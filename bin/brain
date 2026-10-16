@@ -1047,11 +1047,15 @@ def cmd_sync(a):
                 ahead, behind = ab.stdout.split()
                 track = f", {ahead} ahead / {behind} behind upstream"
             print(f"branch: {br}{track}")
-            log = git("log", "--all", f"--since={iso}", "--date=format:%Y-%m-%d %H:%M",
-                      "--format=%h %ad %an: %s%d", "-n", "60", cwd=home).stdout.strip()
-            print("\n## Commits (all branches)\n" + (log or "none"))
-            st = git("status", "--porcelain", cwd=home).stdout.rstrip()
-            print("\n## Uncommitted in this checkout\n" + (st or "none"))
+            # branches, remotes and tags only: hosts and tools keep private refs of their own
+            log = git("log", "--branches", "--remotes", "--tags", f"--since={iso}",
+                      "--date=format:%Y-%m-%d %H:%M", "--format=%h %ad %an: %s%d", "-n", "60",
+                      cwd=home).stdout.strip()
+            print("\n## Commits (branches, remotes, tags)\n" + (log or "none"))
+            st = git("status", "--porcelain", cwd=home).stdout.rstrip().splitlines()
+            shown = st[:a.limit]
+            more = f"\n... and {len(st) - len(shown)} more" if len(st) > len(shown) else ""
+            print(f"\n## Uncommitted in this checkout ({len(st)})\n" + ("\n".join(shown) + more if st else "none"))
             url = remote_url(home)
             if has_remote and not a.offline and "github.com" in url and shutil.which("gh"):
                 try:
@@ -1614,7 +1618,8 @@ def main():
         "specialist", "node", opt("--task", required=True), opt("--items", default=""), opt("--out"))
 
     cmd("sync", cmd_sync, "what changed in a node (and its home) since the last sync", "id",
-        opt("--offline", action="store_true"), opt("--mark", action="store_true"))
+        opt("--offline", action="store_true"), opt("--mark", action="store_true"),
+        opt("--limit", type=int, default=20, help="uncommitted files to list"))
     cmd("tree", cmd_tree, "show the node tree")
     cmd("status", cmd_status, "first line of every status.md")
     cmd("registry", cmd_registry, "regenerate registry.md")
