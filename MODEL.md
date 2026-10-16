@@ -85,8 +85,10 @@ sense, it belongs in the instance, not here.
 
 22. **Runtime neutrality.** Everything a role needs exists in a runtime-neutral form, with a
     thin adapter per runtime. Every axiom is tested on every runtime in use.
-23. **Host neutrality.** The core uses only the host contract below. A host binding maps
-    it to a real system.
+23. **Host and machine neutrality.** The core uses only the host contract below. A host
+    binding maps it to a real system. Bindings to one machine (thread and project IDs, local
+    paths) are kept per machine and are never part of the shared state, so the same instance
+    works on every machine that holds it.
 
 ### Safety
 

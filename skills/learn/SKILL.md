@@ -5,18 +5,17 @@ description: Capture reusable knowledge (a method, style, asset, script, lesson 
 
 # Learn (axiom 10)
 
-1. **Pick the library.** Use the lowest node that every node likely to reuse the item
-   descends from; usually it is the one running this skill.
-2. **Write the item.** Copy `core/templates/item.md` to `<that node>/library/<item-id>.md`, and
-   fill in:
-   - `source_node`: where the item came from;
-   - `source_ref`: the exact file and commit, URL, or thread with its date;
-   - `learned_at`: now;
-   - `source_owners`: the effective owners of the source node (`core/bin/brain tree`);
-   - `scope`: the same as `source_owners`. Never wider, unless every principal in it consents
-     (axiom 11).
+1. **Pick the library.** Use the lowest node that every node likely to reuse the item descends
+   from (`--at`, default the root). Never a sealed node's home: libraries live on this side.
+2. **Write the item:**
+   `core/bin/brain item add <item-id> --from <source node> --title "…" --kind <kind> --ref "<file@commit, URL, or thread + date>" [--at <node>] --body "…"`
+   (or `--body-file`). It records the source, time and the source's owners, and sets the scope
+   to those owners.
 3. **Write the body** so it can be used without the source. A general lesson may be abstracted
-   from a specific one; the abstraction keeps the same scope unless widened per axiom 11.
-4. **A correction to a specialist** goes to that specialist's `lessons.md` instead:
-   `- <timestamp> · from <node> · scope <owners of that node>: <lesson>`.
-5. Run `core/bin/brain check`, then commit `learn: <item-id>`.
+   from a specific one; it keeps the same scope.
+4. **Wider use** needs everyone in the scope to agree (axiom 11):
+   `core/bin/brain item scope <item-id> <new scope> --consented-by <everyone in the current scope>`.
+   Never claim consent the operator didn't report.
+5. **A correction to a specialist** is a lesson:
+   `core/bin/brain lesson <specialist> --from <node where it happened> "<the lesson>"`.
+6. Run `core/bin/brain check`.

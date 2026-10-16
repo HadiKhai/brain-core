@@ -5,16 +5,18 @@ description: Run a specialist (tester, designer, analyst, editor...) on a job in
 
 # Hire
 
-1. **Find the specialist.** Look in `specialists/<id>/role.md` in this node and its
-   ancestors, and pick the nearest. The target node's own agents for the job come first
-   (axiom 7). The specialist adds to them.
-2. **Check the scope.** Every owner of the target node must be in the specialist's `scope`.
+1. **The node's own agents come first** (axiom 7). If the target (or its home) already has an
+   agent or skill for the job, the specialist adds to it, it doesn't replace it.
+2. **Pick the items** the job needs: `core/bin/brain item list --node <target>` shows what the
+   target may use.
 3. **Assemble the brief:**
-   - the role, standards and checklist from `role.md`;
-   - the lessons from `lessons.md` whose scope covers the target's owners;
-   - the library items the target may use (`core/bin/brain usable`);
-   - the task, the constraints, and who to report to.
-4. **Run it** as a worker: host `launch` in the target node (in its home, for a sealed node),
-   or host `delegate` for one-shot work. Use the runtime from `role.md` unless the operator
-   says otherwise.
-5. **Review.** When the operator corrects the result, run `learn` to add a lesson.
+   `core/bin/brain hire <specialist> <target> --task "<task, constraints, who to report to>" [--items a,b] [--out <file>]`.
+   It finds the nearest specialist at or above the target, refuses if its scope doesn't cover
+   the target's owners, and includes only the lessons and items in scope.
+4. **Run it** as a worker with that brief: host `launch` in the target node (in its home, for an
+   external home), or host `delegate` for one-shot work. Use the runtime the brief names unless
+   the operator says otherwise.
+5. **Review.** When the operator corrects the result, record a lesson (the learn skill, step 5).
+
+To create a specialist: `core/bin/brain specialist new <id> --title "…" [--at <node>] [--scope a,b]`,
+then fill in its `role.md`.

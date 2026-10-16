@@ -15,7 +15,8 @@ Run by the coordinator of the parent node.
    - the labels (`key:value`, using `label_keys` from `instance.md`);
    - the runtime (one of `runtimes`);
    - the `home`, if the node's material lives outside the instance (required for a sealed
-     node).
+     node). For a node that already exists and is gaining owners, use the node-transition
+     skill (`brain seal`) instead.
 2. **Create it:** `core/bin/brain new <parent-id>/<id> --title "…" [--owners …] [--labels …] [--runtime …] [--home …]`
    (use just `<id>` when the parent is the root). Note whether it reports **sealed**.
 3. **Write the brief.** Fill `brief.md` with what the operator said, and add any node-specific
@@ -24,7 +25,7 @@ Run by the coordinator of the parent node.
 4. **Register with the host.** Follow the host adapter
    (`core/adapters/hosts/<host>.md`): create the node's host project and record it with
    `core/bin/brain set <id> host_project=…`. For a sealed node with a git home, also register
-   the home and record `home_project=…`.
+   the home and record `home_project=…`. These IDs stay on this machine (axiom 23).
 5. **Start the coordinator.** Host `launch` in the node's project, with the node's runtime and
    this brief:
    > Role: coordinator of node `<id>`. Read the instance `AGENTS.md`, `core/roles/coordinator.md`

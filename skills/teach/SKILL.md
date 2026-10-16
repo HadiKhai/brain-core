@@ -6,7 +6,7 @@ description: Give a node a capability that exists elsewhere (a role, checklist, 
 # Teach (axiom 12)
 
 1. **Check that the node may use it:** `core/bin/brain usable <item> <node>`. If not, stop and
-   ask the principals in its scope.
+   ask the principals in its scope (`core/bin/brain item scope`, axiom 11).
 2. **Learn the target's conventions.** Look at where its rules, agents, skills, scripts and
    tests live, and at any generator that produces them. If it has one, change the generator's
    source, never the generated output.
