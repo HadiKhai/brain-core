@@ -1,0 +1,584 @@
+#!/usr/bin/env python3
+"""brain: mechanics for a Brain instance (see core/MODEL.md).
+
+Generic: everything specific is read from the instance (instance.md, node.md files).
+Judgment work (what goes in a brief, how to split state) lives in core/skills, not here.
+"""
+import argparse
+import datetime
+import os
+import re
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+CORE = Path(__file__).resolve().parent.parent
+NODE_FIELDS = ["id", "title", "owners", "labels", "home", "runtime", "coordinator",
+               "host_project", "created"]
+ITEM_FIELDS = ["id", "title", "kind", "source_node", "source_ref", "learned_at",
+               "source_owners", "scope", "status"]
+
+
+# ---------- files ----------
+
+def read_fm(path):
+    text = Path(path).read_text()
+    m = re.match(r"^---\n(.*?)\n---\n?(.*)$", text, re.S)
+    if not m:
+        return {}, text
+    fm = {}
+    for line in m.group(1).splitlines():
+        if ":" in line:
+            k, v = line.split(":", 1)
+            fm[k.strip()] = v.strip()
+    return fm, m.group(2)
+
+
+def write_fm(path, fm, body):
+    lines = "\n".join(f"{k}: {v}" for k, v in fm.items())
+    Path(path).write_text(f"---\n{lines}\n---\n{body}")
+
+
+def lst(value):
+    return [x.strip() for x in (value or "").split(",") if x.strip() and x.strip() != "none"]
+
+
+def fill(text, values):
+    for k, v in values.items():
+        text = text.replace("{{" + k + "}}", v)
+    return text
+
+
+# ---------- instance ----------
+
+class Instance:
+    def __init__(self, root):
+        self.root = root
+        self.cfg, _ = read_fm(root / "instance.md")
+        self.principals = lst(self.cfg.get("principals"))
+        self.runtimes = lst(self.cfg.get("runtimes"))
+        self.tz = self.cfg.get("timezone", "UTC")
+
+    def now(self):
+        try:
+            from zoneinfo import ZoneInfo
+            return datetime.datetime.now(ZoneInfo(self.tz)).strftime("%Y-%m-%d %H:%M")
+        except Exception:
+            return datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+
+    def adapter(self, runtime):
+        f = CORE / "adapters" / "runtimes" / f"{runtime}.env"
+        out = {}
+        if f.exists():
+            for line in f.read_text().splitlines():
+                if "=" in line and not line.startswith("#"):
+                    k, v = line.split("=", 1)
+                    out[k.strip()] = v.strip()
+        return out
+
+    def node_dir(self, nid):
+        d = self.root
+        if nid in ("root", ""):
+            return d
+        for seg in nid.split("/"):
+            d = d / "nodes" / seg
+        return d
+
+    def nodes(self):
+        out = []
+
+        def rec(d, nid, parent):
+            fm, _ = read_fm(d / "node.md")
+            n = {"id": nid, "dir": d, "parent": parent, "fm": fm}
+            out.append(n)
+            kids = d / "nodes"
+            if kids.is_dir():
+                for c in sorted(kids.iterdir()):
+                    if (c / "node.md").exists():
+                        rec(c, c.name if nid == "root" else f"{nid}/{c.name}", n)
+
+        rec(self.root, "root", None)
+        for n in out:  # effective owners: inherit from parent when unset
+            own = lst(n["fm"].get("owners"))
+            n["owners"] = own or (n["parent"]["owners"] if n["parent"] else [])
+            n["sealed"] = bool(n["parent"]) and set(n["owners"]) != set(n["parent"]["owners"])
+        return out
+
+    def node(self, nid):
+        for n in self.nodes():
+            if n["id"] == nid:
+                return n
+        die(f"no node '{nid}'")
+
+    def items(self):
+        out = []
+        for lib in self.root.rglob("library"):
+            if lib.is_dir() and ".git" not in lib.parts and "core" not in lib.relative_to(self.root).parts:
+                for f in sorted(lib.glob("*.md")):
+                    if f.name.lower() == "readme.md":
+                        continue
+                    fm, _ = read_fm(f)
+                    out.append({"path": f, "fm": fm})
+        return out
+
+    def commit(self, paths, msg):
+        if not (self.root / ".git").exists():
+            return
+        subprocess.run(["git", "-C", str(self.root), "add", "-A", "--", *[str(p) for p in paths]], check=True)
+        r = subprocess.run(["git", "-C", str(self.root), "diff", "--cached", "--quiet"])
+        if r.returncode:
+            subprocess.run(["git", "-C", str(self.root), "commit", "-qm", msg], check=True)
+
+
+def die(msg):
+    sys.exit(f"brain: {msg}")
+
+
+def find_root():
+    env = os.environ.get("BRAIN_ROOT")
+    starts = [Path(env)] if env else []
+    starts += [Path.cwd(), CORE.parent]
+    for s in starts:
+        s = s.resolve()
+        for d in [s, *s.parents]:
+            if (d / "instance.md").exists() and (d / "node.md").exists():
+                return d
+    die("not inside a Brain instance (no instance.md + node.md found)")
+
+
+# ---------- commands ----------
+
+def cmd_init(a):
+    root = Path(a.dir).expanduser().resolve()
+    if (root / "instance.md").exists():
+        die(f"{root} is already an instance")
+    root.mkdir(parents=True, exist_ok=True)
+    if CORE.resolve() != (root / "core").resolve():
+        shutil.copytree(CORE, root / "core", ignore=shutil.ignore_patterns("__pycache__", ".DS_Store"))
+    runtimes = a.runtimes
+    values = {"OPERATOR": a.operator, "RUNTIMES": runtimes, "DEFAULT_RUNTIME": lst(runtimes)[0],
+              "HOST": a.host, "TZ": a.tz, "ROOT": str(root), "TITLE": a.title}
+    for name in ("AGENTS.md", "instance.md"):
+        (root / name).write_text(fill((CORE / "templates" / "root" / name).read_text(), values))
+    inst_tmp = Instance(root)
+    _make_node(inst_tmp, root, "root", a.title, a.operator, "", "here", lst(runtimes)[0], parent_owners=None)
+    (root / "nodes").mkdir(exist_ok=True)
+    for d in ("library", "specialists"):
+        (root / d).mkdir(exist_ok=True)
+        (root / d / ".gitkeep").touch()
+    inst = Instance(root)
+    cmd_link_inst(inst)
+    write_registry(inst)
+    if not (root / ".git").exists():
+        subprocess.run(["git", "init", "-q", str(root)], check=True)
+        (root / ".gitignore").write_text(".DS_Store\n__pycache__/\n")
+    inst.commit(["."], f"Initialize instance: {a.title}")
+    print(f"instance: {root}\noperator: {a.operator}\nruntimes: {runtimes}\nhost: {a.host}")
+
+
+def _make_node(inst, d, nid, title, owners, labels, home, runtime, parent_owners):
+    d.mkdir(parents=True, exist_ok=True)
+    values = {"ID": nid, "TITLE": title, "OWNERS": owners, "LABELS": labels, "HOME": home,
+              "RUNTIME": runtime, "DATE": inst.now()}
+    tdir = CORE / "templates" / "node"
+    for f in tdir.rglob("*"):
+        rel = f.relative_to(tdir)
+        dest = d / rel
+        if f.is_dir():
+            dest.mkdir(exist_ok=True)
+        elif not dest.exists() or rel.name == "node.md":
+            if nid == "root" and rel.name == "AGENTS.md":
+                continue  # the root uses templates/root/AGENTS.md
+            dest.write_text(fill(f.read_text(), values))
+    eff = lst(owners) or (parent_owners or [])
+    if parent_owners is not None and set(eff) != set(parent_owners):
+        with open(d / "AGENTS.md", "a") as fh:
+            fh.write((CORE / "templates" / "sealed-view.md").read_text())
+
+
+def cmd_new(a):
+    inst = Instance(find_root())
+    nid = a.id.strip("/")
+    parent_id = nid.rsplit("/", 1)[0] if "/" in nid else "root"
+    parent = inst.node(parent_id)
+    d = inst.node_dir(nid)
+    if d.exists():
+        die(f"node '{nid}' already exists at {d}")
+    if not re.fullmatch(r"[a-z0-9][a-z0-9-]*(/[a-z0-9][a-z0-9-]*)*", nid):
+        die("node ids are lowercase words with dashes, nested with '/'")
+    for p in lst(a.owners):
+        if p not in inst.principals:
+            die(f"unknown principal '{p}'; add it to principals in instance.md first")
+    runtime = a.runtime or inst.cfg.get("default_runtime", "")
+    if runtime not in inst.runtimes:
+        die(f"runtime '{runtime}' is not in instance.md runtimes")
+    home = a.home or "here"
+    eff = lst(a.owners) or parent["owners"]
+    sealed = set(eff) != set(parent["owners"])
+    if sealed and home != "here":
+        hp = Path(home).expanduser().resolve()
+        if inst.root.resolve() in [hp, *hp.parents]:
+            die("a sealed node's home can't be inside the instance (axiom 8)")
+    _make_node(inst, d, nid, a.title, a.owners or "", a.labels or "", home, runtime, parent["owners"])
+    cmd_link_inst(inst)
+    write_registry(inst)
+    inst.commit([d, "registry.md"], f"Add node {nid}")
+    print(f"created: {d}\nparent: {parent_id}\nowners: {', '.join(eff)}{'  (sealed)' if sealed else ''}\n"
+          f"home: {home}\nruntime: {runtime}")
+
+
+def cmd_set(a):
+    inst = Instance(find_root())
+    n = inst.node(a.id)
+    fm, body = read_fm(n["dir"] / "node.md")
+    for kv in a.pairs:
+        if "=" not in kv:
+            die(f"expected key=value, got '{kv}'")
+        k, v = kv.split("=", 1)
+        if k in ("owners", "id"):
+            die(f"use 'brain owners' to change owners; ids change only with 'brain move'")
+        fm[k] = v
+    write_fm(n["dir"] / "node.md", fm, body)
+    write_registry(inst)
+    inst.commit([n["dir"] / "node.md", "registry.md"], f"{a.id}: set {', '.join(a.pairs)}")
+
+
+def cmd_relabel(a):
+    inst = Instance(find_root())
+    n = inst.node(a.id)
+    fm, body = read_fm(n["dir"] / "node.md")
+    labels = dict(l.split(":", 1) for l in lst(fm.get("labels")) if ":" in l)
+    for kv in a.labels:
+        if ":" not in kv:
+            die(f"labels are key:value (use key:- to remove), got '{kv}'")
+        k, v = kv.split(":", 1)
+        if v == "-":
+            labels.pop(k, None)
+        else:
+            labels[k] = v
+    fm["labels"] = ", ".join(f"{k}:{v}" for k, v in labels.items())
+    write_fm(n["dir"] / "node.md", fm, body)
+    write_registry(inst)
+    inst.commit([n["dir"] / "node.md", "registry.md"], f"{a.id}: relabel")
+    print(f"{a.id}: {fm['labels'] or '(no labels)'}  (axiom 18: nothing else changed)")
+
+
+def snapshot(inst):
+    return {n["id"]: (n["sealed"], tuple(sorted(n["owners"]))) for n in inst.nodes()}
+
+
+def _boundary_report(before, after):
+    for nid in sorted(set(before) | set(after)):
+        b, c = before.get(nid), after.get(nid)
+        if b is None or c is None:
+            continue
+        if b[1] != c[1]:
+            print(f"  {nid}: effective owners {','.join(b[1])} -> {','.join(c[1])}")
+        if b[0] != c[0]:
+            print(f"  {nid}: {'SEALED' if c[0] else 'UNSEALED'} -> run the "
+                  f"{'sealing' if c[0] else 'unsealing'} procedure (core/MODEL.md, Procedures)")
+
+
+def sync_view_section(d, sealed):
+    """Keep the sealed-view section of a node's AGENTS.md in step with its boundary."""
+    ag = d / "AGENTS.md"
+    if not ag.exists():
+        return
+    section = (CORE / "templates" / "sealed-view.md").read_text()
+    text = ag.read_text()
+    if sealed and section.strip() not in text:
+        ag.write_text(text.rstrip("\n") + "\n" + section)
+    elif not sealed and section.strip() in text:
+        ag.write_text(text.replace(section.strip(), "").rstrip("\n") + "\n")
+
+
+def cmd_owners(a):
+    inst = Instance(find_root())
+    before = snapshot(inst)
+    n = inst.node(a.id)
+    for p in lst(a.owners):
+        if p not in inst.principals:
+            die(f"unknown principal '{p}'; add it to principals in instance.md first")
+    fm, body = read_fm(n["dir"] / "node.md")
+    fm["owners"] = a.owners
+    write_fm(n["dir"] / "node.md", fm, body)
+    after = snapshot(inst)
+    for m in inst.nodes():
+        if before.get(m["id"], (None,))[0] != m["sealed"]:
+            sync_view_section(m["dir"], m["sealed"])
+    print(f"{a.id}: owners -> {a.owners or '(parent)'}")
+    _boundary_report(before, after)
+    write_registry(inst)
+    inst.commit(["."], f"{a.id}: owners -> {a.owners}")
+
+
+def cmd_move(a):
+    inst = Instance(find_root())
+    before = snapshot(inst)
+    n = inst.node(a.id)
+    newp = inst.node(a.parent)
+    if a.parent == a.id or a.parent.startswith(a.id + "/"):
+        die("can't move a node under itself")
+    leaf = a.id.rsplit("/", 1)[-1]
+    new_id = leaf if a.parent == "root" else f"{a.parent}/{leaf}"
+    dest = inst.node_dir(new_id)
+    if dest.exists():
+        die(f"{new_id} already exists")
+    # A move is not a transfer (axiom 3): pin inherited owners if the new parent's differ.
+    fm, body = read_fm(n["dir"] / "node.md")
+    if not lst(fm.get("owners")) and set(n["owners"]) != set(newp["owners"]):
+        fm["owners"] = ", ".join(n["owners"])
+        write_fm(n["dir"] / "node.md", fm, body)
+        print(f"  {a.id}: owners kept as {fm['owners']} (use 'brain owners' to transfer)")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    if (inst.root / ".git").exists():
+        subprocess.run(["git", "-C", str(inst.root), "mv", str(n["dir"]), str(dest)], check=True)
+    else:
+        shutil.move(str(n["dir"]), str(dest))
+    for m in inst.nodes():  # rewrite ids in the moved subtree
+        if m["id"] == new_id or m["id"].startswith(new_id + "/"):
+            old_id = a.id + m["id"][len(new_id):]
+            fm, body = read_fm(m["dir"] / "node.md")
+            fm["id"] = m["id"]
+            write_fm(m["dir"] / "node.md", fm, body)
+            ag = m["dir"] / "AGENTS.md"
+            if ag.exists():
+                ag.write_text(ag.read_text().replace(f"Node `{old_id}`", f"Node `{m['id']}`"))
+    after = {(a.id + k[len(new_id):] if k == new_id or k.startswith(new_id + "/") else k): v
+             for k, v in snapshot(inst).items()}
+    print(f"moved {a.id} -> {new_id}")
+    _boundary_report(before, after)
+    for m in inst.nodes():
+        if m["id"] == new_id or m["id"].startswith(new_id + "/"):
+            sync_view_section(m["dir"], m["sealed"])
+    print("  host: update the node's host project folder (see the host adapter)")
+    write_registry(inst)
+    inst.commit(["."], f"Move {a.id} -> {new_id}")
+
+
+def cmd_archive(a):
+    a.labels = ["state:archived"]
+    cmd_relabel(a)
+
+
+def usable(item_fm, owners):
+    scope = lst(item_fm.get("scope"))
+    if item_fm.get("status", "active") != "active":
+        return False, f"item is {item_fm.get('status')}"
+    if "*" in scope:
+        return True, "scope is *"
+    missing = [o for o in owners if o not in scope]
+    return (not missing), ("all owners in scope" if not missing else f"not in scope: {', '.join(missing)}")
+
+
+def cmd_usable(a):
+    inst = Instance(find_root())
+    n = inst.node(a.node)
+    items = [i for i in inst.items() if i["fm"].get("id") == a.item or i["path"].stem == a.item]
+    if not items:
+        die(f"no item '{a.item}'")
+    ok, why = usable(items[0]["fm"], n["owners"])
+    print(f"{'yes' if ok else 'no'}: {why}")
+    sys.exit(0 if ok else 1)
+
+
+def cmd_tree(a):
+    inst = Instance(find_root())
+    for n in inst.nodes():
+        depth = 0 if n["id"] == "root" else n["id"].count("/") + 1
+        fm = n["fm"]
+        tag = " [sealed]" if n["sealed"] else ""
+        labels = f"  {{{fm.get('labels')}}}" if fm.get("labels") else ""
+        print(f"{'  ' * depth}{n['id']}: {fm.get('title', '')}  owners={','.join(n['owners'])}{tag}{labels}")
+
+
+def status_line(n):
+    s = n["dir"] / "status.md"
+    return s.read_text().splitlines()[0] if s.exists() else "(no status.md)"
+
+
+def cmd_status(a):
+    inst = Instance(find_root())
+    for n in inst.nodes():
+        print(f"{n['id']:<28} {status_line(n)}")
+
+
+def write_registry(inst):
+    rows = ["# Registry", "",
+            "Generated by `core/bin/brain registry` from every `node.md`. Do not edit; change nodes with `core/bin/brain`.",
+            "",
+            "| Node | Title | Owners | Sealed | Labels | Runtime | Home | Coordinator | Host project | Status |",
+            "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |"]
+    for n in inst.nodes():
+        fm = n["fm"]
+        upd = status_line(n).replace("Updated: ", "")
+        rows.append(f"| {n['id']} | {fm.get('title', '')} | {', '.join(n['owners'])} | "
+                    f"{'yes' if n['sealed'] else ''} | {fm.get('labels', '')} | {fm.get('runtime', '')} | "
+                    f"{fm.get('home', '')} | {fm.get('coordinator', '')} | {fm.get('host_project', '')} | {upd} |")
+    (inst.root / "registry.md").write_text("\n".join(rows) + "\n")
+
+
+def cmd_registry(a):
+    inst = Instance(find_root())
+    write_registry(inst)
+    print(inst.root / "registry.md")
+
+
+def cmd_link_inst(inst):
+    made = []
+    for rt in inst.runtimes:
+        ad = inst.adapter(rt)
+        link = ad.get("INSTRUCTIONS_LINK")
+        if link:
+            for agents in [inst.root / "AGENTS.md", *inst.root.glob("**/nodes/**/AGENTS.md")]:
+                if "core" in agents.relative_to(inst.root).parts:
+                    continue
+                l = agents.parent / link
+                if not l.is_symlink():
+                    if l.exists():
+                        die(f"{l} is a real file; merge it into AGENTS.md and delete it")
+                    l.symlink_to("AGENTS.md")
+                    made.append(l)
+        sk = ad.get("SKILLS_DIR")
+        if sk:
+            l = inst.root / sk
+            target = os.path.relpath(CORE / "skills", l.parent)
+            if l.is_symlink() and os.readlink(l) != target:
+                l.unlink()
+            if not l.is_symlink():
+                if l.exists():
+                    die(f"{l} exists and is not a link; move its contents to core/skills")
+                l.parent.mkdir(parents=True, exist_ok=True)
+                l.symlink_to(target)
+                made.append(l)
+    return made
+
+
+def cmd_link(a):
+    inst = Instance(find_root())
+    for l in cmd_link_inst(inst):
+        print(f"linked {l.relative_to(inst.root)}")
+
+
+def cmd_check(a):
+    inst = Instance(find_root())
+    problems = []
+    p = problems.append
+    if not inst.principals:
+        p("instance.md: no principals")
+    for rt in inst.runtimes:
+        if not (CORE / "adapters" / "runtimes" / f"{rt}.env").exists():
+            p(f"runtime '{rt}' has no adapter in core/adapters/runtimes")
+    host = inst.cfg.get("host")
+    if host and not (CORE / "adapters" / "hosts" / f"{host}.md").exists():
+        p(f"host '{host}' has no adapter in core/adapters/hosts")
+    patterns = set(lst(inst.cfg.get("trace_patterns")))
+    for r in {str(inst.root), str(inst.root.resolve())}:
+        patterns.add(r)
+        if r.startswith("/private/"):
+            patterns.add(r[len("/private"):])
+        if r.startswith(str(Path.home()) + "/"):
+            patterns.add("~/" + r[len(str(Path.home())) + 1:])
+    for n in inst.nodes():
+        fm, nid = n["fm"], n["id"]
+        for f in NODE_FIELDS:
+            if f not in fm:
+                p(f"{nid}: node.md is missing '{f}'")
+        if fm.get("id") not in (nid, None):
+            p(f"{nid}: node.md says id '{fm.get('id')}'")
+        if not n["owners"]:
+            p(f"{nid}: no owners (axiom: owners are non-empty)")
+        for o in n["owners"]:
+            if o not in inst.principals:
+                p(f"{nid}: unknown principal '{o}'")
+        if fm.get("runtime") and fm["runtime"] not in inst.runtimes:
+            p(f"{nid}: runtime '{fm['runtime']}' not in instance runtimes")
+        for rt in inst.runtimes:
+            link = inst.adapter(rt).get("INSTRUCTIONS_LINK")
+            if link and (n["dir"] / "AGENTS.md").exists():
+                l = n["dir"] / link
+                if not (l.is_symlink() and os.readlink(l) == "AGENTS.md"):
+                    p(f"{nid}: {link} must be a link to AGENTS.md (axiom 22)")
+        home = fm.get("home", "here")
+        if n["sealed"] and home not in ("here", "none", ""):
+            hp = Path(home).expanduser()
+            if inst.root.resolve() in [hp.resolve(), *hp.resolve().parents]:
+                p(f"{nid}: sealed home is inside the instance (axiom 8)")
+            elif (hp / ".git").exists():
+                for pat in patterns:
+                    r = subprocess.run(["git", "-C", str(hp), "grep", "-I", "-l", "-F", "-i", "-e",
+                                        pat.replace("~", str(Path.home()), 1) if pat.startswith("~") else pat],
+                                       capture_output=True, text=True)
+                    if r.stdout.strip():
+                        p(f"{nid}: trace of '{pat}' in its home (axiom 6): {r.stdout.split()[0]}")
+            elif not hp.exists():
+                p(f"{nid}: home {home} not found on this machine")
+    for it in inst.items():
+        fm, name = it["fm"], it["path"].relative_to(inst.root)
+        for f in ITEM_FIELDS:
+            if not fm.get(f):
+                p(f"{name}: missing '{f}' (axiom 10)")
+        for o in lst(fm.get("scope")) + lst(fm.get("source_owners")):
+            if o != "*" and o not in inst.principals:
+                p(f"{name}: unknown principal '{o}'")
+        if fm.get("status") not in ("active", "quarantined"):
+            p(f"{name}: status must be active or quarantined")
+    for role in inst.root.glob("**/specialists/*/role.md"):
+        fm, _ = read_fm(role)
+        if not fm.get("scope"):
+            p(f"{role.relative_to(inst.root)}: missing scope")
+    if problems:
+        print("\n".join(f"✗ {x}" for x in problems))
+        sys.exit(1)
+    print(f"✓ {len(inst.nodes())} nodes, {len(inst.items())} items: all checks pass")
+
+
+def main():
+    ap = argparse.ArgumentParser(prog="brain", description=__doc__.splitlines()[0])
+    sub = ap.add_subparsers(dest="cmd")
+
+    s = sub.add_parser("init", help="create a new instance from this core")
+    s.add_argument("dir"); s.add_argument("--operator", required=True); s.add_argument("--title", required=True)
+    s.add_argument("--runtimes", default="claude,codex"); s.add_argument("--host", default="t3")
+    s.add_argument("--tz", default="UTC"); s.set_defaults(f=cmd_init)
+
+    s = sub.add_parser("new", help="create a node: brain new <id> --title T [--owners a,b] [--labels k:v,...] [--runtime r] [--home path]")
+    s.add_argument("id"); s.add_argument("--title", required=True); s.add_argument("--owners", default="")
+    s.add_argument("--labels", default=""); s.add_argument("--runtime"); s.add_argument("--home")
+    s.set_defaults(f=cmd_new)
+
+    s = sub.add_parser("set", help="set node.md fields: brain set <id> key=value ...")
+    s.add_argument("id"); s.add_argument("pairs", nargs="+"); s.set_defaults(f=cmd_set)
+
+    s = sub.add_parser("relabel", help="brain relabel <id> key:value ... (key:- removes)")
+    s.add_argument("id"); s.add_argument("labels", nargs="+"); s.set_defaults(f=cmd_relabel)
+
+    s = sub.add_parser("owners", help="transfer: brain owners <id> a,b  (empty string = same as parent)")
+    s.add_argument("id"); s.add_argument("owners"); s.set_defaults(f=cmd_owners)
+
+    s = sub.add_parser("move", help="brain move <id> <new-parent-id>")
+    s.add_argument("id"); s.add_argument("parent"); s.set_defaults(f=cmd_move)
+
+    s = sub.add_parser("archive", help="brain archive <id>")
+    s.add_argument("id"); s.set_defaults(f=cmd_archive)
+
+    s = sub.add_parser("usable", help="may <node> use <item>? (axiom 10 scope check)")
+    s.add_argument("item"); s.add_argument("node"); s.set_defaults(f=cmd_usable)
+
+    for name, fn, h in [("tree", cmd_tree, "show the node tree"),
+                        ("status", cmd_status, "first line of every status.md"),
+                        ("registry", cmd_registry, "regenerate registry.md"),
+                        ("link", cmd_link, "create runtime links (axiom 22)"),
+                        ("check", cmd_check, "verify the axioms that can be checked mechanically")]:
+        sub.add_parser(name, help=h).set_defaults(f=fn)
+
+    a = ap.parse_args()
+    if not getattr(a, "f", None):
+        ap.print_help()
+        return
+    a.f(a)
+
+
+if __name__ == "__main__":
+    main()
