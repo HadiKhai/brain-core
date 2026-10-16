@@ -1068,6 +1068,8 @@ def cmd_sync(a):
                 print("\n## Open pull requests")
                 if prs is None:
                     print("(couldn't list them)")
+                elif not prs:
+                    print("none")
                 for pr in prs or []:
                     tag = " draft" if pr.get("isDraft") else ""
                     rv = f" {pr['reviewDecision'].lower()}" if pr.get("reviewDecision") else ""
@@ -1511,7 +1513,7 @@ def cmd_upgrade(a):
         print(f"core is up to date ({new[:7]})")
         return
     print(f"core {old[:7]} -> {new[:7]}")
-    print(git("log", "--oneline", f"{old}..{new}", cwd=root / "core").stdout.rstrip())
+    print(git("log", "--oneline", f"{old}..{new}", cwd=root / "core").stdout.rstrip(), flush=True)
     newbin = str(root / "core" / "bin" / "brain")
     env = {**os.environ, "BRAIN_ROOT": str(root)}
     subprocess.run([sys.executable, newbin, "link"], env=env)
