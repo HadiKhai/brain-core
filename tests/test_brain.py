@@ -355,7 +355,8 @@ class InstallAndUpgrade(Scenario):
         return src
 
     def install(self, *args):
-        r = subprocess.run(["sh", str(CORE / "install.sh"), "--yes", *args], cwd=self.tmp, env=self.env,
+        r = subprocess.run(["sh", str(CORE / "install.sh"), "--yes", *args], cwd=self.tmp,
+                           env={**self.env, "SHELL": "/bin/zsh"},
                            capture_output=True, text=True, stdin=subprocess.DEVNULL)
         if r.returncode:
             self.fail(f"install.sh failed:\n{r.stdout}\n{r.stderr}")
@@ -374,6 +375,9 @@ class InstallAndUpgrade(Scenario):
         env.pop("BRAIN_NO_REEXEC")
         t = subprocess.run([str(cmd), "tree"], cwd=self.tmp, env=env, capture_output=True, text=True)
         self.assertIn("root: Bob", t.stdout, t.stderr)
+        rc = self.tmp / ".zshrc"
+        self.assertIn(f'export PATH="{self.tmp / "bin"}:$PATH"', rc.read_text())
+        self.assertIn("Open a new terminal", out)
 
         # a sealed node, so the second machine has a home to bind
         self.b(bob, "principal", "add", "team")
@@ -392,15 +396,17 @@ class InstallAndUpgrade(Scenario):
         # second machine: same Brain, its own bindings
         bob2 = self.tmp / "Brain2"
         out = self.install("--from", str(bob), "--dir", str(bob2), "--home", f"code={code}",
-                           "--bin-dir", str(self.tmp / "bin2"))
+                           "--bin-dir", str(self.tmp / "bin2"), "--no-modify-path")
         self.assertIn("✓ checks pass", out)
         self.assertIn("UPGRADED", (bob2 / "core" / "README.md").read_text())
         self.assertEqual(json.loads((bob2 / ".brain" / "local.json").read_text())["nodes"]["code"]["home"], str(code))
         self.assertIn("coordinator MISSING", self.b(bob2, "machine"))
 
         bob3 = self.tmp / "Brain3"
-        out = self.install("--from", str(bob), "--dir", str(bob3), "--bin-dir", str(self.tmp / "bin3"))
+        out = self.install("--from", str(bob), "--dir", str(bob3), "--bin-dir", str(self.tmp / "bin"))
         self.assertIn("code: home not set", out)
+        self.assertNotIn("bin2", rc.read_text())
+        self.assertEqual(rc.read_text().count("# brain"), 1)
         self.assertIn("home not set on this machine", self.b(bob3, "check", ok=False))
 
 

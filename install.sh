@@ -15,12 +15,13 @@
 #   --core-url URL      where the core comes from (default $BRAIN_CORE_URL or the published core)
 #   --home ID=PATH      this machine's path for a sealed node's home (repeatable, --from only)
 #   --bin-dir PATH      where the `brain` command goes (default ~/.local/bin)
+#   --no-modify-path    don't add --bin-dir to PATH in your shell's startup file
 #   --yes               don't ask; use defaults
 set -eu
 
 CORE_URL="${BRAIN_CORE_URL:-https://github.com/OWNER/brain-core.git}"
 DIR="$HOME/Brain"; FROM=""; OPERATOR=""; TITLE=""; RUNTIMES=""; HOST="t3"; TZONE=""
-BIN_DIR="$HOME/.local/bin"; YES=0; HOMES=""
+BIN_DIR="$HOME/.local/bin"; YES=0; HOMES=""; MODIFY_PATH=1
 
 die() { echo "install: $*" >&2; exit 1; }
 need() { command -v "$1" >/dev/null 2>&1 || die "needs $1"; }
@@ -39,8 +40,9 @@ while [ $# -gt 0 ]; do
     --home) HOMES="$HOMES
 $2"; shift 2 ;;
     --bin-dir) BIN_DIR=$(expand "$2"); shift 2 ;;
+    --no-modify-path) MODIFY_PATH=0; shift ;;
     --yes|-y) YES=1; shift ;;
-    -h|--help) sed -n '2,20p' "$0" 2>/dev/null | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,21p' "$0" 2>/dev/null | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) die "unknown option $1 (try --help)" ;;
   esac
 done
@@ -117,12 +119,34 @@ else
 fi
 
 brain link --command --bin-dir "$BIN_DIR"
+
+# So `brain` works in every new terminal: put BIN_DIR on PATH in the shell's startup file.
+on_path() { case ":$PATH:" in *":$1:"*) return 0 ;; *) return 1 ;; esac; }
+NEW_SHELL=""
+if [ "$MODIFY_PATH" = 1 ] && ! on_path "$BIN_DIR"; then
+  case "$(basename "${SHELL:-sh}")" in
+    zsh) rc="$HOME/.zshrc"; line="export PATH=\"$BIN_DIR:\$PATH\"" ;;
+    bash) rc="$HOME/.bashrc"; [ "$(uname)" = Darwin ] && rc="$HOME/.bash_profile"
+          line="export PATH=\"$BIN_DIR:\$PATH\"" ;;
+    fish) rc="$HOME/.config/fish/config.fish"; line="fish_add_path \"$BIN_DIR\"" ;;
+    *) rc="$HOME/.profile"; line="export PATH=\"$BIN_DIR:\$PATH\"" ;;
+  esac
+  if ! grep -qsF "$line" "$rc"; then
+    mkdir -p "$(dirname "$rc")"
+    printf '\n# brain\n%s\n' "$line" >> "$rc"
+    echo "Added $BIN_DIR to PATH in $rc"
+  fi
+  NEW_SHELL=1
+fi
 echo
 if brain check >/dev/null 2>&1; then echo "✓ checks pass"; else echo "! run 'brain check' to see what's left"; fi
 cat <<EOF
 
 Done: $DIR
 Next:
+EOF
+[ -z "$NEW_SHELL" ] || echo "  0. Open a new terminal so the \`brain\` command is found."
+cat <<EOF
   1. In your host ($HOST), add a project for $DIR and start a thread in it.
   2. Tell it: "set up this machine" (it registers the projects and coordinators).
 EOF
