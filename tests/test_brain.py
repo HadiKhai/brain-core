@@ -482,6 +482,136 @@ class Provenance(Scenario):
         self.assertIn("source_node 'ghost'", self.b(r, "check", ok=False))
 
 
+class Workbench(Scenario):
+    def test_worktrees_with_setup_ports_and_prune(self):
+        r = self.init("alice")
+        self.b(r, "principal", "add", "team")
+        origin = self.tmp / "origin.git"
+        self.git("init", "-q", "--bare", "-b", "main", str(origin), cwd=self.tmp)
+        home = self.repo(self.tmp / "code" / "app", {"README.md": "app\n", ".gitignore": ".env\n"})
+        self.git("remote", "add", "origin", str(origin), cwd=home)
+        self.git("push", "-q", "-u", "origin", "main", cwd=home)
+        self.git("remote", "set-head", "origin", "main", cwd=home)
+        (home / ".env").write_text("SECRET=1\n")
+        self.b(r, "new", "app", "--title", "App", "--owners", "team", "--home", str(home))
+        (r / "nodes" / "app" / "worktree-setup.sh").write_text('cp "$MAIN/.env" .env\necho "PORT=$PORT" >> .env\n')
+
+        out = self.b(r, "wt", "add", "app", "feat-a")
+        wa = self.tmp / "code" / "app-work" / "worktrees" / "feat-a"
+        self.assertIn("setup: ok", out)
+        self.assertIn("SECRET=1", (wa / ".env").read_text())
+        self.b(r, "wt", "add", "app", "feat-b")
+        wb_ = wa.parent / "feat-b"
+        ports = {(w / ".env").read_text().split("PORT=")[1].strip() for w in (wa, wb_)}
+        self.assertEqual(len(ports), 2, "each worktree gets its own port")
+        self.assertIn("✓", self.b(r, "check"))                  # nothing in the home, nothing in the instance
+
+        # feat-a is done and merged; feat-b has unfinished work; feat-c is new and untouched
+        (wa / "a.txt").write_text("a\n")
+        self.git("add", "a.txt", cwd=wa); self.git("commit", "-qm", "A", cwd=wa)
+        self.git("merge", "-q", "feat-a", cwd=home); self.git("push", "-q", "origin", "main", cwd=home)
+        (wb_ / "wip.txt").write_text("wip\n")
+        self.b(r, "wt", "add", "app", "feat-c")
+        self.assertIn("would remove: feat-a", self.b(r, "wt", "prune", "app", "--dry-run"))
+        out = self.b(r, "wt", "prune", "app")
+        self.assertIn("removed: feat-a", out)
+        self.assertIn("feat-b (uncommitted work)", out)
+        self.assertIn("feat-c (not merged)", out)
+        self.assertFalse(wa.exists())
+        self.assertTrue((wb_ / "wip.txt").exists())
+        self.b(r, "wt", "rm", "app", "feat-b", ok=False)        # uncommitted work is never discarded silently
+        self.assertIn("feat-c", self.b(r, "wt", "list"))
+
+    def test_reports_have_a_predictable_place(self):
+        r = self.init("alice")
+        self.b(r, "new", "site", "--title", "Site")
+        d = Path(self.b(r, "report", "site", "UI audit: mobile").strip())
+        self.assertEqual(d.parent, r / "nodes" / "site" / "reports")
+        self.assertTrue(d.name.endswith("-ui-audit-mobile"))
+        self.assertIn("UI audit: mobile", self.b(r, "reports"))
+        self.assertIn("scripts/", self.b(r, "workbench", "site"))
+
+    def test_a_workbench_inside_the_instance_is_refused(self):
+        r = self.init("alice")
+        self.b(r, "principal", "add", "team")
+        home = self.repo(self.tmp / "h")
+        self.b(r, "new", "x", "--title", "X", "--owners", "team", "--home", str(home))
+        self.b(r, "set", "x", "workbench=" + str(r / "wb"))
+        self.assertIn("workbench is inside the instance", self.b(r, "check", ok=False))
+
+
+class EntryPoints(Scenario):
+    def test_global_pointer_is_added_once_and_removable(self):
+        r = self.init("alice")
+        claude_md = self.tmp / ".claude" / "CLAUDE.md"
+        claude_md.parent.mkdir()
+        claude_md.write_text("# My own rules\n\nKeep me.\n")
+        out = self.b(r, "link", "--global")
+        self.assertIn("claude:", out)
+        self.assertIn("codex:", out)
+        for f in (claude_md, self.tmp / ".codex" / "AGENTS.md"):
+            text = f.read_text()
+            self.assertIn(f"alice's Brain is at `~/alice`", text)
+            self.assertIn("only a pointer", text)
+        self.assertIn("already up to date", self.b(r, "link", "--global"))
+        self.assertEqual(claude_md.read_text().count("brain:begin"), 1)
+        self.assertTrue(claude_md.read_text().startswith("# My own rules\n\nKeep me.\n"))
+        self.b(r, "link", "--remove-global")
+        self.assertEqual(claude_md.read_text(), "# My own rules\n\nKeep me.\n")
+        self.env["CODEX_HOME"] = str(self.tmp / "ch")
+        self.b(r, "link", "--global")
+        self.assertTrue((self.tmp / "ch" / "AGENTS.md").exists())
+
+
+class Review(Scenario):
+    def test_review_brief_goes_to_the_other_runtime(self):
+        r = self.init("alice")
+        self.b(r, "principal", "add", "team")
+        home = self.repo(self.tmp / "app")
+        self.b(r, "new", "app", "--title", "App", "--owners", "team", "--home", str(home))
+        self.b(r, "wt", "add", "app", "fix-login", "--base", "main")
+        wt = self.tmp / "app-work" / "worktrees" / "fix-login"
+        (wt / "login.py").write_text("def login(u, p):\n    return True\n")
+        self.git("add", "-A", cwd=wt); self.git("commit", "-qm", "Fix login", cwd=wt)
+        out = self.b(r, "review", "app", "--branch", "fix-login", "--built-by", "claude", "--focus", "auth")
+        self.assertIn("Reviewer runtime: codex", out)
+        self.assertIn(f"Run in: {wt}", out)
+        self.assertIn("login.py", out)
+        self.assertIn("Don't modify any file", out)
+        self.assertIn("has its own owners", out)
+        self.assertNotIn(str(r), out)                        # nothing from above the boundary
+        self.assertIn("Reviewer runtime: claude",
+                      self.b(r, "review", "app", "--branch", "fix-login", "--built-by", "codex"))
+        self.b(r, "review", "app", "--branch", "fix-login", "--built-by", "codex", "--by", "codex", ok=False)
+
+
+class Schedules(Scenario):
+    def test_schedules_are_shared_and_bound_per_machine(self):
+        r = self.init("alice")
+        self.b(r, "schedule", "add", "daily-brief", "--when", "daily 09:00", "--brief", "Run the node-brief skill.")
+        self.assertIn("schedule: daily-brief", self.git("log", "-1", "--format=%s", cwd=r))
+        self.assertIn("not on this machine", self.b(r, "schedule"))
+        self.b(r, "schedule", "bind", "daily-brief", "host-42")
+        self.assertIn("on this machine: host-42", self.b(r, "schedule", "list"))
+        self.assertNotIn("host-42", self.git("show", "HEAD", cwd=r))       # the binding isn't shared
+        self.assertIn("daily-brief                  on this machine", self.b(r, "machine"))
+        self.assertIn("✓", self.b(r, "check"))
+        (r / "schedules.md").write_text((r / "schedules.md").read_text().replace("node: root", "node: ghost"))
+        self.assertIn("unknown node 'ghost'", self.b(r, "check", ok=False))
+
+    def test_sync_all_covers_every_external_home(self):
+        r = self.init("alice")
+        self.b(r, "principal", "add", "team")
+        for nid in ("one", "two"):
+            home = self.repo(self.tmp / nid, {"README.md": f"{nid}\n"})
+            self.b(r, "new", nid, "--title", nid, "--owners", "team", "--home", str(home))
+        self.b(r, "new", "local", "--title", "Local")
+        out = self.b(r, "sync", "--all", "--offline")
+        self.assertIn("# one:", out)
+        self.assertIn("# two:", out)
+        self.assertNotIn("# local:", out)
+
+
 class InstallAndUpgrade(Scenario):
     def core_repo(self):
         src = self.tmp / "core-src"
@@ -514,6 +644,7 @@ class InstallAndUpgrade(Scenario):
         self.assertIn("root: Bob", t.stdout, t.stderr)
         rc = self.tmp / ".zshrc"
         self.assertIn('export PATH="$HOME/bin:$PATH"', rc.read_text())
+        self.assertIn("Brain is at `~/Brain`", (self.tmp / ".claude" / "CLAUDE.md").read_text())
         self.assertNotIn("to PATH)", out)
         self.assertIn("Open a new terminal", out)
 

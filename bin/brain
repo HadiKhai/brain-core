@@ -417,8 +417,8 @@ def cmd_set(a):
         k, v = kv.split("=", 1)
         if k in ("owners", "id"):
             die("use 'brain owners' or 'brain seal' to change owners; ids change only with 'brain move'")
-        if k in LOCAL_KEYS or k == "synced_at":
-            inst.local_of(a.id)[k] = v
+        if k in LOCAL_KEYS or k in ("synced_at", "workbench"):
+            inst.local_of(a.id)[k] = str(Path(v).expanduser().resolve()) if k == "workbench" else v
             fm.pop(k, None)
             print(f"  {k}: this machine (.brain/local.json)")
         elif k == "home":
@@ -1092,6 +1092,58 @@ def cmd_hire(a):
         print(text, end="")
 
 
+# ---------- second-runtime review ----------
+
+def cmd_review(a):
+    """Brief for a reviewer on a different runtime than the one that built the change."""
+    inst = load()
+    n = inst.node(a.id)
+    built = a.built_by or n["fm"].get("runtime") or inst.cfg.get("default_runtime", "")
+    others = [rt for rt in inst.runtimes if rt != built]
+    reviewer = a.by or (others[0] if others else None)
+    if not reviewer:
+        die(f"only one runtime ({built}) in instance.md: nothing to cross-review with")
+    if reviewer == built:
+        die("the reviewer must run on a different runtime from the builder")
+    where, base = None, a.base
+    if n["external"] and n["home_path"]:
+        w = n["local"].get("worktrees", {}).get(a.branch)
+        where = Path(w["path"]) if w else n["home_path"]
+        base = base or (w.get("base") if w else None) or default_base(n["home_path"])
+        stat = git("diff", "--stat", f"{base}...{a.branch}", cwd=n["home_path"]).stdout.strip()
+    else:
+        where, base = n["dir"], base or "main"
+        stat = git("diff", "--stat", f"{base}...{a.branch}", cwd=inst.root).stdout.strip()
+    out = [f"Reviewer runtime: {reviewer}  (the change was built on {built})", f"Run in: {where}", "",
+           "Role: worker, reviewing a change you didn't write. Don't modify any file, commit or push.",
+           "The rules, agents and skills where you run come first (axiom 7): if this project has its own "
+           "review checklist or reviewer agents, apply them too.", ""]
+    if n["sealed"]:
+        out += ["This project has its own owners. Write nothing into it, and keep your report free of any "
+                "reference to where this brief came from (axiom 6).", ""]
+    out += ["## Change", "", f"Branch `{a.branch}` against `{base}`. See it with `git diff {base}...{a.branch}`"
+            f" and `git log {base}..{a.branch}`.", ""]
+    if stat:
+        out += ["```", stat, "```", ""]
+    if a.focus:
+        out += ["## Focus", "", a.focus.strip(), ""]
+    out += ["## What to check", "",
+            "- Correctness: does it do what the commits and the task say, including edge cases?",
+            "- Breakage: run the project's own tests, type checks and linters that cover the change; report results.",
+            "- Security and data: secrets, auth, user input, destructive operations.",
+            "- The project's rules (its AGENTS.md and conventions).", "",
+            "## Report", "",
+            "A list of findings, most severe first. Each: severity (blocker, major, minor), `file:line`, "
+            "the problem, and a concrete fix. Say which tests you ran and their results. If you find nothing "
+            "that matters, say so plainly."]
+    text = "\n".join(out) + "\n"
+    if a.out:
+        Path(a.out).write_text(text)
+        print(a.out)
+    else:
+        print(text, end="")
+
+
 # ---------- sync ----------
 
 def last_sync(inst, n):
@@ -1108,7 +1160,26 @@ def last_sync(inst, n):
 
 def cmd_sync(a):
     inst = load()
-    n = inst.node(a.id)
+    if a.all:
+        if a.id:
+            die("give a node or --all, not both")
+        ids = [n["id"] for n in inst.nodes() if n["external"] and not n["archived"]]
+        for i, nid in enumerate(ids):
+            if i:
+                print("\n" + "-" * 60 + "\n")
+            if not (inst.node(nid)["home_path"] and inst.node(nid)["home_path"].exists()):
+                print(f"# {nid}: home not on this machine (brain set {nid} home=<path>)")
+                continue
+            sync_one(inst, inst.node(nid), a)
+        if not ids:
+            print("no node has an external home")
+        return
+    if not a.id:
+        die("which node? (or --all)")
+    sync_one(inst, inst.node(a.id), a)
+
+
+def sync_one(inst, n, a):
     since, basis = last_sync(inst, n)
     iso = since.isoformat(timespec="seconds")
     print(f"# {n['id']}: changes since {since.strftime('%Y-%m-%d %H:%M')} ({basis})")
@@ -1175,6 +1246,286 @@ def cmd_sync(a):
         print(f"\nmarked synced at {inst.now()}")
     else:
         print(f"\n(fold this into status.md, then: brain sync {n['id']} --mark)")
+
+
+# ---------- workbench, worktrees, reports ----------
+
+WT_PORT_BASE = 4100
+SETUP_FILE = "worktree-setup.sh"  # in a node folder: prepares each new worktree (env files, installs)
+
+
+def workbench(inst, n, create=False):
+    """Where AI operations on a node happen: scripts/, reports/ and, for a git home, worktrees/ and scratch/.
+    A node whose home is here keeps them in its folder. An external home gets a workbench beside it, so
+    worktrees never sit inside the instance (axiom 8) and nothing lands in the home (axiom 6)."""
+    if not n["external"]:
+        wb = n["dir"]
+    elif n["local"].get("workbench"):
+        wb = Path(n["local"]["workbench"]).expanduser()
+    elif n["home_path"]:
+        wb = n["home_path"].parent / f"{n['home_path'].name}-work"
+    else:
+        die(f"{n['id']}: home not set on this machine: brain set {n['id']} home=<path>")
+    if create:
+        subdirs = ["scripts", "reports"] + (["worktrees", "scratch"] if n["external"] else [])
+        for d in subdirs:
+            (wb / d).mkdir(parents=True, exist_ok=True)
+        if n["external"]:
+            gi = wb / ".gitignore"
+            if not gi.exists():
+                gi.write_text("worktrees/\nscratch/\n.DS_Store\n")
+            inst.local_of(n["id"])["workbench"] = str(wb)
+            inst.save_local()
+    return wb
+
+
+def cmd_workbench(a):
+    inst = load()
+    n = inst.node(a.id)
+    wb = workbench(inst, n, create=True)
+    if a.path:
+        print(wb)
+        return
+    print(f"{n['id']}: workbench {tilde(wb)}")
+    print("  scripts/    reusable scripts (screenshots, seeding, audits); one line at the top says what each does")
+    print("  reports/    one folder per report: <date>-<topic>/index.md plus its files (brain report)")
+    if n["external"]:
+        print("  worktrees/  one per job, made by 'brain wt add' (this machine only)")
+        print("  scratch/    throwaway (this machine only)")
+        print(f"  Not in the home and not in the instance. To keep scripts and reports on other machines, make it a\n"
+              f"  private git repository of its own (worktrees/ and scratch/ are already ignored).")
+
+
+def git_home(inst, nid):
+    n = inst.node(nid)
+    h = n["home_path"]
+    if not n["external"] or not h or not (h / ".git").exists():
+        die(f"{nid}: worktrees need an external home that is a git repository on this machine")
+    return n, h
+
+
+def default_base(home):
+    r = git("symbolic-ref", "--short", "refs/remotes/origin/HEAD", cwd=home)
+    return r.stdout.strip() if r.returncode == 0 and r.stdout.strip() else "HEAD"
+
+
+def free_port(inst):
+    import socket as so
+    used = {w.get("port") for v in inst.local["nodes"].values() for w in v.get("worktrees", {}).values()}
+    port = WT_PORT_BASE
+    while True:
+        if port not in used:
+            with so.socket(so.AF_INET, so.SOCK_STREAM) as sk:
+                if sk.connect_ex(("127.0.0.1", port)) != 0:
+                    return port
+        port += 1
+
+
+def cmd_wt_add(a):
+    inst = load()
+    n, home = git_home(inst, a.id)
+    wb = workbench(inst, n, create=True)
+    path = wb / "worktrees" / a.branch.replace("/", "-")
+    if path.exists():
+        die(f"{tilde(path)} already exists")
+    exists = git("rev-parse", "--verify", "--quiet", f"refs/heads/{a.branch}", cwd=home).returncode == 0
+    base = a.base or default_base(home)
+    args = ["worktree", "add", str(path), a.branch] if exists else ["worktree", "add", "-b", a.branch, str(path), base]
+    r = git(*args, cwd=home)
+    if r.returncode:
+        die(f"git {' '.join(args)}: {r.stderr.strip()}")
+    port = free_port(inst)
+    inst = Instance(inst.root)  # git may have touched nothing here, but reload bindings to be safe
+    start = git("rev-parse", "HEAD", cwd=path).stdout.strip()
+    inst.local_of(n["id"]).setdefault("worktrees", {})[a.branch] = {
+        "path": str(path), "port": port, "base": base, "start": start, "created": inst.now()}
+    inst.local_of(n["id"]).setdefault("workbench", str(wb))
+    inst.save_local()
+    print(f"worktree: {tilde(path)}\n  branch {a.branch}{'' if exists else ' (new, from ' + base + ')'}  ·  port {port}")
+    setup = n["dir"] / SETUP_FILE
+    if setup.exists() and not a.no_setup:
+        env = {**os.environ, "MAIN": str(home), "WORKTREE": str(path), "PORT": str(port), "BRANCH": a.branch,
+               "NODE": n["id"], "WORKBENCH": str(wb)}
+        r = subprocess.run(["sh", str(setup)], cwd=path, env=env, capture_output=True, text=True)
+        out = (r.stdout + r.stderr).strip()
+        print(f"  setup: {'ok' if r.returncode == 0 else 'FAILED (exit ' + str(r.returncode) + ')'}"
+              + ("\n" + "\n".join("    " + l for l in out.splitlines()[-15:]) if out else ""))
+    elif not setup.exists():
+        print(f"  no {SETUP_FILE} in the node folder: nothing copied in (env files, installs)")
+    print(f"  launch a worker there (host adapter: an existing worktree at this path, branch {a.branch})")
+
+
+def worktree_state(home, w, branch):
+    """(uncommitted files or None if gone, merged?, commits ahead of base). A branch that never moved past
+    where it started isn't merged: it's new."""
+    path, base = w["path"], w.get("base")
+    dirty = len(git("status", "--porcelain", cwd=path).stdout.splitlines()) if Path(path).exists() else None
+    tip = git("rev-parse", "--verify", "--quiet", branch, cwd=home).stdout.strip()
+    moved = bool(tip) and tip != w.get("start")
+    merged = moved and bool(base) and git("merge-base", "--is-ancestor", branch, base, cwd=home).returncode == 0
+    if moved and not merged and shutil.which("gh") and "github.com" in remote_url(home):
+        try:
+            r = subprocess.run(["gh", "pr", "list", "--head", branch, "--state", "merged", "--json", "number"],
+                               cwd=home, capture_output=True, text=True, timeout=30)
+            merged = r.returncode == 0 and json.loads(r.stdout or "[]") != []  # squash merges
+        except (subprocess.TimeoutExpired, ValueError):
+            pass
+    ahead = git("rev-list", "--count", f"{base}..{branch}", cwd=home).stdout.strip() if base and tip else ""
+    return dirty, merged, ahead
+
+
+def cmd_wt_list(a):
+    inst = load()
+    for n in inst.nodes():
+        if a.id and n["id"] != a.id:
+            continue
+        wts = n["local"].get("worktrees", {})
+        if not wts:
+            continue
+        print(n["id"])
+        for br, w in sorted(wts.items()):
+            dirty, merged, ahead = worktree_state(n["home_path"], w, br)
+            state = "missing" if dirty is None else (f"{dirty} uncommitted" if dirty else "clean")
+            print(f"  {br:<28} port {w.get('port')}  {state}  "
+                  f"{'merged' if merged else (ahead + ' commit(s) ahead') if ahead else ''}  {tilde(w['path'])}")
+
+
+def remove_worktree(inst, n, branch, force=False):
+    w = n["local"].get("worktrees", {}).get(branch)
+    if not w:
+        die(f"{n['id']}: no worktree for '{branch}' made by brain on this machine")
+    if Path(w["path"]).exists():
+        r = git("worktree", "remove", *(["--force"] if force else []), w["path"], cwd=n["home_path"])
+        if r.returncode:
+            die(f"{branch}: {r.stderr.strip()} (uncommitted work? --force discards it)")
+    inst.local_of(n["id"])["worktrees"].pop(branch)
+    inst.save_local()
+
+
+def cmd_wt_rm(a):
+    inst = load()
+    n, home = git_home(inst, a.id)
+    remove_worktree(inst, n, a.branch, a.force)
+    print(f"removed the worktree for {a.branch} (the branch itself stays)")
+
+
+def cmd_wt_prune(a):
+    """Remove clean worktrees whose branch is merged into its base. Never touches uncommitted work."""
+    inst = load()
+    n, home = git_home(inst, a.id)
+    if git("remote", cwd=home).stdout.strip() and not a.offline:
+        git("fetch", "--all", "--prune", "--quiet", cwd=home)
+    removed, kept = [], []
+    for br, w in sorted(n["local"].get("worktrees", {}).items()):
+        dirty, merged, _ = worktree_state(home, w, br)
+        if dirty is None or (merged and dirty == 0):
+            if not a.dry_run:
+                remove_worktree(inst, inst.node(n["id"]), br)
+            removed.append(br)
+        else:
+            kept.append(f"{br} ({'uncommitted work' if dirty else 'not merged'})")
+    git("worktree", "prune", cwd=home)
+    print(f"{'would remove' if a.dry_run else 'removed'}: {', '.join(removed) or 'none'}")
+    if kept:
+        print(f"kept: {', '.join(kept)}")
+
+
+def slug(text):
+    return re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")[:60] or "report"
+
+
+def cmd_report(a):
+    inst = load()
+    n = inst.node(a.id)
+    wb = workbench(inst, n, create=True)
+    d = wb / "reports" / f"{inst.now_dt().strftime('%Y-%m-%d')}-{slug(a.topic)}"
+    d.mkdir(parents=True, exist_ok=True)
+    idx = d / "index.md"
+    if not idx.exists():
+        idx.write_text(f"# {a.topic}\n\nCreated: {inst.now()} for {n['id']}\n\n## Summary\n\n## Findings\n\n"
+                       f"## Files\n\n## How to reproduce\n\n<!-- the script in scripts/ that made this, and how to run it -->\n")
+    print(d)
+
+
+def cmd_reports(a):
+    inst = load()
+    for n in inst.nodes():
+        if a.id and n["id"] != a.id:
+            continue
+        try:
+            wb = workbench(inst, n)
+        except SystemExit:
+            continue
+        for d in sorted((wb / "reports").glob("*/index.md"), reverse=True) if (wb / "reports").is_dir() else []:
+            title = next((l[2:] for l in d.read_text().splitlines() if l.startswith("# ")), d.parent.name)
+            print(f"{n['id']:<24} {d.parent.name[:10]}  {title}  ({tilde(d.parent)})")
+
+
+# ---------- schedules ----------
+
+SCHEDULE_FIELDS = ["when", "node", "brief"]
+
+
+def read_schedules(inst):
+    """schedules.md: `## <id>` sections with `when:`, `node:` and `brief:` (the brief may run on). Shared state:
+    every machine sees every schedule. Which machine runs one is that machine's binding (axiom 23)."""
+    f = inst.root / "schedules.md"
+    out, cur, key = [], None, None
+    if not f.exists():
+        return out
+    for line in f.read_text().splitlines():
+        if line.startswith("## "):
+            cur = {"id": line[3:].strip()}
+            out.append(cur)
+            key = None
+        elif cur is not None:
+            m = re.match(r"^(when|node|brief):\s*(.*)$", line)
+            if m:
+                key = m.group(1)
+                cur[key] = m.group(2).strip()
+            elif key == "brief" and line.strip():
+                cur["brief"] += " " + line.strip()
+    return out
+
+
+def cmd_schedule(a):
+    inst = load()
+    bound = inst.local.setdefault("schedules", {})
+    if a.action == "add":
+        if not (a.id and a.when and a.brief):
+            die("brain schedule add <id> --when \"daily 09:00\" --node <node> --brief \"...\"")
+        if not re.fullmatch(r"[a-z0-9][a-z0-9-]*", a.id):
+            die("schedule ids are lowercase words with dashes")
+        if any(x["id"] == a.id for x in read_schedules(inst)):
+            die(f"schedule '{a.id}' exists")
+        inst.node(a.node)
+        f = inst.root / "schedules.md"
+        head = "" if f.exists() else ("# Schedules\n\nRecurring work. Shared by every machine; each schedule runs on "
+                                      "one machine only (`brain schedule list` shows which).\n")
+        with open(f, "a") as fh:
+            fh.write(f"{head}\n## {a.id}\n\nwhen: {a.when}\nnode: {a.node}\nbrief: {a.brief.strip()}\n")
+        touch(f)
+        inst.commit([f], f"schedule: {a.id}")
+        print(f"{a.id}: added; create it in the host, then: brain schedule bind {a.id} <host id>")
+        return
+    if a.action in ("bind", "unbind"):
+        if not any(x["id"] == a.id for x in read_schedules(inst)):
+            die(f"no schedule '{a.id}' in schedules.md")
+        if a.action == "bind":
+            if not a.host_id:
+                die("brain schedule bind <id> <host schedule id>")
+            bound[a.id] = a.host_id
+        else:
+            bound.pop(a.id, None)
+        inst.save_local()
+        print(f"{a.id}: {'runs on this machine (' + a.host_id + ')' if a.action == 'bind' else 'not on this machine'}")
+        return
+    for x in read_schedules(inst):
+        here = bound.get(x["id"])
+        print(f"{x['id']:<20} {x.get('when', '?'):<16} node {x.get('node', '?'):<16} "
+              f"{'on this machine: ' + here if here else 'not on this machine'}")
+        if a.verbose:
+            print(f"  brief: {x.get('brief', '')}")
 
 
 # ---------- views ----------
@@ -1406,6 +1757,61 @@ def link_runtimes(inst):
     return made
 
 
+GLOBAL_BEGIN = "<!-- brain:begin (written by `brain link --global`; edit outside these lines) -->"
+GLOBAL_END = "<!-- brain:end -->"
+
+
+def global_files(inst):
+    """Each runtime's user-wide instruction file, from its adapter (GLOBAL_INSTRUCTIONS, GLOBAL_HOME_ENV)."""
+    out = []
+    for rt in inst.runtimes:
+        ad = inst.adapter(rt)
+        g = ad.get("GLOBAL_INSTRUCTIONS")
+        if not g:
+            continue
+        env, default = ad.get("GLOBAL_HOME_ENV"), ad.get("GLOBAL_HOME_DEFAULT")
+        if env and default and os.environ.get(env) and g.startswith(default):
+            g = os.environ[env] + g[len(default):]
+        out.append((rt, Path(g).expanduser()))
+    return out
+
+
+def global_block(inst):
+    title = read_fm(inst.root / "node.md")[0].get("title", "Brain")
+    op = inst.cfg.get("operator", "the operator")
+    root = tilde(inst.root)
+    return "\n".join([
+        GLOBAL_BEGIN,
+        f"## {title}",
+        "",
+        f"{op}'s Brain is at `{root}`: their projects, notes and decisions, kept as a tree of nodes.",
+        "",
+        f"- Asked about {op}'s projects, priorities or \"the brain\"? Run `brain` (a dashboard) or "
+        f"`brain show <node>`. `{root}/registry.md` lists every node.",
+        "- To work on one of those projects, work in its node folder or its home, where its own rules apply.",
+        f"- This is only a pointer. Outside `{root}` the Brain's rules don't apply, and nothing from it may be "
+        "written into another project.",
+        GLOBAL_END, ""])
+
+
+def install_global(inst, remove=False):
+    done = []
+    block = global_block(inst)
+    for rt, f in global_files(inst):
+        text = f.read_text() if f.exists() else ""
+        pat = re.compile(re.escape(GLOBAL_BEGIN) + ".*?" + re.escape(GLOBAL_END) + "\n?", re.S)
+        new = pat.sub("", text).rstrip("\n")
+        if not remove:
+            new = (new + "\n\n" if new else "") + block
+        elif new:
+            new += "\n"
+        if new != text:
+            f.parent.mkdir(parents=True, exist_ok=True)
+            f.write_text(new)
+            done.append(f"{rt}: {tilde(f)} {'cleared' if remove else 'points here'}")
+    return done
+
+
 def install_command(inst, bin_dir):
     bin_dir = Path(bin_dir).expanduser()
     bin_dir.mkdir(parents=True, exist_ok=True)
@@ -1430,6 +1836,9 @@ def cmd_link(a):
         inst.commit([], "Link runtime instruction files")
     if a.command:
         install_command(inst, a.bin_dir)
+    if a.glob or a.unglobal:
+        for d in install_global(inst, remove=a.unglobal) or ["global instructions: already up to date"]:
+            print(d)
 
 
 # ---------- check ----------
@@ -1512,6 +1921,16 @@ def collect_problems(inst):
             else:
                 for pat, f in scan_traces(inst, hp):
                     p(f"{nid}: trace of '{pat}' in its home (axiom 6): {f}")
+        wbl = n["local"].get("workbench")
+        if wbl:
+            wbp = Path(wbl).expanduser().resolve()
+            for inside, what in ((inst.root.resolve(), "the instance"),
+                                 (n["home_path"].resolve() if n["home_path"] else None, "its home")):
+                if inside and inside in [wbp, *wbp.parents]:
+                    p(f"{nid}: workbench is inside {what} (axioms 6 and 8)")
+        for br, w in n["local"].get("worktrees", {}).items():
+            if not Path(w["path"]).exists():
+                warnings.append(f"{nid}: worktree for {br} is gone; brain wt prune {nid}")
     for it in inst.items():
         fm, name = it["fm"], it["path"].relative_to(inst.root)
         for f in ITEM_FIELDS:
@@ -1530,6 +1949,16 @@ def collect_problems(inst):
         for l in parse_lessons(s["dir"] / "lessons.md") if (s["dir"] / "lessons.md").exists() else []:
             if not resolve_ref(nodes, l["from"]):
                 warnings.append(f"{s['dir'].relative_to(inst.root)}/lessons.md: lesson from unknown node '{l['from']}'")
+    for x in read_schedules(inst):
+        for f in SCHEDULE_FIELDS:
+            if not x.get(f):
+                p(f"schedules.md: '{x['id']}' is missing '{f}'")
+        if x.get("node") and not resolve_ref(nodes, x["node"]):
+            p(f"schedules.md: '{x['id']}' names unknown node '{x['node']}'")
+    for sid in inst.local.get("schedules", {}):
+        if not any(x["id"] == sid for x in read_schedules(inst)):
+            warnings.append(f"this machine runs schedule '{sid}', which schedules.md no longer lists: remove it "
+                            f"in the host, then brain schedule unbind {sid}")
     if registry_stale(inst):
         p("registry.md is out of date")
         fixable.append("registry")
@@ -1632,6 +2061,12 @@ def cmd_machine(a):
                 continue
             bits.append(f"{k} {'✓' if loc.get(k) else 'MISSING'}")
         print(f"  {n['id']:<28} {'  '.join(bits)}")
+    scheds = read_schedules(inst)
+    if scheds:
+        bound = inst.local.get("schedules", {})
+        print("\nschedules (each runs on one machine):")
+        for x in scheds:
+            print(f"  {x['id']:<28} {'on this machine' if bound.get(x['id']) else 'not here'}")
     print("\nTo bind what's missing: tell the root coordinator \"set up this machine\" (skill machine-setup).")
 
 
@@ -1757,14 +2192,45 @@ def main():
     cmd("hire", cmd_hire, "print a specialist's brief for a job: brain hire <specialist> <node> --task \"...\"",
         "specialist", "node", opt("--task", required=True), opt("--items", default=""), opt("--out"))
 
-    cmd("sync", cmd_sync, "what changed in a node (and its home) since the last sync", "id",
+    cmd("workbench", cmd_workbench, "a node's workbench: scripts, reports, worktrees (created if missing)", "id",
+        opt("--path", action="store_true"))
+    s = sub.add_parser("wt", help="worktrees of an external git home: add, list, rm, prune")
+    wsub = s.add_subparsers(dest="wcmd", metavar="<action>")
+    t = wsub.add_parser("add", help="brain wt add <node> <branch> [--base REF]: new worktree + setup + port")
+    t.add_argument("id"); t.add_argument("branch"); t.add_argument("--base")
+    t.add_argument("--no-setup", action="store_true", dest="no_setup")
+    t.set_defaults(f=cmd_wt_add)
+    t = wsub.add_parser("list", help="brain wt list [node]")
+    t.add_argument("id", nargs="?")
+    t.set_defaults(f=cmd_wt_list)
+    t = wsub.add_parser("rm", help="brain wt rm <node> <branch> [--force]")
+    t.add_argument("id"); t.add_argument("branch"); t.add_argument("--force", action="store_true")
+    t.set_defaults(f=cmd_wt_rm)
+    t = wsub.add_parser("prune", help="brain wt prune <node>: remove clean worktrees whose branch is merged")
+    t.add_argument("id"); t.add_argument("--dry-run", action="store_true", dest="dry_run")
+    t.add_argument("--offline", action="store_true")
+    t.set_defaults(f=cmd_wt_prune)
+    cmd("report", cmd_report, "start a report: brain report <node> \"topic\" (prints its folder)", "id", "topic")
+    cmd("reports", cmd_reports, "every report, newest first: brain reports [node]", opt("id", nargs="?"))
+    cmd("review", cmd_review, "brief for a review by another runtime: brain review <node> --branch B",
+        "id", opt("--branch", required=True), opt("--base"), opt("--built-by", dest="built_by"),
+        opt("--by", help="reviewer runtime (default: one the builder didn't use)"), opt("--focus"), opt("--out"))
+    cmd("schedule", cmd_schedule, "recurring work: brain schedule list | add <id> --when W --node N --brief B | "
+        "bind <id> <host id> | unbind <id>", opt("action", choices=["list", "add", "bind", "unbind"], nargs="?",
+                                                  default="list"),
+        opt("id", nargs="?"), opt("host_id", nargs="?"), opt("--when"), opt("--node", default="root"), opt("--brief"),
+        opt("-v", "--verbose", action="store_true"))
+    cmd("sync", cmd_sync, "what changed in a node (and its home) since the last sync; --all: every external home",
+        opt("id", nargs="?"), opt("--all", action="store_true"),
         opt("--offline", action="store_true"), opt("--mark", action="store_true"),
         opt("--limit", type=int, default=20, help="uncommitted files to list"))
     cmd("tree", cmd_tree, "show the node tree")
     cmd("status", cmd_status, "first line of every status.md")
     cmd("registry", cmd_registry, "regenerate registry.md")
-    cmd("link", cmd_link, "create runtime links (axiom 22); --command also puts 'brain' on your PATH",
-        opt("--command", action="store_true"), opt("--bin-dir", dest="bin_dir", default="~/.local/bin"))
+    cmd("link", cmd_link, "create runtime links (axiom 22); --command puts 'brain' on your PATH; --global adds a "
+        "pointer to this Brain in each runtime's user-wide instructions",
+        opt("--command", action="store_true"), opt("--bin-dir", dest="bin_dir", default="~/.local/bin"),
+        opt("--global", action="store_true", dest="glob"), opt("--remove-global", action="store_true", dest="unglobal"))
     cmd("check", cmd_check, "verify what can be checked mechanically; --fix repairs the safe things",
         opt("--fix", action="store_true"))
     cmd("machine", cmd_machine, "this machine's bindings (host IDs, home paths)",
@@ -1776,7 +2242,7 @@ def main():
 
     a = ap.parse_args()
     if not getattr(a, "f", None):
-        if a.cmd in ("item", "specialist"):
+        if a.cmd in ("item", "specialist", "wt"):
             sub.choices[a.cmd].print_help()
             return
         if not cmd_dashboard(a):

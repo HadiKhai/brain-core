@@ -16,12 +16,13 @@
 #   --home ID=PATH      this machine's path for a sealed node's home (repeatable, --from only)
 #   --bin-dir PATH      where the `brain` command goes (default ~/.local/bin)
 #   --no-modify-path    don't add --bin-dir to PATH in your shell's startup file
+#   --no-global         don't add a pointer to this Brain in each runtime's user-wide instructions
 #   --yes               don't ask; use defaults
 set -eu
 
 CORE_URL="${BRAIN_CORE_URL:-https://github.com/HadiKhai/brain-core.git}"
 DIR="$HOME/Brain"; FROM=""; OPERATOR=""; TITLE=""; RUNTIMES=""; HOST="t3"; TZONE=""
-BIN_DIR="$HOME/.local/bin"; YES=0; HOMES=""; MODIFY_PATH=1
+BIN_DIR="$HOME/.local/bin"; YES=0; HOMES=""; MODIFY_PATH=1; GLOBAL=1
 
 die() { echo "install: $*" >&2; exit 1; }
 need() { command -v "$1" >/dev/null 2>&1 || die "needs $1"; }
@@ -41,8 +42,9 @@ while [ $# -gt 0 ]; do
 $2"; shift 2 ;;
     --bin-dir) BIN_DIR=$(expand "$2"); shift 2 ;;
     --no-modify-path) MODIFY_PATH=0; shift ;;
+    --no-global) GLOBAL=0; shift ;;
     --yes|-y) YES=1; shift ;;
-    -h|--help) sed -n '2,21p' "$0" 2>/dev/null | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,22p' "$0" 2>/dev/null | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) die "unknown option $1 (try --help)" ;;
   esac
 done
@@ -120,6 +122,9 @@ fi
 
 # (the PATH hint is dropped when the step below takes care of it)
 brain link --command --bin-dir "$BIN_DIR" | { [ "$MODIFY_PATH" = 1 ] && sed 's/  (add .* to PATH)$//' || cat; }
+
+# So agents started anywhere know where the Brain is (a pointer only; see `brain link --global`)
+[ "$GLOBAL" = 0 ] || brain link --global
 
 # So `brain` works in every new terminal: put BIN_DIR on PATH in the shell's startup file.
 on_path() { case ":$PATH:" in *":$1:"*) return 0 ;; *) return 1 ;; esac; }
