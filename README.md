@@ -34,6 +34,17 @@ Both put a `brain` command in `~/.local/bin` (and on your PATH), and a short poi
 instance in each runtime's user-wide instructions (`--no-global` skips it). Then open your host
 at the instance folder and say "set up this machine" (skill `machine-setup`).
 
+Several brains on one machine (say one personal, one for an employer) never share files. Give
+each its own folder and, if you like, its own runtime config folders:
+
+```
+curl -fsSL https://raw.githubusercontent.com/HadiKhai/brain-core/main/install.sh | sh -s -- --dir ~/WorkBrain --name work --global claude=~/.claude-work
+```
+
+The one `brain` command reaches all of them. It uses the brain whose folders you're in (its
+instance, or a node's home, workbench or worktree), else the one whose pointer is in the
+session's config folder, else the default (`brain use <name>`); `brain -b <name>` picks one.
+
 ## Use
 
 You mostly talk to coordinators, and they run `brain` for you. By hand:
@@ -54,7 +65,8 @@ You mostly talk to coordinators, and they run `brain` for you. By hand:
 | `brain workbench <id>`, `brain report <id> "topic"`, `brain reports` | scripts and reports, in a predictable place |
 | `brain review <id> --branch B` | brief for a review by a runtime the builder didn't use |
 | `brain schedule list/add/bind` | recurring work, shared; each machine binds what it runs |
-| `brain link --global` | a pointer to the instance in each runtime's user-wide instructions |
+| `brain link --global [runtime=folder ...]` | a pointer to the instance in runtimes' user-wide instructions (default: each runtime's own config folder) |
+| `brain brains`, `brain use <name>`, `brain -b <name> ...`, `brain --all` | several brains on one machine (say personal and work): list, set the default, pick one, every dashboard |
 | `brain item add/list/scope/quarantine/restore`, `brain usable` | the library and its scopes |
 | `brain specialist new`, `brain lesson`, `brain hire` | reusable experts and their lessons |
 | `brain check [--fix]` | verify the mechanically checkable axioms; repair the safe things |

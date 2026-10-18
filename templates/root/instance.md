@@ -1,4 +1,5 @@
 ---
+name: {{NAME}}
 operator: {{OPERATOR}}
 principals: {{OPERATOR}}
 runtimes: {{RUNTIMES}}
@@ -13,6 +14,7 @@ trace_patterns: {{ROOT}}
 
 Binds `core/MODEL.md` to real things. The fields above are read by `core/bin/brain`:
 
+- `name`: what this Brain is called on every machine (`brain -b <name>`), when one machine holds several.
 - `principals`: every owner known to this instance. Add one whenever a new owner appears.
 - `runtimes`: the agent runtimes in use. Each needs an adapter in `core/adapters/runtimes/`.
 - `host`: the host in use. Its adapter is `core/adapters/hosts/<host>.md`.

@@ -34,8 +34,12 @@ one machine and live in `.brain/local.json`, never in git.
    `worktree-setup.sh` (if any) works here: `core/bin/brain wt add <id> setup-check`, then
    `core/bin/brain wt rm <id> setup-check --force`. Ask before doing this in a home others own:
    a worktree is local, but it is still their repository.
-7. **The global pointer.** `core/bin/brain link --global`, unless the operator declined it during
-   install.
+7. **The global pointer.** Unless the operator declined it during install: if
+   `core/bin/brain brains` shows other brains on this machine, or a runtime has several config
+   folders here (one per account, say), ask the operator which folders this brain's pointer goes
+   in, then `core/bin/brain link --global <runtime>=<folder> ...` (one per folder). A session
+   started with that folder reaches this brain, and only folders named this way see it.
+   Otherwise `core/bin/brain link --global`.
 8. **Hooks.** If Codex is a runtime, ask the operator's OK, then run `core/bin/brain hook approve`:
    Codex runs the instance's stop hook only once the project is trusted and the hook approved.
    Run it again after a core upgrade that changes the hook.

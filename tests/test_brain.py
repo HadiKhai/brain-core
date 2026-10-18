@@ -22,7 +22,8 @@ class Scenario(unittest.TestCase):
                     "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t",
                     "GIT_COMMITTER_EMAIL": "t@t", "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1",
                     "PATH": os.environ.get("PATH", "")}
-        self.env.pop("BRAIN_ROOT", None)
+        for k in ("BRAIN_ROOT", "BRAIN_CONFIG", "XDG_CONFIG_HOME", "CLAUDE_CONFIG_DIR", "CODEX_HOME"):
+            self.env.pop(k, None)
 
     def tearDown(self):
         shutil.rmtree(self.tmp, ignore_errors=True)
@@ -528,6 +529,8 @@ class Workbench(Scenario):
         d = Path(self.b(r, "report", "site", "UI audit: mobile").strip())
         self.assertEqual(d.parent, r / "nodes" / "site" / "reports")
         self.assertTrue(d.name.endswith("-ui-audit-mobile"))
+        for h in ("## Answer", "## Findings", "## Controls", "## Not run", "## How to reproduce"):
+            self.assertIn(h, (d / "index.md").read_text())
         self.assertIn("UI audit: mobile", self.b(r, "reports"))
         self.assertIn("scripts/", self.b(r, "workbench", "site"))
 
@@ -561,6 +564,128 @@ class EntryPoints(Scenario):
         self.env["CODEX_HOME"] = str(self.tmp / "ch")
         self.b(r, "link", "--global")
         self.assertTrue((self.tmp / "ch" / "AGENTS.md").exists())
+
+
+class SeveralBrains(Scenario):
+    """One machine, two brains (say personal and work): one `brain` command, nothing shared between them."""
+
+    def anywhere(self, *args, ok=True, cwd=None, env=None):
+        saved = self.env
+        self.env = {**self.env, **(env or {})}
+        try:
+            return self.run_(list(args), cwd=cwd or self.tmp, ok=ok, brain=CORE / "bin" / "brain")
+        finally:
+            self.env = saved
+
+    def two(self):
+        me = self.init("me")
+        self.b(me, "new", "blog", "--title", "My blog")
+        work = self.tmp / "Work"
+        self.run_(["init", str(work), "--operator", "me", "--title", "Work brain", "--name", "work", "--tz", "UTC"],
+                  cwd=self.tmp, brain=CORE / "bin" / "brain")
+        self.b(work, "principal", "add", "acme")
+        return me, work
+
+    def test_one_command_reaches_each_brain(self):
+        me, work = self.two()
+        self.assertIn("name: work", (work / "instance.md").read_text())
+        out = self.anywhere("brains")
+        self.assertIn("me ", out)
+        self.assertIn("work ", out)
+        self.assertIn("[default]", out.split("\n")[0], "the first brain is the default")
+        self.assertIn("root: me brain", self.anywhere("tree"))            # outside both: the default
+        self.assertIn("root: Work brain", self.anywhere("-b", "work", "tree"))
+        self.assertIn("root: Work brain", self.anywhere("tree", "--brain", "work"))
+        self.assertIn("root: me brain", self.anywhere("tree", cwd=me / "nodes"))   # inside one: that one
+        self.assertIn("no brain 'nope'", self.anywhere("-b", "nope", "tree", ok=False))
+        self.anywhere("use", "work")
+        self.assertIn("root: Work brain", self.anywhere("tree"))
+        self.assertIn("root: me brain", self.anywhere("tree", cwd=me))
+        out = self.anywhere("--all")
+        self.assertIn("===== me =====", out)
+        self.assertIn("===== work =====", out)
+        self.assertIn("Work brain (work)", out)
+
+    def test_a_project_folder_belongs_to_its_brain(self):
+        me, work = self.two()
+        repo = self.repo(self.tmp / "code" / "acme-app")
+        self.b(work, "new", "app", "--title", "Acme app", "--owners", "acme", "--home", str(repo))
+        self.assertIn("root: Work brain", self.anywhere("tree", cwd=repo))
+        self.b(work, "wt", "add", "app", "fix-1")
+        wt = self.tmp / "code" / "acme-app-work" / "worktrees" / "fix-1"
+        self.assertIn("root: Work brain", self.anywhere("tree", cwd=wt))
+        self.assertIn("root: me brain", self.anywhere("tree", cwd=self.tmp / "code"))
+
+    def test_each_brain_runs_its_own_core(self):
+        me, work = self.two()
+        f = work / "core" / "bin" / "brain"
+        f.write_text(f.read_text().replace("def main():\n", "def main():\n    print('WORK CORE')\n", 1))
+        env = {k: v for k, v in self.env.items() if k != "BRAIN_NO_REEXEC"}
+        self.assertIn("WORK CORE", self.anywhere("-b", "work", "now", env={**env, "BRAIN_NO_REEXEC": ""}))
+        self.assertNotIn("WORK CORE", self.anywhere("now", env={**env, "BRAIN_NO_REEXEC": ""}))
+
+    def test_pointers_go_where_each_brain_is_told(self):
+        me, work = self.two()
+        claude, codex = self.tmp / ".claude" / "CLAUDE.md", self.tmp / ".codex" / "AGENTS.md"
+        self.b(me, "link", "--global")
+        self.assertIn("`brain -b me`", claude.read_text())
+        out = self.b(work, "link", "--global")                      # the default folders already point to 'me'
+        self.assertIn("already points to me: skipped", out)
+        self.assertNotIn("Work brain", claude.read_text())
+        self.b(work, "link", "--global", "claude=~/.claude-work", "codex=~/.codex-work")
+        cw = self.tmp / ".claude-work" / "CLAUDE.md"
+        self.assertIn("`brain -b work`", cw.read_text())
+        self.assertIn("`brain -b work`", (self.tmp / ".codex-work" / "AGENTS.md").read_text())
+        self.assertNotIn("me brain", cw.read_text())
+        self.assertNotIn("Work brain", claude.read_text() + codex.read_text())
+        self.assertIn("pointer in: claude ~/.claude-work; codex ~/.codex-work", self.anywhere("brains"))
+        # a session started with the work config folder reaches the work brain, wherever it runs
+        self.assertIn("root: Work brain", self.anywhere("tree", env={"CLAUDE_CONFIG_DIR": str(cw.parent)}))
+        self.assertIn("root: me brain", self.anywhere("tree"))
+        # moving it: the pointer leaves the old folder
+        self.b(work, "link", "--global", "claude=~/.claude-w2")
+        self.assertNotIn("brain:begin work", cw.read_text())
+        self.assertIn("brain:begin work", (self.tmp / ".claude-w2" / "CLAUDE.md").read_text())
+        # sharing a folder is allowed when asked for, and each pointer comes out on its own
+        self.b(work, "link", "--global", "claude=~/.claude")
+        self.assertEqual(claude.read_text().count("brain:begin"), 2)
+        self.b(work, "link", "--remove-global")
+        self.assertIn("brain:begin me", claude.read_text())
+        self.assertNotIn("brain:begin work", claude.read_text())
+
+    def test_an_older_pointer_is_upgraded_in_place(self):
+        me = self.init("me")
+        claude = self.tmp / ".claude" / "CLAUDE.md"
+        claude.parent.mkdir()
+        claude.write_text("# Mine\n\n<!-- brain:begin (written by `brain link --global`; edit outside these lines) -->\n"
+                          "me's Brain is at `~/me`: old text\n<!-- brain:end -->\n")
+        self.b(me, "link")
+        text = claude.read_text()
+        self.assertTrue(text.startswith("# Mine\n"))
+        self.assertNotIn("old text", text)
+        self.assertEqual(text.count("brain:begin"), 1)
+        self.assertIn("brain:begin me", text)
+        self.assertEqual(json.loads((me / ".brain" / "local.json").read_text())["global"], {"claude": ["~/.claude"]})
+        self.assertIn("this brain: me   pointer in: claude ~/.claude", self.b(me, "machine"))
+
+    def test_ports_never_collide_across_brains(self):
+        me, work = self.two()
+        self.b(me, "principal", "add", "club")
+        a = self.repo(self.tmp / "a")
+        w = self.repo(self.tmp / "w")
+        self.b(me, "new", "a", "--title", "A", "--owners", "club", "--home", str(a))
+        self.b(work, "new", "w", "--title", "W", "--owners", "acme", "--home", str(w))
+        self.b(me, "set", "a", "ports=3")
+        (me / "nodes" / "a" / "worktree-setup.sh").write_text('echo "$PORT $PORTS $PORT_LAST" > ports.txt\n')
+        self.assertIn("ports ", self.b(me, "wt", "add", "a", "j1"))
+        p, n, last = map(int, (self.tmp / "a-work" / "worktrees" / "j1" / "ports.txt").read_text().split())
+        self.assertEqual((n, last), (3, p + 2))
+        self.b(work, "wt", "add", "w", "j2")
+        q = json.loads((work / ".brain" / "local.json").read_text())["nodes"]["w"]["worktrees"]["j2"]["port"]
+        self.assertNotIn(q, range(p, p + 3), "another brain's worktree never gets these ports")
+        self.assertIn(f"ports {p}-{p + 2}", self.b(me, "wt", "list"))
+        self.b(me, "set", "a", "ports=lots")
+        self.assertIn("ports must be a whole number", self.b(me, "wt", "add", "a", "j3", ok=False))
 
 
 class Review(Scenario):
@@ -704,6 +829,21 @@ class InstallAndUpgrade(Scenario):
         self.assertIn("Brain is at `~/Brain`", (self.tmp / ".claude" / "CLAUDE.md").read_text())
         self.assertNotIn("to PATH)", out)
         self.assertIn("Open a new terminal", out)
+
+        # a second brain on this machine: its own folder and config folder, the same command
+        self.install("--dir", "~/Work", "--name", "work", "--operator", "bob", "--title", "Work", "--runtimes",
+                     "claude", "--tz", "UTC", "--core-url", str(src), "--bin-dir", str(self.tmp / "bin"),
+                     "--global", "claude=~/.claude-work")
+        self.assertEqual(os.path.realpath(cmd), str((bob / "core" / "bin" / "brain").resolve()))
+        self.assertNotIn("Work", (self.tmp / ".claude" / "CLAUDE.md").read_text())
+        self.assertIn("`brain -b work`", (self.tmp / ".claude-work" / "CLAUDE.md").read_text())
+        t = subprocess.run([str(cmd), "-b", "work", "tree"], cwd=self.tmp, env=env, capture_output=True, text=True)
+        self.assertIn("root: Work", t.stdout, t.stderr)
+        t = subprocess.run([str(cmd), "tree"], cwd=self.tmp, env=env, capture_output=True, text=True)
+        self.assertIn("root: Bob", t.stdout, t.stderr)
+        self.assertIn("another Brain: --dir",
+                      subprocess.run(["sh", str(CORE / "install.sh"), "--yes", "--title", "X", "--core-url", str(src)],
+                                     cwd=self.tmp, env=self.env, capture_output=True, text=True).stderr)
 
         # a sealed node, so the second machine has a home to bind
         self.b(bob, "principal", "add", "team")

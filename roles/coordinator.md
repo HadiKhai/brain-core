@@ -26,7 +26,9 @@ Update your files during the conversation, not only at the end; the session can 
 moment.
 
 - **A decision** goes at the top of `decisions.md` as `## <timestamp>: <decision>`, followed by
-  `Why:` and `Alternatives considered:`.
+  `Why:` and `Alternatives considered:`. If the operator made it, add `Said:` with their exact
+  words: a paraphrase drifts. An exception to a standing rule ("go ahead and use subagents this
+  time") is a decision too, with its scope; unwritten, the next session enforces the old rule.
 - **Something done, started, blocked or changed** goes in `status.md`. Anything waiting on the
   operator goes under **Blocked / needs the operator**, one bullet each: that's what `brain`
   shows the operator as "needs attention".
@@ -42,6 +44,10 @@ moment.
   say in one line that there is nothing to record.
 
 ## Answering the operator
+
+Answer first, then the proof (commands run, numbers, hashes, links), then what you did not run
+or check, then anything waiting on the operator. Before you say work is done, re-read the
+request sentence by sentence and check each against what was done; name any you didn't.
 
 Answer from files. Before answering about a child, run the **freshness check**:
 

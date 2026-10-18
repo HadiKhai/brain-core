@@ -199,14 +199,16 @@ class Instance:
 
     def items(self):
         out = []
-        for lib in self.root.rglob("library"):
-            rel = lib.relative_to(self.root).parts
-            if lib.is_dir() and ".git" not in rel and "core" not in rel and ".brain" not in rel:
-                for f in sorted(lib.glob("*.md")):
-                    if f.name.lower() == "readme.md":
-                        continue
-                    fm, _ = read_fm(f)
-                    out.append({"path": f, "fm": fm})
+        for d, subdirs, _ in os.walk(self.root):  # never into .git (git may be writing there), core or .brain
+            subdirs[:] = sorted(s for s in subdirs if s not in (".git", ".brain") and
+                                not (s == "core" and Path(d) == self.root))
+            if Path(d).name != "library":
+                continue
+            for f in sorted(Path(d).glob("*.md")):
+                if f.name.lower() == "readme.md":
+                    continue
+                fm, _ = read_fm(f)
+                out.append({"path": f, "fm": fm})
         return out
 
     def item(self, iid):
@@ -253,16 +255,124 @@ def resolve_ref(nodes, ref):
     return None
 
 
+def is_instance(d):
+    return (d / "instance.md").exists() and (d / "node.md").exists()
+
+
+def instance_above(p):
+    p = Path(p).expanduser().resolve()
+    return next((d for d in [p, *p.parents] if is_instance(d)), None)
+
+
+# ---------- the brains on this machine ----------
+# One machine may hold several instances (say, one personal and one for an employer). They never share
+# files; this list only lets one `brain` command reach each of them and keeps their ports apart.
+
+def brains_file():
+    if os.environ.get("BRAIN_CONFIG"):
+        return Path(os.environ["BRAIN_CONFIG"]).expanduser()
+    return Path(os.environ.get("XDG_CONFIG_HOME") or "~/.config").expanduser() / "brain" / "brains.json"
+
+
+def read_brains():
+    try:
+        data = json.loads(brains_file().read_text())
+    except (OSError, ValueError):
+        data = {}
+    data.setdefault("brains", {})
+    return data
+
+
+def write_brains(data):
+    f = brains_file()
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n")
+
+
+def brains_here():
+    """[(name, root)] for every registered brain that is still on this machine."""
+    return [(k, Path(v["root"])) for k, v in sorted(read_brains()["brains"].items()) if is_instance(Path(v["root"]))]
+
+
+def brain_name(root):
+    return slug(read_fm(root / "instance.md")[0].get("name") or root.name)
+
+
+def register(root):
+    """List this brain on this machine (once). Its name is `name` in instance.md, so it is the same on every
+    machine; a second brain with the same name here gets a suffix."""
+    root = Path(root).resolve()
+    data = read_brains()
+    brains = data["brains"]
+    for k, v in brains.items():
+        if Path(v["root"]).resolve() == root:
+            return k
+    name = base = brain_name(root)
+    i = 2
+    while name in brains and is_instance(Path(brains[name]["root"])):
+        name, i = f"{base}-{i}", i + 1
+    brains[name] = {"root": str(root)}
+    if data.get("default") not in brains or not is_instance(Path(brains[data["default"]]["root"])):
+        data["default"] = name
+    write_brains(data)
+    return name
+
+
+def local_of_root(root):
+    try:
+        return json.loads((root / ".brain" / "local.json").read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def root_for_path(p):
+    """The brain a folder belongs to: the instance it is in, else the brain one of whose nodes has its home,
+    workbench or a worktree there on this machine (the nearest such place wins)."""
+    p = Path(p).expanduser().resolve()
+    r = instance_above(p)
+    if r:
+        return r
+    best = (0, None)
+    for _, root in brains_here():
+        for v in local_of_root(root).get("nodes", {}).values():
+            places = [v.get("home"), v.get("workbench"), *[w.get("path") for w in v.get("worktrees", {}).values()]]
+            for x in filter(None, places):
+                x = Path(x).expanduser().resolve()
+                if (x == p or x in p.parents) and len(str(x)) > best[0]:
+                    best = (len(str(x)), root)
+    return best[1]
+
+
+def root_for_runtime_env():
+    """A session whose runtime config folder (e.g. CLAUDE_CONFIG_DIR) holds the pointer of exactly one brain."""
+    hits = set()
+    for f in (CORE / "adapters" / "runtimes").glob("*.env"):
+        ad = read_env(f)
+        v = os.environ.get(ad.get("GLOBAL_HOME_ENV") or "")
+        if not v:
+            continue
+        here = Path(v).expanduser().resolve()
+        for _, root in brains_here():
+            dirs = local_of_root(root).get("global", {}).get(f.stem, [])
+            if any(Path(d).expanduser().resolve() == here for d in dirs):
+                hits.add(root)
+    return hits.pop() if len(hits) == 1 else None
+
+
+def default_root():
+    data = read_brains()
+    v = data["brains"].get(data.get("default") or "")
+    return Path(v["root"]) if v and is_instance(Path(v["root"])) else None
+
+
 def try_find_root():
+    """Which brain a command means: `-b <name>` (which sets BRAIN_ROOT), else the folder it runs in, else the
+    brain whose pointer is in this session's runtime config folder, else this machine's default."""
     env = os.environ.get("BRAIN_ROOT")
-    starts = [Path(env)] if env else []
-    starts += [Path.cwd(), CORE.parent]
-    for s in starts:
-        s = s.resolve()
-        for d in [s, *s.parents]:
-            if (d / "instance.md").exists() and (d / "node.md").exists():
-                return d
-    return None
+    if env:
+        return instance_above(env)
+    return (root_for_path(Path.cwd()) or root_for_runtime_env() or default_root()
+            or instance_above(CORE.parent))
 
 
 def find_root():
@@ -273,7 +383,9 @@ def find_root():
 
 
 def load():
-    return Instance(find_root())
+    root = find_root()
+    register(root)
+    return Instance(root)
 
 
 # ---------- init ----------
@@ -287,7 +399,8 @@ def cmd_init(a):
         shutil.copytree(CORE, root / "core", ignore=shutil.ignore_patterns("__pycache__", ".DS_Store", ".git"))
     runtimes = a.runtimes
     values = {"OPERATOR": a.operator, "RUNTIMES": runtimes, "DEFAULT_RUNTIME": lst(runtimes)[0],
-              "HOST": a.host, "TZ": a.tz, "ROOT": tilde(root), "TITLE": a.title}
+              "HOST": a.host, "TZ": a.tz, "ROOT": tilde(root), "TITLE": a.title,
+              "NAME": slug(a.name or root.name)}
     for name in ("AGENTS.md", "instance.md"):
         (root / name).write_text(fill((CORE / "templates" / "root" / name).read_text(), values))
         touch(root / name)
@@ -304,7 +417,8 @@ def cmd_init(a):
         subprocess.run(["git", "init", "-q", "-b", "main", str(root)], check=True)
     ensure_gitignore(root)
     inst.commit(["."], f"Initialize instance: {a.title}")
-    print(f"instance: {root}\noperator: {a.operator}\nruntimes: {runtimes}\nhost: {a.host}")
+    name = register(root)
+    print(f"instance: {root}\nname: {name}\noperator: {a.operator}\nruntimes: {runtimes}\nhost: {a.host}")
 
 
 def ensure_gitignore(root):
@@ -1309,16 +1423,43 @@ def default_base(home):
     return r.stdout.strip() if r.returncode == 0 and r.stdout.strip() else "HEAD"
 
 
-def free_port(inst):
+def port_count(n):
+    """`ports: N` in node.md: how many consecutive ports each worktree of this node needs (default 1)."""
+    v = n["fm"].get("ports", "1")
+    if not v.isdigit() or int(v) < 1:
+        die(f"{n['id']}: ports must be a whole number of ports per worktree, not '{v}'")
+    return int(v)
+
+
+def ports_taken(inst):
+    """Every port a worktree holds on this machine, in this brain and every other one here."""
+    taken = set()
+    locals_ = [inst.local] + [local_of_root(r) for _, r in brains_here() if r.resolve() != inst.root.resolve()]
+    for loc in locals_:
+        for v in loc.get("nodes", {}).values():
+            for w in v.get("worktrees", {}).values():
+                if w.get("port"):
+                    taken.update(range(w["port"], w["port"] + w.get("ports", 1)))
+    return taken
+
+
+def free_port(inst, count=1):
+    """The first block of `count` ports, from WT_PORT_BASE, that no worktree holds and nothing listens on."""
     import socket as so
-    used = {w.get("port") for v in inst.local["nodes"].values() for w in v.get("worktrees", {}).values()}
+    taken = ports_taken(inst)
+
+    def listening(port):
+        with so.socket(so.AF_INET, so.SOCK_STREAM) as sk:
+            return sk.connect_ex(("127.0.0.1", port)) == 0
+
     port = WT_PORT_BASE
-    while True:
-        if port not in used:
-            with so.socket(so.AF_INET, so.SOCK_STREAM) as sk:
-                if sk.connect_ex(("127.0.0.1", port)) != 0:
-                    return port
+    while any(q in taken or listening(q) for q in range(port, port + count)):
         port += 1
+    return port
+
+
+def port_text(port, count):
+    return f"port {port}" if count == 1 else f"ports {port}-{port + count - 1}"
 
 
 def cmd_wt_add(a):
@@ -1334,18 +1475,21 @@ def cmd_wt_add(a):
     r = git(*args, cwd=home)
     if r.returncode:
         die(f"git {' '.join(args)}: {r.stderr.strip()}")
-    port = free_port(inst)
+    count = port_count(n)
+    port = free_port(inst, count)
     inst = Instance(inst.root)  # git may have touched nothing here, but reload bindings to be safe
     start = git("rev-parse", "HEAD", cwd=path).stdout.strip()
     inst.local_of(n["id"]).setdefault("worktrees", {})[a.branch] = {
-        "path": str(path), "port": port, "base": base, "start": start, "created": inst.now()}
+        "path": str(path), "port": port, **({"ports": count} if count > 1 else {}), "base": base, "start": start,
+        "created": inst.now()}
     inst.local_of(n["id"]).setdefault("workbench", str(wb))
     inst.save_local()
-    print(f"worktree: {tilde(path)}\n  branch {a.branch}{'' if exists else ' (new, from ' + base + ')'}  ·  port {port}")
+    print(f"worktree: {tilde(path)}\n  branch {a.branch}{'' if exists else ' (new, from ' + base + ')'}  ·  "
+          f"{port_text(port, count)}")
     setup = n["dir"] / SETUP_FILE
     if setup.exists() and not a.no_setup:
-        env = {**os.environ, "MAIN": str(home), "WORKTREE": str(path), "PORT": str(port), "BRANCH": a.branch,
-               "NODE": n["id"], "WORKBENCH": str(wb)}
+        env = {**os.environ, "MAIN": str(home), "WORKTREE": str(path), "PORT": str(port), "PORTS": str(count),
+               "PORT_LAST": str(port + count - 1), "BRANCH": a.branch, "NODE": n["id"], "WORKBENCH": str(wb)}
         r = subprocess.run(["sh", str(setup)], cwd=path, env=env, capture_output=True, text=True)
         out = (r.stdout + r.stderr).strip()
         print(f"  setup: {'ok' if r.returncode == 0 else 'FAILED (exit ' + str(r.returncode) + ')'}"
@@ -1386,7 +1530,7 @@ def cmd_wt_list(a):
         for br, w in sorted(wts.items()):
             dirty, merged, ahead = worktree_state(n["home_path"], w, br)
             state = "missing" if dirty is None else (f"{dirty} uncommitted" if dirty else "clean")
-            print(f"  {br:<28} port {w.get('port')}  {state}  "
+            print(f"  {br:<28} {port_text(w.get('port'), w.get('ports', 1))}  {state}  "
                   f"{'merged' if merged else (ahead + ' commit(s) ahead') if ahead else ''}  {tilde(w['path'])}")
 
 
@@ -1442,8 +1586,13 @@ def cmd_report(a):
     d.mkdir(parents=True, exist_ok=True)
     idx = d / "index.md"
     if not idx.exists():
-        idx.write_text(f"# {a.topic}\n\nCreated: {inst.now()} for {n['id']}\n\n## Summary\n\n## Findings\n\n"
-                       f"## Files\n\n## How to reproduce\n\n<!-- the script in scripts/ that made this, and how to run it -->\n")
+        idx.write_text(
+            f"# {a.topic}\n\nCreated: {inst.now()} for {n['id']}\n\n"
+            "## Answer\n\n<!-- the conclusion, in a few lines -->\n\n"
+            "## Findings\n\n<!-- each with its evidence: the command run, the numbers, the hash or file -->\n\n"
+            "## Controls\n\n<!-- what would have failed if the finding were wrong, and whether it did -->\n\n"
+            "## Not run\n\n<!-- what wasn't checked, and why; \"none\" only if truly none -->\n\n"
+            "## Files\n\n## How to reproduce\n\n<!-- the script in scripts/ that made this, and how to run it -->\n")
     print(d)
 
 
@@ -1652,9 +1801,12 @@ def cmd_dashboard(a):
     root = try_find_root()
     if not root:
         return False
+    name = register(root)
     inst = Instance(root)
     nodes = inst.nodes()
-    print(f"{nodes[0]['fm'].get('title', 'Brain')}  ·  {tilde(root)}  ·  machine {inst.local['machine']}\n")
+    others = [k for k, r in brains_here() if r.resolve() != root.resolve()]
+    print(f"{nodes[0]['fm'].get('title', 'Brain')}{f' ({name})' if others else ''}  ·  {tilde(root)}  ·  "
+          f"machine {inst.local['machine']}\n")
     for n in nodes:
         depth = 0 if n["id"] == "root" else n["id"].count("/") + 1
         name = n["id"] if n["id"] == "root" else n["id"].rsplit("/", 1)[-1]
@@ -1691,6 +1843,8 @@ def cmd_dashboard(a):
         for nid, c in coords:
             print(f"  {nid:<28} {inst.thread_link(c)}")
     print("\nbrain help  ·  brain show <node>  ·  brain sync <node>  ·  brain check")
+    if others and sys.stdout.isatty():  # for the person at the terminal; agents see only the brain they asked for
+        print(f"other brains here: {', '.join(others)}  (brain -b <name>, brain --all, brain brains)")
     return True
 
 
@@ -1778,58 +1932,134 @@ def link_runtimes(inst):
     return made
 
 
-GLOBAL_BEGIN = "<!-- brain:begin (written by `brain link --global`; edit outside these lines) -->"
-GLOBAL_END = "<!-- brain:end -->"
+GLOBAL_BEGIN = "<!-- brain:begin {} (written by `brain link --global`; edit outside these lines) -->"
+GLOBAL_END = "<!-- brain:end {} -->"
+LEGACY_BLOCK = re.compile(r"<!-- brain:begin \(written by .*?<!-- brain:end -->\n?", re.S)  # before names
 
 
-def global_files(inst):
-    """Each runtime's user-wide instruction file, from its adapter (GLOBAL_INSTRUCTIONS, GLOBAL_HOME_ENV)."""
-    out = []
+def block_re(name):
+    return re.compile(re.escape(f"<!-- brain:begin {name} ") + ".*?" + re.escape(GLOBAL_END.format(name)) + "\n?",
+                      re.S)
+
+
+def global_dirs(inst):
+    """{runtime: [config folders]} that get this brain's pointer on this machine: the ones given with
+    `brain link --global <runtime>=<folder>` (kept in .brain/local.json), else the runtime's own folder
+    (its GLOBAL_HOME_ENV variable, else GLOBAL_HOME_DEFAULT)."""
+    saved = inst.local.get("global", {})
+    out = {}
     for rt in inst.runtimes:
         ad = inst.adapter(rt)
         g = ad.get("GLOBAL_INSTRUCTIONS")
         if not g:
             continue
-        env, default = ad.get("GLOBAL_HOME_ENV"), ad.get("GLOBAL_HOME_DEFAULT")
-        if env and default and os.environ.get(env) and g.startswith(default):
-            g = os.environ[env] + g[len(default):]
-        out.append((rt, Path(g).expanduser()))
+        default = ad.get("GLOBAL_HOME_DEFAULT") or str(Path(g).parent)
+        dirs = saved.get(rt) or [os.environ.get(ad.get("GLOBAL_HOME_ENV") or "") or default]
+        out[rt] = [Path(d).expanduser() for d in dirs]
     return out
 
 
-def global_block(inst):
+def global_file(inst, rt, folder):
+    ad = inst.adapter(rt)
+    g = ad["GLOBAL_INSTRUCTIONS"]
+    default = ad.get("GLOBAL_HOME_DEFAULT") or str(Path(g).parent)
+    return Path(folder).expanduser() / g[len(default):].lstrip("/")
+
+
+def global_block(inst, name):
     title = read_fm(inst.root / "node.md")[0].get("title", "Brain")
     op = inst.cfg.get("operator", "the operator")
     root = tilde(inst.root)
     return "\n".join([
-        GLOBAL_BEGIN,
+        GLOBAL_BEGIN.format(name),
         f"## {title}",
         "",
-        f"{op}'s Brain is at `{root}`: their projects, notes and decisions, kept as a tree of nodes.",
+        f"{op}'s Brain is at `{root}` (its name: `{name}`): their projects, notes and decisions, kept as a "
+        "tree of nodes.",
         "",
-        f"- Asked about {op}'s projects, priorities or \"the brain\"? Run `brain` (a dashboard) or "
-        f"`brain show <node>`. `{root}/registry.md` lists every node.",
+        f"- Asked about {op}'s projects, priorities or \"the brain\"? Run `brain -b {name}` (a dashboard) or "
+        f"`brain -b {name} show <node>`. `{root}/registry.md` lists every node.",
         "- To work on one of those projects, work in its node folder or its home, where its own rules apply.",
         f"- This is only a pointer. Outside `{root}` the Brain's rules don't apply, and nothing from it may be "
         "written into another project.",
-        GLOBAL_END, ""])
+        GLOBAL_END.format(name), ""])
 
 
-def install_global(inst, remove=False):
+def own_legacy(inst, m):
+    return f"`{tilde(inst.root)}`" in m.group(0)
+
+
+def has_pointer(f, inst, name):
+    text = f.read_text() if f.exists() else ""
+    return bool(block_re(name).search(text)) or any(own_legacy(inst, m) for m in LEGACY_BLOCK.finditer(text))
+
+
+def other_pointers(f, inst, name):
+    text = f.read_text() if f.exists() else ""
+    names = set(re.findall(r"<!-- brain:begin (\S+) \(", text)) - {name}
+    return names | {"an older one"} if any(not own_legacy(inst, m) for m in LEGACY_BLOCK.finditer(text)) else names
+
+
+def set_pointer(f, inst, name, add):
+    text = f.read_text() if f.exists() else ""
+    new = block_re(name).sub("", text)
+    new = LEGACY_BLOCK.sub(lambda m: "" if own_legacy(inst, m) else m.group(0), new).rstrip("\n")
+    if add:
+        new = (new + "\n\n" if new else "") + global_block(inst, name)
+    elif new:
+        new += "\n"
+    if new == text:
+        return False
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_text(new)
+    return True
+
+
+def install_global(inst, targets=(), remove=False, refresh=False):
+    """Put this brain's pointer in its runtimes' user-wide instructions, or take it out. `targets`
+    ("<runtime>=<folder>") choose the folders for a runtime on this machine; the pointer leaves the ones it
+    was in before. A folder that already points to another brain is only shared when named explicitly.
+    `refresh`: only rewrite pointers that are already there."""
+    name = register(inst.root)
+    before = global_dirs(inst)
+    chosen = {}
+    for t in targets:
+        rt, _, d = t.partition("=")
+        if rt not in before or not d:
+            die(f"expected <runtime>=<folder>, runtime one of: {', '.join(before) or 'none'} (got '{t}')")
+        chosen.setdefault(rt, []).append(tilde(Path(d).expanduser().resolve()))
+    saved = inst.local.setdefault("global", {})
+    saved.update(chosen)
+    after = global_dirs(inst)
     done = []
-    block = global_block(inst)
-    for rt, f in global_files(inst):
-        text = f.read_text() if f.exists() else ""
-        pat = re.compile(re.escape(GLOBAL_BEGIN) + ".*?" + re.escape(GLOBAL_END) + "\n?", re.S)
-        new = pat.sub("", text).rstrip("\n")
-        if not remove:
-            new = (new + "\n\n" if new else "") + block
-        elif new:
-            new += "\n"
-        if new != text:
-            f.parent.mkdir(parents=True, exist_ok=True)
-            f.write_text(new)
-            done.append(f"{rt}: {tilde(f)} {'cleared' if remove else 'points here'}")
+    for rt, dirs in after.items():
+        files = [global_file(inst, rt, d) for d in dirs]
+        stale = {global_file(inst, rt, d) for d in before[rt]} - set(files) if chosen.get(rt) else set()
+        for f in [*stale, *(files if remove else [])]:
+            if set_pointer(f, inst, name, add=False):
+                done.append(f"{rt}: {tilde(f)} cleared")
+        if remove:
+            continue
+        kept = []
+        for d, f in zip(dirs, files):
+            if refresh and not has_pointer(f, inst, name):
+                continue
+            others = other_pointers(f, inst, name)
+            if others and rt not in chosen and not has_pointer(f, inst, name):
+                done.append(f"{rt}: {tilde(f)} already points to {', '.join(sorted(others))}: skipped. Give "
+                            f"'{name}' its own folder (brain -b {name} link --global {rt}=<folder>), or share "
+                            f"this one ({rt}={tilde(d)})")
+                continue
+            if set_pointer(f, inst, name, add=True):
+                done.append(f"{rt}: {tilde(f)} points to '{name}'")
+            kept.append(tilde(d))
+        if kept:  # where the pointer is now, so a session started with one of these folders finds this brain
+            saved[rt] = kept
+    if remove:
+        inst.local.pop("global", None)
+    elif not saved:
+        inst.local.pop("global", None)
+    inst.save_local()
     return done
 
 
@@ -1839,6 +2069,11 @@ def install_command(inst, bin_dir):
     l = bin_dir / "brain"
     target = inst.root / "core" / "bin" / "brain"
     if l.is_symlink():
+        cur = Path(os.path.realpath(l))
+        if cur.exists() and cur != target.resolve() and is_instance(cur.parent.parent.parent):
+            # another brain's command: keep it, it reaches this one too (each brain runs its own core)
+            print(f"command: {tilde(l)} (already there; reaches this brain with: brain -b {register(inst.root)})")
+            return
         l.unlink()
     elif l.exists():
         die(f"{l} exists and isn't a link; remove it first")
@@ -1857,9 +2092,45 @@ def cmd_link(a):
         inst.commit([], "Link runtime instruction files")
     if a.command:
         install_command(inst, a.bin_dir)
-    if a.glob or a.unglobal:
-        for d in install_global(inst, remove=a.unglobal) or ["global instructions: already up to date"]:
+    if a.glob or a.unglobal or a.targets:
+        for d in install_global(inst, a.targets, remove=a.unglobal) or ["global instructions: already up to date"]:
             print(d)
+    else:
+        for d in install_global(inst, refresh=True):  # keep existing pointers current (e.g. after an upgrade)
+            print(d)
+
+
+def cmd_brains(a):
+    data = read_brains()
+    if a.action == "forget":
+        if data["brains"].pop(a.name or "", None) is None:
+            die(f"no brain '{a.name}' on this machine")
+        if data.get("default") == a.name:
+            data["default"] = next(iter(sorted(data["brains"])), None)
+        write_brains(data)
+        print(f"forgot '{a.name}' (its folder is untouched)")
+        return
+    here = try_find_root()
+    if not data["brains"]:
+        print("no brains on this machine yet")
+        return
+    for name, v in sorted(data["brains"].items()):
+        root = Path(v["root"])
+        dirs = [f"{rt} {', '.join(ds)}" for rt, ds in sorted(local_of_root(root).get("global", {}).items())]
+        print(f"{'*' if here and root.resolve() == here.resolve() else ' '} {name:<16} {tilde(root)}"
+              f"{'' if is_instance(root) else '  (missing)'}{'  [default]' if data.get('default') == name else ''}"
+              + (f"\n  {'':<16} pointer in: {'; '.join(dirs)}" if dirs else ""))
+    print("\n* = the one a command here uses.  brain -b <name> <command> picks one; brain use <name> sets the default;"
+          "\nbrain --all shows every dashboard.")
+
+
+def cmd_use(a):
+    data = read_brains()
+    if a.name not in data["brains"]:
+        die(f"no brain '{a.name}' on this machine ({', '.join(sorted(data['brains'])) or 'none'})")
+    data["default"] = a.name
+    write_brains(data)
+    print(f"default brain: {a.name} (inside another brain's folders, that brain is used)")
 
 
 # ---------- hooks ----------
@@ -2228,7 +2499,11 @@ def cmd_machine(a):
             if n["external"] and not n["archived"] and not (n["home_path"] and n["home_path"].exists()):
                 print(f"{n['id']}\t{n['fm'].get('home_url', 'none')}")
         return
-    print(f"machine: {inst.local['machine']}   bindings: {tilde(inst.local_path)} (not in git)\n")
+    print(f"machine: {inst.local['machine']}   bindings: {tilde(inst.local_path)} (not in git)")
+    name, others = register(inst.root), [k for k, r in brains_here() if r.resolve() != inst.root.resolve()]
+    dirs = "; ".join(f"{rt} {', '.join(ds)}" for rt, ds in sorted(inst.local.get("global", {}).items()))
+    print(f"this brain: {name}   pointer in: {dirs or 'none (brain link --global)'}"
+          + (f"   other brains here: {', '.join(others)}" if others else "") + "\n")
     for n in nodes:
         loc = n["local"]
         bits = []
@@ -2287,8 +2562,39 @@ def cmd_selftest(a):
 
 # ---------- main ----------
 
+def take_brain_flag():
+    """`-b <name>` / `--brain <name>` anywhere on the command line: run against that brain (sets BRAIN_ROOT,
+    which the instance's own core then sees too)."""
+    args, out, name, i = sys.argv[1:], [], None, 0
+    while i < len(args):
+        x = args[i]
+        if x in ("-b", "--brain") and i + 1 < len(args):
+            name, i = args[i + 1], i + 2
+            continue
+        if x.startswith("--brain="):
+            name = x.split("=", 1)[1]
+        else:
+            out.append(x)
+        i += 1
+    if name is None:
+        return
+    brains = dict(brains_here())
+    if name not in brains:
+        die(f"no brain '{name}' on this machine ({', '.join(brains) or 'none yet'}; see: brain brains)")
+    os.environ["BRAIN_ROOT"] = str(brains[name])
+    sys.argv[1:] = out
+
+
+def dashboard_all():
+    """Every brain's dashboard, each by its own core."""
+    for i, (name, root) in enumerate(brains_here()):
+        print(f"{'' if i == 0 else chr(10)}===== {name} =====", flush=True)
+        subprocess.run([sys.executable, str(root / "core" / "bin" / "brain")],
+                       env={**os.environ, "BRAIN_ROOT": str(root), "BRAIN_NO_REEXEC": "1"})
+
+
 def reexec_into_instance_core():
-    """`brain` on PATH points at one core; inside another instance, use that instance's own core."""
+    """`brain` on PATH points at one core; for another instance, use that instance's own core."""
     if os.environ.get("BRAIN_NO_REEXEC") or (len(sys.argv) > 1 and sys.argv[1] in ("init", "selftest")):
         return
     root = try_find_root()
@@ -2301,8 +2607,12 @@ def reexec_into_instance_core():
 
 
 def main():
+    take_brain_flag()
     reexec_into_instance_core()
     ap = argparse.ArgumentParser(prog="brain", description=__doc__.splitlines()[0])
+    ap.add_argument("-b", "--brain", metavar="NAME", help="use this brain (when this machine has several; "
+                    "default: the one whose folders you are in, else `brain use`)")
+    ap.add_argument("-a", "--all", action="store_true", help="with no command: every brain's dashboard")
     sub = ap.add_subparsers(dest="cmd", metavar="<command>")
 
     def cmd(name, fn, h, *args):
@@ -2317,7 +2627,8 @@ def main():
 
     cmd("init", cmd_init, "create a new instance from this core", "dir",
         opt("--operator", required=True), opt("--title", required=True), opt("--runtimes", default="claude,codex"),
-        opt("--host", default="t3"), opt("--tz", default="UTC"))
+        opt("--host", default="t3"), opt("--tz", default="UTC"),
+        opt("--name", help="short name for `brain -b <name>` (default: the folder's name)"))
     cmd("new", cmd_new, "create a node", "id", opt("--title", required=True), opt("--owners", default=""),
         opt("--labels", default=""), opt("--runtime"), opt("--home", help="a path outside the instance"),
         opt("--home-url", dest="home_url"))
@@ -2417,11 +2728,16 @@ def main():
     cmd("link", cmd_link, "create runtime links (axiom 22); --command puts 'brain' on your PATH; --global adds a "
         "pointer to this Brain in each runtime's user-wide instructions",
         opt("--command", action="store_true"), opt("--bin-dir", dest="bin_dir", default="~/.local/bin"),
-        opt("--global", action="store_true", dest="glob"), opt("--remove-global", action="store_true", dest="unglobal"))
+        opt("--global", action="store_true", dest="glob"), opt("--remove-global", action="store_true", dest="unglobal"),
+        opt("targets", nargs="*", metavar="RUNTIME=FOLDER",
+            help="with --global: the config folders that get this brain's pointer, e.g. claude=~/.claude-work"))
     cmd("check", cmd_check, "verify what can be checked mechanically; --fix repairs the safe things",
         opt("--fix", action="store_true"))
     cmd("machine", cmd_machine, "this machine's bindings (host IDs, home paths)",
         opt("--missing-homes", action="store_true", dest="missing_homes"))
+    cmd("brains", cmd_brains, "the brains on this machine: brain brains [forget <name>]",
+        opt("action", nargs="?", choices=["list", "forget"], default="list"), opt("name", nargs="?"))
+    cmd("use", cmd_use, "set this machine's default brain: brain use <name>", "name")
     cmd("upgrade", cmd_upgrade, "update core/ to the latest version, then link and check")
     cmd("selftest", cmd_selftest, "run the core's scenario tests in throwaway folders",
         opt("-v", "--verbose", action="store_true"), opt("-k"))
@@ -2432,7 +2748,9 @@ def main():
         if a.cmd in ("item", "specialist", "wt", "hook"):
             sub.choices[a.cmd].print_help()
             return
-        if not cmd_dashboard(a):
+        if a.all:
+            dashboard_all()
+        elif not cmd_dashboard(a):
             ap.print_help()
         return
     a.f(a)

@@ -27,6 +27,11 @@ GIT_ENV = {"GIT_AUTHOR_NAME": "live", "GIT_AUTHOR_EMAIL": "live@test", "GIT_COMM
            "GIT_COMMITTER_EMAIL": "live@test", "BRAIN_NO_REEXEC": "1"}
 
 
+def brains_config(folder):
+    """Each run lists its brains in its own file, never in this machine's real list."""
+    return {"BRAIN_CONFIG": str(Path(folder) / "brains.json")}
+
+
 def sh(*args, cwd=None, check=True, env=None):
     r = subprocess.run(list(args), cwd=cwd, capture_output=True, text=True, env={**os.environ, **GIT_ENV, **(env or {})})
     if check and r.returncode:
@@ -35,7 +40,7 @@ def sh(*args, cwd=None, check=True, env=None):
 
 
 def brain(root, *args, check=True):
-    return sh(sys.executable, str(BRAIN), *args, cwd=root, check=check)
+    return sh(sys.executable, str(BRAIN), *args, cwd=root, check=check, env=brains_config(Path(root).parent))
 
 
 class Run:
@@ -49,7 +54,7 @@ class Run:
 
     def instance(self):
         sh(sys.executable, str(BRAIN), "init", str(self.root), "--operator", "alice", "--title", "Alice",
-           "--runtimes", "claude,codex", "--tz", "UTC", cwd=self.tmp)
+           "--runtimes", "claude,codex", "--tz", "UTC", cwd=self.tmp, env=brains_config(self.tmp))
         brain(self.root, "new", "a", "--title", "Atlas", "--runtime", self.runtime)
         return self.root
 
@@ -64,8 +69,10 @@ class Run:
         sh("git", "commit", "-qm", "init", cwd=h)
         return h
 
-    def agent(self, cwd, prompt, writable=None, tools=True):
-        """Run the runtime non-interactively in `cwd`. `writable`: extra folder it may write to."""
+    def agent(self, cwd, prompt, writable=None, tools=True, user_instructions=None):
+        """Run the runtime non-interactively in `cwd`. `writable`: extra folder it may write to.
+        `user_instructions`: stands in for the user-wide instruction file (claude: instead of the real one;
+        codex: its throwaway config folder already holds whatever was linked there)."""
         if self.runtime == "claude":
             # the prompt goes first: --add-dir takes several values and would swallow it
             cmd = ["claude", "-p", prompt, "--model", os.environ.get("LIVE_CLAUDE_MODEL", "claude-sonnet-5-5")]
@@ -73,6 +80,8 @@ class Run:
                 cmd += ["--dangerously-skip-permissions"]  # throwaway folders only
                 if writable:
                     cmd += ["--add-dir", str(writable)]
+            if user_instructions is not None:
+                cmd += ["--setting-sources", "project,local", "--append-system-prompt", user_instructions]
             env = {}
         else:
             codex_home = self.codex_home(cwd)
@@ -81,6 +90,12 @@ class Run:
             cmd += ["--dangerously-bypass-approvals-and-sandbox"] if tools else ["-s", "read-only"]
             cmd.append(prompt)
             env = {"CODEX_HOME": str(codex_home)}
+        # `brain` on PATH is the core under test, and its list of brains is this run's
+        bin_ = self.tmp / "bin"
+        if not bin_.exists():
+            bin_.mkdir()
+            (bin_ / "brain").symlink_to(BRAIN)
+        env = {**env, **brains_config(self.tmp), "PATH": f"{bin_}:{os.environ.get('PATH', '')}"}
         r = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=600,
                            env={**os.environ, **GIT_ENV, **env}, stdin=subprocess.DEVNULL)
         self.output = (r.stdout or "") + ("\n[stderr]\n" + r.stderr[-3000:] if r.returncode else "")
@@ -107,7 +122,7 @@ class Run:
     def approve_hooks(self):
         if self.runtime == "codex":
             sh(sys.executable, str(BRAIN), "hook", "approve", cwd=self.root,
-               env={"CODEX_HOME": str(self.codex_home(self.root / "nodes" / "a"))})
+               env={"CODEX_HOME": str(self.codex_home(self.root / "nodes" / "a")), **brains_config(self.tmp)})
 
     def check(self, cond, msg):
         if not cond:
@@ -126,7 +141,7 @@ class Run:
 
     def brain_check(self):
         r = subprocess.run([sys.executable, str(BRAIN), "check"], cwd=self.root, capture_output=True, text=True,
-                           env={**os.environ, **GIT_ENV})
+                           env={**os.environ, **GIT_ENV, **brains_config(self.tmp)})
         self.check(r.returncode == 0, f"brain check fails: {(r.stdout + r.stderr).strip()[-400:]}")
 
 
@@ -302,9 +317,40 @@ def notes_current_after_an_edit(run):
     run.check(not dirty, f"not committed: {dirty}")
 
 
+def blocked(node_dir, item):
+    st = node_dir / "status.md"
+    st.write_text(st.read_text().replace("## Blocked / needs the operator\n",
+                                         f"## Blocked / needs the operator\n\n- {item}\n"))
+
+
+def a_session_reaches_its_own_brain(run):
+    """Two brains on one machine (personal, the default; and work). A session set up for work (the work
+    pointer in its runtime's config folder) answers from the work brain and never shows the other."""
+    me = run.instance()
+    work = run.tmp / "work"
+    sh(sys.executable, str(BRAIN), "init", str(work), "--operator", "alice", "--title", "Work", "--name", "work",
+       "--runtimes", "claude,codex", "--tz", "UTC", cwd=run.tmp, env=brains_config(run.tmp))
+    brain(work, "new", "orion", "--title", "Orion launch")
+    blocked(me / "nodes" / "a", "Book the dentist for Tuesday")
+    blocked(work / "nodes" / "orion", "Legal hasn't signed off the Orion contract")
+    for root in (me, work):
+        sh("git", "commit", "-qam", "blocked", cwd=root)
+    elsewhere = run.tmp / "elsewhere"
+    elsewhere.mkdir()
+    brain(me, "link", "--global", f"claude={run.tmp / 'claude-me'}", f"codex={run.tmp / 'codex-me'}")
+    brain(work, "link", "--global", f"claude={run.tmp / 'claude-work'}",
+          f"codex={run.codex_home(elsewhere) if run.runtime == 'codex' else run.tmp / 'codex-work'}")
+    pointer = (run.tmp / "claude-work" / "CLAUDE.md").read_text()
+    out = run.agent(elsewhere, "What's blocked and waiting on me? One line, from the Brain.",
+                    user_instructions=pointer if run.runtime == "claude" else None)
+    low = out.lower()
+    run.check("legal" in low or "orion" in low, "didn't answer from the work brain")
+    run.check("dentist" not in low, "showed the personal brain")
+
+
 SCENARIOS = [parity, coordinator_writes_as_it_goes, worker_asks_the_writer, learning_is_a_citation,
              new_node_in_one_sentence, no_upward_traces, second_runtime_review, stop_hook_fires,
-             notes_current_after_an_edit]
+             notes_current_after_an_edit, a_session_reaches_its_own_brain]
 
 
 def main():

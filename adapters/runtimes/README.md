@@ -18,6 +18,9 @@ adapter, `<runtime>.env`, tells `core/bin/brain` how to expose the neutral files
 - `GLOBAL_INSTRUCTIONS`: the runtime's user-wide instruction file. `brain link --global` adds a
   short, marked pointer to the instance there. `GLOBAL_HOME_ENV` names the environment variable
   that moves the runtime's config folder, and `GLOBAL_HOME_DEFAULT` is that folder's default.
+  `brain link --global <runtime>=<folder>` puts the pointer in other config folders instead
+  (a machine with several brains, or several accounts); a session whose `GLOBAL_HOME_ENV` names
+  such a folder reaches that brain.
 
 Inheritance (axiom 5) relies on the runtime loading instruction files from parent folders.
 

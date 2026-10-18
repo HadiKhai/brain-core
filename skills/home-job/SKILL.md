@@ -14,6 +14,9 @@ request. The operator's own checkout of the home is never touched.
    If setup fails, fix the script before going on: a worker without its env files wastes its run.
    - No `worktree-setup.sh` yet and the project needs env files or installs? Write one in the
      node folder (it runs with `MAIN`, `WORKTREE`, `PORT`, `BRANCH`, `NODE` and `WORKBENCH` set).
+   - The project runs several services at once? `core/bin/brain set <id> ports=<N>` gives each
+     worktree a block of N ports: `PORT` to `PORT_LAST` (`PORTS` = N), apart from every other
+     worktree on this machine, in any brain.
 2. **Record it** in `status.md` under **Active work**: `| <branch> | <thread> | <PR or -> | <state> |`.
 3. **Worker.** Host `launch` in the node's `home_project`, in the existing worktree (path and
    branch from step 1), on the node's runtime unless the job calls for another. The brief is
