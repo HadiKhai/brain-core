@@ -8,6 +8,11 @@ Updated: {{DATE}} by {{ID}} coordinator ({{RUNTIME}})
 
 ## Next
 
+## Active work
+
+| Branch | Thread | PR | State |
+| --- | --- | --- | --- |
+
 ## Blocked / needs the operator
 
 ## Recent changes (newest first)

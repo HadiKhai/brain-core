@@ -22,6 +22,12 @@ LOCAL_KEYS = ["coordinator", "host_project", "home_project"]  # per machine (axi
 ITEM_FIELDS = ["id", "title", "kind", "source_node", "source_ref", "learned_at",
                "source_owners", "scope", "status"]
 STALE_DAYS = 7
+TOUCHED = set()  # every path this command wrote; commits include these and nothing else (axiom 15)
+
+
+def touch(*paths):
+    for x in paths:
+        TOUCHED.add(Path(x).absolute())
 
 
 # ---------- files ----------
@@ -42,6 +48,7 @@ def read_fm(path):
 def write_fm(path, fm, body):
     lines = "\n".join(f"{k}: {v}" for k, v in fm.items())
     Path(path).write_text(f"---\n{lines}\n---\n{body}")
+    touch(path)
 
 
 def lst(value):
@@ -216,12 +223,34 @@ class Instance:
                 die(f"principal '{p}' is revoked")
 
     def commit(self, paths, msg):
+        """Commit `paths` plus what this command wrote. Other uncommitted work stays as it is."""
         if not (self.root / ".git").exists():
             return
-        subprocess.run(["git", "-C", str(self.root), "add", "-A", "--", *[str(p) for p in paths]], check=True)
+        root = self.root.resolve()
+        want = []
+        for x in {*(Path(q) if Path(q).is_absolute() else self.root / q for q in paths), *TOUCHED}:
+            x = Path(os.path.abspath(x))
+            rx = x.parent.resolve() / x.name
+            if root not in [rx, *rx.parents] or ".brain" in rx.relative_to(root).parts:
+                continue
+            rel = str(rx.relative_to(root)) or "."
+            if x.exists() or x.is_symlink() or git("ls-files", "--", rel, cwd=root).stdout.strip():
+                want.append(rel)
+        if not want:
+            return
+        subprocess.run(["git", "-C", str(root), "add", "-A", "--", *sorted(set(want))], check=True)
         r = subprocess.run(["git", "-C", str(self.root), "diff", "--cached", "--quiet"])
         if r.returncode:
             subprocess.run(["git", "-C", str(self.root), "commit", "-qm", msg], check=True)
+
+
+def resolve_ref(nodes, ref):
+    """The node a cited id means today: itself, or the node it was moved to or merged into (axiom 19)."""
+    for key in ("id", "former_ids", "merged_from"):
+        for n in nodes:
+            if (n["id"] == ref) if key == "id" else ref in lst(n["fm"].get(key)):
+                return n
+    return None
 
 
 def try_find_root():
@@ -261,6 +290,7 @@ def cmd_init(a):
               "HOST": a.host, "TZ": a.tz, "ROOT": tilde(root), "TITLE": a.title}
     for name in ("AGENTS.md", "instance.md"):
         (root / name).write_text(fill((CORE / "templates" / "root" / name).read_text(), values))
+        touch(root / name)
     inst_tmp = Instance(root)
     _make_node(inst_tmp, root, "root", a.title, a.operator, "", "here", lst(runtimes)[0], parent_owners=None)
     (root / "nodes").mkdir(exist_ok=True)
@@ -284,6 +314,7 @@ def ensure_gitignore(root):
     missing = [w for w in want if w not in lines]
     if missing:
         gi.write_text("\n".join(lines + missing) + "\n")
+        touch(gi)
     return missing
 
 
@@ -303,6 +334,7 @@ def _make_node(inst, d, nid, title, owners, labels, home, runtime, parent_owners
             if nid == "root" and rel.name == "AGENTS.md":
                 continue  # the root uses templates/root/AGENTS.md
             dest.write_text(fill(f.read_text(), values))
+            touch(dest)
     eff = lst(owners) or (parent_owners or [])
     if parent_owners is not None and set(eff) != set(parent_owners):
         sync_view_section(d, True)
@@ -447,9 +479,11 @@ def sync_view_section(d, sealed):
     text = ag.read_text()
     if sealed and section.strip() not in text:
         ag.write_text(text.rstrip("\n") + "\n" + section)
+        touch(ag)
         return True
     if not sealed and section.strip() in text:
         ag.write_text(text.replace(section.strip(), "").rstrip("\n") + "\n")
+        touch(ag)
         return True
     return False
 
@@ -473,7 +507,7 @@ def cmd_owners(a):
     print(f"{a.id}: owners -> {a.owners or '(parent)'}")
     _boundary_report(before, after)
     write_registry(inst)
-    inst.commit(["."], f"{a.id}: owners -> {a.owners or '(parent)'}")
+    inst.commit([], f"{a.id}: owners -> {a.owners or '(parent)'}")
 
 
 # ---------- traces (axiom 6) ----------
@@ -517,6 +551,34 @@ def scan_traces(inst, home):
 
 # ---------- sealing ----------
 
+def rules_section(agents_file, headings=("Rules for this node", "Instance rules")):
+    """The text under a node's own rules heading, without template comments."""
+    if not agents_file.exists():
+        return ""
+    text, out, inside = agents_file.read_text(), [], False
+    for line in text.splitlines():
+        if line.startswith("## "):
+            inside = line[3:].strip() in headings
+        elif inside:
+            out.append(line)
+    body = re.sub(r"<!--.*?-->", "", "\n".join(out), flags=re.S).strip()
+    return body
+
+
+def home_rules(inst, n):
+    """(rules written into the home, rules from above the new boundary to consider). Neither names anything
+    above the boundary by construction; the trace scan verifies (axiom 6)."""
+    own = rules_section(n["dir"] / "AGENTS.md")
+    above = []
+    m = n["parent"]
+    while m:
+        r = rules_section(m["dir"] / "AGENTS.md")
+        if r:
+            above.append((m["id"], r))
+        m = m["parent"]
+    return own, above
+
+
 def cmd_seal(a):
     inst = load()
     before = snapshot(inst)
@@ -546,10 +608,15 @@ def cmd_seal(a):
             die(f"{dest} already exists")
         dest.parent.mkdir(parents=True, exist_ok=True)
         shutil.move(str(src), str(dest))
+        touch(src)
         moved.append(rel)
+    own, above = home_rules(inst, n)
+    wrote_rules = False
     if not (home / "AGENTS.md").exists():
         (home / "AGENTS.md").write_text(fill((CORE / "templates" / "home-AGENTS.md").read_text(),
-                                             {"TITLE": n["fm"].get("title", n["id"])}))
+                                             {"TITLE": n["fm"].get("title", n["id"]),
+                                              "RULES": own or "<!-- This project's own rules. -->"}))
+        wrote_rules = True
         for rt in inst.runtimes:
             link = inst.adapter(rt).get("INSTRUCTIONS_LINK")
             if link and not (home / link).exists():
@@ -564,7 +631,7 @@ def cmd_seal(a):
     after = snapshot(inst)
     resync_views(inst)
     write_registry(inst)
-    inst.commit(["."], f"{a.id}: seal -> owners {a.owners}, home external")
+    inst.commit([], f"{a.id}: seal -> owners {a.owners}, home external")
     print(f"{a.id}: owners -> {a.owners}; home -> {tilde(home)}")
     for nid in sorted(after):
         if before.get(nid) and before[nid][1] != after[nid][1]:
@@ -582,8 +649,17 @@ def cmd_seal(a):
         print("  home: new repository, initial commit made")
     else:
         print("  home: existing; nothing committed there (its own change process decides)")
+    if wrote_rules:
+        print(f"  home AGENTS.md: the shared baseline{' + this node' + chr(39) + 's own rules' if own else ''}")
+    elif own:
+        print("  home has its own AGENTS.md: propose these rules through its change process (axiom 12):")
+        print("\n".join("    " + l for l in own.splitlines()))
+    if above:
+        print("  rules from above the boundary; write in the ones the new owners agree to, in their own words:")
+        for nid, r in above:
+            print(f"    from {nid}:")
+            print("\n".join("      " + l for l in r.splitlines()))
     print("  still yours to do (skills/node-transition, Sealing):\n"
-          "    - write the rules the home still needs into its AGENTS.md, natively\n"
           "    - ask the principals in scope whether earlier items' scopes change (axiom 11)\n"
           "    - the coordinator stays on this side and bridges the boundary")
     if hits:
@@ -613,15 +689,18 @@ def do_move(inst, nid, parent_id):
         subprocess.run(["git", "-C", str(inst.root), "mv", str(n["dir"]), str(dest)], check=True)
     else:
         shutil.move(str(n["dir"]), str(dest))
+    touch(n["dir"], dest)
     for m in inst.nodes():  # rewrite ids in the moved subtree, and this machine's bindings
         if m["id"] == new_id or m["id"].startswith(new_id + "/"):
             old_id = nid + m["id"][len(new_id):]
             fm, body = read_fm(m["dir"] / "node.md")
             fm["id"] = m["id"]
+            fm["former_ids"] = ", ".join(lst(fm.get("former_ids")) + [old_id])  # items still cite old_id
             write_fm(m["dir"] / "node.md", fm, body)
             ag = m["dir"] / "AGENTS.md"
             if ag.exists():
                 ag.write_text(ag.read_text().replace(f"Node `{old_id}`", f"Node `{m['id']}`"))
+                touch(ag)
             if old_id in inst.local["nodes"]:
                 inst.local["nodes"][m["id"]] = inst.local["nodes"].pop(old_id)
     inst.save_local()
@@ -639,7 +718,7 @@ def cmd_move(a):
     resync_views(inst)
     print("  host: update the node's host project folder (see the host adapter)")
     write_registry(inst)
-    inst.commit(["."], f"Move {a.id} -> {new_id}")
+    inst.commit([], f"Move {a.id} -> {new_id}")
 
 
 def git_mv(inst, src, dest):
@@ -649,11 +728,13 @@ def git_mv(inst, src, dest):
         subprocess.run(["git", "-C", str(inst.root), "mv", str(src), str(dest)], check=True)
     else:
         shutil.move(str(src), str(dest))
+    touch(src, dest)
 
 
 def append_inbox(n_dir, who, text, inst):
     with open(n_dir / "inbox.md", "a") as fh:
         fh.write(f"- {inst.now()} from {who}: {text}\n")
+    touch(n_dir / "inbox.md")
 
 
 def cmd_split(a):
@@ -678,7 +759,7 @@ def cmd_split(a):
     append_inbox(d, "brain", note + "; write this node's brief.md", inst)
     link_runtimes(inst)
     write_registry(inst)
-    inst.commit(["."], f"Split {a.new_id} from {a.id}")
+    inst.commit([], f"Split {a.new_id} from {a.id}")
     print(f"split: {a.id} -> {a.id} + {a.new_id}{'  (sealed)' if sealed else ''}")
     _boundary_report(before, snapshot(inst))
     print("  items keep their provenance (axiom 19)")
@@ -711,11 +792,12 @@ def cmd_merge(a):
     old_local = inst.local["nodes"].pop(src["id"], {})
     inst.save_local()
     shutil.rmtree(src["dir"])
+    touch(src["dir"])
     append_inbox(dst["dir"], "brain", f"merged '{src['id']}' into this node: fold "
                  f"sources/merged-{leaf}/ (its brief, status, decisions, rules) into this node's files", inst)
     resync_views(inst)
     write_registry(inst)
-    inst.commit(["."], f"Merge {src['id']} into {dst['id']}")
+    inst.commit([], f"Merge {src['id']} into {dst['id']}")
     print(f"merged {src['id']} into {dst['id']}; its files are in {tilde(target)}")
     _boundary_report(before, snapshot(inst))
     if old_local.get("coordinator"):
@@ -786,7 +868,7 @@ def cmd_revoke(a):
     cfg["revoked"] = ", ".join(lst(cfg.get("revoked")) + [p])
     write_fm(inst.root / "instance.md", cfg, body)
     write_registry(inst)
-    inst.commit(["."], f"Revoke {p}")
+    inst.commit([], f"Revoke {p}")
     print(f"revoked {p}")
     print(f"  quarantined items: {', '.join(quarantined) or 'none'}")
     print(f"  archived nodes: {', '.join(archived) or 'none'}  (each: final status, stop its threads)")
@@ -1117,6 +1199,38 @@ def ago(inst, d):
     return "just now"
 
 
+def status_section(n, heading):
+    """Bullet lines under `## <heading>` in a node's status.md."""
+    f = n["dir"] / "status.md"
+    if not f.exists():
+        return []
+    out, inside = [], False
+    for line in f.read_text().splitlines():
+        if line.startswith("## "):
+            inside = line[3:].strip().lower().startswith(heading.lower())
+        elif inside and line.startswith("- ") and line[2:].strip():
+            out.append(line[2:].strip())
+        elif inside and out and line.startswith("  ") and line.strip():
+            out[-1] += " " + line.strip()  # a wrapped bullet
+    return out
+
+
+def active_work(n):
+    """Rows of the 'Active work' table in status.md (branch, thread, PR, state), minus the header."""
+    f = n["dir"] / "status.md"
+    if not f.exists():
+        return []
+    rows, inside = [], False
+    for line in f.read_text().splitlines():
+        if line.startswith("## "):
+            inside = line[3:].strip().lower().startswith("active work")
+        elif inside and line.startswith("|"):
+            cells = [c.strip() for c in line.strip().strip("|").split("|")]
+            if cells and not set("".join(cells)) <= set("-: ") and cells[0].lower() != "branch":
+                rows.append(cells)
+    return [r for r in rows if not (len(r) > 3 and r[3].lower() in ("merged", "closed", "done", "abandoned"))]
+
+
 def inbox_lines(n):
     f = n["dir"] / "inbox.md"
     return [l for l in f.read_text().splitlines() if l.startswith("- ")] if f.exists() else []
@@ -1174,6 +1288,10 @@ def cmd_show(a):
     print(f"  folder    {tilde(n['dir'])}")
 
 
+def paused(n):
+    return "state:paused" in lst(n["fm"].get("labels"))
+
+
 def cmd_dashboard(a):
     root = try_find_root()
     if not root:
@@ -1184,16 +1302,21 @@ def cmd_dashboard(a):
     for n in nodes:
         depth = 0 if n["id"] == "root" else n["id"].count("/") + 1
         name = n["id"] if n["id"] == "root" else n["id"].rsplit("/", 1)[-1]
-        tags = (" [sealed]" if n["sealed"] else "") + (" [archived]" if n["archived"] else "")
-        ib = len(inbox_lines(n))
+        tags = (" [sealed]" if n["sealed"] else "") + (" [archived]" if n["archived"] else "") + \
+               (" [paused]" if paused(n) else "")
+        ib, work = len(inbox_lines(n)), len(active_work(n))
         print(f"{'  ' * depth}{name:<{28 - 2 * depth}} updated {ago(inst, updated_at(inst, n)):<10}"
-              f"{f'  inbox {ib}' if ib else ''}{tags}")
+              f"{f'  inbox {ib}' if ib else ''}{f'  in flight {work}' if work else ''}{tags}")
     attention = []
     for n in nodes:
         if n["archived"]:
             continue
+        for b in status_section(n, "blocked"):
+            attention.append(f"{n['id']}: {b}")
         for l in inbox_lines(n):
-            attention.append(f"{n['id']}: {l[2:]}")
+            attention.append(f"{n['id']}: inbox: {l[2:]}")
+        if paused(n):
+            continue
         u = updated_at(inst, n)
         if u and (inst.now_dt() - u).days >= STALE_DAYS:
             attention.append(f"{n['id']}: status not updated for {(inst.now_dt() - u).days} days")
@@ -1205,7 +1328,7 @@ def cmd_dashboard(a):
                          + (" (some fixable: 'brain check --fix')" if fixable else ""))
     print("\nNeeds attention" if attention else "\nNothing needs attention.")
     for x in attention[:30]:
-        print(f"  - {x}")
+        print(f"  - {x if len(x) <= 140 else x[:139] + '…'}")
     coords = [(n["id"], n["local"].get("coordinator")) for n in nodes if n["local"].get("coordinator")]
     if coords:
         print("\nCoordinators")
@@ -1216,6 +1339,15 @@ def cmd_dashboard(a):
 
 
 def write_registry(inst):
+    text = registry_text(inst)
+    changed = not (inst.root / "registry.md").exists() or (inst.root / "registry.md").read_text() != text
+    if changed:
+        (inst.root / "registry.md").write_text(text)
+        touch(inst.root / "registry.md")
+    return changed
+
+
+def registry_text(inst):
     rows = ["# Registry", "",
             "Generated by `core/bin/brain registry` from every `node.md`. Do not edit; change nodes with "
             "`core/bin/brain`. Live status: `core/bin/brain status`; this machine's IDs: `core/bin/brain show <node>`.",
@@ -1230,10 +1362,7 @@ def write_registry(inst):
         rows.append(f"| {n['id']} | {fm.get('title', '')} | {', '.join(n['owners'])} | "
                     f"{'yes' if n['sealed'] else ''} | {fm.get('labels', '')} | {fm.get('runtime', '')} | "
                     f"{home} |")
-    text = "\n".join(rows) + "\n"
-    changed = not (inst.root / "registry.md").exists() or (inst.root / "registry.md").read_text() != text
-    (inst.root / "registry.md").write_text(text)
-    return changed
+    return "\n".join(rows) + "\n"
 
 
 def cmd_registry(a):
@@ -1259,6 +1388,7 @@ def link_runtimes(inst):
                     if l.exists():
                         die(f"{l} is a real file; merge it into AGENTS.md and delete it")
                     l.symlink_to("AGENTS.md")
+                    touch(l)
                     made.append(l)
         sk = ad.get("SKILLS_DIR")
         if sk:
@@ -1271,6 +1401,7 @@ def link_runtimes(inst):
                     die(f"{l} exists and is not a link; move its contents to core/skills")
                 l.parent.mkdir(parents=True, exist_ok=True)
                 l.symlink_to(target)
+                touch(l)
                 made.append(l)
     return made
 
@@ -1292,8 +1423,11 @@ def install_command(inst, bin_dir):
 
 def cmd_link(a):
     inst = load()
-    for l in link_runtimes(inst):
+    made = link_runtimes(inst)
+    for l in made:
         print(f"linked {l.relative_to(inst.root)}")
+    if made:
+        inst.commit([], "Link runtime instruction files")
     if a.command:
         install_command(inst, a.bin_dir)
 
@@ -1318,7 +1452,8 @@ def collect_problems(inst):
     label_keys = lst(inst.cfg.get("label_keys"))
     tdir = CORE / "templates" / "node"
     template_files = [f.relative_to(tdir) for f in tdir.rglob("*") if f.is_file()]
-    for n in inst.nodes():
+    nodes = inst.nodes()
+    for n in nodes:
         fm, nid = n["fm"], n["id"]
         for f in NODE_FIELDS:
             if f not in fm:
@@ -1387,9 +1522,14 @@ def collect_problems(inst):
                 p(f"{name}: unknown principal '{o}'")
         if fm.get("status") not in ("active", "quarantined"):
             p(f"{name}: status must be active or quarantined")
+        if fm.get("source_node") and not resolve_ref(nodes, fm["source_node"]):
+            p(f"{name}: source_node '{fm['source_node']}' is no node, former id or merged node (axiom 19)")
     for s in find_specialists(inst):
         if not s["fm"].get("scope"):
             p(f"{s['dir'].relative_to(inst.root)}/role.md: missing scope")
+        for l in parse_lessons(s["dir"] / "lessons.md") if (s["dir"] / "lessons.md").exists() else []:
+            if not resolve_ref(nodes, l["from"]):
+                warnings.append(f"{s['dir'].relative_to(inst.root)}/lessons.md: lesson from unknown node '{l['from']}'")
     if registry_stale(inst):
         p("registry.md is out of date")
         fixable.append("registry")
@@ -1405,11 +1545,7 @@ def registry_stale(inst):
     f = inst.root / "registry.md"
     if not f.exists():
         return True
-    old = f.read_text()
-    write_registry(inst)
-    new = f.read_text()
-    f.write_text(old)
-    return old != new
+    return f.read_text() != registry_text(inst)
 
 
 def apply_fixes(inst, kinds):
@@ -1446,6 +1582,7 @@ def apply_fixes(inst, kinds):
                 if f.is_file() and rel.name != ".gitkeep" and not (n["dir"] / rel).exists():
                     (n["dir"] / rel).parent.mkdir(parents=True, exist_ok=True)
                     (n["dir"] / rel).write_text(fill(f.read_text(), {"ID": n["id"], "TITLE": n["fm"].get("title", "")}))
+                    touch(n["dir"] / rel)
                     done.append(f"{n['id']}: added {rel}")
     if "views" in kinds:
         done += [f"{nid}: sealed-view section updated" for nid in resync_views(inst)]
@@ -1460,7 +1597,7 @@ def cmd_check(a):
     if a.fix and fixable:
         for d in apply_fixes(inst, fixable):
             print(f"fixed: {d}")
-        inst.commit(["."], "check --fix")
+        inst.commit([], "check --fix")
         inst = Instance(inst.root)
         problems, warnings, fixable = collect_problems(inst)
     for w in warnings:
@@ -1516,10 +1653,11 @@ def cmd_upgrade(a):
     print(git("log", "--oneline", f"{old}..{new}", cwd=root / "core").stdout.rstrip(), flush=True)
     newbin = str(root / "core" / "bin" / "brain")
     env = {**os.environ, "BRAIN_ROOT": str(root)}
+    inst = Instance(root)
+    inst.commit(["core", ".gitmodules"], f"Upgrade core {old[:7]} -> {new[:7]}")
+    # the new core's own link and check --fix commit whatever they change
     subprocess.run([sys.executable, newbin, "link"], env=env)
     subprocess.run([sys.executable, newbin, "check", "--fix"], env=env)
-    inst = Instance(root)
-    inst.commit(["."], f"Upgrade core {old[:7]} -> {new[:7]}")
 
 
 def cmd_selftest(a):

@@ -345,6 +345,143 @@ class Specialists(Scenario):
         self.assertIn("✓", self.b(r, "check"))
 
 
+class Dashboard(Scenario):
+    def test_blockers_paused_and_work_in_flight(self):
+        r = self.init("alice")
+        for nid in ("a", "p"):
+            self.b(r, "new", nid, "--title", nid.upper())
+        st = r / "nodes" / "a" / "status.md"
+        text = st.read_text().replace("## Blocked / needs the operator\n",
+                                      "## Blocked / needs the operator\n\n- Pick a hosting plan, cheap or\n"
+                                      "  fast WRAPPED-END\n")
+        text = text.replace("| --- | --- | --- | --- |\n", "| --- | --- | --- | --- |\n"
+                            "| fix-auth | t-1 | #12 | review |\n| old | t-0 | #9 | merged |\n")
+        st.write_text(text)
+        self.b(r, "relabel", "p", "state:paused")
+        out = self.b(r)
+        self.assertIn("a: Pick a hosting plan, cheap or fast WRAPPED-END", out)
+        self.assertIn("in flight 1", out)
+        self.assertIn("[paused]", out)
+        self.assertNotIn("p: no coordinator", out)
+        self.assertIn("a: no coordinator", out)
+
+
+class Housekeeping(Scenario):
+    def dirty(self, r):
+        """Someone else's unfinished work: an edit and a new file in another node."""
+        (r / "nodes" / "b" / "status.md").write_text("Updated: x\nHALF-WRITTEN\n")
+        (r / "nodes" / "b" / "draft.md").write_text("draft\n")
+
+    def assert_untouched(self, r):
+        st = self.git("status", "--porcelain", cwd=r)
+        self.assertIn("nodes/b/status.md", st)
+        self.assertIn("nodes/b/draft.md", st)
+        self.assertNotIn("HALF-WRITTEN", self.git("log", "-p", "--all", "--", "nodes", cwd=r))
+
+    def test_commands_commit_only_what_they_wrote(self):
+        r = self.init("alice")
+        self.b(r, "principal", "add", "bob")
+        for nid in ("a", "b", "c"):
+            self.b(r, "new", nid, "--title", nid.upper())
+        self.dirty(r)
+        self.b(r, "owners", "c", "alice,bob")            # seals c (no home yet)
+        self.b(r, "seal", "c", "--owners", "bob", "--home", str(self.tmp / "ch"))
+        self.b(r, "move", "a", "c")
+        self.b(r, "split", "c/a", "e", "--title", "E")
+        self.b(r, "new", "f", "--title", "F")
+        self.b(r, "merge", "e", "f")
+        (r / "nodes" / "f" / "CLAUDE.md").unlink()
+        self.assertIn("fixed: linked nodes/f/CLAUDE.md", self.b(r, "check", "--fix", ok=None))  # c/a is sealed now
+        self.b(r, "revoke", "bob")
+        self.assert_untouched(r)
+        log = self.git("log", "--format=%s", cwd=r)
+        for msg in ("c: owners", "c: seal", "Move a", "Split e", "Merge e", "Revoke bob"):
+            self.assertIn(msg, log)
+        self.assertNotIn("nodes/b/", self.git("log", "--name-only", "--format=", "-8", cwd=r))
+
+    def test_check_fix_repairs_each_kind(self):
+        r = self.init("alice")
+        self.b(r, "principal", "add", "bob")
+        self.b(r, "new", "a", "--title", "A")
+        (self.tmp / "vh").mkdir()
+        self.b(r, "new", "v", "--title", "V", "--owners", "bob", "--home", str(self.tmp / "vh"))
+        self.b(r, "new", "b", "--title", "B")
+        a, v = r / "nodes" / "a", r / "nodes" / "v"
+        (a / "CLAUDE.md").unlink()                                       # links
+        (a / "decisions.md").unlink()                                    # templates
+        ag = v / "AGENTS.md"                                             # views
+        ag.write_text(ag.read_text().split("## This is the operator's side")[0])
+        gi = r / ".gitignore"                                            # gitignore
+        gi.write_text(gi.read_text().replace(".brain/\n", ""))
+        (r / "registry.md").write_text("stale\n")                        # registry
+        self.git("add", "-A", cwd=r); self.git("commit", "-qm", "break things", cwd=r)
+        self.dirty(r)
+        out = self.b(r, "check", ok=False)
+        for msg in ("CLAUDE.md must be a link", "missing decisions.md", "sealed-view section",
+                    "doesn't ignore .brain/", "registry.md is out of date"):
+            self.assertIn(msg, out)
+        out = self.b(r, "check", "--fix")
+        self.assertIn("all checks pass", out)
+        self.assertTrue((a / "CLAUDE.md").is_symlink())
+        self.assertTrue((a / "decisions.md").exists())
+        self.assertIn("operator's side of a sealed node", ag.read_text())
+        self.assertIn(".brain/", gi.read_text())
+        self.assertIn("| v | V | bob | yes", (r / "registry.md").read_text())
+        self.assert_untouched(r)
+
+
+class SealingRules(Scenario):
+    def test_seal_writes_the_nodes_rules_into_a_new_home(self):
+        r = self.init("alice")
+        self.b(r, "principal", "add", "bob")
+        self.b(r, "new", "v", "--title", "Venture")
+        ag = r / "nodes" / "v" / "AGENTS.md"
+        ag.write_text(ag.read_text() + "\n- Prices are in USD, never LBP.\n")
+        root_ag = r / "AGENTS.md"
+        root_ag.write_text(root_ag.read_text() + "\n- ALICE-PRIVATE: answer in one line.\n")
+        self.git("add", "-A", cwd=r); self.git("commit", "-qm", "rules", cwd=r)
+        home = self.tmp / "vh"
+        out = self.b(r, "seal", "v", "--owners", "alice,bob", "--home", str(home))
+        rules = (home / "AGENTS.md").read_text()
+        self.assertIn("Prices are in USD, never LBP.", rules)
+        self.assertIn("DECISIONS.md", rules)
+        self.assertNotIn("ALICE-PRIVATE", rules)                # not copied without consent (axiom 12)
+        self.assertIn("ALICE-PRIVATE", out)                     # but offered to the coordinator
+        self.assertIn("AGENTS.md", self.git("show", "--name-only", "HEAD", cwd=home))
+        self.assertIn("✓", self.b(r, "check"))
+
+    def test_seal_into_an_existing_home_only_proposes(self):
+        r = self.init("alice")
+        self.b(r, "principal", "add", "bob")
+        self.b(r, "new", "v", "--title", "V")
+        ag = r / "nodes" / "v" / "AGENTS.md"
+        ag.write_text(ag.read_text() + "\n- Ship on Fridays.\n")
+        home = self.repo(self.tmp / "vh", {"AGENTS.md": "# Their rules\n"})
+        out = self.b(r, "seal", "v", "--owners", "bob", "--home", str(home))
+        self.assertEqual((home / "AGENTS.md").read_text(), "# Their rules\n")
+        self.assertIn("propose these rules", out)
+        self.assertIn("Ship on Fridays.", out)
+
+
+class Provenance(Scenario):
+    def test_citations_survive_moves_and_dangling_ones_are_caught(self):
+        r = self.init("alice")
+        self.b(r, "new", "a", "--title", "A")
+        self.b(r, "new", "p", "--title", "P")
+        self.b(r, "item", "add", "tone", "--from", "a", "--title", "Tone", "--kind", "style", "--ref", "a/brief.md")
+        self.b(r, "specialist", "new", "writer", "--title", "Writer")
+        self.b(r, "lesson", "writer", "--from", "a", "shorter titles")
+        self.b(r, "move", "a", "p")
+        self.assertIn("former_ids: a", (r / "nodes" / "p" / "nodes" / "a" / "node.md").read_text())
+        self.assertIn("source_node: a", (r / "library" / "tone.md").read_text())  # never rewritten (axiom 19)
+        out = self.b(r, "check")
+        self.assertIn("all checks pass", out)
+        self.assertNotIn("unknown node", out)
+        it = r / "library" / "tone.md"
+        it.write_text(it.read_text().replace("source_node: a", "source_node: ghost"))
+        self.assertIn("source_node 'ghost'", self.b(r, "check", ok=False))
+
+
 class InstallAndUpgrade(Scenario):
     def core_repo(self):
         src = self.tmp / "core-src"
