@@ -1587,6 +1587,11 @@ def inbox_lines(n):
     return [l for l in f.read_text().splitlines() if l.startswith("- ")] if f.exists() else []
 
 
+def cmd_now(a):
+    inst = load()
+    print(inst.now_dt().isoformat(timespec="seconds") if a.iso else inst.now())
+
+
 def cmd_tree(a):
     inst = load()
     for n in inst.nodes():
@@ -2224,6 +2229,8 @@ def main():
         opt("id", nargs="?"), opt("--all", action="store_true"),
         opt("--offline", action="store_true"), opt("--mark", action="store_true"),
         opt("--limit", type=int, default=20, help="uncommitted files to list"))
+    cmd("now", cmd_now, "the current time in the instance's timezone, as every record writes it (axiom 17)",
+        opt("--iso", action="store_true"))
     cmd("tree", cmd_tree, "show the node tree")
     cmd("status", cmd_status, "first line of every status.md")
     cmd("registry", cmd_registry, "regenerate registry.md")

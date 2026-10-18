@@ -27,10 +27,16 @@ moment.
 
 - **A decision** goes at the top of `decisions.md` as `## <timestamp>: <decision>`, followed by
   `Why:` and `Alternatives considered:`.
-- **Something done, started, blocked or changed** goes in `status.md`.
+- **Something done, started, blocked or changed** goes in `status.md`. Anything waiting on the
+  operator goes under **Blocked / needs the operator**, one bullet each: that's what `brain`
+  shows the operator as "needs attention".
+- **Work in flight** (a worker, a branch, a pull request) is a row under **Active work**:
+  `| <branch> | <thread> | <PR or -> | <state> |`. Keep the state current; mark it `merged` or
+  `abandoned` when it ends.
 - Each time you touch `status.md`, rewrite its first line:
-  `Updated: <YYYY-MM-DD HH:MM> by <node id> coordinator (<runtime>)`, in the instance's
-  timezone.
+  `Updated: <YYYY-MM-DD HH:MM> by <node id> coordinator (<runtime>)`.
+- **Every timestamp** comes from `core/bin/brain now`: the instance's timezone, which may not be
+  this machine's clock.
 - Commit after each update: `<node id>: <what changed>`.
 
 ## Answering the operator
@@ -49,6 +55,8 @@ Answer from files. Before answering about a child, run the **freshness check**:
 | The work is… | Do this |
 | --- | --- |
 | inside this node | do it, or start a worker |
+| changing code or files in the node's external home | the `home-job` skill: one worktree, one worker, one pull request per job |
+| a report, audit or screenshots | a worker, with `core/bin/brain report <id> "<topic>"` as its output folder |
 | inside a child | send it to the child's coordinator, or start a worker in the child if it has none (axiom 14) |
 | a one-shot job that needs no memory | host `delegate` |
 | a job that needs expertise | the `hire` skill (`core/bin/brain hire`) |
@@ -63,6 +71,15 @@ everything it needs to know, the constraints, and who it reports to.
 - Include only items the target node may use: `core/bin/brain item list --node <node>`.
 - For a sealed node, the worker runs in the node's `home`, so it follows that node's own rules
   (axiom 7). Nothing from above may be written into the home (axiom 6).
+
+## Before the operator looks at work
+
+A change the operator will be asked to approve has been reviewed by an agent on another runtime
+first (the `review` skill), and you say what that review found.
+
+Reports live in the node's workbench (`core/bin/brain reports <id>` lists them). Reusable scripts
+go in its `scripts/` (`core/bin/brain workbench <id>`), so the next job reuses them instead of
+rewriting them. Link each finished report from `status.md`.
 
 ## Reporting up
 

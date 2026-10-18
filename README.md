@@ -8,13 +8,13 @@ and uses it as a git submodule at `core/`.
 | --- | --- |
 | `MODEL.md` | Primitives, axioms, procedures, and the runtime and host contracts. The source of truth. |
 | `roles/` | Coordinator, worker and specialist protocols. |
-| `skills/` | Judgment procedures: node-new, node-sync, node-brief, node-transition, learn, teach, hire, check, machine-setup. |
+| `skills/` | Judgment procedures: node-new, node-sync, node-brief, node-transition, home-job, review, learn, teach, hire, check, machine-setup. |
 | `templates/` | Node, root, item, specialist and new-home templates. |
 | `adapters/runtimes/` | One small file per agent runtime. |
 | `adapters/hosts/` | One mapping per host, plus a small `.env` the tool reads. |
 | `bin/brain` | The tool. Python 3.9+, standard library only, nothing to install. |
 | `install.sh` | One-line install, new instance or another machine. |
-| `tests/` | `brain selftest` (scenarios, throwaway folders) and `parity.sh` (runtimes). |
+| `tests/` | `brain selftest` (scenarios, throwaway folders) and `live.py` (the same use cases on every runtime). |
 
 ## Install
 
@@ -30,8 +30,9 @@ The same instance on another machine:
 curl -fsSL https://raw.githubusercontent.com/HadiKhai/brain-core/main/install.sh | sh -s -- --from <your instance's git URL>
 ```
 
-Both put a `brain` command in `~/.local/bin`. Then open your host at the instance folder and
-say "set up this machine" (skill `machine-setup`).
+Both put a `brain` command in `~/.local/bin` (and on your PATH), and a short pointer to the
+instance in each runtime's user-wide instructions (`--no-global` skips it). Then open your host
+at the instance folder and say "set up this machine" (skill `machine-setup`).
 
 ## Use
 
@@ -48,7 +49,12 @@ You mostly talk to coordinators, and they run `brain` for you. By hand:
 | `brain owners <id> a,b` / `brain seal <id> --owners a,b --home path` | change owners; give a node its own home |
 | `brain split`, `merge` | reshape nodes, keeping provenance |
 | `brain revoke <principal>` | end a relationship: quarantine and archive |
-| `brain sync <id>` | what happened in a node and its home since the last sync |
+| `brain sync <id>` / `brain sync --all` | what happened in a node and its home since the last sync |
+| `brain wt add/list/rm/prune` | one worktree per job beside an external home, with setup and a port |
+| `brain workbench <id>`, `brain report <id> "topic"`, `brain reports` | scripts and reports, in a predictable place |
+| `brain review <id> --branch B` | brief for a review by a runtime the builder didn't use |
+| `brain schedule list/add/bind` | recurring work, shared; each machine binds what it runs |
+| `brain link --global` | a pointer to the instance in each runtime's user-wide instructions |
 | `brain item add/list/scope/quarantine/restore`, `brain usable` | the library and its scopes |
 | `brain specialist new`, `brain lesson`, `brain hire` | reusable experts and their lessons |
 | `brain check [--fix]` | verify the mechanically checkable axioms; repair the safe things |
@@ -69,5 +75,5 @@ The core must stay generic: if a change needs a specific name, it belongs in an 
 After any change:
 
 1. `brain selftest`
-2. `core/tests/parity.sh <a node folder>` (axiom 22)
+2. `python3 core/tests/live.py` (axiom 22: the same scenarios on every runtime, with real model calls)
 3. Commit here; instances pick it up with `brain upgrade`.
