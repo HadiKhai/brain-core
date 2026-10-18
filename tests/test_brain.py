@@ -376,7 +376,8 @@ class InstallAndUpgrade(Scenario):
         t = subprocess.run([str(cmd), "tree"], cwd=self.tmp, env=env, capture_output=True, text=True)
         self.assertIn("root: Bob", t.stdout, t.stderr)
         rc = self.tmp / ".zshrc"
-        self.assertIn(f'export PATH="{self.tmp / "bin"}:$PATH"', rc.read_text())
+        self.assertIn('export PATH="$HOME/bin:$PATH"', rc.read_text())
+        self.assertNotIn("to PATH)", out)
         self.assertIn("Open a new terminal", out)
 
         # a sealed node, so the second machine has a home to bind

@@ -118,18 +118,21 @@ else
   brain init "$DIR" --operator "$OPERATOR" --title "$TITLE" --runtimes "$RUNTIMES" --host "$HOST" --tz "$TZONE"
 fi
 
-brain link --command --bin-dir "$BIN_DIR"
+# (the PATH hint is dropped when the step below takes care of it)
+brain link --command --bin-dir "$BIN_DIR" | { [ "$MODIFY_PATH" = 1 ] && sed 's/  (add .* to PATH)$//' || cat; }
 
 # So `brain` works in every new terminal: put BIN_DIR on PATH in the shell's startup file.
 on_path() { case ":$PATH:" in *":$1:"*) return 0 ;; *) return 1 ;; esac; }
 NEW_SHELL=""
 if [ "$MODIFY_PATH" = 1 ] && ! on_path "$BIN_DIR"; then
+  dir="$BIN_DIR"
+  case "$dir" in "$HOME"/*) dir="\$HOME/${dir#"$HOME"/}" ;; esac
   case "$(basename "${SHELL:-sh}")" in
-    zsh) rc="$HOME/.zshrc"; line="export PATH=\"$BIN_DIR:\$PATH\"" ;;
+    zsh) rc="$HOME/.zshrc"; line="export PATH=\"$dir:\$PATH\"" ;;
     bash) rc="$HOME/.bashrc"; [ "$(uname)" = Darwin ] && rc="$HOME/.bash_profile"
-          line="export PATH=\"$BIN_DIR:\$PATH\"" ;;
-    fish) rc="$HOME/.config/fish/config.fish"; line="fish_add_path \"$BIN_DIR\"" ;;
-    *) rc="$HOME/.profile"; line="export PATH=\"$BIN_DIR:\$PATH\"" ;;
+          line="export PATH=\"$dir:\$PATH\"" ;;
+    fish) rc="$HOME/.config/fish/config.fish"; line="fish_add_path \"$dir\"" ;;
+    *) rc="$HOME/.profile"; line="export PATH=\"$dir:\$PATH\"" ;;
   esac
   if ! grep -qsF "$line" "$rc"; then
     mkdir -p "$(dirname "$rc")"
