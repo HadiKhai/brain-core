@@ -612,6 +612,63 @@ class Schedules(Scenario):
         self.assertNotIn("# local:", out)
 
 
+class StopHook(Scenario):
+    def hook(self, r, cwd, session="s1", active=False):
+        """Run the exact command the runtimes run, as they do: hook JSON on stdin, in the session's folder."""
+        cmd = json.loads((CORE / "adapters" / "runtimes" / "claude-hooks.json").read_text())["hooks"]["Stop"][0]["hooks"][0]["command"]
+        env = {k: v for k, v in self.env.items() if k != "BRAIN_HOOK_REMIND_MINUTES"}
+        res = subprocess.run(["sh", "-c", cmd], cwd=cwd, env=env, capture_output=True, text=True,
+                             input=json.dumps({"cwd": str(cwd), "session_id": session, "stop_hook_active": active,
+                                               "hook_event_name": "Stop"}))
+        self.assertEqual(res.returncode, 0, res.stderr)
+        return json.loads(res.stdout) if res.stdout.strip() else None
+
+    def test_links_for_both_runtimes(self):
+        r = self.init("alice")
+        self.b(r, "new", "a", "--title", "A")
+        for f in (r / ".claude" / "settings.json", r / "nodes" / "a" / ".claude" / "settings.json",
+                  r / ".codex" / "hooks.json"):
+            self.assertTrue(f.is_symlink() and f.exists(), f)
+        self.assertFalse((r / "nodes" / "a" / ".codex").exists(), "codex reads hooks from the root only")
+        (r / "nodes" / "a" / ".claude" / "settings.json").unlink()
+        self.assertIn("stop hook) is missing", self.b(r, "check", ok=False))
+        self.b(r, "check", "--fix")
+        self.assertIn("✓", self.b(r, "check"))
+
+    def test_stop_hook_holds_a_turn_until_the_notes_are_current(self):
+        r = self.init("alice")
+        self.b(r, "new", "a", "--title", "A")
+        a = r / "nodes" / "a"
+        self.assertIsNone(self.hook(r, a), "fresh, committed notes: let it stop")
+        time.sleep(1.1)
+        (a / "brief.md").write_text((a / "brief.md").read_text() + "\nAudience: teenagers\n")
+        out = self.hook(r, a)
+        self.assertEqual(out["decision"], "block")
+        self.assertIn("changed after status.md: brief.md", out["reason"])
+        self.assertIn("not committed", out["reason"])
+        self.assertIsNone(self.hook(r, a, active=True), "never twice in a row")
+        st = a / "status.md"
+        st.write_text(st.read_text().replace(st.read_text().splitlines()[0],
+                                             "Updated: " + self.b(r, "now").strip() + " by a coordinator (claude)"))
+        self.git("add", "-A", cwd=r); self.git("commit", "-qm", "a: brief", cwd=r)
+        self.assertIsNone(self.hook(r, a))
+        self.assertIsNone(self.hook(r, self.tmp), "outside an instance: nothing")
+        self.assertIn("stop a s1", (r / ".brain" / "hooks.log").read_text())
+        self.assertNotIn("hooks", self.git("ls-files", ".brain", cwd=r))
+
+    def test_old_notes_get_one_reminder_per_session(self):
+        r = self.init("alice")
+        self.b(r, "new", "a", "--title", "A")
+        a, st = r / "nodes" / "a", r / "nodes" / "a" / "status.md"
+        lines = st.read_text().splitlines()
+        lines[0] = "Updated: 2020-01-01 00:00 by a coordinator (claude)"
+        st.write_text("\n".join(lines) + "\n")
+        self.git("commit", "-qam", "a: old", cwd=r)
+        self.assertIn("last updated", self.hook(r, a, "s1")["reason"])
+        self.assertIsNone(self.hook(r, a, "s1"), "reminded once this hour")
+        self.assertIsNotNone(self.hook(r, a, "s2"), "another session gets its own reminder")
+
+
 class InstallAndUpgrade(Scenario):
     def core_repo(self):
         src = self.tmp / "core-src"

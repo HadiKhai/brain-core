@@ -1746,6 +1746,22 @@ def link_runtimes(inst):
                     l.symlink_to("AGENTS.md")
                     touch(l)
                     made.append(l)
+        hl, hs = ad.get("HOOKS_LINK"), ad.get("HOOKS_SOURCE")
+        if hl and hs:
+            dirs = [inst.root] if ad.get("HOOKS_SCOPE") == "root" else \
+                [n["dir"] for n in inst.nodes() if not ({"core", "sources"} & set(n["dir"].relative_to(inst.root).parts))]
+            for d in dirs:
+                l = d / hl
+                target = os.path.relpath(inst.root / "core" / "adapters" / "runtimes" / hs, l.parent)
+                if l.is_symlink() and os.readlink(l) != target:
+                    l.unlink()
+                if not l.is_symlink():
+                    if l.exists():
+                        die(f"{l} is a real file; merge it into core/adapters/runtimes/{hs} or delete it")
+                    l.parent.mkdir(parents=True, exist_ok=True)
+                    l.symlink_to(target)
+                    touch(l)
+                    made.append(l)
         sk = ad.get("SKILLS_DIR")
         if sk:
             l = inst.root / sk
@@ -1846,6 +1862,158 @@ def cmd_link(a):
             print(d)
 
 
+# ---------- hooks ----------
+
+COORDINATOR_FILES = ["brief.md", "status.md", "decisions.md", "sources", "AGENTS.md"]
+REMIND_MINUTES = int(os.environ.get("BRAIN_HOOK_REMIND_MINUTES", "60"))
+
+
+def node_at(inst, cwd):
+    """The node whose own folder holds `cwd` (not one of its children's)."""
+    cwd = Path(cwd).resolve()
+    best = None
+    for n in inst.nodes():
+        d = n["dir"].resolve()
+        if d == cwd or d in cwd.parents:
+            if best is None or len(d.parts) > len(best["dir"].resolve().parts):
+                best = n
+    return best
+
+
+def notes_lag(inst, n):
+    """Why this node's notes may be behind: coordinator files changed after status.md, or uncommitted."""
+    d = n["dir"]
+    st = d / "status.md"
+    out = []
+    if st.exists():
+        newer = []
+        for name in COORDINATOR_FILES:
+            f = d / name
+            files = [x for x in f.rglob("*") if x.is_file() and x.name != ".gitkeep"] if f.is_dir() else [f]
+            newer += [x for x in files if x.exists() and x != st and x.stat().st_mtime > st.stat().st_mtime + 1]
+        if newer:
+            out.append("changed after status.md: " + ", ".join(sorted(str(x.relative_to(d)) for x in newer)[:5]))
+    rel = d.relative_to(inst.root)
+    paths = [str(rel / name) for name in COORDINATOR_FILES]
+    dirty = git("status", "--porcelain", "--", *paths, cwd=inst.root).stdout.split("\n")
+    dirty = [l[3:] for l in dirty if l.strip()]
+    if dirty:
+        out.append("not committed: " + ", ".join(dirty[:5]))
+    return out
+
+
+def cmd_hook(a):
+    """Runtime hook. `stop`: before a turn ends in a node folder, make sure its notes are current (axioms 15-17).
+    Never fails the runtime: any problem means "let it stop"."""
+    try:
+        data = json.loads(sys.stdin.read() or "{}")
+    except ValueError:
+        return
+    if a.event != "stop" or data.get("stop_hook_active"):
+        return
+    cwd = data.get("cwd") or os.getcwd()
+    start = Path(cwd)
+    root = next((d for d in [start, *start.parents] if (d / "instance.md").exists() and (d / "node.md").exists()), None)
+    if not root:
+        return
+    inst = Instance(root)
+    n = node_at(inst, cwd)
+    if not n:
+        return
+    why = notes_lag(inst, n)
+    state_f = inst.root / ".brain" / "hooks.json"
+    state = json.loads(state_f.read_text()) if state_f.exists() else {}
+    sid = data.get("session_id") or "?"
+    now = inst.now_dt()
+    if not why:
+        u = updated_at(inst, n)
+        last = state.get(sid)
+        last = inst.parse_time(last) if last else None
+        stale = u is None or (now - u).total_seconds() > REMIND_MINUTES * 60
+        if stale and (last is None or (now - last).total_seconds() > REMIND_MINUTES * 60):
+            why.append(f"status.md was last updated {ago(inst, u)}")
+    if not why:
+        return
+    state[sid] = now.isoformat(timespec="seconds")
+    state_f.parent.mkdir(exist_ok=True)
+    state_f.write_text(json.dumps(dict(list(state.items())[-200:]), indent=1))
+    with open(inst.root / ".brain" / "hooks.log", "a") as fh:
+        fh.write(f"{now.isoformat(timespec='seconds')} stop {n['id']} {sid}: {'; '.join(why)}\n")
+    reason = (f"Before you stop, node `{n['id']}`: {'; '.join(why)}. If you are this node's coordinator, record "
+              f"what this conversation decided, started, finished or blocked (decisions.md; status.md and its "
+              f"Updated line; timestamps from `core/bin/brain now`), then commit `{n['id']}: <what changed>`. If "
+              f"there is nothing to record, say so in one line. If you are a worker, don't edit those files: "
+              f"append anything the coordinator should know to inbox.md.")
+    print(json.dumps({"decision": "block", "reason": reason}))
+
+
+def codex_hooks(root):
+    """Ask Codex (app-server, hooks/list) for the project hooks it sees at `root`."""
+    import select
+    exe = shutil.which("codex")
+    if not exe:
+        die("codex isn't installed")
+    msgs = [{"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"clientInfo": {"name": "brain", "version": "1"}}},
+            {"jsonrpc": "2.0", "method": "initialized"},
+            {"jsonrpc": "2.0", "id": 2, "method": "hooks/list", "params": {"cwds": [str(root)]}}]
+    pr = subprocess.Popen([exe, "app-server"], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                          stderr=subprocess.DEVNULL, text=True)
+    pr.stdin.write("".join(json.dumps(m) + "\n" for m in msgs))
+    pr.stdin.flush()
+    found, deadline = None, datetime.datetime.now() + datetime.timedelta(seconds=30)
+    while datetime.datetime.now() < deadline and found is None:
+        if not select.select([pr.stdout], [], [], 1)[0]:
+            continue
+        line = pr.stdout.readline()
+        if not line:
+            break
+        try:
+            m = json.loads(line)
+        except ValueError:
+            continue
+        if m.get("id") == 2:
+            found = [h for d in m.get("result", {}).get("data", []) for h in d.get("hooks", [])]
+    pr.kill()
+    if found is None:
+        die("codex app-server didn't answer hooks/list")
+    return found
+
+
+def cmd_hook_approve(a):
+    """Trust this instance's project hooks in Codex (the operator's explicit consent)."""
+    inst = load()
+    real = inst.root.resolve()
+    home = Path(os.environ.get("CODEX_HOME", Path.home() / ".codex"))
+    cfg = home / "config.toml"
+    text = cfg.read_text() if cfg.exists() else ""
+    add = []
+    if f'[projects."{real}"]' not in text:  # first: Codex lists no hooks for an untrusted project
+        home.mkdir(parents=True, exist_ok=True)
+        text = text.rstrip("\n") + ("\n\n" if text.strip() else "") + f'[projects."{real}"]\ntrust_level = "trusted"\n'
+        cfg.write_text(text)
+        print(f"codex: trusting the project {tilde(real)}")
+    ours = str(real / ".codex" / "hooks.json")
+    hooks = [h for h in codex_hooks(real) if h.get("sourcePath") == ours]
+    if not hooks:
+        print("codex: no project hooks found here (run 'brain link' first)")
+        return
+    for h in hooks:
+        if h.get("trustStatus") == "trusted":
+            continue
+        key = h["key"]
+        block = f'[hooks.state."{key}"]'
+        if block in text:  # an older approval: replace its hash
+            text = re.sub(re.escape(block) + r"\ntrusted_hash = \"[^\"]*\"\n?", "", text)
+        add.append(f'{block}\ntrusted_hash = "{h["currentHash"]}"\n')
+        print(f"codex: trusting {h['eventName']} hook: {h['command'][:80]}")
+    if add:
+        home.mkdir(parents=True, exist_ok=True)
+        cfg.write_text(text.rstrip("\n") + ("\n\n" if text.strip() else "") + "\n".join(add))
+        print(f"codex: wrote {tilde(cfg)}")
+    else:
+        print("codex: already trusted")
+
+
 # ---------- check ----------
 
 def collect_problems(inst):
@@ -1896,7 +2064,13 @@ def collect_problems(inst):
             elif label_keys and l.split(":", 1)[0] not in label_keys:
                 warnings.append(f"{nid}: label key '{l.split(':', 1)[0]}' isn't in instance label_keys")
         for rt in inst.runtimes:
-            link = inst.adapter(rt).get("INSTRUCTIONS_LINK")
+            ad = inst.adapter(rt)
+            hl = ad.get("HOOKS_LINK")
+            if hl and ad.get("HOOKS_SOURCE") and (ad.get("HOOKS_SCOPE") != "root" or nid == "root") \
+                    and not (n["dir"] / hl).is_symlink():
+                p(f"{nid}: {hl} (the {rt} stop hook) is missing")
+                fixable.append("links")
+            link = ad.get("INSTRUCTIONS_LINK")
             if link and (n["dir"] / "AGENTS.md").exists():
                 l = n["dir"] / link
                 if not (l.is_symlink() and os.readlink(l) == "AGENTS.md"):
@@ -2229,6 +2403,12 @@ def main():
         opt("id", nargs="?"), opt("--all", action="store_true"),
         opt("--offline", action="store_true"), opt("--mark", action="store_true"),
         opt("--limit", type=int, default=20, help="uncommitted files to list"))
+    s = sub.add_parser("hook", help="runtime hooks: stop (called by the runtime), approve (trust them in Codex)")
+    hsub = s.add_subparsers(dest="hcmd", metavar="<action>")
+    t = hsub.add_parser("stop", help="called by a runtime when a turn ends; reads the hook's JSON on stdin")
+    t.set_defaults(f=cmd_hook, event="stop")
+    t = hsub.add_parser("approve", help="trust this instance and its project hooks in Codex (writes its config)")
+    t.set_defaults(f=cmd_hook_approve)
     cmd("now", cmd_now, "the current time in the instance's timezone, as every record writes it (axiom 17)",
         opt("--iso", action="store_true"))
     cmd("tree", cmd_tree, "show the node tree")
@@ -2249,7 +2429,7 @@ def main():
 
     a = ap.parse_args()
     if not getattr(a, "f", None):
-        if a.cmd in ("item", "specialist", "wt"):
+        if a.cmd in ("item", "specialist", "wt", "hook"):
             sub.choices[a.cmd].print_help()
             return
         if not cmd_dashboard(a):

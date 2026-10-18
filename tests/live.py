@@ -75,20 +75,7 @@ class Run:
                     cmd += ["--add-dir", str(writable)]
             env = {}
         else:
-            codex_home = self.tmp / "codex-home"
-            if not codex_home.exists():
-                codex_home.mkdir()
-                real = Path(os.environ.get("CODEX_HOME", Path.home() / ".codex"))
-                for f in ("auth.json", "config.toml"):
-                    if (real / f).exists():
-                        shutil.copy(real / f, codex_home / f)
-                cfg = codex_home / "config.toml"
-                text = cfg.read_text() if cfg.exists() else ""
-                text = re.sub(r"(?m)^model_reasoning_effort\s*=.*\n?", "", text)
-                trust = "".join(f'\n[projects."{p}"]\ntrust_level = "trusted"\n'
-                                for p in {str(self.tmp), str(self.root), str(cwd)})
-                effort = os.environ.get("LIVE_CODEX_EFFORT", "medium")
-                cfg.write_text(f'model_reasoning_effort = "{effort}"\n' + text + trust)
+            codex_home = self.codex_home(cwd)
             cmd = ["codex", "exec", "--skip-git-repo-check"]
             # full access, as a host thread has: workspace-write keeps .git read-only, so no commits
             cmd += ["--dangerously-bypass-approvals-and-sandbox"] if tools else ["-s", "read-only"]
@@ -98,6 +85,29 @@ class Run:
                            env={**os.environ, **GIT_ENV, **env}, stdin=subprocess.DEVNULL)
         self.output = (r.stdout or "") + ("\n[stderr]\n" + r.stderr[-3000:] if r.returncode else "")
         return r.stdout or ""
+
+    def codex_home(self, cwd=None):
+        """A throwaway Codex config: the operator's login, this run's folders trusted."""
+        codex_home = self.tmp / "codex-home"
+        if not codex_home.exists():
+                codex_home.mkdir()
+                real = Path(os.environ.get("CODEX_HOME", Path.home() / ".codex"))
+                for f in ("auth.json", "config.toml"):
+                    if (real / f).exists():
+                        shutil.copy(real / f, codex_home / f)
+                cfg = codex_home / "config.toml"
+                text = cfg.read_text() if cfg.exists() else ""
+                text = re.sub(r"(?m)^model_reasoning_effort\s*=.*\n?", "", text)
+                trust = "".join(f'\n[projects."{p}"]\ntrust_level = "trusted"\n'
+                                for p in {str(self.tmp), str(self.root), str(cwd or self.root)})
+                effort = os.environ.get("LIVE_CODEX_EFFORT", "medium")
+                cfg.write_text(f'model_reasoning_effort = "{effort}"\n' + text + trust)
+        return codex_home
+
+    def approve_hooks(self):
+        if self.runtime == "codex":
+            sh(sys.executable, str(BRAIN), "hook", "approve", cwd=self.root,
+               env={"CODEX_HOME": str(self.codex_home(self.root / "nodes" / "a"))})
 
     def check(self, cond, msg):
         if not cond:
@@ -260,8 +270,41 @@ def second_runtime_review(run):
               "the reviewer changed the worktree")
 
 
+def stop_hook_fires(run):
+    """The stop hook runs in this runtime: notes left behind make the turn go on (axioms 15-17)."""
+    root = run.instance()
+    run.approve_hooks()
+    a = root / "nodes" / "a"
+    time.sleep(1.1)
+    (a / "brief.md").write_text((a / "brief.md").read_text() + "\nAudience: teenagers.\n")
+    run.agent(a, "Reply with just: OK", writable=root)
+    log = root / ".brain" / "hooks.log"
+    run.check(log.exists() and "stop a " in log.read_text(), "the stop hook didn't run")
+
+
+def notes_current_after_an_edit(run):
+    """A3: a coordinator that changes the node leaves status.md current and everything committed."""
+    root = run.instance()
+    run.approve_hooks()
+    a = root / "nodes" / "a"
+    st = a / "status.md"
+    lines = st.read_text().splitlines()
+    lines[0] = "Updated: 2020-01-01 00:00 by a coordinator (claude)"
+    st.write_text("\n".join(lines) + "\n")
+    sh("git", "commit", "-qam", "a: old status", cwd=root)
+    run.agent(a, "Role: coordinator of node `a`. Add this line at the end of brief.md: \"Audience: teenagers.\" "
+                 "That's the task. Reply with one word.", writable=root)
+    run.check("teenagers" in (a / "brief.md").read_text(), "brief.md not edited")
+    first = st.read_text().splitlines()[0]
+    run.check(not first.startswith("Updated: 2020"), f"status.md not updated: {first!r}")
+    run.check_time(first, "Updated line")
+    dirty = sh("git", "status", "--porcelain", "--", "nodes/a", cwd=root).strip()
+    run.check(not dirty, f"not committed: {dirty}")
+
+
 SCENARIOS = [parity, coordinator_writes_as_it_goes, worker_asks_the_writer, learning_is_a_citation,
-             new_node_in_one_sentence, no_upward_traces, second_runtime_review]
+             new_node_in_one_sentence, no_upward_traces, second_runtime_review, stop_hook_fires,
+             notes_current_after_an_edit]
 
 
 def main():
@@ -307,6 +350,10 @@ def main():
         print(f"\nfolders: {base}")
     else:
         shutil.rmtree(base, ignore_errors=True)
+    # claude keeps a transcript folder per working folder; these were throwaway
+    slug = re.sub(r"[^A-Za-z0-9]", "-", base.name)
+    for d in (Path.home() / ".claude" / "projects").glob(f"*{slug}*"):
+        shutil.rmtree(d, ignore_errors=True)
     sys.exit(1 if failed else 0)
 
 

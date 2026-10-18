@@ -8,6 +8,13 @@ adapter, `<runtime>.env`, tells `core/bin/brain` how to expose the neutral files
   `AGENTS.md` itself.
 - `SKILLS_DIR`: where this runtime looks for skills, relative to the instance root. `brain link`
   points it at `core/skills`.
+- `HOOKS_LINK`, `HOOKS_SOURCE`, `HOOKS_SCOPE`: where the runtime reads its project hooks, which
+  file in this folder to link there, and whether it goes in every node folder (`node`) or only
+  the instance root (`root`). The hook is `brain hook stop`: when a turn ends in a node folder
+  whose notes are behind (coordinator files changed after `status.md`, uncommitted, or
+  `status.md` older than an hour), it makes the agent continue and record or say there's nothing
+  to record. `HOOKS_APPROVAL=codex`: the runtime runs project hooks only once approved;
+  `brain hook approve` does that, with the operator's consent.
 - `GLOBAL_INSTRUCTIONS`: the runtime's user-wide instruction file. `brain link --global` adds a
   short, marked pointer to the instance there. `GLOBAL_HOME_ENV` names the environment variable
   that moves the runtime's config folder, and `GLOBAL_HOME_DEFAULT` is that folder's default.
@@ -16,8 +23,8 @@ Inheritance (axiom 5) relies on the runtime loading instruction files from paren
 
 | Runtime | How it loads parent folders |
 | --- | --- |
-| claude | `CLAUDE.md` in the working folder and every parent. Imports (`@file`) in parent files are not followed, which is why links are used. |
-| codex | `AGENTS.md` from the git root down to the working folder. |
+| claude | `CLAUDE.md` in the working folder and every parent. Imports (`@file`) in parent files are not followed, which is why links are used. Hooks: only the working folder's `.claude/settings.json`, so each node has one. |
+| codex | `AGENTS.md` from the git root down to the working folder. Hooks: `.codex/hooks.json` from the git root down, once the project is trusted and each hook approved (an edited hook needs approving again). |
 
 To add a runtime, write `<name>.env`, add the name to `runtimes` in `instance.md`, run
 `brain link`, and run `python3 core/tests/live.py` (axiom 22).

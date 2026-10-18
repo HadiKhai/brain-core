@@ -36,5 +36,8 @@ one machine and live in `.brain/local.json`, never in git.
    a worktree is local, but it is still their repository.
 7. **The global pointer.** `core/bin/brain link --global`, unless the operator declined it during
    install.
-8. Run `core/bin/brain check`, then give the operator one link per coordinator
+8. **Hooks.** If Codex is a runtime, ask the operator's OK, then run `core/bin/brain hook approve`:
+   Codex runs the instance's stop hook only once the project is trusted and the hook approved.
+   Run it again after a core upgrade that changes the hook.
+9. Run `core/bin/brain check`, then give the operator one link per coordinator
    (`core/bin/brain` lists them).

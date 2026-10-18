@@ -38,6 +38,8 @@ moment.
 - **Every timestamp** comes from `core/bin/brain now`: the instance's timezone, which may not be
   this machine's clock.
 - Commit after each update: `<node id>: <what changed>`.
+- A stop hook (`brain hook stop`) holds your turn when the notes are behind. Do what it asks, or
+  say in one line that there is nothing to record.
 
 ## Answering the operator
 
