@@ -1,8 +1,8 @@
 #!/bin/sh
 # Install a Brain: a new one, or this machine's copy of an existing one (--from).
 #
-#   curl -fsSL <raw url of this file> | sh
-#   curl -fsSL <raw url of this file> | sh -s -- --from git@github.com:<you>/<your-brain>.git
+#   curl -fsSL https://raw.githubusercontent.com/HadiKhai/brain-core/main/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/HadiKhai/brain-core/main/install.sh | sh -s -- --from git@github.com:<you>/<your-brain>.git
 #
 # Options:
 #   --dir PATH          where the Brain lives (default ~/Brain)
@@ -19,7 +19,7 @@
 #   --yes               don't ask; use defaults
 set -eu
 
-CORE_URL="${BRAIN_CORE_URL:-https://github.com/OWNER/brain-core.git}"
+CORE_URL="${BRAIN_CORE_URL:-https://github.com/HadiKhai/brain-core.git}"
 DIR="$HOME/Brain"; FROM=""; OPERATOR=""; TITLE=""; RUNTIMES=""; HOST="t3"; TZONE=""
 BIN_DIR="$HOME/.local/bin"; YES=0; HOMES=""; MODIFY_PATH=1
 

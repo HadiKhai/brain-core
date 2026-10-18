@@ -21,13 +21,13 @@ and uses it as a git submodule at `core/`.
 A new instance (asks for your id, runtimes and timezone):
 
 ```
-curl -fsSL <raw URL of install.sh> | sh
+curl -fsSL https://raw.githubusercontent.com/HadiKhai/brain-core/main/install.sh | sh
 ```
 
 The same instance on another machine:
 
 ```
-curl -fsSL <raw URL of install.sh> | sh -s -- --from <your instance's git URL>
+curl -fsSL https://raw.githubusercontent.com/HadiKhai/brain-core/main/install.sh | sh -s -- --from <your instance's git URL>
 ```
 
 Both put a `brain` command in `~/.local/bin`. Then open your host at the instance folder and
