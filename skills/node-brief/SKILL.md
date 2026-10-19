@@ -19,7 +19,7 @@ Run by any coordinator, about its own subtree.
    `inbox.md`.
 4. Commit `<id>: brief`.
 5. Brief the operator, in this order:
-   - **Needs you**: decisions or blockers waiting on the operator, by node;
+   - **Needs you**: `core/bin/brain inbox --new`; never relist reported items unless asked;
    - **Moved**: one line per node that changed, including work others did in shared homes;
    - **In flight**: open jobs and pull requests (the Active work rows);
    - **Quiet**: nodes with no change (names only);

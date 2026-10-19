@@ -71,6 +71,11 @@ sense, it belongs in the instance, not here.
     to main, after `brain ready` accepts the packet against current main.
 16. **State lives in files; threads are disposable.** Any thread can be replaced from the
     files of the node it served.
+    Workers own one hand-back signal per job; coordinators own
+    its ledger and refresh generated status facts without hand-writing them. A host tick
+    checks file-derived work and host pending requests; an empty tick leaves no notes.
+    Human requests keep stable identities and are reported once per machine until resolved.
+
     A replacement worker continues existing job commits, packet and ledger state. A usage-limit
     failure advances through this machine's ordered provider `fallback`; the ledger notes the switch.
 17. **Time is absolute.** Every recorded fact carries a full timestamp from `brain now`.

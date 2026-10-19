@@ -44,8 +44,11 @@ moment.
 - **Work in flight** (a worker, a branch, a pull request) is a row under **Active work**:
   `| <branch> | <thread> | <PR or -> | <state> |`. Keep the state current; mark it `merged` or
   `abandoned` when it ends.
-- Each time you touch `status.md`, rewrite its first line:
-  `Updated: <timestamp from brain now, including its UTC offset> by <node id> coordinator (<runtime>)`.
+- Write only the judgement sections of `status.md` (Now, Next, Active work, Blocked, Recent changes).
+  Preserve `<!-- brain:facts v1 -->` through `<!-- /brain:facts -->` verbatim, then run
+  `core/bin/brain status <id> --refresh`. It generates Updated from the clock, recorded merges,
+  worktrees, ledger jobs and attention counts. Its Updated supersedes a legacy first line; never
+  hand-type facts. Refresh before committing, after folding job activity into the judgement sections.
 - **Every timestamp** comes from `core/bin/brain now`: the instance's timezone, which may not be
   this machine's clock. Times you show the operator are in that timezone too. A host may give
   its times in UTC (they end in `Z`): compare moments, not the digits.
@@ -55,6 +58,11 @@ moment.
   what the operator reads, so it must not be a note about notes.
 
 ## Answering the operator
+
+For every coordinator, including the root: report `core/bin/brain inbox --new`. It uses the
+same sources as the UI’s needs-you panel and remembers reported ids on this machine. Never
+relist old items unless asked. Only interrupt the operator for a new decision or something to
+show; an empty scheduled check ends silently. The full list remains in `brain inbox`.
 
 Answer first, then the proof (commands run, numbers, hashes, links), then what you did not run
 or check, then anything waiting on the operator. Before you say work is done, re-read the
@@ -108,8 +116,16 @@ everything it needs to know, the constraints, and who it reports to.
 
 ## While workers run
 
-A launched worker doesn't wake you when it ends; its brief tells it to `send` you. As a
-backstop, each time you are active, go through **Active work**:
+Do not rely on the operator or the root to nudge you. Bind a recurring host interval tick to
+this coordinator thread (T3 pattern in `core/adapters/hosts/t3.md`). On wake, run
+`core/bin/brain due <id>` and check host pending requests for your workers: the CLI cannot see
+those. If both are empty, end the turn at once, saying nothing and changing no files.
+Otherwise act on each due item: read the report, review or reconcile a finished job, answer
+questions, and record the next step. Refresh status after updating judgement. A done signal
+stays due until the job closes; it is evidence to act on, never consent to merge.
+
+A launched worker’s brief also tells it to `send` you and write its own job hand-back file.
+The tick is the backstop if a message is lost. Each time you are active, go through **Active work**:
 
 - **Waiting questions:** host `pending` for each worker's thread. Answer from the brief, the
   rules and `decisions.md`; only what they don't settle goes to the operator, under
@@ -167,3 +183,8 @@ coordinator.
   its owners' consent (axiom 12).
 - Change a node's owners unless the operator asked (axiom 3).
 - Take an action that can't be taken back without consent (axiom 24).
+
+The stop hook only reminds about stale facts; it never refreshes status. It stays fail-open,
+uses cheap file checks and never acquires the instance lock. Refresh is a coordinator command
+under that lock. `brain_lock` lets a holder's descendants (including git hooks) reuse its lock,
+but an independent runtime stop hook could wait behind another writer; it must not take the lock.

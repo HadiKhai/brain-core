@@ -30,6 +30,12 @@ You were started for one job. If your brief names no role, you are a worker for 
   you did **not** run or check, the decisions you made, a **Lessons** section listing each lesson
   the next job should know (a pitfall, a tool's quirk, a method that worked), or `none: <reason>`,
   and what is still open. A missing Lessons section is an incomplete hand-back.
+- **Leave a file signal before handing back an external-home job:**
+  `brain handback <node> --branch <branch> --state done|failed|blocked --report <path>`
+  (choose one state). This writes and commits only your job’s `job-handbacks/<id>.json` in the
+  node, not the ledger or status. You alone write this file; a coordinator closes the ledger
+  instead of deleting or editing your signal. Send the hand-back too. The command is run
+  through the instance CLI, never by writing an upward path into a sealed home.
 - **Words a home must never contain** (the node's `never-name.txt`): if your brief says to run
   `brain guard`, it must print `guard: clean` before you hand back.
 - **Leave no trace of anything above a boundary** in a sealed node's files (axiom 6).

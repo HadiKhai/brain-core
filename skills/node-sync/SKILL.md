@@ -15,9 +15,10 @@ Run by a node's coordinator.
    without you. Read what matters in the home itself. Never write there from here (axiom 6).
 4. Add each new decision to the top of `decisions.md`, with why and the alternatives. Decisions
    others recorded in the home are cited, not copied: "<what> (home: <file or PR>)".
-5. Rewrite `status.md`: Now, Next, Active work (each row's state from the pull requests and
-   branches in step 3), Blocked / needs the operator, and Recent changes. Then update its first
-   line.
+5. Update `status.md` judgement sections: Now, Next, Active work (each row’s state from the
+   pull requests and branches in step 3), Blocked / needs the operator, and Recent changes.
+   Preserve the generated facts markers and their contents; run `core/bin/brain status <id>
+   --refresh` to generate facts and Updated from the clock.
 6. Anything that concerns other nodes goes to the parent's `inbox.md` (axiom 13).
 7. If the node mirrors its decisions to an outside source of truth (named in its rules), mirror
    them now.

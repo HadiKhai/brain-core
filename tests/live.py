@@ -210,8 +210,8 @@ def coordinator_writes_as_it_goes(run):
     run.check(re.search(rf"## {TS_ANY}: .*Postgres", dec), "decisions.md has no timestamped Postgres entry")
     run.check("Why:" in dec.split("Postgres", 1)[-1][:800], "the decision has no Why:")
     st = (a / "status.md").read_text()
-    first = st.splitlines()[0]
-    run.check(first != before and re.match(rf"Updated: {TS_ANY} by a coordinator", first), f"Updated line: {first!r}")
+    first = next((line for line in st.splitlines() if line.startswith("Updated: ")), "")
+    run.check(first != before and re.match(rf"Updated: {TS_ANY}", first), f"Updated line: {first!r}")
     run.check_time(first, "Updated line")
     m = re.search(rf"## ({TS_ANY}): .*Postgres", dec)
     if m:
@@ -332,7 +332,7 @@ def notes_current_after_an_edit(run):
     run.agent(a, "Role: coordinator of node `a`. Add this line at the end of brief.md: \"Audience: teenagers.\" "
                  "That's the task. Reply with one word.", writable=root)
     run.check("teenagers" in (a / "brief.md").read_text(), "brief.md not edited")
-    first = st.read_text().splitlines()[0]
+    first = next((line for line in st.read_text().splitlines() if line.startswith("Updated: ")), "")
     run.check(not first.startswith("Updated: 2020"), f"status.md not updated: {first!r}")
     run.check_time(first, "Updated line")
     dirty = sh("git", "status", "--porcelain", "--", "nodes/a", cwd=root).strip()
@@ -673,7 +673,119 @@ def usage_respects_runtime_pin(run):
     run.brain_check()
 
 
-SCENARIOS = [parity, coordinator_writes_as_it_goes, worker_asks_the_writer, learning_is_a_citation,
+
+def autonomy_worker_handback(run):
+    """A job worker writes its own durable signal without changing coordinator-owned files."""
+    root = run.instance()
+    a = root / "nodes" / "a"
+    home = run.home_repo("worker-app", {"answer.txt": "pending\n"})
+    brain(root, "set", "a", f"home={home}")
+    brain(root, "wt", "add", "a", "job/signal")
+    loc = json.loads((root / ".brain/local.json").read_text())
+    wt = Path(loc["nodes"]["a"]["worktrees"]["job/signal"]["path"])
+    owned = {name: (a / name).read_bytes() for name in ("status.md", "brief.md", "decisions.md", "node.md", "job-ledger.md")}
+    brief = brain(root, "brief", "a", "--branch", "job/signal", "--task",
+                  "Replace answer.txt with ready, write a short report.md in this worktree, and commit both. "
+                  "No host send tool is available in this harness; still complete the file hand-back "
+                  "required by this brief. Do not push or merge.")
+    run.agent(wt, brief, writable=root)
+    signals = list((a / "job-handbacks").glob("*.json"))
+    run.check(len(signals) == 1, "worker did not write its one hand-back file")
+    if signals:
+        signal = json.loads(signals[0].read_text())
+        run.check(signal.get("state") == "done" and signal.get("job") == "job/signal", "incorrect hand-back state/job")
+        run.check(bool(signal.get("report")), "hand-back did not name its report")
+    run.check(all((a / name).read_bytes() == content for name, content in owned.items()), "worker edited coordinator files")
+    run.check((wt / "answer.txt").read_text().strip() == "ready", "worker did not finish the task")
+    due = json.loads(brain(root, "due", "a", "--json"))
+    run.check(any(i["kind"] == "handback" and i.get("state") == "done" for i in due), "completion is not mechanically due")
+
+
+def autonomy_finished_job_wake(run):
+    """An interval wake discovers a worker's durable hand-back and records a concrete next step."""
+    root = run.instance()
+    a = root / "nodes" / "a"
+    home = run.home_repo("app", {"result.txt": "initial\n"})
+    brain(root, "set", "a", f"home={home}")
+    brain(root, "wt", "add", "a", "job/finished")
+    loc = json.loads((root / ".brain/local.json").read_text())
+    wt = Path(loc["nodes"]["a"]["worktrees"]["job/finished"]["path"])
+    (wt / "result.txt").write_text("finished\n")
+    sh("git", "commit", "-qam", "finished job", cwd=wt)
+    report = a / "sources" / "finished-report.md"
+    report.write_text("# Finished job\n\nChanged result.txt; local content check passed. Needs independent review.\n")
+    brain(root, "handback", "a", "--branch", "job/finished", "--state", "done", "--report", str(report))
+    sh("git", "add", "-A", cwd=root); sh("git", "commit", "-qm", "a: ready for tick", cwd=root)
+    run.agent(a, (
+        "Role: coordinator of node `a`. This is your scheduled self-wake tick. Run `brain due a` and act "
+        "according to core/roles/coordinator.md. Host pending requests have already been checked: none. "
+        "No host launch or delegate is available in this scenario; if a finished job needs review, prepare "
+        "or record the concrete next step in your own files. No merge is authorized. End quietly unless "
+        "there is a new decision for the operator or work worth showing."), writable=root)
+    status = (a / "status.md").read_text()
+    judgement = re.sub(r"<!-- brain:facts v1 -->.*?<!-- /brain:facts -->", "", status, flags=re.S)
+    run.check("job/finished" in judgement and "review" in judgement.lower(),
+              "no concrete review/next step for the finished job recorded in judgement")
+    run.check("<!-- brain:facts-state " in status, "facts were not generated")
+    run.check("job/finished" in status and "done; started" in status, "facts missed the worker hand-back")
+    run.check(not sh("git", "status", "--porcelain", "--", "nodes/a", cwd=root).strip(), "node notes not committed")
+    run.check(sh("git", "show", "main:result.txt", cwd=home) == "initial\n", "merged without consent")
+
+
+def autonomy_empty_wake(run):
+    """An empty due queue causes no shared-state or hook bookkeeping writes."""
+    root = run.instance()
+    a = root / "nodes" / "a"
+    brain(root, "set", "a", "coordinator=test-coordinator")
+    brain(root, "status", "a", "--refresh")
+    sh("git", "add", "-A", cwd=root); sh("git", "commit", "-qm", "a: current", cwd=root)
+    run.check(json.loads(brain(root, "due", "a", "--json")) == [], "fixture already has due work")
+    def snapshot():
+        return {str(p.relative_to(root)): p.read_bytes() for p in root.rglob("*")
+                if p.is_file() and not p.is_symlink() and p.relative_to(root).parts[0] not in
+                (".git", "core", ".claude", ".codex")}
+    before = snapshot()
+    head = sh("git", "rev-parse", "HEAD", cwd=root)
+    run.agent(a, (
+        "Role: coordinator of node `a`. Scheduled interval tick: run `brain due a`. Host pending requests "
+        "have already been checked for this coordinator and its workers: none. Follow the self-wake rule "
+        "in core/roles/coordinator.md; if due is empty, end at once, saying nothing, changing no files. "
+        "No other work is requested."), writable=root)
+    run.check(snapshot() == before, "empty wake changed files (including machine-local bookkeeping)")
+    run.check(sh("git", "rev-parse", "HEAD", cwd=root) == head, "empty wake made a commit")
+
+
+def autonomy_status_facts(run):
+    """Coordinator updates judgement while the CLI retains ownership of the generated facts."""
+    root = run.instance()
+    a = root / "nodes" / "a"
+    brain(root, "status", "a", "--refresh")
+    st = a / "status.md"
+    # A stale generated block is regenerated rather than copied or hand-edited.
+    st.write_text(st.read_text().replace("Open worktrees (this machine):\n- None.",
+                                         "Open worktrees (this machine):\n- fabricated-worktree"))
+    sh("git", "add", "-A", cwd=root); sh("git", "commit", "-qm", "a: outdated facts", cwd=root)
+    run.agent(a, (
+        "Role: coordinator of node `a`. The operator says: The draft is ready for my review tomorrow; "
+        "record that in Now and set Next to reviewing the draft. Update status according to your role, "
+        "keeping the facts block generated by the CLI. No new decision or job is needed. Commit your notes."), writable=root)
+    status = st.read_text()
+    m = re.search(r"<!-- brain:facts v1 -->.*?<!-- /brain:facts -->", status, re.S)
+    run.check(bool(m), "facts block was removed")
+    if m:
+        run.check("fabricated-worktree" not in m.group(), "facts block wasn't regenerated")
+        run.check("<!-- brain:facts-state " in m.group(), "facts metadata missing")
+        before = m.group()
+        brain(root, "status", "a", "--refresh")
+        regenerated = re.search(r"<!-- brain:facts v1 -->.*?<!-- /brain:facts -->", st.read_text(), re.S).group()
+        strip_time = lambda text: re.sub(r"^Updated:.*$", "Updated:", text, flags=re.M)
+        run.check(strip_time(before) == strip_time(regenerated), "stored facts differ from the generator")
+    judgement = re.sub(r"<!-- brain:facts v1 -->.*?<!-- /brain:facts -->", "", status, flags=re.S)
+    sections = judgement.split("## Now", 1)[-1].lower()
+    run.check("draft" in sections and "review" in sections, "judgement update missing")
+
+
+SCENARIOS = [autonomy_worker_handback, autonomy_finished_job_wake, autonomy_empty_wake, autonomy_status_facts, parity, coordinator_writes_as_it_goes, worker_asks_the_writer, learning_is_a_citation,
              new_node_in_one_sentence, no_upward_traces, second_runtime_review, stop_hook_fires,
              notes_current_after_an_edit, a_session_reaches_its_own_brain, worker_hands_back_a_question,
              lessons_become_items, limits_carry_their_reason, freshness_across_timezones,

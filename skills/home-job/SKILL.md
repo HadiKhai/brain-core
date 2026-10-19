@@ -34,6 +34,11 @@ stated; never run a polling loop in an agent.
    report: each lesson, or `none: <reason>`.
    While it runs, the worker `send`s you when it finishes, fails, is blocked or has a question
    (the coordinator role, "While workers run", is the backstop).
+   Before handing back, the worker runs `brain handback <id> --branch <branch>
+   --state done|failed|blocked --report <path>` (one state). Its worker-owned file makes a
+   finished job visible even if the host message is lost. Keep a host interval tick on the
+   coordinator: run `brain due <id>` plus host pending requests; empty means stop silently.
+
 4. **Review by the other runtime** before the operator sees it: the `review` skill. The worker
    then commits, rebases on `main`, and runs `brain ready <id> --branch <branch> --record --reviews
    <completed rounds>`. Set `brain set <id> 'verify=<command>'` beforehand. This runs verify in
