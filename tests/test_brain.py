@@ -3,6 +3,11 @@
 Every test builds instances in a throwaway folder that is also $HOME, so nothing real is touched.
 """
 import json
+import datetime
+import importlib.util
+import importlib.machinery
+import threading
+from unittest import mock
 import os
 import shutil
 import subprocess
@@ -21,7 +26,8 @@ class Scenario(unittest.TestCase):
         self.env = {**os.environ, "HOME": str(self.tmp), "BRAIN_NO_REEXEC": "1",
                     "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t",
                     "GIT_COMMITTER_EMAIL": "t@t", "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1",
-                    "PATH": os.environ.get("PATH", "")}
+                    "PATH": os.environ.get("PATH", ""), "BRAIN_USAGE_TESTING": "1",
+                    "BRAIN_USAGE_TEST_NO_KEYCHAIN": "1"}
         for k in ("BRAIN_ROOT", "BRAIN_CONFIG", "XDG_CONFIG_HOME", "CLAUDE_CONFIG_DIR", "CODEX_HOME"):
             self.env.pop(k, None)
 
@@ -2032,6 +2038,387 @@ class InstallAndUpgrade(Scenario):
         self.assertNotIn("bin2", rc.read_text())
         self.assertEqual(rc.read_text().count("# brain"), 1)
         self.assertIn("home not set on this machine", self.b(bob3, "check", ok=False))
+
+
+class Usage(Scenario):
+    def setUp(self):
+        super().setUp()
+        self.cfg = self.tmp / "config"
+        self.cfg.mkdir()
+        self.env["BRAIN_CONFIG"] = str(self.cfg / "brains.json")
+        self.patch_env = mock.patch.dict(os.environ, self.env, clear=True)
+        self.patch_env.start()
+        self.addCleanup(self.patch_env.stop)
+        loader = importlib.machinery.SourceFileLoader("brain_usage_test", str(CORE / "bin/brain"))
+        self.m = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+        loader.exec_module(self.m)
+
+    def subscription(self, id="one", runtime="codex", brains=None):
+        cfg = self.tmp / ("runtime-" + id)
+        cfg.mkdir(exist_ok=True)
+        return {"id": id, "runtime": runtime, "config_dir": str(cfg),
+                "host_provider_instance_id": "host-" + id, "brains": brains if brains is not None else ["alice"]}
+
+    def declare(self, *subs, **policy):
+        (self.cfg / "subscriptions.json").write_text(json.dumps({"subscriptions": subs, **policy}))
+        return self.m.usage_config()
+
+    def fixture(self, sub, used=24, account="same-account"):
+        reset = int(time.time() + 3 * 86400)
+        data = {"account": {"accountId": account}, "rateLimits": {"limitId": "codex", "primary": {
+            "usedPercent": used, "windowDurationMins": 10080, "resetsAt": reset}, "secondary": None}}
+        (Path(sub["config_dir"]) / "fixture.json").write_text(json.dumps(data))
+        return data
+
+    def codex_stub(self):
+        folder = self.tmp / "bin"
+        folder.mkdir(exist_ok=True)
+        exe = folder / "codex"
+        exe.write_text("#!" + sys.executable + "\n" + r'''import json,os,sys
+from pathlib import Path
+cfg=Path(os.environ['CODEX_HOME'])
+for line in sys.stdin:
+    msg=json.loads(line)
+    with (cfg/'requests.txt').open('a') as f: f.write(msg['method']+'\n')
+    if 'id' not in msg: continue
+    data=json.loads((cfg/'fixture.json').read_text())
+    method=msg['method']
+    if method=='initialize': result={}
+    elif method=='account/read': result={'account':data['account']}
+    elif method=='account/rateLimits/read': result={'rateLimits':data['rateLimits']}
+    else: sys.exit(4)
+    print(json.dumps({'method':'notification','params':{}}),flush=True)
+    print(json.dumps({'id':msg['id'],'result':result}),flush=True)
+''')
+        exe.chmod(0o755)
+        self.env["PATH"] = str(folder) + ":" + self.env["PATH"]
+        os.environ["PATH"] = self.env["PATH"]
+
+    def cache(self, config, readings, checked=None):
+        subs, accounts = [], {}
+        for sub, reading in zip(config["subscriptions"], readings):
+            key = "key-" + sub["id"]
+            subs.append({**sub, "account_key": key})
+            accounts[key] = reading
+        data = {**config, "subscriptions": subs, "accounts": accounts,
+                "checked_at": time.time() if checked is None else checked}
+        self.m.usage_atomic(self.m.usage_file(), data)
+        return data
+
+    def reading(self, used=20, weekly=None, elapsed=50, source="lookup", age=0):
+        windows = {"five_hour": {"used_percent": used, "resets_at": time.time() + 3600}}
+        if weekly is not None:
+            windows["seven_day"] = {"used_percent": weekly,
+                                    "resets_at": time.time() + (1 - elapsed / 100) * 7 * 86400}
+        return {"windows": windows if source != "unknown" else {}, "source": source,
+                "read_at": time.time() - age if source != "unknown" else None, "note": ""}
+
+    def test_usage_defaults_and_config_isolation(self):
+        with mock.patch.object(self.m.shutil, "which", return_value="installed"):
+            config = self.m.usage_config()
+        self.assertEqual([s["brains"] for s in config["subscriptions"]], [["*"], ["*"]])
+        self.assertEqual(config["subscriptions"][1]["config_dir"], str(self.tmp / ".codex"))
+        self.assertEqual(self.m.usage_file(), self.cfg / "usage.json")
+        self.env["CODEX_HOME"] = str(self.tmp / "alternate")
+        with mock.patch.dict(os.environ, self.env), mock.patch.object(self.m.shutil, "which", return_value="installed"):
+            self.assertEqual(self.m.usage_config()["subscriptions"][1]["config_dir"], self.env["CODEX_HOME"])
+        sub = self.subscription(brains=[])
+        self.assertEqual(self.declare(sub)["subscriptions"][0]["brains"], [])
+        self.declare(sub, stop_percent=70)
+        self.assertEqual(self.m.usage_config()["stop_percent"], 70)
+        with self.assertRaises(ValueError): self.declare(sub, stop_percent=float("nan"))
+        (self.cfg / "subscriptions.json").write_text("malformed")
+        with self.assertRaises(ValueError): self.m.usage_config()
+
+    def test_usage_real_codex_protocol_and_account_deduplication(self):
+        self.codex_stub()
+        one, two = self.subscription(), self.subscription("two", brains=["work"])
+        alias = {**one, "id": "alias", "host_provider_instance_id": "host-alias", "brains": ["other"]}
+        self.fixture(one); self.fixture(two)
+        config = self.declare(one, two, alias)
+        data = self.m.usage_refresh(config)
+        self.assertEqual(len(data["accounts"]), 1)
+        self.assertEqual(len(data["subscriptions"]), 3)
+        r = next(iter(data["accounts"].values()))
+        self.assertEqual(r["source"], "lookup")
+        self.assertEqual(list(r["windows"]), ["seven_day"])
+        requests = (Path(one["config_dir"]) / "requests.txt").read_text().splitlines()
+        self.assertEqual(requests, ["initialize", "initialized", "account/read", "account/rateLimits/read"])
+        rows, _ = self.m.usage_rows()
+        self.assertEqual(rows[0]["account_key"], rows[1]["account_key"])
+        self.assertEqual(rows[2]["brains"], ["other"])
+        self.assertNotIn("same-account", self.m.usage_file().read_text())
+        self.assertNotIn("credits", self.m.usage_file().read_text())
+
+    def test_usage_codex_old_account_response_uses_account_id_only(self):
+        self.codex_stub()
+        sub = self.subscription()
+        self.fixture(sub)
+        data = json.loads((Path(sub["config_dir"]) / "fixture.json").read_text())
+        data["account"] = {"type": "chatgpt", "email": "private@example.test"}
+        (Path(sub["config_dir"]) / "fixture.json").write_text(json.dumps(data))
+        (Path(sub["config_dir"]) / "auth.json").write_text(json.dumps({"tokens": {
+            "account_id": "account-id", "access_token": "NEVER-CACHE-THIS"}}))
+        out = self.m.usage_refresh(self.declare(sub))
+        self.assertIn(self.m.usage_key("codex", "account-id"), out["accounts"])
+        self.assertNotIn("NEVER-CACHE-THIS", json.dumps(out))
+        self.assertNotIn("private@example.test", json.dumps(out))
+
+    def test_usage_claude_endpoint_credentials_and_failure_degrade(self):
+        import http.server
+        requests, status = [], [200]
+        payload = {"five_hour": {"utilization": 35, "resets_at": "2026-10-20T00:00:00Z"},
+                   "seven_day": {"utilization": 44, "resets_at": "2026-10-25T00:00:00Z"},
+                   "seven_day_sonnet": {"utilization": 99}, "account_id": "claude-account"}
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *args): pass
+            def do_GET(self):
+                requests.append((self.path, self.headers.get("Authorization"), self.headers.get("anthropic-beta")))
+                self.send_response(status[0])
+                if status[0] == 302:
+                    self.send_header("Location", "/stolen")
+                self.end_headers()
+                self.wfile.write(json.dumps(payload).encode())
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True); thread.start()
+        try:
+            sub = self.subscription(runtime="claude")
+            credential = Path(sub["config_dir"]) / ".credentials.json"
+            credential.write_text(json.dumps({"claudeAiOauth": {"accessToken": "TEST-SECRET"}}))
+            with mock.patch.dict(os.environ, {"BRAIN_USAGE_TEST_URL": f"http://127.0.0.1:{server.server_port}/usage"}):
+                data = self.m.usage_refresh(self.declare(sub))
+                self.assertEqual(requests[0], ("/usage", "Bearer TEST-SECRET", "oauth-2025-04-20"))
+                self.assertEqual(next(iter(data["accounts"].values()))["windows"]["five_hour"]["used_percent"], 35)
+                self.assertNotIn("TEST-SECRET", self.m.usage_file().read_text())
+                credential.unlink()
+                with mock.patch.dict(os.environ, {"BRAIN_USAGE_TEST_TOKEN": "INJECTED"}):
+                    self.assertEqual(self.m.usage_claude(sub)[0]["seven_day"]["used_percent"], 44)
+                payload.clear(); payload["five_hour"] = {"utilization": "bad"}
+                with mock.patch.dict(os.environ, {"BRAIN_USAGE_TEST_TOKEN": "INJECTED"}):
+                    data = self.m.usage_refresh(self.m.usage_config())
+                    self.assertEqual(next(iter(data["accounts"].values()))["source"], "unknown")
+                    status[0] = 503
+                    _, reading = self.m.usage_reading(sub)
+                    self.assertEqual(reading["source"], "unknown")
+                    self.assertIn("failed", reading["note"])
+                    status[0] = 302
+                    before = len(requests)
+                    self.assertEqual(self.m.usage_reading(sub)[1]["source"], "unknown")
+                    self.assertEqual(len(requests), before + 1)
+                    self.assertNotIn("/stolen", [r[0] for r in requests])
+            with mock.patch.dict(os.environ, {"BRAIN_USAGE_TEST_URL": "http://external.invalid/usage"}):
+                with self.assertRaises(ValueError): self.m.usage_claude(sub)
+        finally:
+            server.shutdown(); server.server_close(); thread.join()
+
+    def test_usage_keychain_never_interacts_or_retries_after_blocking(self):
+        env = {"BRAIN_USAGE_TEST_NO_KEYCHAIN": "0"}
+        with mock.patch.dict(os.environ, env), mock.patch.object(self.m.sys, "platform", "darwin"), \
+                mock.patch.object(self.m.subprocess, "run", side_effect=subprocess.TimeoutExpired("keychain", 2)) as run:
+            self.assertEqual(self.m.usage_keychain(str(self.tmp / ".claude"))[0], {})
+            self.assertIn("previously blocked", self.m.usage_keychain(str(self.tmp / ".claude"))[1])
+            self.assertEqual(run.call_count, 1)
+            helper = run.call_args.args[0][2]
+            self.assertIn("SecKeychainSetUserInteractionAllowed(0)", helper)
+            self.assertEqual(run.call_args.kwargs["timeout"], 2)
+            self.assertIn("Claude Code-credentials", run.call_args.args[0])
+
+    def test_usage_exact_log_shapes_and_original_observation_times(self):
+        sub = self.subscription()
+        path = Path(sub["config_dir"]) / "sessions/2026/10/19/rollout-one.jsonl"
+        path.parent.mkdir(parents=True)
+        stamp = "2026-10-19T00:00:00Z"
+        event = {"timestamp": stamp, "type": "event_msg", "payload": {"type": "token_count", "rate_limits": {
+            "limit_id": "codex", "primary": {"used_percent": 24.0, "window_minutes": 10080,
+            "resets_at": 1792908009}, "secondary": None, "credits": {"balance": "secret"}, "plan_type": "pro"}}}
+        path.write_text("broken\n" + json.dumps(event) + "\n")
+        # Parsing timestamps, not mtime: a newer transcript can contain an older observation.
+        event["timestamp"] = "2026-10-18T00:00:00Z"
+        event["payload"]["rate_limits"]["primary"]["used_percent"] = 8
+        path.with_name("rollout-two.jsonl").write_text(json.dumps(event) + "\n")
+        windows, read_at = self.m.usage_logs(sub)
+        self.assertEqual(windows["seven_day"]["used_percent"], 24)
+        self.assertEqual(read_at, self.m.usage_stamp(stamp))
+        with mock.patch.object(self.m, "usage_codex", side_effect=OSError("TOKEN-MUST-NOT-LEAK")):
+            _, reading = self.m.usage_reading(sub)
+        self.assertEqual(reading["source"], "log")
+        self.assertNotIn("TOKEN-MUST-NOT-LEAK", json.dumps(reading))
+        sub = self.subscription("claude", runtime="claude")
+        path = Path(sub["config_dir"]) / "projects/project/id.jsonl"; path.parent.mkdir(parents=True)
+        path.write_text(json.dumps({"timestamp": stamp, "apiError": "usage_limit_reached", "apiErrorParams": {
+            "rate_limit_info": {"status": "rejected", "resetsAt": 1792395000, "rateLimitType": "five_hour"}}}) + "\n")
+        windows, read_at = self.m.usage_logs(sub)
+        self.assertEqual(windows["five_hour"]["used_percent"], 100)
+        self.assertEqual(windows["five_hour"]["resets_at"], 1792395000)
+        self.assertEqual(read_at, self.m.usage_stamp(stamp))
+        self.assertNotIn("seven_day", windows)
+
+    def test_usage_parser_defends_against_undocumented_shapes(self):
+        self.assertEqual(self.m.usage_windows(None, "claude"), {})
+        for value in (None, "20", float("nan"), -1, 101, True):
+            self.assertEqual(self.m.usage_windows({"five_hour": {"utilization": value}}, "claude"), {})
+        self.assertEqual(self.m.usage_windows({"primary": {"usedPercent": 20, "windowDurationMins": 1440}}, "codex"), {})
+        self.assertEqual(self.m.usage_windows({"five_hour": {"used_percentage": 25, "resets_at": 1792395000}}, "claude")
+                         ["five_hour"]["used_percent"], 25)
+        self.assertIsNone(self.m.usage_stamp("2026-10-19T00:00:00"))
+
+    def test_usage_atomic_write_and_cleanup_on_failure(self):
+        path = self.m.usage_file()
+        self.m.usage_atomic(path, {"before": True})
+        with mock.patch.object(self.m.os, "replace", side_effect=OSError("fail")):
+            with self.assertRaises(OSError): self.m.usage_atomic(path, {"after": True})
+        self.assertEqual(json.loads(path.read_text()), {"before": True})
+        self.assertEqual(list(path.parent.glob(".usage.json-*")), [])
+        self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+
+    def test_usage_poller_machine_lock_refresh_lock_and_exit(self):
+        config = self.declare(self.subscription())
+        with self.m.usage_lock("usage-watch.lock") as held:
+            self.assertTrue(held)
+            out = self.run_(["usage", "--watch", "--every", "0.1"], cwd=self.tmp, ok=False, brain=CORE / "bin/brain")
+            self.assertIn("poller already running", out)
+        # Dead processes release flock regardless of a stale pid left in the file.
+        self.m.usage_file("usage-watch.lock").write_text("999999")
+        with self.m.usage_lock("usage-watch.lock") as held: self.assertTrue(held)
+        with self.m.usage_lock("usage-refresh.lock"), mock.patch.object(self.m, "usage_reading") as lookup:
+            self.m.usage_refresh(config)
+            lookup.assert_not_called()
+        args = type("Args", (), {"action": None, "watch": True, "every": 300})()
+        with mock.patch.object(self.m, "usage_refresh") as refresh, \
+                mock.patch.object(self.m.time, "sleep", side_effect=KeyboardInterrupt):
+            self.m.cmd_usage(args)
+            refresh.assert_called_once()
+        with self.m.usage_lock("usage-watch.lock") as held: self.assertTrue(held)
+
+    def test_usage_failed_lookup_preserves_newer_stop_observation_as_unknown(self):
+        root = self.init("alice")
+        config = self.declare(self.subscription())
+        self.cache(config, [self.reading(90)], checked=time.time() - 180)
+        stale_log = self.reading(10, source="log", age=86400)
+        with mock.patch.object(self.m, "usage_reading", return_value=("path-key", stale_log)):
+            selected, why = self.m.usage_route(self.m.Instance(root), ["codex"])
+        self.assertIsNone(selected)
+        self.assertIn("Stop starting jobs", why)
+        rows, _ = self.m.usage_rows()
+        self.assertEqual(rows[0]["source"], "unknown")
+        self.assertEqual(rows[0]["windows"]["five_hour"]["used_percent"], 90)
+        self.assertIn("last-known", rows[0]["note"])
+
+    def test_usage_stale_refresh_once_and_read_only_ui(self):
+        root = self.init("alice")
+        config = self.declare(self.subscription())
+        self.cache(config, [self.reading()], checked=time.time() - 121)
+        inst = self.m.Instance(root)
+        with mock.patch.object(self.m, "usage_reading", return_value=("a", self.reading())) as lookup:
+            self.m.usage_route(inst, inst.runtimes)
+            self.m.usage_route(inst, inst.runtimes)
+            self.assertEqual(lookup.call_count, 1)
+            state = self.m.ui_state(inst)
+            self.assertEqual(lookup.call_count, 1)
+        self.assertEqual(state["usage"][0]["source"], "lookup")
+        self.assertIsNotNone(state["usage"][0]["age_seconds"])
+        self.cache(config, [self.reading()], checked=time.time() - 300)
+        with mock.patch.object(self.m, "usage_reading") as lookup:
+            self.m.usage_rows(inst)
+            self.m.ui_state(inst)
+            lookup.assert_not_called()
+
+    def test_usage_routing_stop_pacing_allowlist_fallback_and_unknown(self):
+        root = self.init("alice"); inst = self.m.Instance(root)
+        one, two, work = self.subscription(), self.subscription("two"), self.subscription("work", brains=["work"])
+        config = self.declare(one, two, work)
+        self.cache(config, [self.reading(85), self.reading(40), self.reading(0)])
+        selected, reason = self.m.usage_route(inst, ["codex"])
+        self.assertEqual(selected["id"], "two")
+        self.cache(config, [self.reading(10, weekly=85), self.reading(40), self.reading(0)])
+        self.assertEqual(self.m.usage_route(inst, ["codex"])[0]["id"], "two")
+        self.cache(config, [self.reading(10, weekly=30, elapsed=5), self.reading(40, weekly=40), self.reading(0)])
+        self.assertEqual(self.m.usage_route(inst, ["codex"])[0]["id"], "two")
+        self.cache(config, [self.reading(10, weekly=25), self.reading(40, weekly=40), self.reading(0)])
+        self.assertEqual(self.m.usage_route(inst, ["codex"])[0]["id"], "one")
+        self.cache(config, [self.reading(30), self.reading(30), self.reading(0)])
+        inst.local["fallback"] = ["host-two", "host-one"]
+        self.assertEqual(self.m.usage_route(inst, ["codex"])[0]["id"], "two")
+        self.cache(config, [self.reading(source="unknown"), self.reading(25), self.reading(0)])
+        self.assertEqual(self.m.usage_route(inst, ["codex"])[0]["id"], "two")
+        self.cache(config, [self.reading(source="unknown"), self.reading(90), self.reading(0)])
+        selected, reason = self.m.usage_route(inst, ["codex"])
+        self.assertEqual(selected["id"], "one"); self.assertIn("unknown", reason)
+        self.cache(config, [self.reading(85), self.reading(90), self.reading(0)])
+        self.assertIsNone(self.m.usage_route(inst, ["codex"])[0])
+        self.assertIn("Stop starting jobs", self.m.usage_route(inst, ["codex"])[1])
+        config = self.declare(one, two, stop_percent=70)
+        self.cache(config, [self.reading(70), self.reading(60)])
+        self.assertEqual(self.m.usage_route(inst, ["codex"])[0]["id"], "two")
+        r = self.reading(99); r["windows"]["five_hour"]["resets_at"] = time.time() - 1
+        self.cache(config, [r, self.reading(90)])
+        self.assertIn("unknown", self.m.usage_route(inst, ["codex"])[1])
+
+    def test_usage_brief_hire_review_and_json_timezone(self):
+        root = self.init("alice")
+        config = self.declare(self.subscription(), self.subscription("two", runtime="claude"))
+        self.cache(config, [self.reading(source="unknown"), self.reading(source="unknown")])
+        self.b(root, "set", "root", "runtime=codex")
+        self.assertIn("runtime: codex", self.b(root, "brief", "root"))
+        local = root / ".brain/local.json"
+        data = json.loads(local.read_text()); data["fallback"] = ["host-two", "host-one"]
+        local.write_text(json.dumps(data))
+        self.assertIn("host-two", self.b(root, "brief", "root"))
+        self.b(root, "set", "root", "runtime=claude")
+        self.cache(config, [self.reading(90), self.reading(35)])
+        text = self.b(root, "brief", "root", "--task", "do it")
+        self.assertIn("runtime: claude", text); self.assertIn("host-two", text)
+        text = self.b(root, "brief", "root", "--runtime", "codex")
+        self.assertIn("Stop starting jobs", text)
+        self.b(root, "specialist", "new", "qa", "--title", "QA")
+        self.assertIn("host-two", self.b(root, "hire", "qa", "root", "--task", "test"))
+        self.git("branch", "job/test", cwd=root)
+        text = self.b(root, "review", "root", "--branch", "job/test", "--built-by", "codex")
+        self.assertIn("Reviewer runtime: claude", text); self.assertIn("host-two", text)
+        text = self.b(root, "review", "root", "--branch", "job/test", "--built-by", "claude")
+        self.assertIn("Stop starting jobs", text)
+        file = root / "instance.md"; file.write_text(file.read_text().replace("timezone: UTC", "timezone: Asia/Beirut"))
+        out = json.loads(self.b(root, "usage", "--json"))
+        self.assertEqual(out["scope"], "account-wide")
+        self.assertIn("+03:00", out["subscriptions"][0]["windows"]["five_hour"]["reset_time"])
+        self.assertNotIn("machine_share", out["subscriptions"][0])
+        text = self.b(root, "usage")
+        self.assertIn("Account-wide", text); self.assertIn("share: unavailable", text)
+        self.assertIn("source", text)
+        (self.cfg / "subscriptions.json").write_text("invalid")
+        self.assertIn("Usage unknown", self.b(root, "brief", "root"))
+
+    def test_usage_corrupt_cache_is_unknown_and_ui_redacts_values_safely(self):
+        root = self.init("alice")
+        sub = self.subscription()
+        config = self.declare(sub)
+        self.m.usage_file().write_text('["invalid cache shape"]')
+        self.assertEqual(self.m.usage_rows()[0][0]["source"], "unknown")
+        data = self.cache(config, [self.reading()])
+        next(iter(data["accounts"].values()))["windows"]["five_hour"]["used_percent"] = "invalid"
+        self.m.usage_file().write_text(json.dumps(data))
+        self.assertEqual(self.m.usage_rows()[0][0]["source"], "unknown")
+        sub["label"] = 'Private "label"'
+        config = self.declare(sub)
+        self.cache(config, [self.reading()])
+        (root / "never-name.txt").write_text('Private\n"\n')
+        rows = self.m.usage_ui(self.m.Instance(root))
+        self.assertNotIn("Private", rows[0]["label"])
+        self.assertEqual(rows[0]["source"], "lookup")
+        self.assertIn("windows", rows[0])
+
+    def test_usage_launchagent_only_writes_requested_temp_path(self):
+        import plistlib
+        path = self.tmp / "agents/usage.plist"
+        out = self.run_(["usage", "install", "--launch-agent", str(path)], cwd=self.tmp, brain=CORE / "bin/brain")
+        data = plistlib.loads(path.read_bytes())
+        self.assertIn("not loaded", out)
+        self.assertEqual(data["EnvironmentVariables"]["BRAIN_CONFIG"], str(self.cfg / "brains.json"))
+        self.assertEqual(data["ProgramArguments"][-4:], ["usage", "--watch", "--every", "300"])
+        self.assertIn("--watch", data["ProgramArguments"])
+        self.assertFalse((self.tmp / "Library/LaunchAgents").exists())
+        self.assertIn("already exists", self.run_(["usage", "install", "--launch-agent", str(path)], cwd=self.tmp,
+                                                  ok=False, brain=CORE / "bin/brain"))
 
 
 if __name__ == "__main__":

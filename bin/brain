@@ -16,6 +16,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 CORE = Path(__file__).resolve().parent.parent
@@ -390,6 +391,572 @@ def write_brains(data):
 def brains_here():
     """[(name, root)] for every registered brain that is still on this machine."""
     return [(k, Path(v["root"])) for k, v in sorted(read_brains()["brains"].items()) if is_instance(Path(v["root"]))]
+
+
+# ---------- machine subscriptions ----------
+# Account-wide server readings, shared by every brain here. No tokens or transcripts enter the cache.
+
+USAGE_WINDOWS = {"five_hour": 300, "seven_day": 10080}
+USAGE_MAX_AGE = 120
+_KEYCHAIN_BLOCKED = False
+
+
+def usage_file(name="usage.json"):
+    return brains_file().parent / name
+
+
+def usage_json(path):
+    try:
+        return json.loads(path.read_text())
+    except (OSError, ValueError):
+        return None
+
+
+def usage_number(value):
+    import math
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+
+
+def usage_cache():
+    data = usage_json(usage_file())
+    if not isinstance(data, dict) or not isinstance(data.get("subscriptions"), list) or \
+            not isinstance(data.get("accounts"), dict):
+        return {}
+    if any(not isinstance(s, dict) or not isinstance(s.get("account_key"), str) for s in data["subscriptions"]):
+        return {}
+    for r in data["accounts"].values():
+        if not isinstance(r, dict) or r.get("source") not in ("lookup", "log", "unknown") or \
+                not isinstance(r.get("windows"), dict):
+            return {}
+        if r.get("read_at") is not None and (not usage_number(r["read_at"]) or usage_stamp(r["read_at"]) is None):
+            return {}
+        for name, w in r["windows"].items():
+            if name not in USAGE_WINDOWS or not isinstance(w, dict) or \
+                    not usage_number(w.get("used_percent")) or not 0 <= w["used_percent"] <= 100 or \
+                    (w.get("resets_at") is not None and (not usage_number(w["resets_at"]) or
+                                                        usage_stamp(w["resets_at"]) is None)):
+                return {}
+    return data
+
+
+def usage_config():
+    path = usage_file("subscriptions.json")
+    data = usage_json(path) if path.exists() else {"subscriptions": [
+        {"id": rt, "runtime": rt, "config_dir": os.environ.get(env) or str(Path.home() / ("." + rt)),
+         "brains": ["*"]} for rt, env in (("claude", "CLAUDE_CONFIG_DIR"), ("codex", "CODEX_HOME"))
+        if shutil.which(rt)]}
+    if isinstance(data, list):
+        data = {"subscriptions": data}
+    if not isinstance(data, dict) or not isinstance(data.get("subscriptions"), list):
+        raise ValueError("invalid subscriptions.json (expected subscriptions list)")
+    stop, margin = data.get("stop_percent", 85), data.get("pacing_margin", 10)
+    if not usage_number(stop) or not 0 < stop <= 100 or not usage_number(margin) or not 0 <= margin <= 100:
+        raise ValueError("invalid usage stop_percent or pacing_margin")
+    subs, ids = [], set()
+    for s in data["subscriptions"]:
+        if not isinstance(s, dict) or not isinstance(s.get("runtime"), str) or s["runtime"] not in USAGE_RUNTIMES \
+                or not isinstance(s.get("id"), str) \
+                or not s["id"] or s["id"] in ids or not isinstance(s.get("brains", []), list) \
+                or any(not isinstance(b, str) for b in s.get("brains", [])):
+            raise ValueError("invalid subscription (unique id, runtime and brains list required)")
+        ids.add(s["id"])
+        rt = s["runtime"]
+        cfg = s.get("config_dir") or os.environ.get(USAGE_RUNTIMES[rt]) or str(Path.home() / ("." + rt))
+        host = s.get("host_provider_instance_id", "")
+        label = s.get("label", s["id"])
+        if not isinstance(cfg, str) or not isinstance(host, str) or not isinstance(label, str):
+            raise ValueError("invalid subscription config_dir, label or host_provider_instance_id")
+        subs.append({"id": s["id"], "runtime": rt, "label": label,
+                     "config_dir": str(Path(cfg).expanduser().absolute()),
+                     "host_provider_instance_id": host, "brains": s.get("brains", [])})
+    return {"subscriptions": subs, "stop_percent": stop, "pacing_margin": margin}
+
+
+USAGE_RUNTIMES = {"claude": "CLAUDE_CONFIG_DIR", "codex": "CODEX_HOME"}
+
+
+def usage_stamp(value):
+    if usage_number(value):
+        return value if 0 < value < 253402300799 else None
+    if isinstance(value, str):
+        try:
+            dt = datetime.datetime.fromisoformat(value.replace("Z", "+00:00"))
+            return dt.timestamp() if dt.tzinfo else None
+        except (ValueError, OverflowError):
+            pass
+    return None
+
+
+def usage_windows(data, runtime):
+    """Only the two subscription windows; primary does not necessarily mean five hours."""
+    if not isinstance(data, dict):
+        return {}
+    out = {}
+    if runtime == "codex":
+        if data.get("limitId", data.get("limit_id", "codex")) != "codex":
+            return {}
+        for key in ("primary", "secondary"):
+            w = data.get(key)
+            if not isinstance(w, dict):
+                continue
+            mins = w.get("windowDurationMins", w.get("window_minutes"))
+            name = next((n for n, m in USAGE_WINDOWS.items() if m == mins), None)
+            used = w.get("usedPercent", w.get("used_percent"))
+            reset = usage_stamp(w.get("resetsAt", w.get("resets_at")))
+            if name and usage_number(used) and 0 <= used <= 100:
+                out[name] = {"used_percent": used, "resets_at": reset}
+    else:
+        for name in USAGE_WINDOWS:
+            w = data.get(name)
+            if not isinstance(w, dict):
+                continue
+            used = w.get("utilization", w.get("used_percentage"))
+            if usage_number(used) and 0 <= used <= 100:
+                out[name] = {"used_percent": used, "resets_at": usage_stamp(w.get("resets_at"))}
+    return out
+
+
+def usage_account(data):
+    if isinstance(data, dict):
+        for k in ("account_id", "accountId", "account_uuid", "uuid", "id"):
+            if isinstance(data.get(k), str) and data[k]:
+                return data[k]
+    return None
+
+
+def usage_codex(sub):
+    """JSONL app-server protocol: initialize, initialized, account/read, account/rateLimits/read."""
+    import selectors
+    env = {**os.environ, "CODEX_HOME": sub["config_dir"]}
+    p = subprocess.Popen(["codex", "app-server"], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                         stderr=subprocess.DEVNULL, env=env)
+    sel, pending = selectors.DefaultSelector(), b""
+    sel.register(p.stdout, selectors.EVENT_READ)
+    deadline = time.monotonic() + 15
+
+    def send(msg):
+        p.stdin.write((json.dumps(msg) + "\n").encode())
+        p.stdin.flush()
+
+    def call(i, method, params):
+        nonlocal pending
+        send({"id": i, "method": method, "params": params})
+        while time.monotonic() < deadline:
+            while b"\n" in pending:
+                line, pending = pending.split(b"\n", 1)
+                try:
+                    d = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(d, dict) and d.get("id") == i:
+                    return d.get("result") or {}
+            if not sel.select(max(0, deadline - time.monotonic())):
+                break
+            chunk = os.read(p.stdout.fileno(), 65536)
+            if not chunk:
+                break
+            pending += chunk
+            if len(pending) > 2 * 1024 * 1024:
+                break
+        raise ValueError("Codex usage lookup timed out")
+
+    try:
+        call(1, "initialize", {"clientInfo": {"name": "brain_usage", "version": "1"}})
+        send({"method": "initialized", "params": {}})
+        account = call(2, "account/read", {"refreshToken": False}).get("account") or {}
+        result = call(3, "account/rateLimits/read", {})
+        rates = (result.get("rateLimitsByLimitId") or {}).get("codex") or result.get("rateLimits")
+        windows = usage_windows(rates, "codex")
+        if not windows:
+            raise ValueError("Codex returned no subscription windows")
+        # Older account/read omits the ID. Read only the account label, never decode or retain tokens.
+        identity = usage_account(account)
+        if not identity:
+            auth = usage_json(Path(sub["config_dir"]) / "auth.json")
+            identity = usage_account(auth.get("tokens")) if isinstance(auth, dict) else None
+        return windows, identity
+    finally:
+        sel.close()
+        p.terminate()
+        try:
+            p.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            p.kill()
+            p.wait()
+        p.stdin.close()
+        p.stdout.close()
+
+
+def usage_keychain(config_dir):
+    """No UI, no retries after a blocked read. The helper's captured output stays in memory only."""
+    global _KEYCHAIN_BLOCKED
+    if sys.platform != "darwin" or _KEYCHAIN_BLOCKED or (os.environ.get("BRAIN_USAGE_TESTING") == "1" and
+                                                      os.environ.get("BRAIN_USAGE_TEST_NO_KEYCHAIN") == "1"):
+        return {}, "Keychain unavailable or previously blocked"
+    import hashlib
+    import unicodedata
+    default = str(Path.home() / ".claude")
+    suffix = "" if config_dir == default else "-" + hashlib.sha256(
+        unicodedata.normalize("NFC", config_dir).encode()).hexdigest()[:8]
+    service = "Claude Code-credentials" + suffix
+    # SecKeychainSetUserInteractionAllowed(false) forbids a permission/unlock dialog.
+    helper = '''import ctypes as c, sys
+s=c.CDLL('/System/Library/Frameworks/Security.framework/Security')
+s.SecKeychainSetUserInteractionAllowed.argtypes=[c.c_ubyte]
+if s.SecKeychainSetUserInteractionAllowed(0): sys.exit(2)
+s.SecKeychainFindGenericPassword.argtypes=[c.c_void_p,c.c_uint32,c.c_char_p,c.c_uint32,c.c_char_p,c.POINTER(c.c_uint32),c.POINTER(c.c_void_p),c.c_void_p]
+n=c.c_uint32(); p=c.c_void_p(); name=sys.argv[1].encode(); user=sys.argv[2].encode()
+r=s.SecKeychainFindGenericPassword(None,len(name),name,len(user),user,c.byref(n),c.byref(p),None)
+if r: sys.exit(3)
+try: sys.stdout.buffer.write(c.string_at(p,n.value))
+finally: s.SecKeychainItemFreeContent(None,p)
+'''
+    import getpass
+    user = os.environ.get("USER") or getpass.getuser()
+    if not re.fullmatch(r"[a-zA-Z0-9._-]+", user):
+        user = "claude-code-user"
+    try:
+        r = subprocess.run([sys.executable, "-c", helper, service, user], capture_output=True, timeout=2)
+        if r.returncode:
+            _KEYCHAIN_BLOCKED = True
+            return {}, "Keychain denied/unavailable; no interactive retry"
+        d = json.loads(r.stdout)
+        return (d if isinstance(d, dict) else {}), ""
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        _KEYCHAIN_BLOCKED = True
+        return {}, "Keychain blocked/unavailable; no interactive retry"
+
+
+def usage_claude(sub):
+    import urllib.request
+    import urllib.parse
+    cfg = Path(sub["config_dir"])
+    note, credentials = "", usage_json(cfg / ".credentials.json")
+    testing = os.environ.get("BRAIN_USAGE_TESTING") == "1"
+    url = "https://api.anthropic.com/api/oauth/usage"
+    if testing and os.environ.get("BRAIN_USAGE_TEST_URL"):
+        url = os.environ["BRAIN_USAGE_TEST_URL"]
+        parsed = urllib.parse.urlsplit(url)
+        if parsed.scheme != "http" or parsed.hostname not in ("localhost", "127.0.0.1", "::1"):
+            raise ValueError("test usage URL must be loopback HTTP")
+    if testing and os.environ.get("BRAIN_USAGE_TEST_TOKEN"):
+        token = os.environ["BRAIN_USAGE_TEST_TOKEN"]
+    else:
+        if not isinstance(credentials, dict) or not (credentials.get("claudeAiOauth") or {}).get("accessToken"):
+            credentials, note = usage_keychain(str(cfg))
+        token = (credentials.get("claudeAiOauth") or {}).get("accessToken")
+    if not isinstance(token, str) or not token:
+        return {}, None, note or "No stored Claude OAuth token"
+    # Redirects must never carry the Authorization header to another host.
+    class NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, *args, **kwargs):
+            return None
+    request = urllib.request.Request(url, headers={"Authorization": "Bearer " + token,
+                                                   "anthropic-beta": "oauth-2025-04-20"})
+    with urllib.request.build_opener(NoRedirect).open(request, timeout=8) as response:
+        data = json.loads(response.read(1024 * 1024))
+    return usage_windows(data, "claude"), usage_account(data.get("account")) or usage_account(data), note
+
+
+def usage_logs(sub):
+    cfg, rt = Path(sub["config_dir"]), sub["runtime"]
+    pattern = "sessions/*/*/*/rollout-*.jsonl" if rt == "codex" else "projects/*/*.jsonl"
+    readings = []
+    for path in cfg.glob(pattern):
+        try:
+            # A bounded tail avoids loading long transcripts or retaining conversation content.
+            with path.open("rb") as fh:
+                fh.seek(0, 2)
+                start = max(0, fh.tell() - 1024 * 1024)
+                fh.seek(start)
+                if start:
+                    fh.readline()
+                lines = fh.read().splitlines()
+            for line in lines:
+                try:
+                    e = json.loads(line)
+                    stamp = usage_stamp(e.get("timestamp"))
+                    if not stamp or stamp > time.time() + 60:
+                        continue
+                    if rt == "codex":
+                        p = e.get("payload") or {}
+                        if e.get("type") != "event_msg" or p.get("type") != "token_count":
+                            continue
+                        windows = usage_windows(p.get("rate_limits"), rt)
+                    else:
+                        if e.get("apiError") != "usage_limit_reached":
+                            continue
+                        r = (e.get("apiErrorParams") or {}).get("rate_limit_info") or {}
+                        name = r.get("rateLimitType")
+                        windows = {name: {"used_percent": 100, "resets_at": usage_stamp(r.get("resetsAt"))}} \
+                            if name in USAGE_WINDOWS and r.get("status") == "rejected" else {}
+                    if windows:
+                        readings.append((stamp, windows))
+                except (ValueError, TypeError, AttributeError):
+                    continue
+        except OSError:
+            continue
+    if not readings:
+        return {}, None
+    # Preserve each window's actual observation time, especially sparse Claude limit-hit events.
+    windows = {}
+    for stamp, ws in sorted(readings):
+        windows.update({k: {**w, "read_at": stamp} for k, w in ws.items()})
+    return windows, min(w["read_at"] for w in windows.values())
+
+
+def usage_key(runtime, identity):
+    import hashlib
+    return runtime + ":" + hashlib.sha256(identity.encode()).hexdigest()[:24]
+
+
+def usage_reading(sub):
+    account, note, windows = None, "", {}
+    if not Path(sub["config_dir"]).is_dir():
+        return usage_key(sub["runtime"], sub["config_dir"]), {
+            "windows": {}, "read_at": None, "source": "unknown", "note": "Runtime config directory unavailable"}
+    try:
+        if sub["runtime"] == "codex":
+            windows, account = usage_codex(sub)
+        else:
+            windows, account, note = usage_claude(sub)
+    except Exception:
+        # Never include exception messages: an upstream error can contain headers or credentials.
+        note = "Runtime lookup failed; using logs if available"
+    if windows:
+        stamp, source = time.time(), "lookup"
+    else:
+        windows, stamp = usage_logs(sub)
+        source = "log" if windows else "unknown"
+    return usage_key(sub["runtime"], account or sub["config_dir"]), {
+        "windows": windows, "read_at": stamp, "source": source, "note": note}
+
+
+def usage_atomic(path, data):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix="." + path.name + "-", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w") as fh:
+            json.dump(data, fh, indent=2, allow_nan=False)
+            fh.write("\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+
+
+class usage_lock:
+    def __init__(self, name):
+        self.path, self.fh = usage_file(name), None
+
+    def __enter__(self):
+        import fcntl
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.fh = self.path.open("a+")
+        try:
+            fcntl.flock(self.fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            self.fh.close()
+            self.fh = None
+            return False
+        self.fh.seek(0)
+        self.fh.truncate()
+        self.fh.write(str(os.getpid()))
+        self.fh.flush()
+        return True
+
+    def __exit__(self, *exc):
+        if self.fh:
+            self.fh.seek(0)
+            self.fh.truncate()
+            self.fh.close()  # retain the inode: deleting a flock file races the next holder
+
+
+def usage_refresh(config, stale_only=False):
+    with usage_lock("usage-refresh.lock") as held:
+        cached = usage_cache()
+        if not held:
+            return cached  # another reader/poller is refreshing; never duplicate its calls
+        if stale_only and usage_cache_fresh(cached, config):
+            return cached
+        accounts, subs, paths = {}, [], {}
+        for sub in config["subscriptions"]:
+            path_key = (sub["runtime"], sub["config_dir"])
+            if path_key not in paths:
+                key, reading = usage_reading(sub)
+                prior_sub = next((s for s in cached.get("subscriptions", []) if all(
+                    s.get(k) == sub[k] for k in ("id", "runtime", "config_dir"))), {})
+                prior = cached.get("accounts", {}).get(prior_sub.get("account_key"), {})
+                if reading["source"] != "lookup" and (prior.get("read_at") or 0) > (reading["read_at"] or 0):
+                    # An outage must not replace a recent stop-line observation with an older low log value.
+                    key = prior_sub["account_key"]
+                    reading = {**prior, "source": "log" if prior["source"] == "log" else "unknown",
+                               "note": (reading["note"] or "Current usage unavailable") +
+                               "; retaining the newer last-known observation"}
+                paths[path_key] = key
+                old = accounts.get(key)
+                if not old or (reading["source"] == "lookup", reading["read_at"] or 0) > \
+                        (old["source"] == "lookup", old["read_at"] or 0):
+                    accounts[key] = reading
+            subs.append({**sub, "account_key": paths[path_key]})
+        data = {**config, "subscriptions": subs, "accounts": accounts, "checked_at": time.time()}
+        usage_atomic(usage_file(), data)
+        return data
+
+
+def usage_cache_fresh(cache, config):
+    checked = cache.get("checked_at")
+    keys = ("id", "runtime", "label", "config_dir", "host_provider_instance_id", "brains")
+    return usage_number(checked) and 0 <= time.time() - checked < USAGE_MAX_AGE and \
+        [{k: s.get(k) for k in keys} for s in cache.get("subscriptions", [])] == config["subscriptions"]
+
+
+def usage_rows(inst=None, refresh=False, before_launch=False):
+    config = usage_config()
+    cache = usage_cache()
+    if refresh or (before_launch and not usage_cache_fresh(cache, config)):
+        cache = usage_refresh(config, stale_only=not refresh)
+    rows = []
+    for sub in config["subscriptions"]:
+        prior = next((s for s in cache.get("subscriptions", []) if all(s.get(k) == v for k, v in sub.items())), {})
+        r = cache.get("accounts", {}).get(prior.get("account_key"), {})
+        stamp = r.get("read_at")
+        age = max(0, time.time() - stamp) if usage_number(stamp) else None
+        windows = {}
+        for name, w in r.get("windows", {}).items():
+            reset = w.get("resets_at")
+            windows[name] = {**w, "expired": bool(reset and reset <= time.time())}
+            if inst and reset:
+                windows[name]["reset_time"] = datetime.datetime.fromtimestamp(reset, inst.zone()).isoformat(timespec="seconds")
+        rows.append({**sub, "config_dir": tilde(sub["config_dir"]), "account_key": prior.get("account_key"),
+                     "windows": windows, "read_at": stamp, "age_seconds": round(age, 1) if age is not None else None,
+                     "source": r.get("source", "unknown"), "note": r.get("note", ""),
+                     "reading_time": datetime.datetime.fromtimestamp(stamp, inst.zone()).isoformat(timespec="seconds")
+                     if inst and stamp else None})
+    return rows, config
+
+
+def usage_route(inst, runtimes, preferred=None):
+    try:
+        rows, policy = usage_rows(inst, before_launch=True)
+    except (OSError, ValueError):
+        return None, "Usage unknown: machine subscription configuration unavailable; no subscription selected."
+    names = [name for name, root in brains_here() if root.resolve() == inst.root.resolve()]
+    name = names[0] if names else brain_name(inst.root)
+    allowed = [r for r in rows if r["runtime"] in runtimes and (name in r["brains"] or "*" in r["brains"])]
+    fallback = inst.local.get("fallback", [])
+    fallback = fallback if isinstance(fallback, list) else []
+    eligible = []
+    for r in allowed:
+        active = {n: w for n, w in r["windows"].items() if not w["expired"]}
+        if any(w["used_percent"] >= policy["stop_percent"] for w in active.values()):
+            continue
+        unknown = r["source"] == "unknown" or r["age_seconds"] is None or r["age_seconds"] > USAGE_MAX_AGE or not active
+        weekly = active.get("seven_day", {})
+        reset = weekly.get("resets_at")
+        elapsed = max(0, min(100, 100 * (1 - (reset - time.time()) / (7 * 86400)))) if reset else 100
+        ahead = weekly.get("used_percent", 0) > elapsed + policy["pacing_margin"]
+        used = max((w["used_percent"] for w in active.values()), default=0)
+        host = r["host_provider_instance_id"]
+        rank = fallback.index(host) if host in fallback else len(fallback)
+        eligible.append(((unknown, ahead, used, rank, r["runtime"] != preferred, r["id"]), r))
+    if not eligible:
+        reason = "all allowed subscriptions reached the stop line" if allowed else "no subscription is allowed for this brain and runtime"
+        return None, f"Usage: no subscription selected ({reason}). Stop starting jobs; the brief remains available."
+    score, selected = min(eligible, key=lambda x: x[0])
+    reason = "usage unknown/stale; capacity unverified" if score[0] else \
+        f"most headroom ({100 - score[2]:g}% remaining in the fullest reported window)"
+    week = selected["windows"].get("seven_day", {})
+    if not week.get("resets_at") or week.get("expired"):
+        reason += "; weekly pace unknown"
+    elif not score[1]:
+        reason += "; within weekly pacing"
+    if score[1]:
+        reason += "; weekly usage ahead of pace, no better-paced subscription available"
+    host = selected["host_provider_instance_id"] or "unbound (choose its provider instance before launch)"
+    return selected, f"Subscription: {selected['label']} ({selected['id']}) · host instance: {host} · {reason}."
+
+
+def usage_ui(inst):
+    try:
+        rows, _ = usage_rows(inst)  # UI reads the file; it never polls runtimes.
+    except (OSError, ValueError):
+        return []
+    terms = [term for n in inst.nodes() for term in never_terms(n)]
+    def hide(value):
+        if isinstance(value, str):
+            return redact(value, terms)
+        if isinstance(value, list):
+            return [hide(v) for v in value]
+        if isinstance(value, dict):
+            return {k: hide(v) for k, v in value.items()}
+        return value
+    return hide(rows) if terms else rows
+
+
+def usage_install(a):
+    import plistlib
+    import shlex
+    path = Path(a.launch_agent).expanduser() if a.launch_agent else Path.home() / "Library/LaunchAgents/org.brain.usage.plist"
+    if path.exists():
+        die("usage LaunchAgent already exists; inspect it before replacing it")
+    config = str(brains_file().resolve())
+    data = {"Label": "org.brain.usage", "ProgramArguments": [sys.executable, str(CORE / "bin/brain"),
+            "usage", "--watch", "--every", str(a.every)], "RunAtLoad": True, "KeepAlive": True,
+            "EnvironmentVariables": {"BRAIN_CONFIG": config, "BRAIN_NO_REEXEC": "1", "HOME": str(Path.home()),
+                                     "PATH": os.environ.get("PATH", "/usr/bin:/bin")}}
+    for env in USAGE_RUNTIMES.values():
+        if os.environ.get(env):
+            data["EnvironmentVariables"][env] = os.environ[env]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(plistlib.dumps(data))
+    print(f"wrote {tilde(path)}; not loaded. Start with: launchctl bootstrap gui/$(id -u) {shlex.quote(str(path))}")
+
+
+def cmd_usage(a):
+    if not usage_number(a.every) or a.every <= 0:
+        die("--every must be positive seconds")
+    if a.action == "install":
+        usage_install(a)
+        return
+    if a.watch:
+        with usage_lock("usage-watch.lock") as held:
+            if not held:
+                die("usage poller already running")
+            try:
+                while True:
+                    try:
+                        usage_refresh(usage_config())
+                    except (OSError, ValueError):
+                        print("brain: usage refresh unavailable; retrying next interval", file=sys.stderr, flush=True)
+                    time.sleep(a.every)
+            except KeyboardInterrupt:
+                return
+    root = try_find_root()
+    inst = Instance(root) if root else None
+    try:
+        rows, policy = usage_rows(inst, refresh=a.refresh)
+    except (OSError, ValueError) as e:
+        die(str(e))
+    if a.json:
+        print(json.dumps({"scope": "account-wide", "stop_percent": policy["stop_percent"], "subscriptions": rows}, indent=2))
+        return
+    print(f"Account-wide subscription usage · stop line {policy['stop_percent']:g}% · this machine's share: unavailable")
+    print("runtime  label  5h used / reset  weekly used / reset  reading / age  source  brains")
+    for r in rows:
+        def window(name):
+            w = r["windows"].get(name)
+            if not w:
+                return "unknown"
+            reset = w.get("reset_time") or (datetime.datetime.fromtimestamp(w["resets_at"]).astimezone().isoformat(timespec="seconds") if w["resets_at"] else "unknown")
+            return f"{w['used_percent']:g}% / {reset}" + (" (expired; unknown)" if w["expired"] else "")
+        age = f"{r['age_seconds']:g}s" if r["age_seconds"] is not None else "unknown"
+        print(f"{r['runtime']}  {r['label']}  {window('five_hour')}  {window('seven_day')}  "
+              f"{r['reading_time'] or r['read_at'] or 'unknown'} / {age}  {r['source']}  {','.join(r['brains']) or 'none'}")
+        if r["note"]:
+            print(f"  {r['note']}")
 
 
 def brain_name(root):
@@ -1577,10 +2144,12 @@ def cmd_hire(a):
         die(f"{target['id']}'s home isn't on this machine (brain set {target['id']} home=<path>)")
     where = target["home_path"] if target["external"] else target["dir"]
     runtime = sp["fm"].get("runtime") or target["fm"].get("runtime")
+    subscription, usage = usage_route(inst, [runtime] if runtime else inst.runtimes, preferred=runtime)
+    runtime = subscription["runtime"] if subscription else runtime
     out = [f"Role: worker, hired as specialist `{sp['id']}` ({sp['fm'].get('title', '')}).",
            f"Run in: {where}  ·  runtime: {runtime}",
            "The rules, agents and skills where you run come first (axiom 7); this brief adds to them.",
-           ""]
+           "", redact(usage, never_terms(target)), ""]
     if target["sealed"]:
         out += ["This work happens in a project with its own owners. Leave nothing in it that names "
                 "where this brief came from (axiom 6). Ask before pushing, publishing or anything "
@@ -1680,13 +2249,16 @@ def cmd_brief(a):
             "and never in the instance instead")
     where = Path(w["path"]) if w else (n["home_path"] if n["external"] else n["dir"])
     runtime = a.runtime or n["fm"].get("runtime") or inst.cfg.get("default_runtime", "")
+    subscription, usage = usage_route(inst, [a.runtime] if a.runtime else inst.runtimes, preferred=runtime)
+    runtime = subscription["runtime"] if subscription else runtime
     head = f"Run in: {tilde(where)}" + (f"  ·  branch {a.branch}" if a.branch else "") + f"  ·  runtime: {runtime}"
     if w:
         head += f"  ·  {port_text(w['port'], w.get('ports', 1))}"
     task = Path(a.task_file).read_text() if a.task_file else (a.task or "<!-- the task, what done means, "
                                                                           "where outputs go -->")
     out = [f"Role: worker in node `{n['id']}` ({n['fm'].get('title', '')}), started by its coordinator.", head,
-           "The rules, agents and skills where you run come first (axiom 7); this brief adds to them.", ""]
+           "The rules, agents and skills where you run come first (axiom 7); this brief adds to them.", "",
+           redact(usage, never_terms(n)), ""]
     if n["sealed"]:
         out += ["This work happens in a project with its own owners. Leave nothing in it that names where this "
                 "brief came from (axiom 6). Ask before pushing, publishing or anything irreversible (axiom 24).",
@@ -1860,6 +2432,8 @@ def cmd_review(a):
         die(f"only one runtime ({built}) in instance.md: nothing to cross-review with")
     if reviewer == built:
         die("the reviewer must run on a different runtime from the builder")
+    subscription, usage = usage_route(inst, [a.by] if a.by else others, preferred=reviewer)
+    reviewer = subscription["runtime"] if subscription else reviewer
     where, base = None, a.base
     if n["external"]:
         if not (n["home_path"] and n["home_path"].exists()):
@@ -1878,6 +2452,7 @@ def cmd_review(a):
         die(f"can't diff {a.branch} against {base}: {d.stderr.strip()}")
     diffstat = d.stdout.strip()
     out = [f"Reviewer runtime: {reviewer}  (the change was built on {built})", f"Run in: {where}", "",
+           redact(usage, never_terms(n)), "",
            "Role: worker, reviewing a change you didn't write. Don't modify any file, commit or push.",
            "The rules, agents and skills where you run come first (axiom 7): if this project has its own "
            "review checklist or reviewer agents, apply them too.", ""]
@@ -3402,6 +3977,7 @@ def ui_state(inst, problems=None):
         "schedules": [{"id": x["id"], "when": x.get("when", ""), "node": x.get("node", ""),
                        "here": x["id"] in inst.local.get("schedules", {})} for x in read_schedules(inst)],
         "machine": machine_load(),
+        "usage": usage_ui(inst),
         "problems": problems,
     }
 
@@ -3870,7 +4446,7 @@ def reexec_into_instance_core():
 READ_ONLY = {"cmd_show", "cmd_tree", "cmd_status", "cmd_now", "cmd_jobs", "cmd_stale", "cmd_ui", "cmd_guard",
              "cmd_brief", "cmd_hire", "cmd_reports", "cmd_brains", "cmd_use", "cmd_machine", "cmd_usable",
              "cmd_item_list", "cmd_wt_list", "cmd_selftest", "cmd_init", "cmd_hook", "cmd_hook_approve", "cmd_help",
-             "cmd_dashboard", "cmd_ready"}
+             "cmd_dashboard", "cmd_ready", "cmd_usage"}
 
 
 def writes(a):
@@ -3912,6 +4488,11 @@ def main():
         opt("--operator", required=True), opt("--title", required=True), opt("--runtimes", default="claude,codex"),
         opt("--host", default="t3"), opt("--tz", default="UTC"),
         opt("--name", help="short name for `brain -b <name>` (default: the folder's name)"))
+    cmd("usage", cmd_usage, "account-wide subscription usage (agents read the machine cache)",
+        opt("action", choices=["install"], nargs="?"), opt("--json", action="store_true"),
+        opt("--refresh", action="store_true"), opt("--watch", action="store_true"),
+        opt("--every", type=float, default=300, help="poll interval in seconds"),
+        opt("--launch-agent", help="install: plist path (writes only; does not load it)"))
     cmd("new", cmd_new, "create a node", "id", opt("--title", required=True), opt("--owners", default=""),
         opt("--labels", default=""), opt("--runtime"), opt("--home", help="a path outside the instance"),
         opt("--home-url", dest="home_url"))
