@@ -508,9 +508,13 @@ function renderAgents() {
     el("h3", {}, sp.title || sp.id), el("p", {class:"kv"}, `${sp.node} / ${sp.id} · ${sp.status || "active"} · ${sp.runtime || "runtime not recorded"} · ${(sp.lessons || []).length} lessons`),
     (sp.jobs || []).length ? dataTable(["Node / job", "Hired", "Task", "Reviews", "Runtime / subscription", "Outcome"], sp.jobs.map(hire => {
       const node = nodes.get(hire.node), jobs = node ? node.jobs.rows.filter(r => r.Job === hire.job) : [];
-      const row = jobs.find(r => r.Started === hire.started) || jobs[jobs.length - 1] || {};
+      const hired = Date.parse(hire.time);
+      // A branch name may be reused: don't attribute a later job's outcome to an earlier hire.
+      const row = (hire.started ? jobs.find(r => r.Started === hire.started) : jobs.filter(r =>
+        Date.parse(r.Started) <= hired && (!r.Ended || hired <= Date.parse(r.Ended)))
+        .sort((a,b) => Date.parse(b.Started) - Date.parse(a.Started))[0]) || {};
       return [hire.node + " / " + hire.job, brainTime(hire.time, true), hire.task, row.Reviews || hire.reviews || "—",
-        [hire.runtime || "runtime not recorded", hire.subscription || "subscription not recorded"].join(" · "), row.Outcome || hire.outcome || "open"];
+        [hire.runtime || "runtime not recorded", hire.subscription || "subscription not recorded"].join(" · "), hire.outcome || (row.Job ? row.Outcome || "open" : "outcome not recorded")];
     })) : empty("No recorded hires."))) : [empty("No specialists yet.")]));
   $("ledger").replaceChildren(...S.nodes.filter(n => n.jobs.rows.length).map(n => el("details", {class:"entry", open:true},
     el("summary", {}, `${n.title || n.id} · ${n.jobs.merged} merged · ${n.jobs.abandoned} abandoned · median ${n.jobs.median_hours ?? "—"} h / ${n.jobs.median_reviews ?? "—"} review rounds`),

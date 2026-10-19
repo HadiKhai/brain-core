@@ -1,5 +1,5 @@
 {
-  "passed": 61,
+  "passed": 62,
   "checks": [
     "clock UTC 2026-10-19T06:00:00Z",
     "clock UTC 2026-01-19T06:00:00Z",
@@ -28,6 +28,7 @@
     "specialist hire joins the node ledger",
     "agent metadata remains literal text",
     "node ledger shows medians",
+    "reused branch names do not reassign historical hire outcomes",
     "one usage row per subscription",
     "other subscriptions remain a count",
     "stale usage visibly stale",

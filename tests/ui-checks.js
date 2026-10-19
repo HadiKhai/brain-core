@@ -61,6 +61,9 @@
     check($("agent-results").textContent.includes("timezone-job"), "specialist hire joins the node ledger");
     check($("agent-results").textContent.includes(poison), "agent metadata remains literal text");
     check($("ledger").textContent.includes("median"), "node ledger shows medians");
+    S.nodes[0].jobs.rows.push({Job:"timezone-job", Started:"2026-10-20T06:00:00Z", Ended:"2026-10-20T07:00:00Z", Outcome:"abandoned", Reviews:"9"});
+    renderAgents();
+    check(!$("agent-results").textContent.includes("abandoned"), "reused branch names do not reassign historical hire outcomes");
     const now = Date.now() / 1000;
     S.usage_policy = {stop_percent:73, max_age_seconds:120}; S.usage_other_subscriptions = 4;
     S.usage = [{id:"one", label:poison, runtime:"codex", brains:[poison], read_at:now - 600, source:poison,
