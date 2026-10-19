@@ -2532,11 +2532,19 @@ def future_entries(inst, n):
     """Only absolute dates are evidence: an old bare clock time has no known day."""
     problems, warnings = [], []
     now = inst.now_dt()
-    pattern = r"\b\d{4}-\d{2}-\d{2}(?:[ T]\d{2}:\d{2}(?::\d{2})?(?:\.\d+)?(?:\s*(?:Z|[+-]\d{2}:?\d{2}))?)?"
+    date = r"\b\d{4}-\d{2}-\d{2}"
+    clock = r"\d{2}:\d{2}(?::\d{2})?(?:\.\d+)?"
+    offset = r"[+-]\d{2}:\d{2}"
+    # Attached offsets belong to ISO T timestamps; a space-form 09:00-10:30 is a range.
+    pattern = date + rf"(?:T{clock}(?:Z|{offset})?| {clock}(?: ?Z| {offset})?)?"
     for f in sorted(n["dir"].glob("*.md")):
-        if f.is_symlink():
+        if f.is_symlink() or not f.is_file():
             continue
-        for line_no, line in enumerate(f.read_text().splitlines(), 1):
+        try:
+            lines = f.read_text(errors="replace").splitlines()
+        except OSError:
+            continue
+        for line_no, line in enumerate(lines, 1):
             for m in re.finditer(pattern, line):
                 text = m.group()
                 when = inst.parse_time(text if len(text) > 10 else text + " 00:00")
@@ -3104,8 +3112,7 @@ def hook_stop(a):
     if not n:
         return
     why = notes_lag(inst, n)
-    if future_entries(inst, n)[0]:
-        why.append("status.md has a future Updated: time; fix it with `brain now`")
+    future = bool(future_entries(inst, n)[0])
     state_f = inst.root / ".brain" / "hooks.json"
     try:
         state = json.loads(state_f.read_text()) if state_f.exists() else {}
@@ -3114,12 +3121,16 @@ def hook_stop(a):
         state = {}  # unreadable or half-written: start over (it only spaces out reminders)
     sid = data.get("session_id") or "?"
     now = inst.now_dt()
+    last = state.get(sid)
+    last = inst.parse_time(last) if last else None
+    remind = last is None or elapsed(last, now) > REMIND_MINUTES * 60
+    if future and remind:
+        why.append("status.md has a future Updated: time; fix it with `brain now` if you are its coordinator; "
+                   "if you are a worker, tell your coordinator")
     if not why:
         u = updated_at(inst, n)
-        last = state.get(sid)
-        last = inst.parse_time(last) if last else None
         stale = u is None or elapsed(u, now) > REMIND_MINUTES * 60
-        if stale and (last is None or elapsed(last, now) > REMIND_MINUTES * 60):
+        if stale and remind:
             why.append(f"status.md was last updated {ago(inst, u)}")
     if not why:
         return

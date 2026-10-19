@@ -1251,6 +1251,87 @@ class FutureTimestamps(Scenario):
         self.assertIn("future Updated: time; fix it with `brain now`", json.loads(p.stdout)["reason"])
 
 
+class FutureEntryRegressions(Scenario):
+    def test_invalid_utf8_and_nonfiles_do_not_break_views_or_stop_hook(self):
+        r = self.init("alice")
+        (r / "notes.md").write_bytes(b"invalid \xff\n- 2999-01-01: future note\n")
+        (r / "directory.md").mkdir()
+        if hasattr(os, "mkfifo"):
+            os.mkfifo(r / "pipe.md")
+        self.assertIn("notes.md:2: future dated entry", self.b(r, "check"))
+        self.assertIn("alice brain", self.b(r))
+        self.assertIn('"nodes"', self.b(r, "ui", "--json"))
+        st = r / "status.md"
+        st.write_text("Updated: 2999-01-01 00:00 +00:00\n")
+        res = subprocess.run([sys.executable, str(CORE / "bin/brain"), "hook", "stop"], cwd=r,
+                             input=json.dumps({"cwd": str(r), "session_id": "invalid-utf8"}),
+                             capture_output=True, text=True, env=self.env)
+        self.assertEqual(res.returncode, 0)
+        self.assertIn("future Updated:", json.loads(res.stdout)["reason"])
+
+    def test_unreadable_markdown_is_skipped(self):
+        from importlib.machinery import SourceFileLoader
+        from unittest import mock
+        m = SourceFileLoader("brain_unreadable_future", str(CORE / "bin/brain")).load_module()
+        r = self.init("alice")
+        bad = r / "unreadable.md"
+        bad.write_text("not readable\n")
+        (r / "readable.md").write_text("- 2999-01-01: future\n")
+        original = Path.read_text
+        def read(path, *args, **kwargs):
+            if path == bad:
+                raise PermissionError("unreadable")
+            return original(path, *args, **kwargs)
+        inst = m.Instance(r)
+        with mock.patch.object(Path, "read_text", read):
+            problems, warnings = m.future_entries(inst, inst.node("root"))
+        self.assertEqual(problems, [])
+        self.assertTrue(any("readable.md:1" in w for w in warnings))
+
+    def test_human_time_ranges_are_not_negative_offsets(self):
+        import datetime as dt
+        from importlib.machinery import SourceFileLoader
+        from unittest import mock
+        m = SourceFileLoader("brain_range_future", str(CORE / "bin/brain")).load_module()
+        r = self.init("alice")
+        inst = m.Instance(r)
+        node = inst.node("root")
+        now = dt.datetime(2026, 10, 19, 12, tzinfo=dt.timezone.utc)
+        with mock.patch.object(inst, "now_dt", return_value=now):
+            for text in ("2026-10-19 09:00-10:30", "2026-10-19 09:00-1030",
+                         "2026-10-19 09:00:00-10:30"):
+                (r / "status.md").write_text(f"Updated: {text}\n- {text}: meeting\n")
+                problems, warnings = m.future_entries(inst, node)
+                self.assertEqual(problems, [], text)
+                self.assertFalse(any("status.md:" in w for w in warnings), text)
+            # Explicit spaced offsets and ISO T timestamps still compare actual moments.
+            for text in ("2026-10-19 09:00 -10:30", "2026-10-19T09:00-10:30",
+                         "2026-10-19T09:00:00.123-10:30"):
+                (r / "status.md").write_text(f"Updated: {text}\n")
+                self.assertEqual(len(m.future_entries(inst, node)[0]), 1, text)
+
+    def test_future_reminders_are_spaced_per_session_and_address_workers(self):
+        r = self.init("alice")
+        (r / "status.md").write_text("Updated: 2999-01-01 00:00 +00:00\n")
+        self.git("commit", "-qam", "incorrect clock", cwd=r)
+        def hook(session):
+            res = subprocess.run([sys.executable, str(CORE / "bin/brain"), "hook", "stop"], cwd=r,
+                                 input=json.dumps({"cwd": str(r), "session_id": session}),
+                                 capture_output=True, text=True, env=self.env)
+            self.assertEqual(res.returncode, 0)
+            return json.loads(res.stdout) if res.stdout.strip() else None
+        first = hook("worker")
+        self.assertIn("future Updated:", first["reason"])
+        self.assertIn("if you are a worker, tell your coordinator", first["reason"])
+        self.assertIsNone(hook("worker"))
+        self.assertIsNotNone(hook("coordinator"))
+        state = r / ".brain/hooks.json"
+        reminders = json.loads(state.read_text())
+        reminders["worker"] = "2020-01-01T00:00:00+00:00"
+        state.write_text(json.dumps(reminders))
+        self.assertIsNotNone(hook("worker"))
+
+
 class JobLessonOutcomes(Scenario):
     def test_merge_requires_outcome_but_historical_rows_do_not(self):
         r = self.init("alice")
