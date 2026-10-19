@@ -3379,7 +3379,7 @@ class ImportProjects(Scenario):
         self.assertTrue(repo["has_remote"])
         self.assertEqual(repo["node"], "project")
         self.assertTrue(repo["already_home"])
-        self.assertTrue({"AGENTS.md", "memory.md", "notes/lessons.md", ".codex/", "skills/"} <= set(repo["agent_setup"]))
+        self.assertTrue({"AGENTS.md", "memory.md", ".codex/", "skills/"} <= set(repo["agent_setup"]))
         for secret in ("fake-import-token", "fake-query", "fake-fragment", "person:"):
             self.assertNotIn(secret, out)
             self.assertNotIn(secret, self.all_text(r))
@@ -3400,7 +3400,7 @@ class ImportProjects(Scenario):
         wt = self.tmp / "checkout"
         self.git("worktree", "add", "-qb", "study", str(wt), cwd=h)
         self.assertEqual(len(json.loads(self.b(r, "scan", str(wt), "--json"))), 1)
-        self.b(r, "adopt", str(wt), "--id", "checkout")
+        self.assertIn("main repository", self.b(r, "adopt", str(wt), "--id", "checkout", ok=False))
         empty = self.tmp / "empty"
         empty.mkdir(); self.git("init", "-q", cwd=empty)
         row = json.loads(self.b(r, "scan", str(empty), "--json"))[0]
@@ -3505,7 +3505,7 @@ class ImportProjects(Scenario):
         self.assertEqual({x["path"] for x in rows}, {"~/projects/outer", "~/projects/outer/child"})
         outer = next(x for x in rows if x["path"] == "~/projects/outer")
         self.assertEqual(outer["remotes"], ["git@example.test:team/outer.git", "ssh://user@example.test/outer.git"])
-        self.assertIn("memory-notes.txt", outer["agent_setup"])
+        self.assertNotIn("memory-notes.txt", outer["agent_setup"])
         self.b(r, "scan", str(self.tmp / "missing"), "--json", ok=False)
         alias = base / "alias"; alias.symlink_to(child)
         self.assertEqual(len(json.loads(self.b(r, "scan", str(base), "--json"))), 2)
@@ -3597,6 +3597,127 @@ class ImportSafety(Scenario):
         self.assertIn("PrivateFixtureTerm", (r / "library/legacy.md").read_text())
         self.b(r, "item", "add", "proposal", *args, "--proposed", "--repo", "fixture",
                "--commit", "a" * 40, ok=False)
+
+
+class ImportDiscovery(Scenario):
+    def rows(self, r, path):
+        return json.loads(self.b(r, "scan", str(path), "--json"))
+
+    def test_common_directory_workbench_and_nested_repositories(self):
+        r = self.init("alice")
+        h = self.repo(self.tmp / "project")
+        wt = self.tmp / "linked"
+        self.git("worktree", "add", "-qb", "study", str(wt), cwd=h)
+        self.assertEqual(self.rows(r, wt)[0]["kind"], "worktree")
+        self.b(r, "adopt", str(wt), ok=False)
+        child = self.repo(h / "nested")
+        self.assertFalse(next(row for row in self.rows(r, h) if row["name"] == "nested")["adoptable"])
+        self.assertIn("enclosing main repository", self.b(r, "adopt", str(child), ok=False))
+        self.b(r, "adopt", str(h))
+        row = self.rows(r, wt)[0]
+        self.assertTrue(row["already_home"])
+        self.assertEqual(row["node"], "project")
+        self.b(r, "wt", "add", "project", "job/feature")
+        self.assertEqual(self.rows(r, self.tmp / "project-work"), [])
+        worktrees = json.loads((r / ".brain/local.json").read_text())["nodes"]["project"]["worktrees"]
+        self.b(r, "adopt", worktrees["job/feature"]["path"], ok=False)
+        source = self.repo(self.tmp / "source")
+        self.git("submodule", "add", str(source), "module", cwd=h)
+        row = next(row for row in self.rows(r, h) if row["name"] == "module")
+        self.assertEqual(row["kind"], "submodule")
+        self.assertFalse(row["adoptable"])
+        self.assertIn("main repository", self.b(r, "adopt", str(h / "module"), ok=False))
+
+    def test_another_brain_homes_and_linked_checkouts_are_private(self):
+        r = self.init("personal")
+        work = self.init("work")
+        h = self.repo(self.tmp / "client-project")
+        self.b(work, "adopt", str(h), "--id", "private-client-node")
+        wt = self.tmp / "linked"
+        self.git("worktree", "add", "-qb", "study", str(wt), cwd=h)
+        self.b(work, "wt", "add", "private-client-node", "job/feature")
+        for path in (h, wt):
+            row = self.rows(r, path)[0]
+            self.assertEqual(row["brain"], "personal")
+            self.assertEqual(row["ownership"], "another brain: work")
+            self.assertTrue(row["already_home"])
+            self.assertIsNone(row["node"])
+            out = self.b(r, "adopt", str(path), ok=False)
+            self.assertIn("another brain: work", out)
+            self.assertNotIn("private-client-node", out)
+        wb = self.tmp / "client-project-work"
+        self.assertEqual(self.rows(r, wb), [])
+        paths = json.loads((work / ".brain/local.json").read_text())["nodes"]["private-client-node"]["worktrees"]
+        self.assertIn("another brain: work", self.b(r, "adopt", paths["job/feature"]["path"], ok=False))
+        self.assertIn("brain: personal", self.b(r, "scan", str(h)))
+        other = self.repo(self.tmp / "personal-project")
+        self.assertIn("brain: personal", self.b(r, "adopt", str(other)))
+
+    def test_empty_brief_instance_ancestor_and_pruned_directories(self):
+        r = self.init("alice")
+        h = self.tmp / "empty"; h.mkdir()
+        self.git("init", "-q", cwd=h)
+        self.b(r, "adopt", str(h))
+        self.assertIn("Snapshot commit: unborn", self.b(r, "brief", "empty", "--import"))
+        self.git("init", "-q", cwd=self.tmp)
+        self.assertIn("contains an instance", self.b(r, "adopt", str(self.tmp), ok=False))
+        for skip in ("Library", ".Trash", ".Trashes", ".cache"):
+            self.repo(self.tmp / "discovery" / skip / "hidden")
+        self.assertEqual(self.rows(r, self.tmp / "discovery"), [])
+
+    def test_agent_memory_is_bounded_and_non_utf8_names_do_not_crash(self):
+        r = self.init("alice")
+        h = self.repo(self.tmp / "project")
+        for base in ("src/memory", "memory", ".claude/memory"):
+            (h / base).mkdir(parents=True)
+            for i in range(50):
+                (h / base / (str(i) + ".md")).write_text("data")
+        self.git("add", ".", cwd=h)
+        # APFS rejects invalid UTF-8 filenames, but Git's index accepts them on every host.
+        blob = self.git("rev-parse", "HEAD:README.md", cwd=h).strip()
+        indexed = subprocess.run(["git", "update-index", "-z", "--index-info"], cwd=h, env=self.env,
+                                 input=b"100644 " + blob.encode() + b"\tbad-\xff.py\0", capture_output=True)
+        self.assertEqual(indexed.returncode, 0, indexed.stderr)
+        row = self.rows(r, h)[0]
+        self.assertIn("Python", row["languages"])
+        self.assertEqual(len(row["agent_setup"]), 40)
+        self.assertGreater(row["agent_setup_omitted"], 0)
+        self.assertFalse(any(x.startswith("src/memory") for x in row["agent_setup"]))
+        text = self.b(r, "scan", str(h))
+        self.assertRegex(text, r"\d{4}-\d{2}-\d{2} \d{2}:\d{2} \+00:00")
+        self.assertIn("~/project", text)
+        self.assertNotIn(str(self.tmp), text)
+
+    def test_unreadable_scan_directory_warns_and_continues(self):
+        import contextlib
+        import io
+        from importlib.machinery import SourceFileLoader
+        from unittest import mock
+        from types import SimpleNamespace
+        r = self.init("alice")
+        mod = SourceFileLoader("brain_scan_test", str(CORE / "bin/brain")).load_module()
+        out, err = io.StringIO(), io.StringIO()
+        def walk(root, **kwargs):
+            kwargs["onerror"](PermissionError(13, "Permission denied", str(self.tmp / "blocked")))
+            return iter(())
+        with mock.patch.dict(os.environ, self.env), mock.patch.object(mod, "find_root", return_value=r), \
+                mock.patch.object(mod.os, "walk", side_effect=walk), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            mod.cmd_scan(SimpleNamespace(depth=4, dirs=[str(self.tmp)], json=True))
+        self.assertEqual(json.loads(out.getvalue()), [])
+        self.assertIn("~/blocked", err.getvalue())
+        self.assertIn("skipped", err.getvalue())
+
+    def test_scan_closed_pipe_exits_without_traceback(self):
+        r = self.init("alice")
+        h = self.repo(self.tmp / "project")
+        proc = subprocess.Popen([sys.executable, str(CORE / "bin/brain"), "scan", str(h), "--json"],
+                                cwd=r, env=self.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        proc.stdout.close()
+        error = proc.stderr.read().decode()
+        proc.stderr.close()
+        self.assertEqual(proc.wait(), 0, error)
+        self.assertNotIn("BrokenPipeError", error)
 
 
 if __name__ == "__main__":
