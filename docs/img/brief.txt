@@ -1,6 +1,14 @@
 Role: worker in node `website` (Studio website), started by its coordinator.
-Run in: ~/code/website-work/worktrees/job-blog-search  ·  branch job/blog-search  ·  runtime: claude  ·  ports 4120-4122
+Run in: ~/code/website-work/worktrees/job-blog-search  ·  branch job/blog-search  ·  runtime: claude  ·  ports 4103-4105
 The rules, agents and skills where you run come first (axiom 7); this brief adds to them.
+
+Subscription: Research (studio-claude) · host instance: demo-claude · usage unknown/stale; capacity unverified; within weekly pacing.
+
+## Resume existing work
+
+This job has 6 own commit(s) and uncommitted changes; its worktree HEAD is `6ae98f7bf89b8ffdc66b974f5ba7b3f7ebaa414f`. Continue from these commits. Read the branch's log, diff and any uncommitted work first; do not reset, recreate the branch or start the task over.
+Read the worker hand-back in `~/Brain/nodes/website/job-handbacks` if present, or a legacy packet in `~/code/website-work/scratch/ready/`; it may be missing or stale. Recheck it after finishing the remaining work.
+Job ledger state: {"Job": "job/blog-search", "Started": "2026-10-19T13:00+01:00", "Ended": "", "Hours": "", "Outcome": "", "Commits": "", "Reviews": "0", "Runtime": "claude", "Cause": "", "Lessons": "", "Lesson check": "", "Switches": ""}
 
 ## Task
 
@@ -14,10 +22,11 @@ Rank results by title match first, then recency. Done when the search page shows
 ## Questions and hand-back
 
 - **Never ask the operator, and never wait for an answer in this thread**: nobody is watching it.
-- **A choice** the task, the rules or this brief settle: make it, and list it in your report under "Decisions I made".
-- **A question you can't go on without:** host `send` to thread `demo-web` (T3: t3_thread_send, threadId demo-web) with the question and append `- <time from brain now> from worker: question: <it>` to `~/Brain/nodes/website/inbox.md`, then end your turn with the question as your last line.
-- **When you finish, fail or get blocked**, tell your coordinator straight away: host `send` to thread `demo-web` (T3: t3_thread_send, threadId demo-web) with `done|failed|blocked: <one line>. Report: <path>`. Then end your turn.
+- **A choice** the brief or rules settle: make it and record it under Decisions I made.
+- **Before handing back**, Finish reviews, commit, then `git rebase main`; resolve conflicts yourself. Run `brain handback website --branch job/blog-search --state done --reviews <completed rounds> --report <path> --lessons '<proposed lessons or none: reason>'`. This one step runs node verify and checks local main. If verify is unset, ask the coordinator to set it. If main moves, rebase and hand back again. Only the coordinator merges to main. State and proposed lessons live in your one worker-owned job-handbacks/<key>.json. Do not edit the ledger or status. Use `none: <reason>` when there is no reusable lesson.
+- **Blocked or need a choice:** use the same command with `--state blocked` or `--state question`, omit --reviews, and describe the blocker/question in --report. Legacy failed is also accepted.
+- End your turn after recording the hand-back. The coordinator reads it with brain due; a host message is optional notification (host `send` to thread `demo-web` (T3: t3_thread_send, threadId demo-web)) and need only link the record. Do not duplicate Lessons in a message or report; --lessons carries your proposals.
 
 ## Report
 
-The answer first; then the proof (commands, numbers, hashes); what you produced and where; what you did **not** run or check; "Decisions I made"; "Lessons": what the next job should know (a pitfall, a tool's quirk, a method that worked), or "none"; and what is still open.
+The answer first; then the proof (commands, numbers, hashes); what you produced and where; what you did **not** run or check; Decisions I made; proposed lessons go in the hand-back's --lessons field; and what is still open.
