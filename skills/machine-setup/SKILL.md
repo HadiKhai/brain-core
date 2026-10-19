@@ -9,6 +9,10 @@ Run by the thread the operator opened at the instance root. Host IDs and local p
 one machine and live in `.brain/local.json`, never in git.
 
 1. Run `core/bin/brain machine` to see what this machine is missing.
+   Set the operator's provider fallback order with `brain set root fallback=<first>,<next>`.
+   These are host provider instance ids from the host catalog, kept as a plain ordered
+   `fallback` list in `.brain/local.json`; an empty value clears it. Workers that hit a usage
+   limit resume on the next available instance in the same worktree (coordinator role).
 2. **Homes.** For each node whose home is missing, ask the operator where it is on this machine.
    If it isn't there yet and `home_url` is known, offer to clone it (that's a network action:
    ask first). Then `core/bin/brain set <id> home=<path>`.

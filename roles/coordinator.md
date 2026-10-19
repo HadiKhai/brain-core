@@ -108,6 +108,15 @@ backstop, each time you are active, go through **Active work**:
 - **Inbox:** questions and hand-backs from workers land in `inbox.md` too.
 - **Silent threads:** a worker whose thread is idle but hasn't reported: host `read` its last
   message, and act on it.
+- **Usage limit:** when the host reports a worker's thread failed on a usage limit, use the
+  next host provider instance in this machine's `.brain/local.json` `fallback` list, after
+  the failed one (skip known exhausted instances). Stop the old worker before replacing it:
+  one writer per file still holds. Record
+  `brain jobs <id> --branch <branch> --switch "<old> -> <new>: usage limit"`.
+  Regenerate `brain brief <id> --branch <branch>` with the
+  same task and constraints; its resume section preserves commits, packet and ledger state.
+  Relaunch in the same worktree on the next instance and update Active work.
+  If no instance remains, record the blocker and when it can resume; do not duplicate workers.
 
 **Closing a job:** require its report's **Lessons** section (each lesson, or `none: <reason>`).
 Each reusable lesson becomes a library item (the `learn`

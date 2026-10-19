@@ -69,6 +69,8 @@ sense, it belongs in the instance, not here.
     to main, after `brain ready` accepts the packet against current main.
 16. **State lives in files; threads are disposable.** Any thread can be replaced from the
     files of the node it served.
+    A replacement worker continues existing job commits, packet and ledger state. A usage-limit
+    failure advances through this machine's ordered provider `fallback`; the ledger notes the switch.
 17. **Time is absolute.** Every recorded fact carries a full timestamp from `brain now`.
     `brain check` rejects a status `Updated:` more than five minutes in the future and warns
     on other future-dated node entries. Undated legacy clock times are not guessed.

@@ -492,11 +492,54 @@ def nine_job_close_lessons(run):
     run.brain_check()
 
 
+def nine_worker_resume_ready(run):
+    """A replacement runtime continues partial commits, writes Lessons and leaves a current ready packet."""
+    root = run.instance()
+    home = run.home_repo("app", {
+        "calc.py": "def add(a, b):\n    raise NotImplementedError\n\ndef multiply(a, b):\n    raise NotImplementedError\n",
+        "test_calc.py": "from calc import add, multiply\nassert add(2, 3) == 5\nassert multiply(2, 3) == 6\n"})
+    brain(root, "set", "a", f"home={home}", "verify=python3 -B test_calc.py")
+    brain(root, "wt", "add", "a", "job/calc")
+    wt = run.tmp / "app-work/worktrees/job-calc"
+    partial = "def add(a, b):\n    # The first worker completed addition.\n    return a + b\n"
+    (wt / "calc.py").write_text(partial + "\ndef multiply(a, b):\n    raise NotImplementedError\n")
+    sh("git", "commit", "-qam", "addition complete; multiplication remains", cwd=wt)
+    prior = sh("git", "rev-parse", "HEAD", cwd=wt).strip()
+    # A completed review is fixture state; this scenario tests resumption, not reviewer quality.
+    brain(root, "review", "a", "--branch", "job/calc", "--built-by", "codex" if run.runtime == "claude" else "claude")
+    brain(root, "jobs", "a", "--branch", "job/calc", "--switch", f"other -> {run.runtime}: usage limit")
+    report = Path(brain(root, "report", "a", "calc").strip()) / "index.md"
+    task = (f"Finish calc.py so test_calc.py passes. Addition was completed before the previous runtime "
+            f"hit its usage limit; multiplication remains. One review round is recorded and no findings "
+            f"remain open. No additional review is needed in this exercise. Commit on the job branch. "
+            f"Write your report to {report}. There is no host in this exercise: your final response is "
+            f"the hand-back; do not try to send a host message.")
+    brief = brain(root, "brief", "a", "--branch", "job/calc", "--runtime", run.runtime, "--task", task)
+    coordinator = {name: (root / "nodes/a" / name).read_text()
+                   for name in ("status.md", "decisions.md", "brief.md", "node.md", "job-ledger.md")}
+    run.agent(wt, brief, writable=root)
+    ancestors = sh("git", "rev-list", "HEAD", cwd=wt).splitlines()
+    run.check(prior in ancestors, "replacement reset the partial branch")
+    run.check(sh("git", "rev-parse", "HEAD", cwd=wt).strip() != prior, "no finishing commit")
+    run.check((wt / "calc.py").read_text().startswith(partial), "completed addition was rewritten")
+    verify = subprocess.run([sys.executable, "-B", "test_calc.py"], cwd=wt, capture_output=True)
+    run.check(verify.returncode == 0, "replacement did not finish multiplication")
+    ready = brain(root, "ready", "a", "--branch", "job/calc", check=False).strip()
+    run.check(ready == "ready", f"no valid ready packet: {ready}")
+    text = report.read_text()
+    lessons = re.search(r"(?ims)^## Lessons\s*\n(.*?)(?=^## |\Z)", text)
+    run.check(lessons and lessons.group(1).strip() and "<!--" not in lessons.group(1), "Lessons section left empty")
+    if lessons and re.search(r"\bnone\b", lessons.group(1), re.I):
+        run.check(bool(re.search(r"none\s*:\s*\S", lessons.group(1), re.I)), "none has no reason")
+    for name, before in coordinator.items():
+        run.check((root / "nodes/a" / name).read_text() == before, f"worker edited coordinator's {name}")
+
+
 SCENARIOS = [parity, coordinator_writes_as_it_goes, worker_asks_the_writer, learning_is_a_citation,
              new_node_in_one_sentence, no_upward_traces, second_runtime_review, stop_hook_fires,
              notes_current_after_an_edit, a_session_reaches_its_own_brain, worker_hands_back_a_question,
              lessons_become_items, limits_carry_their_reason, freshness_across_timezones,
-             nine_job_close_lessons]
+             nine_job_close_lessons, nine_worker_resume_ready]
 
 
 def main():

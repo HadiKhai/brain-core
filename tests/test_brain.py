@@ -1371,6 +1371,48 @@ class WorkerReadyPackets(Scenario):
         self.assertIn("unreadable", self.b(r, "ready", "a", "--branch", "job", ok=False))
 
 
+class RuntimeFallbackResume(Scenario):
+    def test_fallback_is_a_plain_machine_local_order(self):
+        r = self.init("alice")
+        head = self.git("rev-parse", "HEAD", cwd=r)
+        self.b(r, "set", "root", "fallback=claudeAgent,codex")
+        local = json.loads((r / ".brain/local.json").read_text())
+        self.assertEqual(local["fallback"], ["claudeAgent", "codex"])
+        self.assertNotIn("fallback:", (r / "node.md").read_text())
+        self.assertEqual(self.git("rev-parse", "HEAD", cwd=r), head)
+        self.assertIn('["claudeAgent", "codex"]', self.b(r, "machine"))
+        self.assertEqual(json.loads(self.b(r, "ui", "--json"))["brain"]["fallback"], local["fallback"])
+        self.b(r, "set", "root", "fallback=codex,codex", ok=False)
+        self.b(r, "set", "root", "fallback=codex,,claudeAgent", ok=False)
+        self.b(r, "new", "a", "--title", "A")
+        self.b(r, "set", "a", "fallback=codex", ok=False)
+        local["fallback"] = {"first": "codex"}
+        (r / ".brain/local.json").write_text(json.dumps(local))
+        self.assertIn("fallback must be an ordered list", self.b(r, "check", ok=False))
+        self.b(r, "set", "root", "fallback=")
+        self.assertNotIn("fallback must", self.b(r, "check"))
+
+    def test_partial_branch_brief_carries_resume_and_ledger_state(self):
+        r = self.init("alice")
+        home = self.repo(self.tmp / "app")
+        self.b(r, "new", "a", "--title", "A", "--home", str(home))
+        self.b(r, "wt", "add", "a", "job")
+        self.assertNotIn("## Resume existing work", self.b(r, "brief", "a", "--branch", "job"))
+        wt = self.tmp / "app-work/worktrees/job"
+        self.git("commit", "--allow-empty", "-qm", "partial", cwd=wt)
+        sha = self.git("rev-parse", "HEAD", cwd=wt).strip()
+        self.b(r, "jobs", "a", "--branch", "job", "--switch", "claudeAgent -> codex: usage limit")
+        brief = self.b(r, "brief", "a", "--branch", "job", "--runtime", "codex", "--task", "Finish it")
+        self.assertIn("Continue from these commits", brief)
+        self.assertIn(sha, brief)
+        self.assertIn("do not reset, recreate the branch", brief)
+        self.assertIn("scratch/ready/", brief)
+        self.assertIn("Job ledger state:", brief)
+        self.assertIn("claudeAgent -> codex: usage limit", brief)
+        self.assertIn("runtime: codex", brief)
+        self.assertIn("Finish it", brief)
+
+
 class Measures(Scenario):
     def test_jobs_are_measured_from_start_to_end(self):
         r = self.init("alice")

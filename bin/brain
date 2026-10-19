@@ -634,7 +634,16 @@ def cmd_set(a):
         k, v = kv.split("=", 1)
         if k in ("owners", "id"):
             die("use 'brain owners' or 'brain seal' to change owners; ids change only with 'brain move'")
-        if k in LOCAL_KEYS or k in ("synced_at", "workbench"):
+        if k == "fallback":
+            if a.id != "root":
+                die("fallback is per machine: brain set root fallback=<instance ids in order>")
+            order = [x.strip() for x in v.split(",")] if v.strip() else []
+            if any(not x for x in order) or len(order) != len(set(order)):
+                die("fallback needs distinct, nonempty host provider instance ids")
+            inst.local["fallback"] = order
+            fm.pop(k, None)
+            print("  fallback: this machine (.brain/local.json)")
+        elif k in LOCAL_KEYS or k in ("synced_at", "workbench"):
             inst.local_of(a.id)[k] = str(Path(v).expanduser().resolve()) if k == "workbench" else v
             fm.pop(k, None)
             print(f"  {k}: this machine (.brain/local.json)")
@@ -1682,6 +1691,20 @@ def cmd_brief(a):
         out += ["This work happens in a project with its own owners. Leave nothing in it that names where this "
                 "brief came from (axiom 6). Ask before pushing, publishing or anything irreversible (axiom 24).",
                 ""]
+    if w:
+        base = "refs/heads/main" if git("rev-parse", "--verify", "--quiet", "refs/heads/main", cwd=where).returncode == 0 \
+            else w.get("start")
+        count = git("rev-list", "--count", f"{base}..refs/heads/{a.branch}", cwd=where).stdout.strip() if base else ""
+        if count.isdigit() and int(count):
+            head_sha = git("rev-parse", "HEAD", cwd=where).stdout.strip()
+            row = next((r for r in reversed(read_jobs(n) or []) if r["Job"] == a.branch), {})
+            out += ["## Resume existing work", "",
+                    f"This branch already has {count} commit(s); its worktree HEAD is `{head_sha}`. "
+                    "Continue from these commits. Read the branch's log, diff and any uncommitted work first; "
+                    "do not reset, recreate the branch or start the task over.",
+                    f"Read the existing ready packet at `{tilde(ready_path(inst, n, a.branch))}` if present; "
+                    "it may be missing or stale. Recheck it after finishing the remaining work.",
+                    "Job ledger state: " + json.dumps(row, ensure_ascii=False), ""]
     out += ["## Task", "", task.strip(), ""]
     out += limits_lines(n)
     if never_terms(n):
@@ -3341,6 +3364,7 @@ def ui_state(inst, problems=None):
     return {
         "brain": {"name": brain_name(inst.root), "title": nodes[0]["fm"].get("title", "Brain"),
                   "root": tilde(inst.root), "machine": inst.local.get("machine", ""), "tz": str(inst.zone() or ""),
+                  "fallback": inst.local.get("fallback", []),
                   "now": now.isoformat(timespec="seconds"), "others": [k for k, r in brains_here()
                                                                        if r.resolve() != inst.root.resolve()]},
         "nodes": out_nodes,
@@ -3475,6 +3499,11 @@ def collect_problems(inst):
     """Returns (problems, warnings, fixable) for the axioms that can be checked mechanically."""
     problems, warnings, fixable = [], [], []
     p = problems.append
+    fallback = inst.local.get("fallback", [])
+    if not isinstance(fallback, list) or any(not isinstance(x, str) or not x.strip() for x in fallback) \
+            or (isinstance(fallback, list) and all(isinstance(x, str) for x in fallback)
+                and len(fallback) != len(set(fallback))):
+        p(".brain/local.json: fallback must be an ordered list of distinct host provider instance ids")
     if not inst.principals:
         p("instance.md: no principals")
     for rt in inst.runtimes:
@@ -3705,6 +3734,7 @@ def cmd_machine(a):
                 print(f"{n['id']}\t{n['fm'].get('home_url', 'none')}")
         return
     print(f"machine: {inst.local['machine']}   bindings: {tilde(inst.local_path)} (not in git)")
+    print("fallback: " + json.dumps(inst.local.get("fallback", [])))
     name, others = register(inst.root), [k for k, r in brains_here() if r.resolve() != inst.root.resolve()]
     dirs = "; ".join(f"{rt} {', '.join(ds)}" for rt, ds in sorted(inst.local.get("global", {}).items()))
     print(f"this brain: {name}   pointer in: {dirs or 'none (brain link --global)'}"
