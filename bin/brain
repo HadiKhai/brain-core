@@ -398,7 +398,8 @@ def brains_here():
 
 USAGE_WINDOWS = {"five_hour": 300, "seven_day": 10080}
 USAGE_MAX_AGE = 120
-_KEYCHAIN_BLOCKED = False
+_KEYCHAIN_RETRY_AT = {}
+_KEYCHAIN_CYCLE_BLOCKED = set()
 
 
 def usage_file(name="usage.json"):
@@ -431,7 +432,7 @@ def usage_cache():
         if r.get("read_at") is not None and (not usage_number(r["read_at"]) or usage_stamp(r["read_at"]) is None):
             return {}
         for name, w in r["windows"].items():
-            if name not in USAGE_WINDOWS or not isinstance(w, dict) or \
+            if (name not in USAGE_WINDOWS and not name.startswith("seven_day_model:")) or not isinstance(w, dict) or \
                     not usage_number(w.get("used_percent")) or not 0 <= w["used_percent"] <= 100 or \
                     (w.get("resets_at") is not None and (not usage_number(w["resets_at"]) or
                                                         usage_stamp(w["resets_at"]) is None)):
@@ -480,6 +481,9 @@ def usage_stamp(value):
         return value if 0 < value < 253402300799 else None
     if isinstance(value, str):
         try:
+            # Python 3.9/3.10 accept only three or six fractional digits.
+            value = re.sub(r"(T\d{2}:\d{2}:\d{2})\.(\d+)",
+                           lambda m: m[1] + "." + (m[2] + "000000")[:6], value)
             dt = datetime.datetime.fromisoformat(value.replace("Z", "+00:00"))
             return dt.timestamp() if dt.tzinfo else None
         except (ValueError, OverflowError):
@@ -488,12 +492,12 @@ def usage_stamp(value):
 
 
 def usage_windows(data, runtime):
-    """Only the two subscription windows; primary does not necessarily mean five hours."""
+    """Subscription windows only; scoped weekly limits carry their model aliases."""
     if not isinstance(data, dict):
         return {}
     out = {}
     if runtime == "codex":
-        if data.get("limitId", data.get("limit_id", "codex")) != "codex":
+        if (data.get("limitId") or data.get("limit_id") or "codex") != "codex":
             return {}
         for key in ("primary", "secondary"):
             w = data.get(key)
@@ -506,7 +510,29 @@ def usage_windows(data, runtime):
             if name and usage_number(used) and 0 <= used <= 100:
                 out[name] = {"used_percent": used, "resets_at": reset}
     else:
+        limits = data.get("limits")
+        if isinstance(limits, list):
+            for w in limits:
+                if not isinstance(w, dict):
+                    continue
+                name = {"session": "five_hour", "weekly_all": "seven_day"}.get(w.get("kind"))
+                models = []
+                if w.get("kind") == "weekly_scoped":
+                    scope = w.get("scope")
+                    model = scope.get("model") if isinstance(scope, dict) else None
+                    if isinstance(model, dict):
+                        models = [model[k] for k in ("id", "display_name")
+                                  if isinstance(model.get(k), str) and model[k]]
+                    if models:
+                        name = "seven_day_model:" + models[0]
+                used = w.get("percent")
+                if name and usage_number(used) and 0 <= used <= 100:
+                    out[name] = {"used_percent": used, "resets_at": usage_stamp(w.get("resets_at"))}
+                    if models:
+                        out[name]["models"] = models
         for name in USAGE_WINDOWS:
+            if name in out:
+                continue
             w = data.get(name)
             if not isinstance(w, dict):
                 continue
@@ -588,50 +614,45 @@ def usage_codex(sub):
 
 
 def usage_keychain(config_dir):
-    """No UI, no retries after a blocked read. The helper's captured output stays in memory only."""
-    global _KEYCHAIN_BLOCKED
-    if sys.platform != "darwin" or _KEYCHAIN_BLOCKED or (os.environ.get("BRAIN_USAGE_TESTING") == "1" and
-                                                      os.environ.get("BRAIN_USAGE_TEST_NO_KEYCHAIN") == "1"):
-        return {}, "Keychain unavailable or previously blocked"
+    """Use the macOS-trusted CLI; its secret stdout stays in a captured pipe only."""
+    if sys.platform != "darwin" or (os.environ.get("BRAIN_USAGE_TESTING") == "1" and
+                                    os.environ.get("BRAIN_USAGE_TEST_NO_KEYCHAIN") == "1"):
+        return {}, "Keychain unavailable"
     import hashlib
     import unicodedata
+    import getpass
     default = str(Path.home() / ".claude")
     suffix = "" if config_dir == default else "-" + hashlib.sha256(
         unicodedata.normalize("NFC", config_dir).encode()).hexdigest()[:8]
     service = "Claude Code-credentials" + suffix
-    # SecKeychainSetUserInteractionAllowed(false) forbids a permission/unlock dialog.
-    helper = '''import ctypes as c, sys
-s=c.CDLL('/System/Library/Frameworks/Security.framework/Security')
-s.SecKeychainSetUserInteractionAllowed.argtypes=[c.c_ubyte]
-if s.SecKeychainSetUserInteractionAllowed(0): sys.exit(2)
-s.SecKeychainFindGenericPassword.argtypes=[c.c_void_p,c.c_uint32,c.c_char_p,c.c_uint32,c.c_char_p,c.POINTER(c.c_uint32),c.POINTER(c.c_void_p),c.c_void_p]
-n=c.c_uint32(); p=c.c_void_p(); name=sys.argv[1].encode(); user=sys.argv[2].encode()
-r=s.SecKeychainFindGenericPassword(None,len(name),name,len(user),user,c.byref(n),c.byref(p),None)
-if r: sys.exit(3)
-try: sys.stdout.buffer.write(c.string_at(p,n.value))
-finally: s.SecKeychainItemFreeContent(None,p)
-'''
-    import getpass
+    if service in _KEYCHAIN_CYCLE_BLOCKED or time.monotonic() < _KEYCHAIN_RETRY_AT.get(service, 0):
+        return {}, "Keychain unavailable; retry after cooldown"
     user = os.environ.get("USER") or getpass.getuser()
-    if not re.fullmatch(r"[a-zA-Z0-9._-]+", user):
-        user = "claude-code-user"
     try:
-        r = subprocess.run([sys.executable, "-c", helper, service, user], capture_output=True, timeout=2)
+        # security has no per-read no-UI flag. No stdin/tty, and bound any permission wait.
+        r = subprocess.run(["/usr/bin/security", "find-generic-password", "-s", service,
+                            "-a", user, "-w"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                           stdin=subprocess.DEVNULL, timeout=2, start_new_session=True)
         if r.returncode:
-            _KEYCHAIN_BLOCKED = True
-            return {}, "Keychain denied/unavailable; no interactive retry"
+            raise ValueError("unavailable")
         d = json.loads(r.stdout)
-        return (d if isinstance(d, dict) else {}), ""
+        if not isinstance(d, dict):
+            raise ValueError("invalid credential")
+        _KEYCHAIN_RETRY_AT.pop(service, None)
+        return d, ""
     except (OSError, ValueError, subprocess.TimeoutExpired):
-        _KEYCHAIN_BLOCKED = True
-        return {}, "Keychain blocked/unavailable; no interactive retry"
+        _KEYCHAIN_CYCLE_BLOCKED.add(service)
+        _KEYCHAIN_RETRY_AT[service] = time.monotonic() + 600
+        return {}, "Keychain denied/unavailable; retry in 10 minutes"
 
 
 def usage_claude(sub):
     import urllib.request
     import urllib.parse
     cfg = Path(sub["config_dir"])
-    note, credentials = "", usage_json(cfg / ".credentials.json")
+    note, credentials = "", {}
+    if sys.platform != "darwin":
+        credentials = usage_json(cfg / ".credentials.json") or {}
     testing = os.environ.get("BRAIN_USAGE_TESTING") == "1"
     url = "https://api.anthropic.com/api/oauth/usage"
     if testing and os.environ.get("BRAIN_USAGE_TEST_URL"):
@@ -642,7 +663,7 @@ def usage_claude(sub):
     if testing and os.environ.get("BRAIN_USAGE_TEST_TOKEN"):
         token = os.environ["BRAIN_USAGE_TEST_TOKEN"]
     else:
-        if not isinstance(credentials, dict) or not (credentials.get("claudeAiOauth") or {}).get("accessToken"):
+        if sys.platform == "darwin":
             credentials, note = usage_keychain(str(cfg))
         token = (credentials.get("claudeAiOauth") or {}).get("accessToken")
     if not isinstance(token, str) or not token:
@@ -664,6 +685,8 @@ def usage_logs(sub):
     readings = []
     for path in cfg.glob(pattern):
         try:
+            if path.stat().st_mtime < time.time() - 8 * 86400:
+                continue
             # A bounded tail avoids loading long transcripts or retaining conversation content.
             with path.open("rb") as fh:
                 fh.seek(0, 2)
@@ -700,7 +723,7 @@ def usage_logs(sub):
         return {}, None
     # Preserve each window's actual observation time, especially sparse Claude limit-hit events.
     windows = {}
-    for stamp, ws in sorted(readings):
+    for stamp, ws in sorted(readings, key=lambda r: r[0]):
         windows.update({k: {**w, "read_at": stamp} for k, w in ws.items()})
     return windows, min(w["read_at"] for w in windows.values())
 
@@ -781,6 +804,7 @@ def usage_refresh(config, stale_only=False):
             return cached  # another reader/poller is refreshing; never duplicate its calls
         if stale_only and usage_cache_fresh(cached, config):
             return cached
+        _KEYCHAIN_CYCLE_BLOCKED.clear()
         accounts, subs, paths = {}, [], {}
         for sub in config["subscriptions"]:
             path_key = (sub["runtime"], sub["config_dir"])

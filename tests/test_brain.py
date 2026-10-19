@@ -2165,6 +2165,8 @@ for line in sys.stdin:
         self.assertNotIn("private@example.test", json.dumps(out))
 
     def test_usage_claude_endpoint_credentials_and_failure_degrade(self):
+        platform = mock.patch.object(self.m.sys, "platform", "linux")
+        platform.start(); self.addCleanup(platform.stop)
         import http.server
         requests, status = [], [200]
         payload = {"five_hour": {"utilization": 35, "resets_at": "2026-10-20T00:00:00Z"},
@@ -2211,17 +2213,79 @@ for line in sys.stdin:
         finally:
             server.shutdown(); server.server_close(); thread.join()
 
-    def test_usage_keychain_never_interacts_or_retries_after_blocking(self):
-        env = {"BRAIN_USAGE_TEST_NO_KEYCHAIN": "0"}
+    def test_usage_keychain_security_pipe_cooldown_and_cycle(self):
+        env = {"BRAIN_USAGE_TEST_NO_KEYCHAIN": "0", "USER": "test-user"}
+        cfg = str(self.tmp / ".claude")
         with mock.patch.dict(os.environ, env), mock.patch.object(self.m.sys, "platform", "darwin"), \
+                mock.patch.object(self.m.time, "monotonic", return_value=100) as clock, \
                 mock.patch.object(self.m.subprocess, "run", side_effect=subprocess.TimeoutExpired("keychain", 2)) as run:
-            self.assertEqual(self.m.usage_keychain(str(self.tmp / ".claude"))[0], {})
-            self.assertIn("previously blocked", self.m.usage_keychain(str(self.tmp / ".claude"))[1])
+            self.assertEqual(self.m.usage_keychain(cfg)[0], {})
+            self.m._KEYCHAIN_CYCLE_BLOCKED.clear()  # next refresh, still in cooldown
+            self.assertIn("cooldown", self.m.usage_keychain(cfg)[1])
             self.assertEqual(run.call_count, 1)
-            helper = run.call_args.args[0][2]
-            self.assertIn("SecKeychainSetUserInteractionAllowed(0)", helper)
+            self.assertEqual(run.call_args.args[0], ["/usr/bin/security", "find-generic-password", "-s",
+                             "Claude Code-credentials", "-a", "test-user", "-w"])
             self.assertEqual(run.call_args.kwargs["timeout"], 2)
-            self.assertIn("Claude Code-credentials", run.call_args.args[0])
+            self.assertEqual(run.call_args.kwargs["stdin"], subprocess.DEVNULL)
+            self.assertEqual(run.call_args.kwargs["stdout"], subprocess.PIPE)
+            self.assertEqual(run.call_args.kwargs["stderr"], subprocess.DEVNULL)
+            clock.return_value = 701
+            run.side_effect = None
+            run.return_value = subprocess.CompletedProcess([], 0, b'{"claudeAiOauth":{"accessToken":"TEST"}}')
+            self.assertEqual(self.m.usage_keychain(cfg)[0]["claudeAiOauth"]["accessToken"], "TEST")
+            self.assertEqual(run.call_count, 2)
+            self.assertNotIn("TEST", str(run.call_args))
+            self.m.usage_keychain(str(self.tmp / "other"))
+            self.assertTrue(run.call_args.args[0][3].startswith("Claude Code-credentials-"))
+
+    def test_usage_claude_limits_and_fractional_timestamps(self):
+        for suffix in (".57+00:00", ".576595+00:00", ".5Z", ".5765Z", ".576595123Z", "Z"):
+            stamp = self.m.usage_stamp("2026-10-19T17:39:59" + suffix)
+            self.assertIsNotNone(stamp, suffix)
+        # Assert normalization even on interpreters that also accept arbitrary fractions.
+        real = datetime.datetime
+        class StrictDateTime(real):
+            @classmethod
+            def fromisoformat(cls, value):
+                import re
+                fraction = re.search(r"\.(\d+)", value)
+                if fraction and len(fraction[1]) not in (3, 6):
+                    raise ValueError("Python 3.9 fraction")
+                return real.fromisoformat(value)
+        with mock.patch.object(self.m.datetime, "datetime", StrictDateTime):
+            self.assertIsNotNone(self.m.usage_stamp("2026-10-19T17:39:59.57+00:00"))
+        windows = self.m.usage_windows({"five_hour": {"utilization": 99}, "limits": [None,
+            {"kind": "session", "percent": 25, "is_active": False, "resets_at": "2026-10-19T17:39:59.57Z"},
+            {"kind": "weekly_all", "percent": 86},
+            {"kind": "weekly_scoped", "percent": 0, "scope": {"model": {"id": None, "display_name": "Fable"}}},
+            {"kind": "unknown", "percent": 100}]}, "claude")
+        self.assertEqual(windows["five_hour"]["used_percent"], 25)
+        self.assertEqual(windows["seven_day"]["used_percent"], 86)
+        self.assertEqual(windows["seven_day_model:Fable"]["models"], ["Fable"])
+        self.assertEqual(len(windows), 3)
+        for key in ("limitId", "limit_id"):
+            self.assertIn("five_hour", self.m.usage_windows({key: None,
+                          "primary": {"windowDurationMins": 300, "usedPercent": 20}}, "codex"))
+        self.assertEqual(self.m.usage_windows({"limitId": None, "limit_id": "other",
+                         "primary": {"windowDurationMins": 300, "usedPercent": 20}}, "codex"), {})
+
+    def test_usage_logs_equal_stamps_and_old_files(self):
+        sub = self.subscription(runtime="claude")
+        folder = Path(sub["config_dir"]) / "projects/project"
+        folder.mkdir(parents=True)
+        for i, name in enumerate(("five_hour", "seven_day")):
+            path = folder / (str(i) + ".jsonl")
+            path.write_text(json.dumps({"timestamp": "2026-10-19T00:00:00Z", "apiError": "usage_limit_reached",
+                "apiErrorParams": {"rate_limit_info": {"status": "rejected", "rateLimitType": name}}}))
+        self.assertEqual(set(self.m.usage_logs(sub)[0]), {"five_hour", "seven_day"})
+        old = time.time() - 9 * 86400
+        os.utime(path, (old, old))
+        real_open = Path.open
+        def checked_open(p, *args, **kwargs):
+            self.assertNotEqual(p, path, "old transcript was opened")
+            return real_open(p, *args, **kwargs)
+        with mock.patch.object(Path, "open", checked_open):
+            self.assertEqual(set(self.m.usage_logs(sub)[0]), {"five_hour"})
 
     def test_usage_exact_log_shapes_and_original_observation_times(self):
         sub = self.subscription()
