@@ -71,9 +71,9 @@ def build(base):
         "--tz", "Europe/Lisbon", "--name", "sam", cwd=base)
     b = lambda *a: run(sys.executable, root / "core" / "bin" / "brain", *a, cwd=root)  # noqa: E731
     code = base / "code"
-    web = home_repo(code / "website", {"README.md": "# Studio website\n", "package.json": "{}\n"})
-    app = home_repo(code / "mobile-app", {"README.md": "# Field app\n"})
-    nw = home_repo(code / "northwind-portal", {"README.md": "# Portal\n"})
+    web = home_repo(code / "website", {"README.md": "# Studio website\n", "package.json": "{}\n", "src/index.ts": "export const title = 'Studio website';\n", "src/style.css": "body { margin: 0; }\n"})
+    app = home_repo(code / "mobile-app", {"README.md": "# Field app\n", "src/sync.ts": "export const offline = true;\n", "ios/App.swift": "import SwiftUI\n"})
+    nw = home_repo(code / "northwind-portal", {"README.md": "# Portal\n", "src/invoices.ts": "export const invoices = [];\n"})
     b("principal", "add", "northwind")
     b("new", "website", "--title", "Studio website", "--home", web, "--labels", "kind:code,area:studio", "--runtime", "claude")
     b("new", "mobile-app", "--title", "Field app", "--home", app, "--labels", "kind:code,area:studio", "--runtime", "codex")
@@ -192,7 +192,7 @@ def build(base):
                                            ("review-two-runtimes", "A second runtime reviews every change before you see it", "website")]):
         b("item", "add", iid, "--from", src, "--title", title, "--kind", "lesson", "--ref", "job report", "--body", title)
     b("item", "add", "import-search", "--from", "website", "--title", "Review imported search ranking guidance", "--kind", "lesson",
-      "--ref", "import: notes.md at 8a61f20", "--body", "Prefer title matches, then explain the tie-breaker.",
+      "--ref", "import: notes.md at 8a61f20", "--body", "Rank results by the strongest signal. Keep the order predictable.\n\n- Prefer title matches over body matches.\n- Break ties by recency.\n\n```ts\nconst rank = titleMatch ? 2 : 1;\n```\n\nExplain the tie-breaker in the search help.",
       "--proposed", "--repo", "studio/search-notes", "--commit", "8a61f20" + "0" * 33)
     b("specialist", "new", "accessibility", "--title", "Accessibility reviewer", "--runtime", "codex")
     b("specialist", "new", "researcher", "--title", "Product researcher", "--runtime", "claude")
@@ -215,6 +215,17 @@ def build(base):
     brain_mod = importlib.util.module_from_spec(spec)
     loader.exec_module(brain_mod)
     inst = brain_mod.Instance(root)
+    # Backdate the actual demo files, so every exported view uses the same chronology.
+    for item, hours in zip(inst.items(), [74, 29, 8, 2.5]):
+        fm, body = brain_mod.read_fm(item["path"])
+        fm["learned_at"] = at(hours)
+        brain_mod.write_fm(item["path"], fm, body)
+    for sp, hours in zip(brain_mod.find_specialists(inst), [17, 41]):
+        lessons = sp["dir"] / "lessons.md"
+        text = lessons.read_text()
+        for lesson in brain_mod.parse_lessons(lessons):
+            text = text.replace(lesson["time"], at(hours))
+        lessons.write_text(text)
     n = inst.node("website")
     ledger = brain_mod.read_jobs(n)
     for row in ledger:
@@ -237,19 +248,25 @@ def build(base):
     # Fake account-wide readings; no provider calls or credentials are used.
     config = {"stop_percent":85, "subscriptions":[
         {"id":"studio-codex", "label":"Studio", "runtime":"codex", "config_dir":str(base / "fake-codex"), "host_provider_instance_id":"demo-codex", "brains":["sam"]},
-        {"id":"studio-claude", "label":"Research", "runtime":"claude", "config_dir":str(base / "fake-claude"), "host_provider_instance_id":"demo-claude", "brains":["sam"]}]}
+        {"id":"studio-claude", "label":"Research", "runtime":"claude", "config_dir":str(base / "fake-claude"), "host_provider_instance_id":"demo-claude", "brains":["sam"]},
+        {"id":"studio-overflow", "label":"Overflow", "runtime":"codex", "config_dir":str(base / "fake-overflow"), "host_provider_instance_id":"demo-overflow", "brains":["sam"]},
+        {"id":"travel-claude", "label":"Travel", "runtime":"claude", "config_dir":str(base / "fake-travel"), "host_provider_instance_id":"demo-travel", "brains":["sam"]}]}
     (base / "subscriptions.json").write_text(json.dumps(config))
     inst = brain_mod.Instance(root)
     for hire in inst.local.get("hires", []):
         hire["runtime"] = "codex" if hire["specialist"] == "accessibility" else "claude"
         hire["subscription"] = "studio-" + hire["runtime"]
+        hire["time"] = at(2 if hire["specialist"] == "accessibility" else 5)
+        job = next((r for r in brain_mod.read_jobs(inst.node(hire["node"])) if r["Job"] == hire["job"]), None)
+        if job:
+            hire["started"] = job["Started"]
     inst.save_local()
     subs = brain_mod.usage_config()["subscriptions"]
     cache = {"version":1, "checked_at":dt.datetime.now(dt.timezone.utc).timestamp(), "poll_interval_seconds":300, "subscriptions":[{**sub, "account_key":"demo-" + sub["id"]} for sub in subs], "accounts":{}}
     for index, sub in enumerate(subs):
-        read_at = NOW.timestamp() - (35 if index == 0 else 7200)
-        windows = {"five_hour":{"used_percent":38 if index == 0 else 64, "resets_at":NOW.timestamp()+7200},
-                   "seven_day":{"used_percent":57 if index == 0 else 81, "resets_at":NOW.timestamp()+172800}}
+        read_at = NOW.timestamp() - (7200 if index == 3 else 35)
+        windows = {"five_hour":{"used_percent":[38, 64, 87, 23][index], "resets_at":NOW.timestamp()+11520},
+                   "seven_day":{"used_percent":[57, 81, 68, 42][index], "resets_at":NOW.timestamp()+172800}}
         if index == 1:
             windows["seven_day_model:sonnet"] = {"used_percent":46, "resets_at":NOW.timestamp()+172800, "models":["sonnet"]}
         cache["accounts"]["demo-" + sub["id"]] = {"read_at":read_at, "source":"lookup", "windows":{key:{**w, "read_at":read_at, "source":"lookup"} for key,w in windows.items()}}
@@ -257,7 +274,7 @@ def build(base):
     return root, b
 
 
-def snapshot(root, b, theme, out, hash_="", size=(1440, 1000)):
+def snapshot(root, b, theme, out, hash_="", size=(1440, 1000), stress=False):
     st = json.loads(b("ui", "--json", "--scan", root.parent / "code"))
     st["brain"].update(root="~/Brain", machine="studio-mac", others=[])
     st["machine"].update(cpus=12, load=[4.2, 3.9, 3.1], mem_free_gb=21.4, mem_total_gb=36, disk_free_gb=312,
@@ -270,9 +287,20 @@ def snapshot(root, b, theme, out, hash_="", size=(1440, 1000)):
         n["home"] = n["home"].replace(str(root.parent), "~")
     # Replace every temporary path in the exported snapshot, including scan candidates.
     st = json.loads(json.dumps(st).replace(str(root.parent), "~"))
+    if stress:
+        long_name = "ExtremelyLongNodeAndLearningNameWithoutAnySpaces" * 7
+        for n in st["nodes"]:
+            n["title"] = long_name
+        st["items"]["all"] = [{"id":f"stress-{i}", "title":long_name + str(i), "status":"active",
+            "body":"A paragraph.\n\n- A long list item " + long_name + "\n\n```\n" + long_name + "\n```",
+            "provenance":{"node":long_name, "ref":long_name, "time":at(i+1)}} for i in range(500)]
+        st["items"]["count"] = 500
+        st["specialists"] = []
     html = (CORE / "ui" / "index.html").read_text().replace(".2s ease", "0s")
     html = html.replace('<script>\n"use strict";', "<script>window.__STATE__=" + json.dumps(st).replace("</", "<\\/")
                         + ';</script>\n<script>\n"use strict";', 1)
+    setup = '<script>if (location.hash === "#view=imports") { const box = document.querySelector("#scan-results input:not(:disabled)"); if (box) box.click(); } if (location.hash === "#view=learnings") { const d = document.querySelector("#learning-results details"); if (d) d.open = true; }</script>'
+    html = html.replace('</body>', setup + '</body>')
     if theme == "light":
         html = html.replace("<html lang=\"en\">", "<html lang=\"en\" data-theme=\"light\">", 1)
     else:
@@ -298,15 +326,20 @@ def check_ui(root, b):
     runner = '<script>try { const result = ' + checks + '; document.body.append(Object.assign(document.createElement("pre"), {id:"ui-check-result", textContent:JSON.stringify(result)})); } catch(e) { document.body.append(Object.assign(document.createElement("pre"), {id:"ui-check-error", textContent:String(e.stack)})); }</script>'
     page = root.parent / "checks.html"
     page.write_text(html.replace('</body>', runner + '</body>'))
-    with tempfile.TemporaryDirectory() as profile:
-        result = subprocess.run([CHROME, "--headless=new", "--disable-gpu", f"--user-data-dir={profile}", "--dump-dom", "--virtual-time-budget=3000", page.as_uri()], capture_output=True, text=True, timeout=120)
     import re
     import html as html_module
-    match = re.search(r'<pre id="ui-check-result">(.*?)</pre>', result.stdout, re.S)
-    if not match:
-        error = re.search(r'<pre id="ui-check-error">(.*?)</pre>', result.stdout, re.S)
-        raise RuntimeError(html_module.unescape(error.group(1)) if error else "UI checks did not complete")
-    report = json.loads(html_module.unescape(match.group(1)))
+    report = {"checks":[]}
+    for width in (1440, 600):
+        with tempfile.TemporaryDirectory() as profile:
+            result = subprocess.run([CHROME, "--headless=new", "--disable-gpu", f"--user-data-dir={profile}",
+                f"--window-size={width},1000", "--dump-dom", "--virtual-time-budget=3000", page.as_uri()],
+                capture_output=True, text=True, timeout=120)
+        match = re.search(r'<pre id="ui-check-result">(.*?)</pre>', result.stdout, re.S)
+        if not match:
+            error = re.search(r'<pre id="ui-check-error">(.*?)</pre>', result.stdout, re.S)
+            raise RuntimeError(f"Chrome {width}px: " + (html_module.unescape(error.group(1)) if error else "UI checks did not complete"))
+        checks_at_width = json.loads(html_module.unescape(match.group(1)))
+        report["checks"].extend(f"{width}px: {name}" for name in checks_at_width["checks"])
     # Reopen the same snapshot in two Chrome processes sharing one disposable profile.
     # A stub records delivery; native notifications and runtime lookups never run.
     stub = '<script>localStorage.setItem("brain-notify","1"); window.Notification=class { static permission="granted"; constructor() { localStorage.setItem("delivery-count",String(Number(localStorage.getItem("delivery-count")||0)+1)); } }; window.EventSource=class { constructor() { throw new Error("Snapshot opened a live connection"); } };</script>'
@@ -333,12 +366,17 @@ def main():
     base = Path(tempfile.mkdtemp(prefix="brain-demo-")).resolve()
     try:
         root, b = build(base)
+        if "--checks-only" in sys.argv:
+            check_ui(root, b)
+            return
         snapshot(root, b, "dark", OUT / "ui-dark.png", size=(1440, 1270))
         snapshot(root, b, "light", OUT / "ui-light.png", size=(1440, 1270))
         snapshot(root, b, "dark", OUT / "ui-project.png", "#node=website", size=(1440, 1000))
         for view in ("learnings", "agents", "usage", "imports"):
             for theme in ("dark", "light"):
-                snapshot(root, b, theme, OUT / f"ui-{view}-{theme}.png", "#view=" + view, size=(1440, 1450 if view == "agents" else 1200))
+                snapshot(root, b, theme, OUT / f"ui-{view}-{theme}.png", "#view=" + view, size=(1440, 1450 if view == "agents" else 1280 if view == "learnings" else 1200))
+        snapshot(root, b, "dark", OUT / "ui-stress-dark.png", "#view=learnings", size=(1440, 1200), stress=True)
+        snapshot(root, b, "light", OUT / "ui-stress-mobile.png", "#view=learnings", size=(600, 1000), stress=True)
         check_ui(root, b)
         dash = b().replace(str(root.parent), "~").replace("machine Mac", "machine studio-mac")
         (OUT / "dashboard.txt").write_text("\n".join(line.rstrip() for line in dash.splitlines()) + "\n")

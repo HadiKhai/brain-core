@@ -1,19 +1,19 @@
 Sam's Brain (sam)  ·  ~/Brain  ·  machine studio-mac
 
-root                         updated 30m ago
+root                         updated 31m ago
   mobile-app                 updated 1h ago      in flight 1
   newsletter                 updated 1d ago
   northwind                  updated 3h ago      in flight 1 [sealed]
   research                   updated 20h ago
     pricing                  updated 6h ago
-  website                    updated 12m ago     inbox 1  in flight 3
+  website                    updated 13m ago     inbox 1  in flight 3
 
 Needs attention
   - northwind: Northwind's API key for the staging billing service.
   - research/pricing: Pick the interview list (shortlist in sources/).
   - website: import review: 0 rule file(s), 0 role(s), 1 item(s) proposed; confirm or reject after reviewing source citations
   - website: Approve the new pricing copy on the landing page.
-  - website: inbox: 2026-10-19 15:45 +01:00 from worker: question: keep the old hero as a fallback for Safari 15? (job/hero-redesign)
+  - website: inbox: 2026-10-19 15:55 +01:00 from worker: question: keep the old hero as a fallback for Safari 15? (job/hero-redesign)
 
 Coordinators
   root                         t3-thread://v1/demo-root

@@ -2,13 +2,13 @@ Role: worker in node `website` (Studio website), started by its coordinator.
 Run in: ~/code/website-work/worktrees/job-blog-search  ·  branch job/blog-search  ·  runtime: claude  ·  ports 4103-4105
 The rules, agents and skills where you run come first (axiom 7); this brief adds to them.
 
-Subscription: Research (studio-claude) · host instance: demo-claude · usage unknown/stale; capacity unverified; within weekly pacing.
+Subscription: Research (studio-claude) · host instance: demo-claude · most headroom (19% remaining in the fullest reported window); within weekly pacing.
 
 ## Resume existing work
 
-This job has 6 own commit(s) and uncommitted changes; its worktree HEAD is `b63de44d795bf814ee31d76033c763911a6ea1a3`. Continue from these commits. Read the branch's log, diff and any uncommitted work first; do not reset, recreate the branch or start the task over.
+This job has 6 own commit(s) and uncommitted changes; its worktree HEAD is `7cdbd39e5fefef61cd006a6f532136ae8b067231`. Continue from these commits. Read the branch's log, diff and any uncommitted work first; do not reset, recreate the branch or start the task over.
 Read the worker hand-back in `~/Brain/nodes/website/job-handbacks` if present, or a legacy packet in `~/code/website-work/scratch/ready/`; it may be missing or stale. Recheck it after finishing the remaining work.
-Job ledger state: {"Job": "job/blog-search", "Started": "2026-10-19T13:03+01:00", "Ended": "", "Hours": "", "Outcome": "", "Commits": "", "Reviews": "0", "Runtime": "claude", "Cause": "", "Lessons": "", "Lesson check": "", "Switches": ""}
+Job ledger state: {"Job": "job/blog-search", "Started": "2026-10-19T13:13+01:00", "Ended": "", "Hours": "", "Outcome": "", "Commits": "", "Reviews": "0", "Runtime": "claude", "Cause": "", "Lessons": "", "Lesson check": "", "Switches": ""}
 
 ## Task
 
