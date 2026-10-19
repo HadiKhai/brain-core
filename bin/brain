@@ -2671,11 +2671,9 @@ def last_sync(inst, n):
     t = n["local"].get("synced_at")
     if t and inst.parse_time(t):
         return inst.parse_time(t), "last sync"
-    s = n["dir"] / "status.md"
-    if s.exists():
-        m = re.search(r"Updated:\s*(\d{4}-\d{2}-\d{2} \d{2}:\d{2}(?: ?(?:Z|[+-]\d{2}:?\d{2}))?)", s.read_text().splitlines()[0])
-        if m and inst.parse_time(m.group(1)):
-            return inst.parse_time(m.group(1)), "status.md Updated"
+    t = updated_at(inst, n)  # status_line skips the generated facts block, including on empty files
+    if t:
+        return t, "status.md Updated"
     return inst.now_dt() - datetime.timedelta(days=STALE_DAYS), f"last {STALE_DAYS} days"
 
 

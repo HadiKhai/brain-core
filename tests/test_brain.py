@@ -2967,6 +2967,25 @@ class AutonomyFacts(AutonomyProject):
         self.assertEqual(st.read_bytes(), before)
 
 
+class AutonomySync(Scenario):
+    def test_sync_uses_judgement_timestamp_after_refresh_and_handles_empty_status(self):
+        r = self.init('alice')
+        st = r / 'status.md'
+        st.write_text('Updated: 2020-01-02 03:04:05 +00:00 by coordinator\n\n## Now\n- Ready.\n')
+        self.b(r, 'status', 'root', '--refresh')
+        self.assertTrue(st.read_text().startswith('<!-- brain:facts v1 -->'))
+        self.assertIn('changes since 2020-01-02 03:04 (status.md Updated)', self.b(r, 'sync', 'root', '--offline'))
+        self.b(r, 'sync', 'root', '--mark', '--offline')
+        self.assertIn('(last sync)', self.b(r, 'sync', 'root', '--offline'))
+        # Without a machine-local sync mark an empty status falls back, rather than raising IndexError.
+        local = r / '.brain/local.json'
+        data = json.loads(local.read_text())
+        data['nodes']['root'].pop('synced_at')
+        local.write_text(json.dumps(data))
+        st.write_text('')
+        self.assertIn('(last 7 days)', self.b(r, 'sync', 'root', '--offline'))
+
+
 class AutonomyInbox(Scenario):
     def items(self, r, *args):
         return json.loads(self.b(r, 'inbox', '--json', *args))
