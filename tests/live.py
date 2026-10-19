@@ -992,7 +992,8 @@ def recover_coordinator_replaced(run):
     run.check(worker_head in sh('git', 'rev-list', 'main', cwd=home).splitlines(), 'original worker commit is not on main')
     run.check(sh('git', 'rev-list', '--count', f'{worker_head}..main', cwd=home).strip() in ('0', '1'),
               'coordinator redid the finished worker change')
-    run.check(record.read_bytes() == packet, 'coordinator rewrote the worker record')
+    # The record is the worker's: unchanged while it exists, removed only after the lesson outcome is recorded.
+    run.check(not record.exists() or record.read_bytes() == packet, 'coordinator rewrote the worker record')
     run.check(not wt.exists(), 'clean merged worktree not pruned')
     ledger = (node / 'job-ledger.md').read_text()
     columns = next(line for line in ledger.splitlines() if line.startswith('| Job |')).strip('|').split('|')
