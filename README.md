@@ -9,7 +9,7 @@ and every decision written down, so nothing lives only in a chat that's about to
 Runs on **Claude Code** and **Codex** (or both at once), in **T3 Code** or any host that can start and message threads.<br>
 Python 3.9 standard library. Nothing to install but one command.
 
-[Why](#why) · [How it works](#how-it-works) · [A job, start to finish](#a-job-start-to-finish) · [See it](#see-it) · [Install](#install) · [Commands](#commands) · [The model](#the-model) · [Tests](#tests)
+[Why](#why) · [How it works](#how-it-works) · [A job, start to finish](#a-job-start-to-finish) · [See it](#see-it) · [Usage](#usage-follows-the-account) · [Import](#bring-an-existing-project) · [Install](#install) · [Commands](#commands) · [The model](#the-model) · [Tests](#tests)
 
 <br>
 
@@ -40,17 +40,17 @@ bigger than one conversation:
 | **Learning** | Lost when the session ends | Lessons from each finished job become library items the next job gets in its brief |
 | **Consent** | Whatever you repeat in each session | Written rules: no push, deploy, send or anything irreversible without your explicit OK |
 
-For a five-minute fix, skip all of this: open the repository itself. The Brain's rules only apply
-inside the Brain.
+For a five-minute fix, open the repository itself or use a small brief. The Brain’s rules apply
+in its nodes; a project’s own rules govern its home.
 
 ---
 
 ## How it works
 
 ```mermaid
-flowchart LR
+flowchart TB
     you(["🧑 You"])
-    root["<b>Root coordinator</b><br/>sees every project<br/>routes work<br/>writes the daily brief"]
+    root["<b>Root coordinator</b><br/>sees every project<br/>routes work<br/>reports new needs to you"]
     subgraph projects["Projects: a coordinator each"]
         direction TB
         web["<b>Studio website</b>"]
@@ -63,7 +63,7 @@ flowchart LR
         w2["worker<br/>job/blog-search"]
         rev["reviewer<br/>on the other runtime"]
     end
-    files[("<b>Files, in git</b><br/>brief · status<br/>decisions · inbox<br/>job ledger · library")]
+    files[("<b>Files, in git</b><br/>judgement · generated facts<br/>inbox · handbacks<br/>job ledger · lessons")]
     you <--> root
     root --> projects
     web <-->|"brief out<br/>done · blocked · question back"| jobs
@@ -78,7 +78,7 @@ flowchart LR
   anything: a question goes back to the coordinator, which answers from the rules and the decisions
   already made, and only brings you what they don't settle.
 - **Everything is a file.** Threads are disposable; when one ends (or hits a usage limit), the next
-  one reads the files and carries on.
+  one reads the files and carries on. A resume brief preserves the job’s commits and unfinished work.
 
 ### The files of a node
 
@@ -87,10 +87,11 @@ nodes/website/
 ├── node.md          id, owners, labels, runtime, where its home is
 ├── AGENTS.md        rules for this node (CLAUDE.md links to it)
 ├── brief.md         what it is, why, who, scope, Limits (each with "Why:" and "Lift when:")
-├── status.md        Now · Next · Active work · Blocked / needs you · Recent changes
+├── status.md        coordinator judgement + generated facts (separate freshness times)
 ├── decisions.md     each decision: time, what, Why, Alternatives, and Said: "your exact words"
 ├── inbox.md         anyone may append a line; only the coordinator clears it
-├── job-ledger.md    every job: started, ended, hours, commits, review rounds, outcome, cause
+├── job-ledger.md    hours, commits, reviews, outcome, lessons and runtime switches
+├── job-handbacks/   one worker-owned record per job: state, readiness, proposed lessons
 ├── never-name.txt   (optional) words this project's code must never contain
 ├── sources/         material the node works from
 └── nodes/           its children, if any
@@ -105,61 +106,82 @@ ignores, so the same brain works on every machine that clones it.
 ## A job, start to finish
 
 ```mermaid
-sequenceDiagram
-    autonumber
-    actor You
-    participant C as Website coordinator
-    participant B as brain (CLI)
-    participant W as Worker (Codex)
-    participant R as Reviewer (Claude)
-    You->>C: "Add search to the blog"
-    C->>B: brain wt add website job/blog-search
-    B-->>C: worktree, ports 4120-4122, setup ran, job recorded
-    C->>B: brain brief website --branch job/blog-search
-    B-->>C: brief with the task, the node's limits, how to hand back
-    C->>W: launch in the worktree with that brief
-    W-->>C: "question: rank by title or by date?"
-    Note over C: answered from decisions.md,<br/>no need to wake you
-    C->>W: "title first, then date"
-    W-->>C: "done: 6 commits, report at reports/…"
-    C->>B: brain review website --branch job/blog-search
-    C->>R: review brief (a different runtime than the builder)
-    R-->>C: 2 findings, 0 blockers
-    C->>W: fix the 2 findings
-    C->>You: answer first, the proof, what wasn't run, what needs you
-    You->>C: "merge it"
-    C->>B: brain wt prune website
-    Note over C,B: job closes in the ledger (hours, commits, rounds)<br/>reusable lessons become library items
+flowchart TB
+    subgraph prepare["Worker prepares"]
+        direction LR
+        brief["Brief<br/>task + usable lessons"]
+        worker["Build<br/>other-runtime review"]
+        handback["Handback<br/>verify + ready packet<br/>report + proposed lessons"]
+        brief --> worker --> handback
+    end
+    subgraph close["Coordinator closes"]
+        direction LR
+        ready["Ready<br/>branch + current main"]
+        merge["Merge<br/>with required consent"]
+        lessons["Record lessons<br/>close job + prune"]
+        ready --> merge --> lessons
+    end
+    prepare --> close
+    close -.->|rank usable items| next["Next brief"]
 ```
 
+The worker builds in its worktree, gets review on another runtime, fixes findings, commits and
+rebases on local `main`. One command finishes its part:
+
+```sh
+brain handback website --branch job/blog-search --state done --reviews 2 \
+  --report reports/blog-search/index.md --lessons "Use title matches before recency."
+```
+
+It runs the node's configured verification, checks local main and stores the worker's state,
+ready packet and proposed lessons together. For a blocker or question, use `--state blocked`
+or `--state question`, omit `--reviews`, and describe it in the report. Questions reach the
+inbox; a blocked human need adds `--need-human "<need>"`.
+
+The coordinator runs `brain ready website --branch job/blog-search` immediately before merging.
+It compares the worker’s packet with the branch and current local main; it does not rerun tests.
+A moved main goes back to the worker. **Only the coordinator merges**, with required consent.
+The packet records worker assertions, not independent proof.
+
+At close, the coordinator saves reusable lessons with their source and scope, then records the
+item ids with `brain jobs website --branch job/blog-search --lessons title-first` (or
+`--lessons "none: <reason>"`). Briefs, hires and reviews automatically rank up to five usable
+items by task, node and specialist. Proposed, rejected and quarantined items never enter a brief.
+
+A clear, low-risk task taking minutes and changing no shared state can use
+`brain brief website --small --task "Check the draft's links"`: one-line handback, no worktree,
+ledger, review or ready packet. Growing scope returns to the full job flow.
+
+### It wakes itself
+
+A recurring host tick wakes each coordinator to run `brain due website` and check host pending
+requests. It handles finished jobs, questions, missing lessons and previews. An empty tick ends
+silently and changes no files. The host supplies the wake-up; the CLI supplies evidence.
+
+`brain status website --refresh` generates the facts block in `status.md` from jobs, worktrees,
+merges and attention counts. The coordinator writes the judgement around it. Refreshing facts
+never makes old judgement look fresh.
+
+`brain inbox root` is the human's one needs-you list. Items have stable ids;
+`brain inbox root --new` reports each once per machine and reporter until resolved. Child
+coordinators handle their own subtree and route unresolved needs upward. **The root reports to
+the human.**
+
 <details>
-<summary><b>The brief the worker gets</b> (from <code>brain brief</code>, demo data)</summary>
+<summary><b>Inside a generated worker brief</b> (excerpt; <a href="docs/img/brief.txt">full demo capture</a>)</summary>
 
 ```markdown
-Role: worker in node `website` (Studio website), started by its coordinator.
-Run in: ~/code/website-work/worktrees/job-blog-search  ·  branch job/blog-search  ·  runtime: claude  ·  ports 4120-4122
-The rules, agents and skills where you run come first (axiom 7); this brief adds to them.
-
 ## Task
 
 Rank results by title match first, then recency. Done when the search page shows the 10 best results in under 100 ms.
 
-## Limits
+## Relevant library items
 
-- At most 3 worktrees at once. Why: each runs a dev server and a browser. Lift when: the CI runners take the browser tests.
-- No deploys without Sam. Why: the site takes payments. Lift when: never.
-
-## Questions and hand-back
-
-- **Never ask the operator, and never wait for an answer in this thread**: nobody is watching it.
-- **A choice** the task, the rules or this brief settle: make it, and list it in your report under "Decisions I made".
-- **A question you can't go on without:** host `send` to thread `demo-web` (T3: t3_thread_send, threadId demo-web) with the question and append `- <time from brain now> from worker: question: <it>` to `~/Brain/nodes/website/inbox.md`, then end your turn with the question as your last line.
-- **When you finish, fail or get blocked**, tell your coordinator straight away: host `send` to thread `demo-web` (T3: t3_thread_send, threadId demo-web) with `done|failed|blocked: <one line>. Report: <path>`. Then end your turn.
-
-## Report
-
-The answer first; then the proof (commands, numbers, hashes); what you produced and where; what you did **not** run or check; "Decisions I made"; "Lessons": what the next job should know (a pitfall, a tool's quirk, a method that worked), or "none"; and what is still open.
+- `flag-before-ship`: Ship UI changes behind a flag, measure, then switch — picked for task: then; same node. Read full: `brain item show flag-before-ship --node website`.
+- `review-two-runtimes`: A second runtime reviews every change before you see it — picked for same node. Read full: `brain item show review-two-runtimes --node website`.
 ```
+
+The full brief adds worktree, ports, subscription, host instance, resume state, limits and handback.
 </details>
 
 ---
@@ -168,8 +190,8 @@ The answer first; then the proof (commands, numbers, hashes); what you produced 
 
 ### In the terminal: `brain`
 
-```
-Sam's Brain  ·  ~/Brain  ·  machine studio-mac
+```text
+Sam's Brain (sam)  ·  ~/Brain  ·  machine studio-mac
 
 root                         updated 30m ago
   mobile-app                 updated 1h ago      in flight 1
@@ -182,36 +204,59 @@ root                         updated 30m ago
 Needs attention
   - northwind: Northwind's API key for the staging billing service.
   - research/pricing: Pick the interview list (shortlist in sources/).
+  - website: import review: 0 rule file(s), 0 role(s), 1 item(s) proposed; confirm or reject after reviewing source citations
   - website: Approve the new pricing copy on the landing page.
-  - website: inbox: 09:04 +01:00 from worker: question: keep the old hero as a fallback for Safari 15?
-
-Coordinators
-  root                         t3-thread://v1/demo-root
-  website                      t3-thread://v1/demo-web
-  …
+  - website: inbox: 2026-10-19 16:31 +01:00 from worker: question: keep the old hero as a fallback for Safari 15? (job/hero-redesign)
 ```
+
+Demo captures: [due](docs/img/due.txt) · [inbox](docs/img/inbox.txt) · [usage](docs/img/usage.txt).
 
 ### Live in the browser: `brain ui --open`
 
 A read-only page on `127.0.0.1` that updates within seconds of any file changing. It shows
-what needs you, the project tree, every job with its worktree, its ports and whether something
-is listening, commits per hour per project, the library, schedules, and the latest decisions.
-Click a project for its notes, limits, decisions and job history.
+Inbox and Due on the overview, the project tree, jobs, ports, activity, schedules and decisions.
+The **Learnings**, **Agents**, **Usage** and **Import checklist** tabs show reusable items and
+review state, specialists and hires, account windows, and discovered repositories. Click a
+project for its notes, limits, decisions and job history.
 
 <img alt="A project's notes in brain ui: needs you, inbox, now, next, recent changes, limits, decisions with the operator's words, jobs" src="docs/img/ui-project.png">
 
 The page is for this machine only: it listens on `127.0.0.1`, refuses other hosts, and its data
-needs a key that is printed with the address. Desktop notifications are opt-in.
+needs a key that is printed with the address. Desktop notifications are opt-in, once per new
+inbox item; saved ids survive reloads.
+
+<details>
+<summary><b>Four views</b> (demo data; follows your light or dark theme)</summary>
+
+| Learnings | Agents |
+| --- | --- |
+| <picture><source media="(prefers-color-scheme: dark)" srcset="docs/img/ui-learnings-dark.png"><img alt="Learnings: active and proposed items, source citations and scope" src="docs/img/ui-learnings-light.png"></picture> | <picture><source media="(prefers-color-scheme: dark)" srcset="docs/img/ui-agents-dark.png"><img alt="Agents: specialist roles, lessons and hires" src="docs/img/ui-agents-light.png"></picture> |
+| **Usage** | **Import checklist** |
+| <picture><source media="(prefers-color-scheme: dark)" srcset="docs/img/ui-usage-dark.png"><img alt="Usage: account-wide windows, stop line, age and reset times" src="docs/img/ui-usage-light.png"></picture> | <picture><source media="(prefers-color-scheme: dark)" srcset="docs/img/ui-imports-dark.png"><img alt="Import checklist: repository candidates and review steps" src="docs/img/ui-imports-light.png"></picture> |
+
+</details>
 
 ### Measured, not guessed: `brain jobs`
 
-```
+```text
 website: 7 finished (6 merged, 1 abandoned); median 2.8 h and 1.5 review round(s) per merged job
   open  job/hero-redesign              7.5 h  2 review(s)   (over twice the median)
   open  job/blog-search                3.1 h  0 review(s)
   open  job/i18n                       1.2 h  0 review(s)
   cause superseded by the redesign
+  blog: 1 similar jobs, too little data (need 3 merged jobs)
+  all jobs on this node: 6 jobs, median 2.8 h, spread 1.1–5.6 h (observed min–max)
 ```
+
+Forecasts use this node’s merged jobs: sample count, median and observed min–max spread.
+Fewer than three samples means “too little data.” `brain jobs website --branch job/blog-search`
+can include a planned job. Comparisons with reset windows describe serial job time, not token
+cost, concurrent throughput or whether the remaining allowance will fit.
+
+Code projects should show a running local preview and a screenshot tour early. Record them with
+`brain set website preview=http://localhost:4100 preview_tour=reports/preview/index.md`.
+These paths stay machine-local. `due` reminds after merges if the preview is missing; old work
+gets a reminder, not a failing check.
 
 ---
 
@@ -249,21 +294,22 @@ flowchart TB
 ## Several brains, several machines
 
 ```mermaid
-flowchart LR
-    subgraph laptop["💻 Personal laptop"]
-        p["~/Brain<br/><b>personal</b>"]
-        cmd1(["brain"])
+flowchart TB
+    account[("Studio subscription<br/>server-wide 5h + 7d usage")]
+    backup[("Overflow subscription<br/>its own 5h + 7d usage")]
+    other["Sam's second machine"] -->|uses Studio too| account
+    subgraph machine["Sam's studio machine"]
+        poller["One 5-minute poller"]
+        cache[("Machine usage cache")]
+        route["Allowed brain + runtime pin<br/>stop line + pace + headroom"]
+        personal["Personal brain worker"]
+        work["Work brain worker"]
+        poller --> cache --> route
+        route -->|allowed subscription| personal
+        route -->|allowed subscription| work
     end
-    subgraph work["💼 Work laptop"]
-        w["~/WorkBrain<br/><b>work</b>"]
-        cmd2(["brain"])
-    end
-    gh[("private git remote<br/>(optional)")]
-    p <--> gh
-    p -.->|"install.sh, from its git URL"| laptop2["another machine"]
-    cmd1 --> p
-    cmd2 --> w
-    laptop ~~~ work
+    account -->|account-wide reading| poller
+    backup -->|account-wide reading| poller
 ```
 
 - **One command, any number of brains.** `brain` picks the brain whose folders you're in (its
@@ -272,6 +318,48 @@ flowchart LR
 - **They never share a file.** A work brain can live only on the work laptop, with no remote at
   all; a personal one can follow you across machines with `install.sh --from <its git URL>`.
 - **Per machine:** thread IDs, local paths, worktrees and ports stay in `.brain/local.json`.
+
+### Usage follows the account
+
+Machine-level `subscriptions.json` declares runtimes, config folders, host instances and allowed
+brains, outside every brain. One `brain usage --watch --every 300` service polls every five minutes;
+agents read the cache with `brain usage`. On macOS, `brain usage install` writes a LaunchAgent
+and prints how to load it. See [machine setup](skills/machine-setup/SKILL.md#subscriptions-on-this-machine).
+
+**Server readings are account-wide.** The same subscription on several machines has one
+combined usage reading, not a fresh allowance per machine. Brain shows five-hour and seven-day
+windows, reading age and resets. Stale or missing readings stay unknown, never spare capacity.
+
+Before launch, routing filters by allowed brain and runtime, stops at the configured line
+(default 85% of either applicable window), then favors weekly pacing and headroom. The machine's
+fallback order breaks ties. Briefs name the subscription and host instance. A node's runtime
+pin stays in force: at its limit, the brief names an alternative and waits for an explicit
+`--runtime` choice. Pass `--model` for model-scoped limits. Without declared subscriptions,
+existing runtime choices stay unchanged.
+
+If a running AI hits a usage limit, the coordinator stops it, records the switch with
+`brain jobs website --branch job/blog-search --switch "claude -> codex: usage limit"`, and
+regenerates the brief with `--runtime codex`. The replacement continues in the same worktree
+with the existing commits, handback and ledger state. If no eligible subscription remains,
+it waits for a reset.
+
+## Bring an existing project
+
+Start with `brain scan ~/code --json`: read-only discovery. Choose the main repositories to
+adopt, confirm the brain, parent and owners, then run `brain adopt ~/code/garden-notes`.
+**Work and personal brains never mix.** Scan flags homes already assigned to another brain;
+never adopt worktrees or nested repositories as separate projects.
+
+Adopt records an import study job. `brain brief garden-notes --import` prepares a worker to
+study local history and agent setup without changing the source repo or running its scripts.
+`brain scrub garden-notes <path>` filters source evidence without revealing forbidden terms.
+The study records cited decisions, unknowns and proposals, then finishes through `handback`.
+
+Imported rules land in `sources/import-proposals.md` as **imported and unreviewed**; roles and
+lessons start proposed and unusable. After actual review, accept a lesson with
+`brain item accept <id> --reviewed-by sam`, or reject it with `brain item reject <id>`. Workers
+never accept their own proposals. The coordinator reviews rules and roles before activating them.
+Recording proposed ids in the ledger never accepts them.
 
 ---
 
@@ -321,7 +409,11 @@ You mostly talk to coordinators, and they run `brain` for you. By hand:
 | `brain` | dashboard: the tree, what needs you, coordinators |
 | `brain ui [--open]` | the same, live in your browser (read-only, this machine only) |
 | `brain show <node>` | everything about one node, with this machine's IDs and the status time in UTC |
-| `brain jobs [node]` | every job's hours, commits and review rounds: medians, open jobs, causes |
+| `brain jobs [node] [--branch B]` | job history and forecasts: samples, medians, spread, causes |
+| `brain due [node]` | coordinator actions from files and local git; empty means silence |
+| `brain inbox [node] [--new]` | one needs-you list; stable ids, only-new reporting per machine and reporter |
+| `brain status <node> --refresh` | regenerate facts without advancing judgement freshness |
+| `brain usage` | allowed subscriptions, account-wide windows, age and resets |
 | `brain stale <node> <host time>` | is a node's status behind its thread? Compares moments, whatever the timezones |
 | `brain sync <node>` / `--all` | what happened in a node and its home since the last sync |
 | `brain check [--fix]` | verify the axioms that can be checked mechanically; repair the safe things |
@@ -349,7 +441,11 @@ You mostly talk to coordinators, and they run `brain` for you. By hand:
 | Command | Does |
 | --- | --- |
 | `brain wt add/list/rm/prune` | one worktree per job beside the project's repo, with setup and a block of ports |
-| `brain brief <id> [--branch B] --task-file F` | a worker brief: where it runs, its ports, the node's limits, how to hand back |
+| `brain brief <id> [--branch B] --task-file F` | task, limits, routing, resume state and ranked usable lessons |
+| `brain brief <id> --small --task "..."` | a minutes-long, low-risk task without job ceremony |
+| `brain handback <id> --branch B --state done --reviews N --report P --lessons "..."` | one worker finishing step: verify, readiness, state and proposed lessons; also accepts blocked/question |
+| `brain ready <id> --branch B` | compare the worker’s packet with branch and current local main before merge |
+| `brain jobs <id> --branch B --lessons "..."` | coordinator records learned item ids or `none: <reason>` at close |
 | `brain review <id> --branch B` | a brief for a review by a runtime the builder didn't use |
 | `brain guard <id> [path ...]` | the project holds none of the words in `never-name.txt` |
 | `brain workbench <id>`, `brain report <id> "topic"`, `brain reports` | scripts and reports, in a predictable place |
@@ -362,16 +458,22 @@ You mostly talk to coordinators, and they run `brain` for you. By hand:
 
 | Command | Does |
 | --- | --- |
-| `brain item add/list/scope/quarantine/restore` | the library and its scopes |
+| `brain item add/list/show/scope/quarantine/restore` | the library, provenance and scopes |
+| `brain item accept <id> --reviewed-by sam` / `brain item reject <id>` | review proposed learning; rejected items stay unusable |
 | `brain usable <item> <node>` | may this node use this item? |
 | `brain specialist new`, `brain lesson`, `brain hire` | reusable experts, their lessons, a brief that brings both |
 </details>
 
 <details>
-<summary><b>This machine and its brains</b></summary>
+<summary><b>Import, this machine and its brains</b></summary>
 
 | Command | Does |
 | --- | --- |
+| `brain scan <folders> --json` | discover main repo candidates without writing |
+| `brain adopt <paths> [--parent <node>]` | adopt selected homes and record import study jobs |
+| `brain brief <node> --import` | study history into cited node state and inactive proposals |
+| `brain scrub <node> [paths ...] [--check]` | filter evidence, or check outputs without exposing forbidden terms |
+| `brain usage --watch --every 300` | one machine poller; agents only read |
 | `brain link --global [runtime=folder ...]` | a pointer to this brain in runtimes' user-wide instructions |
 | `brain brains`, `brain use <name>`, `brain -b <name> …`, `brain --all` | several brains: list, default, pick, every dashboard |
 | `brain upgrade` | update `core/` to the latest version, then link and check |
@@ -389,7 +491,7 @@ uses the core as a submodule at `core/`, binding it in its `instance.md`.
 | --- | --- |
 | [`MODEL.md`](MODEL.md) | primitives, the 24 axioms, procedures, and the runtime and host contracts. The source of truth |
 | [`roles/`](roles) | the coordinator, worker and specialist protocols |
-| [`skills/`](skills) | judgment procedures: node-new, node-sync, node-brief, node-transition, home-job, review, learn, teach, hire, check, machine-setup |
+| [`skills/`](skills) | judgment procedures: import, jobs, review, learning, node changes and machine setup |
 | [`templates/`](templates) | node, root, item, specialist and new-home templates |
 | [`adapters/runtimes/`](adapters/runtimes) | one small file per agent runtime (Claude Code, Codex), with their stop hooks |
 | [`adapters/hosts/`](adapters/hosts) | one mapping per host (T3 Code), plus a small `.env` the tool reads |
@@ -426,9 +528,9 @@ Everything above follows from a small model: **principals** own **nodes** in one
 | 12 | Teaching down is a native copy, through the receiver's own process |
 | 13 | Relations live at the nearest common ancestor |
 | 14 | Coordinators are recursive and optional |
-| 15 | One writer per file |
-| 16 | State lives in files; threads are disposable |
-| 17 | Time is absolute: every recorded fact has a full timestamp |
+| 15 | One writer per file; workers prepare, coordinators merge |
+| 16 | State lives in files; handbacks, facts, ticks and resume survive threads |
+| 17 | Full timestamps; reject status over five minutes ahead, warn on other future entries |
 | 18 | Relabeling changes only labels |
 | 19 | Transitions preserve provenance |
 | 20 | Boundaries are recomputed after every transition |
@@ -442,32 +544,31 @@ Everything above follows from a small model: **principals** own **nodes** in one
 
 ## Tests
 
-Two layers, both run before any change to the core is published.
+Two layers: mechanical checks and real-agent scenarios. A passing unit suite does not prove
+live billing reads, host launches or reviewer quality.
 
-**`brain selftest`**: scenario tests in throwaway folders: the tree and its transitions, sealing
+**`brain selftest`**: 214 tests in throwaway folders: the tree and its transitions, sealing
 and traces, several brains on one machine, worktrees and ports, the job ledger, the guard (binary
 files, Unicode, unreadable folders, submodules), locks under 16 parallel commands, the stop hook,
-the live page and its key, timezones and daylight saving, install and upgrade.
+the live page and its key, timezones and future timestamps, handbacks and facts, inbox ids,
+usage routing, imports, lessons, crash recovery, install and upgrade.
 
 **`tests/live.py`**: the same use cases with real model calls, on **every** runtime in use (axiom 22),
 judged by the files the agent leaves behind:
 
 | Scenario | What a real agent must do |
 | --- | --- |
-| `parity` | load the same rules, role and skills on every runtime |
-| `coordinator_writes_as_it_goes` | record a decision (with why) and a blocker, timestamped and committed |
-| `worker_asks_the_writer` | as a worker, leave coordinator files alone and use the inbox |
-| `learning_is_a_citation` | save a lesson with its source and a scope |
-| `new_node_in_one_sentence` | create a project from one sentence, brief included |
-| `no_upward_traces` | work in a sealed project without naming anything above it |
-| `second_runtime_review` | find a planted bug in a change another runtime built, and change nothing |
-| `stop_hook_fires` | be held by the stop hook when its notes are behind |
-| `notes_current_after_an_edit` | leave status current and everything committed |
-| `a_session_reaches_its_own_brain` | with two brains on the machine, answer from the right one |
-| `worker_hands_back_a_question` | not guess a value only the operator knows; hand the question back |
-| `lessons_become_items` | turn a reusable lesson into a library item, and keep a project-only fact out |
-| `limits_carry_their_reason` | record a limit with why it exists and when to lift it |
-| `freshness_across_timezones` | not be fooled when local digits look later than a UTC time |
+| `parity`, `coordinator_writes_as_it_goes`, `worker_asks_the_writer` | load neutral rules; write timestamped decisions; respect file ownership |
+| `learning_is_a_citation`, `lessons_become_items`, `limits_carry_their_reason` | preserve sources and scopes; learn at close; explain limits |
+| `no_upward_traces`, `second_runtime_review` | respect sealed homes; review another runtime's change |
+| `stop_hook_fires`, `notes_current_after_an_edit`, `freshness_across_timezones` | keep notes current and compare absolute times |
+| `new_node_in_one_sentence`, `a_session_reaches_its_own_brain`, `worker_hands_back_a_question` | create a node; select the right brain; return an unresolved choice |
+| `nine_` | capture close lessons; resume committed or dirty work; repair future status times |
+| `usage_` | route before launch and respect a runtime pin |
+| `autonomy_` | unified handback, finished-job wake, silent empty wake, subtree inbox and generated facts |
+| `import_` | study history into cited decisions and unreviewed rules, roles and lessons |
+| `r2_` | reuse a relevant lesson and finish a small job without ceremony |
+| `recover_` | replace a coordinator, resume a worker on another runtime, route two jobs before launch |
 
 ```sh
 brain selftest
@@ -478,7 +579,9 @@ LIVE_CODEX_BIN=/path/to/codex python3 core/tests/live.py --runtimes codex
 The runner prints each executable and version, and stops calling a runtime that becomes
 unavailable (a usage limit, say) instead of failing every remaining scenario. For the live page,
 `tests/ui-checks.js` runs in a browser against a throwaway brain: timezones, notifications and
-navigation.
+navigation. See [recovery rehearsals](docs/recovery.md) for real-agent fixtures, SIGKILL checks
+and their limits. They test routing artifacts and file recovery, not real subscription exhaustion
+or independent review quality.
 
 ---
 
@@ -489,6 +592,6 @@ After any change:
 
 1. `brain selftest`
 2. `python3 core/tests/live.py` on every runtime
-3. `python3 docs/make-screenshots.py` if the page changed (builds a demo brain; nothing real)
+3. `python3 docs/make-screenshots.py` if the page changed; use `--text-only` for CLI captures (fake data only)
 4. commit here; brains pick it up with `brain upgrade`
 
