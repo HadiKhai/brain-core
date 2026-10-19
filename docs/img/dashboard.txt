@@ -13,7 +13,7 @@ Needs attention
   - research/pricing: Pick the interview list (shortlist in sources/).
   - website: import review: 0 rule file(s), 0 role(s), 1 item(s) proposed; confirm or reject after reviewing source citations
   - website: Approve the new pricing copy on the landing page.
-  - website: inbox: 2026-10-19 15:55 +01:00 from worker: question: keep the old hero as a fallback for Safari 15? (job/hero-redesign)
+  - website: inbox: 2026-10-19 16:11 +01:00 from worker: question: keep the old hero as a fallback for Safari 15? (job/hero-redesign)
 
 Coordinators
   root                         t3-thread://v1/demo-root

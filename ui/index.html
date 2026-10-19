@@ -141,7 +141,6 @@ select, input, textarea { font:inherit; color:var(--ink); background:var(--surfa
 .spark i.late { background:var(--serious); }
 .late-flag { color:var(--serious); font-size:12px; display:block; }
 .ledger-heading { display:flex; justify-content:space-between; flex-wrap:wrap; gap:8px; align-items:baseline; }
-#due { max-height:420px; overflow:auto; }
 #due .badge { flex:none; white-space:nowrap; }
 #overview > section:has(#needs) { align-self:stretch; }
 #adopt-parent { max-width:min(100%,420px); }
@@ -241,6 +240,10 @@ function inline(text) {
   }
   if (last < text.length) out.push(text.slice(last));
   return out;
+}
+function requestContent(text) {
+  const m = String(text).match(/^(?:inbox:\s*)?(\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}(?::\d{2})? ?(?:Z|[+-]\d{2}:\d{2}))\s+from\s+([^:\n]+):\s*(?:question:\s*)?([\s\S]*)$/);
+  return m ? [...inline(m[3]), el("div", {class:"kv"}, "From " + m[2] + " · ", inline(m[1]))] : inline(text);
 }
 function block(md) {
   const wrap = el("div", {class:"md"}); let list = null, paragraph = [], code = null;
@@ -385,7 +388,7 @@ function renderTree() {
 function renderNeeds() {
   const items = S.inbox || S.attention || []; $("needcount").textContent = String(items.length);
   $("needs").replaceChildren(...(items.length ? items.map(a => el("li", {},
-    el("span", {class:"who"}, a.node), el("span", {}, el("code", {title:a.id || ""}, (a.id || a.kind).slice(0, 8)), " · ", inline(a.text),
+    el("span", {class:"who"}, a.node), el("span", {}, el("code", {title:a.id || ""}, (a.id || a.kind).slice(0, 8)), " · ", requestContent(a.text),
       el("div", {class:"kv"}, a.kind + (a.first_seen ? " · first seen " + moment(a.first_seen) : ""))))) : [el("li", {class:"empty"}, "Nothing needs you. New questions and approval requests appear here.")]));
 }
 
@@ -484,7 +487,7 @@ function openDetail(id) {
     x.coordinator && safeHref(x.coordinator) ? el("a", { href: safeHref(x.coordinator) }, "open its coordinator") : el("span", { class: "kv" }, "no coordinator on this machine"));
   const sec = (title, body) => { if (body) kids.push(el("h4", {}, title), body); };
   if (x.blocked.length) sec("Needs you", el("ul", { class: "list" }, ...x.blocked.map((b) => el("li", {}, el("span", { class: "icon", style: "color:var(--warning)", "aria-label": "blocked" }, "●"), el("span", {}, inline(b))))));
-  if (x.inbox.length) sec("Inbox", el("ul", { class: "list" }, ...x.inbox.map((b) => el("li", {}, el("span", {}, inline(b))))));
+  if (x.inbox.length) sec("Inbox", el("ul", { class: "list" }, ...x.inbox.map((b) => el("li", {}, el("span", {}, requestContent(b))))));
   for (const [k, v] of Object.entries(x.status)) if (!/^blocked/i.test(k)) sec(k, block(v.length > 6000 ? v.slice(0, 6000) + "\n…" : v));
   if (x.limits.length) sec("Limits", el("ul", { class: "list" }, ...x.limits.map((l) => el("li", {}, el("span", {}, inline(l))))));
   if (x.decisions.length) sec("Latest decisions", el("ul", { class: "list" }, ...x.decisions.map((dd) => el("li", {}, el("span", {}, dd.title, dd.said ? el("div", { class: "said" }, dd.said) : null), el("span", { class: "when" }, dd.t != null ? moment(dd.t) : dd.time)))));
@@ -551,7 +554,7 @@ function renderDue() {
   for (const item of S.due || []) { if (!groups.has(item.node)) groups.set(item.node, []); groups.get(item.node).push(item); }
   $("due").replaceChildren(...(groups.size ? [...groups].map(([node, items]) => el("details", {class:"entry", open:true, "data-key":"due:" + node},
     el("summary", {}, node + " · " + items.length), el("ul", {class:"list"}, items.map(item => el("li", {},
-      el("span", {class:"badge"}, item.ready ? "Ready to merge" : ({handback:"Hand-back", "stale-status":"Status", "lesson-outcome":"Lessons", inbox:"Inbox"}[item.kind] || item.kind)), el("span", {}, inline(item.text),
+      el("span", {class:"badge"}, item.ready ? "Ready to merge" : ({handback:"Hand-back", "stale-status":"Status", "lesson-outcome":"Lessons", inbox:"Inbox"}[item.kind] || item.kind)), el("span", {}, item.kind === "inbox" ? requestContent(item.text) : inline(item.text),
         (item.reasons || []).length && !item.reasons.every(reason => item.text.includes(reason)) ? el("div", {class:"kv"}, item.reasons.join("; ")) : null)))))) : [empty("Coordinators are idle: nothing due. New hand-backs and stale status checks appear here.")]));
 }
 function renderLearnings() { preserve(renderLearningRows); }
@@ -673,7 +676,7 @@ function renderUsage() {
     const remaining = reset ? Math.max(0, Math.ceil((new Date(reset).getTime()-Date.now())/60000)) : null;
     return el("div", {class:"window"}, el("strong", {}, label + " · " + (w && w.absent ? "none" : known ? w.used_percent + "%" : expired ? "expired · unknown" : "unknown")), meter,
       stateText ? el("div", {class:"kv"}, stateText) : null,
-      el("div", {class:"kv"}, reset ? brainTime(reset, true) + (remaining ? ` · resets in ${Math.floor(remaining/60)} h ${remaining%60} m` : " · reset passed") : "Reset unknown"),
+      el("div", {class:"kv"}, reset ? brainTime(reset, true) + (remaining ? " · resets in " + (remaining >= 1440 ? Math.round(remaining/1440) + " d" : `${Math.floor(remaining/60)} h ${remaining%60} m`) : " · reset passed") : "Reset unknown"),
       el("div", {class:"kv" + (stale ? " stale" : "")}, (stale ? "Stale · " : "") + ageText(seconds) + " · " + ((w && w.source) || row.source || "unknown")));
   }
   const hidden = S.usage_other_subscriptions || 0;

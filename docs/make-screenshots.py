@@ -140,10 +140,10 @@ def build(base):
         f"\n## {stamp(14)}: Offline first: the app works with no signal\nSaid: \"the field teams are in basements\"\n"
         "Why: most use is underground.\nAlternatives considered: online-only with retries.\n"))
     brief = nodes["website"] / "brief.md"
-    brief.write_text(brief.read_text().replace("## Sources of truth", (
+    section(brief, "Limits", [
         "- At most 3 worktrees at once. Why: each runs a dev server and a browser. Lift when: the CI runners take "
-        "the browser tests.\n- No deploys without Sam. Why: the site takes payments. Lift when: never.\n\n"
-        "## Sources of truth")))
+        "the browser tests.",
+        "- No deploys without Sam. Why: the site takes payments. Lift when: never."])
     (nodes["northwind"] / "never-name.txt").write_text("# other clients\nAcme\n")
 
     for nid, h in [("website", web), ("mobile-app", app)]:

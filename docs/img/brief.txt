@@ -6,13 +6,18 @@ Subscription: Research (studio-claude) · host instance: demo-claude · most hea
 
 ## Resume existing work
 
-This job has 6 own commit(s) and uncommitted changes; its worktree HEAD is `7cdbd39e5fefef61cd006a6f532136ae8b067231`. Continue from these commits. Read the branch's log, diff and any uncommitted work first; do not reset, recreate the branch or start the task over.
+This job has 6 own commit(s) and uncommitted changes; its worktree HEAD is `c68c736fa316612a16ed1be97a5e444fbe2033ce`. Continue from these commits. Read the branch's log, diff and any uncommitted work first; do not reset, recreate the branch or start the task over.
 Read the worker hand-back in `~/Brain/nodes/website/job-handbacks` if present, or a legacy packet in `~/code/website-work/scratch/ready/`; it may be missing or stale. Recheck it after finishing the remaining work.
-Job ledger state: {"Job": "job/blog-search", "Started": "2026-10-19T13:13+01:00", "Ended": "", "Hours": "", "Outcome": "", "Commits": "", "Reviews": "0", "Runtime": "claude", "Cause": "", "Lessons": "", "Lesson check": "", "Switches": ""}
+Job ledger state: {"Job": "job/blog-search", "Started": "2026-10-19T13:29+01:00", "Ended": "", "Hours": "", "Outcome": "", "Commits": "", "Reviews": "0", "Runtime": "claude", "Cause": "", "Lessons": "", "Lesson check": "", "Switches": ""}
 
 ## Task
 
 Rank results by title match first, then recency. Done when the search page shows the 10 best results in under 100 ms.
+
+## Relevant library items
+
+- `flag-before-ship`: Ship UI changes behind a flag, measure, then switch — picked for task: then; same node. Read full: `brain item show flag-before-ship --node website`.
+- `review-two-runtimes`: A second runtime reviews every change before you see it — picked for same node. Read full: `brain item show review-two-runtimes --node website`.
 
 ## Limits
 
@@ -24,7 +29,7 @@ Rank results by title match first, then recency. Done when the search page shows
 - **Never ask the operator, and never wait for an answer in this thread**: nobody is watching it.
 - **A choice** the brief or rules settle: make it and record it under Decisions I made.
 - **Before handing back**, Finish reviews, commit, then `git rebase main`; resolve conflicts yourself. Run `brain handback website --branch job/blog-search --state done --reviews <completed rounds> --report <path> --lessons '<proposed lessons or none: reason>'`. This one step runs node verify and checks local main. If verify is unset, ask the coordinator to set it. If main moves, rebase and hand back again. Only the coordinator merges to main. State and proposed lessons live in your one worker-owned job-handbacks/<key>.json. Do not edit the ledger or status. Use `none: <reason>` when there is no reusable lesson.
-- **Blocked or need a choice:** use the same command with `--state blocked` or `--state question`, omit --reviews, and describe the blocker/question in --report. Legacy failed is also accepted.
+- **Blocked or need a choice:** use the same command with `--state blocked` or `--state question`, omit --reviews, and describe the blocker/question in --report. Questions also append to inbox; for a blocked human need add `--need-human '<need>'`. Legacy failed is also accepted.
 - End your turn after recording the hand-back. The coordinator reads it with brain due; a host message is optional notification (host `send` to thread `demo-web` (T3: t3_thread_send, threadId demo-web)) and need only link the record. Do not duplicate Lessons in a message or report; --lessons carries your proposals.
 
 ## Report

@@ -92,6 +92,10 @@
     check($("usage-results").querySelector(".window .meter").classList.contains("critical"), "exact stop line is critical");
     check($("usage-results").querySelector(".usage-grid .usage-model"), "model weekly windows align inside subscription grid");
     check($("usage-results").textContent.includes("resets in 1 h 0 m"), "reset countdown accompanies absolute time");
+    S.usage[0].windows.seven_day.resets_at = Date.now()/1000 + 48*3600 - 60; renderUsage();
+    check($("usage-results").textContent.includes("resets in 2 d") && !$("usage-results").textContent.includes("47 h 59 m"), "weekly reset uses days near the two-day boundary");
+    S.usage[0].windows.seven_day.resets_at = Date.now()/1000 + 72*3600; renderUsage();
+    check($("usage-results").textContent.includes("resets in 3 d"), "long reset durations use days");
     S.usage_other_subscriptions = 0; renderUsage();
     check($("usage-hidden").textContent === "", "zero hidden subscriptions produce no noise");
     S.usage[0].windows.five_hour.used_percent = 80; renderUsage();
@@ -101,6 +105,19 @@
     renderDue();
     check($("due").querySelectorAll("details").length === 2, "due grouped per node");
     check($("due").textContent.includes("Ready to merge") && $("due").textContent.includes("missing lesson outcome"), "due includes readiness and lesson actions");
+    const originalDue = S.due;
+    const workerQuestion = "2026-10-19 15:55 +03:00 from worker: question: Keep the old hero?";
+    S.due = Array.from({length:30}, (_,i) => ({node:"test", kind:"inbox", text:i ? "Action " + i : workerQuestion}));
+    renderDue();
+    const lastDue = $("due").querySelector("li:last-child").getBoundingClientRect();
+    check(lastDue.bottom <= $("due").getBoundingClientRect().bottom + 1, "Due grows to contain its last row");
+    check(!$("due").textContent.includes("from worker: question:") && $("due").textContent.includes("From worker") && $("due").textContent.includes("Keep the old hero?"), "Due questions separate message and sender metadata");
+    S.inbox = [{id:"worker-question", node:"test", kind:"inbox", text:"inbox: " + workerQuestion}]; renderNeeds();
+    check(!$("needs").textContent.includes("inbox:") && !$("needs").textContent.includes("question:") && $("needs").textContent.includes("From worker") && $("needs").textContent.includes("Keep the old hero?"), "Inbox questions omit raw routing prefixes and retain provenance");
+    S.nodes[0].inbox = [workerQuestion]; openDetail(S.nodes[0].id);
+    check(!$("detail").textContent.includes("from worker: question:") && $("detail").textContent.includes("From worker"), "node detail formats worker questions consistently");
+    closeDetail();
+    S.due = originalDue; renderDue();
     S.scan = [{name:poison, path:"/demo/a 'quoted'; $(touch nope)", kind:"repo", commit_count:2, last_commit_date:"2026-10-19T06:00:00Z", languages:[poison], agent_setup:[poison], readme:poison, adoptable:true},
       {name:"Existing", path:"/demo/existing", kind:"repo", commit_count:1, node:"test", already_home:true, adoptable:false},
       {name:"Other", path:"/demo/other", kind:"repo", commit_count:1, ownership:"another brain: workshop", adoptable:false}];
