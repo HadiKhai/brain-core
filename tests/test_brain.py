@@ -1387,6 +1387,77 @@ class WorkerReadyPackets(Scenario):
         self.assertIn("unreadable", self.b(r, "ready", "a", "--branch", "job", ok=False))
 
 
+class ReadyFailureRegressions(Scenario):
+    job = WorkerReadyPackets.job
+    record = WorkerReadyPackets.record
+    packet = WorkerReadyPackets.packet
+
+    def merge_tree_exit(self, code):
+        tools = self.tmp / "tools"
+        tools.mkdir(exist_ok=True)
+        script = tools / "git"
+        script.write_text(f"#!{sys.executable}\nimport os, sys\nfrom pathlib import Path\n"
+                          "if 'merge-tree' in sys.argv and '--write-tree' in sys.argv:\n"
+                          f"    Path({str(self.tmp / 'merge-called')!r}).touch()\n"
+                          f"    sys.exit({code})\n"
+                          f"os.execv({shutil.which('git')!r}, ['git', *sys.argv[1:]])\n")
+        script.chmod(0o755)
+        self.env["PATH"] = str(tools) + os.pathsep + os.environ.get("PATH", "")
+
+    def test_fast_forward_ready_does_not_require_modern_merge_tree(self):
+        r, home, wt = self.job()
+        self.merge_tree_exit(129)
+        self.assertEqual(self.record(r).strip(), "ready")
+        self.assertEqual(self.b(r, "ready", "a", "--branch", "job").strip(), "ready")
+        self.assertFalse((self.tmp / "merge-called").exists())
+
+    def test_ready_uses_local_main_without_updating_remote_refs(self):
+        r, home, wt = self.job()
+        local_main = self.git("rev-parse", "main", cwd=home).strip()
+        self.git("checkout", "-qb", "remote-tip", cwd=home)
+        self.git("commit", "--allow-empty", "-qm", "remote ahead", cwd=home)
+        self.git("update-ref", "refs/remotes/origin/main", "HEAD", cwd=home)
+        remote_main = self.git("rev-parse", "HEAD", cwd=home).strip()
+        self.git("checkout", "-q", "main", cwd=home)
+        self.assertEqual(self.record(r).strip(), "ready")
+        self.assertEqual(json.loads(self.packet().read_text())["main"], local_main)
+        self.assertNotEqual(local_main, remote_main)
+        self.assertEqual(self.git("rev-parse", "origin/main", cwd=home).strip(), remote_main)
+        skill = (CORE / "skills/home-job/SKILL.md").read_text()
+        self.assertIn("local `main` and never fetches", skill)
+        self.assertIn("must fetch and update local `main` before `ready`", skill)
+
+    def test_merge_tree_exit_codes_distinguish_conflict_old_git_and_error(self):
+        r, home, wt = self.job()
+        self.git("commit", "--allow-empty", "-qm", "main moves", cwd=home)
+        for code, expected in ((129, "git is too old"), (128, "merge cleanliness is unknown"),
+                               (1, "merge-tree is not clean")):
+            self.merge_tree_exit(code)
+            out = self.record(r, ok=False)
+            self.assertIn("rebase on current main", out)
+            self.assertIn(expected, out)
+            if code != 1:
+                self.assertNotIn("merge-tree is not clean", out)
+
+    def test_failed_verify_prints_bounded_redacted_stdout_and_stderr(self):
+        r, home, wt = self.job()
+        (r / "nodes/a/never-name.txt").write_text("PrivateName\n")
+        self.b(r, "set", "a", "verify=python3 -B fail.py")
+        (wt / "fail.py").write_text("import sys\nprint('dropped from tail', flush=True)\n"
+                                    "for i in range(20): print(f'context {i}', flush=True)\n"
+                                    "print('PrivateName useful failure', file=sys.stderr)\nsys.exit(7)\n")
+        self.git("add", "fail.py", cwd=wt)
+        self.git("commit", "-qm", "failing verify", cwd=wt)
+        out = self.record(r, ok=False)
+        self.assertIn("verify failed (exit 7)", out)
+        self.assertIn("context 19", out)
+        self.assertIn("[…] useful failure", out)
+        self.assertNotIn("PrivateName", out)
+        self.assertNotIn("dropped from tail", out)
+        self.assertNotIn("context 0\n", out)
+        self.assertEqual(json.loads(self.packet().read_text())["verify_result"], 7)
+
+
 class RuntimeFallbackResume(Scenario):
     def test_fallback_is_a_plain_machine_local_order(self):
         r = self.init("alice")

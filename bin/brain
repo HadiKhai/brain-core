@@ -1759,8 +1759,13 @@ def ready_preflight(n, branch):
         reasons.append("the job branch must differ from main")
     if git("merge-base", "--is-ancestor", main, head, cwd=n["home_path"]).returncode:
         reasons.append("worker must rebase on current main")
-    if git("merge-tree", "--write-tree", main, head, cwd=n["home_path"]).returncode:
-        reasons.append("merge-tree is not clean (or this git lacks --write-tree)")
+        result = git("merge-tree", "--write-tree", main, head, cwd=n["home_path"])
+        if result.returncode == 1:
+            reasons.append("merge-tree is not clean")
+        elif result.returncode == 129:
+            reasons.append("git is too old for merge-tree --write-tree; Git 2.38 or newer is required")
+        elif result.returncode:
+            reasons.append(f"merge-tree failed (exit {result.returncode}); merge cleanliness is unknown")
     w = n["local"].get("worktrees", {}).get(branch)
     if not w or not Path(w["path"]).exists():
         reasons.append("job worktree is missing")
@@ -1823,7 +1828,11 @@ def cmd_ready(a):
                "NODE": n["id"], "PORT": str(w["port"]), "PORTS": str(w.get("ports", 1)),
                "PORT_LAST": str(w["port"] + w.get("ports", 1) - 1)}
         unlock()  # verification belongs to this worker, not the instance-wide lock
-        result = subprocess.run(verify, shell=True, cwd=w["path"], env=env, capture_output=True, text=True)
+        result = subprocess.run(verify, shell=True, cwd=w["path"], env=env,
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors="replace")
+        if result.returncode:
+            print(f"verify failed (exit {result.returncode}); output tail:")
+            print(redact("\n".join(result.stdout.splitlines()[-15:]), never_terms(n)))
         packet = {"version": 1, "node": n["id"], "branch": a.branch, "head": head, "main": main,
                   "verify_command": verify, "verify_result": result.returncode,
                   "review_rounds": a.reviews, "checked_at": stamp(inst)}

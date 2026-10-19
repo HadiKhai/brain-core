@@ -34,6 +34,8 @@ request. The operator's own checkout of the home is never touched.
    <completed rounds>`. Set `brain set <id> 'verify=<command>'` beforehand. This runs verify in
    the worktree and checks `merge-tree`; the ready packet records both SHAs, command, result
    and completed review rounds. The worker includes its path and review evidence in the report.
+   `ready` compares against local `main` and never fetches. Homes merging through GitHub pull
+   requests must fetch and update local `main` before `ready`; the worker then rebases and records again.
 5. **Pull request.** Once pushing is allowed and the review is addressed, the worker opens it.
    Have the host watch it (host `watch`), so reviews, checks and conflicts come back to you.
    Update the Active work row.

@@ -139,6 +139,7 @@ ready packet. Before merging, run `brain ready <id> --branch <branch>`; merge on
 and with the required consent. Main must match the packet exactly: if it moved, send the job
 back to its worker to rebase and verify again. Do not rerun the worker's tests or repair its
 merge. You alone merge to main (axiom 15); check readiness immediately before that merge.
+The worker self-asserts the ready packet; `ready` binds only the head and local main SHAs.
 
 Reports live in the node's workbench (`core/bin/brain reports <id>` lists them). Reusable scripts
 go in its `scripts/` (`core/bin/brain workbench <id>`), so the next job reuses them instead of
