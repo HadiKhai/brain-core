@@ -4337,6 +4337,7 @@ class RoundTwo(AutonomyProject):
         inst = self.m.Instance(r); n = inst.node("app")
         f = self.m.ready_path(inst, n, "job-a"); f.parent.mkdir(parents=True); f.write_text("{}")
         self.b(r, "handback", "app", "--branch", "job-a", "--state", "done")
+        self.b(r, "jobs", "app", "--branch", "job-a", "--lessons", "none: routine cleanup")
         self.git("commit", "--allow-empty", "-qm", "work", cwd=wt)
         self.git("merge", "-q", "job-a", cwd=home)
         self.b(r, "wt", "prune", "app", "--offline", "--dry-run")
@@ -4344,6 +4345,47 @@ class RoundTwo(AutonomyProject):
         self.b(r, "wt", "prune", "app", "--offline")
         self.assertFalse(f.exists())
         self.assertEqual(list((n["dir"] / "job-handbacks").glob("*.json")), [])
+
+    def test_merged_cleanup_retains_proposals_until_lesson_outcome(self):
+        for command in (("prune", "--offline"), ("rm", "job-a")):
+            with self.subTest(command=command):
+                r, home, wt = self.project()
+                inst = self.m.Instance(r); n = inst.node("app")
+                row = self.m.open_job(self.m.read_jobs(n), "job-a")
+                record = self.m.handback_file(n, row)
+                self.b(r, "handback", "app", "--branch", "job-a", "--state", "done",
+                       "--lessons", "Preserve migration ordering", "--report", "reports/ordering/index.md")
+                original = record.read_bytes()
+                self.git("commit", "--allow-empty", "-qm", "work", cwd=wt)
+                self.git("merge", "-q", "job-a", cwd=home)
+                due = next(i for i in self.due(r) if i["kind"] == "merged-job")
+                self.assertIn("brain jobs app --branch job-a --lessons first", due["text"])
+                for output in (due["text"], self.b(r, "wt", command[0], "app", *command[1:])):
+                    self.assertIn("Preserve migration ordering", output)
+                    self.assertIn("reports/ordering/index.md", output)
+                self.assertEqual(record.read_bytes(), original)
+                self.assertIn("Preserve migration ordering", next(i for i in self.due(r) if i["kind"] == "lesson-outcome")["text"])
+                self.b(r, "jobs", "app", "--branch", "job-a", "--lessons", "none: specific to this job")
+                self.assertFalse(record.exists())
+                self.assertNotIn("lesson-outcome", [i["kind"] for i in self.due(r)])
+                # project() uses the same paths; keep each subcase independent.
+                shutil.rmtree(r)
+                shutil.rmtree(home)
+                shutil.rmtree(home.parent / (home.name + "-work"))
+
+    def test_import_closes_without_machine_home_or_workbench(self):
+        r = self.init("alice")
+        self.b(r, "new", "app", "--title", "App", "--home", "external")
+        inst = self.m.Instance(r); n = inst.node("app")
+        branch = "import:" + "a" * 40
+        self.m.job_started(inst, n, branch, "codex")
+        self.b(r, "handback", "app", "--branch", branch, "--state", "done", "--lessons", "none: no reusable lesson")
+        self.b(r, "jobs", "app", "--branch", branch, "--lessons", "none: no reusable lesson", "--close")
+        row = self.m.read_jobs(n)[0]
+        self.assertEqual(row["Outcome"], "studied")
+        self.assertTrue(row["Ended"])
+        self.assertEqual(row["Lessons"], "none: no reusable lesson")
+        self.assertFalse(self.m.handback_file(n, row).exists())
 
     def test_questions_and_blocked_human_needs_reach_inbox_once(self):
         r, home, wt = self.project()

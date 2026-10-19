@@ -75,7 +75,8 @@ sense, it belongs in the instance, not here.
 16. **State lives in files; threads are disposable.** Any thread can be replaced from the
     files of the node it served. Workers own one hand-back file per job: state, proposed lessons
     and ready packet. Coordinators own the ledger and refresh generated status facts without
-    hand-writing them. Job cleanup deletes completion records; history stays in the ledger.
+    hand-writing them. Job cleanup retains merged-job hand-backs until the ledger has a lesson
+    outcome; other completion records are deleted. History stays in the ledger.
     A facts refresh never advances the coordinator judgement's own Updated
     timestamp. A host tick checks file-derived work and host pending requests; an empty tick leaves no notes.
     Human requests keep stable identities and are reported once per machine and reporter node

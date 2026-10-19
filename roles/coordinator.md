@@ -193,9 +193,9 @@ skill), placed where the next job will find it. A lesson only for this node goes
 files instead. Record the learned item ids with `brain jobs <id> --branch <branch> --lessons
 <id1,id2>`, or `--lessons "none: <reason>"`, before `wt prune` records the merge. Then mark
 the row `merged` or `abandoned`. Merged v2 jobs missing a required lesson outcome remain due;
-legacy merges have no retroactive requirement. Never edit the worker record; `wt rm`/`wt prune`
-delete it and its ready packet after closing the ledger. A job dropped
-without a merge ends
+legacy merges have no retroactive requirement. Never edit the worker record. Cleanup prints
+lessons and the report path first, deletes the ready packet, and retains a merged-job hand-back
+until its lesson outcome is recorded, even after pruning the worktree. A job dropped without a merge ends
 with `core/bin/brain wt rm <id> <branch> --cause "<why>"`, so `core/bin/brain jobs` can say
 what goes wrong, how long jobs take and how many review rounds they need: base estimates on
 it, not on a guess.

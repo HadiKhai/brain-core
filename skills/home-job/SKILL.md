@@ -58,7 +58,8 @@ stated; never run a polling loop in an agent.
    <id1,id2>` (or `--lessons "none: <reason>"`), and run `core/bin/brain wt prune <id>`. It removes only clean, merged
    worktrees. A job dropped instead: `core/bin/brain wt rm <id> <branch> --cause "<why>"`.
    Either way the node's `job-ledger.md` gets the job's hours, commits and review rounds
-   (`core/bin/brain jobs <id>`). Cleanup deletes ready and hand-back records; the ledger keeps history.
+   (`core/bin/brain jobs <id>`). Cleanup prints lessons and the report first, deletes ready records,
+   and retains a merged-job hand-back until its lesson outcome is recorded. The ledger keeps history.
 
 Never merge, push to a shared branch, deploy or delete a branch without explicit consent
 (axiom 24). Several jobs can run at once; each has its own worktree and port.

@@ -3686,7 +3686,8 @@ def job_ended(inst, n, branch, outcome, commits="", cause=""):
     with brain_lock(inst):
         rows = ledger_rows(n)
         r = open_job(rows or [], branch)
-        ready_path(inst, n, branch).unlink(missing_ok=True)
+        if not n["external"] or n["local"].get("workbench") or n["home_path"]:
+            ready_path(inst, n, branch).unlink(missing_ok=True)
         if not r:
             return
         r.update(Ended=stamp(inst), Outcome=outcome, Commits=str(commits), Cause=cause)
@@ -3695,10 +3696,26 @@ def job_ended(inst, n, branch, outcome, commits="", cause=""):
         a, b = inst.parse_time(r["Started"]), inst.parse_time(r["Ended"])
         r["Hours"] = f"{elapsed(a, b) / 3600:.1f}" if a and b else ""
         write_jobs(inst, n, rows)
-        record = handback_file(n, r)
+        cleanup_handback(n, r)
+        inst.commit([], f"{n['id']}: job {outcome}")
+
+
+def cleanup_handback(n, row):
+    if row.get("Ended") and (row.get("Outcome") != "merged" or row.get("Lessons")):
+        record = handback_file(n, row)
         record.unlink(missing_ok=True)
         touch(record)
-        inst.commit([], f"{n['id']}: job {outcome}")
+
+
+def handback_detail(n, row):
+    signal = read_handback(n, row) or {}
+    return f"lessons: {signal.get('lessons') or 'not recorded'}; report: {signal.get('report') or 'not recorded'}"
+
+
+def print_job_handback(n, branch):
+    row = open_job(read_jobs(n) or [], branch)
+    if row:
+        print(redact(f"{branch}: {handback_detail(n, row)}", never_terms(n)), flush=True)
 
 
 def jobs_summary(inst, n):
@@ -3831,6 +3848,7 @@ def cmd_jobs(a):
                 die("--switch needs old -> new: reason")
             r["Switches"] = "; ".join(filter(None, [r.get("Switches"), f"{stamp(inst)} {switch}"]))
         write_jobs(inst, n, rows)
+        cleanup_handback(n, r)
         inst.commit([], f"{n['id']}: job outcome")
         if a.close:
             if not open_job(rows or [], a.branch):
@@ -3885,6 +3903,7 @@ def cmd_wt_rm(a):
     n, home = git_home(inst, a.id)
     w = n["local"].get("worktrees", {}).get(a.branch)
     state = worktree_state(home, w, a.branch) if w else (None, False, "")
+    print_job_handback(n, a.branch)
     remove_worktree(inst, n, a.branch, a.force)
     job_ended(inst, n, a.branch, "merged" if state[1] else "abandoned", job_commits(home, w, a.branch), a.cause or "")
     print(f"removed the worktree for {a.branch} (the branch itself stays)")
@@ -3900,6 +3919,7 @@ def cmd_wt_prune(a):
     for br, w in sorted(n["local"].get("worktrees", {}).items()):
         dirty, merged, ahead = worktree_state(home, w, br)
         if dirty is None or (merged and dirty == 0):
+            print_job_handback(n, br)
             if not a.dry_run:
                 remove_worktree(inst, inst.node(n["id"]), br)
                 job_ended(inst, n, br, "merged" if merged else "abandoned", job_commits(home, w, br),
@@ -4205,13 +4225,15 @@ def due_items(inst, n, evidence=None, include_stale=True):
         if row["Ended"]:
             if row["Outcome"] == "merged" and row.get("Lesson check") == "required" and not row.get("Lessons"):
                 add("lesson-outcome", f"{row['Job']}: merged job needs a lesson outcome; learn proposed lessons "
-                    "and record item ids or none: <reason> with brain jobs --lessons", job=job_key(row))
+                    f"and record item ids or none: <reason> with brain jobs {n['id']} --branch {row['Job']} --lessons; "
+                    + handback_detail(n, row), job=job_key(row))
             continue
         branch = row["Job"]
         w = state["worktrees"].get(branch)
         signal = state["handbacks"][job_key(row)]
         if w and w["merged"]:
-            add("merged-job", f"{branch}: merged in local git; close the ledger and prune", job=job_key(row))
+            add("merged-job", f"{branch}: merged in local git; record brain jobs {n['id']} --branch {branch} --lessons "
+                "first, then close the ledger and prune; " + handback_detail(n, row), job=job_key(row))
         elif signal:
             ready = ready_state(inst, n, branch) if signal["state"] == "done" and not import_job(branch) else None
             detail = ("ready to merge" if ready["ready"] else
