@@ -3479,7 +3479,7 @@ def write_jobs(inst, n, rows):
             "`brain wt rm` and `brain wt prune`; times carry their UTC offset. `brain jobs` sums it up.\n\n")
     out = [head + "| " + " | ".join(JOB_COLS) + " |", "| " + " | ".join("---" for _ in JOB_COLS) + " |"]
     out += ["| " + " | ".join(cell(r.get(c, "")) for c in JOB_COLS) + " |" for r in rows]
-    f.write_text("\n".join(out) + "\n")
+    atomic_write(f, "\n".join(out) + "\n")
     touch(f)
 
 

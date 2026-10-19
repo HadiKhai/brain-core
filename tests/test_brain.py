@@ -3274,6 +3274,150 @@ runpy.run_path(brain, run_name='__main__')
         self.assertEqual(json.loads(self.b(r, 'inbox', 'root', '--new', '--json')), [])
 
 
+class RecoveryCrashes(AutonomyProject):
+    # Instrument only the child process: no crash switches in the installed CLI.
+    def paused_write(self, root, destination, args, phase, reading=None):
+        marker = self.tmp / 'replace-paused'
+        candidate = self.tmp / 'replace-candidate'
+        marker.unlink(missing_ok=True)
+        code = """
+import importlib.machinery, importlib.util, json, os, sys, time
+from pathlib import Path
+target, marker, candidate, phase, source, reading = sys.argv[1:7]
+sys.argv = [source, *sys.argv[7:]]
+loader = importlib.machinery.SourceFileLoader('recovery_brain', source)
+spec = importlib.util.spec_from_loader(loader.name, loader)
+m = importlib.util.module_from_spec(spec)
+loader.exec_module(m)
+if reading:
+    m.usage_reading = lambda sub: ('fixture', json.loads(reading))
+original = os.replace
+paused = False
+def replace(src, dst):
+    global paused
+    if Path(dst) != Path(target) or paused:
+        return original(src, dst)
+    paused = True
+    Path(candidate).write_bytes(Path(src).read_bytes())
+    if phase == 'after':
+        original(src, dst)
+    Path(marker).write_text('paused')
+    while Path(marker).exists():
+        time.sleep(0.01)
+    if phase == 'before':
+        return original(src, dst)
+os.replace = replace
+m.main()
+"""
+        source = str(root / 'core/bin/brain')
+        proc = subprocess.Popen([sys.executable, '-c', code, str(destination), str(marker), str(candidate),
+                                 phase, source, json.dumps(reading) if reading else '', *args],
+                                cwd=root, env=self.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        try:
+            deadline = time.monotonic() + 10
+            while not marker.exists() and proc.poll() is None and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertTrue(marker.exists(), 'command never reached atomic replace')
+            return proc, candidate.read_bytes()
+        except BaseException:
+            proc.kill(); proc.communicate(timeout=5)
+            raise
+
+    def kill_write(self, root, destination, args, phase):
+        before = destination.read_bytes()
+        proc, after = self.paused_write(root, destination, args, phase)
+        proc.kill()
+        proc.communicate(timeout=5)
+        self.assertEqual(proc.returncode, -9)
+        self.assertNotEqual(before, after, 'fixture must change the destination')
+        self.assertEqual(destination.read_bytes(), before if phase == 'before' else after)
+        # This command takes the instance lock and must not wedge on the dead writer's pid.
+        follow = subprocess.run([sys.executable, str(root / 'core/bin/brain'), *args], cwd=root,
+                                env=self.env, capture_output=True, text=True, timeout=10)
+        self.assertEqual(follow.returncode, 0, follow.stderr)
+
+    def test_recover_sigkill_status_handback_inbox_and_jobs(self):
+        for phase in ('before', 'after'):
+            for command in ('status', 'handback', 'inbox', 'jobs'):
+                with self.subTest(phase=phase, command=command):
+                    # Every subcase gets a fresh home, even if a preceding assertion failed.
+                    shutil.rmtree(self.tmp / 'alice', ignore_errors=True)
+                    shutil.rmtree(self.tmp / 'code', ignore_errors=True)
+                    r, home, wt = self.project()
+                    node = r / 'nodes/app'
+                    if command == 'status':
+                        dest, args = node / 'status.md', ['status', 'app', '--refresh']
+                    elif command == 'handback':
+                        self.b(r, 'handback', 'app', '--branch', 'job-a', '--state', 'blocked')
+                        dest = next((node / 'job-handbacks').glob('*.json'))
+                        args = ['handback', 'app', '--branch', 'job-a', '--state', 'question']
+                    elif command == 'inbox':
+                        self.b(r, 'inbox', 'app', '--new')
+                        (node / 'inbox.md').write_text('- 2026-10-19 10:00 +00:00 from worker: Recover me.\n')
+                        dest, args = r / '.brain/inbox-seen.json', ['inbox', 'app', '--new', '--json']
+                    else:
+                        dest = node / 'job-ledger.md'
+                        args = ['jobs', 'app', '--branch', 'job-a', '--switch', 'claude -> codex: usage limit']
+                    self.kill_write(r, dest, args, phase)
+                    if dest.suffix == '.json':
+                        json.loads(dest.read_text())
+                    if command == 'inbox':
+                        self.assertEqual(json.loads(self.b(r, *args)), [])
+                    # Reuse the helper's fixed instance name on the next case.
+                    shutil.rmtree(r)
+                    shutil.rmtree(home.parent)
+
+    def test_recover_sigkill_usage_poller_restarts_and_keeps_last_reading(self):
+        r = self.init('alice')
+        self.env['BRAIN_CONFIG'] = str(self.tmp / 'config/brains.json')
+        cfg = self.tmp / 'config'
+        cfg.mkdir()
+        sub = {'id': 'test', 'label': 'test', 'runtime': 'claude', 'config_dir': str(self.tmp / 'no-login'),
+               'host_provider_instance_id': 'fixture-provider', 'brains': ['alice']}
+        (cfg / 'subscriptions.json').write_text(json.dumps({'subscriptions': [sub]}))
+        observed = time.time() - 900
+        old = {'source': 'lookup', 'read_at': observed, 'note': '',
+               'windows': {'five_hour': {'used_percent': 42, 'resets_at': time.time() + 3600}}}
+        cache = cfg / 'usage.json'
+        cache.write_text(json.dumps({'subscriptions': [{**sub, 'account_key': 'fixture'}],
+                                     'accounts': {'fixture': old}, 'checked_at': observed}))
+        before = cache.read_bytes()
+        newer = {**old, 'read_at': time.time(), 'windows': {
+            'five_hour': {'used_percent': 47, 'resets_at': time.time() + 3600}}}
+        args = ['usage', '--watch', '--every', '0.1']
+        for attempt in range(2):
+            proc, candidate = self.paused_write(r, cache, args, 'before', newer)
+            try:
+                # Both the watch and refresh locks are held while readers use the old snapshot.
+                row = json.loads(self.b(r, 'usage', '--json'))['subscriptions'][0]
+                self.assertEqual(row['windows']['five_hour']['used_percent'], 42)
+                self.assertGreaterEqual(row['age_seconds'], 900)
+                self.assertEqual(row['read_at'], observed)
+                self.assertIn('15 m', self.b(r, 'usage'))
+                self.assertEqual(cache.read_bytes(), before)
+            finally:
+                proc.kill(); proc.communicate(timeout=5)
+            self.assertEqual(proc.returncode, -9)
+            # With no poller alive, ordinary readers still retain the observation and its age.
+            dead_row = json.loads(self.b(r, 'usage', '--json'))['subscriptions'][0]
+            self.assertEqual(dead_row['read_at'], observed)
+            self.assertGreaterEqual(dead_row['age_seconds'], 900)
+        # A third watch process acquires both stale-pid locks and publishes a full new cache.
+        proc, candidate = self.paused_write(r, cache, args, 'before', newer)
+        try:
+            (self.tmp / 'replace-paused').unlink()
+            deadline = time.monotonic() + 5
+            while cache.read_bytes() == before and time.monotonic() < deadline:
+                time.sleep(0.01)
+            result = json.loads(cache.read_text())
+            self.assertEqual(result['accounts']['fixture']['windows']['five_hour']['used_percent'], 47)
+            self.assertEqual(result['accounts']['fixture']['read_at'], newer['read_at'])
+        finally:
+            proc.kill(); proc.communicate(timeout=5)
+        self.assertEqual(proc.returncode, -9)
+
+
+
 class AutonomySync(Scenario):
     def test_sync_uses_judgement_timestamp_after_refresh_and_handles_empty_status(self):
         r = self.init('alice')
