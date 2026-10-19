@@ -437,6 +437,13 @@ def usage_cache():
                     (w.get("resets_at") is not None and (not usage_number(w["resets_at"]) or
                                                         usage_stamp(w["resets_at"]) is None)):
                 return {}
+            if w.get("read_at") is not None and usage_stamp(w["read_at"]) is None:
+                return {}
+            if "source" in w and w["source"] not in ("lookup", "log", "unknown"):
+                return {}
+            if name.startswith("seven_day_model:") and (not isinstance(w.get("models"), list) or
+                    not w["models"] or any(not isinstance(m, str) or not m for m in w["models"])):
+                return {}
     return data
 
 
@@ -470,7 +477,8 @@ def usage_config():
         subs.append({"id": s["id"], "runtime": rt, "label": label,
                      "config_dir": str(Path(cfg).expanduser().absolute()),
                      "host_provider_instance_id": host, "brains": s.get("brains", [])})
-    return {"subscriptions": subs, "stop_percent": stop, "pacing_margin": margin}
+    return {"subscriptions": subs, "stop_percent": stop, "pacing_margin": margin,
+            "autodetected": not path.exists()}
 
 
 USAGE_RUNTIMES = {"claude": "CLAUDE_CONFIG_DIR", "codex": "CODEX_HOME"}
@@ -797,7 +805,31 @@ class usage_lock:
             self.fh.close()  # retain the inode: deleting a flock file races the next holder
 
 
-def usage_refresh(config, stale_only=False):
+def usage_merge(prior, reading):
+    """Keep the newest observation of each window, including its source and time."""
+    if not prior.get("windows"):
+        return reading
+    windows = {}
+    changed = False
+    for r in (prior, reading):
+        for name, w in r.get("windows", {}).items():
+            w = {**w, "read_at": w.get("read_at", r.get("read_at")), "source": w.get("source", r.get("source"))}
+            old = windows.get(name)
+            if old is None or (w["read_at"] or 0, w["source"] == "lookup") > \
+                    (old["read_at"] or 0, old["source"] == "lookup"):
+                windows[name] = w
+                if r is reading:
+                    changed = True
+    if not changed and prior.get("windows"):
+        return prior
+    if not windows:
+        return reading
+    newest = max(windows.values(), key=lambda w: w["read_at"] or 0)
+    return {**reading, "windows": windows, "read_at": min(w["read_at"] or 0 for w in windows.values()),
+            "source": newest["source"]}
+
+
+def usage_refresh(config, stale_only=False, poll_interval=None):
     with usage_lock("usage-refresh.lock") as held:
         cached = usage_cache()
         if not held:
@@ -813,37 +845,93 @@ def usage_refresh(config, stale_only=False):
                 prior_sub = next((s for s in cached.get("subscriptions", []) if all(
                     s.get(k) == sub[k] for k in ("id", "runtime", "config_dir"))), {})
                 prior = cached.get("accounts", {}).get(prior_sub.get("account_key"), {})
-                if reading["source"] != "lookup" and (prior.get("read_at") or 0) > (reading["read_at"] or 0):
-                    # An outage must not replace a recent stop-line observation with an older low log value.
+                if reading["source"] != "lookup" and prior.get("windows"):
                     key = prior_sub["account_key"]
-                    reading = {**prior, "source": "log" if prior["source"] == "log" else "unknown",
-                               "note": (reading["note"] or "Current usage unavailable") +
-                               "; retaining the newer last-known observation"}
+                # A different account confirmed by a lookup must not inherit another account's limits.
+                if reading["source"] != "lookup" or key == prior_sub.get("account_key"):
+                    reading = usage_merge(prior, reading)
                 paths[path_key] = key
-                old = accounts.get(key)
-                if not old or (reading["source"] == "lookup", reading["read_at"] or 0) > \
-                        (old["source"] == "lookup", old["read_at"] or 0):
-                    accounts[key] = reading
+                accounts[key] = usage_merge(accounts.get(key, {}), reading)
             subs.append({**sub, "account_key": paths[path_key]})
+        if stale_only and accounts == cached.get("accounts") and subs == cached.get("subscriptions"):
+            return cached  # a failed inline lookup cannot relabel or freshen the last good cache
         data = {**config, "subscriptions": subs, "accounts": accounts, "checked_at": time.time()}
+        interval = poll_interval if poll_interval is not None else cached.get("poll_interval_seconds")
+        if usage_number(interval) and interval > 0:
+            data["poll_interval_seconds"] = interval
         usage_atomic(usage_file(), data)
         return data
+
+
+def usage_max_age(cache):
+    every = cache.get("poll_interval_seconds")
+    return 2 * every if usage_number(every) and every > 0 else USAGE_MAX_AGE
+
+
+def usage_poller_live():
+    import fcntl
+    try:
+        with usage_file("usage-watch.lock").open() as fh:
+            try:
+                fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return True
+    except FileNotFoundError:
+        pass
+    return False
 
 
 def usage_cache_fresh(cache, config):
     checked = cache.get("checked_at")
     keys = ("id", "runtime", "label", "config_dir", "host_provider_instance_id", "brains")
-    return usage_number(checked) and 0 <= time.time() - checked < USAGE_MAX_AGE and \
+    return usage_number(checked) and 0 <= time.time() - checked < usage_max_age(cache) and \
         [{k: s.get(k) for k in keys} for s in cache.get("subscriptions", [])] == config["subscriptions"]
+
+
+def usage_brain_name(inst):
+    names = [name for name, root in brains_here() if root.resolve() == inst.root.resolve()]
+    return names[0] if names else brain_name(inst.root)
+
+
+def usage_allowed(sub, name):
+    return "*" in sub["brains"] or name in sub["brains"]
+
+
+def usage_datetime(stamp, inst=None):
+    zone = inst.zone() if inst else None
+    return datetime.datetime.fromtimestamp(stamp, zone) if zone else datetime.datetime.fromtimestamp(stamp).astimezone()
+
+
+def usage_time(stamp, inst=None):
+    if not stamp:
+        return "unknown"
+    d = usage_datetime(stamp, inst)
+    z = d.strftime("%z")
+    return f"{d:%Y-%m-%d %H:%M} {z[:3]}:{z[3:]}"
+
+
+def usage_age(seconds):
+    if seconds is None:
+        return "unknown"
+    seconds = int(seconds)
+    if seconds < 60:
+        return f"{seconds} s"
+    minutes = seconds // 60
+    return f"{minutes // 60} h {minutes % 60} m" if minutes >= 60 else f"{minutes} m"
 
 
 def usage_rows(inst=None, refresh=False, before_launch=False):
     config = usage_config()
     cache = usage_cache()
-    if refresh or (before_launch and not usage_cache_fresh(cache, config)):
+    if refresh or (before_launch and not usage_cache_fresh(cache, config) and not usage_poller_live()):
         cache = usage_refresh(config, stale_only=not refresh)
+    config = {**config, "max_age_seconds": usage_max_age(cache), "other_subscriptions": 0}
+    brain = usage_brain_name(inst) if inst else None
     rows = []
     for sub in config["subscriptions"]:
+        if inst and not usage_allowed(sub, brain):
+            config["other_subscriptions"] += 1
+            continue
         prior = next((s for s in cache.get("subscriptions", []) if all(s.get(k) == v for k, v in sub.items())), {})
         r = cache.get("accounts", {}).get(prior.get("account_key"), {})
         stamp = r.get("read_at")
@@ -853,42 +941,50 @@ def usage_rows(inst=None, refresh=False, before_launch=False):
             reset = w.get("resets_at")
             windows[name] = {**w, "expired": bool(reset and reset <= time.time())}
             if inst and reset:
-                windows[name]["reset_time"] = datetime.datetime.fromtimestamp(reset, inst.zone()).isoformat(timespec="seconds")
-        rows.append({**sub, "config_dir": tilde(sub["config_dir"]), "account_key": prior.get("account_key"),
+                windows[name]["reset_time"] = usage_datetime(reset, inst).isoformat(timespec="seconds")
+        rows.append({**sub, "brains": ["*"] if "*" in sub["brains"] else ([brain] if inst else sub["brains"]),
+                     "available_to_every_brain": "*" in sub["brains"], "autodetected": config["autodetected"], "config_dir": tilde(sub["config_dir"]), "account_key": prior.get("account_key"),
                      "windows": windows, "read_at": stamp, "age_seconds": round(age, 1) if age is not None else None,
                      "source": r.get("source", "unknown"), "note": r.get("note", ""),
-                     "reading_time": datetime.datetime.fromtimestamp(stamp, inst.zone()).isoformat(timespec="seconds")
+                     "reading_time": usage_datetime(stamp, inst).isoformat(timespec="seconds")
                      if inst and stamp else None})
     return rows, config
 
 
-def usage_route(inst, runtimes, preferred=None):
+def usage_route(inst, runtimes, preferred=None, model=None):
     try:
+        if usage_config()["autodetected"]:
+            return None, "Usage unknown: no subscriptions.json; keeping the configured runtime (autodetected defaults allow every brain)."
         rows, policy = usage_rows(inst, before_launch=True)
     except (OSError, ValueError):
         return None, "Usage unknown: machine subscription configuration unavailable; no subscription selected."
-    names = [name for name, root in brains_here() if root.resolve() == inst.root.resolve()]
-    name = names[0] if names else brain_name(inst.root)
-    allowed = [r for r in rows if r["runtime"] in runtimes and (name in r["brains"] or "*" in r["brains"])]
+    allowed = [r for r in rows if r["runtime"] in runtimes]
     fallback = inst.local.get("fallback", [])
     fallback = fallback if isinstance(fallback, list) else []
     eligible = []
     for r in allowed:
-        active = {n: w for n, w in r["windows"].items() if not w["expired"]}
+        active = {n: w for n, w in r["windows"].items() if not w["expired"] and
+                  (n in USAGE_WINDOWS or (model and model.casefold() in
+                   [m.casefold() for m in w.get("models", [])]))}
         if any(w["used_percent"] >= policy["stop_percent"] for w in active.values()):
             continue
-        unknown = r["source"] == "unknown" or r["age_seconds"] is None or r["age_seconds"] > USAGE_MAX_AGE or not active
-        weekly = active.get("seven_day", {})
-        reset = weekly.get("resets_at")
-        elapsed = max(0, min(100, 100 * (1 - (reset - time.time()) / (7 * 86400)))) if reset else 100
-        ahead = weekly.get("used_percent", 0) > elapsed + policy["pacing_margin"]
+        unknown = not active or any(w.get("source", r["source"]) == "unknown" or
+            not w.get("read_at", r["read_at"]) or time.time() - w.get("read_at", r["read_at"]) > policy["max_age_seconds"]
+            for w in active.values())
+        weekly_windows = [w for n, w in active.items() if n.startswith("seven_day")]
+        def ahead_of_pace(w):
+            reset = w.get("resets_at")
+            elapsed = max(0, min(100, 100 * (1 - (reset - time.time()) / (7 * 86400)))) if reset else 100
+            return w["used_percent"] > elapsed + policy["pacing_margin"]
+        ahead = any(ahead_of_pace(w) for w in weekly_windows)
         used = max((w["used_percent"] for w in active.values()), default=0)
         host = r["host_provider_instance_id"]
         rank = fallback.index(host) if host in fallback else len(fallback)
         eligible.append(((unknown, ahead, used, rank, r["runtime"] != preferred, r["id"]), r))
     if not eligible:
-        reason = "all allowed subscriptions reached the stop line" if allowed else "no subscription is allowed for this brain and runtime"
-        return None, f"Usage: no subscription selected ({reason}). Stop starting jobs; the brief remains available."
+        if not allowed:
+            return None, "Usage unknown: no subscription is allowed for this brain and runtime; keeping the configured runtime."
+        return None, "Usage: all allowed subscriptions reached the stop line. Stop starting jobs; the brief remains available."
     score, selected = min(eligible, key=lambda x: x[0])
     reason = "usage unknown/stale; capacity unverified" if score[0] else \
         f"most headroom ({100 - score[2]:g}% remaining in the fullest reported window)"
@@ -917,7 +1013,15 @@ def usage_ui(inst):
         if isinstance(value, dict):
             return {k: hide(v) for k, v in value.items()}
         return value
+    rows = [{k: v for k, v in r.items() if k != "config_dir"} for r in rows]
     return hide(rows) if terms else rows
+
+
+def usage_other_count(inst):
+    try:
+        return usage_rows(inst)[1]["other_subscriptions"]
+    except (OSError, ValueError):
+        return 0
 
 
 def usage_install(a):
@@ -928,13 +1032,18 @@ def usage_install(a):
         die("usage LaunchAgent already exists; inspect it before replacing it")
     config = str(brains_file().resolve())
     data = {"Label": "org.brain.usage", "ProgramArguments": [sys.executable, str(CORE / "bin/brain"),
-            "usage", "--watch", "--every", str(a.every)], "RunAtLoad": True, "KeepAlive": True,
+            "usage", "--watch", "--every", str(a.every)], "RunAtLoad": True,
+            "KeepAlive": {"SuccessfulExit": False}, "ThrottleInterval": 30, "ProcessType": "Background",
+            "StandardOutPath": str(Path.home() / "Library/Logs/brain-usage.log"),
+            "StandardErrorPath": str(Path.home() / "Library/Logs/brain-usage.log"),
             "EnvironmentVariables": {"BRAIN_CONFIG": config, "BRAIN_NO_REEXEC": "1", "HOME": str(Path.home()),
                                      "PATH": os.environ.get("PATH", "/usr/bin:/bin")}}
     for env in USAGE_RUNTIMES.values():
         if os.environ.get(env):
             data["EnvironmentVariables"][env] = os.environ[env]
     path.parent.mkdir(parents=True, exist_ok=True)
+    # launchd requires the log's parent to exist.
+    (Path.home() / "Library/Logs").mkdir(parents=True, exist_ok=True)
     path.write_bytes(plistlib.dumps(data))
     print(f"wrote {tilde(path)}; not loaded. Start with: launchctl bootstrap gui/$(id -u) {shlex.quote(str(path))}")
 
@@ -948,12 +1057,13 @@ def cmd_usage(a):
     if a.watch:
         with usage_lock("usage-watch.lock") as held:
             if not held:
-                die("usage poller already running")
+                print("brain: usage poller already running", file=sys.stderr)
+                return
             try:
                 while True:
                     try:
-                        usage_refresh(usage_config())
-                    except (OSError, ValueError):
+                        usage_refresh(usage_config(), poll_interval=a.every)
+                    except Exception:
                         print("brain: usage refresh unavailable; retrying next interval", file=sys.stderr, flush=True)
                     time.sleep(a.every)
             except KeyboardInterrupt:
@@ -964,23 +1074,39 @@ def cmd_usage(a):
         rows, policy = usage_rows(inst, refresh=a.refresh)
     except (OSError, ValueError) as e:
         die(str(e))
+    if not inst:
+        visible = [r for r in rows if usage_allowed(r, None)]
+        policy["other_subscriptions"] = len(rows) - len(visible)
+        rows = visible
     if a.json:
-        print(json.dumps({"scope": "account-wide", "stop_percent": policy["stop_percent"], "subscriptions": rows}, indent=2))
+        print(json.dumps({"scope": "account-wide", "stop_percent": policy["stop_percent"],
+                          "other_subscriptions": policy["other_subscriptions"], "subscriptions": rows}, indent=2))
         return
     print(f"Account-wide subscription usage · stop line {policy['stop_percent']:g}% · this machine's share: unavailable")
-    print("runtime  label  5h used / reset  weekly used / reset  reading / age  source  brains")
+    table = [["runtime", "label", "5h used / reset", "weekly used / reset", "reading / age", "source", "brains"]]
     for r in rows:
         def window(name):
             w = r["windows"].get(name)
             if not w:
                 return "unknown"
-            reset = w.get("reset_time") or (datetime.datetime.fromtimestamp(w["resets_at"]).astimezone().isoformat(timespec="seconds") if w["resets_at"] else "unknown")
+            reset = usage_time(w.get("resets_at"), inst)
             return f"{w['used_percent']:g}% / {reset}" + (" (expired; unknown)" if w["expired"] else "")
-        age = f"{r['age_seconds']:g}s" if r["age_seconds"] is not None else "unknown"
-        print(f"{r['runtime']}  {r['label']}  {window('five_hour')}  {window('seven_day')}  "
-              f"{r['reading_time'] or r['read_at'] or 'unknown'} / {age}  {r['source']}  {','.join(r['brains']) or 'none'}")
+        table.append([r["runtime"], r["label"], window("five_hour"), window("seven_day"),
+                      f"{usage_time(r['read_at'], inst)} / {usage_age(r['age_seconds'])}", r["source"],
+                      "every brain" + (" (autodetected)" if r["autodetected"] else "")
+                      if r["available_to_every_brain"] else ','.join(r['brains']) or 'none'])
+    widths = [max(len(row[i]) for row in table) for i in range(len(table[0]))]
+    for row in table:
+        print("  ".join(cell.ljust(width) for cell, width in zip(row, widths)).rstrip())
+    for r in rows:
+        for name, w in r["windows"].items():
+            if name.startswith("seven_day_model:"):
+                print(f"  {r['label']} · weekly model {', '.join(w.get('models', []))}: "
+                      f"{w['used_percent']:g}% / {usage_time(w.get('resets_at'), inst)}")
         if r["note"]:
-            print(f"  {r['note']}")
+            print(f"  {r['label']}: {r['note']}")
+    if policy["other_subscriptions"]:
+        print(f"{policy['other_subscriptions']} other subscription(s) unavailable to this brain.")
 
 
 def brain_name(root):
@@ -2168,10 +2294,10 @@ def cmd_hire(a):
         die(f"{target['id']}'s home isn't on this machine (brain set {target['id']} home=<path>)")
     where = target["home_path"] if target["external"] else target["dir"]
     runtime = sp["fm"].get("runtime") or target["fm"].get("runtime")
-    subscription, usage = usage_route(inst, [runtime] if runtime else inst.runtimes, preferred=runtime)
+    subscription, usage = usage_route(inst, [runtime] if runtime else inst.runtimes, preferred=runtime, model=a.model)
     runtime = subscription["runtime"] if subscription else runtime
     out = [f"Role: worker, hired as specialist `{sp['id']}` ({sp['fm'].get('title', '')}).",
-           f"Run in: {where}  ·  runtime: {runtime}",
+           f"Run in: {where}  ·  runtime: {runtime}" + (f"  ·  model: {a.model}" if a.model else ""),
            "The rules, agents and skills where you run come first (axiom 7); this brief adds to them.",
            "", redact(usage, never_terms(target)), ""]
     if target["sealed"]:
@@ -2273,9 +2399,20 @@ def cmd_brief(a):
             "and never in the instance instead")
     where = Path(w["path"]) if w else (n["home_path"] if n["external"] else n["dir"])
     runtime = a.runtime or n["fm"].get("runtime") or inst.cfg.get("default_runtime", "")
-    subscription, usage = usage_route(inst, [a.runtime] if a.runtime else inst.runtimes, preferred=runtime)
+    pin = a.runtime or n["fm"].get("runtime")
+    subscription, usage = usage_route(inst, [pin] if pin else inst.runtimes, preferred=runtime, model=a.model)
+    if pin and not subscription and "Stop starting jobs" in usage:
+        alternative, _ = usage_route(inst, [r for r in inst.runtimes if r != pin], model=a.model)
+        usage += f" Pinned runtime {pin} reached its stop line."
+        if alternative:
+            usage += (f" Alternative: {alternative['label']} ({alternative['runtime']}); "
+                      "choose it explicitly with --runtime to change the pin for this job.")
+        else:
+            usage += " No eligible alternative is known."
     runtime = subscription["runtime"] if subscription else runtime
     head = f"Run in: {tilde(where)}" + (f"  ·  branch {a.branch}" if a.branch else "") + f"  ·  runtime: {runtime}"
+    if a.model:
+        head += f"  ·  model: {a.model}"
     if w:
         head += f"  ·  {port_text(w['port'], w.get('ports', 1))}"
     task = Path(a.task_file).read_text() if a.task_file else (a.task or "<!-- the task, what done means, "
@@ -2456,7 +2593,7 @@ def cmd_review(a):
         die(f"only one runtime ({built}) in instance.md: nothing to cross-review with")
     if reviewer == built:
         die("the reviewer must run on a different runtime from the builder")
-    subscription, usage = usage_route(inst, [a.by] if a.by else others, preferred=reviewer)
+    subscription, usage = usage_route(inst, [a.by] if a.by else others, preferred=reviewer, model=a.model)
     reviewer = subscription["runtime"] if subscription else reviewer
     where, base = None, a.base
     if n["external"]:
@@ -2475,7 +2612,8 @@ def cmd_review(a):
     if d.returncode:
         die(f"can't diff {a.branch} against {base}: {d.stderr.strip()}")
     diffstat = d.stdout.strip()
-    out = [f"Reviewer runtime: {reviewer}  (the change was built on {built})", f"Run in: {where}", "",
+    out = [f"Reviewer runtime: {reviewer}  (the change was built on {built})",
+           f"Run in: {where}" + (f"  ·  model: {a.model}" if a.model else ""), "",
            redact(usage, never_terms(n)), "",
            "Role: worker, reviewing a change you didn't write. Don't modify any file, commit or push.",
            "The rules, agents and skills where you run come first (axiom 7): if this project has its own "
@@ -4002,6 +4140,7 @@ def ui_state(inst, problems=None):
                        "here": x["id"] in inst.local.get("schedules", {})} for x in read_schedules(inst)],
         "machine": machine_load(),
         "usage": usage_ui(inst),
+        "usage_other_subscriptions": usage_other_count(inst),
         "problems": problems,
     }
 
@@ -4522,7 +4661,7 @@ def main():
         opt("--home-url", dest="home_url"))
     cmd("brief", cmd_brief, "a worker brief: where it runs, the task, the node's limits, how to ask and hand back",
         "id", opt("--branch", help="the job's worktree (brain wt add)"), opt("--task"),
-        opt("--task-file", dest="task_file"), opt("--runtime"),
+        opt("--task-file", dest="task_file"), opt("--runtime"), opt("--model", help="job model for scoped usage limits"),
         opt("--to", help="the thread the worker reports to (default: the node's coordinator)"), opt("--out"))
     cmd("guard", cmd_guard, f"check a home and its worktrees for the terms in {NEVER_FILE} (and, if sealed, "
         "upward traces); exits 1 if any", "id", opt("paths", nargs="*"))
@@ -4584,7 +4723,8 @@ def main():
     cmd("lesson", cmd_lesson, "brain lesson <specialist> --from <node> \"text\"", "specialist",
         opt("--from", dest="source", required=True), opt("--at"), "text")
     cmd("hire", cmd_hire, "print a specialist's brief for a job: brain hire <specialist> <node> --task \"...\"",
-        "specialist", "node", opt("--task", required=True), opt("--items", default=""), opt("--out"))
+        "specialist", "node", opt("--task", required=True), opt("--items", default=""),
+        opt("--model", help="job model for scoped usage limits"), opt("--out"))
 
     cmd("workbench", cmd_workbench, "a node's workbench: scripts, reports, worktrees (created if missing)", "id",
         opt("--path", action="store_true"))
@@ -4609,7 +4749,8 @@ def main():
     cmd("reports", cmd_reports, "every report, newest first: brain reports [node]", opt("id", nargs="?"))
     cmd("review", cmd_review, "brief for a review by another runtime: brain review <node> --branch B",
         "id", opt("--branch", required=True), opt("--base"), opt("--built-by", dest="built_by"),
-        opt("--by", help="reviewer runtime (default: one the builder didn't use)"), opt("--focus"), opt("--out"))
+        opt("--by", help="reviewer runtime (default: one the builder didn't use)"), opt("--focus"),
+        opt("--model", help="job model for scoped usage limits"), opt("--out"))
     cmd("ready", cmd_ready, "check a worker's ready packet against the branch and current local main", "id",
         opt("--branch", required=True), opt("--record", action="store_true", help="worker: run node verify and record"),
         opt("--reviews", type=int, help="completed review rounds, required with --record"))
