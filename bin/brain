@@ -3656,11 +3656,9 @@ def cmd_inbox(a):
         state = {i["id"]: {"first_seen": i["first_seen"], "reported_at": seen.get(i["id"], {}).get("reported_at") or now}
                  for i in items}
         items = fresh
-    if a.json:
-        print(json.dumps(items, indent=2))
-    else:
-        for item in items:
-            print(f"{item['node']}: [{item['id']}] {item['text']}")
+    output = json.dumps(items, indent=2) + "\n" if a.json else "".join(
+        f"{item['node']}: [{item['id']}] {item['text']}\n" for item in items)
+    sys.stdout.write(output)
     if a.new:
         # Delivery comes first, under the same lock. A crash before saving repeats an item.
         sys.stdout.flush()

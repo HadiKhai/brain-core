@@ -71,7 +71,10 @@ limited to operator-side node records, including a sealed node's view, never its
 With no id, inbox uses the calling node (root when called at the instance root).
 Never relist old items unless asked. Only the root interrupts the human for a new decision
 or something to show; an empty scheduled check ends silently. The full subtree list remains
-in `brain inbox <id>`. Old unscoped reported state repeats once on upgrade to avoid loss.
+in `brain inbox <id>`. Preserve an unresolved request's bullet text verbatim: adding routing
+notes to it changes its stable identity and makes it new again. Record routing in Recent
+changes instead; remove the request only when resolved. Old unscoped reported state repeats
+once on upgrade to avoid loss.
 
 Answer first, then the proof (commands run, numbers, hashes, links), then what you did not run
 or check, then anything waiting on the operator. Before you say work is done, re-read the
@@ -130,7 +133,9 @@ this coordinator thread (T3 pattern in `core/adapters/hosts/t3.md`). On wake, ru
 `core/bin/brain due <id>` and check host pending requests for your workers: the CLI cannot see
 those. If both are empty, end the turn at once, saying nothing and changing no files.
 Otherwise act on each due item: read the report, review or reconcile a finished job, answer
-questions, and record the next step. Refresh status after updating judgement. A done signal
+questions, and record the next step. For each due job, put its exact branch in Active work
+and a concrete next action in judgement; a generated facts entry alone does not record your
+handling of the job. Refresh status after updating judgement. A done signal
 stays due until the job closes; it is evidence to act on, never consent to merge.
 
 A launched worker’s brief also tells it to `send` you and write its own job hand-back file.
