@@ -500,6 +500,7 @@ def nine_worker_resume_ready(run):
         "test_calc.py": "from calc import add, multiply\nassert add(2, 3) == 5\nassert multiply(2, 3) == 6\n"})
     brain(root, "set", "a", f"home={home}", "verify=python3 -B test_calc.py")
     brain(root, "wt", "add", "a", "job/calc")
+    main_before = sh("git", "rev-parse", "main", cwd=home)
     wt = run.tmp / "app-work/worktrees/job-calc"
     partial = "def add(a, b):\n    # The first worker completed addition.\n    return a + b\n"
     (wt / "calc.py").write_text(partial + "\ndef multiply(a, b):\n    raise NotImplementedError\n")
@@ -521,6 +522,7 @@ def nine_worker_resume_ready(run):
     ancestors = sh("git", "rev-list", "HEAD", cwd=wt).splitlines()
     run.check(prior in ancestors, "replacement reset the partial branch")
     run.check(sh("git", "rev-parse", "HEAD", cwd=wt).strip() != prior, "no finishing commit")
+    run.check(sh("git", "rev-parse", "main", cwd=home) == main_before, "worker changed main")
     run.check((wt / "calc.py").read_text().startswith(partial), "completed addition was rewritten")
     verify = subprocess.run([sys.executable, "-B", "test_calc.py"], cwd=wt, capture_output=True)
     run.check(verify.returncode == 0, "replacement did not finish multiplication")
@@ -535,11 +537,29 @@ def nine_worker_resume_ready(run):
         run.check((root / "nodes/a" / name).read_text() == before, f"worker edited coordinator's {name}")
 
 
+def nine_future_updated_repaired(run):
+    """A future Updated value makes the stop hook ask the coordinator to repair it with brain now."""
+    root = run.instance()
+    run.approve_hooks()
+    node = root / "nodes/a"
+    st = node / "status.md"
+    lines = st.read_text().splitlines()
+    lines[0] = "Updated: 2999-01-01 12:00 +00:00 by a coordinator (claude)"
+    st.write_text("\n".join(lines) + "\n")
+    sh("git", "commit", "-qam", "a: incorrect clock", cwd=root)
+    run.agent(node, "Role: coordinator of node `a`. Check your notes, then reply with one word.", writable=root)
+    run.check_time(st.read_text().splitlines()[0], "repaired Updated line")
+    log = root / ".brain/hooks.log"
+    run.check(log.exists() and "future Updated:" in log.read_text(), "hook did not flag future Updated")
+    run.check(not sh("git", "status", "--porcelain", "--", "nodes/a", cwd=root).strip(), "repair not committed")
+    run.brain_check()
+
+
 SCENARIOS = [parity, coordinator_writes_as_it_goes, worker_asks_the_writer, learning_is_a_citation,
              new_node_in_one_sentence, no_upward_traces, second_runtime_review, stop_hook_fires,
              notes_current_after_an_edit, a_session_reaches_its_own_brain, worker_hands_back_a_question,
              lessons_become_items, limits_carry_their_reason, freshness_across_timezones,
-             nine_job_close_lessons, nine_worker_resume_ready]
+             nine_job_close_lessons, nine_worker_resume_ready, nine_future_updated_repaired]
 
 
 def main():
