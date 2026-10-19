@@ -1382,6 +1382,27 @@ class JobLessonOutcomes(Scenario):
         self.assertIn("--lessons", brief)
         self.assertIn("none: <reason>", brief)
 
+    def test_proposed_import_lessons_close_jobs_without_acceptance_or_warning(self):
+        r = self.init("alice")
+        home = self.repo(self.tmp / "app")
+        self.b(r, "adopt", str(home), "--id", "a")
+        self.b(r, "wt", "add", "a", "job/import")
+        wt = self.tmp / "app-work/worktrees/job-import"
+        self.git("commit", "--allow-empty", "-qm", "study complete", cwd=wt)
+        self.git("merge", "-q", "job/import", cwd=home)
+        self.b(r, "wt", "prune", "a")
+        self.assertIn("has no lesson outcome", self.b(r, "check"))
+        for iid, source in (("import-lesson", "a"), ("wrong-source", "root")):
+            self.b(r, "item", "add", iid, "--from", source, "--at", source, "--title", "Bound reads",
+                   "--kind", "lesson", "--ref", "README.md@" + "a" * 40, "--repo", "fixture",
+                   "--commit", "a" * 40, "--proposed", "--body", "Bound reads before parsing.")
+        self.b(r, "jobs", "a", "--branch", "job/import", "--lessons", "wrong-source", ok=False)
+        self.b(r, "jobs", "a", "--branch", "job/import", "--lessons", "import-lesson")
+        self.assertNotIn("lesson outcome", self.b(r, "check"))
+        self.assertIn('"Lessons": "import-lesson"', self.b(r, "jobs", "a", "--branch", "job/import"))
+        self.assertIn("status: proposed", (r / "nodes/a/library/import-lesson.md").read_text())
+        self.b(r, "usable", "import-lesson", "a", ok=False)
+
 
 class WorkerReadyPackets(Scenario):
     def job(self):
@@ -2819,6 +2840,50 @@ for line in sys.stdin:
         self.assertIn("Pinned runtime claude", text); self.assertIn("Alternative: two (codex)", text)
         text = self.b(root, "brief", "root", "--runtime", "codex")
         self.assertIn("runtime: codex", text); self.assertIn("host-two", text)
+
+    def test_import_brief_composes_worker_usage_limits_and_handback(self):
+        root = self.init("alice")
+        home = self.repo(self.tmp / "project")
+        self.b(root, "adopt", str(home))
+        self.b(root, "set", "project", "runtime=claude", "coordinator=study-owner")
+        node = root / "nodes/project"
+        (node / "brief.md").write_text("## Limits\n\n- Stay offline. Why: private inputs. Lift when: never.\n")
+        config = self.declare(self.subscription(runtime="claude"), self.subscription("two"))
+        self.cache(config, [self.reading(90), self.reading(10)])
+        before = self.git("status", "--porcelain", cwd=home), self.git("rev-parse", "HEAD", cwd=home)
+        text = self.b(root, "brief", "project", "--import", "--model", "opus")
+        for expected in ("runtime: claude", "model: opus", "Stop starting jobs", "Pinned runtime claude",
+                         "Alternative: two (codex)", "study-owner", "must have a Lessons section",
+                         "brain ready", "leave the source branch and history unchanged"):
+            self.assertIn(expected, text)
+        for section in ("Task", "Limits", "Before you hand back", "Questions and hand-back", "Report"):
+            self.assertEqual(text.count("## " + section + "\n"), 1, section)
+        self.assertEqual(text.count("Stay offline."), 1)
+        self.assertNotIn("Run `brain guard", text)
+        text = self.b(root, "brief", "project", "--import", "--runtime", "codex", "--model", "opus")
+        self.assertIn("runtime: codex", text)
+        self.assertIn("host-two", text)
+        self.assertNotIn("Stop starting jobs", text)
+        self.assertEqual(before, (self.git("status", "--porcelain", cwd=home),
+                                  self.git("rev-parse", "HEAD", cwd=home)))
+
+    def test_proposed_hire_gate_keeps_usage_model_and_job_record(self):
+        root = self.init("alice")
+        config = self.declare(self.subscription())
+        reading = self.reading(10)
+        reading["windows"]["seven_day_model:opus"] = {"used_percent": 95, "resets_at": time.time() + 86400, "models": ["opus"]}
+        self.cache(config, [reading])
+        self.b(root, "specialist", "new", "qa", "--title", "QA", "--runtime", "codex", "--proposed")
+        out = self.b(root, "hire", "qa", "root", "--task", "Inspect", "--model", "opus",
+                     "--job", "job/import", ok=False)
+        self.assertIn("imported specialist is unreviewed", out)
+        local = root / ".brain/local.json"
+        self.assertFalse(json.loads(local.read_text()).get("hires") if local.exists() else False)
+        self.b(root, "specialist", "accept", "qa", "--reviewed-by", "alice")
+        out = self.b(root, "hire", "qa", "root", "--task", "Inspect", "--model", "opus", "--job", "job/import")
+        self.assertIn("model: opus", out)
+        self.assertIn("Stop starting jobs", out)
+        self.assertEqual(json.loads((root / ".brain/local.json").read_text())["hires"][-1]["job"], "job/import")
 
     def test_usage_human_output_and_unknown_zone_keep_offset(self):
         root = self.init("alice"); inst = self.m.Instance(root)

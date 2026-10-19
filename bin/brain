@@ -2802,6 +2802,23 @@ def report_lines(job=False):
              "Lessons: what the next job should know, or none: <reason>; ") + "and what is still open."]
 
 
+def worker_route(inst, n, a):
+    """Route all worker briefs with the same runtime pin and model usage limits."""
+    runtime = a.runtime or n["fm"].get("runtime") or inst.cfg.get("default_runtime", "")
+    pin = a.runtime or n["fm"].get("runtime")
+    subscription, usage = usage_route(inst, [pin] if pin else inst.runtimes, preferred=runtime, model=a.model)
+    if pin and not subscription and "Stop starting jobs" in usage:
+        alternative, _ = usage_route(inst, [r for r in inst.runtimes if r != pin], model=a.model)
+        usage += f" Pinned runtime {pin} reached its stop line."
+        if alternative:
+            usage += (f" Alternative: {alternative['label']} ({alternative['runtime']}); "
+                      "choose it explicitly with --runtime to change the pin for this job.")
+        else:
+            usage += " No eligible alternative is known."
+    runtime = subscription["runtime"] if subscription else runtime
+    return runtime, redact(usage, never_terms(n))
+
+
 def import_brief(a):
     inst = Instance(find_root())
     n = inst.node(a.id)
@@ -2811,8 +2828,11 @@ def import_brief(a):
         die("--import needs an external git home on this machine")
     home = n["home_path"]
     head = git("rev-parse", "--verify", "-q", "HEAD", cwd=home).stdout.strip() or "unborn"
+    runtime, usage = worker_route(inst, n, a)
     out = [f"Role: import worker for node `{n['id']}` ({n['fm'].get('title', '')}).",
-           f"Run in: {n['dir']}  ·  runtime: {a.runtime or n['fm'].get('runtime', '')}",
+           f"Run in: {n['dir']}  ·  runtime: {runtime}" + (f"  ·  model: {a.model}" if a.model else ""),
+           "The rules, agents and skills where you run come first (axiom 7); this brief adds to them.",
+           "", usage, "",
            f"Source repository (read-only): {home}", f"Snapshot commit: {head}",
            f"Read and follow: {CORE / 'skills' / 'import' / 'SKILL.md'}", "",
            "## Task", "",
@@ -2836,7 +2856,15 @@ def import_brief(a):
     task = Path(a.task_file).read_text() if a.task_file else (a.task or "")
     if task:
         out += [task, ""]
-    out += limits_lines(n) + handback_lines(inst, n, a.to) + report_lines()
+    out += limits_lines(n)
+    out += ["## Before you hand back", "",
+            "Finish the import skill's output checks, commit only this job's node files, and report the "
+            "checks and review evidence with the proposed item ids in your Lessons section. "
+            "Keep pre-existing source findings separate from output findings.",
+            "Ready packets (`brain ready`) apply to jobs in a home worktree. This study has no source "
+            "worktree: leave the source branch and history unchanged. If a later job changes the home, "
+            "its worker must rebase on main and record a ready packet before handing back.", ""]
+    out += handback_lines(inst, n, a.to) + report_lines()
     text = "\n".join(out) + "\n"
     no_terms_in(n, text, "the import brief")
     if SECRET_META.search(text) or SECRET_LINE.search(task + "\n" + "\n".join(limits_lines(n))):
@@ -2863,18 +2891,7 @@ def cmd_brief(a):
         die(f"{n['id']}'s home isn't on this machine (brain set {n['id']} home=<path>): a worker can't run there, "
             "and never in the instance instead")
     where = Path(w["path"]) if w else (n["home_path"] if n["external"] else n["dir"])
-    runtime = a.runtime or n["fm"].get("runtime") or inst.cfg.get("default_runtime", "")
-    pin = a.runtime or n["fm"].get("runtime")
-    subscription, usage = usage_route(inst, [pin] if pin else inst.runtimes, preferred=runtime, model=a.model)
-    if pin and not subscription and "Stop starting jobs" in usage:
-        alternative, _ = usage_route(inst, [r for r in inst.runtimes if r != pin], model=a.model)
-        usage += f" Pinned runtime {pin} reached its stop line."
-        if alternative:
-            usage += (f" Alternative: {alternative['label']} ({alternative['runtime']}); "
-                      "choose it explicitly with --runtime to change the pin for this job.")
-        else:
-            usage += " No eligible alternative is known."
-    runtime = subscription["runtime"] if subscription else runtime
+    runtime, usage = worker_route(inst, n, a)
     head = f"Run in: {tilde(where)}" + (f"  ·  branch {a.branch}" if a.branch else "") + f"  ·  runtime: {runtime}"
     if a.model:
         head += f"  ·  model: {a.model}"
@@ -3608,6 +3625,7 @@ def cmd_jobs(a):
                     die("none needs a reason")
             else:
                 ids = lst(outcome)
+                # A proposed import lesson is a filed outcome, even before review permits its use.
                 items = {it["fm"].get("id"): it for it in inst.items()}
                 if not ids or any(i not in items or items[i]["fm"].get("source_node") != n["id"] for i in ids):
                     die("lessons must be item ids filed via learn from this node, or none: <reason>")
