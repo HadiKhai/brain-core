@@ -4002,5 +4002,68 @@ class ImportAutonomy(Scenario):
         self.assertIn("status: proposed", (r / "nodes/a/library/bounded.md").read_text())
 
 
+class ExpandedUI(Scenario):
+    def setUp(self):
+        super().setUp()
+        self.env["PYTHONDONTWRITEBYTECODE"] = "1"
+        self.env["BRAIN_CONFIG"] = str(self.tmp / "config" / "brains.json")
+        patch = mock.patch.dict(os.environ, self.env, clear=True)
+        patch.start()
+        self.addCleanup(patch.stop)
+        loader = importlib.machinery.SourceFileLoader("brain_ui_test", str(CORE / "bin/brain"))
+        self.m = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+        loader.exec_module(self.m)
+
+    def test_ui_scan_matches_cli_and_does_not_write(self):
+        root = self.init("alice")
+        first = self.repo(self.tmp / "code" / "first")
+        second = self.repo(self.tmp / "elsewhere" / "second")
+        self.b(root, "new", "first", "--title", "First", "--home", str(first))
+        expected = json.loads(self.b(root, "scan", str(first.parent), str(second.parent), "--json"))
+        def files():
+            return {str(p.relative_to(self.tmp)): p.read_bytes() for p in self.tmp.rglob("*")
+                    if p.is_file() and not p.is_symlink()}
+        before = files()
+        state = json.loads(self.b(root, "ui", "--json", "--scan", str(first.parent),
+                                  "--scan", str(second.parent)))
+        self.assertEqual(state["scan"], expected)
+        self.assertEqual(files(), before)
+        self.assertEqual([c["adoptable"] for c in state["scan"]], [False, True])
+        self.assertEqual(json.loads(self.b(root, "ui", "--json"))["scan"], [])
+        self.assertIn("every scan path must be a directory", self.b(root, "ui", "--json", "--scan",
+                                                                   str(self.tmp / "missing"), ok=False))
+
+    def test_ui_exposes_due_and_complete_ledger_without_polling(self):
+        root = self.init("alice")
+        self.b(root, "new", "project", "--title", "Project")
+        inst = self.m.Instance(root)
+        node = inst.node("project")
+        rows = [{"Job":f"job-{i}", "Started":"2026-01-01T00:00:00+00:00", "Ended":"2026-01-01T01:00:00+00:00",
+                 "Hours":"1", "Reviews":"2", "Outcome":"merged", "Lesson check":"required"} for i in range(65)]
+        self.m.write_jobs(inst, node, rows)
+        with mock.patch.object(self.m, "usage_refresh", side_effect=AssertionError("UI must never poll")):
+            state = self.m.ui_state(inst)
+        ui_node = next(n for n in state["nodes"] if n["id"] == "project")
+        self.assertEqual(len(ui_node["jobs"]["rows"]), 65)
+        self.assertEqual(ui_node["jobs"]["median_reviews"], 2)
+        self.assertEqual(len([d for d in state["due"] if d["kind"] == "lesson-outcome"]), 65)
+        self.assertEqual(state["due"], json.loads(self.b(root, "due", "--json")))
+
+    def test_ui_policy_and_new_data_redact_home_terms(self):
+        root = self.init("alice")
+        self.b(root, "new", "project", "--title", "Project")
+        (root / "nodes/project/never-name.txt").write_text("HiddenName\n")
+        cfg = Path(self.env["BRAIN_CONFIG"]).parent
+        (cfg / "subscriptions.json").write_text(json.dumps({"stop_percent":73, "subscriptions":[]}))
+        (cfg / "usage.json").write_text(json.dumps({"poll_interval_seconds":300, "subscriptions":[], "accounts":{}}))
+        with mock.patch.object(self.m, "due_items", return_value=[{"node":"project", "text":"HiddenName action", "reasons":["HiddenName"]}]):
+            state = self.m.ui_state(self.m.Instance(root), scan=[{"name":"HiddenName", "path":"/tmp/HiddenName"}])
+        self.assertNotIn("HiddenName", json.dumps({k:state[k] for k in ("due", "scan")}))
+        self.assertEqual(state["usage_policy"], {"stop_percent":73, "max_age_seconds":600})
+        (cfg / "subscriptions.json").write_text("not json")
+        state = self.m.ui_state(self.m.Instance(root))
+        self.assertIsNone(state["usage_policy"]["stop_percent"])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -4950,7 +4950,7 @@ def machine_load():
     return d
 
 
-def ui_state(inst, problems=None):
+def ui_state(inst, problems=None, scan=None):
     """Everything the page shows, from the same files `brain` reads. Read-only."""
     now = inst.now_dt()
     nodes = inst.nodes()
@@ -5004,7 +5004,7 @@ def ui_state(inst, problems=None):
             "status": {k: v for k, v in secs.items() if v and k.lower() != "active work"},
             "work": work, "worktrees": wts, "inbox": [l[2:] for l in inbox_lines(n)],
             "blocked": status_section(n, "blocked"), "decisions": ui_decisions(inst, n), "limits": limits_of(n),
-            "never_name": len(terms), "jobs": {**js, "rows": [{k: hide(v) for k, v in r.items()} for r in js["rows"]],
+            "never_name": len(terms), "jobs": {**js, "rows": [{k: hide(v) for k, v in r.items()} for r in (read_jobs(n) or [])],
                                                "open": [{k: hide(v) for k, v in r.items()} for r in js["open"]]},
             "reports": [{"name": d.parent.name, "title": next((l[2:] for l in d.read_text().splitlines()
                                                               if l.startswith("# ")), d.parent.name),
@@ -5050,7 +5050,15 @@ def ui_state(inst, problems=None):
                                  "lessons": parse_lessons(lesson_path) if lesson_path.exists() else [],
                                  "jobs": [r for r in inst.local.get("hires", [])
                                           if r.get("specialist") == sp["id"] and r.get("at") == sp["node"]["id"]]}))
+    try:
+        policy = usage_rows(inst)[1]
+        usage_policy = {k: policy[k] for k in ("stop_percent", "max_age_seconds")}
+    except (OSError, ValueError):
+        usage_policy = {"stop_percent": None, "max_age_seconds": 120}
     return {
+        "due": safe([item for n in nodes for item in due_items(inst, n)]),
+        "scan": safe(scan or []),
+        "usage_policy": usage_policy,
         "brain": {"name": brain_name(inst.root), "title": nodes[0]["fm"].get("title", "Brain"),
                   "root": tilde(inst.root), "machine": inst.local.get("machine", ""), "tz": str(inst.zone() or ""),
                   "fallback": inst.local.get("fallback", []),
@@ -5082,9 +5090,18 @@ def cmd_ui(a):
     import threading
     import urllib.parse
     inst = load()
+    # Scan only explicit startup directories, once. Reuse the CLI's read-only discovery.
+    scan = []
+    if a.scan:
+        import contextlib
+        import io
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            cmd_scan(argparse.Namespace(dirs=a.scan, depth=4, json=True))
+        scan = json.loads(output.getvalue())
     key = secrets.token_urlsafe(18)  # other accounts on this machine can reach 127.0.0.1 too; they don't get this
     if a.json:
-        print(json.dumps(ui_state(inst, len(collect_problems(inst)[0])), indent=1))
+        print(json.dumps(ui_state(inst, len(collect_problems(inst)[0]), scan), indent=1))
         return
     page = (CORE / "ui" / "index.html").read_bytes()
     lock, cond = threading.Lock(), threading.Condition()
@@ -5097,7 +5114,7 @@ def cmd_ui(a):
                 i = Instance(inst.root)
                 if time.time() - box["checked"] > 30:  # the full check is slower; once every 30 s is enough
                     box["problems"], box["checked"] = len(collect_problems(i)[0]), time.time()
-                st = ui_state(i, box["problems"])
+                st = ui_state(i, box["problems"], scan)
                 body = json.dumps(st, sort_keys=True).encode()
                 plain = json.dumps({**st, "brain": {**st["brain"], "now": ""}, "machine": {}}, sort_keys=True)
                 with cond:
@@ -5160,7 +5177,7 @@ def cmd_ui(a):
     box["problems"] = len(collect_problems(inst)[0])
     import time
     box["checked"] = time.time()
-    st = ui_state(inst, box["problems"])
+    st = ui_state(inst, box["problems"], scan)
     box.update(json=json.dumps(st, sort_keys=True).encode(), version=1)
     threading.Thread(target=refresh, daemon=True).start()
     port = a.port
@@ -5613,6 +5630,7 @@ def main():
     cmd("ui", cmd_ui, "a live view of this brain in your browser: projects, work in flight, worktrees, activity "
         "(read-only, this machine only)", opt("--port", type=int, default=UI_PORT),
         opt("--every", type=float, default=3.0, help="seconds between refreshes"),
+        opt("--scan", nargs="+", action="extend", default=[], help="discover import candidates in DIR... (read-only)"),
         opt("--open", action="store_true", help="open it in the browser"),
         opt("--json", action="store_true", help="print the state once, as JSON"))
     cmd("stale", cmd_stale, "freshness check: is <id>'s status.md behind a time the host gave (e.g. a thread's "
