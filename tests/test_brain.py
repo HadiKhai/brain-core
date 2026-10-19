@@ -1197,6 +1197,44 @@ class Hardening8(Scenario):
         self.assertNotIn("oldco", out.casefold())
 
 
+class FutureTimestamps(Scenario):
+    def test_offsets_skew_and_legacy_entries(self):
+        import datetime as dt
+        r = self.init("alice")
+        self.b(r, "new", "a", "--title", "A")
+        cfg = r / "instance.md"
+        cfg.write_text(cfg.read_text().replace("timezone: UTC", "timezone: Asia/Beirut"))
+        st = r / "nodes/a/status.md"
+        from zoneinfo import ZoneInfo
+        now = dt.datetime.now(ZoneInfo("Asia/Beirut"))
+        for when in (now + dt.timedelta(minutes=4), now - dt.timedelta(days=1)):
+            st.write_text(f"Updated: {when:%Y-%m-%d %H:%M} by coordinator\n")
+            self.assertNotIn("future", self.b(r, "check"))
+        future = now + dt.timedelta(minutes=20)
+        for text in (future.strftime("%Y-%m-%d %H:%M"), future.isoformat(timespec="seconds"),
+                     future.astimezone(dt.timezone.utc).strftime("%Y-%m-%d %H:%M +00:00")):
+            st.write_text(f"Updated: {text} by coordinator\n")
+            self.assertIn("future Updated: time", self.b(r, "check", ok=False))
+        st.write_text("Updated: 15:58 by coordinator\n- 23:59: old log\n")
+        self.assertNotIn("future", self.b(r, "check"))
+
+    def test_other_dated_entries_warn_and_hook_explains_fix(self):
+        r = self.init("alice")
+        self.b(r, "new", "a", "--title", "A")
+        node = r / "nodes/a"
+        (node / "decisions.md").write_text("## 2999-01-01 00:00 +03:00: decision\n")
+        st = node / "status.md"
+        st.write_text("Updated: 2020-01-01 00:00\n- 2999-01-02: log entry\n- 23:59: old\n")
+        out = self.b(r, "check")
+        self.assertIn("! a: decisions.md:1: future dated entry", out)
+        self.assertIn("! a: status.md:2: future dated entry", out)
+        st.write_text("Updated: 2999-01-01 00:00 +03:00 by coordinator\n")
+        p = subprocess.run([sys.executable, str(CORE / "bin/brain"), "hook", "stop"], cwd=node,
+                           input=json.dumps({"cwd": str(node)}), capture_output=True, text=True, env=self.env)
+        self.assertEqual(p.returncode, 0)
+        self.assertIn("future Updated: time; fix it with `brain now`", json.loads(p.stdout)["reason"])
+
+
 class Measures(Scenario):
     def test_jobs_are_measured_from_start_to_end(self):
         r = self.init("alice")

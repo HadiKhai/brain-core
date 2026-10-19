@@ -2341,6 +2341,26 @@ def updated_at(inst, n):
     return inst.parse_time(m.group(1)) if m else None
 
 
+def future_entries(inst, n):
+    """Only absolute dates are evidence: an old bare clock time has no known day."""
+    problems, warnings = [], []
+    cutoff = inst.now_dt() + datetime.timedelta(minutes=5)
+    pattern = r"\b\d{4}-\d{2}-\d{2}(?:[ T]\d{2}:\d{2}(?::\d{2})?(?:\.\d+)?(?:\s*(?:Z|[+-]\d{2}:?\d{2}))?)?"
+    for f in sorted(n["dir"].glob("*.md")):
+        if f.is_symlink():
+            continue
+        for line_no, line in enumerate(f.read_text().splitlines(), 1):
+            for m in re.finditer(pattern, line):
+                text = m.group()
+                when = inst.parse_time(text if len(text) > 10 else text + " 00:00")
+                if when and when > cutoff:
+                    updated = f.name == "status.md" and bool(re.match(r"^Updated:\s*$", line[:m.start()]))
+                    target = problems if updated else warnings
+                    target.append(f"{n['id']}: {f.name}:{line_no}: future "
+                                  + ("Updated: time; fix it with brain now" if updated else "dated entry"))
+    return problems, warnings
+
+
 def elapsed(a, b):
     """Seconds from a to b as real moments. Two times with the same zone object subtract by their wall clocks
     in Python, which is wrong across a daylight-saving change; in UTC it isn't."""
@@ -2897,6 +2917,8 @@ def hook_stop(a):
     if not n:
         return
     why = notes_lag(inst, n)
+    if future_entries(inst, n)[0]:
+        why.append("status.md has a future Updated: time; fix it with `brain now`")
     state_f = inst.root / ".brain" / "hooks.json"
     try:
         state = json.loads(state_f.read_text()) if state_f.exists() else {}
@@ -3314,6 +3336,9 @@ def collect_problems(inst):
     nodes = inst.nodes()
     for n in nodes:
         fm, nid = n["fm"], n["id"]
+        future, dated = future_entries(inst, n)
+        problems.extend(future)
+        warnings.extend(dated)
         for f in NODE_FIELDS:
             if f not in fm:
                 p(f"{nid}: node.md is missing '{f}'")

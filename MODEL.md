@@ -67,7 +67,9 @@ sense, it belongs in the instance, not here.
 15. **One writer per file.** Everyone else asks the writer.
 16. **State lives in files; threads are disposable.** Any thread can be replaced from the
     files of the node it served.
-17. **Time is absolute.** Every recorded fact carries a full timestamp.
+17. **Time is absolute.** Every recorded fact carries a full timestamp from `brain now`.
+    `brain check` rejects a status `Updated:` more than five minutes in the future and warns
+    on other future-dated node entries. Undated legacy clock times are not guessed.
 
 ### Change
 
