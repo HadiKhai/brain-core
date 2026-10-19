@@ -1627,6 +1627,37 @@ class ResumeBriefRegressions(Scenario):
         self.assertIn("0 own commit(s)", brief)
 
 
+class LedgerVersionRegressions(Scenario):
+    def test_legacy_ledgers_migrate_without_losing_rows_or_extended_fields(self):
+        r = self.init("alice")
+        home = self.repo(self.tmp / "app")
+        self.b(r, "new", "a", "--title", "A", "--home", str(home))
+        ledger = r / "nodes/a/job-ledger.md"
+        ledger.write_text("<!-- brain:job-ledger v1 -->\n\n"
+                          "| Job | Started | Ended | Hours | Outcome | Commits | Reviews | Runtime | Cause |\n"
+                          "| --- | --- | --- | --- | --- | --- | --- | --- | --- |\n"
+                          "| old | 2020-01-01T00:00Z | 2020-01-01T01:00Z | 1 | merged | 1 | 1 | codex | original |\n")
+        self.b(r, "wt", "add", "a", "job")
+        self.b(r, "jobs", "a", "--branch", "job", "--lessons", "none: mechanical",
+               "--switch", "claude -> codex: usage limit")
+        text = ledger.read_text()
+        self.assertIn("<!-- brain:job-ledger v2 -->", text)
+        # The exact recognition gate in a v1 core's read_jobs returns None, so its writers skip the file.
+        self.assertNotIn("<!-- brain:job-ledger v1 -->", text)
+        self.assertIn("| old | 2020-01-01T00:00Z", text)
+        self.assertIn("| original |", text)
+        self.assertIn('"Lessons": "none: mechanical"', self.b(r, "jobs", "a", "--branch", "job"))
+        # Also migrate the 12-column v1 files emitted earlier on this feature branch.
+        ledger.write_text(text.replace("brain:job-ledger v2", "brain:job-ledger v1"))
+        self.b(r, "review", "a", "--branch", "job", "--built-by", "claude")
+        out = self.b(r, "jobs", "a", "--branch", "job")
+        self.assertIn('"Lessons": "none: mechanical"', out)
+        self.assertIn('"Reviews": "1"', out)
+        self.assertIn("claude -> codex: usage limit", out)
+        self.assertNotIn("<!-- brain:job-ledger v1 -->", ledger.read_text())
+        self.assertIn("✓", self.b(r, "check"))
+
+
 class Measures(Scenario):
     def test_jobs_are_measured_from_start_to_end(self):
         r = self.init("alice")

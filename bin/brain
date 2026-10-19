@@ -2194,7 +2194,8 @@ def cmd_wt_list(a):
 
 
 JOBS_FILE = "job-ledger.md"  # in a node folder: one row per job, written by `brain wt` and `brain review`
-JOBS_MARK = "<!-- brain:job-ledger v1 -->"
+JOBS_MARK = "<!-- brain:job-ledger v2 -->"  # v1 cores refuse this format instead of dropping new columns
+JOBS_LEGACY_MARK = "<!-- brain:job-ledger v1 -->"
 JOB_COLS = ["Job", "Started", "Ended", "Hours", "Outcome", "Commits", "Reviews", "Runtime", "Cause"]
 JOB_COLS += ["Lessons", "Lesson check", "Switches"]
 
@@ -2213,7 +2214,7 @@ def read_jobs(n):
     if not f.exists():
         return []
     text = f.read_text()
-    if JOBS_MARK not in text:
+    if JOBS_MARK not in text and JOBS_LEGACY_MARK not in text:
         return None
     rows, columns = [], JOB_COLS
     for line in text.splitlines():

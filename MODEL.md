@@ -104,6 +104,12 @@ sense, it belongs in the instance, not here.
     push, send, deploy) or can't be undone need the explicit consent of the operator and of
     the owners of every affected node.
 
+## Core upgrades
+
+Upgrade every machine sharing an instance together. Extended job ledgers use the v2 marker;
+older cores refuse to record jobs in them rather than discard lessons and runtime switches.
+This core reads v1 ledgers and upgrades their marker on the next ledger write.
+
 ## Procedures
 
 **Sealing** (a boundary appears above node *n*):
