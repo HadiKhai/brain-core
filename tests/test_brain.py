@@ -2483,9 +2483,10 @@ for line in sys.stdin:
             self.assertEqual(self.m.usage_keychain(cfg)[0], {})
             self.m._KEYCHAIN_CYCLE_BLOCKED.clear()  # next refresh, still in cooldown
             self.assertIn("cooldown", self.m.usage_keychain(cfg)[1])
-            self.assertEqual(run.call_count, 1)
-            self.assertEqual(run.call_args.args[0], ["/usr/bin/security", "find-generic-password", "-s",
+            self.assertEqual(run.call_count, 2)  # the default folder has two possible names
+            self.assertEqual(run.call_args_list[0].args[0], ["/usr/bin/security", "find-generic-password", "-s",
                              "Claude Code-credentials", "-a", "test-user", "-w"])
+            self.assertTrue(run.call_args.args[0][3].startswith("Claude Code-credentials-"))
             self.assertEqual(run.call_args.kwargs["timeout"], 2)
             self.assertEqual(run.call_args.kwargs["stdin"], subprocess.DEVNULL)
             self.assertEqual(run.call_args.kwargs["stdout"], subprocess.PIPE)
@@ -2494,10 +2495,28 @@ for line in sys.stdin:
             run.side_effect = None
             run.return_value = subprocess.CompletedProcess([], 0, b'{"claudeAiOauth":{"accessToken":"TEST"}}')
             self.assertEqual(self.m.usage_keychain(cfg)[0]["claudeAiOauth"]["accessToken"], "TEST")
-            self.assertEqual(run.call_count, 2)
+            self.assertEqual(run.call_count, 4)
             self.assertNotIn("TEST", str(run.call_args))
+            run.reset_mock()
             self.m.usage_keychain(str(self.tmp / "other"))
+            self.assertEqual(run.call_count, 1)  # another folder has only its suffixed name
             self.assertTrue(run.call_args.args[0][3].startswith("Claude Code-credentials-"))
+            # A host that sets CLAUDE_CONFIG_DIR=~/.claude renews the suffixed login; the plain one goes stale.
+            def login(args, **kwargs):
+                old = args[3] == "Claude Code-credentials"
+                return subprocess.CompletedProcess([], 0, json.dumps({"claudeAiOauth": {
+                    "accessToken": "OLD" if old else "NEW", "expiresAt": 1000 if old else 9e12}}).encode())
+            run.side_effect = login
+            self.m._KEYCHAIN_CYCLE_BLOCKED.clear()
+            self.assertEqual(self.m.usage_keychain(cfg)[0]["claudeAiOauth"]["accessToken"], "NEW")
+            self.assertEqual(self.m.usage_keychain(cfg)[1], "")
+            # An entry without a usable login, or without an expiry, never beats a dated login.
+            for stale in ({"other": 1}, {"claudeAiOauth": {"accessToken": "UNDATED"}}):
+                run.side_effect = lambda args, stale=stale, **kw: subprocess.CompletedProcess([], 0, json.dumps(
+                    stale if args[3] == "Claude Code-credentials" else
+                    {"claudeAiOauth": {"accessToken": "NEW", "expiresAt": 9e12}}).encode())
+                self.m._KEYCHAIN_CYCLE_BLOCKED.clear()
+                self.assertEqual(self.m.usage_keychain(cfg)[0]["claudeAiOauth"]["accessToken"], "NEW")
 
     def test_usage_claude_limits_and_fractional_timestamps(self):
         for suffix in (".57+00:00", ".576595+00:00", ".5Z", ".5765Z", ".576595123Z", "Z"):

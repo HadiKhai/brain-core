@@ -658,18 +658,39 @@ def usage_codex(sub):
         p.stdout.close()
 
 
+def usage_keychain_services(config_dir):
+    import hashlib
+    import unicodedata
+    hashed = "Claude Code-credentials-" + hashlib.sha256(
+        unicodedata.normalize("NFC", config_dir).encode()).hexdigest()[:8]
+    # Claude Code suffixes the entry whenever CLAUDE_CONFIG_DIR is set, even to the default
+    # folder (hosts set it), so the default folder may have a login under either name.
+    return ["Claude Code-credentials", hashed] if config_dir == str(Path.home() / ".claude") else [hashed]
+
+
 def usage_keychain(config_dir):
     """Use the macOS-trusted CLI; its secret stdout stays in a captured pipe only."""
     if sys.platform != "darwin" or (os.environ.get("BRAIN_USAGE_TESTING") == "1" and
                                     os.environ.get("BRAIN_USAGE_TEST_NO_KEYCHAIN") == "1"):
         return {}, "Keychain unavailable"
-    import hashlib
-    import unicodedata
+    found, notes = [], []
+    for service in usage_keychain_services(config_dir):
+        d, note = usage_keychain_read(service)
+        oauth = d.get("claudeAiOauth")
+        if isinstance(oauth, dict) and isinstance(oauth.get("accessToken"), str) and oauth["accessToken"]:
+            found.append(d)
+        else:
+            notes.append(note or "No stored Claude OAuth token")
+    if not found:
+        return {}, notes[-1]
+    def expiry(d):
+        v = d["claudeAiOauth"].get("expiresAt")
+        return v if usage_number(v) else 0
+    return max(found, key=expiry), ""  # the login Claude renewed most recently
+
+
+def usage_keychain_read(service):
     import getpass
-    default = str(Path.home() / ".claude")
-    suffix = "" if config_dir == default else "-" + hashlib.sha256(
-        unicodedata.normalize("NFC", config_dir).encode()).hexdigest()[:8]
-    service = "Claude Code-credentials" + suffix
     if service in _KEYCHAIN_CYCLE_BLOCKED or time.monotonic() < _KEYCHAIN_RETRY_AT.get(service, 0):
         return {}, "Keychain unavailable; retry after cooldown"
     user = os.environ.get("USER") or getpass.getuser()
