@@ -85,10 +85,12 @@ Answer from files. Before answering about a child, run the **freshness check**:
 | creating a node, or changing one's owners, place or labels | the `node-new` or `node-transition` skill |
 
 Before any host launch or delegation, run `brain usage` (any agent may run it). `brain brief`,
-`brain hire` and `brain review` refresh stale readings once and name the subscription and host
-provider instance to use. Respect its brain allow-list; stop starting jobs on a subscription at
+`brain hire` and `brain review` use the poller's cache and name the subscription and host
+provider instance to use. They refresh stale readings once only if no poller is running. Respect its brain allow-list; stop starting jobs on a subscription at
 the stop line (default 85% of either window). Prefer room within the weekly pace. If none is
-eligible, keep the brief and wait for a reset; if usage is unknown, say so. Agents never poll:
+below the stop line, keep the brief and wait for a reset; if usage is unknown or no subscription
+is declared or allowed, say so without treating it as exhausted. A node's runtime is pinned:
+keep it, and explicitly choose an alternative when its stop line requires one. Agents never poll:
 leave `brain usage --watch` to the machine service.
 
 ## Briefing workers (axiom 9)

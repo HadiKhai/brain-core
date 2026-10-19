@@ -155,9 +155,14 @@ runtime's own file names and formats.
 
 Subscriptions belong to the machine, outside every brain. Server readings are account-wide,
 including other machines: five-hour and seven-day windows, never a daily allowance. A brain may
-use only its allowed subscriptions. One poller writes the machine cache; agents read it. Before
-starting work, refresh stale readings once, respect the stop line and prefer weekly headroom.
-Unknown usage is stated, never presented as spare capacity; it does not prevent a brief.
+use only its allowed subscriptions and sees no other subscription's details. One poller writes
+the machine cache; agents read it. Readers refresh stale readings once only when no poller is
+running. Respect the stop line and prefer weekly headroom; scoped limits apply only to the job's
+named model. Unknown usage is stated, never presented as spare capacity; it does not prevent a
+brief. Without declared subscriptions, existing runtime choices remain unchanged.
+
+A node's runtime is a pin. A brief keeps it unless explicitly overridden; when it reaches the
+stop line, name an eligible alternative and wait for an explicit choice, never switch silently.
 
 ## Host contract
 

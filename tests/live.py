@@ -568,6 +568,7 @@ def nine_future_updated_repaired(run):
 def usage_routes_before_launch(run):
     """A coordinator keeps work off exhausted and other-brain accounts; evidence stays in files."""
     root = run.instance()
+    brain(root, "set", "a", "runtime=codex")
     # A synthetic read-only app-server makes refreshes deterministic even if the agent takes >2 min.
     bin_ = run.tmp / "bin"
     bin_.mkdir(exist_ok=True)
@@ -621,10 +622,54 @@ for line in sys.stdin:
     rows = {s.get("id"): s for s in usage.get("subscriptions", [])}
     run.check(rows.get("full", {}).get("windows", {}).get("seven_day", {}).get("used_percent") == 95,
               "exhausted account not checked")
-    run.check(rows.get("work", {}).get("brains") == ["work-only"], "other brain's account not checked")
+    run.check("work" not in rows and usage.get("other_subscriptions") == 1,
+              "other brain's subscription was exposed or not counted")
+    run.check("provider-work" not in json.dumps(usage) and "work-only" not in json.dumps(usage),
+              "other brain's provider or allow-list leaked")
     brief = (node / "worker-brief.md").read_text() if (node / "worker-brief.md").exists() else ""
     run.check("provider-room" in brief, "worker brief lacks the chosen provider")
     run.check("provider-full" not in brief and "provider-work" not in brief, "worker brief chose ineligible provider")
+    run.brain_check()
+
+
+def usage_respects_runtime_pin(run):
+    """A coordinator keeps a stopped runtime pin and records its alternative without launching."""
+    root = run.instance()
+    brain(root, "set", "a", "runtime=claude")
+    now, subs, accounts = time.time(), [], {}
+    # Deterministic machine-cache fixtures; the real agent must interpret the launch rules.
+    for runtime, used in (("claude", 90), ("codex", 25)):
+        cfg = run.tmp / ("usage-" + runtime)
+        cfg.mkdir()
+        key = "test-" + runtime
+        subs.append({"id": runtime, "label": runtime, "runtime": runtime, "config_dir": str(cfg),
+                     "host_provider_instance_id": "provider-" + runtime, "brains": ["alice"], "account_key": key})
+        accounts[key] = {"source": "lookup", "read_at": now, "note": "", "windows": {
+            "five_hour": {"used_percent": used, "resets_at": now + 3600},
+            "seven_day": {"used_percent": 25, "resets_at": now + 3 * 86400}}}
+    config = {"subscriptions": [{k: v for k, v in s.items() if k != "account_key"} for s in subs]}
+    (run.tmp / "subscriptions.json").write_text(json.dumps(config))
+    (run.tmp / "usage.json").write_text(json.dumps({"subscriptions": subs, "accounts": accounts,
+                                                  "checked_at": now, "poll_interval_seconds": 3600}))
+    run.agent(root / "nodes/a", (
+        "Role: coordinator of node `a`. Prepare a worker to audit the clarity of this node's brief. "
+        "Read the machine usage and assemble pinned-brief.md using brain brief without a runtime override. "
+        "Write launch-decision.json with runtime (the pinned runtime), launch (boolean: can that pinned job "
+        "start now?), alternative_runtime (if the brief names one), and reason. "
+        "Do not launch a thread or change the node's runtime. Commit the evidence and reply in one line."), writable=root)
+    node = root / "nodes/a"
+    try:
+        decision = json.loads((node / "launch-decision.json").read_text())
+        brief = (node / "pinned-brief.md").read_text()
+    except (OSError, ValueError) as e:
+        run.check(False, f"pinned launch evidence missing or invalid: {e}")
+        return
+    run.check(decision.get("runtime") == "claude" and decision.get("launch") is False,
+              f"silently switched or launched stopped pin: {decision}")
+    run.check(decision.get("alternative_runtime") == "codex", f"alternative not recorded: {decision}")
+    run.check("runtime: claude" in brief and "Stop starting jobs" in brief and "Alternative: codex" in brief,
+              "brief lost its stopped pin or alternative")
+    run.check("runtime: claude" in (node / "node.md").read_text(), "changed node runtime")
     run.brain_check()
 
 
@@ -633,7 +678,7 @@ SCENARIOS = [parity, coordinator_writes_as_it_goes, worker_asks_the_writer, lear
              notes_current_after_an_edit, a_session_reaches_its_own_brain, worker_hands_back_a_question,
              lessons_become_items, limits_carry_their_reason, freshness_across_timezones,
              nine_job_close_lessons, nine_worker_resume_ready, nine_worker_resume_uncommitted,
-             nine_future_updated_repaired, usage_routes_before_launch]
+             nine_future_updated_repaired, usage_routes_before_launch, usage_respects_runtime_pin]
 
 
 def main():

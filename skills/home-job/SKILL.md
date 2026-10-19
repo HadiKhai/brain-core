@@ -24,7 +24,8 @@ stated; never run a polling loop in an agent.
 2. **Record it** in `status.md` under **Active work**: `| <branch> | <thread> | <PR or -> | <state> |`.
 3. **Worker.** Host `launch` in the node's `home_project`, in the existing worktree (path and
    branch from step 1), on the node's runtime unless the job calls for another. The brief is
-   self-contained (axiom 9). Write the task (what done means, where reports go:
+   self-contained (axiom 9). A runtime pin at its stop line stays pinned: use the named alternative
+   only after explicitly choosing `--runtime`; never silently switch it. Write the task (what done means, where reports go:
    `core/bin/brain report <id> "<topic>"` gives a folder; commit on the branch; push the branch
    and open a pull request only when the operator or the home's rules allow it, axiom 24), then
    wrap it with `core/bin/brain brief <id> --branch <branch> --task-file <file>`: that adds the

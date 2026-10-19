@@ -16,7 +16,7 @@ stated; never run a polling loop in an agent.
    checklist, the builder runs them; this review adds to them.
 2. **Brief.** `core/bin/brain review <id> --branch <branch> --built-by <builder runtime>
    [--focus "<what worries you>"]`. It picks a reviewer runtime the builder didn't use and says
-   where to run.
+   where to run. Add `--model <id or display name>` for model-scoped weekly limits.
 3. **Run it.** Host `delegate` on the reviewer runtime, in the job's worktree (or `launch` a
    worker there if the host's delegate can't pick a folder). The reviewer changes nothing.
 4. **Address.** Send the findings to the builder (host `send`). Blockers and majors get fixed or

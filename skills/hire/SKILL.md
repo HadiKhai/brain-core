@@ -15,7 +15,8 @@ stated; never run a polling loop in an agent.
    target may use.
 3. **Assemble the brief:**
    `core/bin/brain hire <specialist> <target> --task "<task, constraints, who to report to>" [--items a,b] [--out <file>]`.
-   It finds the nearest specialist at or above the target, refuses if its scope doesn't cover
+   Add `--model <id or display name>` when the job's model is known, so its scoped weekly
+   limit is checked. It finds the nearest specialist at or above the target, refuses if its scope doesn't cover
    the target's owners, and includes only the lessons and items in scope.
 4. **Run it** as a worker with that brief: host `launch` in the target node (in its home, for an
    external home), or host `delegate` for one-shot work. Use the runtime the brief names unless

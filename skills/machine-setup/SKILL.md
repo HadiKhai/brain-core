@@ -75,24 +75,41 @@ IDs with `orchestrator_capabilities`, never infer them from a runtime's name:
 Names in `brains` are machine registry names (`brain brains`); `[]` allows none, `["*"]`
 explicitly allows every brain. Without a file, installed runtimes each have one subscription,
 using `CLAUDE_CONFIG_DIR` / `CODEX_HOME` when set, otherwise `~/.claude` / `~/.codex`, allowed
-for every brain. Bind host instances explicitly before launching; defaults cannot infer them.
+for every brain; the output says so. These defaults are informational until subscriptions are
+declared: existing runtime choices stay unchanged. Bind host instances explicitly before
+launching; defaults cannot infer them. Brain usage output lists only subscriptions that brain
+may use, plus a count of others; the UI never exposes config directories.
 Duplicate account IDs share one reading while each entry keeps its own brain allow-list.
 Account keys are hashed; account names, tokens and credit balances are not cached.
 `pacing_margin` is percentage points ahead of the fraction of the week elapsed, default 10.
 The fullest window determines headroom; `.brain/local.json`'s ordered `fallback` host instance
-IDs break ties; otherwise equal readings keep the node's preferred runtime. An explicit runtime flag (and a specialist's runtime) constrains selection;
-review always uses a runtime different from the builder.
+IDs break ties; otherwise equal readings keep the preferred runtime. A node's `runtime` pins
+`brain brief` just as a specialist's runtime constrains `hire`. At its stop line, the brief keeps
+the pin, says to stop, and names an eligible alternative; `--runtime` explicitly overrides it.
+Review always uses a runtime different from the builder. Pass `--model <id or display name>`
+to brief/hire/review to apply matching model-scoped weekly limits; other model limits are shown
+separately and ignored for routing. Unknown model means no scoped limit can be applied.
 
 Run `brain usage --refresh` once to check access. Codex uses read-only app-server account
-lookups; Claude uses its stored OAuth credential in memory. Keychain reads never request a
-dialog and stop trying after a blocked read in that poller. Failures fall back to timestamped
-logs or unknown. A newer cached observation survives an outage as unknown (with its original
-time), so an old low log value cannot clear a stop line. Tokens never belong in this file, command arguments, reports or the cache.
+lookups; on macOS Claude reads its stored OAuth credential through `/usr/bin/security`, with
+stdout captured only in memory, no stdin or terminal, and a two-second timeout. The CLI has no
+per-read flag to suppress Keychain UI; a denied or timed-out read retries after ten minutes,
+with at most one failed attempt per service per refresh cycle. Non-macOS reads
+`$CLAUDE_CONFIG_DIR/.credentials.json` (default `~/.claude`). Failures fall back to timestamped
+logs or unknown. Merge observations per window: retain newer cached windows and their original
+source and time during an outage. A failed inline refresh never relabels or freshens good
+readings, so an old low log value cannot clear a stop line. Tokens never belong in this file,
+command arguments, reports or the cache.
 Local logs do not reliably measure this machine's share of the account-wide allowance.
 
 Keep one `brain usage --watch --every 300` process per machine, outside agent threads.
 On macOS, `brain usage install` writes `~/Library/LaunchAgents/org.brain.usage.plist` and prints
 the `launchctl bootstrap` command; it does not load it. Inspect the paths first, then load it
 only when the operator wants the service. `--launch-agent <path>` writes a plist elsewhere.
-Agents read `usage.json`; brief/hire/review refresh it once if last checked over two minutes
-ago. The UI reads it without calling runtimes. Expired observations are unknown until refreshed.
+The LaunchAgent restarts failed exits, throttled to thirty seconds, and writes stdout/stderr
+to `~/Library/Logs/brain-usage.log`; a duplicate poller exits successfully without restarting.
+One bad refresh logs a generic failure and the watch loop continues.
+Agents read `usage.json`; freshness is twice its stored poll interval (two minutes for old
+caches). While a live poller holds the watch lock, brief/hire/review never poll inline, even
+when stale. The UI reads without calling runtimes. Expired observations are unknown until
+refreshed; fallback skips transcript files older than eight days.
