@@ -2836,6 +2836,18 @@ class AutonomyDue(AutonomyProject):
         self.assertFalse((self.tmp / 'network-called').exists())
 
 
+class AutonomyHire(AutonomyProject):
+    def test_hire_branch_adds_the_durable_handback_without_changing_other_output(self):
+        r, home, wt = self.project()
+        self.b(r, 'specialist', 'new', 'tester', '--title', 'Tester')
+        base = self.b(r, 'hire', 'tester', 'app', '--task', 'Check the result.')
+        branched = self.b(r, 'hire', 'tester', 'app', '--task', 'Check the result.', '--branch', 'job-a')
+        added = [line for line in branched.splitlines(keepends=True) if '**Before handing back**' in line]
+        self.assertEqual(len(added), 1)
+        self.assertIn('brain handback app --branch job-a', added[0])
+        self.assertEqual(branched.replace(added[0], ''), base)
+
+
 class AutonomyFacts(AutonomyProject):
     def test_refresh_preserves_judgement_bytes_and_separates_timestamps(self):
         r, home, wt = self.project()

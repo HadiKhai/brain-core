@@ -684,7 +684,9 @@ def autonomy_worker_handback(run):
     loc = json.loads((root / ".brain/local.json").read_text())
     wt = Path(loc["nodes"]["a"]["worktrees"]["job/signal"]["path"])
     owned = {name: (a / name).read_bytes() for name in ("status.md", "brief.md", "decisions.md", "node.md", "job-ledger.md")}
-    brief = brain(root, "brief", "a", "--branch", "job/signal", "--task",
+    brain(root, "specialist", "new", "finisher", "--title", "Finisher", "--runtime", run.runtime)
+    brief = brain(root, "hire", "finisher", "a", "--branch", "job/signal", "--task",
+                  f"Work only in this existing job worktree: {wt}. "
                   "Replace answer.txt with ready, write a short report.md in this worktree, and commit both. "
                   "No host send tool is available in this harness; still complete the file hand-back "
                   "required by this brief. Do not push or merge.")

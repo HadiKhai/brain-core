@@ -30,8 +30,8 @@ stated; never run a polling loop in an agent.
    and open a pull request only when the operator or the home's rules allow it, axiom 24), then
    wrap it with `core/bin/brain brief <id> --branch <branch> --task-file <file>`: that adds the
    worktree, port, limits, guard step and hand-back. Use `core/bin/brain hire` when a
-   specialist fits; its brief has the same hand-back. Require a **Lessons** section in the
-   report: each lesson, or `none: <reason>`.
+   specialist fits; pass `--branch <branch>` so its brief has the same hand-back. Require a
+   **Lessons** section in the report: each lesson, or `none: <reason>`.
    While it runs, the worker `send`s you when it finishes, fails, is blocked or has a question
    (the coordinator role, "While workers run", is the backstop).
    Before handing back, the worker runs `brain handback <id> --branch <branch>

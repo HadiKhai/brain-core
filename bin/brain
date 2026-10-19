@@ -2331,7 +2331,7 @@ def cmd_hire(a):
     if others and not target["sealed"]:
         out += ["## Other knowledge you may ask for", ""] + \
                [f"- `{i['fm'].get('id')}`: {i['fm'].get('title')}" for i in others] + [""]
-    out += handback_lines(inst, target) + report_lines()
+    out += handback_lines(inst, target, branch=a.branch) + report_lines()
     text = "\n".join(out) + "\n"
     no_terms_in(target, text, "the brief")
     if a.out:
@@ -5053,7 +5053,7 @@ def main():
         opt("--from", dest="source", required=True), opt("--at"), "text")
     cmd("hire", cmd_hire, "print a specialist's brief for a job: brain hire <specialist> <node> --task \"...\"",
         "specialist", "node", opt("--task", required=True), opt("--items", default=""),
-        opt("--model", help="job model for scoped usage limits"), opt("--out"))
+        opt("--model", help="job model for scoped usage limits"), opt("--out"), opt("--branch"))
 
     cmd("workbench", cmd_workbench, "a node's workbench: scripts, reports, worktrees (created if missing)", "id",
         opt("--path", action="store_true"))
