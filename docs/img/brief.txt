@@ -1,0 +1,23 @@
+Role: worker in node `website` (Studio website), started by its coordinator.
+Run in: ~/code/website-work/worktrees/job-blog-search  ·  branch job/blog-search  ·  runtime: claude  ·  ports 4120-4122
+The rules, agents and skills where you run come first (axiom 7); this brief adds to them.
+
+## Task
+
+Rank results by title match first, then recency. Done when the search page shows the 10 best results in under 100 ms.
+
+## Limits
+
+- At most 3 worktrees at once. Why: each runs a dev server and a browser. Lift when: the CI runners take the browser tests.
+- No deploys without Sam. Why: the site takes payments. Lift when: never.
+
+## Questions and hand-back
+
+- **Never ask the operator, and never wait for an answer in this thread**: nobody is watching it.
+- **A choice** the task, the rules or this brief settle: make it, and list it in your report under "Decisions I made".
+- **A question you can't go on without:** host `send` to thread `demo-web` (T3: t3_thread_send, threadId demo-web) with the question and append `- <time from brain now> from worker: question: <it>` to `~/Brain/nodes/website/inbox.md`, then end your turn with the question as your last line.
+- **When you finish, fail or get blocked**, tell your coordinator straight away: host `send` to thread `demo-web` (T3: t3_thread_send, threadId demo-web) with `done|failed|blocked: <one line>. Report: <path>`. Then end your turn.
+
+## Report
+
+The answer first; then the proof (commands, numbers, hashes); what you produced and where; what you did **not** run or check; "Decisions I made"; "Lessons": what the next job should know (a pitfall, a tool's quirk, a method that worked), or "none"; and what is still open.

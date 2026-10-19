@@ -1,0 +1,9 @@
+mobile-app: 0 finished (0 merged, 0 abandoned)
+  open  job/push                       9.4 h  0 review(s)
+northwind: 0 finished (0 merged, 0 abandoned)
+  open  job/invoices                   3.3 h  0 review(s)
+website: 7 finished (6 merged, 1 abandoned); median 2.8 h and 1.5 review round(s) per merged job
+  open  job/hero-redesign              7.5 h  2 review(s)   (over twice the median)
+  open  job/blog-search                3.1 h  0 review(s)
+  open  job/i18n                       1.2 h  0 review(s)
+  cause superseded by the redesign
