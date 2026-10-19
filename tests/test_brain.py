@@ -3370,7 +3370,7 @@ class ImportProjects(Scenario):
         rows = json.loads(out)
         self.assertEqual(len(rows), 1)
         repo = rows[0]
-        self.assertEqual(repo["path"], str(h))
+        self.assertEqual(repo["path"], "~/code/project")
         self.assertEqual(repo["name"], "project")
         self.assertEqual(repo["commit_count"], 4)
         self.assertIn("Python", repo["languages"])
@@ -3502,9 +3502,9 @@ class ImportProjects(Scenario):
         self.git("remote", "add", "extra", "ssh://user:fake-password@example.test/outer.git?fake-query", cwd=h)
         (h / "memory-notes.txt").write_text("untracked memory\n")
         rows = json.loads(self.b(r, "scan", str(base), str(h), "--json", "--depth", "1"))
-        self.assertEqual({x["path"] for x in rows}, {str(h), str(child)})
-        outer = next(x for x in rows if x["path"] == str(h))
-        self.assertEqual(outer["remotes"], ["example.test:team/outer.git", "ssh://example.test/outer.git"])
+        self.assertEqual({x["path"] for x in rows}, {"~/projects/outer", "~/projects/outer/child"})
+        outer = next(x for x in rows if x["path"] == "~/projects/outer")
+        self.assertEqual(outer["remotes"], ["git@example.test:team/outer.git", "ssh://user@example.test/outer.git"])
         self.assertIn("memory-notes.txt", outer["agent_setup"])
         self.b(r, "scan", str(self.tmp / "missing"), "--json", ok=False)
         alias = base / "alias"; alias.symlink_to(child)
@@ -3533,6 +3533,70 @@ class ImportProjects(Scenario):
         (r / "never-name.txt").write_text("NeverCopy\n")
         self.b(r, *args, "--repo", "safe", "--commit", "a" * 40, "--body", "NeverCopy", ok=False)
         self.assertFalse((r / "library/bad.md").exists())
+
+
+class ImportSafety(Scenario):
+    def test_secret_prefixes_do_not_match_project_metadata(self):
+        r = self.init("alice")
+        for name in ("task-scheduler", "risk-analysis", "disk-usage-tool", "sk-" + "a" * 24):
+            h = self.repo(self.tmp / name)
+            self.b(r, "adopt", str(h))
+            row = json.loads(self.b(r, "scan", str(h), "--json"))[0]
+            self.assertEqual(row["name"], name)
+            self.assertNotIn("[redacted secret]", row["path"])
+            self.b(r, "brief", name, "--import")
+            self.b(r, "item", "add", name, "--from", name, "--title", name, "--kind", "lesson",
+                   "--ref", name + "/AGENTS.md", "--repo", name, "--commit", "a" * 40,
+                   "--proposed", "--body", "Bound memory.")
+        for i, body in enumerate(("sk-" + "a" * 24, "ghp_" + "b" * 36, "AKIA" + "A" * 16,
+                                  "PASSWORD=fake", "Api_Key: fake")):
+            self.b(r, "item", "add", "unsafe-" + str(i), "--from", "root", "--title", "Unsafe",
+                   "--kind", "lesson", "--ref", "source", "--repo", "fixture", "--commit", "a" * 40,
+                   "--proposed", "--body", body, ok=False)
+        self.b(r, "item", "add", "case-sensitive", "--from", "root", "--title", "Safe",
+               "--kind", "fact", "--ref", "source", "--repo", "fixture", "--commit", "a" * 40,
+               "--proposed", "--body", "SK-" + "a" * 24 + " xsk-" + "b" * 24)
+
+    def test_local_origins_never_enter_committed_node_metadata(self):
+        r = self.init("alice")
+        for i, origin in enumerate((str(self.tmp / "origin"), "~/origin", "./origin", "../origin",
+                                    "file:///tmp/origin", "relative/origin")):
+            h = self.repo(self.tmp / ("local-" + str(i)))
+            self.git("remote", "add", "origin", origin, cwd=h)
+            command = "adopt" if i % 2 else "new"
+            args = (str(h),) if command == "adopt" else (h.name, "--title", "Local", "--home", str(h))
+            self.b(r, command, *args)
+            text = self.git("show", "HEAD:nodes/" + h.name + "/node.md", cwd=r)
+            self.assertNotIn("home_url:", text.replace("home_url: none", ""))
+            self.assertNotIn(origin, text)
+        h = self.repo(self.tmp / "rewritten")
+        self.git("config", "url.file:///tmp/private-origin/.insteadOf", "https://example.test/", cwd=h)
+        self.git("remote", "add", "origin", "https://example.test/project", cwd=h)
+        self.b(r, "adopt", str(h))
+        self.assertNotIn("file:", (r / "nodes/rewritten/node.md").read_text())
+
+    def test_ssh_clone_users_survive_without_passwords(self):
+        r = self.init("alice")
+        for i, (origin, clean) in enumerate((
+                ("git@github.com:org/repo", "git@github.com:org/repo"),
+                ("ssh://git:fake@host.test/x?private#fragment", "ssh://git@host.test/x"),
+                ("user:fake@host.test:org/repo", "user@host.test:org/repo"),
+                ("ftp://user:fake@host.test/x", "ftp://host.test/x"))):
+            h = self.repo(self.tmp / ("remote-" + str(i)))
+            self.git("remote", "add", "origin", origin, cwd=h)
+            self.b(r, "new", h.name, "--title", "Remote", "--home", str(h))
+            self.assertIn("home_url: " + clean, (r / "nodes" / h.name / "node.md").read_text())
+            self.assertEqual(json.loads(self.b(r, "scan", str(h), "--json"))[0]["remotes"], [clean])
+
+    def test_direct_learning_keeps_never_name_compatibility(self):
+        r = self.init("alice")
+        (r / "never-name.txt").write_text("PrivateFixtureTerm\n")
+        args = ("--from", "root", "--title", "Fact", "--kind", "fact", "--ref", "source",
+                "--body", "PrivateFixtureTerm")
+        self.b(r, "item", "add", "legacy", *args)
+        self.assertIn("PrivateFixtureTerm", (r / "library/legacy.md").read_text())
+        self.b(r, "item", "add", "proposal", *args, "--proposed", "--repo", "fixture",
+               "--commit", "a" * 40, ok=False)
 
 
 if __name__ == "__main__":

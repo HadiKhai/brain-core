@@ -20,6 +20,7 @@ import sys
 import tempfile
 import time
 import urllib.parse
+import unicodedata
 from pathlib import Path
 
 CORE = Path(__file__).resolve().parent.parent
@@ -88,7 +89,7 @@ def fill(text, values):
 
 def git(*args, cwd=None, check=False):
     return subprocess.run(["git", *(["-C", str(cwd)] if cwd else []), *args],
-                          capture_output=True, text=True, check=check)
+                          capture_output=True, text=True, errors="replace", check=check)
 
 
 def die(msg):
@@ -1382,25 +1383,36 @@ LANGUAGES = {".py": "Python", ".js": "JavaScript", ".jsx": "JavaScript", ".ts": 
              ".swift": "Swift", ".rb": "Ruby", ".php": "PHP", ".cs": "C#", ".c": "C", ".h": "C",
              ".cpp": "C++", ".cc": "C++", ".sh": "Shell", ".vue": "Vue", ".svelte": "Svelte",
              ".ex": "Elixir", ".exs": "Elixir", ".dart": "Dart", ".scala": "Scala"}
-SECRET_LINE = re.compile(r"(?i)(?:password|passwd|secret|token|api[_-]?key|authorization)\s*[=:]|"
-                         r"(?:sk-|gh[pousr]_|github_pat_|AKIA)[A-Za-z0-9_-]{8,}|"
-                         r"-----BEGIN .*PRIVATE KEY-----|[a-z][a-z0-9+.-]*://[^/\s]*@")
+SECRET_META = re.compile(r"(?i:\b(?:password|passwd|secret|token|api[_-]?key|authorization)\s*[=:])|"
+                         r"-----BEGIN .*PRIVATE KEY-----|(?:https?|ftp)://[^/\s]*@|"
+                         r"[a-z][a-z0-9+.-]*://[^/\s@]*:[^/\s@]*@")
+SECRET_KEY = re.compile(r"(?<![A-Za-z0-9])(?:sk-[A-Za-z0-9_-]{20,}|gh[pousr]_[A-Za-z0-9]{36,}|"
+                        r"github_pat_[A-Za-z0-9_]{22,}|AKIA[A-Z0-9]{16})(?![A-Za-z0-9])")
+SECRET_LINE = re.compile(SECRET_META.pattern + "|" + SECRET_KEY.pattern)
 
 
 def clean_remote(url):
-    """Remotes are labels, never credentials. Drop userinfo, query and fragment altogether."""
+    """Only portable network remotes; preserve SSH users needed to clone, never passwords."""
     if "://" in url:
         try:
             u = urllib.parse.urlsplit(url)
+            if u.scheme not in ("http", "https", "ftp", "ftps", "ssh", "git", "git+ssh") or not u.hostname:
+                return ""
             host = u.netloc.rsplit("@", 1)[-1]
+            if u.scheme in ("ssh", "git+ssh") and u.username:
+                host = u.username + "@" + host
             return urllib.parse.urlunsplit((u.scheme, host, u.path, "", ""))
         except ValueError:
-            return "[redacted remote]"
-    return re.sub(r"^[^/:]+@([^:]+:)", r"\1", url).split("?", 1)[0].split("#", 1)[0]
+            return ""
+    if url.startswith(("/", "~", ".", "file:")) or not re.match(r"(?:[^/@:]+(?::[^/@]*)?@)?[^/:]+:.+", url):
+        return ""
+    return re.sub(r"^([^/@:]+):[^/@]*@", r"\1@", url).split("?", 1)[0].split("#", 1)[0]
 
 
-def import_text(text, terms):
-    return redact("\n".join("[redacted secret]" if SECRET_LINE.search(l) else l
+def import_text(text, terms, *, metadata=False):
+    text = "".join(c for c in text if c in "\n\t" or unicodedata.category(c) not in ("Cc", "Cf", "Cs"))
+    pattern = SECRET_META if metadata else SECRET_LINE
+    return redact("\n".join("[redacted secret]" if pattern.search(l) else l
                             for l in text.splitlines()), terms)
 
 
@@ -1443,13 +1455,13 @@ def repo_candidate(inst, path, homes):
     count = git("rev-list", "--count", "HEAD", cwd=path).stdout.strip()
     remotes = git("config", "--get-regexp", r"^remote\..*\.url$", cwd=path).stdout.splitlines()
     urls = sorted({clean_remote(l.split(None, 1)[1]) for l in remotes if len(l.split(None, 1)) == 2})
-    return {"path": import_text(str(path), terms), "name": import_text(path.name, terms),
+    return {"path": import_text(tilde(path), terms, metadata=True), "name": import_text(path.name, terms, metadata=True),
             "last_commit_date": last or None, "commit_count": int(count) if count.isdigit() else 0,
             "languages": sorted(counts, key=lambda k: (-counts[k], k))[:5],
             "readme": import_text(readme, terms), "has_remote": bool(urls),
-            "remotes": [import_text(u, terms) for u in urls],
-            "agent_setup": sorted(import_text(f, terms) for f in setup),
-            "node": import_text(n["id"], terms) if n else None, "already_home": bool(n)}
+            "remotes": [import_text(u, terms, metadata=True) for u in urls if u],
+            "agent_setup": sorted(import_text(f, terms, metadata=True) for f in setup),
+            "node": import_text(n["id"], terms, metadata=True) if n else None, "already_home": bool(n)}
 
 
 def cmd_scan(a):
@@ -1518,7 +1530,7 @@ def cmd_adopt(a):
         title = a.title or path.name
         for value in (nid, title, str(path)):
             no_terms_in(parent, value, "the adoption metadata")
-            if "\n" in value or "\r" in value or SECRET_LINE.search(value):
+            if "\n" in value or "\r" in value or SECRET_META.search(value):
                 die("unsafe adoption metadata")
         planned.append((path, nid, title))
         homes.add(path)
@@ -2341,18 +2353,21 @@ def cmd_item_add(a):
     if a.body or a.body_file:
         body = a.body if a.body else Path(a.body_file).read_text()
         text = text.split("\n---\n", 1)[0] + "\n---\n\n" + body.strip() + "\n"
-    no_terms_in(src, text, "the library item")
     if a.proposed:
-        if SECRET_LINE.search(text):
+        no_terms_in(src, text, "the library item")
+        body = text.split("\n---\n", 1)[-1]
+        if SECRET_META.search(text) or SECRET_KEY.search(body):
             die("unsafe proposed item content")
         if not a.repo or not a.commit or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", a.commit):
             die("a proposed item needs --repo <non-local repo identity> and --commit <full hash>")
-        if Path(a.repo).is_absolute() or a.repo.startswith(("~/", "file:")):
+        if Path(a.repo).is_absolute() or a.repo.startswith(("~", ".", "file:")):
             die("--repo must be a portable identity, not a local path")
-        repo = clean_remote(a.repo)
+        repo = clean_remote(a.repo) if ":" in a.repo else a.repo
+        if not repo:
+            die("--repo must be a portable identity, not a local path")
         metadata = repo + "\n" + a.commit
         no_terms_in(src, metadata, "the item provenance")
-        if "\n" in repo or "\r" in repo or SECRET_LINE.search(metadata):
+        if "\n" in repo or "\r" in repo or SECRET_META.search(metadata):
             die("unsafe item provenance")
         text = text.replace("\n---\n", f"\nsource_repo: {repo}\nsource_commit: {a.commit}\n---\n", 1)
     lib = at["dir"] / "library"
@@ -2427,7 +2442,7 @@ def cmd_item_accept(a):
     src = resolve_ref(inst.nodes(), fm.get("source_node", ""))
     if src:
         no_terms_in(src, a.reviewed_by, "the review attribution")
-    if SECRET_LINE.search(a.reviewed_by):
+    if SECRET_META.search(a.reviewed_by):
         die("unsafe review attribution")
     fm["status"] = "active"
     fm["accepted_at"] = inst.now()
@@ -2564,7 +2579,7 @@ def cmd_hire(a):
         record = {"specialist": sp["id"], "at": sp["node"]["id"], "node": target["id"],
                   "job": a.job, "task": a.task.strip(), "time": inst.now()}
         no_terms_in(target, json.dumps(record, ensure_ascii=False), "the hire record")
-        if SECRET_LINE.search(a.job + "\n" + a.task):
+        if SECRET_META.search(a.job) or SECRET_LINE.search(a.task):
             die("unsafe hire record")
         rows.append(record)
         inst.save_local()
@@ -2682,7 +2697,7 @@ def import_brief(a):
     out += limits_lines(n) + handback_lines(inst, n, a.to) + report_lines()
     text = "\n".join(out) + "\n"
     no_terms_in(n, text, "the import brief")
-    if SECRET_LINE.search(text):
+    if SECRET_META.search(text) or SECRET_LINE.search(a.task or ""):
         die("unsafe import brief metadata")
     if a.out:
         Path(a.out).write_text(text)
@@ -4781,13 +4796,13 @@ def ui_state(inst, problems=None):
     items = sorted(inst.items(), key=lambda i: str(i["fm"].get("learned_at", "")), reverse=True)
     # Imported knowledge stays inspectable even while it is awaiting review.
     terms = list({t for n in nodes for t in never_terms(n)})
-    def safe(value):
+    def safe(value, field=""):
         if isinstance(value, str):
-            return import_text(value, terms)
+            return import_text(value, terms, metadata=field not in ("body", "text"))
         if isinstance(value, dict):
-            return {k: safe(v) for k, v in value.items()}
+            return {k: safe(v, k) for k, v in value.items()}
         if isinstance(value, list):
-            return [safe(v) for v in value]
+            return [safe(v, field) for v in value]
         return value
     library = []
     for i in items:
