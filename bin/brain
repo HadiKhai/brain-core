@@ -691,7 +691,12 @@ def usage_keychain(config_dir):
         return {}, "Keychain denied/unavailable; retry in 10 minutes"
 
 
+EXPIRED_CLAUDE_LOGIN = ("Claude login expired: it renews the next time Claude runs with this "
+                        "subscription's folder; using logs if available")
+
+
 def usage_claude(sub):
+    import urllib.error
     import urllib.request
     import urllib.parse
     cfg = Path(sub["config_dir"])
@@ -710,7 +715,11 @@ def usage_claude(sub):
     else:
         if sys.platform == "darwin":
             credentials, note = usage_keychain(str(cfg))
-        token = (credentials.get("claudeAiOauth") or {}).get("accessToken")
+        oauth = credentials.get("claudeAiOauth") or {}
+        token = oauth.get("accessToken")
+        if isinstance(token, str) and token and usage_number(oauth.get("expiresAt")) and \
+                oauth["expiresAt"] / 1000 <= time.time():
+            return {}, None, EXPIRED_CLAUDE_LOGIN
     if not isinstance(token, str) or not token:
         return {}, None, note or "No stored Claude OAuth token"
     # Redirects must never carry the Authorization header to another host.
@@ -719,8 +728,15 @@ def usage_claude(sub):
             return None
     request = urllib.request.Request(url, headers={"Authorization": "Bearer " + token,
                                                    "anthropic-beta": "oauth-2025-04-20"})
-    with urllib.request.build_opener(NoRedirect).open(request, timeout=8) as response:
-        data = json.loads(response.read(1024 * 1024))
+    try:
+        with urllib.request.build_opener(NoRedirect).open(request, timeout=8) as response:
+            data = json.loads(response.read(1024 * 1024))
+    except urllib.error.HTTPError as e:
+        # Only the status code: the body and headers stay unread.
+        return {}, None, EXPIRED_CLAUDE_LOGIN if e.code in (401, 403) else \
+            f"Claude usage lookup refused (HTTP {e.code}); using logs if available"
+    except (urllib.error.URLError, OSError):
+        return {}, None, "Claude usage lookup unreachable (network); using logs if available"
     return usage_windows(data, "claude"), usage_account(data.get("account")) or usage_account(data), note
 
 
@@ -858,7 +874,7 @@ def usage_merge(prior, reading):
                 if r is reading:
                     changed = True
     if not changed and prior.get("windows"):
-        return prior
+        return {**prior, "note": reading.get("note", "")}  # older numbers, today's reason
     if not windows:
         return reading
     newest = max(windows.values(), key=lambda w: w["read_at"] or 0)

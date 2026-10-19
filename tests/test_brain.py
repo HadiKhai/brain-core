@@ -2440,6 +2440,10 @@ for line in sys.stdin:
                 self.assertEqual(requests[0], ("/usage", "Bearer TEST-SECRET", "oauth-2025-04-20"))
                 self.assertEqual(next(iter(data["accounts"].values()))["windows"]["five_hour"]["used_percent"], 35)
                 self.assertNotIn("TEST-SECRET", self.m.usage_file().read_text())
+                before = len(requests)
+                credential.write_text(json.dumps({"claudeAiOauth": {"accessToken": "OLD", "expiresAt": 1000}}))
+                self.assertIn("login expired", self.m.usage_reading(sub)[1]["note"])
+                self.assertEqual(len(requests), before)  # an expired token is never sent
                 credential.unlink()
                 with mock.patch.dict(os.environ, {"BRAIN_USAGE_TEST_TOKEN": "INJECTED"}):
                     self.assertEqual(self.m.usage_claude(sub)[0]["seven_day"]["used_percent"], 44)
@@ -2450,7 +2454,16 @@ for line in sys.stdin:
                     status[0] = 503
                     _, reading = self.m.usage_reading(sub)
                     self.assertEqual(reading["source"], "unknown")
-                    self.assertIn("failed", reading["note"])
+                    self.assertIn("HTTP 503", reading["note"])
+                    status[0] = 401
+                    self.assertIn("login expired", self.m.usage_reading(sub)[1]["note"])
+                    status[0] = 200
+                    payload.update({"five_hour": {"utilization": 5}, "seven_day": {"utilization": 6}})
+                    self.m.usage_refresh(self.m.usage_config())
+                    status[0] = 401
+                    kept = next(iter(self.m.usage_refresh(self.m.usage_config())["accounts"].values()))
+                    self.assertEqual(kept["windows"]["seven_day"]["used_percent"], 6)
+                    self.assertIn("login expired", kept["note"])
                     status[0] = 302
                     before = len(requests)
                     self.assertEqual(self.m.usage_reading(sub)[1]["source"], "unknown")
