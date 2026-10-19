@@ -668,6 +668,20 @@ class SeveralBrains(Scenario):
         self.assertEqual(json.loads((me / ".brain" / "local.json").read_text())["global"], {"claude": ["~/.claude"]})
         self.assertIn("this brain: me   pointer in: claude ~/.claude", self.b(me, "machine"))
 
+    def test_a_throwaway_brain_stays_out_of_the_real_list(self):
+        import tempfile as tf
+        real = self.tmp / "real-config"                       # stands in for ~/.config/brain, outside the temp dir?
+        if str(real.resolve()).startswith(str(Path(tf.gettempdir()).resolve())):
+            # this test's folders are themselves in the temp dir; point the list somewhere that isn't
+            real = Path.home() / ".cache" / f"brain-test-{os.getpid()}"
+        self.env["BRAIN_CONFIG"] = str(real / "brains.json")
+        try:
+            r = self.init("alice")                             # lives in the temp dir
+            self.b(r, "tree")
+            self.assertFalse((real / "brains.json").exists() and "alice" in (real / "brains.json").read_text())
+        finally:
+            shutil.rmtree(real, ignore_errors=True)
+
     def test_ports_never_collide_across_brains(self):
         me, work = self.two()
         self.b(me, "principal", "add", "club")
@@ -715,8 +729,14 @@ class WorkerBriefs(Scenario):
         self.b(r, "brief", "app", "--branch", "nope", ok=False)
         # the same hand-back in a specialist's brief and a review brief
         self.b(r, "specialist", "new", "qa", "--title", "QA")
-        self.assertIn("Never ask the operator", self.b(r, "hire", "qa", "app", "--task", "test it"))
-        self.assertIn("thr-app", self.b(r, "review", "app", "--branch", "job-a"))
+        hb = self.b(r, "hire", "qa", "app", "--task", "test it")
+        self.assertIn("Never ask the operator", hb)
+        self.assertIn("Lift when: over 50 GB free", hb)
+        rb = self.b(r, "review", "app", "--branch", "job-a")
+        self.assertIn("thr-app", rb)
+        self.assertIn("Lift when: over 50 GB free", rb)
+        self.assertNotIn("inbox.md", rb)                              # a reviewer changes nothing, not even that
+        self.assertIn("Write no file", rb)
         # a limit with no reason or end is flagged; show gives the status time in UTC for host times
         self.assertIn("a limit in brief.md has no Why: or Lift when:", self.b(r, "check"))
         self.assertRegex(self.b(r, "show", "app"), r"\(= \d{4}-\d{2}-\d{2}T\d{2}:\d{2}Z")
@@ -726,6 +746,13 @@ class WorkerBriefs(Scenario):
         self.b(r, "new", "shared", "--title", "Shared", "--owners", "team", "--home", str(sh))
         sb = self.b(r, "brief", "shared", "--task", "x")
         self.assertNotIn("alice", sb)
+        loc = json.loads((r / ".brain" / "local.json").read_text())   # this machine loses the home's path
+        home_was = loc["nodes"]["shared"].pop("home")
+        (r / ".brain" / "local.json").write_text(json.dumps(loc))
+        out = self.b(r, "brief", "shared", "--task", "x", ok=False)
+        self.assertIn("isn't on this machine", out)
+        loc["nodes"]["shared"]["home"] = home_was
+        (r / ".brain" / "local.json").write_text(json.dumps(loc))
         self.assertIn("Leave nothing in it that names", sb)
         d = Path(self.b(r, "report", "app", "job a").strip())
         self.assertIn("## Lessons", (d / "index.md").read_text())
@@ -745,15 +772,26 @@ class WorkerBriefs(Scenario):
         self.assertNotIn("oldco", out.lower())                               # never shows the word
         self.assertIn("contains term 1 of app/never-name.txt", self.b(r, "check", ok=False))
         (home / "notes.md").unlink()
-        self.b(r, "wt", "add", "app", "port-oldco")                          # a branch name
-        w = self.tmp / "code" / "app-work" / "worktrees" / "port-oldco"
+        out = self.b(r, "wt", "add", "app", "port-oldco", ok=False)        # brain won't write the word itself
+        self.assertNotIn("oldco", out.lower())
+        self.assertFalse((r / "nodes" / "app" / "job-ledger.md").exists())
+        self.git("branch", "port-OldCo", cwd=home)                           # a branch name someone else made
+        self.b(r, "wt", "add", "app", "port")
+        w = self.tmp / "code" / "app-work" / "worktrees" / "port"
         (w / "x.md").write_text("x\n")
         self.git("add", "x.md", cwd=w)
         self.git("commit", "-qm", "like oldco did", cwd=w)                   # a commit message
+        (w / "oldco-notes.txt").write_text("nothing here\n")                 # a file name
         out = self.b(r, "guard", "app", ok=False)
-        self.assertIn("branch port-oldco", out)
+        self.assertIn("branch port-[…]", out)
+        self.assertIn("[…]-notes.txt", out)
         self.assertRegex(out, r"commit [0-9a-f]+ in")
-        self.assertNotIn("oldco", out.replace("port-oldco", "").lower())
+        self.assertNotIn("oldco", out.lower())
+        self.assertNotIn("oldco", self.b(r, "check", ok=False).lower())
+        self.assertNotIn("oldco", self.b(r, "ui", "--json").lower())       # the live view shows it as guard does
+        out = self.b(r, "guard", "app", str(self.tmp / "nowhere"), ok=False)  # a path that isn't there isn't clean
+        self.assertIn("not found", out)
+        (w / "oldco-notes.txt").unlink()
         # a child's home is covered by the parent's words; briefs that carry a word are refused
         kid = self.repo(self.tmp / "code" / "kid", {"a.md": "OldCo inside\n"})
         self.b(r, "new", "app/kid", "--title", "Kid", "--home", str(kid))
@@ -763,7 +801,483 @@ class WorkerBriefs(Scenario):
         self.assertNotIn("oldco", out.lower())
         self.b(r, "new", "plain", "--title", "Plain")
         self.assertIn("nothing to check", self.b(r, "guard", "plain", str(kid)))
+        # a node whose home is its own folder: its files are checked, its notes (which state the rule) aren't
+        self.b(r, "new", "app/notes", "--title", "Notes")
+        nd = next(p_.parent for p_ in r.rglob("node.md") if "id: app/notes" in p_.read_text())
+        (nd / "brief.md").write_text((nd / "brief.md").read_text() + "\nNever name OldCo.\n")
+        self.assertIn("guard: clean", self.b(r, "guard", "app/notes"))
+        (nd / "sources" / "draft.md").write_text("from OldCo\n")
+        self.assertIn("draft.md: term 1 of app/never-name.txt", self.b(r, "guard", "app/notes", ok=False))
 
+
+
+
+class Hardening(Scenario):
+    """What the second-runtime reviews broke, kept broken-proof."""
+
+    def never(self, r, node):
+        nd = next(p_.parent for p_ in r.rglob("node.md") if f"id: {node}\n" in p_.read_text())
+        (nd / "never-name.txt").write_text("OldCo\n")
+        return nd
+
+    def test_guard_on_a_home_inside_the_brain(self):
+        r = self.init("alice")
+        self.b(r, "new", "notes", "--title", "Notes")
+        nd = self.never(r, "notes")
+        (r / ".gitignore").write_text((r / ".gitignore").read_text() + "dist/\n")
+        (nd / "dist").mkdir()
+        (nd / "dist" / "gen.js").write_text("OldCo\n")                    # ignored: not part of the home
+        os.mkfifo(nd / "sources" / "events.pipe")                         # a special file never blocks the scan
+        self.assertIn("guard: clean", self.b(r, "guard", "notes"))
+        (nd / ".github").mkdir()
+        (nd / ".github" / "ci.yml").write_text("run: oldco\n")             # dot-folders are part of it
+        (nd / "sources" / "OldCo").mkdir()
+        (nd / "sources" / "OldCo" / "clean.txt").write_text("nothing\n")   # a folder's name is too
+        out = self.b(r, "guard", "notes", ok=False)
+        self.assertIn(".github/ci.yml", out)
+        self.assertIn("sources/[…]/clean.txt", out)
+        self.assertNotIn("oldco", out.lower())
+
+    def test_an_unreadable_repository_is_never_clean(self):
+        r = self.init("alice")
+        home = self.repo(self.tmp / "code" / "app")
+        self.b(r, "new", "app", "--title", "App", "--home", str(home))
+        self.never(r, "app")
+        (home / ".git" / "HEAD").rename(home / ".git" / "HEAD.bak")
+        r_ = subprocess.run([sys.executable, str(r / "core" / "bin" / "brain"), "guard", "app"], cwd=r, env=self.env,
+                            capture_output=True, text=True)
+        self.assertEqual(r_.returncode, 2, r_.stdout + r_.stderr)
+        self.assertIn("incomplete", r_.stdout)
+        (home / ".git" / "HEAD.bak").rename(home / ".git" / "HEAD")
+        out = self.b(r, "guard", "app", str(self.tmp / "OldCo-missing"), ok=False)
+        self.assertNotIn("oldco", out.lower())
+
+    def test_no_review_brief_into_a_missing_home(self):
+        r = self.init("alice")
+        home = self.repo(self.tmp / "code" / "app")
+        self.b(r, "new", "app", "--title", "App", "--home", str(home))
+        self.b(r, "review", "app", "--branch", "main", "--base", "main")
+        loc = json.loads((r / ".brain" / "local.json").read_text())
+        loc["nodes"]["app"].pop("home")
+        (r / ".brain" / "local.json").write_text(json.dumps(loc))
+        self.assertIn("isn't on this machine", self.b(r, "review", "app", "--branch", "main", ok=False))
+
+    def test_a_git_hook_that_runs_brain_does_not_deadlock(self):
+        r = self.init("alice")
+        gi = r / ".gitignore"                       # something for the hook's `check --fix` to repair and commit
+        gi.write_text(gi.read_text().replace(".brain/\n", ""))
+        self.git("commit", "-qam", "drop .brain/ from .gitignore", cwd=r)
+        hook = r / ".git" / "hooks" / "post-commit"
+        hook.write_text(f"#!/bin/sh\n'{sys.executable}' '{r / 'core' / 'bin' / 'brain'}' check --fix >/dev/null 2>&1\n")
+        hook.chmod(0o755)
+        p = subprocess.run([sys.executable, str(r / "core" / "bin" / "brain"), "new", "x", "--title", "X"], cwd=r,
+                           env=self.env, capture_output=True, text=True, timeout=60)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertIn(".brain/", gi.read_text())    # the hook did run, inside brain's own commit
+
+    def test_a_branch_called_job_keeps_its_row(self):
+        r = self.init("alice")
+        home = self.repo(self.tmp / "code" / "app")
+        self.b(r, "new", "app", "--title", "App", "--home", str(home))
+        self.b(r, "wt", "add", "app", "Job")
+        self.b(r, "review", "app", "--branch", "Job", "--built-by", "claude")
+        self.b(r, "wt", "add", "app", "other")
+        self.assertIn("open  Job", self.b(r, "jobs", "app"))
+        self.assertIn("| Job | 20", (r / "nodes" / "app" / "job-ledger.md").read_text())
+
+
+class Hardening3(Scenario):
+    """Round three of the second-runtime review."""
+
+    def test_commands_that_change_things_take_turns(self):
+        r = self.init("alice")
+        for i in range(6):
+            self.b(r, "new", f"n{i}", "--title", f"N{i}")
+        ps = [subprocess.Popen([sys.executable, str(r / "core" / "bin" / "brain"), "set", f"n{i}", f"coordinator=t{i}"],
+                               cwd=r, env=self.env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+              for i in range(6)]
+        self.assertEqual([p.communicate()[1] and p.returncode or p.returncode for p in ps], [0] * 6)
+        loc = json.loads((r / ".brain" / "local.json").read_text())
+        self.assertEqual({k: v.get("coordinator") for k, v in loc["nodes"].items() if k.startswith("n")},
+                         {f"n{i}": f"t{i}" for i in range(6)})            # no binding lost
+
+    def test_a_dead_holders_permission_does_not_outlive_it(self):
+        import fcntl
+        r = self.init("alice")
+        lock = r / ".brain" / "lock"
+        lock.parent.mkdir(exist_ok=True)
+        with open(lock, "a+") as fh:                                  # someone else holds the lock now
+            fcntl.flock(fh, fcntl.LOCK_EX)
+            fh.seek(0); fh.truncate(); fh.write("1"); fh.flush()     # pid 1: alive, but not our ancestor's lock...
+            env = {**self.env, "BRAIN_LOCK_HELD": f"{r.resolve()}|999999", "BRAIN_LOCK_WAIT": "2"}  # ...a dead holder
+            p = subprocess.run([sys.executable, str(r / "core" / "bin" / "brain"), "new", "x", "--title", "X"], cwd=r,
+                               env=env, capture_output=True, text=True, timeout=30)
+            self.assertNotEqual(p.returncode, 0)                      # it waited, then gave up: it didn't skip
+            self.assertIn("held this instance's lock", p.stderr)
+        self.assertNotIn("id: x\n", "".join(q.read_text() for q in r.rglob("node.md")))
+
+    def test_guard_edge_cases(self):
+        r = self.init("alice")
+        self.b(r, "new", "notes", "--title", "Notes")
+        nd = r / "nodes" / "notes"
+        (nd / "never-name.txt").write_text("OldCo\n")
+        comp = nd / "sources" / "component"
+        comp.mkdir(parents=True)
+        (comp / "node.md").write_text("# docs for a component, not a brain node\n")
+        (comp / "artifact.py").write_text("# from OldCo\n")
+        self.assertIn("artifact.py", self.b(r, "guard", "notes", ok=False))   # only real child nodes are skipped
+        (comp / "artifact.py").write_text("clean\n")
+        locked = nd / "sources" / "locked.txt"
+        locked.write_text("OldCo\n")
+        locked.chmod(0)
+        try:
+            p = subprocess.run([sys.executable, str(r / "core" / "bin" / "brain"), "guard", "notes"], cwd=r,
+                               env=self.env, capture_output=True, text=True)
+            self.assertEqual(p.returncode, 2, p.stdout)                       # unreadable isn't clean
+            self.assertIn("couldn't read", p.stdout)
+        finally:
+            locked.chmod(0o644)
+        # a sealed home whose repository can't be read: incomplete, not clean
+        self.b(r, "principal", "add", "team")
+        sh = self.repo(self.tmp / "code" / "shared")
+        self.b(r, "new", "shared", "--title", "Shared", "--owners", "team", "--home", str(sh))
+        (sh / ".git" / "HEAD").rename(sh / ".git" / "HEAD.bak")
+        p = subprocess.run([sys.executable, str(r / "core" / "bin" / "brain"), "guard", "shared"], cwd=r,
+                           env=self.env, capture_output=True, text=True)
+        (sh / ".git" / "HEAD.bak").rename(sh / ".git" / "HEAD")
+        self.assertEqual(p.returncode, 2, p.stdout + p.stderr)
+
+    def test_decisions_with_offsets_reach_the_live_view(self):
+        r = self.init("alice")
+        self.b(r, "new", "a", "--title", "A")
+        d = r / "nodes" / "a" / "decisions.md"
+        d.write_text(d.read_text() + "\n## 2026-10-19 06:32 +03:00: Use Postgres\nWhy: writes.\n"
+                     "\n## 2026-01-10 09:00: An old one, in winter\nWhy: x.\n")
+        st = json.loads(self.b(r, "ui", "--json"))
+        dec = {x["title"]: x["t"] for x in next(n for n in st["nodes"] if n["id"] == "a")["decisions"]}
+        self.assertEqual(dec["Use Postgres"], 1792380720)                  # 03:32Z
+        self.assertEqual(dec["An old one, in winter"], 1768035600)         # UTC instance: 09:00Z
+
+
+class Hardening4(Scenario):
+    """Round four of the second-runtime review."""
+
+    def held(self, r):
+        import fcntl
+        lock = r / ".brain" / "lock"
+        lock.parent.mkdir(exist_ok=True)
+        fh = open(lock, "a+")
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        return fh
+
+    def run_b(self, r, *args, env=None):
+        return subprocess.run([sys.executable, str(r / "core" / "bin" / "brain"), *args], cwd=r,
+                              env={**self.env, "BRAIN_LOCK_WAIT": "2", **(env or {})}, capture_output=True, text=True,
+                              input="", timeout=60)
+
+    def test_unreadable_files_in_a_repository_are_not_clean(self):
+        r = self.init("alice")
+        home = self.repo(self.tmp / "code" / "app", {"a.txt": "OldCo\n"})
+        self.b(r, "new", "app", "--title", "App", "--home", str(home))
+        (r / "nodes" / "app" / "never-name.txt").write_text("OldCo\n")
+        (home / "a.txt").chmod(0)
+        try:
+            p = self.run_b(r, "guard", "app")
+            self.assertEqual(p.returncode, 2, p.stdout + p.stderr)
+        finally:
+            (home / "a.txt").chmod(0o644)
+
+    def test_every_writer_waits_and_readers_do_not(self):
+        r = self.init("alice")
+        self.b(r, "item", "add", "m1", "--from", "root", "--title", "M", "--kind", "method", "--ref", "x", "--body", "b")
+        item = next(r.rglob("library/m1.md"))
+        before = item.read_text()
+        fh = self.held(r)
+        try:
+            p = self.run_b(r, "item", "quarantine", "m1")
+            self.assertNotEqual(p.returncode, 0)                     # it waited, then gave up...
+            self.assertEqual(item.read_text(), before)               # ...without touching the item
+            out = r / "nodes" / "brief.txt"
+            self.assertNotEqual(self.run_b(r, "brief", "root", "--task", "x", "--out", str(out)).returncode, 0)
+            for args in (["principal", "list"], ["schedule", "list"], ["brief", "root", "--task", "x"], ["show", "root"]):
+                self.assertEqual(self.run_b(r, *args).returncode, 0, args)   # reading never waits
+        finally:
+            fh.close()
+
+    def test_the_stop_hook_never_breaks_a_turn(self):
+        r = self.init("alice")
+        self.b(r, "new", "a", "--title", "A")
+        a = r / "nodes" / "a"
+        st = a / "status.md"
+        st.write_text(st.read_text().replace(st.read_text().splitlines()[0], "Updated: 2020-01-01 00:00 by a coordinator"))
+        (r / ".brain").mkdir(exist_ok=True)
+        (r / ".brain" / "hooks.json").write_text("{half a fi")              # half-written by another session
+        payload = json.dumps({"cwd": str(a), "session_id": "s1"})
+        p = subprocess.run([sys.executable, str(r / "core" / "bin" / "brain"), "hook", "stop"], cwd=a, env=self.env,
+                           input=payload, capture_output=True, text=True, timeout=30)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertIn('"decision": "block"', p.stdout)                      # the reminder still goes out
+        (r / ".brain").chmod(0o500)                                         # nothing can be written there
+        try:
+            p = subprocess.run([sys.executable, str(r / "core" / "bin" / "brain"), "hook", "stop"], cwd=a, env=self.env,
+                               input=json.dumps({"cwd": str(a), "session_id": "s2"}), capture_output=True, text=True,
+                               timeout=30)
+            self.assertEqual(p.returncode, 0, p.stderr)
+            self.assertEqual(p.stderr, "")
+        finally:
+            (r / ".brain").chmod(0o755)
+
+
+class Hardening5(Scenario):
+    """Round five of the second-runtime review."""
+
+    def test_big_files_and_unreadable_folders(self):
+        r = self.init("alice")
+        self.b(r, "new", "notes", "--title", "Notes")
+        nd = r / "nodes" / "notes"
+        (nd / "never-name.txt").write_text("OldCo\n")
+        big = nd / "sources" / "big.txt"
+        big.write_bytes(b"x" * (2_000_010 - 3) + b"Old" + b"Co and more\n")   # past 2 MB, across a 1 MiB boundary
+        self.assertIn("big.txt", self.b(r, "guard", "notes", ok=False))
+        big.write_bytes(b"x" * ((1 << 20) - 3) + b"OldCo\n")                     # split exactly at a chunk edge
+        self.assertIn("big.txt", self.b(r, "guard", "notes", ok=False))
+        big.unlink()
+        hidden = nd / "sources" / "hidden"
+        hidden.mkdir()
+        (hidden / "f.txt").write_text("OldCo\n")
+        hidden.chmod(0)
+        try:
+            p = subprocess.run([sys.executable, str(r / "core" / "bin" / "brain"), "guard", "notes"], cwd=r,
+                               env=self.env, capture_output=True, text=True)
+            self.assertEqual(p.returncode, 2, p.stdout)                           # couldn't look: not clean
+        finally:
+            hidden.chmod(0o755)
+
+
+class Hardening6(Scenario):
+    """Round six of the second-runtime review."""
+
+    def test_a_character_split_between_reads_is_still_found(self):
+        r = self.init("alice")
+        self.b(r, "new", "notes", "--title", "Notes")
+        nd = r / "nodes" / "notes"
+        (nd / "never-name.txt").write_text("Café\n")
+        f = nd / "sources" / "edge.txt"
+        for pad in range(1, 6):                                       # é straddles the 1 MiB edge at some pad
+            f.write_bytes(b"x" * ((1 << 20) - pad) + "Café\n".encode())
+            self.assertIn("edge.txt", self.b(r, "guard", "notes", ok=False), pad)
+
+    def test_seal_commits_nothing_that_names_a_never_word(self):
+        r = self.init("alice")
+        self.b(r, "principal", "add", "team")
+        self.b(r, "new", "legacy", "--title", "OldCo port")
+        (r / "nodes" / "legacy" / "never-name.txt").write_text("OldCo\n")
+        home = self.tmp / "code" / "legacy"
+        p = subprocess.run([sys.executable, str(r / "core" / "bin" / "brain"), "seal", "legacy", "--owners", "team",
+                            "--home", str(home)], cwd=r, env=self.env, capture_output=True, text=True)
+        self.assertEqual(p.returncode, 1, p.stdout + p.stderr)
+        self.assertNotIn("oldco", (p.stdout + p.stderr).lower())
+        self.assertEqual(subprocess.run(["git", "rev-parse", "--verify", "-q", "HEAD"], cwd=home,
+                                        capture_output=True).returncode, 1 if (home / ".git").exists() else 128)
+
+
+class Hardening7(Scenario):
+    """Round seven of the second-runtime review."""
+
+    def test_binary_files_greek_words_and_the_word_list_itself(self):
+        r = self.init("alice")
+        home = self.repo(self.tmp / "code" / "app", {".gitattributes": "*.dat binary\n"})
+        self.b(r, "new", "app", "--title", "App", "--home", str(home))
+        (r / "nodes" / "app" / "never-name.txt").write_text("OldCo\nΟΣ\n")
+        (home / "x.dat").write_bytes(b"\0\1OldCo\0")                       # git calls it binary
+        self.assertIn("x.dat", self.b(r, "guard", "app", ok=False))
+        (home / "x.dat").unlink()
+        for pad in (2, 3):                                                   # Σ on a chunk edge
+            (home / "g.txt").write_bytes(b"x" * ((1 << 20) - pad) + "ΟΣ\n".encode())
+            self.assertIn("g.txt", self.b(r, "guard", "app", ok=False))
+        (home / "g.txt").unlink()
+        self.b(r, "principal", "add", "team")
+        self.b(r, "new", "legacy", "--title", "Legacy")
+        (r / "nodes" / "legacy" / "never-name.txt").write_text("OldCo\n")
+        for rel in ("never-name.txt", "./never-name.txt", "sources/../never-name.txt"):
+            out = self.b(r, "seal", "legacy", "--owners", "team", "--home", str(self.tmp / "h"), "--move", rel, ok=False)
+            self.assertIn("stays on the operator's side", out)
+            self.assertTrue((r / "nodes" / "legacy" / "never-name.txt").exists())
+            self.assertFalse((self.tmp / "h").exists())                       # refused before anything happened
+
+class Hardening8(Scenario):
+    """Ordinary staged edits, deletions and populated submodules from review round eight."""
+
+    def test_runtime_links_visit_only_registered_nodes(self):
+        r = self.init("alice")
+        impostors = [r / ".git" / "nodes" / "fake", r / "artifacts" / "nodes" / "fake"]
+        for folder in impostors:
+            folder.mkdir(parents=True)
+            (folder / "AGENTS.md").write_text("Unrelated instructions\n")
+        self.b(r, "new", "a", "--title", "A")
+        self.b(r, "new", "a/b", "--title", "B")
+        for folder in impostors:
+            self.assertFalse((folder / "CLAUDE.md").exists())
+        self.assertTrue((r / "nodes" / "a" / "nodes" / "b" / "CLAUDE.md").is_symlink())
+
+    def test_index_contents_and_tracked_deletions(self):
+        r = self.init("alice")
+        home = self.repo(self.tmp / "code" / "app", {"a.txt": "clean\n"})
+        self.b(r, "new", "app", "--title", "App", "--home", str(home))
+        (r / "nodes" / "app" / "never-name.txt").write_text("OldCo\nCafé\n")
+        f = home / "a.txt"
+        # Binary content and an accented term split across a chunk edge must also be checked in the index.
+        f.write_bytes(b"\0OldCo\n" + b"x" * ((1 << 20) - 9) + "Café\n".encode())
+        self.git("add", "a.txt", cwd=home)
+        f.write_text("clean again\n")
+        out = self.b(r, "guard", "app", ok=False)
+        self.assertIn("index stage 0:", out)
+        self.assertIn("term 1", out)
+        self.assertIn("term 2", out)
+        self.assertNotIn("OldCo", out)
+        f.unlink()
+        out = self.b(r, "guard", "app", ok=False)
+        self.assertIn("index stage 0:", out)
+        self.assertNotIn("incomplete", out)
+        self.git("add", "-u", cwd=home)
+        self.assertIn("clean", self.b(r, "guard", "app"))
+        # A clean unstaged deletion is clean too, while its clean blob remains staged.
+        self.git("restore", "--source=HEAD", "--staged", "--worktree", "a.txt", cwd=home)
+        f.unlink()
+        self.assertIn("clean", self.b(r, "guard", "app"))
+
+    def test_submodules_include_working_index_and_history(self):
+        r = self.init("alice")
+        lib = self.repo(self.tmp / "lib", {"note.txt": "clean\n"})
+        home = self.repo(self.tmp / "code" / "app")
+        self.git("submodule", "add", "-q", str(lib), "vendor/lib", cwd=home)
+        self.git("commit", "-qam", "add library", cwd=home)
+        self.b(r, "new", "app", "--title", "App", "--home", str(home))
+        (r / "nodes" / "app" / "never-name.txt").write_text("OldCo\n")
+        sub = home / "vendor" / "lib"
+        self.assertIn("clean", self.b(r, "guard", "app"))
+        (sub / "note.txt").write_text("OldCo\n")
+        self.assertIn("vendor/lib/note.txt", self.b(r, "guard", "app", ok=False))
+        self.git("add", "note.txt", cwd=sub)
+        (sub / "note.txt").write_text("clean\n")
+        self.assertIn("index stage 0:", self.b(r, "guard", "app", ok=False))
+        self.git("restore", "--staged", "note.txt", cwd=sub)
+        self.git("branch", "OldCo-migration", cwd=sub)
+        self.assertIn("branch", self.b(r, "guard", "app", ok=False))
+        self.git("branch", "-D", "OldCo-migration", cwd=sub)
+        self.git("commit", "--allow-empty", "-qm", "OldCo migration", cwd=sub)
+        self.assertIn("commit", self.b(r, "guard", "app", ok=False))
+        self.git("submodule", "deinit", "-f", "vendor/lib", cwd=home)
+        out = self.b(r, "guard", "app", ok=False)
+        self.assertIn("incomplete", out)
+        self.assertIn("submodule unavailable", out)
+
+    def test_seal_redacts_inherited_owner_summary(self):
+        r = self.init("oldco")
+        self.b(r, "new", "legacy", "--title", "Legacy")
+        (r / "nodes" / "legacy" / "never-name.txt").write_text("OldCo\n")
+        self.b(r, "principal", "add", "team")
+        out = self.b(r, "seal", "legacy", "--owners", "team", "--home", str(self.tmp / "code" / "legacy"))
+        self.assertIn("effective owners", out)
+        self.assertNotIn("oldco", out.casefold())
+
+
+class Measures(Scenario):
+    def test_jobs_are_measured_from_start_to_end(self):
+        r = self.init("alice")
+        home = self.repo(self.tmp / "code" / "app")
+        self.b(r, "new", "app", "--title", "App", "--home", str(home))
+        self.b(r, "wt", "add", "app", "job-a")
+        self.b(r, "wt", "add", "app", "job-b")
+        jobs = (r / "nodes" / "app" / "job-ledger.md").read_text()
+        self.assertIn("| job-a |", jobs)
+        self.assertEqual(self.git("status", "--porcelain", "--", "nodes/app/job-ledger.md", cwd=r).strip(), "")  # committed
+        self.b(r, "review", "app", "--branch", "job-a", "--built-by", "claude")
+        self.b(r, "review", "app", "--branch", "job-a", "--built-by", "claude")
+        wa = self.tmp / "code" / "app-work" / "worktrees" / "job-a"
+        (wa / "a.txt").write_text("a\n")
+        self.git("add", "a.txt", cwd=wa); self.git("commit", "-qm", "A", cwd=wa)
+        self.git("merge", "-q", "job-a", cwd=home)
+        self.assertIn("removed: job-a", self.b(r, "wt", "prune", "app"))
+        self.b(r, "wt", "rm", "app", "job-b", "--cause", "superseded by job-a")
+        rows = {l.split("|")[1].strip(): [c.strip() for c in l.split("|")[1:-1]]
+                for l in (r / "nodes" / "app" / "job-ledger.md").read_text().splitlines() if l.startswith("| job-")}
+        self.assertEqual(rows["job-a"][4], "merged")
+        self.assertEqual(rows["job-a"][5], "1")                 # commits
+        self.assertEqual(rows["job-a"][6], "2")                 # review rounds
+        self.assertEqual(rows["job-b"][4], "abandoned")
+        self.assertEqual(rows["job-b"][8], "superseded by job-a")
+        out = self.b(r, "jobs", "app")
+        self.assertIn("2 finished (1 merged, 1 abandoned)", out)
+        self.assertIn("2 review round(s) per merged job", out)
+        self.assertIn("cause superseded by job-a", out)
+        self.b(r, "wt", "add", "app", "job-c")
+        self.assertIn("open  job-c", self.b(r, "jobs", "app"))
+        self.assertIn("✓", self.b(r, "check"))
+        self.b(r, "wt", "add", "app", "job|pipe")                  # git allows it; the row must still be found
+        self.b(r, "review", "app", "--branch", "job|pipe", "--built-by", "claude")
+        self.b(r, "wt", "rm", "app", "job|pipe")
+        self.assertIn("job|pipe", (r / "nodes" / "app" / "job-ledger.md").read_text().replace("\\|", "|"))
+        self.assertNotIn("open  job|pipe", self.b(r, "jobs", "app"))
+
+    def test_a_file_brain_did_not_write_is_never_overwritten(self):
+        r = self.init("alice")
+        home = self.repo(self.tmp / "code" / "app")
+        self.b(r, "new", "app", "--title", "App", "--home", str(home))
+        mine = r / "nodes" / "app" / "job-ledger.md"
+        mine.write_text("# My own notes\n\nAcceptance: the export must round-trip.\n")
+        out = self.b(r, "wt", "add", "app", "job-a")
+        self.assertIn("isn't a job ledger written by brain", out)
+        self.assertEqual(mine.read_text(), "# My own notes\n\nAcceptance: the export must round-trip.\n")
+
+    def test_medians_and_daylight_saving(self):
+        from importlib.machinery import SourceFileLoader
+        import datetime as dt
+        from zoneinfo import ZoneInfo
+        m = SourceFileLoader("brain_mod", str(CORE / "bin" / "brain")).load_module()
+        ny = ZoneInfo("America/New_York")
+        a, b = dt.datetime(2026, 3, 8, 1, 30, tzinfo=ny), dt.datetime(2026, 3, 8, 3, 30, tzinfo=ny)
+        self.assertEqual(m.elapsed(a, b), 3600)                    # clocks jump forward: one real hour
+        r = self.init("alice")
+        self.b(r, "new", "app", "--title", "App")
+        led = r / "nodes" / "app" / "job-ledger.md"
+        led.write_text("# Jobs: app\n\n<!-- brain:job-ledger v1 -->\n\n| Job | Started | Ended | Hours | Outcome | Commits"
+                       " | Reviews | Runtime | Cause |\n| --- | --- | --- | --- | --- | --- | --- | --- | --- |\n"
+                       "| a | 2026-01-01T00:00+00:00 | 2026-01-01T01:00+00:00 | 1.0 | merged | 1 | 1 | claude |  |\n"
+                       "| b | 2026-01-01T00:00+00:00 | 2026-01-01T09:00+00:00 | 9.0 | merged | 1 | 3 | claude |  |\n")
+        self.assertIn("median 5.0 h and 2 review round(s)", self.b(r, "jobs", "app"))
+
+    def test_jobs_survive_commands_running_at_once(self):
+        r = self.init("alice")
+        home = self.repo(self.tmp / "code" / "app")
+        self.b(r, "new", "app", "--title", "App", "--home", str(home))
+        self.b(r, "wt", "add", "app", "job-a")
+        st = r / "nodes" / "app" / "status.md"
+        st.write_text(st.read_text() + "\n- the coordinator's edit, not committed yet\n")
+        ps = [subprocess.Popen([sys.executable, str(r / "core" / "bin" / "brain"), "review", "app", "--branch", "job-a",
+                                "--built-by", "claude"], cwd=r, env=self.env, stdout=subprocess.DEVNULL,
+                               stderr=subprocess.PIPE, text=True) for _ in range(16)]
+        errs = [p.communicate()[1] for p in ps]
+        self.assertEqual([p.returncode for p in ps], [0] * 16, errs)
+        row = next(l for l in (r / "nodes" / "app" / "job-ledger.md").read_text().splitlines() if l.startswith("| job-a"))
+        self.assertEqual(row.split("|")[7].strip(), "16")         # no round lost
+        self.assertEqual(self.git("status", "--porcelain", "--", "nodes", cwd=r).strip(), "M nodes/app/status.md")
+
+    def test_stale_compares_moments_not_digits(self):
+        r = self.init("alice")
+        self.b(r, "new", "app", "--title", "App")
+        inst = r / "instance.md"
+        inst.write_text(inst.read_text().replace("timezone: UTC", "timezone: Asia/Beirut"))
+        st = r / "nodes" / "app" / "status.md"
+        lines = st.read_text().splitlines()
+        lines[0] = "Updated: 2026-10-19 06:31 by app coordinator (claude)"   # Beirut, UTC+3: 03:31Z
+        st.write_text("\n".join(lines) + "\n")
+        self.assertIn("current", self.b(r, "stale", "app", "2026-10-19T03:20:00Z"))     # looks later, isn't
+        out = self.b(r, "stale", "app", "2026-10-19T05:00:00.000Z")
+        self.assertIn("behind by 1h 29m", out)
+        self.assertIn("node-sync", out)
+        self.assertIn("current", self.b(r, "stale", "app", "2026-10-19T06:33:00+03:00"))  # within the grace
+        self.b(r, "stale", "app", "2026-10-19 05:00", ok=False)                          # no zone: refused
 
 class LiveView(Scenario):
     def test_ui_serves_a_read_only_live_state_to_this_machine_only(self):
@@ -793,16 +1307,20 @@ class LiveView(Scenario):
                               "--every", "0.5"], cwd=r, env=self.env, stdout=subprocess.PIPE, text=True)
         try:
             line = p.stdout.readline()
-            url = line.split(": ", 1)[1].split()[0]
-            self.assertTrue(url.startswith("http://127.0.0.1:"))
+            full = line.split(": ", 1)[1].split()[0]
+            self.assertTrue(full.startswith("http://127.0.0.1:"))
+            url, key = full.split("?k=")
             self.assertIn(b"<title>", urllib.request.urlopen(url, timeout=5).read())
-            state = json.loads(urllib.request.urlopen(url + "api/state", timeout=5).read())
+            with self.assertRaises(urllib.error.HTTPError) as e:   # another account on this machine has no key
+                urllib.request.urlopen(url + "api/state", timeout=5)
+            self.assertEqual(e.exception.code, 403)
+            state = json.loads(urllib.request.urlopen(url + "api/state?k=" + key, timeout=5).read())
             self.assertEqual(state["brain"]["name"], "alice")
-            req = urllib.request.Request(url + "api/state", headers={"Host": "evil.example"})
+            req = urllib.request.Request(url + "api/state?k=" + key, headers={"Host": "evil.example"})
             with self.assertRaises(urllib.error.HTTPError) as e:
                 urllib.request.urlopen(req, timeout=5)
             self.assertEqual(e.exception.code, 403)              # another site can't read it through a browser
-            ev = urllib.request.urlopen(url + "api/events", timeout=10)
+            ev = urllib.request.urlopen(url + "api/events?k=" + key, timeout=10)
             first = ev.readline()
             self.assertTrue(first.startswith(b"data: {"))
             ev.readline()

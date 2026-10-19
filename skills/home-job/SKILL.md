@@ -37,7 +37,9 @@ request. The operator's own checkout of the home is never touched.
 6. **Done.** When the operator (and the home's owners) merge it, set the row to `merged`, record
    the outcome in `status.md`, turn the report's reusable lessons into library items (the
    `learn` skill), and run `core/bin/brain wt prune <id>`. It removes only clean, merged
-   worktrees.
+   worktrees. A job dropped instead: `core/bin/brain wt rm <id> <branch> --cause "<why>"`.
+   Either way the node's `job-ledger.md` gets the job's hours, commits and review rounds
+   (`core/bin/brain jobs <id>`).
 
 Never merge, push to a shared branch, deploy or delete a branch without explicit consent
 (axiom 24). Several jobs can run at once; each has its own worktree and port.

@@ -131,7 +131,7 @@ class Run:
     def check_time(self, text, what):
         """Axiom 17: the instance's timezone (UTC here), not the machine's clock."""
         m = re.search(TS, text)
-        now = brain(self.root, "now").strip()
+        now = brain(self.root, "now").strip()[:16]  # "YYYY-MM-DD HH:MM", then its offset
         if not m:
             return self.failures.append(f"{what}: no timestamp")
         fmt = "%Y-%m-%d %H:%M"
@@ -146,7 +146,7 @@ class Run:
 
 
 TS = r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}"
-TS_ANY = TS + r"(:\d{2})?( ?[A-Z]{2,5}|[+-]\d{2}:?\d{2})?"  # seconds and a zone are fine too (axiom 17)
+TS_ANY = TS + r"(:\d{2})?( ?(?:[A-Z]{2,5}|Z|[+-]\d{2}:?\d{2}))?"  # seconds and a zone are fine too (axiom 17)
 
 
 # ---------- scenarios ----------
@@ -409,10 +409,45 @@ def limits_carry_their_reason(run):
     run.check("disk" in lim.lower(), "the reason (the disk) isn't recorded")
     run.brain_check()
 
+
+def freshness_across_timezones(run):
+    """#10, one clock: a child's status written 90 minutes ago in Beirut time (its digits look later than the
+    thread's UTC time from 30 minutes ago) is behind that thread. Every clue agrees: the status line, its
+    commit date, its change log. The coordinator must not call it current."""
+    import datetime as dt
+    from zoneinfo import ZoneInfo
+    root = run.instance()
+    inst = root / "instance.md"
+    inst.write_text(inst.read_text().replace("timezone: UTC", "timezone: Asia/Beirut"))
+    now = dt.datetime.now(dt.timezone.utc).replace(second=0, microsecond=0)
+    wrote = (now - dt.timedelta(minutes=90)).astimezone(ZoneInfo("Asia/Beirut"))
+    thread = now - dt.timedelta(minutes=30)
+    st = root / "nodes" / "a" / "status.md"
+    text = st.read_text()
+    lines = text.splitlines()
+    off = "" if os.environ.get("LIVE_LEGACY_TIME") else " +03:00"  # the control: times as older cores wrote them
+    lines[0] = f"Updated: {wrote:%Y-%m-%d %H:%M}{off} by a coordinator (claude)"  # as `brain now` writes it
+    body = "\n".join(lines) + "\n"
+    body = re.sub(r"(## Recent changes[^\n]*\n)(?:\n?- [^\n]*\n)*", rf"\1\n- {wrote:%Y-%m-%d %H:%M}{off}: started\n", body)
+    st.write_text(body)
+    rs = root / "status.md"  # the root's own notes are current, so its stop hook stays quiet
+    rl = rs.read_text().splitlines()
+    rl[0] = f"Updated: {brain(root, 'now').strip()} by root coordinator (claude)"
+    rs.write_text("\n".join(rl) + "\n")
+    sh("git", "add", "-A", cwd=root)
+    when = wrote.isoformat()
+    sh("git", "commit", "-qm", "a: status", cwd=root, env={"GIT_AUTHOR_DATE": when, "GIT_COMMITTER_DATE": when})
+    out = run.agent(root, (
+        f"Role: coordinator of node `root`. Freshness check for child `a`: the host says its coordinator thread "
+        f"was last active at {thread:%Y-%m-%dT%H:%M:%S}Z. Is a's status.md current or behind? Answer in one line, "
+        "starting with the word current or behind."), writable=root)
+    first = out.strip().lower()
+    run.check(first.startswith("behind") or "behind" in first[:200], f"called it current: {out.strip()[:200]!r}")
+
 SCENARIOS = [parity, coordinator_writes_as_it_goes, worker_asks_the_writer, learning_is_a_citation,
              new_node_in_one_sentence, no_upward_traces, second_runtime_review, stop_hook_fires,
              notes_current_after_an_edit, a_session_reaches_its_own_brain, worker_hands_back_a_question,
-             lessons_become_items, limits_carry_their_reason]
+             lessons_become_items, limits_carry_their_reason, freshness_across_timezones]
 
 
 def main():

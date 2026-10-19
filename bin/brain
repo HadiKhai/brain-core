@@ -12,8 +12,10 @@ import os
 import re
 import shutil
 import socket
+import stat
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 CORE = Path(__file__).resolve().parent.parent
@@ -111,11 +113,22 @@ class Instance:
         return datetime.datetime.now(z) if z else datetime.datetime.now().astimezone()
 
     def now(self):
-        return self.now_dt().strftime("%Y-%m-%d %H:%M")
+        """A timestamp for the notes, with its UTC offset, so no reader has to guess the zone."""
+        d = self.now_dt()
+        z = d.strftime("%z")
+        return f"{d:%Y-%m-%d %H:%M} {z[:3]}:{z[3:]}" if z else f"{d:%Y-%m-%d %H:%M}"
 
     def parse_time(self, s):
+        """'2026-10-19 06:31', '2026-10-19 06:31 +03:00', '2026-10-19T03:31Z'... A time without a zone is in the
+        instance's timezone."""
+        m = re.match(r"\s*(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}(?::\d{2})?)(?:\.\d+)?\s*(Z|[+-]\d{2}:?\d{2})?\s*$",
+                     s or "")
+        if not m:
+            return None
+        z = m.group(3) or ""
+        z = "+00:00" if z == "Z" else (z[:3] + ":" + z[-2:] if z else "")
         try:
-            d = datetime.datetime.fromisoformat(s.strip())
+            d = datetime.datetime.fromisoformat(f"{m.group(1)}T{m.group(2)}{z}")
         except ValueError:
             return None
         if d.tzinfo is None:
@@ -240,10 +253,95 @@ class Instance:
                 want.append(rel)
         if not want:
             return
-        subprocess.run(["git", "-C", str(root), "add", "-A", "--", *sorted(set(want))], check=True)
-        r = subprocess.run(["git", "-C", str(self.root), "diff", "--cached", "--quiet"])
-        if r.returncode:
-            subprocess.run(["git", "-C", str(self.root), "commit", "-qm", msg], check=True)
+        with brain_lock(self):
+            self._commit(root, sorted(set(want)), msg)
+
+    def _commit(self, root, want, msg):
+        import time
+        for attempt in range(8):  # a git command outside brain may hold git's index.lock for a moment  # another brain command may be committing at this moment (git's index.lock)
+            add = subprocess.run(["git", "-C", str(root), "add", "-A", "--", *want], capture_output=True, text=True)
+            if add.returncode == 0:
+                r = subprocess.run(["git", "-C", str(self.root), "diff", "--cached", "--quiet", "--", *want])
+                if not r.returncode:
+                    return  # nothing of ours left to commit
+                c = subprocess.run(["git", "-C", str(self.root), "commit", "-qm", msg, "--", *want],
+                                   capture_output=True, text=True)
+                if c.returncode == 0:
+                    return
+                add = c
+            if "index.lock" not in (add.stderr or "") or attempt == 7:
+                die(f"git: {(add.stderr or add.stdout).strip()}")
+            time.sleep(0.15 * (attempt + 1))
+
+
+_LOCK = {"depth": 0, "fh": None}
+LOCK_WAIT = int(os.environ.get("BRAIN_LOCK_WAIT") or 300)  # seconds a command waits for another before giving up
+
+
+class brain_lock:
+    """Several coordinators may run `brain` at once: every command that changes something runs under one lock
+    per instance (machine-local, in .brain/, never deleted: a lock on a deleted file isn't a lock for the next
+    process). The holder writes its pid into the file and says so in BRAIN_LOCK_HELD, so a brain command it
+    starts itself (git runs hooks inside our commit) goes on without waiting for it, and only while it holds it."""
+
+    def __init__(self, inst_or_root):
+        root = inst_or_root.root if isinstance(inst_or_root, Instance) else inst_or_root  # (a Path's .root is "/")
+        self.path = Path(root) / ".brain" / "lock"
+        self.key = str(Path(root).resolve())
+
+    def owner_is_running_us(self):
+        held = os.environ.get("BRAIN_LOCK_HELD", "")
+        if not held.startswith(self.key + "|"):
+            return False
+        pid = held.rsplit("|", 1)[1]
+        try:
+            os.kill(int(pid), 0)  # still alive...
+            return self.path.read_text().strip() == pid  # ...and still the holder
+        except (OSError, ValueError):
+            return False
+
+    def __enter__(self):
+        if _LOCK["fh"] is None and not self.owner_is_running_us():
+            import fcntl
+            import time
+            self.path.parent.mkdir(exist_ok=True)
+            fh = open(self.path, "a+")
+            deadline = time.time() + LOCK_WAIT
+            while True:
+                try:
+                    fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    if time.time() > deadline:
+                        fh.close()
+                        die(f"another brain command has held this instance's lock for {LOCK_WAIT // 60} minutes; "
+                            f"try again (lock: {tilde(self.path)})")
+                    time.sleep(0.05)
+            fh.seek(0)
+            fh.truncate()
+            fh.write(str(os.getpid()))
+            fh.flush()
+            _LOCK["fh"] = fh
+            os.environ["BRAIN_LOCK_HELD"] = f"{self.key}|{os.getpid()}"
+        _LOCK["depth"] += 1
+        return self
+
+    def __exit__(self, *exc):
+        _LOCK["depth"] -= 1
+        if _LOCK["depth"] == 0:
+            unlock()
+
+
+def unlock():
+    """Let go of the instance lock now (before a long, unrelated step); a later `with brain_lock` takes it again."""
+    fh = _LOCK["fh"]
+    if fh:
+        fh.seek(0)
+        fh.truncate()  # no holder: whoever still has our BRAIN_LOCK_HELD can't skip the lock any more
+        fh.flush()
+        fh.close()
+        _LOCK["fh"] = None
+        os.environ.pop("BRAIN_LOCK_HELD", None)
 
 
 def resolve_ref(nodes, ref):
@@ -308,6 +406,11 @@ def register(root):
         if Path(v["root"]).resolve() == root:
             return k
     name = base = brain_name(root)
+    tmp = Path(tempfile.gettempdir()).resolve()
+    under = lambda p, d: d == p or d in p.parents  # noqa: E731
+    if (under(root, tmp) or under(root, Path("/tmp").resolve())) and not under(brains_file().resolve(), tmp) \
+            and not under(brains_file().resolve(), Path("/tmp").resolve()):
+        return name  # a throwaway brain never enters this machine's real list (`brain -b` can't reach it; cd can)
     i = 2
     while name in brains and is_instance(Path(brains[name]["root"])):
         name, i = f"{base}-{i}", i + 1
@@ -636,30 +739,31 @@ def trace_patterns(inst):
     return {p for p in pats if p and p != "~"}
 
 
-def scan_traces(inst, home):
-    """Files in `home` (tracked or untracked, not ignored) that mention anything above the boundary."""
-    hits = []
+def scan_traces(inst, home, errors=None):
+    """Files in `home` (tracked or untracked, not ignored) that mention anything above the boundary. What couldn't
+    be checked goes to `errors` (a list), when given."""
+    hits, errs = [], []
     for pat in sorted(trace_patterns(inst)):
         needle = str(Path.home()) + pat[1:] if pat.startswith("~/") else pat
         if (home / ".git").exists():
-            r = git("grep", "--untracked", "-I", "-l", "-F", "-i", "-e", needle, cwd=home)
-            files = r.stdout.split()
-            if pat.startswith("~/"):
-                files += git("grep", "--untracked", "-I", "-l", "-F", "-i", "-e", pat, cwd=home).stdout.split()
+            files = []
+            for e in ([needle, pat] if pat.startswith("~/") else [needle]):
+                r = git("grep", "--untracked", "-a", "-l", "-F", "-i", "-e", e, cwd=home)
+                if r.returncode > 1 or r.stderr.strip():
+                    errs.append((home, f"git grep: {r.stderr.strip() or 'exit ' + str(r.returncode)}"))
+                files += r.stdout.split()
         else:
             files = []
-            for dp, dn, fn in os.walk(home):
+            for dp, dn, fn in os.walk(home, onerror=lambda e: errs.append((Path(e.filename), e.strerror))):
                 dn[:] = [x for x in dn if x not in (".git", "node_modules")]
                 for f in fn:
                     p = Path(dp) / f
-                    try:
-                        t = p.read_text(errors="ignore")[:2_000_000].lower()
-                    except OSError:
-                        continue
-                    if needle.lower() in t or pat.lower() in t:
+                    if file_mentions(p, [needle.casefold(), pat.casefold()], errors=errs):
                         files.append(str(p.relative_to(home)))
         for f in sorted(set(files)):
             hits.append((pat, f))
+    if errors is not None:
+        errors += sorted({f"{tilde(w)}: {why}" for w, why in errs})
     return hits
 
 
@@ -682,12 +786,12 @@ def never_terms(n):
                     k += 1
                     out.append((t, f"term {k} of {m['id']}/{NEVER_FILE}"))
         m = m["parent"]
-    return out
+    return [(t, redact(label, out)) for t, label in out]  # even a node's own id may hold one of its words
 
 
 def find_terms(text, terms):
-    low = text.lower()
-    return [label for t, label in terms if t.lower() in low]
+    low = text.casefold()  # casefold, not lower: context-free (Greek Σ) and full (ß -> ss)
+    return [label for t, label in terms if t.casefold() in low]
 
 
 def no_terms_in(n, text, what):
@@ -697,66 +801,228 @@ def no_terms_in(n, text, what):
         die(f"{what} contains {', '.join(hits)}: reword it (the term itself stays out of every brief)")
 
 
+NOTE_FILES = {"AGENTS.md", "CLAUDE.md", "brief.md", "status.md", "decisions.md", "inbox.md", "node.md",
+              NEVER_FILE, "job-ledger.md", "worktree-setup.sh"}  # a node's own notes: they may discuss the rule
+
+
+def redact(text, terms):
+    """`text` with every term blanked out: what brain prints never shows the word it is guarding against."""
+    for t, _ in terms:
+        text = re.sub(re.escape(t), "[…]", text, flags=re.I)
+        if t.casefold() in text.casefold():  # what re.I doesn't fold (ß, final sigma): blank the whole line
+            text = "[…]"
+    return text
+
+
 def guard_paths(n, paths=()):
-    """The home and every recorded worktree of it, or the paths given."""
+    """The home and every recorded worktree of it, or the paths given (which must exist)."""
     if paths:
-        return [Path(x).expanduser().resolve() for x in paths]
-    out = [n["home_path"]] if n["external"] and n["home_path"] and n["home_path"].exists() else []
+        out = [Path(x).expanduser().resolve() for x in paths]
+        missing = [redact(str(x), never_terms(n)) for x in out if not x.exists()]
+        if missing:
+            die(f"not found: {', '.join(missing)}")
+        return out
+    if not n["external"]:
+        return [n["dir"]]  # the home is the node folder itself (its notes aside)
+    out = [n["home_path"]] if n["home_path"] and n["home_path"].exists() else []
     out += [Path(w["path"]) for w in n["local"].get("worktrees", {}).values() if Path(w["path"]).exists()]
     return out
 
 
-def scan_terms(n, paths=()):
-    """[(label, where)]: never-name terms in files (tracked, or untracked and not ignored), commit messages
-    and branch names of each path. Never returns the term itself."""
-    terms = never_terms(n)
+def stream_mentions(fh, needles, size=None, chunk=1 << 20):
+    """Read a whole byte stream (or exactly one Git blob), preserving UTF-8 and folded chunk edges."""
+    import codecs
+    found, keep = set(), max((len(x) for x in needles), default=1) - 1
+    dec, tail = codecs.getincrementaldecoder("utf-8")(errors="ignore"), ""
+    while True:
+        block = fh.read(chunk if size is None else min(chunk, size))
+        if size is not None:
+            size -= len(block)
+            if not block and size:
+                raise OSError("unexpected end of Git blob")
+        final = not block or size == 0
+        text = tail + dec.decode(block, final=final).casefold()
+        found |= {x for x in needles if x in text}
+        if final:
+            return found
+        tail = text[-keep:] if keep else ""
+
+
+def file_mentions(fp, needles, errors=None, chunk=1 << 20):
+    """Which of `needles` (case-folded) appear in a regular file, read whole in chunks that overlap by the longest
+    needle, so nothing is missed at a boundary or past any size. Not a regular file: nothing (a FIFO would block
+    a read forever). A regular file that can't be read: nothing, and the reason goes to `errors`."""
+    found = set()
+    try:
+        if not stat.S_ISREG(os.stat(fp).st_mode):
+            return found
+        with open(fp, "rb") as fh:
+            found = stream_mentions(fh, needles, chunk=chunk)
+    except OSError as e:
+        if errors is not None:
+            errors.append((fp, e.strerror or str(e)))
+    return found
+
+
+def home_files(root, in_node):
+    """(relative paths, error): files of `root` that git would keep (tracked, or untracked and not ignored).
+    For a node whose home is its own folder: without its notes, its child nodes' folders, and the core."""
+    r = git("ls-files", "--cached", "--others", "--exclude-standard", "-z", "--", ".", cwd=root)
+    if r.returncode or r.stderr.strip():  # "could not open directory …" is only a warning, with exit 0
+        return None, r.stderr.strip() or f"git ls-files exited {r.returncode}"
+    out = []
+    for f in (x for x in r.stdout.split("\0") if x):
+        parts = Path(f).parts
+        if in_node:
+            if len(parts) == 1 and parts[0] in NOTE_FILES:
+                continue
+            if parts[0] == "core" and (root / "instance.md").exists():
+                continue
+            if len(parts) > 2 and parts[0] == "nodes" and (root / "nodes" / parts[1] / "node.md").exists():
+                continue  # a child node (always in nodes/<name>/) is its own home
+        out.append(f)
+    return out, None
+
+
+def scan_terms(n, paths=(), terms=None):
+    """([(label, where)], [errors]): never-name terms in the names and contents of a home's files (tracked, or
+    untracked and not ignored), its index blobs, and populated submodules recursively. For a home with its own
+    git repository, also its commit messages and branch names. Neither the label nor `where` shows the term.
+    Any error makes the scan incomplete, never clean."""
+    terms = never_terms(n) if terms is None else terms
     if not terms:
-        return []
-    hits, repos = [], {}
-    for root in guard_paths(n, paths):
-        if (root / ".git").exists():
-            for t, label in terms:
-                r = git("grep", "--untracked", "-I", "-l", "-F", "-i", "-e", t, cwd=root)
-                hits += [(label, f"{tilde(root)}/{f}") for f in r.stdout.split()]
-            common = git("rev-parse", "--git-common-dir", cwd=root).stdout.strip()
-            repos.setdefault(str((root / common).resolve()) if common else str(root), root)
-        else:
-            for dp, dn, fn in os.walk(root):
+        return [], []
+    hits, errors, repos, unread = [], [], {}, []
+    needles = [t.casefold() for t, _ in terms]
+    visited = set()
+
+    def failed(what, root, r):
+        errors.append(f"{what} in {redact(tilde(root), terms)}: {redact((r.stderr or '').strip(), terms)}")
+
+    pending = list(guard_paths(n, paths))
+    while pending:
+        root = pending.pop(0)
+        if root.resolve() in visited:
+            continue
+        visited.add(root.resolve())
+        in_node = root.resolve() == n["dir"].resolve()
+        own_repo = (root / ".git").exists() and not in_node
+        if own_repo or in_node:
+            files, err = home_files(root, in_node)
+            if err:
+                errors.append(f"listing {redact(tilde(root), terms)}: {redact(err, terms)}")
+                continue
+            index = git("ls-files", "--stage", "-z", "--", ".", cwd=root)
+            if index.returncode or index.stderr.strip():
+                failed("git ls-files --stage", root, index)
+                continue
+            entries = []
+            for entry in index.stdout.split("\0"):
+                if entry:
+                    meta, f = entry.split("\t", 1)
+                    mode, oid, stage = meta.split()
+                    entries.append((mode, oid, stage, f))
+            tracked = {f for _, _, _, f in entries}
+            submodules = {f for mode, _, _, f in entries if mode == "160000"}
+            for f in files:  # names and folders, then contents: every file, binary or not, whole
+                hits += [(label, f"{tilde(root)}/{f}") for label in find_terms(f, terms)]
+                if f in submodules:
+                    sub = root / f
+                    if not (sub / ".git").exists():
+                        errors.append(f"submodule unavailable: {redact(tilde(sub), terms)}")
+                    else:
+                        pending.append(sub)
+                    continue
+                # An unstaged deletion is valid; the index blob below still guards what a commit would keep.
+                if f in tracked and not os.path.lexists(root / f):
+                    continue
+                seen = file_mentions(root / f, needles, errors=unread)
+                hits += [(label, f"{tilde(root)}/{f}") for t, label in terms if t.casefold() in seen]
+            blobs = {}
+            included = set(files)
+            for mode, oid, stage, f in entries:
+                if f in included and mode != "160000" and set(oid) != {"0"}:
+                    blobs.setdefault(oid, []).append((f, stage))
+            if blobs:
+                # One streaming process per repository: no size cap, and no process per file.
+                with subprocess.Popen(["git", "cat-file", "--batch"], cwd=root, stdin=subprocess.PIPE,
+                                      stdout=subprocess.PIPE, stderr=subprocess.DEVNULL) as proc:
+                    try:
+                        for oid, names in blobs.items():
+                            proc.stdin.write((oid + "\n").encode()); proc.stdin.flush()
+                            header = proc.stdout.readline().split()
+                            if len(header) != 3 or header[1] != b"blob":
+                                raise OSError("Git index blob unavailable")
+                            seen = stream_mentions(proc.stdout, needles, size=int(header[2]))
+                            if proc.stdout.read(1) != b"\n":
+                                raise OSError("incomplete Git blob response")
+                            hits += [(label, f"index stage {stage}: {tilde(root)}/{f}")
+                                     for f, stage in names for t, label in terms if t.casefold() in seen]
+                    except (OSError, ValueError) as e:
+                        errors.append(redact(f"reading index in {tilde(root)}: {e}", terms))
+                    finally:
+                        proc.stdin.close()
+                        proc.stdout.close()
+                    if proc.wait():
+                        errors.append(f"git cat-file failed in {redact(tilde(root), terms)}")
+            if own_repo:
+                r = git("rev-parse", "--git-common-dir", cwd=root)
+                if r.returncode:
+                    failed("git rev-parse", root, r)
+                else:
+                    repos.setdefault(str((root / r.stdout.strip()).resolve()), root)
+        else:  # a folder given by path, outside any repository
+            for dp, dn, fn in os.walk(root, onerror=lambda e: unread.append((Path(e.filename), e.strerror))):
                 dn[:] = [x for x in dn if x not in (".git", "node_modules")]
                 for f in fn:
                     fp = Path(dp) / f
-                    try:
-                        text = fp.read_text(errors="ignore")[:2_000_000]
-                    except OSError:
-                        continue
-                    hits += [(label, tilde(fp)) for label in find_terms(text, terms)]
+                    seen = file_mentions(fp, [t.casefold() for t, _ in terms], errors=unread)
+                    hits += [(label, tilde(fp)) for t, label in terms
+                             if t.casefold() in seen or t.casefold() in str(fp.relative_to(root)).casefold()]
     for root in repos.values():
-        log = git("log", "--all", "--format=%h%x00%B%x01", cwd=root).stdout
-        for entry in log.split("\x01"):
+        log = git("log", "--all", "--format=%h%x00%B%x01", cwd=root)
+        if log.returncode:
+            failed("git log", root, log)
+        for entry in log.stdout.split("\x01"):
             if "\x00" in entry:
                 sha, body = entry.strip().split("\x00", 1)
                 hits += [(label, f"commit {sha} in {tilde(root)}") for label in find_terms(body, terms)]
-        refs = git("for-each-ref", "--format=%(refname:short)", "refs/heads", "refs/remotes", cwd=root).stdout
-        for ref in refs.split():
+        refs = git("for-each-ref", "--format=%(refname:short)", "refs/heads", "refs/remotes", cwd=root)
+        if refs.returncode:
+            failed("git for-each-ref", root, refs)
+        for ref in refs.stdout.split():
             hits += [(label, f"branch {ref} in {tilde(root)}") for label in find_terms(ref, terms)]
-    return sorted(set(hits), key=lambda h: (h[1], h[0]))
+    errors += [f"couldn't read {redact(tilde(fp), terms)}: {why}" for fp, why in unread]
+    hits = sorted({(label, redact(where, terms)) for label, where in hits}, key=lambda h: (h[1], h[0]))
+    return hits, errors
 
 
 def cmd_guard(a):
     """Before a merge or a pull request: nothing in the home names what it must never name."""
     inst = load()
     n = inst.node(a.id)
-    paths = guard_paths(n, a.paths)
-    if not paths:
-        die(f"{n['id']} has no home or worktree on this machine to check; give a path")
-    hits = scan_terms(n, a.paths) + [(f"trace of '{pat}' (axiom 6)", f"{tilde(hp)}/{f}")
-                                     for hp in (paths if n["sealed"] else []) for pat, f in scan_traces(inst, hp)]
     if not never_terms(n) and not n["sealed"]:
         print(f"guard: {n['id']} has no {NEVER_FILE} (here or above) and isn't sealed: nothing to check")
         return
+    paths = guard_paths(n, a.paths)
+    if not paths:
+        die(f"{n['id']}: its home isn't on this machine (brain set {n['id']} home=<path>), or give a path")
+    terms = never_terms(n)
+    hits, errors = scan_terms(n, a.paths)
+    for hp in (paths if n["sealed"] else []):
+        terrs = []
+        hits += [(redact(f"trace of '{pat}' (axiom 6)", terms), redact(f"{tilde(hp)}/{f}", terms))
+                 for pat, f in scan_traces(inst, hp, terrs)]
+        errors += [redact(e, terms) for e in terrs]
     for label, where in hits:
         print(f"  ✗ {where}: {label}")
-    print(f"guard: {'clean' if not hits else str(len(hits)) + ' found'} ({', '.join(tilde(x) for x in paths)})")
+    for e in errors:
+        print(f"  ! couldn't check: {e}")
+    where = ", ".join(redact(tilde(x), terms) for x in paths)
+    if errors:
+        print(f"guard: incomplete ({len(errors)} error(s){', ' + str(len(hits)) + ' found' if hits else ''}) ({where})")
+        sys.exit(2)
+    print(f"guard: {'clean' if not hits else str(len(hits)) + ' found'} ({where})")
     if hits:
         sys.exit(1)
 
@@ -802,6 +1068,20 @@ def cmd_seal(a):
     home = Path(a.home).expanduser().resolve()
     if inst.root.resolve() in [home, *home.parents]:
         die("the home must be outside the instance (axiom 8)")
+    terms = never_terms(n)  # taken now: nothing below may move or change them
+    keep = {"node.md", "AGENTS.md", "nodes", NEVER_FILE, JOBS_FILE}
+    for rel in a.move or []:  # every move is checked before anything moves
+        src = n["dir"] / rel
+        try:
+            inside = src.resolve().relative_to(n["dir"].resolve())
+        except ValueError:
+            die(f"'{rel}' isn't inside the node's folder")
+        if not inside.parts or inside.parts[0] in keep or src.is_symlink():
+            die(redact(f"'{rel}' is part of the node's record and stays on the operator's side", terms))
+        if not src.exists():
+            die(redact(f"no '{rel}' in {n['dir']}", terms))
+        if (home / rel).exists():
+            die(redact(f"{home / rel} already exists", terms))
     created_repo = False
     home.mkdir(parents=True, exist_ok=True)
     if not (home / ".git").exists() and not a.no_git:
@@ -810,13 +1090,7 @@ def cmd_seal(a):
     moved = []
     for rel in a.move or []:
         src = n["dir"] / rel
-        if Path(rel).parts[0] in ("node.md", "AGENTS.md", "nodes") or src.is_symlink():
-            die(f"'{rel}' is part of the node's record and stays on the operator's side")
-        if not src.exists():
-            die(f"no '{rel}' in {n['dir']}")
         dest = home / rel
-        if dest.exists():
-            die(f"{dest} already exists")
         dest.parent.mkdir(parents=True, exist_ok=True)
         shutil.move(str(src), str(dest))
         touch(src)
@@ -843,17 +1117,25 @@ def cmd_seal(a):
     resync_views(inst)
     write_registry(inst)
     inst.commit([], f"{a.id}: seal -> owners {a.owners}, home external")
-    print(f"{a.id}: owners -> {a.owners}; home -> {tilde(home)}")
+    print(redact(f"{a.id}: owners -> {a.owners}; home -> {tilde(home)}", terms))
     for nid in sorted(after):
         if before.get(nid) and before[nid][1] != after[nid][1]:
-            print(f"  {nid}: effective owners {','.join(before[nid][1])} -> {','.join(after[nid][1])}")
+            print(redact(f"  {nid}: effective owners {','.join(before[nid][1])} -> {','.join(after[nid][1])}", terms))
     if moved:
-        print(f"  moved to the home: {', '.join(moved)}")
-    hits = scan_traces(inst, home)
-    if hits:
-        print("  ✗ upward traces in the home (axiom 6); remove them before anything is committed there:")
+        print(redact(f"  moved to the home: {', '.join(moved)}", terms))
+    terrs = []
+    hits = scan_traces(inst, home, terrs)
+    words, werrs = scan_terms(inst.node(a.id), [home], terms=terms)  # the words taken before anything moved
+    terrs += werrs
+    hits += [(label, where) for label, where in words]
+    if hits or terrs:
+        print("  ✗ upward traces or never-name words in the home; remove them before anything is committed there:"
+              if hits else "  ! couldn't check the home for upward traces, so nothing was committed there:")
+        nt = never_terms(inst.node(a.id))
         for pat, f in hits:
-            print(f"    {f}: mentions '{pat}'")
+            print(redact(f"    {f}: mentions '{pat}'", nt))
+        for e in terrs:
+            print(redact(f"    {e}", nt))
     elif created_repo:
         git("add", "-A", cwd=home, check=True)
         git("commit", "-qm", "Initial commit", cwd=home)
@@ -864,15 +1146,17 @@ def cmd_seal(a):
         print(f"  home AGENTS.md: the shared baseline{' + this node' + chr(39) + 's own rules' if own else ''}")
     elif own:
         print("  home has its own AGENTS.md: propose these rules through its change process (axiom 12):")
-        print("\n".join("    " + l for l in own.splitlines()))
+        print("\n".join(redact("    " + l, terms) for l in own.splitlines()))
     if above:
         print("  rules from above the boundary; write in the ones the new owners agree to, in their own words:")
         for nid, r in above:
-            print(f"    from {nid}:")
-            print("\n".join("      " + l for l in r.splitlines()))
+            print(redact(f"    from {nid}:", terms))
+            print("\n".join(redact("      " + l, terms) for l in r.splitlines()))
     print("  still yours to do (skills/node-transition, Sealing):\n"
           "    - ask the principals in scope whether earlier items' scopes change (axiom 11)\n"
           "    - the coordinator stays on this side and bridges the boundary")
+    if terrs:
+        sys.exit(2)
     if hits:
         sys.exit(1)
 
@@ -1200,6 +1484,14 @@ def find_specialists(inst, sid=None):
     return out
 
 
+def cmd_item_quarantine(a):
+    cmd_item_status(a, "quarantined")
+
+
+def cmd_item_restore(a):
+    cmd_item_status(a, "active")
+
+
 def cmd_specialist_new(a):
     inst = load()
     at = inst.node(a.at or "root")
@@ -1272,6 +1564,8 @@ def cmd_hire(a):
     for w in wanted:
         if not any(i["fm"].get("id") == w for i in items):
             die(f"item '{w}' doesn't exist or isn't usable in {target['id']}")
+    if target["external"] and not (target["home_path"] and target["home_path"].exists()):
+        die(f"{target['id']}'s home isn't on this machine (brain set {target['id']} home=<path>)")
     where = target["home_path"] if target["external"] else target["dir"]
     runtime = sp["fm"].get("runtime") or target["fm"].get("runtime")
     out = [f"Role: worker, hired as specialist `{sp['id']}` ({sp['fm'].get('title', '')}).",
@@ -1282,7 +1576,7 @@ def cmd_hire(a):
         out += ["This work happens in a project with its own owners. Leave nothing in it that names "
                 "where this brief came from (axiom 6). Ask before pushing, publishing or anything "
                 "irreversible (axiom 24).", ""]
-    out += ["## Task", "", a.task.strip(), "", role_body.strip(), ""]
+    out += ["## Task", "", a.task.strip(), "", role_body.strip(), ""] + limits_lines(target)
     if lessons:
         out += ["## Lessons from earlier jobs", ""] + [f"- {l['text']}" for l in lessons] + [""]
     if wanted:
@@ -1324,6 +1618,11 @@ def limits_of(n):
     return out
 
 
+def limits_lines(n):
+    lims = limits_of(n)
+    return (["## Limits", ""] + [f"- {l}" for l in lims] + [""]) if lims else []
+
+
 def handback_lines(inst, n, to=None, who="worker"):
     """How a worker started by a coordinator asks, and says it's done. It never waits on the operator:
     nobody watches its thread, and a launched thread doesn't wake whoever launched it."""
@@ -1331,6 +1630,13 @@ def handback_lines(inst, n, to=None, who="worker"):
     send = inst.host_adapter().get("SEND")
     how = f"host `send` to thread `{to}`" + (f" ({send.replace('{id}', to)})" if send else "") if to else \
         "host `send` to whoever started you (their thread is in your launch message)"
+    if who == "reviewer":  # a reviewer changes nothing, not even the inbox
+        return ["## Questions and hand-back", "",
+                "- **Never ask the operator, and never wait for an answer in this thread**: nobody is watching it.",
+                f"- **A question you can't go on without:** {how} with the question, then end your turn with the "
+                "question as your last line.",
+                f"- **When you finish**, {how} with `done: <n> findings, <n> blockers` and put the findings in "
+                "your final message. Write no file.", ""]
     inbox = "" if n["sealed"] else f" and append `- <time from brain now> from {who}: question: <it>` " \
                                      f"to `{tilde(n['dir'] / 'inbox.md')}`"
     return ["## Questions and hand-back", "",
@@ -1356,8 +1662,13 @@ def cmd_brief(a):
     n = inst.node(a.id)
     w = n["local"].get("worktrees", {}).get(a.branch) if a.branch else None
     if a.branch and not w:
-        die(f"no worktree for {a.branch} in {n['id']} (brain wt add {n['id']} {a.branch})")
-    where = Path(w["path"]) if w else (n["home_path"] if n["external"] and n["home_path"] else n["dir"])
+        die(redact(f"no worktree for {a.branch} in {n['id']} (brain wt add {n['id']} <branch>)", never_terms(n)))
+    if w and not Path(w["path"]).exists():
+        die(f"the worktree for {a.branch} is gone ({tilde(w['path'])}); brain wt prune {n['id']}, then add it again")
+    if n["external"] and not (n["home_path"] and n["home_path"].exists()):
+        die(f"{n['id']}'s home isn't on this machine (brain set {n['id']} home=<path>): a worker can't run there, "
+            "and never in the instance instead")
+    where = Path(w["path"]) if w else (n["home_path"] if n["external"] else n["dir"])
     runtime = a.runtime or n["fm"].get("runtime") or inst.cfg.get("default_runtime", "")
     head = f"Run in: {tilde(where)}" + (f"  ·  branch {a.branch}" if a.branch else "") + f"  ·  runtime: {runtime}"
     if w:
@@ -1371,9 +1682,7 @@ def cmd_brief(a):
                 "brief came from (axiom 6). Ask before pushing, publishing or anything irreversible (axiom 24).",
                 ""]
     out += ["## Task", "", task.strip(), ""]
-    lims = limits_of(n)
-    if lims:
-        out += ["## Limits", ""] + [f"- {l}" for l in lims] + [""]
+    out += limits_lines(n)
     if never_terms(n):
         out += ["## Before you hand back", "", f"Run `brain guard {n['id']} {tilde(where)}`. It must print "
                 "`guard: clean`; if not, remove what it lists (it names the file, never the word).", ""]
@@ -1400,14 +1709,22 @@ def cmd_review(a):
     if reviewer == built:
         die("the reviewer must run on a different runtime from the builder")
     where, base = None, a.base
-    if n["external"] and n["home_path"]:
+    if n["external"]:
+        if not (n["home_path"] and n["home_path"].exists()):
+            die(f"{n['id']}'s home isn't on this machine (brain set {n['id']} home=<path>): a reviewer can't run "
+                "there, and never in the instance instead")
         w = n["local"].get("worktrees", {}).get(a.branch)
+        if w and not Path(w["path"]).exists():
+            die(f"the worktree for {a.branch} is gone ({tilde(w['path'])}); brain wt prune {n['id']}")
         where = Path(w["path"]) if w else n["home_path"]
         base = base or (w.get("base") if w else None) or default_base(n["home_path"])
-        stat = git("diff", "--stat", f"{base}...{a.branch}", cwd=n["home_path"]).stdout.strip()
+        d = git("diff", "--stat", f"{base}...{a.branch}", cwd=n["home_path"])
     else:
         where, base = n["dir"], base or "main"
-        stat = git("diff", "--stat", f"{base}...{a.branch}", cwd=inst.root).stdout.strip()
+        d = git("diff", "--stat", f"{base}...{a.branch}", cwd=inst.root)
+    if d.returncode:
+        die(f"can't diff {a.branch} against {base}: {d.stderr.strip()}")
+    diffstat = d.stdout.strip()
     out = [f"Reviewer runtime: {reviewer}  (the change was built on {built})", f"Run in: {where}", "",
            "Role: worker, reviewing a change you didn't write. Don't modify any file, commit or push.",
            "The rules, agents and skills where you run come first (axiom 7): if this project has its own "
@@ -1417,10 +1734,11 @@ def cmd_review(a):
                 "reference to where this brief came from (axiom 6).", ""]
     out += ["## Change", "", f"Branch `{a.branch}` against `{base}`. See it with `git diff {base}...{a.branch}`"
             f" and `git log {base}..{a.branch}`.", ""]
-    if stat:
-        out += ["```", stat, "```", ""]
+    if diffstat:
+        out += ["```", diffstat, "```", ""]
     if a.focus:
         out += ["## Focus", "", a.focus.strip(), ""]
+    out += limits_lines(n)
     out += ["## What to check", "",
             "- Correctness: does it do what the commits and the task say, including edge cases?",
             "- Breakage: run the project's own tests, type checks and linters that cover the change; report results.",
@@ -1432,6 +1750,7 @@ def cmd_review(a):
             "that matters, say so plainly.", ""] + handback_lines(inst, n, who="reviewer")
     text = "\n".join(out) + "\n"
     no_terms_in(n, text, "the review brief")
+    job_reviewed(inst, n, a.branch)
     if a.out:
         Path(a.out).write_text(text)
         print(a.out)
@@ -1447,7 +1766,7 @@ def last_sync(inst, n):
         return inst.parse_time(t), "last sync"
     s = n["dir"] / "status.md"
     if s.exists():
-        m = re.search(r"Updated:\s*(\d{4}-\d{2}-\d{2} \d{2}:\d{2})", s.read_text().splitlines()[0])
+        m = re.search(r"Updated:\s*(\d{4}-\d{2}-\d{2} \d{2}:\d{2}(?: ?(?:Z|[+-]\d{2}:?\d{2}))?)", s.read_text().splitlines()[0])
         if m and inst.parse_time(m.group(1)):
             return inst.parse_time(m.group(1)), "status.md Updated"
     return inst.now_dt() - datetime.timedelta(days=STALE_DAYS), f"last {STALE_DAYS} days"
@@ -1646,6 +1965,8 @@ def port_text(port, count):
 def cmd_wt_add(a):
     inst = load()
     n, home = git_home(inst, a.id)
+    if find_terms(a.branch, never_terms(n)):
+        die(f"that branch name contains {', '.join(find_terms(a.branch, never_terms(n)))}: pick another")
     wb = workbench(inst, n, create=True)
     path = wb / "worktrees" / a.branch.replace("/", "-")
     if path.exists():
@@ -1655,7 +1976,7 @@ def cmd_wt_add(a):
     args = ["worktree", "add", str(path), a.branch] if exists else ["worktree", "add", "-b", a.branch, str(path), base]
     r = git(*args, cwd=home)
     if r.returncode:
-        die(f"git {' '.join(args)}: {r.stderr.strip()}")
+        die(redact(f"git {' '.join(args)}: {r.stderr.strip()}", never_terms(n)))
     count = port_count(n)
     port = free_port(inst, count)
     inst = Instance(inst.root)  # git may have touched nothing here, but reload bindings to be safe
@@ -1665,9 +1986,11 @@ def cmd_wt_add(a):
         "created": inst.now()}
     inst.local_of(n["id"]).setdefault("workbench", str(wb))
     inst.save_local()
+    job_started(inst, n, a.branch, n["fm"].get("runtime") or inst.cfg.get("default_runtime", ""))
     print(f"worktree: {tilde(path)}\n  branch {a.branch}{'' if exists else ' (new, from ' + base + ')'}  ·  "
           f"{port_text(port, count)}")
     setup = n["dir"] / SETUP_FILE
+    unlock()  # the setup can take minutes and touches only the worktree
     if setup.exists() and not a.no_setup:
         env = {**os.environ, "MAIN": str(home), "WORKTREE": str(path), "PORT": str(port), "PORTS": str(count),
                "PORT_LAST": str(port + count - 1), "BRANCH": a.branch, "NODE": n["id"], "WORKBENCH": str(wb)}
@@ -1715,6 +2038,144 @@ def cmd_wt_list(a):
                   f"{'merged' if merged else (ahead + ' commit(s) ahead') if ahead else ''}  {tilde(w['path'])}")
 
 
+JOBS_FILE = "job-ledger.md"  # in a node folder: one row per job, written by `brain wt` and `brain review`
+JOBS_MARK = "<!-- brain:job-ledger v1 -->"
+JOB_COLS = ["Job", "Started", "Ended", "Hours", "Outcome", "Commits", "Reviews", "Runtime", "Cause"]
+
+
+def cell(v):
+    return str(v).replace("\\", "\\\\").replace("|", "\\|").replace("\n", " ")
+
+
+def uncell(v):
+    return re.sub(r"\\(.)", r"\1", v.strip())
+
+
+def read_jobs(n):
+    """Rows of the node's ledger; None if a file of that name exists but isn't one (brain never overwrites it)."""
+    f = n["dir"] / JOBS_FILE
+    if not f.exists():
+        return []
+    text = f.read_text()
+    if JOBS_MARK not in text:
+        return None
+    rows = []
+    for line in text.splitlines():
+        if line.startswith("| "):
+            cells = [uncell(c) for c in re.split(r"(?<!\\)\|", line.strip()[1:-1])]
+            if cells == JOB_COLS or set("".join(cells)) <= set("-: "):
+                continue  # the header row and its separator
+            rows.append(dict(zip(JOB_COLS, cells + [""] * (len(JOB_COLS) - len(cells)))))
+    return rows
+
+
+def write_jobs(inst, n, rows):
+    f = n["dir"] / JOBS_FILE
+    head = (f"# Jobs: {n['id']}\n\n{JOBS_MARK}\nOne row per job, kept by `brain wt add`, `brain review`, "
+            "`brain wt rm` and `brain wt prune`; times carry their UTC offset. `brain jobs` sums it up.\n\n")
+    out = [head + "| " + " | ".join(JOB_COLS) + " |", "| " + " | ".join("---" for _ in JOB_COLS) + " |"]
+    out += ["| " + " | ".join(cell(r.get(c, "")) for c in JOB_COLS) + " |" for r in rows]
+    f.write_text("\n".join(out) + "\n")
+    touch(f)
+
+
+def ledger_rows(n):
+    rows = read_jobs(n)
+    if rows is None:
+        print(f"note: {tilde(n['dir'] / JOBS_FILE)} isn't a job ledger written by brain; this job isn't recorded",
+              file=sys.stderr)
+    return rows
+
+
+def stamp(inst):
+    return inst.now_dt().isoformat(timespec="minutes")
+
+
+def open_job(rows, branch):
+    return next((r for r in reversed(rows) if r["Job"] == branch and not r["Ended"]), None)
+
+
+def job_started(inst, n, branch, runtime):
+    with brain_lock(inst):
+        rows = ledger_rows(n)
+        if rows is not None and not open_job(rows, branch):
+            rows.append({"Job": branch, "Started": stamp(inst), "Reviews": "0", "Runtime": runtime})
+            write_jobs(inst, n, rows)
+            inst.commit([], f"{n['id']}: job started")
+
+
+def job_reviewed(inst, n, branch):
+    with brain_lock(inst):
+        rows = ledger_rows(n)
+        r = open_job(rows or [], branch)
+        if r:
+            r["Reviews"] = str(int(r.get("Reviews") or 0) + 1)
+            write_jobs(inst, n, rows)
+            inst.commit([], f"{n['id']}: job reviewed")
+
+
+def job_ended(inst, n, branch, outcome, commits="", cause=""):
+    with brain_lock(inst):
+        rows = ledger_rows(n)
+        r = open_job(rows or [], branch)
+        if not r:
+            return
+        r.update(Ended=stamp(inst), Outcome=outcome, Commits=str(commits), Cause=cause)
+        a, b = inst.parse_time(r["Started"]), inst.parse_time(r["Ended"])
+        r["Hours"] = f"{elapsed(a, b) / 3600:.1f}" if a and b else ""
+        write_jobs(inst, n, rows)
+        inst.commit([], f"{n['id']}: job {outcome}")
+
+
+def jobs_summary(inst, n):
+    """Finished and open jobs of one node, with medians, for `brain jobs` and the live view."""
+    import statistics
+    rows = read_jobs(n) or []
+    done = [r for r in rows if r["Ended"]]
+    hours = [float(r["Hours"]) for r in done if r["Outcome"] == "merged" and r["Hours"]]
+    reviews = [int(r["Reviews"] or 0) for r in done if r["Outcome"] == "merged"]
+    def med(xs):
+        if not xs:
+            return None
+        v = round(statistics.median(xs), 1)
+        return int(v) if v == int(v) and all(isinstance(x, int) for x in xs) else v
+    now = inst.now_dt()
+    open_ = [{**r, "age_h": round(elapsed(inst.parse_time(r["Started"]), now) / 3600, 1)}
+             for r in rows if not r["Ended"] and inst.parse_time(r["Started"])]
+    return {"rows": rows[-40:], "open": open_, "finished": len(done),
+            "merged": sum(1 for r in done if r["Outcome"] == "merged"),
+            "abandoned": sum(1 for r in done if r["Outcome"] == "abandoned"),
+            "median_hours": med(hours), "median_reviews": med(reviews),
+            "causes": [r["Cause"] for r in done if r["Cause"]][-10:]}
+
+
+def cmd_jobs(a):
+    inst = load()
+    for n in inst.nodes():
+        if a.id and n["id"] != a.id:
+            continue
+        j = jobs_summary(inst, n)
+        if not j["rows"]:
+            continue
+        print(f"{n['id']}: {j['finished']} finished ({j['merged']} merged, {j['abandoned']} abandoned)"
+              + (f"; median {j['median_hours']} h and {j['median_reviews']} review round(s) per merged job"
+                 if j["median_hours"] is not None else ""))
+        for r in j["open"]:
+            late = j["median_hours"] is not None and r["age_h"] > 2 * j["median_hours"]
+            print(f"  open  {r['Job']:<28} {r['age_h']:>5} h  {r['Reviews'] or 0} review(s)"
+                  + ("   (over twice the median)" if late else ""))
+        for c in j["causes"]:
+            print(f"  cause {c}")
+
+
+def job_commits(home, w, branch):
+    """Commits made on the job's branch since its worktree was created (still right after a merge)."""
+    if not w or not w.get("start"):
+        return ""
+    c = git("rev-list", "--count", f"{w['start']}..{branch}", cwd=home).stdout.strip()
+    return c if c.isdigit() else ""
+
+
 def remove_worktree(inst, n, branch, force=False):
     w = n["local"].get("worktrees", {}).get(branch)
     if not w:
@@ -1730,7 +2191,10 @@ def remove_worktree(inst, n, branch, force=False):
 def cmd_wt_rm(a):
     inst = load()
     n, home = git_home(inst, a.id)
+    w = n["local"].get("worktrees", {}).get(a.branch)
+    state = worktree_state(home, w, a.branch) if w else (None, False, "")
     remove_worktree(inst, n, a.branch, a.force)
+    job_ended(inst, n, a.branch, "merged" if state[1] else "abandoned", job_commits(home, w, a.branch), a.cause or "")
     print(f"removed the worktree for {a.branch} (the branch itself stays)")
 
 
@@ -1742,10 +2206,12 @@ def cmd_wt_prune(a):
         git("fetch", "--all", "--prune", "--quiet", cwd=home)
     removed, kept = [], []
     for br, w in sorted(n["local"].get("worktrees", {}).items()):
-        dirty, merged, _ = worktree_state(home, w, br)
+        dirty, merged, ahead = worktree_state(home, w, br)
         if dirty is None or (merged and dirty == 0):
             if not a.dry_run:
                 remove_worktree(inst, inst.node(n["id"]), br)
+                job_ended(inst, n, br, "merged" if merged else "abandoned", job_commits(home, w, br),
+                          "" if merged else "worktree was gone")
             removed.append(br)
         else:
             kept.append(f"{br} ({'uncommitted work' if dirty else 'not merged'})")
@@ -1868,14 +2334,21 @@ def status_line(n):
 
 
 def updated_at(inst, n):
-    m = re.search(r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2})", status_line(n))
+    m = re.search(r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2}(?: ?(?:Z|[+-]\d{2}:?\d{2}))?)", status_line(n))
     return inst.parse_time(m.group(1)) if m else None
+
+
+def elapsed(a, b):
+    """Seconds from a to b as real moments. Two times with the same zone object subtract by their wall clocks
+    in Python, which is wrong across a daylight-saving change; in UTC it isn't."""
+    utc = datetime.timezone.utc
+    return (b.astimezone(utc) - a.astimezone(utc)).total_seconds()
 
 
 def ago(inst, d):
     if not d:
         return "never"
-    s = (inst.now_dt() - d).total_seconds()
+    s = elapsed(d, inst.now_dt())
     for unit, size in (("d", 86400), ("h", 3600), ("m", 60)):
         if s >= size:
             return f"{int(s // size)}{unit} ago"
@@ -1917,6 +2390,30 @@ def active_work(n):
 def inbox_lines(n):
     f = n["dir"] / "inbox.md"
     return [l for l in f.read_text().splitlines() if l.startswith("- ")] if f.exists() else []
+
+
+def cmd_stale(a):
+    """Freshness check: is a node's status.md older than its thread's last activity (any timezone, e.g. ...Z)?"""
+    inst = load()
+    n = inst.node(a.id)
+    u = updated_at(inst, n)
+    try:
+        t = datetime.datetime.fromisoformat(a.host_time.strip().replace("Z", "+00:00"))
+    except ValueError:
+        die(f"not a time: {a.host_time} (ISO 8601, as the host gives it, e.g. 2026-10-19T03:31:00Z)")
+    if t.tzinfo is None:
+        die("give the host time with its zone (Z or +hh:mm): without one it can't be compared")
+    if not u:
+        print(f"behind: {n['id']} has no Updated line; ask its coordinator to run the node-sync skill")
+        return
+    gap = elapsed(u, t)
+    when = f"status {u.strftime('%Y-%m-%d %H:%M')} {inst.zone() or ''} = {u.astimezone(datetime.timezone.utc):%H:%MZ}"
+    if gap > a.grace * 60:
+        h, m = divmod(int(gap // 60), 60)
+        print(f"behind by {h}h {m:02d}m ({when}; thread {t.astimezone(datetime.timezone.utc):%H:%MZ}): ask its "
+              f"coordinator to run the node-sync skill for everything since {u.strftime('%Y-%m-%d %H:%M')}")
+    else:
+        print(f"current ({when}; thread {t.astimezone(datetime.timezone.utc):%H:%MZ})")
 
 
 def cmd_now(a):
@@ -2035,8 +2532,9 @@ def attention_items(inst, nodes):
         if paused(n):
             continue
         u = updated_at(inst, n)
-        if u and (inst.now_dt() - u).days >= STALE_DAYS:
-            out.append((n["id"], "stale", f"status not updated for {(inst.now_dt() - u).days} days"))
+        days = int(elapsed(u, inst.now_dt()) // 86400) if u else 0
+        if u and days >= STALE_DAYS:
+            out.append((n["id"], "stale", f"status not updated for {days} days"))
         if not (n["local"].get("coordinator") or n["fm"].get("coordinator", "none") != "none"):
             out.append((n["id"], "setup", "no coordinator on this machine (skill: machine-setup)"))
     return out
@@ -2079,11 +2577,14 @@ def cmd_registry(a):
 
 def link_runtimes(inst):
     made = []
+    # Visit the node tree, never .git, homes, or arbitrary source folders. Git maintenance can remove
+    # object directories during a recursive filesystem glob, and those folders cannot need runtime links.
+    node_dirs = [n["dir"] for n in inst.nodes()]
     for rt in inst.runtimes:
         ad = inst.adapter(rt)
         link = ad.get("INSTRUCTIONS_LINK")
         if link:
-            for agents in [inst.root / "AGENTS.md", *inst.root.glob("**/nodes/**/AGENTS.md")]:
+            for agents in (d / "AGENTS.md" for d in node_dirs):
                 rel = agents.relative_to(inst.root).parts
                 if "core" in rel or "sources" in rel:
                     continue
@@ -2371,6 +2872,13 @@ def cmd_hook(a):
     """Runtime hook. `stop`: before a turn ends in a node folder, make sure its notes are current (axioms 15-17).
     Never fails the runtime: any problem means "let it stop"."""
     try:
+        hook_stop(a)
+    except Exception:  # noqa: BLE001 - a broken hook must never break an agent's turn
+        return
+
+
+def hook_stop(a):
+    try:
         data = json.loads(sys.stdin.read() or "{}")
     except ValueError:
         return
@@ -2387,28 +2895,38 @@ def cmd_hook(a):
         return
     why = notes_lag(inst, n)
     state_f = inst.root / ".brain" / "hooks.json"
-    state = json.loads(state_f.read_text()) if state_f.exists() else {}
+    try:
+        state = json.loads(state_f.read_text()) if state_f.exists() else {}
+        state = state if isinstance(state, dict) else {}
+    except (OSError, ValueError):
+        state = {}  # unreadable or half-written: start over (it only spaces out reminders)
     sid = data.get("session_id") or "?"
     now = inst.now_dt()
     if not why:
         u = updated_at(inst, n)
         last = state.get(sid)
         last = inst.parse_time(last) if last else None
-        stale = u is None or (now - u).total_seconds() > REMIND_MINUTES * 60
-        if stale and (last is None or (now - last).total_seconds() > REMIND_MINUTES * 60):
+        stale = u is None or elapsed(u, now) > REMIND_MINUTES * 60
+        if stale and (last is None or elapsed(last, now) > REMIND_MINUTES * 60):
             why.append(f"status.md was last updated {ago(inst, u)}")
     if not why:
         return
     state[sid] = now.isoformat(timespec="seconds")
-    state_f.parent.mkdir(exist_ok=True)
-    state_f.write_text(json.dumps(dict(list(state.items())[-200:]), indent=1))
-    with open(inst.root / ".brain" / "hooks.log", "a") as fh:
-        fh.write(f"{now.isoformat(timespec='seconds')} stop {n['id']} {sid}: {'; '.join(why)}\n")
+    try:
+        state_f.parent.mkdir(exist_ok=True)
+        tmp = state_f.with_name(f".hooks.{os.getpid()}.json")
+        tmp.write_text(json.dumps(dict(list(state.items())[-200:]), indent=1))
+        os.replace(tmp, state_f)  # whole or not at all: another session's hook never reads half a file
+        with open(inst.root / ".brain" / "hooks.log", "a") as fh:
+            fh.write(f"{now.isoformat(timespec='seconds')} stop {n['id']} {sid}: {'; '.join(why)}\n")
+    except OSError:
+        pass  # the reminder still goes out; only its bookkeeping is lost
     reason = (f"Before you stop, node `{n['id']}`: {'; '.join(why)}. If you are this node's coordinator, record "
               f"what this conversation decided, started, finished or blocked (decisions.md; status.md and its "
-              f"Updated line; timestamps from `core/bin/brain now`), then commit `{n['id']}: <what changed>`. If "
-              f"there is nothing to record, say so in one line. If you are a worker, don't edit those files: "
-              f"append anything the coordinator should know to inbox.md.")
+              f"Updated line; timestamps from `core/bin/brain now`), then commit `{n['id']}: <what changed>`. If you are a worker, don't edit those files: append anything "
+              f"the coordinator should know to inbox.md. If this conversation changed nothing here (you only read "
+              f"this node, or it isn't yours), record nothing and end by repeating your previous answer unchanged: "
+              f"your last message is what the operator reads.")
     print(json.dumps({"decision": "block", "reason": reason}))
 
 
@@ -2498,30 +3016,40 @@ def md_sections(text):
     return {k: "\n".join(v).strip() for k, v in out.items()}
 
 
-def ui_decisions(n, limit=6):
+def ui_decisions(inst, n, limit=6):
     f = n["dir"] / "decisions.md"
     if not f.exists():
         return []
     out, text = [], f.read_text()
-    for m in re.finditer(r"^#{2,3} (\d{4}-\d{2}-\d{2} \d{2}:\d{2}): (.+)$", text, re.M):
+    for m in re.finditer(r"^#{2,3} (\d{4}-\d{2}-\d{2} \d{2}:\d{2}(?: ?(?:Z|[+-]\d{2}:?\d{2}))?): (.+)$", text, re.M):
         rest = text[m.end():].split("\n#", 1)[0]
         said = re.search(r"^Said: (.+)$", rest, re.M)
-        out.append({"time": m.group(1), "title": m.group(2).strip(), "said": said.group(1).strip() if said else ""})
-    return sorted(out, key=lambda d: d["time"], reverse=True)[:limit]
+        d = inst.parse_time(m.group(1))
+        out.append({"time": m.group(1), "t": int(d.timestamp()) if d else None, "title": m.group(2).strip(),
+                    "said": said.group(1).strip() if said else ""})
+    return sorted(out, key=lambda d: d["t"] or 0, reverse=True)[:limit]
 
 
 def ui_worktree(inst, home, branch, w):
     import socket as so
     path = Path(w["path"])
     d = {"branch": branch, "path": tilde(path), "port": w.get("port"), "ports": w.get("ports", 1),
-         "exists": path.exists(), "listening": [], "dirty": None, "ahead": None, "last": None}
+         "exists": path.exists(), "listening": [], "dirty": None, "ahead": None, "last": None, "wrote": None}
     for q in range(w.get("port") or 0, (w.get("port") or 0) + w.get("ports", 1)) if w.get("port") else []:
         with so.socket(so.AF_INET, so.SOCK_STREAM) as sk:
             sk.settimeout(0.05)
             if sk.connect_ex(("127.0.0.1", q)) == 0:
                 d["listening"].append(q)
     if d["exists"]:
-        d["dirty"] = len(git("status", "--porcelain", cwd=path).stdout.splitlines())
+        changed = git("status", "--porcelain", cwd=path).stdout.splitlines()
+        d["dirty"] = len(changed)
+        times = []
+        for line in changed[:200]:  # the newest uncommitted write: an agent at work right now
+            try:
+                times.append((path / line[3:].split(" -> ")[-1].strip('"')).stat().st_mtime)
+            except OSError:
+                pass
+        d["wrote"] = int(max(times)) if times else None
         if w.get("base"):
             c = git("rev-list", "--count", f"{w['base']}..{branch}", cwd=home).stdout.strip()
             d["ahead"] = int(c) if c.isdigit() else None
@@ -2590,11 +3118,16 @@ def ui_state(inst, problems=None):
                          r[1]) or [None, ""])[1] if len(r) > 1 else "", "pr": r[2] if len(r) > 2 else "",
                          "state": r[3] if len(r) > 3 else ""})
         wts = []
+        terms = never_terms(n)
+        hide = lambda t: redact(t, terms) if terms and isinstance(t, str) else t  # noqa: E731
         if n["external"] and n["home_path"] and n["home_path"].exists():
             home = n["home_path"]
-            wts = [ui_worktree(inst, home, b, w) for b, w in sorted(loc.get("worktrees", {}).items())]
-            for c in ui_commits(home, since, all_refs=True):
-                commits.append({**c, "node": n["id"], "where": "home"})
+            wts = [{k: hide(v) for k, v in ui_worktree(inst, home, b, w).items()}
+                   for b, w in sorted(loc.get("worktrees", {}).items())]
+            for c in ui_commits(home, since, all_refs=True):  # what comes from the home is shown as guard shows it
+                commits.append({**c, "subject": hide(c["subject"]), "node": n["id"], "where": "home"})
+        work = [{k: hide(v) for k, v in j.items()} for j in work]
+        js = jobs_summary(inst, n)
         try:
             wb = workbench(inst, n)
             reps = sorted((wb / "reports").glob("*/index.md"), reverse=True)[:5] if (wb / "reports").is_dir() else []
@@ -2609,8 +3142,9 @@ def ui_state(inst, problems=None):
             "updated": u.isoformat() if u else None, "updated_ago": ago(inst, u),
             "status": {k: v for k, v in secs.items() if v and k.lower() != "active work"},
             "work": work, "worktrees": wts, "inbox": [l[2:] for l in inbox_lines(n)],
-            "blocked": status_section(n, "blocked"), "decisions": ui_decisions(n), "limits": limits_of(n),
-            "never_name": len(never_terms(n)),
+            "blocked": status_section(n, "blocked"), "decisions": ui_decisions(inst, n), "limits": limits_of(n),
+            "never_name": len(terms), "jobs": {**js, "rows": [{k: hide(v) for k, v in r.items()} for r in js["rows"]],
+                                               "open": [{k: hide(v) for k, v in r.items()} for r in js["open"]]},
             "reports": [{"name": d.parent.name, "title": next((l[2:] for l in d.read_text().splitlines()
                                                               if l.startswith("# ")), d.parent.name),
                          "path": tilde(d)} for d in reps]})
@@ -2644,9 +3178,13 @@ def ui_state(inst, problems=None):
 
 def cmd_ui(a):
     """A live view of this brain in a browser on this machine: read-only, listening on 127.0.0.1 only."""
+    import hmac
     import http.server
+    import secrets
     import threading
+    import urllib.parse
     inst = load()
+    key = secrets.token_urlsafe(18)  # other accounts on this machine can reach 127.0.0.1 too; they don't get this
     if a.json:
         print(json.dumps(ui_state(inst, len(collect_problems(inst)[0])), indent=1))
         return
@@ -2691,11 +3229,15 @@ def cmd_ui(a):
             host = (self.headers.get("Host") or "").rsplit(":", 1)[0]
             if host not in ("127.0.0.1", "localhost", "[::1]"):  # no other site can read it through this browser
                 return self.send(403, b"forbidden", "text/plain")
-            if self.path in ("/", "/index.html"):
-                return self.send(200, page, "text/html; charset=utf-8")
-            if self.path == "/api/state":
+            url = urllib.parse.urlsplit(self.path)
+            given = urllib.parse.parse_qs(url.query).get("k", [""])[0]
+            if url.path in ("/", "/index.html"):
+                return self.send(200, page, "text/html; charset=utf-8")  # the page holds no data; the API does
+            if url.path.startswith("/api/") and not hmac.compare_digest(given, key):
+                return self.send(403, b"this run's key is missing: open the address brain ui printed", "text/plain")
+            if url.path == "/api/state":
                 return self.send(200, box["json"], "application/json")
-            if self.path == "/api/events":
+            if url.path == "/api/events":
                 self.send_response(200)
                 self.send_header("Content-Type", "text/event-stream")
                 self.send_header("Cache-Control", "no-store")
@@ -2734,7 +3276,7 @@ def cmd_ui(a):
     if not srv:
         die(f"no free port from {port}")
     srv.daemon_threads = True
-    url = f"http://127.0.0.1:{srv.server_address[1]}/"
+    url = f"http://127.0.0.1:{srv.server_address[1]}/?k={key}"
     print(f"{st['brain']['title']} ({st['brain']['name']}): {url}  (read-only, this machine only; Ctrl-C stops it)",
           flush=True)
     if a.open:
@@ -2830,11 +3372,17 @@ def collect_problems(inst):
             elif inst.root.resolve() in [hp.resolve(), *hp.resolve().parents]:
                 p(f"{nid}: sealed home is inside the instance (axiom 8)")
             else:
-                for pat, f in scan_traces(inst, hp):
-                    p(f"{nid}: trace of '{pat}' in its home (axiom 6): {f}")
+                terrs = []
+                for pat, f in scan_traces(inst, hp, terrs):
+                    p(redact(f"{nid}: trace of '{pat}' in its home (axiom 6): {f}", never_terms(n)))
+                for e in terrs:
+                    p(redact(f"{nid}: couldn't check its home for traces: {e}", never_terms(n)))
         if not n["archived"]:
-            for label, where in scan_terms(n):
+            found, errs = scan_terms(n)
+            for label, where in found:
                 p(f"{nid}: {where} contains {label} (see: brain guard {nid})")
+            for e in errs:
+                p(f"{nid}: couldn't check for never-name words: {e}")
             for lim in limits_of(n):
                 missing = [k for k in ("Why:", "Lift when:") if k.lower() not in lim.lower()]
                 if missing:
@@ -3075,6 +3623,25 @@ def reexec_into_instance_core():
         os.execv(sys.executable, [sys.executable, str(other), *sys.argv[1:]])
 
 
+# Commands that change nothing in the instance: they never wait for the lock.
+READ_ONLY = {"cmd_show", "cmd_tree", "cmd_status", "cmd_now", "cmd_jobs", "cmd_stale", "cmd_ui", "cmd_guard",
+             "cmd_brief", "cmd_hire", "cmd_reports", "cmd_brains", "cmd_use", "cmd_machine", "cmd_usable",
+             "cmd_item_list", "cmd_wt_list", "cmd_selftest", "cmd_init", "cmd_hook", "cmd_hook_approve", "cmd_help",
+             "cmd_dashboard"}
+
+
+def writes(a):
+    """Does this command, with these options, change anything in the instance?"""
+    name = a.f.__name__
+    if name in ("cmd_brief", "cmd_hire"):
+        return bool(getattr(a, "out", None))  # --out writes a file, maybe inside the instance
+    if name == "cmd_check":
+        return bool(a.fix)
+    if name in ("cmd_principal", "cmd_schedule"):
+        return a.action not in ("list", None)
+    return name not in READ_ONLY
+
+
 def main():
     take_brain_flag()
     reexec_into_instance_core()
@@ -3112,6 +3679,10 @@ def main():
         opt("--every", type=float, default=3.0, help="seconds between refreshes"),
         opt("--open", action="store_true", help="open it in the browser"),
         opt("--json", action="store_true", help="print the state once, as JSON"))
+    cmd("stale", cmd_stale, "freshness check: is <id>'s status.md behind a time the host gave (e.g. a thread's "
+        "updatedAt, in UTC)?", "id", "host_time", opt("--grace", type=int, default=5, help="minutes allowed"))
+    cmd("jobs", cmd_jobs, "jobs per node: open ones and their age, median hours and review rounds, causes",
+        opt("id", nargs="?"))
     cmd("show", cmd_show, "everything about one node, including this machine's bindings", "id")
     cmd("set", cmd_set, "set fields: brain set <id> key=value ... (host IDs and home paths stay on this machine)",
         "id", opt("pairs", nargs="+"))
@@ -3148,7 +3719,7 @@ def main():
     for st, name in (("quarantined", "quarantine"), ("active", "restore")):
         t = isub.add_parser(name, help=f"brain item {name} <id>")
         t.add_argument("id"); t.add_argument("--reason")
-        t.set_defaults(f=lambda a, st=st: cmd_item_status(a, st))
+        t.set_defaults(f=cmd_item_quarantine if st == "quarantined" else cmd_item_restore)
     cmd("usable", cmd_usable, "may <node> use <item>? (axiom 10)", "item", "node")
 
     s = sub.add_parser("specialist", help="specialists: new")
@@ -3173,8 +3744,9 @@ def main():
     t = wsub.add_parser("list", help="brain wt list [node]")
     t.add_argument("id", nargs="?")
     t.set_defaults(f=cmd_wt_list)
-    t = wsub.add_parser("rm", help="brain wt rm <node> <branch> [--force]")
+    t = wsub.add_parser("rm", help="brain wt rm <node> <branch> [--force] [--cause 'why it was dropped']")
     t.add_argument("id"); t.add_argument("branch"); t.add_argument("--force", action="store_true")
+    t.add_argument("--cause", help="why the job ended without a merge; kept in the node's job-ledger.md")
     t.set_defaults(f=cmd_wt_rm)
     t = wsub.add_parser("prune", help="brain wt prune <node>: remove clean worktrees whose branch is merged")
     t.add_argument("id"); t.add_argument("--dry-run", action="store_true", dest="dry_run")
@@ -3221,7 +3793,9 @@ def main():
     cmd("upgrade", cmd_upgrade, "update core/ to the latest version, then link and check")
     cmd("selftest", cmd_selftest, "run the core's scenario tests in throwaway folders",
         opt("-v", "--verbose", action="store_true"), opt("-k"))
-    sub.add_parser("help", help="show this help").set_defaults(f=lambda a: ap.print_help())
+    def cmd_help(a):
+        ap.print_help()
+    sub.add_parser("help", help="show this help").set_defaults(f=cmd_help)
 
     a = ap.parse_args()
     if not getattr(a, "f", None):
@@ -3233,7 +3807,12 @@ def main():
         elif not cmd_dashboard(a):
             ap.print_help()
         return
-    a.f(a)
+    root = try_find_root() if writes(a) else None
+    if root:
+        with brain_lock(root):
+            a.f(a)
+    else:
+        a.f(a)
 
 
 if __name__ == "__main__":

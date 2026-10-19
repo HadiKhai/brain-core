@@ -113,6 +113,7 @@ aside .md ul { margin: 4px 0; padding-left: 18px; } aside .md p { margin: 4px 0;
   <span class="meta" id="meta"></span>
   <span class="spacer"></span>
   <span class="live"><span class="dot" id="livedot"></span><span id="livetext">connecting…</span></span>
+  <button class="ghost" id="notify" title="A desktop notification when something new needs you">Notify me</button>
   <button class="ghost" id="theme" title="Light or dark">Theme</button>
 </header>
 <main>
@@ -182,11 +183,6 @@ function ago(sec) {
   if (s < 86400) return Math.floor(s / 3600) + "h ago"; return Math.floor(s / 86400) + "d ago";
 }
 function tsec(iso) { return iso ? Date.parse(iso) / 1000 : null; }
-// a time written in the brain's timezone ("2026-10-19 06:20"); `now` carries that zone's offset
-function localSec(t) {
-  if (!t || !S) return null; const off = S.brain.now.slice(19) || "Z";
-  const v = Date.parse(t.replace(" ", "T") + ":00" + off); return isNaN(v) ? null : v / 1000;
-}
 const fmtTime = new Intl.DateTimeFormat(undefined, { hour: "2-digit", minute: "2-digit" });
 function brainClock() {
   if (!S) return ""; try { return new Intl.DateTimeFormat(undefined, { hour: "2-digit", minute: "2-digit", timeZone: S.brain.tz || undefined }).format(new Date()); }
@@ -221,6 +217,10 @@ function renderKpis() {
     tile("Worktrees", wts.length, `${live} with something listening`),
     tile("Commits, 24 h", day, `${S.commits_total} in ${S.hours} h`),
   ];
+  const merged = n.flatMap((x) => x.jobs.rows.filter((r) => r.Outcome === "merged" && r.Hours).map((r) => +r.Hours)).sort((a, b) => a - b);
+  const open = n.reduce((a, x) => a + x.jobs.open.length, 0);
+  const mid = merged.length >> 1, median = merged.length % 2 ? merged[mid] : (merged[mid - 1] + merged[mid]) / 2;
+  if (merged.length) kids.push(tile("Median job", median.toFixed(1) + " h", `${merged.length} merged · ${open} open`));
   if (m.load) { const v = m.load[0] / (m.cpus || 1); kids.push(tile("Load", m.load[0].toFixed(1), `${m.cpus} cores · 5 min ${m.load[1].toFixed(1)}`, { v, level: v > 0.9 ? "critical" : v > 0.7 ? "warning" : "" })); }
   if (m.mem_total_gb) { const used = 1 - m.mem_free_gb / m.mem_total_gb; kids.push(tile("Memory free", m.mem_free_gb + " GB", `of ${m.mem_total_gb} GB`, { v: used, level: m.mem_free_gb < 8 ? "critical" : used > 0.8 ? "warning" : "" })); }
   if (m.disk_total_gb) { const used = 1 - m.disk_free_gb / m.disk_total_gb; kids.push(tile("Disk free", m.disk_free_gb + " GB", `of ${m.disk_total_gb} GB`, { v: used, level: m.disk_free_gb < 40 ? "critical" : used > 0.85 ? "warning" : "" })); }
@@ -284,10 +284,15 @@ function renderWork() {
     for (const w of x.worktrees) if (!used.has(w.branch)) rows.push([x, null, w]);
   }
   if (!rows.length) return $("work").replaceChildren(el("div", { class: "empty" }, "No jobs in flight."));
-  const t = el("table", {}, el("thead", {}, el("tr", {}, ["Project", "Job", "Thread", "State", "Ports", "Changes", "Ahead", "Last commit"].map((h, i) => el("th", { style: i > 4 ? "text-align:right" : null }, h)))));
+  const t = el("table", {}, el("thead", {}, el("tr", {}, ["Project", "Job", "Thread", "State", "Ports", "Changes", "Ahead", "Age", "Activity"].map((h, i) => el("th", { style: i > 4 ? "text-align:right" : null }, h)))));
   const tb = el("tbody");
-  rows.sort((a, b) => ((b[2] && b[2].last) || 0) - ((a[2] && a[2].last) || 0));
+  const act = (w) => Math.max((w && w.last) || 0, (w && w.wrote) || 0);
+  rows.sort((a, b) => act(b[2]) - act(a[2]));
   for (const [x, j, w] of rows) {
+    const job = x.jobs.open.find((r) => r.Job === (j ? j.branch : w && w.branch));
+    const t = act(w), writing = w && w.wrote && Date.now() / 1000 - w.wrote < 120;
+    const activity = !t ? "-" : writing ? el("span", { class: "row", style: "flex-wrap:nowrap;justify-content:flex-end" }, el("span", { class: "dot good pulse", "aria-label": "writing" }), "writing now")
+      : (w.wrote && w.wrote >= (w.last || 0) ? "wrote " : "commit ") + ago(t);
     const live = w && w.listening.length;
     const ports = w && w.port ? el("span", { class: "row", style: "flex-wrap:nowrap" }, el("span", { class: "dot " + (live ? "good pulse" : ""), title: live ? "listening" : "nothing listening", "aria-label": live ? "listening" : "idle" }),
       (w.ports > 1 ? `${w.port}–${w.port + w.ports - 1}` : String(w.port)) + (live ? `  (${w.listening.length} live)` : "")) : "-";
@@ -300,7 +305,8 @@ function renderWork() {
       el("td", { class: "nowrap" }, ports),
       el("td", { class: "num" }, w && w.dirty != null ? String(w.dirty) : "-"),
       el("td", { class: "num" }, w && w.ahead != null ? String(w.ahead) : "-"),
-      el("td", { class: "num" }, w && w.last ? ago(w.last) : "-")));
+      el("td", { class: "num", title: job ? `started ${job.Started.replace("T", " ").slice(0, 16)}, ${job.Reviews || 0} review round(s)` : "" }, job ? job.age_h.toFixed(1) + " h" : "-"),
+      el("td", { class: "num" }, activity)));
   }
   t.append(tb); $("work").replaceChildren(t);
 }
@@ -345,7 +351,7 @@ function renderLib() {
 
 function renderFeed() {
   const rows = S.commits.slice(0, 60).map((c) => ({ t: c.t, who: c.node, kind: c.where === "home" ? "commit in its home" : "brain commit", text: c.subject, key: "c:" + c.sha }));
-  for (const x of S.nodes) for (const d of x.decisions) { const t = localSec(d.time); if (t) rows.push({ t, who: x.id, kind: "decision", text: d.title, said: d.said, key: "d:" + x.id + d.time + d.title }); }
+  for (const x of S.nodes) for (const d of x.decisions) { const t = d.t; if (t) rows.push({ t, who: x.id, kind: "decision", text: d.title, said: d.said, key: "d:" + x.id + d.time + d.title }); }
   rows.sort((a, b) => b.t - a.t);
   $("feed").replaceChildren(...rows.slice(0, 40).map((r) => el("li", { class: mark(r.key) },
     el("span", { class: "icon", title: r.kind, "aria-label": r.kind, style: `color:${r.kind === "decision" ? "var(--accent)" : "var(--muted)"}` }, r.kind === "decision" ? "◆" : r.kind === "brain commit" ? "○" : "●"),
@@ -369,14 +375,36 @@ function openDetail(id) {
   for (const [k, v] of Object.entries(x.status)) if (!/^blocked/i.test(k)) sec(k, block(v.length > 6000 ? v.slice(0, 6000) + "\n…" : v));
   if (x.limits.length) sec("Limits", el("ul", { class: "list" }, ...x.limits.map((l) => el("li", {}, el("span", {}, inline(l))))));
   if (x.decisions.length) sec("Latest decisions", el("ul", { class: "list" }, ...x.decisions.map((dd) => el("li", {}, el("span", {}, dd.title, dd.said ? el("div", { class: "said" }, dd.said) : null), el("span", { class: "when" }, dd.time)))));
+  if (x.jobs.rows.length) {
+    const jj = x.jobs, rows = jj.rows.slice().reverse().slice(0, 12);
+    const t = el("table", {}, el("thead", {}, el("tr", {}, ["Job", "Started", "Hours", "Outcome", "Reviews"].map((h) => el("th", {}, h)))),
+      el("tbody", {}, ...rows.map((r) => el("tr", {}, el("td", {}, el("code", {}, r.Job)), el("td", {}, (r.Started || "").replace("T", " ").slice(0, 16)), el("td", { class: "num" }, r.Hours || "open"), el("td", { title: r.Cause || "" }, r.Outcome || "-"), el("td", { class: "num" }, r.Reviews || "0")))));
+    sec(`Jobs · ${jj.merged} merged, ${jj.abandoned} abandoned` + (jj.median_hours != null ? ` · median ${jj.median_hours} h, ${jj.median_reviews} review round(s)` : ""), t);
+  }
   if (x.reports.length) sec("Reports", el("ul", { class: "list" }, ...x.reports.map((r) => el("li", {}, el("span", {}, r.title), el("span", { class: "when" }, el("code", {}, r.path))))));
   if (x.never_name) kids.push(el("p", { class: "kv" }, `${x.never_name} word(s) its home must never contain (brain guard ${x.id})`));
   const keep = d.scrollTop; d.replaceChildren(...kids); d.scrollTop = keep; d.classList.add("open"); d.setAttribute("aria-hidden", "false"); renderTree();
 }
-function closeDetail() { if (location.hash) history.replaceState(null, "", location.pathname); selected = null; $("detail").classList.remove("open"); $("detail").setAttribute("aria-hidden", "true"); if (S) renderTree(); }
+function closeDetail() { if (location.hash) history.replaceState(null, "", location.pathname + location.search); selected = null; $("detail").classList.remove("open"); $("detail").setAttribute("aria-hidden", "true"); if (S) renderTree(); }
 addEventListener("keydown", (e) => { if (e.key === "Escape") closeDetail(); });
 addEventListener("hashchange", () => { if (S && location.hash.startsWith("#node=")) openDetail(decodeURIComponent(location.hash.slice(6))); });
 
+// desktop notifications, opt-in: only for things that newly need the operator
+let notifyOn = localStorage.getItem("brain-notify") === "1" && "Notification" in window && Notification.permission === "granted";
+function notifyLabel() { $("notify").textContent = notifyOn ? "Notifying" : "Notify me"; }
+$("notify").addEventListener("click", async () => {
+  if (!("Notification" in window)) return alert("This browser can't show notifications.");
+  if (notifyOn) { notifyOn = false; localStorage.removeItem("brain-notify"); return notifyLabel(); }
+  if ((await Notification.requestPermission()) === "granted") { notifyOn = true; localStorage.setItem("brain-notify", "1"); }
+  notifyLabel();
+});
+function notifyNew() {
+  if (!notifyOn || firstPaint) return;
+  for (const a of S.attention) {
+    const key = "need:" + a.node + a.text;
+    if (!seen.has(key)) new Notification(`${S.brain.title}: ${a.node} needs you`, { body: a.text.replace(/^inbox: /, "").slice(0, 200), tag: key });
+  }
+}
 // new things flash once (not on the first paint)
 function mark(key) { const isNew = !firstPaint && !seen.has(key); seen.add(key); return isNew ? "new" : null; }
 
@@ -384,6 +412,7 @@ function render() {
   document.title = `${S.brain.title} · brain`;
   $("title").textContent = S.brain.title;
   $("meta").textContent = `${S.brain.name} · ${S.brain.root} · ${S.brain.machine}${S.brain.tz ? " · " + S.brain.tz + " " + brainClock() : ""}${S.brain.others.length ? " · other brains here: " + S.brain.others.join(", ") : ""}`;
+  notifyNew(); notifyLabel();
   renderKpis(); renderTree(); renderNeeds(); renderWork(); renderHeat(); renderLib(); renderFeed();
   if (firstPaint && location.hash.startsWith("#node=")) selected = decodeURIComponent(location.hash.slice(6));
   if (selected) openDetail(selected);
@@ -394,7 +423,8 @@ function render() {
 let lastMsg = 0;
 function setLive(state, text) { $("livedot").className = "dot " + state; $("livetext").textContent = text; }
 function connect() {
-  const es = new EventSource("/api/events");
+  const k = new URLSearchParams(location.search).get("k") || "";
+  const es = new EventSource("/api/events?k=" + encodeURIComponent(k));
   es.onmessage = (e) => { S = JSON.parse(e.data); lastMsg = Date.now(); render(); setLive("good pulse", "live"); };
   es.onerror = () => { setLive("warning", "reconnecting…"); };
 }

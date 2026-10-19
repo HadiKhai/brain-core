@@ -63,6 +63,8 @@ You mostly talk to coordinators, and they run `brain` for you. By hand:
 | `brain revoke <principal>` | end a relationship: quarantine and archive |
 | `brain sync <id>` / `brain sync --all` | what happened in a node and its home since the last sync |
 | `brain wt add/list/rm/prune` | one worktree per job beside an external home, with setup and a port |
+| `brain jobs [id]` | every job's hours, commits and review rounds (the node's `job-ledger.md`): medians, open jobs, causes |
+| `brain stale <id> <host time>` | freshness check: is a node's status behind its thread, whatever the timezones |
 | `brain workbench <id>`, `brain report <id> "topic"`, `brain reports` | scripts and reports, in a predictable place |
 | `brain brief <id> [--branch B] --task-file F` | a worker brief: where it runs, its ports, the node's limits, how to ask and hand back |
 | `brain guard <id> [path ...]` | a home and its worktrees hold none of the words in the node's `never-name.txt` |
@@ -75,6 +77,12 @@ You mostly talk to coordinators, and they run `brain` for you. By hand:
 | `brain check [--fix]` | verify the mechanically checkable axioms; repair the safe things |
 | `brain machine` | this machine's bindings |
 | `brain upgrade` | update `core/` to the latest version, then link and check |
+
+The never-name guard checks working files and staged contents, including populated submodules
+recursively, plus branch names and commit messages. Ignored untracked files are excluded.
+Unavailable submodules or read errors make the scan incomplete (exit 2); matches exit 1 and
+a complete clean scan exits 0. It catches accidental slips; it is not a defence against
+deliberate evasion.
 
 **Small work.** For a quick fix in one repository, open the repository itself in your host, not
 its node. The Brain's rules don't apply there and nothing is recorded; `brain sync` shows the

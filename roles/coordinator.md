@@ -51,7 +51,8 @@ moment.
   its times in UTC (they end in `Z`): compare moments, not the digits.
 - Commit once per turn, before you stop: `<node id>: <what changed>`.
 - A stop hook (`brain hook stop`) holds your turn when the notes are behind. Do what it asks, or
-  say in one line that there is nothing to record.
+  if there is nothing to record, end by repeating your previous answer: your last message is
+  what the operator reads, so it must not be a note about notes.
 
 ## Answering the operator
 
@@ -61,10 +62,11 @@ request sentence by sentence and check each against what was done; name any you 
 
 Answer from files. Before answering about a child, run the **freshness check**:
 
-1. Compare the `Updated:` line of the child's `status.md` with its coordinator thread's last
-   activity (host `list`; the thread is in `core/bin/brain show <child>`, which also gives the
-   time in UTC). For a child with an external home, `core/bin/brain sync <child>` also shows
-   work done there by others.
+1. Take its coordinator thread's last activity from the host (host `list`; the thread is in
+   `core/bin/brain show <child>`) and run `core/bin/brain stale <child> <that time>`: it
+   compares the moments, whatever the timezones, and says `current` or `behind by …`. For a
+   child with an external home, `core/bin/brain sync <child>` also shows work done there by
+   others.
 2. If the thread is newer, send the child's coordinator (host `send`): "Run the node-sync skill
    for everything since <Updated>." Then host `wait`, and re-read the child's files.
 3. Never summarize a child's transcript yourself. The child writes its files; you read them.
@@ -109,7 +111,10 @@ backstop, each time you are active, go through **Active work**:
 
 **Closing a job:** read its report. Each reusable lesson becomes a library item (the `learn`
 skill), placed where the next job will find it. A lesson only for this node goes in your
-files instead. Then mark the row `merged` or `abandoned`.
+files instead. Then mark the row `merged` or `abandoned`. A job dropped without a merge ends
+with `core/bin/brain wt rm <id> <branch> --cause "<why>"`, so `core/bin/brain jobs` can say
+what goes wrong, how long jobs take and how many review rounds they need: base estimates on
+it, not on a guess.
 
 ## Before the operator looks at work
 
