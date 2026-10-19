@@ -49,3 +49,50 @@ one machine and live in `.brain/local.json`, never in git.
    Run it again after a core upgrade that changes the hook.
 9. Run `core/bin/brain check`, then give the operator one link per coordinator
    (`core/bin/brain` lists them).
+
+## Subscriptions on this machine
+
+`brain usage` reads account-wide limits from the machine cache. Declare subscriptions in
+`subscriptions.json` beside the registry (`BRAIN_CONFIG` names that registry file; normally
+`~/.config/brain/brains.json`). Keep the file outside every brain. Discover T3 provider instance
+IDs with `orchestrator_capabilities`, never infer them from a runtime's name:
+
+```json
+{
+  "stop_percent": 85,
+  "pacing_margin": 10,
+  "subscriptions": [
+    {"id": "personal-codex", "runtime": "codex", "label": "Personal",
+     "config_dir": "~/.codex", "host_provider_instance_id": "<from capabilities>",
+     "brains": ["personal"]},
+    {"id": "work-claude", "runtime": "claude", "label": "Work",
+     "config_dir": "~/.claude-work", "host_provider_instance_id": "<from capabilities>",
+     "brains": ["work"]}
+  ]
+}
+```
+
+Names in `brains` are machine registry names (`brain brains`); `[]` allows none, `["*"]`
+explicitly allows every brain. Without a file, installed runtimes each have one subscription,
+using `CLAUDE_CONFIG_DIR` / `CODEX_HOME` when set, otherwise `~/.claude` / `~/.codex`, allowed
+for every brain. Bind host instances explicitly before launching; defaults cannot infer them.
+Duplicate account IDs share one reading while each entry keeps its own brain allow-list.
+Account keys are hashed; account names, tokens and credit balances are not cached.
+`pacing_margin` is percentage points ahead of the fraction of the week elapsed, default 10.
+The fullest window determines headroom; `.brain/local.json`'s ordered `fallback` host instance
+IDs break ties; otherwise equal readings keep the node's preferred runtime. An explicit runtime flag (and a specialist's runtime) constrains selection;
+review always uses a runtime different from the builder.
+
+Run `brain usage --refresh` once to check access. Codex uses read-only app-server account
+lookups; Claude uses its stored OAuth credential in memory. Keychain reads never request a
+dialog and stop trying after a blocked read in that poller. Failures fall back to timestamped
+logs or unknown. A newer cached observation survives an outage as unknown (with its original
+time), so an old low log value cannot clear a stop line. Tokens never belong in this file, command arguments, reports or the cache.
+Local logs do not reliably measure this machine's share of the account-wide allowance.
+
+Keep one `brain usage --watch --every 300` process per machine, outside agent threads.
+On macOS, `brain usage install` writes `~/Library/LaunchAgents/org.brain.usage.plist` and prints
+the `launchctl bootstrap` command; it does not load it. Inspect the paths first, then load it
+only when the operator wants the service. `--launch-agent <path>` writes a plist elsewhere.
+Agents read `usage.json`; brief/hire/review refresh it once if last checked over two minutes
+ago. The UI reads it without calling runtimes. Expired observations are unknown until refreshed.

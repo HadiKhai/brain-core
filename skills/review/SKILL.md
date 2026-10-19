@@ -8,6 +8,10 @@ description: Have a change reviewed by an agent on a different runtime than the 
 Run by the coordinator that started the builder. A reviewer on another runtime catches what the
 builder's runtime tends to miss.
 
+Before launching, run `brain usage`. Use only a subscription allowed for this brain and below
+the stop line; follow the subscription and host instance in the brief. Unknown usage must be
+stated; never run a polling loop in an agent.
+
 1. **The node's own reviewers first** (axiom 7). If the home has its own review agents or
    checklist, the builder runs them; this review adds to them.
 2. **Brief.** `core/bin/brain review <id> --branch <branch> --built-by <builder runtime>

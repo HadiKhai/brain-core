@@ -16,6 +16,9 @@ Every agent working anywhere under it reads this file first.
 - **Runtimes:** instruction files named for a specific runtime (like `CLAUDE.md`) are links to
   `AGENTS.md`. Always edit `AGENTS.md`.
 
+Any agent may run `brain usage`: read the machine cache before launching work, respect the
+subscription's allowed brains and stop line, and follow the host instance chosen by the brief.
+
 ## About the operator
 
 <!-- TODO(operator): 5-10 lines. Who you are, how you like answers, what agents must never do.

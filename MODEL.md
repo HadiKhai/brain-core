@@ -151,6 +151,14 @@ A runtime can serve this framework if it can:
 Each runtime's adapter maps the neutral forms (instructions, roles, skills) to that
 runtime's own file names and formats.
 
+## Machine subscriptions
+
+Subscriptions belong to the machine, outside every brain. Server readings are account-wide,
+including other machines: five-hour and seven-day windows, never a daily allowance. A brain may
+use only its allowed subscriptions. One poller writes the machine cache; agents read it. Before
+starting work, refresh stale readings once, respect the stop line and prefer weekly headroom.
+Unknown usage is stated, never presented as spare capacity; it does not prevent a brief.
+
 ## Host contract
 
 | Operation | Meaning |

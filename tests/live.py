@@ -565,12 +565,75 @@ def nine_future_updated_repaired(run):
     run.brain_check()
 
 
+def usage_routes_before_launch(run):
+    """A coordinator keeps work off exhausted and other-brain accounts; evidence stays in files."""
+    root = run.instance()
+    # A synthetic read-only app-server makes refreshes deterministic even if the agent takes >2 min.
+    bin_ = run.tmp / "bin"
+    bin_.mkdir(exist_ok=True)
+    (bin_ / "brain").symlink_to(BRAIN)
+    stub = bin_ / "codex"
+    stub.write_text("#!" + sys.executable + "\n" + r'''import json,os,sys,time
+from pathlib import Path
+for line in sys.stdin:
+    msg=json.loads(line)
+    if 'id' not in msg: continue
+    cfg=Path(os.environ['CODEX_HOME'])
+    if msg['method']=='initialize': result={}
+    elif msg['method']=='account/read': result={'account':{'accountId':cfg.name}}
+    elif msg['method']=='account/rateLimits/read':
+        used=95 if cfg.name=='full' else 0 if cfg.name=='work' else 30
+        result={'rateLimits':{'primary':{'usedPercent':used,'windowDurationMins':10080,
+                                       'resetsAt':int(time.time()+3*86400)},'secondary':None}}
+    else: sys.exit(3)
+    print(json.dumps({'id':msg['id'],'result':result}),flush=True)
+''')
+    stub.chmod(0o755)
+    subs = []
+    for name in ("full", "work", "room"):
+        cfg = run.tmp / name
+        cfg.mkdir()
+        subs.append({"id": name, "runtime": "codex", "config_dir": str(cfg),
+                     "host_provider_instance_id": "provider-" + name,
+                     "brains": ["work-only"] if name == "work" else ["alice"]})
+    (run.tmp / "subscriptions.json").write_text(json.dumps({"subscriptions": subs}))
+    # Seed only through the command under test, with the stub on PATH.
+    sh(sys.executable, str(BRAIN), "usage", "--refresh", cwd=root,
+       env={**brains_config(run.tmp), "PATH": f"{bin_}:{os.environ.get('PATH', '')}"})
+    run.agent(root / "nodes/a", (
+        "Role: coordinator of node `a`. Prepare a worker to audit this node's brief for clarity. "
+        "The host's launch tools are unavailable in this test, so prepare the launch without starting a thread. "
+        "Write launch-plan.json in your node with runtime, subscription_id, provider_instance_id, and reason. "
+        "Save the machine eligibility evidence you used as usage-before-launch.json in your node, and the "
+        "worker's assembled brief as worker-brief.md. Follow your coordinator rules and commit your files. "
+        "Reply in one line."), writable=root)
+    node = root / "nodes/a"
+    try:
+        plan = json.loads((node / "launch-plan.json").read_text())
+        usage = json.loads((node / "usage-before-launch.json").read_text())
+    except (OSError, ValueError) as e:
+        run.check(False, f"launch evidence missing or invalid: {e}")
+        return
+    run.check(plan.get("subscription_id") == "room", f"wrong subscription: {plan}")
+    run.check(plan.get("provider_instance_id") == "provider-room", f"wrong host instance: {plan}")
+    run.check(plan.get("runtime") == "codex", f"wrong worker runtime: {plan}")
+    run.check(usage.get("scope") == "account-wide", "no account-wide brain usage evidence")
+    rows = {s.get("id"): s for s in usage.get("subscriptions", [])}
+    run.check(rows.get("full", {}).get("windows", {}).get("seven_day", {}).get("used_percent") == 95,
+              "exhausted account not checked")
+    run.check(rows.get("work", {}).get("brains") == ["work-only"], "other brain's account not checked")
+    brief = (node / "worker-brief.md").read_text() if (node / "worker-brief.md").exists() else ""
+    run.check("provider-room" in brief, "worker brief lacks the chosen provider")
+    run.check("provider-full" not in brief and "provider-work" not in brief, "worker brief chose ineligible provider")
+    run.brain_check()
+
+
 SCENARIOS = [parity, coordinator_writes_as_it_goes, worker_asks_the_writer, learning_is_a_citation,
              new_node_in_one_sentence, no_upward_traces, second_runtime_review, stop_hook_fires,
              notes_current_after_an_edit, a_session_reaches_its_own_brain, worker_hands_back_a_question,
              lessons_become_items, limits_carry_their_reason, freshness_across_timezones,
              nine_job_close_lessons, nine_worker_resume_ready, nine_worker_resume_uncommitted,
-             nine_future_updated_repaired]
+             nine_future_updated_repaired, usage_routes_before_launch]
 
 
 def main():

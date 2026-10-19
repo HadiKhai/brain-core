@@ -8,6 +8,10 @@ description: Run one job (a fix, a feature, tests, an audit) in a node's externa
 Run by the node's coordinator. One job = one branch = one worktree = one worker = one pull
 request. The operator's own checkout of the home is never touched.
 
+Before launching, run `brain usage`. Use only a subscription allowed for this brain and below
+the stop line; follow the subscription and host instance in the brief. Unknown usage must be
+stated; never run a polling loop in an agent.
+
 1. **Worktree.** `core/bin/brain wt add <id> <branch> [--base <ref>]`. It creates the worktree
    in the node's workbench (beside the home, never inside it or the instance), runs the node's
    `worktree-setup.sh` if it has one (env files, installs), and gives the job its own port.

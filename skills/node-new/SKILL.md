@@ -7,6 +7,10 @@ description: Create a child node of the current node with its folder, record, co
 
 Run by the coordinator of the parent node.
 
+Before launching, run `brain usage`. Use only a subscription allowed for this brain and below
+the stop line; follow the subscription and host instance in the brief. Unknown usage must be
+stated; never run a polling loop in an agent.
+
 1. **Collect the details.** Infer what you can and ask only for what's missing:
    - the id (lowercase, dashes);
    - the title;

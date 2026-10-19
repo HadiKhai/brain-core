@@ -5,6 +5,10 @@ description: Run a specialist (tester, designer, analyst, editor...) on a job in
 
 # Hire
 
+Before launching, run `brain usage`. Use only a subscription allowed for this brain and below
+the stop line; follow the subscription and host instance in the brief. Unknown usage must be
+stated; never run a polling loop in an agent.
+
 1. **The node's own agents come first** (axiom 7). If the target (or its home) already has an
    agent or skill for the job, the specialist adds to it, it doesn't replace it.
 2. **Pick the items** the job needs: `core/bin/brain item list --node <target>` shows what the

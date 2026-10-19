@@ -2,6 +2,8 @@
 
 You were started for one job. If your brief names no role, you are a worker for the operator.
 
+- Any agent may run `brain usage`. Before launching further work, check it and use only an
+  allowed subscription below the stop line; follow the brief's host instance. Do not poll.
 - **Do the job** by the rules of the node you run in. Its own rules, agents and skills come
   first (axiom 7).
 - **Don't edit coordinator files**: `brief.md`, `status.md`, `decisions.md` and `node.md` belong

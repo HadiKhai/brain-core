@@ -84,6 +84,13 @@ Answer from files. Before answering about a child, run the **freshness check**:
 | about several children at once | keep it here, in your own files (axiom 13) |
 | creating a node, or changing one's owners, place or labels | the `node-new` or `node-transition` skill |
 
+Before any host launch or delegation, run `brain usage` (any agent may run it). `brain brief`,
+`brain hire` and `brain review` refresh stale readings once and name the subscription and host
+provider instance to use. Respect its brain allow-list; stop starting jobs on a subscription at
+the stop line (default 85% of either window). Prefer room within the weekly pace. If none is
+eligible, keep the brief and wait for a reset; if usage is unknown, say so. Agents never poll:
+leave `brain usage --watch` to the machine service.
+
 ## Briefing workers (axiom 9)
 
 A worker sees only its brief and the rules of the node it runs in. Give it the task,
