@@ -1687,6 +1687,16 @@ def cmd_brief(a):
     if never_terms(n):
         out += ["## Before you hand back", "", f"Run `brain guard {n['id']} {tilde(where)}`. It must print "
                 "`guard: clean`; if not, remove what it lists (it names the file, never the word).", ""]
+    if w:
+        out += ["## Ready packet", "",
+                "Before handing back done: commit your changes, finish the required review rounds, then "
+                "`git rebase main` in your worktree. Resolve conflicts and address review findings yourself.",
+                f"Run `brain ready {n['id']} --branch {a.branch} --record --reviews <completed rounds>`. "
+                "It dry-runs the merge with merge-tree, runs the node's configured verify command, and records "
+                "the checked head/main SHAs and result. If verify is unset, ask the coordinator to set it.",
+                "Hand back only when it prints `ready`; include the packet path and review evidence. "
+                "If main moves, rebase and record again. Only the coordinator merges to main.",
+                f"Packet: `{tilde(ready_path(inst, n, a.branch))}`", ""]
     out += handback_lines(inst, n, a.to) + report_lines()
     text = "\n".join(out) + "\n"
     no_terms_in(n, text, "the brief")
@@ -1697,6 +1707,111 @@ def cmd_brief(a):
         print(text, end="")
 
 # ---------- second-runtime review ----------
+
+def ready_path(inst, n, branch):
+    import hashlib
+    key = hashlib.sha256(branch.encode()).hexdigest()
+    return workbench(inst, n) / "scratch" / "ready" / f"{key}.json"
+
+
+def ready_refs(n, branch):
+    home = n["home_path"]
+    return tuple(git("rev-parse", "--verify", "--quiet", f"refs/heads/{ref}^{{commit}}", cwd=home).stdout.strip()
+                 for ref in (branch, "main"))
+
+
+def ready_preflight(n, branch):
+    """Use local main exactly: testing against an older main is not testing the proposed integration."""
+    reasons = []
+    if not n["external"] or not n["home_path"] or not n["home_path"].exists():
+        return ["an external git home on this machine is required"], "", ""
+    head, main = ready_refs(n, branch)
+    if not head or not main:
+        return ["branch or local main is missing"], head, main
+    if branch == "main":
+        reasons.append("the job branch must differ from main")
+    if git("merge-base", "--is-ancestor", main, head, cwd=n["home_path"]).returncode:
+        reasons.append("worker must rebase on current main")
+    if git("merge-tree", "--write-tree", main, head, cwd=n["home_path"]).returncode:
+        reasons.append("merge-tree is not clean (or this git lacks --write-tree)")
+    w = n["local"].get("worktrees", {}).get(branch)
+    if not w or not Path(w["path"]).exists():
+        reasons.append("job worktree is missing")
+    else:
+        path = w["path"]
+        if git("symbolic-ref", "--short", "HEAD", cwd=path).stdout.strip() != branch:
+            reasons.append("job worktree is on a different branch")
+        status = git("status", "--porcelain", cwd=path)
+        if status.returncode or status.stdout.strip():
+            reasons.append("job worktree is dirty or unreadable")
+    return reasons, head, main
+
+
+def ready_state(inst, n, branch):
+    reasons, head, main = ready_preflight(n, branch)
+    packet = None
+    if n["external"] and n["home_path"]:
+        try:
+            packet = json.loads(ready_path(inst, n, branch).read_text())
+            if not isinstance(packet, dict):
+                packet = None
+        except (OSError, ValueError):
+            pass
+    if packet is None:
+        reasons.append("ready packet missing or unreadable; worker must record it")
+    else:
+        if packet.get("version") != 1 or packet.get("node") != n["id"] or packet.get("branch") != branch:
+            reasons.append("ready packet identifies a different job or format")
+        if packet.get("head") != head:
+            reasons.append("branch head changed; return to worker")
+        if packet.get("main") != main:
+            reasons.append("main moved; return to worker to rebase and verify again")
+        verify = n["fm"].get("verify", "").strip()
+        if not verify or packet.get("verify_command") != verify or type(packet.get("verify_result")) is not int \
+                or packet["verify_result"] != 0:
+            reasons.append("node verify missing, changed or failed")
+        rounds = packet.get("review_rounds")
+        if type(rounds) is not int or rounds < 1:
+            reasons.append("no completed review rounds recorded")
+        if not isinstance(packet.get("checked_at"), str) or not inst.parse_time(packet["checked_at"]):
+            reasons.append("packet has no valid check time")
+    return {"ready": not reasons, "reasons": reasons, "packet": packet}
+
+
+def cmd_ready(a):
+    inst = load()
+    n = inst.node(a.id)
+    if a.record:
+        reasons, head, main = ready_preflight(n, a.branch)
+        verify = n["fm"].get("verify", "").strip()
+        if not verify:
+            reasons.append("node has no verify command; coordinator must set verify=<command>")
+        if a.reviews is None or a.reviews < 1:
+            reasons.append("--record requires --reviews N completed review rounds (at least one)")
+        if reasons:
+            print("not ready: " + "; ".join(reasons))
+            sys.exit(1)
+        w = n["local"]["worktrees"][a.branch]
+        env = {**os.environ, "MAIN": str(n["home_path"]), "WORKTREE": w["path"], "BRANCH": a.branch,
+               "NODE": n["id"], "PORT": str(w["port"]), "PORTS": str(w.get("ports", 1)),
+               "PORT_LAST": str(w["port"] + w.get("ports", 1) - 1)}
+        unlock()  # verification belongs to this worker, not the instance-wide lock
+        result = subprocess.run(verify, shell=True, cwd=w["path"], env=env, capture_output=True, text=True)
+        packet = {"version": 1, "node": n["id"], "branch": a.branch, "head": head, "main": main,
+                  "verify_command": verify, "verify_result": result.returncode,
+                  "review_rounds": a.reviews, "checked_at": stamp(inst)}
+        path = ready_path(inst, n, a.branch)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(f".{path.name}.{os.getpid()}")
+        tmp.write_text(json.dumps(packet, indent=2) + "\n")
+        os.replace(tmp, path)
+        inst = Instance(inst.root)  # also detect a verify configuration change while it ran
+        n = inst.node(a.id)
+    state = ready_state(inst, n, a.branch)
+    print("ready" if state["ready"] else "not ready: " + "; ".join(state["reasons"]))
+    if not state["ready"]:
+        sys.exit(1)
+
 
 def cmd_review(a):
     """Brief for a reviewer on a different runtime than the one that built the change."""
@@ -3185,6 +3300,11 @@ def ui_state(inst, problems=None):
             home = n["home_path"]
             wts = [{k: hide(v) for k, v in ui_worktree(inst, home, b, w).items()}
                    for b, w in sorted(loc.get("worktrees", {}).items())]
+            for wt, branch in zip(wts, sorted(loc.get("worktrees", {}))):
+                state = ready_state(inst, n, branch)
+                wt["ready"] = {"ready": state["ready"], "reasons": [hide(x) for x in state["reasons"]],
+                               "packet": {k: hide(v) for k, v in state["packet"].items()}
+                               if state["packet"] else None}
             for c in ui_commits(home, since, all_refs=True):  # what comes from the home is shown as guard shows it
                 commits.append({**c, "subject": hide(c["subject"]), "node": n["id"], "where": "home"})
         work = [{k: hide(v) for k, v in j.items()} for j in work]
@@ -3695,7 +3815,7 @@ def reexec_into_instance_core():
 READ_ONLY = {"cmd_show", "cmd_tree", "cmd_status", "cmd_now", "cmd_jobs", "cmd_stale", "cmd_ui", "cmd_guard",
              "cmd_brief", "cmd_hire", "cmd_reports", "cmd_brains", "cmd_use", "cmd_machine", "cmd_usable",
              "cmd_item_list", "cmd_wt_list", "cmd_selftest", "cmd_init", "cmd_hook", "cmd_hook_approve", "cmd_help",
-             "cmd_dashboard"}
+             "cmd_dashboard", "cmd_ready"}
 
 
 def writes(a):
@@ -3707,6 +3827,8 @@ def writes(a):
         return bool(a.fix)
     if name == "cmd_jobs":
         return a.lessons is not None or a.switch is not None
+    if name == "cmd_ready":
+        return a.record
     if name in ("cmd_principal", "cmd_schedule"):
         return a.action not in ("list", None)
     return name not in READ_ONLY
@@ -3828,6 +3950,9 @@ def main():
     cmd("review", cmd_review, "brief for a review by another runtime: brain review <node> --branch B",
         "id", opt("--branch", required=True), opt("--base"), opt("--built-by", dest="built_by"),
         opt("--by", help="reviewer runtime (default: one the builder didn't use)"), opt("--focus"), opt("--out"))
+    cmd("ready", cmd_ready, "check a worker's ready packet against the branch and current local main", "id",
+        opt("--branch", required=True), opt("--record", action="store_true", help="worker: run node verify and record"),
+        opt("--reviews", type=int, help="completed review rounds, required with --record"))
     cmd("schedule", cmd_schedule, "recurring work: brain schedule list | add <id> --when W --node N --brief B | "
         "bind <id> <host id> | unbind <id>", opt("action", choices=["list", "add", "bind", "unbind"], nargs="?",
                                                   default="list"),

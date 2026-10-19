@@ -65,6 +65,8 @@ sense, it belongs in the instance, not here.
 14. **Coordinators are recursive and optional.** Any node may have one. If it does, work
     for that node goes through it.
 15. **One writer per file.** Everyone else asks the writer.
+    Workers prepare their branches, reviews and ready packets; the coordinator alone merges
+    to main, after `brain ready` accepts the packet against current main.
 16. **State lives in files; threads are disposable.** Any thread can be replaced from the
     files of the node it served.
 17. **Time is absolute.** Every recorded fact carries a full timestamp from `brain now`.

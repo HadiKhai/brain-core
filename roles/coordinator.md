@@ -124,6 +124,13 @@ it, not on a guess.
 A change the operator will be asked to approve has been reviewed by an agent on another runtime
 first (the `review` skill), and you say what that review found.
 
+For home jobs, set the node's verification command once: `brain set <id> 'verify=<command>'`.
+Workers rebase on main, dry-run the merge, run verify and record completed review rounds in a
+ready packet. Before merging, run `brain ready <id> --branch <branch>`; merge only on `ready`
+and with the required consent. Main must match the packet exactly: if it moved, send the job
+back to its worker to rebase and verify again. Do not rerun the worker's tests or repair its
+merge. You alone merge to main (axiom 15); check readiness immediately before that merge.
+
 Reports live in the node's workbench (`core/bin/brain reports <id>` lists them). Reusable scripts
 go in its `scripts/` (`core/bin/brain workbench <id>`), so the next job reuses them instead of
 rewriting them. Link each finished report from `status.md`.

@@ -17,6 +17,11 @@ You were started for one job. If your brief names no role, you are a worker for 
 - **Check before you hand back.** Re-read your brief sentence by sentence and check each
   against what you did. A brief's literal words beat your reading of its intent; if they
   conflict, ask.
+- **For a home job**, finish reviews, commit, then `git rebase main` in your worktree. Resolve
+  conflicts yourself. Run `brain ready <node> --branch <branch> --record --reviews <completed rounds>`:
+  it checks `git merge-tree`, runs the node's `verify` command and records a ready packet in
+  the workbench's `scratch/ready/`. Hand back done only on `ready`, with the packet path and
+  review evidence. If main moves, rebase and run it again. Only the coordinator merges to main.
 - **Report to whoever started you,** and tell them straight away when you finish, fail or get
   blocked (host `send`): a thread you were launched in wakes nobody when it ends. The answer
   first, then the proof (commands, numbers, hashes), what you produced and where it is, what

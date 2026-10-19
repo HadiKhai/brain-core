@@ -1280,6 +1280,97 @@ class JobLessonOutcomes(Scenario):
         self.assertIn("none: <reason>", brief)
 
 
+class WorkerReadyPackets(Scenario):
+    def job(self):
+        r = self.init("alice")
+        home = self.repo(self.tmp / "app", {"calc.py": "value = 1\n",
+                         "verify.py": "from calc import value\nassert value == 2\n"})
+        self.b(r, "new", "a", "--title", "A", "--home", str(home))
+        self.b(r, "set", "a", "verify=python3 -B verify.py")
+        self.b(r, "wt", "add", "a", "job")
+        wt = self.tmp / "app-work/worktrees/job"
+        (wt / "calc.py").write_text("value = 2\n")
+        self.git("commit", "-qam", "fix", cwd=wt)
+        return r, home, wt
+
+    def record(self, r, ok=True):
+        return self.b(r, "ready", "a", "--branch", "job", "--record", "--reviews", "2", ok=ok)
+
+    def packet(self):
+        return next((self.tmp / "app-work/scratch/ready").glob("*.json"))
+
+    def test_packet_records_executed_verify_and_checker_does_not_rerun(self):
+        r, home, wt = self.job()
+        self.assertIn("packet missing", self.b(r, "ready", "a", "--branch", "job", ok=False))
+        before = self.git("rev-parse", "HEAD", cwd=r)
+        self.assertEqual(self.record(r).strip(), "ready")
+        p = json.loads(self.packet().read_text())
+        self.assertEqual(p["head"], self.git("rev-parse", "job", cwd=home).strip())
+        self.assertEqual(p["main"], self.git("rev-parse", "main", cwd=home).strip())
+        self.assertEqual((p["verify_command"], p["verify_result"], p["review_rounds"]), ("python3 -B verify.py", 0, 2))
+        self.assertEqual(self.git("rev-parse", "HEAD", cwd=r), before)
+        # A checker must not execute the command: make the executable unavailable in its PATH.
+        original = self.env["PATH"]
+        tools = self.tmp / "tools"
+        tools.mkdir()
+        (tools / "git").symlink_to(shutil.which("git"))
+        self.env["PATH"] = str(tools)
+        try:
+            self.assertEqual(self.b(r, "ready", "a", "--branch", "job").strip(), "ready")
+        finally:
+            self.env["PATH"] = original
+        state = json.loads(self.b(r, "ui", "--json"))
+        node = next(n for n in state["nodes"] if n["id"] == "a")
+        self.assertTrue(node["worktrees"][0]["ready"]["ready"])
+
+    def test_main_move_and_head_change_require_worker_recheck(self):
+        r, home, wt = self.job()
+        self.record(r)
+        (home / "other.txt").write_text("new main\n")
+        self.git("add", "other.txt", cwd=home)
+        self.git("commit", "-qm", "main moves", cwd=home)
+        self.assertIn("main moved", self.b(r, "ready", "a", "--branch", "job", ok=False))
+        self.assertIn("rebase on current main", self.record(r, ok=False))
+        self.git("rebase", "main", cwd=wt)
+        self.assertEqual(self.record(r).strip(), "ready")
+        self.git("commit", "--allow-empty", "-qm", "amend job", cwd=wt)
+        self.assertIn("branch head changed", self.b(r, "ready", "a", "--branch", "job", ok=False))
+
+    def test_failed_verify_dirty_tree_missing_config_and_reviews(self):
+        r, home, wt = self.job()
+        (wt / "calc.py").write_text("value = 3\n")
+        self.assertIn("dirty", self.record(r, ok=False))
+        self.git("commit", "-qam", "wrong", cwd=wt)
+        self.assertIn("verify missing, changed or failed", self.record(r, ok=False))
+        self.assertNotEqual(json.loads(self.packet().read_text())["verify_result"], 0)
+        self.b(r, "set", "a", "verify=")
+        self.assertIn("no verify command", self.record(r, ok=False))
+        self.b(r, "set", "a", "verify=true")
+        self.assertIn("requires --reviews", self.b(r, "ready", "a", "--branch", "job", "--record", ok=False))
+        self.assertIn("at least one", self.b(r, "ready", "a", "--branch", "job", "--record", "--reviews", "0", ok=False))
+
+    def test_conflict_and_mutation_during_verify_cannot_be_ready(self):
+        r, home, wt = self.job()
+        (home / "calc.py").write_text("value = 9\n")
+        self.git("commit", "-qam", "conflict", cwd=home)
+        self.assertIn("merge-tree is not clean", self.record(r, ok=False))
+        self.git("rebase", "--onto", "job", "main", "main", cwd=home)
+        self.b(r, "set", "a", "verify=git commit --allow-empty -qm changed-during-verify")
+        self.assertIn("branch head changed", self.record(r, ok=False))
+
+    def test_malformed_or_incomplete_packets_fail_closed(self):
+        r, home, wt = self.job()
+        self.record(r)
+        path = self.packet()
+        original = json.loads(path.read_text())
+        for data in ([1], {}, {**original, "review_rounds": 0}, {**original, "verify_result": "0"},
+                     {**original, "checked_at": {}}, {**original, "node": "other"}):
+            path.write_text(json.dumps(data))
+            self.assertIn("not ready", self.b(r, "ready", "a", "--branch", "job", ok=False))
+        path.write_text("{")
+        self.assertIn("unreadable", self.b(r, "ready", "a", "--branch", "job", ok=False))
+
+
 class Measures(Scenario):
     def test_jobs_are_measured_from_start_to_end(self):
         r = self.init("alice")

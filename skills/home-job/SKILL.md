@@ -29,12 +29,19 @@ request. The operator's own checkout of the home is never touched.
    report: each lesson, or `none: <reason>`.
    While it runs, the worker `send`s you when it finishes, fails, is blocked or has a question
    (the coordinator role, "While workers run", is the backstop).
-4. **Review by the other runtime** before the operator sees it: the `review` skill.
+4. **Review by the other runtime** before the operator sees it: the `review` skill. The worker
+   then commits, rebases on `main`, and runs `brain ready <id> --branch <branch> --record --reviews
+   <completed rounds>`. Set `brain set <id> 'verify=<command>'` beforehand. This runs verify in
+   the worktree and checks `merge-tree`; the ready packet records both SHAs, command, result
+   and completed review rounds. The worker includes its path and review evidence in the report.
 5. **Pull request.** Once pushing is allowed and the review is addressed, the worker opens it.
    Have the host watch it (host `watch`), so reviews, checks and conflicts come back to you.
    Update the Active work row.
    Before anything is merged: `core/bin/brain guard <id> <worktree>` must print `guard: clean`
    when the node (or one above it) has a `never-name.txt`.
+   The coordinator runs `brain ready <id> --branch <branch>` immediately before merging and
+   merges only on `ready`. A moved main goes back to the worker for rebase and verification;
+   the coordinator does not repeat its tests. Only the coordinator merges to main.
 6. **Done.** When the operator (and the home's owners) merge it, set the row to `merged`, record
    the outcome in `status.md`, turn the report's reusable lessons into library items (the
    `learn` skill), record their ids with `core/bin/brain jobs <id> --branch <branch> --lessons
