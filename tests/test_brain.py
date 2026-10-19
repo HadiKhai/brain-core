@@ -4297,9 +4297,19 @@ class RoundTwo(AutonomyProject):
         self.assertLess(len(short.splitlines()), len(full.splitlines()) * .6)
         self.assertIn("Only local drafts", short)
         self.assertIn("brain guard app", short)
+        self.assertNotIn(str(self.tmp), short)
+        self.assertIn("brain guard app ~/code/app", short)
+        self.assertIn("host `send` to whoever started you", short)
+        self.assertIn("Do not commit to main unless the task explicitly says so", short)
+        self.assertTrue(all(p.read_bytes() == data for p, data in before.items()))
+        self.b(r, "set", "app", "coordinator=coordinator-thread")
+        routed = self.b(r, "brief", "app", "--small", "--to", "override-thread")
+        self.assertIn("host `send` to thread `override-thread`", routed)
+        self.assertNotIn("coordinator-thread", routed)
+        self.b(r, "set", "app", "coordinator=")
         self.assertIn("one line", short)
         self.assertNotIn("brain handback", short)
-        self.assertTrue(all(p.read_bytes() == data for p, data in before.items()))
+        self.assertEqual((n / "job-ledger.md").read_bytes(), before[n / "job-ledger.md"])
         self.assertEqual(worktrees, self.git("worktree", "list", "--porcelain", cwd=home))
         self.b(r, "brief", "app", "--small", "--branch", "job-a", ok=False)
         self.b(r, "brief", "app", "--small", "--import", ok=False)
@@ -4426,8 +4436,64 @@ class RoundTwo(AutonomyProject):
         self.b(r, "set", "app", "preview=http://localhost:3000", "preview_tour=reports/tour/index.md")
         self.assertNotIn("missing-preview", [i["kind"] for i in self.due(r)])
         self.b(r, "status", "app", "--refresh")
-        self.assertIn("Preview: http://localhost:3000; tour: reports/tour/index.md", status.read_text())
+        self.assertNotIn("http://localhost:3000", status.read_text())
+        self.assertNotIn("reports/tour/index.md", status.read_text())
         self.assertIn("## Now\n- Keep judgement.", status.read_text())
+
+    def test_preview_bindings_stay_local_and_none_clears_reminder(self):
+        r, home, wt = self.project()
+        inst = self.m.Instance(r); n = inst.node("app")
+        self.m.write_jobs(inst, n, [self.row("job/preview-one")])
+        self.assertIn("missing-preview", [i["kind"] for i in self.due(r)])
+        self.b(r, "set", "app", "preview=http://localhost:3456", "preview_tour=~/local-tour/index.md")
+        local = json.loads((r / ".brain/local.json").read_text())["nodes"]["app"]
+        self.assertEqual(local["preview"], "http://localhost:3456")
+        self.assertEqual(local["preview_tour"], "~/local-tour/index.md")
+        self.b(r, "status", "app", "--refresh")
+        tracked = self.git("show", "HEAD:nodes/app/status.md", cwd=r)
+        for path in (n["dir"] / "node.md", n["dir"] / "status.md", r / "registry.md"):
+            self.assertNotIn("localhost:3456", path.read_text())
+            self.assertNotIn("local-tour", path.read_text())
+        self.assertNotIn("localhost:3456", tracked)
+        ui = next(n for n in json.loads(self.b(r, "ui", "--json"))["nodes"] if n["id"] == "app")
+        self.assertEqual(ui["preview"], "http://localhost:3456")
+        self.assertEqual(ui["preview_tour"], "~/local-tour/index.md")
+        self.assertNotIn("local-only key", self.b(r, "check"))
+        self.b(r, "set", "app", "preview=none")
+        self.assertNotIn("missing-preview", [i["kind"] for i in self.due(r)])
+        self.b(r, "set", "app", "preview=")
+        self.assertIn("missing-preview", [i["kind"] for i in self.due(r)])
+        # Legacy committed values are flagged and are never used as local bindings.
+        fm, body = self.m.read_fm(n["dir"] / "node.md")
+        fm.update(preview="http://localhost:9876", preview_tour="~/legacy-tour")
+        self.m.write_fm(n["dir"] / "node.md", fm, body)
+        check = self.b(r, "check", ok=False)
+        self.assertIn("preview", check)
+        self.assertIn("preview_tour", check)
+        self.assertIn("missing-preview", [i["kind"] for i in self.due(r)])
+        self.b(r, "set", "app", "preview=none", "preview_tour=", "preview_url=https://demo.example.org")
+        self.b(r, "status", "app", "--refresh")
+        self.assertIn("Published preview: https://demo.example.org", (n["dir"] / "status.md").read_text())
+        self.assertNotIn("preview", self.m.read_fm(n["dir"] / "node.md")[0])
+
+    def test_unsafe_library_candidates_are_silently_skipped(self):
+        r, home, wt = self.project()
+        self.learn(r, "safe", title="Service guidance")
+        self.learn(r, "unsafe-title", title="Service HiddenBrand guidance")
+        self.learn(r, "unsafe-body", body="Service work for HiddenBrand")
+        self.learn(r, "unsafe-metadata", args=["--ref", "HiddenBrand@commit"])
+        n = r / "nodes/app"
+        (n / "never-name.txt").write_text("hiddenbrand\n")
+        self.b(r, "specialist", "new", "service", "--title", "Service", "--runtime", "codex")
+        for args in (("brief", "app", "--task", "Service"),
+                     ("brief", "app", "--small", "--task", "Service"),
+                     ("hire", "service", "app", "--task", "Service"),
+                     ("review", "app", "--branch", "job-a", "--built-by", "claude", "--focus", "Service")):
+            text = self.b(r, *args)
+            self.assertIn("`safe`", text)
+            self.assertNotIn("unsafe-", text)
+            self.assertNotIn("hiddenbrand", text.casefold())
+        self.assertNotIn("HiddenBrand", self.b(r, "item", "show", "unsafe-title", "--node", "app", ok=False))
 
     def test_forecasts_only_merged_valid_samples_and_honest_sparse_kinds(self):
         rows = [self.row("feat/a", "1"), self.row("feat/b", "2"), self.row("feat/c", "9"),
@@ -4443,6 +4509,27 @@ class RoundTwo(AutonomyProject):
         self.assertEqual(self.m.job_kind("import:abc"), "import")
         r = self.init("alice")
         self.assertIn("feat: 0 similar jobs, too little data", self.b(r, "jobs", "root", "--branch", "feat/planned"))
+
+    def test_generic_job_branches_use_repeated_slug_families_or_explicit_all_jobs(self):
+        rows = [self.row("job/m7-read", "1"), self.row("job/m7-write", "2"), self.row("job/m7-review", "9"),
+                self.row("job/ui-overview", "4"), self.row("job/ui-inbox", "6"), self.row("job/oneoff", "8"),
+                self.row("job/47-draft", "2"), self.row("job/47-other", "2")]
+        fs = {f["kind"]: f for f in self.m.job_forecasts(rows)}
+        self.assertNotIn("job", fs)
+        self.assertEqual((fs["m7"]["samples"], fs["m7"]["median_h"]), (3, 2))
+        self.assertEqual(fs["ui"]["samples"], 2)
+        lines = "\n".join(self.m.forecast_lines(rows, "job/preview-first"))
+        self.assertIn("m7: 3 similar jobs, median 2 h, spread 1–9 h", lines)
+        self.assertIn("ui: 2 similar jobs, too little data", lines)
+        self.assertIn("all jobs on this node: 8 jobs", lines)
+        self.assertNotIn("8 similar jobs", lines)
+        self.assertEqual(self.m.job_kind("job/preview-first", rows), "unclassified")
+        self.assertEqual(self.m.job_kind("job/47-next", rows), "unclassified")
+        r = self.init("alice")
+        self.b(r, "new", "other", "--title", "Other")
+        self.assertEqual(self.b(r, "jobs", "--branch", "job/anything", ok=False).strip(),
+                         "brain: --branch needs a node: brain jobs <node> --branch <branch>")
+        self.assertNotIn("other:", self.b(r, "jobs", "root", "--branch", "job/anything"))
 
     def test_new_ui_forecasts_and_preview_fields_are_additive_and_redacted(self):
         r, home, wt = self.project()

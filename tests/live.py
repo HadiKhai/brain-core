@@ -1167,6 +1167,9 @@ def r2_small_job(run):
     """A minutes-long local draft respects limits without job/worktree state."""
     root = run.instance()
     node = root / "nodes/a"
+    home = run.home_repo("project", {"README.md": "Local draft test\n"})
+    brain(root, "set", "a", "home=" + str(home))
+    head = sh("git", "rev-parse", "HEAD", cwd=home)
     brief_file = node / "brief.md"
     brief_file.write_text(brief_file.read_text().replace("## Limits", "## Limits\n\n- Drafts must be uppercase. Why: house style. Lift when: never."))
     output = run.tmp / "draft.txt"
@@ -1175,7 +1178,7 @@ def r2_small_job(run):
     brief = brain(root, "brief", "a", "--small", "--task",
                   f"Write the local disposable draft {output} containing a greeting, following node limits. "
                   "There is no host messaging tool; your final one-line reply is delivered to the coordinator.")
-    run.agent(node, brief, writable=run.tmp, trace=True)
+    run.agent(home, brief, writable=run.tmp, trace=True)
     run.check(output.exists() and output.read_text().strip() and output.read_text() == output.read_text().upper(),
               "small task did not produce an uppercase draft")
     run.check((root / ".brain/local.json").read_bytes() == local, "small task changed machine/worktree state")
@@ -1184,6 +1187,9 @@ def r2_small_job(run):
     run.check(not (node / "job-handbacks").exists(), "small task created a job hand-back")
     run.check("guard: clean" in run.trace or "guard: clean" in run.output,
               "small task did not show guard proof")
+    run.check(sh("git", "rev-parse", "HEAD", cwd=home) == head and
+              not sh("git", "status", "--porcelain", cwd=home), "small task changed the operator's checkout")
+    run.check(bool(re.search(r"(?:done|blocked|question):", run.output)), "small task did not deliver its hand-back")
 
 
 SCENARIOS = [recover_coordinator_replaced, recover_worker_other_runtime, recover_usage_before_two_jobs,

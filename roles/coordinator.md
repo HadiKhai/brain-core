@@ -111,20 +111,26 @@ Answer from files. Before answering about a child, run the **freshness check**:
 
 A small job is clear, low risk, takes minutes and changes no shared state: a local draft,
 formatting a disposable output, or a read-only check. Use `brain brief <id> --small --task ...`
-and a one-line hand-back; create no worktree, ledger row, review round or ready packet.
+and send its one-line hand-back through the host to your thread; create no worktree, ledger row,
+review round or ready packet. It may run in the operator's checkout: no commits to main unless
+the task explicitly says so.
 Use the full path for shared code/config/data, uncertain scope, security, migrations,
 irreversible actions or work that grows past minutes. Big nights keep the full ceremony.
 
 For a code project, the first milestones include a running local preview and a screenshot
 tour the human can open. Record `brain set <id> preview=<URL/path> preview_tour=<path>` after
-actually running it. External git homes, `type:code`/`kind:code` labels, or a `stack` field
+actually running it; both values stay in `.brain/local.json`, never in shared node or status files
+(axiom 23). Use `preview=none` to clear the reminder when no preview applies; use `preview=` to
+remove that exemption. Only `preview_url=<deployed URL>` is explicitly shareable in node.md and facts.
+External git homes, `type:code`/`kind:code` labels, or a `stack` field
 identify code nodes mechanically. `brain due` and facts flag merged work with no preview.
 Old merged work gets a reminder, never a failing check.
 
-Quote `brain jobs` forecasts rather than guessing: kind is the branch's first slash prefix
-(`import:` studies are import; bare names are unclassified). Only merged durations from
-this node count. Fewer than three similar jobs means too little data; otherwise quote N,
-median and observed min–max spread. Use `--branch <planned branch>` to include a planned job.
+Quote `brain jobs` forecasts rather than guessing: `job/<slug>` uses the first slug token
+when that family repeats (`m7`, `ui`, `preview`); other branch prefixes and `import:` keep their kind.
+Without a meaningful kind it says "all jobs on this node". Only merged durations from this node
+count. Fewer than three samples means too little data; otherwise quote N, median and observed
+min–max spread. Use `brain jobs <id> --branch <planned branch>` to include a planned job.
 `brain usage` and `brain jobs` compare typical serial full-job durations for open/planned jobs
 with fresh routed reset windows when there are enough samples. They do not subtract elapsed
 time or predict concurrency, token costs or allowance fit; allowance fit needs per-job usage

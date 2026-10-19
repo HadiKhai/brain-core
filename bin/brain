@@ -25,7 +25,7 @@ from pathlib import Path
 
 CORE = Path(__file__).resolve().parent.parent
 NODE_FIELDS = ["id", "title", "owners", "labels", "home", "runtime", "created"]
-LOCAL_KEYS = ["coordinator", "host_project", "home_project"]  # per machine (axiom 23)
+LOCAL_KEYS = ["coordinator", "host_project", "home_project", "preview", "preview_tour"]  # per machine (axiom 23)
 ITEM_FIELDS = ["id", "title", "kind", "source_node", "source_ref", "learned_at",
                "source_owners", "scope", "status"]
 STALE_DAYS = 7
@@ -99,6 +99,11 @@ def die(msg):
 def tilde(p):
     p, h = str(p), str(Path.home())
     return "~" + p[len(h):] if p == h or p.startswith(h + "/") else p
+
+
+def tilde_shell(p):
+    path = tilde(p)
+    return "~/" + shlex.quote(path[2:]) if path.startswith("~/") else "~" if path == "~" else shlex.quote(path)
 
 
 def read_env(f):
@@ -1683,7 +1688,7 @@ def cmd_set(a):
     if fm != old:
         write_fm(n["dir"] / "node.md", fm, body)
         write_registry(inst)
-        inst.commit([n["dir"] / "node.md", "registry.md"], f"{a.id}: set {', '.join(a.pairs)}")
+        inst.commit([n["dir"] / "node.md", "registry.md"], f"{a.id}: set {', '.join(kv.split('=', 1)[0] for kv in a.pairs)}")
 
 
 def cmd_relabel(a):
@@ -2757,9 +2762,13 @@ def knowledge_lines(inst, n, task, specialist="", exclude=()):
                 ("labels/stack", tokens(n["fm"].get("labels", "") + " " + n["fm"].get("stack", "")), 3),
                 ("specialist", tokens(specialist), 3)]
     ranked = []
+    forbidden = never_terms(n)
     for item in inst.items():
         fm = item["fm"]
         if fm.get("id") in exclude or not usable(fm, n["owners"])[0]:
+            continue
+        full_text = item["path"].read_text()
+        if find_terms(full_text, forbidden):
             continue
         body = read_fm(item["path"])[1]
         words = tokens(" ".join(str(fm.get(k, "")) for k in ("id", "title", "kind")) + " " + body)
@@ -2773,13 +2782,14 @@ def knowledge_lines(inst, n, task, specialist="", exclude=()):
             score += 2
             why.append("same node")
         if score:
-            ranked.append((-score, fm.get("id", ""), fm, why))
+            key = fm.get("id", "")
+            line = f"- `{key}`: {' '.join(fm.get('title', key).split())} — picked for {'; '.join(why)}. " \
+                   f"Read full: `brain item show {key} --node {n['id']}`."
+            if not find_terms(line, forbidden):
+                ranked.append((-score, key, line))
     if not ranked:
         return []
-    return ["## Relevant library items", ""] + [
-        f"- `{key}`: {' '.join(fm.get('title', key).split())} — picked for {'; '.join(why)}. "
-        f"Read full: `brain item show {key} --node {n['id']}`."
-        for _, key, fm, why in sorted(ranked, key=lambda r: (r[0], r[1]))[:5]] + [""]
+    return ["## Relevant library items", ""] + [line for _, _, line in sorted(ranked)[:5]] + [""]
 
 
 def limits_of(n):
@@ -2804,13 +2814,17 @@ def limits_lines(n):
     return (["## Limits", ""] + [f"- {l}" for l in lims] + [""]) if lims else []
 
 
+def host_send(inst, n, to=None):
+    to = to or n["local"].get("coordinator")
+    send = inst.host_adapter().get("SEND")
+    return f"host `send` to thread `{to}`" + (f" ({send.replace('{id}', to)})" if send else "") if to else \
+        "host `send` to whoever started you (their thread is in your launch message)"
+
+
 def handback_lines(inst, n, to=None, who="worker", branch=None):
     """How a worker started by a coordinator asks, and says it's done. It never waits on the operator:
     nobody watches its thread, and a launched thread doesn't wake whoever launched it."""
-    to = to or n["local"].get("coordinator")
-    send = inst.host_adapter().get("SEND")
-    how = f"host `send` to thread `{to}`" + (f" ({send.replace('{id}', to)})" if send else "") if to else \
-        "host `send` to whoever started you (their thread is in your launch message)"
+    how = host_send(inst, n, to)
     if who == "reviewer":  # a reviewer changes nothing, not even the inbox
         return ["## Questions and hand-back", "",
                 "- **Never ask the operator, and never wait for an answer in this thread**: nobody is watching it.",
@@ -2975,10 +2989,13 @@ def cmd_brief(a):
                "Follow this node's rules. Task: " + task.strip(),
                "Clear, low risk, minutes, no shared-state changes. If that stops being true, hand back for a full job.",
                *limits_lines(n), *knowledge_lines(inst, n, task),
-               f"Before hand-back or anything leaves, run `brain guard {n['id']} {shlex.quote(str(where))}`; require `guard: clean`.",
+               f"Before hand-back or anything leaves, run `brain guard {n['id']} {tilde_shell(where)}`; require `guard: clean`.",
                "Ask before publishing, pushing or irreversible actions. Keep boundary context out of project files.",
                "No worktree, ledger, reviews or ready packet. Do not edit coordinator files.",
-               "End with one line to your coordinator: done|blocked|question: <result>; proof: <check/output>."]
+               "This may be the operator's checkout. Do not commit to main unless the task explicitly says so; "
+               "shared repository changes need a full job.",
+               f"Send one line via {host_send(inst, n, a.to)}: done|blocked|question: <result>; proof: <check/output>. "
+               "Never ask the operator or wait in this thread; send questions too, then end your turn."]
         text = "\n".join(out) + "\n"
         no_terms_in(n, text, "the brief")
         if a.out:
@@ -3741,9 +3758,17 @@ def jobs_summary(inst, n):
             "forecasts": job_forecasts(rows)}
 
 
-def job_kind(branch):
-    # Prefixes are historical and immutable; today's labels/specialists cannot reclassify old jobs.
-    return "import" if branch.startswith("import:") else branch.split("/", 1)[0].lower() if "/" in branch else "unclassified"
+def job_kind(branch, rows=()):
+    # Generic job/ says nothing about the task. Repeated slug families do.
+    if branch.startswith("import:"):
+        return "import"
+    prefix, _, name = branch.lower().partition("/")
+    if prefix != "job":
+        return prefix if name else "unclassified"
+    token = name.split("-", 1)[0]
+    repeats = sum(r["Job"].lower().startswith("job/" + token + "-") or
+                  r["Job"].lower() == "job/" + token for r in rows)
+    return token if token and not token.isdigit() and repeats >= 2 else "unclassified"
 
 
 def job_forecasts(rows):
@@ -3757,7 +3782,10 @@ def job_forecasts(rows):
                 continue
             if not 0 <= hours < float("inf"):
                 continue
-            groups.setdefault(job_kind(row["Job"]), []).append(hours)
+            groups.setdefault("unclassified", []).append(hours)  # the explicit all-jobs fallback
+            kind = job_kind(row["Job"], rows)
+            if kind != "unclassified":
+                groups.setdefault(kind, []).append(hours)
     return [{"kind": kind, "samples": len(xs), "median_h": round(statistics.median(xs), 1),
              "min_h": min(xs), "max_h": max(xs), "enough_data": len(xs) >= 3}
             for kind, xs in sorted(groups.items())]
@@ -3765,13 +3793,14 @@ def job_forecasts(rows):
 
 def forecast_lines(rows, planned=None):
     forecasts = {f["kind"]: f for f in job_forecasts(rows)}
-    kinds = set(forecasts) | {job_kind(r["Job"]) for r in rows if not r["Ended"]}
+    kinds = {job_kind(r["Job"], rows) for r in rows}
     if planned:
-        kinds.add(job_kind(planned))
+        kinds.add(job_kind(planned, rows))
     out = []
     for kind in sorted(kinds):
         f = forecasts.get(kind, {"samples": 0, "enough_data": False})
-        out.append(f"{kind}: {f['samples']} similar jobs, " +
+        label = f"{kind}: {f['samples']} similar jobs" if kind != "unclassified" else f"all jobs on this node: {f['samples']} jobs"
+        out.append(label + ", " +
                    (f"median {f['median_h']:g} h, spread {f['min_h']:g}–{f['max_h']:g} h (observed min–max)"
                     if f["enough_data"] else "too little data (need 3 merged jobs)"))
     return out
@@ -3784,7 +3813,7 @@ def job_budget_lines(inst, n, planned=None):
     if planned and not any(r["Job"] == planned for r in rows):
         jobs.append({"Job": planned, "Runtime": n["fm"].get("runtime", "")})
     forecasts = {f["kind"]: f for f in job_forecasts(rows) if f["enough_data"]}
-    if not jobs or any(job_kind(r["Job"]) not in forecasts for r in jobs):
+    if not jobs or any(job_kind(r["Job"], rows) not in forecasts for r in jobs):
         return []
     out = []
     for runtime in sorted({r.get("Runtime") or n["fm"].get("runtime") or inst.cfg.get("default_runtime", "") for r in jobs}):
@@ -3803,7 +3832,7 @@ def job_budget_lines(inst, n, planned=None):
         if not windows:
             continue
         these = [r for r in jobs if (r.get("Runtime") or n["fm"].get("runtime") or inst.cfg.get("default_runtime", "")) == runtime]
-        estimate = sum(forecasts[job_kind(r["Job"])]["median_h"] for r in these)
+        estimate = sum(forecasts[job_kind(r["Job"], rows)]["median_h"] for r in these)
         remaining = min((w["resets_at"] - time.time()) / 3600 for w in windows)
         out.append(f"current route {selected['label']}: {len(these)} open/planned job(s), typical serial full-job time {estimate:g} h "
                    f"{'fits' if estimate <= remaining else 'exceeds'} {remaining:.1f} h until the next recorded reset; "
@@ -3813,6 +3842,8 @@ def job_budget_lines(inst, n, planned=None):
 
 def cmd_jobs(a):
     inst = load()
+    if a.branch and not a.id:
+        die("--branch needs a node: brain jobs <node> --branch <branch>")
     if a.start or a.close or a.lessons is not None or a.switch is not None:
         if not a.id or not a.branch:
             die("job updates need a node and --branch")
@@ -4275,7 +4306,7 @@ def missing_preview(n, state):
         bool(n["external"] and n["home_path"] and (n["home_path"] / ".git").exists())
     merged = any(r["Ended"] and r["Outcome"] == "merged" for r in state["jobs"] or []) or \
         any(w["merged"] for w in state["worktrees"].values())
-    return code and merged and not n["fm"].get("preview", "").strip()
+    return code and merged and not (n["local"].get("preview", "").strip() or n["fm"].get("preview_url", "").strip())
 
 
 def display_time(inst, value):
@@ -4318,8 +4349,8 @@ def status_facts(inst, n, state, known_merges):
         lines += ["", "Forecasts (merged ledger durations):"] + ["- " + redact(s, never_terms(n)) for s in forecasts]
     if missing_preview(n, state):
         lines += ["", "Preview: missing — merged code jobs need a local preview and screenshot tour."]
-    elif n["fm"].get("preview"):
-        lines += ["", redact("Preview: " + n["fm"]["preview"] + "; tour: " + n["fm"].get("preview_tour", "not recorded"), never_terms(n))]
+    if n["fm"].get("preview_url"):
+        lines += ["", redact("Published preview: " + n["fm"]["preview_url"], never_terms(n))]
     rules, roles, items = pending_imports(inst, n)
     if rules or roles or items:
         lines += ["", f"Imported, unreviewed (inactive): {rules} rule file(s), {roles} role(s), {items} proposed item(s)."]
@@ -5243,7 +5274,8 @@ def ui_state(inst, problems=None, scan=None):
         out_nodes.append({
             "id": n["id"], "title": fm.get("title", ""), "parent": n["parent"]["id"] if n["parent"] else None,
             "owners": n["owners"], "labels": lst(fm.get("labels")), "runtime": fm.get("runtime", ""),
-            "preview": hide(fm.get("preview", "")), "preview_tour": hide(fm.get("preview_tour", "")),
+            "preview": hide(loc.get("preview", "")), "preview_tour": hide(loc.get("preview_tour", "")),
+            "preview_url": hide(fm.get("preview_url", "")),
             "sealed": n["sealed"], "archived": n["archived"], "paused": paused(n), "external": n["external"],
             "home": tilde(n["home_path"]) if n["home_path"] else "",
             "coordinator": inst.thread_link(loc["coordinator"]) if loc.get("coordinator") else "",
