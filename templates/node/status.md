@@ -11,6 +11,9 @@ Updated: {{DATE}} by {{ID}} coordinator ({{RUNTIME}})
 
 ## Next
 
+<!-- Code projects: first run a local preview and make a screenshot tour the human can open;
+     record preview=<URL/path> and preview_tour=<path> via brain set after verifying them. -->
+
 ## Active work
 
 | Branch | Thread | PR | State |

@@ -11,7 +11,8 @@ stated; never run a polling loop in an agent.
 
 1. **The node's own agents come first** (axiom 7). If the target (or its home) already has an
    agent or skill for the job, the specialist adds to it, it doesn't replace it.
-2. **Pick the items** the job needs: `core/bin/brain item list --node <target>` shows what the
+2. Briefs automatically rank up to five relevant usable items with reasons. **Explicit items**
+   may also be picked: `core/bin/brain item list --node <target>` shows what the
    target may use.
 3. **Assemble the brief:**
    `core/bin/brain hire <specialist> <target> --task "<task, constraints, who to report to>" [--items a,b] [--out <file>] [--branch <branch>] [--job <job id>]`.

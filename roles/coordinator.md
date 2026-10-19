@@ -109,6 +109,27 @@ Answer from files. Before answering about a child, run the **freshness check**:
 | bringing in an existing repository | the `import` skill: confirm brain, parent and owners; scan, operator selection, adopt the main repo, then a study worker |
 | creating a node, or changing one's owners, place or labels | the `node-new` or `node-transition` skill |
 
+A small job is clear, low risk, takes minutes and changes no shared state: a local draft,
+formatting a disposable output, or a read-only check. Use `brain brief <id> --small --task ...`
+and a one-line hand-back; create no worktree, ledger row, review round or ready packet.
+Use the full path for shared code/config/data, uncertain scope, security, migrations,
+irreversible actions or work that grows past minutes. Big nights keep the full ceremony.
+
+For a code project, the first milestones include a running local preview and a screenshot
+tour the human can open. Record `brain set <id> preview=<URL/path> preview_tour=<path>` after
+actually running it. External git homes, `type:code`/`kind:code` labels, or a `stack` field
+identify code nodes mechanically. `brain due` and facts flag merged work with no preview.
+Old merged work gets a reminder, never a failing check.
+
+Quote `brain jobs` forecasts rather than guessing: kind is the branch's first slash prefix
+(`import:` studies are import; bare names are unclassified). Only merged durations from
+this node count. Fewer than three similar jobs means too little data; otherwise quote N,
+median and observed min–max spread. Use `--branch <planned branch>` to include a planned job.
+`brain usage` and `brain jobs` compare typical serial full-job durations for open/planned jobs
+with fresh routed reset windows when there are enough samples. They do not subtract elapsed
+time or predict concurrency, token costs or allowance fit; allowance fit needs per-job usage
+data that the ledger does not record. State that boundary and quote actual usage headroom.
+
 Before any host launch or delegation, run `brain usage` (any agent may run it). `brain brief`,
 `brain hire` and `brain review` use the poller's cache and name the subscription and host
 provider instance to use. They refresh stale readings once only if no poller is running. Respect its brain allow-list; stop starting jobs on a subscription at
@@ -127,7 +148,8 @@ everything it needs to know, the constraints, and who it reports to.
   runs, its ports, the node's limits, the words it must never write (as a `brain guard` step,
   never the words), and how to ask and hand back: never the operator, always you, at once.
   It refuses a brief that contains one of those words.
-- Include only items the target node may use: `core/bin/brain item list --node <node>`.
+- Brief, hire and review automatically include up to five relevant usable library items,
+  with reasons and full-item commands. Read and apply the relevant items; scope checks still win.
 - For a sealed node, the worker runs in the node's `home`, so it follows that node's own rules
   (axiom 7). Nothing from above may be written into the home (axiom 6).
 
@@ -150,7 +172,8 @@ message. Each time you are active, go through **Active work**:
 - **Waiting questions:** host `pending` for each worker's thread. Answer from the brief, the
   rules and `decisions.md`; only what they don't settle goes to the operator, under
   **Blocked / needs the operator**.
-- **Inbox:** questions and hand-backs from workers land in `inbox.md` too.
+- **Inbox:** `handback --state question` also appends a deduplicated need to `inbox.md`.
+  A blocked worker adds `--need-human "<need>"` when it needs a human; done signals stay in due.
 - **Silent threads:** a worker whose thread is idle but hasn't reported: host `read` its last
   message, and act on it.
 - **Usage limit:** when the host reports a worker's thread failed on a usage limit, use the
@@ -170,7 +193,8 @@ skill), placed where the next job will find it. A lesson only for this node goes
 files instead. Record the learned item ids with `brain jobs <id> --branch <branch> --lessons
 <id1,id2>`, or `--lessons "none: <reason>"`, before `wt prune` records the merge. Then mark
 the row `merged` or `abandoned`. Merged v2 jobs missing a required lesson outcome remain due;
-legacy merges have no retroactive requirement. Never edit the worker record. A job dropped
+legacy merges have no retroactive requirement. Never edit the worker record; `wt rm`/`wt prune`
+delete it and its ready packet after closing the ledger. A job dropped
 without a merge ends
 with `core/bin/brain wt rm <id> <branch> --cause "<why>"`, so `core/bin/brain jobs` can say
 what goes wrong, how long jobs take and how many review rounds they need: base estimates on

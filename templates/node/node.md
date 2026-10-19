@@ -18,3 +18,7 @@ the worker's worktree before hand-back.
 
 `runtime` pins worker briefs to that engine. At its subscription stop line, the brief keeps the
 pin and names an alternative; choose `brain brief --runtime <runtime>` explicitly to use it.
+
+Code projects record `preview: <URL/path>` and `preview_tour: <path>` via `brain set` after
+running them. A git home, `type:code`/`kind:code` label or `stack` field identifies code nodes;
+merged jobs without a preview get a due/facts reminder.

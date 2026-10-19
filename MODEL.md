@@ -53,7 +53,7 @@ sense, it belongs in the instance, not here.
 10. **Learning up is a citation.** An item taken from a node records its provenance. Its
     scope starts as the source's owners at that time.
     A merged job records the learned item ids, or `none: <reason>`, in its ledger; its worker's
-    report always has a Lessons section.
+    unified hand-back carries proposed lessons in `--lessons`; other workers include Lessons in their report.
 11. **Only the named owners can widen a scope.** Widening an item's scope needs the consent
     of every principal currently in it.
 12. **Teaching down is a native copy.** Giving a node an item means writing it in that
@@ -66,13 +66,17 @@ sense, it belongs in the instance, not here.
 
 14. **Coordinators are recursive and optional.** Any node may have one. If it does, work
     for that node goes through it.
-15. **One writer per file.** Everyone else asks the writer.
+15. **One writer per file.** Everyone else asks the writer. Anyone may append a need to
+    `inbox.md`; only its coordinator clears it.
     Workers prepare their branches, reviews and unified hand-backs; the coordinator alone merges
-    to main, after `brain ready` accepts the packet against current main.
+    to main, after `brain ready` accepts the packet against current main. Clear, low-risk tasks
+    taking minutes with no shared-state changes may use a small brief and one-line hand-back,
+    without a worktree, ledger, reviews or ready packet; node limits and guard still apply.
 16. **State lives in files; threads are disposable.** Any thread can be replaced from the
     files of the node it served. Workers own one hand-back file per job: state, proposed lessons
     and ready packet. Coordinators own the ledger and refresh generated status facts without
-    hand-writing them. A facts refresh never advances the coordinator judgement's own Updated
+    hand-writing them. Job cleanup deletes completion records; history stays in the ledger.
+    A facts refresh never advances the coordinator judgement's own Updated
     timestamp. A host tick checks file-derived work and host pending requests; an empty tick leaves no notes.
     Human requests keep stable identities and are reported once per machine and reporter node
     until resolved. Coordinators handle only their subtree; the root reports to the human.
@@ -204,3 +208,8 @@ stop line, name an eligible alternative and wait for an explicit choice, never s
 | `schedule(when, brief)` | Recurring or triggered work. |
 | `pending(thread)` | Questions a thread is waiting on someone to answer. Optional; without it, workers must hand questions back (`send`). |
 | `watch(change)` | Wake a thread when a proposed change (a pull request) gets reviews, check results or conflicts. Optional. |
+
+Briefs automatically select up to five usable library items by task words (weight 4), node
+labels/stack and specialist words (3), and source-node match (2), then item id to break ties.
+Each line explains the match and gives a scope-checked full-item command. Proposed, rejected
+and quarantined items never enter this selection.

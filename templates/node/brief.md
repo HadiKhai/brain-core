@@ -14,4 +14,9 @@
 - At most 3 worktrees at once. Why: the disk is 98% full. Lift when: more than 50 GB free.
 "Lift when: never" for a rule that is meant to stay. -->
 
+## First milestones
+
+<!-- Code projects: first run a local preview and make a screenshot tour the human can open.
+Record preview=<URL/path> and preview_tour=<path> with brain set after verifying them. -->
+
 ## Sources of truth

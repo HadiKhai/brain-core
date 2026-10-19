@@ -41,6 +41,7 @@ stated; never run a polling loop in an agent.
    records the packet, state and proposed lessons in one worker-owned `job-handbacks/<key>.json`.
    No separate packet command, host message or Lessons section is required. Blockers/questions
    use the same command with `--state blocked`/`question` and no --reviews; the report states why.
+   Questions also append to inbox; a blocked human need adds `--need-human "<need>"`.
    `ready` compares against local `main` and never fetches. Homes merging through GitHub pull
    requests must fetch and update local `main` before `ready`; the worker then rebases and hands back again.
 5. **Pull request.** Once pushing is allowed and the review is addressed, the worker opens it.
@@ -57,7 +58,7 @@ stated; never run a polling loop in an agent.
    <id1,id2>` (or `--lessons "none: <reason>"`), and run `core/bin/brain wt prune <id>`. It removes only clean, merged
    worktrees. A job dropped instead: `core/bin/brain wt rm <id> <branch> --cause "<why>"`.
    Either way the node's `job-ledger.md` gets the job's hours, commits and review rounds
-   (`core/bin/brain jobs <id>`).
+   (`core/bin/brain jobs <id>`). Cleanup deletes ready and hand-back records; the ledger keeps history.
 
 Never merge, push to a shared branch, deploy or delete a branch without explicit consent
 (axiom 24). Several jobs can run at once; each has its own worktree and port.

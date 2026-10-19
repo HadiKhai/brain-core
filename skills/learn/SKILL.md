@@ -1,6 +1,6 @@
 ---
 name: learn
-description: Capture reusable knowledge (a method, style, asset, script, lesson or fact) from a node, or a correction to a specialist, as a library item or lesson with provenance and scope. Use when the operator says "keep this", "remember how we did this", or corrects a specialist, and when a job closes with lessons in its report.
+description: Capture reusable knowledge (a method, style, asset, script, lesson or fact) from a node, or a correction to a specialist, as a library item or lesson with provenance and scope. Use when the operator says "keep this", "remember how we did this", or corrects a specialist, and when a job closes with proposed lessons in its unified hand-back's --lessons field.
 ---
 
 # Learn (axiom 10)
@@ -18,7 +18,9 @@ description: Capture reusable knowledge (a method, style, asset, script, lesson 
    Never claim consent the operator didn't report.
 5. **A correction to a specialist** is a lesson:
    `core/bin/brain lesson <specialist> --from <node where it happened> "<the lesson>"`.
-6. **Closing a job:** file its reusable lessons with step 2, then record the item ids:
+6. **Closing a job:** read the worker hand-back's `lessons` field (`brain handback --lessons`),
+   file its reusable proposals with step 2, then record the item ids. Only legacy reports
+   need a Lessons section:
    `core/bin/brain jobs <node> --branch <branch> --lessons <id1,id2>`.
    If there are none, use `--lessons "none: <reason>"` (say where node-only facts were kept).
    Do this before `wt prune` records the merge; it may also complete a missing outcome later.
@@ -28,4 +30,6 @@ description: Capture reusable knowledge (a method, style, asset, script, lesson 
    They remain unusable until a human or separate reviewer accepts them with
    `brain item accept <id> --reviewed-by <operator or non-revoked principal>`;
    `brain item reject <id>` retains an unusable rejected record. Restore accepts neither state.
-8. Run `core/bin/brain check`.
+8. Brief, hire and review select relevant usable items automatically for the next job;
+   give items descriptive titles and self-contained bodies so lexical matching can find them.
+9. Run `core/bin/brain check`.
