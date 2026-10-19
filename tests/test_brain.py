@@ -2961,6 +2961,8 @@ class AutonomyDue(AutonomyProject):
         self.assertNotIn('handback', [i['kind'] for i in self.due(r)])
         self.b(r, 'wt', 'prune', 'app', '--offline')
         self.assertNotIn('handback', [i['kind'] for i in self.due(r)])
+        self.assertEqual(len(list((r / 'nodes/app/job-handbacks').glob('*.json'))), 1)
+        self.b(r, 'jobs', 'app', '--branch', 'job-a', '--lessons', 'none: job-specific result')
         self.assertEqual(len(list((r / 'nodes/app/job-handbacks').glob('*.json'))), 0)
 
     def test_quiet_empty_and_due_exit_codes_and_no_file_changes(self):
@@ -4471,6 +4473,13 @@ class RoundTwo(AutonomyProject):
         self.assertIn("preview", check)
         self.assertIn("preview_tour", check)
         self.assertIn("missing-preview", [i["kind"] for i in self.due(r)])
+        fm["preview"] = "none"
+        self.m.write_fm(n["dir"] / "node.md", fm, body)
+        self.b(r, "check", "--fix")
+        migrated = json.loads((r / ".brain/local.json").read_text())["nodes"]["app"]
+        self.assertEqual(migrated["preview"], "none")
+        self.assertEqual(migrated["preview_tour"], "~/legacy-tour")
+        self.assertNotIn("missing-preview", [i["kind"] for i in self.due(r)])
         self.b(r, "set", "app", "preview=none", "preview_tour=", "preview_url=https://demo.example.org")
         self.b(r, "status", "app", "--refresh")
         self.assertIn("Published preview: https://demo.example.org", (n["dir"] / "status.md").read_text())

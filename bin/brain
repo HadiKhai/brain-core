@@ -5668,7 +5668,7 @@ def apply_fixes(inst, kinds):
             for k in LOCAL_KEYS:
                 if k in fm:
                     v = fm.pop(k)
-                    if v and v != "none":
+                    if v and (v != "none" or k == "preview"):
                         inst.local_of(n["id"])[k] = v
                     moved.append(k)
             home = fm.get("home", "here")
