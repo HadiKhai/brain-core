@@ -34,7 +34,9 @@ You were started for one job. If your brief names no role, you are a worker for 
   `brain handback <node> --branch <branch> --state done|failed|blocked --report <path>`
   (choose one state). This writes and commits only your job’s `job-handbacks/<id>.json` in the
   node, not the ledger or status. You alone write this file; a coordinator closes the ledger
-  instead of deleting or editing your signal. Send the hand-back too. The command is run
+  instead of deleting or editing your signal. The JSON stays simple: job, started, state, at,
+  report. Report paths are workbench-relative or `~`-prefixed, never a raw home-derived path.
+  Send the hand-back too. The command is run
   through the instance CLI, never by writing an upward path into a sealed home.
 - **Words a home must never contain** (the node's `never-name.txt`): if your brief says to run
   `brain guard`, it must print `guard: clean` before you hand back.

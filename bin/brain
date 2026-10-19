@@ -3041,7 +3041,7 @@ def cmd_handback(a):
         die(redact(f"no open job for {a.branch} in {n['id']}", never_terms(n)))
     f = handback_file(n, row)
     data = {"job": row["Job"], "started": row["Started"], "state": a.state,
-            "at": inst.now_dt().isoformat(timespec="seconds"), "report": a.report or ""}
+            "at": inst.now_dt().isoformat(timespec="seconds"), "report": tilde(a.report) if a.report else ""}
     f.parent.mkdir(exist_ok=True)
     f.write_text(json.dumps(data, indent=2) + "\n")
     touch(f)

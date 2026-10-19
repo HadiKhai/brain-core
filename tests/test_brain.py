@@ -2836,6 +2836,24 @@ class AutonomyDue(AutonomyProject):
         self.assertFalse((self.tmp / 'network-called').exists())
 
 
+class AutonomyHandbackPaths(AutonomyProject):
+    def test_handback_stores_and_shows_portable_report_paths(self):
+        r, home, wt = self.project()
+        report = self.tmp / 'code/app-work/reports/result.md'
+        report.parent.mkdir(parents=True, exist_ok=True)
+        report.write_text('Result.\n')
+        self.b(r, 'handback', 'app', '--branch', 'job-a', '--state', 'done', '--report', str(report))
+        signal = next((r / 'nodes/app/job-handbacks').glob('*.json'))
+        data = json.loads(signal.read_text())
+        self.assertEqual(data['report'], '~/code/app-work/reports/result.md')
+        self.assertNotIn(str(self.tmp), self.git('show', 'HEAD:' + str(signal.relative_to(r)), cwd=r))
+        due = self.b(r, 'due', 'app', '--json')
+        self.assertIn('~/code/app-work/reports/result.md', due)
+        self.assertNotIn(str(self.tmp), due)
+        self.b(r, 'handback', 'app', '--branch', 'job-a', '--state', 'done', '--report', 'reports/relative.md')
+        self.assertEqual(json.loads(signal.read_text())['report'], 'reports/relative.md')
+
+
 class AutonomyHire(AutonomyProject):
     def test_hire_branch_adds_the_durable_handback_without_changing_other_output(self):
         r, home, wt = self.project()
