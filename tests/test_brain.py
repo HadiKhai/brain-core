@@ -2928,6 +2928,24 @@ class AutonomyInbox(Scenario):
     def items(self, r, *args):
         return json.loads(self.b(r, 'inbox', '--json', *args))
 
+    def test_failed_stdout_does_not_consume_new_items(self):
+        r = self.init('alice')
+        self.items(r, '--new')
+        saved = r / '.brain/inbox-seen.json'
+        before = saved.read_bytes()
+        (r / 'inbox.md').write_text('- 2026-10-19 10:00 +00:00 from worker: New question.\n')
+        for flags in [[], ['--json']]:
+            read_fd, write_fd = os.pipe()
+            os.close(read_fd)
+            with os.fdopen(write_fd, 'w') as broken:
+                result = subprocess.run([sys.executable, str(r / 'core/bin/brain'), 'inbox', '--new', *flags],
+                                        cwd=r, env=self.env, stdout=broken, stderr=subprocess.PIPE, text=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn('BrokenPipeError', result.stderr)
+            self.assertEqual(saved.read_bytes(), before)
+        self.assertEqual([i['text'] for i in self.items(r, '--new')], ['inbox: 2026-10-19 10:00 +00:00 from worker: New question.'])
+        self.assertEqual(self.items(r, '--new'), [])
+
     def test_stable_ids_once_per_machine_and_resolution(self):
         r = self.init('alice')
         self.b(r, 'new', 'a', '--title', 'A')

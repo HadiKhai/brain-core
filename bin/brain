@@ -3634,17 +3634,20 @@ def cmd_inbox(a):
         # Keep only unresolved ids: removing an item resolves it; a later recurrence can notify again.
         state = {i["id"]: {"first_seen": i["first_seen"], "reported_at": seen.get(i["id"], {}).get("reported_at") or now}
                  for i in items}
-        f = inst.root / ".brain" / "inbox-seen.json"
-        f.parent.mkdir(exist_ok=True)
-        tmp = f.with_suffix(".tmp")
-        tmp.write_text(json.dumps(state, indent=2) + "\n")
-        os.replace(tmp, f)
         items = fresh
     if a.json:
         print(json.dumps(items, indent=2))
     else:
         for item in items:
             print(f"{item['node']}: [{item['id']}] {item['text']}")
+    if a.new:
+        # Delivery comes first, under the same lock. A crash before saving repeats an item.
+        sys.stdout.flush()
+        f = inst.root / ".brain" / "inbox-seen.json"
+        f.parent.mkdir(exist_ok=True)
+        tmp = f.with_suffix(".tmp")
+        tmp.write_text(json.dumps(state, indent=2) + "\n")
+        os.replace(tmp, f)
 
 
 def cmd_stale(a):
