@@ -432,8 +432,12 @@ def usage_cache():
         if r.get("read_at") is not None and (not usage_number(r["read_at"]) or usage_stamp(r["read_at"]) is None):
             return {}
         for name, w in r["windows"].items():
-            if (name not in USAGE_WINDOWS and not name.startswith("seven_day_model:")) or not isinstance(w, dict) or \
-                    not usage_number(w.get("used_percent")) or not 0 <= w["used_percent"] <= 100 or \
+            if (name not in USAGE_WINDOWS and not name.startswith("seven_day_model:")) or not isinstance(w, dict):
+                return {}
+            absent = w.get("absent") is True
+            if absent and (name != "five_hour" or w.get("source", r["source"]) != "lookup" or "used_percent" in w):
+                return {}
+            if (not absent and (not usage_number(w.get("used_percent")) or not 0 <= w["used_percent"] <= 100)) or \
                     (w.get("resets_at") is not None and (not usage_number(w["resets_at"]) or
                                                         usage_stamp(w["resets_at"]) is None)):
                 return {}
@@ -499,7 +503,7 @@ def usage_stamp(value):
     return None
 
 
-def usage_windows(data, runtime):
+def usage_windows(data, runtime, absences=False):
     """Subscription windows only; scoped weekly limits carry their model aliases."""
     if not isinstance(data, dict):
         return {}
@@ -517,6 +521,11 @@ def usage_windows(data, runtime):
             reset = usage_stamp(w.get("resetsAt", w.get("resets_at")))
             if name and usage_number(used) and 0 <= used <= 100:
                 out[name] = {"used_percent": used, "resets_at": reset}
+        # A null slot alongside a valid weekly window declares no five-hour limit.
+        # Omitted or malformed slots leave it unknown.
+        if absences and "seven_day" in out and "five_hour" not in out and all(k in data for k in ("primary", "secondary")) \
+                and any(data[k] is None for k in ("primary", "secondary")):
+            out["five_hour"] = {"absent": True}
     else:
         limits = data.get("limits")
         if isinstance(limits, list):
@@ -600,7 +609,7 @@ def usage_codex(sub):
         account = call(2, "account/read", {"refreshToken": False}).get("account") or {}
         result = call(3, "account/rateLimits/read", {})
         rates = (result.get("rateLimitsByLimitId") or {}).get("codex") or result.get("rateLimits")
-        windows = usage_windows(rates, "codex")
+        windows = usage_windows(rates, "codex", absences=True)
         if not windows:
             raise ValueError("Codex returned no subscription windows")
         # Older account/read omits the ID. Read only the account label, never decode or retain tokens.
@@ -963,7 +972,7 @@ def usage_route(inst, runtimes, preferred=None, model=None):
     fallback = fallback if isinstance(fallback, list) else []
     eligible = []
     for r in allowed:
-        active = {n: w for n, w in r["windows"].items() if not w["expired"] and
+        active = {n: w for n, w in r["windows"].items() if not w.get("absent") and not w["expired"] and
                   (n in USAGE_WINDOWS or (model and model.casefold() in
                    [m.casefold() for m in w.get("models", [])]))}
         if any(w["used_percent"] >= policy["stop_percent"] for w in active.values()):
@@ -1089,6 +1098,8 @@ def cmd_usage(a):
             w = r["windows"].get(name)
             if not w:
                 return "unknown"
+            if w.get("absent"):
+                return "none"
             reset = usage_time(w.get("resets_at"), inst)
             return f"{w['used_percent']:g}% / {reset}" + (" (expired; unknown)" if w["expired"] else "")
         table.append([r["runtime"], r["label"], window("five_hour"), window("seven_day"),

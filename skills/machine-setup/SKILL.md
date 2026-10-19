@@ -81,6 +81,7 @@ launching; defaults cannot infer them. Brain usage output lists only subscriptio
 may use, plus a count of others; the UI never exposes config directories.
 Duplicate account IDs share one reading while each entry keeps its own brain allow-list.
 Account keys are hashed; account names, tokens and credit balances are not cached.
+An explicitly absent Codex five-hour window shows `none`; missing readings stay `unknown`.
 `pacing_margin` is percentage points ahead of the fraction of the week elapsed, default 10.
 The fullest window determines headroom; `.brain/local.json`'s ordered `fallback` host instance
 IDs break ties; otherwise equal readings keep the preferred runtime. A node's `runtime` pins

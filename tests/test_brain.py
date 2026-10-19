@@ -2141,7 +2141,8 @@ for line in sys.stdin:
         self.assertEqual(len(data["subscriptions"]), 3)
         r = next(iter(data["accounts"].values()))
         self.assertEqual(r["source"], "lookup")
-        self.assertEqual(list(r["windows"]), ["seven_day"])
+        self.assertEqual(list(r["windows"]), ["seven_day", "five_hour"])
+        self.assertTrue(r["windows"]["five_hour"]["absent"])
         requests = (Path(one["config_dir"]) / "requests.txt").read_text().splitlines()
         self.assertEqual(requests, ["initialize", "initialized", "account/read", "account/rateLimits/read"])
         rows, _ = self.m.usage_rows()
@@ -2149,6 +2150,70 @@ for line in sys.stdin:
         self.assertEqual(rows[2]["brains"], ["other"])
         self.assertNotIn("same-account", self.m.usage_file().read_text())
         self.assertNotIn("credits", self.m.usage_file().read_text())
+
+    def test_usage_absent_five_hour_is_not_a_missing_reading(self):
+        root = self.init("alice")
+        self.codex_stub()
+        one, missing = self.subscription(), self.subscription("missing")
+        data = self.fixture(one)
+        config = self.declare(one, missing)
+        self.m.usage_refresh(config)
+        text = self.b(root, "usage")
+        self.assertRegex(text, r"codex\s+one\s+none\s+24%")
+        self.assertRegex(text, r"codex\s+missing\s+unknown\s+unknown")
+        selected, reason = self.m.usage_route(self.m.Instance(root), ["codex"])
+        self.assertEqual(selected["id"], "one")
+        self.assertNotIn("unknown", reason)
+        for rates in ({}, {"primary": data["rateLimits"]["primary"]},
+                      {"primary": data["rateLimits"]["primary"], "secondary": {"usedPercent": "bad"}}):
+            self.assertNotIn("five_hour", self.m.usage_windows(rates, "codex", absences=True))
+        # The declaration survives a failed lookup, but newer actual readings replace it.
+        absent = self.m.usage_cache()["accounts"][selected["account_key"]]
+        later = self.reading(90)
+        merged = self.m.usage_merge(absent, later)
+        self.assertEqual(merged["windows"]["five_hour"]["used_percent"], 90)
+        self.assertNotIn("absent", merged["windows"]["five_hour"])
+        self.assertEqual(self.m.usage_merge(absent, self.reading(source="unknown")), absent)
+        # A successful plan change can remove a previously observed five-hour limit.
+        removed = self.m.usage_merge(self.reading(90, age=60), absent)
+        self.assertTrue(removed["windows"]["five_hour"]["absent"])
+        self.cache(config, [removed, self.reading(source="unknown")])
+        self.assertIn("none", self.b(root, "usage"))
+        self.assertNotIn("Stop starting", self.m.usage_route(self.m.Instance(root), ["codex"])[1])
+
+    def test_usage_resume_switch_uses_replacement_subscription_and_local_fallback(self):
+        root = self.init("alice")
+        home = self.repo(self.tmp / "app")
+        self.b(root, "new", "a", "--title", "A", "--home", str(home), "--runtime", "claude")
+        self.b(root, "wt", "add", "a", "job")
+        wt = self.tmp / "app-work/worktrees/job"
+        self.git("commit", "--allow-empty", "-qm", "partial", cwd=wt)
+        sha = self.git("rev-parse", "HEAD", cwd=wt).strip()
+        config = self.declare(self.subscription("old", runtime="claude"),
+                              self.subscription("one"), self.subscription("two"))
+        self.cache(config, [self.reading(90), self.reading(25), self.reading(25)])
+        self.b(root, "set", "root", "fallback=host-old,host-two,host-one")
+        self.assertEqual(self.m.Instance(root).local["fallback"], ["host-old", "host-two", "host-one"])
+        before = self.b(root, "brief", "a", "--branch", "job")
+        self.assertIn("Pinned runtime claude", before)
+        self.b(root, "jobs", "a", "--branch", "job", "--switch", "host-old -> host-two: usage limit")
+        brief = self.b(root, "brief", "a", "--branch", "job", "--runtime", "codex", "--task", "Finish it")
+        self.assertIn("runtime: codex", brief)
+        self.assertIn("Subscription: two (two) · host instance: host-two", brief)
+        self.assertNotIn("Subscription: old", brief)
+        self.assertNotIn("host instance: host-one", brief)
+        self.assertNotIn("Stop starting", brief)
+        self.assertNotIn("Pinned runtime claude", brief)
+        self.assertIn("## Resume existing work", brief)
+        self.assertIn(sha, brief)
+        self.assertIn("Continue from these commits", brief)
+        self.assertIn("host-old -> host-two: usage limit", brief)
+        self.assertIn("## Ready packet", brief)
+        self.assertIn("Finish it", brief)
+        # Headroom still takes priority over the configured fallback order.
+        self.cache(config, [self.reading(90), self.reading(10), self.reading(25)])
+        brief = self.b(root, "brief", "a", "--branch", "job", "--runtime", "codex")
+        self.assertIn("host instance: host-one", brief)
 
     def test_usage_codex_old_account_response_uses_account_id_only(self):
         self.codex_stub()
