@@ -5,7 +5,8 @@ description: Brief the operator on everything under the current node - syncs sta
 
 # Brief
 
-Run by any coordinator, about its own subtree.
+Run by any coordinator, about its own subtree. The root reports to the human; other
+coordinators route unresolved needs to their parent, never report other subtrees.
 
 1. Run `core/bin/brain` (the dashboard: what needs the operator, work in flight) and
    `core/bin/brain status` for the `Updated:` lines. Run `core/bin/brain sync --all` to see what
@@ -19,7 +20,7 @@ Run by any coordinator, about its own subtree.
    `inbox.md`.
 4. Commit `<id>: brief`.
 5. Brief the operator, in this order:
-   - **Needs you**: `core/bin/brain inbox --new`; never relist reported items unless asked;
+   - **Needs you**: `core/bin/brain inbox <id> --new` (root uses `root`); never relist reported items unless asked;
    - **Moved**: one line per node that changed, including work others did in shared homes;
    - **In flight**: open jobs and pull requests (the Active work rows);
    - **Quiet**: nodes with no change (names only);

@@ -74,7 +74,8 @@ sense, it belongs in the instance, not here.
     Workers own one hand-back signal per job; coordinators own
     its ledger and refresh generated status facts without hand-writing them. A host tick
     checks file-derived work and host pending requests; an empty tick leaves no notes.
-    Human requests keep stable identities and are reported once per machine until resolved.
+    Human requests keep stable identities and are reported once per machine and reporter node
+    until resolved. Coordinators handle only their subtree; the root reports to the human.
 
     A replacement worker continues existing job commits, packet and ledger state. A usage-limit
     failure advances through this machine's ordered provider `fallback`; the ledger notes the switch.

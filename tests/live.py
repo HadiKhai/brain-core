@@ -755,6 +755,36 @@ def autonomy_empty_wake(run):
     run.check(sh("git", "rev-parse", "HEAD", cwd=root) == head, "empty wake made a commit")
 
 
+def autonomy_subtree_inbox(run):
+    """A child handles its own queue and routes upward without consuming the human reporter's queue."""
+    root = run.instance()
+    brain(root, "new", "sibling", "--title", "Sibling")
+    brain(root, "principal", "add", "bob")
+    brain(root, "seal", "a", "--owners", "alice,bob", "--home", str(run.tmp / "sealed-home"))
+    for node, question in [("root", "Root-only request"), ("sibling", "Sibling-only request"), ("a", "Choose the draft budget")]:
+        folder = root if node == "root" else root / "nodes" / node
+        st = folder / "status.md"
+        st.write_text(st.read_text().replace("## Blocked / needs the operator", "## Blocked / needs the operator\n\n- " + question))
+    sh("git", "add", "-A", cwd=root); sh("git", "commit", "-qm", "needs by subtree", cwd=root)
+    run.agent(root / "nodes/a", (
+        "Role: coordinator of node `a`, in the operator-side view of a sealed node. Check new needs using "
+        "the coordinator role's inbox reporting rule. Your rules settle none of the requested choices. "
+        "No host send is available; use the file route to your parent for unresolved needs. "
+        "Record what you handled in your own status and commit. Do no other work."), writable=root)
+    saved = root / ".brain/inbox-seen.json"
+    run.check(saved.exists(), "coordinator did not check its new queue")
+    if saved.exists():
+        reporters = json.loads(saved.read_text()).get("reporters", {})
+        run.check("a" in reporters and "root" not in reporters and "sibling" not in reporters,
+                  "child consumed another reporter's queue")
+    parent_inbox = (root / "inbox.md").read_text()
+    run.check("budget" in parent_inbox.lower(), "unresolved need was not routed to the parent")
+    run.check("Root-only request" not in parent_inbox and "Sibling-only request" not in parent_inbox,
+              "child routed needs outside its subtree")
+    human = json.loads(brain(root, "inbox", "root", "--new", "--json"))
+    run.check(any(i["text"] == "Choose the draft budget" for i in human), "child suppressed root's human report")
+
+
 def autonomy_status_facts(run):
     """Coordinator updates judgement while the CLI retains ownership of the generated facts."""
     root = run.instance()
@@ -785,7 +815,7 @@ def autonomy_status_facts(run):
     run.check("draft" in sections and "review" in sections, "judgement update missing")
 
 
-SCENARIOS = [autonomy_worker_handback, autonomy_finished_job_wake, autonomy_empty_wake, autonomy_status_facts, parity, coordinator_writes_as_it_goes, worker_asks_the_writer, learning_is_a_citation,
+SCENARIOS = [autonomy_worker_handback, autonomy_finished_job_wake, autonomy_empty_wake, autonomy_subtree_inbox, autonomy_status_facts, parity, coordinator_writes_as_it_goes, worker_asks_the_writer, learning_is_a_citation,
              new_node_in_one_sentence, no_upward_traces, second_runtime_review, stop_hook_fires,
              notes_current_after_an_edit, a_session_reaches_its_own_brain, worker_hands_back_a_question,
              lessons_become_items, limits_carry_their_reason, freshness_across_timezones,

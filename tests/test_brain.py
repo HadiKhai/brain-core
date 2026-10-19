@@ -2963,12 +2963,48 @@ class AutonomyInbox(Scenario):
         self.assertTrue(again['reported'])
         st.write_text(st.read_text().replace('- Pick a plan.\n', ''))
         self.assertNotIn(plan['id'], [i['id'] for i in self.items(r, '--new')])
-        self.assertNotIn(plan['id'], json.loads((r / '.brain/inbox-seen.json').read_text()))
+        self.assertNotIn(plan['id'], json.loads((r / '.brain/inbox-seen.json').read_text())['reporters']['root'])
         st.write_text(st.read_text().replace('## Blocked / needs the operator\n',
                                              '## Blocked / needs the operator\n\n- Pick a plan.\n'))
         self.assertEqual([i['text'] for i in self.items(r, '--new')], ['Pick a plan.'])
         (r / '.brain/inbox-seen.json').unlink()
         self.assertTrue(self.items(r, '--new'), 'another machine has independent seen state')
+
+    def test_subtree_reporters_do_not_consume_each_others_requests(self):
+        r = self.init('alice')
+        for node in ['a', 'a/child', 'ab', 'sibling']:
+            self.b(r, 'new', node, '--title', node)
+        self.b(r, 'principal', 'add', 'bob')
+        home = self.tmp / 'sealed-home'
+        self.b(r, 'seal', 'a', '--owners', 'alice,bob', '--home', str(home))
+        for node in ['root', 'a', 'a/child', 'ab', 'sibling']:
+            folder = r if node == 'root' else r.joinpath('nodes', *node.replace('/', '/nodes/').split('/'))
+            (folder / 'inbox.md').write_text('- 2026-10-19 10:00 +00:00 from worker: question for ' + node + '\n')
+        def requests(*args):
+            return [i for i in self.items(r, *args) if i['kind'] == 'inbox']
+        child = requests('a', '--new')
+        self.assertEqual({i['node'] for i in child}, {'a', 'a/child'})
+        self.assertEqual(requests('a', '--new'), [])
+        root = requests('root', '--new')
+        self.assertEqual({i['node'] for i in root}, {'root', 'a', 'a/child', 'ab', 'sibling'})
+        self.assertEqual({i['id'] for i in child}, {i['id'] for i in root if i['node'] in ('a', 'a/child')})
+        self.assertEqual({i['node'] for i in requests('a/child', '--new')}, {'a/child'})
+        # A sealed coordinator's local folder defaults to its own subtree, never parents or siblings.
+        local = json.loads(self.run_(['inbox', '--json'], cwd=r / 'nodes/a', brain=r / 'core/bin/brain'))
+        self.assertEqual({i['node'] for i in local}, {'a', 'a/child'})
+        self.env['BRAIN_ROOT'] = str(r)
+        external = json.loads(self.run_(['inbox', '--json'], cwd=home, brain=r / 'core/bin/brain'))
+        self.assertEqual({i['node'] for i in external}, {'a', 'a/child'})
+        self.assertFalse((home / '.brain/inbox-seen.json').exists())
+        self.assertFalse(self.git('ls-files', '.brain', cwd=r).strip())
+
+    def test_unscoped_legacy_state_repeats_instead_of_losing_requests(self):
+        r = self.init('alice')
+        first = self.items(r, '--new')
+        saved = r / '.brain/inbox-seen.json'
+        saved.write_text(json.dumps({i['id']: {'reported_at': '2026-01-01T00:00:00Z'} for i in first}))
+        self.assertEqual({i['id'] for i in first}, {i['id'] for i in self.items(r, '--new')})
+        self.assertEqual(self.items(r, '--new'), [])
 
     def test_ui_reuses_attention_sources_without_marking_reported(self):
         r = self.init('alice')

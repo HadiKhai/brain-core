@@ -59,10 +59,16 @@ moment.
 
 ## Answering the operator
 
-For every coordinator, including the root: report `core/bin/brain inbox --new`. It uses the
-same sources as the UI’s needs-you panel and remembers reported ids on this machine. Never
-relist old items unless asked. Only interrupt the operator for a new decision or something to
-show; an empty scheduled check ends silently. The full list remains in `brain inbox`.
+The root reports new needs to the human with `core/bin/brain inbox root --new`. Other
+coordinators run `core/bin/brain inbox <id> --new` for their own subtree only, resolve what
+their rules settle, and route unresolved needs to their parent (Reporting up). Never consume
+another coordinator's queue. Each reporter has independent machine-local reported ids; a
+child's check cannot suppress the root's report. The sources are the UI's needs-you sources,
+limited to operator-side node records, including a sealed node's view, never its home.
+With no id, inbox uses the calling node (root when called at the instance root).
+Never relist old items unless asked. Only the root interrupts the human for a new decision
+or something to show; an empty scheduled check ends silently. The full subtree list remains
+in `brain inbox <id>`. Old unscoped reported state repeats once on upgrade to avoid loss.
 
 Answer first, then the proof (commands run, numbers, hashes, links), then what you did not run
 or check, then anything waiting on the operator. Before you say work is done, re-read the

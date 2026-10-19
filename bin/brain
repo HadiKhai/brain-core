@@ -3592,16 +3592,18 @@ def refresh_status(inst, n):
     touch(f)
 
 
-def inbox_items(inst, nodes=None):
+def inbox_items(inst, nodes=None, reporter="root"):
     """The existing UI attention sources, with identities independent of line positions or other items.
     Read-only; until reported, first_seen comes from the source's git introduction (mtime if uncommitted)."""
     saved = inst.root / ".brain" / "inbox-seen.json"
     try:
-        seen = json.loads(saved.read_text()) if saved.exists() else {}
-        seen = seen if isinstance(seen, dict) else {}
+        data = json.loads(saved.read_text()) if saved.exists() else {}
+        reporters = data.get("reporters", {}) if isinstance(data, dict) and data.get("version") == 2 else {}
+        reporters = reporters if isinstance(reporters, dict) else {}
     except (OSError, ValueError):
-        seen = {}
-    seen = {key: value for key, value in seen.items() if isinstance(value, dict)}
+        reporters = {}
+    reporters = {key: value for key, value in reporters.items() if isinstance(value, dict)}
+    seen = {key: value for key, value in reporters.get(reporter, {}).items() if isinstance(value, dict)}
     by_id = {n["id"]: n for n in (nodes if nodes is not None else inst.nodes())}
     out, ids = [], set()
     for nid, kind, text in attention_items(inst, list(by_id.values())):
@@ -3622,12 +3624,24 @@ def inbox_items(inst, nodes=None):
                 source.stat().st_mtime if source.exists() else inst.now_dt().timestamp(), inst.zone()).isoformat(timespec="seconds")
         out.append({"id": key, "node": nid, "kind": kind, "text": redact(text, never_terms(n)),
                     "first_seen": first, "reported": bool(record.get("reported_at")) if isinstance(record, dict) else False})
-    return out, seen
+    return out, reporters
 
 
 def cmd_inbox(a):
     inst = load()
-    items, seen = inbox_items(inst)
+    # Default to the calling node, including external homes/workbenches. Explicit root is instance-wide.
+    here = node_at(inst, Path.cwd())
+    if not here:
+        cwd = Path.cwd().resolve()
+        places = [(Path(p).expanduser().resolve(), n) for n in inst.nodes()
+                  for p in [n["home_path"], n["local"].get("workbench"),
+                            *[w["path"] for w in n["local"].get("worktrees", {}).values()]] if p]
+        here = next((n for p, n in sorted(places, key=lambda x: len(x[0].parts), reverse=True)
+                     if p == cwd or p in cwd.parents), None)
+    reporter = inst.node(a.id)["id"] if a.id else here["id"] if here else "root"
+    nodes = [n for n in inst.nodes() if reporter == "root" or n["id"] == reporter or n["id"].startswith(reporter + "/")]
+    items, reporters = inbox_items(inst, nodes, reporter)
+    seen = reporters.get(reporter, {})
     if a.new:
         fresh = [i for i in items if not i["reported"]]
         now = inst.now_dt().isoformat(timespec="seconds")
@@ -3646,7 +3660,8 @@ def cmd_inbox(a):
         f = inst.root / ".brain" / "inbox-seen.json"
         f.parent.mkdir(exist_ok=True)
         tmp = f.with_suffix(".tmp")
-        tmp.write_text(json.dumps(state, indent=2) + "\n")
+        reporters[reporter] = state
+        tmp.write_text(json.dumps({"version": 2, "reporters": reporters}, indent=2) + "\n")
         os.replace(tmp, f)
 
 
@@ -4995,8 +5010,8 @@ def main():
     cmd("due", cmd_due, "coordinator actions from files and local git; empty means no output",
         opt("id", nargs="?"), opt("--json", action="store_true"),
         opt("--quiet", action="store_true", help="no output; exit 1 when anything is due, 0 otherwise"))
-    cmd("inbox", cmd_inbox, "what waits on the human across nodes; --new reports each unresolved item once",
-        opt("--json", action="store_true"), opt("--new", action="store_true"))
+    cmd("inbox", cmd_inbox, "needs in a node's subtree (default: calling node); --new remembers per reporter",
+        opt("id", nargs="?"), opt("--json", action="store_true"), opt("--new", action="store_true"))
     cmd("handback", cmd_handback, "worker signal for one open ledger job (does not edit coordinator files)",
         "id", opt("--branch", required=True), opt("--state", choices=["done", "failed", "blocked"], required=True),
         opt("--report"))
