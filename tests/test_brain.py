@@ -3330,6 +3330,205 @@ class AutonomyInbox(Scenario):
         self.assertEqual(self.items(r, '--new'), [])
         self.assertEqual(next(i['id'] for i in self.items(r) if i['kind'] == 'stale'), first['id'])
 
+class ImportProjects(Scenario):
+    def history_repo(self, path):
+        h = self.repo(path, {"README.md": "# Fixture project\n", "main.py": "print('ready')\n",
+                             "AGENTS.md": "# Rules\nNo network calls. Why: offline tool.\n",
+                             "memory.md": "2024-02-01: use streaming to bound memory.\n"})
+        self.git("commit", "--amend", "--no-edit", "--date=2024-01-01T10:00:00+00:00", cwd=h)
+        (h / "main.py").write_text("print('refactor')\n")
+        self.git("commit", "-qam", "refactor: stream records", "--date=2024-02-01T10:00:00+00:00", cwd=h)
+        self.git("revert", "--no-edit", "HEAD", cwd=h)
+        # Both dates matter: the scanner reports the last commit's committer date.
+        old = self.env.copy()
+        self.env.update(GIT_COMMITTER_DATE="2024-03-01T12:00:00+00:00")
+        self.git("commit", "--amend", "--no-edit", "--date=2024-03-01T12:00:00+00:00", cwd=h)
+        self.env = old
+        self.git("remote", "add", "origin", "https://person:fake-import-token@example.test/team/project.git?token=fake-query#fake-fragment", cwd=h)
+        return h
+
+    def snapshot_files(self, root):
+        import hashlib
+        return {str(p.relative_to(root)): (p.lstat().st_mtime_ns, hashlib.sha256(p.read_bytes()).hexdigest())
+                for p in root.rglob("*") if p.is_file() and not p.is_symlink()}
+
+    def test_scan_metadata_depth_and_no_writes(self):
+        r = self.init("alice")
+        base = self.tmp / "code"
+        h = self.history_repo(base / "project")
+        (h / ".codex").mkdir()
+        (h / "skills").mkdir()
+        (h / "notes").mkdir()
+        (h / "notes" / "lessons.md").write_text("bounded parsing\n")
+        self.git("add", ".", cwd=h); self.git("commit", "-qm", "lessons", cwd=h)
+        for skip in ("node_modules", "vendor", "build", "dist", ".venv"):
+            self.repo(base / skip / "hidden")
+        deeper = self.repo(base / "group" / "deeper")
+        self.b(r, "adopt", str(h))
+        before = self.snapshot_files(self.tmp)
+        out = self.b(r, "scan", str(base), str(base), str(r), "--json", "--depth", "1")
+        rows = json.loads(out)
+        self.assertEqual(len(rows), 1)
+        repo = rows[0]
+        self.assertEqual(repo["path"], str(h))
+        self.assertEqual(repo["name"], "project")
+        self.assertEqual(repo["commit_count"], 4)
+        self.assertIn("Python", repo["languages"])
+        self.assertEqual(repo["readme"], "# Fixture project")
+        self.assertEqual(repo["remotes"], ["https://example.test/team/project.git"])
+        self.assertTrue(repo["has_remote"])
+        self.assertEqual(repo["node"], "project")
+        self.assertTrue(repo["already_home"])
+        self.assertTrue({"AGENTS.md", "memory.md", "notes/lessons.md", ".codex/", "skills/"} <= set(repo["agent_setup"]))
+        for secret in ("fake-import-token", "fake-query", "fake-fragment", "person:"):
+            self.assertNotIn(secret, out)
+            self.assertNotIn(secret, self.all_text(r))
+        self.assertEqual(self.snapshot_files(self.tmp), before)
+        self.assertEqual(len(json.loads(self.b(r, "scan", str(base), "--depth", "2", "--json"))), 2)
+        self.assertEqual(len(json.loads(self.b(r, "scan", str(deeper), "--depth", "0", "--json"))), 1)
+        self.b(r, "scan", str(base), "--depth", "-1", ok=False)
+
+    def test_scan_dates_empty_repo_redaction_and_worktrees(self):
+        r = self.init("alice")
+        h = self.history_repo(self.tmp / "project")
+        date = json.loads(self.b(r, "scan", str(h), "--json", "--depth", "0"))[0]
+        self.assertEqual(date["last_commit_date"], "2024-03-01T12:00:00Z")
+        (r / "never-name.txt").write_text("ForbiddenTerm\n")
+        (h / "README.md").write_text("ForbiddenTerm token=fake-value\n")
+        self.assertNotIn("fake-value", self.b(r, "scan", str(h)))
+        self.assertNotIn("ForbiddenTerm", self.b(r, "scan", str(h), "--json"))
+        wt = self.tmp / "checkout"
+        self.git("worktree", "add", "-qb", "study", str(wt), cwd=h)
+        self.assertEqual(len(json.loads(self.b(r, "scan", str(wt), "--json"))), 1)
+        self.b(r, "adopt", str(wt), "--id", "checkout")
+        empty = self.tmp / "empty"
+        empty.mkdir(); self.git("init", "-q", cwd=empty)
+        row = json.loads(self.b(r, "scan", str(empty), "--json"))[0]
+        self.assertEqual(row["commit_count"], 0)
+        self.assertIsNone(row["last_commit_date"])
+        self.assertFalse(row["has_remote"])
+        self.assertEqual(row["languages"], [])
+
+    def test_adopt_multiple_parent_and_machine_local_homes(self):
+        r = self.init("alice")
+        self.b(r, "new", "projects", "--title", "Projects")
+        a = self.history_repo(self.tmp / "alpha")
+        b = self.repo(self.tmp / "beta")
+        before = self.snapshot_files(a)
+        out = self.b(r, "adopt", str(a), str(b), "--parent", "projects")
+        self.assertIn("brain brief projects/alpha --import", out)
+        loc = json.loads((r / ".brain/local.json").read_text())
+        self.assertEqual(loc["nodes"]["projects/alpha"]["home"], str(a))
+        self.assertIn("home: external", (r / "nodes/projects/nodes/alpha/node.md").read_text())
+        self.assertNotIn(str(a), self.git("show", "HEAD:nodes/projects/nodes/alpha/node.md", cwd=r))
+        self.assertEqual(self.snapshot_files(a), before)
+        self.assertEqual(self.git("status", "--porcelain", cwd=r), "")
+        self.b(r, "check")
+        out = self.b(r, "brief", "projects/alpha", "--import")
+        self.assertIn("sole initial writer", out)
+        self.assertIn("2000 commit headers", out)
+        self.assertIn("skills/import/SKILL.md", out)
+        self.assertIn("read-only", out)
+        self.b(r, "brief", "projects/alpha", "--import", "--branch", "wrong", ok=False)
+
+    def test_adopt_refuses_invalid_batch_before_any_creation(self):
+        r = self.init("alice")
+        h = self.repo(self.tmp / "project")
+        (h / "sub").mkdir()
+        for paths in ((str(r),), (str(h / "sub"),), (str(h), str(h)), (str(h), str(self.tmp / "missing"))):
+            self.b(r, "adopt", *paths, ok=False)
+            self.assertFalse((r / "nodes/project").exists())
+        self.b(r, "adopt", str(h), "--id", "bad/id", ok=False)
+        self.b(r, "adopt", str(h), str(r), "--title", "Title", ok=False)
+        self.b(r, "adopt", str(h), "--id", "renamed", "--title", "New title")
+        self.assertIn("title: New title", (r / "nodes/renamed/node.md").read_text())
+        self.b(r, "adopt", str(h), ok=False)
+        alias = self.tmp / "alias"; alias.symlink_to(h)
+        self.b(r, "adopt", str(alias), ok=False)
+        (r / "nodes/renamed/never-name.txt").write_text("unsafe-term\n")
+        self.b(r, "brief", "renamed", "--import", "--task", "unsafe-term", ok=False)
+
+    def proposal(self, r, source="root", iid="bounded-input"):
+        return self.b(r, "item", "add", iid, "--from", source, "--title", "Bound inputs", "--kind", "lesson",
+                      "--ref", "AGENTS.md@" + "a" * 40, "--body", "Bound each input before parsing.",
+                      "--repo", "fixture-project", "--commit", "a" * 40, "--proposed")
+
+    def test_proposed_acceptance_quarantine_restore_and_ui(self):
+        r = self.init("alice")
+        self.proposal(r)
+        path = r / "library/bounded-input.md"
+        original = path.read_text()
+        self.assertIn("status: proposed", original)
+        self.assertIn("source_commit: " + "a" * 40, original)
+        self.b(r, "usable", "bounded-input", "root", ok=False)
+        self.b(r, "item", "restore", "bounded-input", ok=False)
+        for _ in range(2):
+            self.b(r, "item", "quarantine", "bounded-input")
+        self.b(r, "item", "accept", "bounded-input", "--reviewed-by", "human", ok=False)
+        self.b(r, "item", "restore", "bounded-input")
+        self.assertIn("status: proposed", path.read_text())
+        self.b(r, "specialist", "new", "reader", "--title", "Reader")
+        self.b(r, "lesson", "reader", "--from", "root", "Bound source reads")
+        self.b(r, "hire", "reader", "root", "--task", "Study fixture", "--job", "job/import")
+        self.b(r, "hire", "reader", "root", "--task", "Study", "--items", "bounded-input", ok=False)
+        ui = json.loads(self.b(r, "ui", "--json"))
+        item = ui["items"]["all"][0]
+        self.assertEqual(item["state"], "proposed")
+        self.assertEqual(item["provenance"]["repo"], "fixture-project")
+        self.assertEqual(item["provenance"]["commit"], "a" * 40)
+        self.assertEqual(ui["specialists"][0]["lessons"][0]["text"], "Bound source reads")
+        self.assertEqual(ui["specialists"][0]["jobs"][0]["job"], "job/import")
+        self.b(r, "item", "accept", "bounded-input", "--reviewed-by", "human")
+        self.assertIn("accepted_by: human", path.read_text())
+        self.b(r, "usable", "bounded-input", "root")
+        self.b(r, "item", "quarantine", "bounded-input")
+        self.b(r, "item", "restore", "bounded-input")
+        self.b(r, "usable", "bounded-input", "root")
+        self.assertEqual(json.loads(self.b(r, "ui", "--json"))["items"]["all"][0]["state"], "accepted")
+        for field in ("source_ref", "source_commit", "source_repo", "source_owners", "scope"):
+            before = next(l for l in original.splitlines() if l.startswith(field + ":"))
+            self.assertIn(before, path.read_text())
+        self.b(r, "check")
+        path.write_text(path.read_text().replace("status: active", "status: proposed").replace("source_repo:", "lost_repo:"))
+        self.assertIn("proposed learning needs source_repo", self.b(r, "check", ok=False))
+
+    def test_scan_remote_forms_and_overlapping_roots(self):
+        r = self.init("alice")
+        base = self.tmp / "projects"
+        h = self.repo(base / "outer")
+        child = self.repo(h / "child")
+        self.git("remote", "add", "origin", "git@example.test:team/outer.git", cwd=h)
+        self.git("remote", "add", "extra", "ssh://user:fake-password@example.test/outer.git?fake-query", cwd=h)
+        (h / "memory-notes.txt").write_text("untracked memory\n")
+        rows = json.loads(self.b(r, "scan", str(base), str(h), "--json", "--depth", "1"))
+        self.assertEqual({x["path"] for x in rows}, {str(h), str(child)})
+        outer = next(x for x in rows if x["path"] == str(h))
+        self.assertEqual(outer["remotes"], ["example.test:team/outer.git", "ssh://example.test/outer.git"])
+        self.assertIn("memory-notes.txt", outer["agent_setup"])
+        self.b(r, "scan", str(self.tmp / "missing"), "--json", ok=False)
+        alias = base / "alias"; alias.symlink_to(child)
+        self.assertEqual(len(json.loads(self.b(r, "scan", str(base), "--json"))), 2)
+
+    def test_proposal_provenance_and_revocation(self):
+        r = self.init("alice")
+        self.b(r, "principal", "add", "team")
+        h = self.repo(self.tmp / "team-project")
+        self.b(r, "new", "team", "--title", "Team", "--owners", "team", "--home", str(h))
+        self.proposal(r, source="team")
+        self.b(r, "revoke", "team")
+        self.assertIn("status_before_quarantine: proposed", (r / "library/bounded-input.md").read_text())
+        self.b(r, "item", "restore", "bounded-input", ok=False)
+        self.b(r, "usable", "bounded-input", "root", ok=False)
+        args = ("item", "add", "bad", "--from", "root", "--title", "Bad", "--kind", "lesson", "--ref", "x", "--proposed")
+        self.b(r, *args, ok=False)
+        self.b(r, *args, "--repo", "safe", "--commit", "a" * 40, "--title", "Bad\n---\n", ok=False)
+        self.b(r, *args, "--repo", str(h), "--commit", "a" * 40, ok=False)
+        self.b(r, *args, "--repo", "safe", "--commit", "short", ok=False)
+        self.b(r, *args, "--repo", "safe", "--commit", "a" * 40, "--body", "token=fake-token", ok=False)
+        (r / "never-name.txt").write_text("NeverCopy\n")
+        self.b(r, *args, "--repo", "safe", "--commit", "a" * 40, "--body", "NeverCopy", ok=False)
+        self.assertFalse((r / "library/bad.md").exists())
+
 
 if __name__ == "__main__":
     unittest.main()

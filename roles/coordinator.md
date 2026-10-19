@@ -102,6 +102,7 @@ Answer from files. Before answering about a child, run the **freshness check**:
 | a one-shot job that needs no memory | host `delegate` |
 | a job that needs expertise | the `hire` skill (`core/bin/brain hire`) |
 | about several children at once | keep it here, in your own files (axiom 13) |
+| bringing in an existing repository | the `import` skill: scan, operator selection, adopt, then a study worker |
 | creating a node, or changing one's owners, place or labels | the `node-new` or `node-transition` skill |
 
 Before any host launch or delegation, run `brain usage` (any agent may run it). `brain brief`,

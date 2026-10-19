@@ -7,7 +7,7 @@ source_ref: {{SOURCE_REF}}
 learned_at: {{DATE}}
 source_owners: {{SOURCE_OWNERS}}
 scope: {{SCOPE}}
-status: active
+status: {{STATUS}}
 ---
 
 <!-- The reusable knowledge itself: a method, style, asset, script, lesson or fact.

@@ -23,4 +23,7 @@ description: Capture reusable knowledge (a method, style, asset, script, lesson 
    If there are none, use `--lessons "none: <reason>"` (say where node-only facts were kept).
    Do this before `wt prune` records the merge; it may also complete a missing outcome later.
    Old merged jobs need no backfill; newly recorded merges without an outcome warn in `check`.
-7. Run `core/bin/brain check`.
+7. Imported lessons use the import skill: `--proposed --repo <identity> --commit <hash>`.
+   They remain unusable until a human or separate reviewer accepts them with
+   `brain item accept <id> --reviewed-by "..."`; restore does not accept a proposal.
+8. Run `core/bin/brain check`.

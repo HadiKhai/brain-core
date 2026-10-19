@@ -9,6 +9,8 @@ You were started for one job. If your brief names no role, you are a worker for 
 - **Don't edit coordinator files**: `brief.md`, `status.md`, `decisions.md` and `node.md` belong
   to the coordinator. For a home job, use the hand-back command below. Other workers may
   append to the node's `inbox.md`: `- <timestamp> from worker: <item>`, the timestamp from `core/bin/brain now`.
+- An import worker explicitly delegated sole initial write ownership follows the `import`
+  skill for those node files; the source home stays read-only.
 - **Outputs go where your brief says.** Reports go in the folder `core/bin/brain report <node>
   "<topic>"` gives you: `index.md` with the summary and findings, plus their files. A script
   worth running again goes in the workbench's `scripts/`, with a first line saying what it does.

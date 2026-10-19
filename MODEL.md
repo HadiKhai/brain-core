@@ -143,6 +143,15 @@ readable.
 **Revoke** (the operator's relationship with a principal ends): the axiom 21 quarantine,
 plus archiving every node that principal alone now owns.
 
+## Item review state
+
+Items learned directly are `active` (accepted), as before. Imported learning starts `proposed`:
+it records the same provenance and source-owner scope (axiom 10), but no node may use it.
+A human or separate reviewer accepts it explicitly; acceptance records who and when, without
+changing provenance or scope. A worker never accepts its own proposals. Quarantine blocks both
+states (axiom 21); restoring a quarantined proposal leaves it proposed, not accepted. Older
+quarantined items without a saved state restore to active for compatibility.
+
 ## Runtime contract
 
 A runtime can serve this framework if it can:
