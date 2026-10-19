@@ -19,6 +19,7 @@ stated; never run a polling loop in an agent.
    limit is checked. It finds the nearest specialist at or above the target, refuses if its scope doesn't cover
    the target's owners, and includes only the lessons and items in scope.
    For an external-home job, pass its branch so the specialist gets the unified hand-back step.
+   Imported proposed specialists cannot be hired until confirmed after review (`brain specialist accept`).
    `--job` records the hire on this machine for the UI; printing a brief alone records no job.
 4. **Run it** as a worker with that brief: host `launch` in the target node (in its home, for an
    external home), or host `delegate` for one-shot work. Use the runtime the brief names unless

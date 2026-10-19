@@ -17,6 +17,9 @@ A hired specialist runs as a **worker** in the target node. Its brief is assembl
 2. the lessons and library items the target node may use (`core/bin/brain usable`);
 3. the task.
 
+Imported roles start `proposed` and cannot be hired until the operator/coordinator confirms
+their review with `brain specialist accept`. Source roles are summarized, never copied as authority.
+
 The target node's own rules still win (axiom 7). The specialist adds to them.
 
 ## Getting better

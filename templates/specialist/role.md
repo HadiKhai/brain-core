@@ -3,6 +3,7 @@ id: {{ID}}
 title: {{TITLE}}
 runtime: {{RUNTIME}}
 scope: {{SCOPE}}
+status: active
 ---
 
 # {{TITLE}}
