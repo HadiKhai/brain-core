@@ -46,9 +46,12 @@ moment.
   `abandoned` when it ends.
 - Write only the judgement sections of `status.md` (Now, Next, Active work, Blocked, Recent changes).
   Preserve `<!-- brain:facts v1 -->` through `<!-- /brain:facts -->` verbatim, then run
-  `core/bin/brain status <id> --refresh`. It generates Updated from the clock, recorded merges,
-  worktrees, ledger jobs and attention counts. Its Updated supersedes a legacy first line; never
-  hand-type facts. Refresh before committing, after folding job activity into the judgement sections.
+  `core/bin/brain status <id> --refresh`. It generates Facts refreshed from the clock, recorded
+  merges, worktrees, ledger jobs and attention counts. The facts fingerprint covers only what
+  the block displays, not unprinted commits or notes. Never hand-type facts.
+  When you update judgement, set its separate `Updated:` line outside the block from `brain now`.
+  A facts-only refresh never advances it: stale-days, `brain stale` and the stop hook measure
+  judgement age. Refresh before committing, after folding job activity into judgement.
 - **Every timestamp** comes from `core/bin/brain now`: the instance's timezone, which may not be
   this machine's clock. Times you show the operator are in that timezone too. A host may give
   its times in UTC (they end in `Z`): compare moments, not the digits.

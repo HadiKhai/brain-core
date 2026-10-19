@@ -2,7 +2,8 @@ Updated: {{DATE}} by {{ID}} coordinator ({{RUNTIME}})
 
 # {{TITLE}}: status
 
-<!-- Coordinator: write judgement below; brain status {{ID}} --refresh inserts and owns the facts block. -->
+<!-- Coordinator: update judgement and its Updated line above from brain now.
+     brain status {{ID}} --refresh owns only the facts block and its separate refresh time. -->
 
 ## Now
 

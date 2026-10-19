@@ -17,8 +17,10 @@ Run by a node's coordinator.
    others recorded in the home are cited, not copied: "<what> (home: <file or PR>)".
 5. Update `status.md` judgement sections: Now, Next, Active work (each row’s state from the
    pull requests and branches in step 3), Blocked / needs the operator, and Recent changes.
+   Set the judgement's `Updated:` line outside the facts block from `core/bin/brain now`.
    Preserve the generated facts markers and their contents; run `core/bin/brain status <id>
-   --refresh` to generate facts and Updated from the clock.
+   --refresh` to regenerate facts and their separate `Facts refreshed:` time. Refreshing facts
+   alone must never make old judgement appear current.
 6. Anything that concerns other nodes goes to the parent's `inbox.md` (axiom 13).
 7. If the node mirrors its decisions to an outside source of truth (named in its rules), mirror
    them now.

@@ -70,9 +70,9 @@ sense, it belongs in the instance, not here.
     Workers prepare their branches, reviews and ready packets; the coordinator alone merges
     to main, after `brain ready` accepts the packet against current main.
 16. **State lives in files; threads are disposable.** Any thread can be replaced from the
-    files of the node it served.
-    Workers own one hand-back signal per job; coordinators own
-    its ledger and refresh generated status facts without hand-writing them. A host tick
+    files of the node it served. Workers own one hand-back signal per job; coordinators own
+    its ledger and refresh generated status facts without hand-writing them. A facts refresh
+    never advances the coordinator judgement's own Updated timestamp. A host tick
     checks file-derived work and host pending requests; an empty tick leaves no notes.
     Human requests keep stable identities and are reported once per machine and reporter node
     until resolved. Coordinators handle only their subtree; the root reports to the human.

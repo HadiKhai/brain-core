@@ -2782,10 +2782,10 @@ class AutonomyDue(AutonomyProject):
         self.assertIn('stale-status', [i['kind'] for i in self.due(r)])
         self.b(r, 'status', 'app', '--refresh')
         self.assertEqual([i['kind'] for i in self.due(r)], ['handback'])
-        # A local commit on a worker branch is visible even with no new ledger event.
+        # A worker commit changes no displayed fact until its signal or merge state changes.
         (wt / 'new.txt').write_text('new\n')
         self.git('add', '-A', cwd=wt); self.git('commit', '-qm', 'new', cwd=wt)
-        self.assertIn('stale-status', [i['kind'] for i in self.due(r)])
+        self.assertNotIn('stale-status', [i['kind'] for i in self.due(r)])
 
     def test_refresh_before_a_combined_notes_commit_stays_current(self):
         r, home, wt = self.project()
@@ -2795,7 +2795,7 @@ class AutonomyDue(AutonomyProject):
         self.git('add', 'nodes/app', cwd=r); self.git('commit', '-qm', 'app: notes', cwd=r)
         self.assertEqual(self.due(r), [])
         brief.write_text(brief.read_text() + '\nAnother event.\n')
-        self.assertIn('stale-status', [i['kind'] for i in self.due(r)])
+        self.assertEqual(self.due(r), [], 'unprinted notes are not generated facts')
 
     def test_reused_branch_has_a_distinct_signal(self):
         r, home, wt = self.project()
@@ -2837,7 +2837,7 @@ class AutonomyDue(AutonomyProject):
 
 
 class AutonomyFacts(AutonomyProject):
-    def test_refresh_preserves_every_byte_outside_markers_and_updates_timestamp(self):
+    def test_refresh_preserves_judgement_bytes_and_separates_timestamps(self):
         r, home, wt = self.project()
         st = r / 'nodes/app/status.md'
         original = 'Updated: 2020-01-01 00:00 +00:00\n\n# App\n\n## Now\n\n- Judgement, exactly.\n'
@@ -2847,8 +2847,8 @@ class AutonomyFacts(AutonomyProject):
         self.assertTrue(text.endswith('\n\n' + original))
         self.assertIn('Open worktrees (this machine):\n- job-a: present', text)
         self.assertIn('runtime activity unknown', text)
-        self.assertNotIn('2020', self.b(r, 'status', 'app'))
-        self.assertIn('+00:00', text.split('Updated:', 1)[1].splitlines()[0])
+        self.assertIn('Updated: 2020-01-01 00:00 +00:00', self.b(r, 'status', 'app'))
+        self.assertIn('+00:00', text.split('Facts refreshed:', 1)[1].splitlines()[0])
         st.write_text('PREFIX\n' + text + '\nSUFFIX')
         prefix, rest = st.read_text().split('<!-- brain:facts v1 -->')
         _, suffix = rest.split('<!-- /brain:facts -->')
@@ -2856,6 +2856,49 @@ class AutonomyFacts(AutonomyProject):
         self.assertTrue(st.read_text().startswith(prefix))
         self.assertTrue(st.read_text().endswith(suffix))
         self.b(r, 'status', '--refresh', ok=False)
+
+    def test_fingerprint_tracks_only_displayed_facts(self):
+        r, home, wt = self.project()
+        self.b(r, 'status', 'app', '--refresh')
+        st = r / 'nodes/app/status.md'
+        before = st.read_text().split('<!-- brain:facts-state ', 1)[1].split(' -->', 1)[0]
+        (wt / 'worker.txt').write_text('worker change\n')
+        self.git('add', '-A', cwd=wt); self.git('commit', '-qm', 'worker commit', cwd=wt)
+        (home / 'home.txt').write_text('unrelated home change\n')
+        self.git('add', '-A', cwd=home); self.git('commit', '-qm', 'home commit', cwd=home)
+        (r / 'nodes/app/brief.md').write_text('unprinted judgement\n')
+        self.assertEqual(self.due(r), [])
+        self.b(r, 'status', 'app', '--refresh')
+        after = st.read_text().split('<!-- brain:facts-state ', 1)[1].split(' -->', 1)[0]
+        self.assertEqual(json.loads(before)['fingerprint'], json.loads(after)['fingerprint'])
+        self.b(r, 'handback', 'app', '--branch', 'job-a', '--state', 'done')
+        self.assertIn('stale-status', [i['kind'] for i in self.due(r)])
+        self.b(r, 'status', 'app', '--refresh')
+        self.assertNotIn('stale-status', [i['kind'] for i in self.due(r)])
+        self.git('merge', '-qm', 'merge worker', 'job-a', cwd=home)
+        self.assertIn('stale-status', [i['kind'] for i in self.due(r)])
+        self.b(r, 'status', 'app', '--refresh')
+        self.assertNotIn('stale-status', [i['kind'] for i in self.due(r)])
+
+    def test_facts_refresh_does_not_freshen_judgement_or_hook(self):
+        r = self.init('alice')
+        st = r / 'status.md'
+        st.write_text('Updated: 2020-01-01 00:00 +00:00\n\n## Now\n- Old judgement.\n')
+        self.b(r, 'status', 'root', '--refresh')
+        self.git('add', 'status.md', cwd=r); self.git('commit', '-qm', 'facts only', cwd=r)
+        self.assertIn('Updated: 2020-01-01', self.b(r, 'status', 'root'))
+        self.assertIn('behind by', self.b(r, 'stale', 'root', '2020-01-02T00:00:00Z'))
+        self.assertIn('stale', [i['kind'] for i in json.loads(self.b(r, 'inbox', '--json'))])
+        result = subprocess.run([sys.executable, str(r / 'core/bin/brain'), 'hook', 'stop'],
+                                cwd=r, env=self.env, input=json.dumps({'cwd': str(r), 'session_id': 'old-judgement'}),
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('status.md was last updated', json.loads(result.stdout)['reason'])
+        # Older generated Updated lines are never mistaken for coordinator judgement.
+        st.write_text(st.read_text().replace('Facts refreshed:', 'Updated:').replace(
+            'Updated: 2020-01-01 00:00 +00:00', 'No coordinator timestamp'))
+        self.assertIn('(no Updated line)', self.b(r, 'status', 'root'))
+        self.assertIn('has no Updated line', self.b(r, 'stale', 'root', '2020-01-02T00:00:00Z'))
 
     def test_merged_since_previous_refresh_is_a_snapshot_not_a_guess_from_the_clock(self):
         r, home, wt = self.project()

@@ -3318,12 +3318,10 @@ def cmd_schedule(a):
 def status_line(n):
     s = n["dir"] / "status.md"
     text = s.read_text() if s.exists() else ""
-    block = FACTS_RE.search(text)
-    if block:
-        m = re.search(r"^Updated: .+$", block.group(), re.M)
-        if m:
-            return m.group()
-    return text.splitlines()[0] if text.strip() else "(no status.md)"
+    # Updated belongs to coordinator judgement, never to a generated facts refresh.
+    text = FACTS_RE.sub("", text)
+    m = re.search(r"^Updated: .+$", text, re.M)
+    return m.group() if m else "(no Updated line)"
 
 
 def updated_at(inst, n):
@@ -3452,24 +3450,11 @@ def due_evidence(inst, n):
              "job-handbacks"]
     paths = [str((n["dir"] / name).relative_to(inst.root)) for name in names]
     last = git("log", "-1", "--format=%H %cI", "--", *paths, cwd=inst.root).stdout.strip()
-    # Fingerprint current content, not the last commit id: refreshing just before committing
-    # other coordinator notes must stay current after that commit.
-    files = {}
-    for name in names:
-        p = n["dir"] / name
-        for f in p.rglob("*") if p.is_dir() and not p.is_symlink() else [p]:
-            if f.exists() and stat.S_ISREG(f.lstat().st_mode):
-                h = hashlib.sha256()
-                with f.open("rb") as stream:
-                    for chunk in iter(lambda: stream.read(65536), b""):
-                        h.update(chunk)
-                files[str(f.relative_to(n["dir"]))] = h.hexdigest()
-    home = n["home_path"] if n["external"] else None
-    base = default_base(home) if home and home.exists() else None
-    head = git("rev-parse", "--verify", "--quiet", base, cwd=home).stdout.strip() if base else ""
-    state = {"jobs": rows, "worktrees": wts, "handbacks": signals, "inbox": inbox_lines(n),
-             "node_files": files, "blocked": status_section(n, "blocked"), "home_head": head}
-    return state, digest(state), last
+    state = {"jobs": rows, "worktrees": wts, "handbacks": signals, "inbox": inbox_lines(n)}
+    # Hash exactly the generated display, apart from its refresh time and metadata. Retain
+    # the last refresh's merge baseline so its "since previous" snapshot stays comparable.
+    lines, _ = status_facts(inst, n, state, facts_meta(n).get("merged_before", []))
+    return state, digest(lines), last
 
 
 def status_lag(inst, n, evidence=None):
@@ -3495,7 +3480,7 @@ def status_lag(inst, n, evidence=None):
     return None
 
 
-def due_items(inst, n, evidence=None):
+def due_items(inst, n, evidence=None, include_stale=True):
     if n["archived"]:
         return []
     evidence = evidence or due_evidence(inst, n)
@@ -3525,7 +3510,7 @@ def due_items(inst, n, evidence=None):
             add("unrecorded-worktree", f"{branch}: worktree has no open ledger job; reconcile the records")
     for line in state["inbox"]:
         add("inbox", line[2:])  # coordinator removes handled lines; remaining questions are unanswered
-    lag = status_lag(inst, n, evidence)
+    lag = status_lag(inst, n, evidence) if include_stale else None
     if lag:
         add("stale-status", lag + "; update judgement sections, then brain status <node> --refresh")
     return items
@@ -3544,6 +3529,31 @@ def cmd_due(a):
             print(f"{item['node']}: {item['kind']}: {item['text']}")
 
 
+def status_facts(inst, n, state, known_merges):
+    """The displayed facts only: no hidden git tips, file hashes or judgement timestamp."""
+    merged = {job_key(r): r for r in state["jobs"] or [] if r["Ended"] and r["Outcome"] == "merged"}
+    for r in state["jobs"] or []:
+        if not r["Ended"] and state["worktrees"].get(r["Job"], {}).get("merged"):
+            merged[job_key(r)] = {**r, "local_merge": True}
+    new = [r for key, r in merged.items() if key not in known_merges]
+    lines = ["Merged since previous refresh:"]
+    lines += [redact(f"- {r['Job']}: merged in local git; ledger still open" if r.get("local_merge") else
+                     f"- {r['Ended']}: {r['Job']} ({r['Commits'] or '?'} commits)", never_terms(n)) for r in new] or ["- None recorded."]
+    lines += ["", "Open worktrees (this machine):"]
+    lines += [redact(f"- {b}: {'present' if w['exists'] else 'missing'}" + ("; merged in local git" if w["merged"] else ""),
+                     never_terms(n)) for b, w in state["worktrees"].items()] or ["- None."]
+    lines += ["", "Running jobs (open in ledger; a hand-back means the worker stopped):"]
+    lines += [redact(f"- {r['Job']}: " + ((state['handbacks'][job_key(r)] or {}).get('state') or "open; runtime activity unknown") +
+                     f"; started {r['Started']}; {r['Reviews'] or '0'} reviews", never_terms(n))
+              for r in state["jobs"] or [] if not r["Ended"]] or ["- None."]
+    if state["jobs"] is None:
+        lines += ["- Legacy ledger: running jobs unknown."]
+    due = due_items(inst, n, (state, "", ""), include_stale=False)
+    human = [i for i in attention_items(inst, [n]) if i[1] not in ("stale",)]
+    lines += ["", f"Due: {len(due)} · Needs the human (attention sources, excluding stale status): {len(human)}"]
+    return lines, merged
+
+
 def refresh_status(inst, n):
     f = n["dir"] / "status.md"
     text = ""
@@ -3556,36 +3566,17 @@ def refresh_status(inst, n):
     previous = facts_meta(n)
     evidence = due_evidence(inst, n)
     state, fingerprint, _ = evidence
-    merged = {job_key(r): r for r in state["jobs"] or [] if r["Ended"] and r["Outcome"] == "merged"}
-    for r in state["jobs"] or []:
-        if not r["Ended"] and state["worktrees"].get(r["Job"], {}).get("merged"):
-            merged[job_key(r)] = {**r, "local_merge": True}
-    new = [r for key, r in merged.items() if key not in previous.get("merged", [])]
+    lines, merged = status_facts(inst, n, state, previous.get("merged", []))
+    fingerprint = digest(lines)
     lines = [FACTS_START, "## Facts (generated by brain status --refresh)", "",
-             "Updated: " + inst.now_dt().isoformat(sep=" ", timespec="seconds"), "",
-             "Merged since previous refresh" + (" (first refresh: recorded history)" if not previous else "") + ":"]
-    lines += [redact(f"- {r['Job']}: merged in local git; ledger still open" if r.get("local_merge") else
-                     f"- {r['Ended']}: {r['Job']} ({r['Commits'] or '?'} commits)", never_terms(n)) for r in new] or ["- None recorded."]
-    lines += ["", "Open worktrees (this machine):"]
-    lines += [redact(f"- {b}: {'present' if w['exists'] else 'missing'}" + ("; merged in local git" if w["merged"] else ""),
-                     never_terms(n)) for b, w in state["worktrees"].items()] or ["- None."]
-    lines += ["", "Running jobs (open in ledger; a hand-back means the worker stopped):"]
-    lines += [redact(f"- {r['Job']}: " + ((state['handbacks'][job_key(r)] or {}).get('state') or "open; runtime activity unknown") +
-                     f"; started {r['Started']}; {r['Reviews'] or '0'} reviews", never_terms(n))
-              for r in state["jobs"] or [] if not r["Ended"]] or ["- None."]
-    if state["jobs"] is None:
-        lines += ["- Legacy ledger: running jobs unknown."]
-    # This refresh resolves only the stale-status item. All actual work remains due.
-    due = [i for i in due_items(inst, n, evidence) if i["kind"] != "stale-status"]
-    human = [i for i in attention_items(inst, [n]) if i[1] not in ("stale",)]
-    lines += ["", f"Due: {len(due)} · Needs the human (attention sources, excluding stale status): {len(human)}", "",
-              "<!-- brain:facts-state " + json.dumps({"fingerprint": fingerprint, "merged": list(merged)}, sort_keys=True) + " -->",
-              FACTS_END]
+             "Facts refreshed: " + inst.now_dt().isoformat(sep=" ", timespec="seconds"), "", *lines, "",
+             "<!-- brain:facts-state " + json.dumps({"fingerprint": fingerprint, "merged": list(merged),
+                 "merged_before": previous.get("merged", [])}, sort_keys=True) + " -->", FACTS_END]
     block = "\n".join(lines)
     if FACTS_RE.search(text):
         text = FACTS_RE.sub(lambda m: block, text)
     else:
-        # Prepend: generated Updated is visible before an old, preserved handwritten timestamp.
+        # Preserve the coordinator's judgement timestamp outside the generated block.
         text = block + "\n\n" + text
     with f.open("w", newline="") as stream:
         stream.write(text)

@@ -791,6 +791,8 @@ def autonomy_status_facts(run):
     a = root / "nodes" / "a"
     brain(root, "status", "a", "--refresh")
     st = a / "status.md"
+    # Old judgement must get its own timestamp when the coordinator updates it.
+    st.write_text(re.sub(r"^Updated:.*$", "Updated: 2020-01-01 00:00 +00:00", st.read_text(), flags=re.M))
     # A stale generated block is regenerated rather than copied or hand-edited.
     st.write_text(st.read_text().replace("Open worktrees (this machine):\n- None.",
                                          "Open worktrees (this machine):\n- fabricated-worktree"))
@@ -808,9 +810,11 @@ def autonomy_status_facts(run):
         before = m.group()
         brain(root, "status", "a", "--refresh")
         regenerated = re.search(r"<!-- brain:facts v1 -->.*?<!-- /brain:facts -->", st.read_text(), re.S).group()
-        strip_time = lambda text: re.sub(r"^Updated:.*$", "Updated:", text, flags=re.M)
+        strip_time = lambda text: re.sub(r"^Facts refreshed:.*$", "Facts refreshed:", text, flags=re.M)
         run.check(strip_time(before) == strip_time(regenerated), "stored facts differ from the generator")
     judgement = re.sub(r"<!-- brain:facts v1 -->.*?<!-- /brain:facts -->", "", status, flags=re.S)
+    run.check("Updated: 2020-01-01" not in judgement, "coordinator did not update judgement timestamp")
+    run.check_time(judgement, "judgement Updated")
     sections = judgement.split("## Now", 1)[-1].lower()
     run.check("draft" in sections and "review" in sections, "judgement update missing")
 
