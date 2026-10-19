@@ -1692,14 +1692,18 @@ def cmd_brief(a):
                 "brief came from (axiom 6). Ask before pushing, publishing or anything irreversible (axiom 24).",
                 ""]
     if w:
-        base = "refs/heads/main" if git("rev-parse", "--verify", "--quiet", "refs/heads/main", cwd=where).returncode == 0 \
-            else w.get("start")
-        count = git("rev-list", "--count", f"{base}..refs/heads/{a.branch}", cwd=where).stdout.strip() if base else ""
-        if count.isdigit() and int(count):
+        exclude = [w["start"]] if w.get("start") else []
+        if git("rev-parse", "--verify", "--quiet", "refs/heads/main", cwd=where).returncode == 0:
+            exclude.append("refs/heads/main")
+        count = git("rev-list", "--count", f"refs/heads/{a.branch}",
+                    *("^" + ref for ref in exclude), cwd=where).stdout.strip() if exclude else ""
+        row = next((r for r in reversed(read_jobs(n) or []) if r["Job"] == a.branch), {})
+        dirty = git("status", "--porcelain", cwd=where).stdout.strip()
+        if (count.isdigit() and int(count)) or dirty or row.get("Switches") or row.get("Reviews", "") not in ("", "0"):
             head_sha = git("rev-parse", "HEAD", cwd=where).stdout.strip()
-            row = next((r for r in reversed(read_jobs(n) or []) if r["Job"] == a.branch), {})
             out += ["## Resume existing work", "",
-                    f"This branch already has {count} commit(s); its worktree HEAD is `{head_sha}`. "
+                    f"This job has {count or 'unknown'} own commit(s) and "
+                    f"{'uncommitted changes' if dirty else 'a clean worktree'}; its worktree HEAD is `{head_sha}`. "
                     "Continue from these commits. Read the branch's log, diff and any uncommitted work first; "
                     "do not reset, recreate the branch or start the task over.",
                     f"Read the existing ready packet at `{tilde(ready_path(inst, n, a.branch))}` if present; "

@@ -1429,6 +1429,52 @@ class RuntimeFallbackResume(Scenario):
         self.assertIn("Finish it", brief)
 
 
+class ResumeBriefRegressions(Scenario):
+    def job(self, base):
+        r = self.init("alice")
+        home = self.repo(self.tmp / "app")
+        self.git("checkout", "-qb", "feature", cwd=home)
+        self.git("commit", "--allow-empty", "-qm", "inherited work", cwd=home)
+        if base == "origin/main":
+            self.git("update-ref", "refs/remotes/origin/main", "HEAD", cwd=home)
+            self.git("symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main", cwd=home)
+            self.git("checkout", "-q", "main", cwd=home)
+        self.b(r, "new", "a", "--title", "A", "--home", str(home))
+        self.b(r, "wt", "add", "a", "job")
+        return r, self.tmp / "app-work/worktrees/job"
+
+    def test_fresh_remote_base_does_not_resume_inherited_commits(self):
+        r, wt = self.job("origin/main")
+        self.assertNotIn("## Resume existing work", self.b(r, "brief", "a", "--branch", "job"))
+        self.git("commit", "--allow-empty", "-qm", "own work", cwd=wt)
+        self.assertIn("1 own commit(s)", self.b(r, "brief", "a", "--branch", "job"))
+
+    def test_fresh_feature_head_base_does_not_resume_inherited_commits(self):
+        r, wt = self.job("HEAD")
+        self.assertNotIn("## Resume existing work", self.b(r, "brief", "a", "--branch", "job"))
+        self.git("commit", "--allow-empty", "-qm", "own work", cwd=wt)
+        self.assertIn("1 own commit(s)", self.b(r, "brief", "a", "--branch", "job"))
+
+    def test_uncommitted_work_resumes_before_first_commit(self):
+        r, wt = self.job("HEAD")
+        (wt / "partial.txt").write_text("unfinished work\n")
+        brief = self.b(r, "brief", "a", "--branch", "job")
+        self.assertIn("## Resume existing work", brief)
+        self.assertIn("0 own commit(s) and uncommitted changes", brief)
+        self.b(r, "jobs", "a", "--branch", "job", "--switch", "claude -> codex: usage limit")
+        self.assertIn("claude -> codex: usage limit", self.b(r, "brief", "a", "--branch", "job"))
+
+    def test_switch_or_review_alone_resumes_before_first_commit(self):
+        r, wt = self.job("HEAD")
+        self.b(r, "review", "a", "--branch", "job", "--built-by", "claude")
+        self.assertIn("## Resume existing work", self.b(r, "brief", "a", "--branch", "job"))
+        self.b(r, "wt", "add", "a", "switched")
+        self.b(r, "jobs", "a", "--branch", "switched", "--switch", "claude -> codex: usage limit")
+        brief = self.b(r, "brief", "a", "--branch", "switched")
+        self.assertIn("## Resume existing work", brief)
+        self.assertIn("0 own commit(s)", brief)
+
+
 class Measures(Scenario):
     def test_jobs_are_measured_from_start_to_end(self):
         r = self.init("alice")

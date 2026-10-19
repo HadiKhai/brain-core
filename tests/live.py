@@ -492,8 +492,7 @@ def nine_job_close_lessons(run):
     run.brain_check()
 
 
-def nine_worker_resume_ready(run):
-    """A replacement runtime continues partial commits, writes Lessons and leaves a current ready packet."""
+def _nine_worker_resume(run, committed):
     root = run.instance()
     home = run.home_repo("app", {
         "calc.py": "def add(a, b):\n    raise NotImplementedError\n\ndef multiply(a, b):\n    raise NotImplementedError\n",
@@ -504,7 +503,8 @@ def nine_worker_resume_ready(run):
     wt = run.tmp / "app-work/worktrees/job-calc"
     partial = "def add(a, b):\n    # The first worker completed addition.\n    return a + b\n"
     (wt / "calc.py").write_text(partial + "\ndef multiply(a, b):\n    raise NotImplementedError\n")
-    sh("git", "commit", "-qam", "addition complete; multiplication remains", cwd=wt)
+    if committed:
+        sh("git", "commit", "-qam", "addition complete; multiplication remains", cwd=wt)
     prior = sh("git", "rev-parse", "HEAD", cwd=wt).strip()
     # A completed review is fixture state; this scenario tests resumption, not reviewer quality.
     brain(root, "review", "a", "--branch", "job/calc", "--built-by", "codex" if run.runtime == "claude" else "claude")
@@ -537,6 +537,16 @@ def nine_worker_resume_ready(run):
         run.check((root / "nodes/a" / name).read_text() == before, f"worker edited coordinator's {name}")
 
 
+def nine_worker_resume_ready(run):
+    """A replacement runtime continues partial commits, writes Lessons and leaves a current ready packet."""
+    _nine_worker_resume(run, committed=True)
+
+
+def nine_worker_resume_uncommitted(run):
+    """A runtime switch before the first commit preserves and finishes uncommitted work."""
+    _nine_worker_resume(run, committed=False)
+
+
 def nine_future_updated_repaired(run):
     """A future Updated value makes the stop hook ask the coordinator to repair it with brain now."""
     root = run.instance()
@@ -559,7 +569,8 @@ SCENARIOS = [parity, coordinator_writes_as_it_goes, worker_asks_the_writer, lear
              new_node_in_one_sentence, no_upward_traces, second_runtime_review, stop_hook_fires,
              notes_current_after_an_edit, a_session_reaches_its_own_brain, worker_hands_back_a_question,
              lessons_become_items, limits_carry_their_reason, freshness_across_timezones,
-             nine_job_close_lessons, nine_worker_resume_ready, nine_future_updated_repaired]
+             nine_job_close_lessons, nine_worker_resume_ready, nine_worker_resume_uncommitted,
+             nine_future_updated_repaired]
 
 
 def main():
