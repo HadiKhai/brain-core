@@ -8,6 +8,9 @@ import importlib.util
 import importlib.machinery
 import threading
 from unittest import mock
+import argparse
+import contextlib
+import io
 import os
 import shutil
 import subprocess
@@ -2167,6 +2170,10 @@ class InstallAndUpgrade(Scenario):
         self.assertIn("Brain is at `~/Brain`", (self.tmp / ".claude" / "CLAUDE.md").read_text())
         self.assertNotIn("to PATH)", out)
         self.assertIn("Open a new terminal", out)
+        if sys.platform == "darwin":  # the usage poller is installed by default (tests never load it)
+            agent = self.tmp / "Library/LaunchAgents/org.brain.usage.plist"
+            self.assertIn(str(bob / "core/bin/brain"), agent.read_text())
+            self.assertIn("not loaded", out)
 
         # a second brain on this machine: its own folder and config folder, the same command
         self.install("--dir", "~/Work", "--name", "work", "--operator", "bob", "--title", "Work", "--runtimes",
@@ -2924,8 +2931,104 @@ for line in sys.stdin:
         self.assertEqual(data["StandardOutPath"], str(self.tmp / "Library/Logs/brain-usage.log"))
         self.assertEqual(data["StandardOutPath"], data["StandardErrorPath"])
         self.assertFalse((self.tmp / "Library/LaunchAgents").exists())
-        self.assertIn("already exists", self.run_(["usage", "install", "--launch-agent", str(path)], cwd=self.tmp,
-                                                  ok=False, brain=CORE / "bin/brain"))
+        again = self.run_(["usage", "install", "--launch-agent", str(path)], cwd=self.tmp, brain=CORE / "bin/brain")
+        self.assertIn("unchanged", again)
+        self.assertEqual(plistlib.loads(path.read_bytes()), data)
+        self.assertIn("removed", self.run_(["usage", "uninstall", "--launch-agent", str(path)], cwd=self.tmp,
+                                           brain=CORE / "bin/brain"))
+        self.assertFalse(path.exists())
+        self.assertIn("not installed", self.run_(["usage", "uninstall", "--launch-agent", str(path)], cwd=self.tmp,
+                                                 brain=CORE / "bin/brain"))
+
+    def test_usage_install_replaces_only_its_own_agent(self):
+        import plistlib
+        path = self.tmp / "agents/usage.plist"
+        path.parent.mkdir(parents=True)
+        path.write_bytes(plistlib.dumps({"Label": "com.example.other"}))
+        self.assertIn("isn't the brain usage LaunchAgent", self.run_(
+            ["usage", "install", "--launch-agent", str(path)], cwd=self.tmp, ok=False, brain=CORE / "bin/brain"))
+        self.assertEqual(plistlib.loads(path.read_bytes()), {"Label": "com.example.other"})
+        path.write_bytes(plistlib.dumps({"Label": "org.brain.usage", "ProgramArguments": ["/old/core/bin/brain"]}))
+        self.assertIn("wrote", self.run_(["usage", "install", "--launch-agent", str(path), "--every", "120"],
+                                         cwd=self.tmp, brain=CORE / "bin/brain"))
+        self.assertEqual(plistlib.loads(path.read_bytes())["ProgramArguments"][-1], "120")
+
+    def fake_launchd(self, stops=True, starts=True, restarts=True):
+        calls, state = [], {"loaded": False}
+        def run(*args):
+            calls.append(args[0])
+            ok = {"print": state["loaded"], "bootout": stops, "bootstrap": starts, "kickstart": restarts}[args[0]]
+            if args[0] == "bootout" and stops:
+                state["loaded"] = False
+            if args[0] == "bootstrap" and starts:
+                state["loaded"] = True
+            return subprocess.CompletedProcess(args, 0 if ok else 5, "", "" if ok else "Input/output error")
+        for target, value in (("usage_launchd", run), ("usage_service_managed", lambda: True)):
+            patcher = mock.patch.object(self.m, target, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        for patcher in (mock.patch.object(self.m.time, "sleep", lambda s: None),
+                        mock.patch.object(self.m.sys, "platform", "darwin")):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        return calls, state
+
+    def usage_args(self, **kw):
+        return argparse.Namespace(**{"launch_agent": None, "every": 300, "no_load": False, **kw})
+
+    def test_usage_install_loads_once_and_reloads_only_on_change(self):
+        calls, state = self.fake_launchd()
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.m.usage_install(self.usage_args())
+            self.m.usage_install(self.usage_args())
+            self.m.usage_install(self.usage_args(every=120))
+        self.assertTrue(state["loaded"])
+        self.assertEqual([c for c in calls if c != "print"], ["bootstrap", "bootout", "bootstrap"])
+        self.assertIn("already running", out.getvalue())
+
+    def test_usage_failed_stop_never_reports_success(self):
+        calls, state = self.fake_launchd(stops=False)
+        agent = self.tmp / "Library/LaunchAgents/org.brain.usage.plist"
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.m.usage_install(self.usage_args())
+        with self.assertRaises(SystemExit) as e:
+            self.m.usage_install(self.usage_args(every=120))
+        self.assertIn("didn't stop", str(e.exception))
+        with self.assertRaises(SystemExit) as e:
+            self.m.usage_uninstall(self.usage_args())
+        self.assertIn("didn't stop", str(e.exception))
+        self.assertTrue(agent.exists(), "kept while the poller still runs")
+
+    def test_usage_restart_only_for_this_brains_core_and_reports_failure(self):
+        calls, state = self.fake_launchd(restarts=False)
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.m.usage_install(self.usage_args())
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()) as out:
+            self.m.usage_restart(self.tmp / "other-brain")
+        self.assertNotIn("kickstart", calls)
+        self.assertEqual(out.getvalue() + err.getvalue(), "")
+        import plistlib
+        agent = self.tmp / "Library/LaunchAgents/org.brain.usage.plist"
+        data = plistlib.loads(agent.read_bytes())
+        data["ProgramArguments"][1] = str(self.tmp / "mine/core/bin/brain")
+        agent.write_bytes(plistlib.dumps(data))
+        with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()) as out:
+            self.m.usage_restart(self.tmp / "mine")
+        self.assertIn("kickstart", calls)
+        self.assertIn("couldn't restart", err.getvalue())
+        self.assertNotIn("restarted", out.getvalue())
+
+    def test_usage_install_default_path_never_loads_under_tests(self):
+        import plistlib
+        out = self.run_(["usage", "install"], cwd=self.tmp, brain=CORE / "bin/brain")
+        if sys.platform != "darwin":
+            self.assertIn("macOS-only", out)
+            return
+        path = self.tmp / "Library/LaunchAgents/org.brain.usage.plist"
+        self.assertIn("not loaded", out)
+        self.assertEqual(plistlib.loads(path.read_bytes())["Label"], "org.brain.usage")
 
 
 class AutonomyProject(Scenario):

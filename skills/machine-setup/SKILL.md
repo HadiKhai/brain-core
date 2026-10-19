@@ -104,9 +104,12 @@ command arguments, reports or the cache.
 Local logs do not reliably measure this machine's share of the account-wide allowance.
 
 Keep one `brain usage --watch --every 300` process per machine, outside agent threads.
-On macOS, `brain usage install` writes `~/Library/LaunchAgents/org.brain.usage.plist` and prints
-the `launchctl bootstrap` command; it does not load it. Inspect the paths first, then load it
-only when the operator wants the service. `--launch-agent <path>` writes a plist elsewhere.
+`install.sh` starts it (skip with `--no-usage`). On macOS, `brain usage install` writes
+`~/Library/LaunchAgents/org.brain.usage.plist` and loads it; running it again is safe (unchanged:
+nothing happens; changed: the agent is reloaded) and it refuses to replace a plist that isn't its
+own. `brain usage uninstall` stops and removes it; `brain upgrade` restarts it on the new core.
+`--no-load` or `--launch-agent <path>` only writes the plist. Elsewhere, run the watch loop as a
+background service yourself.
 The LaunchAgent restarts failed exits, throttled to thirty seconds, and writes stdout/stderr
 to `~/Library/Logs/brain-usage.log`; a duplicate poller exits successfully without restarting.
 One bad refresh logs a generic failure and the watch loop continues.

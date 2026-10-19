@@ -1061,15 +1061,47 @@ def usage_other_count(inst):
         return 0
 
 
+USAGE_LABEL = "org.brain.usage"
+
+
+def usage_agent_default():
+    return Path.home() / "Library/LaunchAgents" / f"{USAGE_LABEL}.plist"
+
+
+def usage_launchd(*args):
+    return subprocess.run(["launchctl", *args], capture_output=True, text=True)
+
+
+def usage_service_managed():
+    """True where this command may start, stop or restart the machine's real poller."""
+    return sys.platform == "darwin" and not os.environ.get("BRAIN_USAGE_TESTING") and bool(shutil.which("launchctl"))
+
+
+def usage_loaded():
+    return usage_launchd("print", f"gui/{os.getuid()}/{USAGE_LABEL}").returncode == 0
+
+
+def usage_stop():
+    """Stop the loaded poller; True once launchd no longer has it (bootout finishes asynchronously)."""
+    usage_launchd("bootout", f"gui/{os.getuid()}/{USAGE_LABEL}")
+    for _ in range(20):
+        if not usage_loaded():
+            return True
+        time.sleep(0.25)
+    return False
+
+
 def usage_install(a):
     import plistlib
     import shlex
-    path = Path(a.launch_agent).expanduser() if a.launch_agent else Path.home() / "Library/LaunchAgents/org.brain.usage.plist"
-    if path.exists():
-        die("usage LaunchAgent already exists; inspect it before replacing it")
+    path = Path(a.launch_agent).expanduser() if a.launch_agent else usage_agent_default()
+    if not a.launch_agent and sys.platform != "darwin":
+        print("usage poller: automatic install is macOS-only here; keep one `brain usage --watch` running as a "
+              "background service (a systemd user unit, say)")
+        return
     config = str(brains_file().resolve())
-    data = {"Label": "org.brain.usage", "ProgramArguments": [sys.executable, str(CORE / "bin/brain"),
-            "usage", "--watch", "--every", str(a.every)], "RunAtLoad": True,
+    data = {"Label": USAGE_LABEL, "ProgramArguments": [sys.executable, str(CORE / "bin/brain"),
+            "usage", "--watch", "--every", f"{a.every:g}"], "RunAtLoad": True,
             "KeepAlive": {"SuccessfulExit": False}, "ThrottleInterval": 30, "ProcessType": "Background",
             "StandardOutPath": str(Path.home() / "Library/Logs/brain-usage.log"),
             "StandardErrorPath": str(Path.home() / "Library/Logs/brain-usage.log"),
@@ -1078,11 +1110,71 @@ def usage_install(a):
     for env in USAGE_RUNTIMES.values():
         if os.environ.get(env):
             data["EnvironmentVariables"][env] = os.environ[env]
-    path.parent.mkdir(parents=True, exist_ok=True)
-    # launchd requires the log's parent to exist.
-    (Path.home() / "Library/Logs").mkdir(parents=True, exist_ok=True)
-    path.write_bytes(plistlib.dumps(data))
-    print(f"wrote {tilde(path)}; not loaded. Start with: launchctl bootstrap gui/$(id -u) {shlex.quote(str(path))}")
+    same = False
+    if path.exists():
+        try:
+            old = plistlib.loads(path.read_bytes())
+        except Exception:
+            old = None
+        # Only ever replace our own agent; anything else at that path is the operator's to inspect.
+        if not isinstance(old, dict) or old.get("Label") != USAGE_LABEL:
+            die(f"{tilde(path)} exists and isn't the brain usage LaunchAgent; inspect it before replacing it")
+        same = old == data
+    if not same:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        # launchd requires the log's parent to exist.
+        (Path.home() / "Library/Logs").mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_bytes(plistlib.dumps(data))
+        os.replace(tmp, path)
+    state = "unchanged" if same else "wrote"
+    if a.no_load or path != usage_agent_default() or not usage_service_managed():
+        print(f"{state} {tilde(path)}; not loaded. Start with: launchctl bootstrap gui/$(id -u) "
+              f"{shlex.quote(str(path))}")
+        return
+    domain = f"gui/{os.getuid()}"
+    if usage_loaded():
+        if same:
+            print(f"usage poller already running ({tilde(path)}); every {a.every:g} s")
+            return
+        if not usage_stop():
+            die(f"wrote {tilde(path)} but the running poller didn't stop; the old one is still running "
+                f"(launchctl bootout {domain}/{USAGE_LABEL}, then brain usage install)")
+    r = usage_launchd("bootstrap", domain, str(path))
+    if r.returncode and not usage_loaded():
+        die(f"wrote {tilde(path)} but launchd didn't load it: {r.stderr.strip() or r.returncode}")
+    print(f"usage poller running: every {a.every:g} s, account-wide; log ~/Library/Logs/brain-usage.log "
+          "(stop: brain usage uninstall)")
+
+
+def usage_uninstall(a):
+    path = Path(a.launch_agent).expanduser() if a.launch_agent else usage_agent_default()
+    if path == usage_agent_default() and usage_service_managed() and usage_loaded() and not usage_stop():
+        die("the usage poller didn't stop; left its LaunchAgent in place")
+    if path.exists():
+        path.unlink()
+        print(f"usage poller removed ({tilde(path)}); readings stay until they expire")
+    else:
+        print("usage poller not installed")
+
+
+def usage_restart(root):
+    """After an upgrade, a running poller restarts so it runs the new core, if it runs this brain's core."""
+    import plistlib
+    if not (usage_service_managed() and usage_loaded()):
+        return
+    try:
+        args = plistlib.loads(usage_agent_default().read_bytes())["ProgramArguments"]
+        mine = Path(args[1]).resolve() == (root / "core/bin/brain").resolve()
+    except Exception:
+        mine = False
+    if not mine:
+        return  # another brain's core runs it; that brain's upgrade restarts it
+    if usage_launchd("kickstart", "-k", f"gui/{os.getuid()}/{USAGE_LABEL}").returncode:
+        print("brain: couldn't restart the usage poller; it runs the old core until it restarts "
+              "(brain usage install)", file=sys.stderr)
+    else:
+        print("usage poller restarted on the new core")
 
 
 def cmd_usage(a):
@@ -1090,6 +1182,9 @@ def cmd_usage(a):
         die("--every must be positive seconds")
     if a.action == "install":
         usage_install(a)
+        return
+    if a.action == "uninstall":
+        usage_uninstall(a)
         return
     if a.watch:
         with usage_lock("usage-watch.lock") as held:
@@ -5778,6 +5873,7 @@ def cmd_upgrade(a):
     # the new core's own link and check --fix commit whatever they change
     subprocess.run([sys.executable, newbin, "link"], env=env)
     subprocess.run([sys.executable, newbin, "check", "--fix"], env=env)
+    usage_restart(root)
 
 
 def cmd_selftest(a):
@@ -5889,10 +5985,11 @@ def main():
         opt("--host", default="t3"), opt("--tz", default="UTC"),
         opt("--name", help="short name for `brain -b <name>` (default: the folder's name)"))
     cmd("usage", cmd_usage, "account-wide subscription usage (agents read the machine cache)",
-        opt("action", choices=["install"], nargs="?"), opt("--json", action="store_true"),
+        opt("action", choices=["install", "uninstall"], nargs="?"), opt("--json", action="store_true"),
         opt("--refresh", action="store_true"), opt("--watch", action="store_true"),
         opt("--every", type=float, default=300, help="poll interval in seconds"),
-        opt("--launch-agent", help="install: plist path (writes only; does not load it)"))
+        opt("--launch-agent", help="install: plist path elsewhere (writes only; does not load it)"),
+        opt("--no-load", action="store_true", help="install: write the LaunchAgent without loading it"))
     cmd("new", cmd_new, "create a node", "id", opt("--title", required=True), opt("--owners", default=""),
         opt("--labels", default=""), opt("--runtime"), opt("--home", help="a path outside the instance"),
         opt("--home-url", dest="home_url"))

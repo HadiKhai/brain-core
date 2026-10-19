@@ -9,7 +9,9 @@ and every decision written down, so nothing lives only in a chat that's about to
 Runs on **Claude Code** and **Codex** (or both at once), in **T3 Code** or any host that can start and message threads.<br>
 Python 3.9 standard library. Nothing to install but one command.
 
-[Why](#why) · [How it works](#how-it-works) · [A job, start to finish](#a-job-start-to-finish) · [See it](#see-it) · [Usage](#usage-follows-the-account) · [Import](#bring-an-existing-project) · [Install](#install) · [Commands](#commands) · [The model](#the-model) · [Tests](#tests)
+![MIT licence](https://img.shields.io/badge/licence-MIT-blue) ![Python 3.9+](https://img.shields.io/badge/python-3.9%2B-3776ab) ![Runtimes: Claude Code and Codex](https://img.shields.io/badge/runtimes-Claude%20Code%20%C2%B7%20Codex-8a63d2) ![No dependencies](https://img.shields.io/badge/dependencies-none-success)
+
+[Quick start](#quick-start) · [Why](#why) · [How it works](#how-it-works) · [A job, start to finish](#a-job-start-to-finish) · [See it](#see-it) · [Usage](#usage-follows-the-account) · [Import](#bring-an-existing-project) · [Install](#install) · [Commands](#commands) · [The model](#the-model) · [Tests](#tests) · [Licence](#licence)
 
 <br>
 
@@ -21,6 +23,21 @@ Python 3.9 standard library. Nothing to install but one command.
 <sub>`brain ui` on a demo brain. Every name, project and number in these images is made up.</sub>
 
 </div>
+
+---
+
+## Quick start
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/HadiKhai/brain-core/main/install.sh | sh
+```
+
+1. Answer a few questions (your id, the brain's name, the runtimes you use, your timezone).
+2. Open your host (T3 Code, say) at `~/Brain` and say **"set up this machine"**.
+3. Talk to the root: *"New project: the studio website, home at ~/code/website."*
+
+The installer also starts one usage poller for the machine, so agents know how much of each
+subscription is left before they start a job. Details in [Install](#install).
 
 ---
 
@@ -323,8 +340,8 @@ flowchart TB
 
 Machine-level `subscriptions.json` declares runtimes, config folders, host instances and allowed
 brains, outside every brain. One `brain usage --watch --every 300` service polls every five minutes;
-agents read the cache with `brain usage`. On macOS, `brain usage install` writes a LaunchAgent
-and prints how to load it. See [machine setup](skills/machine-setup/SKILL.md#subscriptions-on-this-machine).
+agents read the cache with `brain usage`. The installer starts it on macOS as a LaunchAgent
+(`brain usage install`; `brain usage uninstall` removes it). See [machine setup](skills/machine-setup/SKILL.md#subscriptions-on-this-machine).
 
 **Server readings are account-wide.** The same subscription on several machines has one
 combined usage reading, not a fresh allowance per machine. Brain shows five-hour and seven-day
@@ -385,7 +402,9 @@ curl -fsSL https://raw.githubusercontent.com/HadiKhai/brain-core/main/install.sh
 
 The installer puts `brain` in `~/.local/bin` (on your PATH) and a short pointer in each runtime's
 user-wide instructions, so an agent started anywhere knows where the brain is (`--no-global`
-skips that). Then open your host at the brain's folder and say **"set up this machine"**: it creates
+skips that). On macOS it also starts the machine's usage poller, a LaunchAgent that reads each
+subscription's account-wide usage every five minutes (`--no-usage` skips it; `brain usage
+uninstall` removes it later). A second brain on the same machine keeps the one poller. Then open your host at the brain's folder and say **"set up this machine"**: it creates
 the projects and a coordinator thread for each node.
 
 Then talk to it:
@@ -473,7 +492,8 @@ You mostly talk to coordinators, and they run `brain` for you. By hand:
 | `brain adopt <paths> [--parent <node>]` | adopt selected homes and record import study jobs |
 | `brain brief <node> --import` | study history into cited node state and inactive proposals |
 | `brain scrub <node> [paths ...] [--check]` | filter evidence, or check outputs without exposing forbidden terms |
-| `brain usage --watch --every 300` | one machine poller; agents only read |
+| `brain usage install` / `uninstall` | start or remove the machine's poller (macOS LaunchAgent; safe to rerun) |
+| `brain usage --watch --every 300` | the poller itself, for other systems; agents only read |
 | `brain link --global [runtime=folder ...]` | a pointer to this brain in runtimes' user-wide instructions |
 | `brain brains`, `brain use <name>`, `brain -b <name> …`, `brain --all` | several brains: list, default, pick, every dashboard |
 | `brain upgrade` | update `core/` to the latest version, then link and check |
@@ -499,6 +519,7 @@ uses the core as a submodule at `core/`, binding it in its `instance.md`.
 | [`ui/index.html`](ui/index.html) | the live page `brain ui` serves. One file, no build step |
 | [`install.sh`](install.sh) | one-line install: a new brain, another machine, or a second brain |
 | [`tests/`](tests) | `brain selftest` and `live.py` |
+| [`LICENSE`](LICENSE) | MIT |
 | [`docs/`](docs) | these images, and the script that makes them from a demo brain |
 
 ---
@@ -595,3 +616,9 @@ After any change:
 3. `python3 docs/make-screenshots.py` if the page changed; use `--text-only` for CLI captures (fake data only)
 4. commit here; brains pick it up with `brain upgrade`
 
+---
+
+## Licence
+
+[MIT](LICENSE): free to use, copy, change and share, commercially or not. Keep the copyright
+notice. It comes with no warranty.

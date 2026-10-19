@@ -20,6 +20,7 @@
 #   --global RT=DIR     put this Brain's pointer in that config folder of runtime RT, e.g.
 #                       claude=~/.claude-work (repeatable; default: each runtime's own folder)
 #   --no-global         don't add a pointer to this Brain in each runtime's user-wide instructions
+#   --no-usage          don't start the machine's usage poller (macOS LaunchAgent; `brain usage install` later)
 #
 # A second Brain on the same machine: give it its own --dir. The `brain` command reaches both
 # (`brain -b NAME`, `brain brains`).
@@ -28,7 +29,7 @@ set -eu
 
 CORE_URL="${BRAIN_CORE_URL:-https://github.com/HadiKhai/brain-core.git}"
 DIR="$HOME/Brain"; FROM=""; OPERATOR=""; TITLE=""; NAME=""; RUNTIMES=""; HOST="t3"; TZONE=""
-BIN_DIR="$HOME/.local/bin"; YES=0; HOMES=""; MODIFY_PATH=1; GLOBAL=1; GLOBALS=""
+BIN_DIR="$HOME/.local/bin"; YES=0; HOMES=""; MODIFY_PATH=1; GLOBAL=1; GLOBALS=""; USAGE=1
 
 die() { echo "install: $*" >&2; exit 1; }
 need() { command -v "$1" >/dev/null 2>&1 || die "needs $1"; }
@@ -51,8 +52,9 @@ $2"; shift 2 ;;
     --no-modify-path) MODIFY_PATH=0; shift ;;
     --global) GLOBALS="$GLOBALS ${2%%=*}=$(expand "${2#*=}")"; shift 2 ;;
     --no-global) GLOBAL=0; shift ;;
+    --no-usage) USAGE=0; shift ;;
     --yes|-y) YES=1; shift ;;
-    -h|--help) sed -n '2,28p' "$0" 2>/dev/null | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,27p' "$0" 2>/dev/null | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) die "unknown option $1 (try --help)" ;;
   esac
 done
@@ -137,6 +139,9 @@ brain link --command --bin-dir "$BIN_DIR" | { [ "$MODIFY_PATH" = 1 ] && sed 's/ 
 # So agents started anywhere know where the Brain is (a pointer only; see `brain link --global`)
 # shellcheck disable=SC2086 # GLOBALS: space-separated RT=DIR pairs
 [ "$GLOBAL" = 0 ] || brain link --global $GLOBALS
+
+# One usage poller per machine, so agents see each subscription's limits (account-wide, every 5 minutes)
+[ "$USAGE" = 0 ] || brain usage install || echo "! usage poller not started (later: brain usage install)"
 
 # So `brain` works in every new terminal: put BIN_DIR on PATH in the shell's startup file.
 on_path() { case ":$PATH:" in *":$1:"*) return 0 ;; *) return 1 ;; esac; }
