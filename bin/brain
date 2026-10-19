@@ -1998,6 +1998,9 @@ def cmd_wt_add(a):
         out = (r.stdout + r.stderr).strip()
         print(f"  setup: {'ok' if r.returncode == 0 else 'FAILED (exit ' + str(r.returncode) + ')'}"
               + ("\n" + "\n".join("    " + l for l in out.splitlines()[-15:]) if out else ""))
+        if r.returncode:
+            print("  worktree retained with its setup output; resolve the setup failure before starting a worker")
+            sys.exit(r.returncode if r.returncode > 0 else 1)
     elif not setup.exists():
         print(f"  no {SETUP_FILE} in the node folder: nothing copied in (env files, installs)")
     print(f"  launch a worker there (host adapter: an existing worktree at this path, branch {a.branch})")

@@ -484,6 +484,21 @@ class Provenance(Scenario):
 
 
 class Workbench(Scenario):
+    def test_failed_setup_keeps_the_worktree_and_reports_failure(self):
+        r = self.init("alice")
+        home = self.repo(self.tmp / "code" / "app")
+        self.b(r, "new", "app", "--title", "App", "--home", str(home))
+        (r / "nodes" / "app" / "worktree-setup.sh").write_text('echo partial > partial.txt\nexit 7\n')
+        p = subprocess.run([sys.executable, str(r / "core" / "bin" / "brain"), "wt", "add", "app", "job-fails"],
+                           cwd=r, env=self.env, capture_output=True, text=True)
+        self.assertEqual(p.returncode, 7, p.stdout + p.stderr)
+        self.assertIn("setup: FAILED", p.stdout)
+        self.assertNotIn("launch a worker there", p.stdout)
+        local = json.loads((r / ".brain" / "local.json").read_text())
+        path = Path(local["nodes"]["app"]["worktrees"]["job-fails"]["path"])
+        self.assertEqual((path / "partial.txt").read_text(), "partial\n")
+        self.assertIn("job-fails", self.b(r, "wt", "list", "app"))
+
     def test_worktrees_with_setup_ports_and_prune(self):
         r = self.init("alice")
         self.b(r, "principal", "add", "team")
@@ -1280,6 +1295,39 @@ class Measures(Scenario):
         self.b(r, "stale", "app", "2026-10-19 05:00", ok=False)                          # no zone: refused
 
 class LiveView(Scenario):
+    def test_unavailable_live_runtime_stops_new_calls_and_keeps_a_failed_gate(self):
+        import contextlib
+        import importlib.util
+        import io
+        from unittest import mock
+        spec = importlib.util.spec_from_file_location("brain_live_under_test", CORE / "tests" / "live.py")
+        live = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(live)
+        calls = []
+        def unavailable(run, *args, **kwargs):
+            calls.append(run.scenario.__name__)
+            raise live.RuntimeUnavailable("provider session limit")
+        def first(run):
+            run.agent(self.tmp, "test")
+        def second(run):
+            run.agent(self.tmp, "test")
+        mkdtemp = tempfile.mkdtemp
+        def temporary(*args, **kwargs):
+            kwargs.setdefault("dir", self.tmp)
+            return mkdtemp(*args, **kwargs)
+        output = io.StringIO()
+        with mock.patch.object(live.Run, "agent", unavailable), \
+             mock.patch.object(live, "SCENARIOS", [first, second]), \
+             mock.patch.object(live.tempfile, "mkdtemp", temporary), \
+             mock.patch.object(sys, "argv", ["live.py", "--runtimes", "codex", "--jobs", "1"]), \
+             mock.patch.dict(os.environ, {"LIVE_CODEX_BIN": sys.executable}), \
+             contextlib.redirect_stdout(output), self.assertRaises(SystemExit) as ended:
+            live.main()
+        self.assertEqual(ended.exception.code, 1)
+        self.assertEqual(calls, ["first"])
+        self.assertIn("BLOCKED", output.getvalue())
+        self.assertIn("not started: codex unavailable", output.getvalue())
+
     def test_ui_serves_a_read_only_live_state_to_this_machine_only(self):
         import socket
         import urllib.error

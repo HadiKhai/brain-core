@@ -45,7 +45,7 @@ moment.
   `| <branch> | <thread> | <PR or -> | <state> |`. Keep the state current; mark it `merged` or
   `abandoned` when it ends.
 - Each time you touch `status.md`, rewrite its first line:
-  `Updated: <YYYY-MM-DD HH:MM> by <node id> coordinator (<runtime>)`.
+  `Updated: <timestamp from brain now, including its UTC offset> by <node id> coordinator (<runtime>)`.
 - **Every timestamp** comes from `core/bin/brain now`: the instance's timezone, which may not be
   this machine's clock. Times you show the operator are in that timezone too. A host may give
   its times in UTC (they end in `Z`): compare moments, not the digits.

@@ -183,11 +183,19 @@ function ago(sec) {
   if (s < 86400) return Math.floor(s / 3600) + "h ago"; return Math.floor(s / 86400) + "d ago";
 }
 function tsec(iso) { return iso ? Date.parse(iso) / 1000 : null; }
-const fmtTime = new Intl.DateTimeFormat(undefined, { hour: "2-digit", minute: "2-digit" });
-function brainClock() {
-  if (!S) return ""; try { return new Intl.DateTimeFormat(undefined, { hour: "2-digit", minute: "2-digit", timeZone: S.brain.tz || undefined }).format(new Date()); }
-  catch { return fmtTime.format(new Date()); }
+const timeFormats = new Map();
+function brainTime(value, withDate = false) {
+  const date = value instanceof Date ? value : new Date(value);
+  if (!Number.isFinite(date.getTime())) return String(value || "");
+  const zone = S && S.brain.tz, key = JSON.stringify([zone, withDate]);
+  if (!timeFormats.has(key)) {
+    const options = { hour: "2-digit", minute: "2-digit", ...(withDate ? { year: "numeric", month: "short", day: "numeric" } : {}), timeZone: zone || undefined };
+    try { timeFormats.set(key, new Intl.DateTimeFormat(undefined, options)); }
+    catch { timeFormats.set(key, new Intl.DateTimeFormat(undefined, { ...options, timeZone: "UTC" })); }
+  }
+  return timeFormats.get(key).format(date);
 }
+function brainClock() { return S ? brainTime(new Date()) : ""; }
 
 // ---- tooltip ----
 const tip = $("tip");
@@ -305,7 +313,7 @@ function renderWork() {
       el("td", { class: "nowrap" }, ports),
       el("td", { class: "num" }, w && w.dirty != null ? String(w.dirty) : "-"),
       el("td", { class: "num" }, w && w.ahead != null ? String(w.ahead) : "-"),
-      el("td", { class: "num", title: job ? `started ${job.Started.replace("T", " ").slice(0, 16)}, ${job.Reviews || 0} review round(s)` : "" }, job ? job.age_h.toFixed(1) + " h" : "-"),
+      el("td", { class: "num", title: job ? `started ${brainTime(job.Started, true)}, ${job.Reviews || 0} review round(s)` : "" }, job ? job.age_h.toFixed(1) + " h" : "-"),
       el("td", { class: "num" }, activity)));
   }
   t.append(tb); $("work").replaceChildren(t);
@@ -332,13 +340,13 @@ function renderHeat() {
       cell.addEventListener("pointermove", (ev) => {
         const t0 = new Date((start + hh * 3600) * 1000);
         const list = (subj[k] || []).slice(0, 5).map((c) => el("div", { class: "m" }, c.subject.slice(0, 70)));
-        showTip(ev, el("strong", {}, `${v} commit${v === 1 ? "" : "s"}`), el("div", {}, `${(x && x.title) || id} · ${fmtTime.format(t0)}`), ...list);
+        showTip(ev, el("strong", {}, `${v} commit${v === 1 ? "" : "s"}`), el("div", {}, `${(x && x.title) || id} · ${brainTime(t0, true)}`), ...list);
       });
       cell.addEventListener("pointerleave", hideTip);
       g.append(cell);
     }
   });
-  for (let hh = 0; hh < H; hh += 6) g.append(sv("text", { class: "tick", x: LW + hh * (C + G), y: h - 4 }, fmtTime.format(new Date((start + hh * 3600) * 1000))));
+  for (let hh = 0; hh < H; hh += 6) g.append(sv("text", { class: "tick", x: LW + hh * (C + G), y: h - 4 }, brainTime(new Date((start + hh * 3600) * 1000))));
   const legend = el("div", { class: "legend" }, "fewer", ...steps.map((s) => el("i", { style: `background:var(${s})` })), "more", el("span", { style: "margin-left:12px" }, `darkest = ${max} in an hour`));
   $("heat").replaceChildren(g, legend);
 }
@@ -374,11 +382,11 @@ function openDetail(id) {
   if (x.inbox.length) sec("Inbox", el("ul", { class: "list" }, ...x.inbox.map((b) => el("li", {}, el("span", {}, inline(b))))));
   for (const [k, v] of Object.entries(x.status)) if (!/^blocked/i.test(k)) sec(k, block(v.length > 6000 ? v.slice(0, 6000) + "\n…" : v));
   if (x.limits.length) sec("Limits", el("ul", { class: "list" }, ...x.limits.map((l) => el("li", {}, el("span", {}, inline(l))))));
-  if (x.decisions.length) sec("Latest decisions", el("ul", { class: "list" }, ...x.decisions.map((dd) => el("li", {}, el("span", {}, dd.title, dd.said ? el("div", { class: "said" }, dd.said) : null), el("span", { class: "when" }, dd.time)))));
+  if (x.decisions.length) sec("Latest decisions", el("ul", { class: "list" }, ...x.decisions.map((dd) => el("li", {}, el("span", {}, dd.title, dd.said ? el("div", { class: "said" }, dd.said) : null), el("span", { class: "when" }, dd.t != null ? brainTime(new Date(dd.t * 1000), true) : dd.time)))));
   if (x.jobs.rows.length) {
     const jj = x.jobs, rows = jj.rows.slice().reverse().slice(0, 12);
     const t = el("table", {}, el("thead", {}, el("tr", {}, ["Job", "Started", "Hours", "Outcome", "Reviews"].map((h) => el("th", {}, h)))),
-      el("tbody", {}, ...rows.map((r) => el("tr", {}, el("td", {}, el("code", {}, r.Job)), el("td", {}, (r.Started || "").replace("T", " ").slice(0, 16)), el("td", { class: "num" }, r.Hours || "open"), el("td", { title: r.Cause || "" }, r.Outcome || "-"), el("td", { class: "num" }, r.Reviews || "0")))));
+      el("tbody", {}, ...rows.map((r) => el("tr", {}, el("td", {}, el("code", {}, r.Job)), el("td", {}, r.Started ? brainTime(r.Started, true) : "-"), el("td", { class: "num" }, r.Hours || "open"), el("td", { title: r.Cause || "" }, r.Outcome || "-"), el("td", { class: "num" }, r.Reviews || "0")))));
     sec(`Jobs · ${jj.merged} merged, ${jj.abandoned} abandoned` + (jj.median_hours != null ? ` · median ${jj.median_hours} h, ${jj.median_reviews} review round(s)` : ""), t);
   }
   if (x.reports.length) sec("Reports", el("ul", { class: "list" }, ...x.reports.map((r) => el("li", {}, el("span", {}, r.title), el("span", { class: "when" }, el("code", {}, r.path))))));
@@ -398,12 +406,15 @@ $("notify").addEventListener("click", async () => {
   if ((await Notification.requestPermission()) === "granted") { notifyOn = true; localStorage.setItem("brain-notify", "1"); }
   notifyLabel();
 });
+let previousAttention = new Set();
 function notifyNew() {
-  if (!notifyOn || firstPaint) return;
+  const current = new Set();
   for (const a of S.attention) {
-    const key = "need:" + a.node + a.text;
-    if (!seen.has(key)) new Notification(`${S.brain.title}: ${a.node} needs you`, { body: a.text.replace(/^inbox: /, "").slice(0, 200), tag: key });
+    const key = JSON.stringify([a.node, a.kind, a.text]);
+    current.add(key);
+    if (notifyOn && !firstPaint && !previousAttention.has(key)) new Notification(`${S.brain.title}: ${a.node} needs you`, { body: a.text.replace(/^inbox: /, "").slice(0, 200), tag: key });
   }
+  previousAttention = current;
 }
 // new things flash once (not on the first paint)
 function mark(key) { const isNew = !firstPaint && !seen.has(key); seen.add(key); return isNew ? "new" : null; }

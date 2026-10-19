@@ -7,6 +7,7 @@ result mechanically. Costs one model call per scenario per runtime.
     python3 core/tests/live.py [--runtimes claude,codex] [-k name] [--keep] [--jobs 4]
 
 Environment: LIVE_CLAUDE_MODEL (default claude-sonnet-5-5), LIVE_CODEX_EFFORT (default medium).
+LIVE_CLAUDE_BIN and LIVE_CODEX_BIN select an executable explicitly; otherwise PATH is used.
 """
 import argparse
 import concurrent.futures as cf
@@ -17,6 +18,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
 
@@ -30,6 +32,23 @@ GIT_ENV = {"GIT_AUTHOR_NAME": "live", "GIT_AUTHOR_EMAIL": "live@test", "GIT_COMM
 def brains_config(folder):
     """Each run lists its brains in its own file, never in this machine's real list."""
     return {"BRAIN_CONFIG": str(Path(folder) / "brains.json")}
+
+
+def runtime_bin(runtime):
+    requested = os.environ.get(f"LIVE_{runtime.upper()}_BIN", runtime)
+    found = shutil.which(requested)
+    if not found:
+        raise RuntimeError(f"live: executable not found for {runtime}: {requested}")
+    return found
+
+
+def runtime_path(runtime):
+    # Hook approval starts the CLI too: use the same executable directory as the scenario agent.
+    return f"{Path(runtime_bin(runtime)).parent}:{os.environ.get('PATH', '')}"
+
+
+class RuntimeUnavailable(RuntimeError):
+    """The CLI failed before it could provide a usable scenario result."""
 
 
 def sh(*args, cwd=None, check=True, env=None):
@@ -50,7 +69,7 @@ class Run:
         self.scenario, self.runtime = scenario, runtime
         self.tmp = Path(tempfile.mkdtemp(prefix=f"live-{scenario.__name__}-{runtime}-", dir=base)).resolve()
         self.root = self.tmp / "alice"
-        self.failures, self.output = [], ""
+        self.failures, self.output, self.blocked = [], "", False
 
     def instance(self):
         sh(sys.executable, str(BRAIN), "init", str(self.root), "--operator", "alice", "--title", "Alice",
@@ -75,7 +94,7 @@ class Run:
         codex: its throwaway config folder already holds whatever was linked there)."""
         if self.runtime == "claude":
             # the prompt goes first: --add-dir takes several values and would swallow it
-            cmd = ["claude", "-p", prompt, "--model", os.environ.get("LIVE_CLAUDE_MODEL", "claude-sonnet-5-5")]
+            cmd = [runtime_bin("claude"), "-p", prompt, "--model", os.environ.get("LIVE_CLAUDE_MODEL", "claude-sonnet-5-5")]
             if tools:
                 cmd += ["--dangerously-skip-permissions"]  # throwaway folders only
                 if writable:
@@ -85,7 +104,7 @@ class Run:
             env = {}
         else:
             codex_home = self.codex_home(cwd)
-            cmd = ["codex", "exec", "--skip-git-repo-check"]
+            cmd = [runtime_bin("codex"), "exec", "--skip-git-repo-check"]
             # full access, as a host thread has: workspace-write keeps .git read-only, so no commits
             cmd += ["--dangerously-bypass-approvals-and-sandbox"] if tools else ["-s", "read-only"]
             cmd.append(prompt)
@@ -95,10 +114,12 @@ class Run:
         if not bin_.exists():
             bin_.mkdir()
             (bin_ / "brain").symlink_to(BRAIN)
-        env = {**env, **brains_config(self.tmp), "PATH": f"{bin_}:{os.environ.get('PATH', '')}"}
+        env = {**env, **brains_config(self.tmp), "PATH": f"{bin_}:{runtime_path(self.runtime)}"}
         r = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=600,
                            env={**os.environ, **GIT_ENV, **env}, stdin=subprocess.DEVNULL)
         self.output = (r.stdout or "") + ("\n[stderr]\n" + r.stderr[-3000:] if r.returncode else "")
+        if r.returncode:
+            raise RuntimeUnavailable(f"{self.runtime} exited {r.returncode}: {self.output.strip()[-500:]}")
         return r.stdout or ""
 
     def codex_home(self, cwd=None):
@@ -122,7 +143,8 @@ class Run:
     def approve_hooks(self):
         if self.runtime == "codex":
             sh(sys.executable, str(BRAIN), "hook", "approve", cwd=self.root,
-               env={"CODEX_HOME": str(self.codex_home(self.root / "nodes" / "a")), **brains_config(self.tmp)})
+               env={"CODEX_HOME": str(self.codex_home(self.root / "nodes" / "a")),
+                    "PATH": runtime_path("codex"), **brains_config(self.tmp)})
 
     def check(self, cond, msg):
         if not cond:
@@ -458,19 +480,37 @@ def main():
     ap.add_argument("--jobs", type=int, default=4)
     a = ap.parse_args()
     runtimes = [r for r in a.runtimes.split(",") if r]
+    if not runtimes or any(rt not in ("claude", "codex") for rt in runtimes):
+        ap.error("--runtimes must name claude, codex, or both")
     for rt in runtimes:
-        if not shutil.which(rt):
-            sys.exit(f"live: '{rt}' isn't installed")
+        try:
+            executable = runtime_bin(rt)
+            version = sh(executable, "--version").strip()
+        except RuntimeError as e:
+            sys.exit(str(e))
+        print(f"runtime {rt}: {executable} ({version})", flush=True)
     base = Path(tempfile.mkdtemp(prefix="brain-live-")).resolve()
     jobs = [(s, rt) for s in SCENARIOS if not a.k or a.k in s.__name__ for rt in runtimes]
     results = {}
+    unavailable, runtime_lock = {}, threading.Lock()
 
     def go(job):
         s, rt = job
         run = Run(s, rt, base)
         t0 = time.time()
+        with runtime_lock:
+            reason = unavailable.get(rt)
+        if reason:
+            run.blocked = True
+            run.failures.append(f"not started: {rt} unavailable earlier in this run")
+            return job, run, time.time() - t0
         try:
             s(run)
+        except RuntimeUnavailable as e:
+            run.blocked = True
+            run.failures.append(str(e))
+            with runtime_lock:
+                unavailable[rt] = str(e)
         except Exception as e:  # a crash is a failure, not an abort
             run.failures.append(f"crashed: {e}")
         return job, run, time.time() - t0
@@ -478,7 +518,7 @@ def main():
     with cf.ThreadPoolExecutor(a.jobs) as ex:
         for (s, rt), run, secs in ex.map(go, jobs):
             results[(s.__name__, rt)] = run
-            mark = "✓" if not run.failures else "✗"
+            mark = "!" if run.blocked else "✓" if not run.failures else "✗"
             print(f"{mark} {s.__name__:<32} {rt:<7} {secs:5.0f}s", flush=True)
             for f in run.failures:
                 print(f"    - {f}")
@@ -487,7 +527,7 @@ def main():
     names = [s.__name__ for s in SCENARIOS if (s.__name__, runtimes[0]) in results]
     print("\n" + f"{'scenario':<32}" + "".join(f"{rt:<9}" for rt in runtimes))
     for n in names:
-        print(f"{n:<32}" + "".join(f"{('pass' if not results[(n, rt)].failures else 'FAIL'):<9}" for rt in runtimes))
+        print(f"{n:<32}" + "".join(f"{('BLOCKED' if results[(n, rt)].blocked else 'FAIL' if results[(n, rt)].failures else 'pass'):<9}" for rt in runtimes))
     failed = sum(1 for r in results.values() if r.failures)
     if a.keep or failed:
         print(f"\nfolders: {base}")

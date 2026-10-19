@@ -104,3 +104,19 @@ After any change:
 1. `brain selftest`
 2. `python3 core/tests/live.py` (axiom 22: the same scenarios on every runtime, with real model calls)
 3. Commit here; instances pick it up with `brain upgrade`.
+
+When several CLI versions are installed, select the one under test explicitly:
+
+```
+LIVE_CODEX_BIN=/path/to/codex LIVE_CLAUDE_BIN=/path/to/claude python3 tests/live.py
+```
+
+The runner prints each executable and version. Codex hook approval uses the same selected
+executable as its scenarios. A CLI process failure marks that runtime blocked and stops its
+remaining queued calls; the suite still exits nonzero. Dashboard desktop notifications require
+the page to remain open; all displayed clock times use the instance timezone.
+
+For dashboard checks, open a throwaway populated instance with `brain ui` and evaluate
+`tests/ui-checks.js` using the host's browser tool. It checks timezone conversions, notification
+transitions and keyed navigation, then restores the page state. It intercepts notifications
+for the test, so it does not deliver native desktop notifications.
