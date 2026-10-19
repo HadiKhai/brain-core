@@ -52,6 +52,8 @@ sense, it belongs in the instance, not here.
    through the briefs of its threads, never by being written into its state.
 10. **Learning up is a citation.** An item taken from a node records its provenance. Its
     scope starts as the source's owners at that time.
+    A merged job records the learned item ids, or `none: <reason>`, in its ledger; its worker's
+    report always has a Lessons section.
 11. **Only the named owners can widen a scope.** Widening an item's scope needs the consent
     of every principal currently in it.
 12. **Teaching down is a native copy.** Giving a node an item means writing it in that

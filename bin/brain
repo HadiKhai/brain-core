@@ -2206,7 +2206,7 @@ def read_jobs(n):
     for line in text.splitlines():
         if line.startswith("| "):
             cells = [uncell(c) for c in re.split(r"(?<!\\)\|", line.strip()[1:-1])]
-            if cells and cells[0] == "Job":
+            if cells[:2] == ["Job", "Started"]:
                 columns = cells  # older ledgers have fewer columns
                 continue
             if set("".join(cells)) <= set("-: "):
@@ -2518,7 +2518,7 @@ def updated_at(inst, n):
 def future_entries(inst, n):
     """Only absolute dates are evidence: an old bare clock time has no known day."""
     problems, warnings = [], []
-    cutoff = inst.now_dt() + datetime.timedelta(minutes=5)
+    now = inst.now_dt()
     pattern = r"\b\d{4}-\d{2}-\d{2}(?:[ T]\d{2}:\d{2}(?::\d{2})?(?:\.\d+)?(?:\s*(?:Z|[+-]\d{2}:?\d{2}))?)?"
     for f in sorted(n["dir"].glob("*.md")):
         if f.is_symlink():
@@ -2527,7 +2527,7 @@ def future_entries(inst, n):
             for m in re.finditer(pattern, line):
                 text = m.group()
                 when = inst.parse_time(text if len(text) > 10 else text + " 00:00")
-                if when and when > cutoff:
+                if when and elapsed(now, when) > 5 * 60:
                     updated = f.name == "status.md" and bool(re.match(r"^Updated:\s*$", line[:m.start()]))
                     target = problems if updated else warnings
                     target.append(f"{n['id']}: {f.name}:{line_no}: future "

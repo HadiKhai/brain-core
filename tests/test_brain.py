@@ -1198,6 +1198,22 @@ class Hardening8(Scenario):
 
 
 class FutureTimestamps(Scenario):
+    def test_five_minute_skew_uses_elapsed_time_across_dst(self):
+        import datetime as dt
+        from importlib.machinery import SourceFileLoader
+        from unittest import mock
+        from zoneinfo import ZoneInfo
+        m = SourceFileLoader("brain_future", str(CORE / "bin/brain")).load_module()
+        r = self.init("alice")
+        inst = m.Instance(r)
+        node = inst.node("root")
+        now = dt.datetime(2026, 11, 1, 1, 59, tzinfo=ZoneInfo("America/New_York"))
+        with mock.patch.object(inst, "now_dt", return_value=now):
+            (r / "status.md").write_text("Updated: 2026-11-01 01:03 -05:00\n")  # four actual minutes later
+            self.assertEqual(m.future_entries(inst, node)[0], [])
+            (r / "status.md").write_text("Updated: 2026-11-01 01:10 -05:00\n")  # eleven actual minutes later
+            self.assertIn("future Updated:", m.future_entries(inst, node)[0][0])
+
     def test_offsets_skew_and_legacy_entries(self):
         import datetime as dt
         r = self.init("alice")

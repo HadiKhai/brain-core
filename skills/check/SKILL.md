@@ -9,7 +9,10 @@ description: Verify the instance against the model - structure, owners, runtime 
    - fields, owners and principals;
    - runtime links (axiom 22);
    - sealed homes outside the instance (axiom 8), with no traces (axiom 6);
-   - item provenance and scope (axiom 10).
+   - item provenance and scope (axiom 10);
+   - future status `Updated:` times (five minutes of skew allowed); other future-dated node
+     entries warn, and undated legacy clock times are ignored (axiom 17);
+   - lesson outcomes on newly recorded merges; historical merges are not flagged.
 2. `core/bin/brain check --fix` repairs the safe things (links, registry, sealed-view
    sections, missing template files, machine IDs left in `node.md`). Fix the rest, or explain
    to the operator why something can't be fixed.
