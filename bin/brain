@@ -56,6 +56,25 @@ def write_fm(path, fm, body):
     touch(path)
 
 
+def atomic_write(path, text):
+    """Replace a whole file from a same-folder temporary; failures leave the old file intact."""
+    path = Path(path)
+    tmp = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", newline="", dir=path.parent,
+                                         prefix="." + path.name + ".", delete=False) as stream:
+            tmp = Path(stream.name)
+            if path.exists():
+                os.fchmod(stream.fileno(), stat.S_IMODE(path.stat().st_mode))
+            stream.write(text)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(tmp, path)
+    finally:
+        if tmp and tmp.exists():
+            tmp.unlink()
+
+
 def lst(value):
     return [x.strip() for x in (value or "").split(",") if x.strip() and x.strip() != "none"]
 
@@ -3043,7 +3062,7 @@ def cmd_handback(a):
     data = {"job": row["Job"], "started": row["Started"], "state": a.state,
             "at": inst.now_dt().isoformat(timespec="seconds"), "report": tilde(a.report) if a.report else ""}
     f.parent.mkdir(exist_ok=True)
-    f.write_text(json.dumps(data, indent=2) + "\n")
+    atomic_write(f, json.dumps(data, indent=2) + "\n")
     touch(f)
     inst.commit([], f"{n['id']}: worker hand-back")
     print(redact(f"{n['id']}: {a.branch} {a.state}; coordinator can see it with brain due", never_terms(n)))
@@ -3576,8 +3595,7 @@ def refresh_status(inst, n):
     else:
         # Preserve the coordinator's judgement timestamp outside the generated block.
         text = block + "\n\n" + text
-    with f.open("w", newline="") as stream:
-        stream.write(text)
+    atomic_write(f, text)
     touch(f)
 
 
@@ -3648,10 +3666,8 @@ def cmd_inbox(a):
         sys.stdout.flush()
         f = inst.root / ".brain" / "inbox-seen.json"
         f.parent.mkdir(exist_ok=True)
-        tmp = f.with_suffix(".tmp")
         reporters[reporter] = state
-        tmp.write_text(json.dumps({"version": 2, "reporters": reporters}, indent=2) + "\n")
-        os.replace(tmp, f)
+        atomic_write(f, json.dumps({"version": 2, "reporters": reporters}, indent=2) + "\n")
 
 
 def cmd_stale(a):

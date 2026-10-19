@@ -2997,6 +2997,64 @@ class AutonomyFacts(AutonomyProject):
         self.assertEqual(st.read_bytes(), before)
 
 
+class AutonomyAtomicWrites(AutonomyProject):
+    def failed_replace(self, r, destination, args):
+        before = destination.read_bytes()
+        names = {p.name for p in destination.parent.iterdir()}
+        head = self.git('rev-parse', 'HEAD', cwd=r)
+        code = """
+import os, runpy, sys
+from pathlib import Path
+target = Path(sys.argv[1])
+brain = sys.argv[2]
+sys.argv = sys.argv[2:]
+original_replace = os.replace
+def fail_replace(src, dst):
+    if Path(dst) == target:
+        assert Path(src).parent == target.parent
+        assert Path(src).read_bytes() != target.read_bytes()
+        assert Path(src).stat().st_size > 0
+        raise OSError('injected replacement failure')
+    return original_replace(src, dst)
+os.replace = fail_replace
+runpy.run_path(brain, run_name='__main__')
+"""
+        result = subprocess.run([sys.executable, '-c', code, str(destination), str(r / 'core/bin/brain'), *args],
+                                cwd=r, env=self.env, capture_output=True, text=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('injected replacement failure', result.stderr)
+        self.assertEqual(destination.read_bytes(), before)
+        self.assertEqual({p.name for p in destination.parent.iterdir()}, names, 'temporary file leaked')
+        self.assertEqual(self.git('rev-parse', 'HEAD', cwd=r), head)
+        return result.stdout
+
+    def test_status_and_handback_keep_old_complete_file_when_replace_fails(self):
+        r, home, wt = self.project()
+        status = r / 'nodes/app/status.md'
+        status.chmod(0o640)
+        self.failed_replace(r, status, ['status', 'app', '--refresh'])
+        self.b(r, 'status', 'app', '--refresh')
+        self.assertIn('<!-- /brain:facts -->', status.read_text())
+        self.assertEqual(status.stat().st_mode & 0o777, 0o640)
+        self.b(r, 'handback', 'app', '--branch', 'job-a', '--state', 'blocked')
+        signal = next((r / 'nodes/app/job-handbacks').glob('*.json'))
+        self.failed_replace(r, signal, ['handback', 'app', '--branch', 'job-a', '--state', 'done'])
+        self.assertEqual(json.loads(signal.read_text())['state'], 'blocked')
+        self.b(r, 'handback', 'app', '--branch', 'job-a', '--state', 'done')
+        self.assertEqual(json.loads(signal.read_text())['state'], 'done')
+
+    def test_delivery_before_failed_persistence_repeats_instead_of_losing_item(self):
+        r = self.init('alice')
+        self.b(r, 'inbox', 'root', '--new')
+        saved = r / '.brain/inbox-seen.json'
+        (r / 'inbox.md').write_text('- 2026-10-19 10:00 +00:00 from worker: Question after output.\n')
+        output = self.failed_replace(r, saved, ['inbox', 'root', '--new', '--json'])
+        delivered = json.loads(output)
+        repeated = json.loads(self.b(r, 'inbox', 'root', '--new', '--json'))
+        self.assertEqual(delivered, repeated)
+        self.assertEqual(json.loads(self.b(r, 'inbox', 'root', '--new', '--json')), [])
+
+
 class AutonomySync(Scenario):
     def test_sync_uses_judgement_timestamp_after_refresh_and_handles_empty_status(self):
         r = self.init('alice')
