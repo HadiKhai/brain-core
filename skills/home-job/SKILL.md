@@ -25,7 +25,8 @@ request. The operator's own checkout of the home is never touched.
    and open a pull request only when the operator or the home's rules allow it, axiom 24), then
    wrap it with `core/bin/brain brief <id> --branch <branch> --task-file <file>`: that adds the
    worktree, port, limits, guard step and hand-back. Use `core/bin/brain hire` when a
-   specialist fits; its brief has the same hand-back.
+   specialist fits; its brief has the same hand-back. Require a **Lessons** section in the
+   report: each lesson, or `none: <reason>`.
    While it runs, the worker `send`s you when it finishes, fails, is blocked or has a question
    (the coordinator role, "While workers run", is the backstop).
 4. **Review by the other runtime** before the operator sees it: the `review` skill.
@@ -36,7 +37,8 @@ request. The operator's own checkout of the home is never touched.
    when the node (or one above it) has a `never-name.txt`.
 6. **Done.** When the operator (and the home's owners) merge it, set the row to `merged`, record
    the outcome in `status.md`, turn the report's reusable lessons into library items (the
-   `learn` skill), and run `core/bin/brain wt prune <id>`. It removes only clean, merged
+   `learn` skill), record their ids with `core/bin/brain jobs <id> --branch <branch> --lessons
+   <id1,id2>` (or `--lessons "none: <reason>"`), and run `core/bin/brain wt prune <id>`. It removes only clean, merged
    worktrees. A job dropped instead: `core/bin/brain wt rm <id> <branch> --cause "<why>"`.
    Either way the node's `job-ledger.md` gets the job's hours, commits and review rounds
    (`core/bin/brain jobs <id>`).

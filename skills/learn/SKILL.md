@@ -18,4 +18,9 @@ description: Capture reusable knowledge (a method, style, asset, script, lesson 
    Never claim consent the operator didn't report.
 5. **A correction to a specialist** is a lesson:
    `core/bin/brain lesson <specialist> --from <node where it happened> "<the lesson>"`.
-6. Run `core/bin/brain check`.
+6. **Closing a job:** file its reusable lessons with step 2, then record the item ids:
+   `core/bin/brain jobs <node> --branch <branch> --lessons <id1,id2>`.
+   If there are none, use `--lessons "none: <reason>"` (say where node-only facts were kept).
+   Do this before `wt prune` records the merge; it may also complete a missing outcome later.
+   Old merged jobs need no backfill; newly recorded merges without an outcome warn in `check`.
+7. Run `core/bin/brain check`.

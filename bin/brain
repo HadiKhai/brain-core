@@ -1643,6 +1643,7 @@ def handback_lines(inst, n, to=None, who="worker"):
             "- **Never ask the operator, and never wait for an answer in this thread**: nobody is watching it.",
             "- **A choice** the task, the rules or this brief settle: make it, and list it in your report under "
             "\"Decisions I made\".",
+            "- **Your report must have a Lessons section:** list each lesson, or `none: <reason>`.",
             f"- **A question you can't go on without:** {how} with the question{inbox}, then end your turn "
             "with the question as your last line.",
             f"- **When you finish, fail or get blocked**, tell your coordinator straight away: {how} with "
@@ -1653,7 +1654,7 @@ def report_lines():
     return ["## Report", "",
             "The answer first; then the proof (commands, numbers, hashes); what you produced and where; what you "
             "did **not** run or check; \"Decisions I made\"; \"Lessons\": what the next job should know (a "
-            "pitfall, a tool's quirk, a method that worked), or \"none\"; and what is still open."]
+            "pitfall, a tool's quirk, a method that worked), or \"none: <reason>\"; and what is still open."]
 
 
 def cmd_brief(a):
@@ -2044,6 +2045,7 @@ def cmd_wt_list(a):
 JOBS_FILE = "job-ledger.md"  # in a node folder: one row per job, written by `brain wt` and `brain review`
 JOBS_MARK = "<!-- brain:job-ledger v1 -->"
 JOB_COLS = ["Job", "Started", "Ended", "Hours", "Outcome", "Commits", "Reviews", "Runtime", "Cause"]
+JOB_COLS += ["Lessons", "Lesson check", "Switches"]
 
 
 def cell(v):
@@ -2062,13 +2064,16 @@ def read_jobs(n):
     text = f.read_text()
     if JOBS_MARK not in text:
         return None
-    rows = []
+    rows, columns = [], JOB_COLS
     for line in text.splitlines():
         if line.startswith("| "):
             cells = [uncell(c) for c in re.split(r"(?<!\\)\|", line.strip()[1:-1])]
-            if cells == JOB_COLS or set("".join(cells)) <= set("-: "):
-                continue  # the header row and its separator
-            rows.append(dict(zip(JOB_COLS, cells + [""] * (len(JOB_COLS) - len(cells)))))
+            if cells and cells[0] == "Job":
+                columns = cells  # older ledgers have fewer columns
+                continue
+            if set("".join(cells)) <= set("-: "):
+                continue
+            rows.append({**dict.fromkeys(JOB_COLS, ""), **dict(zip(columns, cells))})
     return rows
 
 
@@ -2124,6 +2129,8 @@ def job_ended(inst, n, branch, outcome, commits="", cause=""):
         if not r:
             return
         r.update(Ended=stamp(inst), Outcome=outcome, Commits=str(commits), Cause=cause)
+        if outcome == "merged":
+            r["Lesson check"] = "required"  # old, already-ended rows never acquire this marker
         a, b = inst.parse_time(r["Started"]), inst.parse_time(r["Ended"])
         r["Hours"] = f"{elapsed(a, b) / 3600:.1f}" if a and b else ""
         write_jobs(inst, n, rows)
@@ -2154,6 +2161,32 @@ def jobs_summary(inst, n):
 
 def cmd_jobs(a):
     inst = load()
+    if a.lessons is not None or a.switch is not None:
+        if not a.id or not a.branch:
+            die("--lessons and --switch need a node and --branch")
+        n = inst.node(a.id)
+        rows = ledger_rows(n)
+        r = next((r for r in reversed(rows or []) if r["Job"] == a.branch), None)
+        if not r:
+            die("no job with that branch in the ledger")
+        if a.lessons is not None:
+            outcome = a.lessons.strip()
+            if outcome.startswith("none:"):
+                if not outcome[5:].strip():
+                    die("none needs a reason")
+            else:
+                ids = lst(outcome)
+                items = {it["fm"].get("id"): it for it in inst.items()}
+                if not ids or any(i not in items or items[i]["fm"].get("source_node") != n["id"] for i in ids):
+                    die("lessons must be item ids filed via learn from this node, or none: <reason>")
+                outcome = ", ".join(ids)
+            r["Lessons"] = outcome
+        if a.switch is not None:
+            if not a.switch.strip():
+                die("--switch needs the old instance, new instance and reason")
+            r["Switches"] = "; ".join(filter(None, [r.get("Switches"), f"{stamp(inst)} {a.switch.strip()}"]))
+        write_jobs(inst, n, rows)
+        inst.commit([], f"{n['id']}: job outcome")
     for n in inst.nodes():
         if a.id and n["id"] != a.id:
             continue
@@ -2169,6 +2202,9 @@ def cmd_jobs(a):
                   + ("   (over twice the median)" if late else ""))
         for c in j["causes"]:
             print(f"  cause {c}")
+        for r in j["rows"]:
+            if a.branch and r["Job"] == a.branch:
+                print(redact(json.dumps(r, ensure_ascii=False), never_terms(n)))
 
 
 def job_commits(home, w, branch):
@@ -2243,7 +2279,7 @@ def cmd_report(a):
             "## Controls\n\n<!-- what would have failed if the finding were wrong, and whether it did -->\n\n"
             "## Not run\n\n<!-- what wasn't checked, and why; \"none\" only if truly none -->\n\n"
             "## Lessons\n\n<!-- what the next job should know: a pitfall, a tool's quirk, a method that worked; "
-            "or \"none\". The coordinator turns reusable ones into library items -->\n\n"
+            "or \"none: <reason>\". The coordinator turns reusable ones into library items -->\n\n"
             "## Files\n\n## How to reproduce\n\n<!-- the script in scripts/ that made this, and how to run it -->\n")
     print(d)
 
@@ -3339,6 +3375,10 @@ def collect_problems(inst):
         future, dated = future_entries(inst, n)
         problems.extend(future)
         warnings.extend(dated)
+        for r in read_jobs(n) or []:
+            if r["Outcome"] == "merged" and r.get("Lesson check") == "required" and not r.get("Lessons"):
+                warnings.append(redact(f"{nid}: merged job {r['Job']} has no lesson outcome; "
+                                       "brain jobs --lessons", never_terms(n)))
         for f in NODE_FIELDS:
             if f not in fm:
                 p(f"{nid}: node.md is missing '{f}'")
@@ -3665,6 +3705,8 @@ def writes(a):
         return bool(getattr(a, "out", None))  # --out writes a file, maybe inside the instance
     if name == "cmd_check":
         return bool(a.fix)
+    if name == "cmd_jobs":
+        return a.lessons is not None or a.switch is not None
     if name in ("cmd_principal", "cmd_schedule"):
         return a.action not in ("list", None)
     return name not in READ_ONLY
@@ -3710,7 +3752,8 @@ def main():
     cmd("stale", cmd_stale, "freshness check: is <id>'s status.md behind a time the host gave (e.g. a thread's "
         "updatedAt, in UTC)?", "id", "host_time", opt("--grace", type=int, default=5, help="minutes allowed"))
     cmd("jobs", cmd_jobs, "jobs per node: open ones and their age, median hours and review rounds, causes",
-        opt("id", nargs="?"))
+        opt("id", nargs="?"), opt("--branch"), opt("--lessons", help="learned item ids, or none: <reason>"),
+        opt("--switch", help="record provider switch: old -> new: reason"))
     cmd("show", cmd_show, "everything about one node, including this machine's bindings", "id")
     cmd("set", cmd_set, "set fields: brain set <id> key=value ... (host IDs and home paths stay on this machine)",
         "id", opt("pairs", nargs="+"))

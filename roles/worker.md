@@ -20,8 +20,9 @@ You were started for one job. If your brief names no role, you are a worker for 
 - **Report to whoever started you,** and tell them straight away when you finish, fail or get
   blocked (host `send`): a thread you were launched in wakes nobody when it ends. The answer
   first, then the proof (commands, numbers, hashes), what you produced and where it is, what
-  you did **not** run or check, the decisions you made, **lessons** the next job should know
-  (a pitfall, a tool's quirk, a method that worked), and what is still open.
+  you did **not** run or check, the decisions you made, a **Lessons** section listing each lesson
+  the next job should know (a pitfall, a tool's quirk, a method that worked), or `none: <reason>`,
+  and what is still open. A missing Lessons section is an incomplete hand-back.
 - **Words a home must never contain** (the node's `never-name.txt`): if your brief says to run
   `brain guard`, it must print `guard: clean` before you hand back.
 - **Leave no trace of anything above a boundary** in a sealed node's files (axiom 6).

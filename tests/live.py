@@ -466,10 +466,37 @@ def freshness_across_timezones(run):
     first = out.strip().lower()
     run.check(first.startswith("behind") or "behind" in first[:200], f"called it current: {out.strip()[:200]!r}")
 
+def nine_job_close_lessons(run):
+    """A coordinator closes a real merged job and records learned item ids in its ledger."""
+    root = run.instance()
+    home = run.home_repo("app", {"app.py": "print('hello')\n"})
+    brain(root, "set", "a", f"home={home}")
+    brain(root, "wt", "add", "a", "job/deps")
+    wt = run.tmp / "app-work/worktrees/job-deps"
+    sh("git", "commit", "--allow-empty", "-qm", "pin dependencies", cwd=wt)
+    sh("git", "merge", "-q", "job/deps", cwd=home)
+    report = Path(brain(root, "report", "a", "deps").strip()) / "index.md"
+    report.write_text("# Done\n\nDependencies pinned.\n\n## Lessons\n\n"
+                      "- Bun treats empty trustedDependencies as unset; explicitly list allowed install scripts.\n")
+    run.agent(root / "nodes/a", f"Role: coordinator of node `a`. job/deps is merged. Close the job using "
+              f"its report at {report}, update your notes and clean up the worktree. Reply in one line.", writable=root)
+    ledger = (root / "nodes/a/job-ledger.md").read_text()
+    items = [p for p in root.rglob("library/*.md") if "core" not in p.relative_to(root).parts]
+    ids = [re.search(r"(?m)^id: (.+)$", p.read_text()).group(1) for p in items
+           if "trusteddependencies" in p.read_text().lower()]
+    run.check(ids, "reusable lesson not filed via learn")
+    row = next((line for line in ledger.splitlines() if line.startswith("| job/deps |")), "")
+    run.check("merged" in row, "job not recorded merged")
+    run.check(any(f"| {i} |" in row for i in ids), "ledger has no learned item id")
+    run.check(not wt.exists(), "merged worktree not pruned")
+    run.brain_check()
+
+
 SCENARIOS = [parity, coordinator_writes_as_it_goes, worker_asks_the_writer, learning_is_a_citation,
              new_node_in_one_sentence, no_upward_traces, second_runtime_review, stop_hook_fires,
              notes_current_after_an_edit, a_session_reaches_its_own_brain, worker_hands_back_a_question,
-             lessons_become_items, limits_carry_their_reason, freshness_across_timezones]
+             lessons_become_items, limits_carry_their_reason, freshness_across_timezones,
+             nine_job_close_lessons]
 
 
 def main():

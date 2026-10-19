@@ -1235,6 +1235,51 @@ class FutureTimestamps(Scenario):
         self.assertIn("future Updated: time; fix it with `brain now`", json.loads(p.stdout)["reason"])
 
 
+class JobLessonOutcomes(Scenario):
+    def test_merge_requires_outcome_but_historical_rows_do_not(self):
+        r = self.init("alice")
+        home = self.repo(self.tmp / "app")
+        self.b(r, "new", "a", "--title", "A", "--home", str(home))
+        led = r / "nodes/a/job-ledger.md"
+        led.write_text("<!-- brain:job-ledger v1 -->\n\n| Job | Started | Ended | Hours | Outcome | Commits"
+                       " | Reviews | Runtime | Cause |\n| --- | --- | --- | --- | --- | --- | --- | --- | --- |\n"
+                       "| old | 2020-01-01T00:00Z | 2020-01-01T01:00Z | 1 | merged | 1 | 1 | codex |  |\n")
+        self.assertNotIn("lesson outcome", self.b(r, "check"))
+        self.b(r, "wt", "add", "a", "job")
+        wt = self.tmp / "app-work/worktrees/job"
+        self.git("commit", "--allow-empty", "-qm", "job", cwd=wt)
+        self.git("merge", "-q", "job", cwd=home)
+        self.b(r, "wt", "prune", "a")
+        self.assertIn("merged job job has no lesson outcome", self.b(r, "check"))
+        self.assertNotIn("merged job old has", self.b(r, "check"))
+        for value in ("none", "none: ", "unknown"):
+            self.b(r, "jobs", "a", "--branch", "job", "--lessons", value, ok=False)
+        self.b(r, "jobs", "a", "--branch", "job", "--lessons", "none: mechanical change")
+        self.assertNotIn("lesson outcome", self.b(r, "check"))
+        self.assertIn("none: mechanical change", self.b(r, "jobs", "a", "--branch", "job"))
+        self.assertNotIn("merged job old has", self.b(r, "check"))
+
+    def test_learned_item_ids_and_switches_are_recorded_without_other_files(self):
+        r = self.init("alice")
+        home = self.repo(self.tmp / "app")
+        self.b(r, "new", "a", "--title", "A", "--home", str(home))
+        self.b(r, "wt", "add", "a", "job|pipe")
+        self.b(r, "item", "add", "method", "--from", "a", "--title", "Method", "--kind", "lesson",
+               "--ref", "report@commit", "--body", "Keep a control.")
+        st = r / "nodes/a/status.md"
+        st.write_text(st.read_text() + "\nuncommitted coordinator work\n")
+        self.b(r, "jobs", "a", "--branch", "job|pipe", "--lessons", "method",
+               "--switch", "claudeAgent -> codex: usage limit")
+        out = self.b(r, "jobs", "a", "--branch", "job|pipe")
+        self.assertIn('"Lessons": "method"', out)
+        self.assertIn("claudeAgent -> codex: usage limit", out)
+        self.assertEqual(self.git("status", "--porcelain", "--", "nodes", cwd=r).strip(), "M nodes/a/status.md")
+        self.b(r, "jobs", "--lessons", "method", ok=False)
+        brief = self.b(r, "brief", "a", "--branch", "job|pipe")
+        self.assertIn("must have a Lessons section", brief)
+        self.assertIn("none: <reason>", brief)
+
+
 class Measures(Scenario):
     def test_jobs_are_measured_from_start_to_end(self):
         r = self.init("alice")
