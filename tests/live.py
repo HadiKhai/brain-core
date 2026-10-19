@@ -951,7 +951,197 @@ def import_project_history(run):
     run.check("contains never-name" in checked or "contains term" in checked or "contains forbidden" in checked,
               "pre-existing source violation was not reported by brain check")
 
-SCENARIOS = [autonomy_worker_handback, autonomy_finished_job_wake, autonomy_empty_wake, autonomy_subtree_inbox, autonomy_status_facts, parity, coordinator_writes_as_it_goes, worker_asks_the_writer, learning_is_a_citation,
+
+def recover_coordinator_replaced(run):
+    """A fresh coordinator closes ready work from disk, preserving history and reported inbox ids."""
+    root = run.instance()
+    brain(root, 'set', 'root', 'coordinator=fixture-root-coordinator')
+    brain(root, 'set', 'a', 'coordinator=replacement-coordinator')
+    node = root / 'nodes/a'
+    counter = run.tmp / 'verification-count'
+    home = run.home_repo('recovery-app', {'result.txt': 'initial\n', 'verify.py':
+        f"from pathlib import Path\np = Path({str(counter)!r})\np.write_text(str(int(p.read_text()) + 1) if p.exists() else '1')\nassert Path('result.txt').read_text() == 'finished\\n'\n"})
+    brain(root, 'set', 'a', f'home={home}', 'verify=python3 -B verify.py')
+    brain(root, 'wt', 'add', 'a', 'job/recovered')
+    wt = run.tmp / 'recovery-app-work/worktrees/job-recovered'
+    (wt / 'result.txt').write_text('finished\n')
+    sh('git', 'commit', '-qam', 'finish result', cwd=wt)
+    worker_head = sh('git', 'rev-parse', 'HEAD', cwd=wt).strip()
+    report = Path(brain(root, 'report', 'a', 'recovered').strip()) / 'index.md'
+    report.write_text('# Finished\n\nResult verified; one independent review complete, no findings.\n')
+    brain(root, 'handback', 'a', '--branch', 'job/recovered', '--state', 'done', '--reviews', '1',
+          '--report', str(report), '--lessons', 'none: fixture result has no reusable lesson')
+    record = next((node / 'job-handbacks').glob('*.json'))
+    packet = record.read_bytes()
+    now = brain(root, 'now').strip()
+    (node / 'status.md').write_text(f'Updated: {now} by previous coordinator\n\n## Now\n- Overnight build in flight.\n'
+        '## Next\n- Reconcile worker hand-backs.\n## Active work\n| job/recovered | old-thread | - | running |\n'
+        '## Blocked / needs the operator\n- Old reported request: choose the launch date.\n'
+        '## Recent changes\n- Historical milestone: addition shipped.\n')
+    brain(root, 'inbox', 'a', '--new')
+    (node / 'inbox.md').write_text(f'- {now} from worker: The finished result is waiting for reconciliation.\n')
+    brain(root, 'status', 'a', '--refresh')
+    sh('git', 'add', '-A', cwd=root); sh('git', 'commit', '-qm', 'a: overnight checkpoint', cwd=root)
+    run.agent(node, 'Role: replacement coordinator of node `a`. Your predecessor vanished mid-night; '
+        'you have no conversation history. Recover from the node files and `brain due a`, following your role. '
+        'The operator authorizes a local merge of ready job branches and pruning their clean merged worktrees. '
+        'The independent review reported in the worker record is complete. No host is available; no workers '
+        'have pending host questions. Handle the inbox and report only new needs in recovery-update.md. '
+        'Commit your notes. Do not push or launch further work.', writable=run.tmp, trace=True)
+    run.check(sh('git', 'show', 'main:result.txt', cwd=home) == 'finished\n', 'ready job was not merged')
+    run.check(worker_head in sh('git', 'rev-list', 'main', cwd=home).splitlines(), 'original worker commit is not on main')
+    run.check(sh('git', 'rev-list', '--count', f'{worker_head}..main', cwd=home).strip() in ('0', '1'),
+              'coordinator redid the finished worker change')
+    run.check(record.read_bytes() == packet, 'coordinator rewrote the worker record')
+    run.check(not wt.exists(), 'clean merged worktree not pruned')
+    ledger = (node / 'job-ledger.md').read_text()
+    columns = next(line for line in ledger.splitlines() if line.startswith('| Job |')).strip('|').split('|')
+    cells = next((line for line in ledger.splitlines() if line.startswith('| job/recovered |')), '').strip('|').split('|')
+    row = dict(zip((c.strip() for c in columns), (c.strip() for c in cells)))
+    run.check(row.get('Outcome') == 'merged' and bool(row.get('Lessons')), 'merged job lacks a recorded lessons outcome')
+    run.check(not any(i['kind'] == 'handback' for i in json.loads(brain(root, 'due', 'a', '--json'))),
+              'closed hand-back still due')
+    status = (node / 'status.md').read_text()
+    run.check('Historical milestone: addition shipped.' in status, 'replacement lost historical judgement')
+    facts = re.search(r'<!-- brain:facts v1 -->.*?<!-- /brain:facts -->', status, re.S)
+    run.check(facts and '<!-- brain:facts-state ' in facts.group() and 'job/recovered' in facts.group() and
+              'ready to merge' not in facts.group() and 'Open worktrees (this machine):\n- None.' in facts.group(),
+              'generated facts were not refreshed after closing the job')
+    update = (node / 'recovery-update.md').read_text() if (node / 'recovery-update.md').exists() else ''
+    run.check(bool(update), 'no durable recovery update')
+    human_report = update + '\n' + run.output
+    run.check('Old reported request' not in human_report and 'launch date' not in human_report.lower(),
+              'relisted old human request')
+    commands = []
+    def command_events(value):
+        if isinstance(value, dict):
+            if value.get('type') == 'command_execution' and value.get('command'):
+                commands.append(value['command'])
+            elif value.get('type') == 'tool_use' and value.get('name') == 'Bash':
+                commands.append(value.get('input', {}).get('command', ''))
+            for child in value.values():
+                command_events(child)
+        elif isinstance(value, list):
+            for child in value:
+                command_events(child)
+    for line in run.trace.splitlines():
+        if line.startswith('{'):
+            command_events(json.loads(line))
+    executed = '\n'.join(commands)
+    ready = re.search(r'\bready\s+a\s+--branch\s+job/recovered', executed)
+    merge = re.search(r'\bgit(?:\s+-C\s+\S+)?\s+merge\b', executed)
+    run.check(ready and merge and ready.start() < merge.start(), 'no readiness command before merge')
+    run.check(counter.read_text() == '1', 'coordinator repeated worker verification')
+    (run.tmp / 'coordinator-trace.jsonl').write_text(run.trace)
+    run.check(json.loads(brain(root, 'inbox', 'a', '--new', '--json')) == [], 'new inbox item was not handled/reported')
+    run.check(not sh('git', 'status', '--porcelain', '--', 'nodes/a', cwd=root).strip(), 'recovery notes uncommitted')
+
+
+def recover_worker_other_runtime(run):
+    """A regenerated brief preserves committed and dirty work when the other runtime takes over."""
+    root = run.instance()
+    previous = 'codex' if run.runtime == 'claude' else 'claude'
+    brain(root, 'set', 'a', 'runtime=' + previous)
+    home = run.home_repo('resume-app', {'calc.py': 'def add(a, b):\n    raise NotImplementedError\n',
+        'test_calc.py': 'from calc import add, multiply\nassert add(2, 3) == 5\nassert multiply(2, 3) == 6\n',
+        '.gitignore': '__pycache__/\n'})
+    brain(root, 'set', 'a', f'home={home}', 'verify=python3 -B test_calc.py')
+    brain(root, 'wt', 'add', 'a', 'job/resume')
+    wt = run.tmp / 'resume-app-work/worktrees/job-resume'
+    partial = 'def add(a, b):\n    # Preserve the first worker addition.\n    return a + b\n'
+    (wt / 'calc.py').write_text(partial)
+    sh('git', 'commit', '-qam', 'complete addition', cwd=wt)
+    prior = sh('git', 'rev-parse', 'HEAD', cwd=wt).strip()
+    dirty = '\ndef multiply(a, b):\n    # Preserve this uncommitted multiplication design.\n    raise NotImplementedError\n'
+    (wt / 'calc.py').write_text(partial + dirty)
+    (wt / 'worker-note.txt').write_text('Keep this untracked recovery note.\n')
+    brain(root, 'jobs', 'a', '--branch', 'job/resume', '--switch', f'{previous} -> {run.runtime}: usage limit')
+    task = ('Finish multiply so test_calc.py passes. The previous worker is stopped after a usage limit. '
+            'Continue the same job, preserving its existing commits, uncommitted design comment and worker-note.txt. '
+            'One independent review round is completed with no findings; no more review is needed in this exercise. '
+            'Commit the completed code and worker-note.txt, then complete the unified file hand-back with --reviews 1. '
+            'Do not hide recovered work in git excludes. No host is available. Do not merge or push.')
+    brief = brain(root, 'brief', 'a', '--branch', 'job/resume', '--runtime', run.runtime, '--task', task)
+    owned = {name: (root / 'nodes/a' / name).read_bytes()
+             for name in ('node.md', 'brief.md', 'status.md', 'decisions.md', 'job-ledger.md')}
+    main = sh('git', 'rev-parse', 'main', cwd=home)
+    run.check(prior in brief and '## Resume existing work' in brief, 'regenerated brief lacks resume history')
+    run.agent(wt, brief, writable=run.tmp)
+    run.check(prior in sh('git', 'rev-list', 'HEAD', cwd=wt).splitlines(), 'partial commit discarded')
+    run.check((wt / 'calc.py').read_text().startswith(partial), 'completed addition rewritten')
+    run.check('Preserve this uncommitted multiplication design.' in (wt / 'calc.py').read_text(), 'dirty design discarded')
+    run.check((wt / 'worker-note.txt').read_text() == 'Keep this untracked recovery note.\n', 'untracked work discarded')
+    run.check(sh('git', 'show', 'HEAD:worker-note.txt', cwd=wt, check=False) == 'Keep this untracked recovery note.\n',
+              'recovered untracked work was not committed')
+    run.check(not sh('git', 'status', '--porcelain', cwd=wt).strip(), 'replacement left uncommitted work')
+    run.check(sh('git', 'rev-parse', 'main', cwd=home) == main, 'worker changed main')
+    checked = subprocess.run([sys.executable, '-B', 'test_calc.py'], cwd=wt, capture_output=True)
+    run.check(checked.returncode == 0, 'replacement did not finish')
+    run.check(brain(root, 'ready', 'a', '--branch', 'job/resume', check=False).strip() == 'ready', 'replacement not ready')
+    records = list((root / 'nodes/a/job-handbacks').glob('*.json'))
+    run.check(len(records) == 1 and json.loads(records[0].read_text()).get('state') == 'done', 'no unified done record')
+    run.check(all((root / 'nodes/a' / name).read_bytes() == before for name, before in owned.items()),
+              'replacement edited coordinator files')
+
+
+def recover_usage_before_two_jobs(run):
+    """Two planned jobs avoid Claude's stop line; a stopped pin receives an explicit decision."""
+    root = run.instance()
+    brain(root, 'set', 'a', 'runtime=')
+    brain(root, 'new', 'pinned', '--title', 'Pinned', '--runtime', 'claude')
+    now, subs, accounts = time.time(), [], {}
+    for runtime, used in (('claude', 93), ('codex', 24)):
+        cfg = run.tmp / ('usage-' + runtime); cfg.mkdir()
+        key = 'fixture-' + runtime
+        subs.append({'id': runtime, 'label': runtime, 'runtime': runtime, 'config_dir': str(cfg),
+                     'host_provider_instance_id': 'provider-' + runtime, 'brains': ['alice'], 'account_key': key})
+        accounts[key] = {'source': 'lookup', 'read_at': now, 'note': '', 'windows': {
+            'five_hour': {'used_percent': used, 'resets_at': now + 3600},
+            'seven_day': {'used_percent': 24, 'resets_at': now + 3 * 86400}}}
+    (run.tmp / 'subscriptions.json').write_text(json.dumps({'subscriptions': [
+        {k: v for k, v in sub.items() if k != 'account_key'} for sub in subs]}))
+    (run.tmp / 'usage.json').write_text(json.dumps({'subscriptions': subs, 'accounts': accounts,
+        'checked_at': now, 'poll_interval_seconds': 3600}))
+    run.agent(root, 'Role: root coordinator. Prepare two independent workers in node `a`: job/clarity audits '
+        'brief clarity and job/links audits source links. Check machine usage before preparing either launch. '
+        'No host launch tools exist in this test; write launch-plan.json at the root with a jobs array '
+        '(each has job, runtime, subscription_id, provider_instance_id, reason) and save the two generated '
+        'worker briefs as clarity-brief.md and links-brief.md. Also prepare pinned-brief.md for node `pinned` '
+        'without a runtime override. Record its launch decision in the same JSON as pinned: '
+        '{runtime, launch, alternative_runtime, reason}. Tell the pinned node the decision through its inbox. '
+        'No runtime override for the pinned node is authorized. Save brain usage --json as usage-evidence.json. '
+        'Commit your files.', writable=root)
+    try:
+        plan = json.loads((root / 'launch-plan.json').read_text())
+        usage = json.loads((root / 'usage-evidence.json').read_text())
+    except (OSError, ValueError) as e:
+        run.check(False, f'missing routing evidence: {e}'); return
+    jobs = plan.get('jobs', [])
+    run.check(len(jobs) == 2 and {j.get('job', '').removeprefix('job/') for j in jobs} == {'clarity', 'links'},
+              'two jobs not planned')
+    for job in jobs:
+        run.check(job.get('runtime') == 'codex' and job.get('subscription_id') == 'codex' and
+                  job.get('provider_instance_id') == 'provider-codex', f'wrong route: {job}')
+        reason = job.get('reason', '').lower()
+        run.check('claude' in reason and any(word in reason for word in ('93', 'stop', 'limit', 'exhaust')), 'route has no stop-line reason')
+    pin = plan.get('pinned', {})
+    run.check(pin.get('runtime') == 'claude' and pin.get('launch') is False and pin.get('alternative_runtime') == 'codex',
+              'stopped pin silently switched or launched')
+    run.check('runtime: claude' in (root / 'nodes/pinned/node.md').read_text(), 'node pin changed')
+    notice = (root / 'nodes/pinned/inbox.md').read_text().lower()
+    run.check('claude' in notice and 'codex' in notice, 'pinned node was not told about stop and alternative')
+    for name in ('clarity', 'links'):
+        brief = root / (name + '-brief.md')
+        run.check(brief.exists() and 'provider-codex' in brief.read_text(), f'{name} brief missing correct provider')
+    pinned = root / 'pinned-brief.md'
+    run.check(pinned.exists() and 'runtime: claude' in pinned.read_text() and 'Stop starting jobs' in pinned.read_text(),
+              'pinned brief failed to keep stopped runtime')
+    rows = {row['id']: row for row in usage.get('subscriptions', [])}
+    run.check(rows.get('claude', {}).get('windows', {}).get('five_hour', {}).get('used_percent') == 93, 'usage evidence missing')
+    run.check(not sh('git', 'status', '--porcelain', cwd=root).strip(), 'launch evidence uncommitted')
+
+
+SCENARIOS = [recover_coordinator_replaced, recover_worker_other_runtime, recover_usage_before_two_jobs, autonomy_worker_handback, autonomy_finished_job_wake, autonomy_empty_wake, autonomy_subtree_inbox, autonomy_status_facts, parity, coordinator_writes_as_it_goes, worker_asks_the_writer, learning_is_a_citation,
              new_node_in_one_sentence, no_upward_traces, second_runtime_review, stop_hook_fires,
              notes_current_after_an_edit, a_session_reaches_its_own_brain, worker_hands_back_a_question,
              lessons_become_items, limits_carry_their_reason, freshness_across_timezones,

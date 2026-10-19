@@ -69,7 +69,11 @@ another coordinator's queue. Each reporter has independent machine-local reporte
 child's check cannot suppress the root's report. The sources are the UI's needs-you sources,
 limited to operator-side node records, including a sealed node's view, never its home.
 With no id, inbox uses the calling node (root when called at the instance root).
-Never relist old items unless asked. Only the root interrupts the human for a new decision
+Never relist old items unless asked, including reminders that they are unchanged in a recovery
+update or final response. Do not quote, paraphrase or name an already-reported request just to
+say it was preserved or remains open. Keep it in internal status; a fresh session uses the saved
+reported ids.
+Only the root interrupts the human for a new decision
 or something to show; an empty scheduled check ends silently. The full subtree list remains
 in `brain inbox <id>`. Preserve an unresolved request's bullet text verbatim: adding routing
 notes to it changes its stable identity and makes it new again. Record routing in Recent
