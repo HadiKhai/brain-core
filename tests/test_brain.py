@@ -764,6 +764,61 @@ class WorkerBriefs(Scenario):
         self.b(r, "new", "plain", "--title", "Plain")
         self.assertIn("nothing to check", self.b(r, "guard", "plain", str(kid)))
 
+
+class LiveView(Scenario):
+    def test_ui_serves_a_read_only_live_state_to_this_machine_only(self):
+        import socket
+        import urllib.error
+        import urllib.request
+        r = self.init("alice")
+        home = self.repo(self.tmp / "code" / "app")
+        self.b(r, "new", "app", "--title", "App", "--home", str(home))
+        st = r / "nodes" / "app" / "status.md"
+        st.write_text(st.read_text().replace("| --- | --- | --- | --- |\n",
+                      "| --- | --- | --- | --- |\n| job-a | [job a](t3-thread://v1/t1) (Codex) | - | building |\n")
+                      .replace("## Blocked / needs the operator\n", "## Blocked / needs the operator\n\n- The API key\n"))
+        self.git("commit", "-qam", "app: job a started", cwd=r)
+        self.b(r, "wt", "add", "app", "job-a")
+        port = json.loads(self.b(r, "ui", "--json"))   # the same state, once
+        app = next(n for n in port["nodes"] if n["id"] == "app")
+        self.assertEqual(app["work"][0]["link"], "t3-thread://v1/t1")
+        self.assertEqual(app["work"][0]["runtime"], "Codex")
+        self.assertEqual(app["worktrees"][0]["branch"], "job-a")
+        self.assertIn({"node": "app", "kind": "blocked", "text": "The API key"}, port["attention"])
+        self.assertGreaterEqual(sum(port["activity"]["counts"].get("app", [])), 1)   # "app: …" commits count for app
+        with socket.socket() as sk:
+            sk.bind(("127.0.0.1", 0))
+            free = sk.getsockname()[1]
+        p = subprocess.Popen([sys.executable, str(r / "core" / "bin" / "brain"), "ui", "--port", str(free),
+                              "--every", "0.5"], cwd=r, env=self.env, stdout=subprocess.PIPE, text=True)
+        try:
+            line = p.stdout.readline()
+            url = line.split(": ", 1)[1].split()[0]
+            self.assertTrue(url.startswith("http://127.0.0.1:"))
+            self.assertIn(b"<title>", urllib.request.urlopen(url, timeout=5).read())
+            state = json.loads(urllib.request.urlopen(url + "api/state", timeout=5).read())
+            self.assertEqual(state["brain"]["name"], "alice")
+            req = urllib.request.Request(url + "api/state", headers={"Host": "evil.example"})
+            with self.assertRaises(urllib.error.HTTPError) as e:
+                urllib.request.urlopen(req, timeout=5)
+            self.assertEqual(e.exception.code, 403)              # another site can't read it through a browser
+            ev = urllib.request.urlopen(url + "api/events", timeout=10)
+            first = ev.readline()
+            self.assertTrue(first.startswith(b"data: {"))
+            ev.readline()
+            # a change in the files reaches an open page without a reload
+            (r / "nodes" / "app" / "inbox.md").write_text("- 2026-01-01 00:00 from worker: question: which key?\n")
+            deadline = time.time() + 10
+            got = b""
+            while time.time() < deadline and b"which key?" not in got:
+                got = ev.readline()
+            self.assertIn(b"which key?", got)
+            ev.close()
+        finally:
+            p.terminate()
+            p.wait(timeout=5)
+            p.stdout.close()
+
 class Review(Scenario):
     def test_review_brief_goes_to_the_other_runtime(self):
         r = self.init("alice")

@@ -1,0 +1,407 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Brain</title>
+<!-- Served by `brain ui`: a read-only, live view of one brain. No build step, no dependencies.
+     Everything shown comes from /api/state (and /api/events as it changes); text goes in with textContent. -->
+<style>
+:root {
+  color-scheme: light;
+  --page: #f9f9f7; --surface: #fcfcfb; --ink: #0b0b0b; --ink-2: #52514e; --muted: #898781;
+  --grid: #e1e0d9; --axis: #c3c2b7; --ring: rgba(11,11,11,0.10); --hover: rgba(11,11,11,0.04);
+  --accent: #2a78d6; --good: #0ca30c; --good-text: #006300; --warning: #fab219; --serious: #ec835a; --critical: #d03b3b;
+  --seq-0: #f0efec; --seq-1: #cde2fb; --seq-2: #9ec5f4; --seq-3: #6da7ec; --seq-4: #3987e5; --seq-5: #256abf; --seq-6: #184f95;
+  --font: system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+@media (prefers-color-scheme: dark) {
+  :root:where(:not([data-theme="light"])) {
+    color-scheme: dark;
+    --page: #0d0d0d; --surface: #1a1a19; --ink: #f0efec; --ink-2: #c3c2b7; --muted: #898781;
+    --grid: #2c2c2a; --axis: #383835; --ring: rgba(255,255,255,0.10); --hover: rgba(255,255,255,0.05);
+    --accent: #3987e5; --good-text: #0ca30c;
+    --seq-0: #262624; --seq-1: #104281; --seq-2: #184f95; --seq-3: #256abf; --seq-4: #3987e5; --seq-5: #6da7ec; --seq-6: #9ec5f4;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --page: #0d0d0d; --surface: #1a1a19; --ink: #f0efec; --ink-2: #c3c2b7; --muted: #898781;
+  --grid: #2c2c2a; --axis: #383835; --ring: rgba(255,255,255,0.10); --hover: rgba(255,255,255,0.05);
+  --accent: #3987e5; --good-text: #0ca30c;
+  --seq-0: #262624; --seq-1: #104281; --seq-2: #184f95; --seq-3: #256abf; --seq-4: #3987e5; --seq-5: #6da7ec; --seq-6: #9ec5f4;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--page); color: var(--ink); font: 14px/1.45 var(--font); }
+a { color: var(--accent); text-decoration: none; } a:hover { text-decoration: underline; }
+code { font: 12.5px ui-monospace, SFMono-Regular, Menlo, monospace; background: var(--hover); padding: 0 4px; border-radius: 4px; }
+header { display: flex; align-items: center; gap: 16px; padding: 16px 24px; position: sticky; top: 0; z-index: 5;
+  background: color-mix(in srgb, var(--page) 88%, transparent); backdrop-filter: blur(8px); border-bottom: 1px solid var(--grid); }
+header h1 { font-size: 17px; margin: 0; font-weight: 600; }
+header .meta { color: var(--ink-2); font-size: 13px; }
+header .spacer { flex: 1; }
+.live { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--ink-2); }
+.dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); display: inline-block; flex: none; }
+.dot.good { background: var(--good); } .dot.warning { background: var(--warning); } .dot.critical { background: var(--critical); }
+.dot.pulse { animation: pulse 2s ease-in-out infinite; }
+@keyframes pulse { 50% { opacity: .35; } }
+button.ghost { font: inherit; font-size: 12.5px; color: var(--ink-2); background: none; border: 1px solid var(--grid); border-radius: 6px; padding: 3px 8px; cursor: pointer; }
+button.ghost:hover { background: var(--hover); }
+main { padding: 20px 24px 48px; display: grid; align-items: start; gap: 16px; grid-template-columns: repeat(12, 1fr); max-width: 1600px; margin: 0 auto; }
+.card { background: var(--surface); border: 1px solid var(--ring); border-radius: 10px; padding: 16px; min-width: 0; }
+.card h2 { font-size: 13px; font-weight: 600; margin: 0 0 12px; color: var(--ink); display: flex; align-items: baseline; gap: 8px; }
+.card h2 .sub { color: var(--muted); font-weight: 400; }
+.span-12 { grid-column: span 12; } .span-8 { grid-column: span 8; } .span-7 { grid-column: span 7; }
+.span-5 { grid-column: span 5; } .span-4 { grid-column: span 4; }
+@media (max-width: 1100px) { .span-8, .span-7, .span-5, .span-4 { grid-column: span 12; } }
+.kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 16px; }
+.tile .label { color: var(--ink-2); font-size: 12.5px; }
+.tile .value { font-size: 26px; font-weight: 600; margin-top: 2px; }
+.tile .note { color: var(--muted); font-size: 12px; margin-top: 2px; }
+.meter { height: 6px; border-radius: 3px; background: var(--seq-1); margin-top: 8px; overflow: hidden; }
+.meter > i { display: block; height: 100%; border-radius: 3px; background: var(--accent); }
+.meter.warning > i { background: var(--warning); } .meter.critical > i { background: var(--critical); }
+svg text { font-family: var(--font); }
+.tree-node { cursor: pointer; }
+.tree-node rect.box { fill: var(--surface); stroke: var(--axis); stroke-width: 1; }
+.tree-node:hover rect.box, .tree-node.sel rect.box { stroke: var(--accent); stroke-width: 1.5; }
+.tree-node .t { font-size: 13px; font-weight: 600; fill: var(--ink); }
+.tree-node .s { font-size: 11.5px; fill: var(--ink-2); }
+.edge { fill: none; stroke: var(--axis); stroke-width: 1.5; }
+.badge { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; color: var(--ink-2); border: 1px solid var(--grid); border-radius: 999px; padding: 1px 8px; white-space: nowrap; }
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th { text-align: left; font-weight: 500; color: var(--muted); font-size: 12px; padding: 6px 8px; border-bottom: 1px solid var(--grid); }
+td { padding: 7px 8px; border-bottom: 1px solid var(--grid); vertical-align: top; }
+tr:last-child td { border-bottom: 0; }
+td.num { font-variant-numeric: tabular-nums; text-align: right; white-space: nowrap; }
+td .state { color: var(--ink-2); }
+.clip { max-width: 360px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.list { list-style: none; margin: 0; padding: 0; }
+.list li { display: flex; gap: 10px; padding: 8px 0; border-bottom: 1px solid var(--grid); align-items: baseline; }
+.list li:last-child { border-bottom: 0; }
+.list.scroll { max-height: 420px; overflow-y: auto; padding-right: 6px; }
+.list .who { color: var(--ink-2); font-size: 12px; min-width: 84px; flex: none; }
+td.nowrap, td.nowrap code { white-space: nowrap; }
+.list .when { color: var(--muted); font-size: 12px; margin-left: auto; white-space: nowrap; flex: none; font-variant-numeric: tabular-nums; }
+.icon { flex: none; font-size: 12px; width: 16px; text-align: center; }
+.new { animation: flash 2.5s ease-out; }
+@keyframes flash { from { background: color-mix(in srgb, var(--accent) 16%, transparent); } to { background: transparent; } }
+.heat rect.cell { rx: 2; }
+.heat .lab { font-size: 12px; fill: var(--ink-2); }
+.heat .tick { font-size: 11px; fill: var(--muted); }
+.legend { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 12px; margin-top: 8px; }
+.legend i { width: 14px; height: 10px; border-radius: 2px; display: inline-block; }
+#tip { position: fixed; pointer-events: none; z-index: 20; background: var(--surface); color: var(--ink); border: 1px solid var(--ring);
+  box-shadow: 0 4px 16px rgba(0,0,0,.12); border-radius: 8px; padding: 8px 10px; font-size: 12.5px; max-width: 360px; display: none; }
+#tip strong { font-weight: 600; }
+#tip .m { color: var(--ink-2); }
+aside#detail { position: fixed; top: 0; right: 0; bottom: 0; width: min(560px, 100%); background: var(--surface); border-left: 1px solid var(--ring);
+  box-shadow: -8px 0 32px rgba(0,0,0,.10); transform: translateX(100%); transition: transform .2s ease; z-index: 10; overflow-y: auto; padding: 20px 24px 40px; }
+aside#detail.open { transform: none; }
+aside h3 { margin: 0; font-size: 17px; } aside h4 { font-size: 13px; margin: 20px 0 6px; }
+aside .md { color: var(--ink); font-size: 13.5px; }
+aside .md ul { margin: 4px 0; padding-left: 18px; } aside .md p { margin: 4px 0; }
+.said { color: var(--ink-2); border-left: 2px solid var(--axis); padding-left: 8px; margin: 4px 0 0; font-size: 12.5px; }
+.empty { color: var(--muted); font-size: 13px; }
+.row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.kv { color: var(--ink-2); font-size: 12.5px; }
+</style>
+</head>
+<body>
+<header>
+  <h1 id="title">Brain</h1>
+  <span class="meta" id="meta"></span>
+  <span class="spacer"></span>
+  <span class="live"><span class="dot" id="livedot"></span><span id="livetext">connecting…</span></span>
+  <button class="ghost" id="theme" title="Light or dark">Theme</button>
+</header>
+<main>
+  <section class="card span-12"><div class="kpis" id="kpis"></div></section>
+  <section class="card span-7"><h2>Projects <span class="sub">click one for its notes</span></h2><div id="tree"></div></section>
+  <section class="card span-5"><h2>Needs you <span class="sub" id="needcount"></span></h2><ul class="list scroll" id="needs"></ul></section>
+  <section class="card span-12"><h2>Work in flight <span class="sub">jobs, their worktrees, and what's listening</span></h2><div id="work"></div></section>
+  <section class="card span-8"><h2>Activity <span class="sub" id="heatsub"></span></h2><div id="heat"></div></section>
+  <section class="card span-4"><h2>Library <span class="sub" id="libcount"></span></h2><ul class="list" id="lib"></ul>
+    <h2 style="margin-top:16px">Schedules</h2><ul class="list" id="sched"></ul></section>
+  <section class="card span-12"><h2>Latest <span class="sub">commits and decisions, newest first</span></h2><ul class="list" id="feed"></ul></section>
+</main>
+<aside id="detail" aria-hidden="true"></aside>
+<div id="tip" role="tooltip"></div>
+<script>
+"use strict";
+let S = null, selected = null, seen = new Set(), firstPaint = true;
+const $ = (id) => document.getElementById(id);
+
+// ---- tiny DOM helpers: text always goes in as text ----
+function el(tag, attrs, ...kids) {
+  const e = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs || {})) {
+    if (v == null || v === false) continue;
+    if (k === "class") e.className = v; else if (k.startsWith("on")) e.addEventListener(k.slice(2), v); else e.setAttribute(k, v);
+  }
+  for (const k of kids.flat()) if (k != null && k !== false) e.append(k instanceof Node ? k : document.createTextNode(String(k)));
+  return e;
+}
+const SVG = "http://www.w3.org/2000/svg";
+function sv(tag, attrs, ...kids) {
+  const e = document.createElementNS(SVG, tag);
+  for (const [k, v] of Object.entries(attrs || {})) if (v != null) e.setAttribute(k, v);
+  for (const k of kids.flat()) if (k != null) e.append(k instanceof Node ? k : document.createTextNode(String(k)));
+  return e;
+}
+function safeHref(u) { return /^(https?:|t3-thread:)/i.test(u) ? u : null; }
+// minimal inline markdown: `code`, **bold**, [text](link)
+function inline(text) {
+  const out = []; const re = /(`[^`]+`)|(\*\*[^*]+\*\*)|(\[[^\]]*\]\([^)\s]+\))/g; let last = 0, m;
+  while ((m = re.exec(text))) {
+    if (m.index > last) out.push(text.slice(last, m.index));
+    const t = m[0];
+    if (m[1]) out.push(el("code", {}, t.slice(1, -1)));
+    else if (m[2]) out.push(el("strong", {}, t.slice(2, -2)));
+    else { const mm = t.match(/^\[([^\]]*)\]\(([^)\s]+)\)$/); const h = safeHref(mm[2]); out.push(h ? el("a", { href: h }, mm[1]) : mm[1]); }
+    last = re.lastIndex;
+  }
+  if (last < text.length) out.push(text.slice(last));
+  return out;
+}
+function block(md) {
+  const wrap = el("div", { class: "md" }); let ul = null;
+  for (const raw of md.split("\n")) {
+    const line = raw.replace(/<!--.*?-->/g, "");
+    if (/^\s*[-*] /.test(line)) { if (!ul) { ul = el("ul"); wrap.append(ul); } ul.append(el("li", {}, inline(line.replace(/^\s*[-*] /, "")))); }
+    else if (/^\s{2,}\S/.test(line) && ul && ul.lastChild) { ul.lastChild.append(" ", ...inline(line.trim())); }
+    else if (line.trim()) { ul = null; wrap.append(el("p", {}, inline(line.replace(/^#+\s*/, "")))); }
+    else ul = null;
+  }
+  return wrap;
+}
+function ago(sec) {
+  if (sec == null) return "never";
+  const s = Math.max(0, Date.now() / 1000 - sec);
+  if (s < 60) return "just now"; if (s < 3600) return Math.floor(s / 60) + "m ago";
+  if (s < 86400) return Math.floor(s / 3600) + "h ago"; return Math.floor(s / 86400) + "d ago";
+}
+function tsec(iso) { return iso ? Date.parse(iso) / 1000 : null; }
+// a time written in the brain's timezone ("2026-10-19 06:20"); `now` carries that zone's offset
+function localSec(t) {
+  if (!t || !S) return null; const off = S.brain.now.slice(19) || "Z";
+  const v = Date.parse(t.replace(" ", "T") + ":00" + off); return isNaN(v) ? null : v / 1000;
+}
+const fmtTime = new Intl.DateTimeFormat(undefined, { hour: "2-digit", minute: "2-digit" });
+function brainClock() {
+  if (!S) return ""; try { return new Intl.DateTimeFormat(undefined, { hour: "2-digit", minute: "2-digit", timeZone: S.brain.tz || undefined }).format(new Date()); }
+  catch { return fmtTime.format(new Date()); }
+}
+
+// ---- tooltip ----
+const tip = $("tip");
+function showTip(ev, ...kids) { tip.replaceChildren(...kids); tip.style.display = "block"; moveTip(ev); }
+function moveTip(ev) {
+  const r = tip.getBoundingClientRect(); let x = ev.clientX + 14, y = ev.clientY + 14;
+  if (x + r.width > innerWidth - 8) x = ev.clientX - r.width - 14; if (y + r.height > innerHeight - 8) y = ev.clientY - r.height - 14;
+  tip.style.left = x + "px"; tip.style.top = y + "px";
+}
+function hideTip() { tip.style.display = "none"; }
+
+// ---- sections ----
+function tile(label, value, note, meter) {
+  const t = el("div", { class: "tile" }, el("div", { class: "label" }, label), el("div", { class: "value" }, value));
+  if (note) t.append(el("div", { class: "note" }, note));
+  if (meter) { const m = el("div", { class: "meter " + (meter.level || ""), role: "meter", "aria-valuenow": Math.round(meter.v * 100), "aria-valuemin": 0, "aria-valuemax": 100 }); m.append(el("i", { style: `width:${Math.min(100, Math.max(2, meter.v * 100))}%` })); t.append(m); }
+  return t;
+}
+function renderKpis() {
+  const n = S.nodes, m = S.machine;
+  const jobs = n.reduce((a, x) => a + x.work.length, 0);
+  const wts = n.flatMap((x) => x.worktrees), live = wts.filter((w) => w.listening.length).length;
+  const day = S.commits_24h;
+  const kids = [
+    tile("Needs you", S.attention.length, S.problems ? `${S.problems} check problem(s): brain check` : `across ${new Set(S.attention.map((a) => a.node)).size} project(s)`),
+    tile("Jobs in flight", jobs, `${n.filter((x) => x.work.length).length} project(s)`),
+    tile("Worktrees", wts.length, `${live} with something listening`),
+    tile("Commits, 24 h", day, `${S.commits_total} in ${S.hours} h`),
+  ];
+  if (m.load) { const v = m.load[0] / (m.cpus || 1); kids.push(tile("Load", m.load[0].toFixed(1), `${m.cpus} cores · 5 min ${m.load[1].toFixed(1)}`, { v, level: v > 0.9 ? "critical" : v > 0.7 ? "warning" : "" })); }
+  if (m.mem_total_gb) { const used = 1 - m.mem_free_gb / m.mem_total_gb; kids.push(tile("Memory free", m.mem_free_gb + " GB", `of ${m.mem_total_gb} GB`, { v: used, level: m.mem_free_gb < 8 ? "critical" : used > 0.8 ? "warning" : "" })); }
+  if (m.disk_total_gb) { const used = 1 - m.disk_free_gb / m.disk_total_gb; kids.push(tile("Disk free", m.disk_free_gb + " GB", `of ${m.disk_total_gb} GB`, { v: used, level: m.disk_free_gb < 40 ? "critical" : used > 0.85 ? "warning" : "" })); }
+  $("kpis").replaceChildren(...kids);
+}
+
+function renderTree() {
+  const nodes = S.nodes.filter((x) => !x.archived), byId = Object.fromEntries(nodes.map((x) => [x.id, x]));
+  const kids = {}; for (const x of nodes) if (x.parent && byId[x.parent]) (kids[x.parent] ||= []).push(x.id);
+  const W = 228, H = 58, GX = 56, GY = 14, pos = {}; let leaf = 0, maxDepth = 0;
+  (function place(id, d) {
+    maxDepth = Math.max(maxDepth, d); const ch = kids[id] || [];
+    if (!ch.length) { pos[id] = { x: d * (W + GX), y: leaf++ * (H + GY) }; return; }
+    ch.forEach((c) => place(c, d + 1));
+    const ys = ch.map((c) => pos[c].y); pos[id] = { x: d * (W + GX), y: (Math.min(...ys) + Math.max(...ys)) / 2 };
+  })("root", 0);
+  const w = (maxDepth + 1) * (W + GX) - GX + 2, h = Math.max(leaf, 1) * (H + GY) - GY + 2;
+  const g = sv("svg", { viewBox: `-1 -1 ${w} ${h}`, width: "100%", style: `max-height:${Math.max(h, 120)}px`, role: "img", "aria-label": "Project tree" });
+  for (const x of nodes) if (x.parent && pos[x.parent] && pos[x.id]) {
+    const a = pos[x.parent], b = pos[x.id], x1 = a.x + W, y1 = a.y + H / 2, x2 = b.x, y2 = b.y + H / 2, mx = (x1 + x2) / 2;
+    g.append(sv("path", { class: "edge", d: `M${x1},${y1} C${mx},${y1} ${mx},${y2} ${x2},${y2}` }));
+  }
+  for (const x of nodes) {
+    const p = pos[x.id]; if (!p) continue;
+    const live = x.worktrees.filter((w) => w.listening.length).length, need = S.attention.filter((a) => a.node === x.id).length;
+    const fresh = tsec(x.updated), age = fresh ? Date.now() / 1000 - fresh : Infinity;
+    const grp = sv("g", { class: "tree-node" + (selected === x.id ? " sel" : ""), transform: `translate(${p.x},${p.y})`, tabindex: 0, role: "button", "aria-label": `${x.title || x.id}: open notes` });
+    grp.append(sv("rect", { class: "box", width: W, height: H, rx: 8 }));
+    grp.append(sv("circle", { cx: 14, cy: 18, r: 4, fill: age < 3600 ? "var(--good)" : age < 86400 * 7 ? "var(--axis)" : "var(--warning)" }));
+    grp.append(sv("text", { class: "t", x: 26, y: 22 }, (x.title || x.id).slice(0, 26) + (x.sealed ? "  ·  sealed" : "")));
+    const bits = [`updated ${x.updated_ago}`]; if (x.work.length) bits.push(`${x.work.length} in flight`); if (live) bits.push(`${live} live`); if (need) bits.push(`${need} for you`);
+    let sub = bits.join("  ·  "); if (sub.length > 36) sub = bits.slice(1).join(" · ");
+    grp.append(sv("text", { class: "s", x: 14, y: 43, textLength: sub.length > 34 ? W - 26 : null, lengthAdjust: "spacingAndGlyphs" }, sub));
+    const open = () => openDetail(x.id);
+    grp.addEventListener("click", open); grp.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(); } });
+    grp.addEventListener("pointermove", (ev) => showTip(ev, el("strong", {}, x.title || x.id), el("div", { class: "m" }, x.id + (x.home ? " · " + x.home : "")),
+      el("div", {}, `${x.runtime || "-"} · owners ${x.owners.join(", ")}`), el("div", { class: "m" }, "freshness dot: green within the hour, amber after 7 days")));
+    grp.addEventListener("pointerleave", hideTip);
+    g.append(grp);
+  }
+  $("tree").replaceChildren(g);
+}
+
+function renderNeeds() {
+  const items = S.attention; $("needcount").textContent = items.length ? String(items.length) : "";
+  if (!items.length) return $("needs").replaceChildren(el("li", { class: "empty" }, "Nothing is waiting on you."));
+  const icon = { blocked: ["●", "var(--warning)", "blocked"], inbox: ["✉", "var(--accent)", "inbox"], stale: ["◷", "var(--muted)", "stale"], setup: ["⚙", "var(--muted)", "setup"] };
+  $("needs").replaceChildren(...items.map((a) => {
+    const [g, c, word] = icon[a.kind] || ["•", "var(--muted)", a.kind];
+    const key = "need:" + a.node + a.text;
+    return el("li", { class: mark(key) }, el("span", { class: "icon", style: `color:${c}`, title: word, "aria-label": word }, g),
+      el("span", { class: "who" }, a.node), el("span", {}, inline(a.text.replace(/^inbox: /, ""))));
+  }));
+}
+
+function renderWork() {
+  const rows = [];
+  for (const x of S.nodes) {
+    const wtBy = Object.fromEntries(x.worktrees.map((w) => [w.branch, w])), used = new Set();
+    for (const j of x.work) { rows.push([x, j, wtBy[j.branch]]); used.add(j.branch); }
+    for (const w of x.worktrees) if (!used.has(w.branch)) rows.push([x, null, w]);
+  }
+  if (!rows.length) return $("work").replaceChildren(el("div", { class: "empty" }, "No jobs in flight."));
+  const t = el("table", {}, el("thead", {}, el("tr", {}, ["Project", "Job", "Thread", "State", "Ports", "Changes", "Ahead", "Last commit"].map((h, i) => el("th", { style: i > 4 ? "text-align:right" : null }, h)))));
+  const tb = el("tbody");
+  rows.sort((a, b) => ((b[2] && b[2].last) || 0) - ((a[2] && a[2].last) || 0));
+  for (const [x, j, w] of rows) {
+    const live = w && w.listening.length;
+    const ports = w && w.port ? el("span", { class: "row", style: "flex-wrap:nowrap" }, el("span", { class: "dot " + (live ? "good pulse" : ""), title: live ? "listening" : "nothing listening", "aria-label": live ? "listening" : "idle" }),
+      (w.ports > 1 ? `${w.port}–${w.port + w.ports - 1}` : String(w.port)) + (live ? `  (${w.listening.length} live)` : "")) : "-";
+    const th = j && j.link && safeHref(j.link) ? el("a", { href: safeHref(j.link) }, j.thread || "thread") : (j ? j.thread : "");
+    tb.append(el("tr", { class: mark("work:" + x.id + (j ? j.branch + j.state : w.branch)) },
+      el("td", {}, el("a", { href: "#", onclick: (e) => { e.preventDefault(); openDetail(x.id); } }, x.title || x.id)),
+      el("td", { class: "nowrap" }, el("code", {}, j ? j.branch : w.branch)),
+      el("td", {}, th, j && j.runtime ? el("span", { class: "kv" }, " · " + j.runtime) : null),
+      el("td", { class: "clip", title: j ? j.state : "worktree with no Active work row" }, j ? inline(j.state) : el("span", { class: "kv" }, "no Active work row")),
+      el("td", { class: "nowrap" }, ports),
+      el("td", { class: "num" }, w && w.dirty != null ? String(w.dirty) : "-"),
+      el("td", { class: "num" }, w && w.ahead != null ? String(w.ahead) : "-"),
+      el("td", { class: "num" }, w && w.last ? ago(w.last) : "-")));
+  }
+  t.append(tb); $("work").replaceChildren(t);
+}
+
+function renderHeat() {
+  const H = S.hours, start = S.activity.start, A = S.activity.counts;
+  const order = S.nodes.map((x) => x.id).filter((i) => A[i]);
+  $("heatsub").textContent = `commits per hour, last ${H} h`;
+  if (!order.length) return $("heat").replaceChildren(el("div", { class: "empty" }, `No commits in the last ${H} hours.`));
+  const subj = {};
+  for (const c of S.commits) { const h = Math.floor((c.t - start) / 3600); if (h >= 0 && h < H) (subj[c.node + "|" + h] ||= []).push(c); }
+  const max = Math.max(1, ...Object.values(A).flat());
+  const steps = ["--seq-1", "--seq-2", "--seq-3", "--seq-4", "--seq-5", "--seq-6"];
+  const LW = 150, C = 14, G = 2, w = LW + H * (C + G), h = order.length * (C + G) + 22;
+  const g = sv("svg", { class: "heat", viewBox: `0 0 ${w} ${h}`, width: "100%", role: "img", "aria-label": "Commits per hour per project" });
+  order.forEach((id, r) => {
+    const x = S.nodes.find((n) => n.id === id);
+    g.append(sv("text", { class: "lab", x: 0, y: r * (C + G) + 11 }, ((x && x.title) || id).slice(0, 22)));
+    for (let hh = 0; hh < H; hh++) {
+      const k = id + "|" + hh, v = A[id][hh];
+      const fill = v ? `var(${steps[Math.min(steps.length - 1, Math.floor((v / max) * (steps.length - 1) + 0.0001))]})` : "var(--seq-0)";
+      const cell = sv("rect", { class: "cell", x: LW + hh * (C + G), y: r * (C + G), width: C, height: C, fill });
+      cell.addEventListener("pointermove", (ev) => {
+        const t0 = new Date((start + hh * 3600) * 1000);
+        const list = (subj[k] || []).slice(0, 5).map((c) => el("div", { class: "m" }, c.subject.slice(0, 70)));
+        showTip(ev, el("strong", {}, `${v} commit${v === 1 ? "" : "s"}`), el("div", {}, `${(x && x.title) || id} · ${fmtTime.format(t0)}`), ...list);
+      });
+      cell.addEventListener("pointerleave", hideTip);
+      g.append(cell);
+    }
+  });
+  for (let hh = 0; hh < H; hh += 6) g.append(sv("text", { class: "tick", x: LW + hh * (C + G), y: h - 4 }, fmtTime.format(new Date((start + hh * 3600) * 1000))));
+  const legend = el("div", { class: "legend" }, "fewer", ...steps.map((s) => el("i", { style: `background:var(${s})` })), "more", el("span", { style: "margin-left:12px" }, `darkest = ${max} in an hour`));
+  $("heat").replaceChildren(g, legend);
+}
+
+function renderLib() {
+  $("libcount").textContent = `${S.items.count} item${S.items.count === 1 ? "" : "s"}`;
+  $("lib").replaceChildren(...(S.items.recent.length ? S.items.recent.map((i) => el("li", {}, el("span", {}, i.title || i.id), el("span", { class: "when" }, i.source || ""))) : [el("li", { class: "empty" }, "Nothing learned yet. Lessons from finished jobs land here.")]));
+  $("sched").replaceChildren(...(S.schedules.length ? S.schedules.map((x) => el("li", {}, el("span", { class: "dot " + (x.here ? "good" : ""), title: x.here ? "runs on this machine" : "another machine" }), el("span", {}, x.id), el("span", { class: "when" }, x.when + (x.here ? " · here" : "")))) : [el("li", { class: "empty" }, "None.")]));
+}
+
+function renderFeed() {
+  const rows = S.commits.slice(0, 60).map((c) => ({ t: c.t, who: c.node, kind: c.where === "home" ? "commit in its home" : "brain commit", text: c.subject, key: "c:" + c.sha }));
+  for (const x of S.nodes) for (const d of x.decisions) { const t = localSec(d.time); if (t) rows.push({ t, who: x.id, kind: "decision", text: d.title, said: d.said, key: "d:" + x.id + d.time + d.title }); }
+  rows.sort((a, b) => b.t - a.t);
+  $("feed").replaceChildren(...rows.slice(0, 40).map((r) => el("li", { class: mark(r.key) },
+    el("span", { class: "icon", title: r.kind, "aria-label": r.kind, style: `color:${r.kind === "decision" ? "var(--accent)" : "var(--muted)"}` }, r.kind === "decision" ? "◆" : r.kind === "brain commit" ? "○" : "●"),
+    el("span", { class: "who" }, r.who), el("span", {}, inline(r.text), r.said ? el("div", { class: "said" }, r.said) : null),
+    el("span", { class: "when" }, ago(r.t)))));
+}
+
+function openDetail(id) {
+  selected = id; const x = S.nodes.find((n) => n.id === id); const d = $("detail");
+  if (x && location.hash !== "#node=" + encodeURIComponent(id)) history.replaceState(null, "", "#node=" + encodeURIComponent(id));
+  if (!x) return closeDetail();
+  const kids = [el("div", { class: "row", style: "justify-content:space-between" }, el("h3", {}, x.title || x.id), el("button", { class: "ghost", onclick: closeDetail }, "Close"))];
+  kids.push(el("div", { class: "row", style: "margin-top:6px" }, el("span", { class: "badge" }, x.id), x.runtime ? el("span", { class: "badge" }, x.runtime) : null,
+    el("span", { class: "badge" }, "owners " + x.owners.join(", ")), x.sealed ? el("span", { class: "badge" }, "sealed") : null, x.paused ? el("span", { class: "badge" }, "paused") : null,
+    ...x.labels.map((l) => el("span", { class: "badge" }, l))));
+  kids.push(el("div", { class: "kv", style: "margin-top:8px" }, `updated ${x.updated_ago}`, x.home ? " · home " + x.home : "", " · "),
+    x.coordinator && safeHref(x.coordinator) ? el("a", { href: safeHref(x.coordinator) }, "open its coordinator") : el("span", { class: "kv" }, "no coordinator on this machine"));
+  const sec = (title, body) => { if (body) kids.push(el("h4", {}, title), body); };
+  if (x.blocked.length) sec("Needs you", el("ul", { class: "list" }, ...x.blocked.map((b) => el("li", {}, el("span", { class: "icon", style: "color:var(--warning)", "aria-label": "blocked" }, "●"), el("span", {}, inline(b))))));
+  if (x.inbox.length) sec("Inbox", el("ul", { class: "list" }, ...x.inbox.map((b) => el("li", {}, el("span", {}, inline(b))))));
+  for (const [k, v] of Object.entries(x.status)) if (!/^blocked/i.test(k)) sec(k, block(v.length > 6000 ? v.slice(0, 6000) + "\n…" : v));
+  if (x.limits.length) sec("Limits", el("ul", { class: "list" }, ...x.limits.map((l) => el("li", {}, el("span", {}, inline(l))))));
+  if (x.decisions.length) sec("Latest decisions", el("ul", { class: "list" }, ...x.decisions.map((dd) => el("li", {}, el("span", {}, dd.title, dd.said ? el("div", { class: "said" }, dd.said) : null), el("span", { class: "when" }, dd.time)))));
+  if (x.reports.length) sec("Reports", el("ul", { class: "list" }, ...x.reports.map((r) => el("li", {}, el("span", {}, r.title), el("span", { class: "when" }, el("code", {}, r.path))))));
+  if (x.never_name) kids.push(el("p", { class: "kv" }, `${x.never_name} word(s) its home must never contain (brain guard ${x.id})`));
+  const keep = d.scrollTop; d.replaceChildren(...kids); d.scrollTop = keep; d.classList.add("open"); d.setAttribute("aria-hidden", "false"); renderTree();
+}
+function closeDetail() { if (location.hash) history.replaceState(null, "", location.pathname); selected = null; $("detail").classList.remove("open"); $("detail").setAttribute("aria-hidden", "true"); if (S) renderTree(); }
+addEventListener("keydown", (e) => { if (e.key === "Escape") closeDetail(); });
+addEventListener("hashchange", () => { if (S && location.hash.startsWith("#node=")) openDetail(decodeURIComponent(location.hash.slice(6))); });
+
+// new things flash once (not on the first paint)
+function mark(key) { const isNew = !firstPaint && !seen.has(key); seen.add(key); return isNew ? "new" : null; }
+
+function render() {
+  document.title = `${S.brain.title} · brain`;
+  $("title").textContent = S.brain.title;
+  $("meta").textContent = `${S.brain.name} · ${S.brain.root} · ${S.brain.machine}${S.brain.tz ? " · " + S.brain.tz + " " + brainClock() : ""}${S.brain.others.length ? " · other brains here: " + S.brain.others.join(", ") : ""}`;
+  renderKpis(); renderTree(); renderNeeds(); renderWork(); renderHeat(); renderLib(); renderFeed();
+  if (firstPaint && location.hash.startsWith("#node=")) selected = decodeURIComponent(location.hash.slice(6));
+  if (selected) openDetail(selected);
+  firstPaint = false;
+}
+
+// ---- live: server-sent events, with a reconnect ----
+let lastMsg = 0;
+function setLive(state, text) { $("livedot").className = "dot " + state; $("livetext").textContent = text; }
+function connect() {
+  const es = new EventSource("/api/events");
+  es.onmessage = (e) => { S = JSON.parse(e.data); lastMsg = Date.now(); render(); setLive("good pulse", "live"); };
+  es.onerror = () => { setLive("warning", "reconnecting…"); };
+}
+setInterval(() => { if (lastMsg && S) { const s = Math.round((Date.now() - lastMsg) / 1000); if ($("livetext").textContent !== "reconnecting…") $("livetext").textContent = s < 5 ? "live" : `live · changed ${s < 60 ? s + "s" : Math.round(s / 60) + "m"} ago`; } }, 1000);
+setInterval(() => { if (S) { renderFeed(); renderWork(); } }, 60000); // keep the "ago" times honest
+$("theme").addEventListener("click", () => { const r = document.documentElement; const dark = r.dataset.theme ? r.dataset.theme === "dark" : matchMedia("(prefers-color-scheme: dark)").matches; r.dataset.theme = dark ? "light" : "dark"; });
+if (window.__STATE__) { S = window.__STATE__; render(); setLive("", "snapshot"); } else connect();
+</script>
+</body>
+</html>

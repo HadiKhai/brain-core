@@ -52,6 +52,7 @@ You mostly talk to coordinators, and they run `brain` for you. By hand:
 | Command | Does |
 | --- | --- |
 | `brain` | dashboard: tree, what needs you, coordinators |
+| `brain ui [--open]` | the same, live in your browser: projects, work in flight with its worktrees and ports, what needs you, activity, decisions (read-only, this machine only) |
 | `brain show <node>` | everything about one node, with this machine's IDs |
 | `brain new <id> --title T [--owners a,b] [--home path]` | create a node (ids nest with `/`) |
 | `brain set <id> key=value` | fields; host IDs and home paths stay on this machine |
