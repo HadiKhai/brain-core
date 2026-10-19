@@ -1634,6 +1634,7 @@ def cmd_adopt(a):
         ids.add(nid)
     for path, nid, title in planned:
         d, _, _, _ = create_node(inst, nid, title, home=str(path))
+        job_started(inst, inst.node(nid), import_job_id(path), inst.node(nid)["fm"].get("runtime", ""))
         link_runtimes(inst)
         write_registry(inst)
         inst.commit([d, "registry.md"], f"Adopt node {nid}")
@@ -2770,16 +2771,22 @@ def handback_lines(inst, n, to=None, who="worker", branch=None):
     inbox = "" if n["sealed"] else f" and append `- <time from brain now> from {who}: question: <it>` " \
                                      f"to `{tilde(n['dir'] / 'inbox.md')}`"
     if branch:
+        study = import_job(branch)
+        prepare = ("Finish the import output checks and commit this job's node files; leave the source home read-only. "
+                   if study else "Finish reviews, commit, then `git rebase main`; resolve conflicts yourself. ")
+        evidence = ("This node-folder study needs no home ready evidence. Record proposed item ids in --lessons; "
+                    "recording them never accepts them. " if study else
+                    "This one step runs node verify and checks local main. If verify is unset, ask the coordinator "
+                    "to set it. If main moves, rebase and hand back again. Only the coordinator merges to main. ")
         return ["## Questions and hand-back", "",
                 "- **Never ask the operator, and never wait for an answer in this thread**: nobody is watching it.",
                 "- **A choice** the brief or rules settle: make it and record it under Decisions I made.",
-                "- **Before handing back**, finish reviews, commit, then `git rebase main`; resolve conflicts yourself. "
+                "- **Before handing back**, " + prepare +
                 f"Run `brain handback {shlex.quote(n['id'])} --branch {shlex.quote(branch)} "
                 "--state done --reviews <completed rounds> --report <path> --lessons '<proposed lessons or none: reason>'`. "
-                "This one step runs node verify, checks local main and records readiness, state and proposed lessons "
-                "in your one worker-owned job-handbacks/<key>.json. Do not edit the ledger or status. "
-                "If verify is unset, ask the coordinator to set it. If main moves, rebase and hand back again. "
-                "Only the coordinator merges to main. Use `none: <reason>` when there is no reusable lesson.",
+                + evidence + "State and proposed lessons live in your one worker-owned job-handbacks/<key>.json. "
+                "Do not edit the ledger" + (". " if study else " or status. ") +
+                "Use `none: <reason>` when there is no reusable lesson.",
                 "- **Blocked or need a choice:** use the same command with `--state blocked` or `--state question`, "
                 "omit --reviews, and describe the blocker/question in --report. Legacy failed is also accepted.",
                 "- End your turn after recording the hand-back. The coordinator reads it with brain due; "
@@ -2817,6 +2824,16 @@ def worker_route(inst, n, a):
             usage += " No eligible alternative is known."
     runtime = subscription["runtime"] if subscription else runtime
     return runtime, redact(usage, never_terms(n))
+
+
+def import_job_id(home):
+    head = git("rev-parse", "--verify", "-q", "HEAD", cwd=home).stdout.strip() or "unborn"
+    return "import:" + head
+
+
+def import_job(branch):
+    # Colon cannot occur in a git branch: node studies never bypass home-job readiness.
+    return bool(re.fullmatch(r"import:(?:[0-9a-f]{40}|[0-9a-f]{64}|unborn)", branch))
 
 
 def import_brief(a):
@@ -2857,14 +2874,15 @@ def import_brief(a):
     if task:
         out += [task, ""]
     out += limits_lines(n)
+    branch = import_job_id(home)
+    if not open_job(read_jobs(n) or [], branch):
+        out += [f"Before launching, the coordinator must run `brain jobs {shlex.quote(n['id'])} "
+                f"--branch {shlex.quote(branch)} --start` to record this study.", ""]
     out += ["## Before you hand back", "",
-            "Finish the import skill's output checks, commit only this job's node files, and report the "
-            "checks and review evidence with the proposed item ids in your Lessons section. "
-            "Keep pre-existing source findings separate from output findings.",
-            "Ready packets (`brain ready`) apply to jobs in a home worktree. This study has no source "
-            "worktree: leave the source branch and history unchanged. If a later job changes the home, "
-            "its worker must rebase on main and record a ready packet before handing back.", ""]
-    out += handback_lines(inst, n, a.to) + report_lines()
+            "Finish the import skill's output checks and commit only this job's node files. "
+            "Report checks and review evidence; keep pre-existing source findings separate from output findings. "
+            "Leave the source branch and history unchanged.", ""]
+    out += report_lines(job=True) + handback_lines(inst, n, a.to, branch=branch)
     text = "\n".join(out) + "\n"
     no_terms_in(n, text, "the import brief")
     if SECRET_META.search(text) or SECRET_LINE.search(task + "\n" + "\n".join(limits_lines(n))):
@@ -3520,10 +3538,11 @@ def cmd_handback(a):
     if a.lessons is not None and (not lessons or lessons == "none:" or lessons.lower() == "none"):
         die("--lessons needs proposed lessons, or none: <reason>")
     packet, reasons = None, []
-    if a.state == "done" and previous.get("state", "done") == "done":
+    study = import_job(row["Job"])
+    if a.state == "done" and not study and previous.get("state", "done") == "done":
         packet = read_ready_packet(inst, n, a.branch, row)
         reasons = previous.get("ready_reasons", [])
-    if a.state == "done" and (a.reviews is not None or getattr(a, "record", False)):
+    if a.state == "done" and not study and (a.reviews is not None or getattr(a, "record", False)):
         packet, reasons = record_ready(inst, n, a.branch, a.reviews)
     # Verification released the global lock. Re-read under it before publishing so a
     # concurrently closed/restarted job never receives this worker's old result.
@@ -3537,11 +3556,13 @@ def cmd_handback(a):
         data = {"version": 2, "job": row["Job"], "started": row["Started"], "state": a.state,
                 "at": inst.now_dt().isoformat(timespec="seconds"), "report": tilde(a.report) if a.report is not None else previous.get("report", ""),
                 "lessons": lessons, "ready": packet, "ready_reasons": reasons}
+        if study:
+            data.update(ready_required=False, review_rounds=a.reviews)
         f.parent.mkdir(exist_ok=True)
         atomic_write(f, json.dumps(data, indent=2) + "\n")
         touch(f)
         inst.commit([], f"{n['id']}: worker hand-back")
-    checked = a.state == "done" and (a.reviews is not None or getattr(a, "record", False))
+    checked = not study and a.state == "done" and (a.reviews is not None or getattr(a, "record", False))
     if checked:
         state = ready_state(inst, n, a.branch)
         why = reasons + state["reasons"]
@@ -3610,9 +3631,17 @@ def jobs_summary(inst, n):
 
 def cmd_jobs(a):
     inst = load()
-    if a.lessons is not None or a.switch is not None:
+    if a.start or a.close or a.lessons is not None or a.switch is not None:
         if not a.id or not a.branch:
-            die("--lessons and --switch need a node and --branch")
+            die("job updates need a node and --branch")
+        if a.start or a.close:
+            n = inst.node(a.id)
+            if not import_job(a.branch):
+                die("--start and --close apply only to import:<snapshot> studies")
+            if a.start:
+                if a.close or not n["external"] or not n["home_path"] or a.branch != import_job_id(n["home_path"]):
+                    die("--start needs the current import snapshot and cannot combine with --close")
+                job_started(inst, n, a.branch, n["fm"].get("runtime", ""))
         n = inst.node(a.id)
         rows = ledger_rows(n)
         r = next((r for r in reversed(rows or []) if r["Job"] == a.branch), None)
@@ -3637,6 +3666,10 @@ def cmd_jobs(a):
             r["Switches"] = "; ".join(filter(None, [r.get("Switches"), f"{stamp(inst)} {a.switch.strip()}"]))
         write_jobs(inst, n, rows)
         inst.commit([], f"{n['id']}: job outcome")
+        if a.close:
+            if not open_job(rows or [], a.branch):
+                die("no open import study to close")
+            job_ended(inst, n, a.branch, "studied", cause="coordinator processed import hand-back")
     for n in inst.nodes():
         if a.id and n["id"] != a.id:
             continue
@@ -4007,15 +4040,16 @@ def due_items(inst, n, evidence=None, include_stale=True):
         if w and w["merged"]:
             add("merged-job", f"{branch}: merged in local git; close the ledger and prune", job=job_key(row))
         elif signal:
-            ready = ready_state(inst, n, branch) if signal["state"] == "done" else None
+            ready = ready_state(inst, n, branch) if signal["state"] == "done" and not import_job(branch) else None
             detail = ("ready to merge" if ready["ready"] else
-                      "finished but not ready (" + "; ".join(ready["reasons"]) + ")") if ready else signal["state"]
+                      "finished but not ready (" + "; ".join(ready["reasons"]) + ")") if ready else (signal["state"] + "; node study, no home ready evidence required"
+                                           if import_job(branch) else signal["state"])
             add("handback", f"{branch}: {detail}; review report {signal.get('report', '')} and record the next step",
                 job=job_key(row), state=signal["state"], ready=bool(ready and ready["ready"]),
                 reasons=ready["reasons"] if ready else [])
         elif handback_file(n, row).exists():
             add("invalid-handback", f"{branch}: unreadable worker signal; ask the worker to write it again", job=job_key(row))
-        if not w or not w["exists"]:
+        if not import_job(branch) and (not w or not w["exists"]):
             add("missing-worktree", f"{branch}: open ledger job has no worktree on this machine", job=job_key(row))
     for branch, w in state["worktrees"].items():
         if not open_job(state["jobs"] or [], branch):
@@ -4068,6 +4102,9 @@ def status_facts(inst, n, state, known_merges):
                       "legacy; outcome not required")), never_terms(n)) for r in lessons] or ["- None."]
     lines += ["", "Finished jobs awaiting coordinator:"]
     lines += ["- " + i["text"] for i in due if i["kind"] == "handback"] or ["- None."]
+    rules, roles, items = pending_imports(inst, n)
+    if rules or roles or items:
+        lines += ["", f"Imported, unreviewed (inactive): {rules} rule file(s), {roles} role(s), {items} proposed item(s)."]
     human = [i for i in attention_items(inst, [n]) if i[1] not in ("stale",)]
     lines += ["", f"Due: {len(due)} · Needs the human (attention sources, excluding stale status): {len(human)}"]
     return lines, merged
@@ -4126,6 +4163,13 @@ def inbox_items(inst, nodes=None, reporter="root"):
         first = record.get("first_seen") if isinstance(record, dict) else None
         if not first:
             source = n["dir"] / ("inbox.md" if kind == "inbox" else "status.md" if kind in ("blocked", "stale") else "node.md")
+            if kind == "import-review":
+                sources = [n["dir"] / "sources/import-proposals.md"]
+                sources += [s["dir"] / "role.md" for s in find_specialists(inst)
+                            if s["node"]["id"] == nid and s["fm"].get("status") == "proposed"]
+                sources += [i["path"] for i in inst.items() if i["fm"].get("source_node") == nid and
+                            i["fm"].get("status") == "proposed"]
+                source = next((p for p in sources if p.is_file()), source)
             needle = text.removeprefix("inbox: ") if kind == "inbox" else text
             history = git("log", "--reverse", "--format=%cI", "-S", needle, "--",
                           str(source.relative_to(inst.root)), cwd=inst.root).stdout.splitlines()
@@ -4303,12 +4347,32 @@ def cmd_dashboard(a):
     return True
 
 
+def pending_imports(inst, n):
+    rules = n["dir"] / "sources/import-proposals.md"
+    rules_pending = False
+    if rules.is_file() and rules.read_text().strip():
+        fm, _ = read_fm(rules)
+        reviewed = (fm.get("status") in ("reviewed", "rejected") and
+                    fm.get("reviewed_by") in ({inst.cfg.get("operator")} | (set(inst.principals) - set(inst.revoked))) and
+                    inst.parse_time(fm.get("reviewed_at", "")))
+        rules_pending = not reviewed
+    items = sum(1 for i in inst.items() if i["fm"].get("source_node") == n["id"] and
+                i["fm"].get("status") == "proposed")
+    roles = sum(1 for s in find_specialists(inst) if s["node"]["id"] == n["id"] and
+                s["fm"].get("status") == "proposed")
+    return int(rules_pending), roles, items
+
+
 def attention_items(inst, nodes):
     """[(node id, kind, text)]: what waits on the operator, node by node."""
     out = []
     for n in nodes:
         if n["archived"]:
             continue
+        rules, roles, items = pending_imports(inst, n)
+        if rules or roles or items:
+            out.append((n["id"], "import-review", f"import review: {rules} rule file(s), {roles} role(s), "
+                        f"{items} item(s) proposed; confirm or reject after reviewing source citations"))
         out += [(n["id"], "blocked", b) for b in status_section(n, "blocked")]
         out += [(n["id"], "inbox", "inbox: " + l[2:]) for l in inbox_lines(n)]
         if paused(n):
@@ -5493,7 +5557,7 @@ def writes(a):
     if name == "cmd_check":
         return bool(a.fix)
     if name == "cmd_jobs":
-        return a.lessons is not None or a.switch is not None
+        return a.start or a.close or a.lessons is not None or a.switch is not None
     if name == "cmd_ready":
         return a.record
     if name in ("cmd_principal", "cmd_schedule"):
@@ -5555,7 +5619,9 @@ def main():
         "updatedAt, in UTC)?", "id", "host_time", opt("--grace", type=int, default=5, help="minutes allowed"))
     cmd("jobs", cmd_jobs, "jobs per node: open ones and their age, median hours and review rounds, causes",
         opt("id", nargs="?"), opt("--branch"), opt("--lessons", help="learned item ids, or none: <reason>"),
-        opt("--switch", help="record provider switch: old -> new: reason"))
+        opt("--switch", help="record provider switch: old -> new: reason"),
+        opt("--start", action="store_true", help="coordinator: start an import:<snapshot> study"),
+        opt("--close", action="store_true", help="coordinator: close a processed import study"))
     cmd("due", cmd_due, "coordinator actions from files and local git; empty means no output",
         opt("id", nargs="?"), opt("--json", action="store_true"),
         opt("--quiet", action="store_true", help="no output; exit 1 when anything is due, 0 otherwise"))
@@ -5626,7 +5692,7 @@ def main():
         opt("--from", dest="source", required=True), opt("--at"), "text")
     cmd("hire", cmd_hire, "print a specialist's brief for a job: brain hire <specialist> <node> --task \"...\"",
         "specialist", "node", opt("--task", required=True), opt("--items", default=""),
-        opt("--model", help="job model for scoped usage limits"), opt("--out"), opt("--branch",
+        opt("--model", help="job model for scoped usage limits"), opt("--out"), opt("--branch"),
         opt("--job", help="record this hire for a branch or job id on this machine"))
 
     cmd("workbench", cmd_workbench, "a node's workbench: scripts, reports, worktrees (created if missing)", "id",
@@ -5715,6 +5781,15 @@ def main():
         elif not cmd_dashboard(a):
             ap.print_help()
         return
+    if a.f == cmd_scan:
+        try:
+            a.f(a)
+            sys.stdout.flush()
+        except BrokenPipeError:
+            # Read-only discovery may be piped to head; writes must report delivery failure.
+            with open(os.devnull, "w") as sink:
+                os.dup2(sink.fileno(), sys.stdout.fileno())
+        return
     root = try_find_root() if writes(a) else None
     if root:
         with brain_lock(root):
@@ -5724,9 +5799,4 @@ def main():
 
 
 if __name__ == "__main__":
-    try:
-        main()
-        sys.stdout.flush()
-    except BrokenPipeError:
-        # Avoid another flush failure during interpreter shutdown (e.g. scan | head).
-        os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+    main()

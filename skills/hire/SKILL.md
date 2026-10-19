@@ -14,7 +14,7 @@ stated; never run a polling loop in an agent.
 2. **Pick the items** the job needs: `core/bin/brain item list --node <target>` shows what the
    target may use.
 3. **Assemble the brief:**
-   `core/bin/brain hire <specialist> <target> --task "<task, constraints, who to report to>" [--items a,b] [--out <file>] [--branch <branch>]`.
+   `core/bin/brain hire <specialist> <target> --task "<task, constraints, who to report to>" [--items a,b] [--out <file>] [--branch <branch>] [--job <job id>]`.
    Add `--model <id or display name>` when the job's model is known, so its scoped weekly
    limit is checked. It finds the nearest specialist at or above the target, refuses if its scope doesn't cover
    the target's owners, and includes only the lessons and items in scope.

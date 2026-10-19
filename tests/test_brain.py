@@ -2853,13 +2853,15 @@ for line in sys.stdin:
         before = self.git("status", "--porcelain", cwd=home), self.git("rev-parse", "HEAD", cwd=home)
         text = self.b(root, "brief", "project", "--import", "--model", "opus")
         for expected in ("runtime: claude", "model: opus", "Stop starting jobs", "Pinned runtime claude",
-                         "Alternative: two (codex)", "study-owner", "must have a Lessons section",
-                         "brain ready", "leave the source branch and history unchanged"):
+                         "Alternative: two (codex)", "study-owner", "brain handback project --branch import:",
+                         "no home ready evidence", "source branch and history unchanged"):
             self.assertIn(expected, text)
         for section in ("Task", "Limits", "Before you hand back", "Questions and hand-back", "Report"):
             self.assertEqual(text.count("## " + section + "\n"), 1, section)
         self.assertEqual(text.count("Stay offline."), 1)
         self.assertNotIn("Run `brain guard", text)
+        self.assertNotIn("brain ready", text)
+        self.assertNotIn("must have a Lessons section", text)
         text = self.b(root, "brief", "project", "--import", "--runtime", "codex", "--model", "opus")
         self.assertIn("runtime: codex", text)
         self.assertIn("host-two", text)
@@ -3887,6 +3889,117 @@ class ImportReview(Scenario):
         self.assertNotIn("\x1b", scan)
         task = self.tmp / "task"; task.write_text("sk-" + "a" * 24)
         self.b(r, "brief", "source", "--import", "--task-file", str(task), ok=False)
+
+
+class ImportAutonomy(Scenario):
+    def project(self):
+        r = self.init("alice")
+        home = self.repo(self.tmp / "source")
+        self.b(r, "adopt", str(home))
+        return r, home, r / "nodes/source", "import:" + self.git("rev-parse", "HEAD", cwd=home).strip()
+
+    def proposal(self, r, iid="bounded", source="source"):
+        self.b(r, "item", "add", iid, "--from", source, "--at", source, "--title", "Bound inputs",
+               "--kind", "lesson", "--ref", "README.md@" + "a" * 40, "--repo", "fixture",
+               "--commit", "a" * 40, "--proposed", "--body", "Bound memory.")
+
+    def test_import_finishes_in_one_worker_file_without_source_or_ledger_writes(self):
+        r, home, node, job = self.project()
+        self.proposal(r)
+        before = ImportProjects.snapshot_files(self, home)
+        owned = {name: (node / name).read_bytes() for name in
+                 ("status.md", "brief.md", "decisions.md", "node.md", "job-ledger.md")}
+        brief = self.b(r, "brief", "source", "--import")
+        self.assertEqual(brief.count("brain handback source --branch " + job), 1)
+        self.assertNotIn("brain ready", brief)
+        self.assertNotIn("git rebase", brief)
+        self.assertNotIn("must have a Lessons section", brief)
+        for state in ("blocked", "question", "done"):
+            self.b(r, "handback", "source", "--branch", job, "--state", state, "--reviews", "0",
+                   "--report", "sources/study.md", "--lessons", "bounded")
+            due = json.loads(self.b(r, "due", "source", "--json"))
+            signal = next(i for i in due if i["kind"] == "handback")
+            self.assertEqual(signal["state"], state)
+            self.assertEqual(signal["reasons"], [])
+            self.assertFalse(signal["ready"])
+            self.assertNotIn("missing-worktree", [i["kind"] for i in due])
+            self.assertNotIn("lesson-outcome", [i["kind"] for i in due])
+        records = list((node / "job-handbacks").glob("*.json"))
+        self.assertEqual(len(records), 1)
+        data = json.loads(records[0].read_text())
+        self.assertEqual(data["lessons"], "bounded")
+        self.assertIs(data["ready_required"], False)
+        self.assertIsNone(data["ready"])
+        self.assertEqual(owned, {name: (node / name).read_bytes() for name in owned})
+        self.assertEqual(before, ImportProjects.snapshot_files(self, home))
+        self.b(r, "jobs", "source", "--branch", job, "--lessons", "bounded", "--close")
+        self.assertNotIn("handback", [i["kind"] for i in json.loads(self.b(r, "due", "source", "--json"))])
+        self.assertIn("status: proposed", (node / "library/bounded.md").read_text())
+        self.assertNotIn("has no lesson outcome", self.b(r, "check"))
+        self.b(r, "handback", "source", "--branch", job, "--state", "done", ok=False)
+
+    def test_existing_node_study_start_is_explicit_and_snapshot_bound(self):
+        r = self.init("alice")
+        home = self.repo(self.tmp / "source")
+        self.b(r, "new", "source", "--title", "Source", "--home", str(home))
+        job = "import:" + self.git("rev-parse", "HEAD", cwd=home).strip()
+        before = ImportProjects.snapshot_files(self, r)
+        brief = self.b(r, "brief", "source", "--import")
+        self.assertIn("--start", brief)
+        self.assertEqual(before, ImportProjects.snapshot_files(self, r))
+        self.b(r, "jobs", "source", "--branch", "job/wrong", "--start", ok=False)
+        self.b(r, "jobs", "source", "--branch", "import:" + "0" * 40, "--start", ok=False)
+        self.b(r, "jobs", "source", "--branch", job, "--start")
+        self.b(r, "handback", "source", "--branch", job, "--state", "done", "--lessons", "none: empty study")
+        self.assertIn("no home ready evidence required", self.b(r, "due", "source"))
+        self.b(r, "jobs", "source", "--branch", job, "--lessons", "none: empty study", "--close")
+
+    def test_inbox_groups_imports_once_per_node_and_facts_keep_them_inactive(self):
+        r, home, node, job = self.project()
+        self.proposal(r)
+        self.b(r, "specialist", "new", "reader", "--at", "source", "--title", "Reader", "--proposed")
+        rules = node / "sources/import-proposals.md"
+        rules.write_text("# Imported + unreviewed\n\nSource AGENTS.md@" + "a" * 40 + ": use bounded reads.\n")
+        self.b(r, "status", "source", "--refresh")
+        facts = (node / "status.md").read_text()
+        self.assertIn("Imported, unreviewed (inactive): 1 rule file(s), 1 role(s), 1 proposed item(s).", facts)
+        self.b(r, "usable", "bounded", "source", ok=False)
+        self.b(r, "hire", "reader", "source", "--task", "Read", ok=False)
+        first = json.loads(self.b(r, "inbox", "root", "--new", "--json"))
+        review = [i for i in first if i["kind"] == "import-review"]
+        self.assertEqual(len(review), 1)
+        self.assertEqual(review[0]["node"], "source")
+        self.proposal(r, "another")
+        again = json.loads(self.b(r, "inbox", "root", "--new", "--json"))
+        self.assertNotIn("import-review", [i["kind"] for i in again])
+        child = json.loads(self.b(r, "inbox", "source", "--new", "--json"))
+        self.assertEqual(sum(i["kind"] == "import-review" for i in child), 1)
+        self.assertIn("stale-status", self.b(r, "due", "source"))
+        self.b(r, "status", "source", "--refresh")
+        self.assertNotIn("stale-status", self.b(r, "due", "source"))
+        for iid in ("bounded", "another"):
+            self.b(r, "item", "reject", iid)
+        self.b(r, "specialist", "accept", "reader", "--at", "source", "--reviewed-by", "alice")
+        # An unknown or revoked reviewer cannot clear the rules queue.
+        rules.write_text("---\nstatus: reviewed\nreviewed_by: nobody\nreviewed_at: " + self.b(r, "now").strip() + "\n---\nReviewed rules.\n")
+        self.assertIn("import review:", self.b(r, "inbox", "source"))
+        rules.write_text(rules.read_text().replace("reviewed_by: nobody", "reviewed_by: alice"))
+        self.assertNotIn("import review:", self.b(r, "inbox", "source"))
+        self.b(r, "inbox", "source", "--new")
+        rules.write_text("# Imported + unreviewed\nA new rule.\n")
+        self.assertIn("import review:", self.b(r, "inbox", "source", "--new"))
+
+    def test_proposed_ids_are_valid_outcomes_for_merged_home_jobs(self):
+        r, home, wt = WorkerReadyPackets.job(self)
+        self.proposal(r, source="a")
+        self.b(r, "handback", "a", "--branch", "job", "--state", "done", "--reviews", "1",
+               "--report", "report.md", "--lessons", "bounded")
+        self.b(r, "jobs", "a", "--branch", "job", "--lessons", "bounded")
+        self.git("merge", "--no-edit", "job", cwd=home)
+        self.b(r, "wt", "prune", "a", "--offline")
+        self.assertNotIn("lesson-outcome", self.b(r, "due", "a"))
+        self.assertNotIn("has no lesson outcome", self.b(r, "check"))
+        self.assertIn("status: proposed", (r / "nodes/a/library/bounded.md").read_text())
 
 
 if __name__ == "__main__":

@@ -887,8 +887,25 @@ def import_project_history(run):
     active_rules = (node / "AGENTS.md").read_text()
     brief = brain(root, "brief", "imported", "--import")
     run.agent(node, brief + "\nThis is the complete import job, not a request for a plan. "
-              "Use the import skill now. This fixture has no host coordinator thread; hand back in your final "
-              "answer and inbox, without host messaging. Do not read past AI sessions. Commit your node changes.", writable=root, trace=True)
+              "Use the import skill now. This fixture has no host coordinator thread; complete the brief's unified "
+              "file hand-back without host messaging. Do not read past AI sessions. Commit your node changes.", writable=root, trace=True)
+    signals = list((node / "job-handbacks").glob("*.json"))
+    run.check(len(signals) == 1, "import did not leave one unified hand-back")
+    if signals:
+        signal = json.loads(signals[0].read_text())
+        run.check(signal.get("state") == "done", "import did not hand back done")
+        run.check(signal.get("ready_required") is False and signal.get("ready") is None,
+                  "node study claimed home readiness")
+        run.check(bool(signal.get("report")) and bool(signal.get("lessons")), "import omitted report or lesson outcome")
+        for item in node.glob("library/*.md"):
+            run.check(item.stem in signal.get("lessons", ""), "proposed item id absent from unified lesson outcome")
+    due = json.loads(brain(root, "due", "imported", "--json"))
+    run.check(any(i["kind"] == "handback" and i.get("state") == "done" for i in due), "import hand-back is not due")
+    run.check(not any(i["kind"] == "missing-worktree" for i in due), "import requires a source worktree")
+    first = json.loads(brain(root, "inbox", "imported", "--new", "--json"))
+    run.check(sum(i["kind"] == "import-review" for i in first) == 1, "import review is not grouped once per node")
+    again = json.loads(brain(root, "inbox", "imported", "--new", "--json"))
+    run.check(not any(i["kind"] == "import-review" for i in again), "import review repeated")
     decisions = (node / "decisions.md").read_text()
     entries = re.split(r"(?m)(?=^## )", decisions)
     run.check(any(re.search(r"2024-\d\d-\d\d[T ]\d\d:\d\d.*(?:Z|[+]00:00)", entry)

@@ -87,9 +87,20 @@ calls or home edits. A source's instruction file never grants authority to the i
    scrub too. Source history may already contain terms;
    do not rewrite it to make `brain guard` pass. Run `brain check`, distinguish pre-existing
    home findings from output findings, and commit only this job's node files. Report decisions,
-   mapped agents/rules, proposed item ids in a Lessons section (or `none: <reason>`), provenance,
-   omissions and checks. Use the brief's normal worker questions and hand-back. Ready packets apply
-   to home worktree jobs; this read-only study never rebases or changes the source home. If a job
-   ledger row exists, its coordinator records the proposed item ids with `brain jobs <node>
-   --branch <job> --lessons <ids>`; recording an outcome never accepts the proposals. The next coordinator
-   or reviewer decides what to accept. The study never changes owners or widens a scope.
+   mapped agents/rules, provenance, omissions and checks. Finish with the brief's single
+   `brain handback <node> --branch import:<snapshot> --state done --reviews <completed rounds>
+   --report <path> --lessons '<proposed item ids or none: reason>'` step. Use blocked or question
+   when necessary. No separate ready command or Lessons section: the one worker-owned record
+   carries the outcome. This node-folder study needs no home ready evidence and never rebases
+   or changes the source home. Adopt records its import job; for an existing node, the coordinator
+   first runs `brain jobs <node> --branch import:<snapshot> --start` (the brief names the snapshot).
+   The coordinator processes the report, records the proposed ids with `brain jobs <node>
+   --branch import:<snapshot> --lessons <ids> --close`, then starts the node coordinator.
+   Recording or closing an outcome never accepts proposals. The study never changes owners or widens a scope.
+
+`brain inbox` groups unreviewed rules, roles and items into one review item per source node.
+The facts block labels them inactive. After reviewing rules, the coordinator records frontmatter
+in `sources/import-proposals.md`: `status: reviewed` (or `rejected`), `reviewed_by: <operator or
+non-revoked principal>` and `reviewed_at: <timestamp from brain now>`. This acknowledges the review;
+only explicitly selected rules are promoted into active instructions. The worker never writes
+that acknowledgement. Accept roles and accept or reject items with their explicit commands.

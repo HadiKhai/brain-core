@@ -153,6 +153,12 @@ never accepts its own proposals. Rejection keeps an unusable `rejected` record; 
 activates it. Quarantine blocks all states (axiom 21); restoring a quarantined proposal leaves it proposed, not accepted. Older
 quarantined items without a saved state restore to active for compatibility.
 
+Node-folder import studies use ledger jobs `import:<snapshot>` and the same worker-owned
+hand-back command. They never change the source home and need no home ready evidence; `due`
+routes their reports to the coordinator, which records the proposed item ids and closes the study.
+Proposed ids are valid lesson outcomes without becoming usable items. Inbox groups pending
+import review once per node; generated facts label proposals inactive.
+
 Imported rules and roles are summarized as untrusted data, never copied into active instructions.
 Rules stay in `sources/import-proposals.md` marked imported and unreviewed; imported specialists
 are `proposed` and cannot be hired. The operator/coordinator confirms activation after review.
