@@ -2706,5 +2706,274 @@ for line in sys.stdin:
                                                   ok=False, brain=CORE / "bin/brain"))
 
 
+class AutonomyProject(Scenario):
+    def project(self):
+        r = self.init('alice')
+        home = self.repo(self.tmp / 'code' / 'app')
+        self.b(r, 'new', 'app', '--title', 'App', '--home', str(home))
+        self.b(r, 'wt', 'add', 'app', 'job-a')
+        local = json.loads((r / '.brain' / 'local.json').read_text())
+        wt = Path(local['nodes']['app']['worktrees']['job-a']['path'])
+        return r, home, wt
+
+    def due(self, r, node='app'):
+        return json.loads(self.b(r, 'due', node, '--json'))
+
+
+
+class AutonomyDue(AutonomyProject):
+    def test_finished_worker_is_due_until_locally_merged_and_closed(self):
+        r, home, wt = self.project()
+        self.assertNotIn('handback', [i['kind'] for i in self.due(r)])
+        (wt / 'result.txt').write_text('ready\n')
+        self.git('add', '-A', cwd=wt); self.git('commit', '-qm', 'result', cwd=wt)
+        before = (r / 'nodes/app/status.md').read_bytes()
+        ledger = (r / 'nodes/app/job-ledger.md').read_bytes()
+        self.b(r, 'handback', 'app', '--branch', 'job-a', '--state', 'done', '--report', 'reports/result.md')
+        self.assertEqual((r / 'nodes/app/status.md').read_bytes(), before)
+        self.assertEqual((r / 'nodes/app/job-ledger.md').read_bytes(), ledger)
+        self.assertEqual([i['state'] for i in self.due(r) if i['kind'] == 'handback'], ['done'])
+        self.assertIn('brain handback app --branch job-a', self.b(r, 'brief', 'app', '--branch', 'job-a'))
+        self.git('merge', '-q', 'job-a', cwd=home)
+        self.assertIn('merged-job', [i['kind'] for i in self.due(r)])
+        self.assertNotIn('handback', [i['kind'] for i in self.due(r)])
+        self.b(r, 'wt', 'prune', 'app', '--offline')
+        self.assertNotIn('handback', [i['kind'] for i in self.due(r)])
+        self.assertEqual(len(list((r / 'nodes/app/job-handbacks').glob('*.json'))), 1)
+
+    def test_quiet_empty_and_due_exit_codes_and_no_file_changes(self):
+        r = self.init('alice')
+        def quiet():
+            return subprocess.run([sys.executable, str(r / 'core/bin/brain'), 'due', 'root', '--quiet'],
+                                  cwd=r, env=self.env, text=True, capture_output=True, timeout=10)
+        p = quiet()
+        self.assertEqual((p.returncode, p.stdout, p.stderr), (0, '', ''))
+        (r / 'inbox.md').write_text('- 2026-10-19 10:00 +00:00 from worker: question: Which format?\n')
+        p = quiet()
+        self.assertEqual((p.returncode, p.stdout, p.stderr), (1, '', ''))
+        self.assertIn('Which format?', self.b(r, 'due'))
+        (r / 'inbox.md').write_text('')
+        self.assertEqual(quiet().returncode, 0)
+
+    def test_legacy_and_missing_worktrees_and_failed_handback(self):
+        r, home, wt = self.project()
+        self.b(r, 'handback', 'app', '--branch', 'job-a', '--state', 'failed')
+        self.assertEqual([i['state'] for i in self.due(r) if i['kind'] == 'handback'], ['failed'])
+        self.git('worktree', 'remove', str(wt), cwd=home)
+        self.assertIn('missing-worktree', [i['kind'] for i in self.due(r)])
+        (r / 'nodes/app/job-ledger.md').write_text('# Old job notes\n')
+        kinds = [i['kind'] for i in self.due(r)]
+        self.assertIn('ledger', kinds)
+        self.assertIn('unrecorded-worktree', kinds)
+        self.assertEqual((r / 'nodes/app/job-ledger.md').read_text(), '# Old job notes\n')
+        self.b(r, 'handback', 'app', '--branch', 'missing', '--state', 'done', ok=False)
+
+    def test_old_status_is_due_and_refresh_resolves_only_staleness(self):
+        r, home, wt = self.project()
+        st = r / 'nodes/app/status.md'
+        st.write_text('Updated: 2020-01-01 00:00 +00:00\n\n## Now\n\n- Busy.\n')
+        self.assertIn('stale-status', [i['kind'] for i in self.due(r)])
+        self.b(r, 'status', 'app', '--refresh')
+        self.assertNotIn('stale-status', [i['kind'] for i in self.due(r)])
+        # The status-only commit must not create a self-sustaining due loop.
+        self.git('add', 'nodes/app/status.md', cwd=r); self.git('commit', '-qm', 'app: refresh', cwd=r)
+        self.assertEqual(self.due(r), [])
+        self.b(r, 'handback', 'app', '--branch', 'job-a', '--state', 'blocked', '--report', 'report.md')
+        self.assertIn('stale-status', [i['kind'] for i in self.due(r)])
+        self.b(r, 'status', 'app', '--refresh')
+        self.assertEqual([i['kind'] for i in self.due(r)], ['handback'])
+        # A local commit on a worker branch is visible even with no new ledger event.
+        (wt / 'new.txt').write_text('new\n')
+        self.git('add', '-A', cwd=wt); self.git('commit', '-qm', 'new', cwd=wt)
+        self.assertIn('stale-status', [i['kind'] for i in self.due(r)])
+
+    def test_refresh_before_a_combined_notes_commit_stays_current(self):
+        r, home, wt = self.project()
+        brief = r / 'nodes/app/brief.md'
+        brief.write_text(brief.read_text() + '\nA fresh judgement.\n')
+        self.b(r, 'status', 'app', '--refresh')
+        self.git('add', 'nodes/app', cwd=r); self.git('commit', '-qm', 'app: notes', cwd=r)
+        self.assertEqual(self.due(r), [])
+        brief.write_text(brief.read_text() + '\nAnother event.\n')
+        self.assertIn('stale-status', [i['kind'] for i in self.due(r)])
+
+    def test_reused_branch_has_a_distinct_signal(self):
+        r, home, wt = self.project()
+        self.b(r, 'handback', 'app', '--branch', 'job-a', '--state', 'done')
+        self.b(r, 'wt', 'rm', 'app', 'job-a', '--cause', 'restart')
+        self.b(r, 'wt', 'add', 'app', 'job-a')
+        self.assertNotIn('handback', [i['kind'] for i in self.due(r)])
+        self.b(r, 'handback', 'app', '--branch', 'job-a', '--state', 'blocked')
+        self.assertEqual(len(list((r / 'nodes/app/job-handbacks').glob('*.json'))), 2)
+
+    def test_corrupt_worker_signal_is_due_rather_than_a_crash(self):
+        r, home, wt = self.project()
+        self.b(r, 'handback', 'app', '--branch', 'job-a', '--state', 'done')
+        signal = next((r / 'nodes/app/job-handbacks').glob('*.json'))
+        signal.write_text('{broken')
+        self.assertIn('invalid-handback', [i['kind'] for i in self.due(r)])
+
+    def test_handback_record_cannot_be_moved_into_a_sealed_home(self):
+        r, home, wt = self.project()
+        self.b(r, 'handback', 'app', '--branch', 'job-a', '--state', 'done')
+        self.b(r, 'principal', 'add', 'bob')
+        sealed_home = self.tmp / 'sealed-app'
+        out = self.b(r, 'seal', 'app', '--owners', 'bob', '--home', str(sealed_home),
+                     '--move', 'job-handbacks', ok=False)
+        self.assertIn("stays on the operator's side", out)
+        self.assertFalse(sealed_home.exists())
+        self.assertTrue(list((r / 'nodes/app/job-handbacks').glob('*.json')))
+
+    def test_due_redacts_and_never_calls_the_network(self):
+        r, home, wt = self.project()
+        (r / 'nodes/app/never-name.txt').write_text('OldCo\n')
+        self.b(r, 'handback', 'app', '--branch', 'job-a', '--state', 'done', '--report', 'OldCo/report.md')
+        fakebin = self.tmp / 'fakebin'; fakebin.mkdir()
+        gh = fakebin / 'gh'; gh.write_text('#!/bin/sh\ntouch "' + str(self.tmp / 'network-called') + '"\nexit 1\n'); gh.chmod(0o755)
+        self.git('remote', 'add', 'origin', 'https://github.com/example/example', cwd=home)
+        self.env['PATH'] = str(fakebin) + ':' + self.env['PATH']
+        self.assertNotIn('OldCo', self.b(r, 'due', 'app', '--json'))
+        self.assertFalse((self.tmp / 'network-called').exists())
+
+
+class AutonomyFacts(AutonomyProject):
+    def test_refresh_preserves_every_byte_outside_markers_and_updates_timestamp(self):
+        r, home, wt = self.project()
+        st = r / 'nodes/app/status.md'
+        original = 'Updated: 2020-01-01 00:00 +00:00\n\n# App\n\n## Now\n\n- Judgement, exactly.\n'
+        st.write_text(original)
+        self.b(r, 'status', 'app', '--refresh')
+        text = st.read_text()
+        self.assertTrue(text.endswith('\n\n' + original))
+        self.assertIn('Open worktrees (this machine):\n- job-a: present', text)
+        self.assertIn('runtime activity unknown', text)
+        self.assertNotIn('2020', self.b(r, 'status', 'app'))
+        self.assertIn('+00:00', text.split('Updated:', 1)[1].splitlines()[0])
+        st.write_text('PREFIX\n' + text + '\nSUFFIX')
+        prefix, rest = st.read_text().split('<!-- brain:facts v1 -->')
+        _, suffix = rest.split('<!-- /brain:facts -->')
+        self.b(r, 'status', 'app', '--refresh')
+        self.assertTrue(st.read_text().startswith(prefix))
+        self.assertTrue(st.read_text().endswith(suffix))
+        self.b(r, 'status', '--refresh', ok=False)
+
+    def test_merged_since_previous_refresh_is_a_snapshot_not_a_guess_from_the_clock(self):
+        r, home, wt = self.project()
+        self.b(r, 'status', 'app', '--refresh')
+        (wt / 'a.txt').write_text('a\n')
+        self.git('add', '-A', cwd=wt); self.git('commit', '-qm', 'A', cwd=wt)
+        self.git('merge', '-q', 'job-a', cwd=home)
+        self.b(r, 'wt', 'prune', 'app', '--offline')
+        self.b(r, 'status', 'app', '--refresh')
+        st = r / 'nodes/app/status.md'
+        self.assertIn('job-a (1 commits)', st.read_text())
+        self.b(r, 'status', 'app', '--refresh')
+        self.assertIn('Merged since previous refresh:\n- None recorded.', st.read_text())
+
+    def test_facts_show_local_merge_before_ledger_closes_without_reporting_it_twice(self):
+        r, home, wt = self.project()
+        self.b(r, 'status', 'app', '--refresh')
+        (wt / 'a.txt').write_text('a\n')
+        self.git('add', '-A', cwd=wt); self.git('commit', '-qm', 'A', cwd=wt)
+        self.git('merge', '-q', 'job-a', cwd=home)
+        self.b(r, 'status', 'app', '--refresh')
+        st = r / 'nodes/app/status.md'
+        self.assertIn('- job-a: merged in local git; ledger still open', st.read_text())
+        self.b(r, 'wt', 'prune', 'app', '--offline')
+        self.b(r, 'status', 'app', '--refresh')
+        self.assertIn('Merged since previous refresh:\n- None recorded.', st.read_text())
+
+    def test_malformed_markers_are_not_overwritten(self):
+        r = self.init('alice')
+        st = r / 'status.md'
+        for text in ['<!-- brain:facts v1 -->\nUnclosed\n',
+                     '<!-- /brain:facts -->\n<!-- brain:facts v1 -->',
+                     '<!-- brain:facts v1 --><!-- /brain:facts -->' * 2]:
+            st.write_text(text)
+            before = st.read_bytes()
+            self.b(r, 'status', 'root', '--refresh', ok=False)
+            self.assertEqual(st.read_bytes(), before)
+
+    def test_refresh_preserves_crlf_outside_the_block(self):
+        r = self.init('alice')
+        st = r / 'status.md'
+        original = b'Updated: old\r\n\r\n## Now\r\n- Original.\r\n'
+        st.write_bytes(original)
+        self.b(r, 'status', 'root', '--refresh')
+        self.assertTrue(st.read_bytes().endswith(original))
+        st.write_bytes(b'PREFIX\r\n' + st.read_bytes() + b'SUFFIX\r\n')
+        before = st.read_bytes()
+        self.b(r, 'status', 'root', '--refresh')
+        self.assertEqual(st.read_bytes().split(b'<!-- /brain:facts -->')[1],
+                         before.split(b'<!-- /brain:facts -->')[1])
+        self.assertTrue(st.read_bytes().startswith(b'PREFIX\r\n'))
+
+    def test_refresh_and_due_do_not_wait_for_lock_from_hook(self):
+        import fcntl
+        r = self.init('alice')
+        self.b(r, 'status', 'root', '--refresh')
+        st = r / 'status.md'
+        before = st.read_bytes()
+        with open(r / '.brain/lock', 'a+') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            for args, data in [(['due', 'root', '--quiet'], None),
+                               (['hook', 'stop'], json.dumps({'cwd': str(r), 'session_id': 'locked'}))]:
+                p = subprocess.run([sys.executable, str(r / 'core/bin/brain'), *args], cwd=r,
+                                   env=self.env, input=data, capture_output=True, text=True, timeout=5)
+                self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertEqual(st.read_bytes(), before)
+
+
+class AutonomyInbox(Scenario):
+    def items(self, r, *args):
+        return json.loads(self.b(r, 'inbox', '--json', *args))
+
+    def test_stable_ids_once_per_machine_and_resolution(self):
+        r = self.init('alice')
+        self.b(r, 'new', 'a', '--title', 'A')
+        st = r / 'nodes/a/status.md'
+        st.write_text(st.read_text().replace('## Blocked / needs the operator\n',
+                                             '## Blocked / needs the operator\n\n- Pick a plan.\n- Approve a budget.\n'))
+        first = self.items(r, '--new')
+        plan = next(i for i in first if i['text'] == 'Pick a plan.')
+        self.assertEqual(self.items(r, '--new'), [])
+        st.write_text(st.read_text().replace('Approve a budget.', 'Choose a new name.'))
+        fresh = self.items(r, '--new')
+        self.assertEqual([i['text'] for i in fresh], ['Choose a new name.'])
+        again = next(i for i in self.items(r) if i['text'] == 'Pick a plan.')
+        self.assertEqual((again['id'], again['first_seen']), (plan['id'], plan['first_seen']))
+        self.assertTrue(again['reported'])
+        st.write_text(st.read_text().replace('- Pick a plan.\n', ''))
+        self.assertNotIn(plan['id'], [i['id'] for i in self.items(r, '--new')])
+        self.assertNotIn(plan['id'], json.loads((r / '.brain/inbox-seen.json').read_text()))
+        st.write_text(st.read_text().replace('## Blocked / needs the operator\n',
+                                             '## Blocked / needs the operator\n\n- Pick a plan.\n'))
+        self.assertEqual([i['text'] for i in self.items(r, '--new')], ['Pick a plan.'])
+        (r / '.brain/inbox-seen.json').unlink()
+        self.assertTrue(self.items(r, '--new'), 'another machine has independent seen state')
+
+    def test_ui_reuses_attention_sources_without_marking_reported(self):
+        r = self.init('alice')
+        (r / 'inbox.md').write_text('- 2026-10-19 10:00 +00:00 from worker: question: Which date?\n')
+        state = json.loads(self.b(r, 'ui', '--json'))
+        self.assertEqual({(i['node'], i['kind'], i['text']) for i in state['inbox']},
+                         {(i['node'], i['kind'], i['text']) for i in state['attention']})
+        self.assertTrue(all(i['id'] and i['first_seen'] for i in state['inbox']))
+        self.assertFalse((r / '.brain/inbox-seen.json').exists())
+        self.assertEqual(state['inbox'], self.items(r))
+        self.assertEqual(len(self.items(r, '--new')), len(state['inbox']))
+        self.assertTrue(all(i['reported'] for i in json.loads(self.b(r, 'ui', '--json'))['inbox']))
+        self.assertFalse(self.git('ls-files', '.brain', cwd=r).strip())
+
+    def test_stale_day_count_does_not_create_another_notification(self):
+        r = self.init('alice')
+        st = r / 'status.md'
+        st.write_text('Updated: 2020-01-01 00:00 +00:00\n')
+        first = next(i for i in self.items(r, '--new') if i['kind'] == 'stale')
+        st.write_text('Updated: 2020-01-02 00:00 +00:00\n')
+        self.assertEqual(self.items(r, '--new'), [])
+        self.assertEqual(next(i['id'] for i in self.items(r) if i['kind'] == 'stale'), first['id'])
+
+
 if __name__ == "__main__":
     unittest.main()

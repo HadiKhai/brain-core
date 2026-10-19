@@ -7,9 +7,11 @@ Judgment work (what goes in a brief, how to split state) lives in core/skills, n
 """
 import argparse
 import datetime
+import hashlib
 import json
 import os
 import re
+import shlex
 import shutil
 import socket
 import stat
@@ -1613,6 +1615,8 @@ def home_files(root, in_node):
         if in_node:
             if len(parts) == 1 and parts[0] in NOTE_FILES:
                 continue
+            if parts[0] == "job-handbacks":
+                continue  # worker-owned node records, never home content
             if parts[0] == "core" and (root / "instance.md").exists():
                 continue
             if len(parts) > 2 and parts[0] == "nodes" and (root / "nodes" / parts[1] / "node.md").exists():
@@ -1806,7 +1810,7 @@ def cmd_seal(a):
     if inst.root.resolve() in [home, *home.parents]:
         die("the home must be outside the instance (axiom 8)")
     terms = never_terms(n)  # taken now: nothing below may move or change them
-    keep = {"node.md", "AGENTS.md", "nodes", NEVER_FILE, JOBS_FILE}
+    keep = {"node.md", "AGENTS.md", "nodes", NEVER_FILE, JOBS_FILE, "job-handbacks"}
     for rel in a.move or []:  # every move is checked before anything moves
         src = n["dir"] / rel
         try:
@@ -2362,7 +2366,7 @@ def limits_lines(n):
     return (["## Limits", ""] + [f"- {l}" for l in lims] + [""]) if lims else []
 
 
-def handback_lines(inst, n, to=None, who="worker"):
+def handback_lines(inst, n, to=None, who="worker", branch=None):
     """How a worker started by a coordinator asks, and says it's done. It never waits on the operator:
     nobody watches its thread, and a launched thread doesn't wake whoever launched it."""
     to = to or n["local"].get("coordinator")
@@ -2378,6 +2382,9 @@ def handback_lines(inst, n, to=None, who="worker"):
                 "your final message. Write no file.", ""]
     inbox = "" if n["sealed"] else f" and append `- <time from brain now> from {who}: question: <it>` " \
                                      f"to `{tilde(n['dir'] / 'inbox.md')}`"
+    signal = ([f"- **Before handing back**, run `brain handback {shlex.quote(n['id'])} --branch {shlex.quote(branch)} "
+               "--state done|failed|blocked --report <path>` (choose one state). This writes only your job's "
+               "hand-back file; do not edit the ledger or status."] if branch else [])
     return ["## Questions and hand-back", "",
             "- **Never ask the operator, and never wait for an answer in this thread**: nobody is watching it.",
             "- **A choice** the task, the rules or this brief settle: make it, and list it in your report under "
@@ -2386,7 +2393,7 @@ def handback_lines(inst, n, to=None, who="worker"):
             f"- **A question you can't go on without:** {how} with the question{inbox}, then end your turn "
             "with the question as your last line.",
             f"- **When you finish, fail or get blocked**, tell your coordinator straight away: {how} with "
-            "`done|failed|blocked: <one line>. Report: <path>`. Then end your turn.", ""]
+            "`done|failed|blocked: <one line>. Report: <path>`. Then end your turn."] + signal + [""]
 
 
 def report_lines():
@@ -2468,7 +2475,7 @@ def cmd_brief(a):
                 "Hand back only when it prints `ready`; include the packet path and review evidence. "
                 "If main moves, rebase and record again. Only the coordinator merges to main.",
                 f"Packet: `{tilde(ready_path(inst, n, a.branch))}`", ""]
-    out += handback_lines(inst, n, a.to) + report_lines()
+    out += handback_lines(inst, n, a.to, branch=a.branch) + report_lines()
     text = "\n".join(out) + "\n"
     no_terms_in(n, text, "the brief")
     if a.out:
@@ -3003,11 +3010,52 @@ def open_job(rows, branch):
     return next((r for r in reversed(rows) if r["Job"] == branch and not r["Ended"]), None)
 
 
+def digest(value):
+    return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()[:24]
+
+
+def job_key(row):
+    return digest([row["Job"], row["Started"]])
+
+
+def handback_file(n, row):
+    return n["dir"] / "job-handbacks" / (job_key(row) + ".json")
+
+
+def read_handback(n, row):
+    f = handback_file(n, row)
+    try:
+        data = json.loads(f.read_text())
+        if (isinstance(data, dict) and data.get("job") == row["Job"] and
+                data.get("started") == row["Started"] and data.get("state") in ("done", "failed", "blocked")):
+            return data
+    except (OSError, ValueError):
+        pass
+    return None
+
+
+def cmd_handback(a):
+    """The worker owns this one file; the coordinator owns the ledger and never rewrites the signal."""
+    inst = load()
+    n = inst.node(a.id)
+    row = open_job(read_jobs(n) or [], a.branch)
+    if not row:
+        die(redact(f"no open job for {a.branch} in {n['id']}", never_terms(n)))
+    f = handback_file(n, row)
+    data = {"job": row["Job"], "started": row["Started"], "state": a.state,
+            "at": inst.now_dt().isoformat(timespec="seconds"), "report": a.report or ""}
+    f.parent.mkdir(exist_ok=True)
+    f.write_text(json.dumps(data, indent=2) + "\n")
+    touch(f)
+    inst.commit([], f"{n['id']}: worker hand-back")
+    print(redact(f"{n['id']}: {a.branch} {a.state}; coordinator can see it with brain due", never_terms(n)))
+
+
 def job_started(inst, n, branch, runtime):
     with brain_lock(inst):
         rows = ledger_rows(n)
         if rows is not None and not open_job(rows, branch):
-            rows.append({"Job": branch, "Started": stamp(inst), "Reviews": "0", "Runtime": runtime})
+            rows.append({"Job": branch, "Started": inst.now_dt().isoformat(), "Reviews": "0", "Runtime": runtime})
             write_jobs(inst, n, rows)
             inst.commit([], f"{n['id']}: job started")
 
@@ -3269,11 +3317,17 @@ def cmd_schedule(a):
 
 def status_line(n):
     s = n["dir"] / "status.md"
-    return s.read_text().splitlines()[0] if s.exists() and s.read_text().strip() else "(no status.md)"
+    text = s.read_text() if s.exists() else ""
+    block = FACTS_RE.search(text)
+    if block:
+        m = re.search(r"^Updated: .+$", block.group(), re.M)
+        if m:
+            return m.group()
+    return text.splitlines()[0] if text.strip() else "(no status.md)"
 
 
 def updated_at(inst, n):
-    m = re.search(r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2}(?: ?(?:Z|[+-]\d{2}:?\d{2}))?)", status_line(n))
+    m = re.search(r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2}(?::\d{2})?(?: ?(?:Z|[+-]\d{2}:?\d{2}))?)", status_line(n))
     return inst.parse_time(m.group(1)) if m else None
 
 
@@ -3359,6 +3413,240 @@ def inbox_lines(n):
     return [l for l in f.read_text().splitlines() if l.startswith("- ")] if f.exists() else []
 
 
+# ---------- coordinator's mechanical queue and generated status ----------
+
+FACTS_START = "<!-- brain:facts v1 -->"
+FACTS_END = "<!-- /brain:facts -->"
+FACTS_RE = re.compile(re.escape(FACTS_START) + r".*?" + re.escape(FACTS_END), re.S)
+
+
+def facts_meta(n):
+    f = n["dir"] / "status.md"
+    block = FACTS_RE.search(f.read_text()) if f.exists() else None
+    m = re.search(r"<!-- brain:facts-state (.*?) -->", block.group()) if block else None
+    try:
+        data = json.loads(m.group(1)) if m else {}
+        return data if isinstance(data, dict) else {}
+    except ValueError:
+        return {}
+
+
+def local_job_state(n, branch, w):
+    """Only files and local git refs. Unlike worktree_state, never asks gh or a remote."""
+    home = n["home_path"]
+    exists = Path(w["path"]).is_dir()
+    if not home or not home.exists():
+        return {"exists": exists, "tip": "", "merged": False}
+    tip = git("rev-parse", "--verify", "--quiet", f"refs/heads/{branch}", cwd=home).stdout.strip()
+    merged = bool(tip and tip != w.get("start") and w.get("base")) and \
+        git("merge-base", "--is-ancestor", tip, w["base"], cwd=home).returncode == 0
+    return {"exists": exists, "tip": tip, "merged": merged}
+
+
+def due_evidence(inst, n):
+    rows = read_jobs(n)
+    wts = {b: {**w, **local_job_state(n, b, w)} for b, w in sorted(n["local"].get("worktrees", {}).items())}
+    signals = {job_key(r): read_handback(n, r) for r in rows or []}
+    # Node's own commits only, excluding status (including its generated refresh commit) and children.
+    names = ["brief.md", "decisions.md", "node.md", "inbox.md", "sources", "AGENTS.md", JOBS_FILE,
+             "job-handbacks"]
+    paths = [str((n["dir"] / name).relative_to(inst.root)) for name in names]
+    last = git("log", "-1", "--format=%H %cI", "--", *paths, cwd=inst.root).stdout.strip()
+    # Fingerprint current content, not the last commit id: refreshing just before committing
+    # other coordinator notes must stay current after that commit.
+    files = {}
+    for name in names:
+        p = n["dir"] / name
+        for f in p.rglob("*") if p.is_dir() and not p.is_symlink() else [p]:
+            if f.exists() and stat.S_ISREG(f.lstat().st_mode):
+                h = hashlib.sha256()
+                with f.open("rb") as stream:
+                    for chunk in iter(lambda: stream.read(65536), b""):
+                        h.update(chunk)
+                files[str(f.relative_to(n["dir"]))] = h.hexdigest()
+    home = n["home_path"] if n["external"] else None
+    base = default_base(home) if home and home.exists() else None
+    head = git("rev-parse", "--verify", "--quiet", base, cwd=home).stdout.strip() if base else ""
+    state = {"jobs": rows, "worktrees": wts, "handbacks": signals, "inbox": inbox_lines(n),
+             "node_files": files, "blocked": status_section(n, "blocked"), "home_head": head}
+    return state, digest(state), last
+
+
+def status_lag(inst, n, evidence=None):
+    state, fingerprint, last = evidence or due_evidence(inst, n)
+    previous = facts_meta(n)
+    if previous:
+        return "facts differ from current files or git" if previous.get("fingerprint") != fingerprint else None
+    if not (any(not r["Ended"] for r in state["jobs"] or []) or state["worktrees"]):
+        return None
+    u = updated_at(inst, n)
+    if not u:
+        return "open jobs have no status timestamp"
+    times = [inst.parse_time(last.split(" ", 1)[1])] if " " in last else []
+    times += [inst.parse_time(r.get("Ended") or r.get("Started")) for r in state["jobs"] or []]
+    times += [inst.parse_time(s.get("at")) for s in state["handbacks"].values() if s]
+    home = n["home_path"]
+    if n["external"] and home and home.exists():
+        t = git("log", "-1", "--branches", "--format=%cI", cwd=home).stdout.strip()
+        times.append(inst.parse_time(t))
+    # Legacy Updated lines have minute precision. Don't make the status commit stale itself.
+    if any(t and elapsed(u, t) >= 60 for t in times) or elapsed(u, inst.now_dt()) > REMIND_MINUTES * 60:
+        return "status predates job activity or is over an hour old with jobs open"
+    return None
+
+
+def due_items(inst, n, evidence=None):
+    if n["archived"]:
+        return []
+    evidence = evidence or due_evidence(inst, n)
+    state, _, _ = evidence
+    items = []
+    def add(kind, text, **extra):
+        items.append({"node": n["id"], "kind": kind, "text": redact(text, never_terms(n)), **extra})
+    if state["jobs"] is None:
+        add("ledger", "job-ledger.md is a legacy file; reconcile jobs without overwriting it")
+    for row in state["jobs"] or []:
+        if row["Ended"]:
+            continue
+        branch = row["Job"]
+        w = state["worktrees"].get(branch)
+        signal = state["handbacks"][job_key(row)]
+        if w and w["merged"]:
+            add("merged-job", f"{branch}: merged in local git; close the ledger and prune", job=job_key(row))
+        elif signal:
+            add("handback", f"{branch}: worker {signal['state']}; review report {signal.get('report', '')} and record the next step",
+                job=job_key(row), state=signal["state"])
+        elif handback_file(n, row).exists():
+            add("invalid-handback", f"{branch}: unreadable worker signal; ask the worker to write it again", job=job_key(row))
+        if not w or not w["exists"]:
+            add("missing-worktree", f"{branch}: open ledger job has no worktree on this machine", job=job_key(row))
+    for branch, w in state["worktrees"].items():
+        if not open_job(state["jobs"] or [], branch):
+            add("unrecorded-worktree", f"{branch}: worktree has no open ledger job; reconcile the records")
+    for line in state["inbox"]:
+        add("inbox", line[2:])  # coordinator removes handled lines; remaining questions are unanswered
+    lag = status_lag(inst, n, evidence)
+    if lag:
+        add("stale-status", lag + "; update judgement sections, then brain status <node> --refresh")
+    return items
+
+
+def cmd_due(a):
+    inst = load()
+    nodes = [inst.node(a.id)] if a.id else inst.nodes()
+    items = [item for n in nodes for item in due_items(inst, n)]
+    if a.quiet:
+        sys.exit(1 if items else 0)
+    if a.json:
+        print(json.dumps(items, indent=2))
+    else:
+        for item in items:
+            print(f"{item['node']}: {item['kind']}: {item['text']}")
+
+
+def refresh_status(inst, n):
+    f = n["dir"] / "status.md"
+    text = ""
+    if f.exists():
+        with f.open(newline="") as stream:
+            text = stream.read()
+    if (text.count(FACTS_START) != text.count(FACTS_END) or text.count(FACTS_START) > 1 or
+            (FACTS_START in text and not FACTS_RE.search(text))):
+        die("status.md has incomplete or duplicate facts markers; repair them before refreshing")
+    previous = facts_meta(n)
+    evidence = due_evidence(inst, n)
+    state, fingerprint, _ = evidence
+    merged = {job_key(r): r for r in state["jobs"] or [] if r["Ended"] and r["Outcome"] == "merged"}
+    for r in state["jobs"] or []:
+        if not r["Ended"] and state["worktrees"].get(r["Job"], {}).get("merged"):
+            merged[job_key(r)] = {**r, "local_merge": True}
+    new = [r for key, r in merged.items() if key not in previous.get("merged", [])]
+    lines = [FACTS_START, "## Facts (generated by brain status --refresh)", "",
+             "Updated: " + inst.now_dt().isoformat(sep=" ", timespec="seconds"), "",
+             "Merged since previous refresh" + (" (first refresh: recorded history)" if not previous else "") + ":"]
+    lines += [redact(f"- {r['Job']}: merged in local git; ledger still open" if r.get("local_merge") else
+                     f"- {r['Ended']}: {r['Job']} ({r['Commits'] or '?'} commits)", never_terms(n)) for r in new] or ["- None recorded."]
+    lines += ["", "Open worktrees (this machine):"]
+    lines += [redact(f"- {b}: {'present' if w['exists'] else 'missing'}" + ("; merged in local git" if w["merged"] else ""),
+                     never_terms(n)) for b, w in state["worktrees"].items()] or ["- None."]
+    lines += ["", "Running jobs (open in ledger; a hand-back means the worker stopped):"]
+    lines += [redact(f"- {r['Job']}: " + ((state['handbacks'][job_key(r)] or {}).get('state') or "open; runtime activity unknown") +
+                     f"; started {r['Started']}; {r['Reviews'] or '0'} reviews", never_terms(n))
+              for r in state["jobs"] or [] if not r["Ended"]] or ["- None."]
+    if state["jobs"] is None:
+        lines += ["- Legacy ledger: running jobs unknown."]
+    # This refresh resolves only the stale-status item. All actual work remains due.
+    due = [i for i in due_items(inst, n, evidence) if i["kind"] != "stale-status"]
+    human = [i for i in attention_items(inst, [n]) if i[1] not in ("stale",)]
+    lines += ["", f"Due: {len(due)} · Needs the human (attention sources, excluding stale status): {len(human)}", "",
+              "<!-- brain:facts-state " + json.dumps({"fingerprint": fingerprint, "merged": list(merged)}, sort_keys=True) + " -->",
+              FACTS_END]
+    block = "\n".join(lines)
+    if FACTS_RE.search(text):
+        text = FACTS_RE.sub(lambda m: block, text)
+    else:
+        # Prepend: generated Updated is visible before an old, preserved handwritten timestamp.
+        text = block + "\n\n" + text
+    with f.open("w", newline="") as stream:
+        stream.write(text)
+    touch(f)
+
+
+def inbox_items(inst, nodes=None):
+    """The existing UI attention sources, with identities independent of line positions or other items.
+    Read-only; until reported, first_seen comes from the source's git introduction (mtime if uncommitted)."""
+    saved = inst.root / ".brain" / "inbox-seen.json"
+    try:
+        seen = json.loads(saved.read_text()) if saved.exists() else {}
+        seen = seen if isinstance(seen, dict) else {}
+    except (OSError, ValueError):
+        seen = {}
+    seen = {key: value for key, value in seen.items() if isinstance(value, dict)}
+    by_id = {n["id"]: n for n in (nodes if nodes is not None else inst.nodes())}
+    out, ids = [], set()
+    for nid, kind, text in attention_items(inst, list(by_id.values())):
+        identity = text if kind in ("blocked", "inbox") else kind  # stale day counts aren't new requests
+        key = digest([nid, kind, " ".join(identity.split())])
+        if key in ids:
+            continue
+        ids.add(key)
+        n = by_id[nid]
+        record = seen.get(key, {})
+        first = record.get("first_seen") if isinstance(record, dict) else None
+        if not first:
+            source = n["dir"] / ("inbox.md" if kind == "inbox" else "status.md" if kind in ("blocked", "stale") else "node.md")
+            needle = text.removeprefix("inbox: ") if kind == "inbox" else text
+            history = git("log", "--reverse", "--format=%cI", "-S", needle, "--",
+                          str(source.relative_to(inst.root)), cwd=inst.root).stdout.splitlines()
+            first = history[0] if history else datetime.datetime.fromtimestamp(
+                source.stat().st_mtime if source.exists() else inst.now_dt().timestamp(), inst.zone()).isoformat(timespec="seconds")
+        out.append({"id": key, "node": nid, "kind": kind, "text": redact(text, never_terms(n)),
+                    "first_seen": first, "reported": bool(record.get("reported_at")) if isinstance(record, dict) else False})
+    return out, seen
+
+
+def cmd_inbox(a):
+    inst = load()
+    items, seen = inbox_items(inst)
+    if a.new:
+        fresh = [i for i in items if not i["reported"]]
+        now = inst.now_dt().isoformat(timespec="seconds")
+        # Keep only unresolved ids: removing an item resolves it; a later recurrence can notify again.
+        state = {i["id"]: {"first_seen": i["first_seen"], "reported_at": seen.get(i["id"], {}).get("reported_at") or now}
+                 for i in items}
+        f = inst.root / ".brain" / "inbox-seen.json"
+        f.parent.mkdir(exist_ok=True)
+        tmp = f.with_suffix(".tmp")
+        tmp.write_text(json.dumps(state, indent=2) + "\n")
+        os.replace(tmp, f)
+        items = fresh
+    if a.json:
+        print(json.dumps(items, indent=2))
+    else:
+        for item in items:
+            print(f"{item['node']}: [{item['id']}] {item['text']}")
+
+
 def cmd_stale(a):
     """Freshness check: is a node's status.md older than its thread's last activity (any timezone, e.g. ...Z)?"""
     inst = load()
@@ -3400,7 +3688,11 @@ def cmd_tree(a):
 
 def cmd_status(a):
     inst = load()
-    for n in inst.nodes():
+    if a.refresh and not a.id:
+        die("--refresh needs a node id: only its coordinator writes status.md")
+    for n in ([inst.node(a.id)] if a.id else inst.nodes()):
+        if a.refresh:
+            refresh_status(inst, n)
         print(f"{n['id']:<28} {status_line(n)}")
 
 
@@ -3826,6 +4118,10 @@ def notes_lag(inst, n):
             newer += [x for x in files if x.exists() and x != st and x.stat().st_mtime > st.stat().st_mtime + 1]
         if newer:
             out.append("changed after status.md: " + ", ".join(sorted(str(x.relative_to(d)) for x in newer)[:5]))
+        if FACTS_START in st.read_text():
+            events = [d / JOBS_FILE, d / "inbox.md", *(d / "job-handbacks").glob("*.json")]
+            if any(f.exists() and f.stat().st_mtime > st.stat().st_mtime for f in events):
+                out.append(f"job or inbox files changed after facts; run brain status {n['id']} --refresh")
     rel = d.relative_to(inst.root)
     paths = [str(rel / name) for name in COORDINATOR_FILES]
     dirty = git("status", "--porcelain", "--", *paths, cwd=inst.root).stdout.split("\n")
@@ -3895,7 +4191,8 @@ def hook_stop(a):
         pass  # the reminder still goes out; only its bookkeeping is lost
     reason = (f"Before you stop, node `{n['id']}`: {'; '.join(why)}. If you are this node's coordinator, record "
               f"what this conversation decided, started, finished or blocked (decisions.md; status.md and its "
-              f"Updated line; timestamps from `core/bin/brain now`), then commit `{n['id']}: <what changed>`. If you are a worker, don't edit those files: append anything "
+              f"Updated line; timestamps from `core/bin/brain now`; preserve the generated facts block and run "
+              f"`core/bin/brain status {n['id']} --refresh`), then commit `{n['id']}: <what changed>`. If you are a worker, don't edit those files: append anything "
               f"the coordinator should know to inbox.md. If this conversation changed nothing here (you only read "
               f"this node, or it isn't yours), record nothing and end by repeating your previous answer unchanged: "
               f"your last message is what the operator reads.")
@@ -4142,6 +4439,7 @@ def ui_state(inst, problems=None):
                                                                        if r.resolve() != inst.root.resolve()]},
         "nodes": out_nodes,
         "attention": [{"node": a, "kind": k, "text": t} for a, k, t in attention_items(inst, nodes)],
+        "inbox": inbox_items(inst, nodes)[0],
         "commits": commits[:300], "hours": UI_HOURS, "activity": {"start": start, "counts": activity},
         "commits_24h": sum(1 for c in commits if c["t"] > time.time() - 86400), "commits_total": len(commits),
         "items": {"count": len(items), "recent": [{"id": i["fm"].get("id"), "title": i["fm"].get("title"),
@@ -4618,6 +4916,7 @@ def reexec_into_instance_core():
 
 # Commands that change nothing in the instance: they never wait for the lock.
 READ_ONLY = {"cmd_show", "cmd_tree", "cmd_status", "cmd_now", "cmd_jobs", "cmd_stale", "cmd_ui", "cmd_guard",
+             "cmd_due", "cmd_inbox",
              "cmd_brief", "cmd_hire", "cmd_reports", "cmd_brains", "cmd_use", "cmd_machine", "cmd_usable",
              "cmd_item_list", "cmd_wt_list", "cmd_selftest", "cmd_init", "cmd_hook", "cmd_hook_approve", "cmd_help",
              "cmd_dashboard", "cmd_ready", "cmd_usage"}
@@ -4626,6 +4925,10 @@ READ_ONLY = {"cmd_show", "cmd_tree", "cmd_status", "cmd_now", "cmd_jobs", "cmd_s
 def writes(a):
     """Does this command, with these options, change anything in the instance?"""
     name = a.f.__name__
+    if name == "cmd_status":
+        return a.refresh
+    if name == "cmd_inbox":
+        return a.new
     if name in ("cmd_brief", "cmd_hire"):
         return bool(getattr(a, "out", None))  # --out writes a file, maybe inside the instance
     if name == "cmd_check":
@@ -4686,6 +4989,14 @@ def main():
     cmd("jobs", cmd_jobs, "jobs per node: open ones and their age, median hours and review rounds, causes",
         opt("id", nargs="?"), opt("--branch"), opt("--lessons", help="learned item ids, or none: <reason>"),
         opt("--switch", help="record provider switch: old -> new: reason"))
+    cmd("due", cmd_due, "coordinator actions from files and local git; empty means no output",
+        opt("id", nargs="?"), opt("--json", action="store_true"),
+        opt("--quiet", action="store_true", help="no output; exit 1 when anything is due, 0 otherwise"))
+    cmd("inbox", cmd_inbox, "what waits on the human across nodes; --new reports each unresolved item once",
+        opt("--json", action="store_true"), opt("--new", action="store_true"))
+    cmd("handback", cmd_handback, "worker signal for one open ledger job (does not edit coordinator files)",
+        "id", opt("--branch", required=True), opt("--state", choices=["done", "failed", "blocked"], required=True),
+        opt("--report"))
     cmd("show", cmd_show, "everything about one node, including this machine's bindings", "id")
     cmd("set", cmd_set, "set fields: brain set <id> key=value ... (host IDs and home paths stay on this machine)",
         "id", opt("pairs", nargs="+"))
@@ -4783,7 +5094,8 @@ def main():
     cmd("now", cmd_now, "the current time in the instance's timezone, as every record writes it (axiom 17)",
         opt("--iso", action="store_true"))
     cmd("tree", cmd_tree, "show the node tree")
-    cmd("status", cmd_status, "first line of every status.md")
+    cmd("status", cmd_status, "status timestamps; --refresh regenerates only one node's facts block",
+        opt("id", nargs="?"), opt("--refresh", action="store_true"))
     cmd("registry", cmd_registry, "regenerate registry.md")
     cmd("link", cmd_link, "create runtime links (axiom 22); --command puts 'brain' on your PATH; --global adds a "
         "pointer to this Brain in each runtime's user-wide instructions",
