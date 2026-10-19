@@ -2404,8 +2404,8 @@ def cmd_item_status(a, status):
         if fm.get("status") == "proposed":
             die("a proposed item needs 'brain item accept', not restore")
         status = fm.pop("status_before_quarantine", "active")
-        if set(lst(fm.get("scope"))) & set(inst.revoked):
-            die("can't restore an item scoped to a revoked principal")
+        if status == "proposed" and set(lst(fm.get("scope"))) & set(inst.revoked):
+            die("can't restore a proposal scoped to a revoked principal")
     fm["status"] = status
     if status == "quarantined":
         fm["quarantined"] = f"{inst.now()}, {a.reason or 'by the operator'}"
@@ -4796,6 +4796,7 @@ def ui_state(inst, problems=None):
                              "status": fm.get("status", "active"),
                              "state": "accepted" if fm.get("status", "active") == "active" else fm.get("status"),
                              "scope": lst(fm.get("scope")), "path": str(i["path"].relative_to(inst.root)),
+                             "body": read_fm(i["path"])[1],
                              "provenance": {"node": fm.get("source_node"), "ref": fm.get("source_ref"),
                                             "repo": fm.get("source_repo"), "commit": fm.get("source_commit"),
                                             "time": fm.get("learned_at"), "owners": lst(fm.get("source_owners"))},

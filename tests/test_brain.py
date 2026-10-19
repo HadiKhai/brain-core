@@ -3474,6 +3474,7 @@ class ImportProjects(Scenario):
         ui = json.loads(self.b(r, "ui", "--json"))
         item = ui["items"]["all"][0]
         self.assertEqual(item["state"], "proposed")
+        self.assertIn("Bound each input", item["body"])
         self.assertEqual(item["provenance"]["repo"], "fixture-project")
         self.assertEqual(item["provenance"]["commit"], "a" * 40)
         self.assertEqual(ui["specialists"][0]["lessons"][0]["text"], "Bound source reads")
@@ -3515,7 +3516,11 @@ class ImportProjects(Scenario):
         h = self.repo(self.tmp / "team-project")
         self.b(r, "new", "team", "--title", "Team", "--owners", "team", "--home", str(h))
         self.proposal(r, source="team")
+        self.b(r, "item", "add", "legacy", "--from", "team", "--title", "Legacy", "--kind", "fact", "--ref", "old")
         self.b(r, "revoke", "team")
+        # An explicit restore of an older active item keeps its existing behavior.
+        self.b(r, "item", "restore", "legacy")
+        self.assertIn("status: active", (r / "library/legacy.md").read_text())
         self.assertIn("status_before_quarantine: proposed", (r / "library/bounded-input.md").read_text())
         self.b(r, "item", "restore", "bounded-input", ok=False)
         self.b(r, "usable", "bounded-input", "root", ok=False)
