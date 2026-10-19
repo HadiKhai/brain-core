@@ -29,6 +29,15 @@ moment.
   `Why:` and `Alternatives considered:`. If the operator made it, add `Said:` with their exact
   words: a paraphrase drifts. An exception to a standing rule ("go ahead and use subagents this
   time") is a decision too, with its scope; unwritten, the next session enforces the old rule.
+- **A limit** (a cap, a ban, a no-go) goes under **Limits** in `brief.md` with its reason and
+  when it stops applying: `- At most 3 worktrees. Why: disk 98% full. Lift when: > 50 GB free.`
+  At the start of each session, check each `Lift when:`. If it has come true, lift or change
+  the limit, and record that as a decision. A limit without a reason outlives its cause.
+- **Words the node's home must never contain** (a former client, a codename): one per line in
+  `never-name.txt` in the node folder, which is outside the home. They cover its descendants'
+  homes too. Write them nowhere else: not in `AGENTS.md`, `brief.md` or a worker's brief
+  (`brain brief` refuses). `core/bin/brain guard <id>` and `brain check` look for them in the
+  home's files, commit messages and branch names, and name the file, never the word.
 - **Something done, started, blocked or changed** goes in `status.md`. Anything waiting on the
   operator goes under **Blocked / needs the operator**, one bullet each: that's what `brain`
   shows the operator as "needs attention".
@@ -38,8 +47,9 @@ moment.
 - Each time you touch `status.md`, rewrite its first line:
   `Updated: <YYYY-MM-DD HH:MM> by <node id> coordinator (<runtime>)`.
 - **Every timestamp** comes from `core/bin/brain now`: the instance's timezone, which may not be
-  this machine's clock.
-- Commit after each update: `<node id>: <what changed>`.
+  this machine's clock. Times you show the operator are in that timezone too. A host may give
+  its times in UTC (they end in `Z`): compare moments, not the digits.
+- Commit once per turn, before you stop: `<node id>: <what changed>`.
 - A stop hook (`brain hook stop`) holds your turn when the notes are behind. Do what it asks, or
   say in one line that there is nothing to record.
 
@@ -52,8 +62,9 @@ request sentence by sentence and check each against what was done; name any you 
 Answer from files. Before answering about a child, run the **freshness check**:
 
 1. Compare the `Updated:` line of the child's `status.md` with its coordinator thread's last
-   activity (host `list`; the thread is in `core/bin/brain show <child>`). For a child with an
-   external home, `core/bin/brain sync <child>` also shows work done there by others.
+   activity (host `list`; the thread is in `core/bin/brain show <child>`, which also gives the
+   time in UTC). For a child with an external home, `core/bin/brain sync <child>` also shows
+   work done there by others.
 2. If the thread is newer, send the child's coordinator (host `send`): "Run the node-sync skill
    for everything since <Updated>." Then host `wait`, and re-read the child's files.
 3. Never summarize a child's transcript yourself. The child writes its files; you read them.
@@ -76,9 +87,29 @@ Answer from files. Before answering about a child, run the **freshness check**:
 A worker sees only its brief and the rules of the node it runs in. Give it the task,
 everything it needs to know, the constraints, and who it reports to.
 
+- Start from `core/bin/brain brief <id> [--branch <b>] --task-file <f>`. It adds where the job
+  runs, its ports, the node's limits, the words it must never write (as a `brain guard` step,
+  never the words), and how to ask and hand back: never the operator, always you, at once.
+  It refuses a brief that contains one of those words.
 - Include only items the target node may use: `core/bin/brain item list --node <node>`.
 - For a sealed node, the worker runs in the node's `home`, so it follows that node's own rules
   (axiom 7). Nothing from above may be written into the home (axiom 6).
+
+## While workers run
+
+A launched worker doesn't wake you when it ends; its brief tells it to `send` you. As a
+backstop, each time you are active, go through **Active work**:
+
+- **Waiting questions:** host `pending` for each worker's thread. Answer from the brief, the
+  rules and `decisions.md`; only what they don't settle goes to the operator, under
+  **Blocked / needs the operator**.
+- **Inbox:** questions and hand-backs from workers land in `inbox.md` too.
+- **Silent threads:** a worker whose thread is idle but hasn't reported: host `read` its last
+  message, and act on it.
+
+**Closing a job:** read its report. Each reusable lesson becomes a library item (the `learn`
+skill), placed where the next job will find it. A lesson only for this node goes in your
+files instead. Then mark the row `merged` or `abandoned`.
 
 ## Before the operator looks at work
 

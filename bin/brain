@@ -663,6 +663,103 @@ def scan_traces(inst, home):
     return hits
 
 
+
+# ---------- words a home must never contain ----------
+
+NEVER_FILE = "never-name.txt"  # in a node folder (outside the home): one term per line; also covers descendants
+
+
+def never_terms(n):
+    """[(term, label)] for a node: its own never-name.txt and its ancestors'. The label never shows the term."""
+    out, m = [], n
+    while m:
+        f = m["dir"] / NEVER_FILE
+        if f.exists():
+            k = 0
+            for line in f.read_text().splitlines():
+                t = line.strip()
+                if t and not t.startswith("#"):
+                    k += 1
+                    out.append((t, f"term {k} of {m['id']}/{NEVER_FILE}"))
+        m = m["parent"]
+    return out
+
+
+def find_terms(text, terms):
+    low = text.lower()
+    return [label for t, label in terms if t.lower() in low]
+
+
+def no_terms_in(n, text, what):
+    """Briefs and reports go to agents who must not see the words they must never write."""
+    hits = find_terms(text, never_terms(n))
+    if hits:
+        die(f"{what} contains {', '.join(hits)}: reword it (the term itself stays out of every brief)")
+
+
+def guard_paths(n, paths=()):
+    """The home and every recorded worktree of it, or the paths given."""
+    if paths:
+        return [Path(x).expanduser().resolve() for x in paths]
+    out = [n["home_path"]] if n["external"] and n["home_path"] and n["home_path"].exists() else []
+    out += [Path(w["path"]) for w in n["local"].get("worktrees", {}).values() if Path(w["path"]).exists()]
+    return out
+
+
+def scan_terms(n, paths=()):
+    """[(label, where)]: never-name terms in files (tracked, or untracked and not ignored), commit messages
+    and branch names of each path. Never returns the term itself."""
+    terms = never_terms(n)
+    if not terms:
+        return []
+    hits, repos = [], {}
+    for root in guard_paths(n, paths):
+        if (root / ".git").exists():
+            for t, label in terms:
+                r = git("grep", "--untracked", "-I", "-l", "-F", "-i", "-e", t, cwd=root)
+                hits += [(label, f"{tilde(root)}/{f}") for f in r.stdout.split()]
+            common = git("rev-parse", "--git-common-dir", cwd=root).stdout.strip()
+            repos.setdefault(str((root / common).resolve()) if common else str(root), root)
+        else:
+            for dp, dn, fn in os.walk(root):
+                dn[:] = [x for x in dn if x not in (".git", "node_modules")]
+                for f in fn:
+                    fp = Path(dp) / f
+                    try:
+                        text = fp.read_text(errors="ignore")[:2_000_000]
+                    except OSError:
+                        continue
+                    hits += [(label, tilde(fp)) for label in find_terms(text, terms)]
+    for root in repos.values():
+        log = git("log", "--all", "--format=%h%x00%B%x01", cwd=root).stdout
+        for entry in log.split("\x01"):
+            if "\x00" in entry:
+                sha, body = entry.strip().split("\x00", 1)
+                hits += [(label, f"commit {sha} in {tilde(root)}") for label in find_terms(body, terms)]
+        refs = git("for-each-ref", "--format=%(refname:short)", "refs/heads", "refs/remotes", cwd=root).stdout
+        for ref in refs.split():
+            hits += [(label, f"branch {ref} in {tilde(root)}") for label in find_terms(ref, terms)]
+    return sorted(set(hits), key=lambda h: (h[1], h[0]))
+
+
+def cmd_guard(a):
+    """Before a merge or a pull request: nothing in the home names what it must never name."""
+    inst = load()
+    n = inst.node(a.id)
+    paths = guard_paths(n, a.paths)
+    if not paths:
+        die(f"{n['id']} has no home or worktree on this machine to check; give a path")
+    hits = scan_terms(n, a.paths) + [(f"trace of '{pat}' (axiom 6)", f"{tilde(hp)}/{f}")
+                                     for hp in (paths if n["sealed"] else []) for pat, f in scan_traces(inst, hp)]
+    if not never_terms(n) and not n["sealed"]:
+        print(f"guard: {n['id']} has no {NEVER_FILE} (here or above) and isn't sealed: nothing to check")
+        return
+    for label, where in hits:
+        print(f"  ✗ {where}: {label}")
+    print(f"guard: {'clean' if not hits else str(len(hits)) + ' found'} ({', '.join(tilde(x) for x in paths)})")
+    if hits:
+        sys.exit(1)
+
 # ---------- sealing ----------
 
 def rules_section(agents_file, headings=("Rules for this node", "Instance rules")):
@@ -1197,14 +1294,97 @@ def cmd_hire(a):
     if others and not target["sealed"]:
         out += ["## Other knowledge you may ask for", ""] + \
                [f"- `{i['fm'].get('id')}`: {i['fm'].get('title')}" for i in others] + [""]
-    out += ["## Report", "", "Say what you did, what you produced and where, and what is still open."]
+    out += handback_lines(inst, target) + report_lines()
     text = "\n".join(out) + "\n"
+    no_terms_in(target, text, "the brief")
     if a.out:
         Path(a.out).write_text(text)
         print(a.out)
     else:
         print(text, end="")
 
+
+
+# ---------- worker briefs ----------
+
+def limits_of(n):
+    """The bullets under "## Limits" in a node's brief.md, each with its continuation lines."""
+    f = n["dir"] / "brief.md"
+    if not f.exists():
+        return []
+    m = re.search(r"^## Limits[^\n]*\n(.*?)(?=^## |\Z)", f.read_text(), re.M | re.S)
+    if not m:
+        return []
+    out = []
+    for line in re.sub(r"<!--.*?-->", "", m.group(1), flags=re.S).splitlines():
+        if line.startswith("- "):
+            out.append(line[2:].strip())
+        elif out and line.startswith("  ") and line.strip():
+            out[-1] += "\n" + line.strip()
+    return out
+
+
+def handback_lines(inst, n, to=None, who="worker"):
+    """How a worker started by a coordinator asks, and says it's done. It never waits on the operator:
+    nobody watches its thread, and a launched thread doesn't wake whoever launched it."""
+    to = to or n["local"].get("coordinator")
+    send = inst.host_adapter().get("SEND")
+    how = f"host `send` to thread `{to}`" + (f" ({send.replace('{id}', to)})" if send else "") if to else \
+        "host `send` to whoever started you (their thread is in your launch message)"
+    inbox = "" if n["sealed"] else f" and append `- <time from brain now> from {who}: question: <it>` " \
+                                     f"to `{tilde(n['dir'] / 'inbox.md')}`"
+    return ["## Questions and hand-back", "",
+            "- **Never ask the operator, and never wait for an answer in this thread**: nobody is watching it.",
+            "- **A choice** the task, the rules or this brief settle: make it, and list it in your report under "
+            "\"Decisions I made\".",
+            f"- **A question you can't go on without:** {how} with the question{inbox}, then end your turn "
+            "with the question as your last line.",
+            f"- **When you finish, fail or get blocked**, tell your coordinator straight away: {how} with "
+            "`done|failed|blocked: <one line>. Report: <path>`. Then end your turn.", ""]
+
+
+def report_lines():
+    return ["## Report", "",
+            "The answer first; then the proof (commands, numbers, hashes); what you produced and where; what you "
+            "did **not** run or check; \"Decisions I made\"; \"Lessons\": what the next job should know (a "
+            "pitfall, a tool's quirk, a method that worked), or \"none\"; and what is still open."]
+
+
+def cmd_brief(a):
+    """A worker brief for one job: where it runs, the task, the node's limits, how to ask and hand back."""
+    inst = load()
+    n = inst.node(a.id)
+    w = n["local"].get("worktrees", {}).get(a.branch) if a.branch else None
+    if a.branch and not w:
+        die(f"no worktree for {a.branch} in {n['id']} (brain wt add {n['id']} {a.branch})")
+    where = Path(w["path"]) if w else (n["home_path"] if n["external"] and n["home_path"] else n["dir"])
+    runtime = a.runtime or n["fm"].get("runtime") or inst.cfg.get("default_runtime", "")
+    head = f"Run in: {tilde(where)}" + (f"  ·  branch {a.branch}" if a.branch else "") + f"  ·  runtime: {runtime}"
+    if w:
+        head += f"  ·  {port_text(w['port'], w.get('ports', 1))}"
+    task = Path(a.task_file).read_text() if a.task_file else (a.task or "<!-- the task, what done means, "
+                                                                          "where outputs go -->")
+    out = [f"Role: worker in node `{n['id']}` ({n['fm'].get('title', '')}), started by its coordinator.", head,
+           "The rules, agents and skills where you run come first (axiom 7); this brief adds to them.", ""]
+    if n["sealed"]:
+        out += ["This work happens in a project with its own owners. Leave nothing in it that names where this "
+                "brief came from (axiom 6). Ask before pushing, publishing or anything irreversible (axiom 24).",
+                ""]
+    out += ["## Task", "", task.strip(), ""]
+    lims = limits_of(n)
+    if lims:
+        out += ["## Limits", ""] + [f"- {l}" for l in lims] + [""]
+    if never_terms(n):
+        out += ["## Before you hand back", "", f"Run `brain guard {n['id']} {tilde(where)}`. It must print "
+                "`guard: clean`; if not, remove what it lists (it names the file, never the word).", ""]
+    out += handback_lines(inst, n, a.to) + report_lines()
+    text = "\n".join(out) + "\n"
+    no_terms_in(n, text, "the brief")
+    if a.out:
+        Path(a.out).write_text(text)
+        print(a.out)
+    else:
+        print(text, end="")
 
 # ---------- second-runtime review ----------
 
@@ -1249,8 +1429,9 @@ def cmd_review(a):
             "## Report", "",
             "A list of findings, most severe first. Each: severity (blocker, major, minor), `file:line`, "
             "the problem, and a concrete fix. Say which tests you ran and their results. If you find nothing "
-            "that matters, say so plainly."]
+            "that matters, say so plainly.", ""] + handback_lines(inst, n, who="reviewer")
     text = "\n".join(out) + "\n"
+    no_terms_in(n, text, "the review brief")
     if a.out:
         Path(a.out).write_text(text)
         print(a.out)
@@ -1592,6 +1773,8 @@ def cmd_report(a):
             "## Findings\n\n<!-- each with its evidence: the command run, the numbers, the hash or file -->\n\n"
             "## Controls\n\n<!-- what would have failed if the finding were wrong, and whether it did -->\n\n"
             "## Not run\n\n<!-- what wasn't checked, and why; \"none\" only if truly none -->\n\n"
+            "## Lessons\n\n<!-- what the next job should know: a pitfall, a tool's quirk, a method that worked; "
+            "or \"none\". The coordinator turns reusable ones into library items -->\n\n"
             "## Files\n\n## How to reproduce\n\n<!-- the script in scripts/ that made this, and how to run it -->\n")
     print(d)
 
@@ -1784,7 +1967,14 @@ def cmd_show(a):
     for k in ("merged_from", "created"):
         if fm.get(k):
             print(f"  {k:<9} {fm[k]}")
-    print(f"  status    {status_line(n)}")
+    u = updated_at(inst, n)
+    utc = f"  (= {u.astimezone(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%MZ')}, to compare with host times)" if u else ""
+    print(f"  status    {status_line(n)}{utc}")
+    lims = limits_of(n)
+    if lims:
+        print(f"  limits    {len(lims)} in brief.md")
+    if never_terms(n):
+        print(f"  never-name  {len(never_terms(n))} term(s) (brain guard {n['id']})")
     ib = inbox_lines(n)
     print(f"  inbox     {len(ib)} item(s)")
     kids = [m["id"] for m in inst.nodes() if m["parent"] and m["parent"]["id"] == n["id"]]
@@ -2371,6 +2561,14 @@ def collect_problems(inst):
             else:
                 for pat, f in scan_traces(inst, hp):
                     p(f"{nid}: trace of '{pat}' in its home (axiom 6): {f}")
+        if not n["archived"]:
+            for label, where in scan_terms(n):
+                p(f"{nid}: {where} contains {label} (see: brain guard {nid})")
+            for lim in limits_of(n):
+                missing = [k for k in ("Why:", "Lift when:") if k.lower() not in lim.lower()]
+                if missing:
+                    warnings.append(f"{nid}: a limit in brief.md has no {' or '.join(missing)} "
+                                    f"(\"{lim.splitlines()[0][:60]}\")")
         wbl = n["local"].get("workbench")
         if wbl:
             wbp = Path(wbl).expanduser().resolve()
@@ -2632,6 +2830,12 @@ def main():
     cmd("new", cmd_new, "create a node", "id", opt("--title", required=True), opt("--owners", default=""),
         opt("--labels", default=""), opt("--runtime"), opt("--home", help="a path outside the instance"),
         opt("--home-url", dest="home_url"))
+    cmd("brief", cmd_brief, "a worker brief: where it runs, the task, the node's limits, how to ask and hand back",
+        "id", opt("--branch", help="the job's worktree (brain wt add)"), opt("--task"),
+        opt("--task-file", dest="task_file"), opt("--runtime"),
+        opt("--to", help="the thread the worker reports to (default: the node's coordinator)"), opt("--out"))
+    cmd("guard", cmd_guard, f"check a home and its worktrees for the terms in {NEVER_FILE} (and, if sealed, "
+        "upward traces); exits 1 if any", "id", opt("paths", nargs="*"))
     cmd("show", cmd_show, "everything about one node, including this machine's bindings", "id")
     cmd("set", cmd_set, "set fields: brain set <id> key=value ... (host IDs and home paths stay on this machine)",
         "id", opt("pairs", nargs="+"))

@@ -148,4 +148,5 @@ runtime's own file names and formats.
 | `list(node)` | List a node's threads and their last activity. |
 | `delegate(runtime, brief)` | One-shot task with no node memory. |
 | `schedule(when, brief)` | Recurring or triggered work. |
+| `pending(thread)` | Questions a thread is waiting on someone to answer. Optional; without it, workers must hand questions back (`send`). |
 | `watch(change)` | Wake a thread when a proposed change (a pull request) gets reviews, check results or conflicts. Optional. |

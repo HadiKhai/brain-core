@@ -688,6 +688,82 @@ class SeveralBrains(Scenario):
         self.assertIn("ports must be a whole number", self.b(me, "wt", "add", "a", "j3", ok=False))
 
 
+
+class WorkerBriefs(Scenario):
+    def test_a_brief_carries_the_job_its_limits_and_the_hand_back(self):
+        r = self.init("alice")
+        home = self.repo(self.tmp / "code" / "app")
+        self.b(r, "new", "app", "--title", "App", "--home", str(home))
+        self.b(r, "set", "app", "coordinator=thr-app", "ports=3")
+        brief = r / "nodes" / "app" / "brief.md"
+        text = brief.read_text()
+        self.assertIn("## Limits", text)                              # the template has the section
+        brief.write_text(text.replace("## Sources of truth", (
+            "- At most 2 worktrees at once. Why: the disk is nearly full. Lift when: over 50 GB free.\n"
+            "- No deploys.\n\n## Sources of truth")))
+        self.b(r, "wt", "add", "app", "job-a")
+        out = self.b(r, "brief", "app", "--branch", "job-a", "--task", "Fix the login bug.")
+        self.assertIn("Run in: ~/code/app-work/worktrees/job-a", out)
+        self.assertIn("ports ", out)                                 # the job's block of ports
+        self.assertIn("Fix the login bug.", out)
+        self.assertIn("Lift when: over 50 GB free", out)              # limits travel with their reasons
+        self.assertIn("Never ask the operator", out)
+        self.assertIn("thr-app", out)                                 # who to wake, and how
+        self.assertIn("t3_thread_send", out)
+        self.assertIn("~/alice/nodes/app/inbox.md", out)
+        self.assertIn("Lessons", out)
+        self.b(r, "brief", "app", "--branch", "nope", ok=False)
+        # the same hand-back in a specialist's brief and a review brief
+        self.b(r, "specialist", "new", "qa", "--title", "QA")
+        self.assertIn("Never ask the operator", self.b(r, "hire", "qa", "app", "--task", "test it"))
+        self.assertIn("thr-app", self.b(r, "review", "app", "--branch", "job-a"))
+        # a limit with no reason or end is flagged; show gives the status time in UTC for host times
+        self.assertIn("a limit in brief.md has no Why: or Lift when:", self.b(r, "check"))
+        self.assertRegex(self.b(r, "show", "app"), r"\(= \d{4}-\d{2}-\d{2}T\d{2}:\d{2}Z")
+        # a sealed node's brief names nothing above it
+        self.b(r, "principal", "add", "team")
+        sh = self.repo(self.tmp / "code" / "shared")
+        self.b(r, "new", "shared", "--title", "Shared", "--owners", "team", "--home", str(sh))
+        sb = self.b(r, "brief", "shared", "--task", "x")
+        self.assertNotIn("alice", sb)
+        self.assertIn("Leave nothing in it that names", sb)
+        d = Path(self.b(r, "report", "app", "job a").strip())
+        self.assertIn("## Lessons", (d / "index.md").read_text())
+
+    def test_words_a_home_must_never_contain(self):
+        r = self.init("alice")
+        home = self.repo(self.tmp / "code" / "app", {"README.md": "app\n", ".gitignore": "backups/\n"})
+        self.b(r, "new", "app", "--title", "App", "--home", str(home))
+        (r / "nodes" / "app" / "never-name.txt").write_text("# earlier codebases\nOldCo\n")
+        self.assertIn("guard: clean", self.b(r, "guard", "app"))
+        (home / "backups").mkdir()
+        (home / "backups" / "dump.bin").write_text("xx oldco xx\n")       # ignored files don't count
+        self.assertIn("guard: clean", self.b(r, "guard", "app"))
+        (home / "notes.md").write_text("ported from OLDCO\n")               # untracked, any case
+        out = self.b(r, "guard", "app", ok=False)
+        self.assertIn("notes.md: term 1 of app/never-name.txt", out)
+        self.assertNotIn("oldco", out.lower())                               # never shows the word
+        self.assertIn("contains term 1 of app/never-name.txt", self.b(r, "check", ok=False))
+        (home / "notes.md").unlink()
+        self.b(r, "wt", "add", "app", "port-oldco")                          # a branch name
+        w = self.tmp / "code" / "app-work" / "worktrees" / "port-oldco"
+        (w / "x.md").write_text("x\n")
+        self.git("add", "x.md", cwd=w)
+        self.git("commit", "-qm", "like oldco did", cwd=w)                   # a commit message
+        out = self.b(r, "guard", "app", ok=False)
+        self.assertIn("branch port-oldco", out)
+        self.assertRegex(out, r"commit [0-9a-f]+ in")
+        self.assertNotIn("oldco", out.replace("port-oldco", "").lower())
+        # a child's home is covered by the parent's words; briefs that carry a word are refused
+        kid = self.repo(self.tmp / "code" / "kid", {"a.md": "OldCo inside\n"})
+        self.b(r, "new", "app/kid", "--title", "Kid", "--home", str(kid))
+        self.assertIn("a.md: term 1 of app/never-name.txt", self.b(r, "guard", "app/kid", ok=False))
+        self.assertIn("guard", self.b(r, "brief", "app", "--task", "tidy up"))
+        out = self.b(r, "brief", "app", "--task", "remove what came from OldCo", ok=False)
+        self.assertNotIn("oldco", out.lower())
+        self.b(r, "new", "plain", "--title", "Plain")
+        self.assertIn("nothing to check", self.b(r, "guard", "plain", str(kid)))
+
 class Review(Scenario):
     def test_review_brief_goes_to_the_other_runtime(self):
         r = self.init("alice")

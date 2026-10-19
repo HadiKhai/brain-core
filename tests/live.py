@@ -348,9 +348,71 @@ def a_session_reaches_its_own_brain(run):
     run.check("dentist" not in low, "showed the personal brain")
 
 
+
+def worker_hands_back_a_question(run):
+    """A worker started by a coordinator never asks the operator: a question it can't settle goes back to the
+    coordinator (the inbox here, as there is no host to send to), and it doesn't guess."""
+    root = run.instance()
+    home = run.home_repo("app", {"config.json": '{"timeout": 30}\n'})
+    brain(root, "set", "a", f"home={home}", "coordinator=thr-a")
+    brief = brain(root, "brief", "a", "--task", (
+        "Set the request timeout in config.json to the value the operator chose for production. That value "
+        "isn't written down anywhere you can see. Commit on main when done."))
+    out = run.agent(home, brief, writable=root)
+    run.check(json.loads((home / "config.json").read_text()) == {"timeout": 30}, "the worker guessed a value")
+    inbox = (root / "nodes" / "a" / "inbox.md").read_text()
+    run.check(re.search(r"^- .*question.*timeout|^- .*timeout.*\?", inbox, re.M | re.I),
+              "no question about the timeout in the inbox")
+    run.check("timeout" in out.lower() and "?" in out, "the turn doesn't end with the question")
+
+
+def lessons_become_items(run):
+    """Closing a job: a reusable lesson from the report becomes a library item; one that only fits this node
+    stays in its files."""
+    root = run.instance()
+    a = root / "nodes" / "a"
+    st = a / "status.md"
+    st.write_text(st.read_text().replace("| --- | --- | --- | --- |\n", "| --- | --- | --- | --- |\n| job/deps | thr-x | - | in review |\n", 1))
+    d = Path(brain(root, "report", "a", "job deps").strip())
+    (d / "index.md").write_text(
+        "# job deps\n\n## Answer\n\nDependencies pinned; install scripts allowed only for esbuild.\n\n"
+        "## Lessons\n\n- Bun treats an empty `trustedDependencies` list as unset, so every package's install "
+        "scripts run; list the allowed packages explicitly.\n- This node's staging server is staging.atlas.test.\n")
+    sh("git", "add", "-A", cwd=root)
+    sh("git", "commit", "-qm", "job deps", cwd=root)
+    run.agent(a, (
+        f"Role: coordinator of node `a`. job/deps is merged; its worker's report is at {d / 'index.md'}. "
+        f"Update your notes, then reply in one line."), writable=root)
+    items = [p.read_text() for p in root.rglob("library/*.md") if "core" not in p.relative_to(root).parts]
+    hit = [t for t in items if "trusteddependencies" in t.lower()]
+    run.check(hit, "the reusable lesson isn't a library item")
+    for t in hit:
+        run.check("source_node: a" in t, "the item doesn't cite node a")
+    run.check(not any("staging.atlas.test" in t for t in items), "a node-only fact became a library item")
+    run.check(re.search(r"job/deps.*merged", st.read_text()), "the Active work row isn't marked merged")
+    run.brain_check()
+
+
+def limits_carry_their_reason(run):
+    """A limit is written with why it exists and when it stops applying, so it doesn't outlive its cause."""
+    root = run.instance()
+    a = root / "nodes" / "a"
+    run.agent(a, (
+        "Role: coordinator of node `a`. The operator says: \"Don't run more than 2 worktrees at once for now, "
+        "the disk is almost full.\" Record this the way your role requires, then reply in one line."), writable=root)
+    brief = (a / "brief.md").read_text()
+    lims = brief.split("## Limits", 1)[-1].split("\n## ", 1)[0] if "## Limits" in brief else ""
+    lim = next((l for l in lims.splitlines() if l.startswith("- ") and "2" in l), "")
+    run.check(lim, "no limit of 2 worktrees under Limits in brief.md")
+    run.check(re.search(r"why:", lim, re.I) and re.search(r"lift when:", lim, re.I),
+              f"the limit has no Why: or Lift when: ({lim!r})")
+    run.check("disk" in lim.lower(), "the reason (the disk) isn't recorded")
+    run.brain_check()
+
 SCENARIOS = [parity, coordinator_writes_as_it_goes, worker_asks_the_writer, learning_is_a_citation,
              new_node_in_one_sentence, no_upward_traces, second_runtime_review, stop_hook_fires,
-             notes_current_after_an_edit, a_session_reaches_its_own_brain]
+             notes_current_after_an_edit, a_session_reaches_its_own_brain, worker_hands_back_a_question,
+             lessons_become_items, limits_carry_their_reason]
 
 
 def main():

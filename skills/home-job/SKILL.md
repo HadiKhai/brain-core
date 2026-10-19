@@ -20,17 +20,24 @@ request. The operator's own checkout of the home is never touched.
 2. **Record it** in `status.md` under **Active work**: `| <branch> | <thread> | <PR or -> | <state> |`.
 3. **Worker.** Host `launch` in the node's `home_project`, in the existing worktree (path and
    branch from step 1), on the node's runtime unless the job calls for another. The brief is
-   self-contained (axiom 9): the task, the port, what done means, where reports go
-   (`core/bin/brain report <id> "<topic>"` gives a folder), and: commit on the branch, push the
-   branch and open a pull request only when the operator or the home's rules allow it (axiom 24),
-   then report back. Use `core/bin/brain hire` when a specialist fits.
+   self-contained (axiom 9). Write the task (what done means, where reports go:
+   `core/bin/brain report <id> "<topic>"` gives a folder; commit on the branch; push the branch
+   and open a pull request only when the operator or the home's rules allow it, axiom 24), then
+   wrap it with `core/bin/brain brief <id> --branch <branch> --task-file <file>`: that adds the
+   worktree, port, limits, guard step and hand-back. Use `core/bin/brain hire` when a
+   specialist fits; its brief has the same hand-back.
+   While it runs, the worker `send`s you when it finishes, fails, is blocked or has a question
+   (the coordinator role, "While workers run", is the backstop).
 4. **Review by the other runtime** before the operator sees it: the `review` skill.
 5. **Pull request.** Once pushing is allowed and the review is addressed, the worker opens it.
    Have the host watch it (host `watch`), so reviews, checks and conflicts come back to you.
    Update the Active work row.
+   Before anything is merged: `core/bin/brain guard <id> <worktree>` must print `guard: clean`
+   when the node (or one above it) has a `never-name.txt`.
 6. **Done.** When the operator (and the home's owners) merge it, set the row to `merged`, record
-   the outcome in `status.md`, and run `core/bin/brain wt prune <id>`. It removes only clean,
-   merged worktrees.
+   the outcome in `status.md`, turn the report's reusable lessons into library items (the
+   `learn` skill), and run `core/bin/brain wt prune <id>`. It removes only clean, merged
+   worktrees.
 
 Never merge, push to a shared branch, deploy or delete a branch without explicit consent
 (axiom 24). Several jobs can run at once; each has its own worktree and port.

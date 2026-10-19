@@ -10,12 +10,20 @@ You were started for one job. If your brief names no role, you are a worker for 
 - **Outputs go where your brief says.** Reports go in the folder `core/bin/brain report <node>
   "<topic>"` gives you: `index.md` with the summary and findings, plus their files. A script
   worth running again goes in the workbench's `scripts/`, with a first line saying what it does.
+- **Never ask the operator, and never wait in your thread for an answer**, unless the operator
+  started you themselves: nobody else watches your thread. A choice the brief or the rules
+  settle, make, and list in your report under "Decisions I made". A question you can't go on
+  without goes to whoever started you (host `send`; the brief says how), then end your turn.
 - **Check before you hand back.** Re-read your brief sentence by sentence and check each
   against what you did. A brief's literal words beat your reading of its intent; if they
   conflict, ask.
-- **Report to whoever started you.** The answer first, then the proof (commands, numbers,
-  hashes), what you produced and where it is, what you did **not** run or check, and what is
-  still open.
+- **Report to whoever started you,** and tell them straight away when you finish, fail or get
+  blocked (host `send`): a thread you were launched in wakes nobody when it ends. The answer
+  first, then the proof (commands, numbers, hashes), what you produced and where it is, what
+  you did **not** run or check, the decisions you made, **lessons** the next job should know
+  (a pitfall, a tool's quirk, a method that worked), and what is still open.
+- **Words a home must never contain** (the node's `never-name.txt`): if your brief says to run
+  `brain guard`, it must print `guard: clean` before you hand back.
 - **Leave no trace of anything above a boundary** in a sealed node's files (axiom 6).
   Context you were given in your brief stays in the conversation.
 - **Ask first** before anything that leaves the instance or can't be undone (axiom 24).

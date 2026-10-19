@@ -1,6 +1,6 @@
 ---
 name: learn
-description: Capture reusable knowledge (a method, style, asset, script, lesson or fact) from a node, or a correction to a specialist, as a library item or lesson with provenance and scope. Use when the operator says "keep this", "remember how we did this", or corrects a specialist.
+description: Capture reusable knowledge (a method, style, asset, script, lesson or fact) from a node, or a correction to a specialist, as a library item or lesson with provenance and scope. Use when the operator says "keep this", "remember how we did this", or corrects a specialist, and when a job closes with lessons in its report.
 ---
 
 # Learn (axiom 10)
