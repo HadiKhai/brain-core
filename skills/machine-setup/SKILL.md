@@ -44,11 +44,18 @@ one machine and live in `.brain/local.json`, never in git.
    in, then `core/bin/brain link --global <runtime>=<folder> ...` (one per folder). A session
    started with that folder reaches this brain, and only folders named this way see it.
    Otherwise `core/bin/brain link --global`.
-8. **Hooks.** If Codex is a runtime, ask the operator's OK, then run `core/bin/brain hook approve`:
+8. **Subscriptions.** The install only detects one account per runtime (its default folder).
+   List the host's provider instances (`orchestrator_capabilities` on T3). If a runtime has
+   several (a work and a personal Claude, say), or the operator mentions another account, ask
+   which config folder each one uses and which brains may use it. Write `subscriptions.json`
+   ([below](#subscriptions-on-this-machine)), one entry per account, bound to its host instance.
+   Then `core/bin/brain usage --refresh`: each account should show its own reading. Two
+   entries showing one reading mean both folders are logged in to the same account.
+9. **Hooks.** If Codex is a runtime, ask the operator's OK, then run `core/bin/brain hook approve`:
    Codex runs the instance's stop hook only once the project is trusted and the hook approved.
    Run it again after a core upgrade that changes the hook.
-9. Run `core/bin/brain check`, then give the operator one link per coordinator
-   (`core/bin/brain` lists them).
+10. Run `core/bin/brain check`, then give the operator one link per coordinator
+    (`core/bin/brain` lists them).
 
 ## Subscriptions on this machine
 
