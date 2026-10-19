@@ -5229,7 +5229,7 @@ def ui_state(inst, problems=None, scan=None):
             "status": {k: v for k, v in secs.items() if v and k.lower() != "active work"},
             "work": work, "worktrees": wts, "inbox": [l[2:] for l in inbox_lines(n)],
             "blocked": status_section(n, "blocked"), "decisions": ui_decisions(inst, n), "limits": limits_of(n),
-            "never_name": len(terms), "jobs": {**js, "rows": [{k: hide(v) for k, v in r.items()} for r in js["rows"]],
+            "never_name": len(terms), "jobs": {**js, "rows": [{k: hide(v) for k, v in r.items()} for r in (read_jobs(n) or [])],
                                                "open": [{k: hide(v) for k, v in r.items()} for r in js["open"]],
                                                "forecasts": [{k: hide(v) for k, v in r.items()} for r in js["forecasts"]]},
             "reports": [{"name": d.parent.name, "title": next((l[2:] for l in d.read_text().splitlines()

@@ -733,9 +733,9 @@ class WorkerBriefs(Scenario):
         brief = r / "nodes" / "app" / "brief.md"
         text = brief.read_text()
         self.assertIn("## Limits", text)                              # the template has the section
-        brief.write_text(text.replace("## Sources of truth", (
-            "- At most 2 worktrees at once. Why: the disk is nearly full. Lift when: over 50 GB free.\n"
-            "- No deploys.\n\n## Sources of truth")))
+        brief.write_text(text.replace("## Limits", (
+            "## Limits\n\n- At most 2 worktrees at once. Why: the disk is nearly full. Lift when: over 50 GB free.\n"
+            "- No deploys.\n")))
         self.b(r, "wt", "add", "app", "job-a")
         out = self.b(r, "brief", "app", "--branch", "job-a", "--task", "Fix the login bug.")
         self.assertIn("Run in: ~/code/app-work/worktrees/job-a", out)
@@ -1577,6 +1577,7 @@ class UnifiedHandbacks(Scenario):
         data = json.loads(path.read_text())
         old = self.tmp / "app-work/scratch/ready" / (hashlib.sha256(b"job").hexdigest() + ".json")
         old.parent.mkdir(parents=True)
+        data["ready"]["checked_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
         old.write_text(json.dumps(data["ready"]))
         path.unlink()
         self.assertEqual(self.b(r, "ready", "a", "--branch", "job").strip(), "ready")
@@ -1612,6 +1613,9 @@ class UnifiedHandbacks(Scenario):
         self.assertIn("stale-status", [i["kind"] for i in self.due(r)])
         self.b(r, "status", "a", "--refresh")
         self.assertIn("none: fix specific to this job", (r / "nodes/a/status.md").read_text())
+        self.assertEqual([i["kind"] for i in self.due(r)], ["missing-preview"])
+        self.b(r, "set", "a", "preview=http://localhost:4100", "preview_tour=reports/tour.md")
+        self.b(r, "status", "a", "--refresh")
         self.assertEqual(self.due(r), [])
 
     def test_unbound_home_does_not_break_read_only_due_or_ready(self):
@@ -2330,7 +2334,7 @@ for line in sys.stdin:
         self.m.usage_refresh(config)
         text = self.b(root, "usage")
         self.assertRegex(text, r"codex\s+one\s+none\s+24%")
-        self.assertRegex(text, r"codex\s+missing\s+unknown\s+unknown")
+        self.assertIn("missing: no reading yet: run `brain usage --refresh`", text)
         selected, reason = self.m.usage_route(self.m.Instance(root), ["codex"])
         self.assertEqual(selected["id"], "one")
         self.assertNotIn("unknown", reason)
@@ -2957,7 +2961,7 @@ class AutonomyDue(AutonomyProject):
         self.assertNotIn('handback', [i['kind'] for i in self.due(r)])
         self.b(r, 'wt', 'prune', 'app', '--offline')
         self.assertNotIn('handback', [i['kind'] for i in self.due(r)])
-        self.assertEqual(len(list((r / 'nodes/app/job-handbacks').glob('*.json'))), 1)
+        self.assertEqual(len(list((r / 'nodes/app/job-handbacks').glob('*.json'))), 0)
 
     def test_quiet_empty_and_due_exit_codes_and_no_file_changes(self):
         r = self.init('alice')
@@ -3022,7 +3026,7 @@ class AutonomyDue(AutonomyProject):
         self.b(r, 'wt', 'add', 'app', 'job-a')
         self.assertNotIn('handback', [i['kind'] for i in self.due(r)])
         self.b(r, 'handback', 'app', '--branch', 'job-a', '--state', 'blocked')
-        self.assertEqual(len(list((r / 'nodes/app/job-handbacks').glob('*.json'))), 2)
+        self.assertEqual(len(list((r / 'nodes/app/job-handbacks').glob('*.json'))), 1)
 
     def test_corrupt_worker_signal_is_due_rather_than_a_crash(self):
         r, home, wt = self.project()
@@ -3093,7 +3097,8 @@ class AutonomyFacts(AutonomyProject):
         st.write_text(original)
         self.b(r, 'status', 'app', '--refresh')
         text = st.read_text()
-        self.assertTrue(text.endswith('\n\n' + original))
+        self.assertEqual(text.split('<!-- brain:facts v1 -->')[0] +
+                         text.split('<!-- /brain:facts -->')[1][2:], original)
         self.assertIn('Open worktrees (this machine):\n- job-a: present', text)
         self.assertIn('runtime activity unknown', text)
         self.assertIn('Updated: 2020-01-01 00:00 +00:00', self.b(r, 'status', 'app'))
@@ -3192,7 +3197,8 @@ class AutonomyFacts(AutonomyProject):
         original = b'Updated: old\r\n\r\n## Now\r\n- Original.\r\n'
         st.write_bytes(original)
         self.b(r, 'status', 'root', '--refresh')
-        self.assertTrue(st.read_bytes().endswith(original))
+        self.assertEqual(st.read_bytes().split(b'<!-- brain:facts v1 -->')[0] +
+                         st.read_bytes().split(b'<!-- /brain:facts -->')[1][2:], original)
         st.write_bytes(b'PREFIX\r\n' + st.read_bytes() + b'SUFFIX\r\n')
         before = st.read_bytes()
         self.b(r, 'status', 'root', '--refresh')
@@ -3424,7 +3430,7 @@ class AutonomySync(Scenario):
         st = r / 'status.md'
         st.write_text('Updated: 2020-01-02 03:04:05 +00:00 by coordinator\n\n## Now\n- Ready.\n')
         self.b(r, 'status', 'root', '--refresh')
-        self.assertTrue(st.read_text().startswith('<!-- brain:facts v1 -->'))
+        self.assertTrue(st.read_text().startswith('Updated: 2020-01-02'))
         self.assertIn('changes since 2020-01-02 03:04 (status.md Updated)', self.b(r, 'sync', 'root', '--offline'))
         self.b(r, 'sync', 'root', '--mark', '--offline')
         self.assertIn('(last sync)', self.b(r, 'sync', 'root', '--offline'))
@@ -4207,6 +4213,292 @@ class ExpandedUI(Scenario):
         (cfg / "subscriptions.json").write_text("not json")
         state = self.m.ui_state(self.m.Instance(root))
         self.assertIsNone(state["usage_policy"]["stop_percent"])
+class RoundTwo(AutonomyProject):
+    def setUp(self):
+        super().setUp()
+        self.patch_env = mock.patch.dict(os.environ, self.env, clear=True)
+        self.patch_env.start()
+        self.addCleanup(self.patch_env.stop)
+        loader = importlib.machinery.SourceFileLoader("brain_r2_test", str(CORE / "bin/brain"))
+        self.m = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+        loader.exec_module(self.m)
+
+    def row(self, branch, hours="1", ended="2026-01-01T01:00:00+00:00", **extra):
+        return {**dict.fromkeys(self.m.JOB_COLS, ""), "Job": branch, "Started": "2026-01-01T00:00:00+00:00",
+                "Ended": ended, "Hours": hours, "Outcome": "merged" if ended else "", "Reviews": "1", **extra}
+
+    def learn(self, root, key, title="Service configuration", **kw):
+        args = ["item", "add", key, "--from", kw.pop("source", "app"), "--title", title,
+                "--kind", "lesson", "--ref", "report@commit", "--body", kw.pop("body", "Validate service settings.")]
+        self.b(root, *args, *kw.pop("args", []))
+
+    def test_lessons_close_to_next_brief_round_trip(self):
+        r, home, wt = self.project()
+        self.b(r, "handback", "app", "--branch", "job-a", "--state", "done", "--lessons", "Validate service settings.")
+        self.learn(r, "service-settings")
+        self.b(r, "jobs", "app", "--branch", "job-a", "--lessons", "service-settings")
+        self.git("commit", "--allow-empty", "-qm", "first job", cwd=wt)
+        self.git("merge", "-q", "job-a", cwd=home)
+        self.b(r, "wt", "prune", "app", "--offline")
+        self.b(r, "wt", "add", "app", "feat/next")
+        brief = self.b(r, "brief", "app", "--branch", "feat/next", "--task", "Update service settings")
+        self.assertIn("`service-settings`: Service configuration", brief)
+        self.assertIn("picked for task: service, settings; same node", brief)
+        self.assertIn("brain item show service-settings --node app", brief)
+        self.assertIn("Validate service settings.", self.b(r, "item", "show", "service-settings", "--node", "app"))
+
+    def test_library_ranking_cap_and_all_eligibility_states(self):
+        r, home, wt = self.project()
+        for i in range(7):
+            self.learn(r, f"service-{i}")
+        self.learn(r, "denied", args=["--proposed", "--repo", "example/repo", "--commit", "a" * 40])
+        self.learn(r, "rejected", args=["--proposed", "--repo", "example/repo", "--commit", "a" * 40])
+        self.b(r, "item", "reject", "rejected")
+        self.learn(r, "quarantined")
+        self.b(r, "item", "quarantine", "quarantined")
+        self.b(r, "principal", "add", "bob")
+        self.b(r, "new", "private", "--title", "Private", "--owners", "bob", "--home", str(self.tmp / "private-home"))
+        self.learn(r, "private-service", source="private")
+        args = ["brief", "app", "--task", "service settings"]
+        brief = self.b(r, *args)
+        self.assertEqual(brief, self.b(r, *args))
+        picks = [line for line in brief.splitlines() if "Read full:" in line]
+        self.assertEqual(len(picks), 5)
+        self.assertIn("`service-0`", picks[0])
+        self.assertIn("`service-4`", picks[-1])
+        for key in ("denied", "rejected", "quarantined", "private-service"):
+            self.assertNotIn(f"`{key}`", brief)
+            self.b(r, "item", "show", key, "--node", "app", ok=False)
+
+    def test_labels_stack_specialist_and_task_weights_and_review(self):
+        r, home, wt = self.project()
+        self.learn(r, "task-first", title="SQL transaction", body="SQL")
+        self.learn(r, "stack-match", title="Python", body="Python")
+        self.b(r, "set", "app", "stack=Python")
+        self.b(r, "relabel", "app", "area:database")
+        self.b(r, "specialist", "new", "database", "--title", "DB", "--runtime", "codex")
+        self.learn(r, "specialist-match", title="Database", body="Database")
+        brief = self.b(r, "hire", "database", "app", "--task", "SQL")
+        self.assertIn("labels/stack: python", brief)
+        self.assertIn("specialist: database", brief)
+        self.assertLess(brief.index("`task-first`"), brief.index("`stack-match`"))
+        review = self.b(r, "review", "app", "--branch", "job-a", "--built-by", "claude", "--focus", "SQL")
+        self.assertIn("`task-first`", review)
+        self.assertIn("picked for task: sql", review)
+
+    def test_small_brief_has_limits_guard_no_ceremony_or_state_changes(self):
+        r, home, wt = self.project()
+        n = r / "nodes/app"
+        (n / "brief.md").write_text("## Limits\n- Only local drafts. Why: rehearsal. Lift when: never.\n")
+        before = {p: p.read_bytes() for p in [r / ".brain/local.json", n / "job-ledger.md"]}
+        worktrees = self.git("worktree", "list", "--porcelain", cwd=home)
+        short = self.b(r, "brief", "app", "--small", "--task", "Prepare a local draft")
+        full = self.b(r, "brief", "app", "--branch", "job-a", "--task", "Prepare a local draft")
+        self.assertLess(len(short.splitlines()), len(full.splitlines()) * .6)
+        self.assertIn("Only local drafts", short)
+        self.assertIn("brain guard app", short)
+        self.assertIn("one line", short)
+        self.assertNotIn("brain handback", short)
+        self.assertTrue(all(p.read_bytes() == data for p, data in before.items()))
+        self.assertEqual(worktrees, self.git("worktree", "list", "--porcelain", cwd=home))
+        self.b(r, "brief", "app", "--small", "--branch", "job-a", ok=False)
+        self.b(r, "brief", "app", "--small", "--import", ok=False)
+        (n / "never-name.txt").write_text("ForbiddenBrand\n")
+        bad = self.b(r, "brief", "app", "--small", "--task", "Use ForbiddenBrand", ok=False)
+        self.assertNotIn("ForbiddenBrand", bad)
+
+    def test_legacy_packet_freshness_and_branch_cleanup(self):
+        r, home, wt = self.project()
+        inst = self.m.Instance(r); n = inst.node("app")
+        row = self.m.open_job(self.m.read_jobs(n), "job-a")
+        row["Started"] = "2026-10-19T10:00:00.900001+00:00"
+        self.m.write_jobs(inst, n, [row])
+        f = self.m.ready_path(inst, n, "job-a"); f.parent.mkdir(parents=True)
+        for checked in ("2020-01-01T00:00:00Z", "2026-10-19T10:00:00.1+00:00", "bad", None):
+            f.write_text(json.dumps({"checked_at": checked}))
+            self.assertNotIn("handback", [i["kind"] for i in self.due(r)])
+            self.b(r, "handback", "app", "--branch", "job-a", "--state", "done")
+            record = self.m.handback_file(n, row)
+            self.assertIsNone(json.loads(record.read_text())["ready"])
+            record.unlink()
+        f.write_text(json.dumps({"checked_at": row["Started"]}))
+        self.assertIn("handback", [i["kind"] for i in self.due(r)])
+        self.b(r, "handback", "app", "--branch", "job-a", "--state", "blocked")
+        self.b(r, "wt", "rm", "app", "job-a", "--cause", "restart")
+        self.assertFalse(f.exists())
+        self.assertFalse(self.m.handback_file(n, row).exists())
+        self.assertEqual(self.git("status", "--porcelain", "--", "nodes/app/job-handbacks", cwd=r), "")
+        self.assertIn("restart", (n["dir"] / "job-ledger.md").read_text())
+        self.b(r, "wt", "add", "app", "job-a")
+        self.assertNotIn("handback", [i["kind"] for i in self.due(r)])
+
+    def test_prune_cleans_both_records(self):
+        r, home, wt = self.project()
+        inst = self.m.Instance(r); n = inst.node("app")
+        f = self.m.ready_path(inst, n, "job-a"); f.parent.mkdir(parents=True); f.write_text("{}")
+        self.b(r, "handback", "app", "--branch", "job-a", "--state", "done")
+        self.git("commit", "--allow-empty", "-qm", "work", cwd=wt)
+        self.git("merge", "-q", "job-a", cwd=home)
+        self.b(r, "wt", "prune", "app", "--offline", "--dry-run")
+        self.assertTrue(f.exists())
+        self.b(r, "wt", "prune", "app", "--offline")
+        self.assertFalse(f.exists())
+        self.assertEqual(list((n["dir"] / "job-handbacks").glob("*.json")), [])
+
+    def test_questions_and_blocked_human_needs_reach_inbox_once(self):
+        r, home, wt = self.project()
+        path = r / "nodes/app/inbox.md"
+        self.b(r, "handback", "app", "--branch", "job-a", "--state", "blocked", "--report", "report.md")
+        self.assertNotIn("worker job-a", path.read_text())
+        for _ in range(2):
+            self.b(r, "handback", "app", "--branch", "job-a", "--state", "question", "--need-human", "Choose the port")
+        self.assertEqual(path.read_text().count("Choose the port"), 1)
+        items = json.loads(self.b(r, "inbox", "root", "--json"))
+        self.assertTrue(any("Choose the port" in item["text"] for item in items))
+        for _ in range(2):
+            self.b(r, "handback", "app", "--branch", "job-a", "--state", "blocked", "--need-human", "Grant access")
+        self.assertEqual(path.read_text().count("Grant access"), 1)
+        self.b(r, "handback", "app", "--branch", "job-a", "--state", "question", "--report", "report.md")
+        self.assertIn("See report report.md", path.read_text())
+
+    def test_facts_header_migration_caps_times_forecasts_preview(self):
+        r, home, wt = self.project()
+        inst = self.m.Instance(r); n = inst.node("app")
+        rows = [self.row(f"feat/{i}", ended=f"2026-01-{i+1:02}T01:00:00+00:00") for i in range(12)]
+        self.m.write_jobs(inst, n, rows)
+        status = n["dir"] / "status.md"
+        original = "# App\n\nUpdated: 2020-01-01 00:00 +00:00\n\n## Now\n- Keep judgement.\n"
+        status.write_text("<!-- brain:facts v1 -->\nOld facts\n<!-- /brain:facts -->\n\n" + original)
+        self.b(r, "status", "app", "--refresh")
+        text = status.read_text()
+        self.assertTrue(text.startswith(original.split("## Now")[0]))
+        self.assertEqual(text.count(self.m.FACTS_START), 1)
+        block = self.m.FACTS_RE.search(text).group()
+        self.assertIn("- +4 more", block)
+        self.assertLess(block.index("feat/11"), block.index("feat/10"))
+        self.assertNotIn("T01:", block)
+        self.assertRegex(block, r"Facts refreshed: \d{4}-\d{2}-\d{2} \d{2}:\d{2} \+00:00\n")
+        self.assertIn("12 similar jobs, median 1 h", block)
+        self.assertIn("Preview: missing", block)
+        self.assertIn("missing-preview", [i["kind"] for i in self.due(r)])
+        self.b(r, "set", "app", "preview=http://localhost:3000", "preview_tour=reports/tour/index.md")
+        self.assertNotIn("missing-preview", [i["kind"] for i in self.due(r)])
+        self.b(r, "status", "app", "--refresh")
+        self.assertIn("Preview: http://localhost:3000; tour: reports/tour/index.md", status.read_text())
+        self.assertIn("## Now\n- Keep judgement.", status.read_text())
+
+    def test_forecasts_only_merged_valid_samples_and_honest_sparse_kinds(self):
+        rows = [self.row("feat/a", "1"), self.row("feat/b", "2"), self.row("feat/c", "9"),
+                self.row("feat/bad", "nan"), self.row("feat/open", "100", ended=""),
+                self.row("feat/dropped", "80", Outcome="abandoned"), self.row("fix/a", "5")]
+        fs = {f["kind"]: f for f in self.m.job_forecasts(rows)}
+        self.assertEqual(fs["feat"]["samples"], 3)
+        self.assertEqual((fs["feat"]["median_h"], fs["feat"]["min_h"], fs["feat"]["max_h"]), (2, 1, 9))
+        lines = "\n".join(self.m.forecast_lines(rows, "docs/planned"))
+        self.assertIn("fix: 1 similar jobs, too little data", lines)
+        self.assertIn("docs: 0 similar jobs, too little data", lines)
+        self.assertEqual(self.m.job_kind("bare"), "unclassified")
+        self.assertEqual(self.m.job_kind("import:abc"), "import")
+        r = self.init("alice")
+        self.assertIn("feat: 0 similar jobs, too little data", self.b(r, "jobs", "root", "--branch", "feat/planned"))
+
+    def test_new_ui_forecasts_and_preview_fields_are_additive_and_redacted(self):
+        r, home, wt = self.project()
+        inst = self.m.Instance(r); n = inst.node("app")
+        self.m.write_jobs(inst, n, [self.row(f"OldCo/{i}") for i in range(3)])
+        (n["dir"] / "never-name.txt").write_text("OldCo\n")
+        self.b(r, "set", "app", "preview=http://OldCo.local", "preview_tour=reports/OldCo/tour.md")
+        output = self.b(r, "ui", "--json")
+        node = next(node for node in json.loads(output)["nodes"] if node["id"] == "app")
+        self.assertNotIn("oldco", json.dumps(node).lower())
+        self.assertIn("forecasts", node["jobs"])
+        self.assertIn("rows", node["jobs"])
+        self.assertIn("preview", node)
+        self.assertIn("preview_tour", node)
+
+    def test_inbox_prefixes_are_unique_full_ids_survive_json_and_state(self):
+        keys = ["abcdef0" + "a" * 17, "abcdef1" + "b" * 17, "123456" + "c" * 18]
+        short = self.m.shortest_ids(keys)
+        self.assertEqual([short[k] for k in keys], ["abcdef0", "abcdef1", "123456"])
+        r = self.init("alice")
+        (r / "inbox.md").write_text("- Need a choice\n- Need approval\n")
+        items = json.loads(self.b(r, "inbox", "--json"))
+        out = self.b(r, "inbox", "--new")
+        for item in items:
+            self.assertEqual(len(item["id"]), 24)
+            self.assertIn("[" + item["id"][:6] + "]", out)
+        state = json.loads((r / ".brain/inbox-seen.json").read_text())
+        self.assertTrue(all(i["id"] in state["reporters"]["root"] for i in items))
+
+    def test_jobs_writes_validate_switches_and_print_human_result(self):
+        r, home, wt = self.project()
+        ledger = r / "nodes/app/job-ledger.md"
+        before = ledger.read_bytes()
+        for switch in ("codex", "old -> new", "old -> new: ", "-> new: reason", "old -> new: reason\nextra", "old\n-> new: reason"):
+            self.assertIn("--switch needs old -> new: reason", self.b(r, "jobs", "app", "--branch", "job-a", "--switch", switch, ok=False))
+            self.assertEqual(ledger.read_bytes(), before)
+        out = self.b(r, "jobs", "app", "--branch", "job-a", "--switch", "old -> new: usage limit", "--lessons", "none: local only")
+        self.assertEqual(out.strip(), "app: updated job job-a")
+        self.assertNotIn("{", out)
+
+
+class RoundTwoUsage(Scenario):
+    def setUp(self):
+        super().setUp()
+        self.cfg = self.tmp / "config"
+        self.cfg.mkdir()
+        self.env["BRAIN_CONFIG"] = str(self.cfg / "brains.json")
+        self.patch_env = mock.patch.dict(os.environ, self.env, clear=True)
+        self.patch_env.start()
+        self.addCleanup(self.patch_env.stop)
+        loader = importlib.machinery.SourceFileLoader("brain_r2_usage_test", str(CORE / "bin/brain"))
+        self.m = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+        loader.exec_module(self.m)
+
+    subscription = Usage.subscription
+    declare = Usage.declare
+    cache = Usage.cache
+    reading = Usage.reading
+
+    def test_no_reading_yet_has_action_instead_of_unknown_rows(self):
+        r = self.init("alice")
+        self.declare(self.subscription())
+        out = self.b(r, "usage")
+        self.assertIn("no reading yet: run `brain usage --refresh`", out)
+        self.assertIn("brain usage install", out)
+        self.assertNotIn("unknown", out)
+        self.assertEqual(json.loads(self.b(r, "usage", "--json"))["subscriptions"][0]["windows"], {})
+
+    def test_budget_compares_only_enough_ledger_data_to_fresh_routed_window(self):
+        r = self.init("alice")
+        self.b(r, "new", "app", "--title", "App", "--runtime", "codex")
+        inst = self.m.Instance(r); n = inst.node("app")
+        def row(branch, hours, ended=True):
+            return {**dict.fromkeys(self.m.JOB_COLS, ""), "Job": branch, "Started": "2026-01-01T00:00Z",
+                    "Ended": "2026-01-01T01:00Z" if ended else "", "Outcome": "merged" if ended else "", "Hours": hours, "Runtime": "codex"}
+        rows = [row("feat/" + str(i), ".2") for i in range(3)] + [row("feat/open", "", False)]
+        self.m.write_jobs(inst, n, rows)
+        cfg = self.declare(self.subscription())
+        self.cache(cfg, [self.reading(20)])
+        with mock.patch.object(self.m, "usage_refresh", side_effect=AssertionError("read-only budget polled")):
+            lines = "\n".join(self.m.job_budget_lines(inst, n))
+            self.assertIn("fits", lines)
+            self.assertIn("allowance fit unknown", lines)
+            reading = self.reading(20)
+            reading["windows"]["five_hour"]["resets_at"] = time.time() + 900
+            self.cache(cfg, [reading])
+            self.assertIn("exceeds", "\n".join(self.m.job_budget_lines(inst, n, "feat/planned")))
+        self.assertIn("typical serial full-job time", self.b(r, "usage"))
+        self.assertIn("typical serial full-job time", self.b(r, "jobs", "app"))
+        self.cache(cfg, [self.reading(20, age=1000)])
+        self.assertEqual(self.m.job_budget_lines(inst, n), [])
+        self.cache(cfg, [self.reading(source="unknown")])
+        self.assertEqual(self.m.job_budget_lines(inst, n), [])
+        self.cache(cfg, [self.reading(95)])
+        self.assertEqual(self.m.job_budget_lines(inst, n), [])
+        self.cache(cfg, [self.reading(20)])
+        self.m.write_jobs(inst, n, rows[1:])
+        self.assertEqual(self.m.job_budget_lines(inst, n), [])
 
 
 if __name__ == "__main__":

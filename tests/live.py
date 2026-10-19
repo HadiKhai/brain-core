@@ -1141,7 +1141,53 @@ def recover_usage_before_two_jobs(run):
     run.check(not sh('git', 'status', '--porcelain', cwd=root).strip(), 'launch evidence uncommitted')
 
 
-SCENARIOS = [recover_coordinator_replaced, recover_worker_other_runtime, recover_usage_before_two_jobs, autonomy_worker_handback, autonomy_finished_job_wake, autonomy_empty_wake, autonomy_subtree_inbox, autonomy_status_facts, parity, coordinator_writes_as_it_goes, worker_asks_the_writer, learning_is_a_citation,
+def r2_reuses_lesson(run):
+    """The worker reads a relevant library item and applies its otherwise unstated requirement."""
+    root = run.instance()
+    home = run.home_repo("lesson-app", {"config.json": "{}\n"})
+    brain(root, "set", "a", f"home={home}", "verify=python3 -m json.tool config.json")
+    brain(root, "item", "add", "service-config", "--from", "a", "--title", "Service configuration checklist",
+          "--kind", "lesson", "--ref", "previous-job@commit", "--body",
+          'Every service configuration must include "strict": true and "retry_limit": 3. Preserve these settings.')
+    brain(root, "wt", "add", "a", "feat/config")
+    local = json.loads((root / ".brain/local.json").read_text())
+    wt = Path(local["nodes"]["a"]["worktrees"]["feat/config"]["path"])
+    brief = brain(root, "brief", "a", "--branch", "feat/config", "--task",
+                  "Prepare the service configuration in config.json, applying the relevant library guidance. "
+                  "Write a short report.md, commit both and hand back. One review round already completed "
+                  "with no findings. No host messaging is available. Do not launch a review, merge or push.")
+    run.agent(wt, brief, writable=root)
+    config = json.loads((wt / "config.json").read_text())
+    run.check(config.get("strict") is True and config.get("retry_limit") == 3,
+              "worker did not apply full library lesson to service configuration")
+    run.check(bool(list((root / "nodes/a/job-handbacks").glob("*.json"))), "worker did not hand back")
+
+
+def r2_small_job(run):
+    """A minutes-long local draft respects limits without job/worktree state."""
+    root = run.instance()
+    node = root / "nodes/a"
+    brief_file = node / "brief.md"
+    brief_file.write_text(brief_file.read_text().replace("## Limits", "## Limits\n\n- Drafts must be uppercase. Why: house style. Lift when: never."))
+    output = run.tmp / "draft.txt"
+    local = (root / ".brain/local.json").read_bytes()
+    owned = {p: p.read_bytes() for p in node.glob("*.md")}
+    brief = brain(root, "brief", "a", "--small", "--task",
+                  f"Write the local disposable draft {output} containing a greeting, following node limits. "
+                  "There is no host messaging tool; your final one-line reply is delivered to the coordinator.")
+    run.agent(node, brief, writable=run.tmp, trace=True)
+    run.check(output.exists() and output.read_text().strip() and output.read_text() == output.read_text().upper(),
+              "small task did not produce an uppercase draft")
+    run.check((root / ".brain/local.json").read_bytes() == local, "small task changed machine/worktree state")
+    run.check(all(p.read_bytes() == value for p, value in owned.items()), "small task changed coordinator files")
+    run.check(not (node / "job-ledger.md").exists(), "small task created a ledger")
+    run.check(not (node / "job-handbacks").exists(), "small task created a job hand-back")
+    run.check("guard: clean" in run.trace or "guard: clean" in run.output,
+              "small task did not show guard proof")
+
+
+SCENARIOS = [recover_coordinator_replaced, recover_worker_other_runtime, recover_usage_before_two_jobs,
+             r2_reuses_lesson, r2_small_job, autonomy_worker_handback, autonomy_finished_job_wake, autonomy_empty_wake, autonomy_subtree_inbox, autonomy_status_facts, parity, coordinator_writes_as_it_goes, worker_asks_the_writer, learning_is_a_citation,
              new_node_in_one_sentence, no_upward_traces, second_runtime_review, stop_hook_fires,
              notes_current_after_an_edit, a_session_reaches_its_own_brain, worker_hands_back_a_question,
              lessons_become_items, limits_carry_their_reason, freshness_across_timezones,
