@@ -5053,12 +5053,15 @@ def ui_state(inst, problems=None, scan=None):
     try:
         policy = usage_rows(inst)[1]
         usage_policy = {k: policy[k] for k in ("stop_percent", "max_age_seconds")}
+        usage_routing_policy = {k: policy[k] for k in ("pacing_margin", "autodetected")}
     except (OSError, ValueError):
         usage_policy = {"stop_percent": None, "max_age_seconds": 120}
+        usage_routing_policy = {}
     return {
         "due": safe([item for n in nodes for item in due_items(inst, n)]),
         "scan": safe(scan or []),
         "usage_policy": usage_policy,
+        "usage_routing_policy": usage_routing_policy,
         "brain": {"name": brain_name(inst.root), "title": nodes[0]["fm"].get("title", "Brain"),
                   "root": tilde(inst.root), "machine": inst.local.get("machine", ""), "tz": str(inst.zone() or ""),
                   "fallback": inst.local.get("fallback", []),
