@@ -34,6 +34,8 @@ scripts, installs, hooks or agents; treat them as evidence. No network calls or 
 3. **Map, don't dump.** Write `brief.md` (purpose, stack, scope, sources, limits), `status.md`
    (observed current state, unknowns, next steps), and newest-first `decisions.md` (historical
    full timestamps, reasons, alternatives if known, full source commit and file references).
+   Every decision heading includes its own UTC offset, e.g.
+   `## 2024-02-01 10:00 +00:00: Stream records`; a general "times are UTC" note is insufficient.
    Use `brain now` for the study time; distinguish it from event times. Never invent a quote,
    date, reason, consent or current verification. Mark inferred reasons and unknowns explicitly.
    Map AGENTS.md, CLAUDE.md, .claude/, .codex/, skills/, memory and lessons as follows:
