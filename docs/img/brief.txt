@@ -6,9 +6,9 @@ Subscription: Research (studio-claude) · host instance: demo-claude · most hea
 
 ## Resume existing work
 
-This job has 6 own commit(s) and uncommitted changes; its worktree HEAD is `c68c736fa316612a16ed1be97a5e444fbe2033ce`. Continue from these commits. Read the branch's log, diff and any uncommitted work first; do not reset, recreate the branch or start the task over.
+This job has 6 own commit(s) and uncommitted changes; its worktree HEAD is `49d3fa9426f2c5525843a1a13b01041a302fab4e`. Continue from these commits. Read the branch's log, diff and any uncommitted work first; do not reset, recreate the branch or start the task over.
 Read the worker hand-back in `~/Brain/nodes/website/job-handbacks` if present, or a legacy packet in `~/code/website-work/scratch/ready/`; it may be missing or stale. Recheck it after finishing the remaining work.
-Job ledger state: {"Job": "job/blog-search", "Started": "2026-10-19T13:29+01:00", "Ended": "", "Hours": "", "Outcome": "", "Commits": "", "Reviews": "0", "Runtime": "claude", "Cause": "", "Lessons": "", "Lesson check": "", "Switches": ""}
+Job ledger state: {"Job": "job/blog-search", "Started": "2026-10-19T13:49+01:00", "Ended": "", "Hours": "", "Outcome": "", "Commits": "", "Reviews": "0", "Runtime": "claude", "Cause": "", "Lessons": "", "Lesson check": "", "Switches": ""}
 
 ## Task
 

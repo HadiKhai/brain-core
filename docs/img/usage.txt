@@ -1,0 +1,7 @@
+Account-wide subscription usage · stop line 85% · this machine's share: unavailable
+runtime  label     5h used / reset                weekly used / reset            reading / age                      source  brains
+codex    Studio    38% / 2026-10-19 20:07 +01:00  57% / 2026-10-21 16:55 +01:00  2026-10-19 16:54 +01:00 / 47 s     lookup  sam
+claude   Research  64% / 2026-10-19 20:07 +01:00  81% / 2026-10-21 16:55 +01:00  2026-10-19 16:54 +01:00 / 47 s     lookup  sam
+codex    Overflow  87% / 2026-10-19 20:07 +01:00  68% / 2026-10-21 16:55 +01:00  2026-10-19 16:54 +01:00 / 47 s     lookup  sam
+claude   Travel    23% / 2026-10-19 20:07 +01:00  42% / 2026-10-21 16:55 +01:00  2026-10-19 14:55 +01:00 / 2 h 0 m  lookup  sam
+  Research · weekly model sonnet: 46% / 2026-10-21 16:55 +01:00

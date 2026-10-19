@@ -3,7 +3,7 @@
 Run the real-agent rehearsals on both runtimes:
 
 ```sh
-LIVE_CODEX_BIN=/Users/hadikhai/.bun/bin/codex python3 tests/live.py --runtimes claude,codex -k recover_
+LIVE_CODEX_BIN=/path/to/codex python3 tests/live.py --runtimes claude,codex -k recover_
 ```
 
 Use `--keep` to retain successful fixtures; failures retain theirs automatically. Each scenario

@@ -1,0 +1,5 @@
+northwind: [014d5f] Northwind's API key for the staging billing service.
+research/pricing: [0c4eda] Pick the interview list (shortlist in sources/).
+website: [44a4e2] import review: 0 rule file(s), 0 role(s), 1 item(s) proposed; confirm or reject after reviewing source citations
+website: [2fdc4d] Approve the new pricing copy on the landing page.
+website: [8a3b11] inbox: 2026-10-19 16:31 +01:00 from worker: question: keep the old hero as a fallback for Safari 15? (job/hero-redesign)

@@ -1,0 +1,5 @@
+website: missing-preview: code node has merged jobs but no recorded preview; run a local preview and screenshot tour, then record preview=<URL/path> and preview_tour=<path> with brain set
+website: lesson-outcome: job/nav: merged job needs a lesson outcome; learn proposed lessons and record item ids or none: <reason> with brain jobs website --branch job/nav --lessons; lessons: not recorded; report: not recorded
+website: handback: job/hero-redesign: ready to merge; review report reports/hero/index.md and record the next step
+website: inbox: 2026-10-19 16:31 +01:00 from worker: question: keep the old hero as a fallback for Safari 15? (job/hero-redesign)
+website: stale-status: status predates job activity or is over an hour old with jobs open; update judgement sections, then brain status <node> --refresh

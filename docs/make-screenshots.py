@@ -3,6 +3,7 @@
 and the terminal dashboard. Nothing here is real data. Needs Google Chrome (headless) on macOS or Linux.
 
     python3 docs/make-screenshots.py            # writes docs/img/*.png and docs/img/dashboard.txt
+    python3 docs/make-screenshots.py --text-only # refreshes CLI captures without opening Chrome
 """
 import datetime as dt
 import json
@@ -360,7 +361,8 @@ def check_ui(root, b):
 
 
 def main():
-    if not CHROME:
+    text_only = "--text-only" in sys.argv
+    if not CHROME and not text_only:
         sys.exit("needs Google Chrome or Chromium for the screenshots")
     OUT.mkdir(parents=True, exist_ok=True)
     base = Path(tempfile.mkdtemp(prefix="brain-demo-")).resolve()
@@ -368,6 +370,9 @@ def main():
         root, b = build(base)
         if "--checks-only" in sys.argv:
             check_ui(root, b)
+            return
+        if text_only:
+            capture_text(root, b)
             return
         snapshot(root, b, "dark", OUT / "ui-dark.png", size=(1440, 1270))
         snapshot(root, b, "light", OUT / "ui-light.png", size=(1440, 1270))
@@ -378,15 +383,26 @@ def main():
         snapshot(root, b, "dark", OUT / "ui-stress-dark.png", "#view=learnings", size=(1440, 1200), stress=True)
         snapshot(root, b, "light", OUT / "ui-stress-mobile.png", "#view=learnings", size=(600, 1000), stress=True)
         check_ui(root, b)
-        dash = b().replace(str(root.parent), "~").replace("machine Mac", "machine studio-mac")
-        (OUT / "dashboard.txt").write_text("\n".join(line.rstrip() for line in dash.splitlines()) + "\n")
-        print("wrote", (OUT / "dashboard.txt").relative_to(CORE))
-        (OUT / "jobs.txt").write_text(b("jobs"))
-        (OUT / "brief.txt").write_text(b("brief", "website", "--branch", "job/blog-search", "--task",
-                                         "Rank results by title match first, then recency. Done when the search page "
-                                         "shows the 10 best results in under 100 ms.").replace(str(root.parent), "~"))
+        capture_text(root, b)
     finally:
         shutil.rmtree(base, ignore_errors=True)
+
+
+def capture_text(root, b):
+    captures = {
+        "dashboard": (),
+        "jobs": ("jobs",),
+        "brief": ("brief", "website", "--branch", "job/blog-search", "--task",
+                  "Rank results by title match first, then recency. Done when the search page "
+                  "shows the 10 best results in under 100 ms."),
+        "due": ("due", "website"),
+        "inbox": ("inbox", "root"),
+        "usage": ("usage",),
+    }
+    for name, args in captures.items():
+        text = b(*args).replace(str(root.parent), "~").replace("machine Mac", "machine studio-mac")
+        (OUT / f"{name}.txt").write_text("\n".join(line.rstrip() for line in text.splitlines()) + "\n")
+        print("wrote", (OUT / f"{name}.txt").relative_to(CORE))
 
 
 if __name__ == "__main__":
