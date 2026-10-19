@@ -145,7 +145,7 @@ class Instance:
     def parse_time(self, s):
         """'2026-10-19 06:31', '2026-10-19 06:31 +03:00', '2026-10-19T03:31Z'... A time without a zone is in the
         instance's timezone."""
-        m = re.match(r"\s*(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}(?::\d{2})?)(?:\.\d+)?\s*(Z|[+-]\d{2}:?\d{2})?\s*$",
+        m = re.match(r"\s*(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}(?::\d{2})?(?:\.\d+)?)\s*(Z|[+-]\d{2}:?\d{2})?\s*$",
                      s or "")
         if not m:
             return None
@@ -983,11 +983,11 @@ def usage_rows(inst=None, refresh=False, before_launch=False):
     return rows, config
 
 
-def usage_route(inst, runtimes, preferred=None, model=None):
+def usage_route(inst, runtimes, preferred=None, model=None, cached_only=False):
     try:
         if usage_config()["autodetected"]:
             return None, "Usage unknown: no subscriptions.json; keeping the configured runtime (autodetected defaults allow every brain)."
-        rows, policy = usage_rows(inst, before_launch=True)
+        rows, policy = usage_rows(inst, before_launch=not cached_only)
     except (OSError, ValueError):
         return None, "Usage unknown: machine subscription configuration unavailable; no subscription selected."
     allowed = [r for r in rows if r["runtime"] in runtimes]
@@ -1117,6 +1117,9 @@ def cmd_usage(a):
     print(f"Account-wide subscription usage · stop line {policy['stop_percent']:g}% · this machine's share: unavailable")
     table = [["runtime", "label", "5h used / reset", "weekly used / reset", "reading / age", "source", "brains"]]
     for r in rows:
+        if not r["read_at"]:
+            print(f"{r['label']}: no reading yet: run `brain usage --refresh` or install the poller (`brain usage install`)")
+            continue
         def window(name):
             w = r["windows"].get(name)
             if not w:
@@ -1130,7 +1133,7 @@ def cmd_usage(a):
                       "every brain" + (" (autodetected)" if r["autodetected"] else "")
                       if r["available_to_every_brain"] else ','.join(r['brains']) or 'none'])
     widths = [max(len(row[i]) for row in table) for i in range(len(table[0]))]
-    for row in table:
+    for row in table if len(table) > 1 else []:
         print("  ".join(cell.ljust(width) for cell, width in zip(row, widths)).rstrip())
     for r in rows:
         for name, w in r["windows"].items():
@@ -1141,6 +1144,10 @@ def cmd_usage(a):
             print(f"  {r['label']}: {r['note']}")
     if policy["other_subscriptions"]:
         print(f"{policy['other_subscriptions']} other subscription(s) unavailable to this brain.")
+    if inst:
+        for n in inst.nodes():
+            for line in job_budget_lines(inst, n):
+                print(redact(f"{n['id']}: {line}", never_terms(n)))
 
 
 def brain_name(root):
@@ -2477,6 +2484,18 @@ def cmd_item_add(a):
     print(f"{tilde(path)}\n  from {src['id']} ({a.ref}); scope {', '.join(scope)}")
 
 
+def cmd_item_show(a):
+    inst = load()
+    item = inst.item(a.id)
+    n = inst.node(a.node)
+    ok, why = usable(item["fm"], n["owners"])
+    if not ok:
+        die("item is not usable here: " + why)
+    text = item["path"].read_text()
+    no_terms_in(n, text, "the item")
+    print(text, end="")
+
+
 def cmd_item_list(a):
     inst = load()
     owners = inst.node(a.node)["owners"] if a.node else None
@@ -2706,10 +2725,7 @@ def cmd_hire(a):
         for i in items:
             if i["fm"].get("id") in wanted:
                 out += [f"### {i['fm'].get('title')}", "", read_fm(i["path"])[1].strip(), ""]
-    others = [i for i in items if i["fm"].get("id") not in wanted]
-    if others and not target["sealed"]:
-        out += ["## Other knowledge you may ask for", ""] + \
-               [f"- `{i['fm'].get('id')}`: {i['fm'].get('title')}" for i in others] + [""]
+    out += knowledge_lines(inst, target, a.task, sp["id"], exclude=wanted)
     out += handback_lines(inst, target, branch=a.branch) + report_lines(job=bool(a.branch))
     text = "\n".join(out) + "\n"
     no_terms_in(target, text, "the brief")
@@ -2731,6 +2747,40 @@ def cmd_hire(a):
 
 
 # ---------- worker briefs ----------
+
+def knowledge_lines(inst, n, task, specialist="", exclude=()):
+    """Explainable lexical ranking; scope/state eligibility is exactly `brain usable`."""
+    def tokens(text):
+        stop = {"the", "and", "for", "with", "from", "this", "that", "into", "use", "job", "node"}
+        return {t for t in re.findall(r"[\w]+", text.casefold()) if len(t) > 2 and t not in stop}
+    contexts = [("task", tokens(task), 4),
+                ("labels/stack", tokens(n["fm"].get("labels", "") + " " + n["fm"].get("stack", "")), 3),
+                ("specialist", tokens(specialist), 3)]
+    ranked = []
+    for item in inst.items():
+        fm = item["fm"]
+        if fm.get("id") in exclude or not usable(fm, n["owners"])[0]:
+            continue
+        body = read_fm(item["path"])[1]
+        words = tokens(" ".join(str(fm.get(k, "")) for k in ("id", "title", "kind")) + " " + body)
+        score, why = 0, []
+        for name, terms, weight in contexts:
+            matches = sorted(words & terms)
+            if matches:
+                score += weight * len(matches)
+                why.append(name + ": " + ", ".join(matches[:4]))
+        if fm.get("source_node") == n["id"]:
+            score += 2
+            why.append("same node")
+        if score:
+            ranked.append((-score, fm.get("id", ""), fm, why))
+    if not ranked:
+        return []
+    return ["## Relevant library items", ""] + [
+        f"- `{key}`: {' '.join(fm.get('title', key).split())} — picked for {'; '.join(why)}. "
+        f"Read full: `brain item show {key} --node {n['id']}`."
+        for _, key, fm, why in sorted(ranked, key=lambda r: (r[0], r[1]))[:5]] + [""]
+
 
 def limits_of(n):
     """The bullets under "## Limits" in a node's brief.md, each with its continuation lines."""
@@ -2788,7 +2838,8 @@ def handback_lines(inst, n, to=None, who="worker", branch=None):
                 "Do not edit the ledger" + (". " if study else " or status. ") +
                 "Use `none: <reason>` when there is no reusable lesson.",
                 "- **Blocked or need a choice:** use the same command with `--state blocked` or `--state question`, "
-                "omit --reviews, and describe the blocker/question in --report. Legacy failed is also accepted.",
+                "omit --reviews, and describe the blocker/question in --report. Questions also append to inbox; "
+                "for a blocked human need add `--need-human '<need>'`. Legacy failed is also accepted.",
                 "- End your turn after recording the hand-back. The coordinator reads it with brain due; "
                 f"a host message is optional notification ({how}) and need only link the record. Do not duplicate Lessons "
                 "in a message or report; --lessons carries your proposals.", ""]
@@ -2896,6 +2947,8 @@ def import_brief(a):
 
 def cmd_brief(a):
     """A worker brief for one job: where it runs, the task, the node's limits, how to ask and hand back."""
+    if a.small and (a.branch or a.import_study):
+        die("--small cannot combine with --branch or --import")
     if a.import_study:
         return import_brief(a)
     inst = load()
@@ -2917,6 +2970,23 @@ def cmd_brief(a):
         head += f"  ·  {port_text(w['port'], w.get('ports', 1))}"
     task = Path(a.task_file).read_text() if a.task_file else (a.task or "<!-- the task, what done means, "
                                                                           "where outputs go -->")
+    if a.small:
+        out = [f"Role: worker in node `{n['id']}`; small job.", head, redact(usage, never_terms(n)),
+               "Follow this node's rules. Task: " + task.strip(),
+               "Clear, low risk, minutes, no shared-state changes. If that stops being true, hand back for a full job.",
+               *limits_lines(n), *knowledge_lines(inst, n, task),
+               f"Before hand-back or anything leaves, run `brain guard {n['id']} {shlex.quote(str(where))}`; require `guard: clean`.",
+               "Ask before publishing, pushing or irreversible actions. Keep boundary context out of project files.",
+               "No worktree, ledger, reviews or ready packet. Do not edit coordinator files.",
+               "End with one line to your coordinator: done|blocked|question: <result>; proof: <check/output>."]
+        text = "\n".join(out) + "\n"
+        no_terms_in(n, text, "the brief")
+        if a.out:
+            Path(a.out).write_text(text)
+            print(a.out)
+        else:
+            print(text, end="")
+        return
     out = [f"Role: worker in node `{n['id']}` ({n['fm'].get('title', '')}), started by its coordinator.", head,
            "The rules, agents and skills where you run come first (axiom 7); this brief adds to them.", "",
            redact(usage, never_terms(n)), ""]
@@ -2944,6 +3014,7 @@ def cmd_brief(a):
                     "it may be missing or stale. Recheck it after finishing the remaining work.",
                     "Job ledger state: " + json.dumps(row, ensure_ascii=False), ""]
     out += ["## Task", "", task.strip(), ""]
+    out += knowledge_lines(inst, n, task)
     out += limits_lines(n)
     if never_terms(n):
         out += ["## Before you hand back", "", f"Run `brain guard {n['id']} {tilde(where)}`. It must print "
@@ -3016,7 +3087,13 @@ def read_ready_packet(inst, n, branch, row=None):
         return None
     try:
         packet = json.loads(ready_path(inst, n, branch).read_text())
-        return packet if isinstance(packet, dict) else None
+        if not isinstance(packet, dict):
+            return None
+        if row:
+            checked, started = inst.parse_time(packet.get("checked_at")), inst.parse_time(row.get("Started"))
+            if not checked or not started or checked < started:
+                return None
+        return packet
     except (OSError, ValueError):
         return None
 
@@ -3134,6 +3211,7 @@ def cmd_review(a):
         out += ["```", diffstat, "```", ""]
     if a.focus:
         out += ["## Focus", "", a.focus.strip(), ""]
+    out += knowledge_lines(inst, n, " ".join(filter(None, [a.branch, a.focus, diffstat])), "reviewer")
     out += limits_lines(n)
     out += ["## What to check", "",
             "- Correctness: does it do what the commits and the task say, including edge cases?",
@@ -3554,13 +3632,25 @@ def cmd_handback(a):
             die("job changed during verification; hand back to its coordinator")
         f = handback_file(n, row)
         data = {"version": 2, "job": row["Job"], "started": row["Started"], "state": a.state,
-                "at": inst.now_dt().isoformat(timespec="seconds"), "report": tilde(a.report) if a.report is not None else previous.get("report", ""),
+                "at": inst.now(), "report": tilde(a.report) if a.report is not None else previous.get("report", ""),
                 "lessons": lessons, "ready": packet, "ready_reasons": reasons}
         if study:
             data.update(ready_required=False, review_rounds=a.reviews)
         f.parent.mkdir(exist_ok=True)
         atomic_write(f, json.dumps(data, indent=2) + "\n")
         touch(f)
+        need = getattr(a, "need_human", None)
+        if a.state == "question" or (a.state == "blocked" and need):
+            message = " ".join((need or ("See report " + data["report"] if data["report"] else
+                                            "Coordinator choice needed; see worker hand-back")).split())
+            marker = "<!-- handback:" + digest([job_key(row), a.state, message]) + " -->"
+            inbox = n["dir"] / "inbox.md"
+            text = inbox.read_text() if inbox.exists() else ""
+            if marker not in text:
+                bullet = f"- {inst.now()} from worker {a.branch}: {a.state}: {message} {marker}\n"
+                no_terms_in(n, bullet, "the inbox question")
+                atomic_write(inbox, text.rstrip() + "\n" + bullet)
+                touch(inbox)
         inst.commit([], f"{n['id']}: worker hand-back")
     checked = not study and a.state == "done" and (a.reviews is not None or getattr(a, "record", False))
     if checked:
@@ -3596,6 +3686,7 @@ def job_ended(inst, n, branch, outcome, commits="", cause=""):
     with brain_lock(inst):
         rows = ledger_rows(n)
         r = open_job(rows or [], branch)
+        ready_path(inst, n, branch).unlink(missing_ok=True)
         if not r:
             return
         r.update(Ended=stamp(inst), Outcome=outcome, Commits=str(commits), Cause=cause)
@@ -3604,6 +3695,9 @@ def job_ended(inst, n, branch, outcome, commits="", cause=""):
         a, b = inst.parse_time(r["Started"]), inst.parse_time(r["Ended"])
         r["Hours"] = f"{elapsed(a, b) / 3600:.1f}" if a and b else ""
         write_jobs(inst, n, rows)
+        record = handback_file(n, r)
+        record.unlink(missing_ok=True)
+        touch(record)
         inst.commit([], f"{n['id']}: job {outcome}")
 
 
@@ -3626,7 +3720,78 @@ def jobs_summary(inst, n):
             "merged": sum(1 for r in done if r["Outcome"] == "merged"),
             "abandoned": sum(1 for r in done if r["Outcome"] == "abandoned"),
             "median_hours": med(hours), "median_reviews": med(reviews),
-            "causes": [r["Cause"] for r in done if r["Cause"]][-10:]}
+            "causes": [r["Cause"] for r in done if r["Cause"]][-10:],
+            "forecasts": job_forecasts(rows)}
+
+
+def job_kind(branch):
+    # Prefixes are historical and immutable; today's labels/specialists cannot reclassify old jobs.
+    return "import" if branch.startswith("import:") else branch.split("/", 1)[0].lower() if "/" in branch else "unclassified"
+
+
+def job_forecasts(rows):
+    import statistics
+    groups = {}
+    for row in rows:
+        if row.get("Ended") and row.get("Outcome") == "merged":
+            try:
+                hours = float(row.get("Hours", ""))
+            except ValueError:
+                continue
+            if not 0 <= hours < float("inf"):
+                continue
+            groups.setdefault(job_kind(row["Job"]), []).append(hours)
+    return [{"kind": kind, "samples": len(xs), "median_h": round(statistics.median(xs), 1),
+             "min_h": min(xs), "max_h": max(xs), "enough_data": len(xs) >= 3}
+            for kind, xs in sorted(groups.items())]
+
+
+def forecast_lines(rows, planned=None):
+    forecasts = {f["kind"]: f for f in job_forecasts(rows)}
+    kinds = set(forecasts) | {job_kind(r["Job"]) for r in rows if not r["Ended"]}
+    if planned:
+        kinds.add(job_kind(planned))
+    out = []
+    for kind in sorted(kinds):
+        f = forecasts.get(kind, {"samples": 0, "enough_data": False})
+        out.append(f"{kind}: {f['samples']} similar jobs, " +
+                   (f"median {f['median_h']:g} h, spread {f['min_h']:g}–{f['max_h']:g} h (observed min–max)"
+                    if f["enough_data"] else "too little data (need 3 merged jobs)"))
+    return out
+
+
+def job_budget_lines(inst, n, planned=None):
+    """Compare ledger wall time with fresh routed reset windows, never infer token allowance."""
+    rows = read_jobs(n) or []
+    jobs = [r for r in rows if not r["Ended"]]
+    if planned and not any(r["Job"] == planned for r in rows):
+        jobs.append({"Job": planned, "Runtime": n["fm"].get("runtime", "")})
+    forecasts = {f["kind"]: f for f in job_forecasts(rows) if f["enough_data"]}
+    if not jobs or any(job_kind(r["Job"]) not in forecasts for r in jobs):
+        return []
+    out = []
+    for runtime in sorted({r.get("Runtime") or n["fm"].get("runtime") or inst.cfg.get("default_runtime", "") for r in jobs}):
+        selected, _ = usage_route(inst, [runtime] if runtime else inst.runtimes, preferred=runtime, cached_only=True)
+        if not selected:
+            continue
+        try:
+            _, policy = usage_rows(inst)
+        except (OSError, ValueError):
+            continue
+        windows = [w for name, w in selected["windows"].items() if name in USAGE_WINDOWS and
+                   not w.get("absent") and not w["expired"] and w.get("resets_at") and
+                   w.get("source", selected["source"]) != "unknown" and
+                   w.get("read_at", selected["read_at"]) and
+                   0 <= time.time() - w.get("read_at", selected["read_at"]) <= policy["max_age_seconds"]]
+        if not windows:
+            continue
+        these = [r for r in jobs if (r.get("Runtime") or n["fm"].get("runtime") or inst.cfg.get("default_runtime", "")) == runtime]
+        estimate = sum(forecasts[job_kind(r["Job"])]["median_h"] for r in these)
+        remaining = min((w["resets_at"] - time.time()) / 3600 for w in windows)
+        out.append(f"current route {selected['label']}: {len(these)} open/planned job(s), typical serial full-job time {estimate:g} h "
+                   f"{'fits' if estimate <= remaining else 'exceeds'} {remaining:.1f} h until the next recorded reset; "
+                   "elapsed time not subtracted; allowance fit unknown (no per-job usage data).")
+    return out
 
 
 def cmd_jobs(a):
@@ -3661,20 +3826,23 @@ def cmd_jobs(a):
                 outcome = ", ".join(ids)
             r["Lessons"] = outcome
         if a.switch is not None:
-            if not a.switch.strip():
-                die("--switch needs the old instance, new instance and reason")
-            r["Switches"] = "; ".join(filter(None, [r.get("Switches"), f"{stamp(inst)} {a.switch.strip()}"]))
+            switch = a.switch.strip()
+            if not re.fullmatch(r"[^\s:;]+[ \t]+->[ \t]+[^\s:;]+:[ \t]*\S.*", switch):
+                die("--switch needs old -> new: reason")
+            r["Switches"] = "; ".join(filter(None, [r.get("Switches"), f"{stamp(inst)} {switch}"]))
         write_jobs(inst, n, rows)
         inst.commit([], f"{n['id']}: job outcome")
         if a.close:
             if not open_job(rows or [], a.branch):
                 die("no open import study to close")
             job_ended(inst, n, a.branch, "studied", cause="coordinator processed import hand-back")
+        print(redact(f"{n['id']}: updated job {a.branch}", never_terms(n)))
+        return
     for n in inst.nodes():
         if a.id and n["id"] != a.id:
             continue
         j = jobs_summary(inst, n)
-        if not j["rows"]:
+        if not j["rows"] and not a.branch:
             continue
         print(f"{n['id']}: {j['finished']} finished ({j['merged']} merged, {j['abandoned']} abandoned)"
               + (f"; median {j['median_hours']} h and {j['median_reviews']} review round(s) per merged job"
@@ -3685,6 +3853,8 @@ def cmd_jobs(a):
                   + ("   (over twice the median)" if late else ""))
         for c in j["causes"]:
             print(f"  cause {c}")
+        for line in forecast_lines(read_jobs(n) or [], a.branch) + job_budget_lines(inst, n, a.branch):
+            print(redact("  " + line, never_terms(n)))
         for r in j["rows"]:
             if a.branch and r["Job"] == a.branch:
                 print(redact(json.dumps(r, ensure_ascii=False), never_terms(n)))
@@ -3981,7 +4151,7 @@ def due_evidence(inst, n):
     wts = {b: {**w, **local_job_state(n, b, w)} for b, w in sorted(n["local"].get("worktrees", {}).items())}
     signals = {job_key(r): read_handback(n, r) for r in rows or []}
     for r in rows or []:
-        if not r["Ended"] and not handback_file(n, r).exists() and read_ready_packet(inst, n, r["Job"]):
+        if not r["Ended"] and not handback_file(n, r).exists() and read_ready_packet(inst, n, r["Job"], r):
             signals[job_key(r)] = {"state": "done", "report": "", "legacy_ready": True}
     # Node's own commits only, excluding status (including its generated refresh commit) and children.
     names = ["brief.md", "decisions.md", "node.md", "inbox.md", "sources", "AGENTS.md", JOBS_FILE,
@@ -4026,6 +4196,9 @@ def due_items(inst, n, evidence=None, include_stale=True):
     items = []
     def add(kind, text, **extra):
         items.append({"node": n["id"], "kind": kind, "text": redact(text, never_terms(n)), **extra})
+    if missing_preview(n, state):
+        add("missing-preview", "code node has merged jobs but no recorded preview; run a local preview and screenshot tour, "
+            "then record preview=<URL/path> and preview_tour=<path> with brain set")
     if state["jobs"] is None:
         add("ledger", "job-ledger.md is a legacy file; reconcile jobs without overwriting it")
     for row in state["jobs"] or []:
@@ -4075,39 +4248,75 @@ def cmd_due(a):
             print(f"{item['node']}: {item['kind']}: {item['text']}")
 
 
+def missing_preview(n, state):
+    code = bool(n["fm"].get("stack")) or any(l in ("type:code", "kind:code") for l in lst(n["fm"].get("labels"))) or \
+        bool(n["external"] and n["home_path"] and (n["home_path"] / ".git").exists())
+    merged = any(r["Ended"] and r["Outcome"] == "merged" for r in state["jobs"] or []) or \
+        any(w["merged"] for w in state["worktrees"].values())
+    return code and merged and not n["fm"].get("preview", "").strip()
+
+
+def display_time(inst, value):
+    parsed = inst.parse_time(value)
+    return usage_time(parsed.timestamp(), inst) if parsed else "unknown (legacy time)"
+
+
 def status_facts(inst, n, state, known_merges):
     """The displayed facts only: no hidden git tips, file hashes or judgement timestamp."""
     merged = {job_key(r): r for r in state["jobs"] or [] if r["Ended"] and r["Outcome"] == "merged"}
     for r in state["jobs"] or []:
         if not r["Ended"] and state["worktrees"].get(r["Job"], {}).get("merged"):
             merged[job_key(r)] = {**r, "local_merge": True}
-    new = [r for key, r in merged.items() if key not in known_merges]
+    def merge_time(r):
+        t = inst.parse_time(r.get("Ended") or r.get("Started"))
+        return t.timestamp() if t else 0
+    new = sorted([r for key, r in merged.items() if key not in known_merges], key=merge_time, reverse=True)
     lines = ["Merged since previous refresh:"]
     lines += [redact(f"- {r['Job']}: merged in local git; ledger still open" if r.get("local_merge") else
-                     f"- {r['Ended']}: {r['Job']} ({r['Commits'] or '?'} commits)", never_terms(n)) for r in new] or ["- None recorded."]
+                     f"- {display_time(inst, r['Ended'])}: {r['Job']} ({r['Commits'] or '?'} commits)", never_terms(n)) for r in new] or ["- None recorded."]
     lines += ["", "Open worktrees (this machine):"]
     lines += [redact(f"- {b}: {'present' if w['exists'] else 'missing'}" + ("; merged in local git" if w["merged"] else ""),
                      never_terms(n)) for b, w in state["worktrees"].items()] or ["- None."]
     lines += ["", "Running jobs (open in ledger; a hand-back means the worker stopped):"]
     lines += [redact(f"- {r['Job']}: " + ((state['handbacks'][job_key(r)] or {}).get('state') or "open; runtime activity unknown") +
-                     f"; started {r['Started']}; {r['Reviews'] or '0'} reviews", never_terms(n))
+                     f"; started {display_time(inst, r['Started'])}; {r['Reviews'] or '0'} reviews", never_terms(n))
               for r in state["jobs"] or [] if not r["Ended"]] or ["- None."]
     if state["jobs"] is None:
         lines += ["- Legacy ledger: running jobs unknown."]
     due = due_items(inst, n, (state, "", ""), include_stale=False)
-    lessons = [r for r in state["jobs"] or [] if r["Ended"] and r["Outcome"] == "merged"]
+    lessons = sorted([r for r in state["jobs"] or [] if r["Ended"] and r["Outcome"] == "merged"], key=merge_time, reverse=True)
     lines += ["", "Lesson outcomes (merged jobs):"]
     lines += [redact(f"- {r['Job']}: " + (r.get("Lessons") or
                      ("missing; coordinator must record outcome" if r.get("Lesson check") == "required" else
                       "legacy; outcome not required")), never_terms(n)) for r in lessons] or ["- None."]
     lines += ["", "Finished jobs awaiting coordinator:"]
     lines += ["- " + i["text"] for i in due if i["kind"] == "handback"] or ["- None."]
+    forecasts = forecast_lines(state["jobs"] or [])
+    if forecasts:
+        lines += ["", "Forecasts (merged ledger durations):"] + ["- " + redact(s, never_terms(n)) for s in forecasts]
+    if missing_preview(n, state):
+        lines += ["", "Preview: missing — merged code jobs need a local preview and screenshot tour."]
+    elif n["fm"].get("preview"):
+        lines += ["", redact("Preview: " + n["fm"]["preview"] + "; tour: " + n["fm"].get("preview_tour", "not recorded"), never_terms(n))]
     rules, roles, items = pending_imports(inst, n)
     if rules or roles or items:
         lines += ["", f"Imported, unreviewed (inactive): {rules} rule file(s), {roles} role(s), {items} proposed item(s)."]
     human = [i for i in attention_items(inst, [n]) if i[1] not in ("stale",)]
     lines += ["", f"Due: {len(due)} · Needs the human (attention sources, excluding stale status): {len(human)}"]
-    return lines, merged
+    compact, count = [], 0
+    for line in lines:
+        if line.startswith("- "):
+            count += 1
+            if count <= 8:
+                compact.append(line)
+        else:
+            if count > 8:
+                compact.append(f"- +{count - 8} more")
+            count = 0
+            compact.append(line)
+    if count > 8:
+        compact.append(f"- +{count - 8} more")
+    return compact, merged
 
 
 def refresh_status(inst, n):
@@ -4125,15 +4334,23 @@ def refresh_status(inst, n):
     lines, merged = status_facts(inst, n, state, previous.get("merged", []))
     fingerprint = digest(lines)
     lines = [FACTS_START, "## Facts (generated by brain status --refresh)", "",
-             "Facts refreshed: " + inst.now_dt().isoformat(sep=" ", timespec="seconds"), "", *lines, "",
+             "Facts refreshed: " + inst.now(), "", *lines, "",
              "<!-- brain:facts-state " + json.dumps({"fingerprint": fingerprint, "merged": list(merged),
                  "merged_before": previous.get("merged", [])}, sort_keys=True) + " -->", FACTS_END]
     block = "\n".join(lines)
-    if FACTS_RE.search(text):
-        text = FACTS_RE.sub(lambda m: block, text)
-    else:
-        # Preserve the coordinator's judgement timestamp outside the generated block.
-        text = block + "\n\n" + text
+    old = FACTS_RE.search(text)
+    if old:
+        suffix = text[old.end():]
+        if suffix.startswith("\n\n"):
+            suffix = suffix[2:]
+        text = text[:old.start()] + suffix
+    # Keep the title and coordinator Updated above facts, including legacy blocks at the top.
+    body = re.search(r"(?m)^## ", text)
+    headers = list(re.finditer(r"(?m)^(?:# |Updated:)[^\r\n]*(?:\r?\n|$)", text[:body.start()] if body else text))
+    at = headers[-1].end() if headers else 0
+    while at < len(text) and text[at] in "\r\n":
+        at += 1
+    text = text[:at] + block + "\n\n" + text[at:]
     atomic_write(f, text)
     touch(f)
 
@@ -4194,6 +4411,7 @@ def cmd_inbox(a):
     reporter = inst.node(a.id)["id"] if a.id else here["id"] if here else "root"
     nodes = [n for n in inst.nodes() if reporter == "root" or n["id"] == reporter or n["id"].startswith(reporter + "/")]
     items, reporters = inbox_items(inst, nodes, reporter)
+    prefixes = shortest_ids([i["id"] for i in items])
     seen = reporters.get(reporter, {})
     if a.new:
         fresh = [i for i in items if not i["reported"]]
@@ -4203,7 +4421,7 @@ def cmd_inbox(a):
                  for i in items}
         items = fresh
     output = json.dumps(items, indent=2) + "\n" if a.json else "".join(
-        f"{item['node']}: [{item['id']}] {item['text']}\n" for item in items)
+        f"{item['node']}: [{prefixes[item['id']]}] {item['text']}\n" for item in items)
     sys.stdout.write(output)
     if a.new:
         # Delivery comes first, under the same lock. A crash before saving repeats an item.
@@ -4212,6 +4430,12 @@ def cmd_inbox(a):
         f.parent.mkdir(exist_ok=True)
         reporters[reporter] = state
         atomic_write(f, json.dumps({"version": 2, "reporters": reporters}, indent=2) + "\n")
+
+
+def shortest_ids(ids):
+    return {key: next((key[:size] for size in range(6, len(key) + 1)
+                       if all(other == key or not other.startswith(key[:size]) for other in ids)), key)
+            for key in ids}
 
 
 def cmd_stale(a):
@@ -4997,6 +5221,7 @@ def ui_state(inst, problems=None, scan=None):
         out_nodes.append({
             "id": n["id"], "title": fm.get("title", ""), "parent": n["parent"]["id"] if n["parent"] else None,
             "owners": n["owners"], "labels": lst(fm.get("labels")), "runtime": fm.get("runtime", ""),
+            "preview": hide(fm.get("preview", "")), "preview_tour": hide(fm.get("preview_tour", "")),
             "sealed": n["sealed"], "archived": n["archived"], "paused": paused(n), "external": n["external"],
             "home": tilde(n["home_path"]) if n["home_path"] else "",
             "coordinator": inst.thread_link(loc["coordinator"]) if loc.get("coordinator") else "",
@@ -5004,8 +5229,9 @@ def ui_state(inst, problems=None, scan=None):
             "status": {k: v for k, v in secs.items() if v and k.lower() != "active work"},
             "work": work, "worktrees": wts, "inbox": [l[2:] for l in inbox_lines(n)],
             "blocked": status_section(n, "blocked"), "decisions": ui_decisions(inst, n), "limits": limits_of(n),
-            "never_name": len(terms), "jobs": {**js, "rows": [{k: hide(v) for k, v in r.items()} for r in (read_jobs(n) or [])],
-                                               "open": [{k: hide(v) for k, v in r.items()} for r in js["open"]]},
+            "never_name": len(terms), "jobs": {**js, "rows": [{k: hide(v) for k, v in r.items()} for r in js["rows"]],
+                                               "open": [{k: hide(v) for k, v in r.items()} for r in js["open"]],
+                                               "forecasts": [{k: hide(v) for k, v in r.items()} for r in js["forecasts"]]},
             "reports": [{"name": d.parent.name, "title": next((l[2:] for l in d.read_text().splitlines()
                                                               if l.startswith("# ")), d.parent.name),
                          "path": tilde(d)} for d in reps]})
@@ -5561,7 +5787,7 @@ def reexec_into_instance_core():
 READ_ONLY = {"cmd_show", "cmd_tree", "cmd_status", "cmd_now", "cmd_jobs", "cmd_stale", "cmd_ui", "cmd_guard",
              "cmd_due", "cmd_inbox",
              "cmd_brief", "cmd_hire", "cmd_reports", "cmd_brains", "cmd_use", "cmd_machine", "cmd_usable",
-             "cmd_item_list", "cmd_wt_list", "cmd_selftest", "cmd_init", "cmd_hook", "cmd_hook_approve", "cmd_help",
+             "cmd_item_list", "cmd_item_show", "cmd_wt_list", "cmd_selftest", "cmd_init", "cmd_hook", "cmd_hook_approve", "cmd_help",
              "cmd_dashboard", "cmd_ready", "cmd_usage", "cmd_scan", "cmd_scrub"}
 
 
@@ -5622,6 +5848,7 @@ def main():
         opt("paths", nargs="+"), opt("--parent", default="root"), opt("--id"), opt("--title"))
     cmd("brief", cmd_brief, "a worker brief: where it runs, the task, the node's limits, how to ask and hand back",
         "id", opt("--import", dest="import_study", action="store_true", help="study an existing home"),
+        opt("--small", action="store_true", help="minutes, low risk: no job ceremony"),
         opt("--branch", help="the job's worktree (brain wt add)"), opt("--task"),
         opt("--task-file", dest="task_file"), opt("--runtime"), opt("--model", help="job model for scoped usage limits"),
         opt("--to", help="the thread the worker reports to (default: the node's coordinator)"), opt("--out"))
@@ -5648,9 +5875,10 @@ def main():
         opt("--quiet", action="store_true", help="no output; exit 1 when anything is due, 0 otherwise"))
     cmd("inbox", cmd_inbox, "needs in a node's subtree (default: calling node); --new remembers per reporter",
         opt("id", nargs="?"), opt("--json", action="store_true"), opt("--new", action="store_true"))
-    cmd("handback", cmd_handback, "worker signal for one open ledger job (does not edit coordinator files)",
+    cmd("handback", cmd_handback, "worker signal and optional inbox need for one open ledger job",
         "id", opt("--branch", required=True), opt("--state", choices=["done", "failed", "blocked", "question"], required=True),
         opt("--report"), opt("--lessons", help="proposed lessons, or none: <reason>"),
+        opt("--need-human", help="question or blocked need to append to the node inbox"),
         opt("--reviews", type=int, help="completed review rounds; runs verify for done"))
     cmd("show", cmd_show, "everything about one node, including this machine's bindings", "id")
     cmd("set", cmd_set, "set fields: brain set <id> key=value ... (host IDs and home paths stay on this machine)",
@@ -5683,6 +5911,9 @@ def main():
     t = isub.add_parser("list", help="brain item list [--node N]  (shows what N may use)")
     t.add_argument("--node")
     t.set_defaults(f=cmd_item_list)
+    t = isub.add_parser("show", help="read a usable item for a target node")
+    t.add_argument("id"); t.add_argument("--node", required=True)
+    t.set_defaults(f=cmd_item_show)
     t = isub.add_parser("scope", help="brain item scope <id> a,b [--consented-by ...]")
     t.add_argument("id"); t.add_argument("scope"); t.add_argument("--consented-by", dest="consented_by", default="")
     t.set_defaults(f=cmd_item_scope)
