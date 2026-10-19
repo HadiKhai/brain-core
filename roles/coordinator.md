@@ -164,7 +164,9 @@ Each reusable lesson becomes a library item (the `learn`
 skill), placed where the next job will find it. A lesson only for this node goes in your
 files instead. Record the learned item ids with `brain jobs <id> --branch <branch> --lessons
 <id1,id2>`, or `--lessons "none: <reason>"`, before `wt prune` records the merge. Then mark
-the row `merged` or `abandoned`. Never edit the worker record. A job dropped without a merge ends
+the row `merged` or `abandoned`. Merged v2 jobs missing a required lesson outcome remain due;
+legacy merges have no retroactive requirement. Never edit the worker record. A job dropped
+without a merge ends
 with `core/bin/brain wt rm <id> <branch> --cause "<why>"`, so `core/bin/brain jobs` can say
 what goes wrong, how long jobs take and how many review rounds they need: base estimates on
 it, not on a guess.

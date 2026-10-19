@@ -1578,6 +1578,21 @@ class UnifiedHandbacks(Scenario):
             self.b(r, "handback", "a", "--branch", "job", "--state", "done", "--lessons", lesson, ok=False)
             self.assertEqual(self.packet().read_bytes(), original)
 
+    def test_merged_required_lesson_outcomes_due_and_facts_clear_on_resolution(self):
+        r, home, wt = self.job()
+        self.finish(r)
+        self.git("merge", "-q", "job", cwd=home)
+        self.b(r, "wt", "prune", "a", "--offline")
+        self.assertEqual(len([i for i in self.due(r) if i["kind"] == "lesson-outcome"]), 1)
+        self.b(r, "status", "a", "--refresh")
+        self.assertIn("missing; coordinator must record outcome", (r / "nodes/a/status.md").read_text())
+        self.b(r, "jobs", "a", "--branch", "job", "--lessons", "none: fix specific to this job")
+        self.assertNotIn("lesson-outcome", [i["kind"] for i in self.due(r)])
+        self.assertIn("stale-status", [i["kind"] for i in self.due(r)])
+        self.b(r, "status", "a", "--refresh")
+        self.assertIn("none: fix specific to this job", (r / "nodes/a/status.md").read_text())
+        self.assertEqual(self.due(r), [])
+
     def test_unbound_home_does_not_break_read_only_due_or_ready(self):
         r, home, wt = self.job()
         local = r / ".brain/local.json"
@@ -1597,6 +1612,15 @@ class UnifiedHandbacks(Scenario):
         self.assertFalse((r / "nodes/a/job-handbacks").exists())
         self.assertIn("abandoned", (r / "nodes/a/job-ledger.md").read_text())
 
+    def test_pre_feature_merges_have_no_retroactive_lesson_requirement(self):
+        r, home, wt = self.job()
+        self.git("merge", "-q", "job", cwd=home)
+        self.b(r, "wt", "prune", "a", "--offline")
+        ledger = r / "nodes/a/job-ledger.md"
+        ledger.write_text(ledger.read_text().replace("| required |", "|  |"))
+        self.assertNotIn("lesson-outcome", [i["kind"] for i in self.due(r)])
+        self.b(r, "status", "a", "--refresh")
+        self.assertIn("legacy; outcome not required", (r / "nodes/a/status.md").read_text())
 
 
 class ReadyFailureRegressions(Scenario):

@@ -3563,6 +3563,9 @@ def due_items(inst, n, evidence=None, include_stale=True):
         add("ledger", "job-ledger.md is a legacy file; reconcile jobs without overwriting it")
     for row in state["jobs"] or []:
         if row["Ended"]:
+            if row["Outcome"] == "merged" and row.get("Lesson check") == "required" and not row.get("Lessons"):
+                add("lesson-outcome", f"{row['Job']}: merged job needs a lesson outcome; learn proposed lessons "
+                    "and record item ids or none: <reason> with brain jobs --lessons", job=job_key(row))
             continue
         branch = row["Job"]
         w = state["worktrees"].get(branch)
@@ -3624,6 +3627,11 @@ def status_facts(inst, n, state, known_merges):
     if state["jobs"] is None:
         lines += ["- Legacy ledger: running jobs unknown."]
     due = due_items(inst, n, (state, "", ""), include_stale=False)
+    lessons = [r for r in state["jobs"] or [] if r["Ended"] and r["Outcome"] == "merged"]
+    lines += ["", "Lesson outcomes (merged jobs):"]
+    lines += [redact(f"- {r['Job']}: " + (r.get("Lessons") or
+                     ("missing; coordinator must record outcome" if r.get("Lesson check") == "required" else
+                      "legacy; outcome not required")), never_terms(n)) for r in lessons] or ["- None."]
     lines += ["", "Finished jobs awaiting coordinator:"]
     lines += ["- " + i["text"] for i in due if i["kind"] == "handback"] or ["- None."]
     human = [i for i in attention_items(inst, [n]) if i[1] not in ("stale",)]
