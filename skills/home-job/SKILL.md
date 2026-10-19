@@ -30,22 +30,19 @@ stated; never run a polling loop in an agent.
    and open a pull request only when the operator or the home's rules allow it, axiom 24), then
    wrap it with `core/bin/brain brief <id> --branch <branch> --task-file <file>`: that adds the
    worktree, port, limits, guard step and hand-back. Use `core/bin/brain hire` when a
-   specialist fits; pass `--branch <branch>` so its brief has the same hand-back. Require a
-   **Lessons** section in the report: each lesson, or `none: <reason>`.
-   While it runs, the worker `send`s you when it finishes, fails, is blocked or has a question
-   (the coordinator role, "While workers run", is the backstop).
-   Before handing back, the worker runs `brain handback <id> --branch <branch>
-   --state done|failed|blocked --report <path>` (one state). Its worker-owned file makes a
-   finished job visible even if the host message is lost. Keep a host interval tick on the
-   coordinator: run `brain due <id>` plus host pending requests; empty means stop silently.
-
-4. **Review by the other runtime** before the operator sees it: the `review` skill. The worker
-   then commits, rebases on `main`, and runs `brain ready <id> --branch <branch> --record --reviews
-   <completed rounds>`. Set `brain set <id> 'verify=<command>'` beforehand. This runs verify in
-   the worktree and checks `merge-tree`; the ready packet records both SHAs, command, result
-   and completed review rounds. The worker includes its path and review evidence in the report.
+   specialist fits; pass `--branch <branch>` so its brief has the same finishing step.
+   Keep a host interval tick on the coordinator: `brain due <id>` plus host pending requests;
+   empty means stop silently. The worker's file is durable; a host notification is optional.
+4. **Review and hand back.** Review by the other runtime before the operator sees it (the
+   `review` skill). Set `brain set <id> 'verify=<command>'` beforehand. The worker finishes
+   reviews, commits, rebases on `main` and runs one command:
+   `brain handback <id> --branch <branch> --state done --reviews <completed rounds>
+   --report <path> --lessons '<proposals or none: reason>'`. This checks main, runs verify and
+   records the packet, state and proposed lessons in one worker-owned `job-handbacks/<key>.json`.
+   No separate packet command, host message or Lessons section is required. Blockers/questions
+   use the same command with `--state blocked`/`question` and no --reviews; the report states why.
    `ready` compares against local `main` and never fetches. Homes merging through GitHub pull
-   requests must fetch and update local `main` before `ready`; the worker then rebases and records again.
+   requests must fetch and update local `main` before `ready`; the worker then rebases and hands back again.
 5. **Pull request.** Once pushing is allowed and the review is addressed, the worker opens it.
    Have the host watch it (host `watch`), so reviews, checks and conflicts come back to you.
    Update the Active work row.
@@ -55,7 +52,7 @@ stated; never run a polling loop in an agent.
    merges only on `ready`. A moved main goes back to the worker for rebase and verification;
    the coordinator does not repeat its tests. Only the coordinator merges to main.
 6. **Done.** When the operator (and the home's owners) merge it, set the row to `merged`, record
-   the outcome in `status.md`, turn the report's reusable lessons into library items (the
+   the outcome in `status.md`, turn the hand-back's proposed reusable lessons into library items (the
    `learn` skill), record their ids with `core/bin/brain jobs <id> --branch <branch> --lessons
    <id1,id2>` (or `--lessons "none: <reason>"`), and run `core/bin/brain wt prune <id>`. It removes only clean, merged
    worktrees. A job dropped instead: `core/bin/brain wt rm <id> <branch> --cause "<why>"`.

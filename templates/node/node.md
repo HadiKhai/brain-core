@@ -13,7 +13,7 @@ through `core/bin/brain`. `owners` empty means: same as the parent. `home` is `h
 `external` when the node's own material lives elsewhere (a sealed node); then `home_url` says
 where to get it. This machine's bindings (host IDs, the home's local path) are in
 `.brain/local.json`: see `core/bin/brain show <id>`.
-For home jobs, set `verify: <command>` with `brain set`; `brain ready --record` runs it in
+For home jobs, set `verify: <command>` with `brain set`; `brain handback --state done --reviews N` runs it in
 the worker's worktree before hand-back.
 
 `runtime` pins worker briefs to that engine. At its subscription stop line, the brief keeps the

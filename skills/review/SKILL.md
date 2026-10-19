@@ -21,6 +21,8 @@ stated; never run a polling loop in an agent.
    worker there if the host's delegate can't pick a folder). The reviewer changes nothing.
 4. **Address.** Send the findings to the builder (host `send`). Blockers and majors get fixed or
    answered with a reason. Repeat 2-4 until the reviewer has no blockers, at most three rounds.
+   The builder then records readiness, state and proposed lessons with one `brain handback`
+   command. Reviewers never write or refresh the builder's job record.
 5. **Report.** In the Active work row and in what you tell the operator: reviewed by `<runtime>`,
    what was found, what was fixed, and anything the builder and reviewer still disagree on. Give
    the operator both sides of a disagreement; don't settle it silently.

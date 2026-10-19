@@ -528,17 +528,21 @@ def _nine_worker_resume(run, committed):
     run.check(verify.returncode == 0, "replacement did not finish multiplication")
     ready = brain(root, "ready", "a", "--branch", "job/calc", check=False).strip()
     run.check(ready == "ready", f"no valid ready packet: {ready}")
-    text = report.read_text()
-    lessons = re.search(r"(?ims)^## Lessons\s*\n(.*?)(?=^## |\Z)", text)
-    run.check(lessons and lessons.group(1).strip() and "<!--" not in lessons.group(1), "Lessons section left empty")
-    if lessons and re.search(r"\bnone\b", lessons.group(1), re.I):
-        run.check(bool(re.search(r"none\s*:\s*\S", lessons.group(1), re.I)), "none has no reason")
+    records = list((root / "nodes/a/job-handbacks").glob("*.json"))
+    run.check(len(records) == 1, "worker did not leave exactly one unified record")
+    record = json.loads(records[0].read_text()) if records else {}
+    lessons = record.get("lessons", "").strip()
+    run.check(bool(lessons) and "<!--" not in lessons, "proposed lessons missing from record")
+    if lessons.lower().startswith("none"):
+        run.check(bool(re.match(r"none\s*:\s*\S", lessons, re.I)), "none has no reason")
+    run.check(record.get("state") == "done" and isinstance(record.get("ready"), dict), "state/packet not unified")
+    run.check(not (run.tmp / "app-work/scratch/ready").exists(), "worker wrote a separate packet")
     for name, before in coordinator.items():
         run.check((root / "nodes/a" / name).read_text() == before, f"worker edited coordinator's {name}")
 
 
 def nine_worker_resume_ready(run):
-    """A replacement runtime continues partial commits, writes Lessons and leaves a current ready packet."""
+    """A replacement runtime continues partial commits and leaves one ready hand-back with lessons."""
     _nine_worker_resume(run, committed=True)
 
 
@@ -557,8 +561,10 @@ def nine_future_updated_repaired(run):
     lines[0] = "Updated: 2999-01-01 12:00 +00:00 by a coordinator (claude)"
     st.write_text("\n".join(lines) + "\n")
     sh("git", "commit", "-qam", "a: incorrect clock", cwd=root)
-    run.agent(node, "Role: coordinator of node `a`. Check your notes, then reply with one word.", writable=root)
-    run.check_time(st.read_text().splitlines()[0], "repaired Updated line")
+    run.agent(node, "Role: coordinator of node `a`. Read status.md to check your notes, then reply with one word.", writable=root)
+    judgement = re.sub(r"<!-- brain:facts v1 -->.*?<!-- /brain:facts -->", "", st.read_text(), flags=re.S)
+    updated = re.search(r"(?m)^Updated:.*$", judgement)
+    run.check_time(updated.group() if updated else "", "repaired Updated line")
     log = root / ".brain/hooks.log"
     run.check(log.exists() and "future Updated:" in log.read_text(), "hook did not flag future Updated")
     run.check(not sh("git", "status", "--porcelain", "--", "nodes/a", cwd=root).strip(), "repair not committed")
@@ -679,7 +685,7 @@ def autonomy_worker_handback(run):
     root = run.instance()
     a = root / "nodes" / "a"
     home = run.home_repo("worker-app", {"answer.txt": "pending\n"})
-    brain(root, "set", "a", f"home={home}")
+    brain(root, "set", "a", f"home={home}", "verify=python3 -c 'assert open(\"answer.txt\").read().strip() == \"ready\"'")
     brain(root, "wt", "add", "a", "job/signal")
     loc = json.loads((root / ".brain/local.json").read_text())
     wt = Path(loc["nodes"]["a"]["worktrees"]["job/signal"]["path"])
@@ -688,6 +694,7 @@ def autonomy_worker_handback(run):
     brief = brain(root, "hire", "finisher", "a", "--branch", "job/signal", "--task",
                   f"Work only in this existing job worktree: {wt}. "
                   "Replace answer.txt with ready, write a short report.md in this worktree, and commit both. "
+                  "One review round is already completed with no open findings; do not launch another review. "
                   "No host send tool is available in this harness; still complete the file hand-back "
                   "required by this brief. Do not push or merge.")
     run.agent(wt, brief, writable=root)
@@ -697,6 +704,10 @@ def autonomy_worker_handback(run):
         signal = json.loads(signals[0].read_text())
         run.check(signal.get("state") == "done" and signal.get("job") == "job/signal", "incorrect hand-back state/job")
         run.check(bool(signal.get("report")), "hand-back did not name its report")
+        run.check(bool(signal.get("lessons")), "unified record has no proposed lessons")
+        run.check(isinstance(signal.get("ready"), dict), "unified record has no ready packet")
+        run.check(brain(root, "ready", "a", "--branch", "job/signal").strip() == "ready", "record is not ready")
+        run.check(not (run.tmp / "worker-app-work/scratch/ready").exists(), "wrote a second packet file")
     run.check(all((a / name).read_bytes() == content for name, content in owned.items()), "worker edited coordinator files")
     run.check((wt / "answer.txt").read_text().strip() == "ready", "worker did not finish the task")
     due = json.loads(brain(root, "due", "a", "--json"))

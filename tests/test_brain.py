@@ -745,7 +745,7 @@ class WorkerBriefs(Scenario):
         self.assertIn("Never ask the operator", out)
         self.assertIn("thr-app", out)                                 # who to wake, and how
         self.assertIn("t3_thread_send", out)
-        self.assertIn("~/alice/nodes/app/inbox.md", out)
+        self.assertNotIn("~/alice/nodes/app/inbox.md", out)  # the unified record carries questions too
         self.assertIn("Lessons", out)
         self.b(r, "brief", "app", "--branch", "nope", ok=False)
         # the same hand-back in a specialist's brief and a review brief
@@ -1379,7 +1379,7 @@ class JobLessonOutcomes(Scenario):
         self.assertEqual(self.git("status", "--porcelain", "--", "nodes", cwd=r).strip(), "M nodes/a/status.md")
         self.b(r, "jobs", "--lessons", "method", ok=False)
         brief = self.b(r, "brief", "a", "--branch", "job|pipe")
-        self.assertIn("must have a Lessons section", brief)
+        self.assertIn("--lessons", brief)
         self.assertIn("none: <reason>", brief)
 
 
@@ -1400,18 +1400,18 @@ class WorkerReadyPackets(Scenario):
         return self.b(r, "ready", "a", "--branch", "job", "--record", "--reviews", "2", ok=ok)
 
     def packet(self):
-        return next((self.tmp / "app-work/scratch/ready").glob("*.json"))
+        return next((self.tmp / "alice/nodes/a/job-handbacks").glob("*.json"))
 
     def test_packet_records_executed_verify_and_checker_does_not_rerun(self):
         r, home, wt = self.job()
         self.assertIn("packet missing", self.b(r, "ready", "a", "--branch", "job", ok=False))
         before = self.git("rev-parse", "HEAD", cwd=r)
         self.assertEqual(self.record(r).strip(), "ready")
-        p = json.loads(self.packet().read_text())
+        p = json.loads(self.packet().read_text())["ready"]
         self.assertEqual(p["head"], self.git("rev-parse", "job", cwd=home).strip())
         self.assertEqual(p["main"], self.git("rev-parse", "main", cwd=home).strip())
         self.assertEqual((p["verify_command"], p["verify_result"], p["review_rounds"]), ("python3 -B verify.py", 0, 2))
-        self.assertEqual(self.git("rev-parse", "HEAD", cwd=r), before)
+        self.assertNotEqual(self.git("rev-parse", "HEAD", cwd=r), before)
         # A checker must not execute the command: make the executable unavailable in its PATH.
         original = self.env["PATH"]
         tools = self.tmp / "tools"
@@ -1445,7 +1445,7 @@ class WorkerReadyPackets(Scenario):
         self.assertIn("dirty", self.record(r, ok=False))
         self.git("commit", "-qam", "wrong", cwd=wt)
         self.assertIn("verify missing, changed or failed", self.record(r, ok=False))
-        self.assertNotEqual(json.loads(self.packet().read_text())["verify_result"], 0)
+        self.assertNotEqual(json.loads(self.packet().read_text())["ready"]["verify_result"], 0)
         self.b(r, "set", "a", "verify=")
         self.assertIn("no verify command", self.record(r, ok=False))
         self.b(r, "set", "a", "verify=true")
@@ -1465,13 +1465,138 @@ class WorkerReadyPackets(Scenario):
         r, home, wt = self.job()
         self.record(r)
         path = self.packet()
-        original = json.loads(path.read_text())
+        record = json.loads(path.read_text())
+        original = record["ready"]
         for data in ([1], {}, {**original, "review_rounds": 0}, {**original, "verify_result": "0"},
                      {**original, "checked_at": {}}, {**original, "node": "other"}):
-            path.write_text(json.dumps(data))
+            path.write_text(json.dumps({**record, "ready": data}))
             self.assertIn("not ready", self.b(r, "ready", "a", "--branch", "job", ok=False))
         path.write_text("{")
         self.assertIn("unreadable", self.b(r, "ready", "a", "--branch", "job", ok=False))
+
+
+class UnifiedHandbacks(Scenario):
+    job = WorkerReadyPackets.job
+    packet = WorkerReadyPackets.packet
+
+    def finish(self, r, ok=True):
+        return self.b(r, "handback", "a", "--branch", "job", "--state", "done", "--reviews", "2",
+                      "--report", "reports/result.md", "--lessons", "Use python -B to keep verification clean.", ok=ok)
+
+    def due(self, r):
+        return json.loads(self.b(r, "due", "a", "--json"))
+
+    def test_one_command_one_worker_file_for_ready_state_and_proposals(self):
+        r, home, wt = self.job()
+        names = ("status.md", "brief.md", "decisions.md", "node.md", "job-ledger.md")
+        before = {name: (r / "nodes/a" / name).read_bytes() for name in names}
+        main = self.git("rev-parse", "main", cwd=home)
+        self.assertEqual(self.finish(r).strip(), "ready")
+        data = json.loads(self.packet().read_text())
+        self.assertEqual((data["version"], data["job"], data["state"]), (2, "job", "done"))
+        self.assertEqual(data["lessons"], "Use python -B to keep verification clean.")
+        self.assertEqual(data["report"], "reports/result.md")
+        self.assertEqual(data["ready"]["review_rounds"], 2)
+        self.assertTrue(data["at"] and data["started"])
+        self.assertFalse((self.tmp / "app-work/scratch/ready").exists())
+        self.assertEqual(len(list(self.packet().parent.glob("*.json"))), 1)
+        self.assertEqual({name: (r / "nodes/a" / name).read_bytes() for name in names}, before)
+        self.assertEqual(self.git("rev-parse", "main", cwd=home), main)
+        self.assertIn("ready to merge", self.b(r, "due", "a"))
+        self.b(r, "status", "a", "--refresh")
+        self.assertIn("ready to merge", (r / "nodes/a/status.md").read_text())
+        brief = self.b(r, "brief", "a", "--branch", "job")
+        self.assertEqual(brief.count("brain handback a --branch job"), 1)
+        self.assertNotIn("--record", brief)
+        self.assertIn("host message is optional", brief)
+
+    def test_alias_replaces_same_record_and_blocked_question_clear_readiness(self):
+        r, home, wt = self.job()
+        self.finish(r)
+        path = self.packet()
+        self.b(r, "ready", "a", "--branch", "job", "--record", "--reviews", "2")
+        self.assertEqual(json.loads(path.read_text())["lessons"], "Use python -B to keep verification clean.")
+        self.assertEqual(json.loads(path.read_text())["report"], "reports/result.md")
+        self.b(r, "handback", "a", "--branch", "job", "--state", "done", "--report", "updated-report.md")
+        self.assertEqual(self.b(r, "ready", "a", "--branch", "job").strip(), "ready")
+        for state in ("blocked", "question"):
+            self.b(r, "handback", "a", "--branch", "job", "--state", state,
+                   "--report", "Need a choice.", "--lessons", "none: job incomplete")
+            self.assertIn("hand-back is " + state, self.b(r, "ready", "a", "--branch", "job", ok=False))
+            self.assertEqual(json.loads(path.read_text())["ready"], None)
+            self.assertEqual(next(i for i in self.due(r) if i["kind"] == "handback")["state"], state)
+        self.b(r, "ready", "a", "--branch", "job", "--record", "--reviews", "2",
+               "--lessons", "none: routine fix")
+        self.assertEqual(list(path.parent.glob("*.json")), [path])
+        self.assertEqual(json.loads(path.read_text())["lessons"], "none: routine fix")
+        self.assertFalse((self.tmp / "app-work/scratch/ready").exists())
+
+    def test_failed_verify_and_changed_main_are_finished_but_not_ready(self):
+        r, home, wt = self.job()
+        self.finish(r)
+        self.git("commit", "--allow-empty", "-qm", "main moves", cwd=home)
+        text = self.b(r, "due", "a")
+        self.assertIn("finished but not ready", text)
+        self.assertIn("main moved", text)
+        self.git("rebase", "main", cwd=wt)
+        (wt / "calc.py").write_text("value = 3\n")
+        self.git("commit", "-qam", "wrong value", cwd=wt)
+        self.assertIn("verify failed", self.finish(r, ok=False))
+        self.assertNotEqual(json.loads(self.packet().read_text())["ready"]["verify_result"], 0)
+        self.assertIn("verify missing, changed or failed", self.b(r, "due", "a"))
+        self.b(r, "set", "a", "verify=")
+        self.assertIn("no verify command", self.finish(r, ok=False))
+        self.assertIn("no verify command", self.b(r, "due", "a"))
+
+    def test_legacy_packets_and_signals_read_but_never_override_new_record(self):
+        import hashlib
+        r, home, wt = self.job()
+        self.finish(r)
+        path = self.packet()
+        data = json.loads(path.read_text())
+        old = self.tmp / "app-work/scratch/ready" / (hashlib.sha256(b"job").hexdigest() + ".json")
+        old.parent.mkdir(parents=True)
+        old.write_text(json.dumps(data["ready"]))
+        path.unlink()
+        self.assertEqual(self.b(r, "ready", "a", "--branch", "job").strip(), "ready")
+        self.assertIn("ready to merge", self.b(r, "due", "a"))
+        legacy = {k: data[k] for k in ("job", "started", "state", "at", "report")}
+        path.write_text(json.dumps(legacy))
+        self.assertEqual(self.b(r, "ready", "a", "--branch", "job").strip(), "ready")
+        self.assertIn("ready to merge", self.b(r, "due", "a"))
+        path.write_text(json.dumps({**data, "ready": None}))
+        self.assertIn("packet missing", self.b(r, "ready", "a", "--branch", "job", ok=False))
+        path.write_text("{bad")
+        self.assertIn("unreadable", self.b(r, "ready", "a", "--branch", "job", ok=False))
+        self.assertIn("invalid-handback", self.b(r, "due", "a"))
+
+    def test_invalid_lessons_do_not_replace_previous_worker_file(self):
+        r, home, wt = self.job()
+        self.finish(r)
+        original = self.packet().read_bytes()
+        for lesson in ("", "none", "none:"):
+            self.b(r, "handback", "a", "--branch", "job", "--state", "done", "--lessons", lesson, ok=False)
+            self.assertEqual(self.packet().read_bytes(), original)
+
+    def test_unbound_home_does_not_break_read_only_due_or_ready(self):
+        r, home, wt = self.job()
+        local = r / ".brain/local.json"
+        data = json.loads(local.read_text())
+        data["nodes"]["a"].pop("home", None)
+        local.write_text(json.dumps(data))
+        self.assertIsInstance(self.due(r), list)
+        self.assertIn("external git home", self.b(r, "ready", "a", "--branch", "job", ok=False))
+
+    def test_job_closed_during_verify_cannot_receive_worker_result(self):
+        import shlex
+        r, home, wt = self.job()
+        command = shlex.join([sys.executable, str(CORE / "bin/brain"), "-b", "alice", "wt", "rm", "a", "job",
+                              "--force", "--cause", "closed during verification"])
+        self.b(r, "set", "a", "verify=" + command)
+        self.assertIn("job changed during verification", self.finish(r, ok=False))
+        self.assertFalse((r / "nodes/a/job-handbacks").exists())
+        self.assertIn("abandoned", (r / "nodes/a/job-ledger.md").read_text())
+
 
 
 class ReadyFailureRegressions(Scenario):
@@ -1507,7 +1632,7 @@ class ReadyFailureRegressions(Scenario):
         remote_main = self.git("rev-parse", "HEAD", cwd=home).strip()
         self.git("checkout", "-q", "main", cwd=home)
         self.assertEqual(self.record(r).strip(), "ready")
-        self.assertEqual(json.loads(self.packet().read_text())["main"], local_main)
+        self.assertEqual(json.loads(self.packet().read_text())["ready"]["main"], local_main)
         self.assertNotEqual(local_main, remote_main)
         self.assertEqual(self.git("rev-parse", "origin/main", cwd=home).strip(), remote_main)
         skill = (CORE / "skills/home-job/SKILL.md").read_text()
@@ -1542,7 +1667,7 @@ class ReadyFailureRegressions(Scenario):
         self.assertNotIn("PrivateName", out)
         self.assertNotIn("dropped from tail", out)
         self.assertNotIn("context 0\n", out)
-        self.assertEqual(json.loads(self.packet().read_text())["verify_result"], 7)
+        self.assertEqual(json.loads(self.packet().read_text())["ready"]["verify_result"], 7)
 
 
 class RuntimeFallbackResume(Scenario):
@@ -2860,10 +2985,11 @@ class AutonomyHire(AutonomyProject):
         self.b(r, 'specialist', 'new', 'tester', '--title', 'Tester')
         base = self.b(r, 'hire', 'tester', 'app', '--task', 'Check the result.')
         branched = self.b(r, 'hire', 'tester', 'app', '--task', 'Check the result.', '--branch', 'job-a')
-        added = [line for line in branched.splitlines(keepends=True) if '**Before handing back**' in line]
-        self.assertEqual(len(added), 1)
-        self.assertIn('brain handback app --branch job-a', added[0])
-        self.assertEqual(branched.replace(added[0], ''), base)
+        self.assertNotIn('brain handback', base)
+        self.assertIn('brain handback app --branch job-a', branched)
+        self.assertIn('--lessons', branched)
+        self.assertNotIn('brain ready app --branch job-a --record', branched)
+        self.assertIn('host message is optional', branched)
 
 
 class AutonomyFacts(AutonomyProject):

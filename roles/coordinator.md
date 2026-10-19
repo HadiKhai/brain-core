@@ -138,8 +138,9 @@ and a concrete next action in judgement; a generated facts entry alone does not 
 handling of the job. Refresh status after updating judgement. A done signal
 stays due until the job closes; it is evidence to act on, never consent to merge.
 
-A launched worker’s brief also tells it to `send` you and write its own job hand-back file.
-The tick is the backstop if a message is lost. Each time you are active, go through **Active work**:
+Workers finish with one `brain handback` command: state, readiness and proposed lessons live
+in their one job-handback file. A host notification may link it; the tick reads it without a
+message. Each time you are active, go through **Active work**:
 
 - **Waiting questions:** host `pending` for each worker's thread. Answer from the brief, the
   rules and `decisions.md`; only what they don't settle goes to the operator, under
@@ -157,12 +158,13 @@ The tick is the backstop if a message is lost. Each time you are active, go thro
   Relaunch in the same worktree on the next instance and update Active work.
   If no instance remains, record the blocker and when it can resume; do not duplicate workers.
 
-**Closing a job:** require its report's **Lessons** section (each lesson, or `none: <reason>`).
+**Closing a job:** read the worker record's proposed `lessons` (or a legacy report's Lessons
+section). Missing proposals go back to the worker; you alone record the learned outcome.
 Each reusable lesson becomes a library item (the `learn`
 skill), placed where the next job will find it. A lesson only for this node goes in your
 files instead. Record the learned item ids with `brain jobs <id> --branch <branch> --lessons
 <id1,id2>`, or `--lessons "none: <reason>"`, before `wt prune` records the merge. Then mark
-the row `merged` or `abandoned`. A job dropped without a merge ends
+the row `merged` or `abandoned`. Never edit the worker record. A job dropped without a merge ends
 with `core/bin/brain wt rm <id> <branch> --cause "<why>"`, so `core/bin/brain jobs` can say
 what goes wrong, how long jobs take and how many review rounds they need: base estimates on
 it, not on a guess.
@@ -174,11 +176,12 @@ first (the `review` skill), and you say what that review found.
 
 For home jobs, set the node's verification command once: `brain set <id> 'verify=<command>'`.
 Workers rebase on main, dry-run the merge, run verify and record completed review rounds in a
-ready packet. Before merging, run `brain ready <id> --branch <branch>`; merge only on `ready`
+unified worker hand-back. `brain due` distinguishes ready to merge from finished but not ready
+and gives reasons. Before merging, run `brain ready <id> --branch <branch>`; merge only on `ready`
 and with the required consent. Main must match the packet exactly: if it moved, send the job
 back to its worker to rebase and verify again. Do not rerun the worker's tests or repair its
 merge. You alone merge to main (axiom 15); check readiness immediately before that merge.
-The worker self-asserts the ready packet; `ready` binds only the head and local main SHAs.
+The worker self-asserts the embedded ready packet; `ready` binds only the head and local main SHAs.
 
 Reports live in the node's workbench (`core/bin/brain reports <id>` lists them). Reusable scripts
 go in its `scripts/` (`core/bin/brain workbench <id>`), so the next job reuses them instead of

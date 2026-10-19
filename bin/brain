@@ -2350,7 +2350,7 @@ def cmd_hire(a):
     if others and not target["sealed"]:
         out += ["## Other knowledge you may ask for", ""] + \
                [f"- `{i['fm'].get('id')}`: {i['fm'].get('title')}" for i in others] + [""]
-    out += handback_lines(inst, target, branch=a.branch) + report_lines()
+    out += handback_lines(inst, target, branch=a.branch) + report_lines(job=bool(a.branch))
     text = "\n".join(out) + "\n"
     no_terms_in(target, text, "the brief")
     if a.out:
@@ -2401,25 +2401,37 @@ def handback_lines(inst, n, to=None, who="worker", branch=None):
                 "your final message. Write no file.", ""]
     inbox = "" if n["sealed"] else f" and append `- <time from brain now> from {who}: question: <it>` " \
                                      f"to `{tilde(n['dir'] / 'inbox.md')}`"
-    signal = ([f"- **Before handing back**, run `brain handback {shlex.quote(n['id'])} --branch {shlex.quote(branch)} "
-               "--state done|failed|blocked --report <path>` (choose one state). This writes only your job's "
-               "hand-back file; do not edit the ledger or status."] if branch else [])
+    if branch:
+        return ["## Questions and hand-back", "",
+                "- **Never ask the operator, and never wait for an answer in this thread**: nobody is watching it.",
+                "- **A choice** the brief or rules settle: make it and record it under Decisions I made.",
+                "- **Before handing back**, finish reviews, commit, then `git rebase main`; resolve conflicts yourself. "
+                f"Run `brain handback {shlex.quote(n['id'])} --branch {shlex.quote(branch)} "
+                "--state done --reviews <completed rounds> --report <path> --lessons '<proposed lessons or none: reason>'`. "
+                "This one step runs node verify, checks local main and records readiness, state and proposed lessons "
+                "in your one worker-owned job-handbacks/<key>.json. Do not edit the ledger or status. "
+                "If verify is unset, ask the coordinator to set it. If main moves, rebase and hand back again. "
+                "Only the coordinator merges to main. Use `none: <reason>` when there is no reusable lesson.",
+                "- **Blocked or need a choice:** use the same command with `--state blocked` or `--state question`, "
+                "omit --reviews, and describe the blocker/question in --report. Legacy failed is also accepted.",
+                "- End your turn after recording the hand-back. The coordinator reads it with brain due; "
+                f"a host message is optional notification ({how}) and need only link the record. Do not duplicate Lessons "
+                "in a message or report; --lessons carries your proposals.", ""]
     return ["## Questions and hand-back", "",
             "- **Never ask the operator, and never wait for an answer in this thread**: nobody is watching it.",
-            "- **A choice** the task, the rules or this brief settle: make it, and list it in your report under "
-            "\"Decisions I made\".",
+            "- **A choice** the task, rules or brief settle: make it and list it under Decisions I made.",
             "- **Your report must have a Lessons section:** list each lesson, or `none: <reason>`.",
-            f"- **A question you can't go on without:** {how} with the question{inbox}, then end your turn "
-            "with the question as your last line.",
+            f"- **A question you can't go on without:** {how} with the question{inbox}, then end your turn.",
             f"- **When you finish, fail or get blocked**, tell your coordinator straight away: {how} with "
-            "`done|failed|blocked: <one line>. Report: <path>`. Then end your turn."] + signal + [""]
+            "`done|failed|blocked: <one line>. Report: <path>`. Then end your turn.", ""]
 
 
-def report_lines():
+def report_lines(job=False):
     return ["## Report", "",
             "The answer first; then the proof (commands, numbers, hashes); what you produced and where; what you "
-            "did **not** run or check; \"Decisions I made\"; \"Lessons\": what the next job should know (a "
-            "pitfall, a tool's quirk, a method that worked), or \"none: <reason>\"; and what is still open."]
+            "did **not** run or check; Decisions I made; " +
+            ("proposed lessons go in the hand-back's --lessons field; " if job else
+             "Lessons: what the next job should know, or none: <reason>; ") + "and what is still open."]
 
 
 def cmd_brief(a):
@@ -2476,7 +2488,8 @@ def cmd_brief(a):
                     f"{'uncommitted changes' if dirty else 'a clean worktree'}; its worktree HEAD is `{head_sha}`. "
                     "Continue from these commits. Read the branch's log, diff and any uncommitted work first; "
                     "do not reset, recreate the branch or start the task over.",
-                    f"Read the existing ready packet at `{tilde(ready_path(inst, n, a.branch))}` if present; "
+                    f"Read the worker hand-back in `{tilde(n['dir'] / 'job-handbacks')}` if present, or a legacy "
+                    f"packet in `{tilde(ready_path(inst, n, a.branch).parent)}/`; "
                     "it may be missing or stale. Recheck it after finishing the remaining work.",
                     "Job ledger state: " + json.dumps(row, ensure_ascii=False), ""]
     out += ["## Task", "", task.strip(), ""]
@@ -2484,17 +2497,7 @@ def cmd_brief(a):
     if never_terms(n):
         out += ["## Before you hand back", "", f"Run `brain guard {n['id']} {tilde(where)}`. It must print "
                 "`guard: clean`; if not, remove what it lists (it names the file, never the word).", ""]
-    if w:
-        out += ["## Ready packet", "",
-                "Before handing back done: commit your changes, finish the required review rounds, then "
-                "`git rebase main` in your worktree. Resolve conflicts and address review findings yourself.",
-                f"Run `brain ready {n['id']} --branch {a.branch} --record --reviews <completed rounds>`. "
-                "It dry-runs the merge with merge-tree, runs the node's configured verify command, and records "
-                "the checked head/main SHAs and result. If verify is unset, ask the coordinator to set it.",
-                "Hand back only when it prints `ready`; include the packet path and review evidence. "
-                "If main moves, rebase and record again. Only the coordinator merges to main.",
-                f"Packet: `{tilde(ready_path(inst, n, a.branch))}`", ""]
-    out += handback_lines(inst, n, a.to, branch=a.branch) + report_lines()
+    out += handback_lines(inst, n, a.to, branch=a.branch) + report_lines(job=bool(a.branch))
     text = "\n".join(out) + "\n"
     no_terms_in(n, text, "the brief")
     if a.out:
@@ -2549,16 +2552,35 @@ def ready_preflight(n, branch):
     return reasons, head, main
 
 
+def read_ready_packet(inst, n, branch, row=None):
+    """New records take precedence; never resurrect stale evidence after a worker replaces it."""
+    if row and handback_file(n, row).exists():
+        signal = read_handback(n, row)
+        if not signal:
+            return None
+        if signal.get("version") == 2:
+            packet = signal.get("ready")
+            return packet if isinstance(packet, dict) else None
+    if not n["external"] or not n["home_path"]:
+        return None
+    try:
+        packet = json.loads(ready_path(inst, n, branch).read_text())
+        return packet if isinstance(packet, dict) else None
+    except (OSError, ValueError):
+        return None
+
+
 def ready_state(inst, n, branch):
     reasons, head, main = ready_preflight(n, branch)
-    packet = None
-    if n["external"] and n["home_path"]:
-        try:
-            packet = json.loads(ready_path(inst, n, branch).read_text())
-            if not isinstance(packet, dict):
-                packet = None
-        except (OSError, ValueError):
-            pass
+    row = open_job(read_jobs(n) or [], branch)
+    signal = read_handback(n, row) if row else None
+    packet = read_ready_packet(inst, n, branch, row)
+    if signal and signal["state"] != "done":
+        reasons.append("worker hand-back is " + signal["state"])
+    if row and handback_file(n, row).exists() and not signal:
+        reasons.append("worker hand-back unreadable; return to worker")
+    if signal and signal.get("version") == 2:
+        reasons += [r for r in signal.get("ready_reasons", []) if isinstance(r, str)]
     if packet is None:
         reasons.append("ready packet missing or unreadable; worker must record it")
     else:
@@ -2580,40 +2602,37 @@ def ready_state(inst, n, branch):
     return {"ready": not reasons, "reasons": reasons, "packet": packet}
 
 
+def record_ready(inst, n, branch, reviews):
+    reasons, head, main = ready_preflight(n, branch)
+    verify = n["fm"].get("verify", "").strip()
+    if not verify:
+        reasons.append("node has no verify command; coordinator must set verify=<command>")
+    if reviews is None or reviews < 1:
+        reasons.append("--record requires --reviews N completed review rounds (at least one)")
+    if reasons:
+        return None, reasons
+    w = n["local"]["worktrees"][branch]
+    env = {**os.environ, "MAIN": str(n["home_path"]), "WORKTREE": w["path"], "BRANCH": branch,
+           "NODE": n["id"], "PORT": str(w["port"]), "PORTS": str(w.get("ports", 1)),
+           "PORT_LAST": str(w["port"] + w.get("ports", 1) - 1)}
+    unlock()  # verification belongs to this worker, not the instance-wide lock
+    result = subprocess.run(verify, shell=True, cwd=w["path"], env=env,
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors="replace")
+    if result.returncode:
+        print(f"verify failed (exit {result.returncode}); output tail:")
+        print(redact("\n".join(result.stdout.splitlines()[-15:]), never_terms(n)))
+    packet = {"version": 1, "node": n["id"], "branch": branch, "head": head, "main": main,
+              "verify_command": verify, "verify_result": result.returncode,
+              "review_rounds": reviews, "checked_at": stamp(inst)}
+    return packet, []
+
+
 def cmd_ready(a):
+    if a.record:  # compatibility alias: one writer, one record, same verification
+        a.state = "done"
+        return cmd_handback(a)
     inst = load()
-    n = inst.node(a.id)
-    if a.record:
-        reasons, head, main = ready_preflight(n, a.branch)
-        verify = n["fm"].get("verify", "").strip()
-        if not verify:
-            reasons.append("node has no verify command; coordinator must set verify=<command>")
-        if a.reviews is None or a.reviews < 1:
-            reasons.append("--record requires --reviews N completed review rounds (at least one)")
-        if reasons:
-            print("not ready: " + "; ".join(reasons))
-            sys.exit(1)
-        w = n["local"]["worktrees"][a.branch]
-        env = {**os.environ, "MAIN": str(n["home_path"]), "WORKTREE": w["path"], "BRANCH": a.branch,
-               "NODE": n["id"], "PORT": str(w["port"]), "PORTS": str(w.get("ports", 1)),
-               "PORT_LAST": str(w["port"] + w.get("ports", 1) - 1)}
-        unlock()  # verification belongs to this worker, not the instance-wide lock
-        result = subprocess.run(verify, shell=True, cwd=w["path"], env=env,
-                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors="replace")
-        if result.returncode:
-            print(f"verify failed (exit {result.returncode}); output tail:")
-            print(redact("\n".join(result.stdout.splitlines()[-15:]), never_terms(n)))
-        packet = {"version": 1, "node": n["id"], "branch": a.branch, "head": head, "main": main,
-                  "verify_command": verify, "verify_result": result.returncode,
-                  "review_rounds": a.reviews, "checked_at": stamp(inst)}
-        path = ready_path(inst, n, a.branch)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_name(f".{path.name}.{os.getpid()}")
-        tmp.write_text(json.dumps(packet, indent=2) + "\n")
-        os.replace(tmp, path)
-        inst = Instance(inst.root)  # also detect a verify configuration change while it ran
-        n = inst.node(a.id)
-    state = ready_state(inst, n, a.branch)
+    state = ready_state(inst, inst.node(a.id), a.branch)
     print("ready" if state["ready"] else "not ready: " + "; ".join(state["reasons"]))
     if not state["ready"]:
         sys.exit(1)
@@ -2669,7 +2688,9 @@ def cmd_review(a):
             "- Correctness: does it do what the commits and the task say, including edge cases?",
             "- Breakage: run the project's own tests, type checks and linters that cover the change; report results.",
             "- Security and data: secrets, auth, user input, destructive operations.",
-            "- The project's rules (its AGENTS.md and conventions).", "",
+            "- The project's rules (its AGENTS.md and conventions).",
+            "- The builder finishes with one `brain handback` command carrying readiness, state and proposed lessons. "
+            "Inspect that worker-owned record when present; only the builder writes or refreshes it after review.", "",
             "## Report", "",
             "A list of findings, most severe first. Each: severity (blocker, major, minor), `file:line`, "
             "the problem, and a concrete fix. Say which tests you ran and their results. If you find nothing "
@@ -3044,7 +3065,10 @@ def read_handback(n, row):
     try:
         data = json.loads(f.read_text())
         if (isinstance(data, dict) and data.get("job") == row["Job"] and
-                data.get("started") == row["Started"] and data.get("state") in ("done", "failed", "blocked")):
+                data.get("started") == row["Started"] and data.get("state") in ("done", "failed", "blocked", "question") and
+                data.get("version") in (None, 2) and (data.get("version") != 2 or
+                (isinstance(data.get("lessons"), str) and isinstance(data.get("ready_reasons", []), list) and
+                 (data.get("ready") is None or isinstance(data["ready"], dict))))):
             return data
     except (OSError, ValueError):
         pass
@@ -3052,20 +3076,47 @@ def read_handback(n, row):
 
 
 def cmd_handback(a):
-    """The worker owns this one file; the coordinator owns the ledger and never rewrites the signal."""
+    """Worker-owned completion, proposed lessons and readiness live in one job-scoped file."""
     inst = load()
     n = inst.node(a.id)
     row = open_job(read_jobs(n) or [], a.branch)
     if not row:
         die(redact(f"no open job for {a.branch} in {n['id']}", never_terms(n)))
-    f = handback_file(n, row)
-    data = {"job": row["Job"], "started": row["Started"], "state": a.state,
-            "at": inst.now_dt().isoformat(timespec="seconds"), "report": tilde(a.report) if a.report else ""}
-    f.parent.mkdir(exist_ok=True)
-    atomic_write(f, json.dumps(data, indent=2) + "\n")
-    touch(f)
-    inst.commit([], f"{n['id']}: worker hand-back")
-    print(redact(f"{n['id']}: {a.branch} {a.state}; coordinator can see it with brain due", never_terms(n)))
+    previous = read_handback(n, row) or {}
+    lessons = (a.lessons if a.lessons is not None else previous.get("lessons", "")).strip()
+    if a.lessons is not None and (not lessons or lessons == "none:" or lessons.lower() == "none"):
+        die("--lessons needs proposed lessons, or none: <reason>")
+    packet, reasons = None, []
+    if a.state == "done" and previous.get("state", "done") == "done":
+        packet = read_ready_packet(inst, n, a.branch, row)
+        reasons = previous.get("ready_reasons", [])
+    if a.state == "done" and (a.reviews is not None or getattr(a, "record", False)):
+        packet, reasons = record_ready(inst, n, a.branch, a.reviews)
+    # Verification released the global lock. Re-read under it before publishing so a
+    # concurrently closed/restarted job never receives this worker's old result.
+    with brain_lock(inst):
+        inst = Instance(inst.root)
+        n = inst.node(a.id)
+        current = open_job(read_jobs(n) or [], a.branch)
+        if not current or job_key(current) != job_key(row):
+            die("job changed during verification; hand back to its coordinator")
+        f = handback_file(n, row)
+        data = {"version": 2, "job": row["Job"], "started": row["Started"], "state": a.state,
+                "at": inst.now_dt().isoformat(timespec="seconds"), "report": tilde(a.report) if a.report is not None else previous.get("report", ""),
+                "lessons": lessons, "ready": packet, "ready_reasons": reasons}
+        f.parent.mkdir(exist_ok=True)
+        atomic_write(f, json.dumps(data, indent=2) + "\n")
+        touch(f)
+        inst.commit([], f"{n['id']}: worker hand-back")
+    checked = a.state == "done" and (a.reviews is not None or getattr(a, "record", False))
+    if checked:
+        state = ready_state(inst, n, a.branch)
+        why = reasons + state["reasons"]
+        print("ready" if not why else "not ready: " + "; ".join(dict.fromkeys(why)))
+        if why:
+            sys.exit(1)
+    else:
+        print(redact(f"{n['id']}: {a.branch} {a.state}; coordinator can see it with brain due", never_terms(n)))
 
 
 def job_started(inst, n, branch, runtime):
@@ -3462,6 +3513,9 @@ def due_evidence(inst, n):
     rows = read_jobs(n)
     wts = {b: {**w, **local_job_state(n, b, w)} for b, w in sorted(n["local"].get("worktrees", {}).items())}
     signals = {job_key(r): read_handback(n, r) for r in rows or []}
+    for r in rows or []:
+        if not r["Ended"] and not handback_file(n, r).exists() and read_ready_packet(inst, n, r["Job"]):
+            signals[job_key(r)] = {"state": "done", "report": "", "legacy_ready": True}
     # Node's own commits only, excluding status (including its generated refresh commit) and children.
     names = ["brief.md", "decisions.md", "node.md", "inbox.md", "sources", "AGENTS.md", JOBS_FILE,
              "job-handbacks"]
@@ -3516,8 +3570,12 @@ def due_items(inst, n, evidence=None, include_stale=True):
         if w and w["merged"]:
             add("merged-job", f"{branch}: merged in local git; close the ledger and prune", job=job_key(row))
         elif signal:
-            add("handback", f"{branch}: worker {signal['state']}; review report {signal.get('report', '')} and record the next step",
-                job=job_key(row), state=signal["state"])
+            ready = ready_state(inst, n, branch) if signal["state"] == "done" else None
+            detail = ("ready to merge" if ready["ready"] else
+                      "finished but not ready (" + "; ".join(ready["reasons"]) + ")") if ready else signal["state"]
+            add("handback", f"{branch}: {detail}; review report {signal.get('report', '')} and record the next step",
+                job=job_key(row), state=signal["state"], ready=bool(ready and ready["ready"]),
+                reasons=ready["reasons"] if ready else [])
         elif handback_file(n, row).exists():
             add("invalid-handback", f"{branch}: unreadable worker signal; ask the worker to write it again", job=job_key(row))
         if not w or not w["exists"]:
@@ -3566,6 +3624,8 @@ def status_facts(inst, n, state, known_merges):
     if state["jobs"] is None:
         lines += ["- Legacy ledger: running jobs unknown."]
     due = due_items(inst, n, (state, "", ""), include_stale=False)
+    lines += ["", "Finished jobs awaiting coordinator:"]
+    lines += ["- " + i["text"] for i in due if i["kind"] == "handback"] or ["- None."]
     human = [i for i in attention_items(inst, [n]) if i[1] not in ("stale",)]
     lines += ["", f"Due: {len(due)} · Needs the human (attention sources, excluding stale status): {len(human)}"]
     return lines, merged
@@ -5016,8 +5076,9 @@ def main():
     cmd("inbox", cmd_inbox, "needs in a node's subtree (default: calling node); --new remembers per reporter",
         opt("id", nargs="?"), opt("--json", action="store_true"), opt("--new", action="store_true"))
     cmd("handback", cmd_handback, "worker signal for one open ledger job (does not edit coordinator files)",
-        "id", opt("--branch", required=True), opt("--state", choices=["done", "failed", "blocked"], required=True),
-        opt("--report"))
+        "id", opt("--branch", required=True), opt("--state", choices=["done", "failed", "blocked", "question"], required=True),
+        opt("--report"), opt("--lessons", help="proposed lessons, or none: <reason>"),
+        opt("--reviews", type=int, help="completed review rounds; runs verify for done"))
     cmd("show", cmd_show, "everything about one node, including this machine's bindings", "id")
     cmd("set", cmd_set, "set fields: brain set <id> key=value ... (host IDs and home paths stay on this machine)",
         "id", opt("pairs", nargs="+"))
@@ -5096,7 +5157,8 @@ def main():
         opt("--model", help="job model for scoped usage limits"), opt("--out"))
     cmd("ready", cmd_ready, "check a worker's ready packet against the branch and current local main", "id",
         opt("--branch", required=True), opt("--record", action="store_true", help="worker: run node verify and record"),
-        opt("--reviews", type=int, help="completed review rounds, required with --record"))
+        opt("--reviews", type=int, help="completed review rounds, required with --record"),
+        opt("--report"), opt("--lessons", help="proposed lessons, or none: <reason>"))
     cmd("schedule", cmd_schedule, "recurring work: brain schedule list | add <id> --when W --node N --brief B | "
         "bind <id> <host id> | unbind <id>", opt("action", choices=["list", "add", "bind", "unbind"], nargs="?",
                                                   default="list"),
