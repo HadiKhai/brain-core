@@ -2357,7 +2357,9 @@ for line in sys.stdin:
         self.assertIn(sha, brief)
         self.assertIn("Continue from these commits", brief)
         self.assertIn("host-old -> host-two: usage limit", brief)
-        self.assertIn("## Ready packet", brief)
+        self.assertIn("brain handback a --branch job", brief)
+        self.assertIn("--lessons", brief)
+        self.assertNotIn("--record", brief)
         self.assertIn("Finish it", brief)
         # Headroom still takes priority over the configured fallback order.
         self.cache(config, [self.reading(90), self.reading(10), self.reading(25)])
