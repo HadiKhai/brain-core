@@ -37,8 +37,8 @@ a { color: var(--accent); text-decoration: none; } a:hover { text-decoration: un
 code { font: 12.5px ui-monospace, SFMono-Regular, Menlo, monospace; background: var(--hover); padding: 0 4px; border-radius: 4px; }
 header { display: flex; align-items: center; gap: 16px; padding: 16px 24px; position: sticky; top: 0; z-index: 5;
   background: color-mix(in srgb, var(--page) 88%, transparent); backdrop-filter: blur(8px); border-bottom: 1px solid var(--grid); }
-header h1 { font-size: 17px; margin: 0; font-weight: 600; }
-header .meta { color: var(--ink-2); font-size: 13px; }
+header h1 { flex-shrink:0; font-size: 17px; margin: 0; font-weight: 600; }
+header .meta { min-width:0; overflow-wrap:anywhere; color: var(--ink-2); font-size: 13px; }
 header .spacer { flex: 1; }
 .live { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--ink-2); }
 .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); display: inline-block; flex: none; }
@@ -105,6 +105,30 @@ aside .md ul { margin: 4px 0; padding-left: 18px; } aside .md p { margin: 4px 0;
 .empty { color: var(--muted); font-size: 13px; }
 .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
 .kv { color: var(--ink-2); font-size: 12.5px; }
+nav { display:flex; gap:8px; padding:12px 24px 0; max-width:1600px; margin:auto; flex-wrap:wrap; }
+nav button[aria-current="page"] { color:var(--ink); border-color:var(--accent); }
+[hidden] { display:none !important; }
+:focus-visible { outline:2px solid var(--accent); outline-offset:3px; }
+select, input, textarea { font:inherit; color:var(--ink); background:var(--surface); border:1px solid var(--axis); border-radius:5px; padding:5px; }
+.filters { margin-bottom:16px; display:flex; flex-wrap:wrap; gap:12px; }
+.filters label { display:flex; align-items:center; gap:6px; font-size:12.5px; color:var(--ink-2); }
+.entry { padding:14px 0; border-bottom:1px solid var(--grid); overflow-wrap:anywhere; }
+.entry:last-child { border-bottom:0; }
+.entry h3 { font-size:14px; margin:0 0 6px; }
+.entry p { margin:6px 0; white-space:pre-wrap; }
+.entry details { margin-top:8px; }
+.entry summary { cursor:pointer; color:var(--ink-2); }
+.review { color:var(--ink); border-color:var(--warning); }
+.command { display:flex; gap:8px; align-items:center; margin-top:8px; }
+.command input { flex:1; min-width:0; font:12px ui-monospace,monospace; }
+.table-wrap { overflow:auto; }
+.usage-grid { display:grid; grid-template-columns:minmax(170px,1fr) repeat(2,minmax(220px,1fr)); gap:20px; align-items:start; }
+.window .meter { position:relative; overflow:visible; background:var(--seq-0); }
+.window .stop { position:absolute; top:-3px; height:12px; width:2px; background:var(--ink-2); border-radius:0; }
+.window .kv { margin-top:6px; }
+.stale { color:light-dark(#a94815, #ec835a); }
+#learning-results, #agent-results { content-visibility:auto; }
+@media(max-width:700px) { header { flex-wrap:wrap; padding:12px; gap:10px; } header .meta { order:2; width:100%; overflow-wrap:anywhere; } main { padding:12px; } nav { padding-left:12px; } .usage-grid { grid-template-columns:1fr; gap:12px; } .list .when { white-space:normal; } .list .who { min-width:60px; } }
 </style>
 </head>
 <body>
@@ -116,21 +140,32 @@ aside .md ul { margin: 4px 0; padding-left: 18px; } aside .md p { margin: 4px 0;
   <button class="ghost" id="notify" title="A desktop notification when something new needs you">Notify me</button>
   <button class="ghost" id="theme" title="Light or dark">Theme</button>
 </header>
-<main>
+<nav aria-label="Views"><button class="ghost" data-view="overview">Overview</button><button class="ghost" data-view="learnings">Learnings</button><button class="ghost" data-view="agents">Agents</button><button class="ghost" data-view="usage">Usage</button><button class="ghost" data-view="imports">Import checklist</button></nav>
+<main id="overview" data-page="overview">
   <section class="card span-12"><div class="kpis" id="kpis"></div></section>
   <section class="card span-7"><h2>Projects <span class="sub">click one for its notes</span></h2><div id="tree"></div></section>
-  <section class="card span-5"><h2>Needs you <span class="sub" id="needcount"></span></h2><ul class="list scroll" id="needs"></ul></section>
+  <section class="card span-5"><h2>Inbox <span class="sub" id="needcount"></span></h2><ul class="list scroll" id="needs"></ul></section>
+  <section class="card span-12"><h2>Due <span class="sub">coordinator actions, from files and local git</span></h2><div id="due"></div></section>
   <section class="card span-12"><h2>Work in flight <span class="sub">jobs, their worktrees, and what's listening</span></h2><div id="work"></div></section>
   <section class="card span-8"><h2>Activity <span class="sub" id="heatsub"></span></h2><div id="heat"></div></section>
   <section class="card span-4"><h2>Library <span class="sub" id="libcount"></span></h2><ul class="list" id="lib"></ul>
     <h2 style="margin-top:16px">Schedules</h2><ul class="list" id="sched"></ul></section>
   <section class="card span-12"><h2>Latest <span class="sub">commits and decisions, newest first</span></h2><ul class="list" id="feed"></ul></section>
 </main>
+<main data-page="learnings" hidden><section class="card span-12"><h2>Learnings <span class="sub">library and specialist lessons</span></h2><div class="filters" id="learning-filters"></div><div id="learning-results"></div></section></main>
+<main data-page="agents" hidden><section class="card span-12"><h2>Agents <span class="sub">specialists and their hires</span></h2><div id="agent-results"></div></section><section class="card span-12"><h2>Job ledger <span class="sub">per node · medians for merged jobs</span></h2><div id="ledger"></div></section></main>
+<main data-page="usage" hidden><section class="card span-12"><h2>Usage <span class="sub" id="usage-hidden"></span></h2><p class="kv">Account-wide windows, including other machines. The vertical marker is the stop line.</p><div id="usage-results"></div></section></main>
+<main data-page="imports" hidden><section class="card span-12"><h2>Import checklist <span class="sub">read-only discovery</span></h2><p class="kv">Select repositories to build a command. Run it in this brain after reviewing the candidates.</p><div id="scan-results"></div><div id="adopt-command"></div></section></main>
 <aside id="detail" aria-hidden="true"></aside>
 <div id="tip" role="tooltip"></div>
 <script>
 "use strict";
 let S = null, selected = null, seen = new Set(), firstPaint = true;
+const renderedData = new Map();
+function renderChanged(key, data, draw) {
+  const signature = JSON.stringify(data);
+  if (renderedData.get(key) !== signature) { draw(); renderedData.set(key, signature); }
+}
 const $ = (id) => document.getElementById(id);
 
 // ---- tiny DOM helpers: text always goes in as text ----
@@ -273,15 +308,10 @@ function renderTree() {
 }
 
 function renderNeeds() {
-  const items = S.attention; $("needcount").textContent = items.length ? String(items.length) : "";
-  if (!items.length) return $("needs").replaceChildren(el("li", { class: "empty" }, "Nothing is waiting on you."));
-  const icon = { blocked: ["●", "var(--warning)", "blocked"], inbox: ["✉", "var(--accent)", "inbox"], stale: ["◷", "var(--muted)", "stale"], setup: ["⚙", "var(--muted)", "setup"] };
-  $("needs").replaceChildren(...items.map((a) => {
-    const [g, c, word] = icon[a.kind] || ["•", "var(--muted)", a.kind];
-    const key = "need:" + a.node + a.text;
-    return el("li", { class: mark(key) }, el("span", { class: "icon", style: `color:${c}`, title: word, "aria-label": word }, g),
-      el("span", { class: "who" }, a.node), el("span", {}, inline(a.text.replace(/^inbox: /, ""))));
-  }));
+  const items = S.inbox || S.attention || []; $("needcount").textContent = String(items.length);
+  $("needs").replaceChildren(...(items.length ? items.map(a => el("li", {},
+    el("span", {class:"who"}, a.node), el("span", {}, el("code", {title:a.id || ""}, (a.id || a.kind).slice(0, 8)), " · ", a.text,
+      el("div", {class:"kv"}, a.kind + (a.first_seen ? " · first seen " + brainTime(a.first_seen, true) : ""))))) : [el("li", {class:"empty"}, "Nothing is waiting on you.")]));
 }
 
 function renderWork() {
@@ -393,28 +423,162 @@ function openDetail(id) {
   if (x.never_name) kids.push(el("p", { class: "kv" }, `${x.never_name} word(s) its home must never contain (brain guard ${x.id})`));
   const keep = d.scrollTop; d.replaceChildren(...kids); d.scrollTop = keep; d.classList.add("open"); d.setAttribute("aria-hidden", "false"); renderTree();
 }
-function closeDetail() { if (location.hash) history.replaceState(null, "", location.pathname + location.search); selected = null; $("detail").classList.remove("open"); $("detail").setAttribute("aria-hidden", "true"); if (S) renderTree(); }
+function closeDetail() { if (location.hash.startsWith("#node=")) history.replaceState(null, "", location.pathname + location.search); selected = null; $("detail").classList.remove("open"); $("detail").setAttribute("aria-hidden", "true"); if (S) renderTree(); }
 addEventListener("keydown", (e) => { if (e.key === "Escape") closeDetail(); });
 addEventListener("hashchange", () => { if (S && location.hash.startsWith("#node=")) openDetail(decodeURIComponent(location.hash.slice(6))); });
 
+let currentView = "overview", learningLimit = 80;
+const learningFilter = {node:"", specialist:"", state:""}, scanSelected = new Set();
+function showView(view) {
+  const hashView = location.hash.startsWith("#view=") ? location.hash.slice(6) : null;
+  currentView = view || hashView || currentView;
+  if (!["overview", "learnings", "agents", "usage", "imports"].includes(currentView)) currentView = "overview";
+  for (const page of document.querySelectorAll("[data-page]")) page.hidden = page.dataset.page !== currentView;
+  for (const button of document.querySelectorAll("[data-view]")) button.setAttribute("aria-current", button.dataset.view === currentView ? "page" : "false");
+}
+for (const button of document.querySelectorAll("[data-view]")) button.addEventListener("click", () => {
+  closeDetail(); currentView = button.dataset.view;
+  history.replaceState(null, "", "#view=" + currentView); showView();
+});
+addEventListener("hashchange", () => showView());
+function shellQuote(value) { return "'" + String(value).replace(/'/g, "'\\''") + "'"; }
+function command(text) {
+  const input = el("input", {readonly:true, value:text, "aria-label":"Command to copy", onclick:e => e.target.select()});
+  const button = el("button", {class:"ghost", onclick:async () => {
+    input.select();
+    try { await navigator.clipboard.writeText(text); button.textContent = "Copied"; }
+    catch { button.textContent = "Selected · copy manually"; }
+  }}, "Copy");
+  return el("div", {class:"command"}, input, button);
+}
+function empty(text) { return el("p", {class:"empty"}, text); }
+function dataTable(headers, rows) {
+  return el("div", {class:"table-wrap"}, el("table", {}, el("thead", {}, el("tr", {}, headers.map(h => el("th", {}, h)))),
+    el("tbody", {}, rows.map(row => el("tr", {}, row.map(cell => el("td", {}, cell ?? "—")))))));
+}
+function renderDue() {
+  const groups = new Map();
+  for (const item of S.due || []) { if (!groups.has(item.node)) groups.set(item.node, []); groups.get(item.node).push(item); }
+  $("due").replaceChildren(...(groups.size ? [...groups].map(([node, items]) => el("details", {class:"entry", open:true},
+    el("summary", {}, node + " · " + items.length), el("ul", {class:"list"}, items.map(item => el("li", {},
+      el("span", {class:"badge"}, item.ready ? "Ready to merge" : item.kind), el("span", {}, item.text,
+        (item.reasons || []).length ? el("div", {class:"kv"}, item.reasons.join("; ")) : null)))))) : [empty("No coordinator actions due.")]));
+}
+function renderLearnings() {
+  const rows = (S.items.all || S.items.recent || []).map(i => ({...i, state:i.status || (i.state === "accepted" ? "active" : i.state) || "active", node:(i.provenance || {}).node || i.source || "", specialist:""}));
+  for (const sp of S.specialists || []) for (const lesson of sp.lessons || []) rows.push({
+    id:sp.id + ":" + lesson.time, title:lesson.text, body:"", kind:"specialist lesson", node:lesson.from,
+    specialist:sp.node + "/" + sp.id, state:sp.status || "active", provenance:{node:lesson.from, time:lesson.time, ref:"specialists/" + sp.id + "/lessons.md"}
+  });
+  const definitions = [["node", "Node", [...new Set(rows.map(i => i.node).filter(Boolean))].sort()],
+    ["specialist", "Specialist", [...new Set(rows.map(i => i.specialist).filter(Boolean))].sort()],
+    ["state", "State", ["active", "proposed", "rejected", "quarantined"]]];
+  // Retain focused controls and selections across live snapshots.
+  for (const [key, label, values] of definitions) {
+    let select = $("filter-" + key);
+    if (!select) {
+      select = el("select", {id:"filter-" + key, onchange:e => { learningFilter[key] = e.target.value; learningLimit = 80; renderLearnings(); }});
+      $("learning-filters").append(el("label", {}, label, select));
+    }
+    const signature = JSON.stringify(values);
+    if (select.dataset.options !== signature) {
+      select.replaceChildren(el("option", {value:""}, "All"), ...values.map(v => el("option", {value:v}, v)));
+      select.value = learningFilter[key]; select.dataset.options = signature;
+    }
+  }
+  const filtered = rows.filter(i => Object.entries(learningFilter).every(([k,v]) => !v || i[k] === v));
+  const entries = filtered.slice(0, learningLimit).map(i => {
+    const p = i.provenance || {}, proposed = i.state === "proposed";
+    const meta = [p.node, p.ref, p.repo, p.commit, p.time ? brainTime(p.time, true) : null].filter(Boolean).join(" · ");
+    return el("article", {class:"entry"}, el("h3", {}, i.title || i.id),
+      el("div", {class:"row"}, el("span", {class:"badge" + (proposed ? " review" : "")}, proposed ? "Proposed · awaiting review" : i.state),
+        el("span", {class:"kv"}, i.kind || "item", i.specialist ? " · " + i.specialist : " · " + i.id)),
+      el("p", {class:"kv"}, meta || "Provenance not recorded"),
+      i.body ? el("details", {}, el("summary", {}, "Read item"), el("p", {}, i.body)) : null,
+      proposed && !i.specialist ? el("div", {}, el("p", {class:"kv"}, "Review the source before accepting. Replace REVIEWER with the operator or a non-revoked principal."),
+        command("brain item accept --reviewed-by 'REVIEWER' -- " + shellQuote(i.id)), command("brain item reject -- " + shellQuote(i.id))) : null);
+  });
+  $("learning-results").replaceChildren(el("div", {class:"kv", role:"status"}, `${filtered.length} learning${filtered.length === 1 ? "" : "s"}`), ...entries,
+    ...(!entries.length ? [empty("No learnings match these filters.")] : []),
+    ...(filtered.length > learningLimit ? [el("button", {class:"ghost", onclick:() => { learningLimit += 80; renderLearnings(); }}, "Show 80 more")] : []));
+}
+function renderAgents() {
+  const nodes = new Map(S.nodes.map(n => [n.id, n]));
+  $("agent-results").replaceChildren(...((S.specialists || []).length ? S.specialists.map(sp => el("article", {class:"entry"},
+    el("h3", {}, sp.title || sp.id), el("p", {class:"kv"}, `${sp.node} / ${sp.id} · ${sp.status || "active"} · ${sp.runtime || "runtime not recorded"} · ${(sp.lessons || []).length} lessons`),
+    (sp.jobs || []).length ? dataTable(["Node / job", "Hired", "Task", "Reviews", "Runtime / subscription", "Outcome"], sp.jobs.map(hire => {
+      const node = nodes.get(hire.node), jobs = node ? node.jobs.rows.filter(r => r.Job === hire.job) : [];
+      const row = jobs.find(r => r.Started === hire.started) || jobs[jobs.length - 1] || {};
+      return [hire.node + " / " + hire.job, brainTime(hire.time, true), hire.task, row.Reviews || hire.reviews || "—",
+        [hire.runtime || "runtime not recorded", hire.subscription || "subscription not recorded"].join(" · "), row.Outcome || hire.outcome || "open"];
+    })) : empty("No recorded hires."))) : [empty("No specialists yet.")]));
+  $("ledger").replaceChildren(...S.nodes.filter(n => n.jobs.rows.length).map(n => el("details", {class:"entry", open:true},
+    el("summary", {}, `${n.title || n.id} · ${n.jobs.merged} merged · ${n.jobs.abandoned} abandoned · median ${n.jobs.median_hours ?? "—"} h / ${n.jobs.median_reviews ?? "—"} review rounds`),
+    dataTable(["Job", "Started", "Hours", "Reviews", "Runtime / subscription", "Outcome / cause", "Lessons"], n.jobs.rows.slice().reverse().map(r => [r.Job, brainTime(r.Started, true), r.Hours || "open", r.Reviews || "0",
+      (r.Runtime || "unknown") + " · " + (r.Subscription || "subscription not recorded"), [r.Outcome || "open", r.Cause].filter(Boolean).join(" · "), r.Lessons || "—"])))));
+  if (!$("ledger").children.length) $("ledger").append(empty("No recorded jobs."));
+}
+function renderUsage() {
+  const policy = S.usage_policy || {}, maxAge = policy.max_age_seconds ?? 120, stop = policy.stop_percent;
+  const age = stamp => typeof stamp === "number" ? Math.max(0, Date.now()/1000 - stamp) : null;
+  const ageText = seconds => seconds == null ? "age unknown" : seconds < 60 ? Math.floor(seconds) + "s old" : seconds < 3600 ? Math.floor(seconds/60) + "m old" : Math.floor(seconds/3600) + "h old";
+  function windowView(label, w, row) {
+    const seconds = age(w && (w.read_at || row.read_at)), stale = seconds == null || seconds > maxAge;
+    const expired = w && (w.expired || (w.resets_at && w.resets_at <= Date.now()/1000));
+    const known = w && !w.absent && !expired && Number.isFinite(w.used_percent);
+    const percent = known ? Math.min(100, Math.max(0, w.used_percent)) : 0;
+    const meter = el("div", {class:"meter" + (known && stop != null && percent >= stop ? " critical" : ""), role:"meter", "aria-label":label + (known ? " usage" : " usage unknown"), "aria-valuemin":0, "aria-valuemax":100, "aria-valuenow":known ? percent : null},
+      known ? el("i", {style:`width:${percent}%`}) : null, Number.isFinite(stop) ? el("i", {class:"stop", style:`left:${Math.min(100, Math.max(0, stop))}%`, title:`Stop at ${stop}%`}) : null);
+    const reset = w && (w.reset_time || (w.resets_at ? new Date(w.resets_at * 1000) : null));
+    return el("div", {class:"window"}, el("strong", {}, label + " · " + (w && w.absent ? "none" : known ? w.used_percent + "%" : expired ? "expired · unknown" : "unknown")), meter,
+      el("div", {class:"kv"}, reset ? "Resets " + brainTime(reset, true) : "Reset unknown"),
+      el("div", {class:"kv" + (stale ? " stale" : "")}, (stale ? "Stale · " : "") + ageText(seconds) + " · " + ((w && w.source) || row.source || "unknown")));
+  }
+  $("usage-hidden").textContent = `${S.usage_other_subscriptions || 0} other subscriptions hidden`;
+  $("usage-results").replaceChildren(...((S.usage || []).length ? S.usage.map(row => el("article", {class:"entry"},
+    el("div", {class:"usage-grid"}, el("div", {}, el("h3", {}, row.label || row.id), el("div", {class:"kv"}, row.id + " · " + row.runtime),
+      el("p", {class:"kv"}, Number.isFinite(stop) ? `Stop at ${stop}%` : "Stop line unknown"),
+      el("div", {class:"kv"}, "Brains: " + (row.brains || []).join(", ")), row.note ? el("p", {class:"kv"}, row.note) : null),
+      windowView("5-hour", (row.windows || {}).five_hour, row), windowView("Weekly", (row.windows || {}).seven_day, row)),
+    ...Object.entries(row.windows || {}).filter(([k]) => !["five_hour", "seven_day"].includes(k)).map(([k,w]) => el("div", {style:"margin-top:16px;max-width:520px"}, windowView("Weekly · " + ((w.models || []).join(", ") || k), w, row))))) : [empty("No subscription readings available. Run brain usage to inspect configuration.")]));
+}
+function renderScan() {
+  const candidates = S.scan || [], adoptable = c => c.adoptable && !/\[redacted(?: secret)?\]|\[…\]/i.test(c.path), available = new Set(candidates.filter(adoptable).map(c => c.path));
+  for (const path of scanSelected) if (!available.has(path)) scanSelected.delete(path);
+  const update = () => $("adopt-command").replaceChildren(...(scanSelected.size ? [command("brain adopt -- " + [...scanSelected].sort().map(shellQuote).join(" "))] : [empty("Select an adoptable repository to build its command.")]));
+  $("scan-results").replaceChildren(...(candidates.length ? candidates.map(c => el("article", {class:"entry"},
+    el("label", {class:"row"}, el("input", {type:"checkbox", checked:scanSelected.has(c.path), disabled:!adoptable(c), onchange:e => { if (e.target.checked) scanSelected.add(c.path); else scanSelected.delete(c.path); update(); }}), el("strong", {}, c.name), el("code", {}, c.path)),
+    el("p", {class:"kv"}, `${c.kind} · ${c.commit_count} commits · last commit ${c.last_commit_date ? brainTime(c.last_commit_date, true) : "none"} · ${(c.languages || []).join(", ") || "languages unknown"}`),
+    el("p", {class:"kv"}, "Agent setup: " + ((c.agent_setup || []).join(", ") || "none") + (c.agent_setup_omitted ? ` · ${c.agent_setup_omitted} more` : "")),
+    el("p", {class:"kv"}, c.ownership || (c.node ? "Already a home: " + c.node : adoptable(c) ? "Available to adopt" : "Not adoptable")),
+    c.readme ? el("details", {}, el("summary", {}, "README · untrusted source data"), el("p", {}, c.readme)) : null)) : [empty("Start brain ui --scan DIR... to discover repositories. Scanning does not change them.")]));
+  update();
+}
+
 // desktop notifications, opt-in: only for things that newly need the operator
-let notifyOn = localStorage.getItem("brain-notify") === "1" && "Notification" in window && Notification.permission === "granted";
+let notifyOn = storageGet("brain-notify") === "1" && "Notification" in window && Notification.permission === "granted";
 function notifyLabel() { $("notify").textContent = notifyOn ? "Notifying" : "Notify me"; }
 $("notify").addEventListener("click", async () => {
   if (!("Notification" in window)) return alert("This browser can't show notifications.");
-  if (notifyOn) { notifyOn = false; localStorage.removeItem("brain-notify"); return notifyLabel(); }
-  if ((await Notification.requestPermission()) === "granted") { notifyOn = true; localStorage.setItem("brain-notify", "1"); }
+  if (notifyOn) { notifyOn = false; storageSet("brain-notify", "0"); return notifyLabel(); }
+  if ((await Notification.requestPermission()) === "granted") { notifyOn = true; storageSet("brain-notify", "1"); }
   notifyLabel();
 });
-let previousAttention = new Set();
+function storageGet(key) { try { return localStorage.getItem(key); } catch { return null; } }
+function storageSet(key, value) { try { localStorage.setItem(key, value); return true; } catch { return false; } }
+function notificationKey() { return "brain-inbox-seen:" + JSON.stringify([S.brain.name, S.brain.root]); }
 function notifyNew() {
-  const current = new Set();
-  for (const a of S.attention) {
-    const key = JSON.stringify([a.node, a.kind, a.text]);
-    current.add(key);
-    if (notifyOn && !firstPaint && !previousAttention.has(key)) new Notification(`${S.brain.title}: ${a.node} needs you`, { body: a.text.replace(/^inbox: /, "").slice(0, 200), tag: key });
+  let ids;
+  try { ids = JSON.parse(storageGet(notificationKey()) || "[]"); } catch { ids = []; }
+  const prior = new Set(Array.isArray(ids) ? ids : []);
+  for (const a of S.inbox || []) {
+    if (!a.id || prior.has(a.id) || !notifyOn) continue;
+    prior.add(a.id);
+    // Persist before delivery; a reload or returning resolved id must never notify twice.
+    if (storageSet(notificationKey(), JSON.stringify([...prior]))) {
+      try { new Notification(`${S.brain.title}: ${a.node} needs you`, {body:a.text.slice(0, 200), tag:a.id}); } catch {}
+    }
   }
-  previousAttention = current;
 }
 // new things flash once (not on the first paint)
 function mark(key) { const isNew = !firstPaint && !seen.has(key); seen.add(key); return isNew ? "new" : null; }
@@ -424,7 +588,10 @@ function render() {
   $("title").textContent = S.brain.title;
   $("meta").textContent = `${S.brain.name} · ${S.brain.root} · ${S.brain.machine}${S.brain.tz ? " · " + S.brain.tz + " " + brainClock() : ""}${S.brain.others.length ? " · other brains here: " + S.brain.others.join(", ") : ""}`;
   notifyNew(); notifyLabel();
-  renderKpis(); renderTree(); renderNeeds(); renderWork(); renderHeat(); renderLib(); renderFeed();
+  renderKpis(); renderTree(); renderNeeds(); renderWork(); renderHeat(); renderLib(); renderFeed(); renderChanged("due", S.due, renderDue);
+  renderChanged("learnings", [S.items, S.specialists], renderLearnings);
+  renderChanged("agents", [S.specialists, S.nodes.map(n => n.jobs)], renderAgents);
+  renderUsage(); renderChanged("scan", S.scan, renderScan); showView();
   if (firstPaint && location.hash.startsWith("#node=")) selected = decodeURIComponent(location.hash.slice(6));
   if (selected) openDetail(selected);
   firstPaint = false;
@@ -440,7 +607,7 @@ function connect() {
   es.onerror = () => { setLive("warning", "reconnecting…"); };
 }
 setInterval(() => { if (lastMsg && S) { const s = Math.round((Date.now() - lastMsg) / 1000); if ($("livetext").textContent !== "reconnecting…") $("livetext").textContent = s < 5 ? "live" : `live · changed ${s < 60 ? s + "s" : Math.round(s / 60) + "m"} ago`; } }, 1000);
-setInterval(() => { if (S) { renderFeed(); renderWork(); } }, 60000); // keep the "ago" times honest
+setInterval(() => { if (S) { renderFeed(); renderWork(); renderUsage(); } }, 60000); // keep the "ago" times honest
 $("theme").addEventListener("click", () => { const r = document.documentElement; const dark = r.dataset.theme ? r.dataset.theme === "dark" : matchMedia("(prefers-color-scheme: dark)").matches; r.dataset.theme = dark ? "light" : "dark"; });
 if (window.__STATE__) { S = window.__STATE__; render(); setLive("", "snapshot"); } else connect();
 </script>
