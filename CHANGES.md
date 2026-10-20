@@ -20,8 +20,9 @@ For agents:
   syncs itself. UI work starts with a UX design job (ui-designer §0) before implementation.
 
 After upgrading:
-- Run `brain check`. For each missing facts block run `brain status <node> --refresh`; repair
-  malformed markers first. Judgement is preserved. Move old Now material to Recent changes
+- Run `brain check --fix` (upgrade also runs it): absent facts blocks are generated while
+  preserving judgement bytes and Updated. Half/duplicate/malformed markers stay errors and
+  are never auto-edited; repair those markers explicitly, then refresh. Move old Now material to Recent changes
   or decisions. Repair dead references or restore the named file/folder. Backticks must name
   explicit paths (`./file`, `folder/`, a path with a file extension) or known structural files;
   ambiguous bare names are skipped. Markdown link targets are always checked.

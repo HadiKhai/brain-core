@@ -9728,6 +9728,8 @@ def collect_problems(inst):
             if (status_text.count(FACTS_START) != 1 or status_text.count(FACTS_END) != 1
                     or not FACTS_RE.search(status_text)):
                 p(f"{nid}: status.md missing or malformed generated facts block; brain status {nid} --refresh")
+                if FACTS_START not in status_text and FACTS_END not in status_text:
+                    fixable.append("facts")
             judgement = FACTS_RE.sub("", status_text)
             now_match = re.search(r"(?ims)^## Now\s*\n(.*?)(?=^## |\Z)", judgement)
             now_lines = len([l for l in re.sub(r"<!--.*?-->", "", now_match.group(1), flags=re.S).splitlines() if l.strip()]) if now_match else 0
@@ -9933,6 +9935,16 @@ def apply_fixes(inst, kinds):
                     done.append(f"{n['id']}: added {rel}")
                     if rel.name == "status.md":
                         refresh_status(inst, n)
+    if "facts" in kinds:
+        for n in inst.nodes():
+            if n["archived"]:
+                continue
+            f = n["dir"] / "status.md"
+            text = f.read_text() if f.exists() else ""
+            # Another node may have requested this fix. Never repair ambiguous markers.
+            if FACTS_START not in text and FACTS_END not in text:
+                refresh_status(inst, n)
+                done.append(f"{n['id']}: inserted generated facts block")
     if "views" in kinds:
         done += [f"{nid}: sealed-view section updated" for nid in resync_views(inst)]
     if write_registry(inst):
