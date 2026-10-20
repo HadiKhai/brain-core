@@ -345,9 +345,11 @@ function renderKpis() {
   if (merged.length) kids.push(tile("Median job", median.toFixed(1) + " h", `${merged.length} merged · ${open} open`));
   const week = S.spend && S.spend.since_week;
   if (week) kids.push(tile("Tokens, 7 days", tokens(week.processed), `${tokens(week.fresh + week.output)} fresh in and out · ${week.active_h} h active`));
-  if (m.load) { const v = m.load[0] / (m.cpus || 1); kids.push(tile("Load", m.load[0].toFixed(1), `${m.cpus} cores · 5 min ${m.load[1].toFixed(1)}`, { v, level: v > 0.9 ? "critical" : v > 0.7 ? "warning" : "" })); }
+  if (m.load) { const v = m.load[1] / (m.cpus || 1); kids.push(tile("Load", m.load[0].toFixed(1), `${m.cpus} cores · 5 min ${m.load[1].toFixed(1)}`, { v, level: v > 0.9 ? "critical" : v > 0.7 ? "warning" : "" })); }
   if (m.mem_total_gb) { const used = 1 - m.mem_free_gb / m.mem_total_gb; kids.push(tile("Memory free", m.mem_free_gb + " GB", `of ${m.mem_total_gb} GB`, { v: used, level: m.mem_free_gb < 8 ? "critical" : used > 0.8 ? "warning" : "" })); }
   if (m.disk_total_gb) { const used = 1 - m.disk_free_gb / m.disk_total_gb; kids.push(tile("Disk free", m.disk_free_gb + " GB", `of ${m.disk_total_gb} GB`, { v: used, level: m.disk_free_gb < 40 ? "critical" : used > 0.85 ? "warning" : "" })); }
+  kids.push(tile("Machine care", m.held && m.held.length ? "Held" : "Ready", `thermal ${m.thermal || "unknown"} · verifies ${m.verifying ?? "?"}/${m.verify_limit ?? "?"} · queued ${m.queued ?? "?"}`));
+  if (m.held && m.held.length) kids.push(tile("Heavy work held", "Waiting", m.held.join("; ")));
   $("kpis").replaceChildren(...kids);
 }
 
