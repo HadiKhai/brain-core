@@ -72,6 +72,12 @@ def safe_target(path):
         real = q.resolve()
         if real != top and top not in real.parents:
             die(f"{p} leads out of the brain through a link; brain writes only inside it (remove the link)")
+    try:
+        shared = not p.is_symlink() and p.is_file() and p.stat().st_nlink > 1
+    except OSError:
+        shared = False
+    if shared:  # a hard link: writing it would change the same file wherever else it is linked
+        die(f"{p} is hard-linked to another file; brain won't write a file shared with another place (copy it)")
 
 
 def outward_links(root):
@@ -120,10 +126,28 @@ def outward_links(root):
             elif deep or e.name in (".brain", "library", "specialists", "job-handbacks", "job-contracts"):
                 look(p, deep=True)
             elif e.name in ("sources", "reports"):
-                look(p, kind="entries")
+                look(p, deep=True)  # merges move files in, reports write index files below
             elif e.name == "nodes" and kind == "node":
                 look(p, kind="nodes")
     look(top)
+    git_dir = top / ".git"
+    if git_dir.is_file():  # a linked worktree or submodule: .git names the real folder
+        m = re.match(r"gitdir: (.+)", git_dir.read_text().strip())
+        git_dir = (top / m[1]).resolve() if m else git_dir
+    try:
+        entries = list(os.scandir(git_dir)) if git_dir.is_dir() else []
+    except OSError:
+        entries = []
+    for e in entries:  # what a commit writes: its message, index, HEAD, refs and logs at the top
+        if e.is_symlink():
+            p = Path(e.path)
+            try:
+                real = p.resolve()
+            except (OSError, RuntimeError):
+                real = None
+            if real is None or not (real == git_dir.resolve() or git_dir.resolve() in real.parents
+                                    or real == top or top in real.parents):
+                bad.append(p)
     return bad
 
 
@@ -7438,6 +7462,10 @@ def hook_stop(a):
     future = bool(future_entries(inst, n)[0])
     state_f = inst.root / ".brain" / "hooks.json"
     try:
+        contained = not outward_links(inst.root)
+    except OSError:
+        contained = False
+    try:
         state = json.loads(state_f.read_text()) if state_f.exists() else {}
         state = state if isinstance(state, dict) else {}
     except (OSError, ValueError):
@@ -7461,13 +7489,16 @@ def hook_stop(a):
         return
     state[sid] = now.isoformat(timespec="seconds")
     try:
+        log = inst.root / ".brain" / "hooks.log"
+        if not contained or any(f.is_file() and not f.is_symlink() and f.stat().st_nlink > 1 for f in (state_f, log)):
+            raise OSError("bookkeeping would leave the brain")  # the reminder still goes out; only this is skipped
         state_f.parent.mkdir(exist_ok=True)
         tmp = state_f.with_name(f".hooks.{os.getpid()}.json")
         tmp.write_text(json.dumps(dict(list(state.items())[-200:]), indent=1))
         os.replace(tmp, state_f)  # whole or not at all: another session's hook never reads half a file
         held = why + ([f"upgrade notice ({len(unread)} unread change entr{'y' if len(unread) == 1 else 'ies'})"]
                       if upgrade else [])
-        with open(inst.root / ".brain" / "hooks.log", "a") as fh:
+        with open(log, "a") as fh:
             fh.write(f"{now.isoformat(timespec='seconds')} stop {n['id']} {sid}: "
                      f"{redact('; '.join(held), never_terms(n))}\n")
     except OSError:

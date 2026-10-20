@@ -6391,6 +6391,46 @@ class SmallFixes(Scenario):
         m = SourceFileLoader("brain_loops", str(CORE / "bin/brain")).load_module()
         self.assertEqual(m.outward_links(r), [])
 
+    def test_git_metadata_reports_merges_hard_links_and_the_hook_stay_inside(self):
+        r = self.init("alice")
+        self.b(r, "new", "a", "--title", "A")
+        self.b(r, "new", "b", "--title", "B")
+        outside = self.tmp / "outside"
+        outside.mkdir()
+        sentinel = outside / "sentinel.txt"
+        sentinel.write_text("keep\n")
+
+        def refused(args, link, target):
+            link.unlink(missing_ok=True)
+            link.symlink_to(target)
+            self.assertIn("lead out of the brain", self.b(r, *args, ok=False), args)
+            self.assertEqual(sentinel.read_text(), "keep\n")
+            link.unlink()
+        refused(["new", "c", "--title", "C"], r / ".git/COMMIT_EDITMSG", sentinel)
+        stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
+        (r / f"reports/{stamp}-audit").mkdir(parents=True)
+        refused(["report", "root", "audit"], r / f"reports/{stamp}-audit/index.md", outside / "missing-report")
+        self.assertFalse((outside / "missing-report").exists())
+        (r / "nodes/a/custom.txt").write_text("mine\n")
+        (r / "nodes/b/sources/merged-a").mkdir(parents=True)
+        refused(["merge", "a", "b"], r / "nodes/b/sources/merged-a/custom.txt", outside)
+        self.assertEqual(sorted(p.name for p in outside.iterdir()), ["sentinel.txt"])
+        shutil.rmtree(r / "nodes/b/sources/merged-a")
+        node = r / "nodes/a/node.md"
+        os.link(node, outside / "node-copy.md")
+        before = (outside / "node-copy.md").read_text()
+        self.assertIn("hard-linked", self.b(r, "relabel", "a", "area:x", ok=False))
+        self.assertEqual((outside / "node-copy.md").read_text(), before)
+        (outside / "node-copy.md").unlink()
+        log = r / ".brain/hooks.log"
+        log.unlink(missing_ok=True)
+        log.symlink_to(sentinel)
+        status = r / "nodes/a/status.md"
+        status.write_text(status.read_text().replace("Updated:", "Updated: 2020-01-01 00:00 by x\nOld:", 1))
+        out = StopHook.hook(self, r, r / "nodes/a", session="s-contained")
+        self.assertEqual(out["decision"], "block")  # the reminder still goes out...
+        self.assertEqual(sentinel.read_text(), "keep\n")  # ...but nothing is written through the link
+
     def test_merge_commits_when_a_node_has_empty_folders(self):
         r = self.init("alice")
         for nid in ("a", "d"):
