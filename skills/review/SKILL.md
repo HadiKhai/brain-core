@@ -17,6 +17,11 @@ stated; never run a polling loop in an agent.
 2. **Brief.** `core/bin/brain review <id> --branch <branch> --built-by <builder runtime>
    [--focus "<what worries you>"]`. It picks a reviewer runtime the builder didn't use and says
    where to run. Add `--model <id or display name>` for model-scoped weekly limits.
+   When reviewing verify failures, inspect the printed private log, each failing lane's own tail,
+   and the overall fallback. `[lane NAME]` prefixes identify interleaved test groups or named steps;
+   `FAIL`, `FAILED`, `FAILURE`, `ERROR`, or `exit N` (nonzero) identifies a failing lane. Missing
+   lane markers do not mean a group passed. Reused evidence is an earlier green run, not a fresh
+   execution; the command, refs, ignored inputs and job ports must still match the reuse rules.
 3. **Run it.** Host `delegate` on the reviewer runtime, in the job's worktree (or `launch` a
    worker there if the host's delegate can't pick a folder). The reviewer changes nothing.
 4. **Address.** Send the findings to the builder (host `send`). Blockers and majors get fixed or
