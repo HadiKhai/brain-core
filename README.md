@@ -562,7 +562,7 @@ uses the core as a submodule at `core/`, binding it in its `instance.md`.
 | [`adapters/runtimes/`](adapters/runtimes) | one small file per agent runtime (Claude Code, Codex), with their stop hooks |
 | [`adapters/hosts/`](adapters/hosts) | one mapping per host (T3 Code), plus a small `.env` the tool reads |
 | [`bin/brain`](bin/brain) | the tool. Python 3.9+, standard library only |
-| [`ui/index.html`](ui/index.html) | the live page `brain ui` serves. One file, no build step |
+| [`ui/`](ui/README.md) | React + shadcn dashboard; committed `ui/dist/` is served by Python with no runtime dependencies |
 | [`install.sh`](install.sh) | one-line install: a new brain, another machine, or a second brain |
 | [`tests/`](tests) | `brain selftest` and `live.py` |
 | [`LICENSE`](LICENSE) | MIT |
@@ -645,8 +645,8 @@ LIVE_CODEX_BIN=/path/to/codex python3 core/tests/live.py --runtimes codex
 
 The runner prints each executable and version, and stops calling a runtime that becomes
 unavailable (a usage limit, say) instead of failing every remaining scenario. For the live page,
-`tests/ui-checks.js` runs in a browser against a throwaway brain: timezones, notifications and
-navigation. See [recovery rehearsals](docs/recovery.md) for real-agent fixtures, SIGKILL checks
+`tests/ui-checks.js` runs in a browser against the synthetic fixture: navigation, knowledge review,
+subscription windows, import commands, tables and scroll geometry. See [dashboard development](ui/README.md). See [recovery rehearsals](docs/recovery.md) for real-agent fixtures, SIGKILL checks
 and their limits. They test routing artifacts and file recovery, not real subscription exhaustion
 or independent review quality.
 

@@ -1,247 +1,335 @@
-// Evaluate in a throwaway `brain ui` browser page. No packages or native notifications; test storage is isolated and removed.
-(() => {
-  const saved = { state: S, selected, url: location.href, notifyOn, firstPaint, notification: window.Notification };
+// Evaluate this expression in the browser at ui/tests/fixture.py's /?k=demo.
+// Uses public DOM interactions only; returns evidence or throws on the first regression.
+(async () => {
   const checks = [];
-  const originalFilter = {...learningFilter}, originalLimit = learningLimit, originalView = currentView, originalScan = [...scanSelected], originalParent = scanParent;
-  const storageKeys = [];
-  function check(condition, name) {
-    if (!condition) throw new Error(name);
-    checks.push(name);
-  }
-  function expected(date, zone, withDate = false) {
-    return new Intl.DateTimeFormat("en-GB", {
-      hour: "2-digit", minute: "2-digit", hourCycle:"h23", timeZone: zone,
-      ...(withDate ? { year: "numeric", month: "short", day: "numeric" } : {}),
-    }).format(date);
-  }
-  try {
-    S = structuredClone(S);
-    notifyOn = false;
-    for (const zone of ["UTC", "Asia/Beirut", "America/New_York"]) {
-      S.brain.tz = zone;
-      for (const stamp of ["2026-10-19T06:00:00Z", "2026-01-19T06:00:00Z"]) {
-        check(brainTime(stamp) === expected(new Date(stamp), zone), `clock ${zone} ${stamp}`);
-      }
-      renderHeat();
-      const tick = document.querySelector("#heat .tick");
-      check(tick && tick.textContent === expected(new Date(S.activity.start * 1000), zone), `chart ${zone}`);
-      const node = S.nodes[0], instant = new Date("2026-10-19T06:00:00Z");
-      node.decisions = [{ title: "Timezone decision", time: "wrong raw timezone", t: instant.getTime() / 1000 }];
-      node.jobs.rows = [{ Job: "timezone-job", Started: "2026-10-19T09:00:00+03:00", Hours: "1", Outcome: "merged", Reviews: "1" }];
-      openDetail(node.id);
-      const detail = document.getElementById("detail");
-      check(Array.from(detail.querySelectorAll(".when")).some(e => e.textContent === moment(instant.getTime()/1000)), `decision ${zone}`);
-      const row = Array.from(detail.querySelectorAll("tr")).find(e => e.textContent.includes("timezone-job"));
-      check(row && row.children[1].textContent === moment(instant.getTime()/1000), `job ${zone}`);
+  const check = (condition, message) => {
+    if (!condition) throw new Error(message);
+    checks.push(message);
+  };
+  const wait = async (predicate, message) => {
+    for (let i = 0; i < 100; i++) {
+      if (predicate()) return;
+      await new Promise((resolve) => setTimeout(resolve, 20));
     }
-    closeDetail();
-    check(location.search === new URL(saved.url).search, "closing notes preserves the API key");
-    const poison = '<img data-ui-attack src=x onerror="window.uiAttack=1">';
-    S.items.all = [{id:"proposal", title:poison, status:"proposed", kind:poison, body:poison,
-      provenance:{node:"test", ref:poison, repo:poison, commit:poison, time:"2026-10-19T06:00:00Z"}},
-      ...Array.from({length:500}, (_, i) => ({id:"large-" + i, title:"Learning " + i, status:i % 2 ? "quarantined" : "active", provenance:{node:"bulk"}}))];
-    S.specialists = [{id:"reviewer", node:"test", title:poison, status:"active", runtime:poison,
-      lessons:[{from:"test", time:"2026-10-19T06:00:00Z", text:poison}], jobs:[{node:S.nodes[0].id, job:"timezone-job", time:"2026-10-19T06:00:00Z", task:poison, subscription:poison}]}];
-    Object.assign(learningFilter, {node:"", specialist:"", state:""}); learningLimit = 80;
-    renderLearnings();
-    check($("learning-results").querySelectorAll("article").length === 80, "large library renders a bounded first page");
-    check($("learning-results").textContent.includes("awaiting review"), "proposals await review");
-    check($("learning-results").querySelector("input").value === "brain item accept --reviewed-by 'REVIEWER' -- 'proposal'", "proposal accept command");
-    check([...$("learning-results").querySelectorAll("input")].some(e => e.value === "brain item reject -- 'proposal'"), "proposal reject command");
-    $("filter-state").value = "quarantined"; $("filter-state").dispatchEvent(new Event("change"));
-    check($("learning-results").textContent.includes("250 learnings"), "state filter includes quarantined records");
-    learningFilter.state = ""; $("filter-state").value = "";
-    $("filter-specialist").value = "test/reviewer"; $("filter-specialist").dispatchEvent(new Event("change"));
-    check($("learning-results").querySelectorAll("article").length === 1, "specialist lesson filter");
-    check($("learning-results").textContent.includes("specialists/reviewer/lessons.md"), "lesson provenance");
-    learningFilter.specialist = ""; $("filter-specialist").value = "";
-    $("filter-node").value = "test"; $("filter-node").dispatchEvent(new Event("change"));
-    check($("learning-results").querySelectorAll("article").length === 2, "node filter combines library and specialist lessons");
-    renderAgents();
-    check($("agent-results").textContent.includes("timezone-job"), "specialist hire joins the node ledger");
-    check($("agent-results").textContent.includes(poison), "agent metadata remains literal text");
-    check($("ledger").textContent.includes("median"), "node ledger shows medians");
-    S.nodes[0].jobs.rows.push({Job:"timezone-job", Started:"2026-10-20T06:00:00Z", Ended:"2026-10-20T07:00:00Z", Outcome:"abandoned", Reviews:"9"});
-    renderAgents();
-    check(!$("agent-results").textContent.includes("abandoned"), "reused branch names do not reassign historical hire outcomes");
-    const now = Date.now() / 1000;
-    S.usage_policy = {stop_percent:73, max_age_seconds:120}; S.usage_other_subscriptions = 4;
-    S.usage = [{id:"one", label:poison, runtime:"codex", brains:[poison], read_at:now - 600, source:poison,
-      windows:{five_hour:{used_percent:80, resets_at:now+3600}, seven_day:{used_percent:50, resets_at:now+86400},
-        "seven_day_model:test":{models:[poison], used_percent:40, resets_at:now+86400}}},
-      {id:"two", label:"Fresh", runtime:"claude", brains:["test"], read_at:now, source:"lookup", windows:{five_hour:{absent:true}}}];
-    renderUsage();
-    check($("usage-results").querySelectorAll("article").length === 2, "one usage row per subscription");
-    check($("usage-hidden").textContent === "4 other subscriptions hidden", "other subscriptions remain a count");
-    check($("usage-results").textContent.includes("Stale"), "stale usage visibly stale");
-    check($("usage-results").textContent.includes("5-hour · none"), "absent usage differs from unknown");
-    check($("usage-results").textContent.includes("Weekly · unknown"), "missing usage is unknown");
-    check($("usage-results").querySelectorAll(".window").length === 5, "per-model weekly window rendered");
-    check($("usage-results").querySelector(".stop").style.left === "73%", "configured stop line");
-    check($("usage-results").querySelector(".stale-meter"), "stale bars have a distinct state");
-    S.usage[0].read_at = now; renderUsage();
-    check($("usage-results").querySelector(".critical"), "fresh usage beyond the stop line is critical");
-    S.usage[0].windows.five_hour.used_percent = 65; renderUsage();
-    check($("usage-results").querySelector(".warning") && $("usage-results").textContent.includes("Near stop line"), "near stop bars include a text state");
-    check($("usage-results").querySelector(".normal"), "normal bars have a distinct state");
-    S.usage[0].windows.five_hour.used_percent = 63; renderUsage();
-    check($("usage-results").querySelector(".window .meter").classList.contains("warning"), "exactly ten points before stop is near");
-    S.usage[0].windows.five_hour.used_percent = 62.9; renderUsage();
-    check($("usage-results").querySelector(".window .meter").classList.contains("normal"), "more than ten points before stop is normal");
-    S.usage[0].windows.five_hour.used_percent = 73; renderUsage();
-    check($("usage-results").querySelector(".window .meter").classList.contains("critical"), "exact stop line is critical");
-    check($("usage-results").querySelector(".usage-grid .usage-model"), "model weekly windows align inside subscription grid");
-    check($("usage-results").textContent.includes("resets in 1 h 0 m"), "reset countdown accompanies absolute time");
-    S.usage[0].windows.seven_day.resets_at = Date.now()/1000 + 48*3600 - 60; renderUsage();
-    check($("usage-results").textContent.includes("resets in 2 d") && !$("usage-results").textContent.includes("47 h 59 m"), "weekly reset uses days near the two-day boundary");
-    S.usage[0].windows.seven_day.resets_at = Date.now()/1000 + 72*3600; renderUsage();
-    check($("usage-results").textContent.includes("resets in 3 d"), "long reset durations use days");
-    S.usage_other_subscriptions = 0; renderUsage();
-    check($("usage-hidden").textContent === "", "zero hidden subscriptions produce no noise");
-    S.usage[0].windows.five_hour.used_percent = 80; renderUsage();
-    check($("usage-results").textContent.includes("Skipped for new jobs") && $("usage-routing").textContent.includes("new jobs go to Fresh"), "stop line explains routing to alternative");
-    S.due = [{node:poison, kind:"handback", ready:true, text:"ready to merge"}, {node:"test", kind:"handback", text:poison, reasons:[poison]},
-      {node:"test", kind:"stale-status", text:"status is stale"}, {node:"test", kind:"lesson-outcome", text:"missing lesson outcome"}];
-    renderDue();
-    check($("due").querySelectorAll("details").length === 2, "due grouped per node");
-    check($("due").textContent.includes("Ready to merge") && $("due").textContent.includes("missing lesson outcome"), "due includes readiness and lesson actions");
-    const originalDue = S.due;
-    const workerQuestion = "2026-10-19 15:55 +03:00 from worker: question: Keep the old hero?";
-    S.due = Array.from({length:30}, (_,i) => ({node:"test", kind:"inbox", text:i ? "Action " + i : workerQuestion}));
-    renderDue();
-    const lastDue = $("due").querySelector("li:last-child").getBoundingClientRect();
-    check(lastDue.bottom <= $("due").getBoundingClientRect().bottom + 1, "Due grows to contain its last row");
-    check(!$("due").textContent.includes("from worker: question:") && $("due").textContent.includes("From worker") && $("due").textContent.includes("Keep the old hero?"), "Due questions separate message and sender metadata");
-    S.inbox = [{id:"worker-question", node:"test", kind:"inbox", text:"inbox: " + workerQuestion}]; renderNeeds();
-    check(!$("needs").textContent.includes("inbox:") && !$("needs").textContent.includes("question:") && $("needs").textContent.includes("From worker") && $("needs").textContent.includes("Keep the old hero?"), "Inbox questions omit raw routing prefixes and retain provenance");
-    S.nodes[0].inbox = [workerQuestion]; openDetail(S.nodes[0].id);
-    check(!$("detail").textContent.includes("from worker: question:") && $("detail").textContent.includes("From worker"), "node detail formats worker questions consistently");
-    closeDetail();
-    S.due = originalDue; renderDue();
-    S.scan = [{name:poison, path:"/demo/a 'quoted'; $(touch nope)", kind:"repo", commit_count:2, last_commit_date:"2026-10-19T06:00:00Z", languages:[poison], agent_setup:[poison], readme:poison, adoptable:true},
-      {name:"Existing", path:"/demo/existing", kind:"repo", commit_count:1, node:"test", already_home:true, adoptable:false},
-      {name:"Other", path:"/demo/other", kind:"repo", commit_count:1, ownership:"another brain: workshop", adoptable:false}];
-    scanSelected.clear(); renderScan();
-    const boxes = $("scan-results").querySelectorAll('input[type="checkbox"]');
-    check(boxes[1].disabled && boxes[2].disabled, "already owned repositories cannot be selected");
-    boxes[0].click();
-    check($("adopt-command").querySelector("input").value === "brain adopt --parent 'root' -- " + shellQuote(S.scan[0].path), "adopt command preserves and shell-quotes the exact path");
-    const parent = S.nodes.find(n => n.id !== "root" && !n.archived).id;
-    $("adopt-parent").value = parent; $("adopt-parent").dispatchEvent(new Event("change"));
-    check($("adopt-command").querySelector("input").value.includes("--parent " + shellQuote(parent)), "adopt parent selector updates command");
-    check(getComputedStyle($("adopt-command")).position === "sticky", "selected import command remains sticky");
-    check(shellQuote("a'b") === "'a'\\''b'", "shell quoting protects apostrophes");
-    check(!document.querySelector("img[data-ui-attack]") && !window.uiAttack, "all new data surfaces escape markup");
-    for (const view of ["learnings", "agents", "usage", "imports", "overview"]) {
-      document.querySelector(`[data-view="${view}"]`).click();
-      check(!document.querySelector(`[data-page="${view}"]`).hidden, `view ${view} accessible via native button`);
-    }
-    document.querySelector('[data-view="imports"]').click(); render();
-    const checkbox = $("scan-results").querySelector("input");
-    checkbox.focus(); render();
-    check(document.activeElement === checkbox, "unchanged scan snapshots preserve keyboard focus");
-    S.scan[0].commit_count++; render();
-    check(document.activeElement.dataset.focus === checkbox.dataset.focus, "changed import snapshot restores checkbox focus");
-    S.scan[0].path = "/demo/[…]-hidden"; renderScan();
-    check($("scan-results").querySelector("input").disabled, "redacted paths never become adopt commands");
-    S.usage[0].windows.five_hour.resets_at = now - 1; renderUsage();
-    check($("usage-results").textContent.includes("expired · unknown"), "expired windows age out without a server refresh");
-    // Changed snapshots preserve user intent, not just byte-identical data.
-    S = structuredClone(saved.state); notifyOn = false; renderedData.clear();
-    Object.assign(learningFilter, {node:"", specialist:"", state:""}); learningLimit = 80;
-    scanSelected.clear(); scanParent = "root"; render();
-    const proposal = S.items.all.find(i => i.status === "proposed");
-    proposal.provenance.commit = "abcdef1" + "0".repeat(33);
-    proposal.provenance.time = "2020-01-01T00:00:00Z";
-    proposal.body = "First paragraph.\nContinued line.\n\n- One\n- Two\n\n1. First\n2. Second\n\n```js\n" + poison + "\n```\n\n" + poison;
-    render();
-    check($("learning-results").querySelector("article h3").textContent === proposal.title, "old proposed items still sort before accepted items");
-    check($("learning-results").textContent.includes("abcdef1") && !$("learning-results").textContent.includes("abcdef10000"), "provenance shortens only commit hashes");
-    check($("filter-state").querySelector('option[value="proposed"]').textContent === "proposed (1)", "state filters count awaiting proposals");
-    const body = $("learning-results").querySelector("details"); body.open = true;
-    check(body.querySelectorAll("p").length === 2 && body.querySelector("ul") && body.querySelector("ol") && body.querySelector("pre code").textContent === poison, "item markdown renders paragraphs lists and literal code safely");
-    const due = $("due").querySelector("details"); due.open = false;
-    const historyGroup = $("ledger").querySelector("details"); historyGroup.open = false;
-    const candidate = S.scan.find(c => c.adoptable);
-    const candidateBox = [...$("scan-results").querySelectorAll("input")].find(e => e.dataset.focus === "scan:" + candidate.path);
-    candidateBox.click();
-    proposal.body += "\n\n" + Array.from({length:20}, () => "Additional context for reviewing the source and its assumptions.").join("\n\n");
-    learningFilter.state = "proposed"; renderLearnings();
-    document.querySelector('[data-view="learnings"]').click();
-    window.scrollTo(0, 200); const priorY = scrollY;
-    proposal.title += " updated"; S.due[0].text += " updated"; S.nodes.find(n => n.jobs.rows.length).jobs.rows[0].Reviews = "8"; candidate.commit_count++;
-    render();
-    check($("learning-results").querySelector("details").open, "open learning body survives changed snapshot");
-    check(!$("due").querySelector("details").open, "collapsed due survives changed snapshot");
-    check(!$("ledger").querySelector("details").open, "collapsed ledger survives changed snapshot");
-    check(learningFilter.state === "proposed" && $("filter-state").value === "proposed", "filters survive changed snapshot");
-    check([...$("scan-results").querySelectorAll("input")].some(e => e.checked && e.dataset.focus === "scan:" + candidate.path), "selected imports survive changed snapshot");
-    check(priorY > 0 && scrollY === priorY, "scroll position survives changed snapshot");
-    check($("ledger").querySelector(".late-flag") && $("ledger").querySelector(".spark"), "ledger flags long open jobs and charts durations");
-    check(!$("agent-results").textContent.includes("1 lessons") && $("ledger").querySelector('[title="Subscription not recorded"]').textContent === "—", "singular lessons and quiet missing subscriptions");
-    check(document.querySelector("#needs").closest('[data-page="overview"]') && document.querySelector("#due").closest('[data-page="overview"]'), "overview contains Inbox and Due");
-    S.inbox = []; S.due = []; renderNeeds(); renderDue();
-    check($("needs").textContent.includes("Nothing needs you") && $("due").textContent.includes("Coordinators are idle: nothing due"), "overview empty states explain what belongs here");
-    const tabs = [...document.querySelectorAll('[role="tab"]')]; tabs[0].click(); tabs[0].focus();
-    tabs[0].dispatchEvent(new KeyboardEvent("keydown", {key:"ArrowRight", bubbles:true}));
-    check(document.activeElement === tabs[1] && location.hash === "#view=learnings" && tabs[1].getAttribute("aria-selected") === "true", "arrow keys activate and link tabs");
-    tabs[1].dispatchEvent(new KeyboardEvent("keydown", {key:"End", bubbles:true}));
-    check(document.activeElement === tabs[4] && currentView === "imports", "End reaches last tab");
-    history.replaceState(null,"", "#view=usage"); showView();
-    check(currentView === "usage" && !document.querySelector('[data-page="usage"]').hidden, "hash restores a linked tab");
-    const long = "LongUnbrokenNodeAndItemName".repeat(12);
-    S.items.all = Array.from({length:500}, (_,i) => ({id:"bulk-"+i,title:long,status:"active",provenance:{node:long,ref:long,time:new Date(Date.now()-i*3600000).toISOString()}}));
-    Object.assign(learningFilter,{node:"",specialist:"",state:""}); learningLimit=80;
-    document.querySelector('[data-view="learnings"]').click(); render();
-    check($("learning-results").querySelectorAll("article").length === 80 && document.documentElement.scrollWidth <= innerWidth, "500 long items stay bounded without document overflow");
-    for (const n of S.nodes) n.title = long;
-    for (const sp of S.specialists) sp.title = long;
-    for (const row of S.usage) row.label = long;
-    for (const candidate of S.scan) candidate.name = long;
-    for (const view of ["overview","agents","usage","imports"]) {
-      document.querySelector(`[data-view="${view}"]`).click(); render();
-      check(document.documentElement.scrollWidth <= innerWidth, `long node names stay contained in ${view}`);
-    }
-    check(displayText("1 commit(s), 2 lesson(s)") === "1 commit, 2 lessons", "CLI plural placeholders read naturally");
-    check(!document.querySelector('script[src], link[href], img[src], iframe[src]'), "page has no automatic external asset requests");
-    const events = [];
-    window.Notification = class { constructor(title, options) { events.push({ title, options }); } };
-    notifyOn = true; firstPaint = true;
-    S.brain.name = "ui-notification-test-" + crypto.randomUUID();
-    storageKeys.push(notificationKey());
-    const question = {id:"stable-first", node:"test", kind:"inbox", text:poison, first_seen:"2026-10-19T06:00:00Z"};
-    S.inbox = [question]; renderNeeds(); notifyNew();
-    check($("needs").textContent.includes("stable-f") && $("needs").textContent.includes("first seen"), "inbox shows short id and first-seen time");
-    check(events.length === 1, "unseen inbox id notifies on load when opted in");
-    firstPaint = false; notifyNew();
-    check(events.length === 1, "same id never repeats on refresh");
-    firstPaint = true; notifyNew();
-    check(events.length === 1, "same id never repeats across a reload");
-    S.inbox = []; notifyNew(); S.inbox = [{...question, text:"edited text"}]; notifyNew();
-    check(events.length === 1, "resolved or edited id never repeats");
-    S.inbox.push({...question, id:"stable-second"}); notifyNew();
-    check(events.length === 2, "new stable id notifies once");
-    notifyOn = false; S.inbox.push({...question, id:"stable-third"}); notifyNew();
-    check(events.length === 2, "notifications remain opt-in");
-    notifyOn = true; notifyNew();
-    check(events.length === 3, "opting in can report an unseen id");
-    S.brain.name += "-other"; storageKeys.push(notificationKey()); notifyNew();
-    check(events.length === 6, "notification history is isolated by brain");
-    return { passed: checks.length, checks };
-  } finally {
-    S = saved.state;
-    selected = saved.selected;
-    firstPaint = saved.firstPaint;
-    Object.assign(learningFilter, originalFilter); learningLimit = originalLimit; currentView = originalView;
-    for (const key of storageKeys) localStorage.removeItem(key);
-    scanParent = originalParent; scanSelected.clear(); for (const path of originalScan) scanSelected.add(path);
-    $("learning-filters").replaceChildren();
-    window.Notification = saved.notification;
-    notifyOn = false;
-    history.replaceState(null, "", saved.url);
-    render();
-    if (!selected) closeDetail();
-    notifyOn = saved.notifyOn;
-    notifyLabel();
+    throw new Error("Timed out: " + message);
+  };
+  const visible = (el) =>
+    !!el?.getClientRects().length &&
+    getComputedStyle(el).visibility !== "hidden";
+  const button = (text, root = document) =>
+    [...root.querySelectorAll("button")].find(
+      (e) =>
+        visible(e) &&
+        (e.getAttribute("aria-label") === text ||
+          e.textContent.trim() === text),
+    );
+  const go = async (view) => {
+    location.hash = "view=" + view;
+    await wait(
+      () => !document.querySelector(`[data-page="${view}"]`)?.hidden,
+      "navigate " + view,
+    );
+    document.querySelector("#workspace-content").scrollTop = 0;
+  };
+  const setInput = (el, value) => {
+    Object.getOwnPropertyDescriptor(
+      HTMLInputElement.prototype,
+      "value",
+    ).set.call(el, value);
+    el.dispatchEvent(new Event("input", { bubbles: true }));
+  };
+  const choose = async (name, text) => {
+    [...document.querySelectorAll("[role=combobox]")]
+      .find((e) => visible(e) && e.getAttribute("aria-label") === name)
+      .click();
+    await wait(
+      () =>
+        [...document.querySelectorAll("[role=option]")].some(
+          (e) => e.textContent.trim() === text,
+        ),
+      "options " + name,
+    );
+    [...document.querySelectorAll("[role=option]")]
+      .find((e) => e.textContent.trim() === text)
+      .click();
+    await new Promise((r) => setTimeout(r, 50));
+  };
+  const scroller = document.querySelector("#workspace-content");
+  await wait(() => document.querySelector("[data-page=overview]"), "state");
+  check(
+    !document.querySelector(
+      "select,details,summary,input[type=date],input[type=time],input[type=color],input[type=file]",
+    ),
+    "no stock controls or disclosures",
+  );
+  check(!document.querySelector("[title]"), "no native title tooltips");
+  check(
+    getComputedStyle(document.body).overflow === "hidden" &&
+      getComputedStyle(document.documentElement).overflow === "hidden",
+    "body and html never scroll",
+  );
+  for (const view of ["overview", "learnings", "agents", "usage", "imports"]) {
+    await go(view);
+    check(
+      document.querySelector("h1").textContent ===
+        {
+          overview: "Overview",
+          learnings: "Learnings",
+          agents: "Agents",
+          usage: "Usage",
+          imports: "Import checklist",
+        }[view],
+      "view " + view + " deep links",
+    );
+    check(
+      document.documentElement.scrollWidth <= innerWidth,
+      "no document overflow: " + view,
+    );
+    check(
+      scroller.scrollWidth <= scroller.clientWidth + 1,
+      "no inset overflow: " + view,
+    );
+    const stray = [...document.querySelectorAll("*")].filter(
+      (e) =>
+        visible(e) &&
+        e !== scroller &&
+        e.scrollHeight > e.clientHeight + 2 &&
+        ["auto", "scroll"].includes(getComputedStyle(e).overflowY),
+    );
+    check(stray.length === 0, "one active page scroller: " + view);
+    const header = document.querySelector(".topbar").getBoundingClientRect(),
+      page = document.querySelector(".page-header").getBoundingClientRect();
+    check(
+      Math.abs(
+        page.left -
+          header.left -
+          parseFloat(
+            getComputedStyle(document.querySelector(".topbar")).paddingLeft,
+          ),
+      ) < 2,
+      "matching topbar/content gutter: " + view,
+    );
   }
-})()
+  await go("overview");
+  check(
+    document
+      .querySelector(".flight-list")
+      .textContent.includes("narrow-screen navigation"),
+    "long job state is readable",
+  );
+  check(
+    !document
+      .querySelector(".flight-list")
+      .textContent.includes("job/complete-1"),
+    "completed rows and worktrees excluded from in-flight",
+  );
+  const projectButton = button("Field Guide");
+  projectButton.click();
+  await wait(() => document.querySelector(".node-sheet"), "node detail");
+  check(
+    document
+      .querySelector(".node-sheet")
+      .textContent.includes("Owners: Morgan"),
+    "node detail retains ownership",
+  );
+  check(location.hash.includes("node=field-guide"), "node details deep link");
+  document.dispatchEvent(
+    new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
+  );
+  await wait(
+    () => !visible(document.querySelector(".node-sheet")),
+    "close node detail",
+  );
+  await go("learnings");
+  check(
+    document
+      .querySelector(".learning-entry")
+      .textContent.includes("awaiting review"),
+    "proposals sort first",
+  );
+  button("Read learning").click();
+  await wait(
+    () => document.querySelector(".learning-entry .markdown"),
+    "learning reader",
+  );
+  check(
+    document
+      .querySelector(".learning-entry .markdown")
+      .textContent.includes("<script>literal, untrusted content</script>"),
+    "untrusted code stays literal",
+  );
+  button("Review and decide").click();
+  await wait(
+    () => document.querySelector(".learning-entry .command input"),
+    "review commands",
+  );
+  check(
+    document.querySelector(".learning-entry .command input").value ===
+      "brain item accept --reviewed-by 'REVIEWER' -- 'lesson-0'",
+    "accept command preserved",
+  );
+  check(
+    [...document.querySelectorAll(".learning-entry .command input")].some(
+      (e) => e.value === "brain item reject -- 'lesson-0'",
+    ),
+    "reject command preserved",
+  );
+  await choose("State", "Accepted (5)");
+  check(
+    !document
+      .querySelector(".learning-results")
+      .textContent.includes("awaiting review"),
+    "custom select filters knowledge",
+  );
+  button("Clear filters").click();
+  const search = document.querySelector(
+    'input[placeholder="Search learnings"]',
+  );
+  setInput(search, "filters");
+  await wait(
+    () => document.querySelector(".results-meta").textContent === "1 learning",
+    "search",
+  );
+  await go("usage");
+  await go("learnings");
+  check(search.value === "filters", "search survives navigation");
+  check(
+    document.querySelector(".results-meta").textContent === "1 learning",
+    "filtered results survive navigation",
+  );
+  button("Clear filters").click();
+  await go("agents");
+  check(
+    document
+      .querySelector("[data-page=agents]")
+      .textContent.includes("Review navigation and focus order"),
+    "specialist hires retain tasks",
+  );
+  check(
+    document
+      .querySelector("[data-page=agents]")
+      .textContent.includes("Median 1.6 h"),
+    "job medians present",
+  );
+  const table = document.querySelector(".ledger-entry .data-table");
+  check(
+    table.querySelectorAll("tbody tr").length === 10,
+    "ledger defaults to ten rows",
+  );
+  button("Next", table).click();
+  await wait(
+    () => table.querySelectorAll("tbody tr").length === 4,
+    "ledger paging",
+  );
+  check(
+    table.querySelector(".table-footer").textContent.includes("11–14 of 14"),
+    "ledger pages the complete history",
+  );
+  await go("usage");
+  const usage = document.querySelector("[data-page=usage]");
+  check(
+    usage.textContent.includes("Stale") &&
+      usage.textContent.includes("No Window"),
+    "stale and absent subscription readings distinct",
+  );
+  check(
+    usage.textContent.includes("Design model"),
+    "per-model weekly window present",
+  );
+  check(
+    usage.querySelectorAll(".window-meter").length === 5,
+    "all subscription windows present",
+  );
+  check(
+    usage.textContent.includes("1 other subscription hidden"),
+    "only count of hidden subscriptions shown",
+  );
+  check(
+    usage.querySelectorAll(".runtime-spend").length === 2,
+    "spend per runtime",
+  );
+  check(
+    usage.textContent.includes("Jobs: time and tokens"),
+    "measured job usage preserved",
+  );
+  check(
+    usage.querySelector(".stop-line").style.left === "85%",
+    "configured stop marker",
+  );
+  await go("imports");
+  const boxes = [
+    ...document.querySelectorAll("[data-page=imports] [role=checkbox]"),
+  ];
+  check(
+    boxes.length === 3 && boxes[1].disabled && boxes[2].disabled,
+    "owned repositories cannot be selected",
+  );
+  boxes[0].click();
+  await wait(
+    () => document.querySelector(".action-dock .command input"),
+    "import selection",
+  );
+  check(
+    document.querySelector(".action-dock .command input").value ===
+      "brain adopt --parent 'root' -- '/demo/pocket-atlas'",
+    "adopt command preserves exact arguments",
+  );
+  check(
+    !scroller.contains(document.querySelector(".action-dock")),
+    "action dock sits outside scroller",
+  );
+  const dockTop = document
+    .querySelector(".action-dock-host")
+    .getBoundingClientRect().top;
+  for (const fraction of [0, 0.5, 1]) {
+    scroller.scrollTop =
+      (scroller.scrollHeight - scroller.clientHeight) * fraction;
+    await new Promise((r) => requestAnimationFrame(r));
+    check(
+      Math.abs(
+        document.querySelector(".action-dock-host").getBoundingClientRect()
+          .top - dockTop,
+      ) < 1,
+      "dock stable at scroll " + fraction,
+    );
+  }
+  await go("overview");
+  await go("imports");
+  check(
+    document
+      .querySelector(".action-dock .command input")
+      .value.includes("pocket-atlas"),
+    "selection survives navigation",
+  );
+  button("Clear", document.querySelector(".action-dock")).click();
+  check(
+    !document.querySelector(".action-dock .command input"),
+    "clear import selection",
+  );
+  check(
+    !document.querySelector("[data-ui-attack]") && !window.uiAttack,
+    "source data cannot create executable markup",
+  );
+  const remote = performance
+    .getEntriesByType("resource")
+    .filter((e) => new URL(e.name).origin !== location.origin);
+  check(remote.length === 0, "fonts scripts and styles stay local");
+  await go("overview");
+  const geometry = {
+    viewport: [innerWidth, innerHeight],
+    scrollers: 1,
+    gutter: parseFloat(getComputedStyle(scroller).paddingLeft),
+    controls: [
+      ...new Set(
+        [
+          ...document.querySelectorAll(
+            "button,input,[role=combobox],[role=checkbox],a",
+          ),
+        ]
+          .filter(visible)
+          .map((e) => e.getAttribute("role") || e.tagName.toLowerCase()),
+      ),
+    ],
+  };
+  return { passed: checks.length, checks, geometry };
+})();
