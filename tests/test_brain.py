@@ -2214,7 +2214,7 @@ class QuestionWake(Scenario):
         request = opener.open.call_args.args[0]
         self.assertEqual(request.data, b'{"event":"brain-wake"}')
         self.assertEqual(opener.open.call_args.kwargs["timeout"], 0.4)
-        handler = build.call_args.args[0]
+        handler = build.call_args.args[0]()
         self.assertIsNone(handler.redirect_request(None, None, 302, "redirect", {}, "https://other.invalid/"))
 
     def test_delivery_racing_with_pending_creation_is_deduplicated(self):
