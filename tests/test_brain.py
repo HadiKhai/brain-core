@@ -7928,6 +7928,17 @@ class MachineCare(Scenario):
             self.assertEqual(reading["mem_free_gb"], 30.7)
             self.assertEqual(reading["thermal"], "pressure")
 
+    def test_slots_are_shared_across_registry_and_xdg_overrides(self):
+        m = self.m
+        with mock.patch.dict(os.environ, {"BRAIN_CONFIG": str(self.tmp / "one/brains.json"),
+                                          "XDG_CONFIG_HOME": str(self.tmp / "one")}):
+            token = m.machine_wait("verify")
+        with mock.patch.dict(os.environ, {"BRAIN_CONFIG": str(self.tmp / "two/brains.json"),
+                                          "XDG_CONFIG_HOME": str(self.tmp / "two")}):
+            with m.machine_queue() as q:
+                self.assertEqual([r["token"] for r in q.rows], [token])
+            m.machine_release(token)
+
     def test_hold_retries_and_releases(self):
         m = self.m
         with mock.patch.object(m, "machine_reading", side_effect=[{**self.good, "thermal": "pressure"}, self.good]), \

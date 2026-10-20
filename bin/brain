@@ -8811,10 +8811,8 @@ def cmd_due(a):
         return
     state = machine_state(inst)
     items = [item for n in nodes for item in due_items(inst, n) + changes_due(inst, n)]
-    if not a.quiet and (state["held"] or state["queued"]):
+    if not a.quiet and (state["held"] or state["queued"] or getattr(a, "machine", False)):
         items.append({"node": a.id or "root", "kind": "machine", "text": machine_summary(state)})
-    elif getattr(a, "machine", False) and not a.json and not a.quiet:
-        print(machine_summary(state))
     if a.quiet:
         sys.exit(1 if items else 0)
     if a.json:
