@@ -15,8 +15,10 @@ For agents:
 - `merge=pr` records the coordinator's explicit `gh pr merge` workflow; no automatic merge.
 
 After upgrading:
-- Fetch explicitly before final readiness. If origin's default branch changed, explicitly run
-  `git remote set-head origin -a`. Rebase job worktrees on that remote default and hand back again.
+- Fetch explicitly before final readiness. If origin's cached default is missing or changed,
+  explicitly run `git remote set-head origin -a`. Until repaired, readiness and sync marking
+  refuse rather than skip integrations. After a history rewrite, inspect it and explicitly
+  use `brain sync <id> --reset-main` to rescan, retaining ledger deduplication. Rebase job worktrees on that remote default and hand back again.
 - For team PR workflows, set `brain set <id> merge=pr` and follow home-job's head-pinned merge step.
 
 ## 2026-10-20: Runtime questions reach the inbox

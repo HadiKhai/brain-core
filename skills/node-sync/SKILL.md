@@ -18,11 +18,15 @@ Run by a node's coordinator.
    ref with `git remote set-head origin -a`.
    Sync records newly observed first-parent default-branch commits as `external` ledger rows,
    keyed by full commit hash. This includes merge commits, squash merges and direct commits:
-   Git alone cannot distinguish the latter two. Exact recorded job tips already integrated here
-   are excluded. These rows assert no review, runtime usage or job duration. First sync uses
+   Git alone cannot distinguish the latter two. A worker's recorded ready head identifies its
+   merge even if the branch was deleted; a squash also needs that head's exact tree and recorded
+   main as its parent. Empty/unverified job branches never claim an external integration. These rows assert no review, runtime usage or job duration. First sync uses
    the existing last-sync/status time window; later syncs use a local commit cursor, including
    without `--mark`. Repeats are deduplicated even if the cursor is lost. A rewritten history
-   refuses cursor advancement and needs coordinator reconciliation. Homes without origin retain
+   refuses cursor advancement. After inspecting rewritten history or a new unrelated default,
+   explicitly run `brain sync <id> --reset-main` to rescan all first-parent default history,
+   preserving the ledger and hash deduplication. `--offline` avoids fetching during that rescan.
+   `--mark` refuses to advance the sync time if integrations could not be recorded. Homes without origin retain
    their existing behavior. Read what matters in the home itself. Never write there from here (axiom 6).
 4. Add each new decision to the top of `decisions.md`, with why and the alternatives. Decisions
    others recorded in the home are cited, not copied: "<what> (home: <file or PR>)".

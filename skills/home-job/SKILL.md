@@ -75,7 +75,8 @@ stated; never run a polling loop in an agent.
    the coordinator explicitly runs `gh pr merge <number> --merge --match-head-commit <verified-head>`
    in the job worktree (or the home's required squash strategy). Host checks and current base
    rules still apply; if the base moves, rebase and hand back again before retrying.
-   Then run `brain sync <id>` to observe the merged remote default.
+   Then run `brain sync <id>` to observe the merged remote default before pruning the job:
+   its verified tree and base let sync associate a squash with the existing ledger row.
    A moved main goes back to the worker for rebase and verification;
    the coordinator does not repeat its tests. Only the coordinator merges to main.
 6. **Done.** When the operator (and the home's owners) merge it, set the row to `merged`, record

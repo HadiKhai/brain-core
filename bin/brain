@@ -6504,7 +6504,7 @@ def integration_ref(home):
     """Cached remote default, never a network request or a local-branch fallback for origin."""
     if "origin" in git("remote", cwd=home).stdout.split():
         target = git("symbolic-ref", "refs/remotes/origin/HEAD", cwd=home).stdout.strip()
-        return target if target.startswith("refs/remotes/origin/") else "refs/remotes/origin/HEAD"
+        return target if target.startswith("refs/remotes/origin/") else ""
     return "refs/heads/main"
 
 
@@ -6513,6 +6513,9 @@ def main_notice(n):
     if not home or not home.exists():
         return
     ref = integration_ref(home)
+    if ref == "":
+        print("main: origin default branch unavailable; explicitly fetch origin and run git remote set-head origin -a")
+        return
     if not ref.startswith("refs/remotes/origin/"):
         return
     short = ref.removeprefix("refs/remotes/")
@@ -6546,7 +6549,8 @@ def ready_preflight(n, branch):
     head, main = ready_refs(n, branch)
     if not head or not main:
         return ["branch or integration main is missing (origin needs a valid cached origin/HEAD)"], head, main
-    if "refs/heads/" + branch == integration_ref(n["home_path"]).replace("refs/remotes/origin/", "refs/heads/"):
+    if branch == "main" or ("refs/heads/" + branch ==
+                            integration_ref(n["home_path"]).replace("refs/remotes/origin/", "refs/heads/")):
         reasons.append("the job branch must differ from main")
     if git("merge-base", "--is-ancestor", main, head, cwd=n["home_path"]).returncode:
         reasons.append("worker must rebase on current main")
@@ -6845,7 +6849,34 @@ def cmd_sync(a):
     sync_one(inst, inst.node(a.id), a)
 
 
-def sync_external_merges(inst, n, since):
+def integration_owners(n, rows):
+    """Index verified contributions once; packets survive deletion of the local job branch."""
+    heads, squashes = {}, {}
+    for row in rows:
+        if row.get("Outcome") == "external" or row.get("Merge commit"):
+            continue
+        hb = read_handback(n, row) or {}
+        packet = hb.get("ready")
+        if hb.get("state") != "done" or not isinstance(packet, dict):
+            continue
+        head, base = packet.get("head"), packet.get("main")
+        if (packet.get("node") != n["id"] or packet.get("branch") != row["Job"] or
+                type(packet.get("verify_result")) is not int or packet.get("verify_result") != 0 or
+                type(packet.get("review_rounds")) is not int or packet["review_rounds"] < 1 or
+                not isinstance(head, str) or not isinstance(base, str) or
+                not re.fullmatch(r"[0-9a-f]{40,64}", head) or not re.fullmatch(r"[0-9a-f]{40,64}", base) or head == base):
+            continue
+        if git("merge-base", "--is-ancestor", base, head, cwd=n["home_path"]).returncode:
+            continue
+        tree = git("rev-parse", "--verify", "--quiet", head + "^{tree}", cwd=n["home_path"]).stdout.strip()
+        base_tree = git("rev-parse", "--verify", "--quiet", base + "^{tree}", cwd=n["home_path"]).stdout.strip()
+        if tree and base_tree and tree != base_tree:
+            heads.setdefault(head, []).append(row)
+            squashes.setdefault((base, tree), []).append(row)
+    return heads, squashes
+
+
+def sync_external_merges(inst, n, since, reset=False):
     """Record observed default-branch integrations, without claiming they were reviewed jobs.
 
     First-parent single commits include squash merges and direct commits: Git alone cannot
@@ -6853,6 +6884,9 @@ def sync_external_merges(inst, n, since):
     """
     home = n["home_path"]
     ref = integration_ref(home)
+    if not ref:
+        print("external merges: not recorded; cached origin default is unavailable; run git remote set-head origin -a")
+        return False
     if not ref.startswith("refs/remotes/origin/"):
         return True
     tip = git("rev-parse", "--verify", "--quiet", ref + "^{commit}", cwd=home)
@@ -6861,12 +6895,14 @@ def sync_external_merges(inst, n, since):
         return False
     tip = tip.stdout.strip()
     cursor = n["local"].get("synced_main", "")
-    args = ["log", "--first-parent", "--reverse", "--format=%H %cI", "--min-parents=1"]
-    if cursor:
+    args = ["log", "--first-parent", "--reverse", "--format=%H %T %P%x09%cI", "--min-parents=1"]
+    if cursor and not reset:
         if git("merge-base", "--is-ancestor", cursor, tip, cwd=home).returncode:
-            print("external merges: default history changed; refusing to advance its sync cursor")
+            print("external merges: default history changed; inspect it, then explicitly use sync --reset-main to rescan")
             return False
         args += [cursor + ".." + tip]
+    elif reset:
+        args += [tip]
     else:
         args += ["--since=" + since.isoformat(timespec="seconds"), tip]
     result = git(*args, cwd=home)
@@ -6878,27 +6914,26 @@ def sync_external_merges(inst, n, since):
         if rows is None:
             return False
         known = {r.get("Merge commit") for r in rows}
+        heads, squashes = integration_owners(n, rows)
         added = 0
         changed = False
         for line in result.stdout.splitlines():
-            commit, when = line.split(" ", 1)
+            identity, when = line.split("\t", 1)
+            commit, tree, *parents = identity.split()
             if commit in known:
                 continue
-            # A recorded branch whose exact tip integrated here already owns this work.
-            owned = False
-            for row in rows:
-                if row.get("Outcome") == "external":
-                    continue
-                branch_tip = git("rev-parse", "--verify", "--quiet", "refs/heads/" + row["Job"] + "^{commit}",
-                                 cwd=home).stdout.strip()
-                parents = git("rev-list", "--parents", "-n", "1", commit, cwd=home).stdout.split()[1:]
-                if branch_tip and (branch_tip == commit or branch_tip in parents[1:]):
-                    row["Merge commit"] = commit
-                    known.add(commit)
-                    changed = True
-                    owned = True
-                    break
-            if owned:
+            candidates = list(heads.get(commit, []))
+            for parent in parents[1:]:
+                candidates += heads.get(parent, [])
+            if len(parents) == 1:
+                candidates += squashes.get((parents[0], tree), [])
+            # Duplicate/ambiguous claims never steal external work from the observation ledger.
+            owners = {job_key(row): row for row in candidates if not row.get("Merge commit")}
+            if len(owners) == 1:
+                row = next(iter(owners.values()))
+                row["Merge commit"] = commit
+                known.add(commit)
+                changed = True
                 continue
             rows.append({"Job": "external:" + commit, "Started": when, "Ended": when,
                          "Outcome": "external", "Commits": "1", "Merge commit": commit,
@@ -6931,7 +6966,7 @@ def sync_one(inst, n, a):
                 r = git("fetch", "--all", "--prune", "--quiet", cwd=home)
                 print("fetched" if r.returncode == 0 else f"fetch failed: {r.stderr.strip()[:200]}")
             main_notice(n)
-            can_mark = sync_external_merges(inst, n, since)
+            can_mark = sync_external_merges(inst, n, since, getattr(a, "reset_main", False))
             br = git("branch", "--show-current", cwd=home).stdout.strip() or "(detached)"
             ab = git("rev-list", "--left-right", "--count", "HEAD...@{u}", cwd=home)
             track = ""
@@ -7450,7 +7485,8 @@ def print_job_handback(n, branch):
 def jobs_summary(inst, n):
     """Finished and open jobs of one node, with medians, for `brain jobs` and the live view."""
     import statistics
-    rows = read_jobs(n) or []
+    all_rows = read_jobs(n) or []
+    rows = [r for r in all_rows if r.get("Outcome") != "external"]
     done = [r for r in rows if r["Ended"]]
     hours = [float(r["Hours"]) for r in done if r["Outcome"] == "merged" and r["Hours"]]
     reviews = [int(r["Reviews"] or 0) for r in done if r["Outcome"] == "merged"]
@@ -7464,6 +7500,7 @@ def jobs_summary(inst, n):
     open_ = [{**r, "age_h": round(elapsed(inst.parse_time(r["Started"]), now) / 3600, 1)}
              for r in rows if not r["Ended"] and inst.parse_time(r["Started"])]
     return {"rows": rows[-40:], "open": open_, "finished": len(done),
+            "external": len(all_rows) - len(rows),
             "merged": sum(1 for r in done if r["Outcome"] == "merged"),
             "abandoned": sum(1 for r in done if r["Outcome"] == "abandoned"),
             "median_hours": med(hours), "median_reviews": med(reviews),
@@ -10417,7 +10454,7 @@ def main():
         "id", opt("--branch", required=True), opt("--base"), opt("--built-by", dest="built_by"),
         opt("--by", help="reviewer runtime (default: one the builder didn't use)"), opt("--focus"),
         opt("--model", help="job model for scoped usage limits"), opt("--out"))
-    cmd("ready", cmd_ready, "check a worker's ready packet against the branch and current local main", "id",
+    cmd("ready", cmd_ready, "check a worker's ready packet against the branch and cached origin default (local main without origin)", "id",
         opt("--branch", required=True), opt("--record", action="store_true", help="worker: run node verify and record"),
         opt("--reviews", type=int, help="completed review rounds, required with --record"),
         opt("--report"), opt("--lessons", help="proposed lessons, or none: <reason>"),
@@ -10430,6 +10467,7 @@ def main():
     cmd("sync", cmd_sync, "what changed in a node (and its home) since the last sync; --all: every external home",
         opt("id", nargs="?"), opt("--all", action="store_true"),
         opt("--offline", action="store_true"), opt("--mark", action="store_true"),
+        opt("--reset-main", action="store_true", help="explicitly rescan all default history after rewriting or changing it; retain ledger deduplication"),
         opt("--limit", type=int, default=20, help="uncommitted files to list"))
     s = sub.add_parser("hook", help="runtime hooks: stop (called by the runtime), approve (trust them in Codex)")
     hsub = s.add_subparsers(dest="hcmd", metavar="<action>")
