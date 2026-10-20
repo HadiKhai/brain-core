@@ -8876,8 +8876,17 @@ def hook_questions(path):
     Only the hook-supplied transcript is read, never session discovery or history imports.
     """
     pending = {}
-    with open(path, "r", encoding="utf-8") as fh:
-        for line in fh:
+    fd = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0))
+    if not stat.S_ISREG(os.fstat(fd).st_mode):
+        os.close(fd)
+        return []  # a FIFO/device must never hold a stop open
+    with os.fdopen(fd, "rb") as fh:
+        remaining = os.fstat(fh.fileno()).st_size  # don't chase a transcript that keeps growing
+        while remaining:
+            line = fh.readline(remaining)
+            if not line:
+                break
+            remaining -= len(line)
             try:
                 rec = json.loads(line)
             except ValueError:

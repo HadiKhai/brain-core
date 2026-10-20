@@ -2193,6 +2193,14 @@ class StopHook(Scenario):
             missing.write_text(raw)
             self.hook(r, r, active=True, transcript=missing)
 
+    def test_nonregular_transcript_never_waits_for_a_writer(self):
+        r = self.init("alice")
+        fifo = self.tmp / "synthetic-transcript-fifo"
+        os.mkfifo(fifo)
+        self.hook(r, r, active=True, transcript=fifo)
+        self.hook(r, r, active=True, transcript=self.tmp)
+        self.assertNotIn("host-question:", (r / "inbox.md").read_text())
+
     def test_question_refusal_never_exits_the_hook_or_suppresses_reminders(self):
         loader = importlib.machinery.SourceFileLoader("brain_hook_refusal", str(CORE / "bin/brain"))
         module = loader.load_module()
