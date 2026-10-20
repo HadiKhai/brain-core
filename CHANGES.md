@@ -44,7 +44,6 @@ After upgrading:
 - Transcript scanning now walks backward in chunks to the last operator message, capped at
   four MiB per stop; questions beyond that cap rely on host pending checks.
 
-
 ## 2026-10-20: History from folders named as the node's
 
 For agents:

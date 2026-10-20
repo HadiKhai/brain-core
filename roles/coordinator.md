@@ -167,7 +167,7 @@ missing reasons in old calls warn rather than stop work.
 
 Declare shared source paths under optional `## Inputs` in each contract, one path per line,
 with no annotations. Plain lines, `-`, `*`, `+` and numbered bullets work. Paths are home-relative
-or absolute; directory paths cover descendants and globs match literal paths. The check does
+or absolute; directory paths cover descendants and `*`/`?` globs match literal paths. Brackets stay literal. The check does
 not compute all intersections between different glob patterns. Only declarations count; prose and
 Git refs are not inferred as paths. Context files passed to a branch brief count on this machine;
 contract inputs travel with the node. `brain jobs` and `brain due` advise once per overlapping

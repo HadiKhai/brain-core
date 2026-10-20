@@ -6410,7 +6410,7 @@ def separation_lines(a, n, branch, default=""):
     row = open_job(read_jobs(n) or [], branch) if branch else None
     contract = contract_file(n, row).read_text() if row and contract_file(n, row).is_file() else ""
     sections = {k.lower(): v for k, v in md_sections(contract).items()}
-    why = a.why_separate if a.why_separate is not None else sections.get("why separate", default)
+    why = a.why_separate if a.why_separate is not None else (default or sections.get("why separate") or "")
     if not why.strip():
         if a.why_separate is not None and not a.allow_unexplained:
             die("--why-separate needs a reason; use --allow-unexplained for an urgent job")
@@ -7348,37 +7348,51 @@ def contract_problems(text):
     return [f for f in CONTRACT_FIELDS if not sections.get(f.lower(), "").strip()]
 
 
+def job_input_path(n, value):
+    """Canonicalize declarations and recorded context with the same alias policy."""
+    import posixpath
+    path = (n.get("home_path") or n["dir"]) / Path(value).expanduser()
+    try:
+        return str(path.resolve(strict=False))
+    except (OSError, RuntimeError, ValueError):
+        return posixpath.normpath(str(path))
+
+
 def job_inputs(n, row):
     """Explicit inputs only: prose and Git refs are not evidence of shared reads."""
-    import posixpath
     f = contract_file(n, row)
     text = f.read_text() if f.is_file() else ""
     sections = {k.lower(): v for k, v in md_sections(text).items()}
     values = [re.sub(r"^(?:[-*+]|[0-9]+[.)])\s+", "", line.strip()).strip().strip("`")
               for line in sections.get("inputs", "").splitlines() if line.strip()]
     values += n["local"].get("worktrees", {}).get(row["Job"], {}).get("context_inputs", [])
-    root = n.get("home_path") or n["dir"]
-    return {posixpath.normpath(str(root / Path(v).expanduser())) for v in values
+    return {job_input_path(n, v) for v in values
             if v and v.casefold() not in ("none", "n/a", "not applicable", "-")}
 
 
-def inputs_overlap(left, right):
-    """Literal paths, directory descendants and globs, without reading source files."""
-    import fnmatch
+def inputs_overlap(left, right, root=""):
+    """Only * and ? are patterns; brackets and the home prefix stay literal."""
+    def matches(path, pattern):
+        prefix = root if root and pattern.startswith(root.rstrip("/") + "/") else ""
+        tail = pattern[len(prefix):]
+        if "*" not in tail and "?" not in tail:
+            return False
+        regex = re.escape(prefix) + re.escape(tail).replace(r"\*", ".*").replace(r"\?", ".")
+        return re.fullmatch(regex, path) is not None
     return any(p == q or p.startswith(q.rstrip("/") + "/") or q.startswith(p.rstrip("/") + "/")
-               or fnmatch.fnmatchcase(p, q) or fnmatch.fnmatchcase(q, p) for p in left for q in right)
+               or matches(p, q) or matches(q, p) for p in left for q in right)
 
 
 def job_overlaps(n, rows, include_resolved=False):
     """Shared context resolves the advice; jobs may still show that softer fact."""
     def context(row):
-        return set(n["local"].get("worktrees", {}).get(row["Job"], {}).get("context_inputs", []))
+        return {job_input_path(n, v) for v in n["local"].get("worktrees", {}).get(row["Job"], {}).get("context_inputs", [])}
     opened = [(r, job_inputs(n, r), context(r)) for r in rows if not r["Ended"]]
     out = {}
     for row, inputs, shared in opened:
         peers, resolved = set(), set()
         for peer, other, peer_shared in opened:
-            if job_key(peer) == job_key(row) or not inputs_overlap(inputs, other):
+            if job_key(peer) == job_key(row) or not inputs_overlap(inputs, other, root=job_input_path(n, ".")):
                 continue
             if shared & peer_shared:
                 resolved.add(peer["Job"])
@@ -7646,8 +7660,6 @@ def cmd_jobs(a):
                  f"({count_of(j['measured'], 'measured job')})" if j["median_tokens"] else ""))
         overlaps = job_overlaps(n, j["open"], include_resolved=True)
         for r in j["open"]:
-            if job_key(r) in overlaps:
-                print(redact("        " + r["Job"] + ": " + overlaps[job_key(r)], never_terms(n)))
             u = live_usage(inst, n, r)
             late = j["median_hours"] is not None and r["age_h"] > 2 * j["median_hours"]
             heavy = bool(u and j["median_tokens"] and u["processed"] > 2 * j["median_tokens"])
@@ -7655,6 +7667,8 @@ def cmd_jobs(a):
                          + (f"  {tokens_text(u['processed'])} tokens" if u and u["sessions"] else "")
                          + ("   (over twice the median" + (" in hours and tokens)" if heavy else ")") if late else
                             "   (over twice the median in tokens)" if heavy else ""), never_terms(n)))
+            if job_key(r) in overlaps:
+                print(redact("        " + r["Job"] + ": " + overlaps[job_key(r)], never_terms(n)))
             for line in job_advice(inst, n, r) + [usage_line(u, job_budget(n, r), r["age_h"])] + \
                     usage_advice(u, j["median_tokens"]):
                 print(redact("        " + line, never_terms(n)))

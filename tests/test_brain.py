@@ -6271,6 +6271,10 @@ class Workflow(Scenario):
         m.write_jobs(None, node, rows + history)
         out = self.b(r, "jobs", "a")
         self.assertEqual(out.count("overlapping inputs with"), 3)
+        lines = out.splitlines()
+        for branch in ("job", "other", "third"):
+            row_at = next(i for i, line in enumerate(lines) if line.startswith("  open  " + branch + " "))
+            self.assertTrue(lines[row_at + 1].startswith("        " + branch + ": overlapping inputs"))
         due = json.loads(self.b(r, "due", "a", "--json"))
         overlaps = [i for i in due if i["kind"] == "overlapping-inputs"]
         self.assertEqual(len(overlaps), 3)
@@ -6309,6 +6313,29 @@ class Workflow(Scenario):
                 m.contract_file(node, row).write_text("## Inputs\n" + value + "\n")
             self.assertEqual(m.job_overlaps(node, rows), {}, (left, right))
 
+    def test_overlap_brackets_and_symlink_aliases(self):
+        m = importlib.machinery.SourceFileLoader("brain_aggregation_aliases", str(CORE / "bin/brain")).load_module()
+        home = self.tmp / "home[x]*"
+        home.mkdir()
+        node = {"dir": self.tmp / "node", "home_path": home, "local": {}}
+        rows = [{"Job": b, "Started": "2026-01-01", "Ended": ""} for b in ("one", "two")]
+        for left, right, count in (("src/*.py", "src/a.py", 2),
+                                   ("app/[id]/page.tsx", "app/i/page.tsx", 0),
+                                   ("app/[id]/*.tsx", "app/[id]/page.tsx", 2)):
+            for row, value in zip(rows, (left, right)):
+                f = m.contract_file(node, row)
+                f.parent.mkdir(parents=True, exist_ok=True)
+                f.write_text("## Inputs\n" + value + "\n")
+            self.assertEqual(len(m.job_overlaps(node, rows)), count, (left, right))
+        alias = self.tmp / "alias"
+        alias.symlink_to(home, target_is_directory=True)
+        m.contract_file(node, rows[0]).write_text("## Inputs\n" + str(alias / "ctx.md") + "\n")
+        m.contract_file(node, rows[1]).write_text("## Inputs\nNone\n")
+        node["local"] = {"worktrees": {"two": {"context_inputs": [str(home / "ctx.md")]}}}
+        self.assertEqual(len(m.job_overlaps(node, rows)), 2)
+        node["local"]["worktrees"]["one"] = {"context_inputs": [str(alias / "ctx.md")]}
+        self.assertEqual(m.job_overlaps(node, rows), {})
+
     def test_hire_and_review_carry_separation_reasons(self):
         r, home, wt = self.job()
         self.b(r, "specialist", "new", "tester", "--title", "Tester")
@@ -6327,7 +6354,10 @@ class Workflow(Scenario):
                             "## Why separate\nDistinct expertise.\n")
         self.b(r, "jobs", "a", "--branch", "job", "--contract-file", str(contract))
         self.assertIn("Why a separate agent: Distinct expertise.", self.b(r, *hire))
-        self.assertIn("Why a separate agent: Distinct expertise.", self.b(r, *review))
+        self.assertIn("Why a separate agent: Independent second-runtime review.", self.b(r, *review))
+        contract.write_text(contract.read_text().replace("Distinct expertise.", ""))
+        self.b(r, "jobs", "a", "--branch", "job", "--contract-file", str(contract))
+        self.assertIn("Why a separate agent: Independent second-runtime review.", self.b(r, *review))
 
     def test_contract_input_overlap_normalization_and_closed_jobs(self):
         loader = importlib.machinery.SourceFileLoader("brain_aggregation", str(CORE / "bin/brain"))

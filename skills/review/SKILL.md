@@ -14,7 +14,7 @@ stated; never run a polling loop in an agent.
 
 1. **The node's own reviewers first** (axiom 7). If the home has its own review agents or
    checklist, the builder runs them; this review adds to them.
-2. **Brief.** `brain review` supplies a separation reason from the contract or its independent
+2. **Brief.** `brain review` supplies a separation reason from its independent
    second-runtime review role; `--why-separate` can state a more specific reason.
    `core/bin/brain review <id> --branch <branch> --built-by <builder runtime>
    [--focus "<what worries you>"]`. It picks a reviewer runtime the builder didn't use and says
