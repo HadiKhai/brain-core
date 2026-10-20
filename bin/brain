@@ -3884,27 +3884,40 @@ def also_folders(inst, n, folders):
             continue
     out = []
     for f in folders or ():
-        p = Path(f).expanduser()
+        try:
+            p = Path(f).expanduser()
+        except (RuntimeError, KeyError, OSError):
+            die(redact(f"--also: can't read the folder {f}", terms))
         if not p.is_absolute():
             die(redact(f"--also takes absolute folders: {f}", terms))
         try:
             p = p.resolve()
         except (OSError, RuntimeError):
             die(redact(f"--also: can't tell where {f} leads (a link loop?)", terms))
-        mine = folder_chain(p)
-        me = mine[0] if mine and p.exists() else None
-        holds = lambda q: me is not None and me in folder_chain(q)  # noqa: E731
-        inside = lambda q: (lambda c: bool(c) and c[0] in mine)(folder_chain(q)) if Path(q).exists() else False  # noqa: E731
-        if holds(Path.home()) or any(holds(b) or inside(b) for b in brains) or \
-                any(is_brain(q) for q in [p, *p.parents]) or contains_brain(p):
-            die(redact(f"{tilde(p)} is, holds or lies in your home folder or a brain: name a narrower folder outside "
-                       "every brain", terms))
-        if any(holds(h) or inside(h) for h in homes) or any(
-                str(h).casefold() == str(p).casefold() or str(p).casefold().startswith(str(h).casefold() + "/")
-                or str(h).casefold().startswith(str(p).casefold() + "/") for h in homes):
-            die(redact(f"{tilde(p)} holds or lies in another project's home: its sessions are not {n['id']}'s", terms))
+        try:
+            refuse = also_refusal(p, brains, homes)
+        except (OSError, RuntimeError, ValueError):
+            refuse = "can't be checked (a folder that can't be read?)"
+        if refuse:
+            die(redact(f"{tilde(p)} {refuse}", terms))
         out.append(p)
     return out
+
+
+def also_refusal(p, brains, homes):
+    """Why a named folder can't be the node's, or None."""
+    mine = folder_chain(p)
+    me = mine[0] if mine and p.exists() else None
+    holds = lambda q: me is not None and me in folder_chain(q)  # noqa: E731
+    inside = lambda q: (lambda c: bool(c) and c[0] in mine)(folder_chain(q)) if Path(q).exists() else False  # noqa: E731
+    if holds(Path.home()) or any(holds(b) or inside(b) for b in brains) or \
+            any(is_brain(q) for q in [p, *p.parents]) or contains_brain(p):
+        return "is, holds or lies in your home folder or a brain: name a narrower folder outside every brain"
+    if any(holds(h) or inside(h) for h in homes) or any(
+            str(h).casefold() == str(p).casefold() or str(p).casefold().startswith(str(h).casefold() + "/")
+            or str(h).casefold().startswith(str(p).casefold() + "/") for h in homes):
+        return "holds or lies in another project's home: its sessions are not this node's"
+    return None
 
 
 def contains_brain(folder, depth=4):
@@ -3930,7 +3943,10 @@ def history_matcher(inst, n, also=()):
 
     def match(cwd, repo_url):
         try:
-            return folder(cwd) or ("remote" if remotes and history_remote(repo_url) in remotes else None)
+            found = folder(cwd)
+            if found is False:
+                return None  # refused under a named folder: nothing else lets it in
+            return found or ("remote" if remotes and history_remote(repo_url) in remotes else None)
         except (OSError, ValueError, RuntimeError):
             return None
 
@@ -3944,10 +3960,13 @@ def history_matcher(inst, n, also=()):
             # A named folder vouches only for sessions that ran outside every brain and outside any repository but
             # this node's own: another project's home, worktree or clone below it stays that project's.
             if not p.is_dir() or any(is_brain(q) for q in [p, *p.parents]):
-                seen[p] = None
+                seen[p] = False
             else:
-                c, r = history_repo(p)
-                seen[p] = "named folder" if not c or c == common or (remotes and remotes & r) else None
+                in_git = any((q / ".git").exists() or (q / ".git").is_symlink() for q in [p, *p.parents])
+                c, r = history_repo(p) if in_git else (None, set())
+                # No repository at all, or this node's own; a repository git can't read is never assumed absent.
+                seen[p] = "named folder" if (not in_git or (c and (c == common or (remotes and remotes & r)))) \
+                    else False
         if p not in seen:
             inside = any(p == r or r in p.parents for r in roots)
             if p.is_dir():

@@ -6599,6 +6599,9 @@ class HistorySizes(History):
         _, m, text = self.batches()
         self.assertEqual([x["match"] for x in m["sessions"] if x["id"] == "55555555-eeee"], ["named folder"])
         self.assertIn("SCRATCH-WORK", text)
+        count = lambda out: int(re.search(r"garden: (\d+) sessions", out)[1])  # noqa: E731
+        self.assertEqual(count(self.b(self.r, "spend", "garden", "--also", str(scratch))),
+                         count(self.b(self.r, "spend", "garden")) + 1)  # spend looks back over the same sessions
         self.b(self.r, "new", "other", "--title", "Other", "--home", str(self.repo(self.tmp / "OtherHome")))
         second = self.init("bob")  # another brain on this machine, with a project of its own
         self.b(second, "new", "theirs", "--title", "Theirs", "--home", str(self.repo(self.tmp / "theirs")))
@@ -6636,13 +6639,24 @@ class HistorySizes(History):
             self.jsonl(self.claude / "projects" / re.sub(r"[^A-Za-z0-9]", "-", str(cwd)) / f"{sid}.jsonl",
                        [{**r, "message": {"role": "user", "content": f"FOREIGN-{sid}"}} if r.get("type") == "user" else r
                         for r in self.claude_rows(cwd, sid, start=15)[:3]])
+        # A refused session isn't let back in by the remote it recorded; broken git metadata is never "no repo".
+        s = self.codex / "sessions" / "2026" / "10" / "04"
+        self.jsonl(s / "rollout-2026-10-04T09-00-00-bbbb0001.jsonl", self.codex_rows(
+            "bbbb0001-0000", deep / "nodes/n", [self.item("UserMessage", "FOREIGN-remote", id="u-r")],
+            repo="https://github.com/Acme/Garden.git", at0="2026-10-04T09:00:00Z"))
+        dangling = scratch / "dangling"
+        dangling.mkdir()
+        (dangling / ".git").write_text("gitdir: /nowhere/at/all\n")
+        self.jsonl(self.claude / "projects" / re.sub(r"[^A-Za-z0-9]", "-", str(dangling)) / "88888888-bbbb.jsonl",
+                   [{**r, "message": {"role": "user", "content": "FOREIGN-dangling"}} if r.get("type") == "user" else r
+                    for r in self.claude_rows(dangling, "88888888-bbbb", start=16)[:3]])
+        out = self.b(self.r, "history", "garden", "--fresh", "--also", "~Zebracorp_nobody/x", ok=False)
+        self.assertNotIn("Zebracorp", out)
+        self.assertNotIn("Traceback", out)
         self.b(self.r, "history", "garden", "--fresh", "--also", str(scratch))
         _, m, text = self.batches()
         self.assertNotIn("FOREIGN-", text)
         self.assertEqual([x["id"] for x in m["sessions"] if x["match"] == "named folder"], ["55555555-eeee"])
-        count = lambda out: int(re.search(r"garden: (\d+) sessions", out)[1])  # noqa: E731
-        self.assertEqual(count(self.b(self.r, "spend", "garden", "--also", str(scratch))),
-                         count(self.b(self.r, "spend", "garden")) + 1)  # spend looks back over the same sessions
 
     def test_sessions_of_a_deleted_checkout_with_a_newline_still_match(self):
         from importlib.machinery import SourceFileLoader
