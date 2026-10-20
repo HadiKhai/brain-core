@@ -6622,6 +6622,18 @@ def read_ready_packet(inst, n, branch, row=None):
         return None
 
 
+def packet_main_matches(n, packet, main):
+    """Old v1 packets captured local main; new v1 packets also capture the integration base.
+
+    Interpret the old evidence in place, without rewriting a worker's file. Preflight still
+    requires the current base to contain origin's default and the job to contain that base.
+    """
+    base = integration_parent(n, main)
+    expected_main = main if "integration_base" in packet else base
+    return (packet.get("main") == expected_main and
+            packet.get("integration_base", packet.get("main")) == base)
+
+
 def ready_state(inst, n, branch):
     reasons, head, main = ready_preflight(n, branch)
     row = open_job(read_jobs(n) or [], branch)
@@ -6640,10 +6652,8 @@ def ready_state(inst, n, branch):
             reasons.append("ready packet identifies a different job or format")
         if packet.get("head") != head:
             reasons.append("branch head changed; return to worker")
-        if packet.get("main") != main:
+        if not packet_main_matches(n, packet, main):
             reasons.append("main moved; return to worker to rebase and verify again")
-        if packet.get("integration_base", packet.get("main")) != integration_parent(n, main):
-            reasons.append("integration base moved; return to worker to rebase and verify again")
         w = n["local"].get("worktrees", {}).get(branch)
         if isinstance(w, dict) and w.get("path") and Path(w["path"]).exists():
             if packet.get("inputs") != verify_inputs(n, w):  # every reader of readiness comes through here
@@ -6689,7 +6699,7 @@ def verify_reuse(n, branch, previous, head, main, verify, cwd, inputs=None):
     sha = lambda v: isinstance(v, str) and re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", v)
     if not (p.get("version") == 1 and p.get("node") == n["id"] and p.get("branch") == branch
             and p.get("verify_command") == verify and type(p.get("verify_result")) is int and p["verify_result"] == 0
-            and p.get("main") == main and type(p.get("review_rounds")) is int and p["review_rounds"] >= 1
+            and packet_main_matches(n, p, main) and type(p.get("review_rounds")) is int and p["review_rounds"] >= 1
             and isinstance(p.get("checked_at"), str) and sha(p.get("head")) and p.get("inputs") == inputs):
         return None  # only a complete green packet, for the same inputs, can stand for a new run
     base = p.get("verified_head") or p["head"]
@@ -7412,7 +7422,7 @@ def cmd_handback(a):
         die("--reverify forces a verify run: it goes with --state done --reviews N")
     fresh = reused = 0
     if a.state == "done" and not study and (a.reviews is not None or getattr(a, "record", False)):
-        packet, reasons = record_ready(inst, n, a.branch, a.reviews, previous.get("ready"),
+        packet, reasons = record_ready(inst, n, a.branch, a.reviews, packet,
                                        getattr(a, "reverify", False))
         if packet:
             reused, fresh = (1, 0) if packet.get("verify_reused") else (0, 1)
@@ -7424,6 +7434,10 @@ def cmd_handback(a):
         current = open_job(read_jobs(n) or [], a.branch)
         if not current or job_key(current) != job_key(row):
             die("job changed during verification; hand back to its coordinator")
+        if packet and packet.get("version") == 1 and "integration_base" not in packet:
+            preflight, head, main = ready_preflight(n, a.branch)
+            if not preflight and packet.get("head") == head and packet_main_matches(n, packet, main):
+                packet = {**packet, "main": main, "integration_base": packet["main"]}
         f = handback_file(n, row)
         count = lambda k: previous.get(k) if type(previous.get(k)) is int else 0
         sessions = [i for i in previous.get("sessions", []) if isinstance(i, str) and SESSION_ID.fullmatch(i)] \

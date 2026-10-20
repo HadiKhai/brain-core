@@ -1411,6 +1411,144 @@ class JobLessonOutcomes(Scenario):
 
 
 class TeamHomes(Scenario):
+    def old_core_job(self):
+        # Exercise the actual pre-team-home writer, not a new packet with fields removed.
+        history = Path(__file__).resolve().parent.parent
+        source = subprocess.run(["git", "show", "4a7a46933ce0ad95d69dbbc91ec5ba730636be6c:bin/brain"],
+                                cwd=history, capture_output=True)
+        if source.returncode:
+            self.skipTest("pre-team-home Git object unavailable in this source archive")
+        old = self.tmp / "old-core/bin/brain"
+        old.parent.mkdir(parents=True)
+        old.write_bytes(source.stdout)
+        root = self.init("alice")
+        seed = self.repo(self.tmp / "seed")
+        origin = self.tmp / "origin.git"
+        self.git("clone", "--bare", str(seed), str(origin), cwd=self.tmp)
+        home = self.tmp / "app"
+        self.git("clone", str(origin), str(home), cwd=self.tmp)
+        (home / "local").write_text("unpublished integration")
+        self.git("add", "-A", cwd=home)
+        self.git("commit", "-qm", "local integration", cwd=home)
+        base = self.git("rev-parse", "HEAD", cwd=home).strip()
+        self.b(root, "new", "app", "--title", "App", "--home", str(home))
+        self.b(root, "set", "app", "verify=python3 -c 'from pathlib import Path; "
+               "p=Path(\"../verify-count\"); p.write_text(p.read_text()+\"x\" if p.exists() else \"x\")'")
+        self.run_(["wt", "add", "app", "job", "--base", "main"], cwd=root, brain=old)
+        wt = self.tmp / "app-work/worktrees/job"
+        (wt / "fix").write_text("job contribution")
+        self.git("add", "-A", cwd=wt)
+        self.git("commit", "-qm", "job contribution", cwd=wt)
+        self.run_(["handback", "app", "--branch", "job", "--state", "done", "--reviews", "1",
+                   "--lessons", "none: fixture"], cwd=root, brain=old)
+        record = next((root / "nodes/app/job-handbacks").glob("*.json"))
+        packet = json.loads(record.read_text())["ready"]
+        self.assertNotIn("integration_base", packet)
+        self.assertEqual(packet["main"], base)
+        self.assertNotIn("Base commit", (root / "nodes/app/job-ledger.md").read_text())
+        return root, origin, home, wt, old, record, base
+
+    def test_real_old_ready_survives_upgrade_and_reuses_verify_on_next_write(self):
+        root, origin, home, wt, old, record, base = self.old_core_job()
+        before = record.read_bytes()
+        ledger = (root / "nodes/app/job-ledger.md").read_bytes()
+        self.assertTrue(self.b(root, "ready", "app", "--branch", "job").strip().endswith("ready"))
+        self.assertIn("ready to merge", self.b(root, "due", "app"))
+        self.assertEqual(record.read_bytes(), before)
+        self.assertEqual((root / "nodes/app/job-ledger.md").read_bytes(), ledger)
+        # Even a report-only worker write lazily upgrades the packet without verification.
+        self.b(root, "handback", "app", "--branch", "job", "--state", "done", "--report", "fixture report")
+        updated = json.loads(record.read_text())["ready"]
+        self.assertEqual(updated["integration_base"], base)
+        self.assertNotEqual(updated["main"], base)
+        self.assertEqual((wt.parent / "verify-count").read_text(), "x")
+        record.write_bytes(before)
+        # Refreshing origin within the unchanged integration base also preserves old evidence.
+        self.git("push", "origin", "main", cwd=home)
+        self.git("fetch", "origin", cwd=home)
+        self.assertTrue(self.b(root, "ready", "app", "--branch", "job").strip().endswith("ready"))
+        # Keep distinct remote/base identities for the lazy upgrade and verify reuse check.
+        self.git("update-ref", "refs/remotes/origin/main", base + "^", cwd=home)
+        out = self.b(root, "handback", "app", "--branch", "job", "--state", "done", "--reviews", "2")
+        self.assertIn("verify: reused", out)
+        packet = json.loads(record.read_text())["ready"]
+        self.assertEqual(packet["integration_base"], base)
+        self.assertNotEqual(packet["main"], base)
+        count = wt.parent / "verify-count"
+        self.assertEqual(count.read_text(), "x")
+        # Rebase keeps preflight green: the old base itself must invalidate the record.
+        record.write_bytes(before)
+        self.git("commit", "--allow-empty", "-qm", "new integration base", cwd=home)
+        self.git("rebase", "main", cwd=wt)
+        self.assertIn("main moved", self.b(root, "ready", "app", "--branch", "job", ok=False))
+        self.b(root, "handback", "app", "--branch", "job", "--state", "done", "--reviews", "2")
+        self.assertEqual(count.read_text(), "xx")
+
+    def test_real_old_ready_no_origin_and_pr_base_change(self):
+        root, origin, home, wt, old, record, base = self.old_core_job()
+        self.b(root, "set", "app", "merge=local")
+        self.assertTrue(self.b(root, "ready", "app", "--branch", "job").strip().endswith("ready"))
+        self.b(root, "set", "app", "merge=pr")
+        self.assertIn("main moved", self.b(root, "ready", "app", "--branch", "job", ok=False))
+        self.b(root, "set", "app", "merge=local")
+        seed = self.tmp / "seed"
+        self.git("commit", "--allow-empty", "-qm", "peer integration", cwd=seed)
+        self.git("push", str(origin), "main", cwd=seed)
+        self.git("fetch", "origin", cwd=home)
+        self.assertIn("local default must include origin default",
+                      self.b(root, "ready", "app", "--branch", "job", ok=False))
+        self.git("remote", "remove", "origin", cwd=home)
+        self.assertEqual(self.b(root, "ready", "app", "--branch", "job").strip(), "ready")
+
+    def test_real_old_ledger_and_handback_survive_close_lesson_cleanup_and_sync(self):
+        root, origin, home, wt, old, record, base = self.old_core_job()
+        head = self.git("rev-parse", "HEAD", cwd=wt).strip()
+        self.git("merge", "--no-ff", "-m", "integrate job", "job", cwd=home)
+        merged = self.git("rev-parse", "HEAD", cwd=home).strip()
+        # Old coordinator closes an old ledger row, leaving evidence for lesson acceptance.
+        self.run_(["wt", "rm", "app", "job", "--cause", "fixture cleanup"], cwd=root, brain=old)
+        self.assertTrue(record.exists())
+        self.b(root, "jobs", "app", "--branch", "job", "--lessons", "none: fixture")
+        self.assertFalse(record.exists())
+        ledger = (root / "nodes/app/job-ledger.md").read_text()
+        self.assertIn(base, ledger)
+        self.assertIn(head, ledger)
+        self.git("branch", "-D", "job", cwd=home)
+        self.git("push", "origin", "main", cwd=home)
+        # The unpublished base is another owner's integration; only that one is external.
+        self.assertIn("1 recorded", self.b(root, "sync", "app"))
+        ledger = (root / "nodes/app/job-ledger.md").read_text()
+        self.assertIn(merged, ledger)
+        self.assertIn("external:" + base, ledger)
+        self.assertNotIn("external:" + merged, ledger)
+        self.assertIn("0 recorded", self.b(root, "sync", "app", "--offline"))
+
+    def test_real_old_standalone_packet_is_retained_before_cleanup(self):
+        import hashlib
+        root, origin, home, wt, old, record, base = self.old_core_job()
+        packet = json.loads(record.read_text())["ready"]
+        packet["checked_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        cache = self.tmp / "app-work/scratch/ready" / (hashlib.sha256(b"job").hexdigest() + ".json")
+        cache.parent.mkdir(parents=True)
+        cache.write_text(json.dumps(packet))
+        record.unlink()
+        before = cache.read_bytes()
+        self.assertTrue(self.b(root, "ready", "app", "--branch", "job").strip().endswith("ready"))
+        self.assertIn("ready to merge", self.b(root, "due", "app"))
+        self.assertEqual(cache.read_bytes(), before)
+        self.assertIn("verify: reused", self.b(root, "handback", "app", "--branch", "job",
+                      "--state", "done", "--reviews", "2"))
+        self.assertEqual((wt.parent / "verify-count").read_text(), "x")
+        self.assertEqual(json.loads(record.read_text())["ready"]["integration_base"], base)
+        record.unlink()  # continue with only the old standalone evidence for the cleanup probe
+        self.git("merge", "--no-ff", "-m", "integrate job", "job", cwd=home)
+        self.b(root, "wt", "rm", "app", "job", "--cause", "fixture cleanup")
+        self.assertFalse(cache.exists())
+        self.b(root, "jobs", "app", "--branch", "job", "--lessons", "none: fixture")
+        ledger = (root / "nodes/app/job-ledger.md").read_text()
+        self.assertIn(base, ledger)
+        self.assertIn(packet["head"], ledger)
+
     def team(self):
         root = self.init("alice")
         seed = self.repo(self.tmp / "seed")

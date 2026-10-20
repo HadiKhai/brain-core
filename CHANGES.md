@@ -17,6 +17,9 @@ For agents:
 - `merge=pr` records the coordinator's explicit `gh pr merge` workflow; no automatic merge.
 
 After upgrading:
+- Existing ready evidence remains valid when its captured local integration base is unchanged
+  and contains origin's default. Reading it never rewrites worker files; the next handback
+  records the new fields and can reuse the unchanged green verify run.
 - Fetch explicitly before final readiness. If origin's cached default is missing or changed,
   explicitly run `git remote set-head origin -a`. Until repaired, readiness and sync marking
   refuse rather than skip integrations. After a history rewrite, inspect it and explicitly
