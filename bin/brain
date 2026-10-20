@@ -6854,29 +6854,29 @@ def sync_external_merges(inst, n, since):
     home = n["home_path"]
     ref = integration_ref(home)
     if not ref.startswith("refs/remotes/origin/"):
-        return
+        return True
     tip = git("rev-parse", "--verify", "--quiet", ref + "^{commit}", cwd=home)
     if tip.returncode:
         print("external merges: not recorded; cached origin default is unavailable")
-        return
+        return False
     tip = tip.stdout.strip()
     cursor = n["local"].get("synced_main", "")
     args = ["log", "--first-parent", "--reverse", "--format=%H %cI", "--min-parents=1"]
     if cursor:
         if git("merge-base", "--is-ancestor", cursor, tip, cwd=home).returncode:
             print("external merges: default history changed; refusing to advance its sync cursor")
-            return
+            return False
         args += [cursor + ".." + tip]
     else:
         args += ["--since=" + since.isoformat(timespec="seconds"), tip]
     result = git(*args, cwd=home)
     if result.returncode:
         print("external merges: history unreadable; not recorded")
-        return
+        return False
     with brain_lock(inst):
         rows = ledger_rows(n)
         if rows is None:
-            return
+            return False
         known = {r.get("Merge commit") for r in rows}
         added = 0
         changed = False
@@ -6912,6 +6912,7 @@ def sync_external_merges(inst, n, since):
         inst.local_of(n["id"])["synced_main"] = tip
         inst.save_local()
     print(f"external merges: {added} recorded")
+    return True
 
 
 def sync_one(inst, n, a):
@@ -6919,6 +6920,7 @@ def sync_one(inst, n, a):
     iso = since.isoformat(timespec="seconds")
     print(f"# {n['id']}: changes since {since.strftime('%Y-%m-%d %H:%M')} ({basis})")
     home = n["home_path"]
+    can_mark = True
     if n["external"]:
         if not home or not home.exists():
             die(f"home isn't on this machine: brain set {n['id']} home=<path>")
@@ -6929,7 +6931,7 @@ def sync_one(inst, n, a):
                 r = git("fetch", "--all", "--prune", "--quiet", cwd=home)
                 print("fetched" if r.returncode == 0 else f"fetch failed: {r.stderr.strip()[:200]}")
             main_notice(n)
-            sync_external_merges(inst, n, since)
+            can_mark = sync_external_merges(inst, n, since)
             br = git("branch", "--show-current", cwd=home).stdout.strip() or "(detached)"
             ab = git("rev-list", "--left-right", "--count", "HEAD...@{u}", cwd=home)
             track = ""
@@ -6977,7 +6979,9 @@ def sync_one(inst, n, a):
     inbox = [l for l in (n["dir"] / "inbox.md").read_text().splitlines() if l.startswith("- ")] \
         if (n["dir"] / "inbox.md").exists() else []
     print("\n## Inbox\n" + ("\n".join(inbox) or "empty"))
-    if a.mark:
+    if a.mark and not can_mark:
+        print("\nnot marked: external integrations could not be recorded; repair and sync again")
+    elif a.mark:
         inst.local_of(n["id"])["synced_at"] = inst.now_dt().isoformat(timespec="seconds")
         inst.save_local()
         print(f"\nmarked synced at {inst.now()}")

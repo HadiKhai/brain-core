@@ -1435,6 +1435,7 @@ class TeamHomes(Scenario):
 
     def test_remote_default_readiness_lag_and_packet_invalidation(self):
         root, seed, origin, home = self.team()
+        self.git("branch", "main", cwd=home)  # a plausible stale local main must not hide origin's default
         self.b(root, "wt", "add", "app", "job")
         wt = self.tmp / "app-work/worktrees/job"
         self.b(root, "handback", "app", "--branch", "job", "--state", "done", "--reviews", "1")
@@ -1527,6 +1528,20 @@ class TeamHomes(Scenario):
         self.assertIn("origin/stable", out)
         packet = json.loads(next((root / "nodes/app/job-handbacks").glob("*.json")).read_text())["ready"]
         self.assertEqual(packet["main"], self.git("rev-parse", "stable", cwd=seed).strip())
+
+    def test_failed_ledger_import_cannot_mark_past_unrecorded_merges(self):
+        root, seed, origin, home = self.team()
+        ledger = root / "nodes/app/job-ledger.md"
+        ledger.write_text("Not a brain ledger\n")
+        self.advance(seed, origin)
+        out = self.b(root, "sync", "app", "--mark")
+        self.assertIn("not marked", out)
+        data = json.loads((root / ".brain/local.json").read_text())["nodes"]["app"]
+        self.assertNotIn("synced_at", data)
+        self.assertNotIn("synced_main", data)
+        self.assertEqual(ledger.read_text(), "Not a brain ledger\n")
+        ledger.unlink()
+        self.assertIn("1 recorded", self.b(root, "sync", "app", "--offline", "--mark"))
 
     def test_missing_origin_head_does_not_fall_back_to_local_main(self):
         root, seed, origin, home = self.team()
@@ -1839,8 +1854,8 @@ class ReadyFailureRegressions(Scenario):
         self.assertNotEqual(local_main, remote_main)
         self.assertEqual(self.git("rev-parse", "origin/main", cwd=home).strip(), remote_main)
         skill = (CORE / "skills/home-job/SKILL.md").read_text()
-        self.assertIn("local `main` and never fetches", skill)
-        self.assertIn("must fetch and update local `main` before `ready`", skill)
+        self.assertIn("cached `origin/HEAD` when origin exists, otherwise local `main`", skill)
+        self.assertIn("Neither fetches", skill)
 
     def test_merge_tree_exit_codes_distinguish_conflict_old_git_and_error(self):
         r, home, wt = self.job()
