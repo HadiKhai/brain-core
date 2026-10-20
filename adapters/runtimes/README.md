@@ -61,6 +61,8 @@ or a live question-to-hook run. Fixture tests cover rollout parsing. Hosts or ru
 that omit the transcript path, never stop while a request is pending, or bypass runtime hooks
 remain a gap: use host pending-request checks. The hook never calls the host API.
 
-Hook failures, unreadable transcripts and a busy inbox fail open; host pending checks remain
-the fallback. External homes must install the Stop hook and have `brain` on PATH; the adapter
+Hook failures and unreadable transcripts fail open; host pending checks remain the fallback.
+A busy inbox saves a screened line in a private local queue: `brain inbox` and `brain due`
+include it immediately and retry the append without waiting. All CLI inbox appends share the
+same short file lock. External homes must install the Stop hook and have `brain` on PATH; the adapter
 command falls back to it outside a Brain folder and resolves registered worktree bindings.

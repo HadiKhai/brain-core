@@ -2563,13 +2563,13 @@ def append_inbox(n_dir, who, text, inst):
     touch(n_dir / "inbox.md")
 
 
-def inbox_append(n_dir, line, marker=None):
+def inbox_append(n_dir, line, marker=None, nonblocking=False):
     """One append, shared by CLI writers and hooks. Hooks never wait for an inbox writer."""
     import fcntl
     target = n_dir / "inbox.md"
     safe_target(target)
     with open(target, "a+") as fh:
-        fcntl.flock(fh, fcntl.LOCK_EX | (fcntl.LOCK_NB if marker else 0))
+        fcntl.flock(fh, fcntl.LOCK_EX | (fcntl.LOCK_NB if nonblocking else 0))
         if marker:
             fh.seek(0)
             if marker in fh.read():
@@ -7208,12 +7208,10 @@ def cmd_handback(a):
                                             "Coordinator choice needed; see worker hand-back")).split())
             marker = "<!-- handback:" + digest([job_key(row), a.state, message]) + " -->"
             inbox = n["dir"] / "inbox.md"
-            text = inbox.read_text() if inbox.exists() else ""
-            if marker not in text:
-                bullet = f"- {inst.now()} from worker {a.branch}: {a.state}: {message} {marker}\n"
-                no_terms_in(n, bullet, "the inbox question")
-                atomic_write(inbox, text.rstrip() + "\n" + bullet)
-                touch(inbox)
+            bullet = f"- {inst.now()} from worker {a.branch}: {a.state}: {message} {marker}\n"
+            no_terms_in(n, bullet, "the inbox question")
+            inbox_append(n["dir"], bullet, marker)
+            touch(inbox)
         inst.commit([], f"{n['id']}: worker hand-back")
     try:
         current = open_job(read_jobs(n) or [], a.branch)
@@ -7852,9 +7850,31 @@ def active_work(n):
     return [r for r in rows if not (len(r) > 3 and r[3].lower() in ("merged", "closed", "done", "abandoned"))]
 
 
+def hook_question_queue(n):
+    root = instance_above(n["dir"])
+    return root / ".brain" / "host-questions" / urllib.parse.quote(n["id"], safe="")
+
+
 def inbox_lines(n):
     f = n["dir"] / "inbox.md"
-    return [l for l in f.read_text().splitlines() if l.startswith("- ")] if f.exists() else []
+    lines = [l for l in f.read_text().splitlines() if l.startswith("- ")] if f.exists() else []
+    # A busy inbox never loses a stopped turn's question. The private queue is also an inbox
+    # source until it can be appended; reading due/inbox retries delivery without waiting.
+    queue = hook_question_queue(n)
+    for pending in sorted(queue.glob("*.json")):
+        try:
+            value = json.loads(pending.read_text())
+            line, marker = value["line"], value["marker"]
+            if not isinstance(line, str) or not isinstance(marker, str):
+                continue
+            if not any(marker in old for old in lines):
+                lines.append(line.rstrip("\n"))
+            if not outward_links(instance_above(n["dir"])):
+                inbox_append(n["dir"], line, marker, nonblocking=True)
+                pending.unlink()
+        except (OSError, ValueError, KeyError, TypeError, SystemExit):
+            continue
+    return lines
 
 
 # ---------- coordinator's mechanical queue and generated status ----------
@@ -8895,8 +8915,14 @@ def hook_questions(path):
                 try:
                     output = item.get("output", "{}")
                     output = json.loads(output) if isinstance(output, str) else output
-                    if isinstance(output, dict) and output.get("answers"):
-                        pending.pop(item.get("call_id"), None)
+                    answers = output.get("answers") if isinstance(output, dict) else None
+                    args = pending.get(item.get("call_id"))
+                    if isinstance(answers, dict) and isinstance(args, dict):
+                        answered = {key for key, value in answers.items() if isinstance(value, dict)
+                                    and isinstance(value.get("answers"), list) and any(
+                                        isinstance(a, str) and a.strip() for a in value["answers"])}
+                        args["questions"] = [q for q in args.get("questions", [])
+                                             if not isinstance(q, dict) or q.get("id") not in answered]
                 except ValueError:
                     pass
     return [q for args in pending.values() if isinstance(args, dict)
@@ -8922,7 +8948,14 @@ def capture_hook_questions(inst, n, data):
         text = " ".join(import_text("\n".join(parts), terms).split())
         # Hash only screened content; raw tool ids, paths, answers and session ids never persist.
         marker = "<!-- host-question:" + hashlib.sha256(text.encode()).hexdigest() + " -->"
-        inbox_append(n["dir"], f"- {inst.now()} from runtime: Host question: {text} {marker}\n", marker)
+        line = f"- {inst.now()} from runtime: Host question: {text} {marker}\n"
+        try:
+            inbox_append(n["dir"], line, marker, nonblocking=True)
+        except BlockingIOError:
+            queue = hook_question_queue(n)
+            queue.mkdir(parents=True, exist_ok=True)
+            atomic_write(queue / (hashlib.sha256(text.encode()).hexdigest() + ".json"),
+                         json.dumps({"line": line, "marker": marker}) + "\n")
 
 
 def cmd_hook(a):
@@ -8930,7 +8963,7 @@ def cmd_hook(a):
     Never fails the runtime: any problem means "let it stop"."""
     try:
         hook_stop(a)
-    except Exception:  # noqa: BLE001 - a broken hook must never break an agent's turn
+    except (Exception, SystemExit):  # a refusal inside bookkeeping must never break an agent's turn
         return
 
 
@@ -8958,7 +8991,7 @@ def hook_stop(a):
         return
     try:
         capture_hook_questions(inst, n, data)
-    except Exception:
+    except (Exception, SystemExit):
         pass  # question bookkeeping must not suppress existing reminders or fail a turn
     if data.get("stop_hook_active") or not node_at(inst, cwd):
         return  # workers capture questions without holding their turn for coordinator notes

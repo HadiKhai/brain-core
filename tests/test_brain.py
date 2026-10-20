@@ -2151,6 +2151,18 @@ class StopHook(Scenario):
         self.hook(r, r, active=True, transcript=self.question_log([call]))
         self.assertEqual((r / "inbox.md").read_text().count("host-question:"), 2)
 
+    def test_codex_partial_and_empty_answers_keep_unanswered_questions(self):
+        r = self.init("alice")
+        call = {"type": "response_item", "payload": {"type": "function_call", "call_id": "c1",
+                "name": "functions.request_user_input", "arguments": json.dumps({"questions": [
+                    {"id": "colour", "question": "Which colour?"}, {"id": "shape", "question": "Which shape?"}]})}}
+        answer = {"type": "response_item", "payload": {"type": "function_call_output", "call_id": "c1",
+                  "output": json.dumps({"answers": {"colour": {"answers": ["Blue"]}, "shape": {"answers": []}}})}}
+        self.hook(r, r, transcript=self.question_log([call, answer]))
+        text = (r / "inbox.md").read_text()
+        self.assertNotIn("Which colour?", text)
+        self.assertIn("Which shape?", text)
+
     def test_question_capture_failure_does_not_suppress_reminder(self):
         r = self.init("alice")
         missing = self.tmp / "absent.jsonl"
@@ -2161,6 +2173,20 @@ class StopHook(Scenario):
             missing.write_text(raw)
             self.hook(r, r, active=True, transcript=missing)
 
+    def test_question_refusal_never_exits_the_hook_or_suppresses_reminders(self):
+        loader = importlib.machinery.SourceFileLoader("brain_hook_refusal", str(CORE / "bin/brain"))
+        module = loader.load_module()
+        r = self.init("alice")
+        (r / "brief.md").write_text("Changed notes\n")
+        args = argparse.Namespace(event="stop")
+        payload = json.dumps({"cwd": str(r)})
+        with mock.patch.object(module, "capture_hook_questions", side_effect=SystemExit(1)), \
+                mock.patch.object(sys, "stdin", io.StringIO(payload)), contextlib.redirect_stdout(io.StringIO()) as output:
+            module.cmd_hook(args)
+        self.assertEqual(json.loads(output.getvalue())["decision"], "block")
+        with mock.patch.object(module, "hook_stop", side_effect=SystemExit(1)):
+            module.cmd_hook(args)
+
     def test_question_capture_does_not_wait_on_busy_inbox(self):
         import fcntl
         r = self.init("alice")
@@ -2168,6 +2194,10 @@ class StopHook(Scenario):
         with (r / "inbox.md").open("a") as stream:
             fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
             self.hook(r, r, active=True, transcript=path)
+            self.assertIn("Host question:", self.b(r, "due", "root"))
+            self.assertIn("Host question:", self.b(r, "inbox", "root"))
+        self.assertIn("Host question:", self.b(r, "inbox", "root"))
+        self.assertEqual((r / "inbox.md").read_text().count("host-question:"), 1)
         self.hook(r, r, active=True, transcript=path)
         self.assertEqual((r / "inbox.md").read_text().count("host-question:"), 1)
 
