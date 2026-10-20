@@ -7022,6 +7022,44 @@ class Spend(Scenario):
         self.b(self.r, "wt", "rm", "app", "job", "--force", "--cause", "measured")
         self.assertEqual((self.row()["Fresh in"], self.row()["Output"]), ("30", "3"))
 
+    def test_a_never_name_word_added_later_and_sessions_without_a_folder(self):
+        s = self.cl(self.home, "18181818-home", "Look.", [("said", 1, "q1", (10, 0, 0, 1))])
+        s.write_text(s.read_text().replace("claude-opus-5-5", "zeta-model"))
+        self.b(self.r, "spend", "app")
+        (self.node / "never-name.txt").write_text("Zeta\n")  # added after the look-back and the cache were written
+        state = json.loads(self.b(self.r, "ui", "--json"))
+        self.assertNotIn("zeta", json.dumps(state).lower())
+        self.assertNotIn("zeta", self.b(self.r, "spend", "--machine", "--json").lower())
+        for f in (self.r / ".brain/spend/files").glob("*.json"):  # caches written before the word was added too
+            self.assertNotIn("zeta", f.read_text().lower())
+        # A transcript with no folder of its own is in no place, wherever the command runs.
+        rows = [{"type": "user", "sessionId": "19191919-nocwd", "message": {"role": "user", "content": "Hi."},
+                 "timestamp": self.at(0)},
+                {"type": "assistant", "sessionId": "19191919-nocwd", "message": {
+                    "id": "n1", "model": "claude-opus-5-5", "role": "assistant", "content": [{"type": "text", "text": "x"}],
+                    "usage": {"input_tokens": 200, "output_tokens": 10}}, "timestamp": self.at(1)}]
+        self.jsonl(self.folder(self.wt) / "19191919-nocwd.jsonl", rows)
+        out = self.run_(["jobs", "app"], cwd=self.wt, brain=self.r / "core/bin/brain")
+        self.assertNotIn("210 tokens", out)
+        self.assertIn("usage: no transcripts found", out)
+
+    def test_a_response_that_grew_after_the_job_began_counts_its_growth(self):
+        ledger = self.node / "job-ledger.md"
+        begun = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=2)).replace(second=40, microsecond=0)
+        ledger.write_text(re.sub(r"(\| job \| )[^|]+", lambda m: m.group(1) + begun.isoformat() + " ", ledger.read_text()))
+        at = lambda sec: (begun + datetime.timedelta(seconds=sec)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        def said(sec, out, blocks):
+            return {"type": "assistant", "cwd": str(self.wt), "sessionId": "20202020-grew", "timestamp": at(sec),
+                    "message": {"id": "grow", "model": "claude-opus-5-5", "role": "assistant", "content": blocks,
+                                "usage": {"input_tokens": 0, "output_tokens": out}}}
+        self.jsonl(self.folder(self.wt) / "20202020-grew.jsonl", [
+            {"type": "user", "cwd": str(self.wt), "sessionId": "20202020-grew", "message": {"role": "user", "content": "Go."},
+             "timestamp": at(-100)},
+            said(-90, 50, [{"type": "text", "text": "x"}]),  # the minute before the job began
+            said(200, 150, [{"type": "tool_use", "id": "t9", "name": "Bash", "input": {}}])])
+        self.b(self.r, "wt", "rm", "app", "job", "--force", "--cause", "measured")
+        self.assertEqual((self.row()["Output"], self.row()["Tool calls"]), ("100", "1"))
+
     def test_host_numbers_win_over_transcripts(self):
         self.cl(self.wt, "99999999-wt", "Fix.", [("said", 1, "z1", (5, 5, 5, 5))])
         usage = self.tmp / "usage.json"

@@ -4778,10 +4778,12 @@ def spend_claude_line(agg, raw, minute, at=None):
             st["tools"] = (st["tools"] + [tid])[-SPEND_RECENT * 2:]
             tools += 1
     prior = next((p for p in st["recent"] if mid and p[0] == mid), None)
-    if prior:  # the same response again: count only what grew, in the minute it was first counted
+    if prior:  # the same response again: count only what grew, in the minute it was first counted (a windowed
+        # read, a job's, counts it in the minute it grew: the first may lie before the job began)
         delta = [max(0, a - b) for a, b in zip(now, prior[1])]
         prior[1] = [max(a, b) for a, b in zip(now, prior[1])]
-        spend_add(agg, "m", prior[2], prior[3], (0, *delta, 0, tools))
+        windowed = st.get("lo") is not None
+        spend_add(agg, "m", minute if windowed else prior[2], model if windowed else prior[3], (0, *delta, 0, tools))
         return
     if mid:
         st["recent"] = (st["recent"] + [[mid, now, minute, model]])[-SPEND_RECENT:]
@@ -4901,6 +4903,14 @@ _SPEND_MEM = {}  # this process's aggregates, by real path: a file that hasn't g
 _SPEND_TERMS = {}
 
 
+def spend_terms(inst):
+    """This brain's never-name words, looked up again at least once a minute (the live view runs for hours)."""
+    hit = _SPEND_TERMS.get(str(inst.root))
+    if not hit or time.monotonic() - hit[0] > 60:
+        hit = _SPEND_TERMS[str(inst.root)] = (time.monotonic(), brain_terms(inst))
+    return hit[1]
+
+
 def brain_terms(inst):
     """Every never-name word of this brain: what machine-wide figures may never show or keep."""
     return list({t for n in inst.nodes() for t in never_terms(n)})
@@ -4931,6 +4941,7 @@ def spend_file(inst, path, runtime, allowed, forbidden, budget=None, window=None
         known = _SPEND_MEM.get(mem)
         if known and known[0] == (size, list(ident)) and known[1].get("complete", True):
             return known[1]
+        terms = spend_terms(inst)
         key = hashlib.sha256(str(real).encode()).hexdigest()[:32]
         cf = spend_cache_dir(inst) / "files" / f"{key}.json"
         agg = None
@@ -4944,6 +4955,10 @@ def spend_file(inst, path, runtime, allowed, forbidden, budget=None, window=None
             agg = {**spend_new(runtime, real), "key": key, "ino": list(ident)}
             if window is not None:
                 agg["state"].update(lo=window[0], hi=window[1])
+        # Never-name words may have been added since the cache was written: names are screened at every read,
+        # and a cache holding one is written again.
+        screened = [m if not find_terms(m, terms) else "other" for m in agg["models"]]
+        stale, agg["models"] = screened != agg["models"], screened
         # Who the session is, never kept on disk: Claude names a session's file by its id, its sub-agents' files
         # sit below it; a Codex transcript says so in its first line.
         if runtime == "claude":
@@ -4954,14 +4969,14 @@ def spend_file(inst, path, runtime, allowed, forbidden, budget=None, window=None
             meta = codex_meta(real, allowed, forbidden)
             if meta:
                 agg.update(id=meta[0], parent=meta[2])
-        if agg["state"]["offset"] < size:
+        if agg["state"]["offset"] < size or stale:
             try:
-                agg["complete"] = spend_read(agg, fh, budget)
+                if agg["state"]["offset"] < size:
+                    agg["complete"] = spend_read(agg, fh, budget)
             except OSError:
                 return None
             if packed:
                 agg["state"]["offset"] = size  # read whole: what it holds is counted
-            terms = _SPEND_TERMS.setdefault(str(inst.root), brain_terms(inst))
             agg["models"] = [m if not find_terms(m, terms) else "other" for m in agg["models"]]
             try:
                 if window is None:  # counts and digests only: no path, folder, session id or text
@@ -5076,6 +5091,8 @@ def spend_active(minutes):
 
 
 def spend_inside(cwd, base):
+    if not isinstance(cwd, str) or not os.path.isabs(cwd):
+        return False  # a transcript without its own folder is in no place (never the command's own)
     try:
         c, b = Path(cwd).resolve(), Path(base).resolve()
     except (OSError, RuntimeError, TypeError, ValueError):
@@ -8984,7 +9001,10 @@ def ui_state(inst, problems=None, scan=None, spend_budget=2.0):
             r["budget"] = job_budget(n, r)
         try:
             back = json.loads(spend_node_file(inst, n).read_text())
-            lookback = {"at": back.get("at"), "since": back.get("since"), "total": back.get("total"),
+            total = back.get("total") if isinstance(back.get("total"), dict) else None
+            if total:  # screened again: never-name words may have been added since it was written
+                total = {**total, "models": spend_models(total.get("models") or {}, terms)}
+            lookback = {"at": back.get("at"), "since": back.get("since"), "total": total,
                         "weeks": {rt: v.get("weeks", {}) for rt, v in (back.get("days") or {}).items()},
                         "sessions": len(back.get("sessions") or [])}
         except (OSError, ValueError, AttributeError):
