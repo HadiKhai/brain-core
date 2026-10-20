@@ -202,3 +202,9 @@ test("machine pressure preserves processor, memory and disk warning thresholds",
   );
   assert.deepEqual(m.machineHealth({}), []);
 });
+
+test("job state kinds stay short while arbitrary descriptions remain readable", () => {
+  assert.deepEqual(m.jobState("Reviewing navigation and keyboard focus"), {kind:"Reviewing", description:"navigation and keyboard focus"});
+  assert.deepEqual(m.jobState("ready to merge · checks passed"), {kind:"ready to merge", description:"checks passed"});
+  assert.deepEqual(m.jobState("Unusual freeform update"), {kind:"In progress", description:"Unusual freeform update"});
+});

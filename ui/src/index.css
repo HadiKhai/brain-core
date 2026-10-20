@@ -1960,11 +1960,11 @@ svg {
     display: none;
   }
 }
-/* Badges may contain complete multi-line job states; the primitive's default h-5 must grow. */
+/* Keep badges vertically centered and allow optional metadata to wrap. */
 .status {
   height: auto !important;
   min-height: 20px;
-  align-items: flex-start !important;
+  align-items: center !important;
 }
 .group[data-state="collapsed"]
   [data-slot="sidebar-menu-button"]
@@ -1995,4 +1995,40 @@ svg {
     grid-template-columns: 1fr;
     gap: 20px;
   }
+}
+
+/* A dimming scrim avoids backdrop blur's mirrored compositing artifacts. */
+[data-slot="sheet-overlay"] {
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+  background: rgb(0 0 0 / 24%);
+}
+.detail-meta > a { width: fit-content; }
+.detail-facts {
+  display: grid;
+  grid-template-columns: 64px minmax(0, 1fr);
+  gap: 8px 16px;
+  font-size: 12px;
+  margin-block: 12px;
+}
+.detail-facts dt { color: var(--muted-foreground); }
+.detail-facts dd { margin: 0; min-width: 0; }
+.flight-description {
+  font-size: 12px;
+  line-height: 1.6;
+  margin-top: 8px;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+}
+.flight-row > div > .tip-trigger { display: block; }
+.heat-axis {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  margin-top: 8px;
+  color: var(--muted-foreground);
+  font-size: 10px;
 }

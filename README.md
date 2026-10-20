@@ -230,10 +230,13 @@ Demo captures: [due](docs/img/due.txt) · [inbox](docs/img/inbox.txt) · [usage]
 
 ### Live in the browser: `brain ui --open`
 
-A read-only page on `127.0.0.1` that updates within seconds of any file changing. It shows
+A read-only dashboard on `127.0.0.1`, with a collapsible sidebar, light and dark themes,
+phone layouts and keyboard navigation. Python serves its committed build with no Node or npm
+installation needed. It updates within seconds of any file changing and shows
 Inbox and Due on the overview, the project tree, jobs, ports, activity, schedules and decisions.
-The **Learnings**, **Agents**, **Usage** and **Import checklist** tabs show reusable items and
-review state, specialists and hires, account windows, and discovered repositories. Click a
+The **Learnings**, **Agents**, **Usage** and **Import checklist** views show reusable items and
+review state, specialists and the job ledger, account windows, measured spend, and discovered
+repositories. Tables offer search, sorting and paging. Click a
 project for its notes, limits, decisions and job history.
 
 <img alt="A project's notes in brain ui: needs you, inbox, now, next, recent changes, limits, decisions with the operator's words, jobs" src="docs/img/ui-project.png">
@@ -659,7 +662,8 @@ After any change:
 
 1. `brain selftest`
 2. `python3 core/tests/live.py` on every runtime
-3. `python3 docs/make-screenshots.py` if the page changed; use `--text-only` for CLI captures (fake data only)
+3. Follow [dashboard verification](ui/README.md) for UI changes and its synthetic screenshot tour.
+   Use `python3 docs/make-screenshots.py --text-only` for CLI captures (fake data only).
 4. commit here; brains pick it up with `brain upgrade`
 
 ---

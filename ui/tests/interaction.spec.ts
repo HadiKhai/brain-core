@@ -1,4 +1,4 @@
-import { test, expect } from "@playwright/test";
+import { test, expect, chromium, webkit } from "@playwright/test";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 test("real touch activates mobile navigation, filters, paging and the fixed import dock", async ({
@@ -268,19 +268,62 @@ test("browser Back restores each destination scroll position", async ({
     .toBe(400);
 });
 
-test("long status badges grow to contain every line", async ({ page }) => {
+test("job state separates its kind from the clamped readable description", async ({ page }) => {
   await page.goto("/?k=long&badge=1");
-  await page.waitForSelector(".flight-row .status");
   for (const width of [1440, 320]) {
     await page.setViewportSize({ width, height: 900 });
-    expect(
-      await page
-        .locator(".flight-row .status")
-        .first()
-        .evaluate((e) => e.scrollHeight <= e.clientHeight + 1),
-    ).toBe(true);
+    const row = page.locator(".flight-row").first();
+    await expect(row.locator(".status").first()).toHaveText("Reviewing");
+    const description = row.locator(".flight-description");
+    await expect(description).toContainText("complete narrow-screen navigation");
+    expect(await description.evaluate(e => e.clientHeight <= 2 * parseFloat(getComputedStyle(e).lineHeight) + 1)).toBe(true);
+    await description.focus();
+    await expect(page.locator('[data-slot="tooltip-content"]')).toContainText("preserving the project context");
+    await page.keyboard.press("Escape");
   }
 });
+
+for (const [engine, browserType] of Object.entries({ chromium, webkit })) {
+  test(`${engine}: detail scrim, focus, metadata, keyboard and activity`, async () => {
+    const browser = await browserType.launch();
+    const page = await browser.newPage();
+    for (const width of [1440, 320]) {
+      await page.setViewportSize({ width, height: 900 });
+      for (const theme of ["light", "dark"]) {
+        await page.emulateMedia({ colorScheme: theme as "light" | "dark" });
+        await page.goto("http://127.0.0.1:4109/?k=demo#view=overview&node=field-guide");
+        const dialog = page.getByRole("dialog");
+        await expect(dialog).toBeVisible();
+        await expect(dialog.getByRole("button", { name: "Close", exact: true })).toBeFocused();
+        expect(await page.locator('[data-slot="sheet-overlay"]').evaluate(e => getComputedStyle(e).backdropFilter)).toBe("none");
+        await expect(page.locator('[data-slot="sidebar"]')).toHaveCount(1);
+        await expect(dialog.locator("dt")).toHaveText(["Owners", "Labels", "Updated", "Home"]);
+        const link = dialog.getByRole("link", { name: "Open coordinator" });
+        expect((await link.boundingBox())!.width).toBeLessThan(160);
+        for (let i = 0; i < 6; i++) {
+          await page.keyboard.press("Tab");
+          expect(await dialog.evaluate(e => e.contains(document.activeElement))).toBe(true);
+        }
+        const dots = await page.locator('.node-sheet .status').evaluateAll(es => es.map(e => {
+          const a=e.getBoundingClientRect(), b=e.querySelector('.status-dot')!.getBoundingClientRect();
+          return Math.abs((a.top+a.bottom)/2-(b.top+b.bottom)/2);
+        }));
+        expect(dots.every(d => d < 1)).toBe(true);
+        await page.screenshot({ path: `/Users/hadikhai/WebstormProjects/brain-core-work/reports/ui-redesign/tour/detail-${engine}-${width}-${theme}.png` });
+        await page.keyboard.press("Escape");
+        await expect(dialog).not.toBeVisible();
+        const axis = page.locator('.heat-axis').first();
+        await axis.scrollIntoViewIfNeeded();
+        await expect(axis).toContainText("72 h ago");
+        const cell = page.locator('.heat-grid .tip-trigger').first();
+        await cell.focus();
+        await expect(page.locator('[data-slot="tooltip-content"]')).toContainText(/Oct.*commit/);
+        await page.keyboard.press("Escape");
+      }
+    }
+    await browser.close();
+  });
+}
 
 test("a corrupt notification cache recovers without losing the workspace", async ({
   page,

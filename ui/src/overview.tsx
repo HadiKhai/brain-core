@@ -33,6 +33,7 @@ import {
   tokens,
   safeHref,
   label,
+  jobState,
   type RecordData,
 } from "./model";
 export function Overview({
@@ -61,10 +62,7 @@ export function Overview({
       icon: GitBranch,
       label: "Jobs in flight",
       value: jobs.filter((j) => j.job.state !== "Worktree only").length,
-      note: count(
-        jobs.filter((j) => j.job.state === "Worktree only").length,
-        "other worktree",
-      ),
+      note: "Active job conversations",
     },
     {
       icon: Layers,
@@ -311,7 +309,8 @@ export function Overview({
                   </div>
                 </div>
                 <div>
-                  <Status>{j.state || "In progress"}</Status>
+                  <Status>{jobState(j.state).kind}</Status>
+                  {jobState(j.state).description && <Tip text={j.state}><p className="flight-description"><Text>{jobState(j.state).description}</Text></p></Tip>}
                   {l && (
                     <small>
                       {Number(l.age_h || 0).toFixed(1)} h ·{" "}
@@ -421,6 +420,7 @@ export function Overview({
                     </Tip>
                   ))}
                 </div>
+                <div className="heat-axis"><span>{counts.length} h ago · read left to right, top to bottom</span><span>Now</span></div>
               </div>
             ))
           ) : (

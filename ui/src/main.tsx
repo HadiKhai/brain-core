@@ -300,7 +300,7 @@ function NodeDetail({
         if (!open) onClose();
       }}
     >
-      <SheetContent className="node-sheet" side="right">
+      <SheetContent className="node-sheet" side="right" initialFocus={() => document.querySelector<HTMLElement>(".node-sheet [data-slot=sheet-close]")}>
         <SheetHeader>
           <SheetTitle>{n?.title || "Project details"}</SheetTitle>
           <SheetDescription>
@@ -320,10 +320,12 @@ function NodeDetail({
                       : "Active"}
               </Status>
               {n.runtime && <Status>{n.runtime}</Status>}
-              <p>Owners: {(n.owners || []).join(", ") || "Not recorded"}</p>
-              <p>{(n.labels || []).join(" · ")}</p>
-              <small>Updated {time(n.updated, s.brain?.tz)}</small>
-              {n.home && <p className="break-all">Home: {n.home}</p>}
+              <dl className="detail-facts">
+                <dt>Owners</dt><dd>{(n.owners || []).join(", ") || "Not recorded"}</dd>
+                <dt>Labels</dt><dd>{(n.labels || []).join(" · ") || "None"}</dd>
+                <dt>Updated</dt><dd>{time(n.updated, s.brain?.tz)}</dd>
+                <dt>Home</dt><dd className="break-all">{n.home || "Not recorded"}</dd>
+              </dl>
               {safeHref(n.coordinator) ? (
                 <a href={safeHref(n.coordinator)}>
                   Open coordinator <ArrowUpRight size={14} />

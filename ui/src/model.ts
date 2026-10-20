@@ -9,6 +9,12 @@ export const label = (v: any) => {
 };
 export const count = (n: number, word: string) =>
   `${n} ${word}${n === 1 ? "" : "s"}`;
+export function jobState(value: any): { kind: string; description: string } {
+  const text = String(value || "In progress").trim();
+  const match = text.match(/^(ready to merge|in progress|worktree only|needs review|needs you|reviewing|review|blocked|paused|working|active|done|merged)(?=$|[\s:·—-])/i);
+  if (!match) return { kind: "In progress", description: text === "In progress" ? "" : text };
+  return { kind: label(match[1]), description: text.slice(match[1].length).replace(/^[\s:·—-]+/, "") };
+}
 export const tokens = (n: any) =>
   Intl.NumberFormat("en", {
     notation: "compact",

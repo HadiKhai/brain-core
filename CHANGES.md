@@ -275,6 +275,21 @@ For agents:
 After upgrading:
 - Pending wakes drain on their own after upgrading; no requeue or binding change is needed.
 
+## 2026-10-20: A new local dashboard
+
+For agents:
+- `brain ui` now serves a React and shadcn dashboard with a shared sidebar, light and dark
+  themes, phone layouts, searchable tables and keyboard navigation. Overview, Learnings,
+  Agents, Usage, Import checklist and project details keep their existing capabilities.
+- Python serves the committed build; running the dashboard still needs only Python 3.9.
+  The live state and event stream still require the key in the printed address.
+- Dashboard sources and build instructions are in `ui/README.md`. Rebuild and commit `ui/dist/`
+  after source changes; dependency licenses and bundled third-party notices are checked.
+
+After upgrading:
+- Reopen `brain ui --open` to load the new dashboard. Saved filters stay within the current
+  browser session; import commands remain a checklist to review and copy.
+- Developers: run the documented UI checks with made-up data before changing the dashboard.
 
 ## 2026-10-21: Name changed verify inputs and finish setup
 
@@ -525,6 +540,7 @@ For agents:
 After upgrading:
 - Nothing, unless a node's history was made mostly outside its home: then ask the operator which
   folders to name, and extract again with `--fresh --also <folder>`.
+
 
 ## 2026-10-20: Time and tokens per job
 
