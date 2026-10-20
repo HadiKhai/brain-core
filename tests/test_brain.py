@@ -6620,6 +6620,26 @@ class HistorySizes(History):
             self.assertIn(why, self.b(self.r, "history", "garden", "--fresh", "--also", bad, ok=False), bad)
         out = self.b(self.r, "history", "garden", "--fresh", "--also", "relative/Zebracorp", ok=False)
         self.assertNotIn("Zebracorp", out)  # a refusal never prints a never-name word
+        loop = self.tmp / "Zebracorp-loop"
+        loop.symlink_to(loop)
+        out = self.b(self.r, "history", "garden", "--fresh", "--also", str(loop), ok=False)
+        self.assertNotIn("Zebracorp", out)
+        self.assertNotIn("Traceback", out)
+        # Inside a named folder, only sessions outside every brain and every other repository count.
+        clone = scratch / "their-clone"
+        self.git("clone", "-q", str(self.tmp / "theirs"), str(clone), cwd=self.tmp)  # another project's clone
+        deep = scratch / "a/b/c/d/e"  # a brain nobody registered, deeper than a folder check looks
+        (deep / "nodes/n").mkdir(parents=True)
+        for f in ("instance.md", "node.md"):
+            (deep / f).write_text("x\n")
+        for cwd, sid in ((clone, "66666666-ffff"), (deep / "nodes/n", "77777777-aaaa")):
+            self.jsonl(self.claude / "projects" / re.sub(r"[^A-Za-z0-9]", "-", str(cwd)) / f"{sid}.jsonl",
+                       [{**r, "message": {"role": "user", "content": f"FOREIGN-{sid}"}} if r.get("type") == "user" else r
+                        for r in self.claude_rows(cwd, sid, start=15)[:3]])
+        self.b(self.r, "history", "garden", "--fresh", "--also", str(scratch))
+        _, m, text = self.batches()
+        self.assertNotIn("FOREIGN-", text)
+        self.assertEqual([x["id"] for x in m["sessions"] if x["match"] == "named folder"], ["55555555-eeee"])
         count = lambda out: int(re.search(r"garden: (\d+) sessions", out)[1])  # noqa: E731
         self.assertEqual(count(self.b(self.r, "spend", "garden", "--also", str(scratch))),
                          count(self.b(self.r, "spend", "garden")) + 1)  # spend looks back over the same sessions

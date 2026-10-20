@@ -3887,7 +3887,10 @@ def also_folders(inst, n, folders):
         p = Path(f).expanduser()
         if not p.is_absolute():
             die(redact(f"--also takes absolute folders: {f}", terms))
-        p = p.resolve()
+        try:
+            p = p.resolve()
+        except (OSError, RuntimeError):
+            die(redact(f"--also: can't tell where {f} leads (a link loop?)", terms))
         mine = folder_chain(p)
         me = mine[0] if mine and p.exists() else None
         holds = lambda q: me is not None and me in folder_chain(q)  # noqa: E731
@@ -3938,7 +3941,13 @@ def history_matcher(inst, n, also=()):
             return None
         p = Path(cwd).resolve()
         if p not in seen and any(p == a or a in p.parents for a in named):
-            seen[p] = "named folder"
+            # A named folder vouches only for sessions that ran outside every brain and outside any repository but
+            # this node's own: another project's home, worktree or clone below it stays that project's.
+            if not p.is_dir() or any(is_brain(q) for q in [p, *p.parents]):
+                seen[p] = None
+            else:
+                c, r = history_repo(p)
+                seen[p] = "named folder" if not c or c == common or (remotes and remotes & r) else None
         if p not in seen:
             inside = any(p == r or r in p.parents for r in roots)
             if p.is_dir():
