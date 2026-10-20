@@ -8321,6 +8321,11 @@ raise SystemExit(result)
         with mock.patch.object(m, "machine_load", return_value=self.good), contextlib.redirect_stdout(io.StringIO()):
             m.machine_sample_once(inst)
         self.assertEqual(len(json.loads(path.read_text())["samples"]), 1)
+        path.write_text(json.dumps({"samples": self.samples(1), "episode": "invalid",
+                                    "pending_notice": "bad metadata", "episode_id": "a" * 24}))
+        with mock.patch.object(m, "machine_load", return_value=self.good), contextlib.redirect_stdout(io.StringIO()):
+            m.machine_sample_once(inst)
+        self.assertFalse(json.loads(path.read_text())["episode"])
 
     def test_thermal_unknown_preserves_warning_until_known_recovery(self):
         m = self.m

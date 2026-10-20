@@ -583,7 +583,7 @@ def machine_samples(inst):
         if not 0 <= age <= 180:
             return None
         prior = data.get("heat_reasons", [])
-        if (not isinstance(prior, list) or any(r not in ("sustained 5-minute load", "sustained thermal pressure") for r in prior)
+        if (type(data.get("episode", False)) is not bool or not isinstance(prior, list) or any(r not in ("sustained 5-minute load", "sustained thermal pressure") for r in prior)
                 or (data.get("episode") and not prior)):
             return None
         return data
@@ -634,7 +634,7 @@ def machine_sustained(samples, policy):
     warning_at, previous = None, None
     for sample in samples:
         at, state = sample["at"], sample["reading"].get("thermal", "unknown")
-        if previous is not None and at - previous > 90:
+        if previous is not None and not 0 <= at - previous <= 90:
             warning_at = None
         if state == "normal":
             warning_at = None
@@ -762,6 +762,17 @@ def machine_sample(inst):
         data = {}
     if not isinstance(data, dict):
         data = {}
+    prior = data.get("heat_reasons", [])
+    metadata_ok = (type(data.get("episode", False)) is bool and isinstance(prior, list)
+                   and all(r in ("sustained 5-minute load", "sustained thermal pressure") for r in prior)
+                   and (not data.get("episode") or bool(prior)))
+    pending = data.get("pending_notice")
+    if pending is not None:
+        metadata_ok = (metadata_ok and isinstance(pending, str) and
+                       (pending == "heavy work hold cleared" or pending.startswith("hold heavy work: sustained"))
+                       and bool(re.fullmatch(r"[0-9a-f]{24}", str(data.get("episode_id", "")))))
+    if not metadata_ok:
+        data = {**data, "episode": False, "heat_reasons": [], "pending_notice": None, "episode_id": ""}
     if (data.get("pending_notice") and isinstance(data.get("pending_notice"), str) and
             re.fullmatch(r"[0-9a-f]{24}", str(data.get("episode_id", "")))):
         data = machine_notice(inst, data)  # deliver old transition before it can be superseded
