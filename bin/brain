@@ -3920,6 +3920,13 @@ def also_refusal(p, brains, homes):
     return None
 
 
+def looks_like_repo(folder):
+    """A .git entry (file, folder or link), or a bare repository's own layout: a repository, read or not."""
+    q = Path(folder)
+    return (q / ".git").exists() or (q / ".git").is_symlink() or \
+        ((q / "HEAD").is_file() and (q / "objects").is_dir() and (q / "refs").is_dir())
+
+
 def contains_brain(folder, depth=4):
     """Is there a brain a few levels below this folder (registered or not)?"""
     for top, dirs, files in os.walk(folder, followlinks=False):
@@ -3962,10 +3969,10 @@ def history_matcher(inst, n, also=()):
             if not p.is_dir() or any(is_brain(q) for q in [p, *p.parents]):
                 seen[p] = False
             else:
-                in_git = any((q / ".git").exists() or (q / ".git").is_symlink() for q in [p, *p.parents])
-                c, r = history_repo(p) if in_git else (None, set())
+                c, r = history_repo(p)  # asked always: a bare repository has no .git entry
                 # No repository at all, or this node's own; a repository git can't read is never assumed absent.
-                seen[p] = "named folder" if (not in_git or (c and (c == common or (remotes and remotes & r)))) \
+                seen[p] = "named folder" if ((c and (c == common or (remotes and remotes & r)))
+                                             or (not c and not any(looks_like_repo(q) for q in [p, *p.parents]))) \
                     else False
         if p not in seen:
             inside = any(p == r or r in p.parents for r in roots)

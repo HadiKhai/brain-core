@@ -6650,6 +6650,16 @@ class HistorySizes(History):
         self.jsonl(self.claude / "projects" / re.sub(r"[^A-Za-z0-9]", "-", str(dangling)) / "88888888-bbbb.jsonl",
                    [{**r, "message": {"role": "user", "content": "FOREIGN-dangling"}} if r.get("type") == "user" else r
                     for r in self.claude_rows(dangling, "88888888-bbbb", start=16)[:3]])
+        bare = scratch / "their-bare.git"  # a bare clone has no .git entry
+        self.git("clone", "-q", "--bare", str(self.tmp / "theirs"), str(bare), cwd=self.tmp)
+        broken_bare = scratch / "broken-bare"
+        (broken_bare / "objects").mkdir(parents=True)
+        (broken_bare / "refs").mkdir()
+        (broken_bare / "HEAD").write_text("garbage\n")  # git can't read it: still someone's repository
+        for cwd, sid in ((bare, "99999999-cccc"), (broken_bare, "99999999-dddd")):
+            self.jsonl(self.claude / "projects" / re.sub(r"[^A-Za-z0-9]", "-", str(cwd)) / f"{sid}.jsonl",
+                       [{**r, "message": {"role": "user", "content": f"FOREIGN-{sid}"}} if r.get("type") == "user" else r
+                        for r in self.claude_rows(cwd, sid, start=17)[:3]])
         out = self.b(self.r, "history", "garden", "--fresh", "--also", "~Zebracorp_nobody/x", ok=False)
         self.assertNotIn("Zebracorp", out)
         self.assertNotIn("Traceback", out)
