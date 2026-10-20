@@ -3,7 +3,9 @@ export type RecordData = Record<string, any>;
 export const list = (v: any): RecordData[] => (Array.isArray(v) ? v : []);
 export const label = (v: any) => {
   const text = String(v ?? "");
-  return /\s/.test(text) ? text : text.replace(/[_-]/g, " ").replace(/^./, c => c.toUpperCase());
+  return /\s/.test(text)
+    ? text
+    : text.replace(/[_-]/g, " ").replace(/^./, (c) => c.toUpperCase());
 };
 export const count = (n: number, word: string) =>
   `${n} ${word}${n === 1 ? "" : "s"}`;
@@ -47,9 +49,7 @@ export function readable(v: any, zone?: string): string {
 export const closed = (r: RecordData) =>
   !!r.Ended ||
   /^(merged|abandoned|closed|done|cancelled|completed)$/i.test(r.Outcome || "");
-export function flight(
-  nodes: RecordData[],
-): {
+export function flight(nodes: RecordData[]): {
   node: RecordData;
   job: RecordData;
   wt: RecordData | undefined;
@@ -223,9 +223,75 @@ export function routing(s: RecordData) {
 }
 
 export function treeRows(nodes: RecordData[]) {
-  const active=nodes.filter(n=>!n.archived),seen=new Set<string>(),out:{node:RecordData,depth:number}[]=[];
-  function visit(n:RecordData,depth:number){if(seen.has(n.id))return;seen.add(n.id);out.push({node:n,depth});for(const child of active.filter(c=>c.parent===n.id))visit(child,depth+1)}
-  for(const n of active.filter(n=>!n.parent||!active.some(p=>p.id===n.parent)))visit(n,0);
-  for(const n of active)visit(n,0);
+  const active = nodes.filter((n) => !n.archived),
+    seen = new Set<string>(),
+    out: { node: RecordData; depth: number }[] = [];
+  function visit(n: RecordData, depth: number) {
+    if (seen.has(n.id)) return;
+    seen.add(n.id);
+    out.push({ node: n, depth });
+    for (const child of active.filter((c) => c.parent === n.id))
+      visit(child, depth + 1);
+  }
+  for (const n of active.filter(
+    (n) => !n.parent || !active.some((p) => p.id === n.parent),
+  ))
+    visit(n, 0);
+  for (const n of active) visit(n, 0);
+  return out;
+}
+
+export function hasMeasuredUsage(row: RecordData) {
+  return (
+    !!row.Usage &&
+    ["Fresh in", "Cache read", "Cache write", "Output", "Active h"].some(
+      (key) =>
+        row[key] !== "" &&
+        row[key] != null &&
+        Number.isFinite(Number(row[key])),
+    )
+  );
+}
+
+export function machineHealth(machine: RecordData) {
+  const out: RecordData[] = [];
+  const add = (name: string, used: number, state: string) =>
+    out.push({ name, percent: Math.max(0, Math.min(100, used * 100)), state });
+  if (Number.isFinite(machine.load?.[0]) && machine.cpus > 0) {
+    const used = machine.load[0] / machine.cpus;
+    add(
+      "Processor load",
+      used,
+      used > 0.9
+        ? "Critical pressure"
+        : used > 0.7
+          ? "Near capacity"
+          : "Normal",
+    );
+  }
+  if (Number.isFinite(machine.mem_free_gb) && machine.mem_total_gb > 0) {
+    const used = 1 - machine.mem_free_gb / machine.mem_total_gb;
+    add(
+      "Memory used",
+      used,
+      machine.mem_free_gb < 8
+        ? "Critical pressure"
+        : used > 0.8
+          ? "Near capacity"
+          : "Normal",
+    );
+  }
+  if (Number.isFinite(machine.disk_free_gb) && machine.disk_total_gb > 0) {
+    const used = 1 - machine.disk_free_gb / machine.disk_total_gb;
+    add(
+      "Disk used",
+      used,
+      machine.disk_free_gb < 40
+        ? "Critical pressure"
+        : used > 0.85
+          ? "Near capacity"
+          : "Normal",
+    );
+  }
   return out;
 }

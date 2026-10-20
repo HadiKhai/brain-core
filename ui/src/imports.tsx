@@ -4,6 +4,7 @@ import { FolderGit2, ShieldCheck } from "lucide-react";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Button } from "@/components/ui/button";
 import {
+  ActionDock,
   PageSection,
   Empty,
   Status,
@@ -118,7 +119,7 @@ export function Imports({ s }: { s: RecordData }) {
       </PageSection>
       {host &&
         createPortal(
-          <div className="action-dock">
+          <ActionDock>
             <div>
               <strong>{count(valid.length, "repository")} selected</strong>
               <p>Review the command, then run it in your brain.</p>
@@ -147,7 +148,7 @@ export function Imports({ s }: { s: RecordData }) {
                 </Button>
               </>
             )}
-          </div>,
+          </ActionDock>,
           host,
         )}
     </div>

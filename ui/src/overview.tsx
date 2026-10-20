@@ -1,4 +1,4 @@
-import type React from 'react';
+import type React from "react";
 import {
   Activity,
   ArrowUpRight,
@@ -13,6 +13,7 @@ import {
   Server,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { Progress } from "@/components/ui/progress";
 import {
   PageSection,
   Empty,
@@ -23,6 +24,7 @@ import {
   Bars,
 } from "./shared";
 import {
+  machineHealth,
   flight,
   treeRows,
   list,
@@ -204,11 +206,24 @@ export function Overview({
         }
       >
         <div className="project-tree">
-          {treeRows(nodes).map(({node:n,depth}) => (
+          {!treeRows(nodes).length && (
+            <Empty
+              text="No projects yet."
+              action="Use brain new to add your first project."
+              icon={FolderGit2}
+            />
+          )}
+          {treeRows(nodes).map(({ node: n, depth }) => (
+            <Tip
+              key={n.id}
+              text={`${n.runtime || "Runtime not recorded"} · Owners: ${(n.owners || []).join(", ") || "not recorded"} · ${n.updated ? "Updated " + time(n.updated, s.brain?.tz) : "Update time not recorded"}`}
+            >
               <Button
                 variant="ghost"
                 className={"project-node " + (n.parent ? "child-node" : "")}
-                style={{"--tree-depth":Math.min(depth,4)} as React.CSSProperties}
+                style={
+                  { "--tree-depth": Math.min(depth, 4) } as React.CSSProperties
+                }
                 key={n.id}
                 onClick={() => onNode(n.id)}
               >
@@ -228,27 +243,27 @@ export function Overview({
                       "active job",
                     )}{" "}
                     ·{" "}
-                    {list(n.worktrees).filter((w) => list(w.listening).length).length + " listening"}{" "}
+                    {list(n.worktrees).filter((w) => list(w.listening).length)
+                      .length + " listening"}{" "}
                     ·{" "}
-                    {list(s.attention).filter((a) => a.node === n.id).length + " for you"}
+                    {list(s.attention).filter((a) => a.node === n.id).length +
+                      " for you"}
                   </small>
                 </span>
-                <Tip
-                  text={`${n.runtime || "Runtime not recorded"} · Owners: ${(n.owners || []).join(", ") || "not recorded"} · ${n.updated ? "Updated " + time(n.updated, s.brain?.tz) : "Update time not recorded"}`}
-                >
-                  <Status>
-                    {n.sealed
-                      ? "Sealed"
-                      : n.paused
-                        ? "Paused"
-                        : list(n.blocked).length
-                          ? "Needs you"
-                          : "Active"}
-                  </Status>
-                </Tip>
+
+                <Status>
+                  {n.sealed
+                    ? "Sealed"
+                    : n.paused
+                      ? "Paused"
+                      : list(n.blocked).length
+                        ? "Needs you"
+                        : "Active"}
+                </Status>
                 <ArrowUpRight size={16} />
               </Button>
-            ))}
+            </Tip>
+          ))}
         </div>
       </PageSection>
       <PageSection
@@ -518,7 +533,9 @@ export function Overview({
             ],
             [
               "Tokens · 7 days",
-              tokens(s.spend?.since_week?.processed),
+              s.spend?.since_week
+                ? tokens(s.spend.since_week.processed)
+                : "Unknown",
               "processed",
             ],
           ].map(([name, value, note]) => (
@@ -527,6 +544,29 @@ export function Overview({
               <strong>
                 {value ?? "Unknown"} <small>{note}</small>
               </strong>
+            </div>
+          ))}
+        </div>
+        <div className="machine-health">
+          {machineHealth(s.machine || {}).map((h) => (
+            <div
+              className={
+                h.state === "Critical pressure"
+                  ? "health-critical"
+                  : h.state === "Near capacity"
+                    ? "health-warning"
+                    : ""
+              }
+              key={h.name}
+            >
+              <div className="meter-heading">
+                <small>{h.name}</small>
+                <Status>{h.state}</Status>
+              </div>
+              <Progress
+                value={h.percent}
+                aria-label={h.name + " · " + h.state}
+              />
             </div>
           ))}
         </div>

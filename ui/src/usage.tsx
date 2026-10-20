@@ -9,6 +9,7 @@ import {
   Tip,
 } from "./shared";
 import {
+  hasMeasuredUsage,
   list,
   windowState,
   routing,
@@ -327,13 +328,11 @@ export function Usage({ s }: { s: RecordData }) {
                 </div>
                 <Bars
                   label="Finished jobs · processed tokens"
-                  entries={measured
-                    .slice(-24)
-                    .map((r) => ({
-                      key: r.Job,
-                      tokens: totalTokens(r),
-                      active_h: r["Active h"],
-                    }))}
+                  entries={measured.slice(-24).map((r) => ({
+                    key: r.Job,
+                    tokens: totalTokens(r),
+                    active_h: r["Active h"],
+                  }))}
                 />
                 <DataTable
                   name="jobs"
@@ -371,7 +370,9 @@ export function Usage({ s }: { s: RecordData }) {
                       label: "Tokens / fresh in + out",
                       render: (r) => (
                         <span>
-                          {tokens(r.usage?.processed ?? totalTokens(r))}
+                          {r.usage || hasMeasuredUsage(r)
+                            ? tokens(r.usage?.processed ?? totalTokens(r))
+                            : "Unmeasured"}
                           <small>
                             {tokens(
                               r.usage

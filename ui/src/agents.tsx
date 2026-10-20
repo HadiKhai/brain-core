@@ -9,6 +9,7 @@ import {
   Bars,
 } from "./shared";
 import {
+  hasMeasuredUsage,
   list,
   hireRow,
   closed,
@@ -220,7 +221,7 @@ export function Agents({ s }: { s: RecordData }) {
                           <span>
                             {u
                               ? tokens(u.processed)
-                              : r.Usage
+                              : hasMeasuredUsage(r)
                                 ? tokens(totalTokens(r))
                                 : "Unmeasured"}
                             <small>

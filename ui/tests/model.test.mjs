@@ -146,6 +146,59 @@ test("editable surfaces use shadcn controls and never browser disclosure/tooltip
   }
 });
 
-test("status copy preserves sentences and punctuation",()=>{assert.equal(m.label("Reviewing narrow-screen navigation"),"Reviewing narrow-screen navigation");assert.equal(m.label("stale_status"),"Stale status")})
+test("status copy preserves sentences and punctuation", () => {
+  assert.equal(
+    m.label("Reviewing narrow-screen navigation"),
+    "Reviewing narrow-screen navigation",
+  );
+  assert.equal(m.label("stale_status"), "Stale status");
+});
 
-test("project tree preserves depth, orphans and cycle containment",()=>{const rows=m.treeRows([{id:'leaf',parent:'child'},{id:'root'},{id:'child',parent:'root'},{id:'orphan',parent:'missing'},{id:'cycle',parent:'cycle'},{id:'archive',archived:true}]);assert.deepEqual(rows.map(r=>[r.node.id,r.depth]),[['root',0],['child',1],['leaf',2],['orphan',0],['cycle',0]])})
+test("project tree preserves depth, orphans and cycle containment", () => {
+  const rows = m.treeRows([
+    { id: "leaf", parent: "child" },
+    { id: "root" },
+    { id: "child", parent: "root" },
+    { id: "orphan", parent: "missing" },
+    { id: "cycle", parent: "cycle" },
+    { id: "archive", archived: true },
+  ]);
+  assert.deepEqual(
+    rows.map((r) => [r.node.id, r.depth]),
+    [
+      ["root", 0],
+      ["child", 1],
+      ["leaf", 2],
+      ["orphan", 0],
+      ["cycle", 0],
+    ],
+  );
+});
+
+test("missing job accounting is not a zero measurement and timezone formatting is explicit", () => {
+  assert.equal(
+    m.hasMeasuredUsage({ Usage: "not counted: ExampleError" }),
+    false,
+  );
+  assert.equal(m.hasMeasuredUsage({ Usage: "fixture", "Fresh in": "0" }), true);
+  assert.match(m.time("2026-10-20T10:00:00Z", "Asia/Tokyo"), /7:00 PM/);
+  assert.match(m.readable("At 2026-10-20T10:00:00Z", "Asia/Tokyo"), /7:00 PM/);
+});
+
+test("machine pressure preserves processor, memory and disk warning thresholds", () => {
+  const rows = m.machineHealth({
+    load: [7.5],
+    cpus: 8,
+    mem_free_gb: 7,
+    mem_total_gb: 32,
+    disk_free_gb: 39,
+    disk_total_gb: 1000,
+  });
+  assert.equal(rows.length, 3);
+  assert.ok(rows.every((r) => r.state === "Critical pressure"));
+  assert.equal(
+    m.machineHealth({ load: [6], cpus: 8 })[0].state,
+    "Near capacity",
+  );
+  assert.deepEqual(m.machineHealth({}), []);
+});

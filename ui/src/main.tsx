@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import {
   Brain,
@@ -14,6 +14,7 @@ import {
   RefreshCw,
   Sun,
   ShieldCheck,
+  X,
   ArrowUpRight,
 } from "lucide-react";
 import {
@@ -49,6 +50,7 @@ import {
   DropdownMenuItem,
 } from "@/components/ui/dropdown-menu";
 import {
+  TimeZoneContext,
   PageHeader,
   PageSection,
   Status,
@@ -141,6 +143,19 @@ function Navigation({
   return (
     <Sidebar variant="inset" collapsible="icon" className="app-sidebar">
       <SidebarHeader>
+        {isMobile && (
+          <div className="mobile-nav-heading">
+            <strong>Workspace</strong>
+            <Button
+              variant="ghost"
+              size="icon"
+              aria-label="Close navigation"
+              onClick={() => setOpenMobile(false)}
+            >
+              <X size={18} />
+            </Button>
+          </div>
+        )}
         <DropdownMenu>
           <DropdownMenuTrigger
             render={<Button variant="outline" className="workspace-switcher" />}
@@ -182,27 +197,65 @@ function Navigation({
       <SidebarContent>
         <SidebarGroup>
           <SidebarGroupLabel>Workspace</SidebarGroupLabel>
-          <SidebarMenu>
-            {destinations.map((d) => (
-              <SidebarMenuItem key={d.id}>
-                <SidebarMenuButton
-                  isActive={view === d.id}
-                  tooltip={d.title}
-                  aria-label={d.title}
-                  onClick={() => {
-                    onView(d.id);
-                    if (isMobile) setOpenMobile(false);
-                  }}
-                >
-                  <d.icon />
-                  <span>{d.title}</span>
-                  {d.id === "overview" && list(s?.inbox).length > 0 && (
-                    <span className="nav-count">{s!.inbox.length}</span>
-                  )}
-                </SidebarMenuButton>
-              </SidebarMenuItem>
-            ))}
-          </SidebarMenu>
+          <nav aria-label="Workspace navigation">
+            <SidebarMenu
+              onKeyDown={(e) => {
+                const keys = [
+                  "ArrowDown",
+                  "ArrowRight",
+                  "ArrowUp",
+                  "ArrowLeft",
+                  "Home",
+                  "End",
+                ];
+                if (!keys.includes(e.key)) return;
+                const buttons = Array.from(
+                    e.currentTarget.querySelectorAll<HTMLButtonElement>(
+                      "button",
+                    ),
+                  ),
+                  index = buttons.indexOf(
+                    document.activeElement as HTMLButtonElement,
+                  );
+                if (index < 0) return;
+                e.preventDefault();
+                const next =
+                  e.key === "Home"
+                    ? 0
+                    : e.key === "End"
+                      ? buttons.length - 1
+                      : (index +
+                          (["ArrowDown", "ArrowRight"].includes(e.key)
+                            ? 1
+                            : -1) +
+                          buttons.length) %
+                        buttons.length;
+                buttons[next].click();
+                buttons[next].focus();
+              }}
+            >
+              {destinations.map((d) => (
+                <SidebarMenuItem key={d.id}>
+                  <SidebarMenuButton
+                    isActive={view === d.id}
+                    tooltip={d.title}
+                    aria-label={d.title}
+                    aria-current={view === d.id ? "page" : undefined}
+                    onClick={() => {
+                      onView(d.id);
+                      if (isMobile) setOpenMobile(false);
+                    }}
+                  >
+                    <d.icon />
+                    <span>{d.title}</span>
+                    {d.id === "overview" && list(s?.inbox).length > 0 && (
+                      <span className="nav-count">{s!.inbox.length}</span>
+                    )}
+                  </SidebarMenuButton>
+                </SidebarMenuItem>
+              ))}
+            </SidebarMenu>
+          </nav>
         </SidebarGroup>
       </SidebarContent>
       <SidebarFooter>
@@ -418,9 +471,20 @@ function App() {
         Notification.permission === "granted",
     );
   const scroll = useRef<HTMLDivElement>(null),
-    positions = useRef<Record<string, number>>({});
+    positions = useRef<Record<string, number>>({}),
+    activeView = useRef(route.view);
+  useLayoutEffect(() => {
+    if (scroll.current)
+      scroll.current.scrollTop = positions.current[route.view] || 0;
+    activeView.current = route.view;
+  }, [route.view]);
   useEffect(() => {
-    const fn = () => setRoute(readRoute());
+    const fn = () => {
+      const next = readRoute();
+      if (next.view !== activeView.current && scroll.current)
+        positions.current[activeView.current] = scroll.current.scrollTop;
+      setRoute(next);
+    };
     addEventListener("hashchange", fn);
     return () => removeEventListener("hashchange", fn);
   }, []);
@@ -492,7 +556,10 @@ function App() {
       "brain-inbox-seen:" + JSON.stringify([s.brain?.name, s.brain?.root]);
     let ids: string[] = [];
     try {
-      ids = JSON.parse(getStorage(key) || "[]");
+      const saved = JSON.parse(getStorage(key) || "[]");
+      ids = Array.isArray(saved)
+        ? saved.filter((id) => typeof id === "string")
+        : [];
     } catch {}
     const seen = new Set(ids);
     for (const item of list(s.inbox)) {
@@ -508,14 +575,7 @@ function App() {
     setStorage(key, JSON.stringify([...seen]));
   }, [s, notify]);
   const go = (view: string) => {
-    if (scroll.current)
-      positions.current[route.view] = scroll.current.scrollTop;
     location.hash = "view=" + view;
-    setRoute({ view, node: null });
-    requestAnimationFrame(() => {
-      if (scroll.current)
-        scroll.current.scrollTop = positions.current[view] || 0;
-    });
   };
   const node = (id: string | null) => {
     const hash =
@@ -554,193 +614,203 @@ function App() {
       );
   };
   return (
-    <TooltipProvider>
-      <SidebarProvider>
-        <Navigation s={s} view={route.view} onView={go} onNotice={setNotice} />
-        <SidebarInset className="app-inset">
-          <div className="topbar">
-            <div className="topbar-left">
-              <SidebarTrigger />
-              <span className="topbar-divider" />
-              <span className="topbar-title">{current.title}</span>
-            </div>
-            <div className="topbar-actions">
-              <Status>{connection}</Status>
-              <Tip text="Switch light and dark appearance">
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  aria-label="Toggle theme"
-                  onClick={() =>
-                    setTheme(
-                      document.documentElement.classList.contains("dark")
-                        ? "light"
-                        : "dark",
-                    )
-                  }
-                >
-                  {theme === "dark" ? <Sun size={17} /> : <Moon size={17} />}
-                </Button>
-              </Tip>
-              <Tip
-                text={
-                  notify
-                    ? "Turn off notifications"
-                    : "Notify me about new inbox items"
-                }
-              >
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  aria-label={
-                    notify ? "Turn off notifications" : "Enable notifications"
-                  }
-                  onClick={enableNotifications}
-                >
-                  <Bell size={17} />
-                  {notify && <span className="notification-dot" />}
-                </Button>
-              </Tip>
-            </div>
-          </div>
-          <div ref={scroll} className="inset-scroll" id="workspace-content">
-            <PageHeader
-              title={current.title}
-              subtitle={
-                route.view === "overview" && s
-                  ? `${count(list(s.inbox).length, "item")} in your inbox · ${count(list(s.nodes).filter((n) => !n.archived).length, "project")} in your workspace.`
-                  : current.subtitle
-              }
-              actions={
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => {
-                    if (window.__STATE__)
-                      setNotice(
-                        "This is a saved snapshot. Open brain ui for live updates.",
-                      );
-                    else setRetry(retry + 1);
-                  }}
-                >
-                  <RefreshCw size={14} />
-                  Refresh
-                </Button>
-              }
-            />
-            {notice && (
-              <Alert className="notice">
-                <AlertTitle>Workspace notice</AlertTitle>
-                <AlertDescription>
-                  {notice}
+    <TimeZoneContext.Provider value={s?.brain?.tz}>
+      <TooltipProvider>
+        <SidebarProvider>
+          <Navigation
+            s={s}
+            view={route.view}
+            onView={go}
+            onNotice={setNotice}
+          />
+          <SidebarInset className="app-inset">
+            <div className="topbar">
+              <div className="topbar-left">
+                <SidebarTrigger />
+                <span className="topbar-divider" />
+                <span className="topbar-title">{current.title}</span>
+              </div>
+              <div className="topbar-actions">
+                <Status>{connection}</Status>
+                <Tip text="Switch light and dark appearance">
                   <Button
                     variant="ghost"
-                    size="sm"
-                    onClick={() => setNotice("")}
+                    size="icon"
+                    aria-label="Toggle theme"
+                    onClick={() =>
+                      setTheme(
+                        document.documentElement.classList.contains("dark")
+                          ? "light"
+                          : "dark",
+                      )
+                    }
                   >
-                    Dismiss
+                    {theme === "dark" ? <Sun size={17} /> : <Moon size={17} />}
                   </Button>
-                </AlertDescription>
-              </Alert>
-            )}
-            {[
-              "Permission required",
-              "Connection failed",
-              "Updates interrupted",
-            ].includes(connection) && (
-              <Alert
-                variant={
-                  connection === "Updates interrupted"
-                    ? "default"
-                    : "destructive"
+                </Tip>
+                <Tip
+                  text={
+                    notify
+                      ? "Turn off notifications"
+                      : "Notify me about new inbox items"
+                  }
+                >
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    aria-label={
+                      notify ? "Turn off notifications" : "Enable notifications"
+                    }
+                    onClick={enableNotifications}
+                  >
+                    <Bell size={17} />
+                    {notify && <span className="notification-dot" />}
+                  </Button>
+                </Tip>
+              </div>
+            </div>
+            <div ref={scroll} className="inset-scroll" id="workspace-content">
+              <PageHeader
+                title={current.title}
+                subtitle={
+                  route.view === "overview" && s
+                    ? `${count(list(s.inbox).length, "item")} in your inbox · ${count(list(s.nodes).filter((n) => !n.archived).length, "project")} in your workspace.`
+                    : current.subtitle
                 }
-              >
-                <AlertTitle>
-                  {connection === "Permission required"
-                    ? "Open your private workspace link"
-                    : connection === "Updates interrupted"
-                      ? "Live updates interrupted"
-                      : "Could not reach your brain"}
-                </AlertTitle>
-                <AlertDescription>
-                  {connection === "Permission required"
-                    ? "Run brain ui and open the complete address it prints. The key protects your workspace."
-                    : connection === "Updates interrupted"
-                      ? "You are viewing the last successful reading. Updates will reconnect automatically, or you can refresh now."
-                      : "Check that brain ui is still running, then refresh this page."}
-                </AlertDescription>
-              </Alert>
-            )}
-            {!s ? (
-              connection === "Connecting" ? (
-                <div
-                  className="page-stack skeleton-page"
-                  aria-label="Loading workspace"
+                actions={
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => {
+                      if (window.__STATE__)
+                        setNotice(
+                          "This is a saved snapshot. Open brain ui for live updates.",
+                        );
+                      else setRetry(retry + 1);
+                    }}
+                  >
+                    <RefreshCw size={14} />
+                    Refresh
+                  </Button>
+                }
+              />
+              {notice && (
+                <Alert className="notice">
+                  <AlertTitle>Workspace notice</AlertTitle>
+                  <AlertDescription>
+                    {notice}
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => setNotice("")}
+                    >
+                      Dismiss
+                    </Button>
+                  </AlertDescription>
+                </Alert>
+              )}
+              {[
+                "Permission required",
+                "Connection failed",
+                "Updates interrupted",
+              ].includes(connection) && (
+                <Alert
+                  variant={
+                    connection === "Updates interrupted"
+                      ? "default"
+                      : "destructive"
+                  }
                 >
-                  <div className="metric-grid">
-                    {[0, 1, 2, 3].map((i) => (
-                      <Skeleton key={i} className="h-32 rounded-xl" />
-                    ))}
+                  <AlertTitle>
+                    {connection === "Permission required"
+                      ? "Open your private workspace link"
+                      : connection === "Updates interrupted"
+                        ? "Live updates interrupted"
+                        : "Could not reach your brain"}
+                  </AlertTitle>
+                  <AlertDescription>
+                    {connection === "Permission required"
+                      ? "Run brain ui and open the complete address it prints. The key protects your workspace."
+                      : connection === "Updates interrupted"
+                        ? "You are viewing the last successful reading. Updates will reconnect automatically, or you can refresh now."
+                        : "Check that brain ui is still running, then refresh this page."}
+                  </AlertDescription>
+                </Alert>
+              )}
+              {!s ? (
+                connection === "Connecting" ? (
+                  <div
+                    className="page-stack skeleton-page"
+                    aria-label="Loading workspace"
+                  >
+                    <div className="metric-grid">
+                      {[0, 1, 2, 3].map((i) => (
+                        <Skeleton key={i} className="h-32 rounded-xl" />
+                      ))}
+                    </div>
+                    <Skeleton className="h-64 rounded-2xl" />
+                    <Skeleton className="h-80 rounded-2xl" />
                   </div>
-                  <Skeleton className="h-64 rounded-2xl" />
-                  <Skeleton className="h-80 rounded-2xl" />
-                </div>
+                ) : (
+                  <Empty
+                    text="Workspace unavailable."
+                    action="Open the address printed by brain ui."
+                  />
+                )
               ) : (
-                <Empty
-                  text="Workspace unavailable."
-                  action="Open the address printed by brain ui."
-                />
-              )
-            ) : (
-              <>
-                <div data-page="overview" hidden={route.view !== "overview"}>
-                  <Overview s={s} onNode={node} onView={go} />
-                </div>
-                <div data-page="learnings" hidden={route.view !== "learnings"}>
-                  <Learnings s={s} />
-                </div>
-                <div data-page="agents" hidden={route.view !== "agents"}>
-                  <Agents s={s} />
-                </div>
-                <div data-page="usage" hidden={route.view !== "usage"}>
-                  <Usage s={s} />
-                </div>
-                <div data-page="imports" hidden={route.view !== "imports"}>
-                  <Imports s={s} />
-                </div>
-              </>
+                <>
+                  <div data-page="overview" hidden={route.view !== "overview"}>
+                    <Overview s={s} onNode={node} onView={go} />
+                  </div>
+                  <div
+                    data-page="learnings"
+                    hidden={route.view !== "learnings"}
+                  >
+                    <Learnings s={s} />
+                  </div>
+                  <div data-page="agents" hidden={route.view !== "agents"}>
+                    <Agents s={s} />
+                  </div>
+                  <div data-page="usage" hidden={route.view !== "usage"}>
+                    <Usage s={s} />
+                  </div>
+                  <div data-page="imports" hidden={route.view !== "imports"}>
+                    <Imports s={s} />
+                  </div>
+                </>
+              )}
+              <footer className="workspace-footer">
+                <span>
+                  <Monitor size={13} />
+                  Local workspace · read-only
+                </span>
+                <span>
+                  {s?.brain?.now
+                    ? time(s.brain.now, s.brain.tz)
+                    : "Waiting for a reading"}{" "}
+                  ·{" "}
+                  <a
+                    href="/assets/THIRD_PARTY_NOTICES.txt"
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    Third-party notices
+                  </a>
+                </span>
+              </footer>
+            </div>
+            <div
+              id="action-dock-host"
+              className="action-dock-host"
+              hidden={route.view !== "imports" || !s}
+            />
+            {s && (
+              <NodeDetail s={s} node={route.node} onClose={() => node(null)} />
             )}
-            <footer className="workspace-footer">
-              <span>
-                <Monitor size={13} />
-                Local workspace · read-only
-              </span>
-              <span>
-                {s?.brain?.now
-                  ? time(s.brain.now, s.brain.tz)
-                  : "Waiting for a reading"}{" "}
-                ·{" "}
-                <a
-                  href="/assets/THIRD_PARTY_NOTICES.txt"
-                  target="_blank"
-                  rel="noreferrer"
-                >
-                  Third-party notices
-                </a>
-              </span>
-            </footer>
-          </div>
-          <div
-            id="action-dock-host"
-            className="action-dock-host"
-            hidden={route.view !== "imports" || !s}
-          />
-          {s && (
-            <NodeDetail s={s} node={route.node} onClose={() => node(null)} />
-          )}
-        </SidebarInset>
-      </SidebarProvider>
-    </TooltipProvider>
+          </SidebarInset>
+        </SidebarProvider>
+      </TooltipProvider>
+    </TimeZoneContext.Provider>
   );
 }
 class ErrorBoundary extends React.Component<

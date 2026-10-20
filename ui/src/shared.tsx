@@ -1,4 +1,12 @@
-import { useState, useId, type ReactNode } from "react";
+import {
+  createContext,
+  useContext,
+  useState,
+  useId,
+  isValidElement,
+  type ReactElement,
+  type ReactNode,
+} from "react";
 import ReactMarkdown from "react-markdown";
 import {
   ChevronDown,
@@ -42,6 +50,12 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { label, readable, safeHref, type RecordData } from "./model";
+export const TimeZoneContext = createContext<string | undefined>(undefined);
+
+export function ActionDock({ children }: { children: ReactNode }) {
+  return <div className="action-dock">{children}</div>;
+}
+
 export function PageHeader({
   title,
   subtitle,
@@ -111,7 +125,9 @@ export function Empty({
   );
 }
 export function Status({ children }: { children: ReactNode }) {
-  const t = String(children || "Not recorded");
+  const zone = useContext(TimeZoneContext);
+  const raw = String(children || "Not recorded");
+  const t = /^[-—\s]*$/.test(raw) ? "State not recorded" : raw;
   return (
     <Badge
       variant="secondary"
@@ -119,7 +135,7 @@ export function Status({ children }: { children: ReactNode }) {
         "status " +
         (/near|review|stale|paused|unknown|proposed|unverified/i.test(t)
           ? "warning"
-          : /blocked|stop|error|abandoned|missing/i.test(t)
+          : /blocked|stop|error|abandoned|missing|critical/i.test(t)
             ? "danger"
             : /ready|merged|active|normal|accepted|live|complete/i.test(t)
               ? "good"
@@ -127,24 +143,36 @@ export function Status({ children }: { children: ReactNode }) {
       }
     >
       <span className="status-dot" />
-      {label(t)}
+      {readable(label(t), zone)}
     </Badge>
   );
 }
 export function Tip({ text, children }: { text: string; children: ReactNode }) {
   return (
     <Tooltip>
-      <TooltipTrigger render={<span tabIndex={0} className="tip-trigger" />}>
-        {children}
-      </TooltipTrigger>
+      {isValidElement(children) &&
+      (children.type === Button || children.type === "button") ? (
+        <TooltipTrigger render={children as ReactElement} />
+      ) : (
+        <TooltipTrigger render={<span tabIndex={0} className="tip-trigger" />}>
+          {children}
+        </TooltipTrigger>
+      )}
+
       <TooltipContent className="max-w-sm break-words">{text}</TooltipContent>
     </Tooltip>
   );
 }
 export function Text({ children, zone }: { children: any; zone?: string }) {
-  return <span className="readable">{readable(children, zone)}</span>;
+  const workspaceZone = useContext(TimeZoneContext);
+  return (
+    <span className="readable">
+      {readable(children, zone || workspaceZone)}
+    </span>
+  );
 }
 export function Markdown({ text }: { text: any }) {
+  const zone = useContext(TimeZoneContext);
   return (
     <div className="markdown">
       <ReactMarkdown
@@ -160,7 +188,7 @@ export function Markdown({ text }: { text: any }) {
           img: ({ alt }) => <span>{alt}</span>,
         }}
       >
-        {readable(text)}
+        {readable(text, zone)}
       </ReactMarkdown>
     </div>
   );
@@ -228,7 +256,11 @@ export function Choice({
   return (
     <div className="field">
       <label htmlFor={id}>{name}</label>
-      <Select items={options} value={value} onValueChange={(v) => onChange(String(v))}>
+      <Select
+        items={options}
+        value={value}
+        onValueChange={(v) => onChange(String(v))}
+      >
         <SelectTrigger id={id} aria-label={name}>
           <SelectValue />
         </SelectTrigger>
@@ -310,14 +342,20 @@ export function DataTable({
       <div className="mobile-table-sort">
         <Choice
           name="Sort by"
-          value={sort.key || columns[0].key}
-          onChange={(key) => setSort({ key, direction: 1 })}
-          options={columns.map((c) => ({ value: c.key, label: c.label }))}
+          value={sort.key || "default"}
+          onChange={(key) =>
+            setSort({ key: key === "default" ? "" : key, direction: 1 })
+          }
+          options={[
+            { value: "default", label: "Original order" },
+            ...columns.map((c) => ({ value: c.key, label: c.label })),
+          ]}
         />
         <Button
           variant="outline"
           size="sm"
           aria-label="Reverse sort order"
+          disabled={!sort.key}
           onClick={() =>
             setSort({
               ...sort,
@@ -436,7 +474,7 @@ export function Bars({
         {entries.map((e, i) => (
           <Tip
             key={i}
-            text={`${e.key}: ${e.tokens || 0} ${unit} · ${e.active_h || 0} h active`}
+            text={`${e.key}: ${e.tokens || 0} ${unit}${unit === "tokens" ? ` · ${e.active_h || 0} h active` : ""}`}
           >
             <i
               style={{

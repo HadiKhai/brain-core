@@ -12,9 +12,13 @@ npm test
 python3 tests/fixture.py --port 4109
 ```
 
+In another terminal, run `cd ui && npm run test:browser`. If Chromium is missing, run `npx playwright install chromium` first; this is a development-only driver.
+
 Open `http://127.0.0.1:4109/?k=demo` for synthetic data, or `/snapshot` for a saved snapshot. Fixture scenarios include `?k=long`, `empty`, `partial`, `error`, and `loading`; no key demonstrates the permission state. No real brain is read. The ordinary Python CLI can also run against an isolated temporary HOME.
 
-Evaluate `tests/ui-checks.js` (from the repository root) in the fixture browser to verify navigation, controls, view parity, filters, paging, command generation, escaping and shell geometry. Run it at desktop and narrow widths. The Python scenario suite verifies serving, key protection, live changes, static asset containment and the unchanged JSON contract.
+Evaluate `tests/ui-checks.js` (from the repository root) in the fixture browser to verify navigation, controls, view parity, filters, paging, command generation, escaping and shell geometry. Run it at desktop and narrow widths. `tests/ui-fitness.js` measures contrast, field labels, font size and geometry in each rendered view. The Playwright tests add actual touch emulation, keyboard navigation, snapshots and state/error checks. Screenshots and traces are disabled in that runner; the T3 browser supplies the screenshot tour.
+
+The Python scenario suite verifies serving, key protection, live changes, static asset containment and the unchanged JSON contract.
 
 The official shadcn CLI initialized Base UI / nova with Tailwind v4. Components under `src/components/ui/` are CLI-generated. Add components through that CLI; compose them in the page files. `shared.tsx` contains product layout compositions, not replacement primitives. One inset content area scrolls; the import action dock is a sibling footer. The bounded node sheet and mobile navigation sheet have their own scroll areas while modal.
 

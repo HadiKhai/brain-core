@@ -102,7 +102,7 @@ if __name__ == "__main__":
                 if params.get('inbox')==['second']:state['inbox'].append({**state['inbox'][0],'id':'synthetic-question-second'})
                 if params.get('workspace')==['other']:state['brain']['name']='other-demo'
                 mock="window.__notifications=[];window.Notification=class{static permission='granted';static async requestPermission(){return 'granted'}constructor(title,options){window.__notifications.push({title,options})}};" if params.get('notify')==['granted'] else ''
-                injected='<script>'+mock+'window.__STATE__='+json.dumps(state).replace('<','\\u003c')+'</script>' 
+                injected='<script>'+mock+'window.__STATE__='+json.dumps(state).replace('<','\\u003c')+'</script>'
                 page=page.replace('</head>',injected+'</head>').encode()
                 self.send_response(200);self.send_header('Content-Type','text/html');self.send_header('Content-Length',str(len(page)));self.end_headers();self.wfile.write(page);return
             if parsed.path in ('/api/state','/api/events'):
