@@ -65,6 +65,8 @@
   }
   for (const body of document.querySelectorAll('.section-body')) {
     if (!rendered(body)) continue;
+    for (const count of body.querySelectorAll(':scope > .table-footer > span'))
+      near(count.getBoundingClientRect().left, body.getBoundingClientRect().left + 20, 'section footer count inset');
     for (const bare of body.querySelectorAll(':scope > .text-preview,:scope > p,:scope > .readable'))
       alignment.failures.push({label:'section content has no padded row', text:bare.textContent.slice(0,40)});
     for (const header of body.querySelectorAll(':scope > .disclosure > .disclosure-button')) {

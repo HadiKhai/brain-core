@@ -2173,3 +2173,4 @@ svg {
 .attention-split > .page-section > .section-body { flex: 1; }
 
 .section-content > .spend-summary { padding: 0; }
+.section-body > .table-footer { padding-inline: var(--section-inset); }
