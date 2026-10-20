@@ -1553,6 +1553,26 @@ class UnifiedHandbacks(Scenario):
                 self.assertEqual(len(calls.read_text().splitlines()), count)
                 (r / "nodes/a/inbox.md").write_text("")
 
+    def test_repeated_blocked_handback_same_report_wakes_again(self):
+        r, home, wt = self.job()
+        module = importlib.machinery.SourceFileLoader("brain_blocked_episode", str(CORE / "bin/brain")).load_module()
+        inst = module.Instance(r)
+        calls = self.tmp / "calls"
+        inst.local_of("root")["wake"] = "echo called >> " + shlex_quote(str(calls))
+        inst.save_local()
+        args = argparse.Namespace(id="a", branch="job", state="blocked", lessons="none: fixture",
+                                  report="report.md", reviews=None, need_human=None)
+        directory = module.wake_directory(inst, inst.node("root"))
+        with mock.patch.dict(os.environ, self.env, clear=True), \
+                mock.patch.object(module, "load", return_value=inst), \
+                mock.patch.object(module, "wake_start"), contextlib.redirect_stdout(io.StringIO()):
+            for count in (1, 2):
+                module.cmd_handback(args)
+                if count == 2:
+                    (directory / "last").write_text(str(time.time() - 121))
+                module.wake_drain(inst, inst.node("root"), once=True)
+                self.assertEqual(len(calls.read_text().splitlines()), count)
+
     def test_question_handback_preserves_a_concurrent_runtime_inbox_append(self):
         r, home, wt = self.job()
         loader = importlib.machinery.SourceFileLoader("brain_handback_append", str(CORE / "bin/brain"))

@@ -7218,7 +7218,7 @@ def cmd_handback(a):
     if question_created:
         request_wake(inst, n, "handback:" + os.urandom(16).hex())
     elif a.state == "blocked" and not need:
-        request_wake(inst, n, "handback:" + digest([job_key(row), a.state, data.get("report", "")]))
+        request_wake(inst, n, "handback:" + os.urandom(16).hex())
     try:
         current = open_job(read_jobs(n) or [], a.branch)
         if current:
