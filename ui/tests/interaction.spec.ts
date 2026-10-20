@@ -277,7 +277,8 @@ test("job state separates its kind from the clamped readable description", async
     const description = row.locator(".flight-description");
     await expect(description).toContainText("complete narrow-screen navigation");
     expect(await description.evaluate(e => e.clientHeight <= 2 * parseFloat(getComputedStyle(e).lineHeight) + 1)).toBe(true);
-    await description.focus();
+    await page.keyboard.press("Tab");
+    await description.locator("..").focus();
     await expect(page.locator('[data-slot="tooltip-content"]')).toContainText("preserving the project context");
     await page.keyboard.press("Escape");
   }
@@ -296,20 +297,20 @@ for (const [engine, browserType] of Object.entries({ chromium, webkit })) {
         await expect(dialog).toBeVisible();
         await expect(dialog.getByRole("button", { name: "Close", exact: true })).toBeFocused();
         expect(await page.locator('[data-slot="sheet-overlay"]').evaluate(e => getComputedStyle(e).backdropFilter)).toBe("none");
-        await expect(page.locator('[data-slot="sidebar"]')).toHaveCount(1);
+        await expect(page.locator('[data-slot="sidebar"]')).toHaveCount(width >= 768 ? 1 : 0);
         await expect(dialog.locator("dt")).toHaveText(["Owners", "Labels", "Updated", "Home"]);
         const link = dialog.getByRole("link", { name: "Open coordinator" });
         expect((await link.boundingBox())!.width).toBeLessThan(160);
+        await expect.poll(() => dialog.evaluate(e => getComputedStyle(e).opacity)).toBe("1");
         for (let i = 0; i < 6; i++) {
           await page.keyboard.press("Tab");
-          expect(await dialog.evaluate(e => e.contains(document.activeElement))).toBe(true);
+          await expect.poll(() => dialog.evaluate(e => e.contains(document.activeElement))).toBe(true);
         }
         const dots = await page.locator('.node-sheet .status').evaluateAll(es => es.map(e => {
           const a=e.getBoundingClientRect(), b=e.querySelector('.status-dot')!.getBoundingClientRect();
           return Math.abs((a.top+a.bottom)/2-(b.top+b.bottom)/2);
         }));
         expect(dots.every(d => d < 1)).toBe(true);
-        await page.screenshot({ path: `/Users/hadikhai/WebstormProjects/brain-core-work/reports/ui-redesign/tour/detail-${engine}-${width}-${theme}.png` });
         await page.keyboard.press("Escape");
         await expect(dialog).not.toBeVisible();
         const axis = page.locator('.heat-axis').first();

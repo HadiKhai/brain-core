@@ -129,7 +129,7 @@
   check(
     document
       .querySelector(".node-sheet")
-      .textContent.includes("Owners: Morgan"),
+      .querySelector(".detail-facts dd").textContent.includes("Morgan"),
     "node detail retains ownership",
   );
   check(location.hash.includes("node=field-guide"), "node details deep link");

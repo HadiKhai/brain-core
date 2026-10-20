@@ -310,7 +310,13 @@ export function Overview({
                 </div>
                 <div>
                   <Status>{jobState(j.state).kind}</Status>
-                  {jobState(j.state).description && <Tip text={j.state}><p className="flight-description"><Text>{jobState(j.state).description}</Text></p></Tip>}
+                  {jobState(j.state).description && (
+                    <Tip text={j.state}>
+                      <span className="flight-description">
+                        <Text>{jobState(j.state).description}</Text>
+                      </span>
+                    </Tip>
+                  )}
                   {l && (
                     <small>
                       {Number(l.age_h || 0).toFixed(1)} h ·{" "}
@@ -420,7 +426,10 @@ export function Overview({
                     </Tip>
                   ))}
                 </div>
-                <div className="heat-axis"><span>{counts.length} h ago · read left to right, top to bottom</span><span>Now</span></div>
+                <div className="heat-axis">
+                  <span>{counts.length} h ago · read left to right, top to bottom</span>
+                  <span>Now</span>
+                </div>
               </div>
             ))
           ) : (

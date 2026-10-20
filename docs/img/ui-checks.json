@@ -1,6 +1,6 @@
 {
   "fixture": "synthetic-only",
-  "python_scenarios": 305,
+  "python_scenarios": 306,
   "browser_assertions": 60,
   "viewports": [
     [
@@ -20,7 +20,11 @@
       640
     ]
   ],
-  "ui_unit_and_license_tests": 13,
-  "playwright_scenarios": 8,
-  "independent_review": "pending coordinator review"
+  "ui_unit_and_license_tests": 14,
+  "playwright_scenarios": 10,
+  "independent_review": "Claude round 1 completed; requested fixes applied",
+  "detail_engines": [
+    "Chromium",
+    "WebKit"
+  ]
 }
