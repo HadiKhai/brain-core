@@ -6929,6 +6929,64 @@ class Spend(Scenario):
         live = next(n for n in state["nodes"] if n["id"] == "app")["jobs"]["open"][0]["usage"]
         self.assertEqual((live["processed"], live["models"]), (10500, {"claude:opus": 10500}))
 
+    def test_model_names_are_ids_and_never_hold_a_never_name_word(self):
+        (self.node / "never-name.txt").write_text("Zebracorp\n")
+        s = self.cl(self.wt, "12121212-model", "Fix.", [("said", 1, "z1", (10, 0, 0, 1))])
+        text = s.read_text().replace("claude-opus-5-5", "zebracorp-tuned")
+        s.write_text(text)
+        self.cl(self.wt, "13131313-odd", "Fix.", [("said", 2, "z2", (20, 0, 0, 2))])
+        odd = self.folder(self.wt) / "13131313-odd.jsonl"
+        odd.write_text(odd.read_text().replace("claude-opus-5-5", "a model with words"))
+        state = json.loads(self.b(self.r, "ui", "--json"))
+        live = next(n for n in state["nodes"] if n["id"] == "app")["jobs"]["open"][0]["usage"]
+        self.assertEqual(sorted(live["models"]), ["claude:other", "claude:unknown"])
+        for out in (json.dumps(state), self.b(self.r, "spend", "--machine", "--json"), self.b(self.r, "jobs", "app")):
+            self.assertNotIn("zebracorp", out.lower())
+        self.b(self.r, "wt", "rm", "app", "job", "--force", "--cause", "measured")
+        self.assertNotIn("zebracorp", self.row()["Models"].lower())
+        for f in (self.r / ".brain/spend").rglob("*.json"):
+            self.assertNotIn("zebracorp", f.read_text().lower())
+        usage = self.tmp / "usage.json"
+        usage.write_text(json.dumps({"fresh": 1, "models": {"zebracorp-x": 1}}))
+        self.assertIn("never-name", self.b(self.r, "jobs", "app", "--branch", "job", "--usage-file", str(usage), ok=False))
+
+    def test_a_fork_copied_earlier_in_its_first_minute_counts_once(self):
+        base = datetime.datetime.fromtimestamp(self.t0 + 600, datetime.timezone.utc).replace(second=0)
+        stamp = lambda sec: (base + datetime.timedelta(seconds=sec)).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+        rows = [{"timestamp": stamp(40), "type": "session_meta", "payload": {
+            "id": "c0000060-fork", "cwd": str(self.wt), "forked_from_id": "c0000000-parent"}},
+                {"timestamp": stamp(10), "type": "response_item", "payload": {"type": "function_call", "name": "x"}},
+                {"timestamp": stamp(10), "type": "compacted", "payload": {"message": "x"}},
+                {"timestamp": stamp(10), "type": "event_msg", "payload": self.counter((1000, 0, 100, 0), (1000, 0, 100, 0))[1]},
+                {"timestamp": stamp(50), "type": "response_item", "payload": {"type": "function_call", "name": "y"}},
+                {"timestamp": stamp(50), "type": "compacted", "payload": {"message": "y"}},
+                {"timestamp": stamp(55), "type": "event_msg", "payload": self.counter((1030, 0, 103, 0), (30, 0, 3, 0))[1]}]
+        when = datetime.datetime.fromtimestamp(self.t0, datetime.timezone.utc).astimezone()
+        self.jsonl(self.codex / "sessions" / when.strftime("%Y/%m/%d") / "rollout-y-c0000060-fork.jsonl", rows)
+        self.b(self.r, "wt", "rm", "app", "job", "--force", "--cause", "measured")
+        row = self.row()
+        self.assertEqual((row["Fresh in"], row["Output"], row["Tool calls"], row["Compactions"]), ("30", "3", "1", "1"))
+
+    def test_a_cut_claude_folder_name_only_counts_sessions_that_ran_there(self):
+        from importlib.machinery import SourceFileLoader
+        deep = self.tmp / ("x" * 120) / ("y" * 120)
+        mine, other = deep / "job-wt", deep / "job-other"
+        for d in (mine, other):
+            d.mkdir(parents=True)
+        name = re.sub(r"[^A-Za-z0-9]", "-", str(mine))
+        self.assertGreater(len(name), 200)
+        self.cl(mine, "14141414-mine", "Fix.", [("said", 1, "m1", (10, 0, 0, 1))],
+                path=self.claude / "projects" / (name[:200] + "-1a2b") / "14141414-mine.jsonl")
+        self.cl(other, "15151515-other", "Other.", [("said", 1, "o1", (9000, 0, 0, 900))],
+                path=self.claude / "projects" / (name[:200] + "-3c4d") / "15151515-other.jsonl")
+        m = SourceFileLoader("brain_spend_cut", str(CORE / "bin/brain")).load_module()
+        with mock.patch.dict(os.environ, self.env, clear=True):
+            inst = m.Instance(self.r)
+            n = inst.node("app")
+            row = m.open_job(m.read_jobs(n), "job")
+            ids = sorted(a["id"] for a in m.job_sessions(inst, n, row, worktree=str(mine)))
+        self.assertEqual(ids, ["14141414-mine"])
+
     def test_host_numbers_win_over_transcripts(self):
         self.cl(self.wt, "99999999-wt", "Fix.", [("said", 1, "z1", (5, 5, 5, 5))])
         usage = self.tmp / "usage.json"
