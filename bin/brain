@@ -7939,7 +7939,14 @@ def wake_drain(inst, n, once=False):
         while time.monotonic() < deadline:
             if outward_links(inst.root):
                 return
-            pending = sorted(directory.glob("*.pending"))
+            pending = []
+            for path in sorted(directory.glob("*.pending")):
+                # A requester may have checked .sent just before another worker published it.
+                # Recheck under the delivery lock so this race cannot send the same reason twice.
+                if path.with_suffix(".sent").exists():
+                    path.unlink(missing_ok=True)
+                else:
+                    pending.append(path)
             if not pending:
                 return
             last = directory / "last"

@@ -2203,6 +2203,18 @@ class QuestionWake(Scenario):
         node_text = (self.r / "node.md").read_text() + (self.r / "nodes/a/node.md").read_text()
         self.assertNotIn(self.command, node_text)
 
+    def test_delivery_racing_with_pending_creation_is_deduplicated(self):
+        original = self.module.os.open
+        def publish_delivery(path, *args, **kwargs):
+            if str(path).endswith(".pending"):
+                Path(path).with_suffix(".sent").write_text("delivered\n")
+            return original(path, *args, **kwargs)
+        with mock.patch.object(self.module.os, "open", side_effect=publish_delivery):
+            self.enqueue("racing reason")
+        self.drain()
+        self.assertFalse(self.calls.exists())
+        self.assertFalse(list(self.module.wake_directory(self.inst, self.n).glob("*.pending")))
+
     def test_parallel_requests_have_one_delivery(self):
         with mock.patch.object(self.module, "wake_start"):
             threads = [threading.Thread(target=self.module.request_wake,
