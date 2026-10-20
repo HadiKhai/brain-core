@@ -17,7 +17,9 @@ not in `node.md`: read them with `core/bin/brain show <id>` (axiom 23).
 
 ## Start of every session
 
-Read `node.md`, `brief.md`, `status.md` and `inbox.md`. If the node's home is external, other
+Read `node.md`, `brief.md`, `status.md` and `inbox.md`. `core/bin/brain due <id>` lists core
+changes you haven't read: read them with `core/bin/brain changes <id>` (they can change these
+rules and add commands), then mark them read with `--seen`. If the node's home is external, other
 owners may have worked there since: run `core/bin/brain sync <id>` and fold what matters into
 `status.md` (the node-sync skill).
 
@@ -41,7 +43,10 @@ moment.
   home's files, commit messages and branch names, and name the file, never the word.
 - **Something done, started, blocked or changed** goes in `status.md`. Anything waiting on the
   operator goes under **Blocked / needs the operator**, one bullet each: that's what `brain`
-  shows the operator as "needs attention".
+  shows the operator as "needs attention". Each says what it waits on and what clears it:
+  `- <what> — waiting on <who or what>; clears when <condition>` (`brain check` warns otherwise).
+  Keep apart what you wait on: a running task, a human decision, missing evidence, a failure
+  shown, or something not yet understood.
 - **Work in flight** (a worker, a branch, a pull request) is a row under **Active work**:
   `| <branch> | <thread> | <PR or -> | <state> |`. Keep the state current; mark it `merged` or
   `abandoned` when it ends.
@@ -154,6 +159,11 @@ leave `brain usage --watch` to the machine service.
 
 A worker sees only its brief and the rules of the node it runs in. Give it the task,
 everything it needs to know, the constraints, and who it reports to.
+
+- For a job, write its contract once (the `home-job` skill, step 2): what it is for, what the
+  worker may do without asking, where it must stop, what needs consent, what done means. Then
+  don't turn routine, reversible steps inside it into approval exchanges, and don't send
+  acknowledgements: report starts, results and decisions.
 
 - Start from `core/bin/brain brief <id> [--branch <b>] --task-file <f>`. It adds where the job
   runs, its ports, the node's limits, the words it must never write (as a `brain guard` step,

@@ -7,6 +7,7 @@ Judgment work (what goes in a brief, how to split state) lives in core/skills, n
 """
 import argparse
 import datetime
+import fnmatch
 import hashlib
 import json
 import os
@@ -1806,6 +1807,12 @@ def cmd_set(a):
             inst.local["fallback"] = order
             fm.pop(k, None)
             print("  fallback: this machine (.brain/local.json)")
+        elif k == "auto_upgrade":
+            if a.id != "root" or v not in ("on", "off"):
+                die("auto_upgrade is per machine: brain set root auto_upgrade=on|off")
+            inst.local["auto_upgrade"] = v
+            fm.pop(k, None)
+            print(f"  auto_upgrade: {v} on this machine (.brain/local.json): upgrades core when no job is open")
         elif k in LOCAL_KEYS or k in ("synced_at", "workbench"):
             inst.local_of(a.id)[k] = str(Path(v).expanduser().resolve()) if k == "workbench" else v
             fm.pop(k, None)
@@ -2982,7 +2989,8 @@ def cmd_hire(a):
         out += ["This work happens in a project with its own owners. Leave nothing in it that names "
                 "where this brief came from (axiom 6). Ask before pushing, publishing or anything "
                 "irreversible (axiom 24).", ""]
-    out += ["## Task", "", a.task.strip(), "", role_body.strip(), ""] + limits_lines(target)
+    out += ["## Task", "", a.task.strip(), ""] + contract_lines(inst, target, a.branch) + \
+        [role_body.strip(), ""] + limits_lines(target)
     if lessons:
         out += ["## Lessons from earlier jobs", ""] + [f"- {l['text']}" for l in lessons] + [""]
     if wanted:
@@ -4907,7 +4915,7 @@ def cmd_brief(a):
                     f"packet in `{tilde(ready_path(inst, n, a.branch).parent)}/`; "
                     "it may be missing or stale. Recheck it after finishing the remaining work.",
                     "Job ledger state: " + json.dumps(row, ensure_ascii=False), ""]
-    out += ["## Task", "", task.strip(), ""]
+    out += ["## Task", "", task.strip(), ""] + contract_lines(inst, n, a.branch)
     out += knowledge_lines(inst, n, task) + node_knowledge_lines(n) + recall_hint(n)
     out += limits_lines(n)
     if never_terms(n):
@@ -4962,7 +4970,8 @@ def ready_preflight(n, branch):
         path = w["path"]
         if git("symbolic-ref", "--short", "HEAD", cwd=path).stdout.strip() != branch:
             reasons.append("job worktree is on a different branch")
-        status = git("status", "--porcelain", cwd=path)
+        status = git("-c", "diff.ignoreSubmodules=none", "-c", "status.showUntrackedFiles=all", "status", "--porcelain",
+                     "--ignore-submodules=none", "--untracked-files=all", cwd=path)
         if status.returncode or status.stdout.strip():
             reasons.append("job worktree is dirty or unreadable")
     return reasons, head, main
@@ -5012,6 +5021,11 @@ def ready_state(inst, n, branch):
             reasons.append("branch head changed; return to worker")
         if packet.get("main") != main:
             reasons.append("main moved; return to worker to rebase and verify again")
+        w = n["local"].get("worktrees", {}).get(branch)
+        if isinstance(w, dict) and w.get("path") and Path(w["path"]).exists():
+            if packet.get("inputs") != verify_inputs(n, w):  # every reader of readiness comes through here
+                reasons.append("what verify reads besides tracked files, or the job's ports, changed since it ran "
+                               "(or the packet predates that check); hand back again")
         verify = n["fm"].get("verify", "").strip()
         if not verify or packet.get("verify_command") != verify or type(packet.get("verify_result")) is not int \
                 or packet["verify_result"] != 0:
@@ -5024,7 +5038,54 @@ def ready_state(inst, n, branch):
     return {"ready": not reasons, "reasons": reasons, "packet": packet}
 
 
-def record_ready(inst, n, branch, reviews):
+VERIFY_INPUTS = ".env,.env.*"  # files git doesn't track that verify reads, unless the node names its own
+
+
+def verify_inputs(n, w):
+    """A digest of what verify reads besides tracked files: the worktree's files matching the node's
+    verify_inputs globs (env files by default), and the ports it runs on. Evidence holds only while it is unchanged."""
+    root = Path(w["path"])
+    found = {}
+    for pat in lst(n["fm"].get("verify_inputs")) or lst(VERIFY_INPUTS):
+        for f in root.glob(pat):
+            rel = f.relative_to(root)
+            if ".git" in rel.parts or not f.is_file():
+                continue
+            try:
+                found[str(rel)] = hashlib.sha256(f.read_bytes()).hexdigest()
+            except OSError:
+                found[str(rel)] = "unreadable"
+    return digest([sorted(found.items()), w.get("port"), w.get("ports", 1)])
+
+
+def verify_reuse(n, branch, previous, head, main, verify, cwd, inputs=None):
+    """The earlier green packet, if it still proves this commit: same node, branch, command and local main, and
+    nothing changed since the commit it verified except paths the node declares can't affect verify
+    (verify_skip globs, e.g. docs/*,*.md). (verified head, changed paths) or None."""
+    p = previous if isinstance(previous, dict) else {}
+    sha = lambda v: isinstance(v, str) and re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", v)
+    if not (p.get("version") == 1 and p.get("node") == n["id"] and p.get("branch") == branch
+            and p.get("verify_command") == verify and type(p.get("verify_result")) is int and p["verify_result"] == 0
+            and p.get("main") == main and type(p.get("review_rounds")) is int and p["review_rounds"] >= 1
+            and isinstance(p.get("checked_at"), str) and sha(p.get("head")) and p.get("inputs") == inputs):
+        return None  # only a complete green packet, for the same inputs, can stand for a new run
+    base = p.get("verified_head") or p["head"]
+    if not sha(base) or (base != p["head"] and git("merge-base", "--is-ancestor", base, p["head"], cwd=cwd).returncode):
+        return None  # the verified commit must be the packet's own commit or one before it
+    if base == head:
+        return base, []
+    diff = git("-c", "diff.ignoreSubmodules=none", "diff", "--name-only", "--no-renames", "--ignore-submodules=none",
+               base, head, cwd=cwd)
+    if diff.returncode:
+        return None
+    changed = [x for x in diff.stdout.splitlines() if x]
+    skip = lst(n["fm"].get("verify_skip"))
+    if not skip or not all(any(fnmatch.fnmatchcase(x, pat) for pat in skip) for x in changed):
+        return None
+    return base, changed
+
+
+def record_ready(inst, n, branch, reviews, previous=None, reverify=False):
     reasons, head, main = ready_preflight(n, branch)
     verify = n["fm"].get("verify", "").strip()
     if not verify:
@@ -5034,6 +5095,16 @@ def record_ready(inst, n, branch, reviews):
     if reasons:
         return None, reasons
     w = n["local"]["worktrees"][branch]
+    inputs = verify_inputs(n, w)
+    reuse = None if reverify else verify_reuse(n, branch, previous, head, main, verify, w["path"], inputs)
+    if reuse:
+        base, changed = reuse
+        print(f"verify: reused the green run of {base[:12]}"
+              + (f": since then only {len(changed)} file(s) under verify_skip changed" if changed else
+                 ": nothing changed since") + " (--reverify runs it again)")
+        return {"version": 1, "node": n["id"], "branch": branch, "head": head, "main": main,
+                "verify_command": verify, "verify_result": 0, "verified_head": base, "verify_reused": True,
+                "inputs": inputs, "review_rounds": reviews, "checked_at": stamp(inst)}, []
     env = {**os.environ, "MAIN": str(n["home_path"]), "WORKTREE": w["path"], "BRANCH": branch,
            "NODE": n["id"], "PORT": str(w["port"]), "PORTS": str(w.get("ports", 1)),
            "PORT_LAST": str(w["port"] + w.get("ports", 1) - 1)}
@@ -5043,13 +5114,22 @@ def record_ready(inst, n, branch, reviews):
     if result.returncode:
         print(f"verify failed (exit {result.returncode}); output tail:")
         print(redact("\n".join(result.stdout.splitlines()[-15:]), never_terms(n)))
+    after, head_after, main_after = ready_preflight(n, branch)
+    if not after and verify_inputs(n, w) != inputs:
+        after = ["files verify reads besides tracked ones (verify_inputs) changed"]
+    if after or head_after != head or main_after != main:
+        # What passed isn't the commit on main that was asked about: never record it as evidence.
+        return None, ["verify changed the job's branch, local main or worktree (" + "; ".join(after or ["refs moved"])
+                      + "); commit or discard what it changed, then hand back again"]
     packet = {"version": 1, "node": n["id"], "branch": branch, "head": head, "main": main,
-              "verify_command": verify, "verify_result": result.returncode,
-              "review_rounds": reviews, "checked_at": stamp(inst)}
+              "verify_command": verify, "verify_result": result.returncode, "verified_head": head,
+              "inputs": inputs, "review_rounds": reviews, "checked_at": stamp(inst)}
     return packet, []
 
 
 def cmd_ready(a):
+    if a.reverify and not a.record:
+        die("--reverify forces a verify run: it goes with --record --reviews N")
     if a.record:  # compatibility alias: one writer, one record, same verification
         a.state = "done"
         return cmd_handback(a)
@@ -5105,6 +5185,15 @@ def cmd_review(a):
         out += ["```", diffstat, "```", ""]
     if a.focus:
         out += ["## Focus", "", a.focus.strip(), ""]
+    row = open_job(read_jobs(n) or [], a.branch)
+    rounds = int(row.get("Reviews") or 0) if row and str(row.get("Reviews") or "0").isdigit() else 0
+    if rounds:
+        out += ["## Earlier rounds", "", f"This is review round {rounds + 1} of this job. Earlier rounds found problems "
+                "that the builder fixed. Check that each fix holds, then look for the same kind of problem everywhere "
+                "in the change, not only where it was found, and report each kind once with all its places."
+                + (f" The review skill caps reviews at {REVIEW_CAP} rounds: report blockers only, and say for each "
+                   "whether it is a class the builder should audit as a whole." if rounds + 1 >= REVIEW_CAP else ""), ""]
+    out += contract_lines(inst, n, a.branch, who="reviewer")
     out += knowledge_lines(inst, n, " ".join(filter(None, [a.branch, a.focus, diffstat])), "reviewer") + \
         node_knowledge_lines(n) + recall_hint(n)
     out += limits_lines(n)
@@ -5515,8 +5604,15 @@ def cmd_handback(a):
     if a.state == "done" and not study and previous.get("state", "done") == "done":
         packet = read_ready_packet(inst, n, a.branch, row)
         reasons = previous.get("ready_reasons", [])
+    if getattr(a, "reverify", False) and not (a.state == "done" and not study and
+                                              (a.reviews is not None or getattr(a, "record", False))):
+        die("--reverify forces a verify run: it goes with --state done --reviews N")
+    fresh = reused = 0
     if a.state == "done" and not study and (a.reviews is not None or getattr(a, "record", False)):
-        packet, reasons = record_ready(inst, n, a.branch, a.reviews)
+        packet, reasons = record_ready(inst, n, a.branch, a.reviews, previous.get("ready"),
+                                       getattr(a, "reverify", False))
+        if packet:
+            reused, fresh = (1, 0) if packet.get("verify_reused") else (0, 1)
     # Verification released the global lock. Re-read under it before publishing so a
     # concurrently closed/restarted job never receives this worker's old result.
     with brain_lock(inst):
@@ -5526,9 +5622,16 @@ def cmd_handback(a):
         if not current or job_key(current) != job_key(row):
             die("job changed during verification; hand back to its coordinator")
         f = handback_file(n, row)
+        count = lambda k: previous.get(k) if type(previous.get(k)) is int else 0
         data = {"version": 2, "job": row["Job"], "started": row["Started"], "state": a.state,
                 "at": inst.now(), "report": tilde(a.report) if a.report is not None else previous.get("report", ""),
-                "lessons": lessons, "ready": packet, "ready_reasons": reasons}
+                "lessons": lessons, "ready": packet, "ready_reasons": reasons,
+                "verify_runs": count("verify_runs") + fresh, "verify_reused": count("verify_reused") + reused}
+        first = previous.get("first_ready") if isinstance(previous.get("first_ready"), str) else None
+        if not first and packet and packet.get("verify_result") == 0 and not reasons:
+            first = inst.now()
+        if first:
+            data["first_ready"] = first
         if study:
             data.update(ready_required=False, review_rounds=a.reviews)
         f.parent.mkdir(exist_ok=True)
@@ -5597,9 +5700,37 @@ def job_ended(inst, n, branch, outcome, commits="", cause=""):
 
 def cleanup_handback(n, row):
     if row.get("Ended") and (row.get("Outcome") != "merged" or row.get("Lessons")):
-        record = handback_file(n, row)
-        record.unlink(missing_ok=True)
-        touch(record)
+        for record in (handback_file(n, row), contract_file(n, row)):
+            record.unlink(missing_ok=True)
+            touch(record)
+
+
+CONTRACT_FIELDS = ("Outcome", "Authorized", "Discretion", "Stop when", "Needs consent", "Done means")
+
+
+def contract_file(n, row):
+    """The coordinator's contract for one job: what the worker may do without asking (one writer: the coordinator)."""
+    return n["dir"] / "job-contracts" / (job_key(row) + ".md")
+
+
+def contract_problems(text):
+    """Fields missing or empty in a contract: each `## <field>` needs at least one line under it."""
+    sections = {k.lower(): v for k, v in md_sections(text).items()}
+    return [f for f in CONTRACT_FIELDS if not sections.get(f.lower(), "").strip()]
+
+
+def contract_lines(inst, n, branch, who="worker"):
+    row = open_job(read_jobs(n) or [], branch) if branch else None
+    f = contract_file(n, row) if row else None
+    if not f or not f.is_file():
+        return []
+    text = redact(f.read_text().strip(), never_terms(n))
+    if who == "reviewer":
+        return ["## The job's contract", "", "Check the change against its outcome and what done means:", "", text, ""]
+    return ["## Contract for this job", "", text, "",
+            "Within this contract, act: don't ask for what it authorizes, and use your discretion where it gives it. "
+            "Report starts, results and decisions, not acknowledgements. Hand back (question or blocked) only on a "
+            "stop condition, or for something it says needs consent.", ""]
 
 
 def handback_detail(n, row):
@@ -5722,6 +5853,26 @@ def cmd_jobs(a):
     inst = load()
     if a.branch and not a.id:
         die("--branch needs a node: brain jobs <node> --branch <branch>")
+    if a.contract_file:
+        if not a.id or not a.branch:
+            die("a contract needs a node and --branch: brain jobs <node> --branch <branch> --contract-file <file>")
+        n = inst.node(a.id)
+        row = open_job(read_jobs(n) or [], a.branch)
+        if not row:
+            die(redact(f"no open job for {a.branch} in {n['id']}", never_terms(n)))
+        text = Path(a.contract_file).read_text().strip() + "\n"
+        missing = contract_problems(text)
+        if missing:
+            die("the contract needs a line under each of: " + ", ".join(f"## {f}" for f in missing))
+        no_terms_in(n, text, "the contract")
+        if SECRET_LINE.search(text):
+            die("unsafe contract text")
+        f = contract_file(n, row)
+        f.parent.mkdir(exist_ok=True)
+        atomic_write(f, text)
+        inst.commit([f], f"{n['id']}: contract for {a.branch}")
+        print(redact(f"{n['id']}: contract for {a.branch} recorded; briefs for this job carry it", never_terms(n)))
+        return
     if a.start or a.close or a.lessons is not None or a.switch is not None:
         if not a.id or not a.branch:
             die("job updates need a node and --branch")
@@ -5776,8 +5927,10 @@ def cmd_jobs(a):
                  if j["median_hours"] is not None else ""))
         for r in j["open"]:
             late = j["median_hours"] is not None and r["age_h"] > 2 * j["median_hours"]
-            print(f"  open  {r['Job']:<28} {r['age_h']:>5} h  {r['Reviews'] or 0} review(s)"
-                  + ("   (over twice the median)" if late else ""))
+            print(redact(f"  open  {r['Job']:<28} {r['age_h']:>5} h  {r['Reviews'] or 0} review(s)"
+                         + ("   (over twice the median)" if late else ""), never_terms(n)))
+            for line in job_advice(inst, n, r):
+                print(redact("        " + line, never_terms(n)))
         for c in j["causes"]:
             print(f"  cause {c}")
         for line in forecast_lines(read_jobs(n) or [], a.branch) + job_budget_lines(inst, n, a.branch):
@@ -5785,6 +5938,29 @@ def cmd_jobs(a):
         for r in j["rows"]:
             if a.branch and r["Job"] == a.branch:
                 print(redact(json.dumps(r, ensure_ascii=False), never_terms(n)))
+
+
+REVIEW_CAP = 3  # rounds, as the review skill says
+
+
+def job_advice(inst, n, row):
+    """What the records say about an open job's process: advice from observed events, never a gate."""
+    out, hb = [], read_handback(n, row) or {}
+    reviews = int(row.get("Reviews") or 0) if str(row.get("Reviews") or "0").isdigit() else 0
+    if reviews > REVIEW_CAP:
+        out.append(f"advice: {reviews} review rounds, over the cap of {REVIEW_CAP}: audit each finding's whole class "
+                   "before another round")
+    runs, reused = (hb.get(k) if type(hb.get(k)) is int else 0 for k in ("verify_runs", "verify_reused"))
+    if runs or reused:
+        out.append(f"verify: {runs} run(s), {reused} reused" + (
+            "; several full runs: set verify_skip for paths that can't affect it, or batch the fixes" if runs > 2 else ""))
+    started, first = inst.parse_time(row.get("Started", "")), inst.parse_time(hb.get("first_ready") or "")
+    if started and first:
+        out.append(f"first ready after {round(elapsed(started, first) / 3600, 1)} h")
+    elif started and not contract_file(n, row).is_file():
+        out.append("no contract: brain jobs <node> --branch <branch> --contract-file <file> says what the worker may do "
+                   "without asking")
+    return out
 
 
 def job_commits(home, w, branch):
@@ -6166,10 +6342,34 @@ def due_items(inst, n, evidence=None, include_stale=True):
     return items
 
 
+def changes_due(inst, n):
+    """Unread core changes, for a node whose coordinator runs here (the root always)."""
+    if n["id"] != "root" and not n["local"].get("coordinator"):
+        return []
+    unread = changes_unread(inst, n)
+    if not unread:
+        return []
+    return [{"node": n["id"], "kind": "core-changes", "text": import_text(
+        f"core changed: {len(unread)} unread entr{'y' if len(unread) == 1 else 'ies'} ("
+        + "; ".join(e["id"] for e in unread[:3]) + (" …" if len(unread) > 3 else "")
+        + f"); read them: brain changes {n['id']}, then brain changes {n['id']} --seen", never_terms(n))}]
+
+
 def cmd_due(a):
     inst = load()
     nodes = [inst.node(a.id)] if a.id else inst.nodes()
-    items = [item for n in nodes for item in due_items(inst, n)]
+    root_tick = (a.id or "root") == "root" and not a.quiet
+    if root_tick:
+        core_update(inst)  # refresh the daily answer the inbox reports
+    upgraded = auto_upgrade(inst) if root_tick else None
+    if upgraded:  # the next tick runs the new core
+        kind, text = upgraded.split(": ", 1)
+        if a.json:
+            print(json.dumps([{"node": "root", "kind": kind, "text": text}], indent=2))
+        else:
+            print(f"root: {upgraded}")
+        return
+    items = [item for n in nodes for item in due_items(inst, n) + changes_due(inst, n)]
     if a.quiet:
         sys.exit(1 if items else 0)
     if a.json:
@@ -6301,7 +6501,7 @@ def inbox_items(inst, nodes=None, reporter="root"):
     by_id = {n["id"]: n for n in (nodes if nodes is not None else inst.nodes())}
     out, ids = [], set()
     for nid, kind, text in attention_items(inst, list(by_id.values())):
-        identity = text if kind in ("blocked", "inbox") else kind  # stale day counts aren't new requests
+        identity = text if kind in ("blocked", "inbox", "core-update") else kind  # stale day counts aren't new
         key = digest([nid, kind, " ".join(identity.split())])
         if key in ids:
             continue
@@ -6624,6 +6824,11 @@ def pending_imports(inst, n):
 def attention_items(inst, nodes):
     """[(node id, kind, text)]: what waits on the operator, node by node."""
     out = []
+    if any(n["id"] == "root" for n in nodes) and inst.local.get("auto_upgrade") != "on":
+        update = core_update(inst, check=False)  # the cached answer only: listing needs never wait on a network
+        if update:
+            out.append(("root", "core-update", f"core update available ({update[0][:7]} -> {update[1][:7]}): "
+                        "brain upgrade, or brain set root auto_upgrade=on to upgrade whenever no job is open"))
     for n in nodes:
         if n["archived"]:
             continue
@@ -7608,6 +7813,11 @@ def collect_problems(inst):
         for ref in lst(fm.get("source_nodes")):
             if not resolve_ref(nodes, ref):
                 p(f"{name}: source_nodes names '{ref}', no node, former id or merged node (axiom 19)")
+    for n in nodes:
+        for b in status_section(n, "blocked"):
+            if b.strip().lower().rstrip(".") not in ("none", "nothing") and "clears when" not in b.lower():
+                warnings.append(f"{n['id']}: a Blocked entry doesn't say what clears it: write "
+                                "'<what> — waiting on <who or what>; clears when <condition>'")
     for s in find_specialists(inst):
         if not s["fm"].get("scope"):
             p(f"{s['dir'].relative_to(inst.root)}/role.md: missing scope")
@@ -7756,6 +7966,12 @@ def cmd_upgrade(a):
         return
     print(f"core {old[:7]} -> {new[:7]}")
     print(git("log", "--oneline", f"{old}..{new}", cwd=root / "core").stdout.rstrip(), flush=True)
+    before = {e["id"] for e in changes_entries(git("show", f"{old}:CHANGES.md", cwd=root / "core").stdout)}
+    fresh = [e for e in changes_entries(git("show", f"{new}:CHANGES.md", cwd=root / "core").stdout)
+             if e["id"] not in before]
+    if fresh:
+        print("\nWhat changed for agents (each coordinator sees it in brain due until brain changes <node> --seen):")
+        print("\n".join(f"- {e['id']}" for e in fresh), flush=True)
     newbin = str(root / "core" / "bin" / "brain")
     env = {**os.environ, "BRAIN_ROOT": str(root)}
     inst = Instance(root)
@@ -7764,6 +7980,140 @@ def cmd_upgrade(a):
     subprocess.run([sys.executable, newbin, "link"], env=env)
     subprocess.run([sys.executable, newbin, "check", "--fix"], env=env)
     usage_restart(root)
+
+
+# ---------- what changed in core, for the agents ----------
+
+CHANGES_HEAD = re.compile(r"^## (\d{4}-\d{2}-\d{2}): (.+?)\s*$", re.M)
+CORE_CHECK_EVERY = 86400  # seconds between asks of the core's remote
+
+
+def changes_entries(text):
+    """CHANGES.md as [{id, date, title, body}], newest first; an entry's id is its heading."""
+    found = list(CHANGES_HEAD.finditer(text or ""))
+    return [{"id": f"{m[1]}: {m[2]}", "date": m[1], "title": m[2],
+             "body": text[m.end():found[i + 1].start() if i + 1 < len(found) else len(text)].strip()}
+            for i, m in enumerate(found)]
+
+
+def changes_baseline(inst):
+    """Entry ids this brain's core held before its latest upgrade; None if it never upgraded."""
+    log = git("log", "-1", "--format=%s", "--grep=^Upgrade core ", cwd=inst.root).stdout.strip()
+    m = re.match(r"Upgrade core ([0-9a-f]{7,40}) -> ", log)
+    if not m:
+        return None
+    old = git("show", f"{m[1]}:CHANGES.md", cwd=inst.root / "core")
+    return {e["id"] for e in changes_entries(old.stdout)} if old.returncode == 0 else set()
+
+
+def changes_unread(inst, n):
+    """Entries this node's coordinator hasn't marked read on this machine. Before it ever marked any, what came
+    with the latest upgrade; a brain that never upgraded starts with nothing unread."""
+    f = CORE / "CHANGES.md"
+    entries = changes_entries(f.read_text()) if f.is_file() else []
+    seen = inst.local.get("changes_seen", {}).get(n["id"])
+    if seen is None:
+        base = changes_baseline(inst)
+        seen = [e["id"] for e in entries] if base is None else base
+    return [e for e in entries if e["id"] not in set(seen)]
+
+
+def core_update(inst, check=True):
+    """(local, remote) when the core's remote has a commit this core lacks. Asked at most daily, five seconds at
+    most, from the core's own remote; the answer is cached in .brain/core-remote.json. None when unknown."""
+    core = inst.root / "core"
+    if os.environ.get("BRAIN_NO_UPDATE_CHECK") or not (core / ".git").exists():
+        return None
+    local = git("rev-parse", "HEAD", cwd=core).stdout.strip()
+    cache_file = inst.root / ".brain" / "core-remote.json"
+    try:
+        cache = json.loads(cache_file.read_text())
+    except (OSError, ValueError):
+        cache = {}
+    if check and (not isinstance(cache.get("checked"), (int, float)) or time.time() - cache["checked"] > CORE_CHECK_EVERY):
+        try:
+            r = subprocess.run(["git", "-C", str(core), "ls-remote", "origin", "HEAD"], capture_output=True,
+                               text=True, timeout=5)
+            head = r.stdout.split()[0] if r.returncode == 0 and r.stdout.split() else ""
+        except (subprocess.TimeoutExpired, OSError):
+            head = ""
+        cache = {"checked": time.time(), "head": head}
+        try:
+            cache_file.parent.mkdir(exist_ok=True)
+            atomic_write(cache_file, json.dumps(cache) + "\n")
+        except OSError:
+            pass
+    remote = cache.get("head") if isinstance(cache.get("head"), str) else ""
+    if not re.fullmatch(r"[0-9a-f]{40}", remote or "") or remote == local:
+        return None
+    if git("merge-base", "--is-ancestor", remote, local, cwd=core).returncode == 0:
+        return None  # this core already holds it
+    return local, remote
+
+
+def open_jobs_anywhere(inst):
+    """Why this brain isn't idle: open ledger jobs, ledgers that can't be read, and job worktrees on this machine.
+    What can't be known counts as busy."""
+    out = []
+    for n in inst.nodes():
+        rows = read_jobs(n)
+        if rows is None:
+            out.append((n["id"], "unreadable job ledger"))
+        out += [(n["id"], r["Job"]) for r in rows or [] if not r["Ended"]]
+        out += [(n["id"], f"worktree {b}") for b, w in n["local"].get("worktrees", {}).items()
+                if isinstance(w, dict) and w.get("path") and Path(w["path"]).exists()]
+    return out
+
+
+def auto_upgrade(inst):
+    """With auto_upgrade=on on this machine, upgrade when the core's remote moved and no job is open anywhere: a
+    worker's rules never change under it. Returns a line saying what happened, or None."""
+    if inst.local.get("auto_upgrade") != "on":
+        return None
+    update = core_update(inst)
+    if not update:
+        return None
+    # Idle is checked, and the upgrade runs, under one hold of the instance lock: no job can start in between.
+    # The upgrade is this process's child, so it reuses the lock (BRAIN_LOCK_HELD).
+    with brain_lock(inst):
+        if open_jobs_anywhere(Instance(inst.root)):
+            return None  # retried on a later tick, once the jobs close
+        r = subprocess.run([sys.executable, str(CORE / "bin" / "brain"), "upgrade"], capture_output=True, text=True,
+                           env={**os.environ, "BRAIN_ROOT": str(inst.root), "BRAIN_NO_REEXEC": "1"})
+    first = (r.stdout.strip().splitlines() or [""])[0]
+    if r.returncode:
+        return f"core-upgrade: automatic upgrade failed ({(r.stderr.strip().splitlines() or ['?'])[-1]}); run brain upgrade"
+    return f"core-upgraded: {first}; read what changed: brain changes root"
+
+
+def cmd_changes(a):
+    """What changed in core for this node's coordinator: unread entries, or all with --all; --seen marks them read."""
+    inst = load()
+    n = inst.node(a.id or "root")
+    f = CORE / "CHANGES.md"
+    entries = changes_entries(f.read_text()) if f.is_file() else []
+    if a.seen:
+        inst.local.setdefault("changes_seen", {})[n["id"]] = [e["id"] for e in entries]
+        inst.save_local()
+        print(f"{n['id']}: {len(entries)} change entr{'y' if len(entries) == 1 else 'ies'} marked read on this machine")
+        return
+    show = entries if a.all else changes_unread(inst, n)
+    terms = never_terms(n)
+    if a.json:
+        print(json.dumps(history_screen(show, terms), indent=1, ensure_ascii=False))
+        return
+    update = core_update(inst)
+    if update:
+        print(f"core update available ({update[0][:7]} -> {update[1][:7]}): brain upgrade"
+              + ("" if inst.local.get("auto_upgrade") == "on" else
+                 ", or brain set root auto_upgrade=on to upgrade whenever no job is open"))
+    if not show:
+        print(f"{n['id']}: nothing new in core since you last read it" if not a.all else "no CHANGES.md")
+        return
+    for e in show:
+        print(import_text(f"## {e['id']}\n\n{e['body']}", terms) + "\n")
+    if not a.all:
+        print(f"Done reading? brain changes {n['id']} --seen")
 
 
 def cmd_selftest(a):
@@ -7829,7 +8179,7 @@ READ_ONLY = {"cmd_show", "cmd_tree", "cmd_status", "cmd_now", "cmd_jobs", "cmd_s
              "cmd_brief", "cmd_hire", "cmd_reports", "cmd_brains", "cmd_use", "cmd_machine", "cmd_usable",
              "cmd_item_list", "cmd_item_show", "cmd_wt_list", "cmd_selftest", "cmd_init", "cmd_hook", "cmd_hook_approve", "cmd_help",
              "cmd_dashboard", "cmd_ready", "cmd_usage", "cmd_scan", "cmd_scrub", "cmd_history",
-             "cmd_connect", "cmd_recall", "cmd_proposals"}
+             "cmd_connect", "cmd_recall", "cmd_proposals", "cmd_changes"}
 
 
 def writes(a):
@@ -7839,6 +8189,8 @@ def writes(a):
         return a.refresh
     if name == "cmd_inbox":
         return a.new
+    if name == "cmd_changes":
+        return a.seen
     if name == "cmd_connect":
         return a.action in (None, "plan") or bool(a.save)
     if name in ("cmd_brief", "cmd_hire", "cmd_history"):
@@ -7846,7 +8198,7 @@ def writes(a):
     if name == "cmd_check":
         return bool(a.fix)
     if name == "cmd_jobs":
-        return a.start or a.close or a.lessons is not None or a.switch is not None
+        return a.start or a.close or a.lessons is not None or a.switch is not None or bool(a.contract_file)
     if name == "cmd_ready":
         return a.record
     if name in ("cmd_principal", "cmd_schedule"):
@@ -7943,7 +8295,9 @@ def main():
         opt("id", nargs="?"), opt("--branch"), opt("--lessons", help="learned item ids, or none: <reason>"),
         opt("--switch", help="record provider switch: old -> new: reason"),
         opt("--start", action="store_true", help="coordinator: start an import:<snapshot> study"),
-        opt("--close", action="store_true", help="coordinator: close a processed import study"))
+        opt("--close", action="store_true", help="coordinator: close a processed import study"),
+        opt("--contract-file", dest="contract_file", help="coordinator: the job's contract (" +
+            ", ".join(f"## {f}" for f in CONTRACT_FIELDS) + ")"))
     cmd("due", cmd_due, "coordinator actions from files and local git; empty means no output",
         opt("id", nargs="?"), opt("--json", action="store_true"),
         opt("--quiet", action="store_true", help="no output; exit 1 when anything is due, 0 otherwise"))
@@ -7953,7 +8307,9 @@ def main():
         "id", opt("--branch", required=True), opt("--state", choices=["done", "failed", "blocked", "question"], required=True),
         opt("--report"), opt("--lessons", help="proposed lessons, or none: <reason>"),
         opt("--need-human", help="question or blocked need to append to the node inbox"),
-        opt("--reviews", type=int, help="completed review rounds; runs verify for done"))
+        opt("--reviews", type=int, help="completed review rounds; runs verify for done (or reuses a green run that "
+            "still proves this commit)"),
+        opt("--reverify", action="store_true", help="run verify even when an earlier green run still proves it"))
     cmd("show", cmd_show, "everything about one node, including this machine's bindings", "id")
     cmd("set", cmd_set, "set fields: brain set <id> key=value ... (host IDs and home paths stay on this machine)",
         "id", opt("pairs", nargs="+"))
@@ -8051,7 +8407,8 @@ def main():
     cmd("ready", cmd_ready, "check a worker's ready packet against the branch and current local main", "id",
         opt("--branch", required=True), opt("--record", action="store_true", help="worker: run node verify and record"),
         opt("--reviews", type=int, help="completed review rounds, required with --record"),
-        opt("--report"), opt("--lessons", help="proposed lessons, or none: <reason>"))
+        opt("--report"), opt("--lessons", help="proposed lessons, or none: <reason>"),
+        opt("--reverify", action="store_true", help="with --record: run verify even if a green run still proves it"))
     cmd("schedule", cmd_schedule, "recurring work: brain schedule list | add <id> --when W --node N --brief B | "
         "bind <id> <host id> | unbind <id>", opt("action", choices=["list", "add", "bind", "unbind"], nargs="?",
                                                   default="list"),
@@ -8087,6 +8444,9 @@ def main():
         opt("action", nargs="?", choices=["list", "forget"], default="list"), opt("name", nargs="?"))
     cmd("use", cmd_use, "set this machine's default brain: brain use <name>", "name")
     cmd("upgrade", cmd_upgrade, "update core/ to the latest version, then link and check")
+    cmd("changes", cmd_changes, "what changed in core for agents: unread entries (default), --all, --seen",
+        opt("id", nargs="?"), opt("--seen", action="store_true", help="mark every entry read on this machine"),
+        opt("--all", action="store_true"), opt("--json", action="store_true"))
     cmd("selftest", cmd_selftest, "run the core's scenario tests in throwaway folders",
         opt("-v", "--verbose", action="store_true"), opt("-k"))
     def cmd_help(a):

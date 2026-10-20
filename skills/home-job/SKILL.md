@@ -22,6 +22,11 @@ stated; never run a polling loop in an agent.
      worktree a block of N ports: `PORT` to `PORT_LAST` (`PORTS` = N), apart from every other
      worktree on this machine, in any brain.
 2. **Record it** in `status.md` under **Active work**: `| <branch> | <thread> | <PR or -> | <state> |`.
+   **Write its contract once:** `core/bin/brain jobs <id> --branch <branch> --contract-file <file>` with
+   `## Outcome`, `## Authorized` (the steps the worker may take), `## Discretion` (routine,
+   reversible fixes it may make within the same scope), `## Stop when`, `## Needs consent` and
+   `## Done means`. Every brief, hire and review for the job carries it, so the worker acts
+   within it instead of asking, and you answer from it instead of re-deciding.
 3. **Worker.** Host `launch` in the node's `home_project`, in the existing worktree (path and
    branch from step 1), on the node's runtime unless the job calls for another. The brief is
    self-contained (axiom 9). A runtime pin at its stop line stays pinned: use the named alternative
@@ -39,6 +44,13 @@ stated; never run a polling loop in an agent.
    `brain handback <id> --branch <branch> --state done --reviews <completed rounds>
    --report <path> --lessons '<proposals or none: reason>'`. This checks main, runs verify and
    records the packet, state and proposed lessons in one worker-owned `job-handbacks/<key>.json`.
+   A green run that still proves the commit is reused rather than rerun: nothing changed since it,
+   or only paths the node declares can't affect verify (`brain set <id> 'verify_skip=docs/*,*.md'`),
+   and the files verify reads that git doesn't track are unchanged, as are the job's ports
+   (`verify_inputs` globs; `.env,.env.*` unless the node names its own).
+   `--reverify` runs it anyway. A verify that changes the branch, local main or the worktree records
+   nothing: commit or discard what it changed, then hand back again. During the job, run the checks
+   the change affects; leave the full verify to this one command.
    No separate packet command, host message or Lessons section is required. Blockers/questions
    use the same command with `--state blocked`/`question` and no --reviews; the report states why.
    Questions also append to inbox; a blocked human need adds `--need-human "<need>"`.

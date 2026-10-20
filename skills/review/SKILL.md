@@ -20,7 +20,10 @@ stated; never run a polling loop in an agent.
 3. **Run it.** Host `delegate` on the reviewer runtime, in the job's worktree (or `launch` a
    worker there if the host's delegate can't pick a folder). The reviewer changes nothing.
 4. **Address.** Send the findings to the builder (host `send`). Blockers and majors get fixed or
-   answered with a reason. Repeat 2-4 until the reviewer has no blockers, at most three rounds.
+   answered with a reason. When a round finds a kind of problem an earlier round already found,
+   the builder audits that whole class before the next round, not only the new sites. Repeat 2-4
+   until the reviewer has no blockers, at most three rounds: a later brief tells its reviewer
+   which round it is and asks it to look for each earlier finding's whole class.
    The builder then records readiness, state and proposed lessons with one `brain handback`
    command. Reviewers never write or refresh the builder's job record.
 5. **Report.** In the Active work row and in what you tell the operator: reviewed by `<runtime>`,

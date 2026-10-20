@@ -1483,7 +1483,7 @@ class WorkerReadyPackets(Scenario):
         self.assertIn("merge-tree is not clean", self.record(r, ok=False))
         self.git("rebase", "--onto", "job", "main", "main", cwd=home)
         self.b(r, "set", "a", "verify=git commit --allow-empty -qm changed-during-verify")
-        self.assertIn("branch head changed", self.record(r, ok=False))
+        self.assertIn("verify changed the job's branch", self.record(r, ok=False))
 
     def test_malformed_or_incomplete_packets_fail_closed(self):
         r, home, wt = self.job()
@@ -5862,6 +5862,298 @@ class Connections(Scenario):
         out = self.b(r, "recall", "lab", "throttling", "writes", "--json")
         self.assertIn('"throttle"', out)
         self.assertNotIn("throttling", out)
+
+
+class Workflow(Scenario):
+    """Less ceremony: core changes reach every coordinator, green verify runs are reused, contracts and advice."""
+
+    job = WorkerReadyPackets.job
+
+    def test_changes_reach_coordinators_once(self):
+        r = self.init("alice")
+        self.b(r, "new", "child", "--title", "Child")
+        self.assertIn("nothing new", self.b(r, "changes"))
+        self.assertNotIn("core-changes", self.b(r, "due"))
+        self.git("commit", "-q", "--allow-empty", "-m", "Upgrade core abc1234 -> def5678", cwd=r)
+        due = self.b(r, "due")
+        self.assertIn("root: core-changes: core changed:", due)
+        self.assertIn("brain changes root", due)
+        self.assertNotIn("child: core-changes", due)  # no coordinator runs it here
+        out = self.b(r, "changes", "root")
+        self.assertIn("## 2026-10-20: Cross-project learning", out)
+        self.assertIn("After upgrading:", out)
+        self.b(r, "changes", "root", "--seen")
+        self.assertNotIn("core-changes", self.b(r, "due"))
+        self.assertIn("nothing new", self.b(r, "changes", "root"))
+        self.assertIn("Cross-project learning", self.b(r, "changes", "root", "--all"))
+        self.b(r, "set", "child", "coordinator=thread-1")
+        self.assertIn("child: core-changes", self.b(r, "due", "child"))
+        changes = r / "core/CHANGES.md"
+        changes.write_text(changes.read_text().replace("Newest first.", "Newest first.\n\n## 2026-12-01: Something new\n\n"
+                                                       "For agents:\n- a new rule\n", 1))
+        unread = json.loads(self.b(r, "changes", "root", "--json"))
+        self.assertEqual([e["id"] for e in unread], ["2026-12-01: Something new"])
+        self.assertEqual(self.git("status", "--porcelain", "--", "nodes", "instance.md", cwd=r), "")
+
+    def test_core_update_is_reported_once_and_upgrades_only_when_idle(self):
+        r = self.init("alice")
+        core, remote = r / "core", self.tmp / "core-remote"
+        self.git("init", "-q", "-b", "main", cwd=core)
+        self.git("add", "-A", cwd=core)
+        self.git("commit", "-qm", "core", cwd=core)
+        self.git("clone", "-q", str(core), str(remote), cwd=self.tmp)
+        self.git("commit", "-q", "--allow-empty", "-m", "newer core", cwd=remote)
+        self.git("remote", "add", "origin", str(remote), cwd=core)
+        self.b(r, "due")  # the root tick asks the remote, at most daily
+        cached = json.loads((r / ".brain/core-remote.json").read_text())
+        self.assertEqual(cached["head"], self.git("rev-parse", "HEAD", cwd=remote).strip())
+        first = self.b(r, "inbox", "root", "--new")
+        self.assertIn("core update available", first)
+        self.assertNotIn("core update available", self.b(r, "inbox", "root", "--new"))  # reported once
+        self.assertIn("core update available", self.b(r, "changes"))
+        self.b(r, "set", "root", "auto_upgrade=maybe", ok=False)
+        self.b(r, "new", "app", "--title", "App")
+        self.b(r, "set", "app", "auto_upgrade=on", ok=False)
+        self.b(r, "set", "root", "auto_upgrade=on")
+        self.assertNotIn("auto_upgrade", (r / "node.md").read_text())
+        self.assertNotIn("core update available", self.b(r, "inbox", "root"))  # it will happen by itself
+        # Busy: no upgrade while a job is open anywhere.
+        home = self.repo(self.tmp / "app-home")
+        self.b(r, "set", "app", f"home={home}")
+        self.b(r, "wt", "add", "app", "job")
+        self.assertNotIn("core-upgrade", self.b(r, "due"))
+        self.b(r, "wt", "rm", "app", "job", "--cause", "fixture")
+        out = self.b(r, "due")
+        self.assertIn("root: core-upgrade", out)  # idle: tries (this core isn't a submodule, so it fails and says so)
+        self.assertIn("run brain upgrade", out)
+        self.assertEqual(json.loads(self.b(r, "due", "--json"))[0]["kind"], "core-upgrade")
+
+    def test_green_verify_runs_are_reused_only_while_they_still_prove_the_commit(self):
+        r, home, wt = self.job()
+        runs = self.tmp / "runs.txt"
+        self.b(r, "set", "a", f"verify=python3 -B verify.py && echo run >> {runs}")
+        count = lambda: len(runs.read_text().split()) if runs.exists() else 0
+
+        def finish(*extra):
+            return self.b(r, "handback", "a", "--branch", "job", "--state", "done", "--reviews", "1",
+                          "--lessons", "none: fixture", *extra)
+        self.assertEqual(finish().strip(), "ready")
+        self.assertEqual(count(), 1)
+        out = finish()
+        self.assertIn("verify: reused the green run", out)
+        self.assertIn("nothing changed since", out)
+        self.assertTrue(out.strip().endswith("ready"))
+        self.assertEqual(count(), 1)
+        (wt / "NOTES.md").write_text("notes\n")
+        self.git("add", "-A", cwd=wt)
+        self.git("commit", "-qm", "notes", cwd=wt)
+        finish()
+        self.assertEqual(count(), 2)  # no verify_skip declared: any change runs it again
+        self.b(r, "set", "a", "verify_skip=*.md,docs/*")
+        (wt / "docs").mkdir()
+        (wt / "docs/guide.txt").write_text("guide\n")
+        (wt / "NOTES.md").write_text("more notes\n")
+        self.git("add", "-A", cwd=wt)
+        self.git("commit", "-qm", "docs", cwd=wt)
+        self.assertIn("only 2 file(s) under verify_skip changed", finish())
+        self.assertEqual(count(), 2)
+        self.assertEqual(self.b(r, "ready", "a", "--branch", "job").strip(), "ready")
+        (wt / "calc.py").write_text("value = 2  # still two\n")
+        self.git("commit", "-qam", "code", cwd=wt)
+        self.assertNotIn("reused", finish())
+        self.assertEqual(count(), 3)
+        finish("--reverify")
+        self.assertEqual(count(), 4)
+        self.b(r, "ready", "a", "--branch", "job", "--record", "--reviews", "1", "--reverify")
+        self.assertEqual(count(), 5)
+        data = json.loads(WorkerReadyPackets.packet(self).read_text())
+        self.assertEqual((data["verify_runs"], data["verify_reused"]), (5, 2))
+        self.assertTrue(data["first_ready"])
+        jobs = self.b(r, "jobs", "a")
+        self.assertIn("verify: 5 run(s), 2 reused", jobs)
+        self.assertIn("first ready after", jobs)
+        # A failed run is never reused, even with the same command on the same commit.
+        flag = self.tmp / "fail"
+        self.b(r, "set", "a", f"verify=python3 -B verify.py && echo run >> {runs} && test ! -e {flag}")
+        finish()
+        flag.write_text("x")
+        (wt / "calc.py").write_text("value = 2  # two\n")
+        self.git("commit", "-qam", "code again", cwd=wt)
+        self.b(r, "handback", "a", "--branch", "job", "--state", "done", "--reviews", "1", ok=False)
+        flag.unlink()
+        before = count()
+        self.assertNotIn("reused", finish())
+        self.assertEqual(count(), before + 1)
+
+    def test_contracts_review_rounds_and_blocked_entries(self):
+        r, home, wt = self.job()
+        self.assertIn("no contract", self.b(r, "jobs", "a"))
+        contract = self.tmp / "contract.md"
+        contract.write_text("## Outcome\nProve the login flow.\n\n## Authorized\nRun the four SQL cases.\n")
+        out = self.b(r, "jobs", "a", "--branch", "job", "--contract-file", str(contract), ok=False)
+        self.assertIn("## Discretion", out)
+        contract.write_text("## Outcome\nProve the login flow.\n\n## Authorized\nRun the four SQL cases.\n\n"
+                            "## Discretion\nRepair reversible preflight defects.\n\n## Stop when\nThe target changes.\n\n"
+                            "## Needs consent\nA live migration.\n\n## Done means\nAll cases pass; resources cleaned up.\n")
+        self.b(r, "jobs", "a", "--branch", "job", "--contract-file", str(contract))
+        self.assertEqual(len(list((r / "nodes/a/job-contracts").glob("*.md"))), 1)
+        self.b(r, "jobs", "a", "--branch", "nope", "--contract-file", str(contract), ok=False)
+        brief = self.b(r, "brief", "a", "--branch", "job", "--task", "Prove it")
+        self.assertIn("## Contract for this job", brief)
+        self.assertIn("Repair reversible preflight defects.", brief)
+        self.assertIn("not acknowledgements", brief)
+        self.assertNotIn("no contract", self.b(r, "jobs", "a"))
+        first = self.b(r, "review", "a", "--branch", "job", "--built-by", "claude")
+        self.assertNotIn("Earlier rounds", first)
+        self.assertIn("## The job's contract", first)
+        self.assertIn("All cases pass", first)
+        second = self.b(r, "review", "a", "--branch", "job", "--built-by", "claude")
+        self.assertIn("This is review round 2", second)
+        self.assertIn("same kind of problem everywhere", second)
+        self.assertNotIn("caps reviews", second)
+        self.assertIn("caps reviews at 3 rounds", self.b(r, "review", "a", "--branch", "job", "--built-by", "claude"))
+        self.b(r, "review", "a", "--branch", "job", "--built-by", "claude")
+        self.assertIn("4 review rounds, over the cap", self.b(r, "jobs", "a"))
+        status = r / "nodes/a/status.md"
+        text = status.read_text()
+        status.write_text(text + "\n## Blocked / needs the operator\n\n- The staging key\n")
+        self.assertIn("doesn't say what clears it", self.b(r, "check"))
+        status.write_text(text + "\n## Blocked / needs the operator\n\n- The staging key — waiting on Sam; "
+                                 "clears when the key is in the vault\n")
+        self.assertNotIn("doesn't say what clears it", self.b(r, "check"))
+        self.b(r, "wt", "rm", "a", "job", "--cause", "fixture done")
+        self.assertEqual(list((r / "nodes/a/job-contracts").glob("*.md")), [])
+
+
+    def test_workflow_review_round_one(self):
+        from importlib.machinery import SourceFileLoader
+        r, home, wt = self.job()
+        # Verify that changes what it verifies records nothing, and the next hand-back runs it again.
+        runs = self.tmp / "runs.txt"
+        self.b(r, "set", "a", f"verify=echo '# touched' >> calc.py && python3 -B verify.py && echo run >> {runs}")
+        out = self.b(r, "handback", "a", "--branch", "job", "--state", "done", "--reviews", "1", ok=False)
+        self.assertIn("verify changed the job's branch, local main or worktree", out)
+        self.assertIsNone(json.loads(WorkerReadyPackets.packet(self).read_text())["ready"])
+        self.git("checkout", "--", "calc.py", cwd=wt)
+        self.b(r, "set", "a", f"verify=python3 -B verify.py && echo run >> {runs}")
+        self.assertNotIn("reused", self.b(r, "handback", "a", "--branch", "job", "--state", "done", "--reviews", "1"))
+        # --reverify forces a run, so it needs one to force.
+        self.assertIn("--reverify forces a verify run", self.b(r, "handback", "a", "--branch", "job", "--state",
+                                                                "done", "--reverify", ok=False))
+        # A submodule change counts, whatever git's config hides.
+        m = SourceFileLoader("brain_workflow_r1", str(CORE / "bin/brain")).load_module()
+        repo = self.repo(self.tmp / "with-sub", {"README.md": "x\n"})
+        self.git("config", "diff.ignoreSubmodules", "all", cwd=repo)
+        base = self.git("rev-parse", "HEAD", cwd=repo).strip()
+        self.git("update-index", "--add", "--cacheinfo", f"160000,{'1' * 40},dep", cwd=repo)
+        self.git("commit", "-qm", "dep", cwd=repo)
+        head = self.git("rev-parse", "HEAD", cwd=repo).strip()
+        n = {"id": "a", "fm": {"verify_skip": "*.md"}}
+        packet = {"version": 1, "node": "a", "branch": "job", "verify_command": "v", "verify_result": 0, "main": "m",
+                  "head": base, "review_rounds": 1, "checked_at": "2026-01-01 10:00 +00:00", "inputs": "i"}
+        self.assertEqual(m.verify_reuse(n, "job", packet, base, "m", "v", str(repo), "i"), (base, []))  # control
+        self.assertIsNone(m.verify_reuse(n, "job", packet, head, "m", "v", str(repo), "i"))
+        # The idle check and the upgrade happen under one hold of the lock: a job started while it waited counts.
+        self.b(r, "set", "root", "auto_upgrade=on")
+        self.b(r, "wt", "rm", "a", "job", "--cause", "fixture done")  # idle, until the late job below
+        inst = m.Instance(r)
+        self.assertEqual(m.open_jobs_anywhere(inst), [])
+        started = []
+
+        class Lock:
+            def __init__(lock, i): pass
+            def __enter__(lock):
+                self.b(r, "wt", "add", "a", "late")  # a job created while the tick waited for the lock
+                started.append(True)
+            def __exit__(lock, *exc): return False
+        calls, real_run = [], subprocess.run
+
+        def run(args, *x, **k):  # everything runs, except an upgrade, which is recorded instead
+            if "upgrade" in args:
+                calls.append(args)
+                return subprocess.CompletedProcess(args, 0, "", "")
+            return real_run(args, *x, **k)
+        with mock.patch.object(m, "core_update", return_value=("a" * 40, "b" * 40)), \
+                mock.patch.object(m, "brain_lock", Lock), mock.patch.object(m.subprocess, "run", side_effect=run):
+            self.assertIsNone(m.auto_upgrade(inst))
+        self.assertEqual((started, calls), ([True], []))
+        # The changelog never shows a node's never-name words.
+        (r / "never-name.txt").write_text("Zebracorp\n")
+        changes = r / "core/CHANGES.md"
+        changes.write_text(changes.read_text().replace("Newest first.", "Newest first.\n\n## 2026-12-01: Zebracorp "
+                                                       "notes\n\n- Ask Zebracorp first.\n", 1))
+        self.git("commit", "-q", "--allow-empty", "-m", "Upgrade core abc1234 -> def5678", cwd=r)
+        for args in (("changes",), ("changes", "--json"), ("changes", "--all"), ("due",)):
+            self.assertNotIn("Zebracorp", self.b(r, *args))
+
+
+    def test_workflow_review_round_two(self):
+        from importlib.machinery import SourceFileLoader
+        r, home, wt = self.job()
+        runs = self.tmp / "runs.txt"
+        self.b(r, "set", "a", f"verify=python3 -B verify.py && echo run >> {runs}")
+        count = lambda: len(runs.read_text().split()) if runs.exists() else 0
+        (wt / ".gitignore").write_text(".env\n")
+        self.git("add", ".gitignore", cwd=wt)
+        self.git("commit", "-qm", "ignore env", cwd=wt)
+        (wt / ".env").write_text("MODE=a\n")
+
+        def finish(ok=True):
+            return self.b(r, "handback", "a", "--branch", "job", "--state", "done", "--reviews", "1", ok=ok)
+        finish()
+        self.assertIn("reused", finish())
+        # Files verify reads that git ignores, and the ports it runs on, are part of the evidence.
+        (wt / ".env").write_text("MODE=b\n")
+        before = count()
+        self.assertNotIn("reused", finish())
+        self.assertEqual(count(), before + 1)
+        # Readiness itself, wherever it is read, holds only for the inputs verify ran with.
+        self.assertEqual(self.b(r, "ready", "a", "--branch", "job").strip(), "ready")
+        (wt / ".env").write_text("MODE=broken\n")
+        self.assertIn("besides tracked files", self.b(r, "ready", "a", "--branch", "job", ok=False))
+        self.assertNotIn("ready to merge", self.b(r, "due", "a"))
+        ui = json.loads(self.b(r, "ui", "--json"))
+        self.assertFalse(any(i.get("ready") for i in ui["due"]))
+        (wt / ".env").write_text("MODE=b\n")
+        self.assertEqual(self.b(r, "ready", "a", "--branch", "job").strip(), "ready")
+        local = json.loads((r / ".brain/local.json").read_text())
+        local["nodes"]["a"]["worktrees"]["job"]["port"] += 7
+        (r / ".brain/local.json").write_text(json.dumps(local))
+        self.assertIn("besides tracked files", self.b(r, "ready", "a", "--branch", "job", ok=False))
+        self.assertNotIn("reused", finish())
+        # A verify that rewrites what it reads records nothing.
+        self.b(r, "set", "a", f"verify=echo MODE=c > .env && python3 -B verify.py && echo run >> {runs}")
+        self.assertIn("verify_inputs", finish(ok=False))
+        self.b(r, "set", "a", f"verify=python3 -B verify.py && echo run >> {runs}")
+        finish()
+        # Untracked files count even when git's config hides them.
+        self.git("config", "status.showUntrackedFiles", "no", cwd=wt)
+        (wt / "stray.py").write_text("x = 1\n")
+        self.assertIn("dirty", finish(ok=False))
+        (wt / "stray.py").unlink()
+        finish()
+        # Only a complete packet whose verified commit is its own (or before it) can be reused.
+        path = WorkerReadyPackets.packet(self)
+        data = json.loads(path.read_text())
+        for bad in ({"version": 7}, {"review_rounds": 0}, {"checked_at": 5}):
+            path.write_text(json.dumps({**data, "ready": {**data["ready"], **bad}}))
+            self.assertNotIn("reused", finish())
+            data = json.loads(path.read_text())
+        (wt / "calc.py").write_text("value = 3\n")  # broken
+        self.git("commit", "-qam", "broken", cwd=wt)
+        broken = self.git("rev-parse", "HEAD", cwd=wt).strip()
+        path.write_text(json.dumps({**data, "ready": {**data["ready"], "verified_head": broken}}))
+        self.assertIn("verify failed", finish(ok=False))
+        self.assertIn("--reverify forces a verify run", self.b(r, "ready", "a", "--branch", "job", "--reverify",
+                                                                ok=False))
+        # Job state that can't be read, or a job worktree without a ledger row, is never idle.
+        m = SourceFileLoader("brain_workflow_r2", str(CORE / "bin/brain")).load_module()
+        self.assertTrue(m.open_jobs_anywhere(m.Instance(r)))
+        ledger = r / "nodes/a/job-ledger.md"
+        text = ledger.read_text()
+        ledger.write_text(text.replace("<!-- brain:job-ledger v2 -->", "").replace("<!-- brain:job-ledger -->", ""))
+        self.assertIn(("a", "unreadable job ledger"), m.open_jobs_anywhere(m.Instance(r)))
+        ledger.write_text(text)
 
 
 if __name__ == "__main__":

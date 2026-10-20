@@ -481,6 +481,9 @@ You mostly talk to coordinators, and they run `brain` for you. By hand:
 | `brain brief <id> --small --task "..."` | a minutes-long, low-risk task without job ceremony |
 | `brain handback <id> --branch B --state done --reviews N --report P --lessons "..."` | one worker finishing step: verify, readiness, state and proposed lessons; also accepts blocked/question |
 | `brain ready <id> --branch B` | compare the worker’s packet with branch and current local main before merge |
+| `brain jobs <id> --branch B --contract-file F` | a job's contract: outcome, what the worker may do without asking, stop conditions, consent, done |
+| `brain set <id> 'verify_skip=docs/*,*.md'` | paths that can't affect verify: a green run survives changes to them |
+| `brain set <id> 'verify_inputs=.env,config/*.local'` | untracked files verify reads (default `.env,.env.*`): a change to them means a fresh run |
 | `brain jobs <id> --branch B --lessons "..."` | coordinator records learned item ids or `none: <reason>` at close |
 | `brain review <id> --branch B` | a brief for a review by a runtime the builder didn't use |
 | `brain guard <id> [path ...]` | the project holds none of the words in `never-name.txt` |
@@ -517,6 +520,8 @@ You mostly talk to coordinators, and they run `brain` for you. By hand:
 | `brain usage --watch --every 300` | the poller itself, for other systems; agents only read |
 | `brain link --global [runtime=folder ...]` | a pointer to this brain in runtimes' user-wide instructions |
 | `brain brains`, `brain use <name>`, `brain -b <name> …`, `brain --all` | several brains: list, default, pick, every dashboard |
+| `brain changes [node] [--seen]` | what changed in core for agents since this coordinator last read it |
+| `brain set root auto_upgrade=on` | this machine upgrades core by itself whenever no job is open |
 | `brain upgrade` | update `core/` to the latest version, then link and check |
 | `brain hook stop` / `brain hook approve` | the stop hook both runtimes run; trust it in Codex |
 </details>
