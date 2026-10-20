@@ -42,3 +42,25 @@ the instance folder **including `.git`**.
   thread's full-access mode.
 - **claude**: the working folder is writable; a coordinator working from a node folder also needs
   the instance root (the host's project root, or `--add-dir`).
+
+## Questions at stop
+
+With a `transcript_path` in the Stop payload, `brain hook stop` reads that file only and
+captures unanswered question-tool calls from its latest turn. Claude `AskUserQuestion`
+tool-use records and Codex `response_item` function calls named `request_user_input` are
+supported. Successful Claude tool results and Codex outputs with nonempty `answers` settle
+the call. Error/cancelled calls stay pending. Question text and options pass the import
+secret/never-name screening, then become one inbox line per distinct screened question.
+No answers, transcript paths, tool ids or session ids enter the inbox. Removing the line
+permits a later recurrence. An active stop-hook retry still captures without holding the turn.
+
+Codex evidence (2026-10-20): codex-cli 0.144.4's generated experimental app-server schema
+contains `ToolRequestUserInputParams` and `ToolRequestUserInputResponse` (an `answers` map).
+This establishes the question/answer shape, not delivery of `transcript_path` by every host
+or a live question-to-hook run. Fixture tests cover rollout parsing. Hosts or runtime versions
+that omit the transcript path, never stop while a request is pending, or bypass runtime hooks
+remain a gap: use host pending-request checks. The hook never calls the host API.
+
+Hook failures, unreadable transcripts and a busy inbox fail open; host pending checks remain
+the fallback. External homes must install the Stop hook and have `brain` on PATH; the adapter
+command falls back to it outside a Brain folder and resolves registered worktree bindings.

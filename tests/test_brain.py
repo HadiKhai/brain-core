@@ -2085,15 +2085,119 @@ class Schedules(Scenario):
 
 
 class StopHook(Scenario):
-    def hook(self, r, cwd, session="s1", active=False):
+    def hook(self, r, cwd, session="s1", active=False, transcript=None):
         """Run the exact command the runtimes run, as they do: hook JSON on stdin, in the session's folder."""
         cmd = json.loads((CORE / "adapters" / "runtimes" / "claude-hooks.json").read_text())["hooks"]["Stop"][0]["hooks"][0]["command"]
         env = {k: v for k, v in self.env.items() if k != "BRAIN_HOOK_REMIND_MINUTES"}
         res = subprocess.run(["sh", "-c", cmd], cwd=cwd, env=env, capture_output=True, text=True,
                              input=json.dumps({"cwd": str(cwd), "session_id": session, "stop_hook_active": active,
-                                               "hook_event_name": "Stop"}))
+                                               "hook_event_name": "Stop", "transcript_path": str(transcript) if transcript else None}), timeout=10)
         self.assertEqual(res.returncode, 0, res.stderr)
         return json.loads(res.stdout) if res.stdout.strip() else None
+
+    def question_log(self, rows):
+        path = self.tmp / "synthetic.jsonl"
+        path.write_text("".join(json.dumps(row) + "\n" for row in rows))
+        return path
+
+    def question_call(self, ident="q1", text="Which colour?", **extra):
+        return {"type": "assistant", "message": {"content": [{"type": "tool_use", "id": ident,
+                "name": "AskUserQuestion", "input": {"questions": [{"question": text, **extra}]}}]}}
+
+    def test_question_capture_screening_dedup_and_due(self):
+        r = self.init("alice")
+        self.b(r, "new", "a", "--title", "A")
+        d = r / "nodes" / "a"
+        (d / "never-name.txt").write_text("ForbiddenColour\n")
+        path = self.question_log([{"type": "user", "message": {"content": "Choose a colour"}},
+                                  self.question_call(text="Use ForbiddenColour?\npassword=made-up",
+                                      options=[{"label": "Blue", "description": "A blue option"}])])
+        self.hook(r, d, transcript=path)
+        self.hook(r, d, active=True, transcript=path)
+        content = (d / "inbox.md").read_text()
+        self.assertEqual(content.count("host-question:"), 1)
+        self.assertNotIn("ForbiddenColour", content)
+        self.assertNotIn("password=", content)
+        self.assertIn("Blue A blue option", content)
+        self.assertIn("Host question:", self.b(r, "inbox", "a"))
+        self.assertIn("Host question:", self.b(r, "due", "a"))
+        # A fresh tool id asking the same question still yields exactly one inbox entry.
+        rows = [self.question_call("q2", text="Use ForbiddenColour?\npassword=made-up",
+                                  options=[{"label": "Blue", "description": "A blue option"}])]
+        self.hook(r, d, transcript=self.question_log(rows))
+        self.assertEqual((d / "inbox.md").read_text().count("host-question:"), 1)
+
+    def test_answered_old_turn_and_errors(self):
+        r = self.init("alice")
+        call = self.question_call()
+        answer = {"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "q1",
+                   "content": "User has answered your questions: Blue"}]}}
+        for rows in ([call, answer], [call, {"type": "user", "message": {"content": "Next task"}}]):
+            self.hook(r, r, transcript=self.question_log(rows))
+            self.assertNotIn("host-question:", (r / "inbox.md").read_text())
+        answer["message"]["content"][0]["is_error"] = True
+        self.hook(r, r, transcript=self.question_log([call, answer]))
+        self.assertEqual((r / "inbox.md").read_text().count("host-question:"), 1)
+
+    def test_codex_question_rollout_answer_and_pending(self):
+        r = self.init("alice")
+        call = {"type": "response_item", "payload": {"type": "function_call", "call_id": "c1",
+                "name": "request_user_input", "arguments": json.dumps({"questions": [
+                    {"id": "colour", "question": "Which colour?"}, {"id": "shape", "question": "Which shape?"}]})}}
+        answer = {"type": "response_item", "payload": {"type": "function_call_output", "call_id": "c1",
+                  "output": json.dumps({"answers": {"colour": {"answers": ["Blue"]}, "shape": {"answers": ["Round"]}}})}}
+        self.hook(r, r, transcript=self.question_log([call, answer]))
+        self.assertNotIn("host-question:", (r / "inbox.md").read_text())
+        self.hook(r, r, active=True, transcript=self.question_log([call]))
+        self.assertEqual((r / "inbox.md").read_text().count("host-question:"), 2)
+
+    def test_question_capture_failure_does_not_suppress_reminder(self):
+        r = self.init("alice")
+        missing = self.tmp / "absent.jsonl"
+        (r / "brief.md").write_text("Changed notes\n")
+        result = self.hook(r, r, transcript=missing)
+        self.assertEqual(result["decision"], "block")  # existing notes reminder still runs
+        for raw in ('not-json\n', '[]\n', '{"message": null}\n'):
+            missing.write_text(raw)
+            self.hook(r, r, active=True, transcript=missing)
+
+    def test_question_capture_does_not_wait_on_busy_inbox(self):
+        import fcntl
+        r = self.init("alice")
+        path = self.question_log([self.question_call()])
+        with (r / "inbox.md").open("a") as stream:
+            fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            self.hook(r, r, active=True, transcript=path)
+        self.hook(r, r, active=True, transcript=path)
+        self.assertEqual((r / "inbox.md").read_text().count("host-question:"), 1)
+
+    def test_question_capture_in_registered_external_worker_folder(self):
+        r = self.init("alice")
+        home = self.tmp / "synthetic-home"
+        home.mkdir()
+        self.b(r, "new", "a", "--title", "A", "--home", str(home))
+        self.env["PATH"] = str(CORE / "bin") + os.pathsep + self.env["PATH"]
+        self.hook(r, home, transcript=self.question_log([self.question_call()]))
+        self.assertEqual((r / "nodes/a/inbox.md").read_text().count("host-question:"), 1)
+        self.assertNotIn("host-question:", (r / "inbox.md").read_text())
+
+    def test_question_capture_concurrent_hooks_and_parent_lock(self):
+        import concurrent.futures
+        import fcntl
+        r = self.init("alice")
+        path = self.question_log([self.question_call()])
+        # A parent CLI lock must not delay the hook (which uses only the inbox lock).
+        with (r / ".brain/lock").open("a") as stream:
+            fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+                list(pool.map(lambda _: self.hook(r, r, active=True, transcript=path), range(4)))
+        self.assertEqual((r / "inbox.md").read_text().count("host-question:"), 1)
+
+    def test_root_tick_contract_covers_descendants_and_provider(self):
+        text = (CORE / "adapters/hosts/t3.md").read_text()
+        for clause in ("every descendant node", "brain show <child>", "each child's coordinator thread id",
+                       "nested nodes", "without open jobs", "provider it was created under"):
+            self.assertIn(clause, text)
 
     def test_links_for_both_runtimes(self):
         r = self.init("alice")

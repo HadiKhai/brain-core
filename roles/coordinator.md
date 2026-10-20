@@ -182,8 +182,11 @@ everything it needs to know, the constraints, and who it reports to.
 
 Do not rely on the operator or the root to nudge you. Bind a recurring host interval tick to
 this coordinator thread (T3 pattern in `core/adapters/hosts/t3.md`). On wake, run
-`core/bin/brain due <id>` and check host pending requests for your workers: the CLI cannot see
-those. If both are empty, end the turn at once, saying nothing and changing no files.
+`core/bin/brain due <id>` and check host pending requests for yourself and your workers.
+Root also checks every descendant coordinator: read each binding with `brain show <child>`
+and list its host pending requests, including nested nodes and nodes without open jobs.
+A missing binding is a setup gap. Runtime questions reach the inbox when a supported stop
+hook runs; live host requests still need the host check. If both are empty, end the turn at once, saying nothing and changing no files.
 Otherwise act on each due item: read the report, review or reconcile a finished job, answer
 questions, and record the next step. For each due job, put its exact branch in Active work
 and a concrete next action in judgement; a generated facts entry alone does not record your

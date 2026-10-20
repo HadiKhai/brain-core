@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "d=\"$PWD\"; while [ \"$d\" != / ] && [ ! -f \"$d/instance.md\" ]; do d=$(dirname \"$d\"); done; [ -f \"$d/core/bin/brain\" ] && exec python3 \"$d/core/bin/brain\" hook stop; exit 0",
+            "command": "d=\"$PWD\"; while [ \"$d\" != / ] && [ ! -f \"$d/instance.md\" ]; do d=$(dirname \"$d\"); done; [ -f \"$d/core/bin/brain\" ] && exec python3 \"$d/core/bin/brain\" hook stop; command -v brain >/dev/null 2>&1 && exec brain hook stop; exit 0",
             "timeout": 30
           }
         ]

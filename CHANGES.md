@@ -5,6 +5,20 @@ upgrading. `brain changes <node>` shows the entries this node's coordinator hasn
 `brain due <node>` lists them until `brain changes <node> --seen`. Entry headings are
 `## <date>: <title>`; once released, a heading never changes.
 
+## 2026-10-20: Runtime questions reach the inbox
+
+For agents:
+- Stop hooks capture unanswered Claude/Codex question-tool calls from the supplied transcript,
+  screen them and append deduplicated node inbox lines. `brain inbox` and `brain due` see them.
+  Hook failures stay fail-open; live host pending requests still need checking.
+- Root's T3 tick checks every descendant coordinator's pending requests using its `brain show`
+  binding. Scheduled tasks retain the provider they were created under.
+
+After upgrading:
+- Re-read `roles/coordinator.md`, `skills/machine-setup/SKILL.md` and `adapters/hosts/t3.md`.
+  Refresh root's tick; verify hooks with made-up questions. Reapprove changed Codex hooks.
+  Configure Stop hooks in external homes and keep `brain` on PATH there.
+
 ## 2026-10-20: History from folders named as the node's
 
 For agents:

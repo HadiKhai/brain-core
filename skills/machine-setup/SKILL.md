@@ -53,7 +53,13 @@ one machine and live in `.brain/local.json`, never in git.
    entries showing one reading mean both folders are logged in to the same account.
 9. **Hooks.** If Codex is a runtime, ask the operator's OK, then run `core/bin/brain hook approve`:
    Codex runs the instance's stop hook only once the project is trusted and the hook approved.
-   Run it again after a core upgrade that changes the hook.
+   Run it again after a core upgrade that changes the hook. Verify a made-up question reaches
+   the node inbox after stopping. The stop payload must include `transcript_path`; the hook
+   captures Claude `AskUserQuestion` and Codex `request_user_input` calls from that file,
+   omits answered calls, screens the text and deduplicates repeats. External homes/worktrees
+   need their runtime's Stop hook configured too, with `brain` on PATH so it can find the
+   registered node. A hook that never runs cannot deliver a question: keep host pending checks.
+   Refresh root's tick to check every child coordinator using `brain show <child>` bindings.
 10. Run `core/bin/brain check`, then give the operator one link per coordinator
     (`core/bin/brain` lists them).
 

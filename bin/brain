@@ -2559,10 +2559,23 @@ def git_mv(inst, src, dest):
 
 
 def append_inbox(n_dir, who, text, inst):
-    safe_target(n_dir / "inbox.md")
-    with open(n_dir / "inbox.md", "a") as fh:
-        fh.write(f"- {inst.now()} from {who}: {text}\n")
+    inbox_append(n_dir, f"- {inst.now()} from {who}: {text}\n")
     touch(n_dir / "inbox.md")
+
+
+def inbox_append(n_dir, line, marker=None):
+    """One append, shared by CLI writers and hooks. Hooks never wait for an inbox writer."""
+    import fcntl
+    target = n_dir / "inbox.md"
+    safe_target(target)
+    with open(target, "a+") as fh:
+        fcntl.flock(fh, fcntl.LOCK_EX | (fcntl.LOCK_NB if marker else 0))
+        if marker:
+            fh.seek(0)
+            if marker in fh.read():
+                return
+        fh.write(line)
+        fh.flush()
 
 
 def cmd_split(a):
@@ -8836,6 +8849,82 @@ def notes_lag(inst, n):
     return out
 
 
+def hook_questions(path):
+    """Unanswered question calls in the latest turn; never treat ordinary prose as a question.
+    Only the hook-supplied transcript is read, never session discovery or history imports.
+    """
+    pending = {}
+    with open(path, "r", encoding="utf-8") as fh:
+        for line in fh:
+            try:
+                rec = json.loads(line)
+            except ValueError:
+                continue  # runtimes may still be appending their last line
+            if not isinstance(rec, dict):
+                continue
+            kind = rec.get("type")
+            msg = rec.get("message", {})
+            if not isinstance(msg, dict):
+                msg = {}
+            blocks = msg.get("content", [])
+            if kind == "user" and isinstance(blocks, (str, list)):
+                # Tool results are user records too; they don't start another operator turn.
+                results = [b for b in blocks if isinstance(b, dict) and b.get("type") == "tool_result"]
+                if not results:
+                    pending = {}
+                for b in results:
+                    if not b.get("is_error"):
+                        pending.pop(b.get("tool_use_id"), None)
+            if kind == "assistant" and isinstance(blocks, list):
+                for b in blocks:
+                    if isinstance(b, dict) and b.get("type") == "tool_use" and b.get("name") == "AskUserQuestion":
+                        pending[b.get("id")] = b.get("input", {})
+            # Codex rollout response items use function_call / function_call_output.
+            item = rec.get("payload", {}) if kind == "response_item" else rec
+            if not isinstance(item, dict):
+                continue
+            if item.get("type") == "message" and item.get("role") == "user":
+                pending = {}
+            if item.get("type") == "function_call" and item.get("name", "").split(".")[-1] == "request_user_input":
+                try:
+                    args = item.get("arguments", "{}")
+                    pending[item.get("call_id")] = json.loads(args) if isinstance(args, str) else args
+                except ValueError:
+                    pass
+            if item.get("type") == "function_call_output":
+                try:
+                    output = item.get("output", "{}")
+                    output = json.loads(output) if isinstance(output, str) else output
+                    if isinstance(output, dict) and output.get("answers"):
+                        pending.pop(item.get("call_id"), None)
+                except ValueError:
+                    pass
+    return [q for args in pending.values() if isinstance(args, dict)
+            for q in args.get("questions", []) if isinstance(q, dict) and isinstance(q.get("question"), str)]
+
+
+def capture_hook_questions(inst, n, data):
+    path = data.get("transcript_path")
+    if not isinstance(path, str) or not path:
+        return
+    questions = hook_questions(path)
+    if not questions:
+        return
+    # Same boundary checks as CLI writes, but no instance lock: a parent brain command may hold it.
+    if outward_links(inst.root):
+        return
+    terms = never_terms(n)
+    for q in questions:
+        parts = [q["question"]]
+        for option in q.get("options", []):
+            if isinstance(option, dict):
+                parts += [v for k in ("label", "description") if isinstance((v := option.get(k)), str)]
+        text = " ".join(import_text("\n".join(parts), terms).split())
+        # Hash only screened content; raw tool ids, paths, answers and session ids never persist.
+        marker = "<!-- host-question:" + hashlib.sha256(text.encode()).hexdigest() + " -->"
+        inbox_append(n["dir"], f"- {inst.now()} from runtime: Host question: {text} {marker}\n", marker)
+
+
 def cmd_hook(a):
     """Runtime hook. `stop`: before a turn ends in a node folder, make sure its notes are current (axioms 15-17).
     Never fails the runtime: any problem means "let it stop"."""
@@ -8850,17 +8939,29 @@ def hook_stop(a):
         data = json.loads(sys.stdin.read() or "{}")
     except ValueError:
         return
-    if a.event != "stop" or data.get("stop_hook_active"):
+    if a.event != "stop" or not isinstance(data, dict):
         return
     cwd = data.get("cwd") or os.getcwd()
     start = Path(cwd)
-    root = next((d for d in [start, *start.parents] if (d / "instance.md").exists() and (d / "node.md").exists()), None)
+    root = root_for_path(start)
     if not root:
         return
     inst = Instance(root)
     n = node_at(inst, cwd)
     if not n:
+        places = [(Path(p).expanduser().resolve(), node) for node in inst.nodes()
+                  for p in [node["home_path"], node["local"].get("workbench"),
+                            *[w["path"] for w in node["local"].get("worktrees", {}).values()]] if p]
+        n = next((node for p, node in sorted(places, key=lambda x: len(x[0].parts), reverse=True)
+                  if p == start.resolve() or p in start.resolve().parents), None)
+    if not n:
         return
+    try:
+        capture_hook_questions(inst, n, data)
+    except Exception:
+        pass  # question bookkeeping must not suppress existing reminders or fail a turn
+    if data.get("stop_hook_active") or not node_at(inst, cwd):
+        return  # workers capture questions without holding their turn for coordinator notes
     try:
         unread = changes_unread(inst, n) if (n["id"] == "root" or n["local"].get("coordinator")) else []
     except (OSError, ValueError):
