@@ -41,7 +41,7 @@ for (const scenario of scenarios) test(`seeded ${scenario}: every screen contain
           unbounded: sections.filter(e => !e.closest('[data-page="inbox"]') && getComputedStyle(e).maxHeight === "none").length,
           requestCount: requests.length,
           missingActions: requests.filter(e => !e.querySelector("a,button")).length,
-          squeezedFilters: [...document.querySelectorAll<HTMLElement>('.filter-toolbar input,.filter-toolbar [role=combobox]')].filter(e => visible(e) && e.getBoundingClientRect().width < 160).length,
+          squeezedFilters: [...document.querySelectorAll<HTMLElement>('.filter-toolbar [data-slot=input-group],.filter-toolbar [data-slot=select-trigger]')].filter(e => visible(e) && e.getBoundingClientRect().width < 160).length,
           primaryAboveFold: primary.height > 0 && primary.bottom <= innerHeight,
           dark: document.documentElement.classList.contains("dark"),
           rtl: [...document.querySelectorAll<HTMLElement>(".readable[dir=auto]")].filter(e => visible(e) && getComputedStyle(e).direction === "rtl").length,
