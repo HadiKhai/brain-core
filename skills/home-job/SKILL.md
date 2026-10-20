@@ -52,7 +52,15 @@ stated; never run a polling loop in an agent.
    and the files verify reads that git doesn't track are unchanged, as are the job's ports
    (`verify_inputs` globs; `.env,.env.*` unless the node names its own).
    `--reverify` runs it anyway. A verify that changes the branch, local main or the worktree records
-   nothing: commit or discard what it changed, then hand back again. During the job, run the checks
+   nothing: commit or discard what it changed, then hand back again.
+   Each fresh verify prints its private 0600 log path under the node's `job-handbacks/` folder,
+   ignores logs in instance Git, redacts never-name words before writing, and reports elapsed time and output counts every five
+   seconds. The five newest logs per job are retained; reuse creates no log or new run. A failure
+   prints the last 15 lines of each failing lane plus the overall tail. For interleaved parallel
+   groups or named steps, prefix every line with `[lane NAME]`; a line containing `FAIL`, `FAILED`,
+   `FAILURE`, `ERROR`, or `exit N` (nonzero N) marks that lane failed. Names are 1-120 characters
+   without `]` or line breaks. Other output uses the overall tail; inspect the full log for more.
+   During the job, run the checks
    the change affects; leave the full verify to this one command.
    No separate packet command, host message or Lessons section is required. Blockers/questions
    use the same command with `--state blocked`/`question` and no --reviews; the report states why.

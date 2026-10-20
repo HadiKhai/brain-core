@@ -1570,7 +1570,7 @@ def cmd_init(a):
 def ensure_gitignore(root):
     gi = root / ".gitignore"
     lines = gi.read_text().splitlines() if gi.exists() else []
-    want = [".DS_Store", "__pycache__/", ".brain/"]
+    want = [".DS_Store", "__pycache__/", ".brain/", "**/job-handbacks/*-verify-*.log"]
     missing = [w for w in want if w not in lines]
     if missing:
         gi.write_text("\n".join(lines + missing) + "\n")
@@ -6643,6 +6643,215 @@ def verify_reuse(n, branch, previous, head, main, verify, cwd, inputs=None):
     return base, changed
 
 
+VERIFY_PROGRESS_SECONDS = 5
+VERIFY_LOG_KEEP = 5
+
+
+class VerifyScrubber:
+    """Keep enough original characters to match a term split across arbitrary pipe/UTF-8 reads.
+    Casefold spans map back to original characters (including expanding folds such as sharp s).
+    A mask absent from every term cannot introduce a new forbidden word at a replacement edge.
+    """
+    def __init__(self, terms):
+        words = [t.casefold() for t, _ in terms if t]
+        self.pattern = re.compile("|".join(re.escape(t) for t in sorted(words, key=len, reverse=True))) if words else None
+        self.keep = max(map(len, words), default=0)
+        self.mask = next(chr(c) for c in range(0x2588, 0x110000) if all(chr(c).casefold() not in t for t in words))
+        self.pending = ""
+
+    def feed(self, text, final=False):
+        from bisect import bisect_right
+        raw = self.pending + text
+        cut = len(raw) if final else max(0, len(raw) - self.keep)
+        spans = []
+        if self.pattern:
+            folded = raw.casefold()
+            offsets = None
+            if len(folded) != len(raw):
+                offsets = [0]
+                for c in raw:
+                    offsets.append(offsets[-1] + len(c.casefold()))
+            for match in self.pattern.finditer(folded):
+                start = bisect_right(offsets, match.start()) - 1 if offsets else match.start()
+                end = bisect_right(offsets, match.end() - 1) if offsets else match.end()
+                spans.append((start, end))
+            # Expanding folds can produce overlapping ORIGINAL spans. Move the boundary
+            # backwards through all of them, so no earlier span is accidentally split.
+            for start, end in reversed(spans):
+                if start < cut < end:
+                    cut = start
+        self.pending = raw[cut:]
+        out, pos = [], 0
+        for start, end in spans:
+            if end <= cut and end > pos:
+                start = max(start, pos)
+                out.extend((raw[pos:start], self.mask * (end - start)))
+                pos = end
+        out.append(raw[pos:cut])
+        return "".join(out)
+
+
+def verify_log_dir(inst, n, branch):
+    """Pin the node and its hand-back folder; never follow a planted directory link into a checkout."""
+    row = open_job(read_jobs(n) or [], branch)
+    key = job_key(row) if row else digest([n["id"], branch])
+    parent = n["dir"].resolve()
+    roots = []
+    for place in home_places(n):
+        try:
+            root_fd = os.open(place.resolve(), HISTORY_DIR_FLAGS)
+        except FileNotFoundError:
+            continue  # an absent folder cannot contain the already-existing node folder
+        except OSError:
+            die("verify can't locate a home/checkout folder; refusing to write logs")
+        try:
+            location = history_fd_path(root_fd)
+            if not location:
+                die("verify can't locate a home/checkout folder; refusing to write logs")
+            roots.append(Path(location))  # actual on-disk case, for every protected root as well
+        finally:
+            os.close(root_fd)
+
+    def check(fd):
+        location = history_fd_path(fd)
+        where = Path(location) if location else None
+        if not where or any(where == p or p in where.parents for p in roots):
+            die("verify log folder is unknown or inside a home/checkout; refusing to run verify")
+        if where != parent / "job-handbacks" and where != parent:
+            die("verify log folder moved; refusing to write")
+
+    try:
+        nfd = os.open(parent, HISTORY_DIR_FLAGS)
+    except OSError:
+        die("verify log node folder is a link or not a folder")
+    try:
+        # Canonical on-disk spelling, including case on a case-insensitive filesystem.
+        location = history_fd_path(nfd)
+        if location:
+            parent = Path(location)
+        check(nfd)
+        try:
+            os.mkdir("job-handbacks", 0o700, dir_fd=nfd)
+        except FileExistsError:
+            pass
+        try:
+            dfd = os.open("job-handbacks", HISTORY_DIR_FLAGS, dir_fd=nfd)
+        except OSError:
+            die("verify log hand-back folder is a link or not a folder")
+    finally:
+        os.close(nfd)
+    try:
+        check(dfd)
+    except BaseException:
+        os.close(dfd)
+        raise
+    return parent / "job-handbacks", dfd, key, check
+
+
+def run_verify(inst, n, branch, verify, w, env):
+    """Drain the same combined stdout/stderr pipe as before; stdin, environment and shell stay unchanged.
+    Only redacted text reaches disk or failure tails. Memory holds at most 15 bounded
+    lines per named lane, plus an overall tail and the scrubber's protected suffix.
+    """
+    import codecs
+    import io
+    import selectors
+    from collections import deque
+    folder, dfd, key, check = verify_log_dir(inst, n, branch)
+    terms = never_terms(n)
+    scrubber = VerifyScrubber(terms)
+    say = lambda text: print(VerifyScrubber(terms).feed(text, final=True), flush=True)
+    name = key + "-verify-" + str(time.time_ns()) + "-" + os.urandom(6).hex() + ".log"
+    proc = None
+    try:
+        check(dfd)
+        fd = os.open(name, os.O_RDWR | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600, dir_fd=dfd)
+        with os.fdopen(fd, "w+", encoding="utf-8") as log:
+            os.fchmod(log.fileno(), 0o600)
+            say("verify log: " + str(folder / name))
+            # Never touch arbitrary entries or another job's logs. Unlinking a link never follows it.
+            old = sorted(x for x in os.listdir(dfd) if x != name and
+                         re.fullmatch(re.escape(key) + r"-verify-\d+-[0-9a-f]{12}\.log", x))
+            # Keep this run even if the wall clock moved backwards since older runs.
+            for entry in old[:max(0, len(old) - VERIFY_LOG_KEEP + 1)]:
+                check(dfd)
+                os.unlink(entry, dir_fd=dfd)
+            overall, lanes, failed = deque(maxlen=15), {}, set()
+            pending, lines, chars = "", 0, 0
+            line_decoder = io.IncrementalNewlineDecoder(None, translate=True)
+
+            def consume(text, final=False):
+                nonlocal pending, lines, chars
+                check(dfd)
+                log.write(text)
+                log.flush()
+                chars += len(text)
+                display = line_decoder.decode(text, final=final)
+                lines += display.count("\n")
+                pending += display
+                while "\n" in pending or len(pending) > 16384:
+                    if "\n" in pending[:16385]:
+                        line, pending = pending.split("\n", 1)
+                    else:
+                        line, pending = pending[:16384], pending[16384:]
+                    tail(line)
+
+            def tail(line):
+                overall.append(line)
+                match = re.match(r"^\[lane ([^]\r\n]{1,120})\]\s?(.*)", line)
+                if match:
+                    lane, body = match.groups()
+                    lanes.setdefault(lane, deque(maxlen=15)).append(line)
+                    if re.search(r"\b(?:FAIL(?:ED|URE)?|ERROR)\b|\bexit[ =:]+[1-9]\d*\b", body, re.I):
+                        failed.add(lane)
+
+            started = time.monotonic()
+            deadline = started + VERIFY_PROGRESS_SECONDS
+            proc = subprocess.Popen(verify, shell=True, cwd=w["path"], env=env,
+                                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+            decoder = codecs.getincrementaldecoder("utf-8")("replace")
+            with selectors.DefaultSelector() as selector:
+                selector.register(proc.stdout, selectors.EVENT_READ)
+                while selector.get_map():
+                    for selected, _ in selector.select(max(0, deadline - time.monotonic())):
+                        data = os.read(selected.fileobj.fileno(), 8192)
+                        if data:
+                            consume(scrubber.feed(decoder.decode(data)))
+                        else:
+                            selector.unregister(selected.fileobj)
+                            consume(scrubber.feed(decoder.decode(b"", final=True), final=True), final=True)
+                    now = time.monotonic()
+                    if now >= deadline:
+                        say(f"verify: running {now - started:.0f}s; {lines} lines, {chars} characters logged")
+                        deadline = now + VERIFY_PROGRESS_SECONDS
+            # A command may close stdout and continue running: progress still matters then.
+            while proc.poll() is None:
+                try:
+                    proc.wait(timeout=max(0.01, deadline - time.monotonic()))
+                except subprocess.TimeoutExpired:
+                    now = time.monotonic()
+                    say(f"verify: running {now - started:.0f}s; {lines} lines, {chars} characters logged")
+                    deadline = now + VERIFY_PROGRESS_SECONDS
+            if pending:
+                tail(pending)
+            if proc.returncode:
+                say(f"verify failed (exit {proc.returncode}); output tail:")
+                for lane in sorted(failed):
+                    say("verify failing lane: " + lane)
+                    say("\n".join(lanes[lane]))
+                # Always retain context for failures outside the named convention as well.
+                say("verify overall tail:")
+                say("\n".join(overall))
+            return proc.returncode, str(folder / name)
+    finally:
+        if proc is not None:
+            if proc.poll() is None:
+                proc.kill()  # subprocess.run also kills on exceptions; SIGTERM can be ignored
+                proc.wait()
+            proc.stdout.close()
+        os.close(dfd)
+
+
 def record_ready(inst, n, branch, reviews, previous=None, reverify=False):
     reasons, head, main = ready_preflight(n, branch)
     verify = n["fm"].get("verify", "").strip()
@@ -6662,16 +6871,20 @@ def record_ready(inst, n, branch, reviews, previous=None, reverify=False):
                  ": nothing changed since") + " (--reverify runs it again)")
         return {"version": 1, "node": n["id"], "branch": branch, "head": head, "main": main,
                 "verify_command": verify, "verify_result": 0, "verified_head": base, "verify_reused": True,
-                "inputs": inputs, "review_rounds": reviews, "checked_at": stamp(inst)}, []
+                "inputs": inputs, "verify_log": previous.get("verify_log"),
+                "review_rounds": reviews, "checked_at": stamp(inst)}, []
     env = {**os.environ, "MAIN": str(n["home_path"]), "WORKTREE": w["path"], "BRANCH": branch,
            "NODE": n["id"], "PORT": str(w["port"]), "PORTS": str(w.get("ports", 1)),
            "PORT_LAST": str(w["port"] + w.get("ports", 1) - 1)}
+    # The CLI holds brain_lock here. Do not sweep an operator's dirty .gitignore into
+    # the worker hand-back commit just because we added the local-output exclusion.
+    gi = inst.root / ".gitignore"
+    dirty_ignore = git("status", "--porcelain", "--", ".gitignore", cwd=inst.root).stdout.strip()
+    ensure_gitignore(inst.root)
+    if dirty_ignore:
+        TOUCHED.discard(gi)
     unlock()  # verification belongs to this worker, not the instance-wide lock
-    result = subprocess.run(verify, shell=True, cwd=w["path"], env=env,
-                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors="replace")
-    if result.returncode:
-        print(f"verify failed (exit {result.returncode}); output tail:")
-        print(redact("\n".join(result.stdout.splitlines()[-15:]), never_terms(n)))
+    result, log_path = run_verify(inst, n, branch, verify, w, env)
     after, head_after, main_after = ready_preflight(n, branch)
     if not after and verify_inputs(n, w) != inputs:
         after = ["files verify reads besides tracked ones (verify_inputs) changed"]
@@ -6680,7 +6893,7 @@ def record_ready(inst, n, branch, reviews, previous=None, reverify=False):
         return None, ["verify changed the job's branch, local main or worktree (" + "; ".join(after or ["refs moved"])
                       + "); commit or discard what it changed, then hand back again"]
     packet = {"version": 1, "node": n["id"], "branch": branch, "head": head, "main": main,
-              "verify_command": verify, "verify_result": result.returncode, "verified_head": head,
+              "verify_command": verify, "verify_result": result, "verify_log": log_path, "verified_head": head,
               "inputs": inputs, "review_rounds": reviews, "checked_at": stamp(inst)}
     return packet, []
 
@@ -9577,7 +9790,7 @@ def collect_problems(inst):
     if host and not (CORE / "adapters" / "hosts" / f"{host}.md").exists():
         p(f"host '{host}' has no adapter in core/adapters/hosts")
     if ensure_gitignore_needed(inst.root):
-        p(".gitignore doesn't ignore .brain/ (this machine's bindings must not be shared)")
+        p(".gitignore doesn't ignore .brain/ or private verify logs (one or both exclusions missing)")
         fixable.append("gitignore")
     label_keys = lst(inst.cfg.get("label_keys"))
     tdir = CORE / "templates" / "node"
@@ -9728,7 +9941,8 @@ def collect_problems(inst):
 
 def ensure_gitignore_needed(root):
     gi = root / ".gitignore"
-    return ".brain/" not in (gi.read_text().splitlines() if gi.exists() else [])
+    lines = gi.read_text().splitlines() if gi.exists() else []
+    return any(p not in lines for p in (".brain/", "**/job-handbacks/*-verify-*.log"))
 
 
 def registry_stale(inst):
@@ -9741,7 +9955,7 @@ def registry_stale(inst):
 def apply_fixes(inst, kinds):
     done = []
     if "gitignore" in kinds and ensure_gitignore(inst.root):
-        done.append(".gitignore ignores .brain/")
+        done.append(".gitignore ignores .brain/ and private verify logs")
     if "local" in kinds:
         for n in inst.nodes():
             fm, body = read_fm(n["dir"] / "node.md")
