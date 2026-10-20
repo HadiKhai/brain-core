@@ -2203,6 +2203,20 @@ class QuestionWake(Scenario):
         node_text = (self.r / "node.md").read_text() + (self.r / "nodes/a/node.md").read_text()
         self.assertNotIn(self.command, node_text)
 
+    def test_url_transport_uses_constant_body_timeout_and_no_redirect(self):
+        import urllib.request
+        response = mock.MagicMock()
+        response.__enter__.return_value.status = 204
+        opener = mock.Mock()
+        opener.open.return_value = response
+        with mock.patch.object(urllib.request, "build_opener", return_value=opener) as build:
+            self.assertTrue(self.module.wake_send("https://wake.invalid/synthetic-capability"))
+        request = opener.open.call_args.args[0]
+        self.assertEqual(request.data, b'{"event":"brain-wake"}')
+        self.assertEqual(opener.open.call_args.kwargs["timeout"], 0.4)
+        handler = build.call_args.args[0]
+        self.assertIsNone(handler.redirect_request(None, None, 302, "redirect", {}, "https://other.invalid/"))
+
     def test_delivery_racing_with_pending_creation_is_deduplicated(self):
         original = self.module.os.open
         def publish_delivery(path, *args, **kwargs):
@@ -2395,6 +2409,27 @@ class StopHook(Scenario):
                                   options=[{"label": "Blue", "description": "A blue option"}])]
         self.hook(r, d, transcript=self.question_log(rows))
         self.assertEqual((d / "inbox.md").read_text().count("host-question:"), 1)
+
+    def test_hanging_wake_keeps_hook_fast_and_inbox_durable(self):
+        r = self.init("alice")
+        self.b(r, "new", "a", "--title", "Alpha")
+        attempted = self.tmp / "wake-attempted"
+        script = "from pathlib import Path; import time; Path(" + repr(str(attempted)) + ").touch(); time.sleep(20)"
+        self.b(r, "set", "a", "coordinator=synthetic-thread", "wake=" +
+               shlex_quote(sys.executable) + " -c " + shlex_quote(script))
+        d = r / "nodes/a"
+        start = time.monotonic()
+        self.hook(r, d, active=True, transcript=self.question_log([self.question_call(text="Choose blue?")]))
+        self.assertLess(time.monotonic() - start, 1)
+        self.assertIn("Choose blue?", (d / "inbox.md").read_text())
+        deadline = time.monotonic() + 5
+        while not attempted.exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        self.assertTrue(attempted.exists())
+        time.sleep(0.5)
+        directory = r / ".brain/wake/a"
+        self.assertEqual(len(list(directory.glob("*.pending"))), 1)
+        self.assertFalse(list(directory.glob("*.sent")))
 
     def test_captured_question_wakes_once_without_holding_stop(self):
         r = self.init("alice")
