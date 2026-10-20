@@ -6247,6 +6247,12 @@ class Workflow(Scenario):
         out = self.b(r, *args, "--context-file", str(self.tmp / "Synthetic Forbidden Phrase-missing.md"), ok=False)
         self.assertNotIn("Synthetic Forbidden Phrase", out)
         self.assertNotIn("Traceback", out)
+        contract = self.tmp / "contract.md"
+        contract.write_text("".join("## " + field + "\nSynthetic scope.\n\n" for field in
+                            ("Outcome", "Authorized", "Discretion", "Stop when", "Needs consent", "Done means")) +
+                            "## Why separate\nDistinct ownership.\n")
+        self.b(r, "jobs", "a", "--branch", "job", "--contract-file", str(contract))
+        self.assertIn("Why a separate agent: Distinct ownership.", self.b(r, *args))
 
     def test_open_job_overlap_is_once_per_job_and_clears(self):
         r, home, wt = self.job()
