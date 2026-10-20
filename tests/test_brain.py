@@ -6463,7 +6463,19 @@ class SmallFixes(Scenario):
             self.assertIn("out of the brain", self.b(r, "new", "a", "--title", "A", ok=False))
             self.assertEqual(sentinel.read_text(), "keep\n")
             f.unlink()
+        alias = r / "scratch/shared"  # an inside file, hard-linked outside, reached through inside links
+        alias.parent.mkdir()
+        os.link(sentinel, alias)
+        for link, args in ((r / "registry.md", ["registry"]), (r / ".git/COMMIT_EDITMSG", ["new", "a", "--title", "A"])):
+            link.unlink(missing_ok=True)
+            link.symlink_to(alias)
+            self.assertIn("out of the brain", self.b(r, *args, ok=False))
+            self.assertEqual(sentinel.read_text(), "keep\n")
+            link.unlink()
+        shutil.rmtree(alias.parent)
+        self.b(r, "registry")
         lock = r / ".brain/lock"
+        lock.unlink(missing_ok=True)
         os.link(sentinel, lock)  # a lock taken by a command that runs no scan is refused at the lock itself
         from importlib.machinery import SourceFileLoader
         m = SourceFileLoader("brain_lock_link", str(CORE / "bin/brain")).load_module()
