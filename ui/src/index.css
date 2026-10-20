@@ -2112,8 +2112,12 @@ svg {
 .project-node strong { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
 .flight-row .disclosure-button { padding: 8px 0 !important; font-size: 11px !important; }
 [data-page="inbox"] > .page-section > .section-body { max-height: none; overflow: visible; }
-.filter-toolbar { padding: 16px 20px; }
+.filter-toolbar { padding: 16px 20px; flex-wrap: wrap; }
+.filter-toolbar > [data-slot="input-group"] { flex: 1 1 200px; }
+.filter-toolbar > .field { flex: 1 1 160px; }
 @media (max-width: 767px) {
+  .filter-toolbar { flex-direction: column; align-items: stretch; }
+  .filter-toolbar > [data-slot="input-group"], .filter-toolbar > .field { flex: none; width: 100%; }
   .section-body { max-height: min(560px, 76dvh); }
   .metric { padding: 12px; }
   .metric-grid { grid-template-columns: repeat(2,minmax(0,1fr)); }
