@@ -40,8 +40,9 @@ Folders of subscriptions not allowed for this brain are never read, only counted
    `brain history <node> plan` prints the summary again.
    Sessions are found by the folder they ran in: the home, its worktrees and other checkouts. Work
    done on the node from elsewhere (a scratch thread, say) counts once the operator names that
-   folder: `--also <folder>` (repeatable). A folder holding the home folder or a brain, or another
-   node's home, is refused.
+   folder: `--also <folder>` (repeatable). Only sessions run in that very folder count, never in
+   folders below it; a folder holding the home folder or a brain, inside a brain or a repository
+   other than the node's, or holding another project's home, is refused.
 3. **Readers.** One per batch or run of batches: `brain history <node> brief b001-b002
    --runtime <rt>`, launched as workers through the host adapter, several at a time. A reader
    reads one slice, appends its notes and `read: b001/s1`, then reads the next. After a

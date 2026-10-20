@@ -3963,9 +3963,12 @@ def history_matcher(inst, n, also=()):
         if not (isinstance(cwd, str) and cwd.startswith("/")):
             return None
         p = Path(cwd).resolve()
-        if p not in seen and any(p == a or a in p.parents for a in named):
-            # A named folder vouches only for sessions that ran outside every brain and outside any repository but
-            # this node's own: another project's home, worktree or clone below it stays that project's.
+        if p not in seen and p.is_dir() and any(is_brain(q) for q in [p, *p.parents]):
+            seen[p] = False  # a brain's own folders are never a project's home, whatever remote a session recorded
+        if p not in seen and any(p == a for a in named):
+            # A named folder vouches only for sessions run in that very folder, never below it (another project's
+            # repository or a brain may lie below, in whatever shape), and only while it is outside every brain
+            # and every repository but this node's own.
             if not p.is_dir() or any(is_brain(q) for q in [p, *p.parents]):
                 seen[p] = False
             else:

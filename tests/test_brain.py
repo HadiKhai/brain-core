@@ -6680,6 +6680,16 @@ class HistorySizes(History):
             source={"subagent": {"thread_spawn": {"parent_thread_id": "cccc0001-0000"}}}))
         after = count(self.b(self.r, "spend", "garden", "--also", str(scratch)))
         self.assertEqual(after, base + 2)  # the scratch sub-agent and the Codex parent; not the foreign children
+        damaged = scratch / "damaged-bare"  # below the named folder: never counted, whatever it is
+        self.git("clone", "-q", "--bare", str(self.tmp / "theirs"), str(damaged), cwd=self.tmp)
+        os.rename(damaged / "HEAD", damaged / "HEAD-gone")
+        plain = scratch / "plain-subfolder"
+        plain.mkdir()
+        for cwd, sid in ((damaged, "aaaaaaaa-1111"), (plain, "aaaaaaaa-2222")):
+            self.jsonl(self.claude / "projects" / re.sub(r"[^A-Za-z0-9]", "-", str(cwd)) / f"{sid}.jsonl",
+                       [{**r, "message": {"role": "user", "content": f"FOREIGN-{sid}"}} if r.get("type") == "user" else r
+                        for r in self.claude_rows(cwd, sid, start=19)[:3]])
+        self.assertEqual(count(self.b(self.r, "spend", "garden", "--also", str(scratch))), after)
         self.b(self.r, "history", "garden", "--fresh", "--also", str(scratch))
         _, m, text = self.batches()
         self.assertNotIn("FOREIGN-", text)

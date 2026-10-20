@@ -8,10 +8,11 @@ upgrading. `brain changes <node>` shows the entries this node's coordinator hasn
 ## 2026-10-20: History from folders named as the node's
 
 For agents:
-- `brain history <node> --also <folder>` (repeatable) also reads sessions that ran in that folder:
-  work done on the node from somewhere other than its home or worktrees, such as a scratch
-  thread. `brain spend <node> --also <folder>` counts them too. A folder holding the home folder
-  or a brain, or another node's home, is refused.
+- `brain history <node> --also <folder>` (repeatable) also reads sessions that ran in that very
+  folder (not in folders below it): work done on the node from somewhere other than its home or
+  worktrees, such as a scratch thread. `brain spend <node> --also <folder>` counts them too, and a
+  sub-agent only when its own folder counts. A folder holding the home folder or a brain, inside a
+  brain or another repository, or holding another project's home, is refused.
 
 After upgrading:
 - Nothing, unless a node's history was made mostly outside its home: then ask the operator which
