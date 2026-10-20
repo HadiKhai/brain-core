@@ -7822,18 +7822,18 @@ def ago(inst, d):
     return "just now"
 
 
-def status_section(n, heading):
+def status_section(n, heading, physical=False):
     """Bullet lines under `## <heading>` in a node's status.md."""
     f = n["dir"] / "status.md"
     if not f.exists():
         return []
     out, inside = [], False
-    for line in f.read_text().splitlines():
+    for line in re.sub(r"<!--.*?-->", "", f.read_text(), flags=re.S).splitlines():
         if line.startswith("## "):
             inside = line[3:].strip().lower().startswith(heading.lower())
         elif inside and line.startswith("- ") and line[2:].strip():
             out.append(line[2:].strip())
-        elif inside and out and line.startswith("  ") and line.strip():
+        elif not physical and inside and out and line.startswith("  ") and line.strip():
             out[-1] += " " + line.strip()  # a wrapped bullet
     return out
 
@@ -7856,25 +7856,46 @@ def code_setup_warnings(inst, n):
     if not n["fm"].get("verify", "").strip():
         out.append(f"{n['id']}: code node needs verify=<command> before its first job; brain set {n['id']} 'verify=<command>'")
     bound = inst.local.get("schedules", {})
-    if not any(x.get("node") == n["id"] and x["id"] in bound for x in read_schedules(inst)):
+    ticks = [x for x in read_schedules(inst) if x.get("node") == n["id"]]
+    if not ticks or (n["local"].get("coordinator") and not any(x["id"] in bound for x in ticks)):
         out.append(f"{n['id']}: code node needs a coordinator tick before its first job; schedule a host interval, "
                    "brain schedule add, then brain schedule bind (adapters/hosts/t3.md)")
     return out
 
 
+def empty_blocked(text):
+    return bool(re.fullmatch(r"\(?\s*(?:none|nothing)(?:\s+(?:right now|blocked|currently|yet|at present))?[.!]?\s*\)?", text, re.I))
+
+
 def blocked_entries(inst, n):
     """Stable source text, with age kept separate so a ticking clock cannot re-notify."""
+    if n["archived"]:
+        return []
+    source = n["dir"] / "status.md"
+    # The Instance lives for one CLI command/UI snapshot. No global or cross-snapshot cache:
+    # edits, policy changes and advancing age are re-read on the next instance.
+    stamp = source.stat() if source.exists() else None
+    now = inst.now_dt()
+    cache = getattr(inst, "_blocked_entries", {})
+    key = (n["id"], stamp.st_mtime_ns if stamp else None, stamp.st_size if stamp else None, now.isoformat())
+    # Cache source parsing/history separately from the clock-derived age.
+    source_key = key[:3]
+    parsed = cache.get(source_key)
+    if parsed is not None:
+        return [{**b, "age_hours": round(max(0, elapsed(inst.parse_time(b["since"]), now) / 3600), 2),
+                 "escalated": elapsed(inst.parse_time(b["since"]), now) > BLOCKED_HOURS * 3600} for b in parsed]
     out = []
-    for text in status_section(n, "blocked"):
-        if text.lower().rstrip(".") in ("none", "nothing"):
+    first_lines = status_section(n, "blocked", physical=True)
+    for index, text in enumerate(status_section(n, "blocked")):
+        if empty_blocked(text):
             continue
         fields = dict((m.group(1).lower(), m.group(2).strip()) for m in re.finditer(
             r"(?:^|;\s*)(since|recommendation|default):\s*([^;]*)", text, re.I))
         since = inst.parse_time(fields.get("since", ""))
         # Legacy entries still age: use this bullet's introduction, never the status Updated line.
         if not since:
-            source = n["dir"] / "status.md"
-            history = git("log", "--reverse", "--format=%cI", "-S", text, "--",
+            needle = first_lines[index]
+            history = git("log", "--reverse", "--format=%cI", "-S", needle, "--",
                           str(source.relative_to(inst.root)), cwd=inst.root).stdout.splitlines()
             since = inst.parse_time(history[0]) if history else datetime.datetime.fromtimestamp(
                 source.stat().st_mtime, inst.zone())
@@ -7884,6 +7905,8 @@ def blocked_entries(inst, n):
                     "recommendation": fields.get("recommendation", ""), "default": fields.get("default", ""),
                     "missing": [k for k in ("since", "recommendation", "default")
                                 if not fields.get(k) or (k == "since" and not inst.parse_time(fields[k]))]})
+    cache[source_key] = out
+    inst._blocked_entries = cache
     return out
 
 
@@ -7895,30 +7918,51 @@ def blocked_metadata(inst, n, kind, text):
                  for b in blocked_entries(inst, n) if b["text"] == text), {})
 
 
-def dead_note_paths(n):
-    """Explicit Markdown paths only. Never interpret commands, URLs, globs or prose as paths."""
+def dead_note_paths(inst, n):
+    """Explicit Markdown paths only; ambiguous package names/refs/prose stay judgement."""
     out = []
+    extensions = set(LANGUAGES) | {".md", ".txt", ".json", ".yaml", ".yml", ".toml", ".ini", ".cfg",
+                                   ".csv", ".tsv", ".sql", ".html", ".css", ".png", ".svg", ".pdf", ".lock"}
+    filenames = {"README.md", "CHANGES.md", "AGENTS.md", "MODEL.md", "Dockerfile", "Makefile", "LICENSE"}
     for name in ("brief.md", "status.md", "knowledge.md"):
         source = n["dir"] / name
-        if not source.exists():
+        if not source.is_file():
             continue
-        text = FACTS_RE.sub("", source.read_text())
-        text = re.sub(r"<!--.*?-->", "", text, flags=re.S)
+        try:
+            text = source.read_text()
+        except (OSError, UnicodeError):
+            out.append(f"{n['id']}: {name}: cannot check paths in unreadable Markdown")
+            continue
+        # Keep line numbers while hiding generated content and template comments.
+        text = re.sub(r"<!-- brain:facts v1 -->.*?<!-- /brain:facts -->|<!--.*?-->",
+                      lambda m: "\n" * m.group().count("\n"), text, flags=re.S)
         for number, line in enumerate(text.splitlines(), 1):
-            candidates = re.findall(r"`([^`\n]+)`", line)
-            candidates += re.findall(r"\[[^\]]*\]\(([^)]+)\)", line)
-            for raw in candidates:
-                value = raw.strip("<>").split("#", 1)[0]
+            candidates = [(v, False) for v in re.findall(r"`([^`\n]+)`", line)]
+            candidates += [(v, True) for v in re.findall(r"\[[^\]]*\]\(([^)]+)\)", line)]
+            for raw, link in candidates:
+                value = raw
+                if link:
+                    match = re.match(r'^<([^>]+)>|^(\S+)', value)
+                    value = (match.group(1) or match.group(2)) if match else ""
+                value = value.split("#", 1)[0]
                 value = re.sub(r":\d+(?::\d+)?$", "", value)
-                if not value or re.search(r"\s|[?*{}$]|://|^[a-zA-Z][a-zA-Z0-9+.-]*:", value):
+                if not value or re.search(r"[?*{}$]|://|^[a-zA-Z][a-zA-Z0-9+.-]*:", value):
                     continue
-                if not ("/" in value or re.search(r"\.[a-zA-Z0-9]{1,10}$", value)):
+                if link:
+                    value = urllib.parse.unquote(value)
+                elif re.search(r"\s", value):
                     continue
                 path = Path(value).expanduser()
-                bases = [n["dir"]] + ([n["home_path"]] if n["home_path"] else [])
+                explicit = value.startswith(("./", "../", "/", "~")) or value.endswith("/")
+                file_shape = path.name in filenames or (path.suffix in extensions and
+                              ("/" in value or value[0].islower() or value[0] == "."))
+                if not link and not (explicit or file_shape):
+                    continue
+                bases = [n["dir"], inst.root] + ([n["home_path"]] if n["home_path"] else [])
                 if not any((base / path).exists() for base in bases):
-                    out.append(f"{n['id']}: {name}: dead path {raw}; repair the reference or restore the file/folder")
+                    out.append(f"{n['id']}: {name}:{number}: dead path {raw}; repair the reference or restore the file/folder")
     return sorted(set(out))
+
 
 def active_work(n):
     """Rows of the 'Active work' table in status.md (branch, thread, PR, state), minus the header."""
@@ -9679,22 +9723,23 @@ def collect_problems(inst):
     nodes = inst.nodes()
     for n in nodes:
         fm, nid = n["fm"], n["id"]
-        status_file = n["dir"] / "status.md"
-        status_text = status_file.read_text() if status_file.exists() else ""
-        if (status_text.count(FACTS_START) != 1 or status_text.count(FACTS_END) != 1
-                or not FACTS_RE.search(status_text)):
-            p(f"{nid}: status.md missing or malformed generated facts block; brain status {nid} --refresh")
-        judgement = FACTS_RE.sub("", status_text)
-        now_match = re.search(r"(?ims)^## Now\s*\n(.*?)(?=^## |\Z)", judgement)
-        now_lines = len([l for l in re.sub(r"<!--.*?-->", "", now_match.group(1), flags=re.S).splitlines() if l.strip()]) if now_match else 0
-        if now_lines > NOW_LINE_LIMIT:
-            warnings.append(f"{nid}: Now has {now_lines} nonblank lines (limit {NOW_LINE_LIMIT}); move history to Recent changes or decisions")
-        incomplete = [b for b in blocked_entries(inst, n) if b["missing"]]
-        if incomplete:
-            warnings.append(f"{nid}: {len(incomplete)} blocked item(s) missing valid since:, recommendation: or default:; "
-                            "add '; since: <brain now timestamp>; recommendation: <action>; default: <fallback>'")
-        warnings.extend(code_setup_warnings(inst, n))
-        warnings.extend(redact(w, never_terms(n)) for w in dead_note_paths(n))
+        if not n["archived"]:
+            status_file = n["dir"] / "status.md"
+            status_text = status_file.read_text() if status_file.exists() else ""
+            if (status_text.count(FACTS_START) != 1 or status_text.count(FACTS_END) != 1
+                    or not FACTS_RE.search(status_text)):
+                p(f"{nid}: status.md missing or malformed generated facts block; brain status {nid} --refresh")
+            judgement = FACTS_RE.sub("", status_text)
+            now_match = re.search(r"(?ims)^## Now\s*\n(.*?)(?=^## |\Z)", judgement)
+            now_lines = len([l for l in re.sub(r"<!--.*?-->", "", now_match.group(1), flags=re.S).splitlines() if l.strip()]) if now_match else 0
+            if now_lines > NOW_LINE_LIMIT:
+                warnings.append(f"{nid}: Now has {now_lines} nonblank lines (limit {NOW_LINE_LIMIT}); move history to Recent changes or decisions")
+            incomplete = [b for b in blocked_entries(inst, n) if b["missing"]]
+            if incomplete:
+                warnings.append(f"{nid}: {len(incomplete)} blocked item(s) missing valid since:, recommendation: or default:; "
+                                "add '; since: <brain now timestamp>; recommendation: <action>; default: <fallback>'")
+            warnings.extend(code_setup_warnings(inst, n))
+            warnings.extend(redact(w, never_terms(n)) for w in dead_note_paths(inst, n))
         future, dated = future_entries(inst, n)
         problems.extend(future)
         warnings.extend(dated)
@@ -9808,8 +9853,10 @@ def collect_problems(inst):
             if not resolve_ref(nodes, ref):
                 p(f"{name}: source_nodes names '{ref}', no node, former id or merged node (axiom 19)")
     for n in nodes:
+        if n["archived"]:
+            continue
         vague = [b for b in status_section(n, "blocked")
-                 if b.strip().lower().rstrip(".") not in ("none", "nothing") and "clears when" not in b.lower()]
+                 if not empty_blocked(b) and "clears when" not in b.lower()]
         if vague:
             warnings.append(f"{n['id']}: {len(vague)} Blocked "
                             + ("entry doesn't say what clears it" if len(vague) == 1 else "entries don't say what clears them")

@@ -194,6 +194,9 @@ Root also checks every descendant coordinator: read each binding with `brain sho
 and list its host pending requests, including nested nodes and nodes without open jobs.
 A missing binding is a setup gap. Runtime questions reach the inbox when a supported stop
 hook runs; live host requests still need the host check. If both are empty, end the turn at once, saying nothing and changing no files.
+If only `blocked-overdue` items remain and no host request needs action, run
+`brain inbox <id> --new` and route only new escalations, then end without refreshing or
+committing unchanged status. An unchanged wait is not new coordinator work.
 Otherwise act on each due item: read the report, review or reconcile a finished job, answer
 questions, and record the next step. For each due job, put its exact branch in Active work
 and a concrete next action in judgement; a generated facts entry alone does not record your
