@@ -80,6 +80,14 @@ def safe_target(path):
         die(f"{p} is hard-linked to another file; brain won't write a file shared with another place (copy it)")
 
 
+def hard_linked(entry):
+    """A regular file with another name somewhere (a hard link): writing it in place changes it there too."""
+    try:
+        return entry.is_file(follow_symlinks=False) and entry.stat(follow_symlinks=False).st_nlink > 1
+    except OSError:
+        return False
+
+
 def outward_links(root):
     """Links in what brain commands write that lead out of the brain: its own files, .brain/, and in the root and
     every node folder their files, library, specialists, job records, sources and reports, and the nodes below.
@@ -118,6 +126,8 @@ def outward_links(root):
                 if not real.is_dir():
                     continue
             elif not e.is_dir(follow_symlinks=False):
+                if hard_linked(e):
+                    bad.append(p)  # the same file is also somewhere else: writing it changes that too
                 continue
             if kind == "entries":
                 continue  # sources/ and reports/: only what lies directly in them is written
@@ -139,7 +149,9 @@ def outward_links(root):
     except OSError:
         entries = []
     for e in entries:  # what a commit writes: its message, index, HEAD, refs and logs at the top
-        if e.is_symlink():
+        if hard_linked(e):
+            bad.append(Path(e.path))
+        elif e.is_symlink():
             p = Path(e.path)
             try:
                 real = p.resolve()
@@ -438,6 +450,9 @@ class brain_lock:
             import time
             self.path.parent.mkdir(exist_ok=True)
             fh = open(self.path, "a+")
+            if os.fstat(fh.fileno()).st_nlink > 1 or self.path.is_symlink():
+                fh.close()
+                die(f"{tilde(self.path)} is linked to another file; brain won't write it (remove it)")
             deadline = time.time() + LOCK_WAIT
             while True:
                 try:
@@ -1491,10 +1506,32 @@ def load():
 
 # ---------- init ----------
 
+def init_links(root, depth=3):
+    """Links in a folder a brain is about to be made in, a few levels down: it would write through them."""
+    out = []
+    for top, dirs, files in os.walk(root, followlinks=False):
+        here = Path(top)
+        for name in dirs + files:
+            p = here / name
+            try:
+                if p.is_symlink() or (p.is_file() and p.stat().st_nlink > 1):
+                    out.append(p)
+            except OSError:
+                pass
+        if len(here.relative_to(root).parts) >= depth or here.name == ".git":
+            dirs[:] = []
+    return out
+
+
 def cmd_init(a):
     root = Path(a.dir).expanduser().resolve()
     if (root / "instance.md").exists():
         die(f"{root} is already an instance")
+    if root.exists():
+        found = [str(p) for p in init_links(root)]
+        if found:
+            die(f"{root} holds links (symbolic or hard) a new brain would write through: {', '.join(found[:5])}; "
+                "use an empty folder")
     root.mkdir(parents=True, exist_ok=True)
     if CORE.resolve() != (root / "core").resolve():
         shutil.copytree(CORE, root / "core", ignore=shutil.ignore_patterns("__pycache__", ".DS_Store", ".git"))
@@ -4785,6 +4822,7 @@ def connect_plan(inst, n, a):
     try:
         connect_inside(inst, n, fd)
         for entry in list(os.scandir(fd)):  # a fresh start: links are removed, never followed
+            connect_inside(inst, n, fd)  # every deletion in a folder still where it was checked
             if entry.is_dir(follow_symlinks=False):
                 history_rmtree(fd, entry.name)
             else:
@@ -7493,8 +7531,10 @@ def hook_stop(a):
         if not contained or any(f.is_file() and not f.is_symlink() and f.stat().st_nlink > 1 for f in (state_f, log)):
             raise OSError("bookkeeping would leave the brain")  # the reminder still goes out; only this is skipped
         state_f.parent.mkdir(exist_ok=True)
-        tmp = state_f.with_name(f".hooks.{os.getpid()}.json")
-        tmp.write_text(json.dumps(dict(list(state.items())[-200:]), indent=1))
+        fd, name = tempfile.mkstemp(prefix=".hooks.", suffix=".json", dir=state_f.parent)  # new, never one planted
+        tmp = Path(name)
+        with os.fdopen(fd, "w") as out:
+            out.write(json.dumps(dict(list(state.items())[-200:]), indent=1))
         os.replace(tmp, state_f)  # whole or not at all: another session's hook never reads half a file
         held = why + ([f"upgrade notice ({len(unread)} unread change entr{'y' if len(unread) == 1 else 'ies'})"]
                       if upgrade else [])
@@ -7957,7 +7997,8 @@ def collect_problems(inst):
         p("instance.md: no principals")
     for link in outward_links(inst.root):
         p(f"{link.relative_to(inst.root.resolve()) if inst.root.resolve() in link.parents else link}: a link leading "
-          "out of the brain, where brain writes: remove it (commands that change anything refuse to run until then)")
+          "out of the brain (symbolic, or a hard link to a file elsewhere), where brain writes: remove it (commands "
+          "that change anything refuse to run until then)")
     for rt in inst.runtimes:
         if not (CORE / "adapters" / "runtimes" / f"{rt}.env").exists():
             p(f"runtime '{rt}' has no adapter in core/adapters/runtimes")
@@ -8758,7 +8799,7 @@ def main():
     if root:
         out = outward_links(root)
         if out:  # checked before anything is written: no command half-done through a link
-            die("these links lead out of the brain, and brain writes only inside it: "
+            die("these links (symbolic or hard) lead out of the brain, and brain writes only inside it: "
                 + ", ".join(str(p.relative_to(Path(root).resolve())) if Path(root).resolve() in p.parents else str(p)
                             for p in out[:5]) + ("…" if len(out) > 5 else "") + "; remove them (brain check lists them)")
         with brain_lock(root):

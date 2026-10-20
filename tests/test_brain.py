@@ -5456,6 +5456,27 @@ class Connections(Scenario):
         return self.add(iid, "--from", src, "--repo", "brain/alice", "--commit", self.H, "--proposed", "--body", body,
                         *args, ok=ok)
 
+    def test_a_plan_deletes_nothing_in_a_connect_folder_moved_away(self):
+        from importlib.machinery import SourceFileLoader
+        self.b(self.r, "connect", "root")
+        conn = self.r / ".brain/connect/root"
+        (conn / "keep.txt").write_text("keep\n")
+        m = SourceFileLoader("brain_plan_move", str(CORE / "bin/brain")).load_module()
+        check, calls, away = m.connect_inside, [], self.homes["app"] / "moved"
+
+        def check_then_move(*args):  # moved right after the folder was first checked
+            check(*args)
+            calls.append(1)
+            if len(calls) == 1:
+                os.rename(conn, away)
+        m.connect_inside, m.find_root = check_then_move, (lambda: self.r)
+        a = argparse.Namespace(id="root", action="plan", nodes=[], final=False, save=False, fresh=True,
+                               only=None, runtime=None, model=None, to=None, json=False)
+        with mock.patch.dict(os.environ, self.env, clear=True), contextlib.redirect_stderr(io.StringIO()), \
+                contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit):
+            m.cmd_connect(a)
+        self.assertEqual((away / "keep.txt").read_text(), "keep\n")
+
     def test_a_saved_brief_never_lands_where_its_folder_moved(self):
         from importlib.machinery import SourceFileLoader
         self.b(self.r, "connect", "root")
@@ -6419,7 +6440,7 @@ class SmallFixes(Scenario):
         node = r / "nodes/a/node.md"
         os.link(node, outside / "node-copy.md")
         before = (outside / "node-copy.md").read_text()
-        self.assertIn("hard-linked", self.b(r, "relabel", "a", "area:x", ok=False))
+        self.assertIn("out of the brain", self.b(r, "relabel", "a", "area:x", ok=False))
         self.assertEqual((outside / "node-copy.md").read_text(), before)
         (outside / "node-copy.md").unlink()
         log = r / ".brain/hooks.log"
@@ -6430,6 +6451,42 @@ class SmallFixes(Scenario):
         out = StopHook.hook(self, r, r / "nodes/a", session="s-contained")
         self.assertEqual(out["decision"], "block")  # the reminder still goes out...
         self.assertEqual(sentinel.read_text(), "keep\n")  # ...but nothing is written through the link
+
+    def test_hard_links_in_the_lock_git_and_hook_files_and_links_where_init_writes(self):
+        r = self.init("alice")
+        sentinel = self.tmp / "sentinel.txt"
+        sentinel.write_text("keep\n")
+        for f in (r / ".git/COMMIT_EDITMSG", r / ".brain/lock"):
+            f.parent.mkdir(exist_ok=True)
+            f.unlink(missing_ok=True)
+            os.link(sentinel, f)
+            self.assertIn("out of the brain", self.b(r, "new", "a", "--title", "A", ok=False))
+            self.assertEqual(sentinel.read_text(), "keep\n")
+            f.unlink()
+        lock = r / ".brain/lock"
+        os.link(sentinel, lock)  # a lock taken by a command that runs no scan is refused at the lock itself
+        from importlib.machinery import SourceFileLoader
+        m = SourceFileLoader("brain_lock_link", str(CORE / "bin/brain")).load_module()
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            with m.brain_lock(r):
+                pass
+        self.assertEqual(sentinel.read_text(), "keep\n")
+        lock.unlink()
+        self.b(r, "new", "a", "--title", "A")
+        log = r / ".brain/hooks.log"
+        log.unlink(missing_ok=True)
+        os.link(sentinel, log)
+        status = r / "nodes/a/status.md"
+        status.write_text(status.read_text().replace("Updated:", "Updated: 2020-01-01 00:00 by x\nOld:", 1))
+        self.assertEqual(StopHook.hook(self, r, r / "nodes/a", session="s-hard")["decision"], "block")
+        self.assertEqual(sentinel.read_text(), "keep\n")
+        fresh = self.tmp / "fresh"
+        fresh.mkdir()
+        (fresh / "AGENTS.md").symlink_to(sentinel)
+        out = self.run_(["init", str(fresh), "--operator", "bob", "--title", "B"], cwd=self.tmp, brain=CORE / "bin/brain",
+                        ok=False)
+        self.assertIn("use an empty folder", out)
+        self.assertEqual(sentinel.read_text(), "keep\n")
 
     def test_merge_commits_when_a_node_has_empty_folders(self):
         r = self.init("alice")
