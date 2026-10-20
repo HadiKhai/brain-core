@@ -24,7 +24,9 @@ Run by a node's coordinator.
    Job closure and lesson cleanup retain verified range endpoints in the ledger before deleting
    worker evidence, so delayed pushes and syncs still associate owned merges, squash and fast-forward
    work. Local mode records its actual local integration parent separately from the remote default,
-   so an unrelated unpublished local change is never attributed to the worker. External rows
+   so an unrelated unpublished local change is never attributed to the worker. Local mode
+   refuses readiness until its local default contains the cached origin default; this keeps
+   published work outside owned ranges and on the default's first-parent history. External rows
    assert no review, runtime usage or job duration. First sync uses
    the existing last-sync/status time window; later syncs use a local commit cursor, including
    without `--mark`. Repeats are deduplicated even if the cursor is lost. A rewritten history

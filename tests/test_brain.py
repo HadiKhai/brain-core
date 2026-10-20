@@ -1718,6 +1718,28 @@ class TeamHomes(Scenario):
         self.assertIn("1 recorded", self.b(root, "sync", "app"))
         self.assertEqual((root / "nodes/app/job-ledger.md").read_text().count("external:" + other), 1)
 
+    def test_local_mode_requires_current_default_before_merging_and_records_other_owner_once(self):
+        root, seed, origin, home = self.team()
+        self.b(root, "set", "app", "merge=local")
+        self.b(root, "sync", "app", "--offline")
+        other = self.advance(seed, origin)
+        self.git("fetch", "origin", cwd=home)
+        self.b(root, "wt", "add", "app", "job")
+        wt = self.tmp / "app-work/worktrees/job"
+        (wt / "fix").write_text("worker change")
+        self.git("add", "-A", cwd=wt)
+        self.git("commit", "-qm", "fix", cwd=wt)
+        self.assertIn("local default must include origin default", self.b(root, "handback", "app", "--branch", "job",
+                      "--state", "done", "--reviews", "1", ok=False))
+        # The fixture owns this checkout; production code never updates an operator checkout.
+        self.git("merge", "--ff-only", "origin/trunk", cwd=home)
+        self.b(root, "handback", "app", "--branch", "job", "--state", "done", "--reviews", "1")
+        self.git("merge", "--no-ff", "-m", "made-up job merge", "job", cwd=home)
+        self.git("push", "origin", "trunk", cwd=home)
+        self.assertIn("1 recorded", self.b(root, "sync", "app"))
+        self.assertEqual((root / "nodes/app/job-ledger.md").read_text().count("external:" + other), 1)
+        self.assertIn("0 recorded", self.b(root, "sync", "app", "--offline"))
+
     def test_reset_is_bounded_and_requires_one_node(self):
         root, seed, origin, home = self.team()
         old = self.env.copy()

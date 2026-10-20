@@ -12,7 +12,9 @@ Before launching, run `brain usage`. Use only a subscription allowed for this br
 the stop line; follow the subscription and host instance in the brief. Unknown usage must be
 stated; never run a polling loop in an agent.
 
-1. **Worktree.** `core/bin/brain wt add <id> <branch> [--base <ref>]`. It creates the worktree
+1. **Worktree.** Choose the integration mode before launching: `brain set <id> merge=pr` for
+   host PR merges; `merge=local` (the default) for coordinator-owned local integration.
+   `core/bin/brain wt add <id> <branch> [--base <ref>]`. It creates the worktree
    in the node's workbench (beside the home, never inside it or the instance), runs the node's
    `worktree-setup.sh` if it has one (env files, installs), and gives the job its own port.
    If setup fails, fix the script before going on: a worker without its env files wastes its run.
@@ -61,8 +63,10 @@ stated; never run a polling loop in an agent.
    Neither fetches. The coordinator explicitly runs `brain sync <id>` (or `git fetch origin`)
    before the final check. If origin's default changes, explicitly run `git remote set-head origin -a`.
    A missing cached default refuses readiness. With `merge=local` (the default), the job must
-   also include unpublished local default-branch commits. With `merge=pr`, the host default
-   is the integration target. Local default-branch lag is informational:
+   also include unpublished local default-branch commits, and that local default must already
+   contain origin's default. The coordinator explicitly reconciles it in a coordinator-owned
+   worktree before handing back; never update the operator checkout. Use `merge=pr` when the
+   operator owns that checkout and integration happens on the host. In PR mode, local lag is informational:
    rebase the job on `origin/<default>` and hand back again, leaving the operator checkout alone.
    To update a local default branch, use a separate worktree and `git merge --ff-only origin/<default>`
    only when that branch is not checked out by the operator; otherwise leave it untouched.

@@ -6539,6 +6539,9 @@ def main_notice(n):
         if int(behind):
             print(f"Leave the operator checkout untouched. In the job worktree: git rebase {short}; "
                   "then hand back again. Fetch explicitly first to refresh cached refs.")
+            if n["fm"].get("merge", "local") != "pr":
+                print("Local merge mode also requires a current default in a coordinator-owned worktree; "
+                      "use merge=pr for host integration when the operator owns the default checkout.")
     else:
         print(f"main: {short} (cached); local {name} is missing")
 
@@ -6576,6 +6579,9 @@ def ready_preflight(n, branch):
         local = git("rev-parse", "--verify", "--quiet", local_ref + "^{commit}", cwd=n["home_path"]).stdout.strip()
         if not local:
             reasons.append("local integration branch is missing; configure merge=pr for host merges")
+        elif git("merge-base", "--is-ancestor", main, local, cwd=n["home_path"]).returncode:
+            reasons.append("local default must include origin default for merge=local; coordinator must update it "
+                           "in a coordinator-owned worktree, or configure merge=pr; never change the operator checkout")
         elif git("merge-base", "--is-ancestor", local, head, cwd=n["home_path"]).returncode:
             reasons.append("worker must rebase on current local main as well as origin default for merge=local")
     w = n["local"].get("worktrees", {}).get(branch)
@@ -6881,7 +6887,14 @@ def packet_endpoints(n, row, packet):
             type(packet.get("verify_result")) is not int or packet.get("verify_result") != 0 or
             type(packet.get("review_rounds")) is not int or packet["review_rounds"] < 1):
         return None
-    return contribution_endpoints(base, head)
+    endpoints = contribution_endpoints(base, head)
+    origin = packet.get("main")
+    if not endpoints or not isinstance(origin, str) or not re.fullmatch(r"[0-9a-f]{40,64}", origin):
+        return None
+    if n["home_path"] and n["home_path"].exists() and git(
+            "merge-base", "--is-ancestor", origin, base, cwd=n["home_path"]).returncode:
+        return None
+    return endpoints
 
 
 def contribution_endpoints(base, head):

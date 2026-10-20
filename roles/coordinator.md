@@ -280,5 +280,7 @@ For team homes, `brain set <id> merge=pr` records the host PR workflow. Explicit
 checking readiness, then run `gh pr merge` with the verified head as `--match-head-commit`
 and the home's merge strategy. Never update the operator checkout to remedy local-main lag:
 workers rebase on the cached origin default. For `merge=local` or an unset mode, readiness
-also requires the job to include unpublished local default-branch commits. Sync after host merges records external integrations
+also requires the local default to contain origin's default and the job to include unpublished
+local default-branch commits. Reconcile that branch only in a coordinator-owned worktree;
+use PR mode for host integration while the operator owns the checkout. Sync after host merges records external integrations
 once by commit identity; those rows supply no review or usage proof.

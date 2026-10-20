@@ -9,7 +9,8 @@ upgrading. `brain changes <node>` shows the entries this node's coordinator hasn
 
 For agents:
 - Ready and handback compare cached origin's default branch; stale local default branches show
-  their lag without being modified. Homes without origin still compare local main.
+  their lag without being modified. Homes without origin still compare local main. Local/unset
+  merge mode also requires a local default containing origin; PR mode permits a stale local checkout.
 - Explicit sync records external default-branch integrations once per commit, including squash
   merges and direct commits, without claiming review or runtime usage. Owned integration ranges
   survive job closure and lesson cleanup, including when push or sync happens later.
