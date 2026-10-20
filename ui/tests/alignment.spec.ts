@@ -18,7 +18,16 @@ test('section content, actions, group headers and pages share rendered alignment
       else await expect(page.locator(`[data-page=${view}]`)).toBeVisible();
       await page.evaluate(async()=>{document.querySelector('#workspace-content')!.scrollTop=0;await document.fonts.ready;await new Promise(r=>setTimeout(r,300));});
       const result = await page.evaluate(audit);
-      evidence.push({width,height,colorScheme,view,result});
+      const primary=page.locator('#screen-action-host [data-slot=button].bg-primary');
+      if(view === 'overview') await expect(primary).toHaveCount(1);
+      let hoverContrast = null;
+      if(view !== 'detail' && await primary.count()) {
+        await primary.hover();
+        await page.evaluate(async()=>{await Promise.all(document.getAnimations().filter(a=>a.effect?.getTiming().iterations!==Infinity).map(a=>a.finished.catch(()=>{})));});
+        hoverContrast = (await page.evaluate(audit)).contrast;
+        await page.locator('.page-header h1').hover();
+      }
+      evidence.push({width,height,colorScheme,view,result,hoverContrast});
       const pageWidth = await page.locator('.page-header').evaluate(e=>e.getBoundingClientRect().width);
       if (widthBefore) expect(Math.abs(pageWidth-widthBefore)).toBeLessThanOrEqual(1);
       widthBefore=pageWidth;

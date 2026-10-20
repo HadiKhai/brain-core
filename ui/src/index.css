@@ -2174,3 +2174,6 @@ svg {
 
 .section-content > .spend-summary { padding: 0; }
 .section-body > .table-footer { padding-inline: var(--section-inset); }
+[data-slot="button"].bg-primary:hover {
+  background-color: color-mix(in srgb, var(--primary) 90%, var(--foreground) 10%);
+}
