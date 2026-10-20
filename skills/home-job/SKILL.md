@@ -8,6 +8,12 @@ description: Run one job (a fix, a feature, tests, an audit) in a node's externa
 Run by the node's coordinator. One job = one branch = one worktree = one worker = one pull
 request. The operator's own checkout of the home is never touched.
 
+Group work by concern before creating worktrees: one agent can investigate, implement and test
+related changes. Split for independent ownership, distinct expertise or independent review, and
+state why. Gather shared facts once; pass `--context-file <file>` to each brief rather than
+asking several workers to rediscover them. Check `brain jobs <id>` / `brain due <id>` for
+overlapping inputs and merge related jobs or share the context.
+
 Before launching, run `brain usage`. Use only a subscription allowed for this brain and below
 the stop line; follow the subscription and host instance in the brief. Unknown usage must be
 stated; never run a polling loop in an agent.
@@ -25,7 +31,8 @@ stated; never run a polling loop in an agent.
    **Write its contract once:** `core/bin/brain jobs <id> --branch <branch> --contract-file <file>` with
    `## Outcome`, `## Authorized` (the steps the worker may take), `## Discretion` (routine,
    reversible fixes it may make within the same scope), `## Stop when`, `## Needs consent` and
-   `## Done means`, and if it helps a `## Budget` (`30M tokens, 6 h`: tokens processed, wall hours),
+   `## Done means`, optional `## Why separate` and `## Inputs` (one home-relative or absolute path per line),
+   and if it helps a `## Budget` (`30M tokens, 6 h`: tokens processed, wall hours),
    sized from `brain jobs <id>`'s measured medians, never padded. Every brief, hire and review for
    the job carries it, so the worker acts within it instead of asking, and you answer from it
    instead of re-deciding. `brain jobs <id>` shows each open job's tokens so far and flags one
@@ -36,7 +43,8 @@ stated; never run a polling loop in an agent.
    only after explicitly choosing `--runtime`; never silently switch it. Write the task (what done means, where reports go:
    `core/bin/brain report <id> "<topic>"` gives a folder; commit on the branch; push the branch
    and open a pull request only when the operator or the home's rules allow it, axiom 24), then
-   wrap it with `core/bin/brain brief <id> --branch <branch> --task-file <file>`: that adds the
+   wrap it with `core/bin/brain brief <id> --branch <branch> --task-file <file>
+   --why-separate "<independent concern>" --context-file <shared findings>`: that adds the
    worktree, port, limits, guard step and hand-back. Use `core/bin/brain hire` when a
    specialist fits; pass `--branch <branch>` so its brief has the same finishing step.
    Keep a host interval tick on the coordinator: `brain due <id>` plus host pending requests;

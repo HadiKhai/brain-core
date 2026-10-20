@@ -6211,6 +6211,72 @@ class Workflow(Scenario):
 
     job = WorkerReadyPackets.job
 
+    def test_shared_context_and_separation_reason(self):
+        r, home, wt = self.job()
+        context = self.tmp / "shared.md"
+        context.write_text("Synthetic finding: calc has one caller.\n")
+        args = ("brief", "a", "--branch", "job", "--task", "Fix the calculation")
+        out = self.b(r, *args, "--why-separate", "Independent arithmetic concern", "--context-file", str(context))
+        self.assertIn("Why a separate agent: Independent arithmetic concern", out)
+        self.assertIn("Synthetic finding: calc has one caller.", out)
+        self.assertIn("## Shared context", out)
+        local = json.loads((r / ".brain/local.json").read_text())
+        self.assertEqual(local["nodes"]["a"]["worktrees"]["job"]["context_inputs"], [str(context)])
+        self.assertIn("warning: why separate is missing", self.b(r, *args))
+        self.assertIn("needs a reason", self.b(r, *args, "--why-separate", "  ", ok=False))
+        self.assertIn("explicitly waived", self.b(r, *args, "--why-separate", "", "--allow-unexplained"))
+        context.write_text("")
+        self.assertIn("shared context file is empty", self.b(r, *args, "--context-file", str(context), ok=False))
+        context.write_text("Synthetic Forbidden Phrase")
+        (r / "nodes/a/never-name.txt").write_text("Synthetic Forbidden Phrase\n")
+        out = self.b(r, *args, "--context-file", str(context), ok=False)
+        self.assertNotIn("Synthetic Forbidden Phrase", out)
+        self.assertIn("shared context", out)
+
+    def test_open_job_overlap_is_once_per_job_and_clears(self):
+        r, home, wt = self.job()
+        self.b(r, "wt", "add", "a", "other")
+        self.b(r, "wt", "add", "a", "third")
+        context = self.tmp / "shared.md"
+        context.write_text("Synthetic shared findings\n")
+        for branch in ("job", "other", "third"):
+            self.b(r, "brief", "a", "--branch", branch, "--task", "Work", "--why-separate", "Independent concern",
+                   "--context-file", str(context))
+        out = self.b(r, "jobs", "a")
+        self.assertEqual(out.count("overlapping inputs with"), 3)
+        due = json.loads(self.b(r, "due", "a", "--json"))
+        overlaps = [i for i in due if i["kind"] == "overlapping-inputs"]
+        self.assertEqual(len(overlaps), 3)
+        self.assertEqual(len({i["job"] for i in overlaps}), 3)
+        for branch in ("other", "third"):
+            own = self.tmp / (branch + ".md")
+            own.write_text("Independent findings\n")
+            self.b(r, "brief", "a", "--branch", branch, "--task", "Work", "--context-file", str(own))
+        self.assertNotIn("overlapping inputs", self.b(r, "jobs", "a"))
+        self.assertNotIn("overlapping-inputs", self.b(r, "due", "a", "--json"))
+
+    def test_contract_input_overlap_normalization_and_closed_jobs(self):
+        loader = importlib.machinery.SourceFileLoader("brain_aggregation", str(CORE / "bin/brain"))
+        m = loader.load_module()
+        node = {"dir": self.tmp / "node", "home_path": self.tmp / "home", "local": {}}
+        rows = [{"Job": b, "Started": "2026-01-01", "Ended": ""} for b in ("one", "two", "three")]
+        for row, inputs in zip(rows, ("- src/./calc.py", "- src/calc.py", "- other.py")):
+            f = m.contract_file(node, row)
+            f.parent.mkdir(exist_ok=True, parents=True)
+            f.write_text("## Inputs\n" + inputs + "\n")
+        overlaps = m.job_overlaps(node, rows)
+        self.assertEqual(set(overlaps), {m.job_key(r) for r in rows[:2]})
+        rows[1]["Ended"] = "2026-01-02"
+        self.assertEqual(m.job_overlaps(node, rows), {})
+        rows[1]["Ended"] = ""
+        m.contract_file(node, rows[0]).write_text("## Authorized\nEdit `src/calc.py`.\n")
+        self.assertEqual(len(m.job_overlaps(node, rows)), 2)
+        m.contract_file(node, rows[1]).write_text("## Authorized\nEdit src/calc.py carefully.\n")
+        self.assertEqual(len(m.job_overlaps(node, rows)), 2)
+        for row in rows:
+            m.contract_file(node, row).write_text("## Outcome\nLegacy contract without inputs.\n")
+        self.assertEqual(m.job_overlaps(node, rows), {})
+
     def test_changes_reach_coordinators_once(self):
         r = self.init("alice")
         self.b(r, "new", "child", "--title", "Child")

@@ -17,7 +17,9 @@ stated; never run a polling loop in an agent.
 2. **Brief.** `core/bin/brain review <id> --branch <branch> --built-by <builder runtime>
    [--focus "<what worries you>"]`. It picks a reviewer runtime the builder didn't use and says
    where to run. Add `--model <id or display name>` for model-scoped weekly limits.
-3. **Run it.** Host `delegate` on the reviewer runtime, in the job's worktree (or `launch` a
+3. **Run it.** Use one reviewer for the concern, not one per file or test step. State why this
+   separate agent is needed (independent second-runtime review), and include shared findings
+   and earlier rounds in the supplied brief so it need not gather them again. Host `delegate` on the reviewer runtime, in the job's worktree (or `launch` a
    worker there if the host's delegate can't pick a folder). The reviewer changes nothing.
 4. **Address.** Send the findings to the builder (host `send`). Blockers and majors get fixed or
    answered with a reason. When a round finds a kind of problem an earlier round already found,

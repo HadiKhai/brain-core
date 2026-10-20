@@ -5,6 +5,23 @@ upgrading. `brain changes <node>` shows the entries this node's coordinator hasn
 `brain due <node>` lists them until `brain changes <node> --seen`. Entry headings are
 `## <date>: <title>`; once released, a heading never changes.
 
+## 2026-10-21: Group agents by concern and share context
+
+For agents:
+- Gather common context once, group related investigation and implementation in one job,
+  and state why each separate agent is needed. `brain brief --context-file <file>` embeds
+  shared findings (repeatable); `--why-separate "<reason>"` or contract `## Why separate`
+  carries the reason. Old calls warn; an explicitly empty reason refuses unless
+  `--allow-unexplained` is set for urgent work.
+- Optional contract `## Inputs` lists paths, one per line. Contract paths and context files
+  recorded by branch briefs on this machine let `brain jobs` and `brain due` flag each
+  overlapping open job once, with advice to merge related work or share a context brief.
+  The check reads local records only and never gates a launch. Old contracts still work.
+
+After upgrading:
+- Coordinators: read the updated coordinator role and home-job skill. Add inputs and a
+  separation reason when briefing new work; old jobs need no migration.
+
 ## 2026-10-20: Runtime questions reach the inbox
 
 For agents:
@@ -22,6 +39,7 @@ After upgrading:
   user settings; Codex uses user-level hooks when supported, otherwise host pending checks.
 - Transcript scanning now walks backward in chunks to the last operator message, capped at
   four MiB per stop; questions beyond that cap rely on host pending checks.
+
 
 ## 2026-10-20: History from folders named as the node's
 
