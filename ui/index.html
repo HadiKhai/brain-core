@@ -140,6 +140,8 @@ select, input, textarea { font:inherit; color:var(--ink); background:var(--surfa
 .spark i { display:block; width:12px; min-height:2px; background:var(--accent); border-radius:2px 2px 0 0; }
 .spark i.late { background:var(--serious); }
 .late-flag { color:var(--serious); font-size:12px; display:block; }
+.spend-grid { display:grid; grid-template-columns:minmax(140px,1fr) repeat(2,minmax(220px,2fr)); gap:20px; align-items:end; }
+@media(max-width:700px) { .spend-grid { grid-template-columns:1fr; } }
 .ledger-heading { display:flex; justify-content:space-between; flex-wrap:wrap; gap:8px; align-items:baseline; }
 #due .badge { flex:none; white-space:nowrap; }
 #overview > section:has(#needs) { align-self:stretch; }
@@ -187,7 +189,7 @@ select, input, textarea { font:inherit; color:var(--ink); background:var(--surfa
 </main>
 <main data-page="learnings" hidden><section class="card span-12"><h2>Learnings <span class="sub">library and specialist lessons</span></h2><div class="filters" id="learning-filters"></div><div id="learning-results"></div></section></main>
 <main data-page="agents" hidden><section class="card span-12"><h2>Agents <span class="sub">specialists and their hires</span></h2><div id="agent-results"></div></section><section class="card span-12"><h2>Job ledger <span class="sub">per node · medians for merged jobs</span></h2><div id="ledger"></div></section></main>
-<main data-page="usage" hidden><section class="card span-12"><h2>Usage <span class="sub" id="usage-hidden"></span></h2><p class="kv">Account-wide windows, including other machines. The vertical marker is the stop line.</p><div class="legend" id="usage-legend" aria-label="Usage states"></div><p class="kv" id="usage-routing"></p><div id="usage-results"></div></section></main>
+<main data-page="usage" hidden><section class="card span-12"><h2>Usage <span class="sub" id="usage-hidden"></span></h2><p class="kv">Account-wide windows, including other machines. The vertical marker is the stop line.</p><div class="legend" id="usage-legend" aria-label="Usage states"></div><p class="kv" id="usage-routing"></p><div id="usage-results"></div></section><section class="card span-12"><h2>Spend <span class="sub" id="spend-sub"></span></h2><p class="kv">From this machine's transcripts, in the subscriptions this brain may read: tokens processed per day and week (fresh input, cache reads and writes, output) and active hours.</p><div id="spend"></div></section><section class="card span-12"><h2>Jobs: time and tokens <span class="sub">per node · measured when a job closes</span></h2><div id="spend-nodes"></div></section></main>
 <main data-page="imports" hidden><section class="card span-12"><h2>Import checklist <span class="sub">read-only discovery</span></h2><p class="kv">Select repositories to build a command. Run it in this brain after reviewing the candidates.</p><div id="scan-results"></div><div id="adopt-command"></div></section></main>
 <aside id="detail" aria-hidden="true"></aside>
 <div id="tip" role="tooltip"></div>
@@ -341,6 +343,8 @@ function renderKpis() {
   const open = n.reduce((a, x) => a + x.jobs.open.length, 0);
   const mid = merged.length >> 1, median = merged.length % 2 ? merged[mid] : (merged[mid - 1] + merged[mid]) / 2;
   if (merged.length) kids.push(tile("Median job", median.toFixed(1) + " h", `${merged.length} merged · ${open} open`));
+  const week = S.spend && S.spend.since_week;
+  if (week) kids.push(tile("Tokens, 7 days", tokens(week.processed), `${tokens(week.fresh + week.output)} fresh in and out · ${week.active_h} h active`));
   if (m.load) { const v = m.load[0] / (m.cpus || 1); kids.push(tile("Load", m.load[0].toFixed(1), `${m.cpus} cores · 5 min ${m.load[1].toFixed(1)}`, { v, level: v > 0.9 ? "critical" : v > 0.7 ? "warning" : "" })); }
   if (m.mem_total_gb) { const used = 1 - m.mem_free_gb / m.mem_total_gb; kids.push(tile("Memory free", m.mem_free_gb + " GB", `of ${m.mem_total_gb} GB`, { v: used, level: m.mem_free_gb < 8 ? "critical" : used > 0.8 ? "warning" : "" })); }
   if (m.disk_total_gb) { const used = 1 - m.disk_free_gb / m.disk_total_gb; kids.push(tile("Disk free", m.disk_free_gb + " GB", `of ${m.disk_total_gb} GB`, { v: used, level: m.disk_free_gb < 40 ? "critical" : used > 0.85 ? "warning" : "" })); }
@@ -617,11 +621,11 @@ function renderAgents() {
         runtimeCell(hire.runtime, hire.subscription), hire.outcome || (row.Job ? row.Outcome || "open" : "outcome not recorded")];
     })) : empty("No recorded hires."))) : [empty("No specialists yet.")]));
   const ledgerNodes = S.nodes.filter(n => n.jobs.rows.length).sort((a,b) => Number(!!b.jobs.open.length) - Number(!!a.jobs.open.length));
-  const table = (n, rows) => dataTable(["Job", "Started", "Duration", "Reviews", "Runtime / subscription", "Outcome / cause", "Lessons"], rows.map(r => {
+  const table = (n, rows) => dataTable(["Job", "Started", "Duration", "Tokens · active", "Reviews", "Runtime / subscription", "Outcome / cause", "Lessons"], rows.map(r => {
     const open = n.jobs.open.find(j => j.Job === r.Job && j.Started === r.Started);
     const late = open && n.jobs.median_hours != null && open.age_h > 2 * n.jobs.median_hours;
     return [el("span", {}, r.Job, late ? el("strong", {class:"late-flag"}, "▲ Over twice median") : null), moment(r.Started),
-      open ? `${open.age_h} h · open` : r.Hours ? `${r.Hours} h` : "—", r.Reviews || "0", runtimeCell(r.Runtime, r.Subscription),
+      open ? `${open.age_h} h · open` : r.Hours ? `${r.Hours} h` : "—", usageCell(n, r, open), r.Reviews || "0", runtimeCell(r.Runtime, r.Subscription),
       [r.Outcome || "open", r.Cause].filter(Boolean).join(" · "), r.Lessons || "—"];
   }));
   $("ledger").replaceChildren(...ledgerNodes.map(n => {
@@ -639,6 +643,61 @@ function renderAgents() {
         done.length > 3 ? el("details", {"data-key":"ledger-older:" + n.id}, el("summary", {}, count(done.length-3, "older job")), table(n,done.slice(3))) : null) : null);
   }));
   if (!$("ledger").children.length) $("ledger").append(empty("No recorded jobs. Finished and open jobs will appear here."));
+}
+function tokens(n) {
+  n = +n || 0;
+  for (const [unit, size] of [["B", 1e9], ["M", 1e6], ["k", 1e3]]) if (n >= size) {
+    const v = (n / size).toPrecision(3);
+    return (v.includes(".") ? v.replace(/0+$/, "").replace(/\.$/, "") : v) + unit;
+  }
+  return String(n);
+}
+function rowTokens(r) { const k = (x) => +r[x] || 0; return k("Fresh in") + k("Cache read") + k("Cache write") + k("Output"); }
+function usageFlags(n, open) {
+  const u = open && open.usage, med = n.jobs.median_tokens, b = open && open.budget, flag = (t) => el("strong", {class:"late-flag"}, "▲ " + t);
+  if (!u) return [];
+  return [med && u.processed > 2 * med ? flag("Tokens over twice median") : null,
+    b && b.tokens && u.processed > b.tokens ? flag(`Over its ${tokens(b.tokens)}-token budget`) : null,
+    b && b.hours && open.age_h > b.hours ? flag(`Over its ${b.hours} h budget`) : null,
+    u.compactions >= 3 ? flag(count(u.compactions, "compaction")) : null,
+    u.subagents && u.sub_share > 0.5 ? flag(`Sub-agents ${Math.round(100 * u.sub_share)}%`) : null].filter(Boolean);
+}
+function usageCell(n, r, open) {
+  const u = open && open.usage, med = n.jobs.median_tokens;
+  if (u) return el("span", {}, `${tokens(u.processed)} · ${u.active_h} h active`, ...usageFlags(n, open));
+  if (!r.Usage) return "—";
+  const t = rowTokens(r);
+  return t || r["Active h"] ? el("span", {title: r.Usage}, `${tokens(t)} · ${r["Active h"] || "—"} h active`, med && t > 2 * med ? el("strong", {class:"late-flag"}, "▲ Tokens over twice median") : null) : el("span", {class:"kv"}, r.Usage);
+}
+function spendBars(entries, label) {
+  const max = Math.max(1, ...entries.map((e) => e.tokens));
+  return el("div", {class:"spark", role:"img", "aria-label": label + ": " + entries.map((e) => `${e.key}, ${tokens(e.tokens)} tokens, ${e.active_h} h active`).join("; ")},
+    entries.map((e) => el("i", {style:`height:${Math.max(2, e.tokens / max * 32)}px`, class: e.late ? "late" : "",
+      title:`${e.key} · ${tokens(e.tokens)} tokens · ${tokens(e.fresh_out)} fresh in and out · ${e.active_h} h active`})));
+}
+function renderSpend() {
+  const sp = S.spend || {}, rts = Object.entries(sp.runtimes || {});
+  $("spend-sub").textContent = sp.complete === false ? `counting… ${sp.read} of ${count(sp.files, "transcript")} read so far` : sp.files ? `${count(sp.files, "transcript")} on this machine` : "";
+  const week = sp.since_week;
+  $("spend").replaceChildren(...(week ? [el("p", {class:"kv"}, `Last 7 days: ${tokens(week.processed)} tokens processed · fresh in ${tokens(week.fresh)} · cache read ${tokens(week.cache_read)} · cache write ${tokens(week.cache_write)} · out ${tokens(week.output)} · ${week.active_h} h active (agents ${week.agent_h} h) · ${count(week.compactions, "compaction")} · sub-agents ${Math.round(100 * week.sub_share)}% of tokens`)] : []),
+    ...(rts.length ? rts.map(([rt, v]) => el("article", {class:"entry"}, el("div", {class:"spend-grid"},
+      el("div", {}, el("h3", {}, rt), el("div", {class:"kv"}, `this week ${tokens((Object.values(v.weeks).slice(-1)[0] || {}).tokens)} tokens`)),
+      el("div", {}, el("div", {class:"kv"}, "Last 14 days"), spendBars(Object.entries(v.days).map(([key, d]) => ({key, ...d})), rt + " per day")),
+      el("div", {}, el("div", {class:"kv"}, "Last 8 weeks, from Monday"), spendBars(Object.entries(v.weeks).map(([key, d]) => ({key, ...d})), rt + " per week")))))
+      : [empty(sp.complete === false ? "Counting this machine's transcripts…" : "No transcripts in the subscriptions this brain may read.")]));
+  const nodes = S.nodes.filter((n) => n.jobs.rows.some((r) => r.Usage) || n.jobs.open.some((r) => r.usage) || n.spend);
+  $("spend-nodes").replaceChildren(...(nodes.length ? nodes.map((n) => {
+    const measured = n.jobs.rows.filter((r) => r.Usage && r.Ended), med = n.jobs.median_tokens, back = n.spend && n.spend.total;
+    const trend = measured.slice(-24).map((r) => ({key: r.Job, tokens: rowTokens(r), fresh_out: (+r["Fresh in"] || 0) + (+r.Output || 0), active_h: r["Active h"] || 0, late: med && rowTokens(r) > 2 * med}));
+    const live = n.jobs.open.filter((r) => r.usage);
+    const rows = [...live.map((r) => [r.Job + " · open", `${r.age_h} h`, `${r.usage.active_h} h`, el("span", {}, tokens(r.usage.processed), ...usageFlags(n, r)), tokens(r.usage.fresh + r.usage.output), String(r.usage.compactions), r.usage.subagents ? `${r.usage.subagents} · ${Math.round(100 * r.usage.sub_share)}%` : "0", Object.keys(r.usage.models).join(", "), r.budget ? [r.budget.tokens ? tokens(r.budget.tokens) + " tokens" : "", r.budget.hours ? r.budget.hours + " h" : ""].filter(Boolean).join(" · ") : "—"]),
+      ...measured.slice(-8).reverse().map((r) => [r.Job, r.Hours ? r.Hours + " h" : "—", (r["Active h"] || "—") + " h", tokens(rowTokens(r)), tokens((+r["Fresh in"] || 0) + (+r.Output || 0)), r.Compactions || "0", +r["Sub-agents"] ? `${r["Sub-agents"]} · ${r["Sub share"]}` : "0", r.Models || "—", r.Budget || "—"])];
+    return el("article", {class:"entry"}, el("div", {class:"ledger-heading"}, el("h3", {}, n.title || n.id),
+      el("span", {class:"kv"}, (med ? `median ${tokens(med)} tokens and ${n.jobs.median_active_h} h active per merged job (${count(n.jobs.measured, "measured job")})` : "no merged job measured yet")
+        + (back ? ` · all past sessions: ${tokens(back.processed)} tokens, ${back.active_h} h active, ${count(back.compactions, "compaction")}, sub-agents ${Math.round(100 * back.sub_share)}%` : ""))),
+      trend.length ? spendBars(trend, "Tokens per finished job") : null,
+      rows.length ? dataTable(["Job", "Wall", "Active", "Tokens", "Fresh in + out", "Compactions", "Sub-agents", "Models", "Budget"], rows) : null);
+  }) : [empty("No job measured yet. Jobs are measured when they close; brain spend <node> looks back over past sessions.")]));
 }
 function runtimeCell(runtime, subscription) {
   return el("span", {}, runtime || "unknown", " · ", subscription || el("span", {title:"Subscription not recorded", tabindex:0, "aria-label":"Subscription not recorded"}, "—"));
@@ -752,7 +811,7 @@ function renderPage() {
   renderKpis(); renderTree(); renderNeeds(); renderWork(); renderHeat(); renderLib(); renderFeed(); renderChanged("due", S.due, renderDue);
   renderChanged("learnings", [S.items, S.specialists], renderLearnings);
   renderChanged("agents", [S.specialists, S.nodes.map(n => n.jobs)], renderAgents);
-  renderUsage(); renderChanged("scan", [S.scan, S.nodes.map(n => [n.id,n.title,n.archived])], renderScan); showView();
+  renderUsage(); renderChanged("spend", [S.spend, S.nodes.map(n => [n.jobs, n.spend])], renderSpend); renderChanged("scan", [S.scan, S.nodes.map(n => [n.id,n.title,n.archived])], renderScan); showView();
   if (firstPaint && location.hash.startsWith("#node=")) selected = decodeURIComponent(location.hash.slice(6));
   if (selected) openDetail(selected);
   firstPaint = false;

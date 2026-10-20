@@ -25,8 +25,11 @@ stated; never run a polling loop in an agent.
    **Write its contract once:** `core/bin/brain jobs <id> --branch <branch> --contract-file <file>` with
    `## Outcome`, `## Authorized` (the steps the worker may take), `## Discretion` (routine,
    reversible fixes it may make within the same scope), `## Stop when`, `## Needs consent` and
-   `## Done means`. Every brief, hire and review for the job carries it, so the worker acts
-   within it instead of asking, and you answer from it instead of re-deciding.
+   `## Done means`, and if it helps a `## Budget` (`30M tokens, 6 h`: tokens processed, wall hours),
+   sized from `brain jobs <id>`'s measured medians, never padded. Every brief, hire and review for
+   the job carries it, so the worker acts within it instead of asking, and you answer from it
+   instead of re-deciding. `brain jobs <id>` shows each open job's tokens so far and flags one
+   over budget, over twice the median, compacting again and again, or mostly spent by sub-agents.
 3. **Worker.** Host `launch` in the node's `home_project`, in the existing worktree (path and
    branch from step 1), on the node's runtime unless the job calls for another. The brief is
    self-contained (axiom 9). A runtime pin at its stop line stays pinned: use the named alternative

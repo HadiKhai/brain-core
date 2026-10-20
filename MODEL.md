@@ -202,6 +202,17 @@ brief. Without declared subscriptions, existing runtime choices remain unchanged
 A node's runtime is a pin. A brief keeps it unless explicitly overridden; when it reaches the
 stop line, name an eligible alternative and wait for an explicit choice, never switch silently.
 
+## Time and tokens
+
+What work cost is read from the runtimes' own transcripts on this machine, in the subscription
+folders this brain may use (links resolved, each file once, other accounts never read). Only
+aggregates are kept, never message text, in `.brain/spend/`, never committed. A job's sessions
+are those started in its worktree, given a brief naming the job, or recorded by its hand-back,
+and the sub-agents they started; only minutes while the job was open count. When the job closes
+its totals go into its ledger row; numbers its host reports win over computed ones. A look-back
+over a node's past sessions is opt-in, like the history study. Usage informs estimates, budgets
+and advice; it never gates work.
+
 ## Host contract
 
 | Operation | Meaning |

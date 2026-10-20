@@ -5,6 +5,35 @@ upgrading. `brain changes <node>` shows the entries this node's coordinator hasn
 `brain due <node>` lists them until `brain changes <node> --seen`. Entry headings are
 `## <date>: <title>`; once released, a heading never changes.
 
+## 2026-10-20: Time and tokens per job
+
+For agents:
+- When a job closes, its ledger row records what it cost on this machine: tokens by kind (fresh
+  input, cache reads and writes, output, reasoning), active and agent hours, tool calls,
+  compactions, sub-agents and their share, models. They come from the runtimes' transcripts of
+  the job's own sessions: those in its worktree, those given a brief naming it (briefs now carry
+  a `brain-job:` line; reviewers are found by it), and those its hand-back recorded. Aggregates
+  only. Older ledgers are read and rewritten in the new format; columns a newer core adds are kept.
+- `brain jobs` shows medians of tokens and active hours, each open job's spend so far, and advice
+  when a job is over twice the median, compacts three times or more, or sub-agents spend most of
+  it. Forecasts give active hours and tokens of similar merged jobs. The live view shows the same,
+  flags such jobs under attention, and totals this machine per runtime per day and week.
+- A contract may set `## Budget` (e.g. `30M tokens, 6 h`). Briefs carry it; `brain handback`
+  prints the spend against it; `brain jobs` and the live view flag a job over it.
+- `brain spend <node>` looks back over every past session about a node's home (opt-in, like
+  `brain history`); `brain spend --machine` totals every session here.
+- Codex's compressed sessions (`.jsonl.zst`) are read through `zstd`, by `brain history` too:
+  earlier extractions missed them.
+- A host that reports usage per thread: `brain jobs <node> --branch <b> --usage-file <json>`.
+
+After upgrading:
+- Ask the operator whether to look back: `brain spend <node>` for each node with an external
+  home, so the live view has history from the start.
+- If earlier `brain history` studies ran on a machine with compressed Codex sessions, extract
+  again (`brain history <node> --fresh`, add `--technical` for a technical re-read): they were
+  missed.
+- Set a `## Budget` in contracts once `brain jobs` shows measured medians for that kind of job.
+
 ## 2026-10-20: Briefs to files, merges, history batch sizes
 
 For agents:

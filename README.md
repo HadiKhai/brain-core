@@ -256,19 +256,36 @@ inbox item; saved ids survive reloads.
 ### Measured, not guessed: `brain jobs`
 
 ```text
-website: 7 finished (6 merged, 1 abandoned); median 2.8 h and 1.5 review round(s) per merged job
-  open  job/hero-redesign              7.5 h  2 review(s)   (over twice the median)
-  open  job/blog-search                3.1 h  0 review(s)
-  open  job/i18n                       1.2 h  0 review(s)
+website: 7 finished (6 merged, 1 abandoned); median 2.8 h and 1.5 review round(s) per merged job; median 18.4M tokens and 1.1 active h (6 measured jobs)
+  open  job/hero-redesign              7.5 h  2 review(s)  52.1M tokens   (over twice the median in hours and tokens)
+        usage: 52.1M tokens processed (fresh in 610k, cache read 50.8M, cache write 520k, out 170k); active 2.4 h (agents 3.9 h); 412 tool calls; 4 compactions; 3 sub-agents, 61% of tokens; budget 30M tokens · 6 h: over (52.1M of 30M tokens, 7.5 of 6 h)
+        advice: 4 compactions: past the context window again and again; hand back and restart from a brief with what is done so far
+        advice: sub-agents spent 61% of its tokens: give them narrower tasks, or do the work in the main thread
+  open  job/blog-search                3.1 h  0 review(s)  9.2M tokens
   cause superseded by the redesign
   blog: 1 similar jobs, too little data (need 3 merged jobs)
-  all jobs on this node: 6 jobs, median 2.8 h, spread 1.1–5.6 h (observed min–max)
+  all jobs on this node: 6 jobs, median 2.8 h, spread 1.1–5.6 h (observed min–max); of which 1.1 h active; 18.4M tokens processed (spread 6.2M–31M), of them 240k fresh input and output; from 6 measured jobs
 ```
 
-Forecasts use this node’s merged jobs: sample count, median and observed min–max spread.
-Fewer than three samples means “too little data.” `brain jobs website --branch job/blog-search`
-can include a planned job. Comparisons with reset windows describe serial job time, not token
-cost, concurrent throughput or whether the remaining allowance will fit.
+Forecasts use this node’s merged jobs: sample count, median and observed min–max spread, in
+wall hours and, for jobs measured since this ledger version, active hours and tokens. Fewer
+than three samples means “too little data.” `brain jobs website --branch job/blog-search`
+can include a planned job. Comparisons with reset windows describe serial job time; a
+subscription says how full it is, not how many tokens a percent is, so whether the remaining
+allowance fits stays unknown.
+
+**Time and tokens.** When a job closes, `brain` reads the transcripts of the sessions that did
+it on this machine and records in the ledger: tokens by kind (fresh input, cache reads and
+writes, output, Codex reasoning), active hours (gaps over five minutes are idle) next to wall
+hours, compactions, sub-agents and their share, tool calls and the models used. The sessions are
+the ones started in the job's worktree, given a brief naming the job (a reviewer in its
+coordinator's folder), or recorded by the worker's hand-back, plus every sub-agent they started.
+Only aggregates are kept, never message text. A contract may set a budget (`## Budget`, e.g.
+`30M tokens, 6 h`); the worker sees it, `brain handback` prints the spend against it, and
+`brain jobs` and the live view flag jobs over budget, over twice the median, compacting three
+times or more, or mostly spent by sub-agents. `brain spend website` looks back over every past
+session about the home (opt-in, like `brain history`); `brain spend --machine` totals this
+machine per runtime, per day and week.
 
 Code projects should show a running local preview and a screenshot tour early. Record them with
 `brain set website preview=http://localhost:4100 preview_tour=reports/preview/index.md`.
@@ -445,7 +462,9 @@ You mostly talk to coordinators, and they run `brain` for you. By hand:
 | `brain` | dashboard: the tree, what needs you, coordinators |
 | `brain ui [--open]` | the same, live in your browser (read-only, this machine only) |
 | `brain show <node>` | everything about one node, with this machine's IDs and the status time in UTC |
-| `brain jobs [node] [--branch B]` | job history and forecasts: samples, medians, spread, causes |
+| `brain jobs [node] [--branch B]` | job history and forecasts: samples, medians, spread, causes; open jobs' tokens so far and advice |
+| `brain spend <node> [--since DATE] [--json]` | time and tokens of every past session about a node's home: opt-in, aggregates only, kept in `.brain/spend/` |
+| `brain spend --machine [--since DATE] [--json]` | every session on this machine, per runtime, per day and week |
 | `brain due [node]` | coordinator actions from files and local git; empty means silence |
 | `brain inbox [node] [--new]` | one needs-you list; stable ids, only-new reporting per machine and reporter |
 | `brain status <node> --refresh` | regenerate facts without advancing judgement freshness |
@@ -481,7 +500,8 @@ You mostly talk to coordinators, and they run `brain` for you. By hand:
 | `brain brief <id> --small --task "..."` | a minutes-long, low-risk task without job ceremony |
 | `brain handback <id> --branch B --state done --reviews N --report P --lessons "..."` | one worker finishing step: verify, readiness, state and proposed lessons; also accepts blocked/question |
 | `brain ready <id> --branch B` | compare the worker’s packet with branch and current local main before merge |
-| `brain jobs <id> --branch B --contract-file F` | a job's contract: outcome, what the worker may do without asking, stop conditions, consent, done |
+| `brain jobs <id> --branch B --contract-file F` | a job's contract: outcome, what the worker may do without asking, stop conditions, consent, done; optionally a budget |
+| `brain jobs <id> --branch B --usage-file F` | a job's usage as its host reports it (JSON); it wins over what transcripts show |
 | `brain set <id> 'verify_skip=docs/*,*.md'` | paths that can't affect verify: a green run survives changes to them |
 | `brain set <id> 'verify_inputs=.env,config/*.local'` | untracked files verify reads (default `.env,.env.*`): a change to them means a fresh run |
 | `brain jobs <id> --branch B --lessons "..."` | coordinator records learned item ids or `none: <reason>` at close |

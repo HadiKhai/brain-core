@@ -117,6 +117,7 @@ Answer from files. Before answering about a child, run the **freshness check**:
 | finding what the nodes below share, after their studies or when asked | the `connect` skill: plan, a digest reader per node, check, one connector |
 | reviewing proposed items, specialists and rules | `brain proposals <id>`, then accept or reject several at once (the `learn` skill) |
 | a problem another project may have met | `brain recall <id> "<the problem>"`, and say what it found |
+| what jobs or a project cost in time and tokens | `brain jobs <id>` (open jobs so far, closed ones from the ledger); `brain spend <id>` to look back over past sessions, once the operator opts in |
 | creating a node, or changing one's owners, place or labels | the `node-new` or `node-transition` skill |
 
 A small job is clear, low risk, takes minutes and changes no shared state: a local draft,

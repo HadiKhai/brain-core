@@ -31,7 +31,8 @@ Folders of subscriptions not allowed for this brain are never read, only counted
    the technical headings below.
 2. **Size the readers.** The summary shows, per runtime, the earliest compaction seen in these
    sessions and how many batches one reader can hold: below half of that point, leaving 30k
-   tokens for the reader's own prompt and tools. Batches are 60k (slices 20k), or smaller when a
+   tokens for the reader's own prompt and tools. Codex compresses older sessions (`.jsonl.zst`);
+   they are read through `zstd`, and the summary counts any it couldn't read without it. Batches are 60k (slices 20k), or smaller when a
    runtime compacted earlier here, so every runtime's reader holds one; `--batch-tokens` and
    `--slice-tokens` set them yourself. The summary also estimates the
    tokens processed: every turn resends what a reader has read so far, so a batch costs several

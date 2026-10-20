@@ -3321,12 +3321,19 @@ def host_send(inst, n, to=None):
         "host `send` to whoever started you (their thread is in your launch message)"
 
 
+def job_mark_lines(n, branch):
+    """The line by which `brain jobs` finds the sessions this brief starts, to count the job's time and tokens."""
+    row = open_job(read_jobs(n) or [], branch) if branch else None
+    return [JOB_MARK.format(job_key(row)) + " (lets `brain jobs` count this job's time and tokens; nothing to do)",
+            ""] if row else []
+
+
 def handback_lines(inst, n, to=None, who="worker", branch=None):
     """How a worker started by a coordinator asks, and says it's done. It never waits on the operator:
     nobody watches its thread, and a launched thread doesn't wake whoever launched it."""
     how = host_send(inst, n, to)
     if who == "reviewer":  # a reviewer changes nothing, not even the inbox
-        return ["## Questions and hand-back", "",
+        return job_mark_lines(n, branch) + ["## Questions and hand-back", "",
                 "- **Never ask the operator, and never wait for an answer in this thread**: nobody is watching it.",
                 f"- **A question you can't go on without:** {how} with the question, then end your turn with the "
                 "question as your last line.",
@@ -3342,7 +3349,7 @@ def handback_lines(inst, n, to=None, who="worker", branch=None):
                     "recording them never accepts them. " if study else
                     "This one step runs node verify and checks local main. If verify is unset, ask the coordinator "
                     "to set it. If main moves, rebase and hand back again. Only the coordinator merges to main. ")
-        return ["## Questions and hand-back", "",
+        return job_mark_lines(n, branch) + ["## Questions and hand-back", "",
                 "- **Never ask the operator, and never wait for an answer in this thread**: nobody is watching it.",
                 "- **A choice** the brief or rules settle: make it and record it under Decisions I made.",
                 "- **Before handing back**, " + prepare +
@@ -3769,6 +3776,55 @@ def history_open(path, allowed, forbidden, same=None):
     return None, why
 
 
+ZSTD = shutil.which("zstd")
+
+
+class Decompressed:
+    """A .zst transcript (Codex compresses older sessions) read through `zstd`, line by line like an open file.
+    zstd reads the already-verified open file, never the path again."""
+
+    def __init__(self, raw):
+        self.raw = raw
+        self.proc = subprocess.Popen([ZSTD, "-dcq"], stdin=raw, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+
+    def __iter__(self):
+        return iter(self.proc.stdout)
+
+    def readline(self, *args):
+        return self.proc.stdout.readline(*args)
+
+    def fileno(self):
+        return self.raw.fileno()
+
+    def close(self):
+        self.proc.stdout.close()
+        if self.proc.poll() is None:
+            self.proc.kill()
+        self.proc.wait()
+        self.raw.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+
+
+def transcript_open(path, allowed, forbidden, same=None):
+    """history_open, and for a compressed transcript a decompressing reader: (None, "compressed") without zstd."""
+    fh, why = history_open(path, allowed, forbidden, same)
+    if fh and str(path).endswith(".zst"):
+        if not ZSTD:
+            fh.close()
+            return None, "compressed"
+        try:
+            return Decompressed(fh), why
+        except OSError:
+            fh.close()
+            return None, "unreadable"
+    return fh, why
+
+
 def history_remote(url):
     """A remote as host[:port]/path, so https, ssh and scp forms of one repository compare equal. A port
     other than the scheme's default names a different server and is kept."""
@@ -3852,7 +3908,8 @@ def history_sources(inst, only=()):
 def history_files(sub):
     cfg = Path(sub["config_dir"])
     if sub["runtime"] == "codex":
-        return sorted(p for d in ("sessions", "archived_sessions") for p in (cfg / d).rglob("rollout-*.jsonl"))
+        return sorted(p for d in ("sessions", "archived_sessions") for pattern in ("rollout-*.jsonl", "rollout-*.jsonl.zst")
+                      for p in (cfg / d).rglob(pattern))
     return sorted(cfg.glob("projects/*/*.jsonl"))  # subagents/ hold delegated work, not the conversation
 
 
@@ -4199,7 +4256,8 @@ def history_extract(inst, n, a):
     match, remotes = history_matcher(inst, n)
     terms = never_terms(n)
     heads, files = [], set()
-    counts = {"files": 0, "unreadable": 0, "unmatched": 0, "duplicates": 0, "empty": 0, "not_allowed": 0, "odd": 0}
+    counts = {"files": 0, "unreadable": 0, "unmatched": 0, "duplicates": 0, "empty": 0, "not_allowed": 0, "odd": 0,
+              "compressed": 0}
     for sub in sources:
         for path in history_files(sub):
             try:
@@ -4213,7 +4271,7 @@ def history_extract(inst, n, a):
             counts["files"] += 1
             # Only files that really live in a folder this brain may read: a link out of one, to any other
             # account's folder (declared or not), is skipped.
-            fh, why = history_open(real, allowed, forbidden)
+            fh, why = transcript_open(real, allowed, forbidden)
             s = history_head(real, sub["runtime"], fh) if fh else None
             if s is None:
                 counts[why if not fh else "unreadable"] += 1
@@ -4227,7 +4285,7 @@ def history_extract(inst, n, a):
                 counts["unmatched"] += 1
     compactions = {"claude": [], "codex": []}
     for s in heads:
-        fh, why = history_open(s["file"], allowed, forbidden, same=s["inode"])
+        fh, why = transcript_open(s["file"], allowed, forbidden, same=s["inode"])
         try:
             if not fh:
                 raise OSError(why)  # changed since its header was read
@@ -4364,7 +4422,9 @@ def history_summary(n, out, m):
     lines.append(f"  scanned {c['files']} session files: {c['unmatched']} about other folders, "
                  f"{c['duplicates']} copies of others, {c['empty']} with no operator message, {c['unreadable']} unreadable"
                  + (f", {c['not_allowed']} linked into a subscription not allowed for this brain" if c.get("not_allowed")
-                    else "") + (f"; {c['odd']} malformed records skipped" if c.get("odd") else ""))
+                    else "") + (f"; {c['odd']} malformed records skipped" if c.get("odd") else "")
+                 + (f"; {c['compressed']} compressed (.zst) not read: install zstd, then extract again with --fresh"
+                    if c.get("compressed") else ""))
     if m["subscriptions_not_allowed"]:
         lines.append(f"  {m['subscriptions_not_allowed']} subscription(s) not allowed for this brain: not read")
     summaries = sum(1 for s in m["sessions"] if s["summary"])
@@ -4600,6 +4660,954 @@ def cmd_history(a):
         print(json.dumps({k: v for k, v in m.items() if k != "sessions"}, indent=1, ensure_ascii=False))
     else:
         print("\n".join(import_text(line, never_terms(n)) for line in history_summary(n, out, m)))
+
+
+
+# ---------- time and tokens: what work cost ----------
+# Read from the runtimes' own transcripts on this machine, in the subscription folders this brain may use. Only
+# aggregates are kept (counts per minute, never message text), in .brain/spend/, and each file is read once and
+# then incrementally: transcripts only grow, so the next read starts where the last one stopped.
+
+SPEND_IDLE_MIN = 5  # a gap between two events of more than this many minutes is idle time
+SPEND_VERSION = 1
+SPEND_FIELDS = ("events", "fresh", "cache_read", "cache_write", "output", "reasoning", "tools")
+SPEND_TOKENS = ("fresh", "cache_read", "cache_write", "output", "reasoning")  # reasoning is part of output
+JOB_MARK = "brain-job: {}"  # in every job brief: the sessions a brief starts are found again by it
+JOB_MARK_RE = re.compile(rb"brain-job: ([0-9a-f]{24})\b")
+SPEND_STAMP = re.compile(rb'"timestamp":"(\d{4})-(\d\d)-(\d\d)T(\d\d):(\d\d):(\d\d)')
+SPEND_RECENT = 64  # Claude splits one response into a few adjacent records: ids remembered to count it once
+
+
+def spend_minute(raw):
+    """The UTC minute of a record's timestamp, from the raw line (both runtimes write UTC `…Z` stamps). Codex puts
+    it first, Claude Code near the end: the last one in the line is the record's own."""
+    at = raw.rfind(b'"timestamp":"')
+    m = SPEND_STAMP.match(raw, at) if at >= 0 else None
+    if not m:
+        return None
+    import calendar
+    try:
+        y, mo, d, h, mi, _ = (int(x) for x in m.groups())
+        return calendar.timegm((y, mo, d, h, mi, 0, 0, 0, 0)) // 60
+    except (ValueError, OverflowError):
+        return None
+
+
+def spend_count(value):
+    return value if type(value) is int and 0 <= value < 10 ** 12 else 0
+
+
+def spend_new(runtime, path):
+    return {"v": SPEND_VERSION, "runtime": runtime, "id": "", "parent": "", "subagent": False, "fork_of": "",
+            "cwd": "", "job": "", "models": [], "m": {}, "mc": {}, "records": False, "compactions": [],
+            "first": None, "last": None, "state": {"offset": 0, "prompt_done": False, "recent": [], "tools": [],
+                                                   "model": -1, "last_input": 0, "prev": None, "own_start": None}}
+
+
+def spend_add(agg, key, minute, model, values):
+    """Add per-field values to one minute of one model. Buckets are keyed "<minute>:<model index>"."""
+    if minute is None:
+        return
+    b = agg[key].setdefault(f"{minute}:{model}", [0] * len(SPEND_FIELDS))
+    for i, v in enumerate(values):
+        b[i] += v
+    agg["first"] = minute if agg["first"] is None else min(agg["first"], minute)
+    agg["last"] = minute if agg["last"] is None else max(agg["last"], minute)
+
+
+def spend_model(agg, name):
+    name = name if isinstance(name, str) and name and len(name) < 120 else "unknown"
+    if name not in agg["models"]:
+        agg["models"].append(name)
+    return agg["models"].index(name)
+
+
+def spend_claude_line(agg, raw, minute):
+    st = agg["state"]
+    spend_add(agg, "m", minute, -1, (1, 0, 0, 0, 0, 0, 0))
+    wanted = (b'"usage"' in raw or b'compact_boundary' in raw or (not st["prompt_done"] and b'"user"' in raw)
+              or (not agg["cwd"] and b'"cwd"' in raw))
+    if not wanted:
+        return
+    try:
+        r = json.loads(raw)
+    except ValueError:
+        return
+    if not isinstance(r, dict):
+        return
+    if not agg["cwd"] and isinstance(r.get("cwd"), str):
+        agg["cwd"] = r["cwd"]
+    kind = r.get("type")
+    msg = r.get("message") if isinstance(r.get("message"), dict) else {}
+    if kind == "user" and not st["prompt_done"] and not r.get("isMeta") and not r.get("isCompactSummary"):
+        content = msg.get("content")
+        if isinstance(content, list) and any(isinstance(c, dict) and c.get("type") == "tool_result" for c in content):
+            return
+        st["prompt_done"] = True  # the brief: only the first message the session was given names its job
+        m = JOB_MARK_RE.search(raw)
+        agg["job"] = m.group(1).decode() if m else ""
+        return
+    if kind == "system" and r.get("subtype") == "compact_boundary":
+        meta = r.get("compactMetadata") if isinstance(r.get("compactMetadata"), dict) else {}
+        agg["compactions"].append([minute, spend_count(meta.get("preTokens")), meta.get("trigger") == "auto"])
+        return
+    usage = msg.get("usage") if isinstance(msg.get("usage"), dict) else None
+    if kind != "assistant" or not usage or msg.get("model") == "<synthetic>":
+        return
+    model = spend_model(agg, msg.get("model"))
+    now = [spend_count(usage.get(k)) for k in ("input_tokens", "cache_read_input_tokens",
+                                                "cache_creation_input_tokens", "output_tokens")]
+    mid = msg.get("id") if isinstance(msg.get("id"), str) else None
+    tools = 0
+    for c in msg.get("content") if isinstance(msg.get("content"), list) else []:
+        tid = c.get("id") if isinstance(c, dict) and c.get("type") in ("tool_use", "server_tool_use") else None
+        if tid and tid not in st["tools"]:
+            st["tools"] = (st["tools"] + [tid])[-SPEND_RECENT * 2:]
+            tools += 1
+    prior = next((p for p in st["recent"] if mid and p[0] == mid), None)
+    if prior:  # the same response again: count only what grew, in the minute it was first counted
+        delta = [max(0, a - b) for a, b in zip(now, prior[1])]
+        prior[1] = [max(a, b) for a, b in zip(now, prior[1])]
+        spend_add(agg, "m", prior[2], prior[3], (0, *delta, 0, tools))
+        return
+    if mid:
+        st["recent"] = (st["recent"] + [[mid, now, minute, model]])[-SPEND_RECENT:]
+    spend_add(agg, "m", minute, model, (0, *now, 0, tools))
+
+
+CODEX_TOOL_CALLS = {"function_call", "custom_tool_call", "local_shell_call", "web_search_call", "tool_search_call",
+                    "image_generation_call", "mcp_tool_call"}
+
+
+def spend_codex_line(agg, raw, minute):
+    st = agg["state"]
+    spend_add(agg, "m", minute, -1, (1, 0, 0, 0, 0, 0, 0))
+    hot = (b'"session_meta"', b'"token_usage_record"', b'"token_count"', b'"compacted"', b'"turn_context"',
+           b'_call"')
+    if not any(h in raw for h in hot) and not (not st["prompt_done"] and b'"user' in raw):
+        return
+    try:
+        r = json.loads(raw)
+    except ValueError:
+        return
+    p = r.get("payload") if isinstance(r, dict) and isinstance(r.get("payload"), dict) else None
+    if p is None:
+        return
+    kind, ptype = r.get("type"), p.get("type")
+    if kind == "session_meta":
+        if not agg["id"]:
+            src = p.get("source")
+            spawn = src.get("subagent", {}).get("thread_spawn", {}) if isinstance(src, dict) and \
+                isinstance(src.get("subagent"), dict) else {}
+            agg.update(id=history_str(p.get("id")), cwd=history_str(p.get("cwd")),
+                       parent=history_str(spawn.get("parent_thread_id")) if isinstance(spawn, dict) else "",
+                       subagent=isinstance(src, dict) and "subagent" in src or p.get("thread_source") == "subagent",
+                       fork_of=history_str(p.get("forked_from_id")) or history_str(
+                           (p.get("history_base") or {}).get("thread_id") if isinstance(p.get("history_base"), dict) else ""))
+            st["own_start"] = minute  # a fork's copied history is older than its own start
+        return
+    if minute is not None and st["own_start"] is not None and minute < st["own_start"]:
+        return  # history a fork copied from its parent: the parent's own file counts it
+    if kind == "turn_context":
+        st["model"] = spend_model(agg, p.get("model"))
+        return
+    if kind == "compacted":
+        agg["compactions"].append([minute, st["last_input"], None])
+        return
+    if kind == "response_item" and ptype in CODEX_TOOL_CALLS:
+        spend_add(agg, "m", minute, st["model"], (0, 0, 0, 0, 0, 0, 1))
+        return
+    if not st["prompt_done"] and ((kind == "response_item" and ptype == "message" and p.get("role") == "user") or
+                                  (kind == "event_msg" and ptype == "user_message")):
+        m = JOB_MARK_RE.search(raw)
+        if m:
+            agg["job"] = m.group(1).decode()
+        return
+    if kind == "token_usage_record":
+        if p.get("thread_id") not in (None, agg["id"]):
+            return  # another thread's response, carried along
+        st["prompt_done"] = True
+        rid = p.get("response_id") if isinstance(p.get("response_id"), str) else None
+        if rid and rid in st["recent"]:
+            return
+        if rid:
+            st["recent"] = (st["recent"] + [rid])[-SPEND_RECENT:]
+        u = p.get("usage") if isinstance(p.get("usage"), dict) else {}
+        inp, cached = spend_count(u.get("input_tokens")), spend_count(u.get("cached_input_tokens"))
+        st["last_input"] = inp or st["last_input"]
+        agg["records"] = True
+        spend_add(agg, "m", minute, st["model"], (0, max(0, inp - cached), cached, spend_count(u.get("cache_write_input_tokens")),
+                                                   spend_count(u.get("output_tokens")),
+                                                   spend_count(u.get("reasoning_output_tokens")), 0))
+        return
+    if kind == "event_msg" and ptype == "token_count" and isinstance(p.get("info"), dict):
+        st["prompt_done"] = True
+        info = p["info"]
+        total = info.get("total_token_usage") if isinstance(info.get("total_token_usage"), dict) else None
+        last = info.get("last_token_usage") if isinstance(info.get("last_token_usage"), dict) else {}
+        st["last_input"] = spend_count(last.get("input_tokens")) or st["last_input"]
+        if not total:
+            return
+        keys = ("input_tokens", "cached_input_tokens", "output_tokens", "reasoning_output_tokens")
+        now = [spend_count(total.get(k)) for k in keys]
+        # Cumulative, and a fork's first counter already holds its parent's total: what this session used
+        # starts at its first counter, less that counter's own last response.
+        prev = st["prev"] or [max(0, a - spend_count(last.get(k))) for a, k in zip(now, keys)]
+        d = [max(0, a - b) for a, b in zip(now, prev)]
+        st["prev"] = [max(a, b) for a, b in zip(now, prev)]
+        spend_add(agg, "mc", minute, st["model"], (0, max(0, d[0] - d[1]), d[1], 0, d[2], d[3], 0))
+
+
+def spend_read(agg, fh, budget=None):
+    """Read what was appended since the last read. Only whole lines: one being written is read next time.
+    A compressed transcript is finished: it is read whole, in one go."""
+    packed = isinstance(fh, Decompressed)
+    deadline = time.monotonic() + budget if budget and not packed else None
+    line_fn = spend_codex_line if agg["runtime"] == "codex" else spend_claude_line
+    st = agg["state"]
+    if not packed:
+        fh.seek(st["offset"])
+    for raw in fh:
+        if not raw.endswith(b"\n"):
+            break
+        st["offset"] += len(raw)
+        line = raw.strip()
+        if line.startswith(b"{"):
+            line_fn(agg, line, spend_minute(line))
+        if deadline and time.monotonic() > deadline:
+            return False
+    return True
+
+
+_SPEND_MEM = {}  # this process's aggregates, by real path: a file that hasn't grown isn't read again
+
+
+def spend_cache_dir(inst):
+    return inst.root / ".brain" / "spend"
+
+
+def spend_file(inst, path, runtime, allowed, forbidden, budget=None):
+    """One transcript's aggregate, brought up to date; None when unreadable or outside the folders this brain may
+    read (checked on the open file, as `brain history` does). A file that shrank or was replaced is read again."""
+    try:
+        real = Path(path).resolve()
+    except (OSError, RuntimeError):
+        return None
+    fh, ident = transcript_open(real, allowed, forbidden)
+    if not fh:
+        return None
+    with fh:
+        try:
+            size = os.fstat(fh.fileno()).st_size
+        except OSError:
+            return None
+        packed = isinstance(fh, Decompressed)
+        known = _SPEND_MEM.get(str(real))
+        if known and known[0] == (size, list(ident)) and known[1].get("complete", True):
+            return known[1]
+        cf = spend_cache_dir(inst) / "files" / (hashlib.sha256(str(real).encode()).hexdigest()[:32] + ".json")
+        agg = None
+        try:
+            agg = json.loads(cf.read_text())
+        except (OSError, ValueError):
+            pass
+        if not (isinstance(agg, dict) and agg.get("v") == SPEND_VERSION and agg.get("path") == str(real)
+                and agg.get("ino") == list(ident) and agg["state"]["offset"] <= size
+                and (not packed or agg["state"]["offset"] in (0, size))):
+            agg = {**spend_new(runtime, real), "path": str(real), "ino": list(ident)}
+            if runtime == "claude":  # a session's file is named by its id; its sub-agents' files sit below it
+                sub = real.parent.name == "subagents"
+                agg.update(id=f"{real.parent.parent.name}/{real.stem}" if sub else real.stem, subagent=sub,
+                           parent=real.parent.parent.name if sub else "")
+        if agg["state"]["offset"] < size:
+            try:
+                agg["complete"] = spend_read(agg, fh, budget)
+            except OSError:
+                return None
+            if packed:
+                agg["state"]["offset"] = size  # read whole: what it holds is counted
+            try:
+                cf.parent.mkdir(parents=True, exist_ok=True)
+                atomic_write(cf, json.dumps(agg, separators=(",", ":")))
+            except OSError:
+                pass  # still right for this run; read again next time
+        _SPEND_MEM[str(real)] = ((size, list(ident)), agg)
+    return agg
+
+
+def spend_sources(inst):
+    """[(runtime, config folder)] of every subscription this brain may read, and the folders it may not."""
+    try:
+        sources, _, forbidden = history_sources(inst)
+    except SystemExit:
+        return [], set(), set()
+    allowed = {Path(s["config_dir"]).resolve() for s in sources}
+    return [(s["runtime"], Path(s["config_dir"])) for s in sources], allowed, forbidden
+
+
+def claude_folder(path):
+    """The folder Claude Code keeps a working folder's sessions in: every character but letters and digits
+    becomes a dash; very long names are cut, with a suffix of their own."""
+    return re.sub(r"[^A-Za-z0-9]", "-", str(path))
+
+
+def spend_walk(folder):
+    """Transcripts below a folder, without following links into loops; each real file once."""
+    seen = set()
+    for top, dirs, files in os.walk(folder, followlinks=False):
+        for f in files:
+            if f.endswith(".jsonl") or f.endswith(".jsonl.zst"):
+                p = Path(top) / f
+                try:
+                    real = p.resolve()
+                except (OSError, RuntimeError):
+                    continue
+                if real not in seen:
+                    seen.add(real)
+                    yield real
+
+
+def spend_once(aggs):
+    """Each session once: Codex may keep a session both as a transcript and as its compressed copy."""
+    best = {}
+    for a in aggs:
+        key = (a["runtime"], a["id"] or a["path"])
+        if key not in best or (a["last"] or 0, a["state"]["offset"]) > (best[key]["last"] or 0, best[key]["state"]["offset"]):
+            best[key] = a
+    return list(best.values())
+
+
+def spend_sum(aggs, since=None, until=None):
+    """Totals over sessions, counting only minutes in [since, until] (epoch seconds)."""
+    aggs = spend_once(aggs)
+    lo = since // 60 if since else None
+    hi = until // 60 if until else None
+    out = {k: 0 for k in SPEND_TOKENS}
+    out.update(tools=0, compactions=0, auto_compactions=0, sessions=0, subagents=0, sub_tokens=0, agent_minutes=0,
+               models={}, runtimes={}, minutes=set(), largest_compaction=0)
+    for agg in aggs:
+        mins, used = set(), 0
+        rows = list(agg["m"].items())
+        token_rows = agg["mc"].items() if agg["runtime"] == "codex" and not agg["records"] else rows
+        for key, b in rows:
+            minute = int(key.split(":")[0])
+            if (lo is None or minute >= lo) and (hi is None or minute <= hi):
+                if b[0]:
+                    mins.add(minute)
+                out["tools"] += b[6]
+        for key, b in token_rows:
+            minute, model = (int(x) for x in key.split(":"))
+            if (lo is None or minute >= lo) and (hi is None or minute <= hi):
+                tokens = dict(zip(SPEND_FIELDS, b))
+                for k in SPEND_TOKENS:
+                    out[k] += tokens[k]
+                n = sum(tokens[k] for k in SPEND_TOKENS if k != "reasoning")
+                used += n
+                if n:
+                    name = f"{agg['runtime']}:{agg['models'][model] if 0 <= model < len(agg['models']) else 'unknown'}"
+                    out["models"][name] = out["models"].get(name, 0) + n
+        if not mins and not used:
+            continue
+        out["sessions"] += 1
+        out["runtimes"][agg["runtime"]] = out["runtimes"].get(agg["runtime"], 0) + used
+        if agg["subagent"]:
+            out["subagents"] += 1
+            out["sub_tokens"] += used
+        for c in agg["compactions"]:
+            if c[0] is not None and (lo is None or c[0] >= lo) and (hi is None or c[0] <= hi):
+                out["compactions"] += 1
+                out["auto_compactions"] += c[2] is True
+                out["largest_compaction"] = max(out["largest_compaction"], c[1] or 0)
+        out["agent_minutes"] += spend_active(mins)
+        out["minutes"] |= mins
+    out["processed"] = out["fresh"] + out["cache_read"] + out["cache_write"] + out["output"]
+    out["sub_share"] = round(out["sub_tokens"] / out["processed"], 3) if out["processed"] else 0
+    out["active_minutes"] = spend_active(out.pop("minutes"))
+    return out
+
+
+def spend_active(minutes):
+    """Minutes of activity: each minute with an event, plus the gaps of at most SPEND_IDLE_MIN between them."""
+    total, prev = 0, None
+    for m in sorted(minutes):
+        total += 1 if prev is None or m - prev > SPEND_IDLE_MIN else m - prev
+        prev = m
+    return total
+
+
+def spend_inside(cwd, base):
+    try:
+        c, b = Path(cwd).resolve(), Path(base).resolve()
+    except (OSError, RuntimeError, TypeError, ValueError):
+        return False
+    return c == b or b in c.parents
+
+
+SESSION_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]{7,79}")
+
+
+def spend_session_ids():
+    """The calling session's own id, as its runtime tells its shells (Claude Code and Codex)."""
+    out = []
+    for var in ("CLAUDE_CODE_SESSION_ID", "CODEX_THREAD_ID"):
+        v = os.environ.get(var, "")
+        if SESSION_ID.fullmatch(v):
+            out.append(v)
+    return out
+
+
+def codex_meta(path, allowed, forbidden):
+    """(id, cwd, parent thread) from a Codex transcript's first line, without reading the rest."""
+    fh, _ = transcript_open(path, allowed, forbidden)
+    if not fh:
+        return None
+    with fh:
+        try:
+            r = json.loads(fh.readline(1 << 20))
+        except (OSError, ValueError):
+            return None
+    p = r.get("payload") if isinstance(r, dict) and r.get("type") == "session_meta" and \
+        isinstance(r.get("payload"), dict) else None
+    if p is None:
+        return None
+    src = p.get("source")
+    spawn = src.get("subagent", {}).get("thread_spawn", {}) if isinstance(src, dict) and \
+        isinstance(src.get("subagent"), dict) else {}
+    return history_str(p.get("id")), history_str(p.get("cwd")), \
+        history_str(spawn.get("parent_thread_id")) if isinstance(spawn, dict) else ""
+
+
+def claude_mark(path, allowed, forbidden):
+    """The job a Claude session's first message (its brief) names, without reading the rest: "" for none."""
+    fh, _ = transcript_open(path, allowed, forbidden)
+    if not fh:
+        return ""
+    with fh:
+        for k, raw in enumerate(fh):
+            if k > 500:
+                break
+            if b'"user"' not in raw:
+                continue
+            try:
+                r = json.loads(raw)
+            except ValueError:
+                continue
+            msg = r.get("message") if isinstance(r, dict) and isinstance(r.get("message"), dict) else {}
+            if r.get("type") != "user" or r.get("isMeta") or r.get("isCompactSummary") or r.get("isSidechain"):
+                continue
+            content = msg.get("content")
+            if isinstance(content, list) and any(isinstance(c, dict) and c.get("type") == "tool_result" for c in content):
+                continue
+            m = JOB_MARK_RE.search(raw)
+            return m.group(1).decode() if m else ""
+    return ""
+
+
+def codex_mark(path, allowed, forbidden):
+    """The job a Codex session's opening user messages (its brief) name: "" for none. Stops at its first reply."""
+    fh, _ = transcript_open(path, allowed, forbidden)
+    if not fh:
+        return ""
+    with fh:
+        for k, raw in enumerate(fh):
+            if k > 400 or b'"token_usage_record"' in raw or b'"token_count"' in raw:
+                break
+            if b'"user' not in raw:
+                continue
+            try:
+                r = json.loads(raw)
+            except ValueError:
+                continue
+            p = r.get("payload") if isinstance(r, dict) and isinstance(r.get("payload"), dict) else {}
+            if (r.get("type") == "response_item" and p.get("type") == "message" and p.get("role") == "user") or \
+                    (r.get("type") == "event_msg" and p.get("type") == "user_message"):
+                m = JOB_MARK_RE.search(raw)
+                if m:
+                    return m.group(1).decode()
+    return ""
+
+
+def job_window(inst, row):
+    a = inst.parse_time(row.get("Started", ""))
+    b = inst.parse_time(row.get("Ended", "")) if row.get("Ended") else None
+    return (a.timestamp() if a else None), (b.timestamp() if b else time.time())
+
+
+def job_sessions(inst, n, row, worktree=None):
+    """The sessions that did this job, and the sub-agents they started: begun in its worktree, given a brief that
+    names it (a reviewer runs in its coordinator's folder), or recorded by its hand-back (a worker elsewhere).
+    Only transcripts touched while the job was open are looked at, and only these are read in full."""
+    start, end = job_window(inst, row)
+    if start is None:
+        return []
+    key = job_key(row)
+    w = worktree or (n["local"].get("worktrees", {}).get(row["Job"]) or {}).get("path")
+    wt = Path(w) if w else None
+    hb = read_handback(n, row) or {}
+    ids = {i for i in hb.get("sessions", []) if isinstance(i, str) and SESSION_ID.fullmatch(i)} \
+        if isinstance(hb.get("sessions"), list) else set()
+    places = [p for p in (wt, n["dir"], inst.root) if p]
+    sources, allowed, forbidden = spend_sources(inst)
+    touched = lambda p: p.stat().st_mtime >= start - 60  # noqa: E731
+    aggs, files, metas = [], set(), []
+
+    def take(runtime, p):
+        try:
+            if p.resolve() in files or not touched(p):
+                return None
+        except (OSError, RuntimeError):
+            return None
+        files.add(p.resolve())
+        agg = spend_file(inst, p, runtime, allowed, forbidden)
+        if agg:
+            aggs.append(agg)
+        return agg
+
+    for runtime, cfg in sources:
+        if runtime == "claude":
+            proj = cfg / "projects"
+            names = set()
+            for p in places:
+                for q in {p, p.resolve()}:
+                    names.add(claude_folder(q))
+            here = {claude_folder(q) for q in ({wt, wt.resolve()} if wt else set())}
+            for name in names:
+                folders = [proj / name] if len(name) <= 200 else list(proj.glob(name[:200] + "*"))  # cut, with a suffix
+                for folder in folders:
+                    for f in sorted(folder.glob("*.jsonl")) if folder.is_dir() else []:
+                        # In the worktree, every session is the job's. In a coordinator's folder only those its
+                        # brief names: a long coordinator session is never read for this.
+                        try:
+                            if name in here or (touched(f) and claude_mark(f, allowed, forbidden) == key):
+                                take("claude", f)
+                        except OSError:
+                            pass
+            for i in ids:
+                for f in proj.glob(f"*/{i}.jsonl"):
+                    take("claude", f)
+        else:
+            day = datetime.date.fromtimestamp(start - 86400)  # Codex files transcripts by their local start day
+            last = datetime.date.fromtimestamp(end + 86400)
+            mine = []
+            while day <= last:
+                for f in [p for pattern in ("rollout-*.jsonl", "rollout-*.jsonl.zst")
+                          for p in sorted((cfg / "sessions" / f"{day:%Y/%m/%d}").glob(pattern))] + \
+                        [p for suffix in (".jsonl", ".jsonl.zst")
+                         for p in sorted((cfg / "archived_sessions").glob(f"rollout-{day:%Y-%m-%d}T*{suffix}"))]:
+                    try:
+                        if touched(f):
+                            m = codex_meta(f, allowed, forbidden)
+                            if m:
+                                mine.append((f, *m))
+                    except OSError:
+                        pass
+                day += datetime.timedelta(days=1)
+            for f, sid, cwd, parent in mine:
+                if sid in ids or (wt and spend_inside(cwd, wt)) or (
+                        any(spend_inside(cwd, p) for p in places) and codex_mark(f, allowed, forbidden) == key):
+                    take("codex", f)
+            metas += mine
+    keep = [a for a in aggs if not a["subagent"] and
+            ((wt and spend_inside(a["cwd"], wt)) or a["job"] == key or a["id"] in ids)]
+    chosen = {a["id"] for a in keep}
+    for a in keep:  # Claude keeps a session's sub-agents beside it
+        if a["runtime"] == "claude":
+            for f in sorted((Path(a["path"]).parent / a["id"] / "subagents").glob("agent-*.jsonl")):
+                agg = take("claude", f) if f.resolve() not in files else next(
+                    (x for x in aggs if x["path"] == str(f.resolve())), None)
+                if agg and agg["id"] not in chosen:
+                    keep.append(agg)
+                    chosen.add(agg["id"])
+    grew = True
+    while grew:  # Codex sub-agents are sessions of their own that name their parent, at any depth
+        grew = False
+        for f, sid, cwd, parent in metas:
+            if parent in chosen and sid not in chosen:
+                agg = take("codex", f) or next((x for x in aggs if x["path"] == str(f.resolve())), None)
+                if agg:
+                    keep.append(agg)
+                    chosen.add(sid)
+                    grew = True
+    return keep
+
+
+def job_usage(inst, n, row, worktree=None):
+    """What a job cost, counted only while it was open: tokens by kind, active time, compactions, sub-agents,
+    tool calls and the models that ran it."""
+    start, end = job_window(inst, row)
+    if start is None:
+        return None
+    u = spend_sum(job_sessions(inst, n, row, worktree), start, end)
+    u["source"] = f"transcripts: {count_of(u['sessions'], 'session')}" if u["sessions"] else "none found"
+    return u
+
+
+def count_of(k, word):
+    return f"{k} {word}{'' if k == 1 else 's'}"
+
+
+def tokens_text(v):
+    v = int(v or 0)
+    for unit, size in (("B", 10 ** 9), ("M", 10 ** 6), ("k", 10 ** 3)):
+        if v >= size:
+            return f"{v / size:.3g}{unit}"
+    return str(v)
+
+
+def tokens_value(text):
+    """'2M', '1.5k', '40000': a number of tokens, or None."""
+    m = re.fullmatch(r"\s*(\d+(?:\.\d+)?)\s*([kKmMbB]?)\s*", str(text or ""))
+    return int(float(m[1]) * {"": 1, "k": 10 ** 3, "m": 10 ** 6, "b": 10 ** 9}[m[2].lower()]) if m else None
+
+
+def usage_cells(u):
+    """The ledger's usage columns for a job."""
+    if not u:
+        return {}
+    models = sorted(u["models"].items(), key=lambda kv: -kv[1])
+    total = sum(v for _, v in models) or 1
+    return {"Active h": f"{u['active_minutes'] / 60:.1f}", "Agent h": f"{u['agent_minutes'] / 60:.1f}",
+            "Fresh in": str(u["fresh"]), "Cache read": str(u["cache_read"]), "Cache write": str(u["cache_write"]),
+            "Output": str(u["output"]), "Reasoning": str(u["reasoning"]), "Tool calls": str(u["tools"]),
+            "Compactions": str(u["compactions"]), "Sub-agents": str(u["subagents"]),
+            "Sub share": f"{round(100 * u['sub_share'])}%",
+            "Models": ", ".join(f"{k} {round(100 * v / total)}%" for k, v in models if v) or "",
+            "Usage": u["source"]}
+
+
+def row_usage(row):
+    """A ledger row's usage, read back from its cells; None for jobs measured before the ledger had them."""
+    if not row.get("Usage"):
+        return None
+    num = lambda k: int(row[k]) if str(row.get(k, "")).isdigit() else 0  # noqa: E731
+    try:
+        active, agent = float(row.get("Active h") or 0), float(row.get("Agent h") or 0)
+    except ValueError:
+        active = agent = 0.0
+    out = {k: num(c) for k, c in (("fresh", "Fresh in"), ("cache_read", "Cache read"), ("cache_write", "Cache write"),
+                                  ("output", "Output"), ("reasoning", "Reasoning"), ("tools", "Tool calls"),
+                                  ("compactions", "Compactions"), ("subagents", "Sub-agents"))}
+    out["processed"] = out["fresh"] + out["cache_read"] + out["cache_write"] + out["output"]
+    share = re.fullmatch(r"(\d+)%", row.get("Sub share", "") or "")
+    out.update(active_h=active, agent_h=agent, sub_share=int(share[1]) / 100 if share else 0, source=row["Usage"])
+    return out
+
+
+def contract_budget(text):
+    """A contract's optional ## Budget: tokens processed and hours, e.g. "20M tokens, 3 h"."""
+    body = {k.lower(): v for k, v in md_sections(text or "").items()}.get("budget", "")
+    t = re.search(r"(\d+(?:\.\d+)?\s*[kKmMbB]?)\s*tokens", body)
+    h = re.search(r"(\d+(?:\.\d+)?)\s*(?:h|hours?)\b", body)
+    out = {"tokens": tokens_value(t[1]) if t else None, "hours": float(h[1]) if h else None}
+    return out if out["tokens"] or out["hours"] else None
+
+
+def job_budget(n, row):
+    f = contract_file(n, row)
+    try:
+        return contract_budget(f.read_text()) if f.is_file() else None
+    except OSError:
+        return None
+
+
+def budget_text(b):
+    return " · ".join(filter(None, [f"{tokens_text(b['tokens'])} tokens" if b.get("tokens") else "",
+                                    f"{b['hours']:g} h" if b.get("hours") else ""]))
+
+
+def usage_line(u, budget=None, hours=None):
+    """One line: what a job has cost so far, and its budget."""
+    if not u or not u.get("sessions") and not u.get("source", "").startswith("host"):
+        return "usage: no transcripts found for this job on this machine"
+    out = (f"usage: {tokens_text(u['processed'])} tokens processed (fresh in {tokens_text(u['fresh'])}, cache read "
+           f"{tokens_text(u['cache_read'])}, cache write {tokens_text(u['cache_write'])}, out {tokens_text(u['output'])}"
+           + (f", reasoning {tokens_text(u['reasoning'])}" if u.get("reasoning") else "") + ")"
+           + f"; active {u['active_minutes'] / 60:.1f} h (agents {u['agent_minutes'] / 60:.1f} h)"
+           + f"; {count_of(u['tools'], 'tool call')}; {count_of(u['compactions'], 'compaction')}"
+           + (f"; {count_of(u['subagents'], 'sub-agent')}, {round(100 * u['sub_share'])}% of tokens" if u["subagents"] else ""))
+    if budget:
+        over = [f"{tokens_text(u['processed'])} of {tokens_text(budget['tokens'])} tokens"
+                for _ in [0] if budget.get("tokens") and u["processed"] > budget["tokens"]]
+        over += [f"{hours:.1f} of {budget['hours']:g} h" for _ in [0]
+                 if budget.get("hours") and hours is not None and hours > budget["hours"]]
+        out += f"; budget {budget_text(budget)}" + (": over (" + ", ".join(over) + ")" if over else "")
+    return out
+
+
+_LIVE = {}
+
+
+def live_usage(inst, n, row):
+    """An open job's usage so far, read again at most once a minute in one process (the live view asks often)."""
+    key = (str(inst.root), n["id"], job_key(row))
+    hit = _LIVE.get(key)
+    if hit and time.monotonic() - hit[0] < 60:
+        return hit[1]
+    try:
+        u = job_usage(inst, n, row)
+    except (OSError, ValueError, RuntimeError):
+        u = None
+    _LIVE[key] = (time.monotonic(), u)
+    return u
+
+
+def host_usage_cells(path):
+    """Usage a host reports for a job, as JSON with the counts `brain jobs` keeps (unknown keys are refused)."""
+    try:
+        data = json.loads(Path(path).read_text())
+    except (OSError, ValueError) as e:
+        die(f"can't read {path}: {e}")
+    known = {"fresh", "cache_read", "cache_write", "output", "reasoning", "tools", "compactions", "subagents",
+             "sub_share", "active_minutes", "agent_minutes", "models", "host"}
+    if not isinstance(data, dict) or set(data) - known or not isinstance(data.get("host", ""), str):
+        die("host usage is a JSON object with: " + ", ".join(sorted(known)))
+    nums = {k: data.get(k, 0) for k in known - {"models", "host", "sub_share"}}
+    if any(type(v) is not int or v < 0 for v in nums.values()) or \
+            not (isinstance(data.get("sub_share", 0), (int, float)) and 0 <= data.get("sub_share", 0) <= 1) or \
+            not isinstance(data.get("models", {}), dict) or \
+            any(not isinstance(k, str) or type(v) is not int or v < 0 for k, v in data.get("models", {}).items()):
+        die("host usage counts are whole numbers, sub_share a fraction from 0 to 1, models {name: tokens}")
+    u = {**nums, "sub_share": data.get("sub_share", 0), "models": data.get("models", {}), "sessions": 1}
+    u["processed"] = u["fresh"] + u["cache_read"] + u["cache_write"] + u["output"]
+    label = " ".join(data.get("host", "").split())[:40]
+    if SECRET_LINE.search(label):
+        die("unsafe host label")
+    return {**usage_cells({**u, "source": ""}), "Usage": "host" + (f": {label}" if label else "")}
+
+
+def usage_advice(u, median_tokens=None):
+    """Advice from a job's usage: never a gate."""
+    out = []
+    if not u:
+        return out
+    if median_tokens and u["processed"] > 2 * median_tokens:
+        out.append(f"advice: {tokens_text(u['processed'])} tokens, over twice the median of {tokens_text(median_tokens)} "
+                   "for merged jobs here")
+    if u["compactions"] >= 3:
+        out.append(f"advice: {u['compactions']} compactions: past the context window again and again; hand back and "
+                   "restart from a brief with what is done so far")
+    if u["subagents"] and u["sub_share"] > 0.5:
+        out.append(f"advice: sub-agents spent {round(100 * u['sub_share'])}% of its tokens: give them narrower tasks, "
+                   "or do the work in the main thread")
+    return out
+
+
+
+def spend_all(inst, budget=None, match=None):
+    """Every transcript in the folders this brain may read (or those `match(path, head)` keeps), up to date.
+    With a budget in seconds, stops early and says so: the next call goes on where this one stopped."""
+    sources, allowed, forbidden = spend_sources(inst)
+    deadline = time.monotonic() + budget if budget else None
+    aggs, total, done, seen = [], 0, True, set()
+    for runtime, cfg in sources:
+        roots = [cfg / "projects"] if runtime == "claude" else [cfg / "sessions", cfg / "archived_sessions"]
+        for root in roots:
+            if not root.is_dir():
+                continue
+            for f in spend_walk(root):
+                if runtime == "claude" and f.parent.name != "subagents" and f.parent.parent != root.resolve():
+                    continue  # a session file sits right in its project folder; sub-agents below it
+                if f in seen:
+                    continue  # two subscription folders linked to one: each file counts once
+                seen.add(f)
+                total += 1
+                if deadline and time.monotonic() > deadline:
+                    done = False
+                    continue
+                if match and not match(runtime, f, allowed, forbidden):
+                    continue
+                left = (deadline - time.monotonic()) if deadline else None
+                agg = spend_file(inst, f, runtime, allowed, forbidden, budget=left)
+                if agg:
+                    aggs.append(agg)
+                    done = done and agg.get("complete", True)
+    return aggs, total, done
+
+
+def spend_days(inst, aggs, days=14, weeks=8):
+    """Per runtime: tokens and active hours per local day and per week, newest last."""
+    zone = inst.zone()
+    now = datetime.datetime.now(zone) if zone else datetime.datetime.now().astimezone()
+    today = now.date()
+    day_keys = [(today - datetime.timedelta(days=k)).isoformat() for k in range(days - 1, -1, -1)]
+    monday = today - datetime.timedelta(days=today.weekday())
+    week_keys = [(monday - datetime.timedelta(weeks=k)).isoformat() for k in range(weeks - 1, -1, -1)]
+    lo = int((datetime.datetime.combine(monday - datetime.timedelta(weeks=weeks - 1), datetime.time(),
+                                        now.tzinfo)).timestamp()) // 60
+    out = {}
+    for agg in spend_once(aggs):
+        rt = out.setdefault(agg["runtime"], {"days": {k: {"tokens": 0, "fresh_out": 0, "minutes": set()} for k in day_keys},
+                                             "weeks": {k: {"tokens": 0, "fresh_out": 0, "minutes": set()} for k in week_keys}})
+        token_rows = agg["mc"] if agg["runtime"] == "codex" and not agg["records"] else agg["m"]
+        for rows, tokens in ((agg["m"], False), (token_rows, True)):
+            for key, b in rows.items():
+                minute = int(key.split(":")[0])
+                if minute < lo:
+                    continue
+                d = datetime.datetime.fromtimestamp(minute * 60, now.tzinfo).date()
+                for bucket in (rt["days"].get(d.isoformat()),
+                               rt["weeks"].get((d - datetime.timedelta(days=d.weekday())).isoformat())):
+                    if bucket is None:
+                        continue
+                    if tokens:
+                        bucket["tokens"] += b[1] + b[2] + b[3] + b[4]
+                        bucket["fresh_out"] += b[1] + b[4]
+                    elif b[0]:
+                        bucket["minutes"].add(minute)
+    for rt in out.values():
+        for part in ("days", "weeks"):
+            for k, v in rt[part].items():
+                v["active_h"] = round(spend_active(v.pop("minutes")) / 60, 1)
+    return out
+
+
+def spend_summary(u):
+    """Totals as plain numbers, for --json and the live view."""
+    keep = (*SPEND_TOKENS, "processed", "tools", "compactions", "auto_compactions", "sessions", "subagents",
+            "sub_share", "models", "runtimes", "largest_compaction")
+    return {**{k: u[k] for k in keep}, "active_h": round(u["active_minutes"] / 60, 1),
+            "agent_h": round(u["agent_minutes"] / 60, 1)}
+
+
+_MACHINE = {}
+
+
+def spend_machine(inst, budget=2.0):
+    """This machine's totals per runtime, for the live view: counted a little at each refresh until complete,
+    then again at most once a minute."""
+    hit = _MACHINE.get(str(inst.root))
+    if hit and hit["complete"] and time.monotonic() - hit["at"] < 60:
+        return hit["value"]
+    aggs, total, done = spend_all(inst, budget=budget)
+    value = {"complete": done, "files": total, "read": len(aggs), "runtimes": spend_days(inst, aggs),
+             "since_week": spend_summary(spend_sum(aggs, time.time() - 7 * 86400)) if done else None}
+    _MACHINE[str(inst.root)] = {"at": time.monotonic(), "complete": done, "value": value}
+    return value
+
+
+def spend_node_file(inst, n):
+    return spend_cache_dir(inst) / "nodes" / f"{connect_name(n['id'])}.json"
+
+
+def spend_lookback(inst, n, since=None):
+    """Every past session about a node's home (as `brain history` finds them), as aggregates only."""
+    match_home, _ = history_matcher(inst, n)
+    heads = {}
+
+    def match(runtime, f, allowed, forbidden):
+        if runtime == "claude" and f.parent.name == "subagents":
+            return f.parent.parent.name in heads  # a sub-agent of a matching session (its parent is read first)
+        fh, why = transcript_open(f, allowed, forbidden)
+        s = history_head(f, runtime, fh) if fh else None
+        if not s or not match_home(s["cwd"], s["repo_url"]):
+            return False
+        heads[f.stem if runtime == "claude" else s["id"]] = True
+        return True
+    aggs, _, _ = spend_all(inst, match=match)
+    ids = {a["id"] for a in aggs}
+    sources, allowed, forbidden = spend_sources(inst)
+    grew = True
+    while grew:  # Codex sub-agents run where their parent did; any started elsewhere still name it
+        grew = False
+        for runtime, cfg in sources:
+            if runtime != "codex":
+                continue
+            for root in (cfg / "sessions", cfg / "archived_sessions"):
+                for f in spend_walk(root) if root.is_dir() else []:
+                    m = codex_meta(f, allowed, forbidden)
+                    if m and m[2] in ids and m[0] not in ids:
+                        agg = spend_file(inst, f, "codex", allowed, forbidden)
+                        if agg:
+                            aggs.append(agg)
+                            ids.add(agg["id"])
+                            grew = True
+    lo = since or None
+    sessions = []
+    for a in spend_once(aggs):
+        u = spend_sum([a], lo)
+        if not u["sessions"]:
+            continue
+        sessions.append({"runtime": a["runtime"], "id": a["id"], "subagent": a["subagent"], "parent": a["parent"],
+                         "start": (a["first"] or 0) * 60, "end": (a["last"] or 0) * 60, **spend_summary(u)})
+    total = spend_sum(aggs, lo)
+    record = {"node": n["id"], "at": inst.now(), "since": lo, "total": spend_summary(total),
+              "days": spend_days(inst, aggs, days=0, weeks=26), "sessions": sorted(sessions, key=lambda x: x["start"])}
+    f = spend_node_file(inst, n)
+    f.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write(f, json.dumps(record, separators=(",", ":")))
+    return record, aggs
+
+
+def spend_lines(title, u, sessions=None):
+    """What a set of sessions cost, in a few lines."""
+    real = u["fresh"] + u["output"]
+    lines = [f"{title}: {count_of(u['sessions'], 'session')} ({count_of(u['subagents'], 'sub-agent')})",
+             f"  tokens: {tokens_text(u['processed'])} processed: fresh in {tokens_text(u['fresh'])}, cache read "
+             f"{tokens_text(u['cache_read'])}, cache write {tokens_text(u['cache_write'])}, out {tokens_text(u['output'])}"
+             + (f" (reasoning {tokens_text(u['reasoning'])})" if u["reasoning"] else "")
+             + (f"; fresh input and output are {100 * real / u['processed']:.1f}% of it" if u["processed"] else ""),
+             f"  active {u['active_minutes'] / 60:.1f} h (agents {u['agent_minutes'] / 60:.1f} h)"
+             f"; {count_of(u['tools'], 'tool call')}",
+             f"  compactions: {u['compactions']}" + (f" ({u['compactions'] / max(1, u['sessions'] - u['subagents']):.1f} "
+                                                      "per session)" if u["compactions"] else "")
+             + (f"; sub-agents spent {round(100 * u['sub_share'])}% of the tokens" if u["subagents"] else "")]
+    total = sum(u["models"].values()) or 1
+    if u["models"]:
+        lines.append("  models: " + ", ".join(f"{k} {round(100 * v / total)}%" for k, v in
+                                              sorted(u["models"].items(), key=lambda kv: -kv[1]) if v))
+    return lines
+
+
+def cmd_spend(a):
+    """Time and tokens from this machine's transcripts: a node's past sessions (opt-in, like history), or every
+    session here (--machine). Aggregates only, kept in .brain/spend/, never committed."""
+    inst = load()
+    since = None
+    if a.since:
+        try:
+            d = datetime.date.fromisoformat(a.since)
+        except ValueError:
+            die("--since is a date: YYYY-MM-DD")
+        zone = inst.zone()
+        since = int(datetime.datetime.combine(d, datetime.time(), zone or datetime.datetime.now().astimezone().tzinfo)
+                    .timestamp())
+    if a.machine:
+        if a.id:
+            die("--machine counts every session here: no node")
+        aggs, total, _ = spend_all(inst)
+        u = spend_sum(aggs, since)
+        days = spend_days(inst, aggs)
+        if a.json:
+            print(json.dumps({"total": spend_summary(u), "files": total, "runtimes": days}, indent=1))
+            return
+        for line in spend_lines("this machine" + (f" since {a.since}" if a.since else ""), u):
+            print(line)
+        for rt, v in days.items():
+            week = ", ".join(f"{k[5:]} {tokens_text(x['tokens'])}" for k, x in v["weeks"].items() if x["tokens"])
+            print(f"  {rt} by week (from Monday): {week or 'nothing'}")
+        return
+    if not a.id:
+        die("brain spend <node> [--since DATE], or brain spend --machine")
+    n = inst.node(a.id)
+    if not n["external"] or not n["home_path"] or not repo_root(n["home_path"]):
+        die(f"{n['id']}: spend looks back over sessions about an external git home (brain set {n['id']} home=<path>)")
+    record, aggs = spend_lookback(inst, n, since)
+    if a.json:
+        print(redact(json.dumps(record, indent=1), never_terms(n)))
+        return
+    u = spend_sum(aggs, since)
+    lines = spend_lines(n["id"] + (f" since {a.since}" if a.since else ""), u)
+    many = sum(1 for x in record["sessions"] if not x["subagent"] and x["compactions"] >= 3)
+    if many:
+        lines.append(f"  {count_of(many, 'session')} compacted 3 times or more: long runs past the window, "
+                     "where a restart from a brief costs less")
+    weeks = record["days"]
+    for rt, v in weeks.items():
+        week = ", ".join(f"{k[5:]} {tokens_text(x['tokens'])}" for k, x in v["weeks"].items() if x["tokens"])
+        if week:
+            lines.append(f"  {rt} by week (from Monday): {week}")
+    lines.append(f"  kept in {tilde(spend_node_file(inst, n))} (this machine only, never committed)")
+    print(redact("\n".join(lines), never_terms(n)))
 
 
 # ---------- connections across nodes ----------
@@ -5489,7 +6497,7 @@ def cmd_review(a):
             "## Report", "",
             "A list of findings, most severe first. Each: severity (blocker, major, minor), `file:line`, "
             "the problem, and a concrete fix. Say which tests you ran and their results. If you find nothing "
-            "that matters, say so plainly.", ""] + handback_lines(inst, n, who="reviewer")
+            "that matters, say so plainly.", ""] + handback_lines(inst, n, who="reviewer", branch=a.branch)
     text = "\n".join(out) + "\n"
     no_terms_in(n, text, "the review brief")
     job_reviewed(inst, n, a.branch)
@@ -5781,10 +6789,12 @@ def cmd_wt_list(a):
 
 
 JOBS_FILE = "job-ledger.md"  # in a node folder: one row per job, written by `brain wt` and `brain review`
-JOBS_MARK = "<!-- brain:job-ledger v2 -->"  # v1 cores refuse this format instead of dropping new columns
-JOBS_LEGACY_MARK = "<!-- brain:job-ledger v1 -->"
+JOBS_MARK = "<!-- brain:job-ledger v3 -->"  # older cores refuse this format instead of dropping new columns
+JOBS_LEGACY_MARKS = ("<!-- brain:job-ledger v2 -->", "<!-- brain:job-ledger v1 -->")
 JOB_COLS = ["Job", "Started", "Ended", "Hours", "Outcome", "Commits", "Reviews", "Runtime", "Cause"]
 JOB_COLS += ["Lessons", "Lesson check", "Switches"]
+JOB_COLS += ["Active h", "Agent h", "Fresh in", "Cache read", "Cache write", "Output", "Reasoning", "Tool calls",
+             "Compactions", "Sub-agents", "Sub share", "Models", "Budget", "Usage"]
 
 
 def cell(v):
@@ -5801,7 +6811,7 @@ def read_jobs(n):
     if not f.exists():
         return []
     text = f.read_text()
-    if JOBS_MARK not in text and JOBS_LEGACY_MARK not in text:
+    if JOBS_MARK not in text and not any(m in text for m in JOBS_LEGACY_MARKS):
         return None
     rows, columns = [], JOB_COLS
     for line in text.splitlines():
@@ -5819,9 +6829,12 @@ def read_jobs(n):
 def write_jobs(inst, n, rows):
     f = n["dir"] / JOBS_FILE
     head = (f"# Jobs: {n['id']}\n\n{JOBS_MARK}\nOne row per job, kept by `brain wt add`, `brain review`, "
-            "`brain wt rm` and `brain wt prune`; times carry their UTC offset. `brain jobs` sums it up.\n\n")
-    out = [head + "| " + " | ".join(JOB_COLS) + " |", "| " + " | ".join("---" for _ in JOB_COLS) + " |"]
-    out += ["| " + " | ".join(cell(r.get(c, "")) for c in JOB_COLS) + " |" for r in rows]
+            "`brain wt rm` and `brain wt prune`; times carry their UTC offset; tokens are exact counts from this "
+            "machine's transcripts. `brain jobs` sums it up.\n\n")
+    # Columns this core doesn't know came from a newer one: kept, in their order, so no row ever loses one.
+    cols = JOB_COLS + list(dict.fromkeys(k for r in rows for k in r if k not in JOB_COLS))
+    out = [head + "| " + " | ".join(cell(c) for c in cols) + " |", "| " + " | ".join("---" for _ in cols) + " |"]
+    out += ["| " + " | ".join(cell(r.get(c, "")) for c in cols) + " |" for r in rows]
     atomic_write(f, "\n".join(out) + "\n")
     touch(f)
 
@@ -5904,7 +6917,10 @@ def cmd_handback(a):
             die("job changed during verification; hand back to its coordinator")
         f = handback_file(n, row)
         count = lambda k: previous.get(k) if type(previous.get(k)) is int else 0
+        sessions = [i for i in previous.get("sessions", []) if isinstance(i, str) and SESSION_ID.fullmatch(i)] \
+            if isinstance(previous.get("sessions"), list) else []
         data = {"version": 2, "job": row["Job"], "started": row["Started"], "state": a.state,
+                "sessions": list(dict.fromkeys(sessions + spend_session_ids()))[-20:],
                 "at": inst.now(), "report": tilde(a.report) if a.report is not None else previous.get("report", ""),
                 "lessons": lessons, "ready": packet, "ready_reasons": reasons,
                 "verify_runs": count("verify_runs") + fresh, "verify_reused": count("verify_reused") + reused}
@@ -5931,6 +6947,15 @@ def cmd_handback(a):
                 atomic_write(inbox, text.rstrip() + "\n" + bullet)
                 touch(inbox)
         inst.commit([], f"{n['id']}: worker hand-back")
+    try:
+        current = open_job(read_jobs(n) or [], a.branch)
+        if current:
+            started, used, budget = inst.parse_time(current["Started"]), job_usage(inst, n, current), job_budget(n, current)
+            if (used and used["sessions"]) or budget:  # the worker sees its spend against its budget
+                print(redact(usage_line(used, budget, elapsed(started, inst.now_dt()) / 3600 if started else None),
+                             never_terms(n)))
+    except (OSError, ValueError, RuntimeError):
+        pass  # accounting never blocks a hand-back
     checked = not study and a.state == "done" and (a.reviews is not None or getattr(a, "record", False))
     if checked:
         state = ready_state(inst, n, a.branch)
@@ -5961,7 +6986,15 @@ def job_reviewed(inst, n, branch):
             inst.commit([], f"{n['id']}: job reviewed")
 
 
-def job_ended(inst, n, branch, outcome, commits="", cause=""):
+def job_ended(inst, n, branch, outcome, commits="", cause="", worktree=None):
+    # Transcripts are read before the lock is taken: a long first read never holds up other commands.
+    early = open_job(read_jobs(n) or [], branch)
+    usage = None
+    if early and not str(early.get("Usage", "")).startswith("host"):  # what the host reported wins
+        try:
+            usage = usage_cells(job_usage(inst, n, early, worktree))
+        except (OSError, ValueError, RuntimeError) as e:
+            usage = {"Usage": f"not counted: {type(e).__name__}"}  # a close never fails for its accounting
     with brain_lock(inst):
         rows = ledger_rows(n)
         r = open_job(rows or [], branch)
@@ -5974,6 +7007,11 @@ def job_ended(inst, n, branch, outcome, commits="", cause=""):
             r["Lesson check"] = "required"  # old, already-ended rows never acquire this marker
         a, b = inst.parse_time(r["Started"]), inst.parse_time(r["Ended"])
         r["Hours"] = f"{elapsed(a, b) / 3600:.1f}" if a and b else ""
+        budget = job_budget(n, r)
+        if budget:
+            r["Budget"] = budget_text(budget)
+        if usage and early and job_key(early) == job_key(r) and not str(r.get("Usage", "")).startswith("host"):
+            r.update(usage)
         write_jobs(inst, n, rows)
         cleanup_handback(n, r)
         inst.commit([], f"{n['id']}: job {outcome}")
@@ -6008,10 +7046,14 @@ def contract_lines(inst, n, branch, who="worker"):
     text = redact(f.read_text().strip(), never_terms(n))
     if who == "reviewer":
         return ["## The job's contract", "", "Check the change against its outcome and what done means:", "", text, ""]
+    budget = contract_budget(text)
     return ["## Contract for this job", "", text, "",
             "Within this contract, act: don't ask for what it authorizes, and use your discretion where it gives it. "
             "Report starts, results and decisions, not acknowledgements. Hand back (question or blocked) only on a "
-            "stop condition, or for something it says needs consent.", ""]
+            "stop condition, or for something it says needs consent.", ""] + (
+        [f"Its budget is {budget_text(budget)}. `brain jobs {shlex.quote(n['id'])} --branch {shlex.quote(branch)}` "
+         "shows what this job has spent so far; check it before long steps, and say in your report how it went "
+         "against the budget (`brain handback` prints it).", ""] if budget else [])
 
 
 def handback_detail(n, row):
@@ -6032,6 +7074,7 @@ def jobs_summary(inst, n):
     done = [r for r in rows if r["Ended"]]
     hours = [float(r["Hours"]) for r in done if r["Outcome"] == "merged" and r["Hours"]]
     reviews = [int(r["Reviews"] or 0) for r in done if r["Outcome"] == "merged"]
+    measured = [u for u in (row_usage(r) for r in done if r["Outcome"] == "merged") if u and u["processed"]]
     def med(xs):
         if not xs:
             return None
@@ -6044,6 +7087,9 @@ def jobs_summary(inst, n):
             "merged": sum(1 for r in done if r["Outcome"] == "merged"),
             "abandoned": sum(1 for r in done if r["Outcome"] == "abandoned"),
             "median_hours": med(hours), "median_reviews": med(reviews),
+            "median_tokens": int(statistics.median([u["processed"] for u in measured])) if measured else None,
+            "median_active_h": med([u["active_h"] for u in measured]),
+            "measured": len(measured),
             "causes": [r["Cause"] for r in done if r["Cause"]][-10:],
             "forecasts": job_forecasts(rows)}
 
@@ -6062,6 +7108,7 @@ def job_kind(branch, rows=()):
 
 
 def job_forecasts(rows):
+    """Per kind of job, what similar merged jobs took: wall hours, and where measured, active hours and tokens."""
     import statistics
     groups = {}
     for row in rows:
@@ -6072,13 +7119,24 @@ def job_forecasts(rows):
                 continue
             if not 0 <= hours < float("inf"):
                 continue
-            groups.setdefault("unclassified", []).append(hours)  # the explicit all-jobs fallback
+            u = row_usage(row)
+            sample = (hours, u if u and u["processed"] else None)
+            groups.setdefault("unclassified", []).append(sample)  # the explicit all-jobs fallback
             kind = job_kind(row["Job"], rows)
             if kind != "unclassified":
-                groups.setdefault(kind, []).append(hours)
-    return [{"kind": kind, "samples": len(xs), "median_h": round(statistics.median(xs), 1),
-             "min_h": min(xs), "max_h": max(xs), "enough_data": len(xs) >= 3}
-            for kind, xs in sorted(groups.items())]
+                groups.setdefault(kind, []).append(sample)
+    out = []
+    for kind, xs in sorted(groups.items()):
+        hours, used = [h for h, _ in xs], [u for _, u in xs if u]
+        f = {"kind": kind, "samples": len(xs), "median_h": round(statistics.median(hours), 1),
+             "min_h": min(hours), "max_h": max(hours), "enough_data": len(xs) >= 3, "measured": len(used)}
+        if len(used) >= 3:
+            tokens = [u["processed"] for u in used]
+            f.update(median_active_h=round(statistics.median([u["active_h"] for u in used]), 1),
+                     median_tokens=int(statistics.median(tokens)), min_tokens=min(tokens), max_tokens=max(tokens),
+                     median_fresh_out=int(statistics.median([u["fresh"] + u["output"] for u in used])))
+        out.append(f)
+    return out
 
 
 def forecast_lines(rows, planned=None):
@@ -6092,7 +7150,11 @@ def forecast_lines(rows, planned=None):
         label = f"{kind}: {f['samples']} similar jobs" if kind != "unclassified" else f"all jobs on this node: {f['samples']} jobs"
         out.append(label + ", " +
                    (f"median {f['median_h']:g} h, spread {f['min_h']:g}–{f['max_h']:g} h (observed min–max)"
-                    if f["enough_data"] else "too little data (need 3 merged jobs)"))
+                    if f["enough_data"] else "too little data (need 3 merged jobs)")
+                   + (f"; of which {f['median_active_h']:g} h active; {tokens_text(f['median_tokens'])} tokens processed "
+                      f"(spread {tokens_text(f['min_tokens'])}–{tokens_text(f['max_tokens'])}), of them "
+                      f"{tokens_text(f['median_fresh_out'])} fresh input and output; from {f['measured']} measured jobs"
+                      if f.get("median_tokens") else ""))
     return out
 
 
@@ -6126,7 +7188,8 @@ def job_budget_lines(inst, n, planned=None):
         remaining = min((w["resets_at"] - time.time()) / 3600 for w in windows)
         out.append(f"current route {selected['label']}: {len(these)} open/planned job(s), typical serial full-job time {estimate:g} h "
                    f"{'fits' if estimate <= remaining else 'exceeds'} {remaining:.1f} h until the next recorded reset; "
-                   "elapsed time not subtracted; allowance fit unknown (no per-job usage data).")
+                   "elapsed time not subtracted; allowance fit unknown (the subscription says how full it is, not "
+                   "how many tokens a percent is).")
     return out
 
 
@@ -6153,6 +7216,21 @@ def cmd_jobs(a):
         atomic_write(f, text)
         inst.commit([f], f"{n['id']}: contract for {a.branch}")
         print(redact(f"{n['id']}: contract for {a.branch} recorded; briefs for this job carry it", never_terms(n)))
+        return
+    if a.usage_file:
+        if not a.id or not a.branch:
+            die("host usage needs a node and --branch: brain jobs <node> --branch <branch> --usage-file <file>")
+        n = inst.node(a.id)
+        cells = host_usage_cells(a.usage_file)
+        with brain_lock(inst):
+            rows = ledger_rows(n)
+            r = next((r for r in reversed(rows or []) if r["Job"] == a.branch), None)
+            if not r:
+                die("no job with that branch in the ledger")
+            r.update(cells)
+            write_jobs(inst, n, rows)
+            inst.commit([], f"{n['id']}: job usage from the host")
+        print(redact(f"{n['id']}: usage for {a.branch} recorded as the host reports it", never_terms(n)))
         return
     if a.start or a.close or a.lessons is not None or a.switch is not None:
         if not a.id or not a.branch:
@@ -6205,12 +7283,19 @@ def cmd_jobs(a):
             continue
         print(f"{n['id']}: {j['finished']} finished ({j['merged']} merged, {j['abandoned']} abandoned)"
               + (f"; median {j['median_hours']} h and {j['median_reviews']} review round(s) per merged job"
-                 if j["median_hours"] is not None else ""))
+                 if j["median_hours"] is not None else "")
+              + (f"; median {tokens_text(j['median_tokens'])} tokens and {j['median_active_h']} active h "
+                 f"({count_of(j['measured'], 'measured job')})" if j["median_tokens"] else ""))
         for r in j["open"]:
+            u = live_usage(inst, n, r)
             late = j["median_hours"] is not None and r["age_h"] > 2 * j["median_hours"]
+            heavy = bool(u and j["median_tokens"] and u["processed"] > 2 * j["median_tokens"])
             print(redact(f"  open  {r['Job']:<28} {r['age_h']:>5} h  {r['Reviews'] or 0} review(s)"
-                         + ("   (over twice the median)" if late else ""), never_terms(n)))
-            for line in job_advice(inst, n, r):
+                         + (f"  {tokens_text(u['processed'])} tokens" if u and u["sessions"] else "")
+                         + ("   (over twice the median" + (" in hours and tokens)" if heavy else ")") if late else
+                            "   (over twice the median in tokens)" if heavy else ""), never_terms(n)))
+            for line in job_advice(inst, n, r) + [usage_line(u, job_budget(n, r), r["age_h"])] + \
+                    usage_advice(u, j["median_tokens"]):
                 print(redact("        " + line, never_terms(n)))
         for c in j["causes"]:
             print(f"  cause {c}")
@@ -6271,7 +7356,8 @@ def cmd_wt_rm(a):
     state = worktree_state(home, w, a.branch) if w else (None, False, "")
     print_job_handback(n, a.branch)
     remove_worktree(inst, n, a.branch, a.force)
-    job_ended(inst, n, a.branch, "merged" if state[1] else "abandoned", job_commits(home, w, a.branch), a.cause or "")
+    job_ended(inst, n, a.branch, "merged" if state[1] else "abandoned", job_commits(home, w, a.branch), a.cause or "",
+              worktree=(w or {}).get("path"))
     print(f"removed the worktree for {a.branch} (the branch itself stays)")
 
 
@@ -6289,7 +7375,7 @@ def cmd_wt_prune(a):
             if not a.dry_run:
                 remove_worktree(inst, inst.node(n["id"]), br)
                 job_ended(inst, n, br, "merged" if merged else "abandoned", job_commits(home, w, br),
-                          "" if merged else "worktree was gone")
+                          "" if merged else "worktree was gone", worktree=w.get("path"))
             removed.append(br)
         else:
             kept.append(f"{br} ({'uncommitted work' if dirty else 'not merged'})")
@@ -6783,7 +7869,8 @@ def inbox_items(inst, nodes=None, reporter="root"):
     by_id = {n["id"]: n for n in (nodes if nodes is not None else inst.nodes())}
     out, ids = [], set()
     for nid, kind, text in attention_items(inst, list(by_id.values())):
-        identity = text if kind in ("blocked", "inbox", "core-update") else kind  # stale day counts aren't new
+        identity = text if kind in ("blocked", "inbox", "core-update") else \
+            re.sub(r"\d[\d.,]*[kMB]?", "#", text) if kind == "job" else kind  # growing counts aren't new
         key = digest([nid, kind, " ".join(identity.split())])
         if key in ids:
             continue
@@ -7103,6 +8190,34 @@ def pending_imports(inst, n):
     return int(rules_pending), roles, items
 
 
+def runaway_jobs(inst, n):
+    """Open jobs past what this node's jobs usually take: twice the median in hours or tokens, over budget,
+    compacting again and again, or mostly spent by sub-agents."""
+    rows = read_jobs(n) or []
+    if not any(not r["Ended"] for r in rows):
+        return []
+    j, out = jobs_summary(inst, n), []
+    for r in j["open"]:
+        u = live_usage(inst, n, r)
+        why = []
+        if j["median_hours"] is not None and r["age_h"] > 2 * j["median_hours"]:
+            why.append(f"open {r['age_h']} h, over twice the median of {j['median_hours']} h")
+        if u and j["median_tokens"] and u["processed"] > 2 * j["median_tokens"]:
+            why.append(f"{tokens_text(u['processed'])} tokens, over twice the median of {tokens_text(j['median_tokens'])}")
+        b = job_budget(n, r)
+        if b and u and b.get("tokens") and u["processed"] > b["tokens"]:
+            why.append(f"over its {tokens_text(b['tokens'])}-token budget")
+        if b and b.get("hours") and r["age_h"] > b["hours"]:
+            why.append(f"over its {b['hours']:g}-hour budget")
+        if u and u["compactions"] >= 3:
+            why.append(f"{u['compactions']} compactions")
+        if u and u["subagents"] and u["sub_share"] > 0.5:
+            why.append(f"sub-agents spent {round(100 * u['sub_share'])}% of its tokens")
+        if why:
+            out.append(redact(f"job {r['Job']}: " + "; ".join(why), never_terms(n)))
+    return out
+
+
 def attention_items(inst, nodes):
     """[(node id, kind, text)]: what waits on the operator, node by node."""
     out = []
@@ -7120,6 +8235,7 @@ def attention_items(inst, nodes):
                         f"{items} item(s) proposed; confirm or reject after reviewing source citations"))
         out += [(n["id"], "blocked", b) for b in status_section(n, "blocked")]
         out += [(n["id"], "inbox", "inbox: " + l[2:]) for l in inbox_lines(n)]
+        out += [(n["id"], "job", t) for t in runaway_jobs(inst, n)]
         if paused(n):
             continue
         u = updated_at(inst, n)
@@ -7730,7 +8846,7 @@ def machine_load():
     return d
 
 
-def ui_state(inst, problems=None, scan=None):
+def ui_state(inst, problems=None, scan=None, spend_budget=2.0):
     """Everything the page shows, from the same files `brain` reads. Read-only."""
     now = inst.now_dt()
     nodes = inst.nodes()
@@ -7769,6 +8885,17 @@ def ui_state(inst, problems=None, scan=None):
                 commits.append({**c, "subject": hide(c["subject"]), "node": n["id"], "where": "home"})
         work = [{k: hide(v) for k, v in j.items()} for j in work]
         js = jobs_summary(inst, n)
+        for r in js["open"]:
+            used = live_usage(inst, n, r)
+            r["usage"] = spend_summary(used) if used and used["sessions"] else None
+            r["budget"] = job_budget(n, r)
+        try:
+            back = json.loads(spend_node_file(inst, n).read_text())
+            lookback = {"at": back.get("at"), "since": back.get("since"), "total": back.get("total"),
+                        "weeks": {rt: v.get("weeks", {}) for rt, v in (back.get("days") or {}).items()},
+                        "sessions": len(back.get("sessions") or [])}
+        except (OSError, ValueError, AttributeError):
+            lookback = None
         try:
             wb = workbench(inst, n)
             reps = sorted((wb / "reports").glob("*/index.md"), reverse=True)[:5] if (wb / "reports").is_dir() else []
@@ -7786,7 +8913,8 @@ def ui_state(inst, problems=None, scan=None):
             "status": {k: v for k, v in secs.items() if v and k.lower() != "active work"},
             "work": work, "worktrees": wts, "inbox": [l[2:] for l in inbox_lines(n)],
             "blocked": status_section(n, "blocked"), "decisions": ui_decisions(inst, n), "limits": limits_of(n),
-            "never_name": len(terms), "jobs": {**js, "rows": [{k: hide(v) for k, v in r.items()} for r in (read_jobs(n) or [])],
+            "never_name": len(terms), "spend": lookback,
+            "jobs": {**js, "rows": [{k: hide(v) for k, v in r.items()} for r in (read_jobs(n) or [])],
                                                "open": [{k: hide(v) for k, v in r.items()} for r in js["open"]],
                                                "forecasts": [{k: hide(v) for k, v in r.items()} for r in js["forecasts"]]},
             "reports": [{"name": d.parent.name, "title": next((l[2:] for l in d.read_text().splitlines()
@@ -7863,6 +8991,7 @@ def ui_state(inst, problems=None, scan=None):
         "schedules": [{"id": x["id"], "when": x.get("when", ""), "node": x.get("node", ""),
                        "here": x["id"] in inst.local.get("schedules", {})} for x in read_schedules(inst)],
         "machine": machine_load(),
+        "spend": spend_machine(inst, budget=spend_budget),  # the live view counts a little at each refresh
         "usage": usage_ui(inst),
         "usage_other_subscriptions": usage_other_count(inst),
         "problems": problems,
@@ -7888,7 +9017,7 @@ def cmd_ui(a):
         scan = json.loads(output.getvalue())
     key = secrets.token_urlsafe(18)  # other accounts on this machine can reach 127.0.0.1 too; they don't get this
     if a.json:
-        print(json.dumps(ui_state(inst, len(collect_problems(inst)[0]), scan), indent=1))
+        print(json.dumps(ui_state(inst, len(collect_problems(inst)[0]), scan, spend_budget=None), indent=1))
         return
     page = (CORE / "ui" / "index.html").read_bytes()
     lock, cond = threading.Lock(), threading.Condition()
@@ -8522,7 +9651,8 @@ def writes(a):
     if name == "cmd_check":
         return bool(a.fix)
     if name == "cmd_jobs":
-        return a.start or a.close or a.lessons is not None or a.switch is not None or bool(a.contract_file)
+        return a.start or a.close or a.lessons is not None or a.switch is not None or bool(a.contract_file) \
+            or bool(a.usage_file)
     if name == "cmd_ready":
         return a.record
     if name in ("cmd_principal", "cmd_schedule"):
@@ -8608,6 +9738,11 @@ def main():
         opt("--only", help="only these nodes (comma-separated)"), opt("--json", action="store_true"))
     cmd("guard", cmd_guard, f"check a home and its worktrees for the terms in {NEVER_FILE} (and, if sealed, "
         "upward traces); exits 1 if any", "id", opt("paths", nargs="*"))
+    cmd("spend", cmd_spend, "time and tokens from this machine's transcripts: a node's past sessions (opt-in, "
+        "aggregates only, never committed), or every session here", opt("id", nargs="?"),
+        opt("--since", help="from this date (YYYY-MM-DD)"), opt("--machine", action="store_true",
+                                                               help="every session on this machine, per runtime"),
+        opt("--json", action="store_true"))
     cmd("ui", cmd_ui, "a live view of this brain in your browser: projects, work in flight, worktrees, activity "
         "(read-only, this machine only)", opt("--port", type=int, default=UI_PORT),
         opt("--every", type=float, default=3.0, help="seconds between refreshes"),
@@ -8622,7 +9757,9 @@ def main():
         opt("--start", action="store_true", help="coordinator: start an import:<snapshot> study"),
         opt("--close", action="store_true", help="coordinator: close a processed import study"),
         opt("--contract-file", dest="contract_file", help="coordinator: the job's contract (" +
-            ", ".join(f"## {f}" for f in CONTRACT_FIELDS) + ")"))
+            ", ".join(f"## {f}" for f in CONTRACT_FIELDS) + "; an optional ## Budget, e.g. 20M tokens, 3 h)"),
+        opt("--usage-file", dest="usage_file", help="coordinator: the job's usage as the host reports it (JSON); "
+            "wins over what transcripts show"))
     cmd("due", cmd_due, "coordinator actions from files and local git; empty means no output",
         opt("id", nargs="?"), opt("--json", action="store_true"),
         opt("--quiet", action="store_true", help="no output; exit 1 when anything is due, 0 otherwise"))
