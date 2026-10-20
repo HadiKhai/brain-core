@@ -90,14 +90,14 @@ Never merge, push to a shared branch, deploy or delete a branch without explicit
 
 ## Machine care is core behaviour
 
-Before starting heavy work outside `brain wt add` or a fresh job verify, run `brain heavy`.
+Before starting heavy work outside `brain wt add` or a fresh job verify, run `brain heavy --node <node>`.
 Those two commands already wait for machine admission. Never start a replacement to bypass
 held work. Running work is left alone. A one-minute load spike does not hold work. With fresh
 sampler history, five consecutive minutes of high five-minute load, or three minutes of
 unresolved thermal warning, hold new heavy work. Without fresh samples, the current five-minute load
 and thermal warning apply immediately. Low free memory or disk also hold admission.
 
-`brain machine` and `brain due` show machine readings, holds and queued work. Full verifies
+`brain machine` and `brain due --machine` show machine readings, holds and queued work. Full verifies
 share a FIFO queue across every brain using the machine's configuration: two slots by day,
 one overnight (22:00–08:00 in the system timezone, independent of a launcher's `TZ`). They wait with progress, preserving their
 command, environment, stdin and exit status. Existing runs finish even if the limit falls.
@@ -122,8 +122,9 @@ window uses its latest reading conservatively, so starting the sampler cannot we
 a one-minute launchd plist (macOS) or cron line. Only run `install --yes` after operator
 consent; `uninstall` also previews unless `--yes` is given. No service is installed by an
 ordinary command. Heat episode transitions create one committed inbox notice each (one opening, one clearing);
-the active hold appears once in due. `due --machine` also shows a clear machine; `due --quiet`
-checks node actions only, so shared queue counts do not wake every brain's coordinator. The marked `machine_wake` call site awaits the core wake integration.
+ordinary `due <node>` shows a machine action only for that node's queued/held start. Root aggregates this brain's waiting work into one line. Episode transitions use the single root inbox action until handled; they never create a line per child.
+Other load and queue counts stay in `due --machine`, the live view and status snapshots. `due --quiet`
+checks the same node actions, including its own held start, so another node's load cannot wake an idle coordinator. The marked `machine_wake` call site awaits the core wake integration.
 Wait progress reports changes and a heartbeat each minute. Keep long waits and hand-backs
 in a persistent terminal session; preserve the queued process rather than letting an agent
 tool timeout kill it and starting a replacement. A busy instance minute skips sampling;

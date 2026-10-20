@@ -1042,7 +1042,7 @@ def process_stamp(pid):
 
 class machine_queue:
     """Short transaction lock; atomic JSON publication preserves queued work after a crash.
-    No node, branch, command, path or brain identity is kept in this machine-wide state.
+    Only opaque scope hashes, never node names, branches, commands or paths, identify work.
     """
     def __enter__(self):
         import fcntl
@@ -1087,6 +1087,8 @@ class machine_queue:
         return (isinstance(row, dict) and isinstance(row.get("token"), str)
                 and bool(re.fullmatch(r"[0-9a-f]{32}", row["token"])) and identity(row.get("owner"))
                 and row.get("kind") in ("heavy", "verify") and row.get("state") in ("queued", "running")
+                and ("scope" not in row or (isinstance(row["scope"], list) and len(row["scope"]) == 2
+                     and all(isinstance(s, str) and re.fullmatch(r"[0-9a-f]{64}", s) for s in row["scope"])))
                 and ("child" not in row or identity(row["child"])))
 
     @staticmethod
@@ -1118,7 +1120,11 @@ class machine_queue:
             os.close(self.fd)
 
 
-def machine_wait(kind="heavy"):
+def machine_scope(inst, node):
+    return [hashlib.sha256(s.encode()).hexdigest() for s in (str(inst.root.resolve()), node)]
+
+
+def machine_wait(kind="heavy", inst=None, node=None):
     token = os.urandom(16).hex()
     owner = [os.getpid(), process_stamp(os.getpid())]
     if owner[1] in (None, "unknown"):
@@ -1135,6 +1141,8 @@ def machine_wait(kind="heavy"):
                 row = next((r for r in queue.rows if r["token"] == token), None)
                 if row is None:
                     row = {"token": token, "owner": owner, "kind": kind, "state": "queued"}
+                    if inst is not None and node is not None:
+                        row["scope"] = machine_scope(inst, node)
                     queue.rows.append(row)
                 waiting = [r for r in queue.rows if r["kind"] == kind and r["state"] == "queued"]
                 running = sum(r["kind"] == "verify" and r["state"] == "running" for r in queue.rows)
@@ -1187,11 +1195,12 @@ def machine_state(inst=None):
             raise ValueError("invalid queue")
         rows = [r for r in rows if machine_queue.alive(r)]
         reading["queued"] = sum(r["state"] == "queued" for r in rows)
+        reading["waiting_scopes"] = [r["scope"] for r in rows if r["state"] == "queued" and "scope" in r]
         reading["verifying"] = sum(r["kind"] == "verify" and r["state"] == "running" for r in rows)
     except FileNotFoundError:
-        reading.update(queued=0, verifying=0)
+        reading.update(queued=0, verifying=0, waiting_scopes=[])
     except (OSError, ValueError, KeyError, TypeError, AttributeError):
-        reading.update(queued=None, verifying=None)
+        reading.update(queued=None, verifying=None, waiting_scopes=[])
     return reading
 
 
@@ -1205,7 +1214,9 @@ def machine_summary(reading):
 
 
 def cmd_heavy(a):
-    token = machine_wait()
+    inst = load()
+    node = inst.node(getattr(a, "node", None) or "root")
+    token = machine_wait(inst=inst, node=node["id"])
     machine_release(token)
     print("machine care: heavy work allowed (admission only)")
 
@@ -7413,7 +7424,7 @@ def verify_log_dir(inst, n, branch):
 
 
 def run_verify(inst, n, branch, verify, w, env):
-    token = machine_wait("verify")
+    token = machine_wait("verify", inst, n["id"])
     try:
         return run_verify_stream(inst, n, branch, verify, w, env, token)
     finally:
@@ -8904,8 +8915,14 @@ def due_items(inst, n, evidence=None, include_stale=True):
     for branch, w in state["worktrees"].items():
         if not open_job(state["jobs"] or [], branch):
             add("unrecorded-worktree", f"{branch}: worktree has no open ledger job; reconcile the records")
+    episode = None
     for line in state["inbox"]:
-        add("inbox", line[2:])  # coordinator removes handled lines; remaining questions are unanswered
+        if n["id"] == "root" and re.search(r"\[machine episode [0-9a-f]{24} (?:open|close)\]$", line):
+            episode = line  # one root action, latest transition; handled by removing its inbox line
+        else:
+            add("inbox", line[2:])  # coordinator removes handled lines; remaining questions are unanswered
+    if episode:
+        add("machine", episode[2:])
     lag = status_lag(inst, n, evidence) if include_stale else None
     if lag:
         add("stale-status", lag + "; update judgement sections, then brain status <node> --refresh")
@@ -8925,6 +8942,18 @@ def changes_due(inst, n):
         + f"); read them: brain changes {n['id']}, then brain changes {n['id']} --seen", never_terms(n))}]
 
 
+def machine_due_items(inst, nodes, state, items):
+    """An idle node never wakes for another node's load or queue. Root aggregates once."""
+    target = next((n for n in nodes if n["id"] == "root"), nodes[0] if nodes else None)
+    if target is None or target["archived"] or any(i["kind"] == "machine" for i in items):
+        return []
+    scope = machine_scope(inst, target["id"])
+    waiting = any(s[0] == scope[0] and (target["id"] == "root" or s == scope)
+                  for s in state.get("waiting_scopes", []))
+    return ([{"node": target["id"], "kind": "machine", "text": machine_summary(state)}]
+            if waiting else [])
+
+
 def cmd_due(a):
     inst = load()
     nodes = [inst.node(a.id)] if a.id else inst.nodes()
@@ -8941,8 +8970,10 @@ def cmd_due(a):
         return
     state = machine_state(inst)
     items = [item for n in nodes for item in due_items(inst, n) + changes_due(inst, n)]
-    if not a.quiet and (state["held"] or state["queued"] or getattr(a, "machine", False)):
-        items.append({"node": a.id or "root", "kind": "machine", "text": machine_summary(state)})
+    items += machine_due_items(inst, nodes, state, items)
+    if not a.quiet and getattr(a, "machine", False):
+        items = [i for i in items if i["kind"] != "machine"] + [
+            {"node": a.id or "root", "kind": "machine", "text": machine_summary(state)}]
     if a.quiet:
         sys.exit(1 if items else 0)
     if a.json:
@@ -9037,6 +9068,8 @@ def refresh_status(inst, n):
     state, fingerprint, _ = evidence
     lines, merged = status_facts(inst, n, state, previous.get("merged", []))
     fingerprint = digest(lines)
+    # Telemetry is an informational snapshot, never part of the stale-status wake fingerprint.
+    lines += ["", "Machine (snapshot at refresh; live: brain due --machine):", "- " + machine_summary(machine_state(inst))]
     lines = [FACTS_START, "## Facts (generated by brain status --refresh)", "",
              "Facts refreshed: " + inst.now(), "", *lines, "",
              "<!-- brain:facts-state " + json.dumps({"fingerprint": fingerprint, "merged": list(merged),
@@ -10345,10 +10378,10 @@ def ui_state(inst, problems=None, scan=None, spend_budget=2.0):
         usage_policy = {"stop_percent": None, "max_age_seconds": 120}
         usage_routing_policy = {}
     machine = machine_state(inst)
-    machine_due = ([{"node": "root", "kind": "machine", "text": machine_summary(machine)}]
-                   if machine["held"] or machine["queued"] else [])
+    due = [item for n in nodes for item in due_items(inst, n)]
+    machine_due = machine_due_items(inst, nodes, machine, due)
     return {
-        "due": safe([item for n in nodes for item in due_items(inst, n)] + machine_due),
+        "due": safe(due + machine_due),
         "scan": safe(scan or []),
         "usage_policy": usage_policy,
         "usage_routing_policy": usage_routing_policy,
@@ -11152,9 +11185,9 @@ def main():
         opt("--usage-file", dest="usage_file", help="coordinator: the job's usage as the host reports it (JSON); "
             "wins over what transcripts show"))
     cmd("due", cmd_due, "coordinator actions and machine holds; empty means no output",
-        opt("--machine", action="store_true", help="also show the machine when no work is held"),
+        opt("--machine", action="store_true", help="also show informational machine readings, even without node actions"),
         opt("id", nargs="?"), opt("--json", action="store_true"),
-        opt("--quiet", action="store_true", help="no output; exit 1 for node actions, 0 otherwise (machine queue is informational)"))
+        opt("--quiet", action="store_true", help="no output; exit 1 for node actions, including its held work, 0 otherwise"))
     cmd("inbox", cmd_inbox, "needs in a node's subtree (default: calling node); --new remembers per reporter",
         opt("id", nargs="?"), opt("--json", action="store_true"), opt("--new", action="store_true"))
     cmd("handback", cmd_handback, "worker signal and optional inbox need for one open ledger job",
@@ -11292,7 +11325,8 @@ def main():
             help="with --global: the config folders that get this brain's pointer, e.g. claude=~/.claude-work"))
     cmd("check", cmd_check, "verify what can be checked mechanically; --fix repairs the safe things",
         opt("--fix", action="store_true"))
-    cmd("heavy", cmd_heavy, "wait until the machine admits new heavy work")
+    cmd("heavy", cmd_heavy, "wait until the machine admits new heavy work",
+        opt("--node", help="coordinator whose work is waiting (default root)"))
     cmd("machine", cmd_machine, "machine state, sampler and bindings",
         opt("action", nargs="?", choices=["sample", "install", "uninstall"]),
         opt("--yes", action="store_true", help="install/remove the sampler with operator consent"),
@@ -11336,7 +11370,9 @@ def main():
                 os.dup2(sink.fileno(), sys.stdout.fileno())
         return
     if a.f == cmd_wt_add:
-        token = machine_wait()
+        inst = load()
+        node = inst.node(a.id)
+        token = machine_wait(inst=inst, node=node["id"])
         machine_release(token)
     if a.f == cmd_machine and a.action == "sample":
         a.f(a)  # short nonblocking instance lock, no whole-brain scan

@@ -12,7 +12,8 @@ For agents:
   Worktree creation and fresh verifies gate themselves; run `brain heavy` before other heavy work.
 - Full verifies share a machine-wide FIFO queue: two by day, one at night. Waiting reports
   progress; commands, environment, stdin and exit status stay intact. Running work is left alone.
-- Machine state, held work and queue counts appear in due and the live view. `brain machine
+- Ordinary due reports only this node's held/queued work or one root episode inbox action;
+  busy-machine facts stay in `due --machine`, status snapshots and the live view. `brain machine
   sample` records a bounded private window; active heat episodes raise one inbox notice.
 
 After upgrading:

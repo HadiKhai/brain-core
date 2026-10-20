@@ -7981,6 +7981,72 @@ class MachineCare(Scenario):
         with m.machine_queue() as q:
             self.assertEqual(q.rows, [])
 
+    def test_due_machine_actions_are_scoped_and_episode_notices_are_single(self):
+        m = self.m
+        root, other = self.init("oak-brain"), self.init("elm-brain")
+        self.b(root, "new", "maple", "--title", "Maple")
+        self.b(root, "new", "ash", "--title", "Ash")
+        inst, other_inst = m.Instance(root), m.Instance(other)
+        high = {**self.good, "load_per_cpu": [1, .92, .92]}
+
+        def due(node=None, machine=False, quiet=False):
+            with mock.patch.object(m, "load", return_value=inst), \
+                    mock.patch.object(m, "core_update"), mock.patch.object(m, "auto_upgrade", return_value=None), \
+                    mock.patch.object(m, "changes_due", return_value=[]), \
+                    mock.patch.object(m, "machine_reading", return_value=dict(high)), \
+                    contextlib.redirect_stdout(io.StringIO()) as output:
+                if quiet:
+                    with self.assertRaises(SystemExit) as result:
+                        m.cmd_due(argparse.Namespace(id=node, quiet=True, json=False, machine=machine))
+                    self.assertEqual(output.getvalue(), "")
+                    return result.exception.code
+                m.cmd_due(argparse.Namespace(id=node, quiet=False, json=True, machine=machine))
+            return json.loads(output.getvalue())
+
+        # High load is a fact, not an action for any idle node, including root.
+        for node in (None, "root", "maple", "ash"):
+            self.assertEqual(due(node), [])
+            self.assertEqual(due(node, quiet=True), 0)
+            self.assertEqual(len(due(node, machine=True)), 1)
+        self.assertFalse(m.machine_dir().exists())  # informational reads publish nothing
+        owner = [os.getpid(), m.process_stamp(os.getpid())]
+        def row(i, instance, node, state="queued"):
+            return {"token": f"{i:032x}", "owner": owner, "kind": "verify", "state": state,
+                    "scope": m.machine_scope(instance, node)}
+        with m.machine_queue() as q:
+            q.rows = [row(1, other_inst, "root")]
+        self.assertEqual(due("root"), [])  # another brain never wakes this one
+        with m.machine_queue() as q:
+            q.rows += [row(2, inst, "maple"), row(3, inst, "maple"), row(4, inst, "ash", "running")]
+        self.assertEqual(len(due("maple")), 1)
+        self.assertEqual(due("maple", quiet=True), 1)
+        self.assertEqual(due("ash"), [])  # running work is left alone
+        self.assertEqual(due("ash", quiet=True), 0)
+        self.assertEqual(len([i for i in due() if i["kind"] == "machine"]), 1)
+        self.assertEqual(len(due("root", machine=True)), 1)
+        with m.machine_queue() as q:
+            q.rows = []
+        inbox = root / "inbox.md"
+        initial = inbox.read_text()
+        for transition in ("open", "close"):
+            line = "- fixture from brain: " + ("hold heavy work: sustained 5-minute load" if transition == "open"
+                                               else "heavy work hold cleared")
+            inbox.write_text(initial + line + " [machine episode " + "a" * 24 + " " + transition + "]\n")
+            self.assertEqual(len(due("root")), 1)
+            self.assertEqual(due("root")[0]["kind"], "machine")
+            self.assertEqual(due("maple"), [])
+            self.assertEqual(due("ash"), [])
+            self.assertEqual(len([i for i in due() if i["kind"] == "machine"]), 1)
+            inbox.write_text(initial)  # coordinator handles the one matching inbox action
+            self.assertEqual(due("root"), [])  # heat still high, no repeated synthetic episode
+        # Snapshot telemetry never makes a quiet node's status stale as load varies.
+        n = inst.node("maple")
+        with mock.patch.object(m, "machine_reading", return_value=dict(high)):
+            m.refresh_status(inst, n)
+        self.assertIn("Machine (snapshot", (n["dir"] / "status.md").read_text())
+        with mock.patch.object(m, "machine_reading", return_value=dict(self.good)):
+            self.assertIsNone(m.status_lag(inst, n))
+
     def test_fifo_day_and_night_with_exit_codes(self):
         m = self.m
         for limit in (2, 1):
@@ -8289,7 +8355,7 @@ raise SystemExit(result)
                     mock.patch.object(m, "changes_due", return_value=[]):
                 with self.assertRaises(SystemExit) as result:
                     m.cmd_due(argparse.Namespace(id="root", quiet=True, json=False))
-                self.assertEqual(result.exception.code, 0)
+                self.assertEqual(result.exception.code, 1)  # this root owns the held start
             readings.write_text(json.dumps(self.good))
             out, err = proc.communicate(timeout=10)
             self.assertEqual(proc.returncode, 0, err)
