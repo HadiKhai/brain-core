@@ -236,6 +236,11 @@ its descendants and marker-matched reviewers. Settle only explicit ledger-closed
 coordinators, open-job threads, running/waiting threads or threads with pending requests.
 Unknown ownership or activity means leave unsettled. After all threads are safely settled,
 record `brain jobs <id> --branch <branch> --settled`; this is your host attestation.
+For legacy jobs missing thread references or markers, exhaust both host projects' unsettled
+thread lists and follow the host adapter's sweep. No attributable unsettled thread remaining
+is sufficient proof; a bounded search is not. Record the completed sweep with
+`brain jobs <id> --settled --all-closed`; it never stamps open jobs and refuses branches with
+open work. Leave doubtful or unsafe closed-work threads unrecorded until resolved.
 `brain due` counts closed jobs still awaiting this step, including old rows. The root's
 `brain due root` includes child settlement counts: route their backlog to their coordinators rather than
 settling their threads without their ownership checks.

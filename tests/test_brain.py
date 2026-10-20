@@ -3390,6 +3390,59 @@ class ThreadSettlement(AutonomyProject):
         self.b(r, "status", "app", "--refresh")
         self.assertIn("Closed jobs with unsettled threads: 151", (r / "nodes/app/status.md").read_text())
 
+    def test_legacy_sweep_clears_backlog_without_markers_and_caps_output(self):
+        r, home, wt = self.project()
+        rows = [self.row("legacy-" + str(i)) for i in range(32)]
+        rows += [self.row("open-other", ended=""), self.row("unknown", outcome="unknown"),
+                 self.row("already", settled="2020-01-01T10:00+00:00")]
+        ledger = self.ledger(r, rows, version="v1")
+        self.assertNotIn("brain-job:", ledger.read_text())
+        out = self.b(r, "jobs", "app")
+        self.assertEqual(sum(line.startswith("  unsettled ") for line in out.splitlines()), 10)
+        self.assertIn("… and 22 more", out)
+        self.assertIn("32 closed job(s) recorded settled", self.b(r, "jobs", "app", "--settled", "--all-closed"))
+        self.assertNotIn("unsettled-threads", [i["kind"] for i in self.due(r)])
+        def detail(branch):
+            return [json.loads(line) for line in self.b(r, "jobs", "app", "--branch", branch).splitlines()
+                    if line.startswith("{")]
+        for row in rows:
+            actual = detail(row["Job"])[0]
+            self.assertEqual(actual["Future field"], "kept")
+            if row["Job"] in ("open-other", "unknown"):
+                self.assertEqual(actual["Settled"], "")
+            else:
+                self.assertTrue(actual["Settled"])
+        self.assertEqual(detail("already")[0]["Settled"], "2020-01-01T10:00+00:00")
+        before = ledger.read_bytes()
+        self.assertIn("0 closed job(s)", self.b(r, "jobs", "app", "--settled", "--all-closed"))
+        self.assertEqual(before, ledger.read_bytes())
+        # A later job reusing a swept branch starts without an attestation.
+        self.b(r, "wt", "add", "app", "legacy-0")
+        self.b(r, "jobs", "app", "--settled", "--all-closed")
+        self.assertEqual(detail("legacy-0")[1]["Settled"], "")
+        self.b(r, "wt", "rm", "app", "legacy-0", "--cause", "fixture finished")
+        self.assertEqual(detail("legacy-0")[1]["Settled"], "")
+        self.assertEqual(next(i for i in self.due(r) if i["kind"] == "unsettled-threads")["count"], 1)
+
+    def test_sweep_refuses_open_target_branch_atomically_and_rejects_mixed_flags(self):
+        r, home, wt = self.project()
+        older, newer = self.row("reused"), self.row("reused", ended="")
+        newer["Started"] = "2026-02-01T10:00+00:00"
+        ledger = self.ledger(r, [self.row("safe"), older, newer])
+        before = ledger.read_bytes()
+        out = self.b(r, "jobs", "app", "--settled", "--all-closed", ok=False)
+        self.assertIn("a branch to stamp has an open job", out)
+        self.assertEqual(before, ledger.read_bytes())
+        for flags in (("--all-closed",), ("--settled", "--all-closed", "--branch", "safe"),
+                      ("--settled", "--all-closed", "--lessons", "none: fixture"),
+                      ("--settled", "--all-closed", "--start"), ("--settled", "--all-closed", "--close"),
+                      ("--settled", "--all-closed", "--switch", "a -> b: fixture"),
+                      ("--settled", "--all-closed", "--usage-file", "missing"),
+                      ("--settled", "--all-closed", "--contract-file", "missing")):
+            self.b(r, "jobs", "app", *flags, ok=False)
+            self.assertEqual(before, ledger.read_bytes())
+        self.b(r, "jobs", "--settled", "--all-closed", ok=False)
+
     def test_settled_is_guarded_idempotent_and_preserves_legacy_columns(self):
         r, home, wt = self.project()
         for version in ("v1", "v2", "v3"):

@@ -82,6 +82,11 @@ stated; never run a polling loop in an agent.
    or threads with pending requests. Unknown state or ownership means leave unsettled.
    After all job threads are confirmed settled through the host, record
    `brain jobs <id> --branch <branch> --settled`. Preserve the Active work thread reference.
+   Legacy jobs missing markers or worker references use the host adapter's complete-project
+   sweep: exhaust unsettled thread lists, protect open/active/coordinator threads and settle
+   safely done closed work. After no attributable unsettled closed-work threads remain,
+   `brain jobs <id> --settled --all-closed` records all closed rows together; branches with
+   open ledger jobs cause refusal. A later job never inherits an old settlement stamp.
    `brain due` counts closed-but-unsettled jobs; `brain due root` includes child settlement counts.
 
 Never merge, push to a shared branch, deploy or delete a branch without explicit consent

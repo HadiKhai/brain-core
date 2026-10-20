@@ -13,6 +13,11 @@ For agents:
   `brain jobs <node> --branch <branch> --settled`. Brain never calls the host API.
 - Never settle coordinators, open jobs, running/waiting threads or threads with pending
   requests. Unknown ownership or activity leaves the job unsettled; partial cleanup does too.
+- Legacy jobs without markers or worker references can be cleared after the host adapter's
+  exhaustive project-list sweep: `brain jobs <node> --settled --all-closed` records all closed
+  rows together, refuses any target branch with open work, and leaves open rows untouched.
+  List exhaustion proves no attributable unsettled threads remain; search only finds candidates.
+- `brain jobs` shows at most ten unsettled rows, then the remaining count.
 - `brain due`, generated facts and live state count closed jobs with unsettled threads,
   including old ledger rows. `brain due root` now includes child settlement counts alongside the root's own work.
 

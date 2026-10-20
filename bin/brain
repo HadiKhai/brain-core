@@ -7496,14 +7496,32 @@ def cmd_jobs(a):
         die("--job-key needs a node and --branch")
     if a.job_key and any((a.start, a.close, a.lessons is not None, a.switch is not None, a.contract_file, a.usage_file)):
         die("--job-key supports inspection or --settled only")
+    if a.all_closed and not (a.settled and a.id):
+        die("--all-closed needs a node and --settled")
+    if a.all_closed and (a.branch or a.job_key):
+        die("--all-closed cannot combine with --branch or --job-key")
     if a.settled:
-        if not a.id or not a.branch:
+        if not a.id or (not a.branch and not a.all_closed):
             die("--settled needs a node and --branch")
         if any((a.start, a.close, a.lessons is not None, a.switch is not None, a.contract_file, a.usage_file)):
             die("--settled cannot combine with other job updates")
         n = inst.node(a.id)
         with brain_lock(inst):
             rows = ledger_rows(n)
+            if a.all_closed:
+                if rows is None:
+                    die("--all-closed requires a recognized job ledger")
+                targets = unsettled_jobs(rows)
+                if any(open_job(rows, r["Job"]) for r in targets):
+                    die("--all-closed refused: a branch to stamp has an open job; no rows changed")
+                if targets:
+                    settled_at = stamp(inst)
+                    for row in targets:
+                        row["Settled"] = settled_at
+                    write_jobs(inst, n, rows)
+                    inst.commit([], f"{n['id']}: closed job thread sweep recorded")
+                print(f"{n['id']}: {len(targets)} closed job(s) recorded settled (coordinator's complete host sweep)")
+                return
             matches = [r for r in rows or [] if r["Job"] == a.branch and
                        (not a.job_key or job_key(r) == a.job_key)]
             if len(matches) > 1 and not a.job_key:
@@ -7616,9 +7634,12 @@ def cmd_jobs(a):
               + (f"; median {tokens_text(j['median_tokens'])} tokens and {j['median_active_h']} active h "
                  f"({count_of(j['measured'], 'measured job')})" if j["median_tokens"] else ""))
         if not a.branch:
-            for r in unsettled_jobs(read_jobs(n)):
+            backlog = unsettled_jobs(read_jobs(n))
+            for r in backlog[:10]:
                 print(redact(f"  unsettled {r['Job']} (brain-job: {job_key(r)}); inspect --branch {r['Job']} --job-key {job_key(r)}",
                              never_terms(n)))
+            if len(backlog) > 10:
+                print(f"  … and {len(backlog) - 10} more unsettled job(s)")
         for r in j["open"]:
             u = live_usage(inst, n, r)
             late = j["median_hours"] is not None and r["age_h"] > 2 * j["median_hours"]
@@ -10273,6 +10294,7 @@ def main():
         opt("--start", action="store_true", help="coordinator: start an import:<snapshot> study"),
         opt("--close", action="store_true", help="coordinator: close a processed import study"),
         opt("--settled", action="store_true", help="coordinator: record all closed job threads safely settled through the host"),
+        opt("--all-closed", action="store_true", help="with --settled: attest a complete host sweep for all closed ledger jobs"),
         opt("--contract-file", dest="contract_file", help="coordinator: the job's contract (" +
             ", ".join(f"## {f}" for f in CONTRACT_FIELDS) + "; an optional ## Budget, e.g. 20M tokens, 3 h)"),
         opt("--usage-file", dest="usage_file", help="coordinator: the job's usage as the host reports it (JSON); "
