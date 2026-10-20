@@ -11,7 +11,8 @@ For agents:
 - Ready and handback compare cached origin's default branch; stale local default branches show
   their lag without being modified. Homes without origin still compare local main.
 - Explicit sync records external default-branch integrations once per commit, including squash
-  merges and direct commits, without claiming review or runtime usage.
+  merges and direct commits, without claiming review or runtime usage. Owned integration ranges
+  survive job closure and lesson cleanup, including when push or sync happens later.
 - `merge=pr` records the coordinator's explicit `gh pr merge` workflow; no automatic merge.
 
 After upgrading:

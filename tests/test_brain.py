@@ -1631,6 +1631,93 @@ class TeamHomes(Scenario):
         self.assertIn("0 recorded", self.b(root, "sync", "app", "--offline"))
         self.assertNotIn("external:", (root / "nodes/app/job-ledger.md").read_text())
 
+    def closed_before_sync(self, strategy, push_first=True, prune=False, legacy=False, backfill=False):
+        root, seed, origin, home = self.team()
+        self.b(root, "set", "app", "merge=local")
+        self.b(root, "sync", "app", "--offline")
+        self.b(root, "wt", "add", "app", "job")
+        wt = self.tmp / "app-work/worktrees/job"
+        for i in range(3):
+            (wt / "fix").write_text(str(i))
+            self.git("add", "-A", cwd=wt)
+            self.git("commit", "-qm", "made-up change", cwd=wt)
+        self.b(root, "handback", "app", "--branch", "job", "--state", "done", "--reviews", "1")
+        if legacy:
+            import hashlib
+            record = next((root / "nodes/app/job-handbacks").glob("*.json"))
+            packet = json.loads(record.read_text())["ready"]
+            packet["checked_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+            cache = self.tmp / "app-work/scratch/ready" / (hashlib.sha256(b"job").hexdigest() + ".json")
+            cache.parent.mkdir(parents=True, exist_ok=True)
+            cache.write_text(json.dumps(packet))
+            record.unlink()
+        if strategy == "squash":
+            self.git("merge", "--squash", "job", cwd=home)
+            self.git("commit", "-qm", "squashed made-up job", cwd=home)
+        else:
+            self.git("merge", "--ff-only" if strategy == "fast-forward" else "--no-ff",
+                     "-m", "integrated made-up job", "job", cwd=home)
+        merged = self.git("rev-parse", "HEAD", cwd=home).strip()
+        if push_first:
+            self.git("push", "origin", "trunk", cwd=home)
+        if prune:
+            self.b(root, "wt", "prune", "app", "--offline")
+        else:
+            self.b(root, "wt", "rm", "app", "job", "--cause", "fixture cleanup")
+        if backfill:  # a pre-upgrade closed row still has its worker evidence, but no endpoint columns
+            loader = importlib.machinery.SourceFileLoader("team_backfill", str(CORE / "bin/brain"))
+            module = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+            loader.exec_module(module)
+            inst = module.Instance(root); node = inst.node("app"); rows = module.read_jobs(node)
+            for row in rows:
+                row.pop("Base commit", None); row.pop("Head commit", None)
+            module.write_jobs(inst, node, rows)
+        self.b(root, "jobs", "app", "--branch", "job", "--lessons", "none: fixture")
+        self.assertEqual(list((root / "nodes/app/job-handbacks").glob("*.json")), [])
+        self.git("branch", "-D", "job", cwd=home)
+        if not push_first:
+            self.git("push", "origin", "trunk", cwd=home)
+        self.assertIn("0 recorded", self.b(root, "sync", "app"))
+        ledger = (root / "nodes/app/job-ledger.md").read_text()
+        self.assertNotIn("external:", ledger)
+        self.assertIn(merged, ledger)
+
+    def test_local_merge_closed_with_lessons_before_sync(self):
+        self.closed_before_sync("merge")
+
+    def test_legacy_packet_is_retained_before_close_deletes_it(self):
+        self.closed_before_sync("merge", legacy=True)
+
+    def test_lesson_cleanup_backfills_preupgrade_closed_row_before_deleting_packet(self):
+        self.closed_before_sync("merge", backfill=True)
+
+    def test_squash_closed_before_push_and_sync(self):
+        self.closed_before_sync("squash", push_first=False)
+
+    def test_fast_forward_pruned_with_lessons_before_sync(self):
+        self.closed_before_sync("fast-forward", prune=True)
+
+    def test_local_job_does_not_claim_earlier_unpublished_work_from_other_owners(self):
+        root, seed, origin, home = self.team()
+        self.b(root, "set", "app", "merge=local")
+        self.b(root, "sync", "app", "--offline")
+        (home / "other").write_text("another owner's unpublished work")
+        self.git("add", "-A", cwd=home)
+        self.git("commit", "-qm", "another owner's change", cwd=home)
+        other = self.git("rev-parse", "HEAD", cwd=home).strip()
+        self.b(root, "wt", "add", "app", "job", "--base", "trunk")
+        wt = self.tmp / "app-work/worktrees/job"
+        (wt / "fix").write_text("job contribution")
+        self.git("add", "-A", cwd=wt)
+        self.git("commit", "-qm", "fix", cwd=wt)
+        self.b(root, "handback", "app", "--branch", "job", "--state", "done", "--reviews", "1")
+        self.git("merge", "--no-ff", "-m", "job integration", "job", cwd=home)
+        self.git("push", "origin", "trunk", cwd=home)
+        self.b(root, "wt", "rm", "app", "job")
+        self.b(root, "jobs", "app", "--branch", "job", "--lessons", "none: fixture")
+        self.assertIn("1 recorded", self.b(root, "sync", "app"))
+        self.assertEqual((root / "nodes/app/job-ledger.md").read_text().count("external:" + other), 1)
+
     def test_reset_is_bounded_and_requires_one_node(self):
         root, seed, origin, home = self.team()
         old = self.env.copy()

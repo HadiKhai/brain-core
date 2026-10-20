@@ -20,12 +20,18 @@ Run by a node's coordinator.
    keyed by full commit hash. This includes merge commits, squash merges and direct commits:
    Git alone cannot distinguish the latter two. A worker's recorded ready head identifies its
    merge even if the branch was deleted; a squash also needs that head's exact tree and recorded
-   main as its parent. Empty/unverified job branches never claim an external integration. These rows assert no review, runtime usage or job duration. First sync uses
+   integration base as its parent. Empty/unverified job branches never claim an external integration.
+   Job closure and lesson cleanup retain verified range endpoints in the ledger before deleting
+   worker evidence, so delayed pushes and syncs still associate owned merges, squash and fast-forward
+   work. Local mode records its actual local integration parent separately from the remote default,
+   so an unrelated unpublished local change is never attributed to the worker. External rows
+   assert no review, runtime usage or job duration. First sync uses
    the existing last-sync/status time window; later syncs use a local commit cursor, including
    without `--mark`. Repeats are deduplicated even if the cursor is lost. A rewritten history
    refuses cursor advancement. After inspecting rewritten history or a new unrelated default,
-   explicitly run `brain sync <id> --reset-main` to rescan from the old/new common ancestor, or the last-sync time window for unrelated history,
-   preserving the ledger and hash deduplication. Reset names one node; it cannot use `--all`. `--offline` avoids fetching during that rescan.
+   explicitly run `brain sync <id> --reset-main` to rescan from the old/new common ancestor,
+   or the last-sync time window for unrelated history, preserving the ledger and hash deduplication.
+   Reset names one node; it cannot use `--all`. `--offline` avoids fetching during that rescan.
    `--mark` refuses to advance the sync time if integrations could not be recorded. Homes without origin retain
    their existing behavior. Read what matters in the home itself. Never write there from here (axiom 6).
 4. Add each new decision to the top of `decisions.md`, with why and the alternatives. Decisions
