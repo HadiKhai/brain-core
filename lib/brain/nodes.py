@@ -178,7 +178,7 @@ def cmd_init(a):
 def ensure_gitignore(root):
     gi = root / ".gitignore"
     lines = gi.read_text().splitlines() if gi.exists() else []
-    want = [".DS_Store", "__pycache__/", ".brain/", "**/job-handbacks/*-verify-*.log"]
+    want = [".DS_Store", "__pycache__/", ".brain/", "**/job-handbacks/*-verify-*.log", "**/job-handbacks/*-inputs-*.map"]
     missing = [w for w in want if w not in lines]
     if missing:
         gi.write_text("\n".join(lines + missing) + "\n")

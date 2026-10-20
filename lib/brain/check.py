@@ -37,7 +37,7 @@ def collect_problems(inst):
     if host and not (_m_common.CORE / "adapters" / "hosts" / f"{host}.md").exists():
         p(f"host '{host}' has no adapter in core/adapters/hosts")
     if ensure_gitignore_needed(inst.root):
-        p(".gitignore doesn't ignore .brain/ or private verify logs (one or both exclusions missing)")
+        p(".gitignore doesn't ignore .brain/ or private verify logs/input maps (required exclusions missing)")
         fixable.append("gitignore")
     label_keys = _m_common.lst(inst.cfg.get("label_keys"))
     tdir = _m_common.CORE / "templates" / "node"
@@ -210,7 +210,7 @@ def collect_problems(inst):
 def ensure_gitignore_needed(root):
     gi = root / ".gitignore"
     lines = gi.read_text().splitlines() if gi.exists() else []
-    return any(p not in lines for p in (".brain/", "**/job-handbacks/*-verify-*.log"))
+    return any(p not in lines for p in (".brain/", "**/job-handbacks/*-verify-*.log", "**/job-handbacks/*-inputs-*.map"))
 
 
 def registry_stale(inst):
@@ -223,7 +223,7 @@ def registry_stale(inst):
 def apply_fixes(inst, kinds):
     done = []
     if "gitignore" in kinds and _m_nodes.ensure_gitignore(inst.root):
-        done.append(".gitignore ignores .brain/ and private verify logs")
+        done.append(".gitignore ignores .brain/ and private verify logs/input maps")
     if "local" in kinds:
         for n in inst.nodes():
             fm, body = _m_common.read_fm(n["dir"] / "node.md")

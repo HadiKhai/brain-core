@@ -160,6 +160,8 @@ def cmd_handback(a):
         count = lambda k: previous.get(k) if type(previous.get(k)) is int else 0
         sessions = [i for i in previous.get("sessions", []) if isinstance(i, str) and _m_spend.SESSION_ID.fullmatch(i)] \
             if isinstance(previous.get("sessions"), list) else []
+        if isinstance(packet, dict):
+            packet.pop("input_files", None)  # never recommit an older experimental inline fingerprint map
         data = {"version": 2, "job": row["Job"], "started": row["Started"], "state": a.state,
                 "sessions": list(dict.fromkeys(sessions + _m_spend.spend_session_ids()))[-20:],
                 "at": inst.now(), "report": _m_common.tilde(a.report) if a.report is not None else previous.get("report", ""),
@@ -204,7 +206,8 @@ def cmd_handback(a):
     if checked:
         state = _m_verify.ready_state(inst, n, a.branch)
         why = reasons + state["reasons"]
-        print("ready" if not why else "not ready: " + "; ".join(dict.fromkeys(why)))
+        print(_m_verify.VerifyScrubber(_m_guard.never_terms(n)).feed(
+            "ready" if not why else "not ready: " + "; ".join(dict.fromkeys(why)), final=True))
         if why:
             sys.exit(1)
     else:

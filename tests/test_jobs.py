@@ -1217,7 +1217,7 @@ class Workflow(Scenario):
         # Readiness itself, wherever it is read, holds only for the inputs verify ran with.
         self.assertEqual(self.b(r, "ready", "a", "--branch", "job").strip(), "ready")
         (wt / ".env").write_text("MODE=broken\n")
-        self.assertIn("besides tracked files", self.b(r, "ready", "a", "--branch", "job", ok=False))
+        self.assertIn("changed since the last verify", self.b(r, "ready", "a", "--branch", "job", ok=False))
         self.assertNotIn("ready to merge", self.b(r, "due", "a"))
         ui = json.loads(self.b(r, "ui", "--json"))
         self.assertFalse(any(i.get("ready") for i in ui["due"]))
@@ -1226,7 +1226,7 @@ class Workflow(Scenario):
         local = json.loads((r / ".brain/local.json").read_text())
         local["nodes"]["a"]["worktrees"]["job"]["port"] += 7
         (r / ".brain/local.json").write_text(json.dumps(local))
-        self.assertIn("besides tracked files", self.b(r, "ready", "a", "--branch", "job", ok=False))
+        self.assertIn("changed since the last verify", self.b(r, "ready", "a", "--branch", "job", ok=False))
         self.assertNotIn("reused", finish())
         # A verify that rewrites what it reads records nothing.
         self.b(r, "set", "a", f"verify=echo MODE=c > .env && python3 -B verify.py && echo run >> {runs}")

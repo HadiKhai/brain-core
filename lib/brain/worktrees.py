@@ -4,6 +4,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 from . import common as _m_common
@@ -12,6 +13,7 @@ from . import instance as _m_instance
 from . import jobs as _m_jobs
 from . import nodes as _m_nodes
 from . import status as _m_status
+from . import verify as _m_verify
 
 
 WT_PORT_BASE = 4100
@@ -146,10 +148,15 @@ def cmd_wt_add(a):
     if setup.exists() and not a.no_setup:
         env = {**os.environ, "MAIN": str(home), "WORKTREE": str(path), "PORT": str(port), "PORTS": str(count),
                "PORT_LAST": str(port + count - 1), "BRANCH": a.branch, "NODE": n["id"], "WORKBENCH": str(wb)}
+        print("  setup: running; waiting for completion", flush=True)
+        started = time.monotonic()
         r = subprocess.run(["sh", str(setup)], cwd=path, env=env, capture_output=True, text=True)
+        duration = time.monotonic() - started
         out = (r.stdout + r.stderr).strip()
-        print(f"  setup: {'ok' if r.returncode == 0 else 'FAILED (exit ' + str(r.returncode) + ')'}"
-              + ("\n" + "\n".join("    " + l for l in out.splitlines()[-15:]) if out else ""))
+        message = f"  setup: {'ok' if r.returncode == 0 else 'FAILED (exit ' + str(r.returncode) + ')'} in {duration:.2f}s"
+        if out:
+            message += "\n" + "\n".join("    " + l for l in out.splitlines()[-15:])
+        print(_m_verify.VerifyScrubber(_m_guard.never_terms(n)).feed(message, final=True), flush=True)
         if r.returncode:
             print("  worktree retained with its setup output; resolve the setup failure before starting a worker")
             sys.exit(r.returncode if r.returncode > 0 else 1)

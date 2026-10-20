@@ -524,5 +524,229 @@ class VerifyLogs(Scenario):
 
 
 
+class VerifyInputDiagnostics(Scenario):
+    job = WorkerReadyPackets.job
+    packet = WorkerReadyPackets.packet
+
+    def inputs_job(self):
+        r, home, wt = self.job()
+        (wt / '.gitignore').write_text('.env*\n')
+        (wt / 'apps/web').mkdir(parents=True)
+        self.git('add', '.gitignore', cwd=wt)
+        self.git('commit', '-qm', 'ignore fixture inputs', cwd=wt)
+        self.b(r, 'set', 'a', 'verify_inputs=apps/web/.env.*')
+        return r, home, wt
+
+    def finish(self, r, ok=True):
+        return self.b(r, 'handback', 'a', '--branch', 'job', '--state', 'done', '--reviews', '1', ok=ok)
+
+    def private_map(self, packet):
+        path = self.packet().parent / packet['input_files_ref']
+        self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+        return json.loads(path.read_text())['files']
+
+    def assert_private(self, output, values):
+        for value in values:
+            self.assertNotIn(value, output)
+        self.assertNotRegex(output, r'\b[0-9a-f]{64}\b')
+
+    def test_verify_edits_own_env_names_path_and_fix_without_contents(self):
+        r, home, wt = self.inputs_job()
+        env = wt / 'apps/web/.env.local'
+        env.write_text('FAKE_VALUE=initial-fixture\n')
+        self.b(r, 'set', 'a', "verify=printf 'GENERATED=second-fixture\\n' >> apps/web/.env.local")
+        output = self.finish(r, ok=False)
+        self.assertIn('verify modified its own inputs: apps/web/.env.local (modified)', output)
+        self.assertIn('before the first verify', output)
+        self.assertIn('only if they cannot affect the result', output)
+        self.assert_private(output, ('initial-fixture', 'second-fixture', 'FAKE_VALUE=', 'GENERATED='))
+        data = json.loads(self.packet().read_text())
+        self.assertIsNone(data['ready'])
+        self.assertIn('verify modified its own inputs:', data['ready_reasons'][0])
+        self.assertIn('verify modified its own inputs:', self.b(r, 'ready', 'a', '--branch', 'job', ok=False))
+
+    def test_between_runs_names_added_removed_modified_and_cannot_reuse(self):
+        r, home, wt = self.inputs_job()
+        folder = wt / 'apps/web'
+        (folder / '.env.local').write_text('FAKE_VALUE=first-fixture\n')
+        (folder / '.env.removed').write_text('FAKE_VALUE=removed-fixture\n')
+        self.finish(r)
+        initial = json.loads(self.packet().read_text())['ready']
+        self.assertEqual(set(self.private_map(initial)), {'apps/web/.env.local', 'apps/web/.env.removed'})
+        self.assertEqual(self.packet().stat().st_mode & 0o777, 0o600)
+        (folder / '.env.local').write_text('FAKE_VALUE=changed-fixture\n')
+        (folder / '.env.removed').unlink()
+        (folder / '.env.added').write_text('FAKE_VALUE=added-fixture\n')
+        output = self.b(r, 'ready', 'a', '--branch', 'job', ok=False)
+        self.assertIn('changed since the last verify:', output)
+        for path, action in (('.env.local', 'modified'), ('.env.removed', 'removed'), ('.env.added', 'added')):
+            self.assertIn('apps/web/' + path + ' (' + action + ')', output)
+        self.assert_private(output, ('first-fixture', 'changed-fixture', 'added-fixture', 'removed-fixture'))
+        self.assertNotIn(str(wt), output)
+        # A fresh successful run may establish new evidence, but a changed input cannot reuse the old one.
+        output = self.finish(r)
+        self.assertNotIn('reused the green run', output)
+        self.assertIn('reused the green run', self.finish(r))
+        self.assertEqual(self.b(r, 'ready', 'a', '--branch', 'job').strip(), 'ready')
+
+    def test_during_verify_added_and_removed_inputs_are_named_even_with_dirty_tracked_files(self):
+        r, home, wt = self.inputs_job()
+        (wt / 'apps/web/.env.removed').write_text('FAKE_VALUE=removed-fixture\n')
+        self.b(r, 'set', 'a', "verify=rm apps/web/.env.removed && printf added-fixture > apps/web/.env.added && echo '# fixture change' >> calc.py")
+        output = self.finish(r, ok=False)
+        self.assertIn('verify modified its own inputs:', output)
+        self.assertIn('apps/web/.env.removed (removed)', output)
+        self.assertIn('apps/web/.env.added (added)', output)
+        self.assertIn("verify changed the job's branch", output)
+        self.assert_private(output, ('removed-fixture', 'added-fixture'))
+        self.assertIsNone(json.loads(self.packet().read_text())['ready'])
+
+    def test_protected_path_and_new_privacy_policy_are_masked(self):
+        r, home, wt = self.inputs_job()
+        env = wt / 'apps/web/.env.HiddenFixture'
+        env.write_text('FAKE_VALUE=initial-fixture\n')
+        self.finish(r)
+        env.write_text('FAKE_VALUE=changed-fixture\n')
+        # The private map retains the real relative key, but every outward reason is screened.
+        (r / 'nodes/a/never-name.txt').write_text('HiddenFixture\n')
+        output = self.b(r, 'ready', 'a', '--branch', 'job', ok=False)
+        self.assertNotIn('hiddenfixture', output.casefold())
+        self.assertIn('apps/web/.env.', output)
+        self.assertIn('(modified)', output)
+        self.assert_private(output, ('initial-fixture', 'changed-fixture'))
+        ui = self.b(r, 'ui', '--json')
+        self.assertNotIn('hiddenfixture', ui.casefold())
+        self.assertNotIn('"input_files"', ui)
+        for fingerprint in self.private_map(json.loads(self.packet().read_text())['ready']).values():
+            self.assertNotIn(fingerprint, ui)
+        self.b(r, 'set', 'a', 'verify=echo another-fixture >> apps/web/.env.HiddenFixture')
+        output = self.finish(r, ok=False)
+        self.assertNotIn('hiddenfixture', output.casefold())
+        # Refreshing policy must also screen the already-recorded refusal, not just a new difference.
+        (r / 'nodes/a/never-name.txt').write_text('HiddenFixture\nmodified\n')
+        self.assertNotIn('modified', self.b(r, 'ready', 'a', '--branch', 'job', ok=False).casefold())
+
+    def test_old_packet_without_path_map_still_refuses_changed_inputs(self):
+        r, home, wt = self.inputs_job()
+        env = wt / 'apps/web/.env.local'
+        env.write_text('FAKE_VALUE=first-fixture\n')
+        self.finish(r)
+        path = self.packet()
+        data = json.loads(path.read_text())
+        del data['ready']['input_files_ref']
+        path.write_text(json.dumps(data))
+        env.write_text('FAKE_VALUE=changed-fixture\n')
+        output = self.b(r, 'ready', 'a', '--branch', 'job', ok=False)
+        self.assertIn('per-path evidence unavailable', output)
+        self.assert_private(output, ('first-fixture', 'changed-fixture'))
+
+    def test_path_only_reason_escapes_controls_and_rejects_invalid_old_map(self):
+        m = core_loader.SourceFileLoader('brain_input_reason', str(CORE / 'bin/brain')).load_module()
+        node = self.tmp / 'node'
+        node.mkdir()
+        n = {'id': 'fixture', 'dir': node, 'parent': None}
+        output = m.verify_input_reason(n, {'apps/.env\nlocal': 'a'*64}, {'apps/.env\nlocal': 'b'*64})
+        self.assertIn(r'apps/.env\nlocal', output)
+        self.assertNotIn('\n', output)
+        self.assert_private(output, ('a'*64, 'b'*64))
+        for old in (None, [], {'../outside': 'a'*64}, {'/outside': 'a'*64}, {'env': []}):
+            output = m.verify_input_reason(n, old, {})
+            self.assertIn('per-path evidence unavailable', output)
+            self.assertNotIn('outside', output)
+            output = m.verify_input_reason(n, {}, old)
+            self.assertIn('per-path evidence unavailable', output)
+            self.assertNotIn('outside', output)
+        (node / 'never-name.txt').write_text('Σ\n')
+        output = m.verify_input_reason(n, {'apps/.env.Σ\nlocal': 'a'*64}, {})
+        self.assertNotIn('Σ', output)
+        self.assertNotIn(r'\u03a3', output)
+        (node / 'never-name.txt').write_text('modified\n')
+        output = m.verify_input_reason(n, {'apps/.env': 'a'*64}, {'apps/.env': 'b'*64})
+        self.assertNotIn('modified', output)
+
+    def test_due_json_rescreens_recorded_paths_after_policy_changes(self):
+        r, home, wt = self.inputs_job()
+        env = wt / 'apps/web/.env.HiddenFixture'
+        env.write_text('FAKE_VALUE=initial-fixture\n')
+        self.b(r, 'set', 'a', 'verify=echo changed-fixture >> apps/web/.env.HiddenFixture')
+        self.finish(r, ok=False)
+        self.assertIn('HiddenFixture', self.packet().read_text())
+        (r / 'nodes/a/never-name.txt').write_text('HiddenFixture\n')
+        for args in (('due', 'a', '--json'), ('due', 'a'), ('ui', '--json'), ('ready', 'a', '--branch', 'job')):
+            output = self.b(r, *args, ok=False if args[0] == 'ready' else True)
+            self.assertNotIn('hiddenfixture', output.casefold())
+
+    def test_per_file_hashes_stay_in_ignored_sidecar_and_missing_evidence_still_refuses(self):
+        r, home, wt = self.inputs_job()
+        env = wt / 'apps/web/.env.local'
+        env.write_text('FAKE_VALUE=first-fixture\n')
+        self.finish(r)
+        packet = json.loads(self.packet().read_text())['ready']
+        files = self.private_map(packet)
+        history = self.git('log', '-p', '--', 'nodes/a/job-handbacks', cwd=r)
+        for fingerprint in files.values():
+            self.assertNotIn(fingerprint, history)
+            self.assertNotIn(fingerprint, self.packet().read_text())
+        sidecar = self.packet().parent / packet['input_files_ref']
+        self.assertEqual(self.git('status', '--porcelain', cwd=r), '')
+        self.assertEqual(self.git('ls-files', str(sidecar.relative_to(r)), cwd=r), '')
+        # Reuse preserves the existing local map rather than multiplying sidecars.
+        self.assertIn('reused the green run', self.finish(r))
+        self.assertEqual(json.loads(self.packet().read_text())['ready']['input_files_ref'], packet['input_files_ref'])
+        sidecar.unlink()
+        env.write_text('FAKE_VALUE=changed-fixture\n')
+        output = self.b(r, 'ready', 'a', '--branch', 'job', ok=False)
+        self.assertIn('per-path evidence unavailable', output)
+        self.assertNotIn('reused the green run', self.finish(r))
+        self.assertTrue(self.private_map(json.loads(self.packet().read_text())['ready']))
+
+
+    def test_untrusted_sidecar_is_optional_and_never_weakens_changed_input_refusal(self):
+        r, home, wt = self.inputs_job()
+        env = wt / 'apps/web/.env.local'
+        env.write_text('FAKE_VALUE=initial-fixture\n')
+        self.finish(r)
+        packet = json.loads(self.packet().read_text())['ready']
+        sidecar = self.packet().parent / packet['input_files_ref']
+        original = sidecar.read_text()
+        env.write_text('FAKE_VALUE=changed-fixture\n')
+        wrong = json.loads(original)
+        wrong['inputs'] = 'wrong-digest-fixture'
+        sidecar.write_text(json.dumps(wrong))
+        self.assertIn('per-path evidence unavailable', self.b(r, 'ready', 'a', '--branch', 'job', ok=False))
+        sidecar.write_text(original)
+        sidecar.chmod(0o644)
+        self.assertIn('per-path evidence unavailable', self.b(r, 'ready', 'a', '--branch', 'job', ok=False))
+        sidecar.chmod(0o600)
+        outside = self.tmp / 'outside.map'
+        outside.write_text(original)
+        sidecar.unlink()
+        sidecar.symlink_to(outside)
+        self.assertIn('per-path evidence unavailable', self.b(r, 'ready', 'a', '--branch', 'job', ok=False))
+        self.assertEqual(outside.read_text(), original)
+
+
+    def test_legacy_inline_map_never_enters_ui_output(self):
+        r, home, wt = self.inputs_job()
+        (wt / 'apps/web/.env.local').write_text('FAKE_VALUE=initial-fixture\n')
+        self.finish(r)
+        data = json.loads(self.packet().read_text())
+        files = self.private_map(data['ready'])
+        # Older experimental packets may still carry the map inline. Keep it private too.
+        data['ready']['input_files'] = files
+        self.packet().write_text(json.dumps(data))
+        output = self.b(r, 'ui', '--json')
+        self.assertNotIn('"input_files"', output)
+        self.assertNotIn('"input_files_ref"', output)
+        for fingerprint in files.values():
+            self.assertNotIn(fingerprint, output)
+
+        self.b(r, 'handback', 'a', '--branch', 'job', '--state', 'done')
+        history = self.git('log', '-p', '--', 'nodes/a/job-handbacks', cwd=r)
+        self.assertNotIn('input_files', self.packet().read_text().replace('input_files_ref', 'sidecar_ref'))
+        for fingerprint in files.values():
+            self.assertNotIn(fingerprint, history)
+
+
 if __name__ == "__main__":
     unittest.main()

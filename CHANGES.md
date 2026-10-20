@@ -5,6 +5,24 @@ upgrading. `brain changes <node>` shows the entries this node's coordinator hasn
 `brain due <node>` lists them until `brain changes <node> --seen`. Entry headings are
 `## <date>: <title>`; once released, a heading never changes.
 
+## 2026-10-21: Name changed verify inputs and finish setup
+
+For agents:
+- Ready refusals identify added, removed and modified inputs by worktree-relative path, never
+  content or per-file hashes. Paths are screened against never-name words. The existing digest,
+  port, ref and tree rules still determine readiness and evidence reuse. Per-file fingerprints stay
+  in ignored 0600 local sidecars under `job-handbacks`, outside instance Git history and UI output.
+- `verify modified its own inputs: <path>` identifies changes during the run. Make setup produce
+  generated settings before the first verify, or stop the test runner writing them. Exclude a
+  file from `verify_inputs` only if it cannot affect the result. Changes between runs say
+  `changed since the last verify`. Old packets without per-path evidence still refuse changes.
+- `wt add` waits for the node's setup script, reports its duration and returns its failure status.
+  Failed setup retains the worktree for repair and gives no worker-launch instruction.
+
+After upgrading:
+- Read the named paths when readiness refuses. Fix setup rather than spending another full verify
+  discovering a first-run env rewrite. The next handback adds private per-path diagnostic evidence.
+
 ## 2026-10-21: Core mechanics split into Python modules
 
 For agents:

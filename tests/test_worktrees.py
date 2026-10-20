@@ -104,5 +104,54 @@ class Workbench(Scenario):
 
 
 
+class WorktreeSetupDiagnostics(Scenario):
+    def finish(self, r):
+        return self.b(r, "handback", "a", "--branch", "job", "--state", "done", "--reviews", "1")
+
+    def test_setup_completes_before_return_and_first_verify(self):
+        r = self.init('alice')
+        home = self.repo(self.tmp / 'app', {'.gitignore': '.env\nsetup-started\n',
+                         'verify.py': "from pathlib import Path\nassert Path('.env').read_text() == 'GENERATED=prepared-fixture\\n'\n"})
+        self.b(r, 'new', 'a', '--title', 'A', '--home', str(home))
+        self.b(r, 'set', 'a', 'verify=python3 -B verify.py')
+        release = home / 'allow-setup'
+        (r / 'nodes/a/worktree-setup.sh').write_text(
+            'touch setup-started\nwhile ! test -f "$MAIN/allow-setup"; do sleep 0.02; done\n'
+            "printf 'GENERATED=prepared-fixture\\n' > .env\n")
+        process = subprocess.Popen([sys.executable, str(r / 'core/bin/brain'), 'wt', 'add', 'a', 'job'],
+                                   cwd=r, env=self.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        wt = self.tmp / 'app-work/worktrees/job'
+        try:
+            deadline = time.monotonic() + 10
+            while not (wt / 'setup-started').exists() and process.poll() is None and time.monotonic() < deadline:
+                time.sleep(.02)
+            self.assertTrue((wt / 'setup-started').exists())
+            self.assertIsNone(process.poll())
+            self.assertFalse((wt / '.env').exists())
+        finally:
+            release.touch()
+            output, errors = process.communicate(timeout=10)
+        self.assertEqual(process.returncode, 0, output + errors)
+        self.assertIn('setup: running; waiting for completion', output)
+        self.assertRegex(output, r'setup: ok in \d+\.\d+s')
+        self.assertLess(output.index('setup: ok'), output.index('launch a worker'))
+        self.assertEqual((wt / '.env').read_text(), 'GENERATED=prepared-fixture\n')
+        self.assertTrue(self.finish(r).strip().endswith('ready'))
+
+    def test_setup_failure_reports_duration_masks_words_and_returns_failure(self):
+        r = self.init('alice')
+        home = self.repo(self.tmp / 'app')
+        self.b(r, 'new', 'a', '--title', 'A', '--home', str(home))
+        (r / 'nodes/a/never-name.txt').write_text('HiddenFixture\n')
+        (r / 'nodes/a/worktree-setup.sh').write_text('echo HiddenFixture\nexit 7\n')
+        process = subprocess.run([sys.executable, str(r / 'core/bin/brain'), 'wt', 'add', 'a', 'job'],
+                                 cwd=r, env=self.env, capture_output=True, text=True)
+        self.assertEqual(process.returncode, 7)
+        self.assertRegex(process.stdout, r'setup: FAILED \(exit 7\) in \d+\.\d+s')
+        self.assertNotIn('hiddenfixture', (process.stdout + process.stderr).casefold())
+        self.assertNotIn('launch a worker', process.stdout)
+        self.assertTrue((self.tmp / 'app-work/worktrees/job').exists())
+
+
 if __name__ == "__main__":
     unittest.main()

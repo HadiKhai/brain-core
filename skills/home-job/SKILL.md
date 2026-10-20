@@ -31,6 +31,8 @@ stated; never run a polling loop in an agent.
    `core/bin/brain wt add <id> <branch> [--base <ref>]`. It creates the worktree
    in the node's workbench (beside the home, never inside it or the instance), runs the node's
    `worktree-setup.sh` if it has one (env files, installs), and gives the job its own port.
+   `wt add` waits for setup to finish, prints its elapsed time and returns a nonzero status on
+   failure; only a completed setup gets the worker-launch instruction.
    If setup fails, fix the script before going on: a worker without its env files wastes its run.
    - No `worktree-setup.sh` yet and the project needs env files or installs? Write one in the
      node folder (it runs with `MAIN`, `WORKTREE`, `PORT`, `BRANCH`, `NODE` and `WORKBENCH` set).
@@ -72,6 +74,13 @@ stated; never run a polling loop in an agent.
    (`verify_inputs` globs; `.env,.env.*` unless the node names its own).
    `--reverify` runs it anyway. A verify that changes the branch, local main or the worktree records
    nothing: commit or discard what it changed, then hand back again.
+   Input refusals name added, removed or modified worktree-relative paths, never contents or
+   per-file hashes. Per-path evidence lives in ignored 0600 sidecars beside the worker record;
+   missing sidecars limit diagnostics, never the digest check. `verify modified its own inputs: <path>` means the run itself changed them:
+   make `worktree-setup.sh` produce the generated settings before the first verify, or stop the
+   test runner writing them. Remove a file from `verify_inputs` only if it cannot affect the result.
+   `changed since the last verify` means the input changed between runs. Older packets without
+   a per-path map still refuse changed evidence, but cannot name the old paths; hand back again.
    Each fresh verify prints its private 0600 log path under the node's `job-handbacks/` folder,
    ignores logs in instance Git, redacts never-name words before writing, and reports elapsed time and output counts every five
    seconds. The five newest logs per job are retained; reuse creates no log or new run. A failure
