@@ -7685,6 +7685,17 @@ class NodeHygiene(Scenario):
         changes = (CORE / 'CHANGES.md').read_text()
         self.assertIn('Legacy age inference is approximate', changes)
         self.assertIn('original waiting time explicitly', changes)
+        brief = (CORE / 'skills/node-brief/SKILL.md').read_text()
+        self.assertIn('Send only a behind signal', brief)
+        self.assertIn('Do not wait for sync during the daily brief', brief)
+        self.assertNotIn('sync --all', brief)
+        self.assertNotIn('`core/bin/brain sync <child>`', brief)
+        # Reconciliation must retain the host-question job's descendant coverage too.
+        for clause in ('every descendant node', "each child's coordinator thread id",
+                       'without open jobs', 'provider it was created under'):
+            self.assertIn(clause, tick)
+        self.assertIn('Root also checks every descendant coordinator', role)
+
 
     def test_wrapped_legacy_age_survives_refresh_and_history_is_read_once(self):
         r, inst, n = self.node()

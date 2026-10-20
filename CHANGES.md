@@ -33,7 +33,8 @@ After upgrading:
 - Update existing root daily-brief schedules to send behind signals and let child coordinators
   run sync; use the revised T3 tick template. Overdue-only ticks report new inbox items then
   stop without committing unchanged status. Archived nodes are exempt from the new hygiene
-  checks. Load the revised coordinator and home-job rules.
+  checks. Load the revised coordinator, daily-brief and home-job rules. The daily-brief skill
+  signals behind children without running their sync or waiting for it.
 
 ## 2026-10-20: Runtime questions reach the inbox
 
