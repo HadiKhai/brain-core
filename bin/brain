@@ -3991,8 +3991,9 @@ def history_matcher(inst, n, also=()):
                 c, r = history_repo(p)
                 # A folder git reads as another repository is that repository's, whatever remote a session
                 # recorded: the recorded remote speaks only for folders that are gone or aren't repositories.
+                damaged = not c and (looks_like_repo(p, strict=True) or any(looks_like_repo(q) for q in p.parents))
                 seen[p] = ("folder" if inside else "worktree") if c and c == common else \
-                    "remote" if remotes & r else (False if c else None)
+                    "remote" if remotes & r else (False if c or damaged else None)
             else:
                 seen[p] = "folder" if inside else None
         return seen[p]

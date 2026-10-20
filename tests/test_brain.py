@@ -6707,6 +6707,12 @@ class HistorySizes(History):
             "eeee0001-0000", clone, [self.item("UserMessage", "FOREIGN-recorded", id="u-f")],
             repo="https://github.com/Acme/Garden.git", at0="2026-10-07T09:00:00Z"))
         self.assertEqual(count(self.b(self.r, "spend", "garden", "--also", str(scratch))), after)
+        # Nor a damaged one (git can't read it), nor a folder below one, whatever remote their sessions recorded.
+        for cwd, sid in ((damaged, "ffff0001"), (damaged / "maintenance", "ffff0002")):
+            self.jsonl(s4 / f"rollout-2026-10-07T10-00-00-{sid}-0000.jsonl", self.codex_rows(
+                f"{sid}-0000", cwd, [self.item("UserMessage", f"FOREIGN-{sid}", id=f"u-{sid}")],
+                repo="https://github.com/Acme/Garden.git", at0="2026-10-07T10:00:00Z"))
+        self.assertEqual(count(self.b(self.r, "spend", "garden", "--also", str(scratch))), after)
         # A session whose folder is gone, inside a brain that's still there, matches nothing by its remote.
         s3 = self.codex / "sessions" / "2026" / "10" / "06"
         self.jsonl(s3 / "rollout-2026-10-06T09-00-00-dddd0001.jsonl", self.codex_rows(
