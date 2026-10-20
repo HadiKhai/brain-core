@@ -107,6 +107,7 @@ Answer from files. Before answering about a child, run the **freshness check**:
 | a job that needs expertise | the `hire` skill (`core/bin/brain hire`) |
 | about several children at once | keep it here, in your own files (axiom 13) |
 | bringing in an existing repository | the `import` skill: confirm brain, parent and owners; scan, operator selection, adopt the main repo, then a study worker |
+| studying the past AI conversations about a node's home, once the operator opts in | the `history` skill: extract, readers per batch, check, merge |
 | creating a node, or changing one's owners, place or labels | the `node-new` or `node-transition` skill |
 
 A small job is clear, low risk, takes minutes and changes no shared state: a local draft,

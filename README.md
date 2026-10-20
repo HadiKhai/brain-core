@@ -372,6 +372,13 @@ study local history and agent setup without changing the source repo or running 
 `brain scrub garden-notes <path>` filters source evidence without revealing forbidden terms.
 The study records cited decisions, unknowns and proposals, then finishes through `handback`.
 
+The import study reads at most ten past AI sessions. To read all of them, `brain history
+garden-notes` extracts every Claude and Codex conversation about the home, from each subscription
+the brain may use, without a model. It keeps the operator's messages and the agent's replies,
+drops tool output and copies, and filters secrets. Then it cuts them into batches that a reader
+finishes before it would compact. Readers record each slice they read; `brain history
+garden-notes check` shows what's covered and catches citations to turns that don't exist.
+
 Imported rules land in `sources/import-proposals.md` as **imported and unreviewed**; roles and
 lessons start proposed and unusable. After actual review, accept a lesson with
 `brain item accept <id> --reviewed-by sam`, or reject it with `brain item reject <id>`. Workers
@@ -492,6 +499,7 @@ You mostly talk to coordinators, and they run `brain` for you. By hand:
 | `brain adopt <paths> [--parent <node>]` | adopt selected homes and record import study jobs |
 | `brain brief <node> --import` | study history into cited node state and inactive proposals |
 | `brain scrub <node> [paths ...] [--check]` | filter evidence, or check outputs without exposing forbidden terms |
+| `brain history <node> [plan\|check\|brief <batches>]` | every past AI conversation about a home, in batches readers finish; coverage check |
 | `brain usage install` / `uninstall` | start or remove the machine's poller (macOS LaunchAgent; safe to rerun) |
 | `brain usage --watch --every 300` | the poller itself, for other systems; agents only read |
 | `brain link --global [runtime=folder ...]` | a pointer to this brain in runtimes' user-wide instructions |
