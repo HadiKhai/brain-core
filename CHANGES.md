@@ -5,6 +5,22 @@ upgrading. `brain changes <node>` shows the entries this node's coordinator hasn
 `brain due <node>` lists them until `brain changes <node> --seen`. Entry headings are
 `## <date>: <title>`; once released, a heading never changes.
 
+## 2026-10-20: Briefs to files, merges, history batch sizes
+
+For agents:
+- `--out` on `brain brief`, `brain review`, `brain hire` and `brain history … brief` writes a new
+  private file, never through a link, and refuses the node's home, its checkouts and the instance.
+  Write briefs to a folder of your own outside them (or let the command print the brief).
+- `brain history <node>` sizes batches so the runtime that compacted soonest here still holds one
+  (60k at most); `--batch-tokens` still sets them yourself.
+- `brain connect <node> check` rejects a digest citing more than 30 code files of one home.
+- `brain check` gives one Blocked warning per node, with a count. `.brain/hooks.log` says when
+  the stop hook held a turn for an upgrade notice.
+- `brain merge` no longer fails its commit when the merged node has empty folders.
+
+After upgrading:
+- Nothing.
+
 ## 2026-10-20: Upgrades reach running coordinators
 
 For agents:

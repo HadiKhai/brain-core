@@ -16,6 +16,8 @@ stated; never run a polling loop in an agent.
    target may use.
 3. **Assemble the brief:**
    `core/bin/brain hire <specialist> <target> --task "<task, constraints, who to report to>" [--items a,b] [--out <file>] [--branch <branch>] [--job <job id>]`.
+   `--out` (here and on `brain brief` and `brain review`) writes a new private file outside the
+   home, its checkouts and the instance, never through a link.
    Add `--model <id or display name>` when the job's model is known, so its scoped weekly
    limit is checked. It finds the nearest specialist at or above the target, refuses if its scope doesn't cover
    the target's owners, and includes only the lessons and items in scope.

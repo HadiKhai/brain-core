@@ -1021,8 +1021,9 @@ class Hardening4(Scenario):
             p = self.run_b(r, "item", "quarantine", "m1")
             self.assertNotEqual(p.returncode, 0)                     # it waited, then gave up...
             self.assertEqual(item.read_text(), before)               # ...without touching the item
-            out = r / "nodes" / "brief.txt"
+            out = self.tmp / "brief.txt"
             self.assertNotEqual(self.run_b(r, "brief", "root", "--task", "x", "--out", str(out)).returncode, 0)
+            self.assertFalse(out.exists())
             for args in (["principal", "list"], ["schedule", "list"], ["brief", "root", "--task", "x"], ["show", "root"]):
                 self.assertEqual(self.run_b(r, *args).returncode, 0, args)   # reading never waits
         finally:
@@ -5598,6 +5599,12 @@ class Connections(Scenario):
         for nid in rows:
             digest(nid)
         self.b(r, "connect", "root", "check")
+        for i in range(31):
+            (self.homes["app"] / f"part{i}.ts").write_text(f"export const p{i} = {i}\n")
+        digest("app", "".join(f"- part {i} [app@part{i}.ts] [app@part{i}.ts#L1]\n" for i in range(30)))  # + main.ts
+        self.assertIn("cites 31 code files, over the 30", self.b(r, "connect", "root", "check", ok=False))
+        digest("app", "".join(f"- part {i} [app@part{i}.ts]\n" for i in range(29)))
+        self.b(r, "connect", "root", "check")
         digest("app", "- [app@../lab-home/main.ts] [app:nope.md] [item:ghost] [studio/a@main.ts] [lab@main.ts]\n")
         self.assertIn("4 to nothing that exists", self.b(r, "connect", "root", "check", ok=False))
         digest("app")
@@ -6017,7 +6024,11 @@ class Workflow(Scenario):
         status = r / "nodes/a/status.md"
         text = status.read_text()
         status.write_text(text + "\n## Blocked / needs the operator\n\n- The staging key\n")
-        self.assertIn("doesn't say what clears it", self.b(r, "check"))
+        self.assertIn("a: 1 Blocked entry doesn't say what clears it", self.b(r, "check"))
+        status.write_text(text + "\n## Blocked / needs the operator\n\n- The staging key\n- The vendor's answer\n")
+        out = self.b(r, "check")
+        self.assertIn("a: 2 Blocked entries don't say what clears them", out)
+        self.assertEqual(out.count("Blocked entr"), 1)  # one warning per node, with a count
         status.write_text(text + "\n## Blocked / needs the operator\n\n- The staging key — waiting on Sam; "
                                  "clears when the key is in the vault\n")
         self.assertNotIn("doesn't say what clears it", self.b(r, "check"))
@@ -6187,6 +6198,80 @@ class Workflow(Scenario):
         self.b(r, "changes", "root", "--seen")
         self.assertNotIn("core was upgraded", reason(hook(r)))
         self.assertNotIn("core was upgraded", reason(hook(a)))
+        log = (r / ".brain/hooks.log").read_text().splitlines()
+        self.assertTrue(any(line.startswith(tuple("0123456789")) and " stop root tick: upgrade notice (" in line
+                            for line in log), log)  # an upgrade-only hold says why, too
+
+class SmallFixes(Scenario):
+    """Briefs written to files, a merge with empty folders, history batches that fit the readers."""
+
+    def test_every_brief_out_stays_out_of_the_home_its_checkouts_and_the_instance(self):
+        r, home, wt = WorkerReadyPackets.job(self)
+        self.b(r, "specialist", "new", "writer", "--at", "root", "--title", "Writer")
+        outside = self.tmp / "briefs"
+        outside.mkdir()
+        (outside / "into-home").symlink_to(home)
+        (home / "precious.txt").write_text("precious\n")
+        os.link(home / "precious.txt", outside / "linked.md")
+        commands = {"brief": ["brief", "a", "--task", "Fix it"], "small": ["brief", "a", "--small", "--task", "Fix it"],
+                    "branch": ["brief", "a", "--branch", "job", "--task", "Fix it"],
+                    "review": ["review", "a", "--branch", "job", "--built-by", "claude"],
+                    "hire": ["hire", "writer", "a", "--task", "Write it"]}
+        for name, args in commands.items():
+            for dest, why in ((home / "b.md", "inside the home"), (wt / "b.md", "inside the home"),
+                              (outside / "into-home" / "b.md", "inside the home"), (r / "nodes/a/b.md", "inside the instance"),
+                              (r / ".brain/b.md", "inside the instance")):
+                self.assertIn(why, self.b(r, *args, "--out", str(dest), ok=False), (name, dest))
+                self.assertFalse(dest.exists(), (name, dest))
+            self.assertIn("a link or not a folder", self.b(r, *args, "--out", str(outside / "linked.md" / "x"), ok=False))
+            mine = outside / f"{name}.md"
+            self.assertEqual(self.b(r, *args, "--out", str(mine)).strip(), str(mine))
+            self.assertEqual(mine.stat().st_mode & 0o777, 0o600)
+        self.b(r, "brief", "a", "--task", "Fix it", "--out", str(outside / "linked.md"))
+        self.assertEqual((home / "precious.txt").read_text(), "precious\n")  # replaced, never written through
+        self.assertIn("Role: worker", (outside / "linked.md").read_text())
+        self.assertEqual([p.name for p in outside.iterdir() if p.name.startswith(".brief-")], [])
+        self.assertNotIn("b.md", self.git("status", "--porcelain", "--ignored", cwd=home))
+
+    def test_merge_commits_when_a_node_has_empty_folders(self):
+        r = self.init("alice")
+        for nid in ("a", "d"):
+            self.b(r, "new", nid, "--title", nid.upper())
+        (r / "nodes/a/job-handbacks").mkdir()
+        (r / "nodes/a/scratch/deeper").mkdir(parents=True)
+        self.b(r, "merge", "a", "d")
+        self.assertEqual(self.git("status", "--porcelain", cwd=r), "")
+        self.assertIn("Merge a into d", self.git("log", "-1", "--format=%s", cwd=r))
+        self.assertIn("✓", self.b(r, "check"))
+
+
+class HistorySizes(History):
+    def test_batches_fit_the_runtime_that_compacts_soonest_unless_given(self):
+        s = self.codex / "sessions" / "2026" / "10" / "03"
+        self.jsonl(s / "rollout-2026-10-03T09-00-00-aaaa0009.jsonl", self.codex_rows("aaaa0009-0000", self.home, [
+            self.item("UserMessage", "Small window here.", id="u-small"),
+            ("event_msg", {"type": "token_count", "info": {"last_token_usage": {"input_tokens": 130000}}}),
+            ("compacted", {"message": "x"}),
+            self.item("AgentMessage", "Compacted.", phase="final_answer")], at0="2026-10-03T09:00:00Z"))
+        summary = self.b(self.r, "history", "garden")
+        m = json.loads((self.tmp / "garden-work/scratch/history/manifest.json").read_text())
+        self.assertEqual(m["compactions"]["codex"][0], 130000)
+        self.assertEqual((m["batch_tokens"], m["slice_tokens"], m["sized_by"]), (35000, 20000, "codex"))
+        self.assertIn("sized so a codex reader holds one before it compacts", summary)
+        self.assertIn("codex compacted as early as 130k here (", summary)
+        self.assertNotIn("holds 0 batch", summary)
+        self.assertTrue(all(b["tokens"] <= 35000 for b in m["batches"]))
+        self.b(self.r, "history", "garden", "--fresh", "--batch-tokens", "60000")
+        m = json.loads((self.tmp / "garden-work/scratch/history/manifest.json").read_text())
+        self.assertEqual((m["batch_tokens"], m["sized_by"]), (60000, None))  # given: kept, and the summary warns
+        self.assertIn("holds 0 batch", self.b(self.r, "history", "garden", "plan"))
+        self.jsonl(s / "rollout-2026-10-03T10-00-00-aaaa0010.jsonl", self.codex_rows("aaaa0010-0000", self.home, [
+            self.item("UserMessage", "Tiny window.", id="u-tiny"),
+            ("event_msg", {"type": "token_count", "info": {"last_token_usage": {"input_tokens": 62000}}}),
+            ("compacted", {"message": "x"})], at0="2026-10-03T10:00:00Z"))
+        self.assertIn("pass --batch-tokens", self.b(self.r, "history", "garden", "--fresh", ok=False))
+        self.b(self.r, "history", "garden", "--fresh", "--batch-tokens", "8000", "--slice-tokens", "4000")
+
 
 if __name__ == "__main__":
     unittest.main()

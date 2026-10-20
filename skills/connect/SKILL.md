@@ -22,7 +22,8 @@ for review; nothing reaches another project until it is accepted.
    keeps it in `.brain/connect/<node>/briefs/` and prints the path), launched
    as workers through the host adapter, several at a time (check `brain usage` first). A reader
    records `read: <id>` after each read and resumes at the first read without one after a
-   compaction. It samples at most 30 code files, each through `brain scrub`, and runs nothing.
+   compaction. It samples at most 30 code files, each through `brain scrub`, and runs nothing;
+   `check` rejects a digest citing more than 30 files of one home.
    Its notes cover how the project is built, design rules, failures and fixes, code conventions,
    tools, kinds of work and what is already learned, each line cited.
 3. **Check.** `brain connect <node> check` shows each digest's unread parts, citations to files,
