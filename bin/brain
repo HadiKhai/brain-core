@@ -54,14 +54,30 @@ def read_fm(path):
 
 
 def write_fm(path, fm, body):
+    safe_target(path)
     lines = "\n".join(f"{k}: {v}" for k, v in fm.items())
     Path(path).write_text(f"---\n{lines}\n---\n{body}")
     touch(path)
 
 
+def safe_target(path):
+    """A file brain writes inside an instance stays inside it: neither a folder on the way nor the file itself may
+    be a link leading out (a node's job-handbacks/ linked into a home would put job records there)."""
+    p = Path(os.path.abspath(path))
+    root = next((d for d in p.parents if (d / "instance.md").is_file() and (d / "node.md").is_file()), None)
+    if root is None:
+        return
+    top = root.resolve()
+    for q in [p.parent] + ([p] if p.is_symlink() else []):
+        real = q.resolve()
+        if real != top and top not in real.parents:
+            die(f"{p} leads out of the brain through a link; brain writes only inside it (remove the link)")
+
+
 def atomic_write(path, text):
     """Replace a whole file from a same-folder temporary; failures leave the old file intact."""
     path = Path(path)
+    safe_target(path)
     tmp = None
     try:
         with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", newline="", dir=path.parent,
@@ -1882,10 +1898,12 @@ def sync_view_section(d, sealed):
     section = (CORE / "templates" / "sealed-view.md").read_text()
     text = ag.read_text()
     if sealed and section.strip() not in text:
+        safe_target(ag)
         ag.write_text(text.rstrip("\n") + "\n" + section)
         touch(ag)
         return True
     if not sealed and section.strip() in text:
+        safe_target(ag)
         ag.write_text(text.replace(section.strip(), "").rstrip("\n") + "\n")
         touch(ag)
         return True
@@ -2383,6 +2401,7 @@ def do_move(inst, nid, parent_id):
             write_fm(m["dir"] / "node.md", fm, body)
             ag = m["dir"] / "AGENTS.md"
             if ag.exists():
+                safe_target(ag)
                 ag.write_text(ag.read_text().replace(f"Node `{old_id}`", f"Node `{m['id']}`"))
                 touch(ag)
             if old_id in inst.local["nodes"]:
@@ -2416,6 +2435,7 @@ def git_mv(inst, src, dest):
 
 
 def append_inbox(n_dir, who, text, inst):
+    safe_target(n_dir / "inbox.md")
     with open(n_dir / "inbox.md", "a") as fh:
         fh.write(f"- {inst.now()} from {who}: {text}\n")
     touch(n_dir / "inbox.md")
@@ -2706,6 +2726,7 @@ def cmd_item_add(a):
     lib = at["dir"] / "library"
     lib.mkdir(exist_ok=True)
     path = lib / f"{a.id}.md"
+    safe_target(path)
     path.write_text(text)
     inst.commit([path], f"learn: {a.id}")
     print(f"{tilde(path)}\n  from {', '.join(n['id'] for n in sources)} ({a.ref}); scope {', '.join(scope)}")
@@ -2943,6 +2964,7 @@ def cmd_lesson(a):
         lines.append("")
         idx += 1
     lines.insert(idx, line)
+    safe_target(path)
     path.write_text("\n".join(lines) + "\n")
     inst.commit([path], f"lesson: {a.specialist} from {src['id']}")
     print(line)
@@ -3653,8 +3675,7 @@ def history_matcher(inst, n):
     home = n["home_path"].resolve()
     common, remotes = history_repo(home)
     roots = [home, (workbench(inst, n) / "worktrees").resolve()]
-    roots += [Path(line[9:]).resolve() for line in git("worktree", "list", "--porcelain", cwd=home).stdout.splitlines()
-              if line.startswith("worktree ")]
+    roots += [p.resolve() for p in git_worktrees(home)]
     seen = {}
 
     def match(cwd, repo_url):
@@ -3833,13 +3854,18 @@ def history_cost(batch):
     return total
 
 
+def git_worktrees(home):
+    """Every checkout git knows of a repository, read NUL-separated: a path may hold a newline."""
+    r = git("worktree", "list", "--porcelain", "-z", cwd=home)
+    return [Path(f[9:]) for f in r.stdout.split("\0") if f.startswith("worktree ")] if not r.returncode else []
+
+
 def home_places(n):
     """A node's home and every checkout of it this machine knows: git's worktrees and the brain's own."""
     home = n.get("home_path")
     places = [home] if home else []
     if home and home.is_dir():
-        r = git("worktree", "list", "--porcelain", "-z", cwd=home)  # NUL-separated: a path may hold a newline
-        places += [Path(f[9:]) for f in r.stdout.split("\0") if f.startswith("worktree ")] if not r.returncode else []
+        places += git_worktrees(home)
     for w in (n["local"].get("worktrees") or {}).values():
         if isinstance(w, dict) and isinstance(w.get("path"), str):
             places.append(Path(w["path"]).expanduser())
@@ -3978,10 +4004,18 @@ def history_write(inst, n, wb, files):
                 if st:
                     os.rename("history", old, src_dir_fd=sfd, dst_dir_fd=sfd)
                 os.rename(tmp, "history", src_dir_fd=sfd, dst_dir_fd=sfd)
+                try:
+                    fd_outside(inst, n, sfd, "the workbench's scratch")  # moved while it was swapped in
+                except SystemExit:
+                    os.rename("history", tmp, src_dir_fd=sfd, dst_dir_fd=sfd)  # take it back, old one in again
+                    if st:
+                        os.rename(old, "history", src_dir_fd=sfd, dst_dir_fd=sfd)
+                    raise
             except BaseException:
                 history_rmtree(sfd, tmp)
                 raise
             if st:
+                fd_outside(inst, n, sfd, "the workbench's scratch")  # never a deletion in a folder moved since
                 history_rmtree(sfd, old)
         finally:
             os.close(sfd)
@@ -4460,6 +4494,32 @@ def connect_dir(inst, n):
     return inst.root / ".brain" / "connect" / connect_name(n["id"])
 
 
+def connect_inside(inst, n, fd):
+    """Asked of an open connect folder before and after it is changed: one moved out of .brain/connect since it was
+    opened (into a home, say) is refused."""
+    where = history_fd_path(fd)
+    top = (inst.root / ".brain" / "connect").resolve()
+    real = Path(where).resolve() if where else None
+    if not real or not (real == top or top in real.parents):
+        die_for(n, f"{n['id']}: the connect folder moved out of .brain/connect; nothing written")
+
+
+def connect_publish(inst, n, fd, tmp, name):
+    """Rename a written temp file into place, checking the folder before and after: moved, nothing stays."""
+    published = False
+    try:
+        connect_inside(inst, n, fd)
+        os.rename(tmp, name, src_dir_fd=fd, dst_dir_fd=fd)
+        published = True
+        connect_inside(inst, n, fd)
+    except BaseException:
+        try:
+            os.unlink(name if published else tmp, dir_fd=fd)
+        except OSError:
+            pass
+        raise
+
+
 def connect_open(inst, n, create=False):
     """The node's connect folder, opened one component at a time without following links: a link planted
     anywhere on the way can't send a deletion or a write out of this machine's .brain folder. None if absent."""
@@ -4630,6 +4690,7 @@ def connect_plan(inst, n, a):
             "skipped": len(set(held))}
     fd = connect_open(inst, n, create=True)
     try:
+        connect_inside(inst, n, fd)
         for entry in list(os.scandir(fd)):  # a fresh start: links are removed, never followed
             if entry.is_dir(follow_symlinks=False):
                 history_rmtree(fd, entry.name)
@@ -4638,7 +4699,7 @@ def connect_plan(inst, n, a):
         os.mkdir("digests", 0o700, dir_fd=fd)
         tmp = f".plan-{os.urandom(6).hex()}"
         history_put(fd, tmp, json.dumps(plan, indent=1, ensure_ascii=False) + "\n")
-        os.rename(tmp, "plan.json", src_dir_fd=fd, dst_dir_fd=fd)
+        connect_publish(inst, n, fd, tmp, "plan.json")
     finally:
         os.close(fd)
     dirty = git("status", "--porcelain", "--", *[str(m["dir"].relative_to(inst.root)) for m in nodes], cwd=inst.root)
@@ -4721,13 +4782,18 @@ def connect_status(inst, n, plan):
     return out, theme
 
 
+def digest_ok(st):
+    """A digest the connector may read: every part read, done, its citations real, none unsafe, within the cap."""
+    return (not st["todo"] and st["done"] and not st["unknown"] and not st["uncited"] and not st["unsafe"]
+            and st["code_files"] <= CONNECT_CODE_FILES)
+
+
 def connect_check(inst, n, plan):
     digests, theme = connect_status(inst, n, plan)
     lines, ok = [f"{n['id']}: connection check, planned {plan['planned_at']}"], True
     for nid, st in digests.items():
         over = st["code_files"] > CONNECT_CODE_FILES
-        good = not st["todo"] and st["done"] and not st["unknown"] and not st["uncited"] and not st["unsafe"] and not over
-        ok = ok and good
+        ok = ok and digest_ok(st)
         state = "done" if st["done"] and not st["todo"] else (
             "not started" if len(st["todo"]) == st["parts"] else f"{st['parts'] - len(st['todo'])} of {st['parts']} read")
         lines.append(f"  {nid}: {state}; {st['cited']} citations"
@@ -4786,8 +4852,7 @@ def connect_brief(inst, n, a, plan):
     cite = ("Every line cites where it comes from: `[<node>:<file>]` for a node file, `[<node>@<path in its home>]` "
             "for code, `[item:<id>]` for a library item.")
     if a.final:
-        bad = [nid for nid, st in digests.items()
-               if st["todo"] or not st["done"] or st["unknown"] or st["uncited"] or st["unsafe"]]
+        bad = [nid for nid, st in digests.items() if not digest_ok(st)]
         if bad:
             die_for(n, f"digests aren't finished and clean: {', '.join(bad)} (brain connect {n['id']} check)")
         if theme["unknown"] or theme["uncited"] or theme["unsafe"]:
@@ -4900,7 +4965,7 @@ def cmd_connect(a):
                 try:
                     tmp = f".brief-{os.urandom(6).hex()}"
                     history_put(bfd, tmp, text)
-                    os.rename(tmp, name, src_dir_fd=bfd, dst_dir_fd=bfd)
+                    connect_publish(inst, n, bfd, tmp, name)
                 finally:
                     os.close(bfd)
             finally:
@@ -6174,6 +6239,7 @@ def cmd_schedule(a):
         f = inst.root / "schedules.md"
         head = "" if f.exists() else ("# Schedules\n\nRecurring work. Shared by every machine; each schedule runs on "
                                       "one machine only (`brain schedule list` shows which).\n")
+        safe_target(f)
         with open(f, "a") as fh:
             fh.write(f"{head}\n## {a.id}\n\nwhen: {a.when}\nnode: {a.node}\nbrief: {a.brief.strip()}\n")
         touch(f)
@@ -6930,6 +6996,7 @@ def write_registry(inst):
     text = registry_text(inst)
     changed = not (inst.root / "registry.md").exists() or (inst.root / "registry.md").read_text() != text
     if changed:
+        safe_target(inst.root / "registry.md")
         (inst.root / "registry.md").write_text(text)
         touch(inst.root / "registry.md")
     return changed
@@ -7092,6 +7159,7 @@ def set_pointer(f, inst, name, add):
     if new == text:
         return False
     f.parent.mkdir(parents=True, exist_ok=True)
+    safe_target(f)
     f.write_text(new)
     return True
 
@@ -7988,6 +8056,7 @@ def apply_fixes(inst, kinds):
                 rel = f.relative_to(tdir)
                 if f.is_file() and rel.name != ".gitkeep" and not (n["dir"] / rel).exists():
                     (n["dir"] / rel).parent.mkdir(parents=True, exist_ok=True)
+                    safe_target(n["dir"] / rel)
                     (n["dir"] / rel).write_text(fill(f.read_text(), {"ID": n["id"], "TITLE": n["fm"].get("title", "")}))
                     touch(n["dir"] / rel)
                     done.append(f"{n['id']}: added {rel}")

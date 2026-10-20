@@ -5456,6 +5456,27 @@ class Connections(Scenario):
         return self.add(iid, "--from", src, "--repo", "brain/alice", "--commit", self.H, "--proposed", "--body", body,
                         *args, ok=ok)
 
+    def test_a_saved_brief_never_lands_where_its_folder_moved(self):
+        from importlib.machinery import SourceFileLoader
+        self.b(self.r, "connect", "root")
+        self.b(self.r, "connect", "root", "brief", "app", "--save")
+        m = SourceFileLoader("brain_connect_move", str(CORE / "bin/brain")).load_module()
+        briefs = self.r / ".brain/connect/root/briefs"
+        put = m.history_put
+
+        def put_then_move(fd, name, text):
+            put(fd, name, text)
+            if name.startswith(".brief-"):
+                os.rename(briefs, self.homes["app"] / "moved")
+        m.history_put = put_then_move
+        a = argparse.Namespace(id="root", action="brief", nodes=["lab"], final=False, save=True, fresh=False,
+                               only=None, runtime=None, model=None, to=None, json=False)
+        m.find_root = lambda: self.r
+        with mock.patch.dict(os.environ, self.env, clear=True), contextlib.redirect_stderr(io.StringIO()), \
+                contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit):
+            m.cmd_connect(a)
+        self.assertEqual(sorted(p.name for p in (self.homes["app"] / "moved").iterdir()), ["app.md"])
+
     def test_items_and_specialists_from_several_nodes(self):
         r = self.r
         self.add("kv-queue", "--from", "app,lab", "--keywords", "rate limit, dropped writes", "--body", "Queue them.")
@@ -5603,6 +5624,7 @@ class Connections(Scenario):
             (self.homes["app"] / f"part{i}.ts").write_text(f"export const p{i} = {i}\n")
         digest("app", "".join(f"- part {i} [app@part{i}.ts] [app@part{i}.ts#L1]\n" for i in range(30)))  # + main.ts
         self.assertIn("cites 31 code files, over the 30", self.b(r, "connect", "root", "check", ok=False))
+        self.assertIn("aren't finished and clean: app", self.b(r, "connect", "root", "brief", "--final", ok=False))
         digest("app", "".join(f"- part {i} [app@part{i}.ts]\n" for i in range(29)))
         self.b(r, "connect", "root", "check")
         digest("app", "".join(f"- spelled [app@{'./' * i}main.ts]\n" for i in range(31)))  # one file, 31 spellings
@@ -6275,6 +6297,24 @@ class SmallFixes(Scenario):
             m.write_out(inst, n, third / "brief.md", "text\n")
         self.assertEqual((third / "brief.md").read_text(), "text\n")
 
+    def test_node_files_never_follow_a_link_out_of_the_brain(self):
+        r, home, wt = WorkerReadyPackets.job(self)
+        hb = r / "nodes/a/job-handbacks"
+        shutil.rmtree(hb, ignore_errors=True)
+        hb.symlink_to(home)
+        out = self.b(r, "handback", "a", "--branch", "job", "--state", "blocked", "--report", "r.md",
+                     "--lessons", "none: none", ok=False)
+        self.assertIn("leads out of the brain through a link", out)
+        self.assertEqual([p.name for p in home.iterdir() if p.suffix == ".json"], [])
+        hb.unlink()
+        inbox = r / "nodes/a/inbox.md"
+        inbox.unlink()
+        inbox.symlink_to(home / "calc.py")
+        before = (home / "calc.py").read_text()
+        self.b(r, "handback", "a", "--branch", "job", "--state", "question", "--report", "r.md",
+               "--lessons", "none: none", ok=False)
+        self.assertEqual((home / "calc.py").read_text(), before)
+
     def test_merge_commits_when_a_node_has_empty_folders(self):
         r = self.init("alice")
         for nid in ("a", "d"):
@@ -6288,6 +6328,51 @@ class SmallFixes(Scenario):
 
 
 class HistorySizes(History):
+    def test_extraction_taken_back_when_its_folder_moves_into_the_home(self):
+        from importlib.machinery import SourceFileLoader
+        self.b(self.r, "history", "garden")
+        m = SourceFileLoader("brain_history_move", str(CORE / "bin/brain")).load_module()
+        inst = m.Instance(self.r)
+        n = inst.node("garden")
+        wb = self.tmp / "garden-work"
+        old = (wb / "scratch/history/manifest.json").read_text()
+        check, calls = m.fd_outside, []
+
+        def check_then_move(*args):  # the scratch folder moves into the home just after it was checked
+            check(*args)
+            calls.append(1)
+            if len(calls) == 1:
+                os.rename(wb / "scratch", self.home / "moved")
+        m.fd_outside = check_then_move
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            m.history_write(inst, n, wb, [("manifest.json", "{}"), ("batches/b001.md", "new\n")])
+        moved = self.home / "moved"
+        self.assertEqual((moved / "history/manifest.json").read_text(), old)  # the old extraction, back in place
+        self.assertEqual([p.name for p in moved.iterdir() if p.name.startswith(".history")], [])
+        self.assertIn("? moved/", self.git("status", "--porcelain", "--untracked-files=normal", cwd=self.home))
+        self.assertNotIn("new", (moved / "history/manifest.json").read_text())
+        os.rename(moved, wb / "scratch")
+        calls.clear()
+
+        def move_before_cleanup(*args):  # moved after the swap was checked: the old one is never deleted there
+            check(*args)
+            calls.append(1)
+            if len(calls) == 2:
+                os.rename(wb / "scratch", self.home / "moved")
+        m.fd_outside = move_before_cleanup
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            m.history_write(inst, n, wb, [("manifest.json", "{}"), ("batches/b001.md", "new\n")])
+        self.assertTrue([p for p in (self.home / "moved").iterdir() if p.name.startswith(".history-old-")])
+
+    def test_sessions_of_a_deleted_checkout_with_a_newline_still_match(self):
+        from importlib.machinery import SourceFileLoader
+        odd = self.tmp / "line\nbreak"
+        self.git("worktree", "add", "-q", "-b", "odd", str(odd), cwd=self.home)
+        shutil.rmtree(odd)
+        m = SourceFileLoader("brain_history_odd", str(CORE / "bin/brain")).load_module()
+        inst = m.Instance(self.r)
+        self.assertTrue(m.history_matcher(inst, inst.node("garden"))[0](str(odd / "src"), ""))
+
     def test_batches_fit_the_runtime_that_compacts_soonest_unless_given(self):
         s = self.codex / "sessions" / "2026" / "10" / "03"
         self.jsonl(s / "rollout-2026-10-03T09-00-00-aaaa0009.jsonl", self.codex_rows("aaaa0009-0000", self.home, [
