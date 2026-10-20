@@ -12,6 +12,10 @@ description: Verify the instance against the model - structure, owners, runtime 
    - item provenance and scope (axiom 10);
    - future status `Updated:` times (five minutes of skew allowed); other future-dated node
      entries warn, and undated legacy clock times are ignored (axiom 17);
+   - generated facts block present (error; repair with `brain status <id> --refresh`);
+   - Now over 30 nonblank lines, blocked bullets missing since/recommendation/default,
+     dead backticked paths or Markdown links in brief/status/knowledge (warnings);
+   - code nodes missing verify or a locally bound coordinator tick (warnings);
    - lesson outcomes on newly recorded merges; historical merges are not flagged.
 2. `core/bin/brain check --fix` repairs the safe things (links, registry, sealed-view
    sections, missing template files, machine IDs left in `node.md`). Fix the rest, or explain

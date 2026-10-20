@@ -1562,6 +1562,7 @@ def cmd_init(a):
     if not (root / ".git").exists():
         subprocess.run(["git", "init", "-q", "-b", "main", str(root)], check=True)
     ensure_gitignore(root)
+    refresh_status(inst, inst.node("root"))
     inst.commit(["."], f"Initialize instance: {a.title}")
     name = register(root)
     print(f"instance: {root}\nname: {name}\noperator: {a.operator}\nruntimes: {runtimes}\nhost: {a.host}")
@@ -1650,6 +1651,7 @@ def create_node(inst, nid, title, owners="", labels="", runtime=None, home=None,
         fm["home_url"] = home_url
     write_fm(d / "node.md", fm, body)
     inst.save_local()
+    refresh_status(inst, inst.node(nid))
     return d, parent_id, eff, sealed
 
 
@@ -6982,6 +6984,8 @@ def cmd_wt_add(a):
     n, home = git_home(inst, a.id)
     if find_terms(a.branch, never_terms(n)):
         die(f"that branch name contains {', '.join(find_terms(a.branch, never_terms(n)))}: pick another")
+    for warning in code_setup_warnings(inst, n):
+        print("! " + warning)
     wb = workbench(inst, n, create=True)
     path = wb / "worktrees" / a.branch.replace("/", "-")
     if path.exists():
@@ -7834,6 +7838,88 @@ def status_section(n, heading):
     return out
 
 
+
+NOW_LINE_LIMIT = 30
+BLOCKED_HOURS = 48
+
+
+def code_node(n):
+    return bool(n["fm"].get("stack")) or any(
+        l in ("type:code", "kind:code") for l in lst(n["fm"].get("labels"))) or bool(
+        n["external"] and n["home_path"] and (n["home_path"] / ".git").exists())
+
+
+def code_setup_warnings(inst, n):
+    if not code_node(n) or n["archived"]:
+        return []
+    out = []
+    if not n["fm"].get("verify", "").strip():
+        out.append(f"{n['id']}: code node needs verify=<command> before its first job; brain set {n['id']} 'verify=<command>'")
+    bound = inst.local.get("schedules", {})
+    if not any(x.get("node") == n["id"] and x["id"] in bound for x in read_schedules(inst)):
+        out.append(f"{n['id']}: code node needs a coordinator tick before its first job; schedule a host interval, "
+                   "brain schedule add, then brain schedule bind (adapters/hosts/t3.md)")
+    return out
+
+
+def blocked_entries(inst, n):
+    """Stable source text, with age kept separate so a ticking clock cannot re-notify."""
+    out = []
+    for text in status_section(n, "blocked"):
+        if text.lower().rstrip(".") in ("none", "nothing"):
+            continue
+        fields = dict((m.group(1).lower(), m.group(2).strip()) for m in re.finditer(
+            r"(?:^|;\s*)(since|recommendation|default):\s*([^;]*)", text, re.I))
+        since = inst.parse_time(fields.get("since", ""))
+        # Legacy entries still age: use this bullet's introduction, never the status Updated line.
+        if not since:
+            source = n["dir"] / "status.md"
+            history = git("log", "--reverse", "--format=%cI", "-S", text, "--",
+                          str(source.relative_to(inst.root)), cwd=inst.root).stdout.splitlines()
+            since = inst.parse_time(history[0]) if history else datetime.datetime.fromtimestamp(
+                source.stat().st_mtime, inst.zone())
+        hours = max(0, elapsed(since, inst.now_dt()) / 3600)
+        out.append({"text": text, "since": since.isoformat(timespec="seconds"),
+                    "age_hours": round(hours, 2), "escalated": hours > BLOCKED_HOURS,
+                    "recommendation": fields.get("recommendation", ""), "default": fields.get("default", ""),
+                    "missing": [k for k in ("since", "recommendation", "default")
+                                if not fields.get(k) or (k == "since" and not inst.parse_time(fields[k]))]})
+    return out
+
+
+def blocked_metadata(inst, n, kind, text):
+    if kind not in ("blocked", "blocked-overdue"):
+        return {}
+    return next(({k: import_text(v, never_terms(n)) if isinstance(v, str) else v
+                  for k, v in b.items() if k not in ("text", "missing")}
+                 for b in blocked_entries(inst, n) if b["text"] == text), {})
+
+
+def dead_note_paths(n):
+    """Explicit Markdown paths only. Never interpret commands, URLs, globs or prose as paths."""
+    out = []
+    for name in ("brief.md", "status.md", "knowledge.md"):
+        source = n["dir"] / name
+        if not source.exists():
+            continue
+        text = FACTS_RE.sub("", source.read_text())
+        text = re.sub(r"<!--.*?-->", "", text, flags=re.S)
+        for number, line in enumerate(text.splitlines(), 1):
+            candidates = re.findall(r"`([^`\n]+)`", line)
+            candidates += re.findall(r"\[[^\]]*\]\(([^)]+)\)", line)
+            for raw in candidates:
+                value = raw.strip("<>").split("#", 1)[0]
+                value = re.sub(r":\d+(?::\d+)?$", "", value)
+                if not value or re.search(r"\s|[?*{}$]|://|^[a-zA-Z][a-zA-Z0-9+.-]*:", value):
+                    continue
+                if not ("/" in value or re.search(r"\.[a-zA-Z0-9]{1,10}$", value)):
+                    continue
+                path = Path(value).expanduser()
+                bases = [n["dir"]] + ([n["home_path"]] if n["home_path"] else [])
+                if not any((base / path).exists() for base in bases):
+                    out.append(f"{n['id']}: {name}: dead path {raw}; repair the reference or restore the file/folder")
+    return sorted(set(out))
+
 def active_work(n):
     """Rows of the 'Active work' table in status.md (branch, thread, PR, state), minus the header."""
     f = n["dir"] / "status.md"
@@ -7959,6 +8045,9 @@ def due_items(inst, n, evidence=None, include_stale=True):
     items = []
     def add(kind, text, **extra):
         items.append({"node": n["id"], "kind": kind, "text": redact(text, never_terms(n)), **extra})
+    for blocked in blocked_entries(inst, n):
+        if blocked["escalated"]:
+            add("blocked-overdue", blocked["text"], **blocked_metadata(inst, n, "blocked-overdue", blocked["text"]))
     if missing_preview(n, state):
         add("missing-preview", "code node has merged jobs but no recorded preview; run a local preview and screenshot tour, "
             "then record preview=<URL/path> and preview_tour=<path> with brain set")
@@ -8034,12 +8123,12 @@ def cmd_due(a):
         print(json.dumps(items, indent=2))
     else:
         for item in items:
-            print(f"{item['node']}: {item['kind']}: {item['text']}")
+            print(f"{item['node']}: {item['kind']}: {item['text']}" +
+                  (f" (escalated: {item['age_hours']:g}h old, over 48h)" if item.get("escalated") else ""))
 
 
 def missing_preview(n, state):
-    code = bool(n["fm"].get("stack")) or any(l in ("type:code", "kind:code") for l in lst(n["fm"].get("labels"))) or \
-        bool(n["external"] and n["home_path"] and (n["home_path"] / ".git").exists())
+    code = code_node(n)
     merged = any(r["Ended"] and r["Outcome"] == "merged" for r in state["jobs"] or []) or \
         any(w["merged"] for w in state["worktrees"].values())
     return code and merged and not (n["local"].get("preview", "").strip() or n["fm"].get("preview_url", "").strip())
@@ -8159,7 +8248,7 @@ def inbox_items(inst, nodes=None, reporter="root"):
     by_id = {n["id"]: n for n in (nodes if nodes is not None else inst.nodes())}
     out, ids = [], set()
     for nid, kind, text in attention_items(inst, list(by_id.values())):
-        identity = text if kind in ("blocked", "inbox", "core-update") else \
+        identity = text if kind in ("blocked", "blocked-overdue", "inbox", "core-update") else \
             re.sub(r"\d[\d.,]*[kMB]?", "#", text) if kind == "job" else kind  # growing counts aren't new
         key = digest([nid, kind, " ".join(identity.split())])
         if key in ids:
@@ -8169,7 +8258,7 @@ def inbox_items(inst, nodes=None, reporter="root"):
         record = seen.get(key, {})
         first = record.get("first_seen") if isinstance(record, dict) else None
         if not first:
-            source = n["dir"] / ("inbox.md" if kind == "inbox" else "status.md" if kind in ("blocked", "stale") else "node.md")
+            source = n["dir"] / ("inbox.md" if kind == "inbox" else "status.md" if kind in ("blocked", "blocked-overdue", "stale") else "node.md")
             if kind == "import-review":
                 sources = [n["dir"] / "sources/import-proposals.md"]
                 sources += [s["dir"] / "role.md" for s in find_specialists(inst)
@@ -8184,7 +8273,8 @@ def inbox_items(inst, nodes=None, reporter="root"):
             first = history[0] if history else datetime.datetime.fromtimestamp(
                 source.stat().st_mtime if source.exists() else inst.now_dt().timestamp(), inst.zone()).isoformat(timespec="seconds")
         out.append({"id": key, "node": nid, "kind": kind, "text": redact(text, never_terms(n)),
-                    "first_seen": first, "reported": bool(record.get("reported_at")) if isinstance(record, dict) else False})
+                    "first_seen": first, "reported": bool(record.get("reported_at")) if isinstance(record, dict) else False,
+                    **blocked_metadata(inst, n, kind, text)})
     return out, reporters
 
 
@@ -8212,7 +8302,8 @@ def cmd_inbox(a):
                  for i in items}
         items = fresh
     output = json.dumps(items, indent=2) + "\n" if a.json else "".join(
-        f"{item['node']}: [{prefixes[item['id']]}] {item['text']}\n" for item in items)
+        f"{item['node']}: [{prefixes[item['id']]}] {item['text']}" +
+        (f" (escalated: {item['age_hours']:g}h old, over 48h)" if item.get("escalated") else "") + "\n" for item in items)
     sys.stdout.write(output)
     if a.new:
         # Delivery comes first, under the same lock. A crash before saving repeats an item.
@@ -8523,7 +8614,8 @@ def attention_items(inst, nodes):
         if rules or roles or items:
             out.append((n["id"], "import-review", f"import review: {rules} rule file(s), {roles} role(s), "
                         f"{items} item(s) proposed; confirm or reject after reviewing source citations"))
-        out += [(n["id"], "blocked", b) for b in status_section(n, "blocked")]
+        for b in blocked_entries(inst, n):
+            out.append((n["id"], "blocked-overdue" if b["escalated"] else "blocked", b["text"]))
         out += [(n["id"], "inbox", "inbox: " + l[2:]) for l in inbox_lines(n)]
         out += [(n["id"], "job", t) for t in runaway_jobs(inst, n)]
         if paused(n):
@@ -9414,7 +9506,9 @@ def ui_state(inst, problems=None, scan=None, spend_budget=2.0):
                   "now": now.isoformat(timespec="seconds"), "others": [k for k, r in brains_here()
                                                                        if r.resolve() != inst.root.resolve()]},
         "nodes": out_nodes,
-        "attention": [{"node": a, "kind": k, "text": t} for a, k, t in attention_items(inst, nodes)],
+        "attention": [safe({"node": a, "kind": k, "text": t,
+                            **blocked_metadata(inst, next(n for n in nodes if n["id"] == a), k, t)})
+                      for a, k, t in attention_items(inst, nodes)],
         "inbox": inbox_items(inst, nodes)[0],
         "commits": commits[:300], "hours": UI_HOURS, "activity": {"start": start, "counts": activity},
         "commits_24h": sum(1 for c in commits if c["t"] > time.time() - 86400), "commits_total": len(commits),
@@ -9585,6 +9679,22 @@ def collect_problems(inst):
     nodes = inst.nodes()
     for n in nodes:
         fm, nid = n["fm"], n["id"]
+        status_file = n["dir"] / "status.md"
+        status_text = status_file.read_text() if status_file.exists() else ""
+        if (status_text.count(FACTS_START) != 1 or status_text.count(FACTS_END) != 1
+                or not FACTS_RE.search(status_text)):
+            p(f"{nid}: status.md missing or malformed generated facts block; brain status {nid} --refresh")
+        judgement = FACTS_RE.sub("", status_text)
+        now_match = re.search(r"(?ims)^## Now\s*\n(.*?)(?=^## |\Z)", judgement)
+        now_lines = len([l for l in re.sub(r"<!--.*?-->", "", now_match.group(1), flags=re.S).splitlines() if l.strip()]) if now_match else 0
+        if now_lines > NOW_LINE_LIMIT:
+            warnings.append(f"{nid}: Now has {now_lines} nonblank lines (limit {NOW_LINE_LIMIT}); move history to Recent changes or decisions")
+        incomplete = [b for b in blocked_entries(inst, n) if b["missing"]]
+        if incomplete:
+            warnings.append(f"{nid}: {len(incomplete)} blocked item(s) missing valid since:, recommendation: or default:; "
+                            "add '; since: <brain now timestamp>; recommendation: <action>; default: <fallback>'")
+        warnings.extend(code_setup_warnings(inst, n))
+        warnings.extend(redact(w, never_terms(n)) for w in dead_note_paths(n))
         future, dated = future_entries(inst, n)
         problems.extend(future)
         warnings.extend(dated)
@@ -9775,6 +9885,8 @@ def apply_fixes(inst, kinds):
                     (n["dir"] / rel).write_text(fill(f.read_text(), {"ID": n["id"], "TITLE": n["fm"].get("title", "")}))
                     touch(n["dir"] / rel)
                     done.append(f"{n['id']}: added {rel}")
+                    if rel.name == "status.md":
+                        refresh_status(inst, n)
     if "views" in kinds:
         done += [f"{nid}: sealed-view section updated" for nid in resync_views(inst)]
     if write_registry(inst):
