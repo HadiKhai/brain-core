@@ -75,8 +75,9 @@ from the runtime adapter JSON into the user's existing settings, preserving othe
 - Claude: the user `~/.claude/settings.json` (or the active configuration folder's user settings).
 - Codex: user-level `~/.codex/hooks.json` (or `$CODEX_HOME/hooks.json`) when the installed
   version supports it; review/trust that hook in Codex too. The official hook documentation
-  lists user-level `hooks.json` and inline `[hooks]` configuration. This is documented support,
-  not a live installation test of the locally found codex-cli 0.144.4. If unavailable, disabled,
+  lists user-level `hooks.json` and inline `[hooks]` configuration. This documents configuration
+  support, not live user-level execution or transcript delivery in every installed runtime.
+  If unavailable, disabled,
   or not propagated by the host, keep host pending checks as the route.
 
 Keep `brain` on PATH. The adapter command falls back to it outside Brain folders;
