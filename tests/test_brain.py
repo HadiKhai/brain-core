@@ -6690,6 +6690,17 @@ class HistorySizes(History):
                        [{**r, "message": {"role": "user", "content": f"FOREIGN-{sid}"}} if r.get("type") == "user" else r
                         for r in self.claude_rows(cwd, sid, start=19)[:3]])
         self.assertEqual(count(self.b(self.r, "spend", "garden", "--also", str(scratch))), after)
+        # Naming a damaged foreign bare repository itself: still a repository.
+        self.jsonl(self.claude / "projects" / re.sub(r"[^A-Za-z0-9]", "-", str(damaged)) / "aaaaaaaa-3333.jsonl",
+                   [{**r, "message": {"role": "user", "content": "FOREIGN-named-bare"}} if r.get("type") == "user" else r
+                    for r in self.claude_rows(damaged, "aaaaaaaa-3333", start=20)[:3]])
+        self.assertEqual(count(self.b(self.r, "spend", "garden", "--also", str(scratch), "--also", str(damaged))), after)
+        # A session whose folder is gone, inside a brain that's still there, matches nothing by its remote.
+        s3 = self.codex / "sessions" / "2026" / "10" / "06"
+        self.jsonl(s3 / "rollout-2026-10-06T09-00-00-dddd0001.jsonl", self.codex_rows(
+            "dddd0001-0000", self.r / "nodes" / "gone-folder", [self.item("UserMessage", "FOREIGN-gone", id="u-g")],
+            repo="https://github.com/Acme/Garden.git", at0="2026-10-06T09:00:00Z"))
+        self.assertEqual(count(self.b(self.r, "spend", "garden", "--also", str(scratch))), after)
         self.b(self.r, "history", "garden", "--fresh", "--also", str(scratch))
         _, m, text = self.batches()
         self.assertNotIn("FOREIGN-", text)

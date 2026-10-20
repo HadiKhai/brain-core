@@ -3920,11 +3920,17 @@ def also_refusal(p, brains, homes):
     return None
 
 
-def looks_like_repo(folder):
-    """A .git entry (file, folder or link), or a bare repository's own layout: a repository, read or not."""
+REPO_MARKS = (".git", "HEAD", "objects", "refs", "packed-refs", "config")
+
+
+def looks_like_repo(folder, strict=False):
+    """A repository, read or not: a .git entry or a bare layout (HEAD, objects/ and refs/). Strict, for the session's
+    own folder: any single trace of one, so a damaged bare repository still counts."""
     q = Path(folder)
-    return (q / ".git").exists() or (q / ".git").is_symlink() or \
-        ((q / "HEAD").is_file() and (q / "objects").is_dir() and (q / "refs").is_dir())
+    if (q / ".git").exists() or (q / ".git").is_symlink():
+        return True
+    present = [(q / m).exists() or (q / m).is_symlink() for m in REPO_MARKS[1:]]
+    return any(present) if strict else all(present[:3])
 
 
 def contains_brain(folder, depth=4):
@@ -3963,7 +3969,7 @@ def history_matcher(inst, n, also=()):
         if not (isinstance(cwd, str) and cwd.startswith("/")):
             return None
         p = Path(cwd).resolve()
-        if p not in seen and p.is_dir() and any(is_brain(q) for q in [p, *p.parents]):
+        if p not in seen and any(is_brain(q) for q in [p, *p.parents]):  # deleted folders included
             seen[p] = False  # a brain's own folders are never a project's home, whatever remote a session recorded
         if p not in seen and any(p == a for a in named):
             # A named folder vouches only for sessions run in that very folder, never below it (another project's
@@ -3975,7 +3981,8 @@ def history_matcher(inst, n, also=()):
                 c, r = history_repo(p)  # asked always: a bare repository has no .git entry
                 # No repository at all, or this node's own; a repository git can't read is never assumed absent.
                 seen[p] = "named folder" if ((c and (c == common or (remotes and remotes & r)))
-                                             or (not c and not any(looks_like_repo(q) for q in [p, *p.parents]))) \
+                                             or (not c and not looks_like_repo(p, strict=True)
+                                                 and not any(looks_like_repo(q) for q in p.parents))) \
                     else False
         if p not in seen:
             inside = any(p == r or r in p.parents for r in roots)
