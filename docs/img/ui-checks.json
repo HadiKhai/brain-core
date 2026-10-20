@@ -1,7 +1,7 @@
 {
   "fixture": "synthetic-only",
   "python_scenarios": 306,
-  "browser_assertions": 60,
+  "browser_assertions": 65,
   "viewports": [
     [
       1440,
@@ -20,9 +20,20 @@
       640
     ]
   ],
-  "ui_unit_and_license_tests": 14,
-  "playwright_scenarios": 10,
-  "independent_review": "Claude round 1 completed; requested fixes applied",
+  "ui_unit_and_license_tests": 15,
+  "playwright_scenarios": 22,
+  "extreme_screenshots": 448,
+  "seed_cases": [
+    "empty",
+    "single",
+    "ten",
+    "hundred",
+    "thousand",
+    "longtext",
+    "longtitle",
+    "rtl"
+  ],
+  "independent_review": "Coordinator review round 1 completed; round 2 awaits coordinator review",
   "detail_engines": [
     "Chromium",
     "WebKit"

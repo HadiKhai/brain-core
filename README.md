@@ -248,7 +248,9 @@ needs a key that is printed with the address. Desktop notifications are opt-in, 
 inbox item; saved ids survive reloads.
 
 <details>
-<summary><b>Four views</b> (demo data; follows your light or dark theme)</summary>
+<summary><b>Five views</b> (demo data; follows your light or dark theme)</summary>
+
+<picture><source media="(prefers-color-scheme: dark)" srcset="docs/img/ui-inbox-dark.png"><img alt="Inbox: questions with conversation actions, search and paging" src="docs/img/ui-inbox-light.png"></picture>
 
 | Learnings | Agents |
 | --- | --- |
