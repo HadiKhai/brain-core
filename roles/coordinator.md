@@ -275,3 +275,13 @@ Its unified hand-back is due without home readiness. Process the report and reco
 item ids (or `none: <reason>`) with `brain jobs <node> --branch import:<snapshot> --lessons <ids>
 --close`. Proposed ids remain inactive. `brain inbox` groups pending import review per node;
 acknowledge rules with the import skill's reviewed frontmatter only after actual review.
+
+## Questions wake their answering coordinator
+
+Configure this machine's `wake=` using the host adapter and retain the interval tick as recovery.
+`brain wake <node> "<reason>"` queues a deduplicated notification without sending question text;
+read `brain due <node>` and the inbox on wake. Nodes without coordinators route to root.
+Question and blocked hand-backs and supported Stop-hook captures request this wake automatically.
+Treat `overdue-question` due/live items as root escalations (ten minutes by default;
+`brain set <node> question_minutes=<minutes>`). Root's tick checks every descendant and follows
+up on those unanswered lines. Remove answered inbox lines; waking does not mark them answered.

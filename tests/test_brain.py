@@ -1513,6 +1513,25 @@ class UnifiedHandbacks(Scenario):
     def due(self, r):
         return json.loads(self.b(r, "due", "a", "--json"))
 
+    def test_question_and_blocked_handbacks_request_wake(self):
+        r, home, wt = self.job()
+        module = importlib.machinery.SourceFileLoader("brain_handback_wake", str(CORE / "bin/brain")).load_module()
+        inst = module.Instance(r)
+        args = argparse.Namespace(id="a", branch="job", state="question", lessons="none: fixture",
+                                  report=None, reviews=None, need_human="Choose blue")
+        with mock.patch.dict(os.environ, self.env, clear=True), \
+                mock.patch.object(module, "load", return_value=inst), \
+                mock.patch.object(module, "wake_start"), contextlib.redirect_stdout(io.StringIO()):
+            # No coordinator on a: both calls route to root's configured fake transport.
+            inst.local_of("root")["wake"] = "exit 0"
+            inst.save_local()
+            module.cmd_handback(args)
+            args.state, args.need_human = "blocked", None
+            module.cmd_handback(args)
+        directory = module.wake_directory(inst, inst.node("root"))
+        self.assertEqual(len(list(directory.glob("*.pending"))), 2)
+        self.assertIn("Choose blue", (r / "nodes/a/inbox.md").read_text())
+
     def test_question_handback_preserves_a_concurrent_runtime_inbox_append(self):
         r, home, wt = self.job()
         loader = importlib.machinery.SourceFileLoader("brain_handback_append", str(CORE / "bin/brain"))
@@ -2104,6 +2123,141 @@ class Schedules(Scenario):
         self.assertNotIn("# local:", out)
 
 
+class QuestionWake(Scenario):
+    def setUp(self):
+        super().setUp()
+        self.module = importlib.machinery.SourceFileLoader("brain_wake_test", str(CORE / "bin/brain")).load_module()
+        self.r = self.init("alice")
+        self.b(self.r, "new", "a", "--title", "Alpha")
+        self.calls = self.tmp / "calls"
+        script = self.tmp / "fake-wake.py"
+        script.write_text("import sys\nfrom pathlib import Path\np=Path(" + repr(str(self.calls)) +
+                          ")\nwith p.open('a') as f: f.write(sys.stdin.read()+'\\n')\n")
+        self.command = shlex_quote(sys.executable) + " " + shlex_quote(str(script))
+        self.b(self.r, "set", "a", "coordinator=synthetic-thread", "wake=" + self.command)
+        self.inst = self.module.Instance(self.r)
+        self.n = self.inst.node("a")
+
+    def enqueue(self, reason, node=None):
+        with mock.patch.object(self.module, "wake_start") as start:
+            self.module.request_wake(self.inst, node or self.n, reason)
+        return start.call_count
+
+    def drain(self, node=None):
+        self.module.wake_drain(self.inst, node or self.n, once=True)
+
+    def test_dedup_rate_window_and_delayed_delivery(self):
+        self.assertEqual(self.enqueue("first question"), 1)
+        self.drain()
+        self.assertEqual(self.calls.read_text().splitlines(), ['{"event":"brain-wake"}'])
+        self.assertEqual(self.enqueue("first question"), 0)
+        self.assertEqual(self.enqueue("second question"), 1)
+        self.drain()
+        self.assertEqual(len(self.calls.read_text().splitlines()), 1)
+        directory = self.module.wake_directory(self.inst, self.n)
+        (directory / "last").write_text(str(time.time() - 121))
+        self.drain()
+        self.assertEqual(len(self.calls.read_text().splitlines()), 2)
+        state = "".join(p.read_text() for p in directory.iterdir() if p.is_file())
+        self.assertNotIn("question", state)
+
+    def test_detached_worker_delivers_held_reason_without_a_tick(self):
+        self.enqueue("first")
+        self.drain()
+        self.enqueue("second")
+        directory = self.module.wake_directory(self.inst, self.n)
+        (directory / "last").write_text(str(time.time()))
+        start = time.monotonic()
+        with mock.patch.object(self.module, "WAKE_INTERVAL", 0.15):
+            self.module.wake_drain(self.inst, self.n)
+        self.assertGreaterEqual(time.monotonic() - start, 0.14)
+        self.assertEqual(len(self.calls.read_text().splitlines()), 2)
+        self.assertFalse(list(directory.glob("*.pending")))
+
+    def test_failed_and_hanging_transport_leave_pending(self):
+        self.enqueue("failure")
+        directory = self.module.wake_directory(self.inst, self.n)
+        for command in ("exit 1", shlex_quote(sys.executable) + " -c 'import time; time.sleep(20)'"):
+            self.b(self.r, "set", "a", "wake=" + command)
+            (directory / "last").unlink(missing_ok=True)
+            start = time.monotonic()
+            self.drain()
+            self.assertLess(time.monotonic() - start, 1)
+            self.assertEqual(len(list(directory.glob("*.pending"))), 1)
+            self.assertFalse(list(directory.glob("*.sent")))
+
+    def test_fallback_and_routing_up(self):
+        self.b(self.r, "set", "root", "wake=" + self.command)
+        self.inst = self.module.Instance(self.r)
+        root = self.inst.node("root")
+        self.assertEqual(self.enqueue("root reason", root), 1)
+        self.drain(root)
+        self.b(self.r, "set", "a", "coordinator=")
+        self.inst = self.module.Instance(self.r)
+        self.assertEqual(self.enqueue("child reason", self.inst.node("a")), 1)
+        directory = self.module.wake_directory(self.inst, root)
+        self.assertEqual(len(list(directory.glob("*.pending"))), 1)
+        self.b(self.r, "set", "root", "wake=", "wake_default=" + self.command)
+        self.inst = self.module.Instance(self.r)
+        self.assertEqual(self.module.wake_target(self.inst, root)[1], self.command)
+        node_text = (self.r / "node.md").read_text() + (self.r / "nodes/a/node.md").read_text()
+        self.assertNotIn(self.command, node_text)
+
+    def test_parallel_requests_have_one_delivery(self):
+        with mock.patch.object(self.module, "wake_start"):
+            threads = [threading.Thread(target=self.module.request_wake,
+                       args=(self.inst, self.n, "same reason")) for _ in range(12)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+        self.drain()
+        self.assertEqual(len(self.calls.read_text().splitlines()), 1)
+
+    def test_root_due_escalates_without_question_text_and_live_shows_age(self):
+        old = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(minutes=11)).isoformat()
+        (self.n["dir"] / "inbox.md").write_text("- " + old +
+            " from runtime: Host question: Choose blue? <!-- host-question:abc -->\n")
+        output = io.StringIO()
+        with mock.patch.dict(os.environ, self.env, clear=True), \
+                mock.patch.object(self.module, "load", return_value=self.inst), \
+                mock.patch.object(self.module, "core_update"), \
+                mock.patch.object(self.module, "auto_upgrade", return_value=None), \
+                mock.patch.object(self.module, "request_wake") as wake, contextlib.redirect_stdout(output):
+            self.module.cmd_due(argparse.Namespace(id="root", quiet=False, json=True))
+            live = self.module.ui_state(self.inst, spend_budget=0)
+        self.assertEqual(wake.call_args.args[1]["id"], "root")
+        self.assertNotIn("Choose blue", wake.call_args.args[2])
+        self.assertIn("overdue-question", output.getvalue())
+        self.assertTrue(any(i["kind"] == "overdue-question" for i in live["due"]))
+
+    def test_outward_state_link_is_refused(self):
+        outside = self.tmp / "outside"
+        outside.mkdir()
+        (self.r / ".brain/wake").symlink_to(outside, target_is_directory=True)
+        self.assertEqual(self.enqueue("question"), 0)
+        self.assertEqual(list(outside.iterdir()), [])
+
+    def test_overdue_question_due_live_and_clear(self):
+        inbox = self.n["dir"] / "inbox.md"
+        marker = "<!-- host-question:" + "a" * 64 + " -->"
+        old = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(minutes=11)).isoformat()
+        inbox.write_text("- " + old + " from runtime: Host question: Choose blue? " + marker + "\n")
+        out = json.loads(self.b(self.r, "due", "a", "--json"))
+        overdue = [i for i in out if i["kind"] == "overdue-question"]
+        self.assertEqual(len(overdue), 1)
+        self.assertEqual(overdue[0]["escalate_to"], "root")
+        self.b(self.r, "set", "a", "question_minutes=20")
+        self.assertNotIn("overdue-question", self.b(self.r, "due", "a", "--json"))
+        inbox.write_text("")
+        self.assertNotIn("overdue-question", self.b(self.r, "due", "a", "--json"))
+
+
+def shlex_quote(value):
+    import shlex
+    return shlex.quote(value)
+
+
 class StopHook(Scenario):
     def hook(self, r, cwd, session="s1", active=False, transcript=None):
         """Run the exact command the runtimes run, as they do: hook JSON on stdin, in the session's folder."""
@@ -2229,6 +2383,26 @@ class StopHook(Scenario):
                                   options=[{"label": "Blue", "description": "A blue option"}])]
         self.hook(r, d, transcript=self.question_log(rows))
         self.assertEqual((d / "inbox.md").read_text().count("host-question:"), 1)
+
+    def test_captured_question_wakes_once_without_holding_stop(self):
+        r = self.init("alice")
+        self.b(r, "new", "a", "--title", "Alpha")
+        calls = self.tmp / "wake-calls"
+        command = "echo called >> " + shlex_quote(str(calls))
+        self.b(r, "set", "a", "coordinator=synthetic-thread", "wake=" + command)
+        d = r / "nodes/a"
+        transcript = self.question_log([self.question_call(text="Choose blue?")])
+        start = time.monotonic()
+        self.hook(r, d, active=True, transcript=transcript)
+        self.assertLess(time.monotonic() - start, 1)
+        deadline = time.monotonic() + 5
+        while not calls.exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        self.assertEqual(calls.read_text().splitlines(), ["called"])
+        self.hook(r, d, active=True, transcript=transcript)
+        time.sleep(0.1)
+        self.assertEqual(calls.read_text().splitlines(), ["called"])
+        self.assertIn("Choose blue?", (d / "inbox.md").read_text())
 
     def test_rendered_question_is_screened_after_whitespace_folding(self):
         r = self.init("alice")

@@ -1961,7 +1961,7 @@ def cmd_set(a):
             inst.local["auto_upgrade"] = v
             fm.pop(k, None)
             print(f"  auto_upgrade: {v} on this machine (.brain/local.json): upgrades core when no job is open")
-        elif k in LOCAL_KEYS or k in ("synced_at", "workbench"):
+        elif k in LOCAL_KEYS or k in ("synced_at", "workbench", "wake", "wake_default"):
             inst.local_of(a.id)[k] = str(Path(v).expanduser().resolve()) if k == "workbench" else v
             fm.pop(k, None)
             print(f"  {k}: this machine (.brain/local.json)")
@@ -7213,6 +7213,8 @@ def cmd_handback(a):
             inbox_append(n["dir"], bullet, marker)
             touch(inbox)
         inst.commit([], f"{n['id']}: worker hand-back")
+    if a.state in ("question", "blocked"):
+        request_wake(inst, n, "handback:" + digest([job_key(row), a.state, data.get("report", ""), need or ""]))
     try:
         current = open_job(read_jobs(n) or [], a.branch)
         if current:
@@ -7850,6 +7852,149 @@ def active_work(n):
     return [r for r in rows if not (len(r) > 3 and r[3].lower() in ("merged", "closed", "done", "abandoned"))]
 
 
+# Wake state belongs to the instance, never to an external home. Only opaque reason
+# digests persist here; transport bodies contain no transcript, node name or question.
+WAKE_INTERVAL = 120
+WAKE_TIMEOUT = 0.4
+
+
+def wake_target(inst, n):
+    target = n if n["local"].get("coordinator") else inst.node("root")
+    return target, target["local"].get("wake") or inst.local_of("root").get("wake_default", "")
+
+
+def wake_directory(inst, n):
+    return inst.root / ".brain" / "wake" / urllib.parse.quote(n["id"], safe="")
+
+
+def wake_start(inst, n):
+    subprocess.Popen([sys.executable, str(CORE / "bin" / "brain"), "wake", n["id"], "--drain"],
+                     cwd=inst.root, env={**os.environ, "BRAIN_ROOT": str(inst.root), "BRAIN_NO_REEXEC": "1"},
+                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                     start_new_session=True, close_fds=True)
+
+
+def request_wake(inst, n, reason):
+    """Fail open, enqueue then detach; never run a transport in the hook's process."""
+    try:
+        target, command = wake_target(inst, n)
+        if not command or outward_links(inst.root):
+            return
+        directory = wake_directory(inst, target)
+        directory.mkdir(parents=True, exist_ok=True)
+        key = hashlib.sha256((n["id"] + "\0" + reason).encode()).hexdigest()
+        pending = directory / (key + ".pending")
+        if (directory / (key + ".sent")).exists():
+            return
+        # Exclusive publication: repeated hooks neither overwrite nor launch more workers.
+        safe_target(pending)
+        try:
+            fd = os.open(pending, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        except FileExistsError:
+            return
+        os.close(fd)
+        wake_start(inst, target)
+    except (Exception, SystemExit):
+        pass  # the inbox is the durable record, even if spawning or state writes fail
+
+
+def wake_send(command):
+    """The sole outward payload is a constant event. Discard all transport output."""
+    payload = b'{"event":"brain-wake"}'
+    if command.startswith(("https://", "http://")):
+        import urllib.request
+        # Do not forward webhook capabilities to redirect destinations.
+        class NoRedirect(urllib.request.HTTPRedirectHandler):
+            def redirect_request(self, req, fp, code, msg, headers, newurl):
+                return None
+        opener = urllib.request.build_opener(NoRedirect)
+        with opener.open(urllib.request.Request(command, data=payload,
+                         headers={"Content-Type": "application/json"}), timeout=WAKE_TIMEOUT) as response:
+            return 200 <= response.status < 300
+    import signal
+    process = subprocess.Popen(command, shell=True, stdin=subprocess.PIPE,
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+    try:
+        process.communicate(payload, timeout=WAKE_TIMEOUT)
+        return process.returncode == 0
+    except subprocess.TimeoutExpired:
+        os.killpg(process.pid, signal.SIGKILL)
+        process.wait()
+        return False
+
+
+def wake_drain(inst, n, once=False):
+    """A short-lived stdlib worker waits out the rate window, without an LLM tick.
+    Failed deliveries remain pending; stop after ten minutes, with due retrying later.
+    """
+    import fcntl
+    directory = wake_directory(inst, n)
+    if not directory.is_dir() or outward_links(inst.root):
+        return
+    lock = directory / "lock"
+    safe_target(lock)
+    with lock.open("a+") as stream:
+        fcntl.flock(stream, fcntl.LOCK_EX)  # detached workers only; callers never wait
+        deadline = time.monotonic() + 600
+        while time.monotonic() < deadline:
+            if outward_links(inst.root):
+                return
+            pending = sorted(directory.glob("*.pending"))
+            if not pending:
+                return
+            last = directory / "last"
+            try:
+                delay = max(0, WAKE_INTERVAL - (time.time() - float(last.read_text())))
+            except (OSError, ValueError):
+                delay = 0
+            if delay:
+                if once:
+                    return
+                time.sleep(min(delay, 5))
+                continue
+            # Reload bindings so removed/changed transport capabilities take effect.
+            current = Instance(inst.root)
+            target, command = wake_target(current, current.node(n["id"]))
+            if target["id"] != n["id"] or not command:
+                return
+            atomic_write(last, str(time.time()))  # failures are rate-limited too
+            try:
+                sent = wake_send(command)
+            except Exception:
+                sent = False
+            if sent:
+                for path in pending:  # one generic tick covers all currently queued reasons
+                    atomic_write(path.with_suffix(".sent"), "delivered\n")
+                    path.unlink(missing_ok=True)
+            if once:
+                return
+
+
+def cmd_wake(a):
+    inst = load()
+    n = inst.node(a.id)
+    if a.drain:
+        wake_drain(inst, n)
+    elif a.reason is not None:
+        request_wake(inst, n, a.reason)
+    else:
+        die('usage: brain wake <node> "<reason>"')
+
+
+def overdue_questions(inst, n, lines):
+    try:
+        minutes = max(1, float(n["fm"].get("question_minutes", 10)))
+    except (ValueError, TypeError):
+        minutes = 10
+    for line in lines:
+        if not ("<!-- host-question:" in line or "<!-- handback:" in line):
+            continue
+        match = re.match(r"- (.*?) from ", line)
+        at = inst.parse_time(match[1]) if match else None
+        if at and elapsed(at, inst.now_dt()) >= minutes * 60:
+            yield line
+
+
 def hook_question_queue(n):
     root = instance_above(n["dir"])
     return root / ".brain" / "host-questions" / urllib.parse.quote(n["id"], safe="")
@@ -7994,6 +8139,8 @@ def due_items(inst, n, evidence=None, include_stale=True):
             add("unrecorded-worktree", f"{branch}: worktree has no open ledger job; reconcile the records")
     for line in state["inbox"]:
         add("inbox", line[2:])  # coordinator removes handled lines; remaining questions are unanswered
+    for line in overdue_questions(inst, n, state["inbox"]):
+        add("overdue-question", "question unanswered past its threshold; root must follow up", escalate_to="root")
     lag = status_lag(inst, n, evidence) if include_stale else None
     if lag:
         add("stale-status", lag + "; update judgement sections, then brain status <node> --refresh")
@@ -8027,7 +8174,21 @@ def cmd_due(a):
         else:
             print(f"root: {upgraded}")
         return
+    # Root's explicit tick also sees descendant escalations, without exposing their text.
+    escalation_nodes = inst.nodes() if a.id == "root" else nodes
+    for n in escalation_nodes:
+        for line in overdue_questions(inst, n, inbox_lines(n)):
+            request_wake(inst, inst.node("root"), "overdue:" + hashlib.sha256(line.encode()).hexdigest())
+        target, command = wake_target(inst, n)
+        if command and wake_directory(inst, target).is_dir() and any(wake_directory(inst, target).glob("*.pending")):
+            try:
+                wake_start(inst, target)
+            except OSError:
+                pass
     items = [item for n in nodes for item in due_items(inst, n) + changes_due(inst, n)]
+    if a.id == "root":
+        items += [item for n in escalation_nodes if n["id"] != "root"
+                  for item in due_items(inst, n, include_stale=False) if item["kind"] == "overdue-question"]
     if a.quiet:
         sys.exit(1 if items else 0)
     if a.json:
@@ -8998,6 +9159,7 @@ def capture_hook_questions(inst, n, data):
             queue.mkdir(parents=True, exist_ok=True)
             atomic_write(queue / (hashlib.sha256(text.encode()).hexdigest() + ".json"),
                          json.dumps({"line": line, "marker": marker}) + "\n")
+        request_wake(inst, n, marker)
 
 
 def cmd_hook(a):
@@ -10323,6 +10485,8 @@ def main():
     t.set_defaults(f=cmd_hook, event="stop")
     t = hsub.add_parser("approve", help="trust this instance and its project hooks in Codex (writes its config)")
     t.set_defaults(f=cmd_hook_approve)
+    cmd("wake", cmd_wake, "wake a node coordinator (or root); inbox remains the record", "id",
+        opt("reason", nargs="?"), opt("--drain", action="store_true", help=argparse.SUPPRESS))
     cmd("now", cmd_now, "the current time in the instance's timezone, as every record writes it (axiom 17)",
         opt("--iso", action="store_true"))
     cmd("tree", cmd_tree, "show the node tree")
