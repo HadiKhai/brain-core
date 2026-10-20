@@ -71,7 +71,8 @@ stated; never run a polling loop in an agent.
    the outcome in `status.md`, turn the hand-back's proposed reusable lessons into library items (the
    `learn` skill), record their ids with `core/bin/brain jobs <id> --branch <branch> --lessons
    <id1,id2>` (or `--lessons "none: <reason>"`), and run `core/bin/brain wt prune <id>`. It removes only clean, merged
-   worktrees. A job dropped instead: `core/bin/brain wt rm <id> <branch> --cause "<why>"`.
+   worktrees. For a dropped job, first set its Active work row to `abandoned`, preserving the
+   worker thread reference, then run `core/bin/brain wt rm <id> <branch> --cause "<why>"`.
    Either way the node's `job-ledger.md` gets the job's hours, commits and review rounds
    (`core/bin/brain jobs <id>`). Cleanup prints lessons and the report first, deletes ready records,
    and retains a merged-job hand-back until its lesson outcome is recorded. The ledger keeps history.

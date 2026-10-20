@@ -3507,6 +3507,29 @@ class ThreadSettlement(AutonomyProject):
         self.assertIn("ownership ambiguous", out)
         self.assertNotIn("fixture-worker-old", out)
 
+    def test_single_job_active_work_ownership_guards_are_independent(self):
+        r, home, wt = self.project()
+        self.ledger(r, [self.row("job-a")])
+        status = r / "nodes/app/status.md"
+        original = status.read_text()
+        header = "\n## Active work\n\n| branch | thread | PR | state |\n| --- | --- | --- | --- |\n"
+        for rows in ("| job-a | fixture-worker-one | - | merged |\n"
+                     "| job-a | fixture-worker-two | - | closed |\n",
+                     "| job-a | fixture-worker-one | - | running |\n",
+                     "| job-a | fixture-worker-one | - | waiting |\n",
+                     "| job-a | fixture-worker-one | - | unknown |\n",
+                     "| job-a | fixture-worker-one |\n", ""):
+            with self.subTest(rows=rows):
+                status.write_text(original + header + rows)
+                out = self.b(r, "jobs", "app", "--branch", "job-a")
+                self.assertIn("ownership ambiguous", out)
+                self.assertNotIn("fixture-worker-one", out)
+                self.assertNotIn("fixture-worker-two", out)
+        for state in ("merged", "abandoned", "closed", "done"):
+            status.write_text(original + header + "| job-a | fixture-worker-one | - | " + state + " |\n")
+            out = self.b(r, "jobs", "app", "--branch", "job-a")
+            self.assertIn("Worker from Active work: fixture-worker-one", out)
+
     def test_study_close_checklist_and_older_core_preserves_settled(self):
         r = self.init("fixture")
         home = self.repo(self.tmp / "source")

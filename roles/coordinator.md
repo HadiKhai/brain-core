@@ -224,11 +224,13 @@ the row `merged` or `abandoned`. Merged v2 jobs missing a required lesson outcom
 legacy merges have no retroactive requirement. Never edit the worker record. Cleanup prints
 lessons and the report path first, deletes the ready packet, and retains a merged-job hand-back
 until its lesson outcome is recorded, even after pruning the worktree. A job dropped without a merge ends
-with `core/bin/brain wt rm <id> <branch> --cause "<why>"`, so `core/bin/brain jobs` can say
+by first marking its Active work row `abandoned` (keep the worker thread), then running
+`core/bin/brain wt rm <id> <branch> --cause "<why>"`, so `core/bin/brain jobs` can say
 what goes wrong, how long jobs take and how many review rounds they need: base estimates on
 it, not on a guess.
 
-After closing any job, follow its printed thread checklist and the host adapter's discovery
+For a finished study, mark its Active work row `closed` (keep the worker thread) before
+`brain jobs <id> --branch <branch> --close`. After closing any job, follow its printed thread checklist and the host adapter's discovery
 and safety checks. Find the worker in Active work (keep its thread reference after closure),
 its descendants and marker-matched reviewers. Settle only explicit ledger-closed jobs, never
 coordinators, open-job threads, running/waiting threads or threads with pending requests.
