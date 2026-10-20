@@ -6599,11 +6599,27 @@ class HistorySizes(History):
         _, m, text = self.batches()
         self.assertEqual([x["match"] for x in m["sessions"] if x["id"] == "55555555-eeee"], ["named folder"])
         self.assertIn("SCRATCH-WORK", text)
-        self.b(self.r, "new", "other", "--title", "Other", "--home", str(self.repo(self.tmp / "other")))
-        for bad, why in ((str(self.tmp.parent), "holds your home folder or a brain"),
-                         (str(self.r / "nodes"), "inside a brain"), ("relative/path", "absolute"),
-                         (str(self.tmp / "other" / "src"), "another node's home")):
+        self.b(self.r, "new", "other", "--title", "Other", "--home", str(self.repo(self.tmp / "OtherHome")))
+        second = self.init("bob")  # another brain on this machine, with a project of its own
+        self.b(second, "new", "theirs", "--title", "Theirs", "--home", str(self.repo(self.tmp / "theirs")))
+        loose = self.tmp / "loose-brain"  # a brain nobody registered
+        (loose / "nodes/x").mkdir(parents=True)
+        for f in ("instance.md", "node.md"):
+            (loose / f).write_text("x\n")
+        (self.tmp / "holder/deep/inner").mkdir(parents=True)
+        for f in ("instance.md", "node.md"):
+            (self.tmp / "holder/deep/inner" / f).write_text("x\n")
+        home_folder, brain = "your home folder or a brain", "your home folder or a brain"
+        for bad, why in ((str(self.tmp.parent), home_folder), (str(self.tmp).upper(), home_folder),
+                         (str(self.r / "nodes"), brain), (str(self.r).upper(), brain),
+                         (str(loose), brain), (str(loose / "nodes/x"), brain), (str(self.tmp / "holder"), brain),
+                         ("relative/path", "absolute"),
+                         (str(self.tmp / "OtherHome" / "src"), "another project's home"),
+                         (str(self.tmp / "otherhome"), "another project's home"),
+                         (str(self.tmp / "theirs"), "another project's home")):
             self.assertIn(why, self.b(self.r, "history", "garden", "--fresh", "--also", bad, ok=False), bad)
+        out = self.b(self.r, "history", "garden", "--fresh", "--also", "relative/Zebracorp", ok=False)
+        self.assertNotIn("Zebracorp", out)  # a refusal never prints a never-name word
         count = lambda out: int(re.search(r"garden: (\d+) sessions", out)[1])  # noqa: E731
         self.assertEqual(count(self.b(self.r, "spend", "garden", "--also", str(scratch))),
                          count(self.b(self.r, "spend", "garden")) + 1)  # spend looks back over the same sessions

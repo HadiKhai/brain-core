@@ -3849,28 +3849,69 @@ def history_repo(path):
     return Path(common.stdout.strip()).resolve(), remotes - {""}
 
 
+def folder_chain(path):
+    """The identities (device, inode) of a folder and every folder above it that exists: two spellings of one
+    folder (case on a case-insensitive disk, links) share them."""
+    out, p = [], Path(path)
+    for q in [p, *p.parents]:
+        try:
+            st = os.stat(q)
+        except OSError:
+            continue
+        out.append((st.st_dev, st.st_ino))
+    return out
+
+
+def is_brain(folder):
+    return (Path(folder) / "instance.md").is_file() and (Path(folder) / "node.md").is_file()
+
+
 def also_folders(inst, n, folders):
     """Folders the operator names as the node's too, for sessions that worked on it from elsewhere (a scratch
-    thread, say). Never one holding the user's home folder or a brain, nor another node's home or a folder in it:
-    their sessions are about everything, or about another project."""
-    out = []
-    others = [m["home_path"].resolve() for m in inst.nodes()
-              if m["id"] != n["id"] and m["external"] and m["home_path"]]
+    thread, say). Never one holding the user's home folder or a brain, one inside a brain, nor one holding or
+    lying in another node's home, in any brain on this machine: their sessions are about everything, or about
+    another project. Compared by what the folders are, not how their paths are spelled."""
+    terms = never_terms(n)
     brains = {inst.root.resolve(), *(r.resolve() for _, r in brains_here())}
+    homes = []
+    for root in brains:
+        try:
+            other = inst if root == inst.root.resolve() else Instance(root)
+            homes += [m["home_path"] for m in other.nodes()
+                      if m["external"] and m["home_path"] and not (other.root.resolve() == inst.root.resolve()
+                                                                    and m["id"] == n["id"])]
+        except (OSError, ValueError, SystemExit):
+            continue
+    out = []
     for f in folders or ():
         p = Path(f).expanduser()
         if not p.is_absolute():
-            die(f"--also takes absolute folders: {f}")
+            die(redact(f"--also takes absolute folders: {f}", terms))
         p = p.resolve()
-        if p == Path.home().resolve() or p in Path.home().resolve().parents or any(
-                b == p or p in b.parents for b in brains):
-            die(f"{tilde(p)} holds your home folder or a brain: name a narrower folder")
-        if any(b in brains for b in [p, *p.parents]) or any(h == p or h in p.parents or p in h.parents
-                                                             for h in others):
-            die(f"{tilde(p)} is inside a brain, or holds or lies in another node's home: its sessions are not "
-                f"{n['id']}'s")
+        mine = folder_chain(p)
+        me = mine[0] if mine and p.exists() else None
+        holds = lambda q: me is not None and me in folder_chain(q)  # noqa: E731
+        inside = lambda q: (lambda c: bool(c) and c[0] in mine)(folder_chain(q)) if Path(q).exists() else False  # noqa: E731
+        if holds(Path.home()) or any(holds(b) or inside(b) for b in brains) or \
+                any(is_brain(q) for q in [p, *p.parents]) or contains_brain(p):
+            die(redact(f"{tilde(p)} is, holds or lies in your home folder or a brain: name a narrower folder outside "
+                       "every brain", terms))
+        if any(holds(h) or inside(h) for h in homes) or any(
+                str(h).casefold() == str(p).casefold() or str(p).casefold().startswith(str(h).casefold() + "/")
+                or str(h).casefold().startswith(str(p).casefold() + "/") for h in homes):
+            die(redact(f"{tilde(p)} holds or lies in another project's home: its sessions are not {n['id']}'s", terms))
         out.append(p)
     return out
+
+
+def contains_brain(folder, depth=4):
+    """Is there a brain a few levels below this folder (registered or not)?"""
+    for top, dirs, files in os.walk(folder, followlinks=False):
+        if "instance.md" in files and "node.md" in files:
+            return True
+        here = Path(top)
+        dirs[:] = [d for d in dirs if d != ".git"] if len(here.relative_to(folder).parts) < depth else []
+    return False
 
 
 def history_matcher(inst, n, also=()):
