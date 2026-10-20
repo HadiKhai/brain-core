@@ -77,20 +77,27 @@ def safe_target(path):
 def outward_links(root):
     """Links in what brain commands write that lead out of the brain: its own files, .brain/, and in the root and
     every node folder their files, library, specialists, job records, sources and reports, and the nodes below.
-    A brain holds none: one would put brain files in a home or anywhere else. Links into the brain (core/'s skills
-    and settings, CLAUDE.md to AGENTS.md) are fine."""
+    A brain holds none: one would put brain files in a home or anywhere else. A link that stays inside the brain
+    (core/'s skills and settings, CLAUDE.md to AGENTS.md) is fine, and a folder it leads to is looked at as the
+    folder it stands for."""
     top = Path(root).resolve()
-    bad = []
+    bad, seen = [], set()
 
-    def link(p):
+    def real_of(p):
         try:
             real = p.resolve()
         except (OSError, RuntimeError):
-            real = None
-        if real is None or (real != top and top not in real.parents):
-            bad.append(p)
+            return None
+        return real if real == top or top in real.parents else None
 
-    def look(folder, deep=False):
+    def look(folder, deep=False, kind="node"):
+        try:
+            key = Path(folder).resolve()
+        except (OSError, RuntimeError):
+            return
+        if (key, deep, kind) in seen:
+            return  # a folder reached twice, through links that loop
+        seen.add((key, deep, kind))
         try:
             entries = list(os.scandir(folder))
         except OSError:
@@ -98,20 +105,24 @@ def outward_links(root):
         for e in entries:
             p = Path(e.path)
             if e.is_symlink():
-                link(p)
-            elif e.is_dir(follow_symlinks=False):
-                if deep or e.name in (".brain", "library", "specialists", "job-handbacks", "job-contracts"):
-                    look(p, deep=True)
-                elif e.name in ("sources", "reports", "nodes") and not deep:
-                    try:
-                        children = list(os.scandir(p))
-                    except OSError:
-                        children = []
-                    for child in children:  # sources and reports: what lies in them; nodes: each node folder
-                        if child.is_symlink():
-                            link(Path(child.path))
-                        elif e.name == "nodes" and child.is_dir(follow_symlinks=False):
-                            look(Path(child.path))
+                real = real_of(p)
+                if real is None:
+                    bad.append(p)
+                    continue
+                if not real.is_dir():
+                    continue
+            elif not e.is_dir(follow_symlinks=False):
+                continue
+            if kind == "entries":
+                continue  # sources/ and reports/: only what lies directly in them is written
+            if kind == "nodes":
+                look(p)  # each node folder below nodes/
+            elif deep or e.name in (".brain", "library", "specialists", "job-handbacks", "job-contracts"):
+                look(p, deep=True)
+            elif e.name in ("sources", "reports"):
+                look(p, kind="entries")
+            elif e.name == "nodes" and kind == "node":
+                look(p, kind="nodes")
     look(top)
     return bad
 
@@ -241,6 +252,7 @@ class Instance:
         return data
 
     def save_local(self):
+        safe_target(self.local_path)
         self.local_path.parent.mkdir(exist_ok=True)
         self.local_path.write_text(json.dumps(self.local, indent=2, sort_keys=True) + "\n")
 
@@ -1500,6 +1512,7 @@ def ensure_gitignore(root):
 # ---------- nodes ----------
 
 def _make_node(inst, d, nid, title, owners, labels, home, runtime, parent_owners):
+    safe_target(d / "node.md")  # the new folder lies inside the brain, through no link out
     d.mkdir(parents=True, exist_ok=True)
     values = {"ID": nid, "TITLE": title, "OWNERS": owners, "LABELS": labels, "HOME": home,
               "RUNTIME": runtime, "DATE": inst.now()}

@@ -6366,6 +6366,31 @@ class SmallFixes(Scenario):
         self.b(r, "check")
         self.b(r, "specialist", "new", "writer", "--at", "root", "--title", "Writer")  # links into the brain are fine
 
+    def test_links_inside_the_brain_are_followed_to_what_lies_beneath(self):
+        r, home, wt = WorkerReadyPackets.job(self)
+        private = home / "private.json"
+        private.write_text("{}\n")
+        os.rename(r / ".brain", r / "state")  # .brain is a link to a folder inside the brain...
+        (r / ".brain").symlink_to(r / "state")
+        os.rename(r / "state/local.json", self.tmp / "local.json")
+        (r / "state/local.json").symlink_to(private)  # ...that holds a link out
+        self.assertIn("lead out of the brain", self.b(r, "set", "root", "coordinator=review-test", ok=False))
+        self.assertEqual(private.read_text(), "{}\n")
+        (r / "state/local.json").unlink()
+        os.rename(self.tmp / "local.json", r / "state/local.json")
+        self.b(r, "set", "root", "coordinator=fine")  # links inside the brain alone are fine
+        os.rename(r / "nodes", r / "pool")
+        (r / "nodes").symlink_to(r / "pool")
+        (r / "pool/a/nodes").symlink_to(home)
+        before = sorted(p.name for p in home.iterdir())
+        self.assertIn("lead out of the brain", self.b(r, "new", "a/b", "--title", "B", ok=False))
+        self.assertEqual(sorted(p.name for p in home.iterdir()), before)
+        (r / "pool/a/nodes").unlink()
+        (r / "pool/a/nodes").symlink_to(r / "pool/a")  # a loop of links inside the brain ends
+        from importlib.machinery import SourceFileLoader
+        m = SourceFileLoader("brain_loops", str(CORE / "bin/brain")).load_module()
+        self.assertEqual(m.outward_links(r), [])
+
     def test_merge_commits_when_a_node_has_empty_folders(self):
         r = self.init("alice")
         for nid in ("a", "d"):
