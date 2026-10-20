@@ -1575,6 +1575,10 @@ class TeamHomes(Scenario):
         self.assertEqual(summary["external"], 45)
         self.assertEqual(summary["finished"], 0)
         self.assertEqual([row["Job"] for row in summary["rows"]], ["job"])
+        payload = json.loads(self.b(root, "ui", "--json"))
+        app = next(n for n in payload["nodes"] if n["id"] == "app")
+        self.assertEqual([row["Job"] for row in app["jobs"]["rows"]], ["job"])
+        self.assertEqual(app["jobs"]["external"], 45)
 
     def test_origin_head_cannot_point_at_local_branch_and_missing_head_can_be_repaired(self):
         root, seed, origin, home = self.team()
@@ -1587,6 +1591,61 @@ class TeamHomes(Scenario):
         self.assertIn("set-head origin -a", out)
         self.git("remote", "set-head", "origin", "-a", cwd=home)
         self.assertIn("marked synced", self.b(root, "sync", "app", "--offline", "--mark"))
+
+    def test_local_mode_includes_unpublished_local_main_and_invalidates_packets(self):
+        root, seed, origin, home = self.team()
+        self.b(root, "set", "app", "merge=local")
+        (home / "local-work").write_text("unpublished")
+        self.git("add", "-A", cwd=home)
+        self.git("commit", "-qm", "local integration", cwd=home)
+        self.b(root, "wt", "add", "app", "job", "--base", "origin/trunk")
+        wt = self.tmp / "app-work/worktrees/job"
+        self.assertIn("current local main", self.b(root, "handback", "app", "--branch", "job", "--state", "done",
+                      "--reviews", "1", ok=False))
+        self.git("rebase", "trunk", cwd=wt)
+        self.b(root, "handback", "app", "--branch", "job", "--state", "done", "--reviews", "1")
+        (home / "second-local-work").write_text("another unpublished integration")
+        self.git("add", "-A", cwd=home)
+        self.git("commit", "-qm", "another local integration", cwd=home)
+        self.assertIn("current local main", self.b(root, "ready", "app", "--branch", "job", ok=False))
+
+    def test_fast_forward_job_range_is_owned_and_survives_cleanup_and_replay(self):
+        root, seed, origin, home = self.team()
+        self.b(root, "sync", "app", "--offline")
+        self.b(root, "wt", "add", "app", "job")
+        wt = self.tmp / "app-work/worktrees/job"
+        for i in range(3):
+            (wt / "fix").write_text(str(i))
+            self.git("add", "-A", cwd=wt)
+            self.git("commit", "-qm", "made-up fix", cwd=wt)
+        self.b(root, "handback", "app", "--branch", "job", "--state", "done", "--reviews", "1")
+        self.git("fetch", str(home), "job:job", cwd=seed)
+        self.git("merge", "--ff-only", "job", cwd=seed)
+        self.git("push", str(origin), "trunk", cwd=seed)
+        self.assertIn("0 recorded", self.b(root, "sync", "app"))
+        for record in (root / "nodes/app/job-handbacks").glob("*.json"):
+            record.unlink()  # simulate post-merge evidence cleanup
+        local = root / ".brain/local.json"
+        data = json.loads(local.read_text()); data["nodes"]["app"].pop("synced_main")
+        local.write_text(json.dumps(data))
+        self.assertIn("0 recorded", self.b(root, "sync", "app", "--offline"))
+        self.assertNotIn("external:", (root / "nodes/app/job-ledger.md").read_text())
+
+    def test_reset_is_bounded_and_requires_one_node(self):
+        root, seed, origin, home = self.team()
+        old = self.env.copy()
+        self.env.update(GIT_AUTHOR_DATE="2020-01-01T00:00:00+00:00", GIT_COMMITTER_DATE="2020-01-01T00:00:00+00:00")
+        for i in range(3):
+            self.git("commit", "--allow-empty", "-qm", "old history", cwd=seed)
+        self.env = old
+        self.git("push", str(origin), "trunk", cwd=seed)
+        self.assertIn("0 recorded", self.b(root, "sync", "app"))
+        self.assertIn("0 recorded", self.b(root, "sync", "app", "--offline", "--reset-main"))
+        local = root / ".brain/local.json"
+        data = json.loads(local.read_text()); data["nodes"]["app"].pop("synced_main")
+        local.write_text(json.dumps(data))
+        self.assertIn("0 recorded", self.b(root, "sync", "app", "--offline", "--reset-main"))
+        self.assertIn("one node", self.b(root, "sync", "--all", "--reset-main", ok=False))
 
     def test_main_job_branch_is_still_refused_with_another_remote_default(self):
         root, seed, origin, home = self.team()

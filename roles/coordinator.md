@@ -279,5 +279,6 @@ acknowledge rules with the import skill's reviewed frontmatter only after actual
 For team homes, `brain set <id> merge=pr` records the host PR workflow. Explicitly sync before
 checking readiness, then run `gh pr merge` with the verified head as `--match-head-commit`
 and the home's merge strategy. Never update the operator checkout to remedy local-main lag:
-workers rebase on the cached origin default. Sync after host merges records external integrations
+workers rebase on the cached origin default. For `merge=local` or an unset mode, readiness
+also requires the job to include unpublished local default-branch commits. Sync after host merges records external integrations
 once by commit identity; those rows supply no review or usage proof.

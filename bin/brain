@@ -6561,6 +6561,15 @@ def ready_preflight(n, branch):
             reasons.append("git is too old for merge-tree --write-tree; Git 2.38 or newer is required")
         elif result.returncode:
             reasons.append(f"merge-tree failed (exit {result.returncode}); merge cleanliness is unknown")
+    # A local merge integrates with unpublished local work too; PR mode integrates on the host.
+    ref = integration_ref(n["home_path"])
+    if n["fm"].get("merge", "local") != "pr" and ref.startswith("refs/remotes/origin/"):
+        local_ref = ref.replace("refs/remotes/origin/", "refs/heads/", 1)
+        local = git("rev-parse", "--verify", "--quiet", local_ref + "^{commit}", cwd=n["home_path"]).stdout.strip()
+        if not local:
+            reasons.append("local integration branch is missing; configure merge=pr for host merges")
+        elif git("merge-base", "--is-ancestor", local, head, cwd=n["home_path"]).returncode:
+            reasons.append("worker must rebase on current local main as well as origin default for merge=local")
     w = n["local"].get("worktrees", {}).get(branch)
     if not w or not Path(w["path"]).exists():
         reasons.append("job worktree is missing")
@@ -6829,6 +6838,8 @@ def last_sync(inst, n):
 
 
 def cmd_sync(a):
+    if a.all and getattr(a, "reset_main", False):
+        die("--reset-main requires one node, not --all")
     inst = load()
     if a.all:
         if a.id:
@@ -6871,8 +6882,8 @@ def integration_owners(n, rows):
         tree = git("rev-parse", "--verify", "--quiet", head + "^{tree}", cwd=n["home_path"]).stdout.strip()
         base_tree = git("rev-parse", "--verify", "--quiet", base + "^{tree}", cwd=n["home_path"]).stdout.strip()
         if tree and base_tree and tree != base_tree:
-            heads.setdefault(head, []).append(row)
-            squashes.setdefault((base, tree), []).append(row)
+            heads.setdefault(head, []).append((row, base, head))
+            squashes.setdefault((base, tree), []).append((row, base, head))
     return heads, squashes
 
 
@@ -6896,13 +6907,15 @@ def sync_external_merges(inst, n, since, reset=False):
     tip = tip.stdout.strip()
     cursor = n["local"].get("synced_main", "")
     args = ["log", "--first-parent", "--reverse", "--format=%H %T %P%x09%cI", "--min-parents=1"]
-    if cursor and not reset:
-        if git("merge-base", "--is-ancestor", cursor, tip, cwd=home).returncode:
+    if cursor:
+        if reset:
+            common = git("merge-base", cursor, tip, cwd=home)
+            cursor = common.stdout.strip() if common.returncode == 0 else ""
+        elif git("merge-base", "--is-ancestor", cursor, tip, cwd=home).returncode:
             print("external merges: default history changed; inspect it, then explicitly use sync --reset-main to rescan")
             return False
+    if cursor:
         args += [cursor + ".." + tip]
-    elif reset:
-        args += [tip]
     else:
         args += ["--since=" + since.isoformat(timespec="seconds"), tip]
     result = git(*args, cwd=home)
@@ -6914,12 +6927,19 @@ def sync_external_merges(inst, n, since, reset=False):
         if rows is None:
             return False
         known = {r.get("Merge commit") for r in rows}
+        # Retain whole owned ranges after the handback/worktree/branch has been cleaned up.
+        for row in rows:
+            base, head = row.get("Base commit", ""), row.get("Head commit", "")
+            if row.get("Merge commit") and all(re.fullmatch(r"[0-9a-f]{40,64}", h) for h in (base, head)):
+                known.update(git("rev-list", base + ".." + head, cwd=home).stdout.split())
         heads, squashes = integration_owners(n, rows)
-        added = 0
-        changed = False
+        records = []
         for line in result.stdout.splitlines():
             identity, when = line.split("\t", 1)
             commit, tree, *parents = identity.split()
+            records.append((commit, tree, parents, when))
+        claims, claimed = {}, set()
+        for commit, tree, parents, when in records:
             if commit in known:
                 continue
             candidates = list(heads.get(commit, []))
@@ -6927,19 +6947,28 @@ def sync_external_merges(inst, n, since, reset=False):
                 candidates += heads.get(parent, [])
             if len(parents) == 1:
                 candidates += squashes.get((parents[0], tree), [])
-            # Duplicate/ambiguous claims never steal external work from the observation ledger.
-            owners = {job_key(row): row for row in candidates if not row.get("Merge commit")}
+            owners = {job_key(r): (r, base, head) for r, base, head in candidates
+                      if not r.get("Merge commit") and job_key(r) not in claimed}
             if len(owners) == 1:
-                row = next(iter(owners.values()))
-                row["Merge commit"] = commit
+                key, claim = next(iter(owners.items()))
+                claims[commit] = claim
+                claimed.add(key)
+        for row, base, head in claims.values():
+            known.update(git("rev-list", base + ".." + head, cwd=home).stdout.split())
+        added = 0
+        changed = False
+        for commit, tree, parents, when in records:
+            if commit in claims:
+                row, base, head = claims[commit]
+                row.update({"Merge commit": commit, "Base commit": base, "Head commit": head})
                 known.add(commit)
                 changed = True
-                continue
-            rows.append({"Job": "external:" + commit, "Started": when, "Ended": when,
-                         "Outcome": "external", "Commits": "1", "Merge commit": commit,
-                         "Cause": "Observed on origin default; merge, squash or direct commit; review/usage unknown"})
-            known.add(commit)
-            added += 1
+            elif commit not in known:
+                rows.append({"Job": "external:" + commit, "Started": when, "Ended": when,
+                             "Outcome": "external", "Commits": "1", "Merge commit": commit,
+                             "Cause": "Observed on origin default; merge, squash or direct commit; review/usage unknown"})
+                known.add(commit)
+                added += 1
         if added or changed:
             write_jobs(inst, n, rows)
             inst.commit([], f"{n['id']}: record external integrations")
@@ -9499,7 +9528,8 @@ def ui_state(inst, problems=None, scan=None, spend_budget=2.0):
             "work": work, "worktrees": wts, "inbox": [l[2:] for l in inbox_lines(n)],
             "blocked": status_section(n, "blocked"), "decisions": ui_decisions(inst, n), "limits": limits_of(n),
             "never_name": len(terms), "spend": lookback,
-            "jobs": {**js, "rows": [{k: hide(v) for k, v in r.items()} for r in (read_jobs(n) or [])],
+            "jobs": {**js, "rows": [{k: hide(v) for k, v in r.items()} for r in (read_jobs(n) or [])
+                                  if r.get("Outcome") != "external"],
                                                "open": [{k: hide(v) for k, v in r.items()} for r in js["open"]],
                                                "forecasts": [{k: hide(v) for k, v in r.items()} for r in js["forecasts"]]},
             "reports": [{"name": d.parent.name, "title": next((l[2:] for l in d.read_text().splitlines()
@@ -10467,7 +10497,7 @@ def main():
     cmd("sync", cmd_sync, "what changed in a node (and its home) since the last sync; --all: every external home",
         opt("id", nargs="?"), opt("--all", action="store_true"),
         opt("--offline", action="store_true"), opt("--mark", action="store_true"),
-        opt("--reset-main", action="store_true", help="explicitly rescan all default history after rewriting or changing it; retain ledger deduplication"),
+        opt("--reset-main", action="store_true", help="rescan from the common ancestor, or last-sync window for unrelated history; one node only"),
         opt("--limit", type=int, default=20, help="uncommitted files to list"))
     s = sub.add_parser("hook", help="runtime hooks: stop (called by the runtime), approve (trust them in Codex)")
     hsub = s.add_subparsers(dest="hcmd", metavar="<action>")

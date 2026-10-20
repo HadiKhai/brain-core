@@ -24,8 +24,8 @@ Run by a node's coordinator.
    the existing last-sync/status time window; later syncs use a local commit cursor, including
    without `--mark`. Repeats are deduplicated even if the cursor is lost. A rewritten history
    refuses cursor advancement. After inspecting rewritten history or a new unrelated default,
-   explicitly run `brain sync <id> --reset-main` to rescan all first-parent default history,
-   preserving the ledger and hash deduplication. `--offline` avoids fetching during that rescan.
+   explicitly run `brain sync <id> --reset-main` to rescan from the old/new common ancestor, or the last-sync time window for unrelated history,
+   preserving the ledger and hash deduplication. Reset names one node; it cannot use `--all`. `--offline` avoids fetching during that rescan.
    `--mark` refuses to advance the sync time if integrations could not be recorded. Homes without origin retain
    their existing behavior. Read what matters in the home itself. Never write there from here (axiom 6).
 4. Add each new decision to the top of `decisions.md`, with why and the alternatives. Decisions

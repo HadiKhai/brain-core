@@ -60,7 +60,9 @@ stated; never run a polling loop in an agent.
    `ready` and handback use cached `origin/HEAD` when origin exists, otherwise local `main`.
    Neither fetches. The coordinator explicitly runs `brain sync <id>` (or `git fetch origin`)
    before the final check. If origin's default changes, explicitly run `git remote set-head origin -a`.
-   A missing cached default refuses readiness. Local default-branch lag is informational:
+   A missing cached default refuses readiness. With `merge=local` (the default), the job must
+   also include unpublished local default-branch commits. With `merge=pr`, the host default
+   is the integration target. Local default-branch lag is informational:
    rebase the job on `origin/<default>` and hand back again, leaving the operator checkout alone.
    To update a local default branch, use a separate worktree and `git merge --ff-only origin/<default>`
    only when that branch is not checked out by the operator; otherwise leave it untouched.
@@ -77,6 +79,9 @@ stated; never run a polling loop in an agent.
    rules still apply; if the base moves, rebase and hand back again before retrying.
    Then run `brain sync <id>` to observe the merged remote default before pruning the job:
    its verified tree and base let sync associate a squash with the existing ledger row.
+   PR mode supports merge commits and squash; do not use the host's rebase strategy, whose
+   rewritten commits cannot be associated with the verified job by Git identity. Local
+   fast-forward integrations retain the verified job's whole commit range in its ledger row.
    A moved main goes back to the worker for rebase and verification;
    the coordinator does not repeat its tests. Only the coordinator merges to main.
 6. **Done.** When the operator (and the home's owners) merge it, set the row to `merged`, record
