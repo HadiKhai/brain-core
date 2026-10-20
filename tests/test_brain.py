@@ -7942,9 +7942,12 @@ class MachineCare(Scenario):
     def test_process_identity_ignores_locale_timezone_and_unknown_is_not_dead(self):
         m = self.m
         stamp = m.process_stamp(os.getpid())
+        limit = m.machine_limit(m.machine_policy())
         with mock.patch.dict(os.environ, {"TZ": "GMT+11", "LC_ALL": "fixture_invalid_locale"}):
             self.assertEqual(m.process_stamp(os.getpid()), stamp)
-        with mock.patch.object(m.subprocess, "run", return_value=subprocess.CompletedProcess([], 1, "", "fixture")):
+            self.assertEqual(m.machine_limit(m.machine_policy()), limit)
+        with mock.patch.object(m.sys, "platform", "darwin"), \
+                mock.patch.object(m.subprocess, "run", return_value=subprocess.CompletedProcess([], 1, "", "fixture")):
             with mock.patch.object(m.os, "kill", return_value=None):
                 self.assertEqual(m.process_stamp(12345), "unknown")
             with mock.patch.object(m.os, "kill", side_effect=ProcessLookupError()):
@@ -7952,6 +7955,21 @@ class MachineCare(Scenario):
         with mock.patch.object(m, "process_stamp", return_value="unknown"), contextlib.redirect_stderr(io.StringIO()):
             with self.assertRaises(SystemExit):
                 m.machine_wait("verify")
+
+    def test_incomplete_fresh_history_does_not_weaken_live_admission(self):
+        m = self.m
+        root = self.tmp / "oak"
+        (root / ".brain").mkdir(parents=True)
+        inst = argparse.Namespace(root=root)
+        path = root / ".brain/machine.json"
+        high = {**self.good, "load_per_cpu": [1, 1, 1]}
+        with mock.patch.dict(os.environ, {"BRAIN_MACHINE_TESTING": "0"}), \
+                mock.patch.object(m, "machine_load", side_effect=AssertionError("fresh sample first")):
+            path.write_text(json.dumps({"samples": self.samples(1, high)}))
+            self.assertTrue(m.machine_reading(inst)["sample_reasons"])
+            spike = {**self.good, "load_per_cpu": [20, .2, .2]}
+            path.write_text(json.dumps({"samples": self.samples(1, spike)}))
+            self.assertEqual(m.machine_reading(inst)["sample_reasons"], [])
 
     def test_hold_retries_and_releases(self):
         m = self.m
@@ -8336,6 +8354,145 @@ raise SystemExit(result)
         for sample in readings:
             sample["reading"]["thermal"] = "unknown"
         self.assertNotIn("sustained thermal pressure", m.machine_sustained(readings, m.machine_policy()))
+
+    def test_sampler_refuses_linked_git_metadata_and_retries_pending_notice(self):
+        m = self.m
+        for kind in ("message", "index", "reflog", "gitdir", "objects"):
+            with self.subTest(kind=kind):
+                root = self.init("tree-" + kind)
+                inst = m.Instance(root)
+                state = root / ".brain/machine.json"
+                high = {**self.good, "load_per_cpu": [1, 1, 1]}
+                state.write_text(json.dumps({"samples": self.samples(5, high), "episode": False}))
+                before_head = self.git("rev-parse", "HEAD", cwd=root)
+                before_inbox = (root / "inbox.md").read_bytes()
+                external = self.tmp / ("outside-" + kind)
+                original = None
+                if kind == "gitdir":
+                    (root / ".git").rename(external)
+                    target = root / ".git"
+                    target.symlink_to(external, target_is_directory=True)
+                    sentinel = external / "COMMIT_EDITMSG"
+                elif kind == "objects":
+                    external.mkdir()
+                    sentinel = external / "sentinel"
+                    sentinel.write_bytes(b"outside fixture")
+                    target = next(root / ".git/objects" / f"{i:02x}" for i in range(256)
+                                  if not (root / ".git/objects" / f"{i:02x}").exists())
+                    target.symlink_to(external, target_is_directory=True)
+                else:
+                    sentinel = external
+                    sentinel.write_bytes(b"outside fixture")
+                    target = root / {"message": ".git/COMMIT_EDITMSG", "index": ".git/index",
+                                     "reflog": ".git/logs/HEAD"}[kind]
+                    original = target.read_bytes()
+                    target.unlink()
+                    if kind == "message":
+                        os.link(sentinel, target)
+                    else:
+                        target.symlink_to(sentinel)
+                before = sentinel.read_bytes()
+                with mock.patch.object(m, "machine_load", return_value=high), \
+                        contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                    with self.assertRaises(SystemExit):
+                        m.machine_sample_once(inst)
+                self.assertEqual(sentinel.read_bytes(), before)
+                self.assertEqual((root / "inbox.md").read_bytes(), before_inbox)
+                self.assertEqual(self.git("rev-parse", "HEAD", cwd=root), before_head)
+                self.assertIsNotNone(json.loads(state.read_text())["pending_notice"])
+                target.unlink()
+                if kind == "gitdir":
+                    external.rename(target)
+                elif original is not None:
+                    target.write_bytes(original)
+                with mock.patch.object(m, "machine_load", return_value=high), contextlib.redirect_stdout(io.StringIO()):
+                    m.machine_sample_once(inst)
+                self.assertIsNone(json.loads(state.read_text())["pending_notice"])
+                self.assertEqual((root / "inbox.md").read_text().count("hold heavy work:"), 1)
+
+    def test_invalid_policy_preserves_diagnostics_and_fails_closed_for_admission(self):
+        m = self.m
+        root = self.init("oak")
+        inst = m.Instance(root)
+        m.machine_dir().mkdir(parents=True)
+        (m.machine_dir() / "machine-care.json").write_text("{invalid")
+        self.assertIn("policy invalid", m.machine_summary(m.machine_state(inst)))
+        self.assertIn("policy invalid", "; ".join(m.ui_state(inst, spend_budget=0)["machine"]["held"]))
+        with mock.patch.object(m, "load", return_value=inst), mock.patch.object(m, "due_items", return_value=[]), \
+                mock.patch.object(m, "changes_due", return_value=[]):
+            with self.assertRaises(SystemExit) as result:
+                m.cmd_due(argparse.Namespace(id="root", quiet=True, json=False))
+            self.assertEqual(result.exception.code, 0)
+        seen = []
+        def repair(_):
+            with m.machine_queue() as q:
+                self.assertEqual(q.rows[0]["state"], "queued")
+                seen.append(q.rows[0]["token"])
+            (m.machine_dir() / "machine-care.json").write_text("{}")
+        with mock.patch.object(m.time, "sleep", side_effect=repair), contextlib.redirect_stdout(io.StringIO()) as out:
+            token = m.machine_wait("verify")
+        self.assertEqual(seen, [token])
+        self.assertIn("policy invalid", out.getvalue())
+        m.machine_release(token)
+
+    def test_linux_process_identity_uses_boot_and_start_ticks_not_wall_clock(self):
+        m = self.m
+        values = {"boot": "12345678-1234-1234-1234-123456789abc", "ticks": "4321", "state": "S"}
+        def reading(path):
+            if path.name == "boot_id":
+                return values["boot"]
+            return "12345 (fixture ) worker) " + " ".join([values["state"]] + ["0"] * 18 + [values["ticks"]])
+        with mock.patch.object(m.sys, "platform", "linux"), mock.patch.object(m.Path, "read_text", reading), \
+                mock.patch.object(m.subprocess, "run", side_effect=AssertionError("no wall-clock ps on Linux")):
+            first = m.process_stamp(12345)
+            with mock.patch.object(m.time, "time", return_value=1):
+                self.assertEqual(m.process_stamp(12345), first)
+            values["boot"] = "abcdef01-1234-1234-1234-123456789abc"
+            self.assertNotEqual(m.process_stamp(12345), first)
+            values["state"] = "Z"
+            self.assertIsNone(m.process_stamp(12345))
+
+    def test_service_payload_round_trips_cron_paths_and_reinstalls_with_mocked_launchd(self):
+        m = self.m
+        inst = argparse.Namespace(root=self.tmp / "fixture\\% space's root")
+        # Cron processes backslash/percent before the shell parses quotes.
+        def cron_command(value):
+            out, escaped = [], False
+            for char in value:
+                if escaped:
+                    if char == "%":
+                        out[-1] = "%"
+                    else:
+                        out.append(char)
+                    escaped = False
+                elif char == "\\":
+                    out.append(char)
+                    escaped = True
+                elif char == "%":
+                    self.fail("unexpected cron stdin separator")
+                else:
+                    out.append(char)
+            return "".join(out)
+        with mock.patch.object(m.sys, "platform", "linux"), mock.patch.object(m.subprocess, "run") as run, \
+                contextlib.redirect_stdout(io.StringIO()) as output:
+            m.machine_service(inst, "install")
+        run.assert_not_called()
+        command = output.getvalue().splitlines()[0].split(maxsplit=5)[5]
+        tokens = shlex.split(cron_command(command))
+        self.assertEqual(tokens[0:2], ["cd", str(inst.root)])
+        for value in ("%", "\\%", "\\\\%", "a\\b% c'\"$()"):
+            self.assertEqual(shlex.split(cron_command(m.machine_cron_quote(value).replace("%", r"\%"))), [value])
+        def service(args, **kw):
+            return subprocess.CompletedProcess(args, 0, "", "")
+        with mock.patch.object(m.sys, "platform", "darwin"), \
+                mock.patch.object(m.subprocess, "run", side_effect=service) as run, \
+                contextlib.redirect_stdout(io.StringIO()):
+            m.machine_service(inst, "install", True)
+            m.machine_service(inst, "install", True)
+            m.machine_service(inst, "uninstall", True)
+        self.assertEqual([call.args[0][1] for call in run.call_args_list],
+                         ["print", "bootout", "bootstrap"] * 2 + ["print", "bootout"])
+        self.assertEqual(list((self.tmp / "Library/LaunchAgents").glob("*.plist")), [])
 
     def test_queue_rejects_links_and_preserves_on_interrupted_publication(self):
         m = self.m

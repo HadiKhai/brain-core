@@ -577,7 +577,8 @@ def machine_samples(inst):
         data = json.loads((inst.root / ".brain/machine.json").read_text())
         samples = data["samples"]
         if (not isinstance(samples, list) or not samples or len(samples) > 1440 or
-                not all(machine_valid_sample(s) for s in samples)):
+                not all(machine_valid_sample(s) for s in samples) or
+                any(a["at"] > b["at"] for a, b in zip(samples, samples[1:]))):
             return None
         age = time.time() - samples[-1]["at"]
         if not 0 <= age <= 180:
@@ -601,8 +602,30 @@ def machine_reading(inst=None):
     data = machine_samples(inst) if inst else None
     if data:
         reading = dict(data["samples"][-1]["reading"])
-        policy = machine_policy()
-        reading["sample_reasons"] = machine_sustained(data["samples"], policy)
+        policy = machine_policy(strict=False)
+        reasons = machine_sustained(data["samples"], policy)
+        end, previous, covered = data["samples"][-1]["at"], data["samples"][-1]["at"], False
+        for sample in reversed(data["samples"]):
+            if not 0 <= previous - sample["at"] <= 90 or not sample["reading"].get("load_per_cpu"):
+                break
+            if end - sample["at"] >= 240:
+                covered = True
+                break
+            previous = sample["at"]
+        if not covered:
+            # A fresh but incomplete window must not weaken the missing-file live guard.
+            reasons += machine_reasons(reading, policy)
+            previous = end
+            for sample in reversed(data["samples"]):
+                if not 0 <= previous - sample["at"] <= 90:
+                    break
+                previous = sample["at"]
+                state = sample["reading"].get("thermal", "unknown")
+                if state in ("normal", "pressure"):
+                    if state == "pressure" and reading.get("thermal") == "unknown":
+                        reasons.append("thermal warning unresolved")
+                    break
+        reading["sample_reasons"] = list(dict.fromkeys(reasons))
         prior = data.get("heat_reasons", [])
         if data.get("episode") and not machine_recovered(data["samples"], policy, prior):
             reading["sample_reasons"] = list(dict.fromkeys(reading["sample_reasons"] + prior))
@@ -686,6 +709,12 @@ def machine_publish(inst, path, text):
             die("machine sampler: state folder moved")
         out = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=fd)
         with os.fdopen(out, "w") as stream:
+            try:
+                prior = os.stat(path.name, dir_fd=fd, follow_symlinks=False)
+                if stat.S_ISREG(prior.st_mode):
+                    os.fchmod(stream.fileno(), stat.S_IMODE(prior.st_mode))
+            except FileNotFoundError:
+                pass
             stream.write(text)
             stream.flush()
             os.fsync(stream.fileno())
@@ -737,10 +766,53 @@ def machine_sample_once(inst):
         os.close(dfd)
 
 
+def machine_commit_check(inst):
+    # Sample-only minutes stay fast. A transition invokes Git and must restore the
+    # ordinary write checks, including metadata reached through a worktree's common dir.
+    if outward_links(inst.root):
+        die("machine sampler: unsafe instance links; notice remains pending (brain check lists them)")
+    meta = inst.root / ".git"
+    if not meta.exists():
+        return
+    if meta.is_file():
+        match = re.fullmatch(r"gitdir: (.+)\s*", meta.read_text().strip())
+        if not match:
+            die("machine sampler: invalid Git metadata; notice remains pending")
+        meta = (inst.root / match[1]).resolve()
+    common = meta / "commondir"
+    bases = {meta.resolve()}
+    if common.is_file():
+        bases.add((meta / common.read_text().strip()).resolve())
+    def unreadable(exc):
+        raise exc
+    for base in bases:
+        for e in os.scandir(base):
+            if e.is_symlink() or hard_linked(e):
+                die("machine sampler: linked Git metadata; notice remains pending")
+        for rel in ("refs", "logs", "objects/info", "objects/pack"):
+            folder = base / rel
+            if folder.is_symlink():
+                die("machine sampler: linked Git metadata; notice remains pending")
+            if not folder.exists():
+                continue
+            for current, dirs, files in os.walk(folder, followlinks=False, onerror=unreadable):
+                for name in dirs + files:
+                    entry = Path(current) / name
+                    if entry.is_symlink() or shared_file(entry):
+                        die("machine sampler: linked Git metadata; notice remains pending")
+        # Loose objects are immutable; check their fanout directories, not every object.
+        objects = base / "objects"
+        if objects.is_dir():
+            for e in os.scandir(objects):
+                if e.is_symlink():
+                    die("machine sampler: linked Git object directory; notice remains pending")
+
+
 def machine_notice(inst, data):
     pending = data.get("pending_notice")
     if not pending:
         return data
+    machine_commit_check(inst)
     inbox = inst.root / "inbox.md"
     marker = "[machine episode " + data["episode_id"] + (" open]" if data["episode"] else " close]")
     text = inbox.read_text() if inbox.exists() else ""
@@ -808,6 +880,10 @@ def machine_sample(inst):
     print(f"machine sample: {len(samples)} readings; " + ("; ".join(heat) if active else "no sustained heat"))
 
 
+def machine_cron_quote(value):
+    return "'%'".join(shlex.quote(part) for part in value.split("%"))
+
+
 def machine_service(inst, action, yes=False):
     """Dry by default. No network, privilege escalation, shell setup or installs."""
     import plistlib
@@ -826,8 +902,18 @@ def machine_service(inst, action, yes=False):
             print("dry run; --yes requires the operator's consent")
             return
         domain = f"gui/{os.getuid()}"
+        if path.exists():
+            try:
+                if plistlib.loads(path.read_bytes()).get("Label") != label:
+                    raise ValueError("different label")
+            except (OSError, ValueError, plistlib.InvalidFileException):
+                die("machine sampler: existing plist is not this instance's service")
+        loaded = subprocess.run(["launchctl", "print", domain + "/" + label], capture_output=True)
+        if loaded.returncode == 0:
+            stopped = subprocess.run(["launchctl", "bootout", domain + "/" + label], capture_output=True)
+            if stopped.returncode:
+                die("machine sampler did not stop; left its plist in place")
         if action == "uninstall":
-            subprocess.run(["launchctl", "bootout", domain + "/" + label], capture_output=True)
             path.unlink(missing_ok=True)
         else:
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -836,8 +922,8 @@ def machine_service(inst, action, yes=False):
             if r.returncode:
                 die("machine sampler not loaded: " + r.stderr.strip())
     else:
-        command = "cd " + shlex.quote(str(inst.root)) + " && env " + shlex.join(
-            [k + "=" + v for k, v in service_env.items()] + args)
+        command = "cd " + machine_cron_quote(str(inst.root)) + " && env " + " ".join(
+            machine_cron_quote(v) for v in [k + "=" + v for k, v in service_env.items()] + args)
         line = "* * * * * " + command.replace("%", r"\%") + " >/dev/null 2>&1 # " + label
         print(line if action == "install" else "remove cron entry # " + label)
         if not yes:
@@ -859,28 +945,31 @@ def machine_dir():
     return Path.home() / ".local/state/brain"
 
 
-def machine_policy():
-    path = machine_dir() / "machine-care.json"
-    try:
-        supplied = json.loads(path.read_text())
-    except FileNotFoundError:
-        supplied = {}
-    except (OSError, ValueError):
-        die("machine care: cannot read machine-care.json")
-    if not isinstance(supplied, dict):
-        die("machine care: configuration must be an object")
-    policy = {**MACHINE_DEFAULTS, **supplied}
+def machine_policy(strict=True):
     import math
-    for k, default in MACHINE_DEFAULTS.items():
-        v = policy[k]
-        if type(v) not in (int, float) or not math.isfinite(v) or v < 0:
-            die("machine care: invalid " + k)
-        if k.startswith("verify_") and (type(v) is not int or v < 1):
-            die("machine care: verify limits must be positive integers")
-        if k.startswith("night_") and (type(v) is not int or v > 23):
-            die("machine care: night hours must be integers from 0 to 23")
-    policy["_configured"] = list(supplied)
-    return policy
+    try:
+        try:
+            supplied = json.loads((machine_dir() / "machine-care.json").read_text())
+        except FileNotFoundError:
+            supplied = {}
+        if not isinstance(supplied, dict):
+            raise ValueError("configuration must be an object")
+        policy = {**MACHINE_DEFAULTS, **supplied}
+        for k in MACHINE_DEFAULTS:
+            v = policy[k]
+            if type(v) not in (int, float) or not math.isfinite(v) or v < 0:
+                raise ValueError("invalid " + k)
+            if k.startswith("verify_") and (type(v) is not int or v < 1):
+                raise ValueError("verify limits must be positive integers")
+            if k.startswith("night_") and (type(v) is not int or v > 23):
+                raise ValueError("night hours must be integers from 0 to 23")
+        policy["_configured"] = list(supplied)
+        return policy
+    except (OSError, ValueError):
+        message = "machine policy invalid; repair ~/.local/state/brain/machine-care.json"
+        if strict:
+            die(message + "; no heavy work started")
+        return {**MACHINE_DEFAULTS, "_configured": [], "_error": message}
 
 
 def machine_reasons(reading, policy):
@@ -905,7 +994,13 @@ def machine_reasons(reading, policy):
 
 
 def machine_limit(policy, hour=None):
-    hour = datetime.datetime.now().hour if hour is None else hour
+    if hour is None:
+        try:
+            from zoneinfo import ZoneInfo
+            with open("/etc/localtime", "rb") as source:
+                hour = datetime.datetime.now(ZoneInfo.from_file(source)).hour
+        except (OSError, ValueError, ImportError):
+            return min(policy["verify_day"], policy["verify_night"])
     start, end = policy["night_start"], policy["night_end"]
     night = (hour >= start or hour < end) if start > end else start <= hour < end
     return policy["verify_night" if night else "verify_day"]
@@ -914,6 +1009,14 @@ def machine_limit(policy, hour=None):
 def process_stamp(pid):
     """PID plus OS start time prevents reclaiming a recycled PID as our worker."""
     try:
+        if sys.platform.startswith("linux"):
+            raw = Path(f"/proc/{pid}/stat").read_text().rsplit(") ", 1)[1].split()
+            if raw[0] == "Z":
+                return None
+            boot = Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+            if not raw[19].isdigit() or not re.fullmatch(r"[0-9a-fA-F-]{36}", boot):
+                return "unknown"
+            return "linux:" + boot + ":" + raw[19]
         r = subprocess.run(["ps", "-p", str(pid), "-o", "lstart=", "-o", "stat="],
                            capture_output=True, text=True, timeout=2,
                            env={**os.environ, "LC_ALL": "C", "TZ": "UTC0"})
@@ -927,10 +1030,14 @@ def process_stamp(pid):
         except PermissionError:
             return "unknown"
         return "unknown"
-    except (OSError, subprocess.SubprocessError):
-        # Unknown is not proof of death: retain its reservation.
+    except (OSError, ValueError, IndexError, subprocess.SubprocessError):
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return None
+        except OSError:
+            pass
         return "unknown"
-    return None
 
 
 class machine_queue:
@@ -1019,9 +1126,11 @@ def machine_wait(kind="heavy"):
     previous, last_report, started = None, 0, time.monotonic()
     try:
         while True:
-            policy = machine_policy()
+            policy = machine_policy(strict=False)
             reading = machine_reading()
             reasons = machine_reasons(reading, policy)
+            if policy.get("_error"):
+                reasons.append(policy["_error"])
             with machine_queue() as queue:
                 row = next((r for r in queue.rows if r["token"] == token), None)
                 if row is None:
@@ -1066,8 +1175,10 @@ def machine_child(token, pid):
 
 def machine_state(inst=None):
     reading = machine_reading(inst)
-    policy = machine_policy()
+    policy = machine_policy(strict=False)
     reading["held"] = machine_reasons(reading, policy)
+    if policy.get("_error"):
+        reading["held"].append(policy["_error"])
     reading["verify_limit"] = machine_limit(policy)
     # Reading the live view never creates state or a lock file.
     try:

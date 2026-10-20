@@ -163,12 +163,12 @@ Before starting heavy work outside `brain wt add` or a fresh job verify, run `br
 Those two commands already wait for machine admission. Never start a replacement to bypass
 held work. Running work is left alone. A one-minute load spike does not hold work. With fresh
 sampler history, five consecutive minutes of high five-minute load, or three minutes of
-thermal pressure, hold new heavy work. Without fresh samples, the current five-minute load
+unresolved thermal warning, hold new heavy work. Without fresh samples, the current five-minute load
 and thermal warning apply immediately. Low free memory or disk also hold admission.
 
 `brain machine` and `brain due` show machine readings, holds and queued work. Full verifies
 share a FIFO queue across every brain using the machine's configuration: two slots by day,
-one overnight (22:00–08:00 in machine local time). They wait with progress, preserving their
+one overnight (22:00–08:00 in the system timezone, independent of a launcher's `TZ`). They wait with progress, preserving their
 command, environment, stdin and exit status. Existing runs finish even if the limit falls.
 
 Machine policy lives in `~/.local/state/brain/machine-care.json`, outside project homes.
@@ -179,12 +179,15 @@ It is independent of `BRAIN_CONFIG` and `XDG_CONFIG_HOME`, so separate registrie
 name the configuration to adjust. Override thresholds there, once for the machine;
 do not copy resource rules into node briefs. Equal night hours disable the night interval.
 Unknown measurements are shown as unknown. An unknown thermal reading cannot clear an
-observed thermal warning; three known normal minutes clear an episode. Initial unknown
+observed thermal warning; three known normal minutes clear an episode. Conservatively,
+one observed warning followed by two unknown minute readings counts as unresolved heat;
+an unavailable reading cannot establish that the warning ended. Initial unknown
 telemetry alone does not invent thermal pressure.
 
 `brain machine sample` is a local, non-LLM sampler. It keeps at most 1,440 readings over
 24 hours in the instance's private `.brain/machine.json`; guard and verify use readings no
-older than three minutes, then fall back to live measurement. `brain machine install` prints
+older than three minutes, then fall back to live measurement. A fresh but incomplete
+window uses its latest reading conservatively, so starting the sampler cannot weaken admission. `brain machine install` prints
 a one-minute launchd plist (macOS) or cron line. Only run `install --yes` after operator
 consent; `uninstall` also previews unless `--yes` is given. No service is installed by an
 ordinary command. Heat episode transitions create one committed inbox notice each (one opening, one clearing);
@@ -193,7 +196,9 @@ checks node actions only, so shared queue counts do not wake every brain's coord
 Wait progress reports changes and a heartbeat each minute. Keep long waits and hand-backs
 in a persistent terminal session; preserve the queued process rather than letting an agent
 tool timeout kill it and starting a replacement. A busy instance minute skips sampling;
-missing/stale history still gets a live admission check. Tests inject fabricated readings;
+missing/stale history still gets a live admission check. Invalid policy keeps diagnostics
+readable and holds queued heavy work in place until repaired. Episode delivery checks
+instance/Git links before committing; unsafe metadata keeps the notice pending. Tests inject fabricated readings;
 never generate load or heat to test the guard.
 
 
