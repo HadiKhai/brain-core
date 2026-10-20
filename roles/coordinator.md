@@ -228,6 +228,16 @@ with `core/bin/brain wt rm <id> <branch> --cause "<why>"`, so `core/bin/brain jo
 what goes wrong, how long jobs take and how many review rounds they need: base estimates on
 it, not on a guess.
 
+After closing any job, follow its printed thread checklist and the host adapter's discovery
+and safety checks. Find the worker in Active work (keep its thread reference after closure),
+its descendants and marker-matched reviewers. Settle only explicit ledger-closed jobs, never
+coordinators, open-job threads, running/waiting threads or threads with pending requests.
+Unknown ownership or activity means leave unsettled. After all threads are safely settled,
+record `brain jobs <id> --branch <branch> --settled`; this is your host attestation.
+`brain due` counts closed jobs still awaiting this step, including old rows. The root's
+`brain due root` includes children: route their backlog to their coordinators rather than
+settling their threads without their ownership checks.
+
 ## Before the operator looks at work
 
 A change the operator will be asked to approve has been reviewed by an agent on another runtime

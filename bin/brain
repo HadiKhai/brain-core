@@ -7060,7 +7060,7 @@ JOBS_FILE = "job-ledger.md"  # in a node folder: one row per job, written by `br
 JOBS_MARK = "<!-- brain:job-ledger v3 -->"  # older cores refuse this format instead of dropping new columns
 JOBS_LEGACY_MARKS = ("<!-- brain:job-ledger v2 -->", "<!-- brain:job-ledger v1 -->")
 JOB_COLS = ["Job", "Started", "Ended", "Hours", "Outcome", "Commits", "Reviews", "Runtime", "Cause"]
-JOB_COLS += ["Lessons", "Lesson check", "Switches"]
+JOB_COLS += ["Lessons", "Lesson check", "Switches", "Settled"]
 JOB_COLS += ["Active h", "Agent h", "Fresh in", "Cache read", "Cache write", "Output", "Reasoning", "Tool calls",
              "Compactions", "Sub-agents", "Sub share", "Models", "Budget", "Usage"]
 
@@ -7281,6 +7281,7 @@ def job_ended(inst, n, branch, outcome, commits="", cause="", worktree=None):
         write_jobs(inst, n, rows)
         cleanup_handback(n, r)
         inst.commit([], f"{n['id']}: job {outcome}")
+        print_thread_checklist(n, r)
 
 
 def cleanup_handback(n, row):
@@ -7333,6 +7334,30 @@ def print_job_handback(n, branch):
         print(redact(f"{branch}: {handback_detail(n, row)}", never_terms(n)), flush=True)
 
 
+def closed_job(row):
+    """Only explicit terminal ledger outcomes qualify; a host idle state is never closure."""
+    return bool(row.get("Ended") and row.get("Outcome") in ("merged", "abandoned", "studied", "closed"))
+
+
+def unsettled_jobs(rows):
+    return [r for r in rows or [] if closed_job(r) and not r.get("Settled")]
+
+
+def print_thread_checklist(n, row):
+    if not closed_job(row):
+        return
+    workers = [r[1] for r in active_work(n, include_closed=True) if len(r) > 1 and r[0] == row["Job"]]
+    text = (f"Threads to settle for {row['Job']} (brain-job: {job_key(row)}):\n"
+            + "  Worker from Active work: " + (", ".join(workers) or "not recorded; find by job marker") + "\n"
+            + "  Find delegated/sub-agent descendants by parentThreadId and reviewers by the brain-job marker.\n"
+            + "  Settle only when the ledger says merged or closed (abandoned/studied count as closed), "
+            "no thread is running or waiting, and no pending requests remain. "
+            "Never settle coordinators or threads belonging to open jobs. "
+            "Check every candidate through the host; unknown state means leave unsettled.\n"
+            + f"  After every job thread is safely settled: brain jobs {n['id']} --branch {row['Job']} --job-key {job_key(row)} --settled")
+    print(redact(text, never_terms(n)))
+
+
 def jobs_summary(inst, n):
     """Finished and open jobs of one node, with medians, for `brain jobs` and the live view."""
     import statistics
@@ -7352,6 +7377,7 @@ def jobs_summary(inst, n):
     return {"rows": rows[-40:], "open": open_, "finished": len(done),
             "merged": sum(1 for r in done if r["Outcome"] == "merged"),
             "abandoned": sum(1 for r in done if r["Outcome"] == "abandoned"),
+            "unsettled": len(unsettled_jobs(rows)),
             "median_hours": med(hours), "median_reviews": med(reviews),
             "median_tokens": int(statistics.median([u["processed"] for u in measured])) if measured else None,
             "median_active_h": med([u["active_h"] for u in measured]),
@@ -7461,6 +7487,29 @@ def job_budget_lines(inst, n, planned=None):
 
 def cmd_jobs(a):
     inst = load()
+    if a.job_key and not (a.id and a.branch):
+        die("--job-key needs a node and --branch")
+    if a.settled:
+        if not a.id or not a.branch:
+            die("--settled needs a node and --branch")
+        if any((a.start, a.close, a.lessons is not None, a.switch is not None, a.contract_file, a.usage_file)):
+            die("--settled cannot combine with other job updates")
+        n = inst.node(a.id)
+        with brain_lock(inst):
+            rows = ledger_rows(n)
+            matches = [r for r in rows or [] if r["Job"] == a.branch and
+                       (not a.job_key or job_key(r) == a.job_key)]
+            if len(matches) > 1 and not a.job_key:
+                die("branch has multiple jobs; select the printed --job-key")
+            row = matches[-1] if matches else None
+            if not row or not closed_job(row) or open_job(rows, a.branch):
+                die("--settled requires a merged or closed ledger job, with no open job on that branch")
+            if not row.get("Settled"):
+                row["Settled"] = stamp(inst)
+                write_jobs(inst, n, rows)
+                inst.commit([], f"{n['id']}: job threads settled")
+        print(redact(f"{n['id']}: threads for {a.branch} recorded settled (coordinator's host check)", never_terms(n)))
+        return
     if a.branch and not a.id:
         die("--branch needs a node: brain jobs <node> --branch <branch>")
     if a.contract_file:
@@ -7547,11 +7596,15 @@ def cmd_jobs(a):
         j = jobs_summary(inst, n)
         if not j["rows"] and not a.branch:
             continue
-        print(f"{n['id']}: {j['finished']} finished ({j['merged']} merged, {j['abandoned']} abandoned)"
+        print(f"{n['id']}: {j['finished']} finished ({j['merged']} merged, {j['abandoned']} abandoned); {j['unsettled']} closed job(s) with unsettled threads"
               + (f"; median {j['median_hours']} h and {j['median_reviews']} review round(s) per merged job"
                  if j["median_hours"] is not None else "")
               + (f"; median {tokens_text(j['median_tokens'])} tokens and {j['median_active_h']} active h "
                  f"({count_of(j['measured'], 'measured job')})" if j["median_tokens"] else ""))
+        if not a.branch:
+            for r in unsettled_jobs(read_jobs(n)):
+                print(redact(f"  unsettled {r['Job']} (brain-job: {job_key(r)}); inspect --branch {r['Job']} --job-key {job_key(r)}",
+                             never_terms(n)))
         for r in j["open"]:
             u = live_usage(inst, n, r)
             late = j["median_hours"] is not None and r["age_h"] > 2 * j["median_hours"]
@@ -7567,9 +7620,11 @@ def cmd_jobs(a):
             print(f"  cause {c}")
         for line in forecast_lines(read_jobs(n) or [], a.branch) + job_budget_lines(inst, n, a.branch):
             print(redact("  " + line, never_terms(n)))
-        for r in j["rows"]:
-            if a.branch and r["Job"] == a.branch:
+        for r in read_jobs(n) or []:
+            if a.branch and r["Job"] == a.branch and (not a.job_key or job_key(r) == a.job_key):
                 print(redact(json.dumps(r, ensure_ascii=False), never_terms(n)))
+                if closed_job(r) and not r.get("Settled"):
+                    print_thread_checklist(n, r)
 
 
 REVIEW_CAP = 3  # rounds, as the review skill says
@@ -7834,7 +7889,7 @@ def status_section(n, heading):
     return out
 
 
-def active_work(n):
+def active_work(n, include_closed=False):
     """Rows of the 'Active work' table in status.md (branch, thread, PR, state), minus the header."""
     f = n["dir"] / "status.md"
     if not f.exists():
@@ -7847,7 +7902,7 @@ def active_work(n):
             cells = [c.strip() for c in line.strip().strip("|").split("|")]
             if cells and not set("".join(cells)) <= set("-: ") and cells[0].lower() != "branch":
                 rows.append(cells)
-    return [r for r in rows if not (len(r) > 3 and r[3].lower() in ("merged", "closed", "done", "abandoned"))]
+    return [r for r in rows if include_closed or not (len(r) > 3 and r[3].lower() in ("merged", "closed", "done", "abandoned"))]
 
 
 def hook_question_queue(n):
@@ -7964,6 +8019,11 @@ def due_items(inst, n, evidence=None, include_stale=True):
             "then record preview=<URL/path> and preview_tour=<path> with brain set")
     if state["jobs"] is None:
         add("ledger", "job-ledger.md is a legacy file; reconcile jobs without overwriting it")
+    unsettled = unsettled_jobs(state["jobs"])
+    if unsettled:
+        add("unsettled-threads", f"{len(unsettled)} closed job(s) with unsettled threads; inspect brain jobs {n['id']}; "
+            "find each job's threads through the host, check safety, settle, then record --branch <branch> --settled",
+            count=len(unsettled))
     for row in state["jobs"] or []:
         if row["Ended"]:
             if row["Outcome"] == "merged" and row.get("Lesson check") == "required" and not row.get("Lessons"):
@@ -8015,7 +8075,7 @@ def changes_due(inst, n):
 
 def cmd_due(a):
     inst = load()
-    nodes = [inst.node(a.id)] if a.id else inst.nodes()
+    nodes = [inst.node(a.id)] if a.id and a.id != "root" else inst.nodes()
     root_tick = (a.id or "root") == "root" and not a.quiet
     if root_tick:
         core_update(inst)  # refresh the daily answer the inbox reports
@@ -8072,6 +8132,7 @@ def status_facts(inst, n, state, known_merges):
               for r in state["jobs"] or [] if not r["Ended"]] or ["- None."]
     if state["jobs"] is None:
         lines += ["- Legacy ledger: running jobs unknown."]
+    lines += ["", f"Closed jobs with unsettled threads: {len(unsettled_jobs(state['jobs']))}"]
     due = due_items(inst, n, (state, "", ""), include_stale=False)
     lessons = sorted([r for r in state["jobs"] or [] if r["Ended"] and r["Outcome"] == "merged"], key=merge_time, reverse=True)
     lines += ["", "Lesson outcomes (merged jobs):"]
@@ -10189,10 +10250,11 @@ def main():
     cmd("stale", cmd_stale, "freshness check: is <id>'s status.md behind a time the host gave (e.g. a thread's "
         "updatedAt, in UTC)?", "id", "host_time", opt("--grace", type=int, default=5, help="minutes allowed"))
     cmd("jobs", cmd_jobs, "jobs per node: open ones and their age, median hours and review rounds, causes",
-        opt("id", nargs="?"), opt("--branch"), opt("--lessons", help="learned item ids, or none: <reason>"),
+        opt("id", nargs="?"), opt("--branch"), opt("--job-key", help="select one ledger job when a branch was reused"), opt("--lessons", help="learned item ids, or none: <reason>"),
         opt("--switch", help="record provider switch: old -> new: reason"),
         opt("--start", action="store_true", help="coordinator: start an import:<snapshot> study"),
         opt("--close", action="store_true", help="coordinator: close a processed import study"),
+        opt("--settled", action="store_true", help="coordinator: record all closed job threads safely settled through the host"),
         opt("--contract-file", dest="contract_file", help="coordinator: the job's contract (" +
             ", ".join(f"## {f}" for f in CONTRACT_FIELDS) + "; an optional ## Budget, e.g. 20M tokens, 3 h)"),
         opt("--usage-file", dest="usage_file", help="coordinator: the job's usage as the host reports it (JSON); "

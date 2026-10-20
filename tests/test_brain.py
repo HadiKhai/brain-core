@@ -3351,6 +3351,133 @@ class AutonomyProject(Scenario):
 
 
 
+class ThreadSettlement(AutonomyProject):
+    def ledger(self, r, rows, node="app", version="v3"):
+        cols = ["Job", "Started", "Ended", "Outcome", "Reviews", "Hours", "Settled", "Future field"]
+        path = r / "nodes" / node / "job-ledger.md"
+        path.write_text("<!-- brain:job-ledger " + version + " -->\n" +
+                        "| " + " | ".join(cols) + " |\n| " + " | ".join("---" for _ in cols) + " |\n" +
+                        "".join("| " + " | ".join(row.get(c, "") for c in cols) + " |\n" for row in rows))
+        return path
+
+    def row(self, branch="job-old", outcome="merged", ended="2026-01-01T12:00+00:00", settled=""):
+        return {"Job": branch, "Started": "2026-01-01T10:00+00:00", "Ended": ended,
+                "Outcome": outcome, "Settled": settled, "Future field": "kept"}
+
+    def test_count_all_closed_rows_and_root_children_read_only(self):
+        r, home, wt = self.project()
+        rows = [self.row("job-" + str(i), outcome=("merged", "abandoned", "studied", "closed")[i % 4])
+                for i in range(151)]
+        rows += [self.row("job-open", ended=""), self.row("job-unknown", outcome="unknown"),
+                 self.row("job-settled", settled="2026-01-01T13:00+00:00")]
+        ledger = self.ledger(r, rows)
+        before = ledger.read_bytes()
+        for node in ("app", "root"):
+            due = self.due(r, node)
+            item = next(i for i in due if i["kind"] == "unsettled-threads" and i["node"] == "app")
+            self.assertEqual(item["count"], 151)
+            self.assertIn("151 closed job(s)", item["text"])
+        self.assertIn("151 closed job(s)", self.b(r, "jobs", "app"))
+        self.assertIn("unsettled job-0 (brain-job:", self.b(r, "jobs", "app"))
+        self.assert_checklist(self.b(r, "jobs", "app", "--branch", "job-0"))
+        state = json.loads(self.b(r, "ui", "--json"))
+        self.assertEqual(next(n for n in state["nodes"] if n["id"] == "app")["jobs"]["unsettled"], 151)
+        self.assertTrue(any(i["kind"] == "unsettled-threads" for i in state["due"]))
+        self.assertEqual(ledger.read_bytes(), before)
+        self.b(r, "status", "app", "--refresh")
+        self.assertIn("Closed jobs with unsettled threads: 151", (r / "nodes/app/status.md").read_text())
+
+    def test_settled_is_guarded_idempotent_and_preserves_legacy_columns(self):
+        r, home, wt = self.project()
+        for version in ("v1", "v2", "v3"):
+            ledger = self.ledger(r, [self.row()], version=version)
+            self.b(r, "jobs", "app", "--branch", "job-old", "--settled")
+            row = json.loads(next(l for l in self.b(r, "jobs", "app", "--branch", "job-old").splitlines()
+                                  if l.startswith("{")))
+            self.assertRegex(row["Settled"], r"^\d{4}-\d\d-\d\dT")
+            self.assertEqual(row["Future field"], "kept")
+            before = ledger.read_bytes()
+            self.b(r, "jobs", "app", "--branch", "job-old", "--settled")
+            self.assertEqual(before, ledger.read_bytes())
+            self.assertNotIn("unsettled-threads", [i["kind"] for i in self.due(r)])
+        for rows in ([self.row(ended="")], [self.row(outcome="unknown")],
+                     [self.row(ended=""), self.row()], []):
+            ledger = self.ledger(r, rows)
+            before = ledger.read_bytes()
+            self.b(r, "jobs", "app", "--branch", "job-old", "--settled", ok=False)
+            self.assertEqual(before, ledger.read_bytes())
+        older, newer = self.row(), self.row()
+        newer["Started"] = "2026-01-02T10:00+00:00"
+        ledger = self.ledger(r, [older, newer])
+        self.b(r, "jobs", "app", "--branch", "job-old", "--settled", ok=False)
+        detail = self.b(r, "jobs", "app", "--branch", "job-old")
+        keys = re.findall(r"--job-key ([0-9a-f]{24}) --settled", detail)
+        self.assertEqual(len(keys), 2)
+        for key in keys:
+            self.b(r, "jobs", "app", "--branch", "job-old", "--job-key", key, "--settled")
+        self.assertNotIn("unsettled-threads", [i["kind"] for i in self.due(r)])
+        ledger = self.ledger(r, [self.row()])
+        for flags in (("--close",), ("--start",), ("--lessons", "none: test"), ("--switch", "a -> b: test")):
+            before = ledger.read_bytes()
+            self.b(r, "jobs", "app", "--branch", "job-old", "--settled", *flags, ok=False)
+            self.assertEqual(before, ledger.read_bytes())
+        self.b(r, "jobs", "--settled", ok=False)
+
+    def assert_checklist(self, out):
+        for expected in ("Threads to settle", "brain-job:", "parentThreadId", "running or waiting",
+                         "pending requests", "Never settle coordinators", "open jobs", "--settled"):
+            self.assertIn(expected, out)
+
+    def test_rm_and_prune_print_checklist_and_closed_worker_reference(self):
+        for closure in ("rm", "prune"):
+            with self.subTest(closure=closure):
+                r, home, wt = self.project()
+                status = r / "nodes/app/status.md"
+                status.write_text(status.read_text() + "\n## Active work\n\n"
+                                  "| branch | thread | PR | state |\n| --- | --- | --- | --- |\n"
+                                  "| job-a | fixture-worker | - | merged |\n")
+                if closure == "prune":
+                    (wt / "result").write_text("done")
+                    self.git("add", "result", cwd=wt)
+                    self.git("commit", "-qm", "result", cwd=wt)
+                    self.git("merge", "-q", "job-a", cwd=home)
+                    dry = self.b(r, "wt", "prune", "app", "--offline", "--dry-run")
+                    self.assertNotIn("Threads to settle", dry)
+                    out = self.b(r, "wt", "prune", "app", "--offline")
+                else:
+                    out = self.b(r, "wt", "rm", "app", "job-a", "--cause", "fixture done")
+                self.assert_checklist(out)
+                self.assertIn("fixture-worker", out)
+                self.assertEqual(next(i for i in self.due(r) if i["kind"] == "unsettled-threads")["count"], 1)
+                self.b(r, "jobs", "app", "--branch", "job-a", "--settled")
+                self.assertNotIn("unsettled-threads", [i["kind"] for i in self.due(r)])
+                # New job on the same branch must start unsettled and cannot be attested while open.
+                self.b(r, "wt", "add", "app", "job-a")
+                self.b(r, "jobs", "app", "--branch", "job-a", "--settled", ok=False)
+                self.assert_checklist(self.b(r, "wt", "rm", "app", "job-a", "--cause", "fixture done"))
+                self.assertEqual(next(i for i in self.due(r) if i["kind"] == "unsettled-threads")["count"], 1)
+                # Release this fixture before the next subtest uses project().
+                self.git("worktree", "prune", cwd=home)
+                shutil.rmtree(r)
+                shutil.rmtree(home)
+
+    def test_study_close_checklist_and_older_core_preserves_settled(self):
+        r = self.init("fixture")
+        home = self.repo(self.tmp / "source")
+        self.b(r, "adopt", str(home))
+        job = "import:" + self.git("rev-parse", "HEAD", cwd=home).strip()
+        self.assert_checklist(self.b(r, "jobs", "source", "--branch", job, "--close"))
+        self.b(r, "jobs", "source", "--branch", job, "--settled")
+        # Execute the actual pre-feature core, whose v3 writer sees Settled as unknown.
+        old = self.tmp / "older-brain"
+        old.write_text((CORE / "bin/brain").read_text().replace(', "Settled"]', ']'))
+        self.run_(["jobs", "source", "--branch", job, "--lessons", "none: fixture study"], cwd=r, brain=old)
+        out = self.b(r, "jobs", "source", "--branch", job)
+        row = json.loads(next(l for l in out.splitlines() if l.startswith("{")))
+        self.assertTrue(row["Settled"])
+        self.assertNotIn("unsettled-threads", [i["kind"] for i in self.due(r, "source")])
+
+
 class AutonomyDue(AutonomyProject):
     def test_finished_worker_is_due_until_locally_merged_and_closed(self):
         r, home, wt = self.project()

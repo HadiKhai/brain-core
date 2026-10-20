@@ -5,6 +5,22 @@ upgrading. `brain changes <node>` shows the entries this node's coordinator hasn
 `brain due <node>` lists them until `brain changes <node> --seen`. Entry headings are
 `## <date>: <title>`; once released, a heading never changes.
 
+## 2026-10-20: Settle closed jobs' host threads
+
+For agents:
+- Closing a job prints its worker reference, job marker and thread-settlement checklist.
+  The coordinator discovers and checks threads through the host, then records
+  `brain jobs <node> --branch <branch> --settled`. Brain never calls the host API.
+- Never settle coordinators, open jobs, running/waiting threads or threads with pending
+  requests. Unknown ownership or activity leaves the job unsettled; partial cleanup does too.
+- `brain due`, generated facts and live state count closed jobs with unsettled threads,
+  including old ledger rows. `brain due root` now covers children as well as the root.
+
+After upgrading:
+- Read the host adapter's settlement checklist and update coordinator ticks. Inspect each
+  node's backlog, settle only safely closed jobs and record settlement after the host checks.
+  Older v3 cores preserve the new Settled column when rewriting ledgers.
+
 ## 2026-10-20: Runtime questions reach the inbox
 
 For agents:
