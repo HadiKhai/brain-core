@@ -904,10 +904,18 @@ def process_stamp(pid):
     """PID plus OS start time prevents reclaiming a recycled PID as our worker."""
     try:
         r = subprocess.run(["ps", "-p", str(pid), "-o", "lstart=", "-o", "stat="],
-                           capture_output=True, text=True, timeout=2)
+                           capture_output=True, text=True, timeout=2,
+                           env={**os.environ, "LC_ALL": "C", "TZ": "UTC0"})
         value = r.stdout.strip()
-        if r.returncode == 0 and value and not value.split()[-1].startswith("Z"):
-            return " ".join(value.split()[:-1])
+        if r.returncode == 0 and value:
+            return None if value.split()[-1].startswith("Z") else " ".join(value.split()[:-1])
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return None
+        except PermissionError:
+            return "unknown"
+        return "unknown"
     except (OSError, subprocess.SubprocessError):
         # Unknown is not proof of death: retain its reservation.
         return "unknown"

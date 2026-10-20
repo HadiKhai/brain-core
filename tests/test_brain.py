@@ -7939,6 +7939,20 @@ class MachineCare(Scenario):
                 self.assertEqual([r["token"] for r in q.rows], [token])
             m.machine_release(token)
 
+    def test_process_identity_ignores_locale_timezone_and_unknown_is_not_dead(self):
+        m = self.m
+        stamp = m.process_stamp(os.getpid())
+        with mock.patch.dict(os.environ, {"TZ": "GMT+11", "LC_ALL": "fixture_invalid_locale"}):
+            self.assertEqual(m.process_stamp(os.getpid()), stamp)
+        with mock.patch.object(m.subprocess, "run", return_value=subprocess.CompletedProcess([], 1, "", "fixture")):
+            with mock.patch.object(m.os, "kill", return_value=None):
+                self.assertEqual(m.process_stamp(12345), "unknown")
+            with mock.patch.object(m.os, "kill", side_effect=ProcessLookupError()):
+                self.assertIsNone(m.process_stamp(12345))
+        with mock.patch.object(m, "process_stamp", return_value="unknown"), contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                m.machine_wait("verify")
+
     def test_hold_retries_and_releases(self):
         m = self.m
         with mock.patch.object(m, "machine_reading", side_effect=[{**self.good, "thermal": "pressure"}, self.good]), \
