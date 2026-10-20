@@ -80,6 +80,14 @@
   if (activePage) {
     const p = activePage.getBoundingClientRect(), h = document.querySelector('.page-header').getBoundingClientRect();
     near(p.left, h.left, 'shared page start'); near(p.right, h.right, 'shared page end');
+    if (innerWidth <= 390) {
+      const scroller = document.querySelector('.inset-scroll');
+      const frame = scroller.getBoundingClientRect();
+      const left = h.left - frame.left - scroller.clientLeft;
+      const right = frame.right - h.right - scroller.clientLeft;
+      alignment.phoneGutters = {left, right};
+      near(left, right, 'equal phone page gutters');
+    }
   }
   const cards = [...document.querySelectorAll('.attention-split > .page-section')].filter(rendered);
   if (cards.length === 2 && Math.abs(cards[0].getBoundingClientRect().top - cards[1].getBoundingClientRect().top) <= 1)

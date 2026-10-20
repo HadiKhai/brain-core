@@ -421,8 +421,11 @@ svg {
   overflow-y: auto;
   overflow-x: hidden;
   padding: 28px;
-  scrollbar-gutter: stable;
+  scrollbar-gutter: auto;
   overscroll-behavior: contain;
+}
+.inset-scroll[data-classic-scrollbars="true"] {
+  scrollbar-gutter: stable;
 }
 .page-header {
   display: flex;
@@ -1501,7 +1504,6 @@ svg {
   }
   .inset-scroll {
     padding: 20px;
-    scrollbar-gutter: stable;
   }
   .page-header {
     padding-bottom: 24px;

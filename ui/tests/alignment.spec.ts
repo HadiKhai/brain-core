@@ -76,3 +76,25 @@ test('fitness audit rejects a removed content inset and a shortened group header
   await page.evaluate(audit);
   if(folder) writeFileSync(join(folder,'alignment-mutations.json'),JSON.stringify(evidence,null,2));
 });
+
+test('overlay phone gutters stay symmetric and reject an unconditional reservation', async ({browser}) => {
+  const evidence: unknown[] = [];
+  for (const [width,height] of [[390,844],[320,640]]) for (const colorScheme of ['light','dark'] as const) {
+    const context = await browser.newContext({viewport:{width,height},colorScheme});
+    const page = await context.newPage();
+    await page.goto('/?k=demo');
+    await page.evaluate(async()=>{await document.fonts.ready;await new Promise(r=>setTimeout(r,300));});
+    const before = await page.evaluate(audit);
+    expect(before.alignment.phoneGutters.left).toBe(20);
+    expect(before.alignment.phoneGutters.right).toBe(20);
+    const mutation = await page.addStyleTag({content:'.inset-scroll { scrollbar-gutter: stable !important; }'});
+    let failure = '';
+    try { await page.evaluate(audit); } catch(error) {failure=String(error);}
+    expect(failure).toContain('equal phone page gutters');
+    await mutation.evaluate(e=>e.remove());
+    const restored = await page.evaluate(audit);
+    evidence.push({width,height,colorScheme,before,mutation:'Restore unconditional stable scrollbar gutter',failure,restored});
+    await context.close();
+  }
+  if(folder) {mkdirSync(folder,{recursive:true});writeFileSync(join(folder,'phone-gutter-mutations.json'),JSON.stringify(evidence,null,2));}
+});

@@ -486,6 +486,21 @@ function App() {
     positions = useRef<Record<string, number>>({}),
     activeView = useRef(route.view);
   useLayoutEffect(() => {
+    // Overlay scrollbars need no reserved space. CSS stable alone can still
+    // allocate a classic-width strip on systems whose scrollbars overlay content.
+    const measure = () => {
+      const probe = document.createElement("div");
+      probe.style.cssText = "position:fixed;top:-9999px;width:100px;height:100px;overflow:scroll;visibility:hidden;pointer-events:none";
+      document.body.append(probe);
+      const classic = probe.offsetWidth - probe.clientWidth > 0;
+      probe.remove();
+      if (scroll.current) scroll.current.dataset.classicScrollbars = String(classic);
+    };
+    measure();
+    addEventListener("resize", measure);
+    return () => removeEventListener("resize", measure);
+  }, []);
+  useLayoutEffect(() => {
     if (scroll.current)
       scroll.current.scrollTop = positions.current[route.view] || 0;
     activeView.current = route.view;

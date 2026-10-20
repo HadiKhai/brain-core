@@ -59,7 +59,7 @@ for (const scenario of scenarios) test(`seeded ${scenario}: every screen contain
       if (view === "inbox") expect(audit.requestCount).toBeLessThanOrEqual(10);
       if (scenario === "rtl" && ["overview","inbox","learnings","agents"].includes(view)) expect(audit.rtl).toBeGreaterThan(0);
       const fitness = await page.evaluate(fitnessSource);
-      if (folder) await page.screenshot({ path:join(folder,`${scenario}-${view}-${width}x${height}-${colorScheme}.png`), animations:"disabled" });
+      if (folder && (!process.env.UI_TOUR_PHONE_ONLY || width < 768)) await page.screenshot({ path:join(folder,`${scenario}-${view}-${width}x${height}-${colorScheme}.png`), animations:"disabled" });
       evidence.push({scenario,view,width,height,colorScheme,...audit,alignment:fitness.alignment,contrast:fitness.contrast});
       if (view === "detail") await page.keyboard.press("Escape");
     }

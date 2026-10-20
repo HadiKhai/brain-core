@@ -21,7 +21,7 @@
     ]
   ],
   "ui_unit_and_license_tests": 15,
-  "playwright_scenarios": 24,
+  "playwright_scenarios": 25,
   "extreme_screenshots": 448,
   "seed_cases": [
     "empty",
@@ -33,12 +33,17 @@
     "longtitle",
     "rtl"
   ],
-  "independent_review": "Coordinator review rounds 1 and 2 completed; round 3 fixes await coordinator and operator trial",
+  "independent_review": "Coordinator review rounds 1, 2 and 3 completed; phone-gutter correction awaits coordinator and operator trial",
   "detail_engines": [
     "Chromium",
     "WebKit"
   ],
   "python_verification": "Full serial pytest via native handback",
   "alignment_matrix_renders": 56,
-  "alignment_mutations": 2
+  "alignment_mutations": 3,
+  "phone_gutter_mutation_cases": 4,
+  "phone_gutters_css_px": {
+    "left": 20,
+    "right": 20
+  }
 }
