@@ -8945,7 +8945,7 @@ def changes_due(inst, n):
 def machine_due_items(inst, nodes, state, items):
     """An idle node never wakes for another node's load or queue. Root aggregates once."""
     target = next((n for n in nodes if n["id"] == "root"), nodes[0] if nodes else None)
-    if target is None or target["archived"] or any(i["kind"] == "machine" for i in items):
+    if target is None or target["archived"] or any(i.get("kind") == "machine" for i in items):
         return []
     scope = machine_scope(inst, target["id"])
     waiting = any(s[0] == scope[0] and (target["id"] == "root" or s == scope)
