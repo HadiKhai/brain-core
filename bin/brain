@@ -3924,13 +3924,14 @@ REPO_MARKS = (".git", "HEAD", "objects", "refs", "packed-refs", "config")
 
 
 def looks_like_repo(folder, strict=False):
-    """A repository, read or not: a .git entry or a bare layout (HEAD, objects/ and refs/). Strict, for the session's
-    own folder: any single trace of one, so a damaged bare repository still counts."""
+    """A repository, read or not: a .git entry or a bare layout (objects/ and refs/, HEAD or not). Strict, for the
+    session's own folder: any single trace of one, so a damaged bare repository still counts."""
     q = Path(folder)
     if (q / ".git").exists() or (q / ".git").is_symlink():
         return True
-    present = [(q / m).exists() or (q / m).is_symlink() for m in REPO_MARKS[1:]]
-    return any(present) if strict else all(present[:3])
+    present = dict((m, (q / m).exists() or (q / m).is_symlink()) for m in REPO_MARKS[1:])
+    # A parent: a bare layout, even with HEAD gone (objects/ and refs/), but not a mere config folder.
+    return any(present.values()) if strict else (present["objects"] and present["refs"])
 
 
 def contains_brain(folder, depth=4):
@@ -3988,8 +3989,10 @@ def history_matcher(inst, n, also=()):
             inside = any(p == r or r in p.parents for r in roots)
             if p.is_dir():
                 c, r = history_repo(p)
+                # A folder git reads as another repository is that repository's, whatever remote a session
+                # recorded: the recorded remote speaks only for folders that are gone or aren't repositories.
                 seen[p] = ("folder" if inside else "worktree") if c and c == common else \
-                    "remote" if remotes & r else None
+                    "remote" if remotes & r else (False if c else None)
             else:
                 seen[p] = "folder" if inside else None
         return seen[p]

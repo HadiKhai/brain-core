@@ -6695,6 +6695,18 @@ class HistorySizes(History):
                    [{**r, "message": {"role": "user", "content": "FOREIGN-named-bare"}} if r.get("type") == "user" else r
                     for r in self.claude_rows(damaged, "aaaaaaaa-3333", start=20)[:3]])
         self.assertEqual(count(self.b(self.r, "spend", "garden", "--also", str(scratch), "--also", str(damaged))), after)
+        # A folder below a damaged bare repository, named directly: still inside a repository.
+        (damaged / "maintenance").mkdir()
+        self.jsonl(self.claude / "projects" / re.sub(r"[^A-Za-z0-9]", "-", str(damaged / "maintenance")) /
+                   "aaaaaaaa-4444.jsonl", self.claude_rows(damaged / "maintenance", "aaaaaaaa-4444", start=21)[:3])
+        self.assertEqual(count(self.b(self.r, "spend", "garden", "--also", str(scratch), "--also",
+                                      str(damaged / "maintenance"))), after)
+        # A readable foreign repository isn't let in by the remote a session recorded there.
+        s4 = self.codex / "sessions" / "2026" / "10" / "07"
+        self.jsonl(s4 / "rollout-2026-10-07T09-00-00-eeee0001.jsonl", self.codex_rows(
+            "eeee0001-0000", clone, [self.item("UserMessage", "FOREIGN-recorded", id="u-f")],
+            repo="https://github.com/Acme/Garden.git", at0="2026-10-07T09:00:00Z"))
+        self.assertEqual(count(self.b(self.r, "spend", "garden", "--also", str(scratch))), after)
         # A session whose folder is gone, inside a brain that's still there, matches nothing by its remote.
         s3 = self.codex / "sessions" / "2026" / "10" / "06"
         self.jsonl(s3 / "rollout-2026-10-06T09-00-00-dddd0001.jsonl", self.codex_rows(

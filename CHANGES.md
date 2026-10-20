@@ -13,6 +13,9 @@ For agents:
   worktrees, such as a scratch thread. `brain spend <node> --also <folder>` counts them too, and a
   sub-agent only when its own folder counts. A folder holding the home folder or a brain, inside a
   brain or another repository, or holding another project's home, is refused.
+- `brain history` and `brain spend` no longer count a session by the remote it recorded when its
+  folder still exists and git reads it as another repository; the recorded remote speaks only for
+  folders that are gone or aren't repositories. A session inside a brain's folders never counts.
 
 After upgrading:
 - Nothing, unless a node's history was made mostly outside its home: then ask the operator which
