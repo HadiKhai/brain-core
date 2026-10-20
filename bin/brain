@@ -7861,6 +7861,8 @@ def inbox_lines(n):
     # A busy inbox never loses a stopped turn's question. The private queue is also an inbox
     # source until it can be appended; reading due/inbox retries delivery without waiting.
     queue = hook_question_queue(n)
+    if not queue.exists() or outward_links(instance_above(n["dir"])):
+        return lines
     for pending in sorted(queue.glob("*.json")):
         try:
             value = json.loads(pending.read_text())

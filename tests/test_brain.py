@@ -1513,6 +1513,26 @@ class UnifiedHandbacks(Scenario):
     def due(self, r):
         return json.loads(self.b(r, "due", "a", "--json"))
 
+    def test_question_handback_preserves_a_concurrent_runtime_inbox_append(self):
+        r, home, wt = self.job()
+        loader = importlib.machinery.SourceFileLoader("brain_handback_append", str(CORE / "bin/brain"))
+        module = loader.load_module()
+        inst = module.Instance(r)
+        original = module.no_terms_in
+        def concurrent_append(n, text, what):
+            original(n, text, what)
+            if what == "the inbox question":
+                module.inbox_append(n["dir"], "- synthetic runtime question\n")
+        args = argparse.Namespace(id="a", branch="job", state="question", lessons="none: fixture",
+                                  report=None, reviews=None, need_human="Choose a colour")
+        with mock.patch.dict(os.environ, self.env, clear=True), mock.patch.object(module, "load", return_value=inst), \
+                mock.patch.object(module, "no_terms_in", side_effect=concurrent_append), \
+                contextlib.redirect_stdout(io.StringIO()):
+            module.cmd_handback(args)
+        text = (r / "nodes/a/inbox.md").read_text()
+        self.assertIn("synthetic runtime question", text)
+        self.assertIn("Choose a colour", text)
+
     def test_one_command_one_worker_file_for_ready_state_and_proposals(self):
         r, home, wt = self.job()
         names = ("status.md", "brief.md", "decisions.md", "node.md", "job-ledger.md")
@@ -2200,6 +2220,17 @@ class StopHook(Scenario):
         self.assertEqual((r / "inbox.md").read_text().count("host-question:"), 1)
         self.hook(r, r, active=True, transcript=path)
         self.assertEqual((r / "inbox.md").read_text().count("host-question:"), 1)
+
+    def test_question_queue_never_reads_or_removes_an_outward_link(self):
+        r = self.init("alice")
+        outside = self.tmp / "outside-queue"
+        (outside / "root").mkdir(parents=True)
+        fake = outside / "root" / ("a" * 64 + ".json")
+        fake.write_text(json.dumps({"line": "- outside question sentinel\n", "marker": "synthetic-marker"}))
+        (r / ".brain/host-questions").symlink_to(outside, target_is_directory=True)
+        self.assertNotIn("outside question sentinel", self.b(r, "due", "root"))
+        self.assertNotIn("outside question sentinel", self.b(r, "inbox", "root"))
+        self.assertTrue(fake.exists())
 
     def test_question_capture_in_registered_external_worker_folder(self):
         r = self.init("alice")
