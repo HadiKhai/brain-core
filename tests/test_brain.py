@@ -6987,6 +6987,41 @@ class Spend(Scenario):
             ids = sorted(a["id"] for a in m.job_sessions(inst, n, row, worktree=str(mine)))
         self.assertEqual(ids, ["14141414-mine"])
 
+    def test_transcript_ids_are_never_kept_and_a_shared_folder_name_isnt_trusted(self):
+        (self.node / "never-name.txt").write_text("Zebracorp\n")
+        tool = [{"type": "tool_use", "id": "toolu_Zebracorp1", "name": "Bash", "input": {}}]
+        self.cl(self.wt, "zebracorp-0001-session", "Fix.", [("said", 1, "msg_Zebracorp", (10, 0, 0, 1), tool)])
+        self.cx(self.wt, "c0000070-zebracorp", [(1, *self.record("c0000070-zebracorp", "resp_Zebracorp", 20, 0, 2))])
+        twin = self.tmp / "app_work/worktrees/job"  # Claude names its folder exactly like the job's worktree
+        twin.mkdir(parents=True)
+        self.cl(twin, "16161616-twin", "Elsewhere.", [("said", 1, "t1", (9000, 0, 0, 900))],
+                path=self.folder(self.wt) / "16161616-twin.jsonl")
+        self.b(self.r, "spend", "app")
+        self.b(self.r, "wt", "rm", "app", "job", "--force", "--cause", "measured")
+        row = self.row()
+        self.assertEqual((row["Fresh in"], row["Output"], row["Usage"]), ("30", "3", "transcripts: 2 sessions"))
+        for f in (self.r / ".brain/spend").rglob("*.json"):
+            self.assertNotIn("zebracorp", f.read_text().lower(), f)
+
+    def test_only_what_happened_while_the_job_was_open_counts_to_the_second(self):
+        ledger = self.node / "job-ledger.md"
+        begun = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=2)).replace(second=40, microsecond=0)
+        ledger.write_text(re.sub(r"(\| job \| )[^|]+", lambda m: m.group(1) + begun.isoformat() + " ", ledger.read_text()))
+        at = lambda sec: (begun + datetime.timedelta(seconds=sec)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        rec = lambda sec, mid, usage: {"type": "assistant", "cwd": str(self.wt), "sessionId": "17171717-span",
+                                       "message": {"id": mid, "model": "claude-opus-5-5", "role": "assistant",
+                                                   "content": [{"type": "text", "text": "ok"}],
+                                                   "usage": dict(zip(("input_tokens", "cache_read_input_tokens",
+                                                                      "cache_creation_input_tokens", "output_tokens"), usage))},
+                                       "timestamp": at(sec)}
+        self.jsonl(self.folder(self.wt) / "17171717-span.jsonl", [
+            {"type": "user", "cwd": str(self.wt), "sessionId": "17171717-span", "message": {"role": "user", "content": "Go."},
+             "timestamp": at(-35)},
+            rec(-30, "before", (9000, 0, 0, 900)),   # the same minute, 30 seconds before the job began
+            rec(10, "during", (30, 0, 0, 3))])
+        self.b(self.r, "wt", "rm", "app", "job", "--force", "--cause", "measured")
+        self.assertEqual((self.row()["Fresh in"], self.row()["Output"]), ("30", "3"))
+
     def test_host_numbers_win_over_transcripts(self):
         self.cl(self.wt, "99999999-wt", "Fix.", [("said", 1, "z1", (5, 5, 5, 5))])
         usage = self.tmp / "usage.json"

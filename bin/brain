@@ -4669,7 +4669,7 @@ def cmd_history(a):
 # then incrementally: transcripts only grow, so the next read starts where the last one stopped.
 
 SPEND_IDLE_MIN = 5  # a gap between two events of more than this many minutes is idle time
-SPEND_VERSION = 2
+SPEND_VERSION = 3
 SPEND_FIELDS = ("events", "fresh", "cache_read", "cache_write", "output", "reasoning", "tools")
 SPEND_TOKENS = ("fresh", "cache_read", "cache_write", "output", "reasoning")  # reasoning is part of output
 JOB_MARK = "brain-job: {}"  # in every job brief: the sessions a brief starts are found again by it
@@ -4699,15 +4699,28 @@ def spend_count(value):
 
 
 def spend_new(runtime, path):
-    return {"v": SPEND_VERSION, "runtime": runtime, "id": "", "parent": "", "subagent": False, "fork_of": "",
-            "job": "", "models": [], "m": {}, "mc": {}, "records": False, "compactions": [],
+    return {"v": SPEND_VERSION, "runtime": runtime, "id": "", "parent": "", "subagent": False,
+            "job": "", "first_at": None, "last_at": None, "models": [], "m": {}, "mc": {}, "records": False, "compactions": [],
             "first": None, "last": None, "state": {"offset": 0, "prompt_done": False, "recent": [], "tools": [],
                                                    "model": -1, "last_input": 0, "prev": None, "own_start": None}}
 
 
+def spend_counts(agg):
+    """Does the record being read count: inside the read's window, when it has one."""
+    st = agg["state"]
+    return st.get("lo") is None or (st.get("at") is not None and st["lo"] <= st["at"] <= st["hi"])
+
+
+def opaque(value):
+    """A transcript's own id (a message, tool call or response), kept only as a digest: equal ids still match."""
+    return hashlib.sha256(value.encode()).hexdigest()[:16]
+
+
 def spend_add(agg, key, minute, model, values):
-    """Add per-field values to one minute of one model. Buckets are keyed "<minute>:<model index>"."""
-    if minute is None:
+    """Add per-field values to one minute of one model. Buckets are keyed "<minute>:<model index>". A read limited
+    to a window ([lo, hi] seconds, a job's) counts nothing outside it."""
+    st = agg["state"]
+    if minute is None or (st.get("lo") is not None and (st.get("at") is None or not st["lo"] <= st["at"] <= st["hi"])):
         return
     b = agg[key].setdefault(f"{minute}:{model}", [0] * len(SPEND_FIELDS))
     for i, v in enumerate(values):
@@ -4747,7 +4760,8 @@ def spend_claude_line(agg, raw, minute, at=None):
         return
     if kind == "system" and r.get("subtype") == "compact_boundary":
         meta = r.get("compactMetadata") if isinstance(r.get("compactMetadata"), dict) else {}
-        agg["compactions"].append([minute, spend_count(meta.get("preTokens")), meta.get("trigger") == "auto"])
+        if spend_counts(agg):
+            agg["compactions"].append([minute, spend_count(meta.get("preTokens")), meta.get("trigger") == "auto"])
         return
     usage = msg.get("usage") if isinstance(msg.get("usage"), dict) else None
     if kind != "assistant" or not usage or msg.get("model") == "<synthetic>":
@@ -4755,10 +4769,11 @@ def spend_claude_line(agg, raw, minute, at=None):
     model = spend_model(agg, msg.get("model"))
     now = [spend_count(usage.get(k)) for k in ("input_tokens", "cache_read_input_tokens",
                                                 "cache_creation_input_tokens", "output_tokens")]
-    mid = msg.get("id") if isinstance(msg.get("id"), str) else None
+    mid = opaque(msg["id"]) if isinstance(msg.get("id"), str) else None
     tools = 0
     for c in msg.get("content") if isinstance(msg.get("content"), list) else []:
-        tid = c.get("id") if isinstance(c, dict) and c.get("type") in ("tool_use", "server_tool_use") else None
+        tid = opaque(c["id"]) if isinstance(c, dict) and c.get("type") in ("tool_use", "server_tool_use") and \
+            isinstance(c.get("id"), str) else None
         if tid and tid not in st["tools"]:
             st["tools"] = (st["tools"] + [tid])[-SPEND_RECENT * 2:]
             tools += 1
@@ -4795,22 +4810,21 @@ def spend_codex_line(agg, raw, minute, at=None):
         return
     kind, ptype = r.get("type"), p.get("type")
     if kind == "session_meta":
-        if not agg["id"]:
+        if st["own_start"] is None:
             src = p.get("source")
             spawn = src.get("subagent", {}).get("thread_spawn", {}) if isinstance(src, dict) and \
                 isinstance(src.get("subagent"), dict) else {}
-            agg.update(id=history_str(p.get("id")),
-                       parent=history_str(spawn.get("parent_thread_id")) if isinstance(spawn, dict) else "",
-                       subagent=isinstance(src, dict) and "subagent" in src or p.get("thread_source") == "subagent",
-                       fork_of=history_str(p.get("forked_from_id")) or history_str(
-                           (p.get("history_base") or {}).get("thread_id") if isinstance(p.get("history_base"), dict) else ""))
+            agg.update(id=agg["id"] or history_str(p.get("id")),
+                       parent=agg.get("parent") or (history_str(spawn.get("parent_thread_id")) if isinstance(spawn, dict) else ""),
+                       subagent=isinstance(src, dict) and "subagent" in src or p.get("thread_source") == "subagent")
             st["own_start"] = at  # a fork's copied history is older than its own start, to the millisecond
         return
     if kind == "turn_context":
         st["model"] = spend_model(agg, p.get("model"))
         return
     if kind == "compacted":
-        agg["compactions"].append([minute, st["last_input"], None])
+        if spend_counts(agg):
+            agg["compactions"].append([minute, st["last_input"], None])
         return
     if kind == "response_item" and ptype in CODEX_TOOL_CALLS:
         spend_add(agg, "m", minute, st["model"], (0, 0, 0, 0, 0, 0, 1))
@@ -4825,7 +4839,7 @@ def spend_codex_line(agg, raw, minute, at=None):
         if p.get("thread_id") not in (None, agg["id"]):
             return  # another thread's response, carried along
         st["prompt_done"] = True
-        rid = p.get("response_id") if isinstance(p.get("response_id"), str) else None
+        rid = opaque(p["response_id"]) if isinstance(p.get("response_id"), str) else None
         if rid and rid in st["recent"]:
             return
         if rid:
@@ -4872,12 +4886,17 @@ def spend_read(agg, fh, budget=None):
         line = raw.strip()
         if line.startswith(b"{"):
             at = spend_stamp(line)
+            st["at"] = at
+            if at is not None:
+                agg["first_at"] = at if agg.get("first_at") is None else min(agg["first_at"], at)
+                agg["last_at"] = at if agg.get("last_at") is None else max(agg["last_at"], at)
             line_fn(agg, line, int(at) // 60 if at is not None else None, at)
         if deadline and time.monotonic() > deadline:
             return False
     return True
 
 
+SPEND_UNKEPT = ("path", "cwd", "id", "parent", "fork_of")  # known again at each read, never written
 _SPEND_MEM = {}  # this process's aggregates, by real path: a file that hasn't grown isn't read again
 _SPEND_TERMS = {}
 
@@ -4891,9 +4910,10 @@ def spend_cache_dir(inst):
     return inst.root / ".brain" / "spend"
 
 
-def spend_file(inst, path, runtime, allowed, forbidden, budget=None):
+def spend_file(inst, path, runtime, allowed, forbidden, budget=None, window=None):
     """One transcript's aggregate, brought up to date; None when unreadable or outside the folders this brain may
-    read (checked on the open file, as `brain history` does). A file that shrank or was replaced is read again."""
+    read (checked on the open file, as `brain history` does). A file that shrank or was replaced is read again.
+    With a window ([lo, hi] seconds), only what happened inside it, to the second; kept in this run only."""
     try:
         real = Path(path).resolve()
     except (OSError, RuntimeError):
@@ -4907,24 +4927,33 @@ def spend_file(inst, path, runtime, allowed, forbidden, budget=None):
         except OSError:
             return None
         packed = isinstance(fh, Decompressed)
-        known = _SPEND_MEM.get(str(real))
+        mem = str(real) if window is None else (str(real), tuple(window))
+        known = _SPEND_MEM.get(mem)
         if known and known[0] == (size, list(ident)) and known[1].get("complete", True):
             return known[1]
         key = hashlib.sha256(str(real).encode()).hexdigest()[:32]
         cf = spend_cache_dir(inst) / "files" / f"{key}.json"
         agg = None
         try:
-            agg = json.loads(cf.read_text())
+            agg = json.loads(cf.read_text()) if window is None else None
         except (OSError, ValueError):
             pass
         if not (isinstance(agg, dict) and agg.get("v") == SPEND_VERSION and agg.get("key") == key
                 and agg.get("ino") == list(ident) and agg["state"]["offset"] <= size
                 and (not packed or agg["state"]["offset"] in (0, size))):
             agg = {**spend_new(runtime, real), "key": key, "ino": list(ident)}
-            if runtime == "claude":  # a session's file is named by its id; its sub-agents' files sit below it
-                sub = real.parent.name == "subagents"
-                agg.update(id=f"{real.parent.parent.name}/{real.stem}" if sub else real.stem, subagent=sub,
-                           parent=real.parent.parent.name if sub else "")
+            if window is not None:
+                agg["state"].update(lo=window[0], hi=window[1])
+        # Who the session is, never kept on disk: Claude names a session's file by its id, its sub-agents' files
+        # sit below it; a Codex transcript says so in its first line.
+        if runtime == "claude":
+            sub = real.parent.name == "subagents"
+            agg.update(id=f"{real.parent.parent.name}/{real.stem}" if sub else real.stem, subagent=sub,
+                       parent=real.parent.parent.name if sub else "")
+        elif not agg.get("id"):
+            meta = codex_meta(real, allowed, forbidden)
+            if meta:
+                agg.update(id=meta[0], parent=meta[2])
         if agg["state"]["offset"] < size:
             try:
                 agg["complete"] = spend_read(agg, fh, budget)
@@ -4935,13 +4964,14 @@ def spend_file(inst, path, runtime, allowed, forbidden, budget=None):
             terms = _SPEND_TERMS.setdefault(str(inst.root), brain_terms(inst))
             agg["models"] = [m if not find_terms(m, terms) else "other" for m in agg["models"]]
             try:
-                cf.parent.mkdir(parents=True, exist_ok=True)  # counts only: no path, no folder, no text
-                atomic_write(cf, json.dumps({k: v for k, v in agg.items() if k not in ("path", "cwd")},
-                                            separators=(",", ":")))
+                if window is None:  # counts and digests only: no path, folder, session id or text
+                    cf.parent.mkdir(parents=True, exist_ok=True)
+                    atomic_write(cf, json.dumps({k: v for k, v in agg.items() if k not in SPEND_UNKEPT},
+                                                separators=(",", ":")))
             except OSError:
                 pass  # still right for this run; read again next time
         agg["path"] = str(real)  # this run's own, never written
-        _SPEND_MEM[str(real)] = ((size, list(ident)), agg)
+        _SPEND_MEM[mem] = ((size, list(ident)), agg)
     return agg
 
 
@@ -5188,14 +5218,16 @@ def job_sessions(inst, n, row, worktree=None):
                 for q in {p, p.resolve()}:
                     names.setdefault(claude_folder(q), (p, p == wt))
             for name, (place, here) in names.items():
-                cut = len(name) > 200  # a long name is cut, with a suffix: folders sharing the cut may be others'
-                folders = [proj / name] if not cut else list(proj.glob(name[:200] + "*"))
+                # A long name is cut, with a suffix: every folder sharing the cut is looked at.
+                folders = [proj / name] if len(name) <= 200 else list(proj.glob(name[:200] + "*"))
                 for folder in folders:
                     for f in sorted(folder.glob("*.jsonl")) if folder.is_dir() else []:
                         # In the worktree, every session is the job's. In a coordinator's folder only those its
                         # brief names: a long coordinator session is never read for this.
                         try:
-                            if cut and not spend_inside(claude_cwd(f, allowed, forbidden), place):
+                            # Claude's folder name stands for more than one path (app-work, app_work, a cut long
+                            # one): only a session that really ran there counts.
+                            if not touched(f) or not spend_inside(claude_cwd(f, allowed, forbidden), place):
                                 continue
                             if here:
                                 in_wt.add(str(f.resolve()))
@@ -5255,7 +5287,17 @@ def job_usage(inst, n, row, worktree=None):
     start, end = job_window(inst, row)
     if start is None:
         return None
-    u = spend_sum(job_sessions(inst, n, row, worktree), start, end)
+    _, allowed, forbidden = spend_sources(inst)
+    hi = end if row.get("Ended") else float("inf")
+    exact = []
+    for a in job_sessions(inst, n, row, worktree):
+        if (a.get("first_at") is not None and a["first_at"] < start) or (a.get("last_at") or 0) > hi:
+            # The session ran before the job began (a reused worktree), or after it ended: read again, counting
+            # only what happened while the job was open, to the second.
+            w = spend_file(inst, Path(a["path"]), a["runtime"], allowed, forbidden, window=(start, hi))
+            a = {**w, "subagent": a["subagent"]} if w else a
+        exact.append(a)
+    u = spend_sum(exact, start, end)
     u["source"] = f"transcripts: {count_of(u['sessions'], 'session')}" if u["sessions"] else "none found"
     return u
 
@@ -5575,7 +5617,8 @@ def spend_lookback(inst, n, since=None):
         u = spend_sum([a], lo)
         if not u["sessions"]:
             continue
-        sessions.append({"runtime": a["runtime"], "id": a["id"], "subagent": a["subagent"], "parent": a["parent"],
+        sessions.append({"runtime": a["runtime"], "id": opaque(a["id"]), "subagent": a["subagent"],
+                         "parent": opaque(a["parent"]) if a["parent"] else "",
                          "start": (a["first"] or 0) * 60, "end": (a["last"] or 0) * 60,
                          **spend_summary(u, never_terms(n))})
     total = spend_sum(aggs, lo)
