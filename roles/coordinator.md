@@ -165,12 +165,15 @@ Before launching, gather common facts once and pass them with `brain brief --con
 under `## Why separate` in the contract. An urgent single job may use `--allow-unexplained`;
 missing reasons in old calls warn rather than stop work.
 
-Declare shared source paths under optional `## Inputs` in each contract (one path per line,
-optionally prefixed `- `). Paths are relative to the node's home, or absolute. Only declared inputs count; prose and Git refs are not inferred as paths.
-Context files passed to a branch brief count
-on this machine; contract inputs travel with the node. `brain jobs` and `brain due` advise once
-per overlapping open job: merge related jobs or share a context brief. This is advice, not a
-launch gate; shared inputs alone do not make independent concerns the same job.
+Declare shared source paths under optional `## Inputs` in each contract, one path per line,
+with no annotations. Plain lines, `-`, `*`, `+` and numbered bullets work. Paths are home-relative
+or absolute; directory paths cover descendants and globs match literal paths. The check does
+not compute all intersections between different glob patterns. Only declarations count; prose and
+Git refs are not inferred as paths. Context files passed to a branch brief count on this machine;
+contract inputs travel with the node. `brain jobs` and `brain due` advise once per overlapping
+open job: merge related jobs or share a context brief. Once a pair shares a context file, its
+advice clears from `due`; `jobs` keeps a softer shared-context line. Unresolved pairs stay due.
+This is advice, not a launch gate; shared inputs alone do not make independent concerns one job.
 
 A worker sees only its brief and the rules of the node it runs in. Give it the task,
 everything it needs to know, the constraints, and who it reports to.

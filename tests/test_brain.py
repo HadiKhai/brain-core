@@ -6258,15 +6258,14 @@ class Workflow(Scenario):
         r, home, wt = self.job()
         self.b(r, "wt", "add", "a", "other")
         self.b(r, "wt", "add", "a", "third")
-        context = self.tmp / "shared.md"
-        context.write_text("Synthetic shared findings\n")
-        for branch in ("job", "other", "third"):
-            self.b(r, "brief", "a", "--branch", branch, "--task", "Work", "--why-separate", "Independent concern",
-                   "--context-file", str(context))
-        # Old open jobs still count after forty newer completed entries.
         m = importlib.machinery.SourceFileLoader("brain_aggregation_ledger", str(CORE / "bin/brain")).load_module()
         node = {"id": "a", "dir": r / "nodes/a"}
         rows = m.read_jobs(node)
+        for row in rows:
+            f = m.contract_file(node, row)
+            f.parent.mkdir(exist_ok=True)
+            f.write_text("## Inputs\n- src/calc.py\n")
+        # Old open jobs still count after forty newer completed entries.
         history = [{**rows[0], "Job": "closed-" + str(i), "Ended": rows[0]["Started"],
                     "Outcome": "abandoned", "Hours": "1"} for i in range(40)]
         m.write_jobs(None, node, rows + history)
@@ -6276,12 +6275,59 @@ class Workflow(Scenario):
         overlaps = [i for i in due if i["kind"] == "overlapping-inputs"]
         self.assertEqual(len(overlaps), 3)
         self.assertEqual(len({i["job"] for i in overlaps}), 3)
-        for branch in ("other", "third"):
-            own = self.tmp / (branch + ".md")
-            own.write_text("Independent findings\n")
-            self.b(r, "brief", "a", "--branch", branch, "--task", "Work", "--context-file", str(own))
-        self.assertNotIn("overlapping inputs", self.b(r, "jobs", "a"))
+        context = self.tmp / "shared.md"
+        context.write_text("Synthetic findings gathered once\n")
+        for branch in ("job", "other", "third"):
+            self.b(r, "brief", "a", "--branch", branch, "--task", "Work", "--why-separate", "Independent concern",
+                   "--context-file", str(context))
         self.assertNotIn("overlapping-inputs", self.b(r, "due", "a", "--json"))
+        out = self.b(r, "jobs", "a")
+        self.assertNotIn("overlapping inputs", out)
+        self.assertEqual(out.count("shares context with"), 3)
+        # One job leaves the common context: the unresolved pairs become due again.
+        own = self.tmp / "other.md"
+        own.write_text("Separate findings\n")
+        self.b(r, "brief", "a", "--branch", "other", "--task", "Work", "--context-file", str(own))
+        self.assertEqual(self.b(r, "due", "a", "--json").count('"kind": "overlapping-inputs"'), 3)
+        for row in rows:
+            m.contract_file(node, row).write_text("## Inputs\n- " + row["Job"] + ".py\n")
+        self.assertNotIn("overlapping-inputs", self.b(r, "due", "a", "--json"))
+
+    def test_input_paths_cover_directories_globs_and_list_styles(self):
+        m = importlib.machinery.SourceFileLoader("brain_aggregation_paths", str(CORE / "bin/brain")).load_module()
+        node = {"dir": self.tmp / "node", "home_path": self.tmp / "home", "local": {}}
+        rows = [{"Job": b, "Started": "2026-01-01", "Ended": ""} for b in ("one", "two")]
+        for left, right in (("- src/", "* src/calc.py"), ("1. src/*.py", "+ src/calc.py"),
+                            ("2) src/calc.py", "src/./calc.py")):
+            for row, value in zip(rows, (left, right)):
+                f = m.contract_file(node, row)
+                f.parent.mkdir(parents=True, exist_ok=True)
+                f.write_text("## Inputs\n" + value + "\n")
+            self.assertEqual(len(m.job_overlaps(node, rows)), 2, (left, right))
+        for left, right in (("src/", "src-other/calc.py"), ("src/*.py", "src/calc.js")):
+            for row, value in zip(rows, (left, right)):
+                m.contract_file(node, row).write_text("## Inputs\n" + value + "\n")
+            self.assertEqual(m.job_overlaps(node, rows), {}, (left, right))
+
+    def test_hire_and_review_carry_separation_reasons(self):
+        r, home, wt = self.job()
+        self.b(r, "specialist", "new", "tester", "--title", "Tester")
+        hire = ("hire", "tester", "a", "--branch", "job", "--task", "Synthetic checks")
+        self.assertIn("warning: why separate is missing", self.b(r, *hire))
+        self.assertIn("Why a separate agent: Dedicated test expertise", self.b(r, *hire,
+                      "--why-separate", "Dedicated test expertise"))
+        self.assertIn("needs a reason", self.b(r, *hire, "--why-separate", "", ok=False))
+        review = ("review", "a", "--branch", "job", "--base", "main", "--built-by", "codex")
+        self.assertIn("Why a separate agent: Independent second-runtime review.", self.b(r, *review))
+        self.assertIn("Why a separate agent: Check independently", self.b(r, *review,
+                      "--why-separate", "Check independently"))
+        contract = self.tmp / "contract.md"
+        contract.write_text("".join("## " + field + "\nSynthetic scope.\n\n" for field in
+                            ("Outcome", "Authorized", "Discretion", "Stop when", "Needs consent", "Done means")) +
+                            "## Why separate\nDistinct expertise.\n")
+        self.b(r, "jobs", "a", "--branch", "job", "--contract-file", str(contract))
+        self.assertIn("Why a separate agent: Distinct expertise.", self.b(r, *hire))
+        self.assertIn("Why a separate agent: Distinct expertise.", self.b(r, *review))
 
     def test_contract_input_overlap_normalization_and_closed_jobs(self):
         loader = importlib.machinery.SourceFileLoader("brain_aggregation", str(CORE / "bin/brain"))

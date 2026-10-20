@@ -11,12 +11,16 @@ For agents:
 - Gather common context once, group related investigation and implementation in one job,
   and state why each separate agent is needed. `brain brief --context-file <file>` embeds
   shared findings (repeatable); `--why-separate "<reason>"` or contract `## Why separate`
-  carries the reason. Old calls warn; an explicitly empty reason refuses unless
+  carries the reason. Hire uses the same option and contract fallback; review defaults to
+  its independent second-runtime role when no reason is supplied. Old worker/hire calls warn; an explicitly empty reason refuses unless
   `--allow-unexplained` is set for urgent work.
 - Optional contract `## Inputs` lists paths, one per line. Declared inputs and context files
   recorded by branch briefs on this machine let `brain jobs` and `brain due` flag each
   overlapping open job once, with advice to merge related work or share a context brief.
-  The check reads local records only and never gates a launch. Old contracts still work.
+  Sharing a context file resolves the pair and clears its due advice; jobs retains a softer
+  shared-context line. Directory descendants and globs against literal paths count; common
+  Markdown bullet styles work. Put paths on their own lines without notes. The check reads
+  local records only and never gates a launch. Old contracts still work.
 
 After upgrading:
 - Coordinators: read the updated coordinator role and home-job skill. Add inputs and a
