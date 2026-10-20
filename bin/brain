@@ -8184,6 +8184,8 @@ def cmd_due(a):
     # Root's explicit tick also sees descendant escalations, without exposing their text.
     escalation_nodes = inst.nodes() if a.id == "root" else nodes
     for n in escalation_nodes:
+        if n["archived"]:
+            continue
         for line in overdue_questions(inst, n, inbox_lines(n)):
             request_wake(inst, inst.node("root"), "overdue:" + hashlib.sha256(line.encode()).hexdigest())
         target, command = wake_target(inst, n)
@@ -8194,8 +8196,14 @@ def cmd_due(a):
                 pass
     items = [item for n in nodes for item in due_items(inst, n) + changes_due(inst, n)]
     if a.id == "root":
-        items += [item for n in escalation_nodes if n["id"] != "root"
-                  for item in due_items(inst, n, include_stale=False) if item["kind"] == "overdue-question"]
+        for n in escalation_nodes:
+            if n["id"] == "root" or n["archived"]:
+                continue
+            items += [item for item in due_items(inst, n, include_stale=False)
+                      if item["kind"] == "overdue-question"]
+            if any("<!-- host-question:" in line or "<!-- handback:" in line for line in inbox_lines(n)):
+                items.append({"node": n["id"], "kind": "question", "text":
+                              "unanswered question in node inbox; follow up with its coordinator or answer for it"})
     if a.quiet:
         sys.exit(1 if items else 0)
     if a.json:

@@ -2240,6 +2240,20 @@ class QuestionWake(Scenario):
         self.drain()
         self.assertEqual(len(self.calls.read_text().splitlines()), 1)
 
+    def test_root_wake_tick_sees_fresh_descendant_question(self):
+        now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        (self.n["dir"] / "inbox.md").write_text("- " + now +
+            " from runtime: Host question: Choose blue? <!-- host-question:abc -->\n")
+        output = io.StringIO()
+        with mock.patch.dict(os.environ, self.env, clear=True), \
+                mock.patch.object(self.module, "load", return_value=self.inst), \
+                mock.patch.object(self.module, "core_update"), \
+                mock.patch.object(self.module, "auto_upgrade", return_value=None), contextlib.redirect_stdout(output):
+            self.module.cmd_due(argparse.Namespace(id="root", quiet=False, json=True))
+        items = json.loads(output.getvalue())
+        self.assertTrue(any(i["kind"] == "question" and i["node"] == "a" for i in items))
+        self.assertNotIn("Choose blue", output.getvalue())
+
     def test_root_due_escalates_without_question_text_and_live_shows_age(self):
         old = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(minutes=11)).isoformat()
         (self.n["dir"] / "inbox.md").write_text("- " + old +
