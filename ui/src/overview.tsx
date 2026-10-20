@@ -28,6 +28,7 @@ import {
   TechnicalDetails,
   ScreenAction,
   Preview,
+  SectionBodyRow,
   ActionLink,
 } from "./shared";
 import {
@@ -109,7 +110,7 @@ export function Overview({
   return (
     <div className="page-stack">
       <ScreenAction active={active}><Button onClick={() => onView(list(s.inbox).length ? "inbox" : jobs.length ? "agents" : "imports")}>{list(s.inbox).length ? `Open Inbox (${list(s.inbox).length})` : jobs.length ? "Check ongoing work" : "Find repositories"}</Button></ScreenAction>
-      <div className="overview-split">
+      <div className="overview-split attention-split">
         <PageSection
           title="Inbox"
           description="Decisions and questions for you"
@@ -127,7 +128,7 @@ export function Overview({
         <PageSection
           title="Due"
           description="Next actions for coordinators"
-          action={<Button variant="ghost" size="sm" disabled={!list(s.due).length} onClick={() => onNode(list(s.due).find(a => a.ready)?.node || list(s.due)[0]?.node)}>Open next project</Button>}
+          action={<Button variant="outline" size="sm" disabled={!list(s.due).length} onClick={() => onNode(list(s.due).find(a => a.ready)?.node || list(s.due)[0]?.node)}>Open next project</Button>}
         >
           {list(s.due).length ? (
             Object.entries(Object.groupBy([...list(s.due)].sort((a,b) => Number(!!b.ready) - Number(!!a.ready)), (a) => a.node)).map(
@@ -138,7 +139,7 @@ export function Overview({
                   initial
                 >
                   {items!.map((a, i) => (
-                    <div className="due-row" key={i}>
+                    <SectionBodyRow className="due-row" key={i}>
                       <Status>
                         {a.ready
                           ? "Ready to merge"
@@ -157,7 +158,7 @@ export function Overview({
                       {list(a.reasons).length > 0 && (
                         <Preview title="Review details" text={a.reasons.join("\n\n")} />
                       )}
-                    </div>
+                    </SectionBodyRow>
                   ))}
                 </Disclosure>
               ),

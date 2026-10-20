@@ -365,7 +365,13 @@ export function Reader({ title, text, trigger = "Read full", children, footer, o
   </>;
 }
 export function Preview({ text, title = "Note" }: { text: any; title?: string }) {
-  return <span className="text-preview"><span className="prose-preview" dir="auto"><Text>{text}</Text></span><Reader title={title} text={String(text || "")} trigger="Read note" /></span>;
+  return <div className="text-preview"><div className="prose-preview preview-markdown" dir="auto"><Markdown text={text} /></div><Reader title={title} text={String(text || "")} trigger="Read note" /></div>;
+}
+export function SectionNote({ text, title = "Note" }: { text: any; title?: string }) {
+  return <SectionBodyRow className="note-row"><Preview text={text} title={title} /></SectionBodyRow>;
+}
+export function SectionBodyRow({ children, className = "" }: { children: ReactNode; className?: string }) {
+  return <div className={`section-content ${className}`}>{children}</div>;
 }
 export function TechnicalDetails({ values }: { values: Record<string, any> }) {
   return <Disclosure title="Technical details"><dl className="technical-facts">{Object.entries(values).filter(([,v]) => v != null && v !== "").map(([key, value]) => <div key={key}><dt>{key}</dt><dd className="verbatim" dir="ltr">{String(value)}</dd></div>)}</dl></Disclosure>;

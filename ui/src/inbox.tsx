@@ -2,7 +2,7 @@ import { useState } from "react";
 import { ArrowUpRight } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { PageSection, FilterToolbar, Text, Reader, Empty, Choice, ScreenAction, ActionLink } from "./shared";
-import { list, safeHref, time, type RecordData } from "./model";
+import { list, safeHref, time, count, type RecordData } from "./model";
 
 export function Correspondence({ s, item, onNode }: { s: RecordData; item: RecordData; onNode: (id: string) => void }) {
   const project = list(s.nodes).find(n => n.id === item.node);
@@ -31,9 +31,9 @@ export function InboxView({ s, onNode, active }: { s: RecordData; onNode: (id: s
   return <><ScreenAction active={active}>{conversation ? <ActionLink href={conversation}>{next?.default ? "Review next step" : /question|answer|\?/i.test(next?.text || "") ? "Answer next question" : "Open next request"}</ActionLink> : <Button variant="default" onClick={() => document.querySelector<HTMLInputElement>('[aria-label="Search inbox"]')?.focus()}>Find a request</Button>}</ScreenAction><PageSection title="Waiting for you" description="Read the request and continue the conversation" action={<span className="count-badge">{rows.length}</span>}>
     <FilterToolbar query={query} onQuery={v => {setQuery(v);setPage(0);}} placeholder="Search inbox">
       <Choice name="Inbox project" value={project} onChange={v => {setProject(v);setPage(0);}} options={[{value:"all",label:"All projects"}, ...list(s.nodes).map(n => ({value:n.id,label:n.title || "Project"}))]} />
-      <Button variant="outline" onClick={() => {setQuery("");setProject("all");setPage(0);}}>Clear filters</Button>
+      <Button variant="outline" disabled={!query && project === "all"} onClick={() => {setQuery("");setProject("all");setPage(0);}}>Clear filters</Button>
     </FilterToolbar>
     <div className="inbox-list">{rows.slice(current * Number(size), (current + 1) * Number(size)).map((a,i) => <Correspondence key={a.id || i} s={s} item={a} onNode={onNode} />)}</div>
-    {!rows.length ? <Empty text="Nothing waiting here." action="Questions and review requests will arrive here." /> : <footer className="table-footer"><span>{current * Number(size) + 1}–{Math.min(rows.length, (current + 1) * Number(size))} of {rows.length} requests</span><div className="pager"><Choice name="Inbox rows" value={size} onChange={v => {setSize(v);setPage(0);}} options={["10","25","50"].map(value => ({value,label:value}))} /><Button variant="ghost" disabled={!current} onClick={() => setPage(0)}>First</Button><Button variant="outline" disabled={!current} onClick={() => setPage(current - 1)}>Previous</Button><span>{current + 1} / {pages}</span><Button variant="outline" disabled={current === pages - 1} onClick={() => setPage(current + 1)}>Next</Button><Button variant="ghost" disabled={current === pages - 1} onClick={() => setPage(pages - 1)}>Last</Button></div></footer>}
+    {!rows.length ? <Empty text="Nothing waiting here." action="Questions and review requests will arrive here." /> : <footer className="table-footer"><span>{current * Number(size) + 1}–{Math.min(rows.length, (current + 1) * Number(size))} of {count(rows.length, "request")}</span>{pages > 1 && <div className="pager"><Choice name="Inbox rows" value={size} onChange={v => {setSize(v);setPage(0);}} options={["10","25","50"].map(value => ({value,label:value}))} /><Button variant="ghost" disabled={!current} onClick={() => setPage(0)}>First</Button><Button variant="outline" disabled={!current} onClick={() => setPage(current - 1)}>Previous</Button><span>{current + 1} / {pages}</span><Button variant="outline" disabled={current === pages - 1} onClick={() => setPage(current + 1)}>Next</Button><Button variant="ghost" disabled={current === pages - 1} onClick={() => setPage(pages - 1)}>Last</Button></div>}</footer>}
   </PageSection></>;
 }

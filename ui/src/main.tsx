@@ -62,6 +62,8 @@ import {
   Empty,
   Reader,
   Preview,
+  SectionNote,
+  SectionBodyRow,
   TechnicalDetails,
   ActionLink,
 } from "./shared";
@@ -331,18 +333,14 @@ function NodeDetail({
             {list(n.blocked).length > 0 && (
               <PageSection title="Needs you">
                 {n.blocked.map((t: string, i: number) => (
-                  <p className="note-row" key={i}>
-                    <Preview text={t} />
-                  </p>
+                  <SectionNote key={i} text={t} />
                 ))}
               </PageSection>
             )}
             {list(n.inbox).length > 0 && (
               <PageSection title="Inbox">
                 {n.inbox.map((t: string, i: number) => (
-                  <p className="note-row" key={i}>
-                    <Preview text={t} />
-                  </p>
+                  <SectionNote key={i} text={t} />
                 ))}
               </PageSection>
             )}
@@ -350,32 +348,28 @@ function NodeDetail({
               .filter(([k]) => !/^blocked/i.test(k))
               .map(([k, v]) => (
                 <PageSection key={k} title={k}>
-                  <Preview text={v} title={k} />
+                  <SectionNote text={v} title={k} />
                 </PageSection>
               ))}
             {list(n.limits).length > 0 && (
               <PageSection title="Limits">
                 {n.limits.map((t: string, i: number) => (
-                  <p className="note-row" key={i}>
-                    <Preview text={t} />
-                  </p>
+                  <SectionNote key={i} text={t} />
                 ))}
               </PageSection>
             )}
             {list(n.decisions).length > 0 && (
               <PageSection title="Latest decisions">
                 {n.decisions.map((d: RecordData, i: number) => (
-                  <div className="note-row" key={i}>
+                  <SectionBodyRow className="note-row" key={i}>
                     <strong>
                       <Text>{d.title}</Text>
                     </strong>
                     {d.said && (
-                      <p>
-                        <Preview text={d.said} title="Decision" />
-                      </p>
+                      <Preview text={d.said} title="Decision" />
                     )}
                     <small>{time(d.t || d.time, s.brain?.tz)}</small>
-                  </div>
+                  </SectionBodyRow>
                 ))}
               </PageSection>
             )}
@@ -413,12 +407,12 @@ function NodeDetail({
             {list(n.reports).length > 0 && (
               <PageSection title="Reports">
                 {n.reports.map((r: RecordData, i: number) => (
-                  <div className="note-row" key={i}>
+                  <SectionBodyRow className="note-row" key={i}>
                     <strong>
                       <Text>{r.title}</Text>
                     </strong>
                     <Reader title={r.title || "Report"} text={"Ask the coordinator to open this report for review."} trigger="Open report details"><TechnicalDetails values={{Location:r.path}} /></Reader>
-                  </div>
+                  </SectionBodyRow>
                 ))}
               </PageSection>
             )}
@@ -459,11 +453,13 @@ function NodeDetail({
             </div>
             {n.never_name > 0 && (
               <PageSection title="Privacy guard">
-                <p>
+                <SectionBodyRow>
+                  <p>
                   {count(n.never_name, "restricted word")} must stay out of this
                   project’s files.
-                </p>
-                <Reader title="Privacy instructions" text="Ask your coordinator to check restricted words before sharing this project. The command inspects the local files." trigger="Check privacy instructions" footer={<Command text={"brain guard " + n.id} />} />
+                  </p>
+                  <Reader title="Privacy instructions" text="Ask your coordinator to check restricted words before sharing this project. The command inspects the local files." trigger="Check privacy instructions" footer={<Command text={"brain guard " + n.id} />} />
+                </SectionBodyRow>
               </PageSection>
             )}
           </div>

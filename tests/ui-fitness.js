@@ -12,6 +12,61 @@
       !e.closest("[hidden]")
     );
   };
+  // Compare rendered anchors with the design inset, not their current padding: a
+  // missing-padding mutation must fail rather than redefine its own expectation.
+  const alignment = { anchors: 0, headers: 0, failures: [] };
+  const rendered = e => !!e.getClientRects().length && !e.closest('[hidden],[aria-hidden=true]');
+  const near = (actual, expected, label) => {
+    alignment.anchors++;
+    if (Math.abs(actual - expected) > 1) alignment.failures.push({label, actual, expected});
+  };
+  const textStart = (e, rtl = false) => {
+    const walker = document.createTreeWalker(e, NodeFilter.SHOW_TEXT);
+    let node;
+    while ((node = walker.nextNode())) if (node.textContent.trim()) {
+      const range = document.createRange(); range.selectNodeContents(node);
+      const rect = range.getBoundingClientRect();
+      return rtl ? rect.right : rect.left;
+    }
+    return e.getBoundingClientRect().left;
+  };
+  for (const row of document.querySelectorAll('.section-body .section-content')) {
+    if (!rendered(row)) continue;
+    const expected = row.getBoundingClientRect().left + 20;
+    for (const block of row.querySelectorAll(':scope > .text-preview,:scope > .prose-preview,:scope > strong,:scope > small,:scope > p'))
+      near(block.getBoundingClientRect().left, expected, 'section content inset');
+    for (const action of row.querySelectorAll(':scope > .reader-trigger,:scope > .action-link-group > .item-action,:scope > .text-preview > .reader-trigger'))
+      near(textStart(action), expected, 'section action text inset');
+    for (const preview of row.querySelectorAll(':scope > .text-preview > .prose-preview'))
+      near(preview.getBoundingClientRect().left, expected, 'section preview inset');
+    for (const block of row.querySelectorAll('.preview-markdown .markdown :is(p,li,h1,h2,h3)')) {
+      let indent = 0;
+      for (let parent = block.parentElement; parent && !parent.classList.contains('markdown'); parent = parent.parentElement)
+        if (parent.matches('ul,ol')) indent += 20;
+      const rtl = getComputedStyle(block).direction === 'rtl';
+      near(textStart(block, rtl), rtl ? row.getBoundingClientRect().right - 20 - indent : expected + indent, 'section rendered Markdown text inset');
+    }
+  }
+  for (const body of document.querySelectorAll('.section-body')) {
+    if (!rendered(body)) continue;
+    for (const bare of body.querySelectorAll(':scope > .text-preview,:scope > p,:scope > .readable'))
+      alignment.failures.push({label:'section content has no padded row', text:bare.textContent.slice(0,40)});
+    for (const header of body.querySelectorAll(':scope > .disclosure > .disclosure-button')) {
+      alignment.headers++;
+      const b = body.getBoundingClientRect(), h = header.getBoundingClientRect();
+      near(h.left, b.left + body.clientLeft, 'group header start');
+      near(h.width, body.clientWidth, 'group header spans container');
+    }
+  }
+  const activePage = document.querySelector('[data-page]:not([hidden])');
+  if (activePage) {
+    const p = activePage.getBoundingClientRect(), h = document.querySelector('.page-header').getBoundingClientRect();
+    near(p.left, h.left, 'shared page start'); near(p.right, h.right, 'shared page end');
+  }
+  const cards = [...document.querySelectorAll('.attention-split > .page-section')].filter(rendered);
+  if (cards.length === 2 && Math.abs(cards[0].getBoundingClientRect().top - cards[1].getBoundingClientRect().top) <= 1)
+    near(cards[0].getBoundingClientRect().bottom, cards[1].getBoundingClientRect().bottom, 'attention row card bottoms');
+  if (alignment.failures.length) throw Error('Section alignment: ' + JSON.stringify(alignment));
   const canvas = document.createElement("canvas");
   canvas.width = canvas.height = 1;
   const ctx = canvas.getContext("2d", { willReadFrequently: true });
@@ -156,6 +211,7 @@
           : 0,
     },
     controls,
+    alignment,
   };
   if (
     contrastFailures.length ||

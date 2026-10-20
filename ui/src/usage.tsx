@@ -1,6 +1,7 @@
 import { Progress } from "@/components/ui/progress";
 import {
   PageSection,
+  SectionBodyRow,
   PagedCollection,
   Reader,
   Preview,
@@ -251,12 +252,12 @@ export function Usage({ s, active }: { s: RecordData; active: boolean }) {
                 </div>
               ))}
             </div>
-            <p className="spend-summary">
+            <SectionBodyRow><p className="spend-summary">
               {week.active_h} h active · {week.agent_h} agent hours ·{" "}
               {count(week.compactions || 0, "compaction")} ·{" "}
               {Math.round((week.sub_share || 0) * 100)}% of tokens from
               sub-agents
-            </p>
+            </p></SectionBodyRow>
           </>
         )}
         {Object.entries(sp.runtimes || {}).length ? (

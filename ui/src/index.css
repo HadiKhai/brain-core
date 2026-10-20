@@ -658,7 +658,6 @@ svg {
   flex-direction: column;
   align-items: flex-start;
   gap: 8px;
-  padding: 16px 20px;
   border-top: 1px solid var(--border);
   font-size: 13px;
 }
@@ -1376,7 +1375,6 @@ svg {
   margin: 0 8px 8px 0;
 }
 .note-row {
-  padding: 16px 20px;
   border-bottom: 1px solid var(--border);
   font-size: 13px;
 }
@@ -1503,7 +1501,7 @@ svg {
   }
   .inset-scroll {
     padding: 20px;
-    scrollbar-gutter: auto;
+    scrollbar-gutter: stable;
   }
   .page-header {
     padding-bottom: 24px;
@@ -2157,3 +2155,21 @@ svg {
 .item-action { max-width: 100%; }
 .item-action > .readable { min-width: 0; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; }
 .recommendation { color: var(--muted-foreground); font-size: 12px; margin-block: 8px; }
+
+/* Section content has one inset; text-only actions share its starting edge. */
+:root { --section-inset: 20px; }
+.section-body { scrollbar-gutter: auto; }
+.reader-trigger { padding-inline: 0 !important; border-width: 0; justify-content: flex-start; }
+.text-preview { display: grid; gap: 8px; min-width: 0; }
+.preview-markdown .markdown { font-size: inherit; line-height: inherit; padding: 0; }
+.preview-markdown .markdown :is(p,ul,ol,li) { margin-block: 0; }
+.preview-markdown .markdown :is(ul,ol) { padding-inline-start: 20px; }
+.overview-split > .page-section { align-self: start; }
+[data-page="inbox"] .filter-toolbar > .field { min-width: min(220px, 100%); }
+
+.section-content { padding: 16px var(--section-inset); }
+.attention-split { align-items: stretch; }
+.attention-split > .page-section { display: flex; flex-direction: column; align-self: stretch; }
+.attention-split > .page-section > .section-body { flex: 1; }
+
+.section-content > .spend-summary { padding: 0; }
