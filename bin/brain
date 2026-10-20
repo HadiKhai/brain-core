@@ -7346,9 +7346,14 @@ def unsettled_jobs(rows):
 def print_thread_checklist(n, row):
     if not closed_job(row):
         return
-    workers = [r[1] for r in active_work(n, include_closed=True) if len(r) > 1 and r[0] == row["Job"]]
+    matches = [r for r in active_work(n, include_closed=True) if r[0] == row["Job"]]
+    branch_jobs = [r for r in read_jobs(n) or [] if r["Job"] == row["Job"]]
+    ambiguous = (len(branch_jobs) != 1 or len(matches) != 1 or
+                 len(matches[0]) < 4 or matches[0][3].lower() not in ("merged", "closed", "done", "abandoned"))
+    worker = ("ownership ambiguous or not recorded; confirm by job marker; no thread selected"
+              if ambiguous else matches[0][1])
     text = (f"Threads to settle for {row['Job']} (brain-job: {job_key(row)}):\n"
-            + "  Worker from Active work: " + (", ".join(workers) or "not recorded; find by job marker") + "\n"
+            + "  Worker from Active work: " + worker + "\n"
             + "  Find delegated/sub-agent descendants by parentThreadId and reviewers by the brain-job marker.\n"
             + "  Settle only when the ledger says merged or closed (abandoned/studied count as closed), "
             "no thread is running or waiting, and no pending requests remain. "
@@ -7489,6 +7494,8 @@ def cmd_jobs(a):
     inst = load()
     if a.job_key and not (a.id and a.branch):
         die("--job-key needs a node and --branch")
+    if a.job_key and any((a.start, a.close, a.lessons is not None, a.switch is not None, a.contract_file, a.usage_file)):
+        die("--job-key supports inspection or --settled only")
     if a.settled:
         if not a.id or not a.branch:
             die("--settled needs a node and --branch")
@@ -7502,8 +7509,12 @@ def cmd_jobs(a):
             if len(matches) > 1 and not a.job_key:
                 die("branch has multiple jobs; select the printed --job-key")
             row = matches[-1] if matches else None
-            if not row or not closed_job(row) or open_job(rows, a.branch):
-                die("--settled requires a merged or closed ledger job, with no open job on that branch")
+            if a.job_key and not row:
+                die("no job with that --job-key on that branch")
+            if not row or not closed_job(row):
+                die("--settled requires a merged or closed ledger job")
+            if open_job(rows, a.branch):
+                die("--settled refused: another job on that branch is open; leave unsettled until it closes")
             if not row.get("Settled"):
                 row["Settled"] = stamp(inst)
                 write_jobs(inst, n, rows)
@@ -7590,6 +7601,9 @@ def cmd_jobs(a):
             job_ended(inst, n, a.branch, "studied", cause="coordinator processed import hand-back")
         print(redact(f"{n['id']}: updated job {a.branch}", never_terms(n)))
         return
+    if a.job_key and not any(r["Job"] == a.branch and job_key(r) == a.job_key
+                             for r in read_jobs(inst.node(a.id)) or []):
+        die("no job with that --job-key on that branch")
     for n in inst.nodes():
         if a.id and n["id"] != a.id:
             continue
@@ -8075,7 +8089,7 @@ def changes_due(inst, n):
 
 def cmd_due(a):
     inst = load()
-    nodes = [inst.node(a.id)] if a.id and a.id != "root" else inst.nodes()
+    nodes = [inst.node(a.id)] if a.id else inst.nodes()
     root_tick = (a.id or "root") == "root" and not a.quiet
     if root_tick:
         core_update(inst)  # refresh the daily answer the inbox reports
@@ -8088,6 +8102,10 @@ def cmd_due(a):
             print(f"root: {upgraded}")
         return
     items = [item for n in nodes for item in due_items(inst, n) + changes_due(inst, n)]
+    if a.id == "root":
+        # Root routes settlement backlogs; child handbacks/merges remain child-owned.
+        items += [item for n in inst.nodes() if n["id"] != "root"
+                  for item in due_items(inst, n, include_stale=False) if item["kind"] == "unsettled-threads"]
     if a.quiet:
         sys.exit(1 if items else 0)
     if a.json:

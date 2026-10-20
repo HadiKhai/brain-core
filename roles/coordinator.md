@@ -235,7 +235,7 @@ coordinators, open-job threads, running/waiting threads or threads with pending 
 Unknown ownership or activity means leave unsettled. After all threads are safely settled,
 record `brain jobs <id> --branch <branch> --settled`; this is your host attestation.
 `brain due` counts closed jobs still awaiting this step, including old rows. The root's
-`brain due root` includes children: route their backlog to their coordinators rather than
+`brain due root` includes child settlement counts: route their backlog to their coordinators rather than
 settling their threads without their ownership checks.
 
 ## Before the operator looks at work

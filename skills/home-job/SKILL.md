@@ -81,7 +81,7 @@ stated; never run a polling loop in an agent.
    or threads with pending requests. Unknown state or ownership means leave unsettled.
    After all job threads are confirmed settled through the host, record
    `brain jobs <id> --branch <branch> --settled`. Preserve the Active work thread reference.
-   `brain due` counts closed-but-unsettled jobs; `brain due root` includes child nodes.
+   `brain due` counts closed-but-unsettled jobs; `brain due root` includes child settlement counts.
 
 Never merge, push to a shared branch, deploy or delete a branch without explicit consent
 (axiom 24). Several jobs can run at once; each has its own worktree and port.

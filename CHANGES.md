@@ -14,7 +14,7 @@ For agents:
 - Never settle coordinators, open jobs, running/waiting threads or threads with pending
   requests. Unknown ownership or activity leaves the job unsettled; partial cleanup does too.
 - `brain due`, generated facts and live state count closed jobs with unsettled threads,
-  including old ledger rows. `brain due root` now covers children as well as the root.
+  including old ledger rows. `brain due root` now includes child settlement counts alongside the root's own work.
 
 After upgrading:
 - Read the host adapter's settlement checklist and update coordinator ticks. Inspect each

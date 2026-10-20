@@ -1639,7 +1639,8 @@ class UnifiedHandbacks(Scenario):
         self.assertIn("stale-status", [i["kind"] for i in self.due(r)])
         self.b(r, "status", "a", "--refresh")
         self.assertIn("none: fix specific to this job", (r / "nodes/a/status.md").read_text())
-        self.assertEqual([i["kind"] for i in self.due(r)], ["missing-preview"])
+        self.assertEqual([i["kind"] for i in self.due(r)], ["missing-preview", "unsettled-threads"])
+        self.b(r, "jobs", "a", "--branch", "job", "--settled")
         self.b(r, "set", "a", "preview=http://localhost:4100", "preview_tour=reports/tour.md")
         self.b(r, "status", "a", "--refresh")
         self.assertEqual(self.due(r), [])
@@ -3376,6 +3377,8 @@ class ThreadSettlement(AutonomyProject):
             due = self.due(r, node)
             item = next(i for i in due if i["kind"] == "unsettled-threads" and i["node"] == "app")
             self.assertEqual(item["count"], 151)
+            if node == "root":
+                self.assertEqual([i["kind"] for i in due if i["node"] == "app"], ["unsettled-threads"])
             self.assertIn("151 closed job(s)", item["text"])
         self.assertIn("151 closed job(s)", self.b(r, "jobs", "app"))
         self.assertIn("unsettled job-0 (brain-job:", self.b(r, "jobs", "app"))
@@ -3396,6 +3399,8 @@ class ThreadSettlement(AutonomyProject):
                                   if l.startswith("{")))
             self.assertRegex(row["Settled"], r"^\d{4}-\d\d-\d\dT")
             self.assertEqual(row["Future field"], "kept")
+            # Move the recorded time back, so always-stamping cannot pass in the same minute.
+            ledger.write_text(ledger.read_text().replace(row["Settled"], "2020-01-01T10:00+00:00"))
             before = ledger.read_bytes()
             self.b(r, "jobs", "app", "--branch", "job-old", "--settled")
             self.assertEqual(before, ledger.read_bytes())
@@ -3413,6 +3418,15 @@ class ThreadSettlement(AutonomyProject):
         detail = self.b(r, "jobs", "app", "--branch", "job-old")
         keys = re.findall(r"--job-key ([0-9a-f]{24}) --settled", detail)
         self.assertEqual(len(keys), 2)
+        # Exact key must not bypass an open job on the same branch.
+        newer["Ended"] = ""
+        ledger = self.ledger(r, [older, newer])
+        before = ledger.read_bytes()
+        self.assertIn("another job on that branch is open", self.b(r, "jobs", "app", "--branch", "job-old",
+                      "--job-key", keys[0], "--settled", ok=False))
+        self.assertEqual(before, ledger.read_bytes())
+        newer["Ended"] = "2026-01-02T12:00+00:00"
+        self.ledger(r, [older, newer])
         for key in keys:
             self.b(r, "jobs", "app", "--branch", "job-old", "--job-key", key, "--settled")
         self.assertNotIn("unsettled-threads", [i["kind"] for i in self.due(r)])
@@ -3422,6 +3436,13 @@ class ThreadSettlement(AutonomyProject):
             self.b(r, "jobs", "app", "--branch", "job-old", "--settled", *flags, ok=False)
             self.assertEqual(before, ledger.read_bytes())
         self.b(r, "jobs", "--settled", ok=False)
+        for flags in ((), ("--settled",)):
+            self.assertIn("no job with that --job-key", self.b(r, "jobs", "app", "--branch", "job-old",
+                          "--job-key", "0" * 24, *flags, ok=False))
+        before = ledger.read_bytes()
+        self.b(r, "jobs", "app", "--branch", "job-old", "--job-key", "0" * 24,
+               "--lessons", "none: fixture", ok=False)
+        self.assertEqual(before, ledger.read_bytes())
 
     def assert_checklist(self, out):
         for expected in ("Threads to settle", "brain-job:", "parentThreadId", "running or waiting",
@@ -3461,6 +3482,31 @@ class ThreadSettlement(AutonomyProject):
                 shutil.rmtree(r)
                 shutil.rmtree(home)
 
+    def test_reused_branch_checklist_never_names_open_or_ambiguous_workers(self):
+        r, home, wt = self.project()
+        older, newer = self.row("job-a"), self.row("job-a", ended="")
+        newer["Started"] = "2026-01-02T10:00+00:00"
+        self.ledger(r, [older, newer])
+        status = r / "nodes/app/status.md"
+        status.write_text(status.read_text() + "\n## Active work\n\n"
+                          "| branch | thread | PR | state |\n| --- | --- | --- | --- |\n"
+                          "| job-a | fixture-worker-old | - | merged |\n"
+                          "| job-a | fixture-worker-open | - | running |\n")
+        out = self.b(r, "jobs", "app", "--branch", "job-a")
+        self.assertIn("ownership ambiguous", out)
+        self.assertNotIn("fixture-worker-open", out)
+        self.assertNotIn("fixture-worker-old", out)
+        # Even when the new job ends, branch-only matching cannot assign two historical workers.
+        newer["Ended"] = "2026-01-02T12:00+00:00"
+        self.ledger(r, [older, newer])
+        out = self.b(r, "jobs", "app", "--branch", "job-a")
+        self.assertIn("ownership ambiguous", out)
+        self.assertNotIn("fixture-worker-open", out)
+        status.write_text(status.read_text().replace("| job-a | fixture-worker-open | - | running |\n", ""))
+        out = self.b(r, "jobs", "app", "--branch", "job-a")
+        self.assertIn("ownership ambiguous", out)
+        self.assertNotIn("fixture-worker-old", out)
+
     def test_study_close_checklist_and_older_core_preserves_settled(self):
         r = self.init("fixture")
         home = self.repo(self.tmp / "source")
@@ -3468,9 +3514,19 @@ class ThreadSettlement(AutonomyProject):
         job = "import:" + self.git("rev-parse", "HEAD", cwd=home).strip()
         self.assert_checklist(self.b(r, "jobs", "source", "--branch", job, "--close"))
         self.b(r, "jobs", "source", "--branch", job, "--settled")
-        # Execute the actual pre-feature core, whose v3 writer sees Settled as unknown.
+        # Execute the actual parent of the feature-introducing commit, not a modified new writer.
+        source = Path(__file__).resolve().parent.parent
+        introduced = subprocess.run(["git", "log", "-1", "--format=%H", "-S", "def closed_job(row):",
+                                     "--", "bin/brain"], cwd=source, env=self.env, capture_output=True, text=True)
+        revision = introduced.stdout.strip() + "^" if introduced.stdout.strip() else "HEAD"
+        baseline = subprocess.run(["git", "show", revision + ":bin/brain"], cwd=source, env=self.env,
+                                  capture_output=True, text=True)
+        if baseline.returncode:
+            self.skipTest("older core source unavailable (installed/shallow source)")
+        self.assertNotIn('def closed_job(row):', baseline.stdout)
+        self.assertIn('brain:job-ledger v3', baseline.stdout)
         old = self.tmp / "older-brain"
-        old.write_text((CORE / "bin/brain").read_text().replace(', "Settled"]', ']'))
+        old.write_text(baseline.stdout)
         self.run_(["jobs", "source", "--branch", job, "--lessons", "none: fixture study"], cwd=r, brain=old)
         out = self.b(r, "jobs", "source", "--branch", job)
         row = json.loads(next(l for l in out.splitlines() if l.startswith("{")))
