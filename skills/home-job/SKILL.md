@@ -43,7 +43,7 @@ stated; never run a polling loop in an agent.
    empty means stop silently. The worker's file is durable; a host notification is optional.
 4. **Review and hand back.** Review by the other runtime before the operator sees it (the
    `review` skill). Set `brain set <id> 'verify=<command>'` beforehand. The worker finishes
-   reviews, commits, rebases on `main` and runs one command:
+   reviews, commits, rebases on the integration main (`origin/<default>` when origin exists, otherwise `main`) and runs one command:
    `brain handback <id> --branch <branch> --state done --reviews <completed rounds>
    --report <path> --lessons '<proposals or none: reason>'`. This checks main, runs verify and
    records the packet, state and proposed lessons in one worker-owned `job-handbacks/<key>.json`.
@@ -57,15 +57,26 @@ stated; never run a polling loop in an agent.
    No separate packet command, host message or Lessons section is required. Blockers/questions
    use the same command with `--state blocked`/`question` and no --reviews; the report states why.
    Questions also append to inbox; a blocked human need adds `--need-human "<need>"`.
-   `ready` compares against local `main` and never fetches. Homes merging through GitHub pull
-   requests must fetch and update local `main` before `ready`; the worker then rebases and hands back again.
+   `ready` and handback use cached `origin/HEAD` when origin exists, otherwise local `main`.
+   Neither fetches. The coordinator explicitly runs `brain sync <id>` (or `git fetch origin`)
+   before the final check. If origin's default changes, explicitly run `git remote set-head origin -a`.
+   A missing cached default refuses readiness. Local default-branch lag is informational:
+   rebase the job on `origin/<default>` and hand back again, leaving the operator checkout alone.
+   To update a local default branch, use a separate worktree and `git merge --ff-only origin/<default>`
+   only when that branch is not checked out by the operator; otherwise leave it untouched.
 5. **Pull request.** Once pushing is allowed and the review is addressed, the worker opens it.
    Have the host watch it (host `watch`), so reviews, checks and conflicts come back to you.
    Update the Active work row.
    Before anything is merged: `core/bin/brain guard <id> <worktree>` must print `guard: clean`
    when the node (or one above it) has a `never-name.txt`.
    The coordinator runs `brain ready <id> --branch <branch>` immediately before merging and
-   merges only on `ready`. A moved main goes back to the worker for rebase and verification;
+   merges only on `ready`. For a team using host PR merges, configure `brain set <id> merge=pr`.
+   This records the workflow choice; it never automatically pushes or merges. After `ready`,
+   the coordinator explicitly runs `gh pr merge <number> --merge --match-head-commit <verified-head>`
+   in the job worktree (or the home's required squash strategy). Host checks and current base
+   rules still apply; if the base moves, rebase and hand back again before retrying.
+   Then run `brain sync <id>` to observe the merged remote default.
+   A moved main goes back to the worker for rebase and verification;
    the coordinator does not repeat its tests. Only the coordinator merges to main.
 6. **Done.** When the operator (and the home's owners) merge it, set the row to `merged`, record
    the outcome in `status.md`, turn the hand-back's proposed reusable lessons into library items (the

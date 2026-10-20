@@ -1410,6 +1410,134 @@ class JobLessonOutcomes(Scenario):
         self.b(r, "usable", "import-lesson", "a", ok=False)
 
 
+class TeamHomes(Scenario):
+    def team(self):
+        root = self.init("alice")
+        seed = self.repo(self.tmp / "seed")
+        self.git("branch", "-m", "trunk", cwd=seed)
+        origin = self.tmp / "origin.git"
+        self.git("clone", "--bare", str(seed), str(origin), cwd=self.tmp)
+        home = self.tmp / "app"
+        self.git("clone", str(origin), str(home), cwd=self.tmp)
+        self.b(root, "new", "app", "--title", "App", "--home", str(home))
+        self.b(root, "set", "app", "verify=python3 -c 'pass'", "merge=pr")
+        return root, seed, origin, home
+
+    def advance(self, seed, origin, label="other"):
+        self.git("checkout", "-b", label, cwd=seed)
+        (seed / label).write_text(label)
+        self.git("add", "-A", cwd=seed)
+        self.git("commit", "-qm", label, cwd=seed)
+        self.git("checkout", "trunk", cwd=seed)
+        self.git("merge", "--no-ff", "-m", "Merge made-up pull request", label, cwd=seed)
+        self.git("push", str(origin), "trunk", cwd=seed)
+        return self.git("rev-parse", "trunk", cwd=seed).strip()
+
+    def test_remote_default_readiness_lag_and_packet_invalidation(self):
+        root, seed, origin, home = self.team()
+        self.b(root, "wt", "add", "app", "job")
+        wt = self.tmp / "app-work/worktrees/job"
+        self.b(root, "handback", "app", "--branch", "job", "--state", "done", "--reviews", "1")
+        old = self.git("rev-parse", "HEAD", cwd=home)
+        (home / "operator.txt").write_text("unfinished made-up work")
+        merge = self.advance(seed, origin)
+        # Nothing fetches as a side effect of ready/handback.
+        self.assertTrue(self.b(root, "ready", "app", "--branch", "job").strip().endswith("ready"))
+        self.git("fetch", "origin", cwd=home)
+        out = self.b(root, "ready", "app", "--branch", "job", ok=False)
+        self.assertIn("local trunk is 2 behind", out)
+        self.assertIn("main moved", out)
+        self.assertIn("rebase on current main", out)
+        out = self.b(root, "handback", "app", "--branch", "job", "--state", "done", "--reviews", "1", ok=False)
+        self.assertIn("local trunk is 2 behind", out)
+        self.git("rebase", "origin/trunk", cwd=wt)
+        out = self.b(root, "handback", "app", "--branch", "job", "--state", "done", "--reviews", "1")
+        self.assertIn("local trunk is 2 behind", out)
+        record = json.loads(next((root / "nodes/app/job-handbacks").glob("*.json")).read_text())
+        self.assertEqual(record["ready"]["main"], merge)
+        self.assertEqual(self.git("rev-parse", "HEAD", cwd=home), old)
+        self.assertEqual((home / "operator.txt").read_text(), "unfinished made-up work")
+        self.assertTrue(self.b(root, "ready", "app", "--branch", "job").strip().endswith("ready"))
+        self.b(root, "set", "app", "merge=invalid", ok=False)
+        self.assertIn("merge: pr", (root / "nodes/app/node.md").read_text())
+
+    def test_external_integrations_once_including_squash_and_no_remote_mutation(self):
+        root, seed, origin, home = self.team()
+        self.b(root, "sync", "app", "--offline", "--mark")
+        merge = self.advance(seed, origin)
+        self.git("commit", "--allow-empty", "-qm", "Squashed made-up change (#23)", cwd=seed)
+        squash = self.git("rev-parse", "HEAD", cwd=seed).strip()
+        self.git("push", str(origin), "trunk", cwd=seed)
+        before = self.git("rev-parse", "HEAD", cwd=home)
+        (home / "draft").write_text("operator work")
+        self.assertIn("2 recorded", self.b(root, "sync", "app"))
+        ledger = root / "nodes/app/job-ledger.md"
+        text = ledger.read_text()
+        self.assertEqual(text.count("external:" + merge), 1)
+        self.assertEqual(text.count("external:" + squash), 1)
+        self.assertIn("0 recorded", self.b(root, "sync", "app", "--offline"))
+        self.b(root, "sync", "app", "--offline", "--mark")
+        self.assertEqual(ledger.read_text(), text)
+        self.assertEqual(self.git("rev-parse", "HEAD", cwd=home), before)
+        self.assertEqual((home / "draft").read_text(), "operator work")
+        # Replaying without the machine cursor must still deduplicate by full identity.
+        local = root / ".brain/local.json"
+        data = json.loads(local.read_text()); data["nodes"]["app"].pop("synced_main")
+        data["nodes"]["app"].pop("synced_at")
+        local.write_text(json.dumps(data))
+        self.b(root, "sync", "app", "--offline")
+        self.assertEqual(ledger.read_text(), text)
+
+    def test_known_job_merge_and_rewritten_history(self):
+        root, seed, origin, home = self.team()
+        self.b(root, "sync", "app", "--offline")
+        self.b(root, "wt", "add", "app", "job")
+        wt = self.tmp / "app-work/worktrees/job"
+        (wt / "fix").write_text("made-up change")
+        self.git("add", "-A", cwd=wt)
+        self.git("commit", "-qm", "fix", cwd=wt)
+        self.git("fetch", str(home), "job:job", cwd=seed)
+        self.git("merge", "--no-ff", "-m", "Merge owned job", "job", cwd=seed)
+        merge = self.git("rev-parse", "HEAD", cwd=seed).strip()
+        self.git("push", str(origin), "trunk", cwd=seed)
+        self.assertIn("0 recorded", self.b(root, "sync", "app"))
+        ledger = (root / "nodes/app/job-ledger.md").read_text()
+        self.assertNotIn("external:", ledger)
+        self.assertIn(merge, ledger)
+        local = root / ".brain/local.json"
+        before = json.loads(local.read_text())["nodes"]["app"]["synced_main"]
+        # Force a non-descendant remote history, never a real repository.
+        self.git("checkout", "--orphan", "replacement", cwd=seed)
+        self.git("commit", "-qm", "New made-up root", cwd=seed)
+        self.git("push", "--force", str(origin), "replacement:trunk", cwd=seed)
+        self.assertIn("history changed", self.b(root, "sync", "app"))
+        self.assertEqual(json.loads(local.read_text())["nodes"]["app"]["synced_main"], before)
+        self.assertEqual((root / "nodes/app/job-ledger.md").read_text(), ledger)
+
+    def test_changed_origin_default_uses_new_cached_symbolic_target(self):
+        root, seed, origin, home = self.team()
+        self.git("checkout", "-b", "stable", cwd=seed)
+        self.git("commit", "--allow-empty", "-qm", "new default", cwd=seed)
+        self.git("push", str(origin), "stable", cwd=seed)
+        self.git("symbolic-ref", "HEAD", "refs/heads/stable", cwd=origin)
+        self.git("fetch", "origin", cwd=home)
+        self.git("remote", "set-head", "origin", "-a", cwd=home)
+        self.b(root, "wt", "add", "app", "job")
+        out = self.b(root, "handback", "app", "--branch", "job", "--state", "done", "--reviews", "1")
+        self.assertIn("origin/stable", out)
+        packet = json.loads(next((root / "nodes/app/job-handbacks").glob("*.json")).read_text())["ready"]
+        self.assertEqual(packet["main"], self.git("rev-parse", "stable", cwd=seed).strip())
+
+    def test_missing_origin_head_does_not_fall_back_to_local_main(self):
+        root, seed, origin, home = self.team()
+        self.git("branch", "main", cwd=home)
+        self.b(root, "wt", "add", "app", "job")
+        self.git("symbolic-ref", "--delete", "refs/remotes/origin/HEAD", cwd=home)
+        out = self.b(root, "handback", "app", "--branch", "job", "--state", "done", "--reviews", "1", ok=False)
+        self.assertIn("origin default branch unavailable", out)
+        self.assertIn("integration main is missing", out)
+
+
 class WorkerReadyPackets(Scenario):
     def job(self):
         r = self.init("alice")

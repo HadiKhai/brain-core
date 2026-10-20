@@ -12,7 +12,18 @@ Run by a node's coordinator.
    thread with host `read`.
 3. If the node's home is external, run `core/bin/brain sync <id>`. It shows the commits on every
    branch, uncommitted work and open pull requests since the last sync: work other owners did
-   without you. Read what matters in the home itself. Never write there from here (axiom 6).
+   without you. This explicit command fetches unless `--offline`; it never updates the operator's
+   local branch or files. Integration main is cached `origin/HEAD` (local `main` without origin),
+   and local default-branch lag is shown. If the default changes, explicitly refresh its symbolic
+   ref with `git remote set-head origin -a`.
+   Sync records newly observed first-parent default-branch commits as `external` ledger rows,
+   keyed by full commit hash. This includes merge commits, squash merges and direct commits:
+   Git alone cannot distinguish the latter two. Exact recorded job tips already integrated here
+   are excluded. These rows assert no review, runtime usage or job duration. First sync uses
+   the existing last-sync/status time window; later syncs use a local commit cursor, including
+   without `--mark`. Repeats are deduplicated even if the cursor is lost. A rewritten history
+   refuses cursor advancement and needs coordinator reconciliation. Homes without origin retain
+   their existing behavior. Read what matters in the home itself. Never write there from here (axiom 6).
 4. Add each new decision to the top of `decisions.md`, with why and the alternatives. Decisions
    others recorded in the home are cited, not copied: "<what> (home: <file or PR>)".
 5. Update `status.md` judgement sections: Now, Next, Active work (each row’s state from the

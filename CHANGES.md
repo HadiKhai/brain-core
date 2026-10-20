@@ -5,6 +5,20 @@ upgrading. `brain changes <node>` shows the entries this node's coordinator hasn
 `brain due <node>` lists them until `brain changes <node> --seen`. Entry headings are
 `## <date>: <title>`; once released, a heading never changes.
 
+## 2026-10-20: Team-owned external homes
+
+For agents:
+- Ready and handback compare cached origin's default branch; stale local default branches show
+  their lag without being modified. Homes without origin still compare local main.
+- Explicit sync records external default-branch integrations once per commit, including squash
+  merges and direct commits, without claiming review or runtime usage.
+- `merge=pr` records the coordinator's explicit `gh pr merge` workflow; no automatic merge.
+
+After upgrading:
+- Fetch explicitly before final readiness. If origin's default branch changed, explicitly run
+  `git remote set-head origin -a`. Rebase job worktrees on that remote default and hand back again.
+- For team PR workflows, set `brain set <id> merge=pr` and follow home-job's head-pinned merge step.
+
 ## 2026-10-20: Runtime questions reach the inbox
 
 For agents:

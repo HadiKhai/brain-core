@@ -240,7 +240,7 @@ and gives reasons. Before merging, run `brain ready <id> --branch <branch>`; mer
 and with the required consent. Main must match the packet exactly: if it moved, send the job
 back to its worker to rebase and verify again. Do not rerun the worker's tests or repair its
 merge. You alone merge to main (axiom 15); check readiness immediately before that merge.
-The worker self-asserts the embedded ready packet; `ready` binds only the head and local main SHAs.
+The worker self-asserts the embedded ready packet; `ready` binds only the head and integration main SHAs (cached origin default when origin exists, otherwise local main).
 
 Reports live in the node's workbench (`core/bin/brain reports <id>` lists them). Reusable scripts
 go in its `scripts/` (`core/bin/brain workbench <id>`), so the next job reuses them instead of
@@ -275,3 +275,9 @@ Its unified hand-back is due without home readiness. Process the report and reco
 item ids (or `none: <reason>`) with `brain jobs <node> --branch import:<snapshot> --lessons <ids>
 --close`. Proposed ids remain inactive. `brain inbox` groups pending import review per node;
 acknowledge rules with the import skill's reviewed frontmatter only after actual review.
+
+For team homes, `brain set <id> merge=pr` records the host PR workflow. Explicitly sync before
+checking readiness, then run `gh pr merge` with the verified head as `--match-head-commit`
+and the home's merge strategy. Never update the operator checkout to remedy local-main lag:
+workers rebase on the cached origin default. Sync after host merges records external integrations
+once by commit identity; those rows supply no review or usage proof.
