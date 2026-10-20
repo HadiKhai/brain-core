@@ -56,9 +56,14 @@ one machine and live in `.brain/local.json`, never in git.
    Run it again after a core upgrade that changes the hook. Verify a made-up question reaches
    the node inbox after stopping. The stop payload must include `transcript_path`; the hook
    captures Claude `AskUserQuestion` and Codex `request_user_input` calls from that file,
-   omits answered calls, screens the text and deduplicates repeats. External homes/worktrees
-   need their runtime's Stop hook configured too, with `brain` on PATH so it can find the
-   registered node. A hook that never runs cannot deliver a question: keep host pending checks.
+   omits answered calls, screens the text and deduplicates repeats. For home/worktree sessions,
+   ask the operator's consent to install a user-level Stop hook once per machine, preserving
+   existing user settings: Claude's user `~/.claude/settings.json`; Codex's user-level
+   `~/.codex/hooks.json` (or `$CODEX_HOME/hooks.json`) when supported and trusted. Never install
+   Brain hooks in a home or worktree. The runtime adapter documents the checked support and
+   JSON entry to merge. Keep `brain` on PATH: its fallback resolves registered paths and exits
+   silently in unrelated folders. If user-level hooks are unsupported or the host bypasses them,
+   host pending checks remain the route. Verify the unrelated-folder no-op too.
    Refresh root's tick to check every child coordinator using `brain show <child>` bindings.
 10. Run `core/bin/brain check`, then give the operator one link per coordinator
     (`core/bin/brain` lists them).

@@ -2115,6 +2115,89 @@ class StopHook(Scenario):
         self.assertEqual(res.returncode, 0, res.stderr)
         return json.loads(res.stdout) if res.stdout.strip() else None
 
+    def test_user_hook_is_quick_silent_and_read_only_in_unrelated_folder(self):
+        r = self.init("alice")
+        unrelated = self.tmp / "unrelated"
+        unrelated.mkdir()
+        self.env["PATH"] = str(CORE / "bin") + os.pathsep + self.env["PATH"]
+        # Exercise the user-level PATH fallback, with another Brain registered on the machine.
+        before = (r / "inbox.md").read_bytes()
+        for runtime in ("claude", "codex"):
+            command = json.loads((CORE / "adapters/runtimes" / (runtime + "-hooks.json")).read_text())[
+                "hooks"]["Stop"][0]["hooks"][0]["command"]
+            start = time.monotonic()
+            result = subprocess.run(["sh", "-c", command], cwd=unrelated, env=self.env,
+                                    input=json.dumps({"cwd": str(unrelated), "transcript_path": "/not/read.jsonl"}),
+                                    capture_output=True, text=True, timeout=2)
+            self.assertLess(time.monotonic() - start, 2)
+            self.assertEqual((result.returncode, result.stdout, result.stderr), (0, "", ""))
+        self.assertEqual(list(unrelated.iterdir()), [])
+        self.assertEqual((r / "inbox.md").read_bytes(), before)
+        for name in ("CHANGES.md", "adapters/runtimes/README.md", "skills/machine-setup/SKILL.md"):
+            text = (CORE / name).read_text()
+            self.assertIn("user-level", text)
+            self.assertIn("consent", text)
+            self.assertRegex(text, r"Never install\s+Brain hooks in a home or worktree")
+
+    def test_large_transcript_reads_only_latest_turn_with_bounded_time_and_io(self):
+        loader = importlib.machinery.SourceFileLoader("brain_hook_tail", str(CORE / "bin/brain"))
+        module = loader.load_module()
+        path = self.tmp / "large-synthetic.jsonl"
+        historical = (json.dumps({"type": "assistant", "message": {"content": "x" * 4000}}) + "\n").encode()
+        with path.open("wb") as stream:
+            block = historical * 1000
+            for _ in range(175):  # more than 700 MB of fabricated, valid JSONL history
+                stream.write(block)
+            stream.write((json.dumps({"type": "user", "message": {"content": "Latest task"}}) + "\n").encode())
+            stream.write((json.dumps(self.question_call()) + "\n").encode())
+        self.assertGreater(path.stat().st_size, 700_000_000)
+        original = module.json.loads
+        parsed = []
+        def counting_loads(value):
+            parsed.append(len(value))
+            # A full-history scanner fails deterministically before chewing through the fixture.
+            self.assertLessEqual(len(parsed), 8)
+            return original(value)
+        start = time.monotonic()
+        with mock.patch.object(module.json, "loads", side_effect=counting_loads):
+            questions = module.hook_questions(path)
+        self.assertLess(time.monotonic() - start, 2)
+        self.assertEqual([q["question"] for q in questions], ["Which colour?"])
+        self.assertLessEqual(sum(parsed), module.HOOK_TRANSCRIPT_CHUNK)
+        # Also assert a byte cap when an oversized last turn has no operator boundary in range.
+        class CountedFile:
+            def __init__(self, stream):
+                self.stream, self.bytes_read = stream, 0
+            def fileno(self):
+                return self.stream.fileno()
+            def seek(self, offset):
+                return self.stream.seek(offset)
+            def read(self, amount):
+                data = self.stream.read(amount)
+                self.bytes_read += len(data)
+                return data
+        with path.open("ab") as stream:
+            stream.write(b"x" * (module.HOOK_TRANSCRIPT_LIMIT + 1))
+        with path.open("rb") as stream:
+            counted = CountedFile(stream)
+            self.assertEqual(module.hook_turn_records(counted), [])
+            self.assertLessEqual(counted.bytes_read, module.HOOK_TRANSCRIPT_LIMIT)
+
+    def test_reverse_transcript_chunks_preserve_answers_boundaries_and_partial_lines(self):
+        loader = importlib.machinery.SourceFileLoader("brain_hook_tail_edges", str(CORE / "bin/brain"))
+        module = loader.load_module()
+        rows = [self.question_call("old", text="Old question?"),
+                {"type": "user", "message": {"content": "New task"}},
+                self.question_call(),
+                {"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "q1",
+                 "content": "User has answered your questions: Blue"}]}},
+                self.question_call("q2", text="Latest question? \u03bb")]
+        path = self.question_log(rows)
+        with path.open("ab") as stream:
+            stream.write(b'\n{"type": "unfinished')
+        with mock.patch.object(module, "HOOK_TRANSCRIPT_CHUNK", 17):
+            self.assertEqual([q["question"] for q in module.hook_questions(path)], ["Latest question? \u03bb"])
+
     def question_log(self, rows):
         path = self.tmp / "synthetic.jsonl"
         path.write_text("".join(json.dumps(row) + "\n" for row in rows))

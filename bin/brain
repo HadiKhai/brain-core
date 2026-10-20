@@ -8871,26 +8871,56 @@ def notes_lag(inst, n):
     return out
 
 
-def hook_questions(path):
-    """Unanswered question calls in the latest turn; never treat ordinary prose as a question.
-    Only the hook-supplied transcript is read, never session discovery or history imports.
+HOOK_TRANSCRIPT_LIMIT = 4 * 1024 * 1024
+HOOK_TRANSCRIPT_CHUNK = 64 * 1024
+
+
+def hook_operator_message(rec):
+    if not isinstance(rec, dict):
+        return False
+    msg = rec.get("message")
+    if rec.get("type") == "user" and isinstance(msg, dict):
+        blocks = msg.get("content", [])
+        return isinstance(blocks, (str, list)) and not any(
+            isinstance(b, dict) and b.get("type") == "tool_result" for b in blocks)
+    item = rec.get("payload", {}) if rec.get("type") in ("response_item", "event_msg") else rec
+    return isinstance(item, dict) and (item.get("type") == "message" and item.get("role") == "user"
+                                      or item.get("type") == "user_message")
+
+
+def hook_turn_records(fh):
+    """Walk backward to the latest operator message, reading at most four MiB of a snapshot.
+    A capped, incomplete leading record is discarded; never parse a fragment as a record.
     """
+    position = os.fstat(fh.fileno()).st_size
+    budget, carry, records = HOOK_TRANSCRIPT_LIMIT, b"", []
+    while position and budget:
+        amount = min(HOOK_TRANSCRIPT_CHUNK, position, budget)
+        position -= amount
+        budget -= amount
+        fh.seek(position)
+        lines = (fh.read(amount) + carry).split(b"\n")
+        carry = lines[0] if position else b""
+        for line in reversed(lines[1:] if position else lines):
+            try:
+                rec = json.loads(line)
+            except ValueError:
+                continue  # partial final line, malformed record, or blank trailing line
+            if hook_operator_message(rec):
+                return list(reversed(records))
+            records.append(rec)
+    return list(reversed(records))
+
+
+def hook_questions(path):
+    """Unanswered question calls in the bounded latest turn of the hook-supplied transcript."""
     pending = {}
     fd = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0))
     if not stat.S_ISREG(os.fstat(fd).st_mode):
         os.close(fd)
         return []  # a FIFO/device must never hold a stop open
     with os.fdopen(fd, "rb") as fh:
-        remaining = os.fstat(fh.fileno()).st_size  # don't chase a transcript that keeps growing
-        while remaining:
-            line = fh.readline(remaining)
-            if not line:
-                break
-            remaining -= len(line)
-            try:
-                rec = json.loads(line)
-            except ValueError:
-                continue  # runtimes may still be appending their last line
+        for rec in hook_turn_records(fh):
             if not isinstance(rec, dict):
                 continue
             kind = rec.get("type")

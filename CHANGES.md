@@ -17,7 +17,11 @@ For agents:
 After upgrading:
 - Re-read `roles/coordinator.md`, `skills/machine-setup/SKILL.md` and `adapters/hosts/t3.md`.
   Refresh root's tick; verify hooks with made-up questions. Reapprove changed Codex hooks.
-  Configure Stop hooks in external homes and keep `brain` on PATH there.
+  With the operator's consent, install the runtime's user-level Stop hook once per machine
+  and keep `brain` on PATH. Never install Brain hooks in a home or worktree. Claude uses its
+  user settings; Codex uses user-level hooks when supported, otherwise host pending checks.
+- Transcript scanning now walks backward in chunks to the last operator message, capped at
+  four MiB per stop; questions beyond that cap rely on host pending checks.
 
 ## 2026-10-20: History from folders named as the node's
 

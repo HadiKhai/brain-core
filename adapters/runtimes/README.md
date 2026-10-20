@@ -26,7 +26,7 @@ Inheritance (axiom 5) relies on the runtime loading instruction files from paren
 
 | Runtime | How it loads parent folders |
 | --- | --- |
-| claude | `CLAUDE.md` in the working folder and every parent. Imports (`@file`) in parent files are not followed, which is why links are used. Hooks: only the working folder's `.claude/settings.json`, so each node has one. |
+| claude | `CLAUDE.md` in the working folder and every parent. Imports (`@file`) in parent files are not followed, which is why links are used. Hooks: user settings apply across projects; Brain's per-node project hook stays inside the Brain instance. |
 | codex | `AGENTS.md` from the git root down to the working folder. Hooks: `.codex/hooks.json` from the git root down, once the project is trusted and each hook approved (an edited hook needs approving again). |
 
 To add a runtime, write `<name>.env`, add the name to `runtimes` in `instance.md`, run
@@ -45,8 +45,10 @@ the instance folder **including `.git`**.
 
 ## Questions at stop
 
-With a `transcript_path` in the Stop payload, `brain hook stop` reads that file only and
-captures unanswered question-tool calls from its latest turn. Claude `AskUserQuestion`
+With a `transcript_path` in the Stop payload, `brain hook stop` reads that file only, backward
+in 64-KiB chunks until the latest operator message or a four-MiB cap, and captures unanswered
+question-tool calls from that suffix. Incomplete leading records are discarded; a question
+beyond the cap remains a host-pending-check gap. Claude `AskUserQuestion`
 tool-use records and Codex `response_item` function calls named `request_user_input` are
 supported. Successful Claude tool results and Codex outputs with nonempty `answers` settle
 the call. Error/cancelled calls stay pending. Question text and options pass the import
@@ -64,5 +66,21 @@ remain a gap: use host pending-request checks. The hook never calls the host API
 Hook failures and unreadable transcripts fail open; host pending checks remain the fallback.
 A busy inbox saves a screened line in a private local queue: `brain inbox` and `brain due`
 include it immediately and retry the append without waiting. All CLI inbox appends share the
-same short file lock. External homes must install the Stop hook and have `brain` on PATH; the adapter
-command falls back to it outside a Brain folder and resolves registered worktree bindings.
+same short file lock.
+
+Home and worktree sessions use a user-level Stop hook installed once per machine, with the
+operator's consent. Never install Brain hooks in a home or worktree. Merge the Stop entry
+from the runtime adapter JSON into the user's existing settings, preserving other hooks:
+
+- Claude: the user `~/.claude/settings.json` (or the active configuration folder's user settings).
+- Codex: user-level `~/.codex/hooks.json` (or `$CODEX_HOME/hooks.json`) when the installed
+  version supports it; review/trust that hook in Codex too. The official hook documentation
+  lists user-level `hooks.json` and inline `[hooks]` configuration. This is documented support,
+  not a live installation test of the locally found codex-cli 0.144.4. If unavailable, disabled,
+  or not propagated by the host, keep host pending checks as the route.
+
+Keep `brain` on PATH. The adapter command falls back to it outside Brain folders;
+`root_for_path` resolves only a Brain or registered home/worktree, so an unrelated folder
+exits at once without output or changes. No project settings file is needed in a home.
+Sources checked 2026-10-21: [Claude hook locations](https://code.claude.com/docs/en/hooks#hook-locations)
+and [Codex hook locations](https://learn.chatgpt.com/docs/hooks).
