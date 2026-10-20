@@ -5705,6 +5705,26 @@ def spend_node_file(inst, n):
     return spend_cache_dir(inst) / "nodes" / f"{connect_name(n['id'])}.json"
 
 
+def any_cwd(path, allowed, forbidden):
+    """The folder a transcript's first records ran in, sub-agents' sidechain records included: "" if none."""
+    fh, _ = transcript_open(path, allowed, forbidden)
+    if not fh:
+        return ""
+    with fh:
+        for k, raw in enumerate(fh):
+            if k > 200:
+                break
+            if b'"cwd"' not in raw:
+                continue
+            try:
+                r = json.loads(raw)
+            except ValueError:
+                continue
+            if isinstance(r, dict) and isinstance(r.get("cwd"), str) and r["cwd"]:
+                return r["cwd"]
+    return ""
+
+
 def spend_lookback(inst, n, since=None, also=()):
     """Every past session about a node's home (as `brain history` finds them), as aggregates only."""
     match_home, _ = history_matcher(inst, n, also)
@@ -5712,7 +5732,9 @@ def spend_lookback(inst, n, since=None, also=()):
 
     def match(runtime, f, allowed, forbidden):
         if runtime == "claude" and f.parent.name == "subagents":
-            return f.parent.parent.name in heads  # a sub-agent of a matching session (its parent is read first)
+            # A sub-agent of a matching session (its parent is read first), and only if it ran in a place that
+            # counts on its own: a parent never vouches for a child's folder.
+            return f.parent.parent.name in heads and bool(match_home(any_cwd(f, allowed, forbidden), ""))
         fh, why = transcript_open(f, allowed, forbidden)
         s = history_head(f, runtime, fh) if fh else None
         if not s or not match_home(s["cwd"], s["repo_url"]):
@@ -5731,7 +5753,7 @@ def spend_lookback(inst, n, since=None, also=()):
             for root in (cfg / "sessions", cfg / "archived_sessions"):
                 for f in spend_walk(root) if root.is_dir() else []:
                     m = codex_meta(f, allowed, forbidden)
-                    if m and m[2] in ids and m[0] not in ids:
+                    if m and m[2] in ids and m[0] not in ids and match_home(m[1], ""):
                         agg = spend_file(inst, f, "codex", allowed, forbidden)
                         if agg:
                             aggs.append(agg)

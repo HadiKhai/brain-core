@@ -6663,10 +6663,28 @@ class HistorySizes(History):
         out = self.b(self.r, "history", "garden", "--fresh", "--also", "~Zebracorp_nobody/x", ok=False)
         self.assertNotIn("Zebracorp", out)
         self.assertNotIn("Traceback", out)
+        # A parent in a named folder never vouches for a sub-agent that ran elsewhere.
+        base = count(self.b(self.r, "spend", "garden", "--also", str(scratch)))
+        parent_dir = self.claude / "projects" / "-scratch-thread" / "55555555-eeee" / "subagents"
+        self.jsonl(parent_dir / "agent-foreign.jsonl", [{**r, "isSidechain": True}
+                                                       for r in self.claude_rows(clone, "55555555-eeee", start=18)[:3]])
+        self.jsonl(parent_dir / "agent-brain.jsonl", [{**r, "isSidechain": True}
+                                                     for r in self.claude_rows(self.r / "nodes", "55555555-eeee", start=18)[:3]])
+        self.jsonl(parent_dir / "agent-ok.jsonl", [{**r, "isSidechain": True}
+                                                  for r in self.claude_rows(scratch, "55555555-eeee", start=18)[:3]])
+        s2 = self.codex / "sessions" / "2026" / "10" / "05"
+        self.jsonl(s2 / "rollout-2026-10-05T09-00-00-cccc0001.jsonl", self.codex_rows(
+            "cccc0001-0000", scratch, [self.item("UserMessage", "parent", id="u-p")], at0="2026-10-05T09:00:00Z"))
+        self.jsonl(s2 / "rollout-2026-10-05T09-10-00-cccc0002.jsonl", self.codex_rows(
+            "cccc0002-0000", clone, [self.item("UserMessage", "child", id="u-c")], at0="2026-10-05T09:10:00Z",
+            source={"subagent": {"thread_spawn": {"parent_thread_id": "cccc0001-0000"}}}))
+        after = count(self.b(self.r, "spend", "garden", "--also", str(scratch)))
+        self.assertEqual(after, base + 2)  # the scratch sub-agent and the Codex parent; not the foreign children
         self.b(self.r, "history", "garden", "--fresh", "--also", str(scratch))
         _, m, text = self.batches()
         self.assertNotIn("FOREIGN-", text)
-        self.assertEqual([x["id"] for x in m["sessions"] if x["match"] == "named folder"], ["55555555-eeee"])
+        self.assertEqual(sorted(x["id"] for x in m["sessions"] if x["match"] == "named folder"),
+                         ["55555555-eeee", "cccc0001-0000"])
 
     def test_sessions_of_a_deleted_checkout_with_a_newline_still_match(self):
         from importlib.machinery import SourceFileLoader
