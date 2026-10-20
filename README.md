@@ -378,6 +378,16 @@ the brain may use, without a model. It keeps the operator's messages and the age
 drops tool output and copies, and filters secrets. Then it cuts them into batches that a reader
 finishes before it would compact. Readers record each slice they read; `brain history
 garden-notes check` shows what's covered and catches citations to turns that don't exist.
+Readers note decisions and open threads, and the technical side too: how it's built, what broke
+and what fixed it, the conventions you asked for. These go to the node's `knowledge.md` and to
+proposed items and specialists other projects can use.
+
+Once several projects are studied, `brain connect root` compares them: one reader digests each
+project's files and a sample of its code, then a connector proposes what they share as items
+and specialists, at their common ancestor and scoped to the owners they share. Review them all
+with `brain proposals`, accept several at once, and every later brief in any project can use
+them. Mid-task, `brain recall garden-notes "builds fail after the upgrade"` lists what every
+project learned that this one may use.
 
 Imported rules land in `sources/import-proposals.md` as **imported and unreviewed**; roles and
 lessons start proposed and unusable. After actual review, accept a lesson with
@@ -485,7 +495,10 @@ You mostly talk to coordinators, and they run `brain` for you. By hand:
 | Command | Does |
 | --- | --- |
 | `brain item add/list/show/scope/quarantine/restore` | the library, provenance and scopes |
-| `brain item accept <id> --reviewed-by sam` / `brain item reject <id>` | review proposed learning; rejected items stay unusable |
+| `brain item accept <id>... --reviewed-by sam` / `brain item reject <id>...` | review proposed learning; rejected items stay unusable |
+| `brain proposals [node]` | everything waiting for review, in full, with commands to accept or reject several at once |
+| `brain recall <node> "<problem>"` | what every project learned that this one may use, for a problem met mid-task |
+| `brain connect <node> [check\|brief <child>\|brief --final]` | what the projects below a node share: digests, then proposed shared items and specialists |
 | `brain usable <item> <node>` | may this node use this item? |
 | `brain specialist new`, `brain lesson`, `brain hire` | reusable experts, their lessons, a brief that brings both |
 </details>

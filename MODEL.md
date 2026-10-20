@@ -212,5 +212,19 @@ stop line, name an eligible alternative and wait for an explicit choice, never s
 
 Briefs automatically select up to five usable library items by task words (weight 4), node
 labels/stack and specialist words (3), and source-node match (2), then item id to break ties.
-Each line explains the match and gives a scope-checked full-item command. Proposed, rejected
-and quarantined items never enter this selection.
+Words match by a light stem ("throttling" meets "throttle") against an item's id, title, kind,
+keywords and body. Each line explains the match and gives a scope-checked full-item command.
+Proposed, rejected and quarantined items never enter this selection. `brain recall` ranks the
+same usable items for a problem described mid-task and only counts matching proposals.
+
+## Learning from several nodes
+
+An item or specialist learned from several nodes records them all. Its scope starts as the owners
+every source shares, so nothing reaches a node that one of its sources may not (axioms 10, 11);
+with no shared owner it can't be learned together. Widening it needs every source owner's consent,
+not only of those left in scope (axiom 11). It lives at the sources' lowest common ancestor unless
+placed higher (axiom 13). Proposed ones wait in that ancestor's review queue. Learning carries its
+sources' never-name words with it: an item or specialist holding one is shown, offered, hired or
+accepted nowhere until edited.
+Connection studies read each node's files and a sample of its home's code into digests outside
+shared state, then propose such items and specialists; they never accept them.

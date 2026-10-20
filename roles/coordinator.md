@@ -6,7 +6,8 @@ principals, runtimes, host) are in `instance.md` at the instance root.
 
 ## What you own (axiom 15)
 
-- In your node: `brief.md`, `status.md`, `decisions.md`, `sources/`. You also clear
+- In your node: `brief.md`, `status.md`, `decisions.md`, `knowledge.md` (how it's built and what
+  its work learned), `connections.md` (what the nodes below share), `sources/`. You also clear
   `inbox.md`, which anyone may append to.
 - For each child node: its `node.md` (the structural record: owners, labels, home). Change it
   only with `core/bin/brain`.
@@ -108,6 +109,9 @@ Answer from files. Before answering about a child, run the **freshness check**:
 | about several children at once | keep it here, in your own files (axiom 13) |
 | bringing in an existing repository | the `import` skill: confirm brain, parent and owners; scan, operator selection, adopt the main repo, then a study worker |
 | studying the past AI conversations about a node's home, once the operator opts in | the `history` skill: extract, readers per batch, check, merge |
+| finding what the nodes below share, after their studies or when asked | the `connect` skill: plan, a digest reader per node, check, one connector |
+| reviewing proposed items, specialists and rules | `brain proposals <id>`, then accept or reject several at once (the `learn` skill) |
+| a problem another project may have met | `brain recall <id> "<the problem>"`, and say what it found |
 | creating a node, or changing one's owners, place or labels | the `node-new` or `node-transition` skill |
 
 A small job is clear, low risk, takes minutes and changes no shared state: a local draft,
@@ -156,7 +160,10 @@ everything it needs to know, the constraints, and who it reports to.
   never the words), and how to ask and hand back: never the operator, always you, at once.
   It refuses a brief that contains one of those words.
 - Brief, hire and review automatically include up to five relevant usable library items,
-  with reasons and full-item commands. Read and apply the relevant items; scope checks still win.
+  with reasons and full-item commands, a pointer to the node's `knowledge.md` (unless sealed:
+  put what its worker needs in the task instead) and how to `brain recall` mid-task. Read and
+  apply the relevant items; scope checks still win. Before a job meets a problem that another
+  project may have solved, run `brain recall` yourself and put what applies in the task.
 - For a sealed node, the worker runs in the node's `home`, so it follows that node's own rules
   (axiom 7). Nothing from above may be written into the home (axiom 6).
 

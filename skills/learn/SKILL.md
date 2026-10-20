@@ -10,7 +10,10 @@ description: Capture reusable knowledge (a method, style, asset, script, lesson 
 2. **Write the item:**
    `core/bin/brain item add <item-id> --from <source node> --title "…" --kind <kind> --ref "<file@commit, URL, or thread + date>" [--at <node>] --body "…"`
    (or `--body-file`). It records the source, time and the source's owners, and sets the scope
-   to those owners.
+   to those owners. Learned from several nodes, `--from a,b` records them all, places the item at
+   their lowest common ancestor (axiom 13) and scopes it to the owners they all share: nothing
+   reaches a node one of its sources may not. Add `--keywords` with the words someone meeting
+   the problem would use; matching reads them with the title and body.
 3. **Write the body** so it can be used without the source. A general lesson may be abstracted
    from a specific one; it keeps the same scope.
 4. **Wider use** needs everyone in the scope to agree (axiom 11):
@@ -30,6 +33,12 @@ description: Capture reusable knowledge (a method, style, asset, script, lesson 
    They remain unusable until a human or separate reviewer accepts them with
    `brain item accept <id> --reviewed-by <operator or non-revoked principal>`;
    `brain item reject <id>` retains an unusable rejected record. Restore accepts neither state.
-8. Brief, hire and review select relevant usable items automatically for the next job;
-   give items descriptive titles and self-contained bodies so lexical matching can find them.
-9. Run `core/bin/brain check`.
+8. Brief, hire and review select relevant usable items automatically for the next job, and
+   `brain recall <node> "<problem>"` finds them mid-task. Matching is by word stems, so give items
+   descriptive titles, keywords and self-contained bodies.
+9. **Reviewing proposals.** `brain proposals [<node>]` prints everything waiting, a node at a
+   time, in full. Read it (or have a reviewer on another runtime read it and recommend), then
+   accept or reject several at once: `brain item accept a b c --reviewed-by <principal>`,
+   `brain item reject d e`, `brain specialist accept x y --at <node> --reviewed-by <principal>`.
+   Edit a proposal's text before accepting it if it needs it. Only the operator or a principal accepts.
+10. Run `core/bin/brain check`.
