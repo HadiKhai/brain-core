@@ -6685,8 +6685,8 @@ class Spend(Scenario):
         self.jsonl(target, out)
         return target
 
-    def cx(self, cwd, sid, items, **meta):
-        when = datetime.datetime.fromtimestamp(self.t0, datetime.timezone.utc).astimezone()
+    def cx(self, cwd, sid, items, began=0, **meta):
+        when = datetime.datetime.fromtimestamp(self.t0 + began * 86400, datetime.timezone.utc).astimezone()
         folder = self.codex / "sessions" / when.strftime("%Y/%m/%d")
         rows = [{"timestamp": self.at(0), "type": "session_meta", "payload": {
             "id": sid, "cwd": str(cwd), "originator": "T3 Code", **meta}},
@@ -6889,6 +6889,45 @@ class Spend(Scenario):
                       "--lessons", "none: none")
         self.assertIn("usage: 145k tokens processed", hand)
         self.assertIn("budget 30k tokens · 3 h: over (145k of 30k tokens", hand)
+
+    def test_resumed_sessions_copied_history_and_what_the_cache_keeps(self):
+        # Resumed today, begun a week ago: its transcript stays in that day's folder.
+        self.cx(self.wt, "c0000050-resumed", [(1, *self.counter((70, 0, 7, 0), (70, 0, 7, 0)))], began=-7)
+        # An old-style fork copies its parent's records, older than its own start: neither tokens nor time count.
+        copied = [(m, "response_item", {"type": "function_call", "name": "shell"}) for m in range(-100, 0)]
+        copied += [(-50, *self.counter((900000, 0, 9000, 0), (900000, 0, 9000, 0)))]
+        rows = [{"timestamp": self.at(0), "type": "session_meta", "payload": {
+            "id": "c0000051-fork", "cwd": str(self.wt), "forked_from_id": "c0000000-parent"}}]
+        rows += [{"timestamp": self.at(m), "type": t, "payload": p} for m, t, p in copied]
+        rows += [{"timestamp": self.at(1), "type": "event_msg", "payload": self.counter(
+            (900000 + 30, 0, 9000 + 3, 0), (30, 0, 3, 0))[1]}]
+        when = datetime.datetime.fromtimestamp(self.t0, datetime.timezone.utc).astimezone()
+        self.jsonl(self.codex / "sessions" / when.strftime("%Y/%m/%d") / "rollout-x-c0000051-fork.jsonl", rows)
+        (self.node / "never-name.txt").write_text("worktrees\n")
+        self.b(self.r, "wt", "rm", "app", "job", "--force", "--cause", "measured")
+        row = self.row()
+        self.assertEqual((row["Fresh in"], row["Output"], row["Tool calls"]), ("100", "10", "0"))
+        self.assertEqual(row["Active h"], "0.0")
+        self.assertEqual(row["Usage"], "transcripts: 2 sessions")
+        for f in (self.r / ".brain/spend/files").glob("*.json"):  # counts only: no folder a word could hide in
+            text = f.read_text()
+            self.assertNotIn(str(self.tmp), text)
+            self.assertNotIn("worktrees", text)
+            self.assertNotIn('"cwd"', text)
+
+    def test_live_figures_use_what_the_host_reported(self):
+        self.cl(self.wt, "99999998-wt", "Fix.", [("said", 1, "y1", (55, 55, 0, 5))])
+        self.assertIn("115 tokens", self.b(self.r, "jobs", "app"))
+        usage = self.tmp / "usage.json"
+        usage.write_text(json.dumps({"fresh": 4000, "cache_read": 6000, "output": 500, "compactions": 4,
+                                     "models": {"claude:opus": 10500}, "host": "T3"}))
+        self.b(self.r, "jobs", "app", "--branch", "job", "--usage-file", str(usage))
+        out = self.b(self.r, "jobs", "app")
+        self.assertIn("usage: 10.5k tokens processed (fresh in 4k", out)
+        self.assertIn("4 compactions: past the context window", out)
+        state = json.loads(self.b(self.r, "ui", "--json"))
+        live = next(n for n in state["nodes"] if n["id"] == "app")["jobs"]["open"][0]["usage"]
+        self.assertEqual((live["processed"], live["models"]), (10500, {"claude:opus": 10500}))
 
     def test_host_numbers_win_over_transcripts(self):
         self.cl(self.wt, "99999999-wt", "Fix.", [("said", 1, "z1", (5, 5, 5, 5))])

@@ -4699,7 +4699,7 @@ def spend_count(value):
 
 def spend_new(runtime, path):
     return {"v": SPEND_VERSION, "runtime": runtime, "id": "", "parent": "", "subagent": False, "fork_of": "",
-            "cwd": "", "job": "", "models": [], "m": {}, "mc": {}, "records": False, "compactions": [],
+            "job": "", "models": [], "m": {}, "mc": {}, "records": False, "compactions": [],
             "first": None, "last": None, "state": {"offset": 0, "prompt_done": False, "recent": [], "tools": [],
                                                    "model": -1, "last_input": 0, "prev": None, "own_start": None}}
 
@@ -4725,8 +4725,7 @@ def spend_model(agg, name):
 def spend_claude_line(agg, raw, minute):
     st = agg["state"]
     spend_add(agg, "m", minute, -1, (1, 0, 0, 0, 0, 0, 0))
-    wanted = (b'"usage"' in raw or b'compact_boundary' in raw or (not st["prompt_done"] and b'"user"' in raw)
-              or (not agg["cwd"] and b'"cwd"' in raw))
+    wanted = b'"usage"' in raw or b'compact_boundary' in raw or (not st["prompt_done"] and b'"user"' in raw)
     if not wanted:
         return
     try:
@@ -4735,8 +4734,6 @@ def spend_claude_line(agg, raw, minute):
         return
     if not isinstance(r, dict):
         return
-    if not agg["cwd"] and isinstance(r.get("cwd"), str):
-        agg["cwd"] = r["cwd"]
     kind = r.get("type")
     msg = r.get("message") if isinstance(r.get("message"), dict) else {}
     if kind == "user" and not st["prompt_done"] and not r.get("isMeta") and not r.get("isCompactSummary"):
@@ -4781,6 +4778,8 @@ CODEX_TOOL_CALLS = {"function_call", "custom_tool_call", "local_shell_call", "we
 
 def spend_codex_line(agg, raw, minute):
     st = agg["state"]
+    if minute is not None and st["own_start"] is not None and minute < st["own_start"]:
+        return  # history a fork copied from its parent: the parent's own file counts it, its time too
     spend_add(agg, "m", minute, -1, (1, 0, 0, 0, 0, 0, 0))
     hot = (b'"session_meta"', b'"token_usage_record"', b'"token_count"', b'"compacted"', b'"turn_context"',
            b'_call"')
@@ -4799,15 +4798,13 @@ def spend_codex_line(agg, raw, minute):
             src = p.get("source")
             spawn = src.get("subagent", {}).get("thread_spawn", {}) if isinstance(src, dict) and \
                 isinstance(src.get("subagent"), dict) else {}
-            agg.update(id=history_str(p.get("id")), cwd=history_str(p.get("cwd")),
+            agg.update(id=history_str(p.get("id")),
                        parent=history_str(spawn.get("parent_thread_id")) if isinstance(spawn, dict) else "",
                        subagent=isinstance(src, dict) and "subagent" in src or p.get("thread_source") == "subagent",
                        fork_of=history_str(p.get("forked_from_id")) or history_str(
                            (p.get("history_base") or {}).get("thread_id") if isinstance(p.get("history_base"), dict) else ""))
             st["own_start"] = minute  # a fork's copied history is older than its own start
         return
-    if minute is not None and st["own_start"] is not None and minute < st["own_start"]:
-        return  # history a fork copied from its parent: the parent's own file counts it
     if kind == "turn_context":
         st["model"] = spend_model(agg, p.get("model"))
         return
@@ -4905,16 +4902,17 @@ def spend_file(inst, path, runtime, allowed, forbidden, budget=None):
         known = _SPEND_MEM.get(str(real))
         if known and known[0] == (size, list(ident)) and known[1].get("complete", True):
             return known[1]
-        cf = spend_cache_dir(inst) / "files" / (hashlib.sha256(str(real).encode()).hexdigest()[:32] + ".json")
+        key = hashlib.sha256(str(real).encode()).hexdigest()[:32]
+        cf = spend_cache_dir(inst) / "files" / f"{key}.json"
         agg = None
         try:
             agg = json.loads(cf.read_text())
         except (OSError, ValueError):
             pass
-        if not (isinstance(agg, dict) and agg.get("v") == SPEND_VERSION and agg.get("path") == str(real)
+        if not (isinstance(agg, dict) and agg.get("v") == SPEND_VERSION and agg.get("key") == key
                 and agg.get("ino") == list(ident) and agg["state"]["offset"] <= size
                 and (not packed or agg["state"]["offset"] in (0, size))):
-            agg = {**spend_new(runtime, real), "path": str(real), "ino": list(ident)}
+            agg = {**spend_new(runtime, real), "key": key, "ino": list(ident)}
             if runtime == "claude":  # a session's file is named by its id; its sub-agents' files sit below it
                 sub = real.parent.name == "subagents"
                 agg.update(id=f"{real.parent.parent.name}/{real.stem}" if sub else real.stem, subagent=sub,
@@ -4927,10 +4925,12 @@ def spend_file(inst, path, runtime, allowed, forbidden, budget=None):
             if packed:
                 agg["state"]["offset"] = size  # read whole: what it holds is counted
             try:
-                cf.parent.mkdir(parents=True, exist_ok=True)
-                atomic_write(cf, json.dumps(agg, separators=(",", ":")))
+                cf.parent.mkdir(parents=True, exist_ok=True)  # counts only: no path, no folder, no text
+                atomic_write(cf, json.dumps({k: v for k, v in agg.items() if k not in ("path", "cwd")},
+                                            separators=(",", ":")))
             except OSError:
                 pass  # still right for this run; read again next time
+        agg["path"] = str(real)  # this run's own, never written
         _SPEND_MEM[str(real)] = ((size, list(ident)), agg)
     return agg
 
@@ -5149,7 +5149,7 @@ def job_sessions(inst, n, row, worktree=None):
     places = [p for p in (wt, n["dir"], inst.root) if p]
     sources, allowed, forbidden = spend_sources(inst)
     touched = lambda p: p.stat().st_mtime >= start - 60  # noqa: E731
-    aggs, files, metas = [], set(), []
+    aggs, files, metas, in_wt = [], set(), [], set()
 
     def take(runtime, p):
         try:
@@ -5178,6 +5178,8 @@ def job_sessions(inst, n, row, worktree=None):
                         # In the worktree, every session is the job's. In a coordinator's folder only those its
                         # brief names: a long coordinator session is never read for this.
                         try:
+                            if name in here:
+                                in_wt.add(str(f.resolve()))
                             if name in here or (touched(f) and claude_mark(f, allowed, forbidden) == key):
                                 take("claude", f)
                         except OSError:
@@ -5186,29 +5188,26 @@ def job_sessions(inst, n, row, worktree=None):
                 for f in proj.glob(f"*/{i}.jsonl"):
                     take("claude", f)
         else:
-            day = datetime.date.fromtimestamp(start - 86400)  # Codex files transcripts by their local start day
-            last = datetime.date.fromtimestamp(end + 86400)
+            # Every Codex transcript written to since the job started, wherever its day folder: a resumed session
+            # keeps writing to the file of the day it began.
             mine = []
-            while day <= last:
-                for f in [p for pattern in ("rollout-*.jsonl", "rollout-*.jsonl.zst")
-                          for p in sorted((cfg / "sessions" / f"{day:%Y/%m/%d}").glob(pattern))] + \
-                        [p for suffix in (".jsonl", ".jsonl.zst")
-                         for p in sorted((cfg / "archived_sessions").glob(f"rollout-{day:%Y-%m-%d}T*{suffix}"))]:
+            for root in (cfg / "sessions", cfg / "archived_sessions"):
+                for f in spend_walk(root) if root.is_dir() else []:
                     try:
-                        if touched(f):
+                        if f.name.startswith("rollout-") and touched(f):
                             m = codex_meta(f, allowed, forbidden)
                             if m:
                                 mine.append((f, *m))
                     except OSError:
                         pass
-                day += datetime.timedelta(days=1)
             for f, sid, cwd, parent in mine:
+                if wt and spend_inside(cwd, wt):
+                    in_wt.add(str(f.resolve()))
                 if sid in ids or (wt and spend_inside(cwd, wt)) or (
                         any(spend_inside(cwd, p) for p in places) and codex_mark(f, allowed, forbidden) == key):
                     take("codex", f)
             metas += mine
-    keep = [a for a in aggs if not a["subagent"] and
-            ((wt and spend_inside(a["cwd"], wt)) or a["job"] == key or a["id"] in ids)]
+    keep = [a for a in aggs if not a["subagent"] and (a["path"] in in_wt or a["job"] == key or a["id"] in ids)]
     chosen = {a["id"] for a in keep}
     for a in keep:  # Claude keeps a session's sub-agents beside it
         if a["runtime"] == "claude":
@@ -5337,8 +5336,26 @@ def usage_line(u, budget=None, hours=None):
 _LIVE = {}
 
 
+def host_row_usage(row):
+    """A ledger row's usage as its host reported it, in the shape transcript totals take."""
+    u = row_usage(row) or {}
+    models = {}
+    for part in (row.get("Models") or "").split(", "):
+        m = re.fullmatch(r"(\S+) (\d+)%", part.strip())
+        if m:
+            models[m[1]] = u.get("processed", 0) * int(m[2]) // 100
+    sub = round(u.get("processed", 0) * u.get("sub_share", 0))
+    return {**{k: u.get(k, 0) for k in (*SPEND_TOKENS, "processed", "tools", "compactions", "subagents")},
+            "auto_compactions": 0, "sessions": 1, "sub_share": u.get("sub_share", 0), "sub_tokens": sub,
+            "models": models, "runtimes": {}, "largest_compaction": 0, "source": row.get("Usage", "host"),
+            "active_minutes": round(u.get("active_h", 0) * 60), "agent_minutes": round(u.get("agent_h", 0) * 60)}
+
+
 def live_usage(inst, n, row):
-    """An open job's usage so far, read again at most once a minute in one process (the live view asks often)."""
+    """An open job's usage so far, read again at most once a minute in one process (the live view asks often).
+    What its host reported wins over what the transcripts show."""
+    if str(row.get("Usage", "")).startswith("host"):
+        return host_row_usage(row)
     key = (str(inst.root), n["id"], job_key(row))
     hit = _LIVE.get(key)
     if hit and time.monotonic() - hit[0] < 60:
@@ -6950,7 +6967,7 @@ def cmd_handback(a):
     try:
         current = open_job(read_jobs(n) or [], a.branch)
         if current:
-            started, used, budget = inst.parse_time(current["Started"]), job_usage(inst, n, current), job_budget(n, current)
+            started, used, budget = inst.parse_time(current["Started"]), live_usage(inst, n, current), job_budget(n, current)
             if (used and used["sessions"]) or budget:  # the worker sees its spend against its budget
                 print(redact(usage_line(used, budget, elapsed(started, inst.now_dt()) / 3600 if started else None),
                              never_terms(n)))
