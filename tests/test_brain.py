@@ -1532,6 +1532,27 @@ class UnifiedHandbacks(Scenario):
         self.assertEqual(len(list(directory.glob("*.pending"))), 2)
         self.assertIn("Choose blue", (r / "nodes/a/inbox.md").read_text())
 
+    def test_answered_handback_same_report_gets_a_fresh_wake(self):
+        r, home, wt = self.job()
+        module = importlib.machinery.SourceFileLoader("brain_handback_episode", str(CORE / "bin/brain")).load_module()
+        inst = module.Instance(r)
+        calls = self.tmp / "calls"
+        inst.local_of("root")["wake"] = "echo called >> " + shlex_quote(str(calls))
+        inst.save_local()
+        args = argparse.Namespace(id="a", branch="job", state="question", lessons="none: fixture",
+                                  report="report.md", reviews=None, need_human=None)
+        directory = module.wake_directory(inst, inst.node("root"))
+        with mock.patch.dict(os.environ, self.env, clear=True), \
+                mock.patch.object(module, "load", return_value=inst), \
+                mock.patch.object(module, "wake_start"), contextlib.redirect_stdout(io.StringIO()):
+            for count in (1, 2):
+                module.cmd_handback(args)
+                if count == 2:
+                    (directory / "last").write_text(str(time.time() - 121))
+                module.wake_drain(inst, inst.node("root"), once=True)
+                self.assertEqual(len(calls.read_text().splitlines()), count)
+                (r / "nodes/a/inbox.md").write_text("")
+
     def test_question_handback_preserves_a_concurrent_runtime_inbox_append(self):
         r, home, wt = self.job()
         loader = importlib.machinery.SourceFileLoader("brain_handback_append", str(CORE / "bin/brain"))
@@ -2182,7 +2203,7 @@ class QuestionWake(Scenario):
             (directory / "last").unlink(missing_ok=True)
             start = time.monotonic()
             self.drain()
-            self.assertLess(time.monotonic() - start, 1)
+            self.assertLess(time.monotonic() - start, 11)
             self.assertEqual(len(list(directory.glob("*.pending"))), 1)
             self.assertFalse(list(directory.glob("*.sent")))
 
@@ -2213,9 +2234,23 @@ class QuestionWake(Scenario):
             self.assertTrue(self.module.wake_send("https://wake.invalid/synthetic-capability"))
         request = opener.open.call_args.args[0]
         self.assertEqual(request.data, b'{"event":"brain-wake"}')
-        self.assertEqual(opener.open.call_args.kwargs["timeout"], 0.4)
+        self.assertEqual(opener.open.call_args.kwargs["timeout"], 10)
         handler = build.call_args.args[0]()
         self.assertIsNone(handler.redirect_request(None, None, 302, "redirect", {}, "https://other.invalid/"))
+
+    def test_slow_transport_succeeds_and_expired_dedup_rearms(self):
+        script = "import time; time.sleep(0.6); " + "open(" + repr(str(self.calls)) + ", 'a').write('called\\n')"
+        self.b(self.r, "set", "a", "wake=" + shlex_quote(sys.executable) + " -c " + shlex_quote(script))
+        self.enqueue("same explicit reason")
+        self.drain()
+        self.assertEqual(len(self.calls.read_text().splitlines()), 1)
+        directory = self.module.wake_directory(self.inst, self.n)
+        sent = next(directory.glob("*.sent"))
+        os.utime(sent, (time.time() - 86401, time.time() - 86401))
+        (directory / "last").write_text(str(time.time() - 121))
+        self.assertEqual(self.enqueue("same explicit reason"), 1)
+        self.drain()
+        self.assertEqual(len(self.calls.read_text().splitlines()), 2)
 
     def test_delivery_racing_with_pending_creation_is_deduplicated(self):
         original = self.module.os.open
@@ -2228,6 +2263,26 @@ class QuestionWake(Scenario):
         self.drain()
         self.assertFalse(self.calls.exists())
         self.assertFalse(list(self.module.wake_directory(self.inst, self.n).glob("*.pending")))
+
+    def test_pending_wake_follows_coordinator_removal_to_root(self):
+        self.enqueue("routed later")
+        self.b(self.r, "set", "root", "wake=" + self.command)
+        self.b(self.r, "set", "a", "coordinator=")
+        with mock.patch.object(self.module, "wake_start") as start:
+            self.drain()
+        self.assertEqual(start.call_args.args[1]["id"], "root")
+        self.inst = self.module.Instance(self.r)
+        self.drain(self.inst.node("root"))
+        self.assertEqual(len(self.calls.read_text().splitlines()), 1)
+        self.assertFalse(list(self.module.wake_directory(self.inst, self.n).glob("*.pending")))
+
+    def test_clock_rollback_defers_for_one_rate_window(self):
+        self.enqueue("clock rollback")
+        directory = self.module.wake_directory(self.inst, self.n)
+        (directory / "last").write_text(str(time.time() + 86400))
+        with mock.patch.object(self.module, "WAKE_INTERVAL", 0.1):
+            self.module.wake_drain(self.inst, self.n)
+        self.assertEqual(len(self.calls.read_text().splitlines()), 1)
 
     def test_parallel_requests_have_one_delivery(self):
         with mock.patch.object(self.module, "wake_start"):
@@ -2423,6 +2478,28 @@ class StopHook(Scenario):
                                   options=[{"label": "Blue", "description": "A blue option"}])]
         self.hook(r, d, transcript=self.question_log(rows))
         self.assertEqual((d / "inbox.md").read_text().count("host-question:"), 1)
+
+    def test_answered_question_can_be_asked_again_and_slow_wake_succeeds(self):
+        r = self.init("alice")
+        self.b(r, "new", "a", "--title", "Alpha")
+        calls = self.tmp / "wake-calls"
+        script = "import time; time.sleep(0.6); open(" + repr(str(calls)) + ", 'a').write('called\\n')"
+        self.b(r, "set", "a", "coordinator=synthetic-thread", "wake=" +
+               shlex_quote(sys.executable) + " -c " + shlex_quote(script))
+        d = r / "nodes/a"
+        transcript = self.question_log([self.question_call(text="Choose blue?")])
+        for count in (1, 2):
+            start = time.monotonic()
+            self.hook(r, d, active=True, transcript=transcript)
+            self.assertLess(time.monotonic() - start, 1)
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                if calls.exists() and len(calls.read_text().splitlines()) == count and list((r / ".brain/wake/a").glob("*.sent")):
+                    break
+                time.sleep(0.05)
+            self.assertEqual(len(calls.read_text().splitlines()), count)
+            (d / "inbox.md").write_text("")  # coordinator answered the previous episode
+            (r / ".brain/wake/a/last").write_text(str(time.time() - 121))
 
     def test_hanging_wake_keeps_hook_fast_and_inbox_durable(self):
         r = self.init("alice")

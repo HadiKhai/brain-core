@@ -2573,9 +2573,10 @@ def inbox_append(n_dir, line, marker=None, nonblocking=False):
         if marker:
             fh.seek(0)
             if marker in fh.read():
-                return
+                return False
         fh.write(line)
         fh.flush()
+        return True
 
 
 def cmd_split(a):
@@ -7203,6 +7204,7 @@ def cmd_handback(a):
         atomic_write(f, json.dumps(data, indent=2) + "\n")
         touch(f)
         need = getattr(a, "need_human", None)
+        question_created = False
         if a.state == "question" or (a.state == "blocked" and need):
             message = " ".join((need or ("See report " + data["report"] if data["report"] else
                                             "Coordinator choice needed; see worker hand-back")).split())
@@ -7210,11 +7212,13 @@ def cmd_handback(a):
             inbox = n["dir"] / "inbox.md"
             bullet = f"- {inst.now()} from worker {a.branch}: {a.state}: {message} {marker}\n"
             no_terms_in(n, bullet, "the inbox question")
-            inbox_append(n["dir"], bullet, marker)
+            question_created = inbox_append(n["dir"], bullet, marker)
             touch(inbox)
         inst.commit([], f"{n['id']}: worker hand-back")
-    if a.state in ("question", "blocked"):
-        request_wake(inst, n, "handback:" + digest([job_key(row), a.state, data.get("report", ""), need or ""]))
+    if question_created:
+        request_wake(inst, n, "handback:" + os.urandom(16).hex())
+    elif a.state == "blocked" and not need:
+        request_wake(inst, n, "handback:" + digest([job_key(row), a.state, data.get("report", "")]))
     try:
         current = open_job(read_jobs(n) or [], a.branch)
         if current:
@@ -7855,7 +7859,8 @@ def active_work(n):
 # Wake state belongs to the instance, never to an external home. Only opaque reason
 # digests persist here; transport bodies contain no transcript, node name or question.
 WAKE_INTERVAL = 120
-WAKE_TIMEOUT = 0.4
+WAKE_TIMEOUT = 10
+WAKE_DEDUP_SECONDS = 86400
 
 
 def wake_target(inst, n):
@@ -7884,7 +7889,8 @@ def request_wake(inst, n, reason):
         directory.mkdir(parents=True, exist_ok=True)
         key = hashlib.sha256((n["id"] + "\0" + reason).encode()).hexdigest()
         pending = directory / (key + ".pending")
-        if (directory / (key + ".sent")).exists():
+        delivered = directory / (key + ".sent")
+        if delivered.exists() and time.time() - delivered.stat().st_mtime < WAKE_DEDUP_SECONDS:
             return
         # Exclusive publication: repeated hooks neither overwrite nor launch more workers.
         safe_target(pending)
@@ -7935,6 +7941,9 @@ def wake_drain(inst, n, once=False):
     safe_target(lock)
     with lock.open("a+") as stream:
         fcntl.flock(stream, fcntl.LOCK_EX)  # detached workers only; callers never wait
+        for sent in directory.glob("*.sent"):
+            if time.time() - sent.stat().st_mtime >= WAKE_DEDUP_SECONDS:
+                sent.unlink(missing_ok=True)
         deadline = time.monotonic() + 600
         while time.monotonic() < deadline:
             if outward_links(inst.root):
@@ -7951,7 +7960,11 @@ def wake_drain(inst, n, once=False):
                 return
             last = directory / "last"
             try:
-                delay = max(0, WAKE_INTERVAL - (time.time() - float(last.read_text())))
+                previous, now = float(last.read_text()), time.time()
+                if previous > now:
+                    atomic_write(last, str(now))  # bound deferral after a clock rollback
+                    previous = now
+                delay = max(0, WAKE_INTERVAL - (now - previous))
             except (OSError, ValueError):
                 delay = 0
             if delay:
@@ -7962,7 +7975,16 @@ def wake_drain(inst, n, once=False):
             # Reload bindings so removed/changed transport capabilities take effect.
             current = Instance(inst.root)
             target, command = wake_target(current, current.node(n["id"]))
-            if target["id"] != n["id"] or not command:
+            if target["id"] != n["id"]:
+                destination = wake_directory(current, target)
+                destination.mkdir(parents=True, exist_ok=True)
+                for path in pending:
+                    safe_target(destination / path.name)
+                    path.replace(destination / path.name)
+                if command:
+                    wake_start(current, target)
+                return
+            if not command:
                 return
             atomic_write(last, str(time.time()))  # failures are rate-limited too
             try:
@@ -9168,13 +9190,25 @@ def capture_hook_questions(inst, n, data):
         marker = "<!-- host-question:" + hashlib.sha256(text.encode()).hexdigest() + " -->"
         line = f"- {inst.now()} from runtime: Host question: {text} {marker}\n"
         try:
-            inbox_append(n["dir"], line, marker, nonblocking=True)
+            created = inbox_append(n["dir"], line, marker, nonblocking=True)
         except BlockingIOError:
+            import fcntl
             queue = hook_question_queue(n)
             queue.mkdir(parents=True, exist_ok=True)
-            atomic_write(queue / (hashlib.sha256(text.encode()).hexdigest() + ".json"),
-                         json.dumps({"line": line, "marker": marker}) + "\n")
-        request_wake(inst, n, marker)
+            pending = queue / (hashlib.sha256(text.encode()).hexdigest() + ".json")
+            # Serialize only this marker's queue publication; hooks never wait on the lock.
+            lock = pending.with_suffix(".lock")
+            safe_target(lock)
+            try:
+                with lock.open("a+") as stream:
+                    fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    created = not pending.exists()
+                    if created:
+                        atomic_write(pending, json.dumps({"line": line, "marker": marker}) + "\n")
+            except BlockingIOError:
+                created = False  # the other publisher is recording this same question
+        if created:
+            request_wake(inst, n, marker + ":" + os.urandom(16).hex())
 
 
 def cmd_hook(a):
