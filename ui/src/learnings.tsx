@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { BookOpen, ShieldCheck } from "lucide-react";
+import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import {
   PageSection,
@@ -8,17 +9,26 @@ import {
   Empty,
   Status,
   Text,
-  Markdown,
-  Disclosure,
+  Reader,
+  PagedCollection,
+  ScreenAction,
+  TechnicalDetails,
   Command,
 } from "./shared";
 import { learningRows, list, quote, time, type RecordData } from "./model";
-export function Learnings({ s }: { s: RecordData }) {
+function ProposalReader({ item: i, primary = false }: { item: RecordData; primary?: boolean }) {
+  const [reviewer, setReviewer] = useState("");
+  const reviewable = i.state === "proposed" && !i.specialist;
+  return <Reader title={i.title || "Learning"} text={i.body || "No additional text recorded."} trigger={reviewable ? "Review proposal" : "Read learning"} primary={primary}
+    footer={reviewable ? <div className="decision-actions"><p>Review the source, copy your decision, then run it in your terminal. Copying does not apply it.</p><div className="field"><label>Reviewer name<Input value={reviewer} onChange={e => setReviewer(e.target.value)} placeholder="Your name" aria-label="Reviewer name" /></label></div><Command text={"brain item accept --reviewed-by " + quote(reviewer || "REVIEWER") + " -- " + quote(i.id)} label={reviewer ? "Copy acceptance" : "Add reviewer name"} disabled={!reviewer.trim()} /><Command text={"brain item reject -- " + quote(i.id)} label="Copy rejection" /></div> : undefined}>
+    <TechnicalDetails values={{Source:i.provenance?.ref, Repository:i.provenance?.repo, Revision:i.provenance?.commit}} />
+  </Reader>;
+}
+export function Learnings({ s, active }: { s: RecordData; active: boolean }) {
   const [query, setQuery] = useState(""),
     [node, setNode] = useState("all"),
     [specialist, setSpecialist] = useState("all"),
-    [state, setState] = useState("all"),
-    [limit, setLimit] = useState(10);
+    [state, setState] = useState("all");
   const rows = learningRows(s),
     filtered = rows.filter(
       (i) =>
@@ -30,7 +40,7 @@ export function Learnings({ s }: { s: RecordData }) {
           .includes(query.toLowerCase()),
     );
   return (
-    <PageSection
+    <><ScreenAction active={active}>{rows[0] ? <ProposalReader item={rows[0]} primary /> : <Reader title="Shared knowledge" text="Record a lesson from a finished job to start your library. New proposals will appear here for review." trigger="Start your library" primary />}</ScreenAction><PageSection
       title="Shared knowledge"
       description="Library items and specialist lessons · proposed items need human review"
     >
@@ -40,7 +50,6 @@ export function Learnings({ s }: { s: RecordData }) {
             query={query}
             onQuery={(v) => {
               setQuery(v);
-              setLimit(10);
             }}
             placeholder="Search learnings"
           />
@@ -87,7 +96,6 @@ export function Learnings({ s }: { s: RecordData }) {
               setNode("all");
               setSpecialist("all");
               setState("all");
-              setLimit(10);
             }}
           >
             Clear filters
@@ -104,7 +112,7 @@ export function Learnings({ s }: { s: RecordData }) {
           <p className="results-meta">
             {filtered.length} {filtered.length === 1 ? "learning" : "learnings"}
           </p>
-          {filtered.slice(0, limit).map((i: any, k) => (
+          <PagedCollection name="learnings">{filtered.map((i: any, k) => (
             <article
               className="learning-entry"
               key={i.id + ":" + i.specialist + k}
@@ -137,20 +145,12 @@ export function Learnings({ s }: { s: RecordData }) {
                     ? time(i.provenance.time, s.brain?.tz)
                     : "Date not recorded"}
                 </span>
-                {i.provenance?.ref && <Text>{i.provenance.ref}</Text>}
-                {i.provenance?.repo && <Text>{i.provenance.repo}</Text>}
-                {i.provenance?.commit && (
-                  <span>Commit {String(i.provenance.commit).slice(0, 7)}</span>
-                )}
                 {i.provenance?.owners?.length > 0 && (
                   <span>Source owners: {i.provenance.owners.join(", ")}</span>
                 )}
               </div>
-              {i.body && (
-                <Disclosure title="Read learning">
-                  <Markdown text={i.body} />
-                </Disclosure>
-              )}
+              <ProposalReader item={i} />
+              <TechnicalDetails values={{Source:i.provenance?.ref, Repository:i.provenance?.repo, Revision:i.provenance?.commit}} />
               {i.scope?.length > 0 && (
                 <p className="muted">Scope: {i.scope.join(", ")}</p>
               )}
@@ -160,37 +160,18 @@ export function Learnings({ s }: { s: RecordData }) {
                   {i.accepted_by || "reviewer not recorded"}
                 </small>
               )}
-              {i.state === "proposed" && !i.specialist && (
-                <Disclosure title="Review and decide">
-                  <p className="muted">
-                    Review the source. Replace REVIEWER with the operator or a
-                    non-revoked principal, then run your decision in the
-                    terminal.
-                  </p>
-                  <Command
-                    text={
-                      "brain item accept --reviewed-by 'REVIEWER' -- " +
-                      quote(i.id)
-                    }
-                  />
-                  <Command text={"brain item reject -- " + quote(i.id)} />
-                </Disclosure>
-              )}
+
             </article>
-          ))}
+          ))}</PagedCollection>
           {!filtered.length && (
             <Empty
               text="No learnings match."
               action="Clear the filters or record a lesson from a finished job."
             />
           )}
-          {filtered.length > limit && (
-            <Button variant="outline" onClick={() => setLimit(limit + 10)}>
-              Show 10 more
-            </Button>
-          )}
+
         </div>
       </div>
-    </PageSection>
+    </PageSection></>
   );
 }

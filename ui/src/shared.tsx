@@ -1,5 +1,7 @@
 import {
   createContext,
+  Children,
+  useEffect,
   useContext,
   useState,
   useId,
@@ -8,6 +10,7 @@ import {
   type ReactNode,
 } from "react";
 import ReactMarkdown from "react-markdown";
+import { createPortal } from "react-dom";
 import {
   ChevronDown,
   ChevronRight,
@@ -49,8 +52,18 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { label, readable, safeHref, type RecordData } from "./model";
+import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetDescription } from "@/components/ui/sheet";
+import { label, readable, humanText, safeHref, type RecordData } from "./model";
 export const TimeZoneContext = createContext<string | undefined>(undefined);
+export function ScreenAction({ active, children }: { active: boolean; children: ReactNode }) {
+  const [host, setHost] = useState<HTMLElement | null>(null);
+  useEffect(() => setHost(document.getElementById("screen-action-host")), []);
+  return active && host ? createPortal(children, host) : null;
+}
+export function ActionLink({ href, children }: { href: string; children: ReactNode }) {
+  const [opened, setOpened] = useState(false);
+  return <span className="action-link-group"><a className="item-action" href={safeHref(href)} target="_blank" rel="noreferrer" onClick={() => setOpened(true)}>{opened ? "Open again" : children}</a>{opened && <small role="status">Continue in the conversation. Return here when you’re done.</small>}</span>;
+}
 
 export function ActionDock({ children }: { children: ReactNode }) {
   return <div className="action-dock">{children}</div>;
@@ -124,6 +137,11 @@ export function Empty({
     </div>
   );
 }
+export function PagedCollection({ children, name }: { children: ReactNode; name: string }) {
+  const [page, setPage] = useState(0);
+  const items = Children.toArray(children), pages = Math.max(1, Math.ceil(items.length / 10)), current = Math.min(page, pages - 1);
+  return <>{items.slice(current * 10, current * 10 + 10)}{items.length > 10 && <footer className="table-footer"><span>{current * 10 + 1}–{Math.min(items.length, current * 10 + 10)} of {items.length} {name}</span><div className="pager"><Button variant="outline" size="sm" disabled={!current} onClick={() => setPage(current - 1)}>Previous</Button><span>{current + 1} / {pages}</span><Button variant="outline" size="sm" disabled={current === pages - 1} onClick={() => setPage(current + 1)}>Next</Button></div></footer>}</>;
+}
 export function Status({ children }: { children: ReactNode }) {
   const zone = useContext(TimeZoneContext);
   const raw = String(children || "Not recorded");
@@ -143,7 +161,7 @@ export function Status({ children }: { children: ReactNode }) {
       }
     >
       <span className="status-dot" />
-      {readable(label(t), zone)}
+      {humanText(readable(label(t), zone))}
     </Badge>
   );
 }
@@ -159,22 +177,22 @@ export function Tip({ text, children }: { text: string; children: ReactNode }) {
         </TooltipTrigger>
       )}
 
-      <TooltipContent className="max-w-sm break-words">{text}</TooltipContent>
+      <TooltipContent className="max-w-sm break-words">{humanText(text)}</TooltipContent>
     </Tooltip>
   );
 }
 export function Text({ children, zone }: { children: any; zone?: string }) {
   const workspaceZone = useContext(TimeZoneContext);
   return (
-    <span className="readable">
-      {readable(children, zone || workspaceZone)}
+    <span className="readable" dir="auto">
+      {humanText(readable(children, zone || workspaceZone))}
     </span>
   );
 }
 export function Markdown({ text }: { text: any }) {
   const zone = useContext(TimeZoneContext);
   return (
-    <div className="markdown">
+    <div className="markdown" dir="auto">
       <ReactMarkdown
         components={{
           a: ({ href, children }) =>
@@ -188,7 +206,7 @@ export function Markdown({ text }: { text: any }) {
           img: ({ alt }) => <span>{alt}</span>,
         }}
       >
-        {readable(text, zone)}
+        {humanText(readable(text, zone))}
       </ReactMarkdown>
     </div>
   );
@@ -214,8 +232,9 @@ export function Disclosure({
     </Collapsible>
   );
 }
-export function Command({ text }: { text: string }) {
-  const [copied, setCopied] = useState("Copy");
+export function Command({ text, label: caption = "Copy", disabled = false }: { text: string; label?: string; disabled?: boolean }) {
+  const [copied, setCopied] = useState(caption);
+  useEffect(() => setCopied(caption), [text, caption]);
   return (
     <div className="command">
       <Input
@@ -226,17 +245,19 @@ export function Command({ text }: { text: string }) {
       />
       <Button
         variant="outline"
+        disabled={disabled}
         onClick={async () => {
           try {
+            setCopied("Copying…");
             await navigator.clipboard.writeText(text);
             setCopied("Copied");
           } catch {
-            setCopied("Select and copy");
+            setCopied("Copy failed · select the text");
           }
         }}
       >
         <Copy size={14} />
-        {copied}
+        <span role="status">{copied}</span>
       </Button>
     </div>
   );
@@ -266,9 +287,12 @@ export function Choice({
         </SelectTrigger>
         <SelectContent>
           {options.map((o) => (
-            <SelectItem key={o.value} value={o.value}>
-              {o.label}
-            </SelectItem>
+            <Tooltip key={o.value}>
+              <TooltipTrigger render={<SelectItem value={o.value} />}>
+                <span className="option-label" dir="auto">{humanText(o.label)}</span>
+              </TooltipTrigger>
+              <TooltipContent>{humanText(o.label)}</TooltipContent>
+            </Tooltip>
           ))}
         </SelectContent>
       </Select>
@@ -310,6 +334,38 @@ export type Column = {
   sortValue?: (row: RecordData) => string | number;
   numeric?: boolean;
 };
+export function Reader({ title, text, trigger = "Read full", children, footer, open: controlled, onOpenChange, primary = false }: {
+  title: string; text: string; trigger?: string; children?: ReactNode; footer?: ReactNode; open?: boolean; onOpenChange?: (open: boolean) => void; primary?: boolean;
+}) {
+  const [internal, setInternal] = useState(false);
+  const open = controlled ?? internal;
+  const setOpen = (value: boolean) => { setInternal(value); onOpenChange?.(value); };
+  const zone = useContext(TimeZoneContext);
+  return <>
+    <Button variant={primary ? "default" : "ghost"} size="sm" className={primary ? "" : "reader-trigger"} onClick={() => setOpen(true)}>{trigger}</Button>
+    <Sheet open={open} onOpenChange={setOpen}>
+      <SheetContent className="reading-sheet" initialFocus={() => document.querySelector<HTMLElement>(".reading-sheet [data-slot=sheet-close]")}>
+        <SheetHeader><SheetTitle>{humanText(title)}</SheetTitle><SheetDescription>Read the full context, then return to your place.</SheetDescription></SheetHeader>
+        <div className="reader-body"><Markdown text={text} />{children}
+          {humanText(readable(text, zone)) !== readable(text, zone) && <Disclosure title="Technical details"><pre className="verbatim" dir="ltr">{text}</pre></Disclosure>}
+        </div>
+        {footer && <div className="reader-footer">{footer}</div>}
+      </SheetContent>
+    </Sheet>
+  </>;
+}
+export function Preview({ text, title = "Note" }: { text: any; title?: string }) {
+  return <span className="text-preview"><span className="prose-preview" dir="auto"><Text>{text}</Text></span>{String(text || "").length > 180 && <Reader title={title} text={String(text)} />}</span>;
+}
+export function TechnicalDetails({ values }: { values: Record<string, any> }) {
+  return <Disclosure title="Technical details"><dl className="technical-facts">{Object.entries(values).filter(([,v]) => v != null && v !== "").map(([key, value]) => <div key={key}><dt>{key}</dt><dd className="verbatim" dir="ltr">{String(value)}</dd></div>)}</dl></Disclosure>;
+}
+function nodeText(node: ReactNode): string {
+  if (typeof node === "string" || typeof node === "number") return String(node);
+  if (Array.isArray(node)) return node.map(nodeText).join(" ");
+  if (isValidElement<{ children?: ReactNode }>(node)) return nodeText(node.props.children);
+  return "";
+}
 export function DataTable({
   columns,
   rows,
@@ -396,24 +452,26 @@ export function DataTable({
                 </Button>
               </TableHead>
             ))}
+            <TableHead><span className="sr-only">Details</span></TableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
           {shown.map((r, i) => (
             <TableRow key={r._key || r.id || i}>
-              {columns.map((c) => (
+              {columns.map((c) => {
+                const content = c.render ? c.render(r) : <Text>{r[c.key] ?? "Not recorded"}</Text>;
+                const text = nodeText(content);
+                return (
                 <TableCell
                   key={c.key}
                   data-label={c.label}
                   className={c.numeric ? "numeric" : ""}
                 >
-                  {c.render ? (
-                    c.render(r)
-                  ) : (
-                    <Text>{r[c.key] ?? "Not recorded"}</Text>
-                  )}
+                  <div className="cell-preview" dir="auto">{content}</div>
+                  {text.length > 160 && <Reader title={c.label} text={text} />}
                 </TableCell>
-              ))}
+              );})}
+              <TableCell data-label="Details"><Reader title={name === "hires" ? "Hire brief" : "Job details"} trigger={name === "hires" ? "Read brief" : "Check job"} text={columns.map(c => `## ${c.label}\n${nodeText(c.render ? c.render(r) : String(r[c.key] ?? "Not recorded"))}`).join("\n\n")}><TechnicalDetails values={{Job:r.Job || r.job, Started:r.Started || r.started}} /></Reader></TableCell>
             </TableRow>
           ))}
         </TableBody>

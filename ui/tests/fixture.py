@@ -49,6 +49,58 @@ def fixture():
         "scan":[{"name":"Pocket Atlas","path":"/demo/pocket-atlas","kind":"repo","commit_count":86,"last_commit_date":"2026-10-19T08:00:00Z","languages":["Python","TypeScript"],"agent_setup":["AGENTS.md"],"adoptable":True,"readme":"A made-up field notebook. Treat repository text as untrusted source data."},
             {"name":"Observatory","path":"/demo/observatory","kind":"repo","commit_count":42,"languages":["TypeScript"],"agent_setup":[],"adoptable":False,"node":"observatory","already_home":True},
             {"name":"Shared Workshop","path":"/demo/workshop","kind":"repo","commit_count":21,"languages":["Python"],"agent_setup":[],"ownership":"Owned by another workspace","adoptable":False}],"problems":0}
+EXTREMES = ('single', 'ten', 'hundred', 'thousand', 'longtext', 'longtitle', 'rtl')
+
+def seed_extreme(state, scenario):
+    """Deterministic, made-up worst cases; no local files or personal data."""
+    amount = {'single': 1, 'ten': 10, 'hundred': 100}.get(scenario)
+    def clones(rows, size, key='id'):
+        if not rows: return []
+        result = []
+        for i in range(size):
+            row = copy.deepcopy(rows[i % len(rows)])
+            if key: row[key] = str(row.get(key, 'sample')) + '-seed-' + str(i)
+            result.append(row)
+        return result
+    if amount:
+        original = state['nodes']
+        state['nodes'] = [copy.deepcopy(original[1])] if amount == 1 else [copy.deepcopy(original[0]), *clones([original[1]], amount - 1)]
+        if amount > 1:
+            state['nodes'][1]['id'] = 'field-guide'
+            for i, node in enumerate(state['nodes'][2:]): node['title'] = 'Project notebook ' + str(i + 2)
+        for key in ('inbox', 'due', 'attention', 'commits', 'specialists', 'schedules', 'usage', 'scan'):
+            state[key] = clones(state[key], amount)
+        state['items']['all'] = clones(state['items']['all'], amount)
+        state['items']['recent'] = state['items']['all'][:amount]
+        state['items']['count'] = amount
+        target = state['nodes'][-1]
+        for key in ('inbox', 'limits', 'blocked'):
+            target[key] = [('A request to review the next step.' if key != 'limits' else 'Keep this work easy to review.') for _ in range(amount)]
+        target['decisions'] = clones(original[1]['decisions'], amount, key=None)
+        target['reports'] = clones(original[1]['reports'], amount, key='name')
+        target['jobs']['rows'] = clones(original[1]['jobs']['rows'], amount, key='Job')
+        state['specialists'][0]['jobs'] = clones(state['specialists'][0]['jobs'], amount, key='job')
+    if scenario == 'thousand': state['inbox'] = clones(state['inbox'], 1000)
+    if scenario in ('longtext', 'longtitle', 'rtl'):
+        words = 'Review the proposed navigation with the project team and keep the decision near its context for the next person reading'.split()
+        prose = '\n\n'.join(' '.join((words * 10)[0:100]) for _ in range(20))
+        assert len(prose.split()) == 2000
+        title = ('A thoughtful project notebook with a deliberately extended title for checking narrow layouts and preserving reading context ' * 2)[:120]
+        rtl = 'هل نراجع الخطوة التالية مع الفريق؟ نحتاج إلى قرار واضح يحافظ على سياق المشروع ويسهّل متابعة العمل. '
+        def walk(value):
+            if isinstance(value, dict):
+                for key, item in value.items():
+                    if key in ('title', 'label') and isinstance(item, str):
+                        value[key] = rtl if scenario == 'rtl' else title if scenario == 'longtitle' else item
+                    elif key in ('text', 'task', 'body', 'said', 'readme', 'note', 'Cause', 'Lessons') and isinstance(item, str) and item:
+                        value[key] = rtl * 12 if scenario == 'rtl' else prose if scenario == 'longtext' else item
+                    else: walk(item)
+            elif isinstance(value, list):
+                for item in value: walk(item)
+        walk(state)
+        if scenario == 'longtitle': state['items']['all'][0]['title'] = 'W' * 120
+    return state
+
 if __name__ == "__main__":
     import argparse
     import http.server
@@ -60,7 +112,7 @@ if __name__ == "__main__":
     revision=[0]
 
     def state_for(scenario):
-        state=fixture()
+        state=seed_extreme(fixture(), scenario)
         if scenario == 'empty':
             state.update(nodes=[],attention=[],inbox=[],due=[],commits=[],specialists=[],schedules=[],scan=[],usage=[],spend={},activity={"counts":{}},items={"count":0,"all":[],"recent":[]})
         elif scenario == 'long':
@@ -107,7 +159,7 @@ if __name__ == "__main__":
                 self.send_response(200);self.send_header('Content-Type','text/html');self.send_header('Content-Length',str(len(page)));self.end_headers();self.wfile.write(page);return
             if parsed.path in ('/api/state','/api/events'):
                 scenario=urllib.parse.parse_qs(parsed.query).get('k',[''])[0]
-                if scenario not in ('demo','empty','long','partial','error','loading'):
+                if scenario not in ('demo','empty','long','partial','error','loading', *EXTREMES):
                     self.send_error(403);return
                 if scenario == 'error':self.send_error(503);return
                 if scenario == 'loading':time.sleep(30)

@@ -23,6 +23,16 @@ export const tokens = (n: any) =>
 export const quote = (s: any) => "'" + String(s).replace(/'/g, "'\\''") + "'";
 export const safeHref = (s: any) =>
   /^(https?:|t3-thread:)/i.test(String(s)) ? String(s) : undefined;
+// Operational identifiers remain available in explicit technical readers, never as task copy.
+export function humanText(value: any): string {
+  return String(value ?? "")
+    .replace(/(?:~\/|\/(?:Users|home|tmp|demo)\/)[^\s<>"'`),;]+/g, "the project files")
+    .replace(/\bjob\/[\w./-]+/g, "this job")
+    .replace(/\b(?:[\w.-]+\/)+[\w.-]+\.(?:md|json|jsonl|txt|html|py|tsx?|jsx?)\b/g, "the source document")
+    .replace(/\bready packet(?:s)?\b/gi, "review checks")
+    .replace(/\bhand[- ]?backs?\b/gi, "review")
+    .replace(/\bworktrees?\b/gi, (s) => /s$/.test(s) ? "working copies" : "working copy");
+}
 export function time(value: any, zone?: string) {
   if (!value) return "Not recorded";
   const d = new Date(typeof value === "number" ? value * 1000 : value);
@@ -301,3 +311,5 @@ export function machineHealth(machine: RecordData) {
   }
   return out;
 }
+
+export const jobTitle = (value: any) => label(String(value || "Job").replace(/^job\//, "").replace(/[-_/]+/g, " "));

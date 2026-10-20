@@ -9,18 +9,22 @@ import {
   Empty,
   Status,
   Text,
-  Disclosure,
   Choice,
   Command,
+  Reader,
+  PagedCollection,
+  ScreenAction,
+  TechnicalDetails,
 } from "./shared";
 import { list, count, time, quote, type RecordData } from "./model";
 export const adoptable = (c: RecordData) =>
   c.adoptable && !/\[redacted(?: secret)?\]|\[…\]/i.test(c.path);
-export function Imports({ s }: { s: RecordData }) {
+export function Imports({ s, active }: { s: RecordData; active: boolean }) {
   const [host, setHost] = useState<HTMLElement | null>(null);
   useEffect(() => setHost(document.getElementById("action-dock-host")), []);
   const [selected, setSelected] = useState<string[]>([]),
-    [parent, setParent] = useState("root");
+    [parent, setParent] = useState("root"),
+    [previous, setPrevious] = useState<string[]>([]);
   const candidates = list(s.scan),
     parents = list(s.nodes).filter((n) => !n.archived),
     valid = selected.filter((path) =>
@@ -31,6 +35,7 @@ export function Imports({ s }: { s: RecordData }) {
       : parents[0]?.id || "root";
   return (
     <div className="import-page">
+      <ScreenAction active={active}>{valid.length ? <Reader title="Review selected repositories" trigger={`Review selected (${valid.length})`} primary text={candidates.filter(c => valid.includes(c.path)).map(c => `- ${c.name || "Repository"}`).join("\n")} footer={<Command text={"brain adopt --parent " + quote(target) + " -- " + [...valid].sort().map(quote).join(" ")} label="Copy import command" />} /> : <Button disabled={!candidates.some(adoptable)} onClick={() => setSelected(candidates.filter(adoptable).map(c => c.path))}>Select all available</Button>}</ScreenAction>
       <PageSection
         title="Discovered repositories"
         description="Select repositories to prepare a command. Review it before running it."
@@ -43,7 +48,7 @@ export function Imports({ s }: { s: RecordData }) {
           </p>
         </div>
         {candidates.length ? (
-          candidates.map((c, i) => (
+          <PagedCollection name="repositories">{candidates.map((c, i) => (
             <article className="import-entry" key={c.path}>
               <div className="entry-heading">
                 <Checkbox
@@ -68,7 +73,7 @@ export function Imports({ s }: { s: RecordData }) {
                       <Text>{c.name || "Repository"}</Text>
                     </strong>
                   </label>
-                  <small className="break-all">{c.path}</small>
+                  <small>{c.already_home ? "Already in your workspace" : "Local repository"}</small>
                 </div>
                 <Status>
                   {adoptable(c) ? "Available to adopt" : "Unavailable"}
@@ -83,7 +88,7 @@ export function Imports({ s }: { s: RecordData }) {
                 · {(c.languages || []).join(", ") || "Languages unknown"}
               </p>
               <p className="muted">
-                Agent setup: {(c.agent_setup || []).join(", ") || "None"}
+                {(c.agent_setup || []).length ? "Agent instructions found" : "No agent instructions found"}
                 {c.agent_setup_omitted
                   ? ` · ${c.agent_setup_omitted} more`
                   : ""}
@@ -102,13 +107,10 @@ export function Imports({ s }: { s: RecordData }) {
                             : "Path unavailable")}
                 </Text>
               </p>
-              {c.readme && (
-                <Disclosure title="Read README · untrusted source">
-                  <Text>{c.readme}</Text>
-                </Disclosure>
-              )}
+              {c.readme && <Reader title={c.name || "Repository"} text={c.readme} trigger="Read repository notes" />}
+              <TechnicalDetails values={{Location:c.path, Setup:(c.agent_setup || []).join(", ")}} />
             </article>
-          ))
+          ))}</PagedCollection>
         ) : (
           <Empty
             text="Discover your next project."
@@ -124,6 +126,7 @@ export function Imports({ s }: { s: RecordData }) {
               <strong>{count(valid.length, "repository")} selected</strong>
               <p>Review the command, then run it in your brain.</p>
             </div>
+            {previous.length > 0 && !valid.length && <Button variant="outline" onClick={() => {setSelected(previous);setPrevious([]);}}>Undo clear</Button>}
             {valid.length > 0 && (
               <>
                 <Choice
@@ -143,7 +146,7 @@ export function Imports({ s }: { s: RecordData }) {
                     [...valid].sort().map(quote).join(" ")
                   }
                 />
-                <Button variant="ghost" onClick={() => setSelected([])}>
+                <Button variant="ghost" onClick={() => {setPrevious(selected);setSelected([]);}}>
                   Clear
                 </Button>
               </>

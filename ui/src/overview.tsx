@@ -1,4 +1,6 @@
 import type React from "react";
+import { JobReview } from "./work";
+import { Correspondence } from "./inbox";
 import {
   Activity,
   ArrowUpRight,
@@ -22,6 +24,9 @@ import {
   Disclosure,
   Tip,
   Bars,
+  Reader,
+  TechnicalDetails,
+  ScreenAction,
 } from "./shared";
 import {
   machineHealth,
@@ -40,10 +45,12 @@ export function Overview({
   s,
   onNode,
   onView,
+  active,
 }: {
   s: RecordData;
   onNode: (id: string) => void;
   onView: (id: string) => void;
+  active: boolean;
 }) {
   const nodes = list(s.nodes),
     jobs = flight(nodes),
@@ -99,49 +106,15 @@ export function Overview({
   ].sort((a: RecordData, b: RecordData) => (b.t || 0) - (a.t || 0));
   return (
     <div className="page-stack">
-      <div className="metric-grid">
-        {metrics.map((m) => (
-          <div className="metric" key={m.label}>
-            <div className="metric-label">
-              <m.icon size={17} />
-              {m.label}
-            </div>
-            <strong>{m.value}</strong>
-            <p>{m.note}</p>
-          </div>
-        ))}
-      </div>
+      <ScreenAction active={active}><Button onClick={() => onView("inbox")}>Open Inbox ({list(s.inbox).length})</Button></ScreenAction>
       <div className="overview-split">
         <PageSection
           title="Inbox"
           description="Decisions and questions for you"
-          action={<span className="count-badge">{list(s.inbox).length}</span>}
+          action={<Button variant="outline" size="sm" onClick={() => onView("inbox")}>View all ({list(s.inbox).length}) <ArrowUpRight size={14} /></Button>}
         >
           {list(s.inbox).length ? (
-            list(s.inbox).map((a, i) => (
-              <div className="request-row" key={a.id || i}>
-                <span className="icon-tile amber">
-                  <Inbox size={17} />
-                </span>
-                <div>
-                  <Button
-                    variant="ghost"
-                    className="text-link"
-                    onClick={() => onNode(a.node)}
-                  >
-                    {naming(a.node)}
-                  </Button>
-                  <p>
-                    <Text zone={s.brain?.tz}>{a.text}</Text>
-                  </p>
-                  <small>
-                    {a.first_seen
-                      ? "First seen " + time(a.first_seen, s.brain?.tz)
-                      : "Awaiting your response"}
-                  </small>
-                </div>
-              </div>
-            ))
+            list(s.inbox).slice(0, 5).map((a, i) => <Correspondence key={a.id || i} s={s} item={a} onNode={onNode} />)
           ) : (
             <Empty
               text="Nothing needs you."
@@ -176,7 +149,9 @@ export function Overview({
                               } as Record<string, string>
                             )[a.kind] || a.kind}
                       </Status>
-                      <Text zone={s.brain?.tz}>{a.text}</Text>
+                      <div className="prose-preview"><Text zone={s.brain?.tz}>{a.text}</Text></div>
+                      <Reader title="Next action" text={a.text} trigger="Read details" />
+                      {safeHref(nodes.find(n => n.id === a.node)?.coordinator) ? <a className="item-action" href={safeHref(nodes.find(n => n.id === a.node)?.coordinator)}>Open coordinator <ArrowUpRight size={14} /></a> : <Button variant="outline" size="sm" onClick={() => onNode(a.node)}>Open project</Button>}
                       {list(a.reasons).length > 0 && (
                         <small>{a.reasons.join(" · ")}</small>
                       )}
@@ -194,20 +169,30 @@ export function Overview({
           )}
         </PageSection>
       </div>
+      <div className="metric-grid">
+        {metrics.map((m) => (
+          <div className="metric" key={m.label}>
+            <div className="metric-label">
+              <m.icon size={17} />
+              {m.label}
+            </div>
+            <strong>{m.value}</strong>
+            <p>{m.note}</p>
+          </div>
+        ))}
+      </div>
       <PageSection
         title="Projects"
         description="Your workspace, connected"
         action={
-          <span className="count-badge">
-            {nodes.filter((n) => !n.archived).length}
-          </span>
+          <Button variant="ghost" size="sm" disabled={!nodes.length} onClick={() => onNode(nodes[0].id)}>Open workspace <ArrowUpRight size={14} /></Button>
         }
       >
         <div className="project-tree">
           {!treeRows(nodes).length && (
             <Empty
               text="No projects yet."
-              action="Use brain new to add your first project."
+              action="Create a project with your coordinator."
               icon={FolderGit2}
             />
           )}
@@ -294,7 +279,7 @@ export function Overview({
                     >
                       {n.title || "Untitled project"}
                     </Button>
-                    <p>{j.branch}</p>
+                    <JobReview node={n} job={j} /><TechnicalDetails values={{Job:j.branch}} />
                     <small>
                       {j.runtime || l?.Runtime || "Runtime not recorded"}{" "}
                       {safeHref(j.link) && (
@@ -327,7 +312,7 @@ export function Overview({
                     <Disclosure
                       title={
                         w.ready.ready
-                          ? "Ready packet verified"
+                          ? "Review checks passed"
                           : "Readiness details"
                       }
                     >
@@ -456,6 +441,7 @@ export function Overview({
                   <BookOpen size={16} />
                   <div>
                     <Text>{i.title || "Untitled learning"}</Text>
+                    <Reader title={i.title || "Learning"} text={i.body || "Open Learnings to review this item and its source."} trigger="Read learning" />
                     <small>{naming(i.source || i.provenance?.node)}</small>
                   </div>
                 </div>
@@ -478,15 +464,13 @@ export function Overview({
                       {naming(a.node)} · {a.when}
                     </small>
                   </div>
-                  <Status>
-                    {a.here ? "On this machine" : "Another machine"}
-                  </Status>
+                  <div><Status>{a.here ? "On this machine" : "Another machine"}</Status><Button variant="ghost" size="sm" onClick={() => onNode(a.node)}>Open project</Button></div>
                 </div>
               ))
             ) : (
               <Empty
                 text="No schedules yet."
-                action="Use brain schedule to plan recurring work."
+                action="Ask your coordinator to plan recurring work."
               />
             )}
           </PageSection>
@@ -498,14 +482,15 @@ export function Overview({
       >
         {feed.length ? (
           <>
-            {feed.slice(0, 40).map((r, i) => (
+            {feed.map((r, i) => (
               <div className="feed-row" key={i}>
                 <span className="icon-tile">
                   <GitCommitHorizontal size={17} />
                 </span>
                 <div>
-                  <Text>{r.text}</Text>
-                  {r.said && (
+                  <div className="prose-preview"><Text>{r.text}</Text></div>
+                  <Reader title="Recent work" text={[r.text,r.said].filter(Boolean).join("\n\n")} trigger="Read entry" />
+                  {false && r.said && (
                     <p>
                       <Text>{r.said}</Text>
                     </p>

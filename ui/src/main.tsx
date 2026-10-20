@@ -2,6 +2,7 @@ import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import {
   Brain,
+  Inbox as InboxIcon,
   Bell,
   BookOpen,
   Bot,
@@ -54,19 +55,22 @@ import {
   PageHeader,
   PageSection,
   Status,
-  Markdown,
   Text,
   Tip,
   DataTable,
   Command,
   Empty,
+  Reader,
+  Preview,
+  TechnicalDetails,
 } from "./shared";
+import { InboxView } from "./inbox";
 import { Overview } from "./overview";
 import { Learnings } from "./learnings";
 import { Agents } from "./agents";
 import { Usage } from "./usage";
 import { Imports } from "./imports";
-import { list, time, safeHref, count, quote, type RecordData } from "./model";
+import { list, time, safeHref, count, quote, jobTitle, type RecordData } from "./model";
 import "./index.css";
 declare global {
   interface Window {
@@ -79,6 +83,12 @@ const destinations = [
     title: "Overview",
     icon: LayoutDashboard,
     subtitle: "Your projects, priorities, and the work moving them forward.",
+  },
+  {
+    id: "inbox",
+    title: "Inbox",
+    icon: InboxIcon,
+    subtitle: "Questions and reviews waiting for your judgment.",
   },
   {
     id: "learnings",
@@ -248,7 +258,7 @@ function Navigation({
                   >
                     <d.icon />
                     <span>{d.title}</span>
-                    {d.id === "overview" && list(s?.inbox).length > 0 && (
+                    {d.id === "inbox" && list(s?.inbox).length > 0 && (
                       <span className="nav-count">{s!.inbox.length}</span>
                     )}
                   </SidebarMenuButton>
@@ -295,7 +305,7 @@ function NodeDetail({
   const n = list(s.nodes).find((n) => n.id === node);
   return (
     <Sheet
-      open={!!n}
+      open={!!node}
       onOpenChange={(open) => {
         if (!open) onClose();
       }}
@@ -308,11 +318,12 @@ function NodeDetail({
         }
       >
         <SheetHeader>
-          <SheetTitle>{n?.title || "Project details"}</SheetTitle>
+          <SheetTitle><Tip text={n?.title || "Project details"}><Text>{n?.title || "Project details"}</Text></Tip></SheetTitle>
           <SheetDescription>
             Project notes, decisions, and local work
           </SheetDescription>
         </SheetHeader>
+        {!n && <div className="detail-scroll"><Empty text="Project unavailable in this reading." action="Return to the project outline or refresh the workspace." /></div>}
         {n && (
           <div className="detail-scroll">
             <div className="detail-meta">
@@ -334,7 +345,7 @@ function NodeDetail({
                 <dt>Updated</dt>
                 <dd>{time(n.updated, s.brain?.tz)}</dd>
                 <dt>Home</dt>
-                <dd className="break-all">{n.home || "Not recorded"}</dd>
+                <dd>{n.home ? "On this machine" : "Not recorded"}</dd>
               </dl>
               {safeHref(n.coordinator) ? (
                 <a href={safeHref(n.coordinator)}>
@@ -358,12 +369,13 @@ function NodeDetail({
                   Preview tour: <Text>{n.preview_tour}</Text>
                 </p>
               )}
+              <TechnicalDetails values={{Home:n.home, Preview:n.preview, "Preview tour":n.preview_tour}} />
             </div>
             {list(n.blocked).length > 0 && (
               <PageSection title="Needs you">
                 {n.blocked.map((t: string, i: number) => (
                   <p className="note-row" key={i}>
-                    <Text>{t}</Text>
+                    <Preview text={t} />
                   </p>
                 ))}
               </PageSection>
@@ -372,7 +384,7 @@ function NodeDetail({
               <PageSection title="Inbox">
                 {n.inbox.map((t: string, i: number) => (
                   <p className="note-row" key={i}>
-                    <Text zone={s.brain?.tz}>{t}</Text>
+                    <Preview text={t} />
                   </p>
                 ))}
               </PageSection>
@@ -381,14 +393,14 @@ function NodeDetail({
               .filter(([k]) => !/^blocked/i.test(k))
               .map(([k, v]) => (
                 <PageSection key={k} title={k}>
-                  <Markdown text={v} />
+                  <Preview text={v} title={k} />
                 </PageSection>
               ))}
             {list(n.limits).length > 0 && (
               <PageSection title="Limits">
                 {n.limits.map((t: string, i: number) => (
                   <p className="note-row" key={i}>
-                    <Text>{t}</Text>
+                    <Preview text={t} />
                   </p>
                 ))}
               </PageSection>
@@ -402,7 +414,7 @@ function NodeDetail({
                     </strong>
                     {d.said && (
                       <p>
-                        <Text>{d.said}</Text>
+                        <Preview text={d.said} title="Decision" />
                       </p>
                     )}
                     <small>{time(d.t || d.time, s.brain?.tz)}</small>
@@ -419,7 +431,7 @@ function NodeDetail({
                   rows={[...n.jobs.rows].reverse()}
                   name="jobs"
                   columns={[
-                    { key: "Job", label: "Job" },
+                    { key: "Job", label: "Job", render: r => <Text>{jobTitle(r.Job)}</Text> },
                     {
                       key: "Started",
                       label: "Started",
@@ -448,7 +460,7 @@ function NodeDetail({
                     <strong>
                       <Text>{r.title}</Text>
                     </strong>
-                    <small className="break-all">{r.path}</small>
+                    <Reader title={r.title || "Report"} text={"Ask the coordinator to open this report for review."} trigger="Open report details"><TechnicalDetails values={{Location:r.path}} /></Reader>
                   </div>
                 ))}
               </PageSection>
@@ -689,7 +701,8 @@ function App() {
                     ? `${count(list(s.inbox).length, "item")} in your inbox · ${count(list(s.nodes).filter((n) => !n.archived).length, "project")} in your workspace.`
                     : current.subtitle
                 }
-                actions={
+                actions={<>
+                  <div id="screen-action-host" />
                   <Button
                     variant="outline"
                     size="sm"
@@ -703,11 +716,11 @@ function App() {
                   >
                     <RefreshCw size={14} />
                     Refresh
-                  </Button>
+                  </Button></>
                 }
               />
               {notice && (
-                <Alert className="notice">
+                <Alert className="notice" role="status">
                   <AlertTitle>Workspace notice</AlertTitle>
                   <AlertDescription>
                     {notice}
@@ -771,23 +784,24 @@ function App() {
                 )
               ) : (
                 <>
+                  <div data-page="inbox" hidden={route.view !== "inbox"}><InboxView s={s} onNode={node} active={route.view === "inbox"} /></div>
                   <div data-page="overview" hidden={route.view !== "overview"}>
-                    <Overview s={s} onNode={node} onView={go} />
+                    <Overview s={s} onNode={node} onView={go} active={route.view === "overview"} />
                   </div>
                   <div
                     data-page="learnings"
                     hidden={route.view !== "learnings"}
                   >
-                    <Learnings s={s} />
+                    <Learnings s={s} active={route.view === "learnings"} />
                   </div>
                   <div data-page="agents" hidden={route.view !== "agents"}>
-                    <Agents s={s} />
+                    <Agents s={s} active={route.view === "agents"} />
                   </div>
                   <div data-page="usage" hidden={route.view !== "usage"}>
-                    <Usage s={s} />
+                    <Usage s={s} active={route.view === "usage"} />
                   </div>
                   <div data-page="imports" hidden={route.view !== "imports"}>
-                    <Imports s={s} />
+                    <Imports s={s} active={route.view === "imports"} />
                   </div>
                 </>
               )}

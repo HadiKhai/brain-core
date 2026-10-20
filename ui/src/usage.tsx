@@ -1,6 +1,9 @@
 import { Progress } from "@/components/ui/progress";
 import {
   PageSection,
+  PagedCollection,
+  Reader,
+  ScreenAction,
   Status,
   Empty,
   Bars,
@@ -11,6 +14,7 @@ import {
 import {
   hasMeasuredUsage,
   list,
+  jobTitle,
   windowState,
   routing,
   time,
@@ -108,7 +112,7 @@ function UsageFlags({ n, r }: { n: RecordData; r: RecordData }) {
     </div>
   );
 }
-export function Usage({ s }: { s: RecordData }) {
+export function Usage({ s, active }: { s: RecordData; active: boolean }) {
   const p = { ...s.usage_routing_policy, ...s.usage_policy },
     route = routing(s),
     sp = s.spend || {},
@@ -121,6 +125,7 @@ export function Usage({ s }: { s: RecordData }) {
   );
   return (
     <div className="page-stack">
+      <ScreenAction active={active}><Reader title="Capacity for the next job" trigger="Check capacity" primary text={route ? `Consider ${route.row.label || "the available subscription"} for new work. Review its current windows and the stop line before starting. Projects with a chosen runtime keep it.` : "No subscription is currently confirmed as available. Refresh the readings before starting more work."} /></ScreenAction>
       <PageSection
         title="Subscription windows"
         description="Account-wide readings · the vertical marker is your stop line"
@@ -150,7 +155,7 @@ export function Usage({ s }: { s: RecordData }) {
           </div>
         </div>
         {list(s.usage).length ? (
-          list(s.usage).map((row, i) => (
+          <PagedCollection name="subscriptions">{list(s.usage).map((row, i) => (
             <article className="subscription" key={row.id || i}>
               <div className="subscription-title">
                 <h3>
@@ -211,7 +216,7 @@ export function Usage({ s }: { s: RecordData }) {
                   />
                 ))}
             </article>
-          ))
+          ))}</PagedCollection>
         ) : (
           <Empty
             text="No subscription readings."
@@ -302,7 +307,7 @@ export function Usage({ s }: { s: RecordData }) {
         description="Live jobs and measured completions, grouped by project"
       >
         {measuredNodes.length ? (
-          measuredNodes.map((n) => {
+          <PagedCollection name="projects">{measuredNodes.map((n) => {
             const open = list(n.jobs.open).filter((r) => r.usage),
               measured = list(n.jobs.rows).filter((r) => r.Usage && r.Ended),
               back = n.spend?.total;
@@ -329,7 +334,7 @@ export function Usage({ s }: { s: RecordData }) {
                 <Bars
                   label="Finished jobs · processed tokens"
                   entries={measured.slice(-24).map((r) => ({
-                    key: r.Job,
+                    key: jobTitle(r.Job),
                     tokens: totalTokens(r),
                     active_h: r["Active h"],
                   }))}
@@ -346,7 +351,7 @@ export function Usage({ s }: { s: RecordData }) {
                       label: "Job",
                       render: (r) => (
                         <div>
-                          <Text>{r.Job}</Text>
+                          <Text>{jobTitle(r.Job)}</Text>
                           <UsageFlags n={n} r={r} />
                         </div>
                       ),
@@ -436,7 +441,7 @@ export function Usage({ s }: { s: RecordData }) {
                 />
               </div>
             );
-          })
+          })}</PagedCollection>
         ) : (
           <Empty
             text="No jobs measured yet."
