@@ -13,7 +13,7 @@ For agents:
   shared findings (repeatable); `--why-separate "<reason>"` or contract `## Why separate`
   carries the reason. Old calls warn; an explicitly empty reason refuses unless
   `--allow-unexplained` is set for urgent work.
-- Optional contract `## Inputs` lists paths, one per line. Contract paths and context files
+- Optional contract `## Inputs` lists paths, one per line. Declared inputs and context files
   recorded by branch briefs on this machine let `brain jobs` and `brain due` flag each
   overlapping open job once, with advice to merge related work or share a context brief.
   The check reads local records only and never gates a launch. Old contracts still work.

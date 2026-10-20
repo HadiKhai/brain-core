@@ -6434,8 +6434,14 @@ def cmd_brief(a):
             print("warning: why separate is missing; aggregate related work or supply --why-separate", file=sys.stderr)
     context, context_inputs = [], []
     for name in a.context_file or []:
-        path = Path(name).expanduser().resolve()
-        body = path.read_text().strip()
+        try:
+            path = Path(name).expanduser().resolve()
+            no_terms_in(n, str(path), "shared context path")
+            if SECRET_LINE.search(str(path)):
+                die("unsafe shared context path")
+            body = path.read_text().strip()
+        except (OSError, UnicodeError, RuntimeError):
+            die("cannot read shared context file; supply a readable UTF-8 file")
         if not body:
             die("shared context file is empty")
         no_terms_in(n, str(path) + "\n" + body, "shared context")
@@ -7336,20 +7342,17 @@ def contract_problems(text):
 
 
 def job_inputs(n, row):
-    """Declared inputs and literal contract paths; no source or transcript reads."""
+    """Explicit inputs only: prose and Git refs are not evidence of shared reads."""
     import posixpath
     f = contract_file(n, row)
     text = f.read_text() if f.is_file() else ""
     sections = {k.lower(): v for k, v in md_sections(text).items()}
     values = [line.strip().removeprefix("- ").strip().strip("`")
               for line in sections.get("inputs", "").splitlines() if line.strip()]
-    # Also recognize unambiguous paths in older contracts, not arbitrary prose words.
-    values += re.findall(r"`([^`\n]+)`", text)
-    values += re.findall(r"(?<![\w:/])(?:[\w.-]+/)+[\w.*?-]+", text)
     values += n["local"].get("worktrees", {}).get(row["Job"], {}).get("context_inputs", [])
     root = n.get("home_path") or n["dir"]
     return {posixpath.normpath(str(root / Path(v).expanduser())) for v in values
-            if v and ("/" in v or v in sections.get("inputs", ""))}
+            if v and v.casefold() not in ("none", "n/a", "not applicable", "-")}
 
 
 def job_overlaps(n, rows):
@@ -7613,7 +7616,7 @@ def cmd_jobs(a):
                  if j["median_hours"] is not None else "")
               + (f"; median {tokens_text(j['median_tokens'])} tokens and {j['median_active_h']} active h "
                  f"({count_of(j['measured'], 'measured job')})" if j["median_tokens"] else ""))
-        overlaps = job_overlaps(n, j["rows"])
+        overlaps = job_overlaps(n, j["open"])
         for r in j["open"]:
             if job_key(r) in overlaps:
                 print(redact("        " + r["Job"] + ": " + overlaps[job_key(r)], never_terms(n)))

@@ -6231,11 +6231,22 @@ class Workflow(Scenario):
         self.assertIn("explicitly waived", self.b(r, *args, "--why-separate", "", "--allow-unexplained"))
         context.write_text("")
         self.assertIn("shared context file is empty", self.b(r, *args, "--context-file", str(context), ok=False))
+        self.assertIn("cannot read shared context file", self.b(r, *args, "--context-file",
+                      str(self.tmp / "missing.md"), ok=False))
+        unsafe = self.tmp / "unsafe.md"
+        unsafe.write_text("token=synthetic-placeholder")
+        out = self.b(r, *args, "--context-file", str(unsafe), ok=False)
+        self.assertIn("unsafe shared context text", out)
+        self.assertNotIn("synthetic-placeholder", out)
+        self.assertEqual(json.loads((r / ".brain/local.json").read_text()), local)
         context.write_text("Synthetic Forbidden Phrase")
         (r / "nodes/a/never-name.txt").write_text("Synthetic Forbidden Phrase\n")
         out = self.b(r, *args, "--context-file", str(context), ok=False)
         self.assertNotIn("Synthetic Forbidden Phrase", out)
         self.assertIn("shared context", out)
+        out = self.b(r, *args, "--context-file", str(self.tmp / "Synthetic Forbidden Phrase-missing.md"), ok=False)
+        self.assertNotIn("Synthetic Forbidden Phrase", out)
+        self.assertNotIn("Traceback", out)
 
     def test_open_job_overlap_is_once_per_job_and_clears(self):
         r, home, wt = self.job()
@@ -6246,6 +6257,13 @@ class Workflow(Scenario):
         for branch in ("job", "other", "third"):
             self.b(r, "brief", "a", "--branch", branch, "--task", "Work", "--why-separate", "Independent concern",
                    "--context-file", str(context))
+        # Old open jobs still count after forty newer completed entries.
+        m = importlib.machinery.SourceFileLoader("brain_aggregation_ledger", str(CORE / "bin/brain")).load_module()
+        node = {"id": "a", "dir": r / "nodes/a"}
+        rows = m.read_jobs(node)
+        history = [{**rows[0], "Job": "closed-" + str(i), "Ended": rows[0]["Started"],
+                    "Outcome": "abandoned", "Hours": "1"} for i in range(40)]
+        m.write_jobs(None, node, rows + history)
         out = self.b(r, "jobs", "a")
         self.assertEqual(out.count("overlapping inputs with"), 3)
         due = json.loads(self.b(r, "due", "a", "--json"))
@@ -6273,13 +6291,15 @@ class Workflow(Scenario):
         rows[1]["Ended"] = "2026-01-02"
         self.assertEqual(m.job_overlaps(node, rows), {})
         rows[1]["Ended"] = ""
-        m.contract_file(node, rows[0]).write_text("## Authorized\nEdit `src/calc.py`.\n")
-        self.assertEqual(len(m.job_overlaps(node, rows)), 2)
-        m.contract_file(node, rows[1]).write_text("## Authorized\nEdit src/calc.py carefully.\n")
-        self.assertEqual(len(m.job_overlaps(node, rows)), 2)
-        for row in rows:
-            m.contract_file(node, row).write_text("## Outcome\nLegacy contract without inputs.\n")
-        self.assertEqual(m.job_overlaps(node, rows), {})
+        # Prose, commands, refs and empty-input sentinels must never create advice.
+        for text in ("## Authorized\nEdit `src/calc.py`; rebase on origin/main.\n",
+                     "## Outcome\nFix input and/or output; see https://example.test/design.\n",
+                     "## Inputs\nNone\n", "## Inputs\n- n/a\n",
+                     "## Done means\n`git diff origin/main...HEAD` is clean.\n",
+                     "## Outcome\nLegacy contract without inputs.\n"):
+            for row in rows:
+                m.contract_file(node, row).write_text(text)
+            self.assertEqual(m.job_overlaps(node, rows), {}, text)
 
     def test_changes_reach_coordinators_once(self):
         r = self.init("alice")

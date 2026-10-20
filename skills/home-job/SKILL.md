@@ -47,6 +47,7 @@ stated; never run a polling loop in an agent.
    --why-separate "<independent concern>" --context-file <shared findings>`: that adds the
    worktree, port, limits, guard step and hand-back. Use `core/bin/brain hire` when a
    specialist fits; pass `--branch <branch>` so its brief has the same finishing step.
+   Include `Why a separate agent: <distinct expertise>` and the shared findings in its task text.
    Keep a host interval tick on the coordinator: `brain due <id>` plus host pending requests;
    empty means stop silently. The worker's file is durable; a host notification is optional.
 4. **Review and hand back.** Review by the other runtime before the operator sees it (the

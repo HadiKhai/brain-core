@@ -166,8 +166,8 @@ under `## Why separate` in the contract. An urgent single job may use `--allow-u
 missing reasons in old calls warn rather than stop work.
 
 Declare shared source paths under optional `## Inputs` in each contract (one path per line,
-optionally prefixed `- `). Paths are relative to the node's home, or absolute. Contract paths
-in backticks and ordinary slash paths also count. Context files passed to a branch brief count
+optionally prefixed `- `). Paths are relative to the node's home, or absolute. Only declared inputs count; prose and Git refs are not inferred as paths.
+Context files passed to a branch brief count
 on this machine; contract inputs travel with the node. `brain jobs` and `brain due` advise once
 per overlapping open job: merge related jobs or share a context brief. This is advice, not a
 launch gate; shared inputs alone do not make independent concerns the same job.
