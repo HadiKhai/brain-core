@@ -163,7 +163,8 @@ one job; split only for independent ownership, distinct expertise or an independ
 Before launching, gather common facts once and pass them with `brain brief --context-file
 <file>` (repeatable). State `--why-separate "<reason>"` for every launch, or put that reason
 under `## Why separate` in the contract. An urgent single job may use `--allow-unexplained`;
-missing reasons in old calls warn rather than stop work.
+missing reasons in old calls warn on stderr rather than stop work, including when saving
+with `--out`. The worker brief neutrally says when the coordinator did not state a reason.
 
 Declare shared source paths under optional `## Inputs` in each contract, one path per line,
 with no annotations. Plain lines, `-`, `*`, `+` and numbered bullets work. Paths are home-relative

@@ -12,7 +12,9 @@ For agents:
   and state why each separate agent is needed. `brain brief --context-file <file>` embeds
   shared findings (repeatable); `--why-separate "<reason>"` or contract `## Why separate`
   carries the reason. Hire uses the same option and contract fallback; review defaults to
-  its independent second-runtime role when no reason is supplied. Old worker/hire calls warn; an explicitly empty reason refuses unless
+  its independent second-runtime role when no reason is supplied. Old worker/hire calls warn
+  on stderr even with `--out`, naming the flag and contract alternative; their brief neutrally
+  states that the coordinator supplied no reason. An explicitly empty reason refuses unless
   `--allow-unexplained` is set for urgent work.
 - Optional contract `## Inputs` lists paths, one per line. Declared inputs and context files
   recorded by branch briefs on this machine let `brain jobs` and `brain due` flag each

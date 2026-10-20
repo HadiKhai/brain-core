@@ -6415,9 +6415,10 @@ def separation_lines(a, n, branch, default=""):
         if a.why_separate is not None and not a.allow_unexplained:
             die("--why-separate needs a reason; use --allow-unexplained for an urgent job")
         why = ("Urgent launch: separation reason explicitly waived." if a.allow_unexplained else
-               "Not recorded. Coordinator: group work by concern and state --why-separate before launching.")
-        if not a.allow_unexplained and not a.out:
-            print("warning: why separate is missing; aggregate related work or supply --why-separate", file=sys.stderr)
+               "not stated by the coordinator")
+        if not a.allow_unexplained:
+            print("warning: why separate is missing; supply --why-separate or the contract's ## Why separate "
+                  "before launching a separate agent", file=sys.stderr)
     no_terms_in(n, why, "why separate")
     if SECRET_LINE.search(why):
         die("unsafe separation reason")

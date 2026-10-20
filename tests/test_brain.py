@@ -6211,6 +6211,46 @@ class Workflow(Scenario):
 
     job = WorkerReadyPackets.job
 
+    def test_missing_launch_reason_warns_coordinator_without_addressing_worker(self):
+        r, home, wt = self.job()
+        self.b(r, "specialist", "new", "tester", "--title", "Tester")
+        saved = self.tmp / "briefs" / "worker.md"
+        saved.parent.mkdir()
+        def capture(*args):
+            return subprocess.run([sys.executable, str(r / "core/bin/brain"), *args], cwd=r,
+                                  env=self.env, capture_output=True, text=True)
+        base = ("brief", "a", "--branch", "job", "--task", "Synthetic checks")
+        for args in (base, (*base, "--out", str(saved)),
+                     ("brief", "a", "--small", "--task", "Synthetic checks"),
+                     ("hire", "tester", "a", "--task", "Synthetic checks", "--out", str(saved))):
+            result = capture(*args)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("warning: why separate is missing", result.stderr)
+            self.assertIn("--why-separate", result.stderr)
+            self.assertIn("## Why separate", result.stderr)
+            content = saved.read_text() if "--out" in args else result.stdout
+            if "--out" in args:
+                self.assertEqual(result.stdout.strip(), str(saved))
+            self.assertIn("Why a separate agent: not stated by the coordinator", content)
+            self.assertNotIn("Coordinator:", content)
+            self.assertNotIn("before launching", content)
+            self.assertNotIn("warning:", result.stdout)
+            explicit = capture(*args, "--why-separate", "Independent concern")
+            self.assertEqual(explicit.returncode, 0, explicit.stderr)
+            self.assertEqual(explicit.stderr, "")
+            body = saved.read_text() if "--out" in args else explicit.stdout
+            self.assertIn("Why a separate agent: Independent concern", body)
+        contract = self.tmp / "contract.md"
+        contract.write_text("".join("## " + field + "\nSynthetic scope.\n\n" for field in
+                            ("Outcome", "Authorized", "Discretion", "Stop when", "Needs consent", "Done means")) +
+                            "## Why separate\nDistinct ownership.\n")
+        self.b(r, "jobs", "a", "--branch", "job", "--contract-file", str(contract))
+        result = capture(*base, "--out", str(saved))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stderr, "")
+        self.assertEqual(result.stdout.strip(), str(saved))
+        self.assertIn("Why a separate agent: Distinct ownership.", saved.read_text())
+
     def test_shared_context_and_separation_reason(self):
         r, home, wt = self.job()
         context = self.tmp / "shared.md"
@@ -6225,8 +6265,9 @@ class Workflow(Scenario):
         self.assertIn("warning: why separate is missing", self.b(r, *args))
         saved = self.tmp / "briefs" / "worker.md"
         saved.parent.mkdir()
-        self.assertEqual(self.b(r, *args, "--out", str(saved)).strip(), str(saved))
-        self.assertIn("Why a separate agent: Not recorded. Coordinator:", saved.read_text())
+        self.assertEqual(self.b(r, *args, "--out", str(saved), "--why-separate",
+                                "Independent arithmetic concern").strip(), str(saved))
+        self.assertIn("Why a separate agent: Independent arithmetic concern", saved.read_text())
         self.assertIn("needs a reason", self.b(r, *args, "--why-separate", "  ", ok=False))
         self.assertIn("explicitly waived", self.b(r, *args, "--why-separate", "", "--allow-unexplained"))
         context.write_text("")
@@ -6725,6 +6766,7 @@ class SmallFixes(Scenario):
                     "review": ["review", "a", "--branch", "job", "--built-by", "claude"],
                     "hire": ["hire", "writer", "a", "--task", "Write it"]}
         for name, args in commands.items():
+            args += ["--why-separate", "Synthetic independent concern"]
             for dest, why in ((home / "b.md", "inside the home"), (wt / "b.md", "inside the home"),
                               (outside / "into-home" / "b.md", "inside the home"), (r / "nodes/a/b.md", "inside the instance"),
                               (r / ".brain/b.md", "inside the instance")):
