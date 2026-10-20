@@ -6223,6 +6223,10 @@ class Workflow(Scenario):
         local = json.loads((r / ".brain/local.json").read_text())
         self.assertEqual(local["nodes"]["a"]["worktrees"]["job"]["context_inputs"], [str(context)])
         self.assertIn("warning: why separate is missing", self.b(r, *args))
+        saved = self.tmp / "briefs" / "worker.md"
+        saved.parent.mkdir()
+        self.assertEqual(self.b(r, *args, "--out", str(saved)).strip(), str(saved))
+        self.assertIn("Why a separate agent: Not recorded. Coordinator:", saved.read_text())
         self.assertIn("needs a reason", self.b(r, *args, "--why-separate", "  ", ok=False))
         self.assertIn("explicitly waived", self.b(r, *args, "--why-separate", "", "--allow-unexplained"))
         context.write_text("")

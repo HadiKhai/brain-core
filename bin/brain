@@ -6430,7 +6430,7 @@ def cmd_brief(a):
             die("--why-separate needs a reason; use --allow-unexplained for an urgent job")
         why = ("Urgent launch: separation reason explicitly waived." if a.allow_unexplained else
                "Not recorded. Coordinator: group work by concern and state --why-separate before launching.")
-        if not a.allow_unexplained:
+        if not a.allow_unexplained and not a.out:
             print("warning: why separate is missing; aggregate related work or supply --why-separate", file=sys.stderr)
     context, context_inputs = [], []
     for name in a.context_file or []:
