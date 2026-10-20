@@ -104,7 +104,8 @@ Answer from files. Before answering about a child, run the **freshness check**:
    child with an external home, ask its coordinator to check home changes in its own sync.
    Root daily briefs send only behind signals: root never runs child sync or marks it for them.
 2. If the thread is newer, send the child's coordinator (host `send`): "Run the node-sync skill
-   for everything since <Updated>." Then host `wait`, and re-read the child's files.
+   for everything since <Updated>." Then host `wait` (not during a daily brief: report the snapshot as behind), and re-read
+   the child's files.
 3. Never summarize a child's transcript yourself. The child writes its files; you read them.
 
 ## Routing work

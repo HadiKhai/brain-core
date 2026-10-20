@@ -7695,6 +7695,7 @@ class NodeHygiene(Scenario):
                        'without open jobs', 'provider it was created under'):
             self.assertIn(clause, tick)
         self.assertIn('Root also checks every descendant coordinator', role)
+        self.assertIn('not during a daily brief: report the snapshot as behind', role)
 
 
     def test_wrapped_legacy_age_survives_refresh_and_history_is_read_once(self):
