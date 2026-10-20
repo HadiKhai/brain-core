@@ -274,17 +274,20 @@ export function Choice({
   value,
   onChange,
   options,
+  disabled = false,
 }: {
   name: string;
   value: string;
   onChange: (v: string) => void;
   options: { value: string; label: string }[];
+  disabled?: boolean;
 }) {
   const id = useId();
   return (
     <div className="field">
       <label htmlFor={id}>{name}</label>
       <Select
+        disabled={disabled}
         items={options}
         value={value}
         onValueChange={(v) => onChange(String(v))}

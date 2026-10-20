@@ -21,11 +21,11 @@ function DecisionFooter({ item, reviewer, setReviewer, decision, setDecision }: 
   const command = decision === "accept" ? "brain item accept --reviewed-by " + quote(reviewer || "REVIEWER") + " -- " + quote(item.id) : "brain item reject -- " + quote(item.id);
   return <div className="decision-actions">
     <p>Copy your decision, then run it in your terminal.</p>
-    <div className="decision-fields"><Choice name="Decision" value={decision} onChange={value => {setDecision(value);setFeedback("");}} options={[{value:"accept",label:"Accept"},{value:"reject",label:"Reject"}]} />
-      {decision === "accept" && <div className="field"><label>Reviewer name<Input value={reviewer} onChange={e => {setReviewer(e.target.value);setFeedback("");}} placeholder="Your name" aria-label="Reviewer name" /></label></div>}
+    <div className="decision-fields"><Choice name="Decision" disabled={feedback === "Copying…"} value={decision} onChange={value => {setDecision(value);setFeedback("");}} options={[{value:"accept",label:"Accept"},{value:"reject",label:"Reject"}]} />
+      {decision === "accept" && <div className="field"><label>Reviewer name<Input disabled={feedback === "Copying…"} value={reviewer} onChange={e => {setReviewer(e.target.value);setFeedback("");}} placeholder="Your name" aria-label="Reviewer name" /></label></div>}
     </div>
     <div className="decision-copy"><Disclosure title="View command"><pre className="verbatim" dir="ltr">{command}</pre></Disclosure>
-      <Button disabled={decision === "accept" && !reviewer.trim()} onClick={async () => {setFeedback("Copying…");try {await navigator.clipboard.writeText(command);setFeedback("Copied. Run the command to apply your decision.");} catch {setFeedback("Copy failed. Open the command and copy its text.");}}}>{decision === "accept" ? "Copy acceptance" : "Copy rejection"}</Button>
+      <Button disabled={feedback === "Copying…" || (decision === "accept" && !reviewer.trim())} onClick={async () => {setFeedback("Copying…");try {await navigator.clipboard.writeText(command);setFeedback("Copied. Run the command to apply your decision.");} catch {setFeedback("Copy failed. Open the command and copy its text.");}}}>{decision === "accept" ? "Copy acceptance" : "Copy rejection"}</Button>
     </div>
     {feedback && <p role="status">{feedback}</p>}
   </div>;

@@ -143,6 +143,8 @@ test("touch decision feedback and import undo preserve the operator's place", as
   await page.evaluate(()=>Object.defineProperty(navigator,'clipboard',{configurable:true,value:{writeText:()=>new Promise<void>(resolve=>{(window as any).__finishCopy=resolve;})}}));
   await dialog.getByRole('button',{name:'Copy acceptance',exact:true}).tap();
   await expect(dialog.getByRole('status')).toHaveText('Copying…');
+  await expect(dialog.getByRole('button',{name:'Copy acceptance',exact:true})).toBeDisabled();
+  await expect(dialog.getByRole('combobox',{name:'Decision'})).toBeDisabled();
   await page.evaluate(()=>(window as any).__finishCopy());
   await expect(dialog.getByRole('status')).toContainText('Copied. Run the command');
   await dialog.getByRole('button',{name:'Close',exact:true}).tap();
