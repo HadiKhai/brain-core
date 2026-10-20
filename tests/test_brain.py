@@ -5477,6 +5477,27 @@ class Connections(Scenario):
             m.cmd_connect(a)
         self.assertEqual(sorted(p.name for p in (self.homes["app"] / "moved").iterdir()), ["app.md"])
 
+    def test_a_connect_folder_swapped_for_a_link_is_not_trusted(self):
+        from importlib.machinery import SourceFileLoader
+        self.b(self.r, "connect", "root")
+        m = SourceFileLoader("brain_connect_swap", str(CORE / "bin/brain")).load_module()
+        conn, away = self.r / ".brain/connect", self.homes["app"] / "connect"
+        put = m.history_put
+
+        def put_then_swap(fd, name, text):  # moved into a home, and a link left where it was
+            put(fd, name, text)
+            if name.startswith(".brief-"):
+                os.rename(conn, away)
+                conn.symlink_to(away)
+        m.history_put = put_then_swap
+        m.find_root = lambda: self.r
+        a = argparse.Namespace(id="root", action="brief", nodes=["lab"], final=False, save=True, fresh=False,
+                               only=None, runtime=None, model=None, to=None, json=False)
+        with mock.patch.dict(os.environ, self.env, clear=True), contextlib.redirect_stderr(io.StringIO()), \
+                contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit):
+            m.cmd_connect(a)
+        self.assertEqual([p.name for p in (away / "root/briefs").iterdir()], [])
+
     def test_items_and_specialists_from_several_nodes(self):
         r = self.r
         self.add("kv-queue", "--from", "app,lab", "--keywords", "rate limit, dropped writes", "--body", "Queue them.")
@@ -5670,13 +5691,13 @@ class Connections(Scenario):
         (victim / "user-data.txt").write_text("keep me\n")
         (r / ".brain").mkdir(exist_ok=True)
         (r / ".brain/connect").symlink_to(self.homes["client"])
-        self.assertIn("holds a link", self.b(r, "connect", "root", ok=False))
+        self.assertIn("lead out of the brain", self.b(r, "connect", "root", ok=False))
         self.assertEqual((victim / "user-data.txt").read_text(), "keep me\n")
         self.assertFalse((victim / "plan.json").exists())
         (r / ".brain/connect").unlink()
         (r / ".brain/connect").mkdir()
         (r / ".brain/connect/root").symlink_to(victim)
-        self.assertIn("holds a link", self.b(r, "connect", "root", ok=False))
+        self.assertIn("lead out of the brain", self.b(r, "connect", "root", ok=False))
         self.assertTrue((victim / "user-data.txt").exists())
         (r / ".brain/connect/root").unlink()
         # Distinct node ids never share a digest.
@@ -5865,7 +5886,7 @@ class Connections(Scenario):
         victim = self.homes["client"] / "briefs"
         victim.mkdir()
         (r / ".brain/connect/root/briefs").symlink_to(victim)
-        self.assertIn("holds a link", self.b(r, "connect", "root", "brief", "app", "--save", ok=False))
+        self.assertIn("lead out of the brain", self.b(r, "connect", "root", "brief", "app", "--save", ok=False))
         self.assertEqual(list(victim.iterdir()), [])
         self.b(r, "connect", "root", "brief", "app", "--out", "x.md", ok=False)  # no arbitrary destinations
         (r / ".brain/connect/root/briefs").unlink()
@@ -6304,7 +6325,7 @@ class SmallFixes(Scenario):
         hb.symlink_to(home)
         out = self.b(r, "handback", "a", "--branch", "job", "--state", "blocked", "--report", "r.md",
                      "--lessons", "none: none", ok=False)
-        self.assertIn("leads out of the brain through a link", out)
+        self.assertIn("out of the brain", out)
         self.assertEqual([p.name for p in home.iterdir() if p.suffix == ".json"], [])
         hb.unlink()
         inbox = r / "nodes/a/inbox.md"
@@ -6314,6 +6335,36 @@ class SmallFixes(Scenario):
         self.b(r, "handback", "a", "--branch", "job", "--state", "question", "--report", "r.md",
                "--lessons", "none: none", ok=False)
         self.assertEqual((home / "calc.py").read_text(), before)
+
+    def test_a_brain_with_a_link_leading_out_refuses_every_change(self):
+        r, home, wt = WorkerReadyPackets.job(self)
+        (r / "specialists").mkdir(exist_ok=True)
+        cases = [(r / "specialists", ["specialist", "new", "writer", "--at", "root", "--title", "Writer"]),
+                 (r / "nodes/a/library", ["item", "add", "x1", "--from", "a", "--title", "X", "--kind", "fact", "--ref", "y"]),
+                 (r / ".brain/local.json", ["set", "a", "coordinator=private-thread"])]
+        for link, args in cases:
+            moved = self.tmp / ("was-" + link.name)
+            if link.exists():
+                os.rename(link, moved)
+            target = home / link.name
+            if link.suffix:
+                target.write_text("{}\n") if not moved.exists() else shutil.copy(moved, target)
+            else:
+                target.mkdir(exist_ok=True)
+            before = sorted(p.name for p in home.rglob("*") if ".git" not in p.parts)
+            text = target.read_text() if target.is_file() else None
+            link.symlink_to(target)
+            out = self.b(r, *args, ok=False)
+            self.assertIn("lead out of the brain", out, args)
+            self.assertEqual(sorted(p.name for p in home.rglob("*") if ".git" not in p.parts), before, args)
+            if text is not None:
+                self.assertEqual(target.read_text(), text)
+            self.assertIn("a link leading out of the brain", self.b(r, "check", ok=False))
+            link.unlink()
+            if moved.exists():
+                os.rename(moved, link)
+        self.b(r, "check")
+        self.b(r, "specialist", "new", "writer", "--at", "root", "--title", "Writer")  # links into the brain are fine
 
     def test_merge_commits_when_a_node_has_empty_folders(self):
         r = self.init("alice")
@@ -6340,8 +6391,8 @@ class HistorySizes(History):
 
         def check_then_move(*args):  # the scratch folder moves into the home just after it was checked
             check(*args)
-            calls.append(1)
-            if len(calls) == 1:
+            calls.append(args[3])
+            if calls.count("the workbench's scratch") == 1 and args[3] == "the workbench's scratch":
                 os.rename(wb / "scratch", self.home / "moved")
         m.fd_outside = check_then_move
         with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
@@ -6356,13 +6407,47 @@ class HistorySizes(History):
 
         def move_before_cleanup(*args):  # moved after the swap was checked: the old one is never deleted there
             check(*args)
-            calls.append(1)
-            if len(calls) == 2:
+            calls.append(args[3])
+            if calls.count("the workbench's scratch") == 2 and args[3] == "the workbench's scratch":
                 os.rename(wb / "scratch", self.home / "moved")
         m.fd_outside = move_before_cleanup
         with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
             m.history_write(inst, n, wb, [("manifest.json", "{}"), ("batches/b001.md", "new\n")])
         self.assertTrue([p for p in (self.home / "moved").iterdir() if p.name.startswith(".history-old-")])
+
+    def test_batches_moved_mid_extraction_get_no_more_and_nothing_is_published(self):
+        from importlib.machinery import SourceFileLoader
+        self.b(self.r, "history", "garden")
+        m = SourceFileLoader("brain_batches_move", str(CORE / "bin/brain")).load_module()
+        inst = m.Instance(self.r)
+        n = inst.node("garden")
+        wb = self.tmp / "garden-work"
+        old = (wb / "scratch/history/manifest.json").read_text()
+        put, moved = m.history_put, self.home / "moved-batches"
+
+        def put_then_move(fd, name, text):
+            put(fd, name, text)
+            if name == "b001.md":
+                staged = next(p for p in (wb / "scratch").iterdir() if p.name.startswith(".history-"))
+                os.rename(staged / "batches", moved)
+        m.history_put = put_then_move
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            m.history_write(inst, n, wb, [("batches/b001.md", "one\n"), ("batches/b002.md", "two\n"),
+                                          ("manifest.json", "{}")])
+        self.assertEqual(sorted(p.name for p in moved.iterdir()), ["b001.md"])  # nothing more written there
+        self.assertEqual((wb / "scratch/history/manifest.json").read_text(), old)  # the old one still published
+        self.assertEqual([p.name for p in (wb / "scratch").iterdir() if p.name.startswith(".history-")], [])
+        shutil.rmtree(moved)
+
+        def put_last_then_move(fd, name, text):  # after the last file: only the staged tree's own check sees it
+            put(fd, name, text)
+            if name == "manifest.json":
+                staged = next(p for p in (wb / "scratch").iterdir() if p.name.startswith(".history-"))
+                os.rename(staged / "batches", moved)
+        m.history_put = put_last_then_move
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            m.history_write(inst, n, wb, [("batches/b001.md", "one\n"), ("manifest.json", "{}")])
+        self.assertEqual((wb / "scratch/history/manifest.json").read_text(), old)  # a tree without batches: not published
 
     def test_sessions_of_a_deleted_checkout_with_a_newline_still_match(self):
         from importlib.machinery import SourceFileLoader
