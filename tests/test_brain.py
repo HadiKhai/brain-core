@@ -7043,6 +7043,22 @@ class Spend(Scenario):
         self.assertNotIn("210 tokens", out)
         self.assertIn("usage: no transcripts found", out)
 
+    def test_a_long_running_view_screens_names_added_while_it_runs(self):
+        from importlib.machinery import SourceFileLoader
+        s = self.cl(self.home, "21212121-live", "Look.", [("said", 1, "lv1", (10, 0, 0, 1))])
+        s.write_text(s.read_text().replace("claude-opus-5-5", "theta-model"))
+        m = SourceFileLoader("brain_live_terms", str(CORE / "bin/brain")).load_module()
+        with mock.patch.dict(os.environ, self.env, clear=True):
+            inst = m.Instance(self.r)
+            m.spend_machine(inst, budget=None)  # the view counts once...
+            (self.node / "never-name.txt").write_text("Theta\n")  # ...the word is added while it runs...
+            m._SPEND_TERMS.clear()  # ...and a minute passes
+            m._MACHINE.clear()
+            value = m.spend_machine(m.Instance(self.r), budget=None)
+        self.assertNotIn("theta", json.dumps(value).lower())
+        for f in (self.r / ".brain/spend/files").glob("*.json"):
+            self.assertNotIn("theta", f.read_text().lower())
+
     def test_a_response_that_grew_after_the_job_began_counts_its_growth(self):
         ledger = self.node / "job-ledger.md"
         begun = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=2)).replace(second=40, microsecond=0)

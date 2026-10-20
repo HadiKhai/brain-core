@@ -4939,9 +4939,10 @@ def spend_file(inst, path, runtime, allowed, forbidden, budget=None, window=None
         packed = isinstance(fh, Decompressed)
         mem = str(real) if window is None else (str(real), tuple(window))
         known = _SPEND_MEM.get(mem)
-        if known and known[0] == (size, list(ident)) and known[1].get("complete", True):
-            return known[1]
         terms = spend_terms(inst)
+        if known and known[0] == (size, list(ident)) and known[1].get("complete", True) and \
+                not any(find_terms(m, terms) for m in known[1]["models"]):
+            return known[1]  # unchanged, and its names still pass today's never-name words
         key = hashlib.sha256(str(real).encode()).hexdigest()[:32]
         cf = spend_cache_dir(inst) / "files" / f"{key}.json"
         agg = None
