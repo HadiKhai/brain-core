@@ -63,6 +63,7 @@ import {
   Reader,
   Preview,
   TechnicalDetails,
+  ActionLink,
 } from "./shared";
 import { InboxView } from "./inbox";
 import { Overview } from "./overview";
@@ -322,55 +323,11 @@ function NodeDetail({
           <SheetDescription>
             Project notes, decisions, and local work
           </SheetDescription>
+          {safeHref(n?.coordinator) && <ActionLink href={n!.coordinator}>Open coordinator <ArrowUpRight size={14} /></ActionLink>}
         </SheetHeader>
         {!n && <div className="detail-scroll"><Empty text="Project unavailable in this reading." action="Return to the project outline or refresh the workspace." /></div>}
         {n && (
           <div className="detail-scroll">
-            <div className="detail-meta">
-              <Status>
-                {n.sealed
-                  ? "Sealed"
-                  : n.paused
-                    ? "Paused"
-                    : n.archived
-                      ? "Archived"
-                      : "Active"}
-              </Status>
-              {n.runtime && <Status>{n.runtime}</Status>}
-              <dl className="detail-facts">
-                <dt>Owners</dt>
-                <dd>{(n.owners || []).join(", ") || "Not recorded"}</dd>
-                <dt>Labels</dt>
-                <dd>{(n.labels || []).join(" · ") || "None"}</dd>
-                <dt>Updated</dt>
-                <dd>{time(n.updated, s.brain?.tz)}</dd>
-                <dt>Home</dt>
-                <dd>{n.home ? "On this machine" : "Not recorded"}</dd>
-              </dl>
-              {safeHref(n.coordinator) ? (
-                <a href={safeHref(n.coordinator)}>
-                  Open coordinator <ArrowUpRight size={14} />
-                </a>
-              ) : (
-                <p>Coordinator not available on this machine</p>
-              )}
-              {safeHref(n.preview_url) && (
-                <a href={safeHref(n.preview_url)}>
-                  Open preview <ArrowUpRight size={14} />
-                </a>
-              )}
-              {n.preview && (
-                <p>
-                  Preview: <Text>{n.preview}</Text>
-                </p>
-              )}
-              {n.preview_tour && (
-                <p>
-                  Preview tour: <Text>{n.preview_tour}</Text>
-                </p>
-              )}
-              <TechnicalDetails values={{Home:n.home, Preview:n.preview, "Preview tour":n.preview_tour}} />
-            </div>
             {list(n.blocked).length > 0 && (
               <PageSection title="Needs you">
                 {n.blocked.map((t: string, i: number) => (
@@ -465,13 +422,48 @@ function NodeDetail({
                 ))}
               </PageSection>
             )}
+            <div className="detail-meta">
+              <Status>
+                {n.sealed
+                  ? "Sealed"
+                  : n.paused
+                    ? "Paused"
+                    : n.archived
+                      ? "Archived"
+                      : "Active"}
+              </Status>
+              {n.runtime && <Status>{n.runtime}</Status>}
+              <dl className="detail-facts">
+                {n.owners?.length > 0 && <><dt>Owners</dt><dd>{n.owners.join(", ")}</dd></>}
+                {n.labels?.length > 0 && <><dt>Labels</dt><dd>{n.labels.join(" · ")}</dd></>}
+                {n.updated && <><dt>Updated</dt><dd>{time(n.updated, s.brain?.tz)}</dd></>}
+                {n.home && <><dt>Home</dt><dd>On this machine</dd></>}
+              </dl>
+              {(!n.owners?.length || !n.updated || !n.home) && <small>Not recorded: {[!n.owners?.length && "owners", !n.updated && "updated", !n.home && "home"].filter(Boolean).join(", ")}</small>}
+              {safeHref(n.preview_url) && (
+                <a href={safeHref(n.preview_url)}>
+                  Open preview <ArrowUpRight size={14} />
+                </a>
+              )}
+              {n.preview && (
+                <p>
+                  Preview: <Text>{n.preview}</Text>
+                </p>
+              )}
+              {n.preview_tour && (
+                <p>
+                  Preview tour: <Text>{n.preview_tour}</Text>
+                </p>
+              )}
+              <TechnicalDetails values={{Home:n.home, Preview:n.preview, "Preview tour":n.preview_tour}} />
+            </div>
             {n.never_name > 0 && (
               <PageSection title="Privacy guard">
                 <p>
                   {count(n.never_name, "restricted word")} must stay out of this
-                  project’s home.
+                  project’s files.
                 </p>
-                <Command text={"brain guard " + n.id} />
+                <Reader title="Privacy instructions" text="Ask your coordinator to check restricted words before sharing this project. The command inspects the local files." trigger="Check privacy instructions" footer={<Command text={"brain guard " + n.id} />} />
               </PageSection>
             )}
           </div>
@@ -709,7 +701,7 @@ function App() {
                     onClick={() => {
                       if (window.__STATE__)
                         setNotice(
-                          "This is a saved snapshot. Open brain ui for live updates.",
+                          "This is a saved snapshot. Open your live workspace to see updates.",
                         );
                       else setRetry(retry + 1);
                     }}
@@ -755,10 +747,10 @@ function App() {
                   </AlertTitle>
                   <AlertDescription>
                     {connection === "Permission required"
-                      ? "Run brain ui and open the complete address it prints. The key protects your workspace."
+                      ? "Open the complete private address from the terminal where you started this dashboard."
                       : connection === "Updates interrupted"
                         ? "You are viewing the last successful reading. Updates will reconnect automatically, or you can refresh now."
-                        : "Check that brain ui is still running, then refresh this page."}
+                        : "Check that your local dashboard is still running, then refresh this page."}
                   </AlertDescription>
                 </Alert>
               )}
@@ -779,7 +771,7 @@ function App() {
                 ) : (
                   <Empty
                     text="Workspace unavailable."
-                    action="Open the address printed by brain ui."
+                    action="Open the complete private address from your terminal."
                   />
                 )
               ) : (

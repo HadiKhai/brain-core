@@ -286,6 +286,10 @@ For agents:
 - Dashboard sources and build instructions are in `ui/README.md`. Rebuild and commit `ui/dist/`
   after source changes; dependency licenses and bundled third-party notices are checked.
 
+- Inbox has a counted destination, search and paging, with conversation actions on every request.
+  Long briefs and proposals open in bounded readers; technical details stay behind explicit controls.
+  Proposal decisions are copied for the terminal, with clear feedback; the dashboard remains read-only.
+
 After upgrading:
 - Reopen `brain ui --open` to load the new dashboard. Saved filters stay within the current
   browser session; import commands remain a checklist to review and copy.

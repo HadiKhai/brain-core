@@ -68,12 +68,13 @@
       getComputedStyle(document.documentElement).overflow === "hidden",
     "body and html never scroll",
   );
-  for (const view of ["overview", "learnings", "agents", "usage", "imports"]) {
+  for (const view of ["overview", "inbox", "learnings", "agents", "usage", "imports"]) {
     await go(view);
     check(
       document.querySelector("h1").textContent ===
         {
           overview: "Overview",
+          inbox: "Inbox",
           learnings: "Learnings",
           agents: "Agents",
           usage: "Usage",
@@ -93,6 +94,7 @@
       (e) =>
         visible(e) &&
         e !== scroller &&
+        !e.matches(".section-body,.verbatim,.reader-body,.reader-footer") &&
         e.scrollHeight > e.clientHeight + 2 &&
         ["auto", "scroll"].includes(getComputedStyle(e).overflowY),
     );
@@ -147,33 +149,24 @@
       .textContent.includes("awaiting review"),
     "proposals sort first",
   );
-  button("Read learning").click();
+  button("Review proposal", document.querySelector(".learning-results")).click();
   await wait(
-    () => document.querySelector(".learning-entry .markdown"),
+    () => document.querySelector(".reading-sheet .markdown"),
     "learning reader",
   );
   check(
     document
-      .querySelector(".learning-entry .markdown")
+      .querySelector(".reading-sheet .markdown")
       .textContent.includes("<script>literal, untrusted content</script>"),
     "untrusted code stays literal",
   );
-  button("Review and decide").click();
-  await wait(
-    () => document.querySelector(".learning-entry .command input"),
-    "review commands",
-  );
-  check(
-    document.querySelector(".learning-entry .command input").value ===
-      "brain item accept --reviewed-by 'REVIEWER' -- 'lesson-0'",
-    "accept command preserved",
-  );
-  check(
-    [...document.querySelectorAll(".learning-entry .command input")].some(
-      (e) => e.value === "brain item reject -- 'lesson-0'",
-    ),
-    "reject command preserved",
-  );
+  button("View command", document.querySelector(".reading-sheet")).click();
+  await wait(() => document.querySelector(".reading-sheet pre.verbatim"), "review commands");
+  check(document.querySelector(".reading-sheet pre.verbatim").textContent === "brain item accept --reviewed-by 'REVIEWER' -- 'lesson-0'", "accept command preserved");
+  await choose("Decision", "Reject");
+  check(document.querySelector(".reading-sheet pre.verbatim").textContent === "brain item reject -- 'lesson-0'", "reject command preserved");
+  button("Close", document.querySelector(".reading-sheet")).click();
+  await wait(() => !visible(document.querySelector(".reading-sheet")), "close learning reader");
   await choose("State", "Accepted (5)");
   check(
     !document
@@ -265,15 +258,19 @@
     "owned repositories cannot be selected",
   );
   boxes[0].click();
+  await wait(() => button("Review import", document.querySelector(".action-dock")), "review import action");
+  button("Review import", document.querySelector(".action-dock")).click();
   await wait(
-    () => document.querySelector(".action-dock .command input"),
+    () => document.querySelector(".reading-sheet .command input"),
     "import selection",
   );
   check(
-    document.querySelector(".action-dock .command input").value ===
+    document.querySelector(".reading-sheet .command input").value ===
       "brain adopt --parent 'root' -- '/demo/pocket-atlas'",
     "adopt command preserves exact arguments",
   );
+  button("Close", document.querySelector(".reading-sheet")).click();
+  await wait(() => !visible(document.querySelector(".reading-sheet")), "close import reader");
   check(
     !scroller.contains(document.querySelector(".action-dock")),
     "action dock sits outside scroller",
@@ -295,15 +292,10 @@
   }
   await go("overview");
   await go("imports");
-  check(
-    document
-      .querySelector(".action-dock .command input")
-      .value.includes("pocket-atlas"),
-    "selection survives navigation",
-  );
+  check(document.querySelector(".action-dock").textContent.includes("1 repository selected"), "selection survives navigation");
   button("Clear", document.querySelector(".action-dock")).click();
-  await wait(()=>!document.querySelector(".action-dock .command input"),"clear import selection");
-  check(!document.querySelector(".action-dock .command input"),"clear import selection");
+  await wait(()=>!button("Review import", document.querySelector(".action-dock")),"clear import selection");
+  check(!button("Review import", document.querySelector(".action-dock")),"clear import selection");
   check(
     !document.querySelector("[data-ui-attack]") && !window.uiAttack,
     "source data cannot create executable markup",

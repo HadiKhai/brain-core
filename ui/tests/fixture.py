@@ -113,6 +113,10 @@ if __name__ == "__main__":
 
     def state_for(scenario):
         state=seed_extreme(fixture(), scenario)
+        for node in state['nodes']:
+            node['coordinator'] = f'http://127.0.0.1:{args.port}/conversation'
+            for job in node.get('work', []):
+                if job.get('link'): job['link'] = node['coordinator']
         if scenario == 'empty':
             state.update(nodes=[],attention=[],inbox=[],due=[],commits=[],specialists=[],schedules=[],scan=[],usage=[],spend={},activity={"counts":{}},items={"count":0,"all":[],"recent":[]})
         elif scenario == 'long':
@@ -147,6 +151,9 @@ if __name__ == "__main__":
 
         def do_GET(self):
             parsed=urllib.parse.urlsplit(self.path)
+            if parsed.path == '/conversation':
+                body=b'<!doctype html><html lang="en"><title>Synthetic conversation</title><main><h1>Conversation opened</h1><p>This is a made-up handoff destination. Replying belongs to your connected conversation.</p></main></html>'
+                self.send_response(200);self.send_header('Content-Type','text/html; charset=utf-8');self.end_headers();self.wfile.write(body);return
             if parsed.path in ('/snapshot','/before'):
                 state=state_for(urllib.parse.parse_qs(parsed.query).get('scenario',['demo'])[0])
                 page=(dist/'index.html').read_text() if parsed.path=='/snapshot' else Path('/tmp/brain-ui-before.html').read_text()

@@ -208,3 +208,10 @@ test("job state kinds stay short while arbitrary descriptions remain readable", 
   assert.deepEqual(m.jobState("ready to merge · checks passed"), {kind:"ready to merge", description:"checks passed"});
   assert.deepEqual(m.jobState("Unusual freeform update"), {kind:"In progress", description:"Unusual freeform update"});
 });
+
+test("task copy hides paths and job ids while preserving usable links", () => {
+  assert.equal(m.humanText("Review report ~/demo/reviews/HANDOFF.md for job/navigation. Check ready packet."), "Review the report for this job. Check review checks.");
+  assert.equal(m.humanText("<script>literal, untrusted content</script>"), "<script>literal, untrusted content</script>");
+  assert.equal(m.humanText("Read /opt/work/review.md"), "Read the project files");
+  assert.equal(m.humanText("[Source](https://example.com/docs/review.md)"), "[Source](https://example.com/docs/review.md)");
+});

@@ -27,6 +27,8 @@ import {
   Reader,
   TechnicalDetails,
   ScreenAction,
+  Preview,
+  ActionLink,
 } from "./shared";
 import {
   machineHealth,
@@ -73,7 +75,7 @@ export function Overview({
     },
     {
       icon: Layers,
-      label: "Worktrees",
+      label: "Working copies",
       value: nodes.reduce((a, n) => a + list(n.worktrees).length, 0),
       note: count(
         nodes
@@ -106,7 +108,7 @@ export function Overview({
   ].sort((a: RecordData, b: RecordData) => (b.t || 0) - (a.t || 0));
   return (
     <div className="page-stack">
-      <ScreenAction active={active}><Button onClick={() => onView("inbox")}>Open Inbox ({list(s.inbox).length})</Button></ScreenAction>
+      <ScreenAction active={active}><Button onClick={() => onView(list(s.inbox).length ? "inbox" : jobs.length ? "agents" : "imports")}>{list(s.inbox).length ? `Open Inbox (${list(s.inbox).length})` : jobs.length ? "Check ongoing work" : "Find repositories"}</Button></ScreenAction>
       <div className="overview-split">
         <PageSection
           title="Inbox"
@@ -125,10 +127,10 @@ export function Overview({
         <PageSection
           title="Due"
           description="Next actions for coordinators"
-          action={<span className="count-badge">{list(s.due).length}</span>}
+          action={<Button variant="ghost" size="sm" disabled={!list(s.due).length} onClick={() => onNode(list(s.due).find(a => a.ready)?.node || list(s.due)[0]?.node)}>Open next project</Button>}
         >
           {list(s.due).length ? (
-            Object.entries(Object.groupBy(list(s.due), (a) => a.node)).map(
+            Object.entries(Object.groupBy([...list(s.due)].sort((a,b) => Number(!!b.ready) - Number(!!a.ready)), (a) => a.node)).map(
               ([id, items]) => (
                 <Disclosure
                   key={id}
@@ -151,9 +153,9 @@ export function Overview({
                       </Status>
                       <div className="prose-preview"><Text zone={s.brain?.tz}>{a.text}</Text></div>
                       <Reader title="Next action" text={a.text} trigger="Read details" />
-                      {safeHref(nodes.find(n => n.id === a.node)?.coordinator) ? <a className="item-action" href={safeHref(nodes.find(n => n.id === a.node)?.coordinator)}>Open coordinator <ArrowUpRight size={14} /></a> : <Button variant="outline" size="sm" onClick={() => onNode(a.node)}>Open project</Button>}
+                      {safeHref(nodes.find(n => n.id === a.node)?.coordinator) ? <ActionLink href={nodes.find(n => n.id === a.node)!.coordinator}>Open coordinator <ArrowUpRight size={14} /></ActionLink> : <Button variant="outline" size="sm" onClick={() => onNode(a.node)}>Open project</Button>}
                       {list(a.reasons).length > 0 && (
-                        <small>{a.reasons.join(" · ")}</small>
+                        <Preview title="Review details" text={a.reasons.join("\n\n")} />
                       )}
                     </div>
                   ))}
@@ -367,6 +369,7 @@ export function Overview({
         <PageSection
           title="Activity"
           description={`Commits by hour · last ${s.hours || 72} hours`}
+          action={<Button variant="ghost" size="sm" disabled={!Object.keys(s.activity?.counts || {}).length} onClick={() => onNode(Object.keys(s.activity?.counts || {})[0])}>Open active project</Button>}
         >
           <div className="heat-legend">
             <span>
@@ -453,7 +456,7 @@ export function Overview({
               />
             )}
           </PageSection>
-          <PageSection title="Schedules" description="Recurring work">
+          <PageSection title="Schedules" description="Recurring work" action={<Reader title="Recurring work" text={list(s.schedules).map(a => `${naming(a.node)} · ${a.when}`).join("\n\n") || "Ask your coordinator to plan recurring work."} trigger="Review schedule" />}>
             {list(s.schedules).length ? (
               list(s.schedules).map((a, i) => (
                 <div className="compact-row" key={i}>
@@ -479,6 +482,7 @@ export function Overview({
       <PageSection
         title="Latest"
         description="Commits and decisions, newest first"
+        action={<Reader title="Recent work" text={feed.map(r => `${time(r.t, s.brain?.tz)} · ${naming(r.node)}\n\n${r.text}`).join("\n\n") || "No recent work recorded."} trigger="Read work log" />}
       >
         {feed.length ? (
           <>
@@ -508,6 +512,7 @@ export function Overview({
         )}
       </PageSection>
       <PageSection title="Machine" description="Local capacity and job pace">
+        <Disclosure title="Inspect local capacity">
         <div className="machine-grid">
           {[
             [
@@ -564,7 +569,7 @@ export function Overview({
             </div>
           ))}
         </div>
-        <div className="compact-row">
+        <div className="compact-row pace-list">
           {nodes
             .filter((n) => n.jobs?.median_hours != null)
             .map((n) => (
@@ -575,6 +580,7 @@ export function Overview({
               </Tip>
             ))}
         </div>
+        </Disclosure>
       </PageSection>
     </div>
   );

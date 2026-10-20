@@ -183,9 +183,11 @@ export function Tip({ text, children }: { text: string; children: ReactNode }) {
 }
 export function Text({ children, zone }: { children: any; zone?: string }) {
   const workspaceZone = useContext(TimeZoneContext);
+  const text = humanText(readable(children, zone || workspaceZone));
+  const rtl = /[\u0590-\u08ff]/.test(text.match(/[A-Za-z\u0590-\u08ff]/)?.[0] || "");
   return (
-    <span className="readable" dir="auto">
-      {humanText(readable(children, zone || workspaceZone))}
+    <span className={"readable" + (rtl ? " rtl-text" : "")} dir="auto">
+      {text}
     </span>
   );
 }
@@ -195,6 +197,11 @@ export function Markdown({ text }: { text: any }) {
     <div className="markdown" dir="auto">
       <ReactMarkdown
         components={{
+          p: ({ children }) => <p dir="auto">{children}</p>,
+          li: ({ children }) => <li dir="auto">{children}</li>,
+          h1: ({ children }) => <h1 dir="auto">{children}</h1>,
+          h2: ({ children }) => <h2 dir="auto">{children}</h2>,
+          h3: ({ children }) => <h3 dir="auto">{children}</h3>,
           a: ({ href, children }) =>
             safeHref(href) ? (
               <a href={safeHref(href)} rel="noreferrer">
@@ -345,7 +352,7 @@ export function Reader({ title, text, trigger = "Read full", children, footer, o
     <Button variant={primary ? "default" : "ghost"} size="sm" className={primary ? "" : "reader-trigger"} onClick={() => setOpen(true)}>{trigger}</Button>
     <Sheet open={open} onOpenChange={setOpen}>
       <SheetContent className="reading-sheet" initialFocus={() => document.querySelector<HTMLElement>(".reading-sheet [data-slot=sheet-close]")}>
-        <SheetHeader><SheetTitle>{humanText(title)}</SheetTitle><SheetDescription>Read the full context, then return to your place.</SheetDescription></SheetHeader>
+        <SheetHeader><SheetTitle><Tip text={title}><Text>{title}</Text></Tip></SheetTitle><SheetDescription>Read the full context, then return to your place.</SheetDescription></SheetHeader>
         <div className="reader-body"><Markdown text={text} />{children}
           {humanText(readable(text, zone)) !== readable(text, zone) && <Disclosure title="Technical details"><pre className="verbatim" dir="ltr">{text}</pre></Disclosure>}
         </div>
@@ -355,7 +362,7 @@ export function Reader({ title, text, trigger = "Read full", children, footer, o
   </>;
 }
 export function Preview({ text, title = "Note" }: { text: any; title?: string }) {
-  return <span className="text-preview"><span className="prose-preview" dir="auto"><Text>{text}</Text></span>{String(text || "").length > 180 && <Reader title={title} text={String(text)} />}</span>;
+  return <span className="text-preview"><span className="prose-preview" dir="auto"><Text>{text}</Text></span><Reader title={title} text={String(text || "")} trigger="Read note" /></span>;
 }
 export function TechnicalDetails({ values }: { values: Record<string, any> }) {
   return <Disclosure title="Technical details"><dl className="technical-facts">{Object.entries(values).filter(([,v]) => v != null && v !== "").map(([key, value]) => <div key={key}><dt>{key}</dt><dd className="verbatim" dir="ltr">{String(value)}</dd></div>)}</dl></Disclosure>;

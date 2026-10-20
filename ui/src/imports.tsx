@@ -35,7 +35,7 @@ export function Imports({ s, active }: { s: RecordData; active: boolean }) {
       : parents[0]?.id || "root";
   return (
     <div className="import-page">
-      <ScreenAction active={active}>{valid.length ? <Reader title="Review selected repositories" trigger={`Review selected (${valid.length})`} primary text={candidates.filter(c => valid.includes(c.path)).map(c => `- ${c.name || "Repository"}`).join("\n")} footer={<Command text={"brain adopt --parent " + quote(target) + " -- " + [...valid].sort().map(quote).join(" ")} label="Copy import command" />} /> : <Button disabled={!candidates.some(adoptable)} onClick={() => setSelected(candidates.filter(adoptable).map(c => c.path))}>Select all available</Button>}</ScreenAction>
+      <ScreenAction active={active}>{valid.length ? <Reader title="Review selected repositories" trigger={`Review selected (${valid.length})`} primary text={candidates.filter(c => valid.includes(c.path)).map(c => `- ${c.name || "Repository"}`).join("\n")} footer={<Command text={"brain adopt --parent " + quote(target) + " -- " + [...valid].sort().map(quote).join(" ")} label="Copy import command" />} /> : candidates.some(adoptable) ? <Button onClick={() => setSelected(candidates.filter(adoptable).map(c => c.path))}>Select all available</Button> : <Reader title="Discover repositories" trigger="Discover repositories" primary text="Ask your coordinator to scan a local folder. Review the discovered repositories here before adding them to your workspace." footer={<Command text="brain ui --scan FOLDER" label="Copy discovery command" />} />}</ScreenAction>
       <PageSection
         title="Discovered repositories"
         description="Select repositories to prepare a command. Review it before running it."
@@ -114,7 +114,7 @@ export function Imports({ s, active }: { s: RecordData; active: boolean }) {
         ) : (
           <Empty
             text="Discover your next project."
-            action="Start brain ui --scan DIR to build an import checklist."
+            action="Ask your coordinator to look for local repositories."
             icon={FolderGit2}
           />
         )}
@@ -138,14 +138,7 @@ export function Imports({ s, active }: { s: RecordData; active: boolean }) {
                     label: n.title || "Project",
                   }))}
                 />
-                <Command
-                  text={
-                    "brain adopt --parent " +
-                    quote(target) +
-                    " -- " +
-                    [...valid].sort().map(quote).join(" ")
-                  }
-                />
+                <Reader title="Review import command" trigger="Review import" text="This adds the selected repositories under the chosen parent project. Review the command before running it in your terminal." footer={<Command text={"brain adopt --parent " + quote(target) + " -- " + [...valid].sort().map(quote).join(" ")} label="Copy import command" />} />
                 <Button variant="ghost" onClick={() => {setPrevious(selected);setSelected([]);}}>
                   Clear
                 </Button>

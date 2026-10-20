@@ -55,9 +55,9 @@ test("real touch activates mobile navigation, filters, paging and the fixed impo
   await nav("Import checklist");
   await page.getByRole("checkbox", { name: "Pocket Atlas", exact: true }).tap();
   const dock = page.locator("#action-dock-host");
-  await expect(
-    dock.getByRole("textbox", { name: "Command to copy" }),
-  ).toHaveValue("brain adopt --parent 'root' -- '/demo/pocket-atlas'");
+  await dock.getByRole("button", {name:"Review import",exact:true}).tap();
+  await expect(page.getByRole("dialog").getByRole("textbox", { name: "Command to copy" })).toHaveValue("brain adopt --parent 'root' -- '/demo/pocket-atlas'");
+  await page.getByRole("dialog").getByRole("button",{name:"Close",exact:true}).tap();
   const before = await dock.boundingBox();
   await page
     .locator("#workspace-content")
@@ -66,9 +66,9 @@ test("real touch activates mobile navigation, filters, paging and the fixed impo
   expect(after!.y).toBe(before!.y);
   await dock.getByRole("combobox", { name: "Parent project" }).tap();
   await page.getByRole("option", { name: "Field Guide", exact: true }).tap();
-  await expect(dock.getByRole("textbox")).toHaveValue(
-    "brain adopt --parent 'field-guide' -- '/demo/pocket-atlas'",
-  );
+  await dock.getByRole("button",{name:"Review import",exact:true}).tap();
+  await expect(page.getByRole("dialog").getByRole("textbox")).toHaveValue("brain adopt --parent 'field-guide' -- '/demo/pocket-atlas'");
+  await page.getByRole("dialog").getByRole("button",{name:"Close",exact:true}).tap();
   await dock.getByRole("button", { name: "Clear", exact: true }).tap();
   await expect(dock.getByRole("textbox")).toHaveCount(0);
   await nav("Overview");
@@ -96,6 +96,8 @@ test("keyboard navigation, visible focus, disclosures and collapsed rail stay us
   await page.goto("/?k=demo");
   const overview = page.getByRole("button", { name: "Overview", exact: true });
   await overview.focus();
+  await page.keyboard.press("ArrowRight");
+  await expect(page.getByRole("button", { name: "Inbox", exact: true })).toBeFocused();
   await page.keyboard.press("ArrowRight");
   await expect(
     page.getByRole("button", { name: "Learnings", exact: true }),
@@ -156,7 +158,8 @@ test("keyboard navigation, visible focus, disclosures and collapsed rail stay us
     .first()
     .focus();
   await page.keyboard.press("Enter");
-  await expect(page.locator(".learning-entry .markdown").first()).toBeVisible();
+  await expect(page.locator(".reading-sheet .markdown").first()).toBeVisible();
+  await page.keyboard.press("Escape");
   expect(
     await page.locator('button button, button [tabindex="0"]').count(),
   ).toBe(0);
@@ -207,12 +210,14 @@ test("long labels, missing values, untrusted markdown and exact import paths rem
     expect(await page.evaluate(() => Boolean((window as any).uiAttack))).toBe(
       false,
     );
+    await page.keyboard.press("Escape");
     await page.evaluate(() => (location.hash = "view=imports"));
     await page
       .getByRole("checkbox", { name: "Pocket Atlas", exact: true })
       .click();
+    await page.locator("#action-dock-host").getByRole("button", {name:"Review import",exact:true}).click();
     await expect(
-      page.getByRole("textbox", { name: "Command to copy" }),
+      page.getByRole("dialog").getByRole("textbox", { name: "Command to copy" }),
     ).toHaveValue(
       "brain adopt --parent 'root' -- '/demo/a '\\''quoted'\\''; $(touch nope)'",
     );
@@ -258,14 +263,17 @@ test("browser Back restores each destination scroll position", async ({
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.goto("/?k=demo&history=1#view=learnings");
   await page.waitForSelector(".learning-entry");
-  await page.locator("#workspace-content").evaluate((e) => (e.scrollTop = 400));
+  const restored = await page.locator("#workspace-content").evaluate((e) => { e.scrollTop = 400; return e.scrollTop; });
+  const section = page.locator("[data-page=learnings] .section-body");
+  const inner = await section.evaluate(e => { e.scrollTop = 200; return e.scrollTop; });
   await page.getByRole("button", { name: "Usage", exact: true }).click();
   await expect(page).toHaveURL(/view=usage/);
   await page.goBack();
   await expect(page).toHaveURL(/view=learnings/);
   await expect
     .poll(() => page.locator("#workspace-content").evaluate((e) => e.scrollTop))
-    .toBe(400);
+    .toBe(restored);
+  expect(await section.evaluate(e => e.scrollTop)).toBe(inner);
 });
 
 test("job state separates its kind from the clamped readable description", async ({ page }) => {

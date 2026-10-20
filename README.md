@@ -234,7 +234,9 @@ A read-only dashboard on `127.0.0.1`, with a collapsible sidebar, light and dark
 phone layouts and keyboard navigation. Python serves its committed build with no Node or npm
 installation needed. It updates within seconds of any file changing and shows
 Inbox and Due on the overview, the project tree, jobs, ports, activity, schedules and decisions.
-The **Learnings**, **Agents**, **Usage** and **Import checklist** views show reusable items and
+The counted **Inbox** opens questions and review requests in their conversations. Overview shows
+the first five requests, and the full Inbox offers search and paging. The **Learnings**,
+**Agents**, **Usage** and **Import checklist** views show reusable items and
 review state, specialists and the job ledger, account windows, measured spend, and discovered
 repositories. Tables offer search, sorting and paging. Click a
 project for its notes, limits, decisions and job history.

@@ -2136,3 +2136,20 @@ svg {
 .actions { align-items: flex-start; }
 .command > button { max-width: 180px; white-space: normal; height: auto; min-height: 32px; }
 @media(max-width: 767px) { .decision-actions input { font-size: 16px; } .reader-footer { padding-inline: 20px; } }
+.rtl-text { display: block; text-align: right; }
+.note-row > strong, .compact-row > div > .readable { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; }
+.correspondence-heading small { max-width: 55%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+@media(max-width:767px) { .correspondence-heading small { max-width: 100%; } }
+.section-body { overflow-x: hidden; }
+.pace-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px,1fr)); align-items: start; }
+.pace-list .tip-trigger { min-width: 0; }
+.pace-list .tip-trigger > span { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; }
+.decision-fields { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; align-items: start; }
+.decision-copy { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; }
+.decision-copy > .disclosure { min-width: 0; }
+.decision-copy > button { flex-shrink: 0; }
+.decision-copy .disclosure-button { padding: 8px 0 !important; min-height: 32px; }
+.decision-copy .verbatim { max-height: 120px; }
+.item-action { max-width: 100%; }
+.item-action > .readable { min-width: 0; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; }
+.recommendation { color: var(--muted-foreground); font-size: 12px; margin-block: 8px; }

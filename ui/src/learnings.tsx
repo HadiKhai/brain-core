@@ -13,14 +13,28 @@ import {
   PagedCollection,
   ScreenAction,
   TechnicalDetails,
-  Command,
+  Disclosure,
 } from "./shared";
 import { learningRows, list, quote, time, type RecordData } from "./model";
+function DecisionFooter({ item, reviewer, setReviewer, decision, setDecision }: { item: RecordData; reviewer: string; setReviewer: (value: string) => void; decision: string; setDecision: (value: string) => void }) {
+  const [feedback, setFeedback] = useState("");
+  const command = decision === "accept" ? "brain item accept --reviewed-by " + quote(reviewer || "REVIEWER") + " -- " + quote(item.id) : "brain item reject -- " + quote(item.id);
+  return <div className="decision-actions">
+    <p>Copy your decision, then run it in your terminal.</p>
+    <div className="decision-fields"><Choice name="Decision" value={decision} onChange={value => {setDecision(value);setFeedback("");}} options={[{value:"accept",label:"Accept"},{value:"reject",label:"Reject"}]} />
+      {decision === "accept" && <div className="field"><label>Reviewer name<Input value={reviewer} onChange={e => {setReviewer(e.target.value);setFeedback("");}} placeholder="Your name" aria-label="Reviewer name" /></label></div>}
+    </div>
+    <div className="decision-copy"><Disclosure title="View command"><pre className="verbatim" dir="ltr">{command}</pre></Disclosure>
+      <Button disabled={decision === "accept" && !reviewer.trim()} onClick={async () => {setFeedback("Copying…");try {await navigator.clipboard.writeText(command);setFeedback("Copied. Run the command to apply your decision.");} catch {setFeedback("Copy failed. Open the command and copy its text.");}}}>{decision === "accept" ? "Copy acceptance" : "Copy rejection"}</Button>
+    </div>
+    {feedback && <p role="status">{feedback}</p>}
+  </div>;
+}
 function ProposalReader({ item: i, primary = false }: { item: RecordData; primary?: boolean }) {
-  const [reviewer, setReviewer] = useState("");
+  const [reviewer, setReviewer] = useState(""), [decision, setDecision] = useState("accept");
   const reviewable = i.state === "proposed" && !i.specialist;
   return <Reader title={i.title || "Learning"} text={i.body || "No additional text recorded."} trigger={reviewable ? "Review proposal" : "Read learning"} primary={primary}
-    footer={reviewable ? <div className="decision-actions"><p>Review the source, copy your decision, then run it in your terminal. Copying does not apply it.</p><div className="field"><label>Reviewer name<Input value={reviewer} onChange={e => setReviewer(e.target.value)} placeholder="Your name" aria-label="Reviewer name" /></label></div><Command text={"brain item accept --reviewed-by " + quote(reviewer || "REVIEWER") + " -- " + quote(i.id)} label={reviewer ? "Copy acceptance" : "Add reviewer name"} disabled={!reviewer.trim()} /><Command text={"brain item reject -- " + quote(i.id)} label="Copy rejection" /></div> : undefined}>
+    footer={reviewable ? <DecisionFooter item={i} reviewer={reviewer} setReviewer={setReviewer} decision={decision} setDecision={setDecision} /> : undefined}>
     <TechnicalDetails values={{Source:i.provenance?.ref, Repository:i.provenance?.repo, Revision:i.provenance?.commit}} />
   </Reader>;
 }

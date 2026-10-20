@@ -25,14 +25,20 @@ export const safeHref = (s: any) =>
   /^(https?:|t3-thread:)/i.test(String(s)) ? String(s) : undefined;
 // Operational identifiers remain available in explicit technical readers, never as task copy.
 export function humanText(value: any): string {
-  return String(value ?? "")
-    .replace(/(?:~\/|\/(?:Users|home|tmp|demo)\/)[^\s<>"'`),;]+/g, "the project files")
-    .replace(/\bjob\/[\w./-]+/g, "this job")
+  const links: string[] = [];
+  const text = String(value ?? "").replace(/\b(?:https?:|t3-thread:)\/\/[^\s<>"'`)\]]+/gi, link => `\uE000${links.push(link) - 1}\uE001`);
+  return text
+    .replace(/(?:~\/|(?<![:\w/<])\/)[^\s<>"'`),;]+/g, s => "the project files" + (s.match(/[.!?]+$/)?.[0] || ""))
+    .replace(/\bjob\/[\w./-]+/g, s => "this job" + (s.match(/[.!?]+$/)?.[0] || ""))
     .replace(/\b(?:[\w.-]+\/)+[\w.-]+\.(?:md|json|jsonl|txt|html|py|tsx?|jsx?)\b/g, "the source document")
+    .replace(/\breview report the project files\b/gi, "Review the report")
+    .replace(/\b[a-f0-9]{16,64}\b/gi, "linked record")
     .replace(/\bready packet(?:s)?\b/gi, "review checks")
     .replace(/\bhand[- ]?backs?\b/gi, "review")
-    .replace(/\bworktrees?\b/gi, (s) => /s$/.test(s) ? "working copies" : "working copy");
+    .replace(/\bworktrees?\b/gi, (s) => /s$/.test(s) ? "working copies" : "working copy")
+    .replace(/\uE000(\d+)\uE001/g, (original, i) => links[Number(i)] || original);
 }
+
 export function time(value: any, zone?: string) {
   if (!value) return "Not recorded";
   const d = new Date(typeof value === "number" ? value * 1000 : value);

@@ -3,6 +3,7 @@ import {
   PageSection,
   PagedCollection,
   Reader,
+  Preview,
   ScreenAction,
   Status,
   Empty,
@@ -181,11 +182,8 @@ export function Usage({ s, active }: { s: RecordData; active: boolean }) {
                       w.used_percent >= p.stop_percent
                     );
                   }) && <Status>Skipped for new jobs</Status>}
-                {row.note && (
-                  <p>
-                    <Text>{row.note}</Text>
-                  </p>
-                )}
+                {row.note && <Preview text={row.note} title="Reading note" />}
+                <Reader title={row.label || "Subscription reading"} trigger="Inspect reading" text={[`Read ${time(row.read_at, s.brain?.tz)}`, ...Object.entries(row.windows || {}).map(([name,w]: any) => `${name === "five_hour" ? "5-hour" : "Weekly"}: ${w.used_percent ?? "Unknown"}% · ${windowState(w,row,p).state} · resets ${time(w.resets_at,s.brain?.tz)}`)].join("\n\n")} />
               </div>
               <WindowMeter
                 name="5-hour"
@@ -266,6 +264,7 @@ export function Usage({ s, active }: { s: RecordData; active: boolean }) {
             <div className="runtime-spend" key={rt}>
               <div>
                 <h3>{rt}</h3>
+                <Reader title={`${rt} usage`} trigger="Inspect usage" text={Object.entries(v.weeks || {}).map(([when,d]: any) => `${when}: ${tokens(d.tokens)} tokens · ${d.active_h || 0} active hours`).join("\n\n")} />
                 <small>
                   {tokens(
                     Object.values(v.weeks || {})
