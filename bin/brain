@@ -7954,8 +7954,7 @@ def dead_note_paths(inst, n):
                     continue
                 path = Path(value).expanduser()
                 explicit = value.startswith(("./", "../", "/", "~")) or value.endswith("/")
-                file_shape = path.name in filenames or (path.suffix in extensions and
-                              ("/" in value or value[0].islower() or value[0] == "."))
+                file_shape = path.name in filenames or ("/" in value and path.suffix in extensions)
                 if not link and not (explicit or file_shape):
                     continue
                 bases = [n["dir"], inst.root] + ([n["home_path"]] if n["home_path"] else [])

@@ -7679,6 +7679,12 @@ class NodeHygiene(Scenario):
         self.assertIn('accepted design', home)
         self.assertIn('root never runs child sync', tick)
         self.assertIn('only for its own node', sync)
+        check = (CORE / 'skills/check/SKILL.md').read_text()
+        self.assertIn('a recorded coordinator tick', check)
+        self.assertNotIn('locally bound coordinator tick', check)
+        changes = (CORE / 'CHANGES.md').read_text()
+        self.assertIn('Legacy age inference is approximate', changes)
+        self.assertIn('original waiting time explicitly', changes)
 
     def test_wrapped_legacy_age_survives_refresh_and_history_is_read_once(self):
         r, inst, n = self.node()
@@ -7711,11 +7717,17 @@ class NodeHygiene(Scenario):
         r, inst, n = self.node()
         (n['dir'] / 'knowledge.md').write_text(
             '`Next.js` `v1.2` `origin/main` `@acme/ui` `text/html` `and/or`\n'
-            '`core/bin/brain` `nodes/app/brief.md` `missing.py`\n'
+            '`core/bin/brain` `nodes/app/brief.md` `./missing.py`\n'
+            '`next.js` `vue.js` `chart.js` `index.ts` `utils.py` `package.json`\n'
             '[a title](lost.md "Local file")\n')
-        problems = self.m.dead_note_paths(inst, n)
+        home = self.repo(self.tmp / 'source', {'README.md': '# source\n'})
+        (home / 'apps/web').mkdir(parents=True)
+        (home / 'apps/web/package.json').write_text('{}\n')
+        self.b(r, 'set', 'app', 'home=' + str(home))
+        inst = self.m.Instance(r)
+        problems = self.m.dead_note_paths(inst, inst.node('app'))
         self.assertEqual(len(problems), 2, problems)
-        self.assertIn('dead path missing.py', problems[0])
+        self.assertIn('dead path ./missing.py', problems[0])
         self.assertIn('dead path lost.md', problems[1])
 
     def test_second_machine_uses_recorded_tick_without_duplicate_binding(self):
