@@ -3838,8 +3838,8 @@ def home_places(n):
     home = n.get("home_path")
     places = [home] if home else []
     if home and home.is_dir():
-        r = git("worktree", "list", "--porcelain", cwd=home)
-        places += [Path(line[9:]) for line in r.stdout.splitlines() if line.startswith("worktree ")] if not r.returncode else []
+        r = git("worktree", "list", "--porcelain", "-z", cwd=home)  # NUL-separated: a path may hold a newline
+        places += [Path(f[9:]) for f in r.stdout.split("\0") if f.startswith("worktree ")] if not r.returncode else []
     for w in (n["local"].get("worktrees") or {}).values():
         if isinstance(w, dict) and isinstance(w.get("path"), str):
             places.append(Path(w["path"]).expanduser())
@@ -3857,6 +3857,15 @@ def history_outside(inst, n, path, what):
     return real
 
 
+def fd_outside(inst, n, fd, what):
+    """Asked again of an open folder just before and after publishing: a folder moved into the home since it was
+    checked follows its descriptor there, and is refused."""
+    where = history_fd_path(fd)
+    if not where:
+        die(f"{n['id']}: can't tell where {what} really is on this system; history won't write without knowing")
+    history_outside(inst, n, where, what)
+
+
 def write_out(inst, n, dest, text):
     """--out: a new private file, made and renamed inside its folder, opened without following links and verified
     where it really is. An existing file, even one hard-linked into the home, is replaced, never written through."""
@@ -3865,16 +3874,21 @@ def write_out(inst, n, dest, text):
         die("--out needs a file name")
     history_outside(inst, n, dest, "--out")
     pfd = history_open_dir(inst, n, dest.parent.resolve(), "--out's folder")
-    tmp = f".brief-{os.urandom(6).hex()}"
+    tmp, published = f".brief-{os.urandom(6).hex()}", False
     try:
         history_put(pfd, tmp, text)
+        fd_outside(inst, n, pfd, "--out's folder")
         os.rename(tmp, dest.name, src_dir_fd=pfd, dst_dir_fd=pfd)
-    except OSError as e:
+        published = True
+        fd_outside(inst, n, pfd, "--out's folder")  # moved while it was renamed: taken back
+    except BaseException as e:
         try:
-            os.unlink(tmp, dir_fd=pfd)
+            os.unlink(dest.name if published else tmp, dir_fd=pfd)
         except OSError:
             pass
-        die(f"can't write {dest}: {e.strerror}")
+        if isinstance(e, OSError):
+            die(f"can't write {dest}: {e.strerror}")
+        raise
     finally:
         os.close(pfd)
     print(dest)
@@ -3960,6 +3974,7 @@ def history_write(inst, n, wb, files):
                 if st and not stat.S_ISDIR(st.st_mode):
                     die(f"{n['id']}: scratch/history is a link or a file; history replaces only a real folder")
                 old = f".history-old-{os.urandom(6).hex()}"
+                fd_outside(inst, n, sfd, "the workbench's scratch")  # moved into the home since: nothing published
                 if st:
                     os.rename("history", old, src_dir_fd=sfd, dst_dir_fd=sfd)
                 os.rename(tmp, "history", src_dir_fd=sfd, dst_dir_fd=sfd)
@@ -4670,12 +4685,13 @@ def connect_scan(inst, plan, text, terms):
             unknown += item not in items
             continue
         row = by_id.get(nid)
-        if sep == "@":
-            code.setdefault(nid, set()).add(rel)
         m = resolve_ref(nodes, nid) if row else None
         base = (m["dir"] if sep == ":" else m["home_path"] if row["code"] else None) if m else None
         target = (base / rel).resolve() if base else None
-        unknown += not (target and target.is_file() and base.resolve() in target.parents)
+        real = bool(target and target.is_file() and base.resolve() in target.parents)
+        unknown += not real
+        if sep == "@" and real:
+            code.setdefault(nid, set()).add(target)  # the file, however its path is spelled
     unsafe = max(sum(1 for line in text.splitlines() if import_text(line, terms) != line),
                  int(import_text(text, terms) != (text[:-1] if text.endswith("\n") else text)))
     return {"cited": cited, "unknown": unknown, "uncited": uncited, "unsafe": unsafe,

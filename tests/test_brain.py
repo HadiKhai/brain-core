@@ -5605,6 +5605,8 @@ class Connections(Scenario):
         self.assertIn("cites 31 code files, over the 30", self.b(r, "connect", "root", "check", ok=False))
         digest("app", "".join(f"- part {i} [app@part{i}.ts]\n" for i in range(29)))
         self.b(r, "connect", "root", "check")
+        digest("app", "".join(f"- spelled [app@{'./' * i}main.ts]\n" for i in range(31)))  # one file, 31 spellings
+        self.b(r, "connect", "root", "check")
         digest("app", "- [app@../lab-home/main.ts] [app:nope.md] [item:ghost] [studio/a@main.ts] [lab@main.ts]\n")
         self.assertIn("4 to nothing that exists", self.b(r, "connect", "root", "check", ok=False))
         digest("app")
@@ -6232,6 +6234,46 @@ class SmallFixes(Scenario):
         self.assertIn("Role: worker", (outside / "linked.md").read_text())
         self.assertEqual([p.name for p in outside.iterdir() if p.name.startswith(".brief-")], [])
         self.assertNotIn("b.md", self.git("status", "--porcelain", "--ignored", cwd=home))
+
+    def test_checkouts_with_newlines_and_folders_moved_mid_write_get_nothing(self):
+        from importlib.machinery import SourceFileLoader
+        r, home, wt = WorkerReadyPackets.job(self)
+        odd = self.tmp / "line\nbreak"
+        self.git("worktree", "add", "-q", "-b", "odd", str(odd), cwd=home)
+        self.assertIn("inside the home", self.b(r, "brief", "a", "--task", "x", "--out", str(odd / "b.md"), ok=False))
+        self.assertFalse((odd / "b.md").exists())
+        m = SourceFileLoader("brain_moving", str(CORE / "bin/brain")).load_module()
+        inst = m.Instance(r)
+        n = inst.node("a")
+        put, check = m.history_put, m.fd_outside
+        first = self.tmp / "first"
+        first.mkdir()
+
+        def put_then_move(fd, name, text):  # the checked folder moves into the home, with its open descriptor
+            put(fd, name, text)
+            os.rename(first, home / "first")
+        m.history_put = put_then_move
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            m.write_out(inst, n, first / "brief.md", "text\n")
+        self.assertEqual(list((home / "first").iterdir()), [])
+        m.history_put, calls, second = put, [], self.tmp / "second"
+        second.mkdir()
+
+        def check_then_move(*args):  # moved between the last check before the rename and the rename
+            check(*args)
+            calls.append(1)
+            if len(calls) == 1:
+                os.rename(second, home / "second")
+        m.fd_outside = check_then_move
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            m.write_out(inst, n, second / "brief.md", "text\n")
+        self.assertEqual(list((home / "second").iterdir()), [])  # published, then taken back
+        m.fd_outside = check
+        third = self.tmp / "third"
+        third.mkdir()
+        with contextlib.redirect_stdout(io.StringIO()):
+            m.write_out(inst, n, third / "brief.md", "text\n")
+        self.assertEqual((third / "brief.md").read_text(), "text\n")
 
     def test_merge_commits_when_a_node_has_empty_folders(self):
         r = self.init("alice")
