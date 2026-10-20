@@ -8957,6 +8957,7 @@ def capture_hook_questions(inst, n, data):
             if isinstance(option, dict):
                 parts += [v for k in ("label", "description") if isinstance((v := option.get(k)), str)]
         text = " ".join(import_text("\n".join(parts), terms).split())
+        text = import_text(text, terms)  # whitespace folding can form a protected phrase or secret assignment
         # Hash only screened content; raw tool ids, paths, answers and session ids never persist.
         marker = "<!-- host-question:" + hashlib.sha256(text.encode()).hexdigest() + " -->"
         line = f"- {inst.now()} from runtime: Host question: {text} {marker}\n"

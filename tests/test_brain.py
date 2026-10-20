@@ -2147,6 +2147,17 @@ class StopHook(Scenario):
         self.hook(r, d, transcript=self.question_log(rows))
         self.assertEqual((d / "inbox.md").read_text().count("host-question:"), 1)
 
+    def test_rendered_question_is_screened_after_whitespace_folding(self):
+        r = self.init("alice")
+        (r / "never-name.txt").write_text("Synthetic Secret\n")
+        rows = [self.question_call(text="Use Synthetic\tSecret?"),
+                self.question_call("q2", text="password\n=made-up-value")]
+        self.hook(r, r, active=True, transcript=self.question_log(rows))
+        text = (r / "inbox.md").read_text()
+        self.assertNotIn("Synthetic Secret", text)
+        self.assertNotIn("made-up-value", text)
+        self.assertEqual(text.count("host-question:"), 2)
+
     def test_answered_old_turn_and_errors(self):
         r = self.init("alice")
         call = self.question_call()
