@@ -17,9 +17,13 @@ For agents:
 - `brain check` gives one Blocked warning per node, with a count. `.brain/hooks.log` says when
   the stop hook held a turn for an upgrade notice.
 - `brain merge` no longer fails its commit when the merged node has empty folders.
+- A brain holding a link that leads out of it, where brain writes (its own files, `.brain/`, library,
+  specialists, a node folder or its job, library, source and report folders), refuses every command
+  that changes something until the link is gone; `brain check` lists such links.
 
 After upgrading:
-- Nothing.
+- Run `brain check`. If it lists links leading out of the brain, remove them (or move what they
+  point to into the brain).
 
 ## 2026-10-20: Upgrades reach running coordinators
 
