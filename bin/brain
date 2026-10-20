@@ -7206,6 +7206,20 @@ def hook_stop(a):
     n = node_at(inst, cwd)
     if not n:
         return
+    try:
+        unread = changes_unread(inst, n) if (n["id"] == "root" or n["local"].get("coordinator")) else []
+    except (OSError, ValueError):
+        unread = []  # fail open: a reminder is never worth a broken stop
+    brain = shlex.quote(str(inst.root / "core" / "bin" / "brain"))
+    upgrade = (
+        # A running coordinator loaded its rules when its session began: an upgrade reaches it here, at the end of
+        # any turn (a tick's included), whatever its tick prompt checks, until it marks the entries read.
+        f"core was upgraded and a coordinator's loaded rules are out of date ({len(unread)} unread change "
+        f"entr{'y' if len(unread) == 1 else 'ies'}: " + "; ".join(e["id"] for e in unread[:3]) + "). If you are "
+        f"this node's coordinator: run `{brain} changes {n['id']}`, re-read "
+        f"{shlex.quote(str(inst.root / 'core' / 'roles' / 'coordinator.md'))} and every skill the entries name, do "
+        f"what their 'After upgrading' asks of this node, then run `{brain} changes {n['id']} --seen`. If you are a "
+        "worker or any other session, don't mark them read: tell your coordinator, and go on") if unread else ""
     why = notes_lag(inst, n)
     future = bool(future_entries(inst, n)[0])
     state_f = inst.root / ".brain" / "hooks.json"
@@ -7219,6 +7233,8 @@ def hook_stop(a):
     last = state.get(sid)
     last = inst.parse_time(last) if last else None
     remind = last is None or elapsed(last, now) > REMIND_MINUTES * 60
+    if not remind:
+        upgrade = ""  # once per session per reminder interval: a worker in a node folder isn't held every turn
     if future and remind:
         why.append("status.md has a future Updated: time; fix it with `brain now` if you are its coordinator; "
                    "if you are a worker, tell your coordinator")
@@ -7227,7 +7243,7 @@ def hook_stop(a):
         stale = u is None or elapsed(u, now) > REMIND_MINUTES * 60
         if stale and remind:
             why.append(f"status.md was last updated {ago(inst, u)}")
-    if not why:
+    if not why and not upgrade:
         return
     state[sid] = now.isoformat(timespec="seconds")
     try:
@@ -7239,14 +7255,19 @@ def hook_stop(a):
             fh.write(f"{now.isoformat(timespec='seconds')} stop {n['id']} {sid}: {'; '.join(why)}\n")
     except OSError:
         pass  # the reminder still goes out; only its bookkeeping is lost
-    reason = (f"Before you stop, node `{n['id']}`: {'; '.join(why)}. If you are this node's coordinator, record "
+    if not why:  # only the upgrade: one notice, then the session goes on
+        print(json.dumps({"decision": "block", "reason": redact(f"Before you stop, node `{n['id']}`: {upgrade}.",
+                                                                 never_terms(n))}))
+        return
+    reason = (f"Before you stop, node `{n['id']}`: " + (upgrade + ". Also: " if upgrade else "") +
+              f"{'; '.join(why)}. If you are this node's coordinator, record "
               f"what this conversation decided, started, finished or blocked (decisions.md; status.md and its "
               f"Updated line; timestamps from `core/bin/brain now`; preserve the generated facts block and run "
               f"`core/bin/brain status {n['id']} --refresh`), then commit `{n['id']}: <what changed>`. If you are a worker, don't edit those files: append anything "
               f"the coordinator should know to inbox.md. If this conversation changed nothing here (you only read "
               f"this node, or it isn't yours), record nothing and end by repeating your previous answer unchanged: "
               f"your last message is what the operator reads.")
-    print(json.dumps({"decision": "block", "reason": reason}))
+    print(json.dumps({"decision": "block", "reason": redact(reason, never_terms(n))}))
 
 
 def codex_hooks(root):

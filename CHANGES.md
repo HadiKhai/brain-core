@@ -5,6 +5,17 @@ upgrading. `brain changes <node>` shows the entries this node's coordinator hasn
 `brain due <node>` lists them until `brain changes <node> --seen`. Entry headings are
 `## <date>: <title>`; once released, a heading never changes.
 
+## 2026-10-20: Upgrades reach running coordinators
+
+For agents:
+- A coordinator thread loads its rules when its session begins. While its node has unread change
+  entries, the stop hook holds its turn once (a tick's too) and asks it to run `brain changes
+  <node>`, re-read `core/roles/coordinator.md` and the skills the entries name, do their "After
+  upgrading", then `brain changes <node> --seen`.
+
+After upgrading:
+- Nothing beyond what the entries below ask.
+
 ## 2026-10-20: Less ceremony per job
 
 For agents:

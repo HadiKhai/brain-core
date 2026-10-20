@@ -118,7 +118,8 @@ sense, it belongs in the instance, not here.
 
 Upgrade every machine sharing an instance together. `CHANGES.md` in core says, for agents, what
 each change means and what to do after it; every coordinator sees the entries it hasn't read in
-`brain due` until it marks them read, per machine. The root tick asks the core's remote at most
+`brain due` until it marks them read, per machine, and a running coordinator's stop hook holds its
+turn once until it has read them. The root tick asks the core's remote at most
 daily and reports an available upgrade once. With `auto_upgrade=on`, given once per machine as
 standing consent (axiom 24), the root tick upgrades when no job is open anywhere, so no worker's
 rules change under it. Extended job ledgers use the v2 marker;

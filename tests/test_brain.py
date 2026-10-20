@@ -6156,5 +6156,37 @@ class Workflow(Scenario):
         ledger.write_text(text)
 
 
+    def test_running_coordinators_hear_of_an_upgrade_at_their_next_stop(self):
+        r = self.init("alice")
+        self.b(r, "new", "a", "--title", "A")
+        a = r / "nodes/a"
+        sessions = iter(f"s{i}" for i in range(100))
+        hook = lambda cwd, active=False, session=None: StopHook.hook(self, r, cwd, session or next(sessions), active)
+        reason = lambda out: (out or {}).get("reason", "")
+        self.assertNotIn("core was upgraded", reason(hook(r)))
+        self.git("commit", "-q", "--allow-empty", "-m", "Upgrade core abc1234 -> def5678", cwd=r)
+        out = hook(r, session="tick")
+        self.assertEqual(out["decision"], "block")
+        self.assertIn("core was upgraded", out["reason"])
+        self.assertIn(f"{r}/core/bin/brain changes root --seen", out["reason"])  # absolute: runs from any folder
+        self.assertIn(f"{r}/core/roles/coordinator.md", out["reason"])
+        self.assertIn("don't mark them read", out["reason"])  # only the coordinator acknowledges
+        self.assertIsNone(hook(r, active=True))  # never twice in one stop
+        self.assertNotIn("core was upgraded", reason(hook(r, session="tick")))  # spaced out per session
+        self.assertNotIn("core was upgraded", reason(hook(a)))  # no coordinator runs it here
+        self.b(r, "set", "a", "coordinator=thread-1")
+        time.sleep(1.1)
+        (a / "brief.md").write_text((a / "brief.md").read_text() + "\nAudience: teenagers\n")
+        both = reason(hook(a))
+        self.assertIn(f"{r}/core/bin/brain changes a", both)
+        self.assertIn("Also:", both)  # the notes reminder still comes, in the same notice
+        self.assertIn("brief.md", both)
+        res = subprocess.run(["sh", "-c", f"{r}/core/bin/brain changes a --seen"], cwd=a, env=self.env,
+                             capture_output=True, text=True)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.b(r, "changes", "root", "--seen")
+        self.assertNotIn("core was upgraded", reason(hook(r)))
+        self.assertNotIn("core was upgraded", reason(hook(a)))
+
 if __name__ == "__main__":
     unittest.main()
