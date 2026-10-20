@@ -6585,6 +6585,29 @@ class HistorySizes(History):
             m.history_write(inst, n, wb, [("batches/b001.md", "one\n"), ("manifest.json", "{}")])
         self.assertEqual((wb / "scratch/history/manifest.json").read_text(), old)  # a tree without batches: not published
 
+    def test_named_folders_add_sessions_that_worked_on_the_node_from_elsewhere(self):
+        scratch = self.tmp / "scratch-thread"
+        scratch.mkdir()
+        self.jsonl(self.claude / "projects" / "-scratch-thread" / "55555555-eeee.jsonl",
+                   [{**r, "message": {"role": "user", "content": "SCRATCH-WORK on the garden."}}
+                    if r.get("type") == "user" else r for r in self.claude_rows(scratch, "55555555-eeee", start=14)[:3]])
+        self.b(self.r, "history", "garden")
+        _, m, text = self.batches()
+        self.assertNotIn("55555555-eeee", [x["id"] for x in m["sessions"]])
+        out = self.b(self.r, "history", "garden", "--fresh", "--also", str(scratch))
+        self.assertIn("also sessions run in 1 folder named as this node's (--also): 1 of them", out)
+        _, m, text = self.batches()
+        self.assertEqual([x["match"] for x in m["sessions"] if x["id"] == "55555555-eeee"], ["named folder"])
+        self.assertIn("SCRATCH-WORK", text)
+        self.b(self.r, "new", "other", "--title", "Other", "--home", str(self.repo(self.tmp / "other")))
+        for bad, why in ((str(self.tmp.parent), "holds your home folder or a brain"),
+                         (str(self.r / "nodes"), "inside a brain"), ("relative/path", "absolute"),
+                         (str(self.tmp / "other" / "src"), "another node's home")):
+            self.assertIn(why, self.b(self.r, "history", "garden", "--fresh", "--also", bad, ok=False), bad)
+        count = lambda out: int(re.search(r"garden: (\d+) sessions", out)[1])  # noqa: E731
+        self.assertEqual(count(self.b(self.r, "spend", "garden", "--also", str(scratch))),
+                         count(self.b(self.r, "spend", "garden")) + 1)  # spend looks back over the same sessions
+
     def test_sessions_of_a_deleted_checkout_with_a_newline_still_match(self):
         from importlib.machinery import SourceFileLoader
         odd = self.tmp / "line\nbreak"

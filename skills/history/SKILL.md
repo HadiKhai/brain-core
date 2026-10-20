@@ -38,6 +38,10 @@ Folders of subscriptions not allowed for this brain are never read, only counted
    tokens processed: every turn resends what a reader has read so far, so a batch costs several
    times its size. Check `brain usage`, then launch in waves that stay below the stop line.
    `brain history <node> plan` prints the summary again.
+   Sessions are found by the folder they ran in: the home, its worktrees and other checkouts. Work
+   done on the node from elsewhere (a scratch thread, say) counts once the operator names that
+   folder: `--also <folder>` (repeatable). A folder holding the home folder or a brain, or another
+   node's home, is refused.
 3. **Readers.** One per batch or run of batches: `brain history <node> brief b001-b002
    --runtime <rt>`, launched as workers through the host adapter, several at a time. A reader
    reads one slice, appends its notes and `read: b001/s1`, then reads the next. After a

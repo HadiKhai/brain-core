@@ -3849,13 +3849,39 @@ def history_repo(path):
     return Path(common.stdout.strip()).resolve(), remotes - {""}
 
 
-def history_matcher(inst, n):
+def also_folders(inst, n, folders):
+    """Folders the operator names as the node's too, for sessions that worked on it from elsewhere (a scratch
+    thread, say). Never one holding the user's home folder or a brain, nor another node's home or a folder in it:
+    their sessions are about everything, or about another project."""
+    out = []
+    others = [m["home_path"].resolve() for m in inst.nodes()
+              if m["id"] != n["id"] and m["external"] and m["home_path"]]
+    brains = {inst.root.resolve(), *(r.resolve() for _, r in brains_here())}
+    for f in folders or ():
+        p = Path(f).expanduser()
+        if not p.is_absolute():
+            die(f"--also takes absolute folders: {f}")
+        p = p.resolve()
+        if p == Path.home().resolve() or p in Path.home().resolve().parents or any(
+                b == p or p in b.parents for b in brains):
+            die(f"{tilde(p)} holds your home folder or a brain: name a narrower folder")
+        if any(b in brains for b in [p, *p.parents]) or any(h == p or h in p.parents or p in h.parents
+                                                             for h in others):
+            die(f"{tilde(p)} is inside a brain, or holds or lies in another node's home: its sessions are not "
+                f"{n['id']}'s")
+        out.append(p)
+    return out
+
+
+def history_matcher(inst, n, also=()):
     """Is a session about this node's home? Its folder is the home, one of its worktrees, or a checkout of the
-    same repository (a worktree elsewhere, a clone, or a folder since deleted whose remote Codex recorded)."""
+    same repository (a worktree elsewhere, a clone, or a folder since deleted whose remote Codex recorded), or a
+    folder the operator named as the node's too (`--also`)."""
     home = n["home_path"].resolve()
     common, remotes = history_repo(home)
     roots = [home, (workbench(inst, n) / "worktrees").resolve()]
     roots += [p.resolve() for p in git_worktrees(home)]
+    named = also_folders(inst, n, also)
     seen = {}
 
     def match(cwd, repo_url):
@@ -3870,6 +3896,8 @@ def history_matcher(inst, n):
         if not (isinstance(cwd, str) and cwd.startswith("/")):
             return None
         p = Path(cwd).resolve()
+        if p not in seen and any(p == a or a in p.parents for a in named):
+            seen[p] = "named folder"
         if p not in seen:
             inside = any(p == r or r in p.parents for r in roots)
             if p.is_dir():
@@ -4253,7 +4281,7 @@ def history_extract(inst, n, a):
         die("--slice-tokens must be at least 2000 and no larger than --batch-tokens")
     sources, skipped_subs, forbidden = history_sources(inst, a.source or ())
     allowed = [Path(sub["config_dir"]).resolve() for sub in sources]
-    match, remotes = history_matcher(inst, n)
+    match, remotes = history_matcher(inst, n, getattr(a, "also", None))
     terms = never_terms(n)
     heads, files = [], set()
     counts = {"files": 0, "unreadable": 0, "unmatched": 0, "duplicates": 0, "empty": 0, "not_allowed": 0, "odd": 0,
@@ -4349,6 +4377,7 @@ def history_extract(inst, n, a):
     manifest = history_screen({
         "node": n["id"], "extracted_at": inst.now(), "snapshot": head,
         "repo": sorted(remotes)[0] if remotes else "", "batch_tokens": a.batch_tokens, "sized_by": sized,
+        "also": len(a.also or []),
         "slice_tokens": a.slice_tokens, "focus": "technical" if a.technical else "all",
         "subscriptions_not_allowed": skipped_subs, "counts": counts,
         "compactions": {rt: sorted(v) for rt, v in compactions.items()},
@@ -4413,6 +4442,9 @@ def history_summary(n, out, m):
              f"in {len(m['batches'])} batches of up to {m['batch_tokens'] // 1000}k ({tilde(out)})"]
     if m.get("sized_by"):
         lines.append(f"  batches sized so a {m['sized_by']} reader holds one before it compacts")
+    if m.get("also"):
+        lines.append(f"  also sessions run in {count_of(m['also'], 'folder')} named as this node's (--also): "
+                     f"{sum(1 for s in m['sessions'] if s['match'] == 'named folder')} of them")
     if m.get("focus") == "technical":
         lines.append("  technical re-read: readers note only how it's built, design rules, failures and fixes, "
                      "conventions and tools")
@@ -5597,9 +5629,9 @@ def spend_node_file(inst, n):
     return spend_cache_dir(inst) / "nodes" / f"{connect_name(n['id'])}.json"
 
 
-def spend_lookback(inst, n, since=None):
+def spend_lookback(inst, n, since=None, also=()):
     """Every past session about a node's home (as `brain history` finds them), as aggregates only."""
-    match_home, _ = history_matcher(inst, n)
+    match_home, _ = history_matcher(inst, n, also)
     heads = {}
 
     def match(runtime, f, allowed, forbidden):
@@ -5702,7 +5734,7 @@ def cmd_spend(a):
     n = inst.node(a.id)
     if not n["external"] or not n["home_path"] or not repo_root(n["home_path"]):
         die(f"{n['id']}: spend looks back over sessions about an external git home (brain set {n['id']} home=<path>)")
-    record, aggs = spend_lookback(inst, n, since)
+    record, aggs = spend_lookback(inst, n, since, a.also)
     if a.json:
         print(redact(json.dumps(record, indent=1), never_terms(n)))
         return
@@ -9833,6 +9865,8 @@ def main():
         opt("--final", action="store_true", help="brief: fold the merged notes into the node's files"),
         opt("--runtime"), opt("--model", help="reader model for scoped usage limits"),
         opt("--to", help="the thread readers report to (default: the node's coordinator)"), opt("--out"),
+        opt("--also", action="append", metavar="FOLDER", help="also sessions run in this folder (repeatable): one "
+            "that worked on this node from elsewhere, such as a scratch thread"),
         opt("--json", action="store_true"))
     cmd("connect", cmd_connect, "what nodes share: plan (default) digests of each node below <id>, then check, "
         "brief <node>... for digest readers, brief --final for the connector", "id",
@@ -9856,6 +9890,7 @@ def main():
         "aggregates only, never committed), or every session here", opt("id", nargs="?"),
         opt("--since", help="from this date (YYYY-MM-DD)"), opt("--machine", action="store_true",
                                                                help="every session on this machine, per runtime"),
+        opt("--also", action="append", metavar="FOLDER", help="also sessions run in this folder (repeatable)"),
         opt("--json", action="store_true"))
     cmd("ui", cmd_ui, "a live view of this brain in your browser: projects, work in flight, worktrees, activity "
         "(read-only, this machine only)", opt("--port", type=int, default=UI_PORT),

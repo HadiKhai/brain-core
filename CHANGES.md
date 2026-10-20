@@ -5,6 +5,18 @@ upgrading. `brain changes <node>` shows the entries this node's coordinator hasn
 `brain due <node>` lists them until `brain changes <node> --seen`. Entry headings are
 `## <date>: <title>`; once released, a heading never changes.
 
+## 2026-10-20: History from folders named as the node's
+
+For agents:
+- `brain history <node> --also <folder>` (repeatable) also reads sessions that ran in that folder:
+  work done on the node from somewhere other than its home or worktrees, such as a scratch
+  thread. `brain spend <node> --also <folder>` counts them too. A folder holding the home folder
+  or a brain, or another node's home, is refused.
+
+After upgrading:
+- Nothing, unless a node's history was made mostly outside its home: then ask the operator which
+  folders to name, and extract again with `--fresh --also <folder>`.
+
 ## 2026-10-20: Time and tokens per job
 
 For agents:
