@@ -1,3 +1,4 @@
+import type React from 'react';
 import {
   Activity,
   ArrowUpRight,
@@ -23,6 +24,7 @@ import {
 } from "./shared";
 import {
   flight,
+  treeRows,
   list,
   count,
   time,
@@ -202,12 +204,11 @@ export function Overview({
         }
       >
         <div className="project-tree">
-          {nodes
-            .filter((n) => !n.archived)
-            .map((n) => (
+          {treeRows(nodes).map(({node:n,depth}) => (
               <Button
                 variant="ghost"
                 className={"project-node " + (n.parent ? "child-node" : "")}
+                style={{"--tree-depth":Math.min(depth,4)} as React.CSSProperties}
                 key={n.id}
                 onClick={() => onNode(n.id)}
               >
@@ -227,16 +228,9 @@ export function Overview({
                       "active job",
                     )}{" "}
                     ·{" "}
-                    {count(
-                      list(n.worktrees).filter((w) => list(w.listening).length)
-                        .length,
-                      "listening",
-                    )}{" "}
+                    {list(n.worktrees).filter((w) => list(w.listening).length).length + " listening"}{" "}
                     ·{" "}
-                    {count(
-                      list(s.attention).filter((a) => a.node === n.id).length,
-                      "for you",
-                    )}
+                    {list(s.attention).filter((a) => a.node === n.id).length + " for you"}
                   </small>
                 </span>
                 <Tip

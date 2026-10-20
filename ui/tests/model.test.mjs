@@ -145,3 +145,7 @@ test("editable surfaces use shadcn controls and never browser disclosure/tooltip
     assert.doesNotMatch(s, /<[a-z][^>]+\btitle=/, file);
   }
 });
+
+test("status copy preserves sentences and punctuation",()=>{assert.equal(m.label("Reviewing narrow-screen navigation"),"Reviewing narrow-screen navigation");assert.equal(m.label("stale_status"),"Stale status")})
+
+test("project tree preserves depth, orphans and cycle containment",()=>{const rows=m.treeRows([{id:'leaf',parent:'child'},{id:'root'},{id:'child',parent:'root'},{id:'orphan',parent:'missing'},{id:'cycle',parent:'cycle'},{id:'archive',archived:true}]);assert.deepEqual(rows.map(r=>[r.node.id,r.depth]),[['root',0],['child',1],['leaf',2],['orphan',0],['cycle',0]])})

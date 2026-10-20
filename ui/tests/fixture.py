@@ -56,6 +56,9 @@ if __name__ == "__main__":
     import threading
     parser=argparse.ArgumentParser();parser.add_argument('--port',type=int,default=4109);args=parser.parse_args()
     dist=Path(__file__).resolve().parents[1]/'dist'
+    overrides={}
+    revision=[0]
+
     def state_for(scenario):
         state=fixture()
         if scenario == 'empty':
@@ -73,16 +76,33 @@ if __name__ == "__main__":
             state['scan'][0]['path']="/demo/a 'quoted'; $(touch nope)"
         elif scenario == 'partial':
             state['spend'].update(complete=False,read=14)
+        current=int(time.time())
+        for row in state['usage']:
+            row['read_at']+=current-NOW
+            for window in row.get('windows',{}).values():
+                if window.get('resets_at'):window['resets_at']+=current-NOW
+        if scenario=='demo':
+            for key,value in overrides.items():state[key]=value
         return state
 
     class Handler(http.server.SimpleHTTPRequestHandler):
         def __init__(self,*a,**kw):super().__init__(*a,directory=str(dist),**kw)
+        def do_POST(self):
+            if self.path!='/fixture/update':self.send_error(404);return
+            data=json.loads(self.rfile.read(int(self.headers.get('Content-Length',0))))
+            overrides.update(data);revision[0]+=1
+            self.send_response(204);self.end_headers()
+
         def do_GET(self):
             parsed=urllib.parse.urlsplit(self.path)
             if parsed.path in ('/snapshot','/before'):
                 state=state_for(urllib.parse.parse_qs(parsed.query).get('scenario',['demo'])[0])
                 page=(dist/'index.html').read_text() if parsed.path=='/snapshot' else Path('/tmp/brain-ui-before.html').read_text()
-                injected='<script>window.__STATE__='+json.dumps(state).replace('<','\\u003c')+'</script>'
+                params=urllib.parse.parse_qs(parsed.query)
+                if params.get('inbox')==['second']:state['inbox'].append({**state['inbox'][0],'id':'synthetic-question-second'})
+                if params.get('workspace')==['other']:state['brain']['name']='other-demo'
+                mock="window.__notifications=[];window.Notification=class{static permission='granted';static async requestPermission(){return 'granted'}constructor(title,options){window.__notifications.push({title,options})}};" if params.get('notify')==['granted'] else ''
+                injected='<script>'+mock+'window.__STATE__='+json.dumps(state).replace('<','\\u003c')+'</script>' 
                 page=page.replace('</head>',injected+'</head>').encode()
                 self.send_response(200);self.send_header('Content-Type','text/html');self.send_header('Content-Length',str(len(page)));self.end_headers();self.wfile.write(page);return
             if parsed.path in ('/api/state','/api/events'):
@@ -95,8 +115,14 @@ if __name__ == "__main__":
                 body=json.dumps(state_for(scenario)).encode()
                 self.wfile.write(body if parsed.path.endswith('state') else b'data: '+body+b'\n\n')
                 if parsed.path.endswith('events'):
+                    seen=revision[0]
                     try:
-                        while True:time.sleep(10);self.wfile.write(b': ping\n\n');self.wfile.flush()
+                        while True:
+                            time.sleep(.5)
+                            if seen!=revision[0]:
+                                self.wfile.write(b'data: '+json.dumps(state_for(scenario)).encode()+b'\n\n');seen=revision[0]
+                            else:self.wfile.write(b': ping\n\n')
+                            self.wfile.flush()
                     except (BrokenPipeError,ConnectionResetError):pass
                 return
             return super().do_GET()

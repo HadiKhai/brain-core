@@ -229,7 +229,7 @@
   const usage = document.querySelector("[data-page=usage]");
   check(
     usage.textContent.includes("Stale") &&
-      usage.textContent.includes("No Window"),
+      usage.textContent.includes("No window"),
     "stale and absent subscription readings distinct",
   );
   check(
@@ -261,7 +261,7 @@
     ...document.querySelectorAll("[data-page=imports] [role=checkbox]"),
   ];
   check(
-    boxes.length === 3 && boxes[1].disabled && boxes[2].disabled,
+    boxes.length === 3 && boxes[1].getAttribute("aria-disabled") === "true" && boxes[2].getAttribute("aria-disabled") === "true",
     "owned repositories cannot be selected",
   );
   boxes[0].click();
@@ -302,10 +302,8 @@
     "selection survives navigation",
   );
   button("Clear", document.querySelector(".action-dock")).click();
-  check(
-    !document.querySelector(".action-dock .command input"),
-    "clear import selection",
-  );
+  await wait(()=>!document.querySelector(".action-dock .command input"),"clear import selection");
+  check(!document.querySelector(".action-dock .command input"),"clear import selection");
   check(
     !document.querySelector("[data-ui-attack]") && !window.uiAttack,
     "source data cannot create executable markup",

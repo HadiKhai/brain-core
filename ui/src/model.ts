@@ -1,10 +1,10 @@
 // The Python API owns this read-only snapshot. Optional fields stay optional across upgrades.
 export type RecordData = Record<string, any>;
 export const list = (v: any): RecordData[] => (Array.isArray(v) ? v : []);
-export const label = (v: any) =>
-  String(v ?? "")
-    .replace(/[_-]/g, " ")
-    .replace(/\b\w/g, (c) => c.toUpperCase());
+export const label = (v: any) => {
+  const text = String(v ?? "");
+  return /\s/.test(text) ? text : text.replace(/[_-]/g, " ").replace(/^./, c => c.toUpperCase());
+};
 export const count = (n: number, word: string) =>
   `${n} ${word}${n === 1 ? "" : "s"}`;
 export const tokens = (n: any) =>
@@ -220,4 +220,12 @@ export function routing(s: RecordData) {
         if (a.score[i] !== b.score[i]) return a.score[i] - b.score[i];
       return String(a.row.id).localeCompare(String(b.row.id));
     })[0];
+}
+
+export function treeRows(nodes: RecordData[]) {
+  const active=nodes.filter(n=>!n.archived),seen=new Set<string>(),out:{node:RecordData,depth:number}[]=[];
+  function visit(n:RecordData,depth:number){if(seen.has(n.id))return;seen.add(n.id);out.push({node:n,depth});for(const child of active.filter(c=>c.parent===n.id))visit(child,depth+1)}
+  for(const n of active.filter(n=>!n.parent||!active.some(p=>p.id===n.parent)))visit(n,0);
+  for(const n of active)visit(n,0);
+  return out;
 }

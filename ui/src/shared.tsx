@@ -228,7 +228,7 @@ export function Choice({
   return (
     <div className="field">
       <label htmlFor={id}>{name}</label>
-      <Select value={value} onValueChange={(v) => onChange(String(v))}>
+      <Select items={options} value={value} onValueChange={(v) => onChange(String(v))}>
         <SelectTrigger id={id} aria-label={name}>
           <SelectValue />
         </SelectTrigger>
