@@ -6908,7 +6908,7 @@ class Workflow(Scenario):
         self.git("update-index", "--add", "--cacheinfo", f"160000,{'1' * 40},dep", cwd=repo)
         self.git("commit", "-qm", "dep", cwd=repo)
         head = self.git("rev-parse", "HEAD", cwd=repo).strip()
-        n = {"id": "a", "fm": {"verify_skip": "*.md"}}
+        n = {"id": "a", "fm": {"verify_skip": "*.md"}, "home_path": repo}
         packet = {"version": 1, "node": "a", "branch": "job", "verify_command": "v", "verify_result": 0, "main": "m",
                   "head": base, "review_rounds": 1, "checked_at": "2026-01-01 10:00 +00:00", "inputs": "i"}
         self.assertEqual(m.verify_reuse(n, "job", packet, base, "m", "v", str(repo), "i"), (base, []))  # control
