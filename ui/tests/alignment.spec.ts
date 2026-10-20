@@ -42,17 +42,28 @@ test('section content, actions, group headers and pages share rendered alignment
 });
 
 test('fitness audit rejects a removed content inset and a shortened group header', async ({page}) => {
+  const evidence: {mutation:string;failure:string}[] = [];
+  const rejects = async (mutation:string, message:string) => {
+    let failure = '';
+    try { await page.evaluate(audit); } catch(error) { failure=String(error); }
+    expect(failure).toContain(message);
+    evidence.push({mutation,failure});
+  };
   await page.goto('/?k=demo#view=overview&node=field-guide');
   await expect(page.locator('.node-sheet')).toBeVisible();
   await page.evaluate(()=>{document.querySelector<HTMLElement>('.node-sheet .section-content')!.style.paddingInlineStart='0px';});
-  await expect(page.evaluate(audit)).rejects.toThrow('section content inset');
+  await rejects('Remove a note row’s start padding', 'section content inset');
   await page.evaluate(()=>{document.querySelector<HTMLElement>('.node-sheet .section-content')!.style.removeProperty('padding-inline-start');});
   await page.evaluate(audit);
   await page.keyboard.press('Escape');
   await expect(page.locator('.node-sheet')).not.toBeVisible();
   await page.evaluate(async()=>{await Promise.all(document.getAnimations().filter(a=>a.effect?.getTiming().iterations!==Infinity).map(a=>a.finished.catch(()=>{})));});
   await page.evaluate(()=>{document.querySelector<HTMLElement>('.attention-split .disclosure-button')!.style.width='calc(100% - 14px)';});
-  await expect(page.evaluate(audit)).rejects.toThrow('group header spans container');
+  const header=page.locator('.attention-split .disclosure-button').first();
+  await expect.poll(()=>header.evaluate(e=>e.closest('.section-body')!.clientWidth-e.getBoundingClientRect().width)).toBeGreaterThan(12);
+  await rejects('Shorten a group header by 14px', 'group header spans container');
   await page.evaluate(()=>{document.querySelector<HTMLElement>('.attention-split .disclosure-button')!.style.removeProperty('width');});
+  await expect.poll(()=>header.evaluate(e=>Math.abs(e.closest('.section-body')!.clientWidth-e.getBoundingClientRect().width))).toBeLessThanOrEqual(1);
   await page.evaluate(audit);
+  if(folder) writeFileSync(join(folder,'alignment-mutations.json'),JSON.stringify(evidence,null,2));
 });

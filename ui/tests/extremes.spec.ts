@@ -1,6 +1,7 @@
 import { test, expect } from "@playwright/test";
-import { mkdirSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { mkdirSync, writeFileSync, readFileSync } from "node:fs";
+import { join, resolve } from "node:path";
+const fitnessSource = readFileSync(resolve('../tests/ui-fitness.js'),'utf8').trim();
 
 const scenarios = ["empty", "single", "ten", "hundred", "thousand", "longtext", "longtitle", "rtl"];
 const views = ["overview", "inbox", "learnings", "agents", "usage", "imports", "detail"];
@@ -57,8 +58,9 @@ for (const scenario of scenarios) test(`seeded ${scenario}: every screen contain
       if (view === "overview") expect(audit.requestCount).toBeLessThanOrEqual(5);
       if (view === "inbox") expect(audit.requestCount).toBeLessThanOrEqual(10);
       if (scenario === "rtl" && ["overview","inbox","learnings","agents"].includes(view)) expect(audit.rtl).toBeGreaterThan(0);
+      const fitness = await page.evaluate(fitnessSource);
       if (folder) await page.screenshot({ path:join(folder,`${scenario}-${view}-${width}x${height}-${colorScheme}.png`), animations:"disabled" });
-      evidence.push({scenario,view,width,height,colorScheme,...audit});
+      evidence.push({scenario,view,width,height,colorScheme,...audit,alignment:fitness.alignment,contrast:fitness.contrast});
       if (view === "detail") await page.keyboard.press("Escape");
     }
     expect(errors).toEqual([]);

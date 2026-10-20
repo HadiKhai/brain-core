@@ -39,13 +39,29 @@
       near(textStart(action), expected, 'section action text inset');
     for (const preview of row.querySelectorAll(':scope > .text-preview > .prose-preview'))
       near(preview.getBoundingClientRect().left, expected, 'section preview inset');
-    for (const block of row.querySelectorAll('.preview-markdown .markdown :is(p,li,h1,h2,h3)')) {
+  }
+  // All preview text and text-only reader actions share their local column's
+  // start; structured tables and inline action groups retain their own columns.
+  for (const preview of document.querySelectorAll('.section-body .text-preview')) {
+    if (!rendered(preview)) continue;
+    const frame = preview.getBoundingClientRect();
+    for (const block of preview.querySelectorAll('.preview-markdown .markdown :is(p,li,h1,h2,h3)')) {
       let indent = 0;
       for (let parent = block.parentElement; parent && !parent.classList.contains('markdown'); parent = parent.parentElement)
         if (parent.matches('ul,ol')) indent += 20;
       const rtl = getComputedStyle(block).direction === 'rtl';
-      near(textStart(block, rtl), rtl ? row.getBoundingClientRect().right - 20 - indent : expected + indent, 'section rendered Markdown text inset');
+      near(textStart(block, rtl), rtl ? frame.right - indent : frame.left + indent, 'section rendered Markdown text inset');
     }
+  }
+  for (const action of document.querySelectorAll('.section-body .reader-trigger'))
+    if (rendered(action)) near(textStart(action), action.getBoundingClientRect().left, 'reader action has no extra text indent');
+  for (const row of document.querySelectorAll('.section-body .correspondence')) {
+    if (!rendered(row)) continue;
+    const frame = row.getBoundingClientRect(), body = row.closest('.section-body').getBoundingClientRect();
+    near(frame.left, body.left + (innerWidth < 768 ? 16 : 20), 'correspondence section inset');
+    const start = frame.left + (innerWidth < 768 ? 14 : 18);
+    for (const block of row.querySelectorAll(':scope > .correspondence-heading,:scope > .correspondence-excerpt,:scope > .recommendation,:scope > .correspondence-actions'))
+      near(block.getBoundingClientRect().left, start, 'correspondence content and action column');
   }
   for (const body of document.querySelectorAll('.section-body')) {
     if (!rendered(body)) continue;
