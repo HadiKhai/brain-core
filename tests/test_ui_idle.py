@@ -99,6 +99,20 @@ def counted_ready(inst, node, branch, *args, **kwargs):
     ready_calls[key] = ready_calls.get(key, 0) + 1
     return ready(inst, node, branch, *args, **kwargs)
 setattr(ui._m_verify, ready_name, counted_ready)
+background_slices = 0
+advance = ui.UISpend.advance
+def counted_advance(self):
+    global background_slices
+    if getattr(self, 'background', False):
+        background_slices += 1
+    return advance(self)
+ui.UISpend.advance = counted_advance
+meters = ui.ui_meters
+def counted_meters(*args, **kwargs):
+    result = meters(*args, **kwargs)
+    result['_test_background_slices'] = background_slices
+    return result
+ui.ui_meters = counted_meters
 signature = ui.UIInputs.signature
 def fast_signature(self):
     self.slow_at = float('-inf')  # exercise file discovery without a 15-second test wait
@@ -573,3 +587,56 @@ cli.main()
             spend.advance()
             self.assertEqual(spend.value['runtimes']['date'], '2026-10-22', 'spend buckets froze at midnight')
             parse.assert_not_called()
+
+    def test_passive_spend_yields_more_often_but_finishes_partial_files(self):
+        import core_loader
+        import importlib.util
+        import datetime
+        from types import SimpleNamespace
+        from unittest import mock
+        loader = core_loader.SourceFileLoader('brain_idle_spend_budget_test', str(CORE / 'bin/brain'))
+        core = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+        loader.exec_module(core)
+        ui = core._owners['UIInputs']
+        inst = SimpleNamespace(root=self.tmp, nodes=lambda: [],
+                               now_dt=lambda: datetime.datetime(2026, 10, 21, tzinfo=datetime.timezone.utc))
+
+        def aggregate(background):
+            clock, reads = [0.0], [0]
+            spend = ui.UISpend(inst)
+            spend.background = background
+            path = self.tmp / 'synthetic-session.jsonl'
+            spend.stamps[path] = ('made-up revision',)
+            spend.queue.append(('codex', path))
+            spend.pending.add(path)
+            def chunk(*args, **kwargs):
+                reads[0] += 1
+                clock[0] += 0.01  # deterministic work cost, with no wall-clock threshold
+                return {'complete': reads[0] >= 12}
+            with mock.patch.object(ui.time, 'monotonic', side_effect=lambda: clock[0]), \
+                 mock.patch.object(ui._m_spend, 'spend_file', side_effect=chunk), \
+                 mock.patch.object(ui._m_spend, 'spend_days', return_value={}), \
+                 mock.patch.object(ui._m_spend, 'spend_sum', return_value={}), \
+                 mock.patch.object(ui._m_spend, 'spend_summary', return_value={}):
+                spend.advance()
+                first = reads[0]
+                for _ in range(20):
+                    if spend.value['complete']:
+                        break
+                    spend.advance()
+                self.assertTrue(spend.value['complete'], 'passive backfill stopped before completion')
+                self.assertFalse(spend.pending)
+                self.assertEqual(reads[0], 12)
+            return first
+
+        active, passive = aggregate(False), aggregate(True)
+        self.assertGreater(passive, 0, 'passive backfill never made progress')
+        self.assertLess(passive, active, 'idle parsing used the same work slice as an active tab')
+        _, state = self.start_server(transcript=True, partial=True)
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            if state().get('_test_background_slices', 0):
+                break
+            time.sleep(0.05)
+        else:
+            self.fail('the live server never selected passive spend slices without a stream')

@@ -561,6 +561,7 @@ class UISpend:
         self.published = float('-inf')
         self.dirty = True
         self.revision = 0
+        self.background = False
         self.view = self.view_key()
         self.value = {'complete': False, 'files': 0, 'read': 0, 'runtimes': {}, 'since_week': None}
 
@@ -608,7 +609,9 @@ class UISpend:
         self.stamps = files
 
     def advance(self):
-        deadline = time.monotonic() + self.BUDGET
+        # Passive tabs reserve CPU for metadata and genuine workspace changes;
+        # unfinished files still advance on every slice and publish completion.
+        deadline = time.monotonic() + self.BUDGET * (0.5 if self.background else 1)
         with _m_spend.spend_read_only():
             while self.queue and time.monotonic() < deadline:
                 runtime, path = self.queue.popleft()
@@ -1032,6 +1035,7 @@ def cmd_ui(a):
                 while not box['clients'] and time.monotonic() - box['last_poll'] > 75:
                     cond.wait()
                 requested = box['request']
+                spend.background = not box['clients']
             try:
                 cadence = interval if box['clients'] else max(interval, 60)
                 if requested > box['checked'] or time.monotonic() - metadata_at >= cadence:
