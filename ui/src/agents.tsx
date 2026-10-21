@@ -4,7 +4,7 @@ import { Button } from "@/components/ui/button";
 import { JobReview } from "./work";
 import { DataTable, Status, Text, Empty, Disclosure, Bars, Reader, ScreenAction, FilterToolbar, Tip, ActionLink } from "./shared";
 import { Kpi, SectionTabs } from "./dash";
-import { Pager } from "./inbox";
+import { Pager, PagedRows } from "./inbox";
 import { RecordPicker } from "./picker";
 import type { Found } from "./search";
 import { flight, threads, tone, jobTitle, hasMeasuredUsage, list, hireRow, closed, count, time, tokens, allJobs, nowOf, stamp, jobState, safeHref, label, type RecordData } from "./model";
@@ -110,13 +110,13 @@ export function Jobs({ s, active, go }: { s: RecordData; active: boolean; go: Go
       </section>
       <section className="surface" aria-label="Recurring work">
         <div className="surface-head"><h2>Recurring work</h2><small>{count(list(s.schedules).length, "schedule")}</small></div>
-        <div className="rows">{list(s.schedules).map((a, i) => (
+        <PagedRows items={list(s.schedules)} noun="schedule" render={(a, i) => (
           <div className="row" data-item key={i}>
             <span className="row-icon"><Clock3 size={16} /></span>
             <div className="row-main"><strong className="row-title">{label(a.id || "Scheduled work")}</strong><small>{nodes.find((n) => n.id === a.node)?.title || "Workspace"} · {a.when}</small></div>
             <div className="row-actions"><Status>{a.here ? "On this machine" : "Another machine"}</Status><Button variant="ghost" size="sm" onClick={() => go({ view: "project", node: a.node })}>Open project</Button></div>
           </div>
-        ))}</div>
+        )} />
         {!list(s.schedules).length && <p className="muted inset-text">No recurring work. Ask a coordinator to schedule a check or a report.</p>}
       </section>
     </>
@@ -161,7 +161,7 @@ export function Threads({ s, active, go }: { s: RecordData; active: boolean; go:
         <FilterToolbar query={query} onQuery={setQuery} placeholder="Search threads">
           <RecordPicker s={s} kind="node" label="Thread project" hideLabel value={project} onChange={setProject} allLabel="All projects" placeholder="Search projects" />
         </FilterToolbar>
-        <div className="rows">{rows.map((f, i) => <ThreadRow key={f.node.id + f.job.branch + i} s={s} f={f} go={go} />)}</div>
+        <PagedRows items={rows} noun="thread" render={(f, i) => <ThreadRow key={f.node.id + f.job.branch + i} s={s} f={f} go={go} />} />
         {!rows.length && <Empty text={query || project ? "No thread matches." : "No threads in flight."} action={query || project ? "Clear the filters to see every thread." : "Start a job from a project coordinator."} icon={GitBranch} />}
       </section>
     </>

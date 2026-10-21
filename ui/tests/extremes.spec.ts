@@ -166,3 +166,30 @@ test("touch decision feedback and import undo preserve the operator's place", as
   await expect(page.locator('.reading-sheet').getByRole('textbox',{name:'Command to copy'})).toHaveValue("brain adopt --parent 'root' -- '/demo/pocket-atlas'");
   await context.close();
 });
+
+test("a hundred threads, schedules and project items stay paged, never an unbounded column", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto("/?k=hundred#view=threads");
+  const threads = page.locator("[data-page=threads]");
+  await expect(threads.locator(".row.thread")).toHaveCount(10);
+  await expect(threads.locator(".table-footer")).toContainText("1–10 of 100 threads");
+  const height = () => page.locator("#workspace-content").evaluate((e) => e.scrollHeight / e.clientHeight);
+  expect(await height()).toBeLessThan(2.5);
+  await page.evaluate(() => (location.hash = "view=jobs"));
+  await expect(page.locator("[aria-label='Recurring work'] [data-item]")).toHaveCount(10);
+  const state = await (await page.request.get("/api/state?k=hundred")).json();
+  const last = state.nodes[state.nodes.length - 1].id;
+  await page.evaluate((id) => (location.hash = "view=project&node=" + id), last);
+  const project = page.locator("[data-page=project]");
+  const work = project.locator("[aria-label=Work]"), notes = project.locator("[aria-label=Notes]");
+  for (const tab of ["Needs you", "Activity"]) {
+    await work.getByRole("tab", { name: new RegExp("^" + tab) }).click();
+    expect(await work.locator("[role=tabpanel]:visible [data-item]").count()).toBeLessThanOrEqual(10);
+  }
+  for (const tab of ["Decisions", "Limits", "Reports"]) {
+    await notes.getByRole("tab", { name: new RegExp("^" + tab) }).click();
+    await expect(notes.locator("[role=tabpanel]:visible [data-item]")).toHaveCount(10);
+    await expect(notes.locator("[role=tabpanel]:visible .table-footer")).toContainText("of 100");
+  }
+  expect(await height()).toBeLessThan(2.5);
+});

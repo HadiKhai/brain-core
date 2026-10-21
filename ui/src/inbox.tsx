@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { ArrowUpRight } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { FilterToolbar, Text, Reader, Empty, Choice, ScreenAction, ActionLink, Status } from "./shared";
@@ -73,6 +73,16 @@ export function Pager({ total, page, size, onPage, onSize, noun }: { total: numb
   );
 }
 
+// Any list that can grow: ten rows at a time with a pager, never an unbounded column.
+export function PagedRows<T>({ items, render, noun, size: initial = 10, className = "rows" }: { items: T[]; render: (item: T, i: number) => ReactNode; noun: string; size?: number; className?: string }) {
+  const [page, setPage] = useState(0), [size, setSize] = useState(initial);
+  const pages = Math.max(1, Math.ceil(items.length / size)), current = Math.min(page, pages - 1);
+  return <>
+    <div className={className}>{items.slice(current * size, (current + 1) * size).map((item, i) => render(item, current * size + i))}</div>
+    {items.length > initial && <Pager total={items.length} page={current} size={size} onPage={setPage} onSize={setSize} noun={noun} />}
+  </>;
+}
+
 export function InboxView({ s, go, tab, active }: { s: RecordData; go: Go; tab: string | null; active: boolean }) {
   const [query, setQuery] = useState(""), [project, setProject] = useState<Found | null>(null), [page, setPage] = useState(0), [size, setSize] = useState(10);
   const nodes = list(s.nodes), title = (id: string) => nodes.find((n) => n.id === id)?.title || "";
@@ -81,10 +91,16 @@ export function InboxView({ s, go, tab, active }: { s: RecordData; go: Go; tab: 
   const current = tab === "due" ? "due" : "inbox", rows = current === "due" ? steps : requests;
   const shown = rows.slice(page * size, (page + 1) * size);
   const next = requests[0], conversation = next && (safeHref(next.link) || safeHref(nodes.find((n) => n.id === next.node)?.coordinator));
+  // The primary action follows the tab: the next request, or the next coordinator step.
+  const step = steps[0];
+  const stepLink = step && safeHref(nodes.find((n) => n.id === step.node)?.coordinator);
   const reset = () => { setQuery(""); setProject(null); setPage(0); };
   return (
     <>
-      <ScreenAction active={active}>{conversation ? <ActionLink href={conversation} primary>{next?.default ? "Review next step" : /question|answer|\?/i.test(next?.text || "") ? "Answer next question" : "Open next request"}</ActionLink> : <Button onClick={() => document.querySelector<HTMLInputElement>('[aria-label="Search inbox"]')?.focus()}>Find a request</Button>}</ScreenAction>
+      <ScreenAction active={active}>{current === "due"
+        ? step ? stepLink ? <ActionLink href={stepLink} primary>{step.ready ? "Review ready job" : "Open next step"}</ActionLink> : <Button onClick={() => go({ view: "project", node: step.node, tab: "needs" })}>{step.ready ? "Review ready job" : "Open next step"}</Button>
+          : <Button onClick={() => go({ view: "inbox" })}>Back to requests</Button>
+        : conversation ? <ActionLink href={conversation} primary>{next?.default ? "Review next step" : /question|answer|\?/i.test(next?.text || "") ? "Answer next question" : "Open next request"}</ActionLink> : <Button onClick={() => document.querySelector<HTMLInputElement>('[aria-label="Search inbox"]')?.focus()}>Find a request</Button>}</ScreenAction>
       <section className="surface" aria-label="Waiting for you">
         <FilterToolbar query={query} onQuery={(v) => { setQuery(v); setPage(0); }} placeholder="Search inbox">
           <RecordPicker s={s} kind="node" label="Inbox project" hideLabel value={project} onChange={(v) => { setProject(v); setPage(0); }} allLabel="All projects" placeholder="Search projects" />

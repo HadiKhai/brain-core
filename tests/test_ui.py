@@ -112,6 +112,12 @@ class LiveView(Scenario):
             notices = urllib.request.urlopen(url + "assets/THIRD_PARTY_NOTICES.txt", timeout=5).read()
             self.assertIn(b"react ", notices)
             self.assertIn(b"SIL OPEN FONT LICENSE", urllib.request.urlopen(url + "assets/Geist-OFL.txt", timeout=5).read())
+            # A rebuild while serving: the shell follows the files on disk, never stale asset names.
+            shell = r / "core/ui/dist/index.html"
+            rebuilt = page.replace(b"<title>", b"<title>Rebuilt ")
+            shell.write_bytes(rebuilt)
+            self.assertEqual(urllib.request.urlopen(url, timeout=5).read(), rebuilt)
+            shell.write_bytes(page)
             script = next(a for a in assets if a.endswith(b".js"))
             self.assertIn(b"__STATE__", urllib.request.urlopen(url + script.decode()[2:], timeout=5).read())
             for path in ("assets/../index.html", "assets/%2e%2e%2findex.html", "assets/%2e%2e%5cindex.html", "assets/.hidden", "assets/nope.js", "assets/%00.js", "assets/a%00b", "assets/%0A.js", "assets/%FF.js"):

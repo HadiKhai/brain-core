@@ -428,7 +428,14 @@ def cmd_ui(a):
         print(json.dumps(ui_state(inst, len(_m_check.collect_problems(inst)[0]), scan, spend_budget=None), indent=1))
         return
     assets = _m_common.CORE / "ui" / "dist"
-    page = (assets / "index.html").read_bytes()
+    started = (assets / "index.html").read_bytes()
+
+    def page():
+        # Read the shell at each request: after a rebuild its asset names must match the files on disk.
+        try:
+            return (assets / "index.html").read_bytes()
+        except OSError:
+            return started
     lock, cond = threading.Lock(), threading.Condition()
     box = {"json": b"", "version": 0, "problems": None, "checked": 0.0}
 
@@ -473,7 +480,7 @@ def cmd_ui(a):
             url = urllib.parse.urlsplit(self.path)
             given = urllib.parse.parse_qs(url.query).get("k", [""])[0]
             if url.path in ("/", "/index.html"):
-                return self.send(200, page, "text/html; charset=utf-8")  # the page holds no data; the API does
+                return self.send(200, page(), "text/html; charset=utf-8")  # the page holds no data; the API does
             if url.path.startswith("/assets/"):
                 # Serve only committed build assets, never arbitrary paths or symlinks.
                 name = urllib.parse.unquote(url.path[len("/assets/"):])

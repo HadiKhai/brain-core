@@ -94,9 +94,13 @@ export function audit(rule: string): Violation[] {
       for (const option of list.querySelectorAll("[role=option], [role=menuitem]")) {
         const r = option.getBoundingClientRect();
         if (r.right > box.right + 1 || r.left < box.left - 1) add(`option ${describe(option)} is wider than its menu`);
+        const tooltip = !!option.closest("[data-slot=tooltip-trigger]") || !!option.querySelector("[data-slot=tooltip-trigger]");
         for (const e of [option, ...option.querySelectorAll("*")]) {
           if (e.scrollWidth > e.clientWidth + 1 && getComputedStyle(e).textOverflow !== "ellipsis" && e.clientWidth > 0)
             add(`option text ${describe(e)} overflows without an ellipsis (${e.scrollWidth} > ${e.clientWidth})`);
+          // A line clamp hides text too: it needs the full text in a tooltip, or the text must wrap in full.
+          if (e.scrollHeight > e.clientHeight + 1 && e.clientHeight > 0 && getComputedStyle(e).overflowY !== "visible" && !tooltip && name(e))
+            add(`option text ${describe(e)} is clamped vertically with no way to read it (${e.scrollHeight} > ${e.clientHeight})`);
         }
       }
     }

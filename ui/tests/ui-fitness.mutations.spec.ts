@@ -45,6 +45,16 @@ test("options rejects menu text that overflows without an ellipsis", async ({ pa
     () => tag.evaluate((e: Element) => e.remove()), "overflows without an ellipsis");
 });
 
+test("options rejects a name clamped to fewer lines with no full text", async ({ page }) => {
+  await open(page, "view=learnings", "longtitle");
+  await page.getByRole("combobox", { name: "Specialist", exact: true }).click();
+  await page.locator("[role=listbox] [role=option]").first().waitFor();
+  let tag: any;
+  await proves(page, "options", "picker names clamped to one line",
+    async () => { tag = await style(page, ".picker-item-title { display: -webkit-box !important; -webkit-line-clamp: 1; -webkit-box-orient: vertical; overflow: hidden !important; }"); },
+    () => tag.evaluate((e: Element) => e.remove()), "clamped vertically");
+});
+
 test("scrollbars rejects the platform default", async ({ page }) => {
   await open(page, "view=jobs", "hundred");
   let tag: any;

@@ -15,11 +15,11 @@ test("snapshot search ranks exactly like the server: exact, start, word start, c
   const ours = rank.localSearch(state, "node", "ana").items.map((i) => i.title);
   assert.deepEqual(ours, ["ana", "Ana Lima", "Ánalyst", "Bruno Ana", "Mariana"]);
   const py = JSON.parse(execFileSync("python3", ["-c", `
-import importlib.machinery, importlib.util, json, sys
-loader = importlib.machinery.SourceFileLoader("b", sys.argv[1])
-m = importlib.util.module_from_spec(importlib.util.spec_from_loader("b", loader)); loader.exec_module(m)
+import json, sys
+sys.path.insert(0, sys.argv[1])
+from brain import ui as m
 print(json.dumps([m.ui_search(json.loads(sys.argv[2]), "node", q)["items"] for q in ("ana", "", "lima", "مدرسه")]))`,
-    new URL("../../bin/brain", import.meta.url).pathname, JSON.stringify({ ...state, nodes: [...state.nodes, { id: "ar", title: "مدرسة" }] })], { encoding: "utf8" }));
+    new URL("../../lib", import.meta.url).pathname, JSON.stringify({ ...state, nodes: [...state.nodes, { id: "ar", title: "مدرسة" }] })], { encoding: "utf8" }));
   const local = ["ana", "", "lima", "مدرسه"].map((q) => rank.localSearch({ ...state, nodes: [...state.nodes, { id: "ar", title: "مدرسة" }] }, "node", q).items);
   assert.deepEqual(local, py);
   const many = { nodes: Array.from({ length: 45 }, (_, i) => ({ id: "p" + i, title: "Project " + i })) };

@@ -2,7 +2,7 @@ import { ArrowUpRight, FolderPlus, GitCommitHorizontal } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { DataTable, Status, Text, Empty, Reader, Preview, Command, TechnicalDetails, ActionLink, ScreenAction, Tip } from "./shared";
 import { Kpi, Spark, SectionTabs } from "./dash";
-import { DueRow, RequestRow } from "./inbox";
+import { DueRow, RequestRow, PagedRows } from "./inbox";
 import { ThreadRow } from "./agents";
 import { list, count, time, flight, threads, jobTitle, closed, safeHref, nowOf, within, type RecordData } from "./model";
 import type { Route } from "./routes";
@@ -46,12 +46,11 @@ export function Project({ s, route, go, active }: { s: RecordData; route: Route;
         <SectionTabs value={route.tab && ["needs", "threads", "jobs", "activity"].includes(route.tab) ? route.tab : needs.length ? "needs" : "threads"}
           onValue={(tab) => go({ view: "project", node: n.id, tab })}
           tabs={[
-            { id: "needs", label: "Needs you", count: needs.length, body: needs.length ? <div className="rows">
-                {(n.blocked as string[] || []).map((t: string, i: number) => <div className="row" data-item key={"b" + i}><div className="row-main"><div className="row-line"><Status>Blocked</Status></div><p className="row-text"><Text>{t}</Text></p></div><div className="row-actions"><Reader title="Blocked" text={t} trigger="Read" /></div></div>)}
-                {inbox.map((a, i) => <RequestRow key={a.id || i} s={s} item={a} go={go} showProject={false} />)}
-                {due.map((d, i) => <DueRow key={"d" + i} s={s} item={d} go={go} showProject={false} />)}
-              </div> : <Empty text="Nothing needs you here." action="Questions and coordinator steps for this project arrive here." /> },
-            { id: "threads", label: "Threads", count: work.length, body: work.length ? <div className="rows">{work.map((f, i) => <ThreadRow key={f.job.branch + i} s={s} f={f} go={go} showProject={false} highlight={route.thread === f.job.branch} />)}</div>
+            { id: "needs", label: "Needs you", count: needs.length, body: needs.length ? <PagedRows items={needs} noun="item" render={(a: RecordData, i) =>
+                a.kind === "blocked" && !a.id && typeof a.text === "string" && !("first_seen" in a)
+                  ? <div className="row" data-item key={"b" + i}><div className="row-main"><div className="row-line"><Status>Blocked</Status></div><p className="row-text"><Text>{a.text}</Text></p></div><div className="row-actions"><Reader title="Blocked" text={a.text} trigger="Read" /></div></div>
+                  : "first_seen" in a ? <RequestRow key={a.id || i} s={s} item={a} go={go} showProject={false} /> : <DueRow key={"d" + i} s={s} item={a} go={go} showProject={false} />} /> : <Empty text="Nothing needs you here." action="Questions and coordinator steps for this project arrive here." /> },
+            { id: "threads", label: "Threads", count: work.length, body: work.length ? <PagedRows items={[...work].sort((a, b) => Number(b.job.branch === route.thread) - Number(a.job.branch === route.thread))} noun="thread" render={(f, i) => <ThreadRow key={f.job.branch + i} s={s} f={f} go={go} showProject={false} highlight={route.thread === f.job.branch} />} />
                 : <Empty text="No threads in flight." action="Start a job from this project's coordinator." /> },
             { id: "jobs", label: "Jobs", count: rows.length, body: <DataTable rows={rows} name="jobs" columns={[
                 { key: "Job", label: "Job", render: (r) => <Text>{jobTitle(r.Job)}</Text> },
@@ -60,22 +59,22 @@ export function Project({ s, route, go, active }: { s: RecordData; route: Route;
                 { key: "Outcome", label: "Outcome", render: (r) => <div><Status>{r.Outcome || "Open"}</Status>{r.Cause && <small><Text>{r.Cause}</Text></small>}</div> },
                 { key: "Reviews", label: "Reviews", numeric: true },
               ]} /> },
-            { id: "activity", label: "Activity", count: feed.length, body: feed.length ? <div className="rows log">{feed.slice(0, 30).map((r, i) => (
+            { id: "activity", label: "Activity", count: feed.length, body: feed.length ? <PagedRows className="rows log" items={feed} noun="entry" render={(r, i) => (
                 <div className="row" data-item key={i}>
                   <span className="row-icon"><GitCommitHorizontal size={16} /></span>
                   <div className="row-main"><strong className="row-title"><Text>{r.text}</Text></strong><small>{r.kind}</small></div>
                   <div className="row-actions"><small className="tabular-nums">{time(r.t, s.brain?.tz)}</small>{r.said && <Reader title={r.text} text={[r.text, r.said].join("\n\n")} trigger="Read" />}</div>
-                </div>))}</div> : <Empty text="No recent activity." action="Commits and decisions for this project appear here." /> },
+                </div>)} /> : <Empty text="No recent activity." action="Commits and decisions for this project appear here." /> },
           ]} />
       </section>
       <section className="surface" aria-label="Notes">
         <SectionTabs tabs={[
           ...notes.map(([k, v]) => ({ id: "note-" + k, label: k, body: <div className="note-body"><Preview text={v} title={k} /></div> })),
-          ...(list(n.decisions).length ? [{ id: "decisions", label: "Decisions", count: n.decisions.length, body: <div className="rows">{n.decisions.map((d: RecordData, i: number) => (
-              <div className="row" data-item key={i}><div className="row-main"><strong className="row-title"><Text>{d.title}</Text></strong>{d.said && <small className="clamp-1"><Text>{d.said}</Text></small>}</div><div className="row-actions"><small className="tabular-nums">{time(d.t || d.time, s.brain?.tz)}</small>{d.said && <Reader title="Decision" text={[d.title, d.said].join("\n\n")} trigger="Read" />}</div></div>))}</div> }] : []),
-          ...(list(n.limits).length ? [{ id: "limits", label: "Limits", count: n.limits.length, body: <ul className="plain-list">{n.limits.map((t: string, i: number) => <li key={i}><Text>{t}</Text></li>)}</ul> }] : []),
-          ...(list(n.reports).length ? [{ id: "reports", label: "Reports", count: n.reports.length, body: <div className="rows">{n.reports.map((r: RecordData, i: number) => (
-              <div className="row" data-item key={i}><div className="row-main"><strong className="row-title"><Text>{r.title}</Text></strong></div><div className="row-actions"><Reader title={r.title || "Report"} text="Ask the coordinator to open this report for review." trigger="Open report details"><TechnicalDetails values={{ Location: r.path }} /></Reader></div></div>))}</div> }] : []),
+          ...(list(n.decisions).length ? [{ id: "decisions", label: "Decisions", count: n.decisions.length, body: <PagedRows items={n.decisions as RecordData[]} noun="decision" render={(d: RecordData, i: number) => (
+              <div className="row" data-item key={i}><div className="row-main"><strong className="row-title"><Text>{d.title}</Text></strong>{d.said && <small className="clamp-1"><Text>{d.said}</Text></small>}</div><div className="row-actions"><small className="tabular-nums">{time(d.t || d.time, s.brain?.tz)}</small>{d.said && <Reader title="Decision" text={[d.title, d.said].join("\n\n")} trigger="Read" />}</div></div>)} /> }] : []),
+          ...(list(n.limits).length ? [{ id: "limits", label: "Limits", count: n.limits.length, body: <PagedRows items={n.limits as string[]} noun="limit" render={(t: string, i: number) => <div className="row" data-item key={i}><div className="row-main"><p className="row-text plain"><Text>{t}</Text></p></div><div className="row-actions"><Reader title="Limit" text={t} trigger="Read" /></div></div>} /> }] : []),
+          ...(list(n.reports).length ? [{ id: "reports", label: "Reports", count: n.reports.length, body: <PagedRows items={n.reports as RecordData[]} noun="report" render={(r: RecordData, i: number) => (
+              <div className="row" data-item key={i}><div className="row-main"><strong className="row-title"><Text>{r.title}</Text></strong></div><div className="row-actions"><Reader title={r.title || "Report"} text="Ask the coordinator to open this report for review." trigger="Open report details"><TechnicalDetails values={{ Location: r.path }} /></Reader></div></div>)} /> }] : []),
           { id: "about", label: "About", body: <div className="about">
               <dl className="detail-facts">
                 <dt>State</dt><dd><Status>{projectState(n)}</Status></dd>

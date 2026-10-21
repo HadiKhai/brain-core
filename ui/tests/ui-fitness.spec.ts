@@ -65,8 +65,10 @@ test("§15 one-title at phone width", async ({ page }) => {
 });
 
 test("§15 options never overflow", async ({ page }) => {
-  await open(page, "long");
-  const found = await everyRoute(page, async () => {
+  const found: Violation[] = [];
+  for (const scenario of ["long", "longtitle"]) {
+  await open(page, scenario);
+  found.push(...await everyRoute(page, async () => {
     const result: Violation[] = [];
     const triggers = page.locator("[data-page]:not([hidden]) [role=combobox]:visible");
     for (let i = 0; i < (await triggers.count()); i++) {
@@ -82,7 +84,8 @@ test("§15 options never overflow", async ({ page }) => {
       await page.locator("[role=listbox]:visible").waitFor({ state: "detached", timeout: 2000 }).catch(() => page.keyboard.press("Escape"));
     }
     return result;
-  });
+  }));
+  }
   record("options", found);
   expect(found, found.map((v) => v.detail).join("\n")).toEqual([]);
 });

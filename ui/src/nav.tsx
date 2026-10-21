@@ -1,4 +1,4 @@
-import { useState, type CSSProperties, type KeyboardEvent } from "react";
+import { useRef, useState, type CSSProperties, type KeyboardEvent, type ReactElement, type ReactNode } from "react";
 import {
   Brain, Inbox as InboxIcon, BookOpen, Bot, ChartNoAxesCombined, ChevronDown, ChevronRight, FolderTree, FolderGit2,
   ArrowUpRight, LayoutDashboard, MessagesSquare, Plus, Search, Share2, ShieldCheck, Workflow, X, Users,
@@ -9,7 +9,7 @@ import {
   SidebarMenuAction, SidebarInput, useSidebar,
 } from "@/components/ui/sidebar";
 import { Button } from "@/components/ui/button";
-import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem } from "@/components/ui/dropdown-menu";
+import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem, DropdownMenuGroup, DropdownMenuLabel } from "@/components/ui/dropdown-menu";
 import { list, quote, safeHref, treeRows, threads, tone, jobTitle, learningRows, type RecordData } from "./model";
 import { fold } from "./search";
 import { writeRoute, type Route } from "./routes";
@@ -37,6 +37,8 @@ export function Navigation({ s, route, go, onAdd, onNotice }: {
     </SidebarMenuItem>
   );
   const agentsActive = ["specialists", "jobs", "threads", "usage"].includes(route.view);
+  const collapsed = useSidebar().state === "collapsed" && !isMobile;
+  const agentAreas = [["specialists", "Specialists", list(s?.specialists).length, Users], ["jobs", "Jobs", nodes.reduce((a, n) => a + list(n.jobs?.open).length, 0), Workflow], ["threads", "Threads", open.length, MessagesSquare], ["usage", "Usage", 0, ChartNoAxesCombined]] as const;
   const proposed = s ? learningRows(s).filter((r) => r.state === "proposed" && !r.specialist).length : 0;
   return (
     <Sidebar variant="inset" collapsible="icon" className="app-sidebar">
@@ -85,10 +87,15 @@ export function Navigation({ s, route, go, onAdd, onNotice }: {
                 const active = route.view === "project" && route.node === n.id;
                 return (
                   <SidebarMenuItem key={n.id} className="tree-item" style={{ "--depth": filter ? 0 : Math.min(depth, 4) } as CSSProperties}>
-                    <SidebarMenuButton isActive={active && !route.thread} tooltip={n.title || "Project"} aria-current={active ? "page" : undefined} onClick={() => goto({ view: "project", node: n.id })}>
+                    <RailFlyout label={n.title || "Project"} items={[
+                      { key: "page", label: "Project page", icon: <FolderGit2 />, active: active && !route.thread, href: writeRoute({ view: "project", node: n.id }) },
+                      ...(safeHref(n.coordinator) ? [{ key: "coordinator", label: "Coordinator", icon: <MessagesSquare />, href: safeHref(n.coordinator), external: true }] : []),
+                      ...work.map((f) => ({ key: f.job.branch, label: jobTitle(f.job.branch), icon: <i className={"dot tone-" + tone(f, due)} />, active: active && route.thread === f.job.branch, href: writeRoute({ view: "project", node: n.id, thread: f.job.branch, tab: "threads" }) })),
+                    ].filter((i) => i.key !== "page" || work.length || safeHref(n.coordinator))} button={
+                    <SidebarMenuButton isActive={active && !route.thread} tooltip={collapsed && (work.length || safeHref(n.coordinator)) ? undefined : n.title || "Project"} aria-current={active ? "page" : undefined} onClick={() => goto({ view: "project", node: n.id })}>
                       <span className="tree-glyph"><FolderGit2 /><i className={"dot live-dot tone-" + (work.some((f) => tone(f, due) === "working" || tone(f, due) === "review") ? "working" : needs(n.id) ? "blocked" : "idle")} aria-hidden /></span>
                       <span className="truncate" dir="auto">{n.title || "Untitled project"}</span>
-                    </SidebarMenuButton>
+                    </SidebarMenuButton>} />
                     {children && !filter ? (
                       <SidebarMenuAction aria-label={(closed[n.id] ? "Expand " : "Collapse ") + (n.title || "project")} onClick={() => setClosed({ ...closed, [n.id]: !closed[n.id] })}>
                         {closed[n.id] ? <ChevronRight /> : <ChevronDown />}
@@ -123,11 +130,12 @@ export function Navigation({ s, route, go, onAdd, onNotice }: {
             <SidebarGroupLabel>Agents</SidebarGroupLabel>
             <SidebarMenu>
               <SidebarMenuItem>
-                <SidebarMenuButton isActive={false} tooltip="Agents" onClick={() => goto({ view: agentsActive ? route.view : "specialists" })}>
-                  <Bot /><span>Agents</span>
-                </SidebarMenuButton>
+                <RailFlyout label="Agents" items={agentAreas.map(([view, title, count, Icon]) => ({ key: view, label: title, count, icon: <Icon />, active: route.view === view, href: writeRoute({ view }) }))}
+                  button={<SidebarMenuButton isActive={false} tooltip={collapsed ? undefined : "Agents"} onClick={() => goto({ view: agentsActive ? route.view : "specialists" })}>
+                    <Bot /><span>Agents</span>
+                  </SidebarMenuButton>} />
                 <SidebarMenuSub>
-                  {([["specialists", "Specialists", list(s?.specialists).length, Users], ["jobs", "Jobs", nodes.reduce((a, n) => a + list(n.jobs?.open).length, 0), Workflow], ["threads", "Threads", open.length, MessagesSquare], ["usage", "Usage", 0, ChartNoAxesCombined]] as const).map(([view, title, count, Icon]) => (
+                  {agentAreas.map(([view, title, count, Icon]) => (
                     <SidebarMenuSubItem key={view}>
                       <SidebarMenuSubButton isActive={route.view === view} aria-current={route.view === view ? "page" : undefined} href={writeRoute({ view })} onClick={() => isMobile && setOpenMobile(false)}>
                         <Icon /><span>{title}</span>{count ? <span className="sub-count">{count}</span> : null}
@@ -151,6 +159,34 @@ export function Navigation({ s, route, go, onAdd, onNotice }: {
         <div className="sidebar-foot"><ShieldCheck size={14} /><span>Local and read-only</span></div>
       </SidebarFooter>
     </Sidebar>
+  );
+}
+
+// The collapsed rail keeps every sub-item reachable: hover, focus or tap on the parent opens a flyout
+// beside it. Choosing a destination navigates; the rail stays collapsed.
+type FlyItem = { key: string; label: string; icon: ReactNode; count?: number; active?: boolean; href?: string; external?: boolean };
+function RailFlyout({ label, items, button }: { label: string; items: FlyItem[]; button: ReactElement }) {
+  const { state, isMobile } = useSidebar();
+  const [open, setOpen] = useState(false), closedAt = useRef(0);
+  if (state !== "collapsed" || isMobile || !items.length) return button;
+  return (
+    <DropdownMenu open={open} onOpenChange={(o) => { if (!o) closedAt.current = Date.now(); setOpen(o); }}>
+      <DropdownMenuTrigger openOnHover delay={80} closeDelay={160} render={button} onFocus={() => {
+        // Focus arriving from the rail opens it; focus returning as the flyout closes (Escape) does not.
+        if (Date.now() - closedAt.current > 200) setOpen(true);
+      }} />
+      <DropdownMenuContent side="right" align="start" sideOffset={8} className="rail-flyout">
+        <DropdownMenuGroup>
+          <DropdownMenuLabel>{label}</DropdownMenuLabel>
+          {items.map((i) => (
+            <DropdownMenuItem key={i.key} data-active={i.active || undefined}
+              render={<a href={i.href} {...(i.external ? { target: "_blank", rel: "noreferrer" } : {})} />}>
+              {i.icon}<span className="truncate">{i.label}</span>{i.count ? <span className="sub-count">{i.count}</span> : null}
+            </DropdownMenuItem>
+          ))}
+        </DropdownMenuGroup>
+      </DropdownMenuContent>
+    </DropdownMenu>
   );
 }
 

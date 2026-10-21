@@ -113,11 +113,11 @@ if __name__ == "__main__":
     import threading
     parser=argparse.ArgumentParser();parser.add_argument('--port',type=int,default=4109);args=parser.parse_args()
     import os
-    import importlib.machinery, importlib.util
+    import sys
     dist=Path(os.environ.get('UI_DIST') or Path(__file__).resolve().parents[1]/'dist')
-    # The picker's search is the CLI's own: same ranking, same paging, on this synthetic state.
-    loader=importlib.machinery.SourceFileLoader('brain_fixture',str(Path(__file__).resolve().parents[2]/'bin'/'brain'))
-    brain=importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name,loader));loader.exec_module(brain)
+    # The picker's search is the core's own (lib/brain/ui.py): same ranking, same paging, on this synthetic state.
+    sys.path.insert(0,str(Path(__file__).resolve().parents[2]/'lib'))
+    from brain import ui as brain
     overrides={}
     revision=[0]
 

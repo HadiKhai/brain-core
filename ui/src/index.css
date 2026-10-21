@@ -608,7 +608,8 @@ svg.searching .gnode:not(.match):not(.selected) { opacity: 0.28; }
 .window-meter { gap: 2px; }
 .window-meter .meter-heading { line-height: 1.3; }
 .meter-foot { line-height: 1.3; }
-.picker-item-title { white-space: normal !important; overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+/* A picked name is never cut: it wraps inside a menu that widens up to its maximum. */
+.picker-item-title { white-space: normal !important; overflow-wrap: anywhere; overflow: visible !important; text-overflow: clip !important; }
 .row[data-slot="button"] { height: auto; justify-content: flex-start; border-radius: 0; font-weight: 400; white-space: normal; }
 .row[data-slot="button"]:hover { background: var(--row-hover); }
 .crumbs .crumb { padding: 0; height: auto; font-size: 12.5px; color: var(--muted-foreground); }
@@ -637,3 +638,11 @@ svg.searching .gnode:not(.match):not(.selected) { opacity: 0.28; }
 [data-slot="button"].bg-primary:hover, .primary-link:hover { background: color-mix(in srgb, var(--primary) 86%, #000) !important; filter: none; }
 .dark [data-slot="button"].bg-primary:hover, .dark .primary-link:hover { background: color-mix(in srgb, var(--primary) 86%, #fff) !important; }
 [data-slot="input-group-control"]:focus-visible, .picker-search input:focus-visible { outline: none; }
+.rail-flyout { min-width: 200px; max-width: 280px; }
+.rail-flyout [data-slot="dropdown-menu-item"][data-active] { background: var(--muted); font-weight: 550; }
+.rail-flyout [data-slot="dropdown-menu-item"] a, .rail-flyout a[data-slot="dropdown-menu-item"] { color: inherit; text-decoration: none; }
+/* Collapsed rail: hidden group labels never sit over an item, and the switcher shows only its tile. */
+[data-collapsible="icon"] [data-slot="sidebar-group-label"] { pointer-events: none; }
+[data-collapsible="icon"] .workspace-switcher { padding: 4px !important; justify-content: center !important; }
+[data-collapsible="icon"] .workspace-switcher .workspace-name, [data-collapsible="icon"] .workspace-switcher > svg:last-child { display: none; }
+.row-text.plain { color: var(--foreground); }

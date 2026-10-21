@@ -85,3 +85,14 @@ test("coordinator steps name their job and render inline code", async ({ page })
   await expect(blocked).toContainText("Project status");
   await expect(blocked.locator(".row-line small")).not.toContainText("Morgan");
 });
+
+test("the Inbox primary action follows the active tab", async ({ page }) => {
+  await page.goto("/?k=demo#view=inbox");
+  const primary = page.locator("#screen-action-host a, #screen-action-host button");
+  await expect(primary).toHaveText(/Answer next question/);
+  await page.getByRole("tab", { name: /^Coordinator steps/ }).click();
+  await expect(primary).toHaveText(/Review ready job/);              // the first step is a ready job
+  await expect(primary).toHaveAttribute("href", /\/conversation$/);   // its project's coordinator
+  await page.getByRole("tab", { name: /^Requests/ }).click();
+  await expect(primary).toHaveText(/Answer next question/);
+});
