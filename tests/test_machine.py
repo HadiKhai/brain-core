@@ -204,17 +204,20 @@ class MachineCare(Scenario):
             line = "- fixture from brain: " + ("hold heavy work: sustained 5-minute load" if transition == "open"
                                                else "heavy work hold cleared")
             inbox.write_text(initial + line + " [machine episode " + "a" * 24 + " " + transition + "]\n")
-            # Node hygiene creates facts at init; changing the inbox legitimately stales them.
-            self.assertTrue(any(i["kind"] == "stale-status" for i in due("root")))
+            # Retired machine records do not change inbox attention or stale the facts.
+            self.assertFalse(any(i["kind"] == "stale-status" for i in due("root")))
             m.refresh_status(inst, inst.node("root"))
             self.assertEqual(due("root"), [])  # old sampler lines no longer create coordinator work
             self.assertEqual(due("maple"), [])
             self.assertEqual(due("ash"), [])
             self.assertEqual(len([i for i in due() if i["kind"] == "machine"]), 0)
-            inbox.write_text(initial)  # coordinator handles the one matching inbox action
-            self.assertTrue(any(i["kind"] == "stale-status" for i in due("root")))
+            inbox.write_text(initial)  # Removing historical noise is equally quiet.
+            self.assertFalse(any(i["kind"] == "stale-status" for i in due("root")))
             m.refresh_status(inst, inst.node("root"))
             self.assertEqual(due("root"), [])  # heat still high, no repeated synthetic episode
+        inbox.write_text(initial + "- fixture question: choose a plan\n")
+        self.assertTrue(any(i["kind"] == "stale-status" for i in due("root")))
+        self.assertTrue(any(i["kind"] == "inbox" for i in due("root")))
         # Snapshot telemetry never makes a quiet node's status stale as load varies.
         n = inst.node("maple")
         with mock.patch.object(m, "machine_reading", return_value=dict(high)):
