@@ -456,7 +456,8 @@ def compare(before, after, expected_changes=None):
                 added = (collections.Counter(map(identity, current))
                          - collections.Counter(map(identity, previous)))
                 expected = (expected_changes or {}).get(key)
-                if expected is not None and expected in current and added[identity(expected)]:
+                if (expected is not None and expected in current and added[identity(expected)]
+                        and all(identity(item) != identity(expected) for item in previous)):
                     added[identity(expected)] -= 1
                 if +added:
                     flags.append(key + ': new due items')

@@ -129,6 +129,13 @@ class StableComparisons(unittest.TestCase):
     def test_non_warning_byte_counts_are_not_normalized(self):
         self.assertNotEqual(rehearsal.normalize('payload: 10 bytes'), rehearsal.normalize('payload: 20 bytes'))
 
+    def test_expected_notice_cannot_exempt_duplicate_of_existing_identity(self):
+        notice = dict(node='root', kind='core-changes', text='candidate notice')
+        before = {'due:0': result(json.dumps([{**notice, 'text': 'existing notice'}]))}
+        after = {'due:0': result(json.dumps([notice, notice]))}
+        self.assertIn('due:0: new due items',
+                      rehearsal.compare(before, after, {'due:0': notice}))
+
 
 class CandidateNotices(RehearsalFixture):
     def test_only_candidate_changes_notice_is_expected(self):
