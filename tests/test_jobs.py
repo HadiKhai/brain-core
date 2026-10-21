@@ -703,9 +703,19 @@ class ThreadSettlement(AutonomyProject):
         self.b(r, "jobs", "source", "--branch", job, "--settled")
         # Execute the actual parent of the feature-introducing commit, not a modified new writer.
         source = Path(__file__).resolve().parent.parent
-        introduced = subprocess.run(["git", "log", "-1", "--format=%H", "-S", "def closed_job(row):",
-                                     "--", "bin/brain"], cwd=source, env=self.env, capture_output=True, text=True)
-        revision = introduced.stdout.strip() + "^" if introduced.stdout.strip() else "HEAD"
+        history = subprocess.run(["git", "log", "--format=%H", "-S", "def closed_job(row):",
+                                  "--", "bin/brain"], cwd=source, env=self.env, capture_output=True, text=True)
+        # A module move removes the definition from bin/brain. Select the actual
+        # addition, rather than treating the most recent removal as its origin.
+        revision = None
+        for commit in history.stdout.splitlines():
+            added = subprocess.run(["git", "show", commit + ":bin/brain"], cwd=source, env=self.env,
+                                   capture_output=True, text=True)
+            if added.returncode == 0 and 'def closed_job(row):' in added.stdout:
+                revision = commit + "^"
+                break
+        if revision is None:
+            self.skipTest("feature introduction unavailable (installed/shallow source)")
         baseline = subprocess.run(["git", "show", revision + ":bin/brain"], cwd=source, env=self.env,
                                   capture_output=True, text=True)
         if baseline.returncode:

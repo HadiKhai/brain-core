@@ -160,7 +160,7 @@ class SeveralBrains(Scenario):
 
     def test_each_brain_runs_its_own_core(self):
         me, work = self.two()
-        f = work / "core" / "bin" / "brain"
+        f = work / "core" / "lib" / "brain" / "cli.py"
         f.write_text(f.read_text().replace("def main():\n", "def main():\n    print('WORK CORE')\n", 1))
         env = {k: v for k, v in self.env.items() if k != "BRAIN_NO_REEXEC"}
         self.assertIn("WORK CORE", self.anywhere("-b", "work", "now", env={**env, "BRAIN_NO_REEXEC": ""}))
