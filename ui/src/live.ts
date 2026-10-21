@@ -27,7 +27,7 @@ export function watchLive(key: string, state: (value: any) => void, status: (val
       const value = await response.json();
       if (current !== generation || disposed || (document.hidden && !notify)) return;
       state(value);
-      status('Live');
+      status(active ? 'Live' : 'Updates each minute');
       if (active) {
         source?.close();
         source = new EventSource('/api/events?k=' + encodeURIComponent(key));
@@ -48,12 +48,13 @@ export function watchLive(key: string, state: (value: any) => void, status: (val
   const idle = () => {
     active = false;
     close();
+    status('Updates each minute');
     if (!document.hidden || notify) pollTimer = setTimeout(read, 60_000);
   };
   const activity = () => {
     if (disposed || document.hidden) return;
     clearTimeout(idleTimer);
-    idleTimer = setTimeout(idle, 30_000);
+    idleTimer = setTimeout(idle, 5_000);
     if (!active) { active = true; close(); void read(); }
   };
   const visibility = () => {

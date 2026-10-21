@@ -19,8 +19,9 @@ test('live transport backs off when idle, pauses when hidden and resumes on acti
   await expect(page.locator('[data-page]:not([hidden])')).toBeVisible();
   const openStreams = () => page.evaluate(() => (window as any).streams.filter((s: any) => !s.closed).length);
   await expect.poll(openStreams).toBe(1);
-  await page.clock.fastForward(31_000);
+  await page.clock.fastForward(6_000);
   expect(await openStreams()).toBe(0);
+  await expect(page.getByText('Updates each minute', { exact: true })).toBeVisible();
   const initial = reads;
   await page.clock.fastForward(58_000);
   expect(reads).toBe(initial);
@@ -33,7 +34,7 @@ test('live transport backs off when idle, pauses when hidden and resumes on acti
   expect(reads).toBe(hiddenReads);
   await page.evaluate(() => { (window as any).hiddenForTest = false; document.dispatchEvent(new Event('visibilitychange')); });
   await expect.poll(openStreams).toBe(1);
-  await page.clock.fastForward(31_000);
+  await page.clock.fastForward(6_000);
   expect(await openStreams()).toBe(0);
   await page.evaluate(() => document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' })));
   await expect.poll(openStreams).toBe(1);

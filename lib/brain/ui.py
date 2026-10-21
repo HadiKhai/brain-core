@@ -19,6 +19,7 @@ from . import jobs as _m_jobs
 from . import knowledge as _m_knowledge
 from . import machine as _m_machine
 from . import nodes as _m_nodes
+from . import rehearse as _m_rehearse
 from . import schedules as _m_schedules
 from . import spend as _m_spend
 from . import status as _m_status
@@ -531,7 +532,19 @@ class UISpend:
         self.published = float('-inf')
         self.dirty = True
         self.revision = 0
+        self.view = self.view_key()
         self.value = {'complete': False, 'files': 0, 'read': 0, 'runtimes': {}, 'since_week': None}
+
+    def view_key(self):
+        return (frozenset(_m_spend.brain_terms(self.inst)), self.inst.now_dt().date(), int(time.time() // 300))
+
+    def refresh_view(self):
+        key = self.view_key()
+        if key != self.view:
+            self.view = key
+            self.dirty, self.published = True, float('-inf')
+            return True
+        return False
 
     def discover(self):
         sources, allowed, forbidden = _m_spend.spend_sources(self.inst)
@@ -614,6 +627,8 @@ class UIInputs:
         self.verify_globs = []
         self.verify_paths = {}
         self.report_dirs = set()
+        self.core_required = any(_m_rehearse.required(n) for n in inst.nodes())
+        self.core_revision, self.core_at = None, None
         for n in inst.nodes():
             loc = n['local']
             homes = [n['home_path']] if n['home_path'] else []
@@ -710,7 +725,7 @@ class UIInputs:
     @staticmethod
     def topology_key(inst):
         # Coordinator/preview/status edits do not change the watched repositories.
-        return (tuple((n['id'], str(n['home_path']), str(n['local'].get('workbench')), n['fm'].get('verify_inputs'), tuple(sorted(
+        return (tuple((n['id'], str(n['home_path']), str(n['local'].get('workbench')), n['fm'].get('verify_inputs'), n['fm'].get('rehearse'), tuple(sorted(
                     (b, str(w.get('path'))) for b, w in n['local'].get('worktrees', {}).items())))
                       for n in inst.nodes()),
                 tuple(UIInputs.stamp(_m_usage.usage_file(name)) for name in ('subscriptions.json', 'brains.json')),
@@ -744,7 +759,8 @@ class UIInputs:
             while parent:
                 key.extend(self.stamp(parent['dir'] / name) for name in ('node.md', 'never-name.txt'))
                 parent = parent['parent']
-            out[n['id']] = (global_rows, json.dumps(n['local'], sort_keys=True), homes, tuple(sorted(set(key))))
+            out[n['id']] = (global_rows, json.dumps(n['local'], sort_keys=True), homes, tuple(sorted(set(key))),
+                            self.core_revision if _m_rehearse.required(n) else None)
         return out
 
     def worktree_keys(self, inst, signature):
@@ -753,6 +769,8 @@ class UIInputs:
         for n in inst.nodes():
             prefix = str(n['dir']) + '/'
             semantic = [self.stamp(n['dir'] / name) for name in ('node.md', 'never-name.txt', _m_jobs.JOBS_FILE)]
+            if _m_rehearse.required(n):
+                semantic.append(('installed-core', self.core_revision))
             semantic.append(self.stamp(self.root / 'instance.md'))
             semantic.append(('bindings', json.dumps({k: n['local'].get(k) for k in ('home', 'workbench', 'worktrees')}, sort_keys=True)))
             trains = str(n['dir'] / 'job-trains') + '/'
@@ -841,6 +859,15 @@ class UIInputs:
             self.update_listings()
             self.slow_rows = [self.stamp(path) for path in self.slow_files - paths]
             self.slow_at = time.monotonic()
+        if self.core_required:
+            clock = int(time.time() // 300)
+            if (self.root / 'core/.git').exists() or clock != self.core_at:
+                try:
+                    self.core_revision = _m_rehearse.installed_core_commit(self.root)
+                except _m_rehearse.RehearsalError:
+                    self.core_revision = None
+                self.core_at = clock
+            rows.append(('installed-core', self.core_revision))
         self.fast_rows = tuple(rows)
         rows.extend(self.slow_rows)
         indexed = {row[0]: row for row in rows}
@@ -923,6 +950,8 @@ def cmd_ui(a):
                             changed = inputs.signature()
                         problems = cache.problems_for(i, changed)
                         spend.inst = i
+                        if spend.refresh_view():
+                            spend.advance()
                         access = inputs.permission_key()
                         if access != permissions:
                             spend.discover()

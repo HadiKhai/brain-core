@@ -419,3 +419,76 @@ cli.main()
         while listening() and time.monotonic() < deadline:
             time.sleep(0.05)
         self.assertFalse(listening(), 'closing a port remained stale without a file edit')
+
+    def test_new_never_name_rule_rescreens_machine_spend_without_transcript_changes(self):
+        root, state = self.start_server(transcript=True)
+        self.assertIn('demo-model', json.dumps(state()['spend']['since_week']['models']))
+        (root / 'never-name.txt').write_text('demo-model\n')
+        self.assertNotIn('demo-model', json.dumps(state()['spend']['since_week']['models']),
+                         'a newly forbidden model name remained in machine spend')
+
+    def test_installed_core_change_invalidates_rehearsal_display_caches(self):
+        import core_loader
+        import importlib
+        import importlib.util
+        import os
+        from unittest import mock
+        root = self.init('demo')
+        home = self.repo(self.tmp / 'app')
+        self.b(root, 'new', 'app', '--title', 'Demo app', '--home', str(home))
+        self.b(root, 'set', 'app', 'rehearse=required')
+        self.b(root, 'wt', 'add', 'app', 'job-demo')
+        loader = core_loader.SourceFileLoader('brain_idle_core_change_test', str(CORE / 'bin/brain'))
+        core = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+        loader.exec_module(core)
+        ui = core._owners['UIInputs']
+        rehearse = importlib.import_module(ui.__package__ + '.rehearse')
+        with mock.patch.dict(os.environ, self.env, clear=True), \
+             mock.patch.object(rehearse, 'installed_core_commit', return_value='a' * 40) as installed:
+            inst = ui.UIInstance(root)
+            inputs = ui.UIInputs(inst)
+            # A .git marker makes this behave like an installed versioned core; the reader is mocked.
+            (root / 'core/.git').mkdir(exist_ok=True)
+            signature = inputs.signature()
+            node_key = inputs.node_keys(inst, signature)['app']
+            before = inputs.worktree_keys(inst, signature)
+            installed.return_value = 'b' * 40
+            changed = inputs.signature()
+            after = inputs.worktree_keys(inst, changed)
+            self.assertTrue(after != before, 'installed core change left readiness inputs unchanged')
+            self.assertTrue(inputs.node_keys(inst, changed)['app'] != node_key,
+                            'the node row retained the old rehearsal badge')
+            values = {}
+            node = inst.node('app')
+            with mock.patch.object(ui._m_verify, '_ready_state', side_effect=[{'ready': True}, {'ready': False}]) as validate:
+                with ui._m_verify.display_cache(values, before):
+                    self.assertTrue(ui._m_verify.ready_state(inst, node, 'job-demo', display=True)['ready'])
+                with ui._m_verify.display_cache(values, after):
+                    self.assertFalse(ui._m_verify.ready_state(inst, node, 'job-demo', display=True)['ready'])
+                self.assertEqual(validate.call_count, 2)
+
+    def test_spend_view_rebuckets_on_clock_change_without_reparsing_files(self):
+        import core_loader
+        import importlib.util
+        import datetime
+        from types import SimpleNamespace
+        from unittest import mock
+        loader = core_loader.SourceFileLoader('brain_idle_spend_clock_test', str(CORE / 'bin/brain'))
+        core = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+        loader.exec_module(core)
+        ui = core._owners['UIInputs']
+        current = [datetime.datetime(2026, 10, 21, 23, 59, tzinfo=datetime.timezone.utc)]
+        inst = SimpleNamespace(root=self.tmp, nodes=lambda: [], now_dt=lambda: current[0])
+        with mock.patch.object(ui._m_spend, 'spend_days', side_effect=lambda *args: {'date': str(current[0].date())}) as days, \
+             mock.patch.object(ui._m_spend, 'spend_file') as parse:
+            spend = ui.UISpend(inst)
+            spend.advance()
+            self.assertEqual(spend.value['runtimes']['date'], '2026-10-21')
+            spend.advance()
+            self.assertEqual(days.call_count, 1, 'unchanged spend was rebuilt per poll')
+            current[0] += datetime.timedelta(minutes=2)
+            if hasattr(spend, 'refresh_view'):
+                spend.refresh_view()
+            spend.advance()
+            self.assertEqual(spend.value['runtimes']['date'], '2026-10-22', 'spend buckets froze at midnight')
+            parse.assert_not_called()
