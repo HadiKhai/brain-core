@@ -155,8 +155,9 @@ def cmd_brief(a):
     task = Path(a.task_file).read_text() if a.task_file else (a.task or "<!-- the task, what done means, "
                                                                           "where outputs go -->")
     if a.small:
+        from . import messages as _m_messages
         out = [f"Role: worker in node `{n['id']}`; small job.", head, _m_guard.redact(usage, _m_guard.never_terms(n)),
-               *shared, "Follow this node's rules. Task: " + task.strip(),
+               *shared, _m_messages.MESSAGE_PROTOCOL, "Follow this node's rules. Task: " + task.strip(),
                "Clear, low risk, minutes, no shared-state changes. If that stops being true, hand back for a full job.",
                *_m_knowledge.limits_lines(n), *_m_knowledge.knowledge_lines(inst, n, task),
                f"Before hand-back or anything leaves, run `brain guard {n['id']} {_m_common.tilde_shell(where)}`; require `guard: clean`.",

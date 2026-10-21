@@ -211,7 +211,11 @@ def cmd_handback(a):
         if why:
             sys.exit(1)
     else:
-        print(_m_guard.redact(f"{n['id']}: {a.branch} {a.state}; coordinator can see it with brain due", _m_guard.never_terms(n)))
+        from . import messages as _m_messages
+        kind = "blocked" if a.state == "failed" else a.state
+        print(_m_guard.redact(_m_messages.format_worker_message(
+            kind, "coordinator can see it with brain due", a.branch, data["report"] or _m_common.tilde(f)),
+            _m_guard.never_terms(n)))
 
 
 def job_started(inst, n, branch, runtime):

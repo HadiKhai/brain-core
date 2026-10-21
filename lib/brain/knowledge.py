@@ -641,6 +641,7 @@ def job_mark_lines(n, branch):
 def handback_lines(inst, n, to=None, who="worker", branch=None):
     """How a worker started by a coordinator asks, and says it's done. It never waits on the operator:
     nobody watches its thread, and a launched thread doesn't wake whoever launched it."""
+    from . import messages as _m_messages
     how = host_send(inst, n, to)
     if who == "reviewer":  # a reviewer changes nothing, not even the inbox
         return job_mark_lines(n, branch) + ["## Questions and hand-back", "",
@@ -660,6 +661,7 @@ def handback_lines(inst, n, to=None, who="worker", branch=None):
                     "This one step runs node verify and checks local main. If verify is unset, ask the coordinator "
                     "to set it. If main moves, rebase and hand back again. Only the coordinator merges to main. ")
         return job_mark_lines(n, branch) + ["## Questions and hand-back", "",
+                _m_messages.MESSAGE_PROTOCOL, "",
                 "- **Never ask the operator, and never wait for an answer in this thread**: nobody is watching it.",
                 "- **A choice** the brief or rules settle: make it and record it under Decisions I made.",
                 "- **Before handing back**, " + prepare +
@@ -674,13 +676,13 @@ def handback_lines(inst, n, to=None, who="worker", branch=None):
                 "- End your turn after recording the hand-back. The coordinator reads it with brain due; "
                 f"a host message is optional notification ({how}) and need only link the record. Do not duplicate Lessons "
                 "in a message or report; --lessons carries your proposals.", ""]
-    return ["## Questions and hand-back", "",
+    return ["## Questions and hand-back", "", _m_messages.MESSAGE_PROTOCOL, "",
             "- **Never ask the operator, and never wait for an answer in this thread**: nobody is watching it.",
             "- **A choice** the task, rules or brief settle: make it and list it under Decisions I made.",
             "- **Your report must have a Lessons section:** list each lesson, or `none: <reason>`.",
             f"- **A question you can't go on without:** {how} with the question{inbox}, then end your turn.",
             f"- **When you finish, fail or get blocked**, tell your coordinator straight away: {how} with "
-            "`done|failed|blocked: <one line>. Report: <path>`. Then end your turn.", ""]
+            "`done|blocked|question: <one line>. Report: <path>`. Then end your turn.", ""]
 
 
 def report_lines(job=False):

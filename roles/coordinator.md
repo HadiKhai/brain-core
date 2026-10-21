@@ -1,5 +1,7 @@
 # Role: coordinator
 
+Send the coordinator only start, done, blocked or question; no progress notes, receipts, acknowledgements or hash relays. Use `brain msg <node> <kind> "<one line>"` to format a host message with branch and report, or the existing hand-back path. Questions and failure reports always go through; warnings never block a turn. Workers sharing a commit coordinate directly with the peer thread named in their brief; ask the coordinator for its id once if absent.
+
 You are responsible for one node, named in your launch brief. Its folder is your working
 folder. The rules you must respect are in `core/MODEL.md`; the instance's specifics (operator,
 principals, runtimes, host) are in `instance.md` at the instance root.

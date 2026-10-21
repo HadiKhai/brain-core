@@ -38,6 +38,15 @@ After upgrading:
 - Read the named paths when readiness refuses. Fix setup rather than spending another full verify
   discovering a first-run env rewrite. The next handback adds private per-path diagnostic evidence.
 
+## 2026-10-21: Four worker message kinds
+
+For agents:
+- Send coordinators only start, done, blocked or question. Coordinate shared commits directly with peers named in the brief.
+- `brain msg <node> <kind> "<one line>"` formats branch/report context for host delivery. Hand-back remains available.
+- Worker Stop hooks warn once about observed other sends, without holding the turn or saving message text.
+
+After upgrading:
+- Re-read the worker/coordinator roles. Name peer threads in shared-commit briefs; no migration is needed.
 
 ## 2026-10-21: Core mechanics split into Python modules
 
