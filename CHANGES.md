@@ -38,6 +38,16 @@ After upgrading:
 - Read the named paths when readiness refuses. Fix setup rather than spending another full verify
   discovering a first-run env rewrite. The next handback adds private per-path diagnostic evidence.
 
+## 2026-10-21: Hired specialists run in the named job worktree
+
+For agents:
+- `brain hire --branch <branch>` now names the registered job worktree, branch
+  and port block in its run line, just as `brain brief --branch` does. An unknown
+  branch or a missing worktree is refused rather than pointing at the home.
+
+After upgrading:
+- Regenerate specialist briefs for branch jobs before launching them. Hires
+  without `--branch` keep their existing home-based run line.
 
 ## 2026-10-21: Core mechanics split into Python modules
 
