@@ -100,16 +100,13 @@ def watch_retry(inst, n, row, record, marker):
     pin = n['fm'].get('runtime')
     if old not in ('codex', 'claude') or not new or (pin and pin != new):
         return ''
-    klass = (_m_jobs.job_class(n, row) if hasattr(_m_jobs, 'job_class')
-             else row.get('Class', '').strip().lower() or 'build')
-    allowed = (_m_usage.class_allows_fallback(klass) if hasattr(_m_usage, 'class_allows_fallback')
-               else klass not in ('review', 'diagnose'))
-    if not allowed:
+    klass = _m_jobs.job_class(n, row)
+    if not _m_usage.class_allows_fallback(klass):
         return ''
-    if hasattr(_m_usage, 'class_route'):
-        selected, subscription, reason = _m_usage.class_route(inst, klass, runtime=new, cached_only=True)
-        if selected != new or not watch_route_allows_switch(reason):
-            return ''
+    # The retry mechanism is reachable only if class_allows_fallback is enabled.
+    selected, subscription, reason = _m_usage.class_route(inst, klass, runtime=new, cached_only=True)
+    if selected != new or not watch_route_allows_switch(reason):
+        return ''
     if (not row.get('Capacity retry')
             and not re.search(r' -> [^:;]+: at capacity(?:;|$)', row.get('Switches', ''))):
         switch = f'{old} -> {new}: at capacity'

@@ -66,6 +66,7 @@ After upgrading:
 - Existing nodes need no migration. To opt in, keep a complete `verify` command and add
   a lane map and coverage gate as described in the home-job skill. Inputs use tracked
   repo-relative globs with `**`, `*`, `?` and leading `!` exclusions only.
+
 ## 2026-10-21: Actionable file watcher replaces frequent AI ticks
 
 For agents:

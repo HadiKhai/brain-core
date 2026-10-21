@@ -310,7 +310,7 @@ class Watcher(Scenario):
             run['run'] = 'bad-route-' + str(index)
             (self.root / '.brain/worker-runs.json').write_text(json.dumps({'runs': [run]}))
             with mock.patch.object(owner._m_usage, 'class_allows_fallback', return_value=True), \
-                    mock.patch.object(owner._m_usage, 'class_route', create=True, side_effect=exc) as route, \
+                    mock.patch.object(owner._m_usage, 'class_route', side_effect=exc) as route, \
                     mock.patch.object(self.m, 'wake_start'):
                 self.watch()
                 route.assert_called_once()

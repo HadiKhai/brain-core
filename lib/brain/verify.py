@@ -182,10 +182,9 @@ def ready_state(inst, n, branch, train=False, display=False):
         if (not isinstance(old_remote, str) or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", old_remote)
                 or _m_common.git("merge-base", "--is-ancestor", old_remote, remote, cwd=n["home_path"]).returncode):
             reasons.append("recorded remote base is not an ancestor of current integration main")
-    ejection = getattr(_m_jobs, 'train_ejection', None)
-    if row and packet and callable(ejection):
+    if row and packet:
         try:
-            if ejection(n, row, packet):
+            if _m_jobs.train_ejection(n, row, packet):
                 reasons.append('train ejected this ready evidence; worker must hand back again')
         except (OSError, ValueError):
             reasons.append('train ejection evidence unreadable; refusing readiness')
