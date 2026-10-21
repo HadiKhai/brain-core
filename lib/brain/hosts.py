@@ -56,24 +56,25 @@ def request_wake(inst, n, reason):
     try:
         target, command = wake_target(inst, n)
         if not command or _m_common.outward_links(inst.root):
-            return
+            return False
         directory = wake_directory(inst, target)
         directory.mkdir(parents=True, exist_ok=True)
         key = hashlib.sha256((n["id"] + "\0" + reason).encode()).hexdigest()
         pending = directory / (key + ".pending")
         delivered = directory / (key + ".sent")
         if delivered.exists() and time.time() - delivered.stat().st_mtime < WAKE_DEDUP_SECONDS:
-            return
+            return True
         # Exclusive publication: repeated hooks neither overwrite nor launch more workers.
         _m_common.safe_target(pending)
         try:
             fd = os.open(pending, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
         except FileExistsError:
-            return
+            return True
         os.close(fd)
         wake_start(inst, target)
+        return True
     except (Exception, SystemExit):
-        pass  # the inbox is the durable record, even if spawning or state writes fail
+        return False  # the inbox remains durable; the watcher retries unacknowledged work
 
 
 def wake_http_status(command):

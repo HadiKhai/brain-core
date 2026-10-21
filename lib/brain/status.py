@@ -357,7 +357,7 @@ def status_lag(inst, n, evidence=None):
     return None
 
 
-def due_items(inst, n, evidence=None, include_stale=True):
+def due_items(inst, n, evidence=None, include_stale=True, include_ready=True):
     if n["archived"]:
         return []
     evidence = evidence or due_evidence(inst, n)
@@ -395,7 +395,7 @@ def due_items(inst, n, evidence=None, include_stale=True):
             add("merged-job", f"{branch}: merged in local git; record brain jobs {n['id']} --branch {branch} --lessons "
                 "first, then close the ledger and prune; " + _m_jobs.handback_detail(n, row), job=_m_jobs.job_key(row))
         elif signal:
-            ready = _m_verify.ready_state(inst, n, branch) if signal["state"] == "done" and not _m_briefs.import_job(branch) else None
+            ready = _m_verify.ready_state(inst, n, branch) if include_ready and signal["state"] == "done" and not _m_briefs.import_job(branch) else None
             detail = ("ready to merge" if ready["ready"] else
                       "finished but not ready (" + "; ".join(ready["reasons"]) + ")") if ready else (signal["state"] + "; node study, no home ready evidence required"
                                            if _m_briefs.import_job(branch) else signal["state"])

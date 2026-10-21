@@ -70,8 +70,17 @@ one machine and live in `.brain/local.json`, never in git.
     URL with `brain set <id> wake=<URL>` (machine-local; never publish it). T3 requires Connect
     remote access when no `webhookUrl` is returned. Set `brain set root wake_default=<command-or-URL>`
     only if one transport can wake the intended answering coordinator. Verify with a made-up
-    `brain wake <id> "setup check"`. Keep interval ticks for failure recovery and hosts without
-    webhooks; root's five-minute fallback checks every project. No CLI host API access is needed.
+    `brain wake <id> "setup check"`. An existing machine-care minute unit picks up the watcher on core upgrade.
+    If it is missing, get operator consent before `brain machine install --yes`;
+    `brain machine sample` also runs `brain watch --once`.
+    Test an unchanged due set, a new fabricated item, a repeated item and failed delivery.
+    The watcher persists fingerprints in `.brain/watch.json` and retries pending transports;
+    never delete its acknowledgement state to repair a transport. After this works, ask the
+    operator before replacing fifteen-minute coordinator and five-minute root AI ticks with
+    one hourly safety-net tick each. Host-only pending requests and failures not yet exported
+    by the host still need that tick; without a working transport retain the existing schedule.
+    Follow the T3 adapter's worker-binding and `.brain/worker-runs.json` failure-record contract.
+    No CLI host API access is needed.
 11. Run `core/bin/brain check`, then give the operator one link per coordinator
     (`core/bin/brain` lists them).
 
