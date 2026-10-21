@@ -14,7 +14,8 @@ For agents:
 - Root receives at most one machine escalation per episode: immediately on a fresh
   thermal-pressure reading, or once a heavy-work hold exceeds 60 minutes. Thermal
   pressure and duration share one identity, so both conditions cannot wake twice.
-  Unknown thermal readings do not end a known episode. Recovery re-arms the next one.
+  Unknown thermal readings do not clear observed thermal pressure. A recovered
+  load-only hold re-arms the next episode even when thermal telemetry is unavailable.
 - Informational machine lines are excluded from the watcher and quiet due checks.
   Questions, blocked hand-backs, failures and overdue questions keep their routes.
 

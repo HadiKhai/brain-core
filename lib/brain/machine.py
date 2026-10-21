@@ -379,7 +379,8 @@ def machine_sample(inst):
     started = (started if data.get('episode') is True and machine_timestamp(started)
                and started <= now else now) if active else None
     thermal = samples[-1]['reading'].get('thermal', 'unknown')
-    alert_open = active or thermal == 'pressure' or (data.get('alert_open') is True and thermal == 'unknown')
+    alert_open = active or thermal == 'pressure' or (data.get('alert_open') is True and thermal == 'unknown'
+                                                    and data.get('episode') is not True)
     alert_id = data.get('alert_id') if data.get('alert_open') is True else None
     if alert_open and not re.fullmatch(r'[0-9a-f]{24}', str(alert_id)):
         alert_id = episode_id if active else os.urandom(12).hex()

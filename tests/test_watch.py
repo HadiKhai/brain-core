@@ -152,6 +152,52 @@ class Watcher(Scenario):
             self.assertEqual(send.call_count, 0)
             self.assertFalse(list(directory.glob('*.pending')))
 
+    def test_machine_unknown_thermal_rearms_recovered_load_holds(self):
+        base = time.time()
+        good = {**json.loads(self.env['BRAIN_MACHINE_READING']), 'thermal': 'unknown'}
+        high = {**good, 'load_per_cpu': [1, 1, 1]}
+        state = self.root / '.brain/machine.json'
+        state.write_text(json.dumps({'samples': [{'at': base - i * 60, 'reading': high} for i in (4, 3, 2, 1)]}))
+        with mock.patch.object(self.m, 'changes_due', return_value=[]), mock.patch.object(self.m, 'wake_start'), \
+                mock.patch.object(self.m, 'WAKE_INTERVAL', 0), mock.patch.object(self.m, 'wake_send', return_value=True) as send:
+            self.machine_tick(base, high)
+            first = json.loads(state.read_text())['episode_id']
+            self.machine_tick(base + 3601, high)
+            self.assertEqual(send.call_count, 1)
+            for offset in (3661, 3721, 3781):
+                self.machine_tick(base + offset, good)
+            self.assertFalse(json.loads(state.read_text())['alert_open'])
+            for offset in (3841, 3901, 3961, 4021, 4081):
+                self.machine_tick(base + offset, high)
+            self.assertNotEqual(json.loads(state.read_text())['episode_id'], first)
+            self.assertEqual(send.call_count, 1)
+            self.machine_tick(base + 7682, high)
+            self.machine_tick(base + 7742, high)
+            self.assertEqual(send.call_count, 2)
+
+    def test_failed_machine_load_alert_retires_with_unknown_thermal_recovery(self):
+        base = time.time()
+        good = {**json.loads(self.env['BRAIN_MACHINE_READING']), 'thermal': 'unknown'}
+        high = {**good, 'load_per_cpu': [1, 1, 1]}
+        state = self.root / '.brain/machine.json'
+        state.write_text(json.dumps({'samples': [{'at': base - i * 60, 'reading': high} for i in (4, 3, 2, 1)]}))
+        with mock.patch.object(self.m, 'changes_due', return_value=[]), mock.patch.object(self.m, 'wake_start'), \
+                mock.patch.object(self.m, 'WAKE_INTERVAL', 0):
+            with mock.patch.object(self.m, 'wake_send', return_value=False):
+                self.machine_tick(base, high)
+                self.machine_tick(base + 3601, high)
+            directory = self.m.wake_directory(self.inst, self.inst.node('root'))
+            self.assertTrue(list(directory.glob('*.pending')))
+            for offset in (3661, 3721, 3781):
+                with mock.patch.object(self.m.time, 'time', return_value=base + offset), \
+                        mock.patch.object(self.m, 'machine_load', return_value=good), contextlib.redirect_stdout(io.StringIO()):
+                    self.m.machine_sample(self.inst)
+            with mock.patch.object(self.m, 'wake_send', return_value=True) as send:
+                self.watch()
+                self.m.wake_drain(self.inst, self.inst.node('root'), once=True)
+            self.assertEqual(send.call_count, 0)
+            self.assertFalse(list(directory.glob('*.pending')))
+
     def test_delivery_history_and_since_wake_track_ids_only_after_success(self):
         inbox = self.root / 'inbox.md'
         inbox.write_text('- fabricated first item\n')
