@@ -198,9 +198,9 @@ def ready_state(inst, n, branch, train=False):
             reasons.append("main moved; return to worker to rebase and verify again")
         w = n["local"].get("worktrees", {}).get(branch)
         if isinstance(w, dict) and w.get("path") and Path(w["path"]).exists():
-            if packet.get("inputs") != verify_inputs(n, w):  # every reader of readiness comes through here
-                reasons.append("what verify reads besides tracked files, or the job's ports, changed since it ran "
-                               "(or the packet predates that check); hand back again")
+            files = verify_input_files(n, w)
+            if packet.get("inputs") != verify_inputs(n, w, files):  # every readiness reader comes through here
+                reasons.append(verify_input_reason(n, read_verify_input_files(n, packet), files))
         verify = n["fm"].get("verify", "").strip()
         if not verify or packet.get("verify_command") != verify or type(packet.get("verify_result")) is not int \
                 or packet["verify_result"] != 0:
@@ -225,27 +225,18 @@ def ready_state(inst, n, branch, train=False):
             reasons.append("no completed review rounds recorded")
         if not isinstance(packet.get("checked_at"), str) or not inst.parse_time(packet["checked_at"]):
             reasons.append("packet has no valid check time")
+    scrubber = VerifyScrubber(_m_guard.never_terms(n))
+    reasons = [scrubber.feed(reason, final=True) for reason in reasons]
     return {"ready": not reasons, "reasons": reasons, "packet": packet}
 
 
 VERIFY_INPUTS = ".env,.env.*"  # files git doesn't track that verify reads, unless the node names its own
 
-
-def verify_inputs(n, w):
-    """A digest of what verify reads besides tracked files: the worktree's files matching the node's
-    verify_inputs globs (env files by default), and the ports it runs on. Evidence holds only while it is unchanged."""
-    root = Path(w["path"])
-    found = {}
-    for pat in _m_common.lst(n["fm"].get("verify_inputs")) or _m_common.lst(VERIFY_INPUTS):
-        for f in root.glob(pat):
-            rel = f.relative_to(root)
-            if ".git" in rel.parts or not f.is_file():
-                continue
-            try:
-                found[str(rel)] = hashlib.sha256(f.read_bytes()).hexdigest()
-            except OSError:
-                found[str(rel)] = "unreadable"
-    return _m_jobs.digest([sorted(found.items()), w.get("port"), w.get("ports", 1)])
+def verify_inputs(n, w, files=None):
+    """Keep the existing digest contract: exact files plus ports decide validity and reuse.
+    The optional map lets a caller compare and diagnose the same single snapshot."""
+    files = verify_input_files(n, w) if files is None else files
+    return _m_jobs.digest([sorted(files.items()), w.get("port"), w.get("ports", 1)])
 
 
 def verify_reuse(n, branch, previous, head, main, verify, cwd, inputs=None):
@@ -418,6 +409,13 @@ def run_verify_stream(inst, n, branch, verify, w, env, token, lane=None):
             for entry in old[:max(0, len(old) - VERIFY_LOG_KEEP + 1)]:
                 check(dfd)
                 os.unlink(entry, dir_fd=dfd)
+            # One input map belongs to one retained log. Also retire legacy unpaired maps.
+            retained_maps = {verify_input_map_name(key, entry) for entry in os.listdir(dfd)
+                             if re.fullmatch(re.escape(key) + r"-verify-\d+-[0-9a-f]{12}\.log", entry)}
+            for entry in os.listdir(dfd):
+                if re.fullmatch(re.escape(key) + r"-inputs-[0-9a-f]{24}\.map", entry) and entry not in retained_maps:
+                    check(dfd)
+                    os.unlink(entry, dir_fd=dfd)
             overall, lanes, failed = deque(maxlen=15), {}, set()
             pending, lines, chars = "", 0, 0
             line_decoder = io.IncrementalNewlineDecoder(None, translate=True)
@@ -627,7 +625,8 @@ def record_ready(inst, n, branch, reviews, previous=None, reverify=False):
     if reasons:
         return None, reasons
     w = n["local"]["worktrees"][branch]
-    inputs = verify_inputs(n, w)
+    input_files = verify_input_files(n, w)
+    inputs = verify_inputs(n, w, input_files)
     integration_base = integration_parent(n, main)
     if previous and previous.get("integration_base", previous.get("main")) != integration_base:
         reverify = True
@@ -640,15 +639,6 @@ def record_ready(inst, n, branch, reviews, previous=None, reverify=False):
     except (ValueError, OSError, UnicodeError) as error:
         return None, ['verify lanes invalid: ' + _m_guard.redact(str(error), _m_guard.never_terms(n))]
     reuse = None if reverify or snap or (previous or {}).get('verify_lanes') is not None else verify_reuse(n, branch, previous, head, main, verify, w["path"], inputs)
-    if reuse:
-        base, changed = reuse
-        print(f"verify: reused the green run of {base[:12]}"
-              + (f": since then only {len(changed)} file(s) under verify_skip changed" if changed else
-                 ": nothing changed since") + " (--reverify runs it again)")
-        return {"version": 1, "node": n["id"], "branch": branch, "head": head, "main": main,
-                "integration_base": integration_base, "verify_command": verify, "verify_result": 0, "verified_head": base, "verify_reused": True,
-                "inputs": inputs, "verify_log": previous.get("verify_log"),
-                "review_rounds": reviews, "checked_at": _m_jobs.stamp(inst)}, []
     # The CLI holds brain_lock here. Do not sweep an operator's dirty .gitignore into
     # the worker hand-back commit just because we added the local-output exclusion.
     gi = inst.root / ".gitignore"
@@ -656,6 +646,17 @@ def record_ready(inst, n, branch, reviews, previous=None, reverify=False):
     _m_nodes.ensure_gitignore(inst.root)
     if dirty_ignore:
         _m_common.TOUCHED.discard(gi)
+    if reuse:
+        input_ref = (previous.get("input_files_ref") if read_verify_input_files(n, previous) == input_files
+                     else write_verify_input_files(inst, n, branch, inputs, input_files, previous.get("verify_log")))
+        base, changed = reuse
+        print(f"verify: reused the green run of {base[:12]}"
+              + (f": since then only {len(changed)} file(s) under verify_skip changed" if changed else
+                 ": nothing changed since") + " (--reverify runs it again)")
+        return {"version": 1, "node": n["id"], "branch": branch, "head": head, "main": main,
+                "integration_base": integration_base, "verify_command": verify, "verify_result": 0, "verified_head": base, "verify_reused": True,
+                "inputs": inputs, "input_files_ref": input_ref, "verify_log": previous.get("verify_log"),
+                "review_rounds": reviews, "checked_at": _m_jobs.stamp(inst)}, []
     _m_instance.unlock()  # verification belongs to this worker, not the instance-wide lock
     lane_evidence = run_lanes(inst, n, branch, w, env, snap, previous, head, main, inputs, reverify) if snap else None
     if lane_evidence:
@@ -663,8 +664,9 @@ def record_ready(inst, n, branch, reviews, previous=None, reverify=False):
     else:
         result, log_path = run_verify(inst, n, branch, verify, w, env)
     after, head_after, main_after = ready_preflight(n, branch)
-    if not after and verify_inputs(n, w) != inputs:
-        after = ["files verify reads besides tracked ones (verify_inputs) changed"]
+    after_files = verify_input_files(n, w)
+    input_reasons = ([verify_input_reason(n, input_files, after_files, during=True)]
+                     if verify_inputs(n, w, after_files) != inputs else [])
     if snap:
         try:
             after_snap = _m_lanes.snapshot(n, w, env, verify_inputs(n, w))
@@ -674,11 +676,15 @@ def record_ready(inst, n, branch, reviews, previous=None, reverify=False):
             after.append('verify lane inputs became unreadable during verify')
     if after or head_after != head or main_after != main or integration_parent(n, main_after) != integration_base:
         # What passed isn't the commit on main that was asked about: never record it as evidence.
-        return None, ["verify changed the job's branch, local main or worktree (" + "; ".join(after or ["refs moved"])
+        return None, input_reasons + ["verify changed the job's branch, local main or worktree ("
+                      + "; ".join(after or ["refs moved"])
                       + "); commit or discard what it changed, then hand back again"]
+    if input_reasons:
+        return None, input_reasons
+    input_ref = write_verify_input_files(inst, n, branch, inputs, input_files, log_path)
     packet = {"version": 1, "node": n["id"], "branch": branch, "head": head, "main": main,
               "integration_base": integration_base, "verify_command": verify, "verify_result": result, "verify_log": log_path, "verified_head": head,
-              "inputs": inputs, "review_rounds": reviews, "checked_at": _m_jobs.stamp(inst)}
+              "inputs": inputs, "input_files_ref": input_ref, "review_rounds": reviews, "checked_at": _m_jobs.stamp(inst)}
     if lane_evidence:
         packet.update(lane_evidence)
         show_lanes(n, packet)
@@ -693,8 +699,113 @@ def cmd_ready(a):
         return _m_jobs.cmd_handback(a)
     inst = _m_nodes.load()
     main_notice(inst.node(a.id))
-    state = ready_state(inst, inst.node(a.id), a.branch)
-    show_lanes(inst.node(a.id), state["packet"])
-    print("ready" if state["ready"] else "not ready: " + "; ".join(state["reasons"]))
+    n = inst.node(a.id)
+    state = ready_state(inst, n, a.branch)
+    show_lanes(n, state["packet"])
+    print(VerifyScrubber(_m_guard.never_terms(n)).feed(
+        "ready" if state["ready"] else "not ready: " + "; ".join(state["reasons"]), final=True))
     if not state["ready"]:
         sys.exit(1)
+
+def verify_input_files(n, w):
+    """Private per-path evidence. Contents never leave this reader; hashes are never diagnostics."""
+    root = Path(w["path"])
+    found = {}
+    for pat in _m_common.lst(n["fm"].get("verify_inputs")) or _m_common.lst(VERIFY_INPUTS):
+        for f in root.glob(pat):
+            rel = f.relative_to(root)
+            if ".git" in rel.parts or not f.is_file():
+                continue
+            try:
+                found[str(rel)] = hashlib.sha256(f.read_bytes()).hexdigest()
+            except OSError:
+                found[str(rel)] = "unreadable"
+    return found
+
+
+def verify_input_reason(n, before, after, during=False):
+    """Explain input differences by relative path/action only. Old packets cannot name past paths."""
+    terms = _m_guard.never_terms(n)
+    scrubber = VerifyScrubber(terms)
+    def valid_map(value):
+        return isinstance(value, dict) and all(
+            isinstance(k, str) and k not in ("", ".") and not Path(k).is_absolute()
+            and ".." not in Path(k).parts and str(Path(k)) == k and isinstance(v, str)
+            for k, v in value.items())
+    if not valid_map(before) or not valid_map(after):
+        text = ("verify_inputs changed since the last verify (or the packet predates this check); "
+                "per-path evidence unavailable; hand back again")
+    else:
+        changes = []
+        for path in sorted(before.keys() | after.keys()):
+            if path in before and path in after and before[path] == after[path]:
+                continue
+            action = "added" if path not in before else "removed" if path not in after else "modified"
+            screened = scrubber.feed(path, final=True)
+            shown = screened if all(c.isprintable() for c in screened) else json.dumps(screened, ensure_ascii=True)
+            changes.append(shown + " (" + action + ")")
+        if changes:
+            text = ("verify modified its own inputs: " if during else
+                    "verify_inputs changed since the last verify: ") + ", ".join(changes)
+            if during:
+                text += ("; make worktree-setup.sh produce these files before the first verify, or stop the "
+                         "test runner writing them; remove them from verify_inputs only if they cannot "
+                         "affect the result; hand back again")
+            else:
+                text += "; hand back again"
+        else:
+            text = ("verify_inputs or the job's ports changed since the last verify "
+                    "(or the packet predates this check); no file differences identified; hand back again")
+    return scrubber.feed(text, final=True)
+
+
+def read_verify_input_files(n, packet):
+    """Private evidence is optional for diagnostics, never a substitute for the packet's digest."""
+    name = packet.get("input_files_ref") if isinstance(packet, dict) else None
+    if not isinstance(name, str) or not re.fullmatch(r"[0-9a-f]{24}-inputs-[0-9a-f]{24}\.map", name):
+        return None
+    folder = n["dir"] / "job-handbacks"
+    fh, _ = _m_history.history_open(folder / name, [folder.resolve()], _m_history.home_places(n))
+    if fh is None:
+        return None
+    try:
+        with fh:
+            st = os.fstat(fh.fileno())
+            if st.st_nlink != 1 or st.st_mode & 0o077:
+                return None
+            data = json.load(fh)
+        if isinstance(data, dict) and data.get("version") == 1 and data.get("inputs") == packet.get("inputs"):
+            return data.get("files")
+    except (OSError, ValueError):
+        pass
+    return None
+
+
+def verify_input_map_name(key, log_name):
+    return key + "-inputs-" + hashlib.sha256(log_name.encode()).hexdigest()[:24] + ".map"
+
+
+def write_verify_input_files(inst, n, branch, inputs, files, log_path):
+    """One atomic 0600 map per verify log, with the same retention as that log."""
+    folder, dfd, key, check = verify_log_dir(inst, n, branch)
+    temp = key + "-inputs-" + os.urandom(12).hex() + ".tmp"
+    try:
+        log_name = Path(log_path).name if isinstance(log_path, str) else ""
+        if not re.fullmatch(re.escape(key) + r"-verify-\d+-[0-9a-f]{12}\.log", log_name):
+            return None  # legacy evidence without a log cannot carry a retained map
+        name = verify_input_map_name(key, log_name)
+        check(dfd)
+        fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600, dir_fd=dfd)
+        with os.fdopen(fd, "w") as fh:
+            os.fchmod(fh.fileno(), 0o600)
+            check(dfd)
+            fh.write(json.dumps({"version": 1, "inputs": inputs, "files": files}) + "\n")
+        check(dfd)
+        os.replace(temp, name, src_dir_fd=dfd, dst_dir_fd=dfd)
+        return name
+    finally:
+        try:
+            os.unlink(temp, dir_fd=dfd)
+        except FileNotFoundError:
+            pass
+        os.close(dfd)

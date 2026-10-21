@@ -23,6 +23,40 @@ After upgrading:
 - Existing nodes need no migration. To opt in, keep a complete `verify` command and add
   a lane map and coverage gate as described in the home-job skill. Inputs use tracked
   repo-relative globs with `**`, `*`, `?` and leading `!` exclusions only.
+## 2026-10-21: Webhook wakes identify their sender and report refusal
+
+For agents:
+- Webhook wakes send a constant User-Agent and the same constant event payload.
+- Due reports the last failed delivery status once per coordinator, without the webhook URL.
+- Check probes bound coordinator webhooks, reusing each binding's result for 24 hours and
+  showing its age. `brain check --live` forces fresh delivery; every HTTP status outside 2xx fails check.
+  Transport errors warn and are not cached. `check --fix` only reads cached probe results.
+- Live probes keep the drain's delivery diagnostics intact.
+- `hosts.wake_probe(inst, n)` shares this probe with rehearsal and returns a code or safe error.
+
+After upgrading:
+- Pending wakes drain on their own after upgrading; no requeue or binding change is needed.
+
+## 2026-10-21: Name changed verify inputs and finish setup
+
+For agents:
+- Ready refusals identify added, removed and modified inputs by worktree-relative path, never
+  content or per-file hashes. Paths are screened against never-name words. The existing digest,
+  port, ref and tree rules still determine readiness and evidence reuse. Per-file fingerprints stay
+  in ignored 0600 local sidecars under `job-handbacks`, outside instance Git history and UI output.
+  Each sidecar is retained with its verify log; older unpaired sidecars are pruned on the next run.
+- `verify modified its own inputs: <path>` identifies changes during the run. Make setup produce
+  generated settings before the first verify, or stop the test runner writing them. Exclude a
+  file from `verify_inputs` only if it cannot affect the result. Changes between runs say
+  `changed since the last verify`. Old packets without per-path evidence still refuse changes.
+- `wt add` waits for the node's setup script, reports its duration and returns its failure status.
+  Failed setup retains the worktree for repair and gives no worker-launch instruction.
+
+After upgrading:
+- Read the named paths when readiness refuses. Fix setup rather than spending another full verify
+  discovering a first-run env rewrite. The next handback adds private per-path diagnostic evidence.
+
+
 
 ## 2026-10-21: Core mechanics split into Python modules
 

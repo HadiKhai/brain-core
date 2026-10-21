@@ -180,7 +180,7 @@ def ui_state(inst, problems=None, scan=None, spend_budget=2.0):
             for wt, branch in zip(wts, sorted(loc.get("worktrees", {}))):
                 state = _m_verify.ready_state(inst, n, branch)
                 wt["ready"] = {"ready": state["ready"], "reasons": [hide(x) for x in state["reasons"]],
-                               "packet": {k: hide(v) for k, v in state["packet"].items()}
+                               "packet": {k: hide(v) for k, v in state["packet"].items() if k not in ("input_files", "input_files_ref")}
                                if state["packet"] else None}
             for c in ui_commits(home, since, all_refs=True):  # what comes from the home is shown as guard shows it
                 commits.append({**c, "subject": hide(c["subject"]), "node": n["id"], "where": "home"})

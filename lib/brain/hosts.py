@@ -2,6 +2,7 @@
 import datetime
 import hashlib
 import json
+import math
 import os
 import re
 import shlex
@@ -29,6 +30,7 @@ from . import upgrade as _m_upgrade
 WAKE_INTERVAL = 120
 WAKE_TIMEOUT = 10
 WAKE_DEDUP_SECONDS = 86400
+WAKE_USER_AGENT = "brain-wake/1"
 
 
 def wake_target(inst, n):
@@ -74,19 +76,37 @@ def request_wake(inst, n, reason):
         pass  # the inbox is the durable record, even if spawning or state writes fail
 
 
+def wake_http_status(command):
+    """Send only the constant event; return the HTTP code, never a response body."""
+    import urllib.error
+    import urllib.request
+
+    # Never forward a webhook capability or its event to a redirect destination.
+    class NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, req, fp, code, msg, headers, newurl):
+            return None
+
+    opener = urllib.request.build_opener(NoRedirect)
+    request = urllib.request.Request(command, data=b'{"event":"brain-wake"}',
+                                    headers={"Content-Type": "application/json", "User-Agent": WAKE_USER_AGENT})
+    try:
+        with opener.open(request, timeout=WAKE_TIMEOUT) as response:
+            return response.status
+    except urllib.error.HTTPError as error:
+        code = error.code
+        error.close()
+        return code
+
+
 def wake_send(command):
     """The sole outward payload is a constant event. Discard all transport output."""
     payload = b'{"event":"brain-wake"}'
     if command.startswith(("https://", "http://")):
-        import urllib.request
-        # Do not forward webhook capabilities to redirect destinations.
-        class NoRedirect(urllib.request.HTTPRedirectHandler):
-            def redirect_request(self, req, fp, code, msg, headers, newurl):
-                return None
-        opener = urllib.request.build_opener(NoRedirect)
-        with opener.open(urllib.request.Request(command, data=payload,
-                         headers={"Content-Type": "application/json"}), timeout=WAKE_TIMEOUT) as response:
-            return 200 <= response.status < 300
+        status = wake_http_status(command)
+        if not 200 <= status < 300:
+            # Internal exception carries only a code; callers never expose transport errors.
+            raise WakeRefused(status)
+        return True
     import signal
     process = subprocess.Popen(command, shell=True, stdin=subprocess.PIPE,
                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
@@ -97,6 +117,75 @@ def wake_send(command):
         os.killpg(process.pid, signal.SIGKILL)
         process.wait()
         return False
+
+
+class WakeRefused(Exception):
+    pass
+
+
+def wake_binding(command):
+    return hashlib.sha256(command.encode()).hexdigest()
+
+
+def wake_record(directory, command, status, name="delivery.json"):
+    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    record = {"binding": wake_binding(command), "status": status, "at": time.time()}
+    _m_common.atomic_write(directory / name, json.dumps(record))
+    return record
+
+
+def wake_read(directory, command, name="delivery.json"):
+    try:
+        record = json.loads((directory / name).read_text())
+        status = record["status"]
+        if (record["binding"] == wake_binding(command)
+                and (type(status) is int and 100 <= status <= 599
+                     or status in ("transport error", "delivery failed"))
+                and type(record["at"]) in (int, float) and math.isfinite(record["at"])):
+            return record
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+    return None
+
+
+def wake_probe(inst, n, force=False):
+    """Probe a webhook at most daily per binding; return an HTTP code or safe error."""
+    import fcntl
+    target, command = wake_target(inst, n)
+    if not command.startswith(("https://", "http://")):
+        return "no webhook"
+    if _m_common.outward_links(inst.root):
+        return "unsafe instance"
+    directory = wake_directory(inst, target)
+    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    name = "probe-" + wake_binding(command) + ".json"
+    lock = directory / "probe.lock"
+    _m_common.safe_target(lock)
+    with lock.open("a+") as stream:
+        os.fchmod(stream.fileno(), 0o600)
+        fcntl.flock(stream, fcntl.LOCK_EX)
+        record = wake_read(directory, command, name)
+        if not force and record and type(record["status"]) is int and 0 <= time.time() - record["at"] < 86400:
+            return record["status"]
+        try:
+            status = wake_http_status(command)
+        except Exception:
+            (directory / name).unlink(missing_ok=True)
+            return "transport error"
+        wake_record(directory, command, status, name)
+        return status
+
+
+def wake_diagnostic(inst, n):
+    target, command = wake_target(inst, n)
+    directory = wake_directory(inst, target)
+    records = [wake_read(directory, command),
+               wake_read(directory, command, "probe-" + wake_binding(command) + ".json")]
+    for record in records:
+        if record and not (type(record["status"]) is int and 200 <= record["status"] < 300):
+            status = record["status"]
+            return "last wake delivery refused: HTTP " + str(status) if type(status) is int else "last wake delivery: " + status
+    return None
 
 
 def wake_drain(inst, n, once=False):
@@ -166,12 +255,19 @@ def wake_drain(inst, n, once=False):
                 _m_common.atomic_write(last, str(time.time()))  # failures are rate-limited too
                 try:
                     sent = wake_send(command)
+                    status = 200 if sent else "delivery failed"
+                except WakeRefused as error:
+                    sent, status = False, error.args[0]
                 except Exception:
-                    sent = False
+                    sent, status = False, "transport error"
                 if sent:
                     for path in pending:  # one generic tick covers all currently queued reasons
                         _m_common.atomic_write(path.with_suffix(".sent"), "delivered\n")
                         path.unlink(missing_ok=True)
+                try:
+                    wake_record(directory, command, status)
+                except OSError:
+                    pass  # diagnostic bookkeeping cannot undo a successful delivery
                 if once:
                     return
     except BaseException:

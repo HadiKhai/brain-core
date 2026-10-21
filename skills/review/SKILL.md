@@ -30,6 +30,11 @@ stated; never run a polling loop in an agent.
    match. Nightly lanes belong to the node's full `verify` command used by trains/nightlies.
    Review the optional `verify_lanes_check` coverage gate as project-owned proof that every
    test belongs to exactly one lane.
+   Input-change refusals identify only relative paths and added/removed/modified status. If verify
+   modified its own inputs, fix setup or the writing runner before the first verify; exclude a
+   file only when it cannot affect the result. Check setup completion, elapsed time and failure
+   status, path/never-name screening, and that private per-file evidence never enters UI output.
+
 3. **Run it.** Use one reviewer for the concern, not one per file or test step. State why this
    separate agent is needed (independent second-runtime review), and include shared findings
    and earlier rounds in the supplied brief so it need not gather them again. Host `delegate` on the reviewer runtime, in the job's worktree (or `launch` a

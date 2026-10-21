@@ -337,6 +337,190 @@ class QuestionWake(Scenario):
         handler = build.call_args.args[0]()
         self.assertIsNone(handler.redirect_request(None, None, 302, "redirect", {}, "https://other.invalid/"))
 
+    @contextlib.contextmanager
+    def webhook(self, status=202, redirect=False):
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+        calls = []
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(handler):
+                body = handler.rfile.read(int(handler.headers.get("Content-Length", "0")))
+                calls.append((handler.path, handler.headers.get("User-Agent"), body))
+                # urllib supplies Python-urllib by default, which the relay also refuses.
+                response = status() if callable(status) else status
+                code = response if handler.headers.get("User-Agent") == "brain-wake/1" else 403
+                handler.send_response(code)
+                if redirect:
+                    handler.send_header("Location", "/must-not-follow")
+                handler.end_headers()
+            def log_message(self, *args):
+                pass
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        worker = threading.Thread(target=server.serve_forever, daemon=True)
+        worker.start()
+        try:
+            yield f"http://127.0.0.1:{server.server_port}/synthetic-capability", calls
+        finally:
+            server.shutdown()
+            server.server_close()
+            worker.join()
+
+    def bind_webhook(self, url):
+        self.b(self.r, "set", "a", "wake=" + url)
+        self.inst = self.module.Instance(self.r)
+        self.n = self.inst.node("a")
+
+    def due_without_drain(self):
+        with mock.patch.object(self.module, "wake_start"), mock.patch.object(self.module, "load", return_value=self.inst):
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                self.module.cmd_due(argparse.Namespace(id="a", quiet=False, json=True, machine=False))
+        return output.getvalue()
+
+    def test_real_webhook_drain_requires_explicit_user_agent(self):
+        with self.webhook() as (url, calls):
+            self.bind_webhook(url)
+            self.enqueue("made-up question")
+            self.drain()
+            directory = self.module.wake_directory(self.inst, self.n)
+            self.assertFalse(list(directory.glob("*.pending")))
+            self.assertEqual(len(list(directory.glob("*.sent"))), 1)
+            self.assertEqual(calls, [("/synthetic-capability", "brain-wake/1", b'{"event":"brain-wake"}')])
+
+    def test_refused_drain_stays_pending_and_due_reports_code_once(self):
+        with self.webhook(403) as (url, calls):
+            self.bind_webhook(url)
+            self.enqueue("made-up question")
+            self.drain()
+            directory = self.module.wake_directory(self.inst, self.n)
+            self.assertEqual(len(list(directory.glob("*.pending"))), 1)
+            due = self.due_without_drain()
+            self.assertEqual(due.count("HTTP 403"), 1)
+            self.assertNotIn(url, due)
+            state = "".join(p.read_text() for p in directory.iterdir() if p.is_file())
+            self.assertNotIn(url, state)
+            self.assertNotIn("made-up question", state)
+            self.assertEqual((directory / "delivery.json").stat().st_mode & 0o777, 0o600)
+
+    def test_check_real_probe_caches_for_day_force_reprobes_and_due_agrees(self):
+        with self.webhook(403) as (url, calls):
+            self.bind_webhook(url)
+            first = self.b(self.r, "check", ok=False)
+            self.assertIn("wake probe HTTP 403", first)
+            self.assertIn("result age", first)
+            self.assertNotIn(url, first)
+            self.assertEqual(len(calls), 1)
+            second = self.b(self.r, "check", ok=False)
+            self.assertIn("wake probe HTTP 403", second)
+            self.assertEqual(len(calls), 1)
+            self.b(self.r, "check", "--live", ok=False)
+            self.assertEqual(len(calls), 2)
+            self.assertEqual(self.due_without_drain().count("HTTP 403"), 1)
+            directory = self.module.wake_directory(self.inst, self.n)
+            cache = next(directory.glob("probe-*.json"))
+            record = json.loads(cache.read_text())
+            record["at"] -= 86401
+            cache.write_text(json.dumps(record))
+            self.b(self.r, "check", ok=False)
+            self.assertEqual(len(calls), 3)
+        with self.webhook() as (url, calls):
+            self.bind_webhook(url)
+            success = self.b(self.r, "check")
+            self.assertIn("wake probe HTTP 202", success)
+            self.assertEqual(len(calls), 1)
+            self.assertNotIn("last wake delivery", self.due_without_drain())
+
+    def test_cached_success_does_not_hide_new_drain_refusal(self):
+        with self.webhook() as (url, calls):
+            self.bind_webhook(url)
+            self.b(self.r, "check")
+            directory = self.module.wake_directory(self.inst, self.n)
+            self.module.wake_record(directory, url, 403)
+            check = self.b(self.r, "check", ok=False)
+            self.assertEqual(check.count("HTTP 403"), 1)
+            self.assertEqual(len(calls), 1)
+
+    def test_probe_rejects_redirects_and_server_errors_without_url(self):
+        for code in (302, 503):
+            with self.webhook(code, redirect=True) as (url, calls):
+                self.bind_webhook(url)
+                self.assertEqual(self.module.wake_probe(self.inst, self.n), code)
+                self.assertEqual(len(calls), 1)
+                self.assertEqual(self.due_without_drain().count("HTTP " + str(code)), 1)
+
+    def test_check_redirect_is_a_problem_for_probe_and_drain(self):
+        with self.webhook(302, redirect=True) as (url, calls):
+            self.bind_webhook(url)
+            check = self.b(self.r, "check", ok=False)
+            self.assertIn("✗ a: wake probe HTTP 302", check)
+            self.assertEqual(len(calls), 1)
+            self.assertNotIn(url, check)
+            directory = self.module.wake_directory(self.inst, self.n)
+            self.module.wake_record(directory, url, 302)
+            name = "probe-" + self.module.wake_binding(url) + ".json"
+            self.module.wake_record(directory, url, 202, name)
+            check = self.b(self.r, "check", ok=False)
+            self.assertIn("✗ a: last wake delivery refused: HTTP 302", check)
+            self.assertEqual(len(calls), 1)
+
+    def test_probe_transport_error_warns_is_safe_and_not_cached(self):
+        self.bind_webhook("http://127.0.0.1:1/synthetic-secret")
+        check = self.b(self.r, "check")
+        self.assertIn("! a: wake probe transport error (not cached)", check)
+        self.assertNotIn("synthetic-secret", check)
+        directory = self.module.wake_directory(self.inst, self.n)
+        self.assertFalse(list(directory.glob("probe-*.json")))
+        with mock.patch.object(self.module, "wake_http_status", return_value=202) as send:
+            self.assertEqual(self.module.wake_probe(self.inst, self.n), 202)
+            send.assert_called_once()
+
+    def test_check_fix_never_sends_even_when_live_or_cache_expired(self):
+        with self.webhook() as (url, calls):
+            self.bind_webhook(url)
+            check = self.b(self.r, "check", "--fix", "--live")
+            self.assertIn("not probed; run brain check", check)
+            self.assertEqual(calls, [])
+            directory = self.module.wake_directory(self.inst, self.n)
+            name = "probe-" + self.module.wake_binding(url) + ".json"
+            self.module.wake_record(directory, url, 202, name)
+            cache = directory / name
+            record = json.loads(cache.read_text())
+            record["at"] -= 86401
+            cache.write_text(json.dumps(record))
+            check = self.b(self.r, "check", "--fix", "--live")
+            self.assertIn("wake probe HTTP 202", check)
+            self.assertIn("result age 864", check)
+            self.assertEqual(calls, [])
+            with mock.patch.object(self.module, "load", return_value=self.inst), \
+                    mock.patch.object(self.module, "wake_http_status") as send, \
+                    contextlib.redirect_stdout(io.StringIO()):
+                self.module.cmd_check(argparse.Namespace(fix=True, live=True))
+            send.assert_not_called()
+
+    def test_probe_success_preserves_real_drain_refusal_for_due(self):
+        response = [403]
+        with self.webhook(lambda: response[0]) as (url, calls):
+            self.bind_webhook(url)
+            self.enqueue("made-up reason")
+            self.drain()
+            response[0] = 202
+            self.assertEqual(self.module.wake_probe(self.inst, self.n, force=True), 202)
+            self.assertEqual(len(calls), 2)
+            self.assertEqual(self.due_without_drain().count("HTTP 403"), 1)
+            directory = self.module.wake_directory(self.inst, self.n)
+            self.assertEqual(json.loads((directory / "delivery.json").read_text())["status"], 403)
+
+    def test_diagnostic_write_failure_cannot_requeue_successful_delivery(self):
+        with self.webhook() as (url, calls):
+            self.bind_webhook(url)
+            self.enqueue("made-up reason")
+            with mock.patch.object(self.module, "wake_record", side_effect=OSError("synthetic failure")):
+                self.drain()
+            directory = self.module.wake_directory(self.inst, self.n)
+            self.assertFalse(list(directory.glob("*.pending")))
+            self.assertEqual(len(list(directory.glob("*.sent"))), 1)
+            self.drain()
+            self.assertEqual(len(calls), 1)
+
     def test_slow_transport_succeeds_and_expired_dedup_rearms(self):
         script = "import time; time.sleep(0.6); " + "open(" + repr(str(self.calls)) + ", 'a').write('called\\n')"
         self.b(self.r, "set", "a", "wake=" + shlex_quote(sys.executable) + " -c " + shlex_quote(script))
