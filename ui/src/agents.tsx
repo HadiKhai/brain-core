@@ -11,7 +11,7 @@ import type { Found } from "./search";
 import { flight, threads, tone, jobTitle, hasMeasuredUsage, list, hireRow, closed, count, time, tokens, allJobs, nowOf, stamp, jobState, label, type RecordData } from "./model";
 import type { Route } from "./routes";
 import { ThreadLink } from "./thread-link";
-import { WorkStatus } from "./work-status";
+import { WorkStatus, workStatus } from "./work-status";
 import { ReviewActions } from "./review";
 
 type Go = (r: Partial<Route> & { view: string }) => void;
@@ -120,7 +120,12 @@ export function Jobs({ s, active, go }: { s: RecordData; active: boolean; go: Go
             { key: "Usage", label: "Tokens / active", numeric: true, sortValue: (r) => usage(r)?.processed ?? totalTokens(r), render: (r) => <span>{usage(r) ? tokens(usage(r).processed) : hasMeasuredUsage(r) ? tokens(totalTokens(r)) : "Unmeasured"}<small>{usage(r)?.active_h ?? r["Active h"] ?? "Unmeasured"} h active</small></span> },
             { key: "Reviews", label: "Reviews", numeric: true },
             { key: "Runtime", label: "Runtime", render: (r) => <span>{r.Runtime || "Unknown"}<small>{r.Subscription || "Subscription not recorded"}</small></span> },
-            { key: "Outcome", label: "Outcome", render: (r) => closed(r) ? <Status>{r.Outcome}</Status> : <WorkStatus s={s} item={list(r._node.work).find(j => j.branch === r.Job) || { state: "In progress" }} ledger={r._open || r} /> },
+            { key: "Outcome", label: "Outcome", render: (r) => {
+              if (closed(r)) return <Status>{r.Outcome}</Status>;
+              const work = list(r._node.work).find(j => j.branch === r.Job);
+              const status = workStatus({ ...r._open, ...work }, s, r._open || r);
+              return <span><Status>{status.kind}</Status>{status.stale && <Status>Stale</Status>}{status.age && <span className="tabular-nums">{status.age}</span>}</span>;
+            } },
             { key: "Details", label: "Lessons and cause", render: (r) => <Text>{[r.Cause, r.Lessons ? "Lessons: " + r.Lessons : "", usage(r) ? `Models: ${Object.keys(usage(r).models || {}).join(", ")} · ${count(usage(r).compactions || 0, "compaction")}` : r.Models ? "Models: " + r.Models : "", r._open?.budget ? `Budget: ${[r._open.budget.tokens ? tokens(r._open.budget.tokens) + " tokens" : "", r._open.budget.hours ? r._open.budget.hours + " h" : ""].filter(Boolean).join(" · ")}` : r.Budget ? "Budget: " + r.Budget : ""].filter(Boolean).join(" · ") || "Not recorded"}</Text> },
           ]} />
       </section>

@@ -253,6 +253,7 @@ def ui_node(inst, n, since, cache=None):
     work = [{k: hide(v) for k, v in j.items()} for j in work]
     js = _m_jobs.jobs_summary(inst, n)
     for r in js["open"]:
+        r.update(work_metadata.get(r["Job"], {}))
         used = _m_spend.live_usage(inst, n, r)
         r["usage"] = _m_spend.spend_summary(used, terms) if used and used["sessions"] else None
         r["budget"] = _m_spend.job_budget(n, r)

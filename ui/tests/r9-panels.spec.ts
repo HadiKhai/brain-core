@@ -76,3 +76,22 @@ test("blocked status distinguishes an operator wait from recorded failure eviden
   await expect(work).toContainText("Blocked by fault");
   await expect(work).toContainText("9 h waiting");
 });
+
+test("ledger-only imports show stale age and current fault evidence without a thread row", async ({ page, request, state }) => {
+  const project = state.nodes.find((n: any) => n.id === "field-guide");
+  const row = { ...project.jobs.open[0], Job: "import:synthetic-snapshot", age_h: 30, age_hours: 30, Outcome: "", fault: false };
+  project.jobs.open = [row];
+  project.jobs.rows = [row];
+  project.work = [];
+  project.worktrees = [];
+  await request.post("/fixture/update", { data: { nodes: state.nodes } });
+  await page.goto("/?k=demo#view=jobs");
+  const job = page.locator('[data-page=jobs] [data-slot=table-row][data-detail-row]').first();
+  await expect(job).toContainText("Import");
+  await expect(job).toContainText("Stale");
+  await expect(job).toContainText("30 h open");
+  await expect(job).not.toContainText("Blocked by fault");
+  row.fault = true;
+  await request.post("/fixture/update", { data: { nodes: state.nodes } });
+  await expect(job).toContainText("Blocked by fault");
+});
