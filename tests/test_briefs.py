@@ -277,10 +277,12 @@ class BriefLimits(Scenario):
             self.assertIn("warning: brief", out)
             self.assertIn("largest sections:", out)
             destination = self.tmp / (command[0] + ".md")
+            ledger_before = (r / "nodes/a/job-ledger.md").read_bytes()
             out = self.b(r, *command, "x" * (17 * 1024), "--out", str(destination), ok=False)
             self.assertIn("refused:", out)
             self.assertIn("Task" if command[0] != "review" else "Focus", out)
             self.assertFalse(destination.exists())
+            self.assertEqual(ledger_before, (r / "nodes/a/job-ledger.md").read_bytes())
         self.b(r, "set", "a", "brief_max_kb=32")
         self.assertNotIn("warning: brief", self.b(r, "brief", "a", "--task", "x" * 17000))
         self.b(r, "set", "a", "brief_max_kb=nan")
@@ -288,6 +290,7 @@ class BriefLimits(Scenario):
 
     def test_compaction_restart_due_and_fresh_brief_resume_without_commits(self):
         r = self.setup_job()
+        self.b(r, "brief", "a", "--branch", "job", "--task", "Finish fixture work")
         self.b(r, "handback", "a", "--branch", "job", "--state", "done", "--restart", "compactions", ok=False)
         self.b(r, "handback", "a", "--branch", "job", "--state", "blocked", "--restart", "compactions")
         due = json.loads(self.b(r, "due", "a", "--json"))
@@ -296,6 +299,50 @@ class BriefLimits(Scenario):
         self.assertIn("## Resume existing work", self.b(r, "brief", "a", "--branch", "job"))
         self.b(r, "handback", "a", "--branch", "job", "--state", "blocked")
         self.assertNotIn('"kind": "restart"', self.b(r, "due", "a", "--json"))
+
+    def test_restart_replays_exact_inputs_and_acknowledges_each_signal(self):
+        r = self.setup_job()
+        task_file = self.tmp / "task with spaces.md"
+        task_file.write_text("Complete the original fixture task.")
+        context = self.tmp / "shared context.md"
+        context.write_text("Existing fixture findings must survive restart.")
+        for task_args, expected in [
+                (["--task-file", str(task_file)], task_file.read_text()),
+                (["--task", "Finish the inline fixture's remaining work."], "Finish the inline fixture's remaining work.")]:
+            self.b(r, "brief", "a", "--branch", "job", *task_args, "--context-file", str(context))
+            self.b(r, "handback", "a", "--branch", "job", "--state", "blocked", "--restart", "compactions")
+            due = json.loads(self.b(r, "due", "a", "--json"))
+            restart = next(i for i in due if i["kind"] == "restart")
+            self.assertEqual(restart["state"], "blocked")
+            self.b(r, "status", "a", "--refresh")
+            finished = (r / "nodes/a/status.md").read_text().split("Finished jobs awaiting coordinator:", 1)[1]
+            self.assertIn("restart: compactions", finished)
+            # Refusal must preserve the old replay inputs and leave restart pending.
+            self.b(r, "brief", "a", "--branch", "job", "--task", "x" * 18000, ok=False)
+            self.assertTrue(any(i["kind"] == "restart" for i in json.loads(self.b(r, "due", "a", "--json"))))
+            command = re.search(r"resume with `([^`]+)`", restart["text"]).group(1)
+            args = shlex.split(command)
+            self.assertIn("--context-file", args)
+            self.assertIn(task_args[0], args)
+            out = self.b(r, *args[1:])  # Run the exact command due supplies, without the executable.
+            self.assertIn(expected, out)
+            self.assertIn(context.read_text(), out)
+            self.assertIn("## Resume existing work", out)
+            self.assertNotIn("<!-- the task", out)
+            self.assertFalse(any(i["kind"] in ("restart", "handback", "invalid-handback")
+                                 for i in json.loads(self.b(r, "due", "a", "--json"))))
+            # A plain subsequent brief also reuses the recorded inputs.
+            self.assertIn(expected, self.b(r, "brief", "a", "--branch", "job"))
+
+    def test_legacy_restart_requires_original_task_and_reviewer_has_no_worker_policy(self):
+        r = self.setup_job()
+        self.b(r, "handback", "a", "--branch", "job", "--state", "blocked", "--restart", "compactions")
+        out = self.b(r, "brief", "a", "--branch", "job", ok=False)
+        self.assertIn("supply the original --task or --task-file", out)
+        review = self.b(r, "review", "a", "--branch", "job")
+        self.assertIn("Write no file", review)
+        self.assertNotIn("second context compaction", review)
+        self.assertNotIn("restart: compactions", review)
 
     def test_byte_measurement_and_exact_thresholds(self):
         sys.path.insert(0, str(CORE / "lib"))

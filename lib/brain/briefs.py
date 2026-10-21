@@ -27,9 +27,10 @@ def reference_line(path, summary):
     return "- `" + _m_common.tilde(path) + "`: " + " ".join(str(summary).split())[:180] + ". Read before working."
 
 
-def checked_brief(n, text):
+def checked_brief(n, text, worker=True):
     """Measure the complete UTF-8 output, without trimming mandatory safety instructions."""
-    text += "\n" + COMPACTION_POLICY + "\n"
+    if worker:
+        text += "\n" + COMPACTION_POLICY + "\n"
     _m_guard.no_terms_in(n, text, "the brief")
     try:
         kb = float(n["fm"].get("brief_max_kb", 8))
@@ -53,6 +54,32 @@ def checked_brief(n, text):
             _m_common.die("refused: " + message)
         print("warning: " + message, file=sys.stderr)
     return text
+
+
+def restart_acknowledged(n, row, signal):
+    """A local re-brief acknowledges only the exact worker restart it consumed."""
+    return bool(signal and signal.get("restart") == "compactions" and
+                n["local"].get("worktrees", {}).get(row["Job"], {}).get("restart_ack") ==
+                _m_jobs.digest([_m_jobs.job_key(row), signal]))
+
+
+def saved_brief_inputs(n, row):
+    if not row:
+        return {}
+    saved = n["local"].get("worktrees", {}).get(row["Job"], {}).get("brief_inputs", {})
+    return saved if saved.get("job") == _m_jobs.job_key(row) else {}
+
+
+def restart_command(n, row):
+    args = ["brain", "brief", n["id"], "--branch", row["Job"]]
+    saved = saved_brief_inputs(n, row)
+    if saved.get("task_file"):
+        args += ["--task-file", saved["task_file"]]
+    elif saved.get("task"):
+        args += ["--task", saved["task"]]
+    for path in saved.get("context_files", []):
+        args += ["--context-file", path]
+    return shlex.join(args)
 
 
 def import_job_id(home):
@@ -163,6 +190,15 @@ def cmd_brief(a):
     if n["external"] and not (n["home_path"] and n["home_path"].exists()):
         _m_common.die(f"{n['id']}'s home isn't on this machine (brain set {n['id']} home=<path>): a worker can't run there, "
             "and never in the instance instead")
+    row = _m_jobs.open_job(_m_jobs.read_jobs(n) or [], a.branch) if w else None
+    signal = _m_jobs.read_handback(n, row) if row else None
+    saved = saved_brief_inputs(n, row)
+    if w and a.task_file is None and a.task is None:
+        a.task_file, a.task = saved.get("task_file"), saved.get("task")
+    if w and a.context_file is None:
+        a.context_file = saved.get("context_files", [])
+    if signal and signal.get("restart") and not (a.task_file or a.task):
+        _m_common.die("restart brief has no recorded task; supply the original --task or --task-file")
     where = Path(w["path"]) if w else (n["home_path"] if n["external"] else n["dir"])
     shared = separation_lines(a, n, a.branch)
     context, context_inputs = [], []
@@ -190,7 +226,10 @@ def cmd_brief(a):
         head += f"  ·  model: {a.model}"
     if w:
         head += f"  ·  {_m_worktrees.port_text(w['port'], w.get('ports', 1))}"
-    task = Path(a.task_file).read_text() if a.task_file else (a.task or "<!-- the task, what done means, "
+    task_path = Path(a.task_file).expanduser().resolve() if a.task_file else None
+    if task_path:
+        _m_guard.no_terms_in(n, str(task_path), "task file path")
+    task = task_path.read_text() if task_path else (a.task or "<!-- the task, what done means, "
                                                                           "where outputs go -->")
     if a.small:
         out = [f"Role: worker in node `{n['id']}`; small job.", head, _m_guard.redact(usage, _m_guard.never_terms(n)),
@@ -252,8 +291,13 @@ def cmd_brief(a):
         _m_history.write_out(inst, n, a.out, text)
     else:
         print(text, end="")
-    if w is not None and a.context_file:
-        inst.local_of(n["id"])["worktrees"][a.branch]["context_inputs"] = context_inputs
+    if w is not None and row:
+        sys.stdout.flush()  # Do not acknowledge a failed delivery through a closed pipe.
+        w["brief_inputs"] = {"job": _m_jobs.job_key(row), "task_file": str(task_path) if task_path else None,
+                             "task": a.task if not task_path else None, "context_files": context_inputs}
+        w["context_inputs"] = context_inputs
+        if signal and signal.get("restart") == "compactions":
+            w["restart_ack"] = _m_jobs.digest([_m_jobs.job_key(row), signal])
         inst.save_local()
 
 # ---------- second-runtime review ----------

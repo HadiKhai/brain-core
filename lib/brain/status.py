@@ -3,7 +3,6 @@ import datetime
 import hashlib
 import json
 import re
-import shlex
 import sys
 import urllib.parse
 from pathlib import Path
@@ -395,11 +394,12 @@ def due_items(inst, n, evidence=None, include_stale=True):
         if w and w["merged"]:
             add("merged-job", f"{branch}: merged in local git; record brain jobs {n['id']} --branch {branch} --lessons "
                 "first, then close the ledger and prune; " + _m_jobs.handback_detail(n, row), job=_m_jobs.job_key(row))
-        elif signal and signal.get("restart") == "compactions" and signal["state"] == "blocked":
-            command = f"brain brief {shlex.quote(n['id'])} --branch {shlex.quote(branch)}"
+        elif (signal and signal.get("restart") == "compactions" and signal["state"] == "blocked"
+              and not _m_briefs.restart_acknowledged(n, row, signal)):
+            command = _m_briefs.restart_command(n, row)
             add("restart", f"{branch}: restart: compactions; resume with `{command}`",
-                job=_m_jobs.job_key(row))
-        elif signal:
+                job=_m_jobs.job_key(row), state=signal["state"])
+        elif signal and not _m_briefs.restart_acknowledged(n, row, signal):
             ready = _m_verify.ready_state(inst, n, branch) if signal["state"] == "done" and not _m_briefs.import_job(branch) else None
             detail = ("ready to merge" if ready["ready"] else
                       "finished but not ready (" + "; ".join(ready["reasons"]) + ")") if ready else (signal["state"] + "; node study, no home ready evidence required"
@@ -407,7 +407,7 @@ def due_items(inst, n, evidence=None, include_stale=True):
             add("handback", f"{branch}: {detail}; review report {signal.get('report', '')} and record the next step",
                 job=_m_jobs.job_key(row), state=signal["state"], ready=bool(ready and ready["ready"]),
                 reasons=ready["reasons"] if ready else [])
-        elif _m_jobs.handback_file(n, row).exists():
+        elif not signal and _m_jobs.handback_file(n, row).exists():
             add("invalid-handback", f"{branch}: unreadable worker signal; ask the worker to write it again", job=_m_jobs.job_key(row))
         if not _m_briefs.import_job(branch) and (not w or not w["exists"]):
             add("missing-worktree", f"{branch}: open ledger job has no worktree on this machine", job=_m_jobs.job_key(row))
@@ -560,7 +560,7 @@ def status_facts(inst, n, state, known_merges):
                      ("missing; coordinator must record outcome" if r.get("Lesson check") == "required" else
                       "legacy; outcome not required")), _m_guard.never_terms(n)) for r in lessons] or ["- None."]
     lines += ["", "Finished jobs awaiting coordinator:"]
-    lines += ["- " + i["text"] for i in due if i["kind"] == "handback"] or ["- None."]
+    lines += ["- " + i["text"] for i in due if i["kind"] in ("handback", "restart")] or ["- None."]
     forecasts = _m_jobs.forecast_lines(state["jobs"] or [])
     if forecasts:
         lines += ["", "Forecasts (merged ledger durations):"] + ["- " + _m_guard.redact(s, _m_guard.never_terms(n)) for s in forecasts]

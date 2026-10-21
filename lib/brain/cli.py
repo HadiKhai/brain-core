@@ -120,7 +120,7 @@ def writes(a):
         return a.action in (None, "plan") or bool(a.save)
     if name in ("cmd_brief", "cmd_hire", "cmd_history"):
         return bool(getattr(a, "out", None) or getattr(a, "job", None) or
-                    (getattr(a, "branch", None) and getattr(a, "context_file", None)))  # --out writes a file, maybe inside the instance
+                    (name == "cmd_brief" and getattr(a, "branch", None)))  # Branch briefs also record replay inputs and acknowledge restarts.
     if name == "cmd_check":
         return bool(a.fix)
     if name == "cmd_jobs":

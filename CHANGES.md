@@ -46,6 +46,8 @@ For agents:
 - Specialist standards and library items are referenced by path. Read them before work.
 - After the second context compaction, stop with a blocked hand-back carrying
   `--restart compactions`; due supplies the resume brief command and preserves commits.
+  Branch briefs record task/context inputs locally and replay them on restart; successful
+  re-briefing acknowledges that restart. Review briefs keep their read-only instructions.
 
 After upgrading:
 - Reload worker, hire and home-job instructions. Shorten oversized task/context text

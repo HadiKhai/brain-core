@@ -311,6 +311,7 @@ class RoundTwo(AutonomyProject):
         before = {p: p.read_bytes() for p in [r / ".brain/local.json", n / "job-ledger.md"]}
         worktrees = self.git("worktree", "list", "--porcelain", cwd=home)
         short = self.b(r, "brief", "app", "--small", "--task", "Prepare a local draft")
+        self.assertTrue(all(p.read_bytes() == data for p, data in before.items()))
         full = self.b(r, "brief", "app", "--branch", "job-a", "--task", "Prepare a local draft")
         self.assertLess(len(short.splitlines()), len(full.splitlines()) * .6)
         self.assertIn("Only local drafts", short)
@@ -319,7 +320,6 @@ class RoundTwo(AutonomyProject):
         self.assertIn("brain guard app ~/code/app", short)
         self.assertIn("host `send` to whoever started you", short)
         self.assertIn("Do not commit to main unless the task explicitly says so", short)
-        self.assertTrue(all(p.read_bytes() == data for p, data in before.items()))
         self.b(r, "set", "app", "coordinator=coordinator-thread")
         routed = self.b(r, "brief", "app", "--small", "--to", "override-thread")
         self.assertIn("host `send` to thread `override-thread`", routed)

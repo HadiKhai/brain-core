@@ -204,3 +204,8 @@ Generated briefs warn above `brief_max_kb` in node.md (8 KB by default) and refu
 at twice that size, naming the largest sections. Follow referenced role/standards
 and library paths before working; their bodies stay out of the brief. Shorten task
 or shared context, preserving node limits, never-name guard and ask/hand-back steps.
+
+Branch briefs retain task-file paths (or inline task text) and shared-context paths in
+machine-local worktree metadata. A restart command replays them; successful re-briefing
+acknowledges that worker restart. Keep referenced input files available. Legacy restarts
+without recorded inputs require the coordinator to supply the original task explicitly.

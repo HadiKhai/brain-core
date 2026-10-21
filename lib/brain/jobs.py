@@ -171,6 +171,7 @@ def cmd_handback(a):
                 "verify_runs": count("verify_runs") + fresh, "verify_reused": count("verify_reused") + reused}
         if getattr(a, "restart", None):
             data["restart"] = a.restart
+            data["restart_id"] = os.urandom(16).hex()
         first = previous.get("first_ready") if isinstance(previous.get("first_ready"), str) else None
         if not first and packet and packet.get("verify_result") == 0 and not reasons:
             first = inst.now()
