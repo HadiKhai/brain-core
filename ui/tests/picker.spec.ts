@@ -45,11 +45,11 @@ test("1,000+ records page in on scroll, keyboard picks one and the chip names it
   await search.fill("a");
   await expect(page.getByRole("option")).toHaveCount(20);
   const list = page.locator("[data-slot=combobox-list]");
-  for (let i = 0; i < 3; i++) {
+  // Each scroll to the end asks the server for the next page; keep scrolling until three pages are in.
+  await expect.poll(async () => {
     await list.evaluate((e) => (e.scrollTop = e.scrollHeight));
-    await page.waitForTimeout(250);
-  }
-  expect(await page.getByRole("option").count()).toBeGreaterThanOrEqual(60);
+    return page.getByRole("option").count();
+  }, { timeout: 15_000, intervals: [300] }).toBeGreaterThanOrEqual(60);
   await search.fill("lina khoury 0012");
   await expect(page.getByRole("option")).toHaveCount(1);
   await page.keyboard.press("ArrowDown");

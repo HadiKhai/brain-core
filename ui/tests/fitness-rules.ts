@@ -124,8 +124,9 @@ export function audit(rule: string): Violation[] {
   if (rule === "job") {
     const main = [...p!.children].filter((e) => !e.matches("header") && !e.querySelector("h1"));
     const content = "table, [role=table], [role=grid], li, [role=listitem], article, [data-item], input:not([type=hidden]), textarea, [role=combobox], [role=checkbox], [role=tab], svg[role=img], canvas, [data-kpi]";
-    const empty = main.flatMap((e) => [...e.querySelectorAll(".empty, [data-empty]")]).filter(visible);
-    const data = main.flatMap((e) => [...e.querySelectorAll(content)]).filter((e) => visible(e) && !e.closest(".empty, [data-empty]") && !inModal(e));
+    const within = (e: Element, sel: string) => [...(e.matches(sel) ? [e] : []), ...e.querySelectorAll(sel)];
+    const empty = main.flatMap((e) => within(e, ".empty, [data-empty]")).filter(visible);
+    const data = main.flatMap((e) => within(e, content)).filter((e) => visible(e) && !e.closest(".empty, [data-empty]") && !inModal(e));
     if (empty.length && !data.length) add(`the main content is only an empty state (${empty.map(describe).join(", ")}); fold it into its parent page`);
     if (!empty.length && !data.length) add("the main content has no list, data or form");
   }
