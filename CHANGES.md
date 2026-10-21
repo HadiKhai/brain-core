@@ -5,6 +5,38 @@ upgrading. `brain changes <node>` shows the entries this node's coordinator hasn
 `brain due <node>` lists them until `brain changes <node> --seen`. Entry headings are
 `## <date>: <title>`; once released, a heading never changes.
 
+## 2026-10-21: Node hygiene and waiting decisions
+
+For agents:
+- Keep status Now within 30 nonblank lines. Missing/malformed generated facts is a check error;
+  Now overflow and dead backticked paths/Markdown links in brief/status/knowledge warn.
+- Blocked bullets carry `since: <brain now timestamp>; recommendation: <action>; default: <fallback>`
+  after the waiting/clears-when text. Keep since stable. Over 48 hours escalates in due, inbox
+  and live attention (`blocked-overdue`, `escalated`, `age_hours`, `since`, recommendation/default).
+  Legacy bullets, including wrapped ones, age from their first physical line’s Git introduction,
+  or file mtime if uncommitted. Clock changes do not re-notify; crossing the threshold does. Defaults never grant consent.
+- Code nodes need verify and a recorded coordinator tick (bound on its coordinator machine)
+  before the first job; missing setup warns in wt add and check. Root daily briefs send behind signals; each coordinator
+  syncs itself. UI work starts with a UX design job (ui-designer §0) before implementation.
+
+After upgrading:
+- Run `brain check --fix` (upgrade also runs it): absent facts blocks are generated while
+  preserving judgement bytes and Updated. Half/duplicate/malformed markers stay errors and
+  are never auto-edited; repair those markers explicitly, then refresh. Move old Now material to Recent changes
+  or decisions. Repair dead references or restore the named file/folder. Backticks must name
+  explicit paths (`./file`, `folder/`, a path with a file extension) or known structural files;
+  ambiguous bare names are skipped. Markdown link targets are always checked.
+- Add since/recommendation/default to unresolved blocked bullets without resetting their age.
+  Legacy age inference is approximate for short/common first lines and moved nodes; set
+  `since:` to the original waiting time explicitly so those cases retain their correct age.
+  Set code nodes’ `verify=<command>`, schedule coordinator intervals on one machine and
+  record/bind them with `brain schedule add` / `brain schedule bind`. Existing jobs continue with warnings.
+- Update existing root daily-brief schedules to send behind signals and let child coordinators
+  run sync; use the revised T3 tick template. Overdue-only ticks report new inbox items then
+  stop without committing unchanged status. Archived nodes are exempt from the new hygiene
+  checks. Load the revised coordinator, daily-brief and home-job rules. The daily-brief skill
+  signals behind children without running their sync or waiting for it.
+
 ## 2026-10-21: Machine care and shared verify slots
 
 For agents:

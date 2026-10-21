@@ -12,9 +12,16 @@ description: Verify the instance against the model - structure, owners, runtime 
    - item provenance and scope (axiom 10);
    - future status `Updated:` times (five minutes of skew allowed); other future-dated node
      entries warn, and undated legacy clock times are ignored (axiom 17);
+   - generated facts block present (error; `check --fix` generates an absent block, while
+     malformed markers require manual repair before refresh);
+   - Now over 30 nonblank lines, blocked bullets missing since/recommendation/default,
+     dead backticked paths or Markdown links in brief/status/knowledge (warnings);
+   - code nodes missing verify or a recorded coordinator tick, bound on the machine that
+     runs its coordinator (warnings);
    - lesson outcomes on newly recorded merges; historical merges are not flagged.
 2. `core/bin/brain check --fix` repairs the safe things (links, registry, sealed-view
-   sections, missing template files, machine IDs left in `node.md`). Fix the rest, or explain
+   sections, missing template files, machine IDs left in `node.md`, absent facts blocks).
+   It never edits malformed facts markers. Fix the rest, or explain
    to the operator why something can't be fixed.
 3. Also review what it can't check:
    - Do workers' briefs carry only usable items (axiom 9)?

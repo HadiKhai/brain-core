@@ -175,6 +175,7 @@ class Sealing(Scenario):
         self.b(r, "new", "venture", "--title", "Venture")
         (r / "nodes" / "venture" / "sources" / "plan.md").write_text("the shared plan\n")
         (r / "nodes" / "venture" / "status.md").write_text("Updated: x\nPRIVATE-ALICE thoughts\n")
+        self.b(r, "status", "venture", "--refresh")
         self.git("add", "-A", cwd=r); self.git("commit", "-qm", "work", cwd=r)
         home = self.tmp / "code" / "venture"
         out = self.b(r, "seal", "venture", "--owners", "alice,bob", "--home", str(home), "--move", "sources/plan.md")
@@ -241,6 +242,7 @@ class Collaboration(Scenario):
             self.assertNotIn(str(shared), (r / "nodes" / "proj" / "node.md").read_text())
             st = r / "nodes" / "proj" / "status.md"
             st.write_text(f"Updated: 2026-01-01 09:00 by proj coordinator (claude)\nPRIVATE-{me.upper()} opinion\n")
+            self.b(r, "status", "proj", "--refresh")
             self.git("commit", "-qam", "proj: status", cwd=r)
             brains[me] = (r, clone)
 
@@ -385,7 +387,9 @@ class Dashboard(Scenario):
 class Housekeeping(Scenario):
     def dirty(self, r):
         """Someone else's unfinished work: an edit and a new file in another node."""
-        (r / "nodes" / "b" / "status.md").write_text("Updated: x\nHALF-WRITTEN\n")
+        st = r / "nodes" / "b" / "status.md"
+        facts = re.search(r"<!-- brain:facts v1 -->.*?<!-- /brain:facts -->", st.read_text(), re.S).group()
+        st.write_text("Updated: x\nHALF-WRITTEN\n" + facts + "\n")
         (r / "nodes" / "b" / "draft.md").write_text("draft\n")
 
     def assert_untouched(self, r):
@@ -1237,17 +1241,18 @@ class FutureTimestamps(Scenario):
         cfg = r / "instance.md"
         cfg.write_text(cfg.read_text().replace("timezone: UTC", "timezone: Asia/Beirut"))
         st = r / "nodes/a/status.md"
+        facts = re.search(r"<!-- brain:facts v1 -->.*?<!-- /brain:facts -->", st.read_text(), re.S).group()
         from zoneinfo import ZoneInfo
         now = dt.datetime.now(ZoneInfo("Asia/Beirut"))
         for when in (now + dt.timedelta(minutes=4), now - dt.timedelta(days=1)):
-            st.write_text(f"Updated: {when:%Y-%m-%d %H:%M} by coordinator\n")
+            st.write_text(f"Updated: {when:%Y-%m-%d %H:%M} by coordinator\n" + facts)
             self.assertNotIn("future", self.b(r, "check"))
         future = now + dt.timedelta(minutes=20)
         for text in (future.strftime("%Y-%m-%d %H:%M"), future.isoformat(timespec="seconds"),
                      future.astimezone(dt.timezone.utc).strftime("%Y-%m-%d %H:%M +00:00")):
-            st.write_text(f"Updated: {text} by coordinator\n")
+            st.write_text(f"Updated: {text} by coordinator\n" + facts)
             self.assertIn("future Updated: time", self.b(r, "check", ok=False))
-        st.write_text("Updated: 15:58 by coordinator\n- 23:59: old log\n")
+        st.write_text("Updated: 15:58 by coordinator\n- 23:59: old log\n" + facts)
         self.assertNotIn("future", self.b(r, "check"))
 
     def test_other_dated_entries_warn_and_hook_explains_fix(self):
@@ -1256,11 +1261,12 @@ class FutureTimestamps(Scenario):
         node = r / "nodes/a"
         (node / "decisions.md").write_text("## 2999-01-01 00:00 +03:00: decision\n")
         st = node / "status.md"
-        st.write_text("Updated: 2020-01-01 00:00\n- 2999-01-02: log entry\n- 23:59: old\n")
+        facts = re.search(r"<!-- brain:facts v1 -->.*?<!-- /brain:facts -->", st.read_text(), re.S).group()
+        st.write_text("Updated: 2020-01-01 00:00\n- 2999-01-02: log entry\n- 23:59: old\n" + facts)
         out = self.b(r, "check")
         self.assertIn("! a: decisions.md:1: future dated entry", out)
         self.assertIn("! a: status.md:2: future dated entry", out)
-        st.write_text("Updated: 2999-01-01 00:00 +03:00 by coordinator\n")
+        st.write_text("Updated: 2999-01-01 00:00 +03:00 by coordinator\n" + facts)
         p = subprocess.run([sys.executable, str(CORE / "bin/brain"), "hook", "stop"], cwd=node,
                            input=json.dumps({"cwd": str(node)}), capture_output=True, text=True, env=self.env)
         self.assertEqual(p.returncode, 0)
@@ -2533,7 +2539,10 @@ class LiveView(Scenario):
         self.assertEqual(app["work"][0]["link"], "t3-thread://v1/t1")
         self.assertEqual(app["work"][0]["runtime"], "Codex")
         self.assertEqual(app["worktrees"][0]["branch"], "job-a")
-        self.assertIn({"node": "app", "kind": "blocked", "text": "The API key"}, port["attention"])
+        need = next(i for i in port["attention"] if i["node"] == "app" and i["kind"] == "blocked")
+        self.assertEqual(need["text"], "The API key")
+        self.assertFalse(need["escalated"])
+        self.assertIn("age_hours", need)
         self.assertGreaterEqual(sum(port["activity"]["counts"].get("app", [])), 1)   # "app: …" commits count for app
         with socket.socket() as sk:
             sk.bind(("127.0.0.1", 0))
@@ -9362,6 +9371,301 @@ raise SystemExit(result)
             with m.machine_queue():
                 pass
         self.assertEqual(outside.read_text(), "sentinel")
+
+
+class NodeHygiene(Scenario):
+    def setUp(self):
+        super().setUp()
+        loader = importlib.machinery.SourceFileLoader('brain_hygiene', str(CORE / 'bin/brain'))
+        self.m = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+        loader.exec_module(self.m)
+
+    def node(self):
+        r = self.init('maple')
+        self.b(r, 'new', 'app', '--title', 'App')
+        inst = self.m.Instance(r)
+        return r, inst, inst.node('app')
+
+    def block(self, n, since):
+        text = ('Choose a color — waiting on owner; clears when chosen; since: ' + since +
+                '; recommendation: blue; default: keep gray')
+        with (n['dir'] / 'status.md').open('a') as f:
+            f.write('\n## Blocked / needs the operator\n\n- ' + text + '\n')
+        return text
+
+    def test_facts_required_refresh_preserves_judgement(self):
+        r, inst, n = self.node()
+        st = n['dir'] / 'status.md'
+        self.assertIn(self.m.FACTS_START, st.read_text())
+        judgement = 'Updated: 2020-01-01 00:00 +00:00\n\n# App\n\n## Now\n\n- Exact judgement.\n'
+        st.write_text(judgement)
+        self.assertIn('missing or malformed generated facts block', self.b(r, 'check', ok=False))
+        self.b(r, 'status', 'app', '--refresh')
+        self.assertIn('✓', self.b(r, 'check'))
+        self.assertEqual(self.m.FACTS_RE.sub('', st.read_text()).replace('\n\n\n\n', '\n\n'), judgement)
+        st.write_text(st.read_text() + self.m.FACTS_START)
+        self.assertIn('malformed', self.b(r, 'check', ok=False))
+
+    def test_check_fix_migrates_missing_facts_without_changing_judgement(self):
+        r, inst, n = self.node()
+        originals = {}
+        for st in (r / 'status.md', n['dir'] / 'status.md'):
+            original = (b'Updated: 2020-01-01 00:00 +00:00\r\n\r\n# Status\r\n\r\n'
+                        b'<!-- Keep this judgement verbatim. -->\r\n\r\n## Now\r\n\r\n'
+                        b'- Exact judgement, with trailing spaces.  \r\n\r\n## Next\r\n- Keep planning.')
+            st.write_bytes(original)
+            originals[st] = original
+        self.assertIn('generated facts block', self.b(r, 'check', ok=False))
+        # This is the new-core migration command used by brain upgrade.
+        out = self.b(r, 'check', '--fix')
+        self.assertIn('root: inserted generated facts block', out)
+        self.assertIn('app: inserted generated facts block', out)
+        self.assertIn('all checks pass', out)
+        pattern = re.compile(re.escape(self.m.FACTS_START.encode()) + b'.*?' +
+                             re.escape(self.m.FACTS_END.encode()), re.S)
+        for st, original in originals.items():
+            after = st.read_bytes()
+            block = pattern.search(after)
+            self.assertIsNotNone(block)
+            self.assertIn(b'## Facts (generated by brain status --refresh)', block.group())
+            self.assertEqual(after[block.end():block.end() + 2], b'\n\n')
+            self.assertEqual(after[:block.start()] + after[block.end() + 2:], original)
+        before = {st: st.read_bytes() for st in originals}
+        self.assertIn('all checks pass', self.b(r, 'check', '--fix'))
+        self.assertEqual({st: st.read_bytes() for st in originals}, before)
+
+    def test_check_fix_never_rewrites_malformed_facts_even_with_other_repairs(self):
+        r, inst, n = self.node()
+        st = n['dir'] / 'status.md'
+        root_status = r / 'status.md'
+        start, end = self.m.FACTS_START, self.m.FACTS_END
+        for markers in (start, end, start + '\n' + start + '\n' + end,
+                        start + '\n' + end + '\n' + start + '\n' + end,
+                        end + '\n' + start):
+            with self.subTest(markers=markers):
+                damaged = ('Updated: 2020-01-01 00:00 +00:00\n\n# App\n\n' +
+                           markers + '\n## Now\n- Preserve this human edit.\n').encode()
+                st.write_bytes(damaged)
+                # Ensure the facts fixer actually runs for a different node in this call.
+                root_status.write_text('Updated: 2020-01-01 00:00 +00:00\n\n# Root\n\n## Now\n- Keep.\n')
+                out = self.b(r, 'check', '--fix', ok=False)
+                self.assertIn('root: inserted generated facts block', out)
+                self.assertIn('app: status.md missing or malformed generated facts block', out)
+                self.assertEqual(st.read_bytes(), damaged)
+                self.assertIn(start, root_status.read_text())
+
+    def test_now_limit_counts_wrapped_lines_but_not_history_or_comments(self):
+        r, inst, n = self.node()
+        st = n['dir'] / 'status.md'
+        base = self.m.FACTS_RE.search(st.read_text()).group()
+        st.write_text(base + '\n## Now\n' + '- current\n' * 30 + '\n<!-- comment -->\n## Recent changes\n' + '- old\n' * 100)
+        self.assertNotIn('Now has', self.b(r, 'check'))
+        st.write_text(st.read_text().replace('## Recent changes', '  wrapped\n## Recent changes'))
+        self.assertIn('Now has 31 nonblank lines (limit 30); move history', self.b(r, 'check'))
+
+    def test_blocked_exact_threshold_escalates_once_without_clock_renotification(self):
+        r, inst, n = self.node()
+        since = datetime.datetime(2020, 1, 1, tzinfo=datetime.timezone.utc)
+        text = self.block(n, since.isoformat())
+        with (n['dir'] / 'status.md').open('a') as f:
+            f.write('<!-- A wrapped comment\n     is not part of the need. -->\n')
+        self.assertEqual(self.m.status_section(n, 'blocked'), [text])
+        with mock.patch.object(inst, 'now_dt', return_value=since + datetime.timedelta(hours=48)):
+            b = self.m.blocked_entries(inst, n)[0]
+            self.assertFalse(b['escalated'])
+            self.assertEqual(b['age_hours'], 48)
+            before = self.m.inbox_items(inst, [n], 'app')[0]
+        with mock.patch.object(inst, 'now_dt', return_value=since + datetime.timedelta(hours=49)):
+            due = [i for i in self.m.due_items(inst, n) if i['kind'] == 'blocked-overdue']
+            self.assertEqual(len(due), 1)
+            self.assertEqual(due[0]['age_hours'], 49)
+            self.assertEqual(due[0]['recommendation'], 'blue')
+            self.assertEqual(due[0]['default'], 'keep gray')
+            after = self.m.inbox_items(inst, [n], 'app')[0]
+            self.assertNotEqual(before[0]['id'], after[0]['id'])
+        saved = r / '.brain/inbox-seen.json'
+        saved.write_text(json.dumps({'version': 2, 'reporters': {'app': {
+            i['id']: {'reported_at': since.isoformat(), 'first_seen': since.isoformat()} for i in after}}}))
+        with mock.patch.object(inst, 'now_dt', return_value=since + datetime.timedelta(hours=50)):
+            later = self.m.inbox_items(inst, [n], 'app')[0]
+            self.assertEqual(after[0]['id'], later[0]['id'])
+            self.assertTrue(later[0]['reported'])
+        attention = json.loads(self.b(r, 'ui', '--json'))['attention']
+        item = next(i for i in attention if i['kind'] == 'blocked-overdue')
+        self.assertTrue(item['escalated'])
+        self.assertEqual(item['text'], text)
+        self.assertIn('blocked-overdue', self.b(r, 'due', 'app'))
+
+    def test_legacy_blocked_age_and_fixable_format_warning(self):
+        r, inst, n = self.node()
+        st = n['dir'] / 'status.md'
+        with st.open('a') as f:
+            f.write('\n## Blocked\n- Need a choice\n')
+        self.git('add', '.', cwd=r)
+        self.git('commit', '-qm', 'record need', cwd=r)
+        intro = inst.now_dt()
+        with mock.patch.object(inst, 'now_dt', return_value=intro + datetime.timedelta(hours=49)):
+            self.assertTrue(self.m.blocked_entries(inst, n)[0]['escalated'])
+        self.assertIn('missing valid since:', self.b(r, 'check'))
+        self.assertIn("doesn't say what clears it", self.b(r, 'check'))
+        # Empty placeholder bullets never become decisions.
+        st.write_text(self.m.FACTS_RE.search(st.read_text()).group() + '\n## Blocked\n- None.\n')
+        self.assertEqual(self.m.blocked_entries(inst, n), [])
+
+    def test_code_setup_warns_without_stranding_jobs_and_accepts_bound_tick(self):
+        r, inst, n = self.node()
+        home = self.repo(self.tmp / 'source')
+        self.b(r, 'set', 'app', 'home=' + str(home), 'coordinator=fixture-coordinator')
+        out = self.b(r, 'wt', 'add', 'app', 'job-first')
+        self.assertIn('needs verify=<command>', out)
+        self.assertIn('needs a coordinator tick', out)
+        self.assertIn('worktree:', out)
+        self.assertIn('needs verify=<command>', self.b(r, 'check'))
+        self.b(r, 'set', 'app', 'verify=python3 -c "pass"')
+        self.b(r, 'schedule', 'add', 'app-tick', '--when', 'every 15 minutes', '--node', 'app', '--brief', 'Run due and pending')
+        self.assertIn('needs a coordinator tick', self.b(r, 'check'))
+        self.b(r, 'schedule', 'bind', 'app-tick', 'fixture-host-id')
+        self.assertNotIn('needs a coordinator tick', self.b(r, 'check'))
+        self.assertNotIn('needs verify=<command>', self.b(r, 'check'))
+
+    def test_dead_note_paths_node_and_home_urls_globs_commands(self):
+        r, inst, n = self.node()
+        home = self.repo(self.tmp / 'source', {'present.py': '# file\n'})
+        self.b(r, 'set', 'app', 'home=' + str(home))
+        (n['dir'] / 'local').mkdir()
+        (n['dir'] / 'brief.md').write_text('`present.py` `local/` `gone/file.py:12`\n'
+            '[lost](missing.md#heading) [web](https://example.test/x)\n'
+            '`*.py` `src/{a,b}.py` `brain check` `https://example.test`\n')
+        (n['dir'] / 'knowledge.md').write_text('[gone folder](absent/)\n')
+        out = self.b(r, 'check')
+        self.assertIn('dead path gone/file.py:12', out)
+        self.assertIn('dead path missing.md#heading', out)
+        self.assertIn('dead path absent/', out)
+        self.assertNotIn('dead path present.py', out)
+        self.assertNotIn('dead path local/', out)
+        self.assertNotIn('dead path https:', out)
+        self.assertNotIn('dead path *.py', out)
+        self.assertNotIn('dead path brain check', out)
+
+    def test_routing_rules_keep_sync_and_design_owned(self):
+        role = (CORE / 'roles/coordinator.md').read_text()
+        home = (CORE / 'skills/home-job/SKILL.md').read_text()
+        tick = (CORE / 'adapters/hosts/t3.md').read_text()
+        sync = (CORE / 'skills/node-sync/SKILL.md').read_text()
+        self.assertIn('root never runs child sync', role)
+        self.assertIn('ui-designer specialist (§0)', role)
+        self.assertIn('before any UI code', home)
+        self.assertIn('accepted design', home)
+        self.assertIn('root never runs child sync', tick)
+        self.assertIn('only for its own node', sync)
+        check = (CORE / 'skills/check/SKILL.md').read_text()
+        self.assertIn('a recorded coordinator tick', check)
+        self.assertNotIn('locally bound coordinator tick', check)
+        changes = (CORE / 'CHANGES.md').read_text()
+        self.assertIn('Legacy age inference is approximate', changes)
+        self.assertIn('original waiting time explicitly', changes)
+        brief = (CORE / 'skills/node-brief/SKILL.md').read_text()
+        self.assertIn('Send only a behind signal', brief)
+        self.assertIn('Do not wait for sync during the daily brief', brief)
+        self.assertNotIn('sync --all', brief)
+        self.assertNotIn('`core/bin/brain sync <child>`', brief)
+        # Reconciliation must retain the host-question job's descendant coverage too.
+        for clause in ('every descendant node', "each child's coordinator thread id",
+                       'without open jobs', 'provider it was created under'):
+            self.assertIn(clause, tick)
+        self.assertIn('Root also checks every descendant coordinator', role)
+        self.assertIn('not during a daily brief: report the snapshot as behind', role)
+
+
+    def test_wrapped_legacy_age_survives_refresh_and_history_is_read_once(self):
+        r, inst, n = self.node()
+        with (n['dir'] / 'status.md').open('a') as f:
+            f.write('\n## Blocked\n- Choose the plan, waiting on owner;\n  clears when approved\n')
+        dates = {k: self.env.get(k) for k in ('GIT_AUTHOR_DATE', 'GIT_COMMITTER_DATE')}
+        self.env.update(GIT_AUTHOR_DATE='2020-01-01T00:00:00Z', GIT_COMMITTER_DATE='2020-01-01T00:00:00Z')
+        self.git('add', '.', cwd=r)
+        self.git('commit', '-qm', 'record wrapped need', cwd=r)
+        for k, v in dates.items():
+            if v is None:
+                self.env.pop(k, None)
+            else:
+                self.env[k] = v
+        self.b(r, 'status', 'app', '--refresh')
+        inst = self.m.Instance(r)
+        n = inst.node('app')
+        with mock.patch.object(self.m, 'git', wraps=self.m.git) as git:
+            first = self.m.blocked_entries(inst, n)
+            second = self.m.blocked_entries(inst, n)
+            meta = self.m.blocked_metadata(inst, n, 'blocked-overdue', first[0]['text'])
+        logs = [c for c in git.call_args_list if c.args[:2] == ('log', '--reverse')]
+        self.assertEqual(len(logs), 1)
+        self.assertEqual(first[0]['since'], '2020-01-01T00:00:00+00:00')
+        self.assertTrue(first[0]['escalated'])
+        self.assertTrue(second[0]['escalated'])
+        self.assertTrue(meta['escalated'])
+
+    def test_dead_path_false_positives_and_brain_relative_paths(self):
+        r, inst, n = self.node()
+        (n['dir'] / 'knowledge.md').write_text(
+            '`Next.js` `v1.2` `origin/main` `@acme/ui` `text/html` `and/or`\n'
+            '`core/bin/brain` `nodes/app/brief.md` `./missing.py`\n'
+            '`next.js` `vue.js` `chart.js` `index.ts` `utils.py` `package.json`\n'
+            '[a title](lost.md "Local file")\n')
+        home = self.repo(self.tmp / 'source', {'README.md': '# source\n'})
+        (home / 'apps/web').mkdir(parents=True)
+        (home / 'apps/web/package.json').write_text('{}\n')
+        self.b(r, 'set', 'app', 'home=' + str(home))
+        inst = self.m.Instance(r)
+        problems = self.m.dead_note_paths(inst, inst.node('app'))
+        self.assertEqual(len(problems), 2, problems)
+        self.assertIn('dead path ./missing.py', problems[0])
+        self.assertIn('dead path lost.md', problems[1])
+
+    def test_second_machine_uses_recorded_tick_without_duplicate_binding(self):
+        r, inst, n = self.node()
+        self.b(r, 'set', 'app', 'stack=python', 'verify=python3 -c "pass"')
+        self.b(r, 'schedule', 'add', 'app-tick', '--when', 'every 15 minutes', '--node', 'app', '--brief', 'Run due')
+        # Shared schedule, no local coordinator: another machine owns its binding.
+        self.assertNotIn('needs a coordinator tick', self.b(r, 'check'))
+        self.b(r, 'set', 'app', 'coordinator=fixture-coordinator')
+        self.assertIn('needs a coordinator tick', self.b(r, 'check'))
+        self.b(r, 'schedule', 'bind', 'app-tick', 'fixture-host-id')
+        self.assertNotIn('needs a coordinator tick', self.b(r, 'check'))
+
+    def test_archived_judgement_is_not_subject_to_new_hygiene_checks(self):
+        r, inst, n = self.node()
+        self.b(r, 'archive', 'app')
+        st = n['dir'] / 'status.md'
+        st.write_text('## Now\n' + '- Historical item\n' * 31 + '\n## Blocked\n- Old choice\n')
+        (n['dir'] / 'knowledge.md').write_text('`./old/missing.py`\n')
+        before = st.read_bytes()
+        out = self.b(r, 'check')
+        self.assertNotIn('Now has', out)
+        self.assertNotIn('missing valid since', out)
+        self.assertNotIn('generated facts block', out)
+        self.assertNotIn('dead path', out)
+        self.assertNotIn("doesn't say what clears it", out)
+        self.assertEqual(st.read_bytes(), before)
+
+    def test_empty_blocked_forms_do_not_escalate_but_real_needs_do(self):
+        r, inst, n = self.node()
+        with (n['dir'] / 'status.md').open('a') as f:
+            f.write('\n## Blocked\n- (none)\n- None right now\n- Nothing blocked.\n')
+        self.assertEqual(self.m.blocked_entries(inst, n), [])
+        self.assertNotIn('missing valid since', self.b(r, 'check'))
+        self.assertNotIn("doesn't say what clears it", self.b(r, 'check'))
+        self.assertFalse(self.m.empty_blocked('Nothing builds — waiting on owner'))
+
+    def test_overdue_only_ticks_route_new_needs_without_status_commits(self):
+        r, inst, n = self.node()
+        self.block(n, '2020-01-01T00:00:00Z')
+        before = (n['dir'] / 'status.md').read_bytes()
+        first = json.loads(self.b(r, 'inbox', 'app', '--new', '--json'))
+        self.assertTrue(any(i['kind'] == 'blocked-overdue' for i in first))
+        self.assertEqual(json.loads(self.b(r, 'inbox', 'app', '--new', '--json')), [])
+        self.assertEqual((n['dir'] / 'status.md').read_bytes(), before)
+        for name in ('roles/coordinator.md', 'adapters/hosts/t3.md'):
+            self.assertIn('committing unchanged status', (CORE / name).read_text())
 
 
 if __name__ == "__main__":

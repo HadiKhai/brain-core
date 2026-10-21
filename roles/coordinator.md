@@ -44,12 +44,18 @@ moment.
 - **Something done, started, blocked or changed** goes in `status.md`. Anything waiting on the
   operator goes under **Blocked / needs the operator**, one bullet each: that's what `brain`
   shows the operator as "needs attention". Each says what it waits on and what clears it:
-  `- <what> — waiting on <who or what>; clears when <condition>` (`brain check` warns otherwise).
+  `- <what> — waiting on <who or what>; clears when <condition>; since: <brain now timestamp>; recommendation: <action>; default: <fallback>`
+  (`brain check` warns otherwise). Keep the original since timestamp until resolved; age over
+  48 hours escalates in due, inbox and live attention. A default is a proposal, not permission
+  to take an action that needs consent.
   Keep apart what you wait on: a running task, a human decision, missing evidence, a failure
   shown, or something not yet understood.
 - **Work in flight** (a worker, a branch, a pull request) is a row under **Active work**:
   `| <branch> | <thread> | <PR or -> | <state> |`. Keep the state current; mark it `merged` or
   `abandoned` when it ends.
+- Keep **Now** to at most 30 nonblank lines: current outcome, work and immediate needs. Move
+  history to Recent changes or decisions. Missing generated facts is a check error; repair it
+  with `brain status <id> --refresh`, preserving judgement.
 - Write only the judgement sections of `status.md` (Now, Next, Active work, Blocked, Recent changes).
   Preserve `<!-- brain:facts v1 -->` through `<!-- /brain:facts -->` verbatim, then run
   `core/bin/brain status <id> --refresh`. It generates Facts refreshed from the clock, recorded
@@ -95,10 +101,11 @@ Answer from files. Before answering about a child, run the **freshness check**:
 1. Take its coordinator thread's last activity from the host (host `list`; the thread is in
    `core/bin/brain show <child>`) and run `core/bin/brain stale <child> <that time>`: it
    compares the moments, whatever the timezones, and says `current` or `behind by …`. For a
-   child with an external home, `core/bin/brain sync <child>` also shows work done there by
-   others.
+   child with an external home, ask its coordinator to check home changes in its own sync.
+   Root daily briefs send only behind signals: root never runs child sync or marks it for them.
 2. If the thread is newer, send the child's coordinator (host `send`): "Run the node-sync skill
-   for everything since <Updated>." Then host `wait`, and re-read the child's files.
+   for everything since <Updated>." Then host `wait` (not during a daily brief: report the snapshot as behind), and re-read
+   the child's files.
 3. Never summarize a child's transcript yourself. The child writes its files; you read them.
 
 ## Routing work
@@ -106,6 +113,7 @@ Answer from files. Before answering about a child, run the **freshness check**:
 | The work is… | Do this |
 | --- | --- |
 | inside this node | do it, or start a worker |
+| UI or UX work | first a UX design job with the ui-designer specialist (§0), then a code job using the accepted design |
 | changing code or files in the node's external home | the `home-job` skill: one worktree, one worker, one pull request per job |
 | a report, audit or screenshots | a worker, with `core/bin/brain report <id> "<topic>"` as its output folder |
 | inside a child | send it to the child's coordinator, or start a worker in the child if it has none (axiom 14) |
@@ -234,6 +242,9 @@ Root also checks every descendant coordinator: read each binding with `brain sho
 and list its host pending requests, including nested nodes and nodes without open jobs.
 A missing binding is a setup gap. Runtime questions reach the inbox when a supported stop
 hook runs; live host requests still need the host check. If both are empty, end the turn at once, saying nothing and changing no files.
+If only `blocked-overdue` items remain and no host request needs action, run
+`brain inbox <id> --new` and route only new escalations, then end without refreshing or
+committing unchanged status. An unchanged wait is not new coordinator work.
 Otherwise act on each due item: read the report, review or reconcile a finished job, answer
 questions, and record the next step. For each due job, put its exact branch in Active work
 and a concrete next action in judgement; a generated facts entry alone does not record your
@@ -297,6 +308,9 @@ settling their threads without their ownership checks.
 A change the operator will be asked to approve has been reviewed by an agent on another runtime
 first (the `review` skill), and you say what that review found.
 
+Before a code node’s first job, bind its coordinator interval tick (`brain schedule add`
+and `brain schedule bind`) and set its verification command. Missing setup warns in
+`brain wt add` and `brain check`, so existing work can proceed while the coordinator repairs it.
 For home jobs, set the node's verification command once: `brain set <id> 'verify=<command>'`.
 Workers rebase on main, dry-run the merge, run verify and record completed review rounds in a
 unified worker hand-back. `brain due` distinguishes ready to merge from finished but not ready

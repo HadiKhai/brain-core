@@ -5,7 +5,8 @@ description: Bring a node's files up to date with everything that happened since
 
 # Sync
 
-Run by a node's coordinator.
+Run by a node's coordinator, only for its own node. Root daily briefs send behind signals
+to child coordinators; they do not run child sync or mark a child synced.
 
 1. Read the `Updated:` line of `status.md`.
 2. Go through your conversation since then. If your context was compacted, re-read your own
@@ -40,6 +41,9 @@ Run by a node's coordinator.
    others recorded in the home are cited, not copied: "<what> (home: <file or PR>)".
 5. Update `status.md` judgement sections: Now, Next, Active work (each row’s state from the
    pull requests and branches in step 3), Blocked / needs the operator, and Recent changes.
+   Keep Now to 30 nonblank lines; move history to Recent changes or decisions. Blocked
+   bullets include `since:`, `recommendation:` and `default:` as well as what clears them;
+   keep since stable until resolved. Over 48 hours is escalated in due/inbox/live attention.
    Set the judgement's `Updated:` line outside the facts block from `core/bin/brain now`.
    Preserve the generated facts markers and their contents; run `core/bin/brain status <id>
    --refresh` to regenerate facts and their separate `Facts refreshed:` time. Refreshing facts

@@ -12,6 +12,13 @@ Before launching, run `brain usage`. Use only a subscription allowed for this br
 the stop line; follow the subscription and host instance in the brief. Unknown usage must be
 stated; never run a polling loop in an agent.
 
+0. **Design and setup first.** UI work starts with a UX-first design job using the
+   ui-designer specialist’s §0, before any UI code. Read its current role, follow its design
+   process, and put the accepted design and acceptance criteria in the later code job’s brief.
+   If the specialist is absent, route the design job through `hire`; do not skip design.
+   Before a code node’s first job, set `verify=<command>` and bind a coordinator interval
+   tick with `brain schedule add` and `brain schedule bind`. Missing setup warns rather
+   than stranding existing jobs.
 1. **Worktree.** Choose the integration mode before launching: `brain set <id> merge=pr` for
    host PR merges; `merge=local` (the default) for coordinator-owned local integration.
    `core/bin/brain wt add <id> <branch> [--base <ref>]`. It creates the worktree
