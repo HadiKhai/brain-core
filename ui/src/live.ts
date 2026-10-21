@@ -32,24 +32,31 @@ export function watchLive(key: string, state: (value: any) => void, status: (val
         source?.close();
         source = new EventSource('/api/events?k=' + encodeURIComponent(key));
         source.onmessage = event => {
-          if (current !== generation || disposed || (document.hidden && !notify)) return;
+          if (!active || current !== generation || disposed || (document.hidden && !notify)) return;
           try { state(JSON.parse(event.data)); status('Live'); }
           catch { status('Updates interrupted'); }
         };
-        source.onerror = () => { if (current === generation) status('Updates interrupted'); };
+        source.onerror = () => { if (active && current === generation) status('Updates interrupted'); };
       }
     } catch (error) {
       if (current === generation && !disposed && (error as Error).name !== 'AbortError') status('Connection failed');
     } finally {
-      if (!disposed && !active && (!document.hidden || notify) && current === generation)
-        pollTimer = setTimeout(read, 60_000);
+      if (current === generation) {
+        controller = undefined;
+        if (!disposed && !active && (!document.hidden || notify))
+          pollTimer = setTimeout(read, 60_000);
+      }
     }
   };
   const idle = () => {
     active = false;
-    close();
+    // Finish a pending snapshot even when its response takes longer than the
+    // active window. Its finally block schedules the next idle poll.
+    source?.close();
+    source = undefined;
+    clearTimeout(pollTimer);
     status('Updates each minute');
-    if (!document.hidden || notify) pollTimer = setTimeout(read, 60_000);
+    if (!controller && (!document.hidden || notify)) pollTimer = setTimeout(read, 60_000);
   };
   const activity = () => {
     if (disposed || document.hidden) return;

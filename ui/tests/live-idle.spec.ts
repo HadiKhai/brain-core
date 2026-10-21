@@ -1,5 +1,39 @@
 import { test, expect } from '@playwright/test';
 
+test('a slow initial snapshot survives the idle transition and then polls once a minute', async ({ page }) => {
+  await page.clock.install();
+  await page.addInitScript(() => {
+    const w = window as any;
+    w.streams = [];
+    w.EventSource = class {
+      closed = false;
+      constructor() { w.streams.push(this); }
+      close() { this.closed = true; }
+    };
+  });
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  let reads = 0, waiting = false;
+  await page.route('**/api/state?*', async route => {
+    const data = await (await route.fetch()).json();
+    reads++;
+    waiting = true;
+    await gate;
+    await route.fulfill({ json: data });
+  });
+  await page.goto('/?k=demo');
+  await expect.poll(() => waiting).toBe(true);
+  await page.clock.fastForward(6_000);
+  release();
+  await expect(page.locator('[data-page]:not([hidden])')).toBeVisible();
+  await expect(page.getByText('Updates each minute', { exact: true })).toBeVisible();
+  expect(await page.evaluate(() => (window as any).streams.length)).toBe(0);
+  await page.clock.fastForward(59_000);
+  expect(reads).toBe(1);
+  await page.clock.fastForward(1_001);
+  await expect.poll(() => reads).toBe(2);
+});
+
 test('live transport backs off when idle, pauses when hidden and resumes on activity', async ({ page }) => {
   await page.clock.install();
   await page.addInitScript(() => {
