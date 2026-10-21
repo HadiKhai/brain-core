@@ -277,6 +277,10 @@ def ui_state(inst, problems=None, scan=None, spend_budget=2.0):
         usage_routing_policy = {}
     machine = _m_machine.machine_state(inst)
     due = [item for n in nodes for item in _m_status.due_items(inst, n)]
+    branches = {(n["id"], _m_jobs.job_key(r)): r["Job"] for n in nodes for r in (_m_jobs.read_jobs(n) or [])}
+    for item in due:  # the job's own name, for a card that otherwise reads "this job"
+        if item.get("job") and (item["node"], item["job"]) in branches:
+            item["branch"] = branches[(item["node"], item["job"])]
     machine_due = _m_status.machine_due_items(inst, nodes, machine, due)
     return {
         "due": safe(due + machine_due),
@@ -292,7 +296,7 @@ def ui_state(inst, problems=None, scan=None, spend_budget=2.0):
         "attention": [safe({"node": a, "kind": k, "text": t,
                             **_m_status.blocked_metadata(inst, next(n for n in nodes if n["id"] == a), k, t)})
                       for a, k, t in _m_status.attention_items(inst, nodes)],
-        "inbox": _m_status.inbox_items(inst, nodes)[0],
+        "inbox": [{**i, "from": inbox_sender(i)} for i in _m_status.inbox_items(inst, nodes)[0]],
         "commits": commits[:300], "hours": UI_HOURS, "activity": {"start": start, "counts": activity},
         "commits_24h": sum(1 for c in commits if c["t"] > time.time() - 86400), "commits_total": len(commits),
         "specialists": specialists,
@@ -307,6 +311,99 @@ def ui_state(inst, problems=None, scan=None, spend_budget=2.0):
         "usage_other_subscriptions": _m_usage.usage_other_count(inst),
         "problems": problems,
     }
+
+
+def inbox_sender(item):
+    """Who wrote an inbox line, from its record: only inbox lines carry a sender ("<time> from <who>: ...")."""
+    if item.get("kind") != "inbox":
+        return ""
+    m = re.match(r"^(?:inbox:\s*)?\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}(?::\d{2})?(?: ?(?:Z|[+-]\d{2}:?\d{2}))? from ([^:\n]{1,60}):",
+                 item.get("text") or "")
+    return m.group(1).strip() if m else ""
+
+
+def search_fold(text):
+    """Accent-, case- and Arabic-letter-form-insensitive text for matching."""
+    import unicodedata
+    text = unicodedata.normalize("NFKD", str(text or ""))
+    text = "".join(c for c in text if not unicodedata.combining(c) and c != "\u0640")
+    for forms, plain in (("أإآٱ", "ا"), ("ى", "ي"), ("ة", "ه"), ("ؤ", "و"), ("ئ", "ي")):
+        for f in forms:
+            text = text.replace(f, plain)
+    return " ".join(text.casefold().split())
+
+
+def search_rank(name, query):
+    """Exact, then the name's start, then a later word's start, then earlier matches, then any match; None if none."""
+    n, q = search_fold(name), search_fold(query)
+    if not q:
+        return (0, 0)
+    if n == q:
+        return (0, 0)
+    if n.startswith(q):
+        return (1, 0)
+    starts = [m.start() for m in re.finditer(r"(?:^|(?<=[\s\-_/(·.,:]))" + re.escape(q), n)]
+    if starts:
+        return (2, starts[0])
+    at = n.find(q)
+    return (3, at) if at >= 0 else None
+
+
+def search_records(state):
+    """Every record a reference field can point at, with one secondary line that tells similar names apart."""
+    nodes = {n["id"]: n for n in state.get("nodes", [])}
+    title = lambda nid: (nodes.get(nid) or {}).get("title") or "Workspace"  # noqa: E731
+    out = []
+    for n in state.get("nodes", []):
+        if n.get("archived"):
+            continue
+        parent = n.get("parent")
+        out.append({"kind": "node", "id": n["id"], "title": n.get("title") or n["id"],
+                    "secondary": (title(parent) + " · " if parent else "Workspace root · ") + (n.get("updated_ago") or "update time not recorded"),
+                    "recent": n.get("updated") or "", "used": len((n.get("jobs") or {}).get("rows") or [])})
+    for sp in state.get("specialists", []):
+        out.append({"kind": "specialist", "id": f"{sp.get('node')}/{sp.get('id')}", "title": sp.get("title") or sp.get("id"),
+                    "secondary": " · ".join(x for x in (sp.get("runtime"), title(sp.get("node")),
+                                                         f"{len(sp.get('jobs') or [])} hires") if x),
+                    "recent": max((str(j.get("time") or "") for j in sp.get("jobs") or []), default=""),
+                    "used": len(sp.get("jobs") or [])})
+    for i in (state.get("items") or {}).get("all", []):
+        prov = i.get("provenance") or {}
+        out.append({"kind": "learning", "id": i.get("id"), "title": i.get("title") or i.get("id"),
+                    "secondary": " · ".join(x for x in ((i.get("kind") or "Item").capitalize(), title(prov.get("node")),
+                                                         "proposed" if i.get("status") == "proposed" else "") if x),
+                    "recent": str(prov.get("time") or ""), "used": 0})
+    for n in state.get("nodes", []):
+        for r in (n.get("jobs") or {}).get("rows") or []:
+            out.append({"kind": "job", "id": f"{n['id']}/{r.get('Job')}/{r.get('Started')}", "title": r.get("Job") or "job",
+                        "secondary": " · ".join(x for x in (n.get("title"), r.get("Outcome") or "open", r.get("Runtime")) if x),
+                        "recent": str(r.get("Started") or ""), "used": 0})
+    return out
+
+
+def ui_search(state, kind="all", query="", offset=0, limit=20):
+    """One page of ranked records for the dashboard's reference pickers: read-only, from the served state."""
+    records = [r for r in search_records(state) if kind in ("all", r["kind"])]
+    query = str(query or "")[:200]
+    if query.strip():
+        ranked = [(rank, r) for r in records for rank in [search_rank(r["title"], query)] if rank is not None]
+        ranked.sort(key=lambda x: (x[0], search_fold(x[1]["title"]), x[1]["id"]))
+        records = [r for _, r in ranked]
+    else:  # nothing typed yet: the most relevant first (recent, then most used, then alphabetical)
+        records.sort(key=lambda r: search_fold(r["title"]))
+        records.sort(key=lambda r: r["used"], reverse=True)
+        records.sort(key=lambda r: r["recent"], reverse=True)
+    offset, limit = max(0, int(offset)), max(1, min(100, int(limit)))
+    page = [{k: v for k, v in r.items() if k not in ("recent", "used")} for r in records[offset:offset + limit]]
+    return {"items": page, "total": len(records), "offset": offset,
+            "next": offset + limit if offset + limit < len(records) else None}
+
+
+def core_revision():
+    """Which core serves the dashboard: its path and commit, so a preview names its source."""
+    head = _m_common.git("rev-parse", "--short", "HEAD", cwd=_m_common.CORE).stdout.strip() if (_m_common.CORE / ".git").exists() else ""
+    dirty = _m_common.git("status", "--porcelain", "--untracked-files=no", cwd=_m_common.CORE).stdout.strip() if head else ""
+    return f"{_m_common.tilde(_m_common.CORE)} @ {head or 'no git commit'}{' (uncommitted changes)' if dirty else ''}"
 
 
 def cmd_ui(a):
@@ -330,7 +427,8 @@ def cmd_ui(a):
     if a.json:
         print(json.dumps(ui_state(inst, len(_m_check.collect_problems(inst)[0]), scan, spend_budget=None), indent=1))
         return
-    page = (_m_common.CORE / "ui" / "index.html").read_bytes()
+    assets = _m_common.CORE / "ui" / "dist"
+    page = (assets / "index.html").read_bytes()
     lock, cond = threading.Lock(), threading.Condition()
     box = {"json": b"", "version": 0, "problems": None, "checked": 0.0}
 
@@ -345,6 +443,7 @@ def cmd_ui(a):
                 body = json.dumps(st, sort_keys=True).encode()
                 plain = json.dumps({**st, "brain": {**st["brain"], "now": ""}, "machine": {}}, sort_keys=True)
                 with cond:
+                    box["state"] = st
                     if plain != box.get("plain") or time.time() - box.get("pushed", 0) > 30:  # machine figures, too
                         box["pushed"] = time.time()
                         box.update(json=body, plain=plain, version=box["version"] + 1)
@@ -375,10 +474,31 @@ def cmd_ui(a):
             given = urllib.parse.parse_qs(url.query).get("k", [""])[0]
             if url.path in ("/", "/index.html"):
                 return self.send(200, page, "text/html; charset=utf-8")  # the page holds no data; the API does
+            if url.path.startswith("/assets/"):
+                # Serve only committed build assets, never arbitrary paths or symlinks.
+                name = urllib.parse.unquote(url.path[len("/assets/"):])
+                path = assets / "assets" / name
+                try:
+                    if "/" in name or "\\" in name or name.startswith(".") or path.is_symlink() or not path.is_file():
+                        return self.send(404, b"not found", "text/plain")
+                    body = path.read_bytes()
+                except (ValueError, OSError):
+                    return self.send(404, b"not found", "text/plain")
+                import mimetypes
+                return self.send(200, body, mimetypes.guess_type(str(path))[0] or "application/octet-stream")
             if url.path.startswith("/api/") and not hmac.compare_digest(given, key):
                 return self.send(403, b"this run's key is missing: open the address brain ui printed", "text/plain")
             if url.path == "/api/state":
                 return self.send(200, box["json"], "application/json")
+            if url.path == "/api/search":
+                q = urllib.parse.parse_qs(url.query)
+                one = lambda k, d: (q.get(k) or [d])[0]  # noqa: E731
+                try:
+                    found = ui_search(box["state"], one("kind", "all"), one("q", ""), int(one("offset", "0")),
+                                      int(one("limit", "20")))
+                except ValueError:
+                    return self.send(400, b"offset and limit are numbers", "text/plain")
+                return self.send(200, json.dumps(found).encode(), "application/json")
             if url.path == "/api/events":
                 self.send_response(200)
                 self.send_header("Content-Type", "text/event-stream")
@@ -405,7 +525,7 @@ def cmd_ui(a):
     import time
     box["checked"] = time.time()
     st = ui_state(inst, box["problems"], scan)
-    box.update(json=json.dumps(st, sort_keys=True).encode(), version=1)
+    box.update(json=json.dumps(st, sort_keys=True).encode(), version=1, state=st)
     threading.Thread(target=refresh, daemon=True).start()
     port = a.port
     srv = None
@@ -419,6 +539,7 @@ def cmd_ui(a):
         _m_common.die(f"no free port from {port}")
     srv.daemon_threads = True
     url = f"http://127.0.0.1:{srv.server_address[1]}/?k={key}"
+    print(f"brain ui core: {core_revision()}", flush=True)
     print(f"{st['brain']['title']} ({st['brain']['name']}): {url}  (read-only, this machine only; Ctrl-C stops it)",
           flush=True)
     if a.open:

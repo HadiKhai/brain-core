@@ -88,6 +88,8 @@ def reexec_into_instance_core():
     """`brain` on PATH points at one core; for another instance, use that instance's own core."""
     if os.environ.get("BRAIN_NO_REEXEC") or (len(sys.argv) > 1 and sys.argv[1] in ("init", "selftest")):
         return
+    if len(sys.argv) > 1 and sys.argv[1] == "ui" and (_m_common.CORE / ".git").is_file():
+        return  # a core worktree (a dashboard in development) serves its own build
     root = _m_nodes.try_find_root()
     if not root:
         return

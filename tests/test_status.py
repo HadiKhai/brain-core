@@ -598,7 +598,9 @@ class AutonomyInbox(Scenario):
                          {(i['node'], i['kind'], i['text']) for i in state['attention']})
         self.assertTrue(all(i['id'] and i['first_seen'] for i in state['inbox']))
         self.assertFalse((r / '.brain/inbox-seen.json').exists())
-        self.assertEqual(state['inbox'], self.items(r))
+        # The live view adds only the record's sender; everything else is the CLI's own inbox.
+        self.assertTrue(all('from' in i for i in state['inbox']))
+        self.assertEqual([{k: v for k, v in i.items() if k != 'from'} for i in state['inbox']], self.items(r))
         self.assertEqual(len(self.items(r, '--new')), len(state['inbox']))
         self.assertTrue(all(i['reported'] for i in json.loads(self.b(r, 'ui', '--json'))['inbox']))
         self.assertFalse(self.git('ls-files', '.brain', cwd=r).strip())

@@ -31,8 +31,12 @@ from scenario import Scenario, AutonomyProject, shlex_quote
 class InstallAndUpgrade(Scenario):
     def core_repo(self):
         src = self.tmp / "core-src"
-        shutil.copytree(CORE, src, ignore=shutil.ignore_patterns(".git", "__pycache__", ".DS_Store"))
+        shutil.copytree(CORE, src, ignore=shutil.ignore_patterns(".git", "__pycache__", ".DS_Store", "node_modules", "*.tsbuildinfo"))
         self.git("init", "-q", "-b", "main", cwd=src)
+        # The source must stay immutable while local submodule clones copy objects.
+        # Larger UI assets can trigger background packing after the initial commit.
+        self.git("config", "maintenance.auto", "false", cwd=src)
+        self.git("config", "gc.auto", "0", cwd=src)
         self.git("add", "-A", cwd=src)
         self.git("commit", "-qm", "core", cwd=src)
         return src
