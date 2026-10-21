@@ -17,7 +17,7 @@ not in `node.md`: read them with `core/bin/brain show <id>` (axiom 23).
 
 ## Start of every session
 
-Read `node.md`, `brief.md`, `status.md` and `inbox.md`. `core/bin/brain due <id>` lists core
+Read `node.md`, `brief.md`, `status.md`, `backlog.md` and `inbox.md`. `core/bin/brain due <id>` lists core
 changes you haven't read: read them with `core/bin/brain changes <id>` (they can change these
 rules and add commands), then mark them read with `--seen`. If the node's home is external, other
 owners may have worked there since: run `core/bin/brain sync <id>` and fold what matters into
@@ -28,6 +28,7 @@ owners may have worked there since: run `core/bin/brain sync <id>` and fold what
 Update your files during the conversation, not only at the end; the session can end at any
 moment.
 
+- **Deferred work** goes in `backlog.md` the moment it is deferred: the item, why, and what would resume it. Create the file in older nodes when first needed.
 - **A decision** goes at the top of `decisions.md` as `## <timestamp>: <decision>`, followed by
   `Why:` and `Alternatives considered:`. If the operator made it, add `Said:` with their exact
   words: a paraphrase drifts. An exception to a standing rule ("go ahead and use subagents this
@@ -390,3 +391,25 @@ Question and blocked hand-backs and supported Stop-hook captures request this wa
 Treat `overdue-question` due/live items as root escalations (ten minutes by default;
 `brain set <node> question_minutes=<minutes>`). Root's tick checks every descendant and follows
 up on those unanswered lines. Remove answered inbox lines; waking does not mark them answered.
+
+## Rotate a long coordinator
+
+Keep every coordinator's runtime session id in the machine-local `coordinator_sessions` list
+(`brain set <node> coordinator_sessions=<old ids>,<new id>`). Preserve order and history: the
+last id is the current coordinator. Obtain the runtime id from its shell (`CODEX_THREAD_ID` or
+`CLAUDE_CODE_SESSION_ID`), never substitute a T3 host thread id. Spend counts all recorded
+sessions, even from scratch folders, through the normal subscription/privacy gates.
+
+`brain due <node>` raises `rotate` at 150,000 input-context tokens or 50 assistant response
+turns. `rotate_tokens=` and `rotate_turns=` configure these thresholds. Claude input includes
+fresh, cache-read and cache-write tokens; Codex's input already includes its cached tokens.
+These are the latest response's accounting counts, never a sum of the conversation's text.
+Unknown/unbound usage does not prove a short thread: bind its session before relying on due.
+
+Run `brain rotate <node>` to prepare `handover.md` from node files, open jobs and hand-backs,
+asks, deferred work, schedules and wake state. Verify the packet against files and the host's
+live pending requests and task inventory. Launch a fresh coordinator in the node's project
+with the handover, update `coordinator=`, append the new runtime session id, rebind every
+schedule and wake task, and route outstanding requests. Tell the old thread to stop, confirm
+it stopped, then settle it. Never settle while a task or request would be lost. The CLI only
+prepares files and prints steps; it never calls the host or transfers transcript text.

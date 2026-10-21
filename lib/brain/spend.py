@@ -21,7 +21,7 @@ from . import ui as _m_ui
 # then incrementally: transcripts only grow, so the next read starts where the last one stopped.
 
 SPEND_IDLE_MIN = 5  # a gap between two events of more than this many minutes is idle time
-SPEND_VERSION = 3
+SPEND_VERSION = 4
 SPEND_FIELDS = ("events", "fresh", "cache_read", "cache_write", "output", "reasoning", "tools")
 SPEND_TOKENS = ("fresh", "cache_read", "cache_write", "output", "reasoning")  # reasoning is part of output
 JOB_MARK = "brain-job: {}"  # in every job brief: the sessions a brief starts are found again by it
@@ -52,6 +52,7 @@ def spend_count(value):
 
 def spend_new(runtime, path):
     return {"v": SPEND_VERSION, "runtime": runtime, "id": "", "parent": "", "subagent": False,
+            "context": None, "turns": 0, "counter_turns": 0, "record_turns": 0,
             "job": "", "first_at": None, "last_at": None, "models": [], "m": {}, "mc": {}, "records": False, "compactions": [],
             "first": None, "last": None, "state": {"offset": 0, "prompt_done": False, "recent": [], "tools": [],
                                                    "model": -1, "last_input": 0, "prev": None, "own_start": None}}
@@ -121,6 +122,7 @@ def spend_claude_line(agg, raw, minute, at=None):
     model = spend_model(agg, msg.get("model"))
     now = [spend_count(usage.get(k)) for k in ("input_tokens", "cache_read_input_tokens",
                                                 "cache_creation_input_tokens", "output_tokens")]
+    agg["context"] = sum(now[:3])
     mid = opaque(msg["id"]) if isinstance(msg.get("id"), str) else None
     tools = 0
     for c in msg.get("content") if isinstance(msg.get("content"), list) else []:
@@ -134,9 +136,11 @@ def spend_claude_line(agg, raw, minute, at=None):
         # read, a job's, counts it in the minute it grew: the first may lie before the job began)
         delta = [max(0, a - b) for a, b in zip(now, prior[1])]
         prior[1] = [max(a, b) for a, b in zip(now, prior[1])]
+        agg["context"] = sum(prior[1][:3])
         windowed = st.get("lo") is not None
         spend_add(agg, "m", minute if windowed else prior[2], model if windowed else prior[3], (0, *delta, 0, tools))
         return
+    agg["turns"] += 1
     if mid:
         st["recent"] = (st["recent"] + [[mid, now, minute, model]])[-SPEND_RECENT:]
     spend_add(agg, "m", minute, model, (0, *now, 0, tools))
@@ -201,6 +205,9 @@ def spend_codex_line(agg, raw, minute, at=None):
         u = p.get("usage") if isinstance(p.get("usage"), dict) else {}
         inp, cached = spend_count(u.get("input_tokens")), spend_count(u.get("cached_input_tokens"))
         st["last_input"] = inp or st["last_input"]
+        agg["context"] = inp  # Codex input includes cached tokens; do not count them twice.
+        agg["record_turns"] += 1
+        agg["turns"] = agg["record_turns"]
         agg["records"] = True
         spend_add(agg, "m", minute, st["model"], (0, max(0, inp - cached), cached, spend_count(u.get("cache_write_input_tokens")),
                                                    spend_count(u.get("output_tokens")),
@@ -211,6 +218,15 @@ def spend_codex_line(agg, raw, minute, at=None):
         info = p["info"]
         total = info.get("total_token_usage") if isinstance(info.get("total_token_usage"), dict) else None
         last = info.get("last_token_usage") if isinstance(info.get("last_token_usage"), dict) else {}
+        if "input_tokens" in last:
+            agg["context"] = spend_count(last.get("input_tokens"))
+            signature = [spend_count(total.get(k)) for k in
+                         ("input_tokens", "cached_input_tokens", "output_tokens", "reasoning_output_tokens")] if total else None
+            if signature is not None and signature != st.get("context_total"):
+                agg["counter_turns"] += 1
+                st["context_total"] = signature
+            if not agg["records"]:
+                agg["turns"] = agg["counter_turns"]
         st["last_input"] = spend_count(last.get("input_tokens")) or st["last_input"]
         if not total:
             return
@@ -1118,4 +1134,25 @@ def cmd_spend(a):
     print(_m_guard.redact("\n".join(lines), _m_guard.never_terms(n)))
 
 
-# ---------- connections across nodes ----------
+# ---------- coordinator accounting ----------
+
+
+def coordinator_measure(inst, n):
+    """Current coordinator only, through the accounting readers. No transcript text is returned."""
+    ids = n["local"].get("coordinator_sessions", [])
+    sid = ids[-1] if isinstance(ids, list) and ids else None
+    if not isinstance(sid, str) or not SESSION_ID.fullmatch(sid):
+        return None
+
+    def match(runtime, path, allowed, forbidden):
+        if runtime == "claude":
+            return path.parent.name != "subagents" and path.stem == sid
+        meta = codex_meta(path, allowed, forbidden)
+        return bool(meta and meta[0] == sid)
+
+    aggs, _, _ = spend_all(inst, match=match)
+    aggs = [a for a in spend_once(aggs) if a.get("complete", True)]
+    if not aggs:
+        return None
+    a = max(aggs, key=lambda a: a.get("last_at") or 0)
+    return {"context": a.get("context"), "turns": a.get("turns", 0)}

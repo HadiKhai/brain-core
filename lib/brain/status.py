@@ -19,6 +19,7 @@ from . import knowledge as _m_knowledge
 from . import machine as _m_machine
 from . import nodes as _m_nodes
 from . import schedules as _m_schedules
+from . import rotation as _m_rotation
 from . import spend as _m_spend
 from . import transitions as _m_transitions
 from . import upgrade as _m_upgrade
@@ -365,6 +366,9 @@ def due_items(inst, n, evidence=None, include_stale=True):
     items = []
     def add(kind, text, **extra):
         items.append({"node": n["id"], "kind": kind, "text": _m_guard.redact(text, _m_guard.never_terms(n)), **extra})
+    rotation = _m_rotation.rotation_due(inst, n)
+    if rotation:
+        add("rotate", rotation)
     for blocked in blocked_entries(inst, n):
         if blocked["escalated"]:
             add("blocked-overdue", blocked["text"], **blocked_metadata(inst, n, "blocked-overdue", blocked["text"]))
