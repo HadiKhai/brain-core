@@ -317,8 +317,10 @@ def main():
     t.add_argument("id", nargs="+"); t.add_argument("--at")
     t.add_argument("--reviewed-by", required=True, dest="reviewed_by")
     t.set_defaults(f=_m_knowledge.cmd_specialist_accept)
-    cmd("lesson", _m_knowledge.cmd_lesson, "brain lesson <specialist> --from <node> \"text\"", "specialist",
-        opt("--from", dest="source", required=True), opt("--at"), "text")
+    cmd("lesson", _m_knowledge.cmd_lesson, "brain lesson <specialist|node> --from <node> \"text\"", "specialist",
+        opt("--from", dest="source", required=True), opt("--at"),
+        opt("--node", action="store_true", help="record a correction to a node instead of a specialist"),
+        opt("--principle", default="unclassified", help="id in the target's direction.md; default: unclassified"), "text")
     cmd("hire", _m_knowledge.cmd_hire, "print a specialist's brief for a job: brain hire <specialist> <node> --task \"...\"",
         "specialist", "node", opt("--task", required=True), opt("--items", default=""),
         opt("--model", help="job model for scoped usage limits"), opt("--out"), opt("--branch"),

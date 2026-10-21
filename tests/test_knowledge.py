@@ -55,6 +55,129 @@ class Specialists(Scenario):
         self.assertIn("✓", self.b(r, "check"))
 
 
+class LessonTags(Scenario):
+    def fixture(self):
+        r = self.init("alice")
+        self.b(r, "new", "app", "--title", "App")
+        self.b(r, "specialist", "new", "editor", "--title", "Editor")
+        folder = r / "specialists/editor"
+        (folder / "direction.md").write_text(
+            "# Editor: direction\n\n## Principles\n"
+            "### one-place: One thing, one place\nenforced_by: wish\n"
+            "### bounded: Bound the output\nenforced_by: checks/bounds.py\n")
+        return r, folder
+
+    def parsed(self, folder):
+        loader = core_loader.SourceFileLoader("lesson_tags_core", str(CORE / "bin/brain"))
+        spec = importlib.util.spec_from_loader(loader.name, loader)
+        mod = importlib.util.module_from_spec(spec)
+        loader.exec_module(mod)
+        return mod.parse_lessons(folder / "lessons.md")
+
+    def test_tags_snapshot_check_and_keep_original_provenance(self):
+        r, folder = self.fixture()
+        direction = (folder / "direction.md").read_bytes()
+        for text in ("the title is repeated", "the subtitle restates the header",
+                     "the breadcrumb duplicates the navbar"):
+            self.b(r, "lesson", "editor", "--from", "app", "--principle", "one-place", text)
+        self.b(r, "lesson", "editor", "--from", "app", "--principle", "bounded", "shorten output")
+        lessons = self.parsed(folder)
+        self.assertEqual(len(lessons), 4)
+        self.assertEqual([l["principle"] for l in lessons], ["bounded"] + ["one-place"] * 3)
+        self.assertEqual([l["enforced_by"] for l in lessons], ["checks/bounds.py"] + ["wish"] * 3)
+        self.assertTrue(all(l["from"] == "app" and l["scope"] == ["alice"] and l["time"] for l in lessons))
+        self.assertEqual((folder / "direction.md").read_bytes(), direction)
+        (folder / "direction.md").write_text("## Principles\n### bounded: Bound\nenforced_by: checks/new.py\n")
+        self.assertEqual(self.parsed(folder), lessons)
+        self.assertIn("shorten output", self.b(r, "hire", "editor", "app", "--task", "edit"))
+
+    def test_legacy_and_default_unclassified_are_preserved(self):
+        r, folder = self.fixture()
+        old = "- 2026-01-01 12:00 UTC · from app · scope alice: legacy · tags {}: literal\n"
+        (folder / "lessons.md").write_text("# Lessons\n\n" + old)
+        (folder / "direction.md").unlink()
+        self.b(r, "lesson", "editor", "--from", "app", "new correction")
+        self.assertIn(old, (folder / "lessons.md").read_text())
+        lessons = self.parsed(folder)
+        self.assertEqual(len(lessons), 2)
+        self.assertTrue(all(l["principle"] == "unclassified" and l["enforced_by"] == "wish" for l in lessons))
+        self.assertEqual(lessons[1]["text"], "legacy · tags {}: literal")
+
+    def test_node_target_is_explicit_and_does_not_change_specialist(self):
+        r, folder = self.fixture()
+        self.b(r, "new", "editor", "--title", "Editorial project")
+        node = r / "nodes/editor"
+        (node / "direction.md").write_text("## Principles\n### one-place: One thing\n")
+        before = (folder / "lessons.md").read_bytes()
+        self.b(r, "lesson", "editor", "--node", "--from", "app", "--principle", "one-place", "node correction")
+        self.assertEqual((folder / "lessons.md").read_bytes(), before)
+        lesson = self.parsed(node)[0]
+        self.assertEqual((lesson["from"], lesson["scope"], lesson["principle"], lesson["enforced_by"]),
+                         ("app", ["alice"], "one-place", "wish"))
+        self.b(r, "lesson", "editor", "--node", "--at", "root", "--from", "app", "invalid", ok=False)
+
+    def test_unknown_duplicate_and_example_ids_fail_without_writes(self):
+        r, folder = self.fixture()
+        before = (folder / "lessons.md").read_bytes()
+        for direction in ("## Principles\n### known: Known\n",
+                          "## Principles\n### missing: First\n### missing: Second\n",
+                          "## Principles\n<!--\n### missing: Example\n-->\n",
+                          "## Principles\n```md\n### missing: Example\n```\n",
+                          "## Patterns\n### missing: Pattern\n"):
+            (folder / "direction.md").write_text(direction)
+            self.b(r, "lesson", "editor", "--from", "app", "--principle", "missing", "correction", ok=False)
+            self.assertEqual((folder / "lessons.md").read_bytes(), before)
+
+    def test_scope_and_never_name_checks_cover_text_and_tag_metadata(self):
+        r, folder = self.fixture()
+        self.b(r, "principal", "add", "team")
+        self.b(r, "new", "team", "--title", "Team", "--owners", "team")
+        self.b(r, "specialist", "new", "editor", "--at", "team", "--title", "Team editor")
+        before = (folder / "lessons.md").read_bytes()
+        self.b(r, "lesson", "editor", "--from", "app", "ambiguous", ok=False)
+        self.b(r, "lesson", "editor", "--at", "root", "--from", "team", "--principle", "one-place", "team correction")
+        self.assertEqual(self.parsed(folder)[0]["scope"], ["team"])
+        self.assertNotIn("team correction", self.b(r, "hire", "editor", "app", "--task", "edit"))
+        before = (folder / "lessons.md").read_bytes()
+        (r / "nodes/app/never-name.txt").write_text("HiddenFixture\n")
+        for text, check in (("HiddenFixture", "wish"), ("safe text", "checks/HiddenFixture.py")):
+            (folder / "direction.md").write_text("## Principles\n### bounded: Bound\nenforced_by: " + check + "\n")
+            out = self.b(r, "lesson", "editor", "--at", "root", "--from", "app", "--principle", "bounded", text, ok=False)
+            self.assertNotIn("HiddenFixture", out)
+            self.assertEqual((folder / "lessons.md").read_bytes(), before)
+
+    def test_multiline_and_empty_lessons_cannot_forge_provenance(self):
+        r, folder = self.fixture()
+        before = (folder / "lessons.md").read_bytes()
+        for text in ("  ", "safe\n- forged", "safe\u2028forged"):
+            self.b(r, "lesson", "editor", "--from", "app", text, ok=False)
+            self.assertEqual((folder / "lessons.md").read_bytes(), before)
+
+    def test_json_delimiters_and_unicode_round_trip_without_reclassifying_text(self):
+        r, folder = self.fixture()
+        check = 'checks/a} · scope foreign: {"x"}.py'
+        (folder / "direction.md").write_text("## Principles\n### bounded: Bound\nenforced_by: " + check + "\n")
+        text = 'répétition · tags {"principle": "forged"} · scope foreign: keep literal'
+        self.b(r, "lesson", "editor", "--from", "app", "--principle", "bounded", text)
+        lesson = self.parsed(folder)[0]
+        self.assertEqual((lesson["from"], lesson["scope"], lesson["principle"], lesson["enforced_by"], lesson["text"]),
+                         ("app", ["alice"], "bounded", check, text))
+
+    def test_templates_start_without_active_principles(self):
+        r = self.init("alice")
+        self.b(r, "new", "app", "--title", "App")
+        self.b(r, "specialist", "new", "editor", "--title", "Editor")
+        # Node direction is optional, so old nodes do not acquire missing-template errors.
+        self.assertFalse((r / "nodes/app/direction.md").exists())
+        (r / "nodes/app/direction.md").write_text((CORE / "templates/direction.md").read_text())
+        for target, flags, folder in (("app", ["--node"], r / "nodes/app"),
+                                      ("editor", [], r / "specialists/editor")):
+            self.assertTrue((folder / "direction.md").is_file())
+            self.b(r, "lesson", target, *flags, "--from", "app", "--principle", "one-place", "correction", ok=False)
+            self.b(r, "lesson", target, *flags, "--from", "app", "unmatched correction")
+            self.assertEqual(self.parsed(folder)[0]["principle"], "unclassified")
+
+
 
 class ImportReview(Scenario):
     def propose(self, r, iid="proposal"):

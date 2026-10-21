@@ -335,6 +335,7 @@ def cmd_specialist_new(a):
     d.mkdir(parents=True)
     for f in ("role.md", "lessons.md"):
         (d / f).write_text(_m_common.fill((_m_common.CORE / "templates" / "specialist" / f).read_text(), vals))
+    (d / "direction.md").write_text(_m_common.fill((_m_common.CORE / "templates/direction.md").read_text(), vals))
     if a.proposed or sources:
         fm, body = _m_common.read_fm(d / "role.md")
         if a.proposed:
@@ -371,27 +372,104 @@ def cmd_specialist_accept(a):
         print(f"{sid}: accepted")
 
 
+def direction_principles(path):
+    """Read explicit ids only from the Principles section; never infer or activate rules.
+
+    Each ### id: title block may name one enforced_by value. Keep that value as
+    evidence at capture time, even if the direction later changes.
+    """
+    if not path.is_file():
+        return {}
+    out, active, current, fenced = {}, False, None, False
+    text = re.sub(r"<!--.*?(?:-->|$)", "", path.read_text(), flags=re.S)
+    for line in text.splitlines():
+        if line.lstrip().startswith(("```", "~~~")):
+            fenced = not fenced
+            continue
+        if fenced:
+            continue
+        if re.match(r"^#{1,2} ", line):
+            active = line.strip() == "## Principles"
+            current = None
+        elif active and line.startswith("### "):
+            m = re.fullmatch(r"### ([a-z][a-z0-9-]*): .+", line)
+            current = m.group(1) if m else None
+            if current:
+                if current == "unclassified" or current in out:
+                    _m_common.die("direction.md has a reserved or duplicate principle id")
+                out[current] = {"enforced_by": "wish"}
+        elif active and current and line.startswith("enforced_by:"):
+            rule = out[current]
+            if rule.get("explicit"):
+                _m_common.die("direction.md has more than one enforced_by for a principle")
+            value = line.split(":", 1)[1].strip()
+            rule.update(enforced_by=value or "wish", explicit=True)
+    return out
+
+
 def parse_lessons(path):
     out = []
+    if not path.is_file():
+        return out
     for line in path.read_text().splitlines():
-        m = re.match(r"^- (.+?) · from (.+?) · scope (.+?): (.+)$", line)
+        m = re.match(r"^- (.+?) · from (.+?) · (.*)$", line)
         if m:
-            out.append({"time": m.group(1), "from": m.group(2), "scope": _m_common.lst(m.group(3)), "text": m.group(4),
-                        "line": line})
+            tags, rest = {}, m.group(3)
+            if rest.startswith("tags "):
+                try:
+                    value, end = json.JSONDecoder().raw_decode(rest[5:])
+                except (ValueError, TypeError):
+                    continue
+                if isinstance(value, dict):
+                    tags = value
+                rest = rest[5 + end:]
+                if not rest.startswith(" · "):
+                    continue
+                rest = rest[3:]
+            scoped = re.fullmatch(r"scope (.+?): (.+)", rest)
+            if not scoped:
+                continue
+            principle = tags.get("principle", "unclassified")
+            if not isinstance(principle, str) or not re.fullmatch(r"[a-z][a-z0-9-]*", principle):
+                principle = "unclassified"
+            check = tags.get("enforced_by", "wish")
+            if not isinstance(check, str) or principle == "unclassified":
+                check = "wish"
+            out.append({"time": m.group(1), "from": m.group(2), "scope": _m_common.lst(scoped.group(1)), "text": scoped.group(2),
+                        "principle": principle, "enforced_by": check, "line": line})
     return out
 
 
 def cmd_lesson(a):
     inst = _m_nodes.load()
-    found = [s for s in find_specialists(inst, a.specialist) if not a.at or s["node"]["id"] == a.at]
-    if not found:
-        _m_common.die(f"no specialist '{a.specialist}'")
-    if len(found) > 1:
-        _m_common.die(f"several specialists named '{a.specialist}'; add --at <node>")
+    if a.node:
+        if a.at:
+            _m_common.die("--at selects a specialist's library; omit it with --node")
+        target = inst.node(a.specialist)
+        folder, sources = target["dir"], {}
+    else:
+        found = [s for s in find_specialists(inst, a.specialist) if not a.at or s["node"]["id"] == a.at]
+        if not found:
+            _m_common.die(f"no specialist '{a.specialist}'")
+        if len(found) > 1:
+            _m_common.die(f"several specialists named '{a.specialist}'; add --at <node>")
+        target, folder, sources = found[0]["node"], found[0]["dir"], found[0]["fm"]
     src = inst.node(a.source)
-    path = found[0]["dir"] / "lessons.md"
-    line = f"- {inst.now()} · from {src['id']} · scope {', '.join(src['owners'])}: {a.text.strip()}"
-    lines = path.read_text().splitlines()
+    text = a.text.strip()
+    if not text or len(text.splitlines()) != 1:
+        _m_common.die("a lesson must be one nonempty line")
+    principle, check = a.principle, "wish"
+    if principle != "unclassified":
+        rules = direction_principles(folder / "direction.md")
+        if principle not in rules:
+            _m_common.die("principle id is absent from the target's direction.md; use unclassified if none fits")
+        check = rules[principle]["enforced_by"]
+    tags = json.dumps({"principle": principle, "enforced_by": check}, ensure_ascii=False)
+    path = folder / "lessons.md"
+    line = f"- {inst.now()} · from {src['id']} · tags {tags} · scope {', '.join(src['owners'])}: {text}"
+    if _m_guard.find_terms(line, learning_terms(inst, sources, [src, target])):
+        _m_common.die("lesson or its tags contain a never-name word of their source or target; reword before recording")
+    lines = path.read_text().splitlines() if path.is_file() else ["# Lessons", ""]
     idx = next((i for i, l in enumerate(lines) if l.startswith("- ")), len(lines))
     if idx == len(lines) and lines and lines[-1].strip():
         lines.append("")
