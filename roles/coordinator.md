@@ -267,8 +267,10 @@ everything it needs to know, the constraints, and who it reports to.
 
 ## While workers run
 
-Do not rely on the operator or the root to nudge you. Bind a recurring host interval tick to
-this coordinator thread (T3 pattern in `core/adapters/hosts/t3.md`). On wake, run
+Configure the non-AI minute watcher with machine-care and a wake transport for this coordinator
+and root (T3 pattern in `core/adapters/hosts/t3.md`). Retain an hourly host safety-net tick for
+live pending requests and unrecorded host failures. Replace existing AI tick schedules only
+with operator consent. On wake, run
 `core/bin/brain due <id>` and check host pending requests for yourself and your workers.
 Root also checks every descendant coordinator: read each binding with `brain show <child>`
 and list its host pending requests, including nested nodes and nodes without open jobs.
@@ -403,7 +405,7 @@ once by commit identity; those rows supply no review or usage proof.
 
 ## Questions wake their answering coordinator
 
-Configure this machine's `wake=` using the host adapter and retain the interval tick as recovery.
+Configure this machine's `wake=` using the host adapter and retain an hourly safety-net tick.
 `brain wake <node> "<reason>"` queues a deduplicated notification without sending question text;
 read `brain due <node>` and the inbox on wake. Nodes without coordinators route to root.
 Question and blocked hand-backs and supported Stop-hook captures request this wake automatically.
@@ -446,3 +448,17 @@ with the handover, update `coordinator=`, append the new runtime session id, reb
 schedule and wake task, and route outstanding requests. Tell the old thread to stop, confirm
 it stopped, then settle it. Never settle while a task or request would be lost. The CLI only
 prepares files and prints steps; it never calls the host or transfers transcript text.
+
+## Failed worker wakes
+
+On launch/replacement, bind the worker under the instance lock with
+`brain set <node> worker:<brain-job-key>=<thread-id>` (machine-local; host adapter). The host integration or safety-net tick writes terminal
+failed run records to `.brain/worker-runs.json`; `brain watch --once` reads only that local
+file and never queries host state. Record provider errors, usage limits and capacity failures;
+inspect bound workers on every host tick, including root's own workers. A failure inbox line
+is actionable even when no hand-back exists. The watcher records one other-runtime capacity
+retry where the router class permits it, with the exact resume brief command in the inbox.
+Confirm the old run is terminal, run that command, relaunch through the host in the existing
+worktree, and update the binding. Keep all original constraints, commits and readiness state.
+Do not relaunch twice for one switch; diagnose/review classes and a second capacity failure
+require coordinator judgement. Clear handled failure lines just like other inbox work.

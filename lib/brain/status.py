@@ -360,7 +360,7 @@ def status_lag(inst, n, evidence=None):
     return None
 
 
-def due_items(inst, n, evidence=None, include_stale=True):
+def due_items(inst, n, evidence=None, include_stale=True, include_ready=True):
     if n["archived"]:
         return []
     evidence = evidence or due_evidence(inst, n)
@@ -406,7 +406,7 @@ def due_items(inst, n, evidence=None, include_stale=True):
             add("restart", f"{branch}: restart: compactions; resume with `{command}`",
                 job=_m_jobs.job_key(row), state=signal["state"])
         elif signal and not _m_briefs.restart_acknowledged(n, row, signal):
-            ready = _m_verify.ready_state(inst, n, branch) if signal["state"] == "done" and not _m_briefs.import_job(branch) else None
+            ready = _m_verify.ready_state(inst, n, branch) if include_ready and signal["state"] == "done" and not _m_briefs.import_job(branch) else None
             detail = ("ready to merge" if ready["ready"] else
                       "finished but not ready (" + "; ".join(ready["reasons"]) + ")") if ready else (signal["state"] + "; node study, no home ready evidence required"
                                            if _m_briefs.import_job(branch) else signal["state"])
@@ -497,6 +497,11 @@ def cmd_due(a):
         if diagnostic and target["id"] not in wake_seen:
             wake_seen.add(target["id"])
             items.append({"node": target["id"], "kind": "wake", "text": diagnostic})
+    if any(n['id'] == 'root' for n in nodes):
+        from . import watch as _m_watch
+        if _m_watch.watch_state_invalid(inst):
+            items.append({'node': 'root', 'kind': 'watcher',
+                          'text': 'watcher state invalid; restore .brain/watch.json before watching'})
     items += machine_due_items(inst, nodes, state, items)
     if not a.quiet and getattr(a, "machine", False):
         items = [i for i in items if i["kind"] != "machine"] + [

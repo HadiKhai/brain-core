@@ -5,6 +5,30 @@ upgrading. `brain changes <node>` shows the entries this node's coordinator hasn
 `brain due <node>` lists them until `brain changes <node> --seen`. Entry headings are
 `## <date>: <title>`; once released, a heading never changes.
 
+## 2026-10-21: Actionable file watcher replaces frequent AI ticks
+
+For agents:
+- `brain watch --once` queues wakes only for new actionable due identities. Repeats,
+  readiness display changes and stale-status alone do not wake. Screened current excerpts
+  and opaque acknowledgement history stay in `.brain/watch.json` on this machine.
+- The machine-care minute sampler also runs the watcher. Failed deliveries retain their
+  queue and inbox. Root receives overdue-question wakes; supported Stop-hook questions
+  and question/blocked hand-backs keep their existing direct wake path.
+- The host adapter documents machine-local bound-worker failure records. A failed run
+  wakes once; an eligible capacity failure records one other-runtime switch and prints
+  the exact resume brief command. Only the coordinator relaunches through the host.
+  There is no host exporter in this release: without a separately configured exporter, failure
+  detection waits for the hourly host tick (up to one hour plus the next watcher minute).
+- Malformed host failure input is isolated; invalid routing disables only the affected retry.
+  Watcher acknowledgement state remains fail-closed, with a short sampler diagnostic and
+  `brain due root` repair notice. Bind workers with `brain set <node> worker:<job-key>=<thread>`.
+
+After upgrading:
+- Read the T3 adapter, coordinator role and machine-setup skill. With operator consent,
+  install the machine-care unit if missing and test wake delivery, then replace frequent AI ticks
+  (including root's) with hourly host safety-net ticks. Keep existing schedules until the
+  transport works. Bind workers and arrange host failure-file export; CLI never queries T3.
+
 ## 2026-10-21: Worktree cleanup preserves live jobs
 
 For agents:

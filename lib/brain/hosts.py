@@ -51,29 +51,37 @@ def wake_start(inst, n):
                      start_new_session=True, close_fds=True)
 
 
+def wake_recorded(inst, n, reason):
+    target, _ = wake_target(inst, n)
+    key = hashlib.sha256((n['id'] + '\0' + reason).encode()).hexdigest()
+    directory = wake_directory(inst, target)
+    return any((directory / (key + suffix)).exists() for suffix in ('.pending', '.sent'))
+
+
 def request_wake(inst, n, reason):
     """Fail open, enqueue then detach; never run a transport in the hook's process."""
     try:
         target, command = wake_target(inst, n)
         if not command or _m_common.outward_links(inst.root):
-            return
+            return False
         directory = wake_directory(inst, target)
         directory.mkdir(parents=True, exist_ok=True)
         key = hashlib.sha256((n["id"] + "\0" + reason).encode()).hexdigest()
         pending = directory / (key + ".pending")
         delivered = directory / (key + ".sent")
         if delivered.exists() and time.time() - delivered.stat().st_mtime < WAKE_DEDUP_SECONDS:
-            return
+            return True
         # Exclusive publication: repeated hooks neither overwrite nor launch more workers.
         _m_common.safe_target(pending)
         try:
             fd = os.open(pending, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
         except FileExistsError:
-            return
+            return True
         os.close(fd)
         wake_start(inst, target)
+        return True
     except (Exception, SystemExit):
-        pass  # the inbox is the durable record, even if spawning or state writes fail
+        return False  # the inbox remains durable; the watcher retries unacknowledged work
 
 
 def wake_http_status(command):
@@ -710,7 +718,8 @@ def capture_hook_questions(inst, n, data):
         text = _m_nodes.import_text(text, terms)  # whitespace folding can form a protected phrase or secret assignment
         # Hash only screened content; raw tool ids, paths, answers and session ids never persist.
         marker = "<!-- host-question:" + hashlib.sha256(text.encode()).hexdigest() + " -->"
-        line = f"- {inst.now()} from runtime: Host question: {text} {marker}\n"
+        wake_id = os.urandom(16).hex()
+        line = f"- {inst.now()} from runtime: Host question: {text} <!-- wake:{wake_id} --> {marker}\n"
         try:
             created = _m_transitions.inbox_append(n["dir"], line, marker, nonblocking=True)
         except BlockingIOError:
@@ -730,7 +739,7 @@ def capture_hook_questions(inst, n, data):
             except BlockingIOError:
                 created = False  # the other publisher is recording this same question
         if created:
-            request_wake(inst, n, marker + ":" + os.urandom(16).hex())
+            request_wake(inst, n, 'wake:' + wake_id)
 
 
 def cmd_hook(a):

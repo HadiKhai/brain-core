@@ -36,6 +36,7 @@ from . import upgrade as _m_upgrade
 from . import usage as _m_usage
 from . import verify as _m_verify
 from . import worktrees as _m_worktrees
+from . import watch as _m_watch
 
 
 def cmd_selftest(a):
@@ -107,6 +108,8 @@ READ_ONLY = {"cmd_show", "cmd_tree", "cmd_status", "cmd_now", "cmd_jobs", "cmd_s
 def writes(a):
     """Does this command, with these options, change anything in the instance?"""
     name = a.f.__name__
+    if name == "cmd_watch":
+        return False  # takes a short nonblocking instance lock itself
     if name == "cmd_wake":
         # Requests publish with O_EXCL; drains serialize on their own per-node lock.
         # Neither may queue behind an instance writer, or hold it during a wait/send.
@@ -397,6 +400,8 @@ def main():
     t.set_defaults(f=_m_hosts.cmd_hook_approve)
     cmd("wake", _m_hosts.cmd_wake, "wake a node coordinator (or root); inbox remains the record", "id",
         opt("reason", nargs="?"), opt("--drain", action="store_true", help=argparse.SUPPRESS))
+    cmd("watch", _m_watch.cmd_watch, "queue wakes only for new actionable file items",
+        opt("--once", action="store_true", required=True))
     cmd("now", _m_status.cmd_now, "the current time in the instance's timezone, as every record writes it (axiom 17)",
         opt("--iso", action="store_true"))
     cmd("tree", _m_status.cmd_tree, "show the node tree")
@@ -462,7 +467,7 @@ def main():
         token = _m_machine.machine_wait(inst=inst, node=node["id"])
         _m_machine.machine_release(token)
     if a.f == _m_machine.cmd_machine and a.action == "sample":
-        a.f(a)  # short nonblocking instance lock, no whole-brain scan
+        a.f(a)  # sampler and watcher each take a short nonblocking instance lock
         return
     root = _m_nodes.try_find_root() if writes(a) else None
     if root:
