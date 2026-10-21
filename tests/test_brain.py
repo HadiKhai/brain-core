@@ -2851,7 +2851,7 @@ class QuestionWake(Scenario):
         output = io.StringIO()
         with mock.patch.dict(os.environ, self.env, clear=True), \
                 mock.patch.object(self.module, "load", return_value=self.inst), \
-                mock.patch.object(self.module, "core_update"), \
+                mock.patch.object(self.module, "core_update", return_value=None), \
                 mock.patch.object(self.module, "auto_upgrade", return_value=None), contextlib.redirect_stdout(output):
             self.module.cmd_due(argparse.Namespace(id="root", quiet=False, json=True))
         items = json.loads(output.getvalue())
@@ -2865,7 +2865,7 @@ class QuestionWake(Scenario):
         output = io.StringIO()
         with mock.patch.dict(os.environ, self.env, clear=True), \
                 mock.patch.object(self.module, "load", return_value=self.inst), \
-                mock.patch.object(self.module, "core_update"), \
+                mock.patch.object(self.module, "core_update", return_value=None), \
                 mock.patch.object(self.module, "auto_upgrade", return_value=None), \
                 mock.patch.object(self.module, "request_wake") as wake, contextlib.redirect_stdout(output):
             self.module.cmd_due(argparse.Namespace(id="root", quiet=False, json=True))
@@ -9328,7 +9328,7 @@ class MachineCare(Scenario):
 
         def due(node=None, machine=False, quiet=False):
             with mock.patch.object(m, "load", return_value=inst), \
-                    mock.patch.object(m, "core_update"), mock.patch.object(m, "auto_upgrade", return_value=None), \
+                    mock.patch.object(m, "core_update", return_value=None), mock.patch.object(m, "auto_upgrade", return_value=None), \
                     mock.patch.object(m, "changes_due", return_value=[]), \
                     mock.patch.object(m, "machine_reading", return_value=dict(high)), \
                     contextlib.redirect_stdout(io.StringIO()) as output:
@@ -9369,12 +9369,17 @@ class MachineCare(Scenario):
             line = "- fixture from brain: " + ("hold heavy work: sustained 5-minute load" if transition == "open"
                                                else "heavy work hold cleared")
             inbox.write_text(initial + line + " [machine episode " + "a" * 24 + " " + transition + "]\n")
+            # Node hygiene creates facts at init; changing the inbox legitimately stales them.
+            self.assertTrue(any(i["kind"] == "stale-status" for i in due("root")))
+            m.refresh_status(inst, inst.node("root"))
             self.assertEqual(len(due("root")), 1)
             self.assertEqual(due("root")[0]["kind"], "machine")
             self.assertEqual(due("maple"), [])
             self.assertEqual(due("ash"), [])
             self.assertEqual(len([i for i in due() if i["kind"] == "machine"]), 1)
             inbox.write_text(initial)  # coordinator handles the one matching inbox action
+            self.assertTrue(any(i["kind"] == "stale-status" for i in due("root")))
+            m.refresh_status(inst, inst.node("root"))
             self.assertEqual(due("root"), [])  # heat still high, no repeated synthetic episode
         # Snapshot telemetry never makes a quiet node's status stale as load varies.
         n = inst.node("maple")
@@ -9639,7 +9644,7 @@ raise SystemExit(result)
             self.assertEqual(len([r for r in state["due"] if r["kind"] == "machine"]), 1)
             self.env["BRAIN_MACHINE_TESTING"] = "0"
             # Root due can check upgrades; suppress that unrelated path in a direct invocation.
-            with mock.patch.object(m, "load", return_value=inst), mock.patch.object(m, "core_update"), \
+            with mock.patch.object(m, "load", return_value=inst), mock.patch.object(m, "core_update", return_value=None), \
                     mock.patch.object(m, "auto_upgrade", return_value=None), contextlib.redirect_stdout(io.StringIO()) as output:
                 m.cmd_due(argparse.Namespace(id="root", json=True, quiet=False))
             self.assertEqual(len([r for r in json.loads(output.getvalue()) if r["kind"] == "machine"]), 1)
