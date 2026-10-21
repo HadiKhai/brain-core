@@ -271,9 +271,26 @@ the row `merged` or `abandoned`. Merged v2 jobs missing a required lesson outcom
 legacy merges have no retroactive requirement. Never edit the worker record. Cleanup prints
 lessons and the report path first, deletes the ready packet, and retains a merged-job hand-back
 until its lesson outcome is recorded, even after pruning the worktree. A job dropped without a merge ends
-with `core/bin/brain wt rm <id> <branch> --cause "<why>"`, so `core/bin/brain jobs` can say
+by first marking its Active work row `abandoned` (keep the worker thread), then running
+`core/bin/brain wt rm <id> <branch> --cause "<why>"`, so `core/bin/brain jobs` can say
 what goes wrong, how long jobs take and how many review rounds they need: base estimates on
 it, not on a guess.
+
+For a finished study, mark its Active work row `closed` (keep the worker thread) before
+`brain jobs <id> --branch <branch> --close`. After closing any job, follow its printed thread checklist and the host adapter's discovery
+and safety checks. Find the worker in Active work (keep its thread reference after closure),
+its descendants and marker-matched reviewers. Settle only explicit ledger-closed jobs, never
+coordinators, open-job threads, running/waiting threads or threads with pending requests.
+Unknown ownership or activity means leave unsettled. After all threads are safely settled,
+record `brain jobs <id> --branch <branch> --settled`; this is your host attestation.
+For legacy jobs missing thread references or markers, exhaust both host projects' unsettled
+thread lists and follow the host adapter's sweep. No attributable unsettled thread remaining
+is sufficient proof; a bounded search is not. Record the completed sweep with
+`brain jobs <id> --settled --all-closed`; it never stamps open jobs and refuses branches with
+open work. Leave doubtful or unsafe closed-work threads unrecorded until resolved.
+`brain due` counts closed jobs still awaiting this step, including old rows. The root's
+`brain due root` includes child settlement counts: route their backlog to their coordinators rather than
+settling their threads without their ownership checks.
 
 ## Before the operator looks at work
 

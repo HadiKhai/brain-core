@@ -23,6 +23,27 @@ After upgrading:
   and `--yes`. Ordinary commands do not install a service. The wake integration call site is
   marked for the separate wake job; sampling itself never calls an LLM.
 
+## 2026-10-20: Settle closed jobs' host threads
+
+For agents:
+- Closing a job prints its worker reference, job marker and thread-settlement checklist.
+  The coordinator discovers and checks threads through the host, then records
+  `brain jobs <node> --branch <branch> --settled`. Brain never calls the host API.
+- Never settle coordinators, open jobs, running/waiting threads or threads with pending
+  requests. Unknown ownership or activity leaves the job unsettled; partial cleanup does too.
+- Legacy jobs without markers or worker references can be cleared after the host adapter's
+  exhaustive project-list sweep: `brain jobs <node> --settled --all-closed` records all closed
+  rows together, refuses any target branch with open work, and leaves open rows untouched.
+  List exhaustion proves no attributable unsettled threads remain; search only finds candidates.
+- `brain jobs` shows at most ten unsettled rows, then the remaining count.
+- `brain due`, generated facts and live state count closed jobs with unsettled threads,
+  including old ledger rows. `brain due root` now includes child settlement counts alongside the root's own work.
+
+After upgrading:
+- Read the host adapter's settlement checklist and update coordinator ticks. Inspect each
+  node's backlog, settle only safely closed jobs and record settlement after the host checks.
+  Older v3 cores preserve the new Settled column when rewriting ledgers.
+
 ## 2026-10-20: Runtime questions reach the inbox
 
 For agents:

@@ -79,10 +79,23 @@ stated; never run a polling loop in an agent.
    the outcome in `status.md`, turn the hand-back's proposed reusable lessons into library items (the
    `learn` skill), record their ids with `core/bin/brain jobs <id> --branch <branch> --lessons
    <id1,id2>` (or `--lessons "none: <reason>"`), and run `core/bin/brain wt prune <id>`. It removes only clean, merged
-   worktrees. A job dropped instead: `core/bin/brain wt rm <id> <branch> --cause "<why>"`.
+   worktrees. For a dropped job, first set its Active work row to `abandoned`, preserving the
+   worker thread reference, then run `core/bin/brain wt rm <id> <branch> --cause "<why>"`.
    Either way the node's `job-ledger.md` gets the job's hours, commits and review rounds
    (`core/bin/brain jobs <id>`). Cleanup prints lessons and the report first, deletes ready records,
    and retains a merged-job hand-back until its lesson outcome is recorded. The ledger keeps history.
+   Follow the printed thread checklist and host adapter: find the worker from Active work,
+   delegated/sub-agent descendants and reviewers by `brain-job: <key>`. Settle only when the
+   ledger is merged or closed; never coordinators, open-job threads, running/waiting threads,
+   or threads with pending requests. Unknown state or ownership means leave unsettled.
+   After all job threads are confirmed settled through the host, record
+   `brain jobs <id> --branch <branch> --settled`. Preserve the Active work thread reference.
+   Legacy jobs missing markers or worker references use the host adapter's complete-project
+   sweep: exhaust unsettled thread lists, protect open/active/coordinator threads and settle
+   safely done closed work. After no attributable unsettled closed-work threads remain,
+   `brain jobs <id> --settled --all-closed` records all closed rows together; branches with
+   open ledger jobs cause refusal. A later job never inherits an old settlement stamp.
+   `brain due` counts closed-but-unsettled jobs; `brain due root` includes child settlement counts.
 
 Never merge, push to a shared branch, deploy or delete a branch without explicit consent
 (axiom 24). Several jobs can run at once; each has its own worktree and port.
