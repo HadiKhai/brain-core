@@ -10,17 +10,17 @@ const load = async (file) => {
 const rank = await load("rank.ts"), model = await load("model.ts"), graph = await load("graph-layout.ts");
 
 test("snapshot search ranks exactly like the server: exact, start, word start, contains, then A to Z", () => {
-  const names = ["Mariana", "Bruno Ana", "Ánalyst", "Ana Lima", "ana", "Zed"];
+  const names = ["Cabana", "Notebook Ana", "Ánalyst", "Analysis notebook", "ana", "Zinc"];
   const state = { nodes: names.map((title, i) => ({ id: "n" + i, title, updated: `2026-01-0${i + 1}` })) };
   const ours = rank.localSearch(state, "node", "ana").items.map((i) => i.title);
-  assert.deepEqual(ours, ["ana", "Ana Lima", "Ánalyst", "Bruno Ana", "Mariana"]);
+  assert.deepEqual(ours, ["ana", "Analysis notebook", "Ánalyst", "Notebook Ana", "Cabana"]);
   const py = JSON.parse(execFileSync("python3", ["-c", `
 import json, sys
 sys.path.insert(0, sys.argv[1])
 from brain import ui as m
-print(json.dumps([m.ui_search(json.loads(sys.argv[2]), "node", q)["items"] for q in ("ana", "", "lima", "مدرسه")]))`,
+print(json.dumps([m.ui_search(json.loads(sys.argv[2]), "node", q)["items"] for q in ("ana", "", "notebook", "مدرسه")]))`,
     new URL("../../lib", import.meta.url).pathname, JSON.stringify({ ...state, nodes: [...state.nodes, { id: "ar", title: "مدرسة" }] })], { encoding: "utf8" }));
-  const local = ["ana", "", "lima", "مدرسه"].map((q) => rank.localSearch({ ...state, nodes: [...state.nodes, { id: "ar", title: "مدرسة" }] }, "node", q).items);
+  const local = ["ana", "", "notebook", "مدرسه"].map((q) => rank.localSearch({ ...state, nodes: [...state.nodes, { id: "ar", title: "مدرسة" }] }, "node", q).items);
   assert.deepEqual(local, py);
   const many = { nodes: Array.from({ length: 45 }, (_, i) => ({ id: "p" + i, title: "Project " + i })) };
   assert.deepEqual([0, 20, 40].map((o) => rank.localSearch(many, "node", "project", o).next), [20, 40, null]);
@@ -32,7 +32,7 @@ test("a Due card names its job from the record, and the sender comes from the re
   assert.equal(due.body, "ready to merge; review it");
   assert.equal(due.label, "Ready to merge");
   assert.equal(model.dueParts({ kind: "stale-status", text: "update `brain status x --refresh`" }).title, "");
-  assert.equal(model.sender({ kind: "blocked", from: "", text: "Waiting on copy from Morgan: a read" }), "Project status");
+  assert.equal(model.sender({ kind: "blocked", from: "", text: "Waiting on copy from Demo reviewer: a read" }), "Project status");
   assert.equal(model.sender({ kind: "inbox", from: "worker", text: "2026-01-01 00:00 from someone-else: question" }), "worker");
 });
 

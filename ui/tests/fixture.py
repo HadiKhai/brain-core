@@ -19,7 +19,7 @@ def fixture():
     def node(nid, title, parent="root"):
         live = job("job/navigation")
         finished = [job("job/complete-"+str(i), 1+i/10, "merged", ended=3+i*14) for i in range(13)]
-        return {"id":nid,"title":title,"parent":parent,"owners":["Morgan"],"labels":["Product"],"runtime":"Codex",
+        return {"id":nid,"title":title,"parent":parent,"owners":["Demo reviewer"],"labels":["Product"],"runtime":"Codex",
             "sealed":False,"archived":False,"paused":False,"home":"~/demo/"+nid,"coordinator":"https://example.com/conversation",
             "updated":"2026-10-20T10:00:00Z","updated_ago":"12 min ago","status":{"Now":"A calmer navigation system is in review.\n\n- Preserve keyboard focus.\n- Keep long project names readable.","Next":"Review the narrow-screen tour before the next job."},
             "inbox":["Should the compact navigation stay open on tablets?"],"blocked":[],"decisions":[{"title":"Keep project notes close to the overview","said":"The next decision should have its context.","t":NOW-900}],"limits":["Use synthetic data in public examples."],"never_name":2,
@@ -32,14 +32,14 @@ def fixture():
     root=node("root","Meadow workspace",None);root["work"]=[];root["worktrees"]=[];root["jobs"]={"rows":[],"open":[],"merged":0,"abandoned":0}
     app=node("field-guide","Field Guide"); site=node("observatory","Observatory website");site["work"]=[];site["worktrees"]=[];site["jobs"]={"rows":[],"open":[],"merged":0,"abandoned":0};site["paused"]=True
     items=[{"id":"lesson-"+str(i),"title":t,"kind":"Lesson","status":"proposed" if i<2 else "active","scope":["Product"],"body":"## What changed\n\nKeep the action near the context it affects.\n\n- Check narrow layouts.\n- Test keyboard focus.\n\n```text\n<script>literal, untrusted content</script>\n```",
-        "provenance":{"node":"field-guide","ref":"notes/review.md","repo":"demo/field-guide","commit":"abcdef1234567890abcdef1234567890abcdef12","time":"2026-10-20T09:00:00Z","owners":["Morgan"]}}
+        "provenance":{"node":"field-guide","ref":"notes/review.md","repo":"demo/field-guide","commit":"abcdef1234567890abcdef1234567890abcdef12","time":"2026-10-20T09:00:00Z","owners":["Demo reviewer"]}}
         for i,t in enumerate(["Keep filters next to the work","Explain every status","Preserve drafts between views","Review mobile navigation with taps","Measure the shared gutters","Make empty states useful"])]
     days={f"Oct {d}":{"tokens":(d*12537)%200000+30000,"fresh_out":18000,"active_h":1.4} for d in range(7,21)}
     weeks={f"Week {d}":{"tokens":d*110000,"active_h":8,"fresh_out":200000} for d in range(1,9)}
     return {"brain":{"name":"meadow-demo","title":"Meadow workspace","root":"~/demo/meadow","machine":"Studio laptop","tz":"UTC","now":iso(NOW),"fallback":["codex","claudeAgent"],"others":["Sandbox"]},
         "nodes":[root,app,site],"attention":[{"node":"field-guide","kind":"inbox","text":"Navigation review needs a decision"}],
         "inbox":[{"id":"synthetic-question-one","node":"field-guide","kind":"inbox","from":"worker","text":"2026-10-20 10:00 +00:00 from worker: question: Keep the compact navigation open on tablets?","first_seen":iso(NOW-3600)},
-                 {"id":"synthetic-blocked-one","node":"observatory","kind":"blocked","from":"","text":"Waiting on copy from Morgan: the launch note needs a final read","first_seen":iso(NOW-30*3600)}],
+                 {"id":"synthetic-blocked-one","node":"observatory","kind":"blocked","from":"","text":"Waiting on copy from Demo reviewer: the launch note needs a final read","first_seen":iso(NOW-30*3600)}],
         "due":[{"node":"field-guide","kind":"handback","branch":"job/navigation","job":"a1b2c3d4e5f6a7b8c9d0e1f2","text":"job/navigation: ready to merge; review the report and record the next step","ready":True},{"node":"observatory","kind":"stale-status","text":"facts differ from current files; update judgement sections, then `brain status observatory --refresh`"}],
         "commits":[{"sha":str(i),"subject":t,"node":"field-guide","where":"home","t":NOW-i*1400} for i,t in enumerate(["Refine the narrow navigation","Preserve the active project context","Add keyboard navigation checks","Improve the review hand-back"])],
         "commits_24h":18,"commits_total":42,"hours":72,"activity":{"start":NOW-72*3600,"counts":{"field-guide":[i%7 if i%4==0 else 0 for i in range(72)],"observatory":[i%5 if i%3==0 else 0 for i in range(72)]}},
@@ -181,9 +181,9 @@ if __name__ == "__main__":
                 if key=='slow':time.sleep(1.2)
                 searched=state_for('demo' if key in ('slow','many') else key)
                 if key=='many':  # 1,200 made-up projects for the picker's paging and ranking
-                    given=['Rana','Omar','Lina','Sami','Maya','Karim','Nour','Hadi','Yara','Zein']
-                    family=['Haddad','Khoury','Nasser','Saleh','Aoun','Fares','Mansour','Rizk']
-                    searched['nodes']=searched['nodes']+[{'id':f'p{i:04}','title':f'{given[i%10]} {family[(i//10)%8]} {i:04}','parent':'root','updated':''} for i in range(1200)]
+                    modifiers=['Rill','Orchid','Lantern','Spruce','Moon','Kite','Nest','Harbor','Yonder','Zephyr']
+                    nouns=['Notebook','Atlas','Workshop','Observatory','Fieldbook','Index','Studio','Archive']
+                    searched['nodes']=searched['nodes']+[{'id':f'p{i:04}','title':f'{modifiers[i%10]} {nouns[(i//10)%8]} {i:04}','parent':'root','updated':''} for i in range(1200)]
                 body=json.dumps(brain.ui_search(searched,one('kind','all'),one('q',''),int(one('offset','0')),int(one('limit','20')))).encode()
                 self.send_response(200);self.send_header('Content-Type','application/json');self.end_headers();self.wfile.write(body);return
             if parsed.path in ('/api/state','/api/events'):

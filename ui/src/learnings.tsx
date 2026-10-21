@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { usePage } from "./hooks/use-page";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { useContext, useEffect } from "react";
@@ -52,13 +53,13 @@ export function Learnings({ s, active, initialState }: { s: RecordData; active: 
   const [query, setQuery] = useState(""),
     [node, setNode] = useState<Found | null>(null),
     [specialist, setSpecialist] = useState<Found | null>(null),
-    [state, setState] = useState(initialState || "all"),
-    [page, setPage] = useState(0), [size, setSize] = useState(10);
+    [state, setState] = useState(initialState || "all");
   useEffect(() => { if (initialState) { setState(initialState); setPage(0); } }, [initialState]);
   const rows = learningRows(s),
     scoped = rows.filter((i) => (!node || node.id === i.node) && (!specialist || specialist.id === i.specialist) &&
       `${i.title} ${i.body || ""}`.toLowerCase().includes(query.toLowerCase())),
     filtered = scoped.filter((i) => state === "all" || state === i.state);
+  const { page, size, setPage, setSize, start, end } = usePage(filtered.length, JSON.stringify([query, node?.id, specialist?.id, state]));
   const title = (id: string) => list(s.nodes).find((n) => n.id === id)?.title || "Source project not recorded";
   const reset = () => { setQuery(""); setNode(null); setSpecialist(null); setState("all"); setPage(0); };
   const first = rows.find((r) => r.state === "proposed" && !r.specialist) || rows[0];
@@ -74,7 +75,7 @@ export function Learnings({ s, active, initialState }: { s: RecordData; active: 
       <div className="learning-results">
         <SectionTabs value={state} onValue={(v) => { setState(v); setPage(0); }} tabs={states.map(([id, label]) => ({ id, label, count: scoped.filter((r) => id === "all" || r.state === id).length, body: null }))} />
         <p className="results-meta" role="status">{filtered.length} {filtered.length === 1 ? "learning" : "learnings"}</p>
-        <div className="rows">{filtered.slice(page * size, (page + 1) * size).map((i: any, k) => (
+        <div className="rows">{filtered.slice(start, end).map((i: any, k) => (
           <div className="row learning" data-item key={i.id + ":" + i.specialist + k}>
             <div className="row-main">
               <strong className="row-title"><Text>{i.title || "Untitled learning"}</Text></strong>

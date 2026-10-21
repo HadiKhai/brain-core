@@ -24,13 +24,13 @@ test("empty focus lists the most relevant records at once, and one letter search
   expect(first[0]).toMatch(/^R/);   // names that start with the query come first
 });
 
-test("a surname, a mid-word query and no match rank and say what to do", async ({ page }) => {
+test("a later word, a mid-word query and no match rank and say what to do", async ({ page }) => {
   const search = await open(page, "many");
-  await search.fill("khoury");
-  await expect.poll(async () => (await titles(page))[0] || "").toMatch(/^\w+ Khoury/);
-  await expect(page.getByRole("option").first().locator("mark")).toHaveText("Khoury");
-  await search.fill("oury");
-  await expect.poll(async () => (await titles(page))[0] || "").toMatch(/Khoury/);
+  await search.fill("atlas");
+  await expect.poll(async () => (await titles(page))[0] || "").toMatch(/^\w+ Atlas/);
+  await expect(page.getByRole("option").first().locator("mark")).toHaveText("Atlas");
+  await search.fill("tlas");
+  await expect.poll(async () => (await titles(page))[0] || "").toMatch(/Atlas/);
   await search.fill("zzqq");
   await expect(page.getByRole("status").filter({ hasText: "No match for “zzqq”" })).toBeVisible();
   await page.getByRole("button", { name: "Clear search" }).click();
@@ -50,12 +50,12 @@ test("1,000+ records page in on scroll, keyboard picks one and the chip names it
     await list.evaluate((e) => (e.scrollTop = e.scrollHeight));
     return page.getByRole("option").count();
   }, { timeout: 15_000, intervals: [300] }).toBeGreaterThanOrEqual(60);
-  await search.fill("lina khoury 0012");
+  await search.fill("lantern atlas 0012");
   await expect(page.getByRole("option")).toHaveCount(1);
   await page.keyboard.press("ArrowDown");
   await page.keyboard.press("Enter");
   const picker = page.getByRole("combobox", { name: "Project", exact: true });
-  await expect(picker).toContainText("Lina Khoury 0012");
+  await expect(picker).toContainText("Lantern Atlas 0012");
   await expect(picker).toContainText("Meadow workspace");   // the secondary line tells similar names apart
   await page.getByRole("button", { name: "Clear Project" }).click();
   await expect(picker).toContainText("All projects");
@@ -83,7 +83,7 @@ test("coordinator steps name their job and render inline code", async ({ page })
   await page.evaluate(() => (location.hash = "view=inbox"));
   const blocked = page.locator("[data-page=inbox] .row.request").filter({ hasText: "launch note" });
   await expect(blocked).toContainText("Project status");
-  await expect(blocked.locator(".row-line small")).not.toContainText("Morgan");
+  await expect(blocked.locator(".row-line small")).not.toContainText("Demo reviewer");
 });
 
 test("the Inbox primary action follows the active tab", async ({ page }) => {

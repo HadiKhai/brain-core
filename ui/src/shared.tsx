@@ -1,3 +1,4 @@
+import { usePage } from "./hooks/use-page";
 import {
   createContext,
   Children,
@@ -150,9 +151,9 @@ export function Empty({
   );
 }
 export function PagedCollection({ children, name }: { children: ReactNode; name: string }) {
-  const [page, setPage] = useState(0);
-  const items = Children.toArray(children), pages = Math.max(1, Math.ceil(items.length / 10)), current = Math.min(page, pages - 1);
-  return <>{items.slice(current * 10, current * 10 + 10)}{items.length > 10 && <footer className="table-footer"><span>{current * 10 + 1}–{Math.min(items.length, current * 10 + 10)} of {items.length} {name}</span><div className="pager"><Button variant="outline" size="sm" disabled={!current} onClick={() => setPage(current - 1)}>Previous</Button><span>{current + 1} / {pages}</span><Button variant="outline" size="sm" disabled={current === pages - 1} onClick={() => setPage(current + 1)}>Next</Button></div></footer>}</>;
+  const items = Children.toArray(children);
+  const { page: current, pages, setPage, start, end } = usePage(items.length, name);
+  return <>{items.slice(start, end)}{items.length > 10 && <footer className="table-footer"><span>{current * 10 + 1}–{Math.min(items.length, current * 10 + 10)} of {items.length} {name}</span><div className="pager"><Button variant="outline" size="sm" disabled={!current} onClick={() => setPage(current - 1)}>Previous</Button><span>{current + 1} / {pages}</span><Button variant="outline" size="sm" disabled={current === pages - 1} onClick={() => setPage(current + 1)}>Next</Button></div></footer>}</>;
 }
 export function Status({ children }: { children: ReactNode }) {
   const zone = useContext(TimeZoneContext);
@@ -401,15 +402,16 @@ export function DataTable({
   rows,
   name = "records",
   details = true,
+  resetKey = "",
 }: {
   columns: Column[];
   rows: RecordData[];
   name?: string;
   details?: boolean;
+  resetKey?: string;
 }) {
-  const [page, setPage] = useState(0),
-    [size, setSize] = useState("10"),
-    [sort, setSort] = useState({ key: "", direction: 1 });
+  const [sort, setSort] = useState({ key: "", direction: 1 });
+  const { page: actual, pages, size, setPage, setSize, start, end } = usePage(rows.length, JSON.stringify([name, resetKey, sort.key, sort.direction]));
   const sortColumn = columns.find((c) => c.key === sort.key);
   const value = (r: RecordData) =>
     sortColumn?.sortValue ? sortColumn.sortValue(r) : (r[sort.key] ?? "");
@@ -420,9 +422,7 @@ export function DataTable({
         }) * sort.direction
       : 0,
   );
-  const pages = Math.max(1, Math.ceil(rows.length / Number(size))),
-    actual = Math.min(page, pages - 1),
-    shown = sorted.slice(actual * Number(size), (actual + 1) * Number(size));
+  const shown = sorted.slice(start, end);
   return !rows.length ? (
     <Empty text={"No " + name + " yet."} />
   ) : (
@@ -517,9 +517,9 @@ export function DataTable({
         <div className="pager">
           <Choice
             name="Rows"
-            value={size}
+            value={String(size)}
             onChange={(v) => {
-              setSize(v);
+              setSize(Number(v));
               setPage(0);
             }}
             options={["10", "25", "50"].map((v) => ({ value: v, label: v }))}

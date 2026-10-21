@@ -1,4 +1,5 @@
 import { useState, type ReactNode } from "react";
+import { usePage } from "./hooks/use-page";
 import { ArrowUpRight } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { FilterToolbar, Text, Reader, Empty, Choice, ScreenAction, ActionLink, Status } from "./shared";
@@ -57,11 +58,11 @@ export function DueRow({ s, item, go, showProject = true }: { s: RecordData; ite
 }
 
 export function Pager({ total, page, size, onPage, onSize, noun }: { total: number; page: number; size: number; onPage: (p: number) => void; onSize: (s: number) => void; noun: string }) {
-  const pages = Math.max(1, Math.ceil(total / size)), current = Math.min(page, pages - 1);
+  const pages = Math.max(1, Math.ceil(total / size)), current = page;
   return (
     <footer className="table-footer">
       <span>{total ? `${current * size + 1}–${Math.min(total, (current + 1) * size)} of ${count(total, noun)}` : `0 ${noun}s`}</span>
-      {pages > 1 && <div className="pager">
+      {total > 10 && <div className="pager">
         <Choice name="Rows per page" value={String(size)} onChange={(v) => { onSize(Number(v)); onPage(0); }} options={["10", "25", "50"].map((value) => ({ value, label: value }))} />
         <Button variant="ghost" size="sm" disabled={!current} onClick={() => onPage(0)}>First</Button>
         <Button variant="outline" size="sm" disabled={!current} onClick={() => onPage(current - 1)}>Previous</Button>
@@ -74,22 +75,22 @@ export function Pager({ total, page, size, onPage, onSize, noun }: { total: numb
 }
 
 // Any list that can grow: ten rows at a time with a pager, never an unbounded column.
-export function PagedRows<T>({ items, render, noun, size: initial = 10, className = "rows" }: { items: T[]; render: (item: T, i: number) => ReactNode; noun: string; size?: number; className?: string }) {
-  const [page, setPage] = useState(0), [size, setSize] = useState(initial);
-  const pages = Math.max(1, Math.ceil(items.length / size)), current = Math.min(page, pages - 1);
+export function PagedRows<T>({ items, render, noun, size: initial = 10, className = "rows", resetKey = "" }: { items: T[]; render: (item: T, i: number) => ReactNode; noun: string; size?: number; className?: string; resetKey?: string }) {
+  const { page: current, size, setPage, setSize, start, end } = usePage(items.length, resetKey, initial);
   return <>
-    <div className={className}>{items.slice(current * size, (current + 1) * size).map((item, i) => render(item, current * size + i))}</div>
+    <div className={className}>{items.slice(start, end).map((item, i) => render(item, current * size + i))}</div>
     {items.length > initial && <Pager total={items.length} page={current} size={size} onPage={setPage} onSize={setSize} noun={noun} />}
   </>;
 }
 
 export function InboxView({ s, go, tab, active }: { s: RecordData; go: Go; tab: string | null; active: boolean }) {
-  const [query, setQuery] = useState(""), [project, setProject] = useState<Found | null>(null), [page, setPage] = useState(0), [size, setSize] = useState(10);
+  const [query, setQuery] = useState(""), [project, setProject] = useState<Found | null>(null);
   const nodes = list(s.nodes), title = (id: string) => nodes.find((n) => n.id === id)?.title || "";
   const match = (a: RecordData) => (!project || a.node === project.id) && `${readable(a.text)} ${a.branch || ""} ${title(a.node)}`.toLowerCase().includes(query.toLowerCase());
   const requests = list(s.inbox).filter(match), steps = list(s.due).filter(match).sort((a, b) => Number(!!b.ready) - Number(!!a.ready));
   const current = tab === "due" ? "due" : "inbox", rows = current === "due" ? steps : requests;
-  const shown = rows.slice(page * size, (page + 1) * size);
+  const { page, size, setPage, setSize, start, end } = usePage(rows.length, JSON.stringify([current, query, project?.id]));
+  const shown = rows.slice(start, end);
   const next = requests[0], conversation = next && (safeHref(next.link) || safeHref(nodes.find((n) => n.id === next.node)?.coordinator));
   // The primary action follows the tab: the next request, or the next coordinator step.
   const step = steps[0];

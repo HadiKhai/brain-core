@@ -108,11 +108,11 @@ test("long hire briefs, proposal decisions and overflowing specialist options ha
   await page.keyboard.press("Escape");
   await page.goto("/?k=demo#view=learnings");
   await page.locator('#screen-action-host').getByRole("button",{name:"Review proposal",exact:true}).click();
-  await dialog.getByRole("textbox",{name:"Reviewer name"}).fill("Morgan");
+  await dialog.getByRole("textbox",{name:"Reviewer name"}).fill("Demo reviewer");
   await context.grantPermissions(["clipboard-write","clipboard-read"]);
   await dialog.getByRole("button",{name:"Copy acceptance",exact:true}).click();
   await expect(dialog.getByRole("status")).toContainText("Copied. Run the command");
-  expect(await page.evaluate(() => navigator.clipboard.readText())).toBe("brain item accept --reviewed-by 'Morgan' -- 'lesson-0'");
+  expect(await page.evaluate(() => navigator.clipboard.readText())).toBe("brain item accept --reviewed-by 'Demo reviewer' -- 'lesson-0'");
   await page.evaluate(() => Object.defineProperty(navigator,"clipboard",{configurable:true,value:{writeText:async()=>{throw new Error("Synthetic denied");}}}));
   await dialog.getByRole("combobox",{name:"Decision",exact:true}).click();
   await page.getByRole("option",{name:"Reject",exact:true}).click();
@@ -144,7 +144,7 @@ test("touch decision feedback and import undo preserve the operator's place", as
   await page.goto('/?k=demo#view=learnings');
   await page.locator('#screen-action-host').getByRole('button',{name:'Review proposal',exact:true}).tap();
   const dialog=page.getByRole('dialog');
-  await dialog.getByRole('textbox',{name:'Reviewer name'}).fill('Morgan');
+  await dialog.getByRole('textbox',{name:'Reviewer name'}).fill('Demo reviewer');
   await page.evaluate(()=>Object.defineProperty(navigator,'clipboard',{configurable:true,value:{writeText:()=>new Promise<void>(resolve=>{(window as any).__finishCopy=resolve;})}}));
   await dialog.getByRole('button',{name:'Copy acceptance',exact:true}).tap();
   await expect(dialog.getByRole('status')).toHaveText('Copying…');
@@ -154,7 +154,7 @@ test("touch decision feedback and import undo preserve the operator's place", as
   await expect(dialog.getByRole('status')).toContainText('Copied. Run the command');
   await dialog.getByRole('button',{name:'Close',exact:true}).tap();
   await page.locator('#screen-action-host').getByRole('button',{name:'Review proposal',exact:true}).tap();
-  await expect(dialog.getByRole('textbox',{name:'Reviewer name'})).toHaveValue('Morgan');
+  await expect(dialog.getByRole('textbox',{name:'Reviewer name'})).toHaveValue('Demo reviewer');
   await dialog.getByRole('button',{name:'Close',exact:true}).tap();
   await page.getByRole('button',{name:'Toggle Sidebar'}).tap();
   await page.locator('[data-mobile=true]').getByRole('button',{name:'Add projects',exact:true}).tap();

@@ -65,7 +65,7 @@
   await wait(() => location.hash.includes("node=field-guide") && page("project"), "project page");
   check(location.hash.includes("view=project") && location.hash.includes("node=field-guide"), "project deep link");
   await tab(page("project"), "About");
-  check(page("project").querySelector(".detail-facts").textContent.includes("Morgan"), "project page retains ownership");
+  check(page("project").querySelector(".detail-facts").textContent.includes("Demo reviewer"), "project page retains ownership");
   await tab(page("project"), "Threads");
   check(page("project").textContent.includes("narrow-screen navigation"), "long job state is readable");
   await go("learnings");

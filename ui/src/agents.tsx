@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { usePage } from "./hooks/use-page";
 import { ArrowUpRight, Bot, Clock3, GitBranch, Server } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { JobReview } from "./work";
@@ -15,15 +16,16 @@ export const totalTokens = (r: RecordData) => ["Fresh in", "Cache read", "Cache 
 const median = (values: number[]) => { const v = values.filter(Number.isFinite).sort((a, b) => a - b); return v.length ? v[Math.floor(v.length / 2)] : null; };
 
 export function Specialists({ s, active }: { s: RecordData; active: boolean }) {
-  const [query, setQuery] = useState(""), [page, setPage] = useState(0), [size, setSize] = useState(10);
+  const [query, setQuery] = useState("");
   const nodes = list(s.nodes), all = list(s.specialists);
   const rows = all.filter((sp) => `${sp.title} ${(sp.scope || []).join(" ")} ${sp.runtime}`.toLowerCase().includes(query.toLowerCase()));
+  const { page, size, setPage, setSize, start, end } = usePage(rows.length, query);
   return (
     <>
       <ScreenAction active={active}><Reader title="Bring in a specialist" text="Ask a project coordinator to hire a specialist for the next job. Each hire records its task, runtime and outcome here." trigger="Hire a specialist" primary /></ScreenAction>
       <section className="surface" aria-label="Specialists">
         <FilterToolbar query={query} onQuery={(v) => { setQuery(v); setPage(0); }} placeholder="Search specialists" />
-        <div className="rows">{rows.slice(page * size, (page + 1) * size).map((sp, i) => (
+        <div className="rows">{rows.slice(start, end).map((sp, i) => (
           <div className="row specialist" data-item key={sp.node + sp.id + i}>
             <span className="row-icon"><Bot size={16} /></span>
             <div className="row-main">
@@ -96,7 +98,7 @@ export function Jobs({ s, active, go }: { s: RecordData; active: boolean; go: Go
           <RecordPicker s={s} kind="node" label="Job project" hideLabel value={project} onChange={setProject} allLabel="All projects" placeholder="Search projects" />
         </FilterToolbar>
         <SectionTabs value={outcome} onValue={setOutcome} tabs={[["all", "All"], ["open", "Open"], ["merged", "Merged"], ["abandoned", "Abandoned"]].map(([id, l]) => ({ id, label: l, count: scoped.filter((r) => id === "all" || kind(r) === id).length, body: null }))} />
-        <DataTable name="jobs" key={outcome + (project?.id || "")} rows={rows.map((r) => ({ ...r, _key: r._node.id + r.Job + r.Started }))}
+        <DataTable name="jobs" resetKey={JSON.stringify([query, outcome, project?.id])} rows={rows.map((r) => ({ ...r, _key: r._node.id + r.Job + r.Started }))}
           columns={[
             { key: "Job", label: "Job", sortValue: (r) => jobTitle(r.Job), render: (r) => <div><strong><Text>{jobTitle(r.Job)}</Text></strong><small>{r._node.title || "Project"}</small>{!closed(r) && r._node.jobs?.median_hours != null && Number(r._open?.age_h) > 2 * r._node.jobs.median_hours && <Status>Over twice median</Status>}<UsageFlags n={r._node} r={r} /></div> },
             { key: "Started", label: "Started", sortValue: (r) => stamp(r.Started) || 0, render: (r) => time(r.Started, s.brain?.tz) },
@@ -161,7 +163,7 @@ export function Threads({ s, active, go }: { s: RecordData; active: boolean; go:
         <FilterToolbar query={query} onQuery={setQuery} placeholder="Search threads">
           <RecordPicker s={s} kind="node" label="Thread project" hideLabel value={project} onChange={setProject} allLabel="All projects" placeholder="Search projects" />
         </FilterToolbar>
-        <PagedRows key={JSON.stringify([query, project?.id])} items={rows} noun="thread" render={(f, i) => <ThreadRow key={f.node.id + f.job.branch + i} s={s} f={f} go={go} />} />
+        <PagedRows resetKey={JSON.stringify([query, project?.id])} items={rows} noun="thread" render={(f, i) => <ThreadRow key={f.node.id + f.job.branch + i} s={s} f={f} go={go} />} />
         {!rows.length && <Empty text={query || project ? "No thread matches." : "No threads in flight."} action={query || project ? "Clear the filters to see every thread." : "Start a job from a project coordinator."} icon={GitBranch} />}
       </section>
     </>
