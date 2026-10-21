@@ -155,6 +155,13 @@ with fresh routed reset windows when there are enough samples. They do not subtr
 time or predict concurrency, token costs or allowance fit; allowance fit needs per-job usage
 data that the ledger does not record. State that boundary and quote actual usage headroom.
 
+Coordinators default to Claude; preserve an explicit runtime or node pin. Give jobs a
+class with `brief|hire|review --class` or contract `## Class`: build/ui/migration/docs use
+Codex by default, diagnose/review use Claude. Unpinned builds above `route_weekly_cap=60`
+use the other runtime when its weekly meter is known. Node `route_model_codex` and
+`route_model_claude` name the launch models; `--model` overrides them. The brief explains
+the route; follow it at launch. Independent review must still use the builder's other runtime.
+
 Before any host launch or delegation, run `brain usage` (any agent may run it). `brain brief`,
 `brain hire` and `brain review` use the poller's cache and name the subscription and host
 provider instance to use. They refresh stale readings once only if no poller is running. Respect its brain allow-list; stop starting jobs on a subscription at

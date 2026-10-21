@@ -101,6 +101,79 @@ for line in sys.stdin:
         return {"windows": windows if source != "unknown" else {}, "source": source,
                 "read_at": time.time() - age if source != "unknown" else None, "note": ""}
 
+    def test_class_router_weekly_policy_and_pins(self):
+        root = self.init("alice")
+        inst = self.m.Instance(root)
+        config = self.declare(self.subscription("cx"), self.subscription("cl", runtime="claude"))
+        self.cache(config, [self.reading(10, weekly=65), self.reading(20, weekly=35)])
+        with mock.patch.object(self.m, "usage_refresh", side_effect=AssertionError("provider called")):
+            routed, sub, why = self.m.class_route(inst, "build", cached_only=True)
+            self.assertEqual(routed, "claude")
+            self.assertEqual(sub["id"], "cl")
+            self.assertIn("65% exceeds route_weekly_cap 60%", why)
+            self.assertEqual(self.m.class_route(inst, "review", cached_only=True)[0], "claude")
+            self.assertEqual(self.m.class_route(inst, "diagnose", cached_only=True)[0], "claude")
+            self.assertEqual(self.m.class_route(inst, "build", runtime="codex", cached_only=True)[0], "codex")
+            self.assertEqual(self.m.class_route(inst, "build", weekly_cap=70, cached_only=True)[0], "codex")
+        self.cache(config, [self.reading(10, weekly=10), self.reading(90, weekly=95)])
+        for kind in ("review", "diagnose"):
+            self.assertEqual(self.m.class_route(inst, kind, cached_only=True)[0], "claude")
+        for kind in ("build", "ui", "migration", "docs"):
+            self.assertEqual(self.m.class_route(inst, kind, cached_only=True)[0], "codex")
+        self.assertTrue(self.m.class_allows_fallback(None))
+        for kind in ("diagnose", "review"):
+            self.assertFalse(self.m.class_allows_fallback(kind))
+        self.cache(config, [self.reading(5, weekly=60), self.reading(1, weekly=10)])
+        self.assertEqual(self.m.class_route(inst, "build", cached_only=True)[0], "codex")
+        self.cache(config, [self.reading(5, weekly=65), self.reading(source="unknown")])
+        self.assertEqual(self.m.class_route(inst, "build", cached_only=True)[0], "codex")
+        self.cache(config, [self.reading(5, weekly=65, age=1000), self.reading(5, weekly=10)])
+        self.assertEqual(self.m.class_route(inst, "build", cached_only=True)[0], "codex")
+
+    def test_class_brief_records_route_contract_and_model(self):
+        root = self.init("alice")
+        home = self.repo(self.tmp / "app")
+        self.b(root, "new", "a", "--title", "A", "--home", str(home))
+        self.b(root, "set", "a", "runtime=", "route_model_claude=example-claude")
+        self.b(root, "wt", "add", "a", "job")
+        inst = self.m.Instance(root)
+        node = inst.node("a")
+        row = self.m.open_job(self.m.read_jobs(node), "job")
+        contract = self.m.contract_file(node, row)
+        contract.parent.mkdir(exist_ok=True)
+        contract.write_text("## Class\nbuild\n")
+        config = self.declare(self.subscription("cx"), self.subscription("cl", runtime="claude"))
+        self.cache(config, [self.reading(10, weekly=65), self.reading(20, weekly=35)])
+        text = self.b(root, "brief", "a", "--branch", "job", "--task", "review diagnose prose cannot classify")
+        for part in ("class: build", "runtime: claude", "model: example-claude", "65% exceeds"):
+            self.assertIn(part, text)
+        row = self.m.open_job(self.m.read_jobs(node), "job")
+        self.assertEqual((row["Class"], row["Runtime"], row["Model"]), ("build", "claude", "example-claude"))
+        self.assertEqual(self.m.job_class(node, row), "build")
+        text = self.b(root, "brief", "a", "--branch", "job", "--class", "review", "--runtime", "codex", "--model", "example-codex")
+        self.assertIn("runtime: codex", text)
+        self.assertEqual(self.m.open_job(self.m.read_jobs(node), "job")["Class"], "review")
+        self.b(root, "set", "a", "runtime=codex")
+        self.assertIn("runtime: codex", self.b(root, "brief", "a", "--branch", "job", "--class", "review"))
+        self.b(root, "brief", "a", "--class", "unknown", ok=False)
+        rows = self.m.read_jobs(node)
+        rows[0]["Future column"] = "kept"
+        self.m.write_jobs(inst, node, rows)
+        self.assertEqual(self.m.read_jobs(node)[0]["Future column"], "kept")
+        self.b(root, "specialist", "new", "qa", "--title", "QA")
+        hired = self.b(root, "hire", "qa", "a", "--branch", "job", "--class", "docs", "--runtime", "claude", "--model", "hire-model", "--task", "x")
+        self.assertIn("class: docs", hired)
+        self.assertEqual(self.m.open_job(self.m.read_jobs(node), "job")["Model"], "hire-model")
+        reviewed = self.b(root, "review", "a", "--branch", "job", "--class", "review", "--built-by", "codex", "--runtime", "claude")
+        self.assertIn("Reviewer runtime: claude", reviewed)
+        self.assertIn("class: review", reviewed)
+        # A reviewer never replaces the worker's route metadata.
+        final = self.m.open_job(self.m.read_jobs(node), "job")
+        self.assertEqual(final["Class"], "docs")
+        self.assertEqual(final["Review class"], "review")
+        self.assertEqual(final["Review runtime"], "claude")
+        self.assertEqual(final["Review model"], "example-claude")
+
     def test_usage_defaults_and_config_isolation(self):
         with mock.patch.object(self.m.shutil, "which", return_value="installed"):
             config = self.m.usage_config()
@@ -721,6 +794,7 @@ for line in sys.stdin:
 
     def test_proposed_hire_gate_keeps_usage_model_and_job_record(self):
         root = self.init("alice")
+        self.b(root, "set", "root", "runtime=codex")  # node pins now take precedence over specialist defaults
         config = self.declare(self.subscription())
         reading = self.reading(10)
         reading["windows"]["seven_day_model:opus"] = {"used_percent": 95, "resets_at": time.time() + 86400, "models": ["opus"]}

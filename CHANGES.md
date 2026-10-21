@@ -38,6 +38,20 @@ After upgrading:
 - Read the named paths when readiness refuses. Fix setup rather than spending another full verify
   discovering a first-run env rewrite. The next handback adds private per-path diagnostic evidence.
 
+## 2026-10-21: Route jobs by declared class and weekly usage
+
+For agents:
+- `brief`, `hire` and `review` accept `--class`; a worker also uses its contract's
+  `## Class`. Build/ui/migration/docs default to Codex, diagnose/review to Claude.
+  Above `route_weekly_cap` (60%), an unpinned build uses the other runtime if its
+  weekly reading is known. Explicit runtimes and node pins win; usage never hides a brief.
+- The v3 ledger preserves `Class` and planned `Model` alongside observed `Models`.
+  Old rows and unknown columns remain readable. Independent reviews keep the other runtime.
+
+After upgrading:
+- Declare job classes. Set node `route_weekly_cap` to change the threshold and
+  `route_model_codex` / `route_model_claude` to name default launch models. Without
+  a model setting, the planned model is labelled `runtime default`; `--model` overrides it.
 
 ## 2026-10-21: Core mechanics split into Python modules
 

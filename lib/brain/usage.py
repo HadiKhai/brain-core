@@ -624,6 +624,86 @@ def usage_rows(inst=None, refresh=False, before_launch=False):
     return rows, config
 
 
+def class_allows_fallback(job_class):
+    """Missing legacy classes permit fallback; Claude-required classes do not."""
+    return job_class not in ("diagnose", "review")
+
+
+def class_route(inst, job_class, runtime=None, model=None, cached_only=False, weekly_cap=None):
+    """Class policy, pins and weekly readings. Cached mode never contacts a provider.
+
+    Usage informs this choice; even exhausted or unknown meters leave a brief available.
+    The optional runtime is an explicit or node pin and always wins.
+    """
+    preferred = "codex" if class_allows_fallback(job_class) else "claude"
+    chosen = runtime or preferred
+    reason = f"Routing: class {job_class or 'build'} defaults to {preferred}."
+    if runtime:
+        reason += f" Runtime pin: {runtime} wins."
+    cap = weekly_cap if weekly_cap is not None else inst.cfg.get("route_weekly_cap", 60)
+    try:
+        cap = float(cap)
+        if not 0 <= cap <= 100:
+            raise ValueError()
+    except (TypeError, ValueError):
+        _m_common.die("route_weekly_cap must be a percentage from 0 to 100")
+    try:
+        rows, policy = usage_rows(inst, before_launch=not cached_only)
+    except (OSError, ValueError):
+        rows, policy = [], {"max_age_seconds": USAGE_MAX_AGE}
+    def weekly(row):
+        w = row.get("windows", {}).get("seven_day", {})
+        stamp = w.get("read_at", row.get("read_at"))
+        if (w.get("absent") or w.get("expired") or
+                w.get("source", row.get("source")) == "unknown" or not usage_number(stamp) or
+                not 0 <= time.time() - stamp <= policy["max_age_seconds"] or
+                not usage_number(w.get("used_percent"))):
+            return None
+        return w["used_percent"]
+    fallback = inst.local.get("fallback", [])
+    fallback = fallback if isinstance(fallback, list) else []
+    def rank(row):
+        host = row.get("host_provider_instance_id")
+        fullest = max((w.get("used_percent", 0) for w in row.get("windows", {}).values()
+                       if not w.get("expired") and not w.get("absent")), default=0)
+        return (fullest >= policy.get("stop_percent", 85), fullest,
+                fallback.index(host) if host in fallback else len(fallback), row["id"])
+    available = sorted([r for r in rows if r["runtime"] == chosen], key=rank)
+    measured = [(weekly(r), r) for r in available if weekly(r) is not None]
+    selected = min(measured, key=lambda x: (rank(x[1])[0], x[0], rank(x[1])))[1] if measured else next(iter(available), None)
+    used = weekly(selected) if selected else None
+    if not runtime and class_allows_fallback(job_class) and used is not None and used > cap:
+        alternate = "claude" if chosen == "codex" else "codex"
+        alternatives = [(weekly(r), r) for r in rows if r["runtime"] == alternate and weekly(r) is not None]
+        # Unknown capacity is never presented as spare; an allowed measured alternative is advisory.
+        if alternate in inst.runtimes and alternatives:
+            selected = min(alternatives, key=lambda x: (rank(x[1])[0], x[0], rank(x[1])))[1]
+            chosen = alternate
+            reason += f" {preferred} weekly meter {used:g}% exceeds route_weekly_cap {cap:g}%; using {chosen}."
+        else:
+            reason += f" {preferred} weekly meter {used:g}% exceeds {cap:g}%; alternative weekly usage unknown."
+    elif used is None:
+        reason += " Usage unknown: weekly reading missing/stale; keeping this runtime."
+    else:
+        reason += f" Weekly meter {used:g}% (routing cap {cap:g}%)."
+    if selected:
+        active = [w for name, w in selected.get("windows", {}).items()
+                  if not w.get("expired") and not w.get("absent") and
+                  (name in USAGE_WINDOWS or (model and model.casefold() in
+                   [m.casefold() for m in w.get("models", [])]))]
+        if any(w["used_percent"] >= policy.get("stop_percent", 85) for w in active):
+            reason += " Usage: subscription reached its stop line. Stop starting jobs; the brief remains available."
+            if runtime:
+                reason += f" Pinned runtime {runtime} reached its stop line."
+                other = next((r for r in rows if r["runtime"] != runtime and any(not w.get("expired") and not w.get("absent") and
+                    w.get("used_percent", 100) < policy.get("stop_percent", 85) for w in r.get("windows", {}).values())), None)
+                if other:
+                    reason += f" Alternative: {other['label']} ({other['runtime']}); choose --runtime explicitly."
+        host = selected.get("host_provider_instance_id") or "unbound"
+        reason += f" Subscription: {selected['label']} ({selected['id']}) · host instance: {host}."
+    return chosen, selected, reason
+
+
 def usage_route(inst, runtimes, preferred=None, model=None, cached_only=False):
     try:
         if usage_config()["autodetected"]:

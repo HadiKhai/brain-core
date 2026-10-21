@@ -38,7 +38,7 @@ def import_brief(a):
     head = _m_common.git("rev-parse", "--verify", "-q", "HEAD", cwd=home).stdout.strip() or "unborn"
     runtime, usage = _m_knowledge.worker_route(inst, n, a)
     out = [f"Role: import worker for node `{n['id']}` ({n['fm'].get('title', '')}).",
-           f"Run in: {n['dir']}  ·  runtime: {runtime}" + (f"  ·  model: {a.model}" if a.model else ""),
+           f"Run in: {n['dir']}  ·  runtime: {runtime}  ·  class: {a.job_class}" + (f"  ·  model: {a.model}" if a.model else ""),
            "The rules, agents and skills where you run come first (axiom 7); this brief adds to them.",
            "", usage, "",
            f"Source repository (read-only): {home}", f"Snapshot commit: {head}",
@@ -81,6 +81,7 @@ def import_brief(a):
     _m_guard.no_terms_in(n, text, "the import brief")
     if _m_nodes.SECRET_META.search(text) or _m_nodes.SECRET_LINE.search(task + "\n" + "\n".join(_m_knowledge.limits_lines(n))):
         _m_common.die("unsafe import brief metadata")
+    _m_jobs.record_job_route(inst, n, branch, a.job_class, runtime, a.model)
     if a.out:
         _m_history.write_out(inst, n, a.out, text)
     else:
@@ -147,7 +148,7 @@ def cmd_brief(a):
     if context:
         shared += ["## Shared context", "", "Gathered once by the coordinator; use these findings before rereading sources.", "", *context]
     runtime, usage = _m_knowledge.worker_route(inst, n, a)
-    head = f"Run in: {_m_common.tilde(where)}" + (f"  ·  branch {a.branch}" if a.branch else "") + f"  ·  runtime: {runtime}"
+    head = f"Run in: {_m_common.tilde(where)}" + (f"  ·  branch {a.branch}" if a.branch else "") + f"  ·  runtime: {runtime}  ·  class: {a.job_class}"
     if a.model:
         head += f"  ·  model: {a.model}"
     if w:
@@ -208,6 +209,7 @@ def cmd_brief(a):
     out += _m_knowledge.handback_lines(inst, n, a.to, branch=a.branch) + _m_knowledge.report_lines(job=bool(a.branch))
     text = "\n".join(out) + "\n"
     _m_guard.no_terms_in(n, text, "the brief")
+    _m_jobs.record_job_route(inst, n, a.branch, a.job_class, runtime, a.model)
     if a.out:
         _m_history.write_out(inst, n, a.out, text)
     else:

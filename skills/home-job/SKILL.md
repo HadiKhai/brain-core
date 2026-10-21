@@ -55,7 +55,15 @@ stated; never run a polling loop in an agent.
    only after explicitly choosing `--runtime`; never silently switch it. Write the task (what done means, where reports go:
    `core/bin/brain report <id> "<topic>"` gives a folder; commit on the branch; push the branch
    and open a pull request only when the operator or the home's rules allow it, axiom 24), then
-   wrap it with `core/bin/brain brief <id> --branch <branch> --task-file <file>
+   Give each job an explicit class (`build`, `diagnose`, `review`, `ui`, `migration`, `docs`)
+   using `--class` on brief/hire/review or the job contract's `## Class`.
+   Build/ui/migration/docs default to Codex, diagnose/review to Claude. Above the default
+   runtime's weekly `route_weekly_cap` (60%), an unpinned build uses the other runtime
+   when its weekly reading is known. Explicit `--runtime` and node runtime pins win.
+   Configure `route_model_codex` / `route_model_claude` on the node to name the launch model;
+   otherwise the ledger honestly records `runtime default`. `--model` wins. Usage informs
+   routing; the brief remains available. Independent reviews still use the other runtime.
+   Wrap it with `core/bin/brain brief <id> --branch <branch> --task-file <file>
    --why-separate "<independent concern>" --context-file <shared findings>`: that adds the
    worktree, port, limits, guard step and hand-back. Use `core/bin/brain hire` when a
    specialist fits; pass `--branch <branch>` so its brief has the same finishing step.

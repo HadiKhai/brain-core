@@ -441,11 +441,10 @@ def cmd_hire(a):
     if target["external"] and not (target["home_path"] and target["home_path"].exists()):
         _m_common.die(f"{target['id']}'s home isn't on this machine (brain set {target['id']} home=<path>)")
     where = target["home_path"] if target["external"] else target["dir"]
-    runtime = sp["fm"].get("runtime") or target["fm"].get("runtime")
-    subscription, usage = _m_usage.usage_route(inst, [runtime] if runtime else inst.runtimes, preferred=runtime, model=a.model)
-    runtime = subscription["runtime"] if subscription else runtime
+    a.runtime = a.runtime or target["fm"].get("runtime") or sp["fm"].get("runtime")
+    runtime, usage = worker_route(inst, target, a)
     out = [f"Role: worker, hired as specialist `{sp['id']}` ({sp['fm'].get('title', '')}).",
-           f"Run in: {where}  ·  runtime: {runtime}" + (f"  ·  model: {a.model}" if a.model else ""),
+           f"Run in: {where}  ·  runtime: {runtime}  ·  class: {a.job_class}" + (f"  ·  model: {a.model}" if a.model else ""),
            "The rules, agents and skills where you run come first (axiom 7); this brief adds to them.",
            "", _m_guard.redact(usage, _m_guard.never_terms(target)), ""]
     if target["sealed"]:
@@ -467,6 +466,7 @@ def cmd_hire(a):
     out += handback_lines(inst, target, branch=a.branch) + report_lines(job=bool(a.branch))
     text = "\n".join(out) + "\n"
     _m_guard.no_terms_in(target, text, "the brief")
+    _m_jobs.record_job_route(inst, target, a.branch, a.job_class, runtime, a.model)
     if a.job:
         rows = inst.local.setdefault("hires", [])
         record = {"specialist": sp["id"], "at": sp["node"]["id"], "node": target["id"],
@@ -693,16 +693,12 @@ def report_lines(job=False):
 
 def worker_route(inst, n, a):
     """Route all worker briefs with the same runtime pin and model usage limits."""
-    runtime = a.runtime or n["fm"].get("runtime") or inst.cfg.get("default_runtime", "")
-    pin = a.runtime or n["fm"].get("runtime")
-    subscription, usage = _m_usage.usage_route(inst, [pin] if pin else inst.runtimes, preferred=runtime, model=a.model)
-    if pin and not subscription and "Stop starting jobs" in usage:
-        alternative, _ = _m_usage.usage_route(inst, [r for r in inst.runtimes if r != pin], model=a.model)
-        usage += f" Pinned runtime {pin} reached its stop line."
-        if alternative:
-            usage += (f" Alternative: {alternative['label']} ({alternative['runtime']}); "
-                      "choose it explicitly with --runtime to change the pin for this job.")
-        else:
-            usage += " No eligible alternative is known."
-    runtime = subscription["runtime"] if subscription else runtime
+    row = _m_jobs.open_job(_m_jobs.read_jobs(n) or [], getattr(a, "branch", None))
+    kind = _m_jobs.job_class(n, row, getattr(a, "job_class", None))
+    pin = getattr(a, "runtime", None) or n["fm"].get("runtime")
+    runtime, subscription, usage = _m_usage.class_route(
+        inst, kind, runtime=pin, model=a.model,
+        weekly_cap=n["fm"].get("route_weekly_cap", inst.cfg.get("route_weekly_cap", 60)))
+    a.job_class = kind
+    a.model = a.model or n["fm"].get("route_model_" + runtime) or inst.cfg.get("route_model_" + runtime) or "runtime default"
     return runtime, _m_guard.redact(usage, _m_guard.never_terms(n))

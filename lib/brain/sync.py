@@ -24,15 +24,19 @@ def cmd_review(a):
     """Brief for a reviewer on a different runtime than the one that built the change."""
     inst = _m_nodes.load()
     n = inst.node(a.id)
-    built = a.built_by or n["fm"].get("runtime") or inst.cfg.get("default_runtime", "")
+    row = _m_jobs.open_job(_m_jobs.read_jobs(n) or [], a.branch)
+    built = a.built_by or (row or {}).get("Runtime") or n["fm"].get("runtime") or inst.cfg.get("default_runtime", "")
     others = [rt for rt in inst.runtimes if rt != built]
-    reviewer = a.by or (others[0] if others else None)
+    kind = _m_jobs.job_class(n, explicit=a.job_class, default="review")
+    reviewer = a.by or ("claude" if "claude" in others else (others[0] if others else None))
     if not reviewer:
         _m_common.die(f"only one runtime ({built}) in instance.md: nothing to cross-review with")
     if reviewer == built:
         _m_common.die("the reviewer must run on a different runtime from the builder")
-    subscription, usage = _m_usage.usage_route(inst, [a.by] if a.by else others, preferred=reviewer, model=a.model)
-    reviewer = subscription["runtime"] if subscription else reviewer
+    reviewer, subscription, usage = _m_usage.class_route(inst, kind, runtime=reviewer, model=a.model,
+        weekly_cap=n["fm"].get("route_weekly_cap", inst.cfg.get("route_weekly_cap", 60)))
+    usage += " Independent review uses the other runtime from the builder."
+    a.model = a.model or n["fm"].get("route_model_" + reviewer) or inst.cfg.get("route_model_" + reviewer) or "runtime default"
     where, base = None, a.base
     if n["external"]:
         if not (n["home_path"] and n["home_path"].exists()):
@@ -50,7 +54,7 @@ def cmd_review(a):
     if d.returncode:
         _m_common.die(f"can't diff {a.branch} against {base}: {d.stderr.strip()}")
     diffstat = d.stdout.strip()
-    out = [f"Reviewer runtime: {reviewer}  (the change was built on {built})",
+    out = [f"Reviewer runtime: {reviewer}  (the change was built on {built}) · class: {kind}",
            f"Run in: {where}" + (f"  ·  model: {a.model}" if a.model else ""), "",
            _m_guard.redact(usage, _m_guard.never_terms(n)), "",
            "Role: worker, reviewing a change you didn't write. Don't modify any file, commit or push.",
@@ -92,6 +96,7 @@ def cmd_review(a):
     text = "\n".join(out) + "\n"
     _m_guard.no_terms_in(n, text, "the review brief")
     _m_jobs.job_reviewed(inst, n, a.branch)
+    _m_jobs.record_job_route(inst, n, a.branch, kind, reviewer, a.model, review=True)
     if a.out:
         _m_history.write_out(inst, n, a.out, text)
     else:
