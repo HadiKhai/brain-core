@@ -153,8 +153,9 @@ For agents:
   function-body change selects train and catch-all; shared core/support changes
   select every lane. Import-time core changes invalidate the complete map.
 - `tests/check_lanes.py` refuses unassigned or multiply assigned tests, missing
-  classes and unknown test programs. Live runtime and browser suites are listed
-  explicitly outside the unit job lanes.
+  runtime-local classes, uncovered repository inputs and drops in nonselective
+  core coverage. Live runtime and browser suites are listed explicitly outside
+  the unit job lanes; unit-test imports of their helpers still declare inputs.
 
 After upgrading:
 - Development nodes for this repository can set

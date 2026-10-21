@@ -39,11 +39,17 @@ OUTSIDE_JOB_LANES = {
     'ui-checks.js': 'browser assertions; separate browser verification',
 }
 SUPPORT = ('scenario.py', 'core_loader.py', 'conftest.py', 'lanes.py', 'check_lanes.py')
+# Only these modules have separately audited dispatch/call selection. The gate
+# requires all remaining core modules in every lane, even after import refactors.
+SELECTIVE_MODULES = ('train',)
+EXTRA_INPUTS = {'ui': ('tests/live.py',)}  # a unit test imports its runtime adapter
+# Mirror the development node's existing documentation/image skip policy.
+OUTSIDE_INPUTS = ('README.md', 'docs/**', 'ui/**/*.png', 'LICENSE', 'tests/ui-checks.js')
 SHARED_INPUTS = (
     'lib/brain/common.py', 'lib/brain/instance.py', 'lib/brain/cli.py',
     'lib/brain/__init__.py', 'tests/scenario.py', 'tests/core_loader.py',
     'tests/conftest.py', 'tests/lanes.py', 'tests/check_lanes.py',
-    'bin/**', 'templates/**', 'skills/**', 'adapters/**', 'ui/**', '!ui/**/*.png',
+    'bin/**', 'templates/**', 'skills/**', 'roles/**', 'adapters/**', 'ui/**', '!ui/**/*.png',
     'install.sh', 'MODEL.md', 'CHANGES.md',
 )
 
@@ -74,29 +80,35 @@ def closure(graph, seeds):
     return found
 
 
-def test_sources(root, files):
+def test_sources(root, files, cache=None):
     """Include reused test helpers, and code snippets run in child interpreters."""
     pending, seen = list(files) + ['scenario.py'], set()
+    cache = {} if cache is None else cache
     while pending:
         name = pending.pop()
         if name in seen:
             continue
         seen.add(name)
-        tree = parse(root / 'tests' / name)
+        if name not in cache:
+            tree = parse(root / 'tests' / name)
+            embedded, helpers = [], []
+            for node in ast.walk(tree):
+                names = []
+                if isinstance(node, ast.Import):
+                    names = [a.name for a in node.names]
+                elif isinstance(node, ast.ImportFrom) and node.module:
+                    names = [node.module]
+                helpers.extend(n + '.py' for n in names if n.startswith('test_'))
+                if isinstance(node, ast.Constant) and isinstance(node.value, str):
+                    try:
+                        embedded.append(ast.parse(node.value))
+                    except (SyntaxError, ValueError):
+                        pass
+            cache[name] = tree, embedded, helpers
+        tree, embedded, helpers = cache[name]
         yield tree
-        for node in ast.walk(tree):
-            names = []
-            if isinstance(node, ast.Import):
-                names = [a.name for a in node.names]
-            elif isinstance(node, ast.ImportFrom) and node.module:
-                names = [node.module]
-            pending.extend(n + '.py' for n in names if n.startswith('test_'))
-            if isinstance(node, ast.Constant) and isinstance(node.value, str):
-                try:
-                    embedded = ast.parse(node.value)
-                except (SyntaxError, ValueError):
-                    continue
-                yield embedded
+        yield from embedded
+        pending.extend(helpers)
 
 
 def startup_fingerprint(trees):
@@ -131,6 +143,27 @@ def test_targets(root, files):
     return targets
 
 
+def source_inputs(tree, train_symbols):
+    uses_train, helpers = False, set()
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Attribute) and node.attr in train_symbols
+                and not (isinstance(node.value, ast.Name) and node.value.id == 'self')):
+            uses_train = True
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            if node.value in {'train', '.train', '_m_train', 'cmd_train'}:
+                uses_train = True
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                and node.func.id == 'getattr' and len(node.args) >= 2
+                and isinstance(node.args[1], ast.Constant)
+                and node.args[1].value in train_symbols):
+            uses_train = True
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            names = ([a.name for a in node.names] if isinstance(node, ast.Import)
+                     else [node.module or ''])
+            helpers.update('tests/' + n + '.py' for n in names if n.startswith('test_'))
+    return uses_train, helpers
+
+
 def lane_map(root=ROOT):
     trees = {p.stem: parse(p) for p in sorted((root / 'lib/brain').glob('*.py'))}
     if not trees:
@@ -141,7 +174,7 @@ def lane_map(root=ROOT):
     train_symbols = {n.name for n in trees['train'].body
                      if isinstance(n, (ast.FunctionDef, ast.ClassDef))}
     startup = startup_fingerprint(trees)
-    lanes = []
+    lanes, source_cache, scan_cache = [], {}, {}
     for name, files in sorted(LANE_TESTS.items()):
         seeds = {'nodes', 'common', 'instance'}  # Scenario.init/project and CLI startup
         if name == 'catch-all':
@@ -149,28 +182,17 @@ def lane_map(root=ROOT):
         elif name != 'cli':
             seeds.add(name)
         helper_inputs = set()
-        for tree in test_sources(root, files):
-            for node in ast.walk(tree):
-                if (isinstance(node, ast.Attribute) and node.attr in train_symbols
-                        and not (isinstance(node.value, ast.Name) and node.value.id == 'self')):
-                    seeds.add('train')
-                if isinstance(node, ast.Constant) and isinstance(node.value, str):
-                    # Direct CLI dispatch, module imports, and getattr-style exports.
-                    if node.value in {'train', '.train', '_m_train', 'cmd_train'}:
-                        seeds.add('train')
-                if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
-                        and node.func.id == 'getattr' and len(node.args) >= 2
-                        and isinstance(node.args[1], ast.Constant)
-                        and node.args[1].value in train_symbols):
-                    seeds.add('train')
-                if isinstance(node, (ast.Import, ast.ImportFrom)):
-                    names = ([a.name for a in node.names] if isinstance(node, ast.Import)
-                             else [node.module or ''])
-                    helper_inputs.update('tests/' + n + '.py' for n in names if n.startswith('test_'))
+        for tree in test_sources(root, files, source_cache):
+            if tree not in scan_cache:
+                scan_cache[tree] = source_inputs(tree, train_symbols)
+            uses_train, helpers = scan_cache[tree]
+            if uses_train:
+                seeds.add('train')
+            helper_inputs.update(helpers)
         dependencies = closure(graph, seeds)
         # The entry imports all modules. Their definition-time behavior is covered
         # by startup above; their callable bodies are covered by these inputs.
-        inputs = set(SHARED_INPUTS) | helper_inputs
+        inputs = set(SHARED_INPUTS) | helper_inputs | set(EXTRA_INPUTS.get(name, ()))
         inputs.update('lib/brain/' + module + '.py' for module in dependencies)
         inputs.update('tests/' + file for file in files)
         if name == 'catch-all':
