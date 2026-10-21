@@ -117,6 +117,32 @@ def read_handback(n, row):
     return None
 
 
+def ready_fingerprint(n, row, packet):
+    """A new reviewed hand-back permits retry without changing a worker-owned file externally."""
+    signal = read_handback(n, row) or {}
+    return digest([packet, signal.get("verify_runs"), signal.get("verify_reused"), signal.get("at")])
+
+
+def train_ejection(n, row, packet):
+    """Shared admission guard for both ordinary readiness and train retries."""
+    if not row or not packet:
+        return None
+    key, fingerprint = job_key(row), ready_fingerprint(n, row, packet)
+    for path in (n["dir"] / "job-trains").glob("*.json"):
+        try:
+            data = json.loads(path.read_text())
+            if not isinstance(data, dict) or data.get("version") != 1 or not isinstance(data.get("ejected"), list):
+                return "train journal unreadable; coordinator must repair it"
+            for entry in data["ejected"]:
+                if not isinstance(entry, dict):
+                    return "train journal unreadable; coordinator must repair it"
+                if entry.get("key") == key and entry.get("packet") == fingerprint:
+                    return "previously ejected from train; worker must hand back again"
+        except (OSError, ValueError):
+            return "train journal unreadable; coordinator must repair it"
+    return None
+
+
 def cmd_handback(a):
     """Worker-owned completion, proposed lessons and readiness live in one job-scoped file."""
     inst = _m_nodes.load()
@@ -169,7 +195,7 @@ def cmd_handback(a):
                 "verify_runs": count("verify_runs") + fresh, "verify_reused": count("verify_reused") + reused}
         first = previous.get("first_ready") if isinstance(previous.get("first_ready"), str) else None
         if not first and packet and packet.get("verify_result") == 0 and not reasons:
-            first = inst.now()
+            first = inst.now_dt().isoformat()
         if first:
             data["first_ready"] = first
         if study:
