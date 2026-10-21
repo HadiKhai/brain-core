@@ -514,14 +514,21 @@ class Connections(Scenario):
         (r / ".brain/connect/root/briefs").unlink()
         # A lesson carries the words of where it was learned.
         self.b(r, "specialist", "new", "tester", "--title", "Tester")
-        self.b(r, "lesson", "tester", "--from", "lab", "Quokkasoft wants green builds")
+        self.assertIn("lesson or its tags contain a never-name word", self.b(
+            r, "lesson", "tester", "--from", "lab", "Quokkasoft wants green builds", ok=False))
+        # Legacy records can predate write screening; their source and scope still govern reads.
+        with (r / "specialists/tester/lessons.md").open("a") as f:
+            f.write("- 2026-01-01 10:00 +00:00 · from lab · scope alice: Quokkasoft wants green builds\n")
         self.b(r, "lesson", "tester", "--from", "app", "Keep builds green")
         brief = self.b(r, "hire", "tester", "app", "--task", "t")
         self.assertIn("Keep builds green", brief)
         self.assertNotIn("uokkasoft", brief)
         # So does every lesson of a proposed specialist, wherever it is shown, accepted or read.
         self.b(r, "specialist", "new", "reviewer", "--at", "app", "--title", "Reviewer", "--proposed")
-        self.b(r, "lesson", "reviewer", "--from", "lab", "Quokkasoft reviews twice")
+        self.assertIn("lesson or its tags contain a never-name word", self.b(
+            r, "lesson", "reviewer", "--from", "lab", "Quokkasoft reviews twice", ok=False))
+        with (r / "nodes/app/specialists/reviewer/lessons.md").open("a") as f:
+            f.write("- 2026-01-01 10:00 +00:00 · from lab · scope alice: Quokkasoft reviews twice\n")
         for args in (("proposals",), ("proposals", "--json")):
             self.assertNotIn("uokkasoft", self.b(r, *args))
         self.assertIn("edit it before accepting", self.b(r, "specialist", "accept", "reviewer", "--at", "app",
