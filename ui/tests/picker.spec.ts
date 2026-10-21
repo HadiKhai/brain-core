@@ -42,7 +42,14 @@ test("1,000+ records page in on scroll, keyboard picks one and the chip names it
   const search = await open(page, "many");
   await search.fill("project");
   await search.fill("");
+  const results = page.waitForResponse((response) => {
+    const url = new URL(response.url());
+    return url.pathname === "/api/search" && url.searchParams.get("q") === "a" && url.searchParams.get("offset") === "0" && response.ok();
+  });
   await search.fill("a");
+  await results;
+  // Twenty old options can remain visible during the debounce. Scroll the ready query's list.
+  await expect(page.locator(".picker-loading")).toBeHidden();
   await expect(page.getByRole("option")).toHaveCount(20);
   const list = page.locator("[data-slot=combobox-list]");
   // Each scroll to the end asks the server for the next page; keep scrolling until three pages are in.
