@@ -40,12 +40,14 @@ test("each open thread has one tone, and graph labels never overlap nodes or eac
   assert.equal(model.tone({ job: { branch: "a", state: "reviewing the layout" } }), "review");
   assert.equal(model.tone({ job: { branch: "a", state: "building" } }, [{ ready: true, branch: "a" }]), "ready");
   assert.equal(model.tone({ job: { branch: "a", state: "Worktree only" } }), "idle");
+  assert.equal(model.jobTitle("import:14e945a9a4bfd7aeb0084b84"), "Import");
+  assert.equal(model.jobTitle("job/ui-redesign"), "Ui redesign");
   for (const count of [0, 1, 100, 400]) {
     const nodes = Array.from({ length: count }, (_, i) => ({ key: "k" + i, kind: i % 3 ? "learning" : "node", id: String(i), title: "A project with a long name " + i, r: 6, recent: false, x: 0, y: 0, vx: 0, vy: 0 }));
     const edges = nodes.slice(1).map((_, i) => ({ a: 0, b: i + 1, kind: "source" }));
     graph.layout(nodes, edges, 80);
     const labels = graph.placeLabels(nodes, new Set(nodes.map((n) => n.key)));
-    const boxes = nodes.filter((n) => labels.has(n.key)).map((p) => { const w = Math.min(28, p.title.length) * 6.2 + 4; return { x0: p.x - w / 2, x1: p.x + w / 2, y0: p.y + p.r + 3, y1: p.y + p.r + 17 }; });
+    const boxes = nodes.filter((n) => labels.has(n.key)).map((p) => graph.labelBox(p, labels.get(p.key)));
     for (let i = 0; i < boxes.length; i++) {
       for (let j = i + 1; j < boxes.length; j++) assert.ok(!(boxes[i].x0 < boxes[j].x1 && boxes[i].x1 > boxes[j].x0 && boxes[i].y0 < boxes[j].y1 && boxes[i].y1 > boxes[j].y0), "labels overlap");
       for (const p of nodes) assert.ok(!(p.x + p.r > boxes[i].x0 && p.x - p.r < boxes[i].x1 && p.y + p.r > boxes[i].y0 && p.y - p.r < boxes[i].y1), "label covers a node");

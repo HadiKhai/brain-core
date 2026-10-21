@@ -31,7 +31,7 @@ export function Specialists({ s, active }: { s: RecordData; active: boolean }) {
               <small>{[sp.runtime || "Runtime not recorded", nodes.find((n) => n.id === sp.node)?.title || "Workspace", sp.scope?.length ? "Scope: " + sp.scope.join(", ") : ""].filter(Boolean).join(" · ")}</small>
             </div>
             <div className="row-actions">
-              <span className="pill">{count(list(sp.lessons).length, "lesson")}</span>
+              {list(sp.lessons).length > 0 && <span className="pill">{count(list(sp.lessons).length, "lesson")}</span>}
               {sp.imported && <Status>Imported · review source</Status>}
               <Status>{sp.status || "Active"}</Status>
               <Reader title={sp.title || "Specialist"} trigger="Open specialist" text={[sp.scope?.length ? "Scope: " + sp.scope.join(", ") : "", ...list(sp.lessons).map((l) => "- " + l.text)].filter(Boolean).join("\n\n") || "No role notes recorded yet."}>

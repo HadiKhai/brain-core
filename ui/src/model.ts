@@ -318,7 +318,8 @@ export function machineHealth(machine: RecordData) {
   return out;
 }
 
-export const jobTitle = (value: any) => String(value || "Job").replace(/^job\//, "").replace(/[-_/]+/g, " ").trim().replace(/^./, (c) => c.toUpperCase());
+// A job's human name: no "job/" prefix, no machine hash (an import job reads "Import").
+export const jobTitle = (value: any) => (String(value || "Job").replace(/^job\//, "").replace(/[:/_-]?\b[0-9a-f]{12,}\b/gi, "").replace(/[-_/:]+/g, " ").trim() || "Job").replace(/^./, (c) => c.toUpperCase());
 
 // Dashboard shaping: derived only from fields the CLI already serves.
 export const stamp = (v: any) => (typeof v === "number" ? v * 1000 : Date.parse(String(v || "")));

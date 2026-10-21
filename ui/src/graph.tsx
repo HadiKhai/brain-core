@@ -5,7 +5,7 @@ import { InputGroup, InputGroupAddon, InputGroupInput } from "@/components/ui/in
 import { Empty, Text, Status } from "./shared";
 import { useSearch } from "./search";
 import { Highlight } from "./picker";
-import { list, nowOf, within, threads, learningRows, type RecordData } from "./model";
+import { list, count, nowOf, within, threads, learningRows, type RecordData } from "./model";
 import type { Route } from "./routes";
 
 type Go = (r: Partial<Route> & { view: string; state?: string | null }) => void;
@@ -24,8 +24,9 @@ export function graphData(s: RecordData) {
     const recent = ((s.activity?.counts?.[n.id] || []) as number[]).slice(-24).some(Boolean) || open.some((f) => f.node.id === n.id && f.wt?.wrote && now / 1000 - f.wt.wrote < 3600);
     add("node", n.id, n.title || n.id, 9 + Math.min(9, list(n.jobs?.rows).length / 4), recent);
   }
-  for (const sp of list(s.specialists)) add("specialist", `${sp.node}/${sp.id}`, sp.title || sp.id, 6 + Math.min(4, list(sp.jobs).length), list(sp.jobs).some((j) => within(j.time, now, 168)));
-  for (const i of learningRows(s).filter((r) => !r.specialist)) add("learning", i.id, i.title || i.id, 4, i.state === "proposed" || within(i.provenance?.time, now, 168));
+  // "Recent" means the last day for every kind, so the glow stays a signal, not a background.
+  for (const sp of list(s.specialists)) add("specialist", `${sp.node}/${sp.id}`, sp.title || sp.id, 6 + Math.min(4, list(sp.jobs).length), list(sp.jobs).some((j) => within(j.time, now, 24)));
+  for (const i of learningRows(s).filter((r) => !r.specialist)) add("learning", i.id, i.title || i.id, 3.5, within(i.provenance?.time, now, 24));
   const link = (a?: number, b?: number, kind = "") => { if (a != null && b != null && a !== b && !edges.some((e) => (e.a === a && e.b === b) || (e.a === b && e.b === a))) edges.push({ a, b, kind }); };
   for (const n of list(s.nodes)) if (n.parent) link(at.get("node:" + n.id), at.get("node:" + n.parent), "parent");
   for (const sp of list(s.specialists)) {
@@ -34,7 +35,9 @@ export function graphData(s: RecordData) {
     for (const j of list(sp.jobs)) link(me, at.get("node:" + j.node), "hire");
     for (const l of list(sp.lessons)) link(me, at.get("node:" + l.from), "lesson");
   }
-  for (const i of list(s.items?.all)) link(at.get("learning:" + i.id), at.get("node:" + (i.provenance?.node || i.source)), "source");
+  for (const i of list(s.items?.all))
+    for (const n of new Set([i.provenance?.node || i.source, ...list(i.provenance?.nodes)].filter(Boolean)))
+      link(at.get("learning:" + i.id), at.get("node:" + n), "source");
   return { nodes, edges };
 }
 
@@ -109,14 +112,14 @@ export function Graph({ s, go }: { s: RecordData; go: Go }) {
                       onPointerEnter={() => setHover(p.key)} onPointerLeave={() => setHover(null)} onClick={() => focus(p.key)}>
                       {(hit || p.recent) && <circle r={p.r + 5} className="halo" filter="url(#glow)" />}
                       <circle r={p.r} className="dot" />
-                      {labels.has(p.key) && <text y={p.r + 13} textAnchor="middle">{short(p.title)}</text>}
+                      {labels.has(p.key) && <text x={labels.get(p.key)!.x - p.x} y={labels.get(p.key)!.y - p.y} textAnchor={labels.get(p.key)!.anchor}>{short(p.title)}</text>}
                     </g>
                   );
                 })}
               </g>
             </svg>
           ) : <Empty text="Nothing to draw yet." action="Projects, specialists and learnings appear here as your brain grows." />}
-          <div className="graph-legend"><span><i className="halo-swatch" />Glows: a search match or activity in the last day (projects) or week (hires, learnings)</span></div>
+          <div className="graph-legend"><span><i className="halo-swatch" />Glows: a search match, or activity in the last day (commits, hires, new learnings)</span></div>
         </div>
         <aside className="graph-side" aria-label={query.trim() ? "Matches" : "Selected"}>
           {chosen && <div className="graph-chosen">
@@ -133,10 +136,19 @@ export function Graph({ s, go }: { s: RecordData; go: Go }) {
                 <span className="row-main"><strong className="row-title"><Highlight text={f.title} query={query} /></strong><small>{f.secondary}</small></span>
               </Button>
             ))}</div>
-          </> : !chosen && <div className="graph-hint">
-            <p>Search to light up matching records. Select a node to see its links.</p>
-            <Status>{`${nodes.filter((n) => n.recent).length} recently active`}</Status>
-          </div>}
+          </> : !chosen && <>
+            <div className="graph-hint">
+              <p>Search to light up matching records. Select a project to see its links.</p>
+              <Status>{`${nodes.filter((n) => n.recent).length} recently active`}</Status>
+            </div>
+            {/* The list view beside the map: every project, by how much it links. */}
+            <div className="rows">{nodes.filter((n) => n.kind === "node").map((p) => ({ p, links: edges.filter((e) => nodes[e.a].key === p.key || nodes[e.b].key === p.key).length }))
+              .sort((a, b) => b.links - a.links).slice(0, 12).map(({ p, links }) => (
+                <Button variant="ghost" className="row match-row" data-item key={p.key} onClick={() => focus(p.key)} onPointerEnter={() => setHover(p.key)} onPointerLeave={() => setHover(null)}>
+                  <span className={"swatch kind-node" + (p.recent ? " recent" : "")} />
+                  <span className="row-main"><strong className="row-title">{p.title}</strong><small>{count(links, "link")}{p.recent ? " · active today" : ""}</small></span>
+                </Button>))}</div>
+          </>}
         </aside>
       </div>
     </section>

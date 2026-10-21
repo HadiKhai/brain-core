@@ -17,7 +17,7 @@ Python 3.9 standard library. Nothing to install but one command.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/img/ui-dark.png">
-  <img alt="brain ui: projects, what needs you, work in flight with ports, activity per hour, library" src="docs/img/ui-light.png">
+  <img alt="brain ui: what needs you, threads moving now, a 24-hour pulse and the brain tree" src="docs/img/ui-light.png">
 </picture>
 
 <sub>`brain ui` on a demo brain. Every name, project and number in these images is made up.</sub>
@@ -230,33 +230,39 @@ Demo captures: [due](docs/img/due.txt) · [inbox](docs/img/inbox.txt) · [usage]
 
 ### Live in the browser: `brain ui --open`
 
-A read-only dashboard on `127.0.0.1`, with a collapsible sidebar, light and dark themes,
-phone layouts and keyboard navigation. Python serves its committed build with no Node or npm
-installation needed. It updates within seconds of any file changing and shows
-Inbox and Due on the overview, the project tree, jobs, ports, activity, schedules and decisions.
-The counted **Inbox** opens questions and review requests in their conversations. Overview shows
-the first five requests, and the full Inbox offers search and paging. The **Learnings**,
-**Agents**, **Usage** and **Import checklist** views show reusable items and
-review state, specialists and the job ledger, account windows, measured spend, and discovered
-repositories. Tables offer search, sorting and paging. Click a
-project for its notes, limits, decisions and job history.
+A read-only dashboard on `127.0.0.1`: a calm control room, dark first, with a light mode, phone
+layouts and keyboard navigation. Python serves its committed build with no Node or npm installation
+needed, and it updates within seconds of any file changing.
 
-<img alt="A project's notes in brain ui: needs you, inbox, now, next, recent changes, limits, decisions with the operator's words, jobs" src="docs/img/ui-project.png">
+- **Overview** answers what needs you, what moved and whether anything is stuck: counts with their
+  trend, one mark per open thread, a 24-hour pulse of merges, questions and commits, subscription
+  and machine meters, the first five items that need you and the threads moving now.
+- **Inbox** holds every request and coordinator step, each with its action, search and paging.
+- The sidebar is the brain's tree: projects, their coordinators and live threads, with a live dot
+  and a needs-you count on each. A project's page shows its threads, jobs, activity and notes.
+- **Agents** splits into Specialists, Jobs (the full ledger), Threads and Usage (subscription
+  windows, measured spend, machine capacity). **Learnings** reviews proposals; **Graph** draws
+  projects, specialists and learnings as a searchable graph that glows on matches and recent activity.
+- Fields that point at another record (a project, a specialist) are searchable pickers backed by the
+  server. Adding projects is a sheet beside the tree: discovered repositories become a reviewed
+  `brain adopt` command.
+
+<img alt="A project's page in brain ui: needs you, threads, jobs, activity and notes" src="docs/img/ui-project.png">
 
 The page is for this machine only: it listens on `127.0.0.1`, refuses other hosts, and its data
 needs a key that is printed with the address. Desktop notifications are opt-in, once per new
 inbox item; saved ids survive reloads.
 
 <details>
-<summary><b>Five views</b> (demo data; follows your light or dark theme)</summary>
+<summary><b>More views</b> (demo data; follows your light or dark theme)</summary>
 
 <picture><source media="(prefers-color-scheme: dark)" srcset="docs/img/ui-inbox-dark.png"><img alt="Inbox: questions with conversation actions, search and paging" src="docs/img/ui-inbox-light.png"></picture>
 
-| Learnings | Agents |
+| Learnings | Jobs |
 | --- | --- |
-| <picture><source media="(prefers-color-scheme: dark)" srcset="docs/img/ui-learnings-dark.png"><img alt="Learnings: active and proposed items, source citations and scope" src="docs/img/ui-learnings-light.png"></picture> | <picture><source media="(prefers-color-scheme: dark)" srcset="docs/img/ui-agents-dark.png"><img alt="Agents: specialist roles, lessons and hires" src="docs/img/ui-agents-light.png"></picture> |
-| **Usage** | **Import checklist** |
-| <picture><source media="(prefers-color-scheme: dark)" srcset="docs/img/ui-usage-dark.png"><img alt="Usage: account-wide windows, stop line, age and reset times" src="docs/img/ui-usage-light.png"></picture> | <picture><source media="(prefers-color-scheme: dark)" srcset="docs/img/ui-imports-dark.png"><img alt="Import checklist: repository candidates and review steps" src="docs/img/ui-imports-light.png"></picture> |
+| <picture><source media="(prefers-color-scheme: dark)" srcset="docs/img/ui-learnings-dark.png"><img alt="Learnings: active and proposed items, source citations and scope" src="docs/img/ui-learnings-light.png"></picture> | <picture><source media="(prefers-color-scheme: dark)" srcset="docs/img/ui-jobs-dark.png"><img alt="Jobs: open and finished jobs with duration, tokens, reviews and outcome" src="docs/img/ui-jobs-light.png"></picture> |
+| **Usage** | **Graph** |
+| <picture><source media="(prefers-color-scheme: dark)" srcset="docs/img/ui-usage-dark.png"><img alt="Usage: account-wide windows, stop line, age and reset times" src="docs/img/ui-usage-light.png"></picture> | <picture><source media="(prefers-color-scheme: dark)" srcset="docs/img/ui-graph-dark.png"><img alt="Graph: projects, specialists and learnings; matches and recent activity glow" src="docs/img/ui-graph-light.png"></picture> |
 
 </details>
 

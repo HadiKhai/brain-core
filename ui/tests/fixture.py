@@ -176,18 +176,24 @@ if __name__ == "__main__":
                 self.send_response(200);self.send_header('Content-Type','text/html');self.send_header('Content-Length',str(len(page)));self.end_headers();self.wfile.write(page);return
             if parsed.path=='/api/search':
                 q=urllib.parse.parse_qs(parsed.query);one=lambda k,d:(q.get(k) or [d])[0]
-                if one('k','') not in ('demo','empty','long','partial','slow',*EXTREMES):self.send_error(403);return
-                if one('k','')=='slow':time.sleep(1.2)
-                body=json.dumps(brain.ui_search(state_for('demo' if one('k','')=='slow' else one('k','')),one('kind','all'),one('q',''),int(one('offset','0')),int(one('limit','20')))).encode()
+                key=one('k','')
+                if key not in ('demo','empty','long','partial','slow','many',*EXTREMES):self.send_error(403);return
+                if key=='slow':time.sleep(1.2)
+                searched=state_for('demo' if key in ('slow','many') else key)
+                if key=='many':  # 1,200 made-up projects for the picker's paging and ranking
+                    given=['Rana','Omar','Lina','Sami','Maya','Karim','Nour','Hadi','Yara','Zein']
+                    family=['Haddad','Khoury','Nasser','Saleh','Aoun','Fares','Mansour','Rizk']
+                    searched['nodes']=searched['nodes']+[{'id':f'p{i:04}','title':f'{given[i%10]} {family[(i//10)%8]} {i:04}','parent':'root','updated':''} for i in range(1200)]
+                body=json.dumps(brain.ui_search(searched,one('kind','all'),one('q',''),int(one('offset','0')),int(one('limit','20')))).encode()
                 self.send_response(200);self.send_header('Content-Type','application/json');self.end_headers();self.wfile.write(body);return
             if parsed.path in ('/api/state','/api/events'):
                 scenario=urllib.parse.parse_qs(parsed.query).get('k',[''])[0]
-                if scenario not in ('demo','empty','long','partial','error','loading','slow', *EXTREMES):
+                if scenario not in ('demo','empty','long','partial','error','loading','slow','many', *EXTREMES):
                     self.send_error(403);return
                 if scenario == 'error':self.send_error(503);return
                 if scenario == 'loading':time.sleep(30)
                 self.send_response(200);self.send_header('Content-Type','application/json' if parsed.path.endswith('state') else 'text/event-stream');self.end_headers()
-                body=json.dumps(state_for('demo' if scenario=='slow' else scenario)).encode()
+                body=json.dumps(state_for('demo' if scenario in ('slow','many') else scenario)).encode()
                 self.wfile.write(body if parsed.path.endswith('state') else b'data: '+body+b'\n\n')
                 if parsed.path.endswith('events'):
                     seen=revision[0]

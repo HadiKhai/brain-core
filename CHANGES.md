@@ -275,25 +275,28 @@ For agents:
 After upgrading:
 - Pending wakes drain on their own after upgrading; no requeue or binding change is needed.
 
-## 2026-10-20: A new local dashboard
+## 2026-10-21: A new local dashboard
 
 For agents:
-- `brain ui` now serves a React and shadcn dashboard with a shared sidebar, light and dark
-  themes, phone layouts, searchable tables and keyboard navigation. Overview, Learnings,
-  Agents, Usage, Import checklist and project details keep their existing capabilities.
-- Python serves the committed build; running the dashboard still needs only Python 3.9.
-  The live state and event stream still require the key in the printed address.
-- Dashboard sources and build instructions are in `ui/README.md`. Rebuild and commit `ui/dist/`
-  after source changes; dependency licenses and bundled third-party notices are checked.
-
-- Inbox has a counted destination, search and paging, with conversation actions on every request.
-  Long briefs and proposals open in bounded readers; technical details stay behind explicit controls.
-  Proposal decisions are copied for the terminal, with clear feedback; the dashboard remains read-only.
+- `brain ui` now serves a React and shadcn dashboard: dark first with a light mode, phone layouts and
+  keyboard navigation. The sidebar holds the brain's tree (projects, their coordinators and live
+  threads), Agents (Specialists, Jobs, Threads, Usage), Learnings and a searchable brain graph.
+  Overview is a decision dashboard: what needs you, what moved, what is running.
+- Every existing capability stays; the import checklist became the Add projects sheet beside the
+  tree, and old addresses (`#view=agents`, `#view=imports`) still land.
+- `ui --json` adds `from` to Inbox items and `branch` to Due items. `/api/search` (keyed) pages and
+  ranks projects, specialists, learnings and jobs for the dashboard's pickers.
+- A core worktree's `brain ui` serves that worktree's build; its first output line names the core
+  path and commit.
+- Python serves the committed build; running the dashboard still needs only Python 3.9. Dashboard
+  sources, the ui-fitness gate and build instructions are in `ui/README.md`; dependency licenses and
+  bundled notices are checked.
 
 After upgrading:
-- Reopen `brain ui --open` to load the new dashboard. Saved filters stay within the current
-  browser session; import commands remain a checklist to review and copy.
-- Developers: run the documented UI checks with made-up data before changing the dashboard.
+- Reopen `brain ui --open`. Scripts that read the first line of `brain ui` output for the address
+  should read the line that contains `?k=` instead.
+- Developers: run the documented UI checks, including the ui-fitness gate, with made-up data before
+  changing the dashboard.
 
 ## 2026-10-21: Name changed verify inputs and finish setup
 

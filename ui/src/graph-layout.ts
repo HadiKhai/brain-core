@@ -12,7 +12,8 @@ export function layout(nodes: GNode[], edges: GEdge[], iterations = 260) {
       let dx = b.x - a.x, dy = b.y - a.y, d2 = dx * dx + dy * dy;
       if (d2 < 0.01) { dx = 0.1 * (j - i); dy = 0.1; d2 = dx * dx + dy * dy; }
       const d = Math.sqrt(d2), min = a.r + b.r + 6;
-      let f = (900 * alpha) / d2;
+      // Big nodes (projects) push harder, so small ones settle around them and labels find room.
+      let f = (520 * alpha * Math.max(1, (a.r * b.r) / 30)) / d2;
       if (d < min) f += (min - d) * 0.5;
       const fx = (dx / d) * f, fy = (dy / d) * f;
       a.vx -= fx; a.vy -= fy; b.vx += fx; b.vy += fy;
@@ -27,16 +28,27 @@ export function layout(nodes: GNode[], edges: GEdge[], iterations = 260) {
   return nodes;
 }
 
-// Labels never overlap nodes or each other: place greedily by priority, hide the rest until hover or match.
+// Labels never overlap nodes or each other: try below, above, right, then left of each node by
+// priority (matches, then projects, then size); the rest appear only on hover, selection or match.
+export type Label = { x: number; y: number; anchor: "middle" | "start" | "end" };
+export const labelWidth = (title: string) => Math.min(28, title.length) * 6.2 + 4;
+export function labelBox(p: GNode, at: Label) {
+  const w = labelWidth(p.title), x0 = at.anchor === "middle" ? at.x - w / 2 : at.anchor === "start" ? at.x : at.x - w;
+  return { x0, x1: x0 + w, y0: at.y - 11, y1: at.y + 3 };
+}
 export function placeLabels(nodes: GNode[], wanted: Set<string>) {
-  const boxes: { x0: number; y0: number; x1: number; y1: number }[] = [], placed = new Set<string>();
+  const boxes: { x0: number; y0: number; x1: number; y1: number }[] = [], placed = new Map<string, Label>();
   const hits = (b: (typeof boxes)[number]) => boxes.some((o) => b.x0 < o.x1 && b.x1 > o.x0 && b.y0 < o.y1 && b.y1 > o.y0)
     || nodes.some((p) => p.x + p.r > b.x0 && p.x - p.r < b.x1 && p.y + p.r > b.y0 && p.y - p.r < b.y1);
   const order = [...nodes].sort((a, b) => Number(wanted.has(b.key)) - Number(wanted.has(a.key)) || (a.kind === "node" ? 0 : 1) - (b.kind === "node" ? 0 : 1) || b.r - a.r);
   for (const p of order) {
     if (!wanted.has(p.key) && p.kind !== "node") continue;
-    const w = Math.min(28, p.title.length) * 6.2 + 4, box = { x0: p.x - w / 2, y0: p.y + p.r + 3, x1: p.x + w / 2, y1: p.y + p.r + 17 };
-    if (!hits(box)) { boxes.push(box); placed.add(p.key); }
+    const options: Label[] = [
+      { x: p.x, y: p.y + p.r + 14, anchor: "middle" }, { x: p.x, y: p.y - p.r - 5, anchor: "middle" },
+      { x: p.x + p.r + 5, y: p.y + 4, anchor: "start" }, { x: p.x - p.r - 5, y: p.y + 4, anchor: "end" },
+    ];
+    const at = options.find((o) => !hits(labelBox(p, o)));
+    if (at) { boxes.push(labelBox(p, at)); placed.set(p.key, at); }
   }
   return placed;
 }

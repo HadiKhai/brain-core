@@ -1,7 +1,7 @@
 import { useId, useMemo, useState, type ReactNode } from "react";
 import { Combobox as ComboboxPrimitive } from "@base-ui/react";
-import { ChevronDown, Search, X } from "lucide-react";
-import { Combobox, ComboboxContent, ComboboxEmpty, ComboboxInput, ComboboxItem, ComboboxList } from "@/components/ui/combobox";
+import { ChevronDown, X } from "lucide-react";
+import { Combobox, ComboboxContent, ComboboxInput, ComboboxItem, ComboboxList } from "@/components/ui/combobox";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Button } from "@/components/ui/button";
 import { useSearch, fold, type Found } from "./search";
@@ -64,17 +64,15 @@ export function RecordPicker({ s, kind, label, value, onChange, placeholder, all
           </ComboboxPrimitive.Trigger>
           {value && <Button variant="ghost" size="icon-xs" className="picker-clear" aria-label={`Clear ${label}`} onClick={() => onChange(null)}><X size={14} /></Button>}
         </div>
-        <ComboboxContent className="picker-popup">
+        <ComboboxContent className="picker-popup" onScrollCapture={(e) => {
+          // Infinite scroll: the next server page loads before the end of the list is reached.
+          const el = e.target as HTMLElement;
+          if (el.dataset.slot === "combobox-list" && el.scrollTop + el.clientHeight > el.scrollHeight - 48) found.more();
+        }}>
           <ComboboxInput showTrigger={false} placeholder={placeholder || `Search ${nouns[kind] || "records"}`} aria-label={`Search ${label}`} className="picker-search">
           </ComboboxInput>
           <PickerStatus state={found.state} total={found.total} query={query} onRetry={found.retry} onClear={() => setQuery("")} />
-          <ComboboxList
-            className="picker-list"
-            onScroll={(e) => {
-              const el = e.currentTarget;
-              if (el.scrollTop + el.clientHeight > el.scrollHeight - 48) found.more();
-            }}
-          >
+          <ComboboxList className="picker-list">
             {(item: Found) => (
               <ComboboxItem key={item.kind + item.id} value={item} className="picker-item">
                 <span className="picker-item-text">
@@ -85,7 +83,6 @@ export function RecordPicker({ s, kind, label, value, onChange, placeholder, all
             )}
           </ComboboxList>
           {found.state === "more" && <div className="picker-more" role="status">Loading more…</div>}
-          <ComboboxEmpty>{found.state === "idle" && query ? null : null}</ComboboxEmpty>
         </ComboboxContent>
       </Combobox>
     </div>
@@ -99,5 +96,3 @@ function PickerStatus({ state, total, query, onRetry, onClear }: { state: string
   if (!total) return <div className="picker-message" role="status">Nothing to choose yet.</div>;
   return null;
 }
-
-export { Search as PickerIcon };

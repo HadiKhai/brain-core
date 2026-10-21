@@ -376,10 +376,10 @@ def main():
             return
         snapshot(root, b, "dark", OUT / "ui-dark.png", size=(1440, 1270))
         snapshot(root, b, "light", OUT / "ui-light.png", size=(1440, 1270))
-        snapshot(root, b, "dark", OUT / "ui-project.png", "#node=website", size=(1440, 1000))
-        for view in ("learnings", "agents", "usage", "imports"):
+        snapshot(root, b, "dark", OUT / "ui-project.png", "#view=project&node=website", size=(1440, 1000))
+        for view in ("inbox", "learnings", "jobs", "usage", "graph"):
             for theme in ("dark", "light"):
-                snapshot(root, b, theme, OUT / f"ui-{view}-{theme}.png", "#view=" + view, size=(1440, 1450 if view == "agents" else 1280 if view == "learnings" else 1200))
+                snapshot(root, b, theme, OUT / f"ui-{view}-{theme}.png", "#view=" + view, size=(1440, 1000))
         snapshot(root, b, "dark", OUT / "ui-stress-dark.png", "#view=learnings", size=(1440, 1200), stress=True)
         snapshot(root, b, "light", OUT / "ui-stress-mobile.png", "#view=learnings", size=(600, 1000), stress=True)
         check_ui(root, b)
