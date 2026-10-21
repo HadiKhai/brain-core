@@ -1,0 +1,550 @@
+"""Verify mechanics for Brain."""
+import fnmatch
+import hashlib
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+from . import common as _m_common
+from . import guard as _m_guard
+from . import history as _m_history
+from . import instance as _m_instance
+from . import jobs as _m_jobs
+from . import machine as _m_machine
+from . import nodes as _m_nodes
+from . import worktrees as _m_worktrees
+
+
+def ready_path(inst, n, branch):
+    import hashlib
+    key = hashlib.sha256(branch.encode()).hexdigest()
+    return _m_worktrees.workbench(inst, n) / "scratch" / "ready" / f"{key}.json"
+
+
+def integration_ref(home):
+    """Cached remote default, never a network request or a local-branch fallback for origin."""
+    if "origin" in _m_common.git("remote", cwd=home).stdout.split():
+        target = _m_common.git("symbolic-ref", "refs/remotes/origin/HEAD", cwd=home).stdout.strip()
+        return target if target.startswith("refs/remotes/origin/") else ""
+    return "refs/heads/main"
+
+
+def integration_parent(n, remote_main):
+    ref = integration_ref(n["home_path"])
+    if n["fm"].get("merge", "local") != "pr" and ref.startswith("refs/remotes/origin/"):
+        local_ref = ref.replace("refs/remotes/origin/", "refs/heads/", 1)
+        return _m_common.git("rev-parse", "--verify", "--quiet", local_ref + "^{commit}", cwd=n["home_path"]).stdout.strip()
+    return remote_main
+
+
+def main_notice(n):
+    home = n["home_path"]
+    if not home or not home.exists():
+        return
+    ref = integration_ref(home)
+    if ref == "":
+        print("main: origin default branch unavailable; explicitly fetch origin and run git remote set-head origin -a")
+        return
+    if not ref.startswith("refs/remotes/origin/"):
+        return
+    short = ref.removeprefix("refs/remotes/")
+    remote = _m_common.git("rev-parse", "--verify", "--quiet", ref + "^{commit}", cwd=home)
+    if remote.returncode:
+        print("main: origin default branch unavailable; explicitly fetch origin and run git remote set-head origin -a")
+        return
+    name = ref.removeprefix("refs/remotes/origin/")
+    counts = _m_common.git("rev-list", "--left-right", "--count", "refs/heads/" + name + "..." + ref, cwd=home)
+    if counts.returncode == 0:
+        ahead, behind = counts.stdout.split()
+        print(f"main: {short} (cached); local {name} is {behind} behind / {ahead} ahead")
+        if int(behind):
+            print(f"Leave the operator checkout untouched. In the job worktree: git rebase {short}; "
+                  "then hand back again. Fetch explicitly first to refresh cached refs.")
+            if n["fm"].get("merge", "local") != "pr":
+                print("Local merge mode also requires a current default in a coordinator-owned worktree; "
+                      "use merge=pr for host integration when the operator owns the default checkout.")
+    else:
+        print(f"main: {short} (cached); local {name} is missing")
+
+
+def ready_refs(n, branch):
+    home = n["home_path"]
+    return tuple(_m_common.git("rev-parse", "--verify", "--quiet", ref + "^{commit}", cwd=home).stdout.strip()
+                 for ref in ("refs/heads/" + branch, integration_ref(home)))
+
+
+def ready_preflight(n, branch):
+    """Test the proposed integration against the cached remote default (local main without origin)."""
+    reasons = []
+    if not n["external"] or not n["home_path"] or not n["home_path"].exists():
+        return ["an external git home on this machine is required"], "", ""
+    head, main = ready_refs(n, branch)
+    if not head or not main:
+        return ["branch or integration main is missing (origin needs a valid cached origin/HEAD)"], head, main
+    if branch == "main" or ("refs/heads/" + branch ==
+                            integration_ref(n["home_path"]).replace("refs/remotes/origin/", "refs/heads/")):
+        reasons.append("the job branch must differ from main")
+    if _m_common.git("merge-base", "--is-ancestor", main, head, cwd=n["home_path"]).returncode:
+        reasons.append("worker must rebase on current main")
+        result = _m_common.git("merge-tree", "--write-tree", main, head, cwd=n["home_path"])
+        if result.returncode == 1:
+            reasons.append("merge-tree is not clean")
+        elif result.returncode == 129:
+            reasons.append("git is too old for merge-tree --write-tree; Git 2.38 or newer is required")
+        elif result.returncode:
+            reasons.append(f"merge-tree failed (exit {result.returncode}); merge cleanliness is unknown")
+    # A local merge integrates with unpublished local work too; PR mode integrates on the host.
+    ref = integration_ref(n["home_path"])
+    if n["fm"].get("merge", "local") != "pr" and ref.startswith("refs/remotes/origin/"):
+        local_ref = ref.replace("refs/remotes/origin/", "refs/heads/", 1)
+        local = _m_common.git("rev-parse", "--verify", "--quiet", local_ref + "^{commit}", cwd=n["home_path"]).stdout.strip()
+        if not local:
+            reasons.append("local integration branch is missing; configure merge=pr for host merges")
+        elif _m_common.git("merge-base", "--is-ancestor", main, local, cwd=n["home_path"]).returncode:
+            reasons.append("local default must include origin default for merge=local; coordinator must update it "
+                           "in a coordinator-owned worktree, or configure merge=pr; never change the operator checkout")
+        elif _m_common.git("merge-base", "--is-ancestor", local, head, cwd=n["home_path"]).returncode:
+            reasons.append("worker must rebase on current local main as well as origin default for merge=local")
+    w = n["local"].get("worktrees", {}).get(branch)
+    if not w or not Path(w["path"]).exists():
+        reasons.append("job worktree is missing")
+    else:
+        path = w["path"]
+        if _m_common.git("symbolic-ref", "--short", "HEAD", cwd=path).stdout.strip() != branch:
+            reasons.append("job worktree is on a different branch")
+        status = _m_common.git("-c", "diff.ignoreSubmodules=none", "-c", "status.showUntrackedFiles=all", "status", "--porcelain",
+                     "--ignore-submodules=none", "--untracked-files=all", cwd=path)
+        if status.returncode or status.stdout.strip():
+            reasons.append("job worktree is dirty or unreadable")
+    return reasons, head, main
+
+
+def read_ready_packet(inst, n, branch, row=None):
+    """New records take precedence; never resurrect stale evidence after a worker replaces it."""
+    if row and _m_jobs.handback_file(n, row).exists():
+        signal = _m_jobs.read_handback(n, row)
+        if not signal:
+            return None
+        if signal.get("version") == 2:
+            packet = signal.get("ready")
+            return packet if isinstance(packet, dict) else None
+    if not n["external"] or not n["home_path"]:
+        return None
+    try:
+        packet = json.loads(ready_path(inst, n, branch).read_text())
+        if not isinstance(packet, dict):
+            return None
+        if row:
+            checked, started = inst.parse_time(packet.get("checked_at")), inst.parse_time(row.get("Started"))
+            if not checked or not started or checked < started:
+                return None
+        return packet
+    except (OSError, ValueError):
+        return None
+
+
+def packet_main_matches(n, packet, main):
+    """Old v1 packets captured local main; new v1 packets also capture the integration base.
+
+    Interpret the old evidence in place, without rewriting a worker's file. Preflight still
+    requires the current base to contain origin's default and the job to contain that base.
+    """
+    base = integration_parent(n, main)
+    expected_main = main if "integration_base" in packet else base
+    return (packet.get("main") == expected_main and
+            packet.get("integration_base", packet.get("main")) == base)
+
+
+def ready_state(inst, n, branch):
+    reasons, head, main = ready_preflight(n, branch)
+    row = _m_jobs.open_job(_m_jobs.read_jobs(n) or [], branch)
+    signal = _m_jobs.read_handback(n, row) if row else None
+    packet = read_ready_packet(inst, n, branch, row)
+    if signal and signal["state"] != "done":
+        reasons.append("worker hand-back is " + signal["state"])
+    if row and _m_jobs.handback_file(n, row).exists() and not signal:
+        reasons.append("worker hand-back unreadable; return to worker")
+    if signal and signal.get("version") == 2:
+        reasons += [r for r in signal.get("ready_reasons", []) if isinstance(r, str)]
+    if packet is None:
+        reasons.append("ready packet missing or unreadable; worker must record it")
+    else:
+        if packet.get("version") != 1 or packet.get("node") != n["id"] or packet.get("branch") != branch:
+            reasons.append("ready packet identifies a different job or format")
+        if packet.get("head") != head:
+            reasons.append("branch head changed; return to worker")
+        if not packet_main_matches(n, packet, main):
+            reasons.append("main moved; return to worker to rebase and verify again")
+        w = n["local"].get("worktrees", {}).get(branch)
+        if isinstance(w, dict) and w.get("path") and Path(w["path"]).exists():
+            if packet.get("inputs") != verify_inputs(n, w):  # every reader of readiness comes through here
+                reasons.append("what verify reads besides tracked files, or the job's ports, changed since it ran "
+                               "(or the packet predates that check); hand back again")
+        verify = n["fm"].get("verify", "").strip()
+        if not verify or packet.get("verify_command") != verify or type(packet.get("verify_result")) is not int \
+                or packet["verify_result"] != 0:
+            reasons.append("node verify missing, changed or failed")
+        rounds = packet.get("review_rounds")
+        if type(rounds) is not int or rounds < 1:
+            reasons.append("no completed review rounds recorded")
+        if not isinstance(packet.get("checked_at"), str) or not inst.parse_time(packet["checked_at"]):
+            reasons.append("packet has no valid check time")
+    return {"ready": not reasons, "reasons": reasons, "packet": packet}
+
+
+VERIFY_INPUTS = ".env,.env.*"  # files git doesn't track that verify reads, unless the node names its own
+
+
+def verify_inputs(n, w):
+    """A digest of what verify reads besides tracked files: the worktree's files matching the node's
+    verify_inputs globs (env files by default), and the ports it runs on. Evidence holds only while it is unchanged."""
+    root = Path(w["path"])
+    found = {}
+    for pat in _m_common.lst(n["fm"].get("verify_inputs")) or _m_common.lst(VERIFY_INPUTS):
+        for f in root.glob(pat):
+            rel = f.relative_to(root)
+            if ".git" in rel.parts or not f.is_file():
+                continue
+            try:
+                found[str(rel)] = hashlib.sha256(f.read_bytes()).hexdigest()
+            except OSError:
+                found[str(rel)] = "unreadable"
+    return _m_jobs.digest([sorted(found.items()), w.get("port"), w.get("ports", 1)])
+
+
+def verify_reuse(n, branch, previous, head, main, verify, cwd, inputs=None):
+    """The earlier green packet, if it still proves this commit: same node, branch, command and local main, and
+    nothing changed since the commit it verified except paths the node declares can't affect verify
+    (verify_skip globs, e.g. docs/*,*.md). (verified head, changed paths) or None."""
+    p = previous if isinstance(previous, dict) else {}
+    sha = lambda v: isinstance(v, str) and re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", v)
+    if not (p.get("version") == 1 and p.get("node") == n["id"] and p.get("branch") == branch
+            and p.get("verify_command") == verify and type(p.get("verify_result")) is int and p["verify_result"] == 0
+            and packet_main_matches(n, p, main) and type(p.get("review_rounds")) is int and p["review_rounds"] >= 1
+            and isinstance(p.get("checked_at"), str) and sha(p.get("head")) and p.get("inputs") == inputs):
+        return None  # only a complete green packet, for the same inputs, can stand for a new run
+    base = p.get("verified_head") or p["head"]
+    if not sha(base) or (base != p["head"] and _m_common.git("merge-base", "--is-ancestor", base, p["head"], cwd=cwd).returncode):
+        return None  # the verified commit must be the packet's own commit or one before it
+    if base == head:
+        return base, []
+    diff = _m_common.git("-c", "diff.ignoreSubmodules=none", "diff", "--name-only", "--no-renames", "--ignore-submodules=none",
+               base, head, cwd=cwd)
+    if diff.returncode:
+        return None
+    changed = [x for x in diff.stdout.splitlines() if x]
+    skip = _m_common.lst(n["fm"].get("verify_skip"))
+    if not skip or not all(any(fnmatch.fnmatchcase(x, pat) for pat in skip) for x in changed):
+        return None
+    return base, changed
+
+
+VERIFY_PROGRESS_SECONDS = 5
+VERIFY_LOG_KEEP = 5
+
+
+class VerifyScrubber:
+    """Keep enough original characters to match a term split across arbitrary pipe/UTF-8 reads.
+    Casefold spans map back to original characters (including expanding folds such as sharp s).
+    A mask absent from every term cannot introduce a new forbidden word at a replacement edge.
+    """
+    def __init__(self, terms):
+        words = [t.casefold() for t, _ in terms if t]
+        self.pattern = re.compile("|".join(re.escape(t) for t in sorted(words, key=len, reverse=True))) if words else None
+        self.keep = max(map(len, words), default=0)
+        self.mask = next(chr(c) for c in range(0x2588, 0x110000) if all(chr(c).casefold() not in t for t in words))
+        self.pending = ""
+
+    def feed(self, text, final=False):
+        from bisect import bisect_right
+        raw = self.pending + text
+        cut = len(raw) if final else max(0, len(raw) - self.keep)
+        spans = []
+        if self.pattern:
+            folded = raw.casefold()
+            offsets = None
+            if len(folded) != len(raw):
+                offsets = [0]
+                for c in raw:
+                    offsets.append(offsets[-1] + len(c.casefold()))
+            for match in self.pattern.finditer(folded):
+                start = bisect_right(offsets, match.start()) - 1 if offsets else match.start()
+                end = bisect_right(offsets, match.end() - 1) if offsets else match.end()
+                spans.append((start, end))
+            # Expanding folds can produce overlapping ORIGINAL spans. Move the boundary
+            # backwards through all of them, so no earlier span is accidentally split.
+            for start, end in reversed(spans):
+                if start < cut < end:
+                    cut = start
+        self.pending = raw[cut:]
+        out, pos = [], 0
+        for start, end in spans:
+            if end <= cut and end > pos:
+                start = max(start, pos)
+                out.extend((raw[pos:start], self.mask * (end - start)))
+                pos = end
+        out.append(raw[pos:cut])
+        return "".join(out)
+
+
+def verify_log_dir(inst, n, branch):
+    """Pin the node and its hand-back folder; never follow a planted directory link into a checkout."""
+    row = _m_jobs.open_job(_m_jobs.read_jobs(n) or [], branch)
+    key = _m_jobs.job_key(row) if row else _m_jobs.digest([n["id"], branch])
+    parent = n["dir"].resolve()
+    roots = []
+    for place in _m_history.home_places(n):
+        try:
+            root_fd = os.open(place.resolve(), _m_history.HISTORY_DIR_FLAGS)
+        except FileNotFoundError:
+            continue  # an absent folder cannot contain the already-existing node folder
+        except OSError:
+            _m_common.die("verify can't locate a home/checkout folder; refusing to write logs")
+        try:
+            location = _m_history.history_fd_path(root_fd)
+            if not location:
+                _m_common.die("verify can't locate a home/checkout folder; refusing to write logs")
+            roots.append(Path(location))  # actual on-disk case, for every protected root as well
+        finally:
+            os.close(root_fd)
+
+    def check(fd):
+        location = _m_history.history_fd_path(fd)
+        where = Path(location) if location else None
+        if not where or any(where == p or p in where.parents for p in roots):
+            _m_common.die("verify log folder is unknown or inside a home/checkout; refusing to run verify")
+        if where != parent / "job-handbacks" and where != parent:
+            _m_common.die("verify log folder moved; refusing to write")
+
+    try:
+        nfd = os.open(parent, _m_history.HISTORY_DIR_FLAGS)
+    except OSError:
+        _m_common.die("verify log node folder is a link or not a folder")
+    try:
+        # Canonical on-disk spelling, including case on a case-insensitive filesystem.
+        location = _m_history.history_fd_path(nfd)
+        if location:
+            parent = Path(location)
+        check(nfd)
+        try:
+            os.mkdir("job-handbacks", 0o700, dir_fd=nfd)
+        except FileExistsError:
+            pass
+        try:
+            dfd = os.open("job-handbacks", _m_history.HISTORY_DIR_FLAGS, dir_fd=nfd)
+        except OSError:
+            _m_common.die("verify log hand-back folder is a link or not a folder")
+    finally:
+        os.close(nfd)
+    try:
+        check(dfd)
+    except BaseException:
+        os.close(dfd)
+        raise
+    return parent / "job-handbacks", dfd, key, check
+
+
+def run_verify(inst, n, branch, verify, w, env):
+    token = _m_machine.machine_wait("verify", inst, n["id"])
+    try:
+        return run_verify_stream(inst, n, branch, verify, w, env, token)
+    finally:
+        _m_machine.machine_release(token)
+
+
+def run_verify_stream(inst, n, branch, verify, w, env, token):
+    """Drain the same combined stdout/stderr pipe as before; stdin, environment and shell stay unchanged.
+    Only redacted text reaches disk or failure tails. Memory holds at most 15 bounded
+    lines per named lane, plus an overall tail and the scrubber's protected suffix.
+    """
+    import codecs
+    import io
+    import selectors
+    from collections import deque
+    folder, dfd, key, check = verify_log_dir(inst, n, branch)
+    terms = _m_guard.never_terms(n)
+    scrubber = VerifyScrubber(terms)
+    say = lambda text: print(VerifyScrubber(terms).feed(text, final=True), flush=True)
+    name = key + "-verify-" + str(time.time_ns()) + "-" + os.urandom(6).hex() + ".log"
+    proc = None
+    try:
+        check(dfd)
+        fd = os.open(name, os.O_RDWR | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600, dir_fd=dfd)
+        with os.fdopen(fd, "w+", encoding="utf-8") as log:
+            os.fchmod(log.fileno(), 0o600)
+            say("verify log: " + str(folder / name))
+            # Never touch arbitrary entries or another job's logs. Unlinking a link never follows it.
+            old = sorted(x for x in os.listdir(dfd) if x != name and
+                         re.fullmatch(re.escape(key) + r"-verify-\d+-[0-9a-f]{12}\.log", x))
+            # Keep this run even if the wall clock moved backwards since older runs.
+            for entry in old[:max(0, len(old) - VERIFY_LOG_KEEP + 1)]:
+                check(dfd)
+                os.unlink(entry, dir_fd=dfd)
+            overall, lanes, failed = deque(maxlen=15), {}, set()
+            pending, lines, chars = "", 0, 0
+            line_decoder = io.IncrementalNewlineDecoder(None, translate=True)
+
+            def consume(text, final=False):
+                nonlocal pending, lines, chars
+                check(dfd)
+                log.write(text)
+                log.flush()
+                chars += len(text)
+                display = line_decoder.decode(text, final=final)
+                lines += display.count("\n")
+                pending += display
+                while "\n" in pending or len(pending) > 16384:
+                    if "\n" in pending[:16385]:
+                        line, pending = pending.split("\n", 1)
+                    else:
+                        line, pending = pending[:16384], pending[16384:]
+                    tail(line)
+
+            def tail(line):
+                overall.append(line)
+                match = re.match(r"^\[lane ([^]\r\n]{1,120})\]\s?(.*)", line)
+                if match:
+                    lane, body = match.groups()
+                    lanes.setdefault(lane, deque(maxlen=15)).append(line)
+                    if re.search(r"\b(?:FAIL(?:ED|URE)?|ERROR)\b|\bexit[ =:]+[1-9]\d*\b", body, re.I):
+                        failed.add(lane)
+
+            started = time.monotonic()
+            deadline = started + VERIFY_PROGRESS_SECONDS
+            # The bootstrap cannot exec the verify until its PID/start stamp is durable.
+            # EOF before publication means no verify starts. No extra FD reaches the shell,
+            # so a background daemon cannot keep a completed verify's reservation alive.
+            gate_read, gate_write = os.pipe()
+            bootstrap = ("import json,os,sys,signal; fd=int(sys.argv[1]); data=bytearray()\n"
+                         "while True:\n"
+                         " chunk=os.read(fd,8192)\n"
+                         " if not chunk: break\n"
+                         " data.extend(chunk)\n"
+                         "os.close(fd)\n"
+                         "if not data: os._exit(125)\n"
+                         "command,env=json.loads(data)\n"
+                         "for name in ('SIGPIPE','SIGXFZ','SIGXFSZ'):\n"
+                         " if hasattr(signal,name): signal.signal(getattr(signal,name),signal.SIG_DFL)\n"
+                         "os.execve('/bin/sh',['/bin/sh','-c',command],env)")
+            try:
+                proc = subprocess.Popen([sys.executable, "-I", "-S", "-c", bootstrap, str(gate_read)],
+                                        cwd=w["path"], env=env, stdout=subprocess.PIPE,
+                                        stderr=subprocess.STDOUT, pass_fds=(gate_read,))
+                os.close(gate_read)
+                gate_read = None
+                _m_machine.machine_child(token, proc.pid)
+                payload = memoryview(json.dumps([verify, env]).encode())
+                while payload:
+                    payload = payload[os.write(gate_write, payload):]
+            finally:
+                if gate_read is not None:
+                    os.close(gate_read)
+                os.close(gate_write)
+            decoder = codecs.getincrementaldecoder("utf-8")("replace")
+            with selectors.DefaultSelector() as selector:
+                selector.register(proc.stdout, selectors.EVENT_READ)
+                while selector.get_map():
+                    for selected, _ in selector.select(max(0, deadline - time.monotonic())):
+                        data = os.read(selected.fileobj.fileno(), 8192)
+                        if data:
+                            consume(scrubber.feed(decoder.decode(data)))
+                        else:
+                            selector.unregister(selected.fileobj)
+                            consume(scrubber.feed(decoder.decode(b"", final=True), final=True), final=True)
+                    now = time.monotonic()
+                    if now >= deadline:
+                        say(f"verify: running {now - started:.0f}s; {lines} lines, {chars} characters logged")
+                        deadline = now + VERIFY_PROGRESS_SECONDS
+            # A command may close stdout and continue running: progress still matters then.
+            while proc.poll() is None:
+                try:
+                    proc.wait(timeout=max(0.01, deadline - time.monotonic()))
+                except subprocess.TimeoutExpired:
+                    now = time.monotonic()
+                    say(f"verify: running {now - started:.0f}s; {lines} lines, {chars} characters logged")
+                    deadline = now + VERIFY_PROGRESS_SECONDS
+            if pending:
+                tail(pending)
+            if proc.returncode:
+                say(f"verify failed (exit {proc.returncode}); output tail:")
+                for lane in sorted(failed):
+                    say("verify failing lane: " + lane)
+                    say("\n".join(lanes[lane]))
+                # Always retain context for failures outside the named convention as well.
+                say("verify overall tail:")
+                say("\n".join(overall))
+            return proc.returncode, str(folder / name)
+    finally:
+        if proc is not None:
+            if proc.poll() is None:
+                proc.kill()  # subprocess.run also kills on exceptions; SIGTERM can be ignored
+                proc.wait()
+            proc.stdout.close()
+        os.close(dfd)
+
+
+def record_ready(inst, n, branch, reviews, previous=None, reverify=False):
+    reasons, head, main = ready_preflight(n, branch)
+    verify = n["fm"].get("verify", "").strip()
+    if not verify:
+        reasons.append("node has no verify command; coordinator must set verify=<command>")
+    if reviews is None or reviews < 1:
+        reasons.append("--record requires --reviews N completed review rounds (at least one)")
+    if reasons:
+        return None, reasons
+    w = n["local"]["worktrees"][branch]
+    inputs = verify_inputs(n, w)
+    integration_base = integration_parent(n, main)
+    if previous and previous.get("integration_base", previous.get("main")) != integration_base:
+        reverify = True
+    reuse = None if reverify else verify_reuse(n, branch, previous, head, main, verify, w["path"], inputs)
+    if reuse:
+        base, changed = reuse
+        print(f"verify: reused the green run of {base[:12]}"
+              + (f": since then only {len(changed)} file(s) under verify_skip changed" if changed else
+                 ": nothing changed since") + " (--reverify runs it again)")
+        return {"version": 1, "node": n["id"], "branch": branch, "head": head, "main": main,
+                "integration_base": integration_base, "verify_command": verify, "verify_result": 0, "verified_head": base, "verify_reused": True,
+                "inputs": inputs, "verify_log": previous.get("verify_log"),
+                "review_rounds": reviews, "checked_at": _m_jobs.stamp(inst)}, []
+    env = {**os.environ, "MAIN": str(n["home_path"]), "WORKTREE": w["path"], "BRANCH": branch,
+           "NODE": n["id"], "PORT": str(w["port"]), "PORTS": str(w.get("ports", 1)),
+           "PORT_LAST": str(w["port"] + w.get("ports", 1) - 1)}
+    # The CLI holds brain_lock here. Do not sweep an operator's dirty .gitignore into
+    # the worker hand-back commit just because we added the local-output exclusion.
+    gi = inst.root / ".gitignore"
+    dirty_ignore = _m_common.git("status", "--porcelain", "--", ".gitignore", cwd=inst.root).stdout.strip()
+    _m_nodes.ensure_gitignore(inst.root)
+    if dirty_ignore:
+        _m_common.TOUCHED.discard(gi)
+    _m_instance.unlock()  # verification belongs to this worker, not the instance-wide lock
+    result, log_path = run_verify(inst, n, branch, verify, w, env)
+    after, head_after, main_after = ready_preflight(n, branch)
+    if not after and verify_inputs(n, w) != inputs:
+        after = ["files verify reads besides tracked ones (verify_inputs) changed"]
+    if after or head_after != head or main_after != main or integration_parent(n, main_after) != integration_base:
+        # What passed isn't the commit on main that was asked about: never record it as evidence.
+        return None, ["verify changed the job's branch, local main or worktree (" + "; ".join(after or ["refs moved"])
+                      + "); commit or discard what it changed, then hand back again"]
+    packet = {"version": 1, "node": n["id"], "branch": branch, "head": head, "main": main,
+              "integration_base": integration_base, "verify_command": verify, "verify_result": result, "verify_log": log_path, "verified_head": head,
+              "inputs": inputs, "review_rounds": reviews, "checked_at": _m_jobs.stamp(inst)}
+    return packet, []
+
+
+def cmd_ready(a):
+    if a.reverify and not a.record:
+        _m_common.die("--reverify forces a verify run: it goes with --record --reviews N")
+    if a.record:  # compatibility alias: one writer, one record, same verification
+        a.state = "done"
+        return _m_jobs.cmd_handback(a)
+    inst = _m_nodes.load()
+    main_notice(inst.node(a.id))
+    state = ready_state(inst, inst.node(a.id), a.branch)
+    print("ready" if state["ready"] else "not ready: " + "; ".join(state["reasons"]))
+    if not state["ready"]:
+        sys.exit(1)

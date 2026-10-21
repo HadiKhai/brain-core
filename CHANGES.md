@@ -5,6 +5,19 @@ upgrading. `brain changes <node>` shows the entries this node's coordinator hasn
 `brain due <node>` lists them until `brain changes <node> --seen`. Entry headings are
 `## <date>: <title>`; once released, a heading never changes.
 
+## 2026-10-21: Core mechanics split into Python modules
+
+For agents:
+- The former single-file CLI now lives under `lib/brain/`, grouped by subsystem;
+  `bin/brain` is a thin launcher. Commands, output and exit codes behave the same.
+- Scenario tests are grouped in `tests/test_<module>.py`. See MODEL.md for the
+  module map; `brain selftest`, unittest discovery and existing
+  `pytest tests/test_brain.py` verify commands still run the same suite.
+
+After upgrading:
+- No migration or new dependency is needed. Keep the complete core checkout,
+  including `lib/`, together; installed commands, hooks and upgrades use it.
+
 ## 2026-10-21: Wake delivery leaves other commands responsive
 
 For agents:

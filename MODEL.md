@@ -245,3 +245,32 @@ sources' never-name words with it: an item or specialist holding one is shown, o
 accepted nowhere until edited.
 Connection studies read each node's files and a sample of its home's code into digests outside
 shared state, then propose such items and specialists; they never accept them.
+
+## Python module map
+
+`bin/brain` resolves its own checkout's `lib/` and calls `brain.cli.main`. The core
+still needs only Python 3.9 and the standard library; installation and upgrades
+copy the modules along with the rest of the core. `common.CORE` names the core
+checkout, and `common.ENTRY_POINT` names its launcher for instance re-execution.
+Cross-module calls use module references, resolved when called, so mutually
+calling subsystems keep their original behaviour without eager function imports.
+
+| Module under `lib/brain/` | Responsibility and representative entry points |
+| --- | --- |
+| `common`, `instance` | Files, containment, Git helpers; `Instance`, `brain_lock` |
+| `nodes`, `transitions`, `guard` | Discovery/binding, tree changes, privacy scans; `cmd_scan`, `cmd_move`, `scan_terms` |
+| `knowledge`, `briefs`, `connect` | Items/specialists/recall, worker briefs/imports, shared digests |
+| `history`, `spend` | Transcript selection/export, aggregate usage and job attribution |
+| `machine`, `usage` | Machine admission/sampling, account-wide subscription readings |
+| `verify`, `sync` | Ready packets/verifiers/reviews, integration evidence and sync |
+| `worktrees`, `jobs` | Worktree/port setup, ledgers/contracts/hand-backs |
+| `status`, `reports`, `schedules` | Due/inbox/status facts/registry, report folders, schedules |
+| `hosts`, `ui` | Runtime links/hooks/wakes, dashboard JSON and HTTP serving |
+| `check`, `upgrade`, `cli` | Mechanical checks/fixes, core upgrade/change notices, command dispatch/selftest |
+
+Scenario classes live in `tests/test_<module>.py`; shared fixtures and isolated
+module imports live in `tests/scenario.py` and `tests/core_loader.py`. `brain selftest`
+and existing `pytest tests/test_brain.py` verify commands are unchanged; the latter
+uses a compatibility entry that imports the lanes. Select a lane with
+`python3 -m unittest discover -s tests -p test_verify.py`, or select a class with
+`brain selftest -k WorkerReadyPackets`.
