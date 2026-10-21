@@ -91,6 +91,6 @@ def cmd_rotate(a):
     inst.commit([path], f"{n['id']}: prepare coordinator handover")
     print(f"handover: {_m_common.tilde(path)}")
     print("1. Launch a fresh coordinator thread in the node's project with this handover.")
-    print(f"2. brain set {n['id']} coordinator=<new>; append its runtime session id to coordinator_sessions=<old ids>,<new session id>.")
+    print(f"2. brain set {n['id']} coordinator=<new>; brain set {n['id']} coordinator_sessions=<new runtime session id> (appends and selects it).")
     print("3. Rebind every schedule and wake task; reconcile host pending requests and open workers.")
     print("4. Tell the old thread to stop, confirm it has stopped, then settle it through the host.")

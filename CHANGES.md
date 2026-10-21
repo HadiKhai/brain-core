@@ -74,8 +74,9 @@ For agents:
 
 After upgrading:
 - Read the coordinator role and T3 adapter. Record runtime session IDs in the ordered
-  `coordinator_sessions` machine binding; retain old IDs and append the new coordinator's
-  ID last. Host thread IDs are different. Spend includes every recorded coordinator session.
+  `coordinator_sessions` machine binding with `brain set <node> coordinator_sessions=<new id>`;
+  this retains prior IDs and selects the new ID last. Host thread IDs are different.
+  Spend includes every recorded coordinator session.
 - Create `backlog.md` for older nodes when deferring work. Launch the new coordinator with
   the handover, update the binding, rebind schedules/wakes, then stop and settle the old one.
 

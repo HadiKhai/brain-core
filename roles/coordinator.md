@@ -395,8 +395,8 @@ up on those unanswered lines. Remove answered inbox lines; waking does not mark 
 ## Rotate a long coordinator
 
 Keep every coordinator's runtime session id in the machine-local `coordinator_sessions` list
-(`brain set <node> coordinator_sessions=<old ids>,<new id>`). Preserve order and history: the
-last id is the current coordinator. Obtain the runtime id from its shell (`CODEX_THREAD_ID` or
+(`brain set <node> coordinator_sessions=<new id>` appends and selects it). Prior IDs remain
+in order; repeating an ID moves it last. The last id is the current coordinator. Obtain the runtime id from its shell (`CODEX_THREAD_ID` or
 `CLAUDE_CODE_SESSION_ID`), never substitute a T3 host thread id. Spend counts all recorded
 sessions, even from scratch folders, through the normal subscription/privacy gates.
 
