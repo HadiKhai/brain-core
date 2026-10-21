@@ -1,4 +1,5 @@
 """Lane selection and evidence regression scenarios, using only fabricated nodes."""
+import importlib
 import json
 from pathlib import Path
 from unittest import mock
@@ -120,8 +121,11 @@ class VerifyLanes(Scenario):
     def test_glob_semantics_and_train_recorded_base(self):
         r, home, wt, lanes = self.setup_lanes()
         m = core_loader.SourceFileLoader('lane_hooks', str(CORE / 'bin/brain')).load_module()
-        self.assertTrue(m.snapshot.__module__.endswith('.nodes'))
-        self.assertTrue(m.lane_snapshot.__module__.endswith('.verify_lanes'))
+        package = m._owners['lane_snapshot'].__package__
+        nodes = importlib.import_module('.nodes', package)
+        verify_lanes = importlib.import_module('.verify_lanes', package)
+        self.assertTrue(nodes.snapshot.__module__.endswith('.nodes'))
+        self.assertTrue(verify_lanes.lane_snapshot.__module__.endswith('.verify_lanes'))
         self.assertTrue(m.matches('root.py', ['**/*.py']))
         self.assertFalse(m.matches('src/nested/a.py', ['src/*.py']))
         self.assertFalse(m.matches('src/no.py', ['**/*.py', '!src/no.py']))
