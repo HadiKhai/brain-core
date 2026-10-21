@@ -441,20 +441,11 @@ def cmd_hire(a):
             _m_common.die(f"item '{w}' doesn't exist or isn't usable in {target['id']}")
     if target["external"] and not (target["home_path"] and target["home_path"].exists()):
         _m_common.die(f"{target['id']}'s home isn't on this machine (brain set {target['id']} home=<path>)")
-    w = target["local"].get("worktrees", {}).get(a.branch) if a.branch else None
-    if a.branch and not w:
-        _m_common.die(_m_guard.redact(f"no worktree for {a.branch} in {target['id']} (brain wt add {target['id']} <branch>)", _m_guard.never_terms(target)))
-    if w and not Path(w["path"]).exists():
-        _m_common.die(f"the worktree for {a.branch} is gone ({_m_common.tilde(w['path'])}); brain wt prune {target['id']}, then add it again")
-    where = Path(w["path"]) if w else (target["home_path"] if target["external"] else target["dir"])
+    where, w = _m_worktrees.job_where(target, a.branch)
     runtime = sp["fm"].get("runtime") or target["fm"].get("runtime")
     subscription, usage = _m_usage.usage_route(inst, [runtime] if runtime else inst.runtimes, preferred=runtime, model=a.model)
     runtime = subscription["runtime"] if subscription else runtime
-    head = f"Run in: {_m_common.tilde(where) if w else where}" + (f"  ·  branch {a.branch}" if a.branch else "") + f"  ·  runtime: {runtime}"
-    if a.model:
-        head += f"  ·  model: {a.model}"
-    if w:
-        head += f"  ·  {_m_worktrees.port_text(w['port'], w.get('ports', 1))}"
+    head = _m_worktrees.job_run_line(where, w, a.branch, runtime, a.model, tilde_home=False)
     out = [f"Role: worker, hired as specialist `{sp['id']}` ({sp['fm'].get('title', '')}).",
            head,
            "The rules, agents and skills where you run come first (axiom 7); this brief adds to them.",

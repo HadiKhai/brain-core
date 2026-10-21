@@ -20,6 +20,30 @@ WT_PORT_BASE = 4100
 SETUP_FILE = "worktree-setup.sh"  # in a node folder: prepares each new worktree (env files, installs)
 
 
+def job_where(n, branch):
+    """Resolve a brief's registered job worktree, or its usual node/home directory."""
+    w = n["local"].get("worktrees", {}).get(branch) if branch else None
+    if branch and not w:
+        _m_common.die(_m_guard.redact(f"no worktree for {branch} in {n['id']} (brain wt add {n['id']} <branch>)", _m_guard.never_terms(n)))
+    if w and not Path(w["path"]).exists():
+        _m_common.die(f"the worktree for {branch} is gone ({_m_common.tilde(w['path'])}); brain wt prune {n['id']}, then add it again")
+    where = Path(w["path"]) if w else (n["home_path"] if n["external"] else n["dir"])
+    return where, w
+
+
+def job_run_line(where, w, branch, runtime, model=None, tilde_home=True):
+    """Format the shared job location and ports, retaining each caller's home-path style."""
+    head = f"Run in: {_m_common.tilde(where) if w or tilde_home else where}"
+    if branch:
+        head += f"  ·  branch {branch}"
+    head += f"  ·  runtime: {runtime}"
+    if model:
+        head += f"  ·  model: {model}"
+    if w:
+        head += f"  ·  {port_text(w['port'], w.get('ports', 1))}"
+    return head
+
+
 def workbench(inst, n, create=False):
     """Where AI operations on a node happen: scripts/, reports/ and, for a git home, worktrees/ and scratch/.
     A node whose home is here keeps them in its folder. An external home gets a workbench beside it, so

@@ -45,7 +45,10 @@ class WorkerBriefs(Scenario):
                 hire = self.b(r, "hire", "qa", "app", *args)
                 run_line = next(line for line in brief.splitlines() if line.startswith("Run in:"))
                 self.assertIn(run_line, hire.splitlines())
-                self.assertIn(f"--branch {branch} --state done", hire)
+                local = json.loads((r / ".brain" / "local.json").read_text())
+                port = local["nodes"]["app"]["worktrees"][branch]["port"]
+                expected_ports = f"port {port}" if ports == 1 else f"ports {port}-{port + ports - 1}"
+                self.assertTrue(run_line.endswith("  ·  " + expected_ports), run_line)
         # Without a branch, keep the existing home-based specialist brief.
         hire = self.b(r, "hire", "qa", "app", "--task", "test it")
         self.assertIn(f"Run in: {home}  ·  runtime: codex", hire)

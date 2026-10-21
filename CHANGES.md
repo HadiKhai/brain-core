@@ -46,6 +46,7 @@ For agents:
   branch or a missing worktree is refused rather than pointing at the home.
 
 After upgrading:
+- Run `brain wt add <node> <branch>` first if the job has no registered worktree.
 - Regenerate specialist briefs for branch jobs before launching them. Hires
   without `--branch` keep their existing home-based run line.
 
