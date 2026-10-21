@@ -158,6 +158,17 @@ with fresh routed reset windows when there are enough samples. They do not subtr
 time or predict concurrency, token costs or allowance fit; allowance fit needs per-job usage
 data that the ledger does not record. State that boundary and quote actual usage headroom.
 
+Coordinators use Claude. Build/ui/migration/docs/mechanical classes use Codex; weekly
+usage never moves a builder to Claude. Diagnose/review use Claude. Explicit runtime options
+and node pins still win. At a stop line, keep the chosen runtime and explicitly choose
+`--runtime claude` to use a named eligible alternative. `route_weekly_cap` never switches builders.
+Node/instance `route_model_codex` and `route_model_claude` name launch models; `--model` wins.
+Effort defaults: build/ui/migration/review high, diagnose xhigh, docs/mechanical medium.
+`--effort` overrides contract `## Effort`, which overrides the class default. Follow the printed
+`modelSelection` at launch: provider instance, configured model and reasoningEffort.
+Without a configured/explicit model, it says unavailable; set the model before launching.
+Independent review must still use the builder's other runtime.
+
 Before any host launch or delegation, run `brain usage` (any agent may run it). `brain brief`,
 `brain hire` and `brain review` use the poller's cache and name the subscription and host
 provider instance to use. They refresh stale readings once only if no poller is running. Respect its brain allow-list; stop starting jobs on a subscription at
@@ -284,8 +295,10 @@ message. Each time you are active, go through **Active work**:
 - **Silent threads:** a worker whose thread is idle but hasn't reported: host `read` its last
   message, and act on it.
 - **Usage limit:** when the host reports a worker's thread failed on a usage limit, use the
-  next eligible subscription from `brain usage` and brief routing (weekly headroom first;
-  this machine's `fallback` order breaks ties). Stop the old worker before replacing it:
+  next eligible subscription within the current runtime from `brain usage` and brief routing (weekly headroom first;
+  this machine's `fallback` order breaks ties). Builders stay on Codex; switching to
+  Claude requires an explicit `--runtime claude` choice, never an automatic retry.
+  Stop the old worker before replacing it:
   one writer per file still holds. Record
   `brain jobs <id> --branch <branch> --switch "<old> -> <new>: usage limit"`.
   Regenerate `brain brief <id> --branch <branch> --runtime <replacement runtime>` with the

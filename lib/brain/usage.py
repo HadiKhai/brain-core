@@ -624,6 +624,89 @@ def usage_rows(inst=None, refresh=False, before_launch=False):
     return rows, config
 
 
+def class_allows_fallback(job_class):
+    """Automatic cross-runtime retries are disabled; explicit runtime choices still win.
+
+    Builders stay on Codex and review/diagnose stay on Claude. Missing legacy
+    classes default to build, so they cannot authorize an automatic switch either.
+    """
+    return False
+
+
+def class_route(inst, job_class, runtime=None, model=None, cached_only=False, weekly_cap=None, runtimes=None):
+    """Class policy, pins and weekly readings. Cached mode never contacts a provider.
+
+    Usage informs this choice; even exhausted or unknown meters leave a brief available.
+    The optional runtime is an explicit or node pin and always wins.
+    """
+    preferred = "claude" if job_class in ("diagnose", "review") else "codex"
+    allowed_runtimes = list(inst.runtimes if runtimes is None else runtimes)
+    reason = f"Routing: class {job_class or 'build'} defaults to {preferred}."
+    if preferred not in allowed_runtimes:
+        configured = inst.cfg.get("default_runtime")
+        preferred = configured if configured in allowed_runtimes else next(iter(allowed_runtimes), None)
+        if not preferred:
+            _m_common.die("no allowed runtime for this job")
+        reason += f" Class default unavailable; using configured/allowed runtime {preferred}."
+    chosen = runtime or preferred
+    if runtime:
+        reason += f" Runtime pin: {runtime} wins."
+    if job_class not in ("diagnose", "review"):
+        reason += " Builder policy keeps Codex regardless of weekly usage; only an explicit runtime or node pin changes it."
+    # weekly_cap is retained for callers of the earlier interface; it never switches builders.
+    try:
+        if usage_config()["autodetected"]:
+            return chosen, None, reason + " Usage unknown: no subscriptions.json; no provider refresh."
+        rows, policy = usage_rows(inst, before_launch=not cached_only)
+    except (OSError, ValueError):
+        rows, policy = [], {"max_age_seconds": USAGE_MAX_AGE}
+    def weekly(row):
+        w = row.get("windows", {}).get("seven_day", {})
+        stamp = w.get("read_at", row.get("read_at"))
+        if (w.get("absent") or w.get("expired") or
+                w.get("source", row.get("source")) == "unknown" or not usage_number(stamp) or
+                not 0 <= time.time() - stamp <= policy["max_age_seconds"] or
+                not usage_number(w.get("used_percent"))):
+            return None
+        return w["used_percent"]
+    def active_windows(row):
+        return [w for name, w in row.get("windows", {}).items()
+                if not w.get("expired") and not w.get("absent") and
+                (name in USAGE_WINDOWS or (model and model.casefold() in
+                 [m.casefold() for m in w.get("models", [])]))]
+    def below_stop(row):
+        active = active_windows(row)
+        return bool(active) and all(w["used_percent"] < policy.get("stop_percent", 85) for w in active)
+    fallback = inst.local.get("fallback", [])
+    fallback = fallback if isinstance(fallback, list) else []
+    def rank(row):
+        host = row.get("host_provider_instance_id")
+        fullest = max((w["used_percent"] for w in active_windows(row)), default=0)
+        return (fullest >= policy.get("stop_percent", 85), fullest,
+                fallback.index(host) if host in fallback else len(fallback), row["id"])
+    available = sorted([r for r in rows if r["runtime"] == chosen], key=rank)
+    measured = [(weekly(r), r) for r in available if weekly(r) is not None]
+    selected = min(measured, key=lambda x: (rank(x[1])[0], x[0], rank(x[1])))[1] if measured else next(iter(available), None)
+    used = weekly(selected) if selected else None
+    if used is None:
+        reason += " Usage unknown: weekly reading missing/stale; keeping this runtime."
+    else:
+        reason += f" Weekly meter {used:g}%; keeping {chosen}."
+    if selected:
+        active = active_windows(selected)
+        if any(w["used_percent"] >= policy.get("stop_percent", 85) for w in active):
+            reason += " Usage: subscription reached its stop line. Stop starting jobs; the brief remains available."
+            if runtime:
+                reason += f" Pinned runtime {runtime} reached its stop line."
+            other = next((r for r in rows if r["runtime"] != chosen and
+                          r["runtime"] in allowed_runtimes and below_stop(r)), None)
+            if other:
+                reason += f" Alternative: {other['label']} ({other['runtime']}); choose --runtime explicitly."
+        host = selected.get("host_provider_instance_id") or "unbound"
+        reason += f" Subscription: {selected['label']} ({selected['id']}) · host instance: {host}."
+    return chosen, selected, reason
+
+
 def usage_route(inst, runtimes, preferred=None, model=None, cached_only=False):
     try:
         if usage_config()["autodetected"]:

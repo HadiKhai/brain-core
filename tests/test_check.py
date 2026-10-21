@@ -308,11 +308,12 @@ class RoundTwo(AutonomyProject):
         r, home, wt = self.project()
         n = r / "nodes/app"
         (n / "brief.md").write_text("## Limits\n- Only local drafts. Why: rehearsal. Lift when: never.\n")
+        full = self.b(r, "brief", "app", "--branch", "job-a", "--task", "Prepare a local draft")
+        # Full briefs record job routing; isolate the small brief's read-only guarantee.
         before = {p: p.read_bytes() for p in [r / ".brain/local.json", n / "job-ledger.md"]}
         worktrees = self.git("worktree", "list", "--porcelain", cwd=home)
         short = self.b(r, "brief", "app", "--small", "--task", "Prepare a local draft")
         self.assertTrue(all(p.read_bytes() == data for p, data in before.items()))
-        full = self.b(r, "brief", "app", "--branch", "job-a", "--task", "Prepare a local draft")
         self.assertLess(len(short.splitlines()), len(full.splitlines()) * .6)
         self.assertIn("Only local drafts", short)
         self.assertIn("brain guard app", short)

@@ -101,6 +101,278 @@ for line in sys.stdin:
         return {"windows": windows if source != "unknown" else {}, "source": source,
                 "read_at": time.time() - age if source != "unknown" else None, "note": ""}
 
+    def test_builders_keep_codex_at_65_and_stop_line(self):
+        root = self.init("alice")
+        inst = self.m.Instance(root)
+        config = self.declare(self.subscription("cx"), self.subscription("cl", runtime="claude"))
+        for used in (65, 90):
+            self.cache(config, [self.reading(10, weekly=used), self.reading(10, weekly=20)])
+            for kind in ("build", "ui", "migration", "docs", "mechanical"):
+                runtime, sub, why = self.m.class_route(inst, kind, weekly_cap=1, cached_only=True)
+                self.assertEqual(runtime, "codex")
+                self.assertEqual(sub["id"], "cx")
+                self.assertIn(f"Weekly meter {used}%; keeping codex", why)
+                self.assertIn("Builder policy", why)
+                if used == 90:
+                    self.assertIn("stop line", why)
+                    self.assertIn("Alternative: cl (claude)", why)
+                    self.assertIn("choose --runtime explicitly", why)
+            self.assertEqual(self.m.class_route(inst, "review", cached_only=True)[0], "claude")
+            self.assertEqual(self.m.class_route(inst, "build", runtime="claude", cached_only=True)[0], "claude")
+        for kind in (None, *self.m.JOB_CLASSES):
+            self.assertFalse(self.m.class_allows_fallback(kind))
+
+    def test_class_effort_mappings(self):
+        root = self.init("alice")
+        node = self.m.Instance(root).node("root")
+        for kind, expected in (("build", "high"), ("ui", "high"), ("migration", "high"),
+                               ("docs", "medium"), ("mechanical", "medium"),
+                               ("review", "high"), ("diagnose", "xhigh")):
+            with self.subTest(kind=kind):
+                self.assertEqual(self.m.job_effort(node, None, kind), expected)
+
+    def test_effort_overrides_ledger_and_exact_launch_selection(self):
+        root = self.init("alice")
+        home = self.repo(self.tmp / "app")
+        self.b(root, "new", "a", "--title", "A", "--home", str(home))
+        self.b(root, "set", "a", "runtime=", "route_model_codex=configured-codex", "route_model_claude=configured-claude")
+        self.b(root, "wt", "add", "a", "job")
+        inst = self.m.Instance(root)
+        node = inst.node("a")
+        row = self.m.open_job(self.m.read_jobs(node), "job")
+        contract = self.m.contract_file(node, row)
+        contract.parent.mkdir(exist_ok=True)
+        contract.write_text("## Class\nbuild\n## Effort\nmedium\n")
+        config = self.declare(self.subscription("cx"), self.subscription("cl", runtime="claude"))
+        self.cache(config, [self.reading(10, weekly=65), self.reading(10, weekly=20)])
+        def selection(text):
+            return json.loads(next(line.split(": ", 1)[1] for line in text.splitlines()
+                                   if line.startswith("modelSelection: {")))
+        text = self.b(root, "brief", "a", "--branch", "job")
+        self.assertEqual(selection(text), {"instanceId": "host-cx", "model": "configured-codex",
+                                         "options": {"reasoningEffort": "medium"}})
+        row = self.m.open_job(self.m.read_jobs(node), "job")
+        self.assertEqual((row["Model"], row["Effort"]), ("configured-codex", "medium"))
+        text = self.b(root, "brief", "a", "--branch", "job", "--effort", "xhigh")
+        self.assertEqual(selection(text)["options"]["reasoningEffort"], "xhigh")
+        self.assertEqual(self.m.open_job(self.m.read_jobs(node), "job")["Effort"], "xhigh")
+        self.b(root, "specialist", "new", "qa", "--title", "QA")
+        text = self.b(root, "hire", "qa", "a", "--branch", "job", "--class", "docs", "--task", "x", "--effort", "low")
+        self.assertEqual(selection(text)["options"]["reasoningEffort"], "low")
+        self.assertEqual(self.m.open_job(self.m.read_jobs(node), "job")["Effort"], "low")
+        text = self.b(root, "review", "a", "--branch", "job", "--built-by", "codex", "--effort", "high")
+        self.assertEqual(selection(text), {"instanceId": "host-cl", "model": "configured-claude",
+                                         "options": {"reasoningEffort": "high"}})
+        self.assertEqual(self.m.open_job(self.m.read_jobs(node), "job")["Review effort"], "high")
+        contract.write_text("## Class\nbuild\n## Effort\ninvalid\n")
+        out = self.b(root, "brief", "a", "--branch", "job", ok=False)
+        self.assertIn(contract.name, out)
+        self.assertIn("## Effort", out)
+        self.b(root, "brief", "a", "--effort", "invalid", ok=False)
+        # Missing model config is explicit; never fabricate an exact host model.
+        self.b(root, "set", "a", "route_model_codex=")
+        self.assertIn("modelSelection: unavailable", self.b(root, "brief", "a", "--class", "docs"))
+
+    def test_class_route_autodetection_never_refreshes_providers(self):
+        root = self.init("alice")
+        inst = self.m.Instance(root)
+        with mock.patch.object(self.m, "usage_refresh", side_effect=AssertionError("provider called")) as refresh:
+            for kind, expected in (("build", "codex"), ("review", "claude")):
+                routed, sub, why = self.m.class_route(inst, kind)
+                self.assertEqual(routed, expected)
+                self.assertIsNone(sub)
+                self.assertIn("Usage unknown", why)
+            refresh.assert_not_called()
+
+    def test_class_route_single_runtime_and_autodetection_stays_offline(self):
+        root = self.init("alice")
+        inst = self.m.Instance(root)
+        self.cache(self.declare(), [])
+        with mock.patch.object(self.m, "usage_refresh", side_effect=AssertionError("provider called")):
+            for runtimes, kind, expected in ((["claude"], "build", "claude"),
+                                              (["codex"], "review", "codex")):
+                inst.runtimes = runtimes
+                routed, sub, why = self.m.class_route(inst, kind)
+                self.assertEqual(routed, expected)
+                self.assertIsNone(sub)
+                self.assertIn("default unavailable", why)
+                self.assertIn("Usage unknown", why)
+            inst.runtimes = ["claude", "codex"]
+            self.assertEqual(self.m.class_route(inst, "build")[0], "codex")
+            self.assertEqual(self.m.class_route(inst, "review")[0], "claude")
+        self.b(root, "set", "root", "runtime=")
+        file = root / "instance.md"
+        file.write_text(file.read_text().replace("runtimes: claude,codex", "runtimes: claude"))
+        # CLI review refuses a same-runtime reviewer on a one-runtime instance.
+        self.git("branch", "job", cwd=root)
+        out = self.b(root, "review", "root", "--branch", "job", "--built-by", "claude", ok=False)
+        self.assertIn("nothing to cross-review", out)
+
+    def test_class_route_never_switches_to_exhausted_alternative(self):
+        root = self.init("alice")
+        inst = self.m.Instance(root)
+        config = self.declare(self.subscription("cx"), self.subscription("cl", runtime="claude"))
+        for five_hour, weekly in ((10, 97), (99, 35), (10, 70)):
+            self.cache(config, [self.reading(10, weekly=65), self.reading(five_hour, weekly=weekly)])
+            self.assertEqual(self.m.class_route(inst, "build", cached_only=True)[0], "codex")
+        self.cache(config, [self.reading(10, weekly=90), self.reading(10, weekly=70)])
+        self.assertEqual(self.m.class_route(inst, "build", cached_only=True)[0], "codex")
+
+    def test_pinned_alternative_requires_all_windows_below_stop(self):
+        root = self.init("alice")
+        inst = self.m.Instance(root)
+        config = self.declare(self.subscription("cx"), self.subscription("cl", runtime="claude"))
+        self.cache(config, [self.reading(99, weekly=99), self.reading(10, weekly=99)])
+        why = self.m.class_route(inst, "build", runtime="codex", cached_only=True)[2]
+        self.assertNotIn("Alternative:", why)
+
+    def test_later_contract_class_overrides_default_and_reports_source(self):
+        root = self.init("alice")
+        home = self.repo(self.tmp / "app")
+        self.b(root, "new", "a", "--title", "A", "--home", str(home))
+        self.b(root, "set", "a", "runtime=")
+        self.b(root, "wt", "add", "a", "job")
+        self.b(root, "brief", "a", "--branch", "job")
+        node = self.m.Instance(root).node("a")
+        row = self.m.open_job(self.m.read_jobs(node), "job")
+        contract = self.m.contract_file(node, row)
+        contract.parent.mkdir(exist_ok=True)
+        contract.write_text("## Class\ndiagnose\n")
+        text = self.b(root, "brief", "a", "--branch", "job")
+        self.assertIn("class: diagnose", text)
+        self.assertIn("runtime: claude", text)
+        contract.write_text("## Class\n`docs` because this job documents the interface\n")
+        self.assertEqual(self.m.job_class(node, row), "docs")
+        contract.write_text("## Class\nunknown\n")
+        out = self.b(root, "brief", "a", "--branch", "job", ok=False)
+        self.assertIn(contract.name, out)
+        self.assertIn("## Class: job class", out)
+        contract.unlink()
+        self.assertEqual(self.m.job_class(node, {**row, "Class": "future-class"}), "build")
+
+    def test_class_section_first_word_and_unknown_ledger_class(self):
+        root = self.init("alice")
+        node = self.m.Instance(root).node("root")
+        row = {"Job": "job", "Started": "2026-01-01", "Class": "future-class"}
+        self.assertEqual(self.m.job_class(node, row), "build")
+        path = self.m.contract_file(node, row)
+        path.parent.mkdir(exist_ok=True)
+        path.write_text("## Class\n`docs` with a short explanation\n")
+        self.assertEqual(self.m.job_class(node, row), "docs")
+        path.write_text("## Class\ninvalid explanation\n")
+        with self.assertRaises(SystemExit) as stopped:
+            self.m.job_class(node, row)
+        self.assertIn(path.name, str(stopped.exception))
+
+    def test_review_columns_survive_v1_v2_roundtrip(self):
+        root = self.init("alice")
+        inst = self.m.Instance(root)
+        node = inst.node("root")
+        ledger = node["dir"] / "job-ledger.md"
+        for version in (1, 2):
+            ledger.write_text(f"<!-- brain:job-ledger v{version} -->\n"
+                "| Job | Started | Review class | Review runtime | Review model | Future |\n"
+                "| --- | --- | --- | --- | --- | --- |\n"
+                "| job | 2026-01-01T00:00:00+00:00 | review | claude | sample-model | keep |\n")
+            rows = self.m.read_jobs(node)
+            self.m.write_jobs(inst, node, rows)
+            reread = self.m.read_jobs(node)
+            for key in ("Review class", "Review runtime", "Review model", "Future"):
+                self.assertEqual(reread[0][key], rows[0][key])
+
+    def test_specialist_defaults_and_implicit_review_are_not_pins(self):
+        root = self.init("alice")
+        self.b(root, "set", "root", "runtime=")
+        self.b(root, "specialist", "new", "qa", "--title", "QA", "--runtime", "claude")
+        config = self.declare(self.subscription("cx"), self.subscription("cl", runtime="claude"))
+        self.cache(config, [self.reading(10, weekly=10), self.reading(10, weekly=20)])
+        text = self.b(root, "hire", "qa", "root", "--class", "build", "--task", "x")
+        self.assertIn("runtime: codex", text)
+        self.assertNotIn("Runtime pin:", text)
+
+    def test_implicit_review_is_not_a_runtime_pin(self):
+        root = self.init("alice")
+        self.b(root, "set", "root", "runtime=")
+        self.git("branch", "job", cwd=root)
+        text = self.b(root, "review", "root", "--branch", "job", "--built-by", "codex")
+        self.assertIn("Reviewer runtime: claude", text)
+        self.assertNotIn("Runtime pin:", text)
+        text = self.b(root, "review", "root", "--branch", "job", "--built-by", "codex", "--by", "claude")
+        self.assertIn("Runtime pin: claude", text)
+
+    def test_class_router_weekly_policy_and_pins(self):
+        root = self.init("alice")
+        inst = self.m.Instance(root)
+        config = self.declare(self.subscription("cx"), self.subscription("cl", runtime="claude"))
+        self.cache(config, [self.reading(10, weekly=65), self.reading(20, weekly=35)])
+        with mock.patch.object(self.m, "usage_refresh", side_effect=AssertionError("provider called")):
+            routed, sub, why = self.m.class_route(inst, "build", cached_only=True)
+            self.assertEqual(routed, "codex")
+            self.assertEqual(sub["id"], "cx")
+            self.assertIn("Weekly meter 65%; keeping codex", why)
+            self.assertEqual(self.m.class_route(inst, "review", cached_only=True)[0], "claude")
+            self.assertEqual(self.m.class_route(inst, "diagnose", cached_only=True)[0], "claude")
+            self.assertEqual(self.m.class_route(inst, "build", runtime="codex", cached_only=True)[0], "codex")
+            self.assertEqual(self.m.class_route(inst, "build", weekly_cap=70, cached_only=True)[0], "codex")
+        self.cache(config, [self.reading(10, weekly=10), self.reading(90, weekly=95)])
+        for kind in ("review", "diagnose"):
+            self.assertEqual(self.m.class_route(inst, kind, cached_only=True)[0], "claude")
+        for kind in ("build", "ui", "migration", "docs"):
+            self.assertEqual(self.m.class_route(inst, kind, cached_only=True)[0], "codex")
+        self.assertFalse(self.m.class_allows_fallback(None))
+        for kind in ("diagnose", "review"):
+            self.assertFalse(self.m.class_allows_fallback(kind))
+        self.cache(config, [self.reading(5, weekly=60), self.reading(1, weekly=10)])
+        self.assertEqual(self.m.class_route(inst, "build", cached_only=True)[0], "codex")
+        self.cache(config, [self.reading(5, weekly=65), self.reading(source="unknown")])
+        self.assertEqual(self.m.class_route(inst, "build", cached_only=True)[0], "codex")
+        self.cache(config, [self.reading(5, weekly=65, age=1000), self.reading(5, weekly=10)])
+        self.assertEqual(self.m.class_route(inst, "build", cached_only=True)[0], "codex")
+
+    def test_class_brief_records_route_contract_and_model(self):
+        root = self.init("alice")
+        home = self.repo(self.tmp / "app")
+        self.b(root, "new", "a", "--title", "A", "--home", str(home))
+        self.b(root, "set", "a", "runtime=", "route_model_claude=example-claude", "route_model_codex=example-codex")
+        self.b(root, "wt", "add", "a", "job")
+        inst = self.m.Instance(root)
+        node = inst.node("a")
+        row = self.m.open_job(self.m.read_jobs(node), "job")
+        contract = self.m.contract_file(node, row)
+        contract.parent.mkdir(exist_ok=True)
+        contract.write_text("## Class\nbuild\n")
+        config = self.declare(self.subscription("cx"), self.subscription("cl", runtime="claude"))
+        self.cache(config, [self.reading(10, weekly=65), self.reading(20, weekly=35)])
+        text = self.b(root, "brief", "a", "--branch", "job", "--task", "review diagnose prose cannot classify")
+        for part in ("class: build", "runtime: codex", "model: example-codex", "Weekly meter 65%; keeping codex"):
+            self.assertIn(part, text)
+        row = self.m.open_job(self.m.read_jobs(node), "job")
+        self.assertEqual((row["Class"], row["Runtime"], row["Model"]), ("build", "codex", "example-codex"))
+        self.assertEqual(self.m.job_class(node, row), "build")
+        text = self.b(root, "brief", "a", "--branch", "job", "--class", "review", "--runtime", "codex", "--model", "example-codex")
+        self.assertIn("runtime: codex", text)
+        self.assertEqual(self.m.open_job(self.m.read_jobs(node), "job")["Class"], "review")
+        self.b(root, "set", "a", "runtime=codex")
+        self.assertIn("runtime: codex", self.b(root, "brief", "a", "--branch", "job", "--class", "review"))
+        self.b(root, "brief", "a", "--class", "unknown", ok=False)
+        rows = self.m.read_jobs(node)
+        rows[0]["Future column"] = "kept"
+        self.m.write_jobs(inst, node, rows)
+        self.assertEqual(self.m.read_jobs(node)[0]["Future column"], "kept")
+        self.b(root, "specialist", "new", "qa", "--title", "QA")
+        hired = self.b(root, "hire", "qa", "a", "--branch", "job", "--class", "docs", "--runtime", "claude", "--model", "hire-model", "--task", "x")
+        self.assertIn("class: docs", hired)
+        self.assertEqual(self.m.open_job(self.m.read_jobs(node), "job")["Model"], "hire-model")
+        reviewed = self.b(root, "review", "a", "--branch", "job", "--class", "review", "--built-by", "codex", "--runtime", "claude")
+        self.assertIn("Reviewer runtime: claude", reviewed)
+        self.assertIn("class: review", reviewed)
+        # A reviewer never replaces the worker's route metadata.
+        final = self.m.open_job(self.m.read_jobs(node), "job")
+        self.assertEqual(final["Class"], "docs")
+        self.assertEqual(final["Review class"], "review")
+        self.assertEqual(final["Review runtime"], "claude")
+        self.assertEqual(final["Review model"], "example-claude")
+
     def test_usage_defaults_and_config_isolation(self):
         with mock.patch.object(self.m.shutil, "which", return_value="installed"):
             config = self.m.usage_config()
@@ -721,6 +993,7 @@ for line in sys.stdin:
 
     def test_proposed_hire_gate_keeps_usage_model_and_job_record(self):
         root = self.init("alice")
+        self.b(root, "set", "root", "runtime=codex")  # node pins now take precedence over specialist defaults
         config = self.declare(self.subscription())
         reading = self.reading(10)
         reading["windows"]["seven_day_model:opus"] = {"used_percent": 95, "resets_at": time.time() + 86400, "models": ["opus"]}

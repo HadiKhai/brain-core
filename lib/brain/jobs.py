@@ -28,6 +28,7 @@ JOBS_FILE = "job-ledger.md"  # in a node folder: one row per job, written by `br
 JOBS_MARK = "<!-- brain:job-ledger v3 -->"  # older cores refuse this format instead of dropping new columns
 JOBS_LEGACY_MARKS = ("<!-- brain:job-ledger v2 -->", "<!-- brain:job-ledger v1 -->")
 JOB_COLS = ["Job", "Started", "Ended", "Hours", "Outcome", "Commits", "Reviews", "Runtime", "Cause"]
+JOB_COLS += ["Class", "Model", "Effort"]
 JOB_COLS += ["Lessons", "Lesson check", "Switches", "Settled"]
 JOB_COLS += ["Active h", "Agent h", "Fresh in", "Cache read", "Cache write", "Output", "Reasoning", "Tool calls",
              "Compactions", "Sub-agents", "Sub share", "Models", "Budget", "Usage"]
@@ -259,6 +260,67 @@ def cmd_handback(a):
         print(_m_guard.redact(_m_messages.format_worker_message(
             kind, "coordinator can see it with brain due", a.branch, data["report"] or _m_common.tilde(f)),
             _m_guard.never_terms(n)))
+
+
+JOB_CLASSES = ("build", "diagnose", "review", "ui", "migration", "docs", "mechanical")
+JOB_EFFORTS = ("low", "medium", "high", "xhigh")
+CLASS_EFFORTS = {"build": "high", "ui": "high", "migration": "high", "docs": "medium",
+                 "mechanical": "medium", "review": "high", "diagnose": "xhigh"}
+
+
+def job_class(n, row=None, explicit=None, default="build"):
+    """Resolve declared metadata only; never inspect tasks or message text."""
+    def parse(value):
+        words = (value or "").strip().split()
+        return words[0].strip("`").lower() if words else ""
+    value, source = parse(explicit), "--class"
+    if not value and row:
+        f = contract_file(n, row)
+        sections = _m_ui.md_sections(f.read_text()) if f.is_file() else {}
+        value = parse(next((v for k, v in sections.items() if k.lower() == "class"), ""))
+        source = str(f) + " ## Class"
+    if not value:
+        stored = parse((row or {}).get("Class"))
+        value = stored if stored in JOB_CLASSES else default
+        source = "default class"
+    if value not in JOB_CLASSES:
+        _m_common.die(_m_guard.redact(source, _m_guard.never_terms(n)) +
+                      ": job class must be one of: " + ", ".join(JOB_CLASSES))
+    return value
+
+
+def job_effort(n, row, kind, explicit=None):
+    """An explicit launch option or contract declaration overrides the class effort."""
+    value, source = explicit, "--effort"
+    if not value and row:
+        path = contract_file(n, row)
+        sections = _m_ui.md_sections(path.read_text()) if path.is_file() else {}
+        value = next((v.strip().split()[0].strip("`").lower() for k, v in sections.items()
+                      if k.lower() == "effort" and v.strip()), None)
+        source = str(path) + " ## Effort"
+    value = value or CLASS_EFFORTS[kind]
+    if value not in JOB_EFFORTS:
+        _m_common.die(_m_guard.redact(source, _m_guard.never_terms(n)) +
+                      ": effort must be one of: " + ", ".join(JOB_EFFORTS))
+    return value
+
+
+def record_job_route(inst, n, branch, kind, runtime, model, review=False, effort=None):
+    """Record a worker's planned route without changing observed Models accounting."""
+    if not branch:
+        return
+    with _m_instance.brain_lock(inst):
+        rows = ledger_rows(n)
+        row = open_job(rows or [], branch)
+        fields = {"Class": kind, "Runtime": runtime, "Model": model}
+        if effort:
+            fields["Effort"] = effort
+        if review:
+            fields = {"Review " + k.lower(): v for k, v in fields.items()}
+        if row and any(row.get(k) != v for k, v in fields.items()):
+            row.update(fields)
+            write_jobs(inst, n, rows)
+            inst.commit([], f"{n['id']}: job route")
 
 
 def job_started(inst, n, branch, runtime):

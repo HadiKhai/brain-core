@@ -5,6 +5,27 @@ upgrading. `brain changes <node>` shows the entries this node's coordinator hasn
 `brain due <node>` lists them until `brain changes <node> --seen`. Entry headings are
 `## <date>: <title>`; once released, a heading never changes.
 
+## 2026-10-21: Route jobs by declared class and effort
+
+For agents:
+- `brief`, `hire` and `review` accept `--class`; workers also use contract `## Class`.
+  Build/ui/migration/docs/mechanical use Codex; weekly usage never switches builders
+  to Claude. Diagnose/review use Claude. Explicit runtimes and node pins win. At
+  a stop line the brief keeps the runtime and names eligible alternatives for an
+  explicit `--runtime` choice. `route_weekly_cap` no longer switches builders;
+  `class_allows_fallback` disables automatic other-runtime retries, including legacy jobs.
+- Effort defaults: build/ui/migration/review high; diagnose xhigh; docs/mechanical medium.
+  Contract `## Effort` overrides the default; `--effort` wins. Briefs print exact
+  `modelSelection` using the configured model, host instance and reasoningEffort.
+- The v3 ledger preserves `Class`, planned `Model` and `Effort` alongside observed
+  `Models`. Old rows and unknown columns survive. Review metadata stays separate.
+
+After upgrading:
+- Declare class and optional effort. Set node/instance `route_model_codex` and
+  `route_model_claude` to name launch models; `--model` overrides them. Without
+  a model setting, the planned model is `runtime default` and `modelSelection`
+  explicitly says unavailable. Configure it before launching.
+
 ## 2026-10-21: Bounded briefs and compaction restarts
 
 For agents:

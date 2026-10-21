@@ -31,15 +31,19 @@ def cmd_review(a):
     row = _m_jobs.open_job(rows, a.branch)
     round_number = _m_review.review_policy(a, row)
     check_fix = getattr(a, "check_fix", False)
-    built = a.built_by or n["fm"].get("runtime") or inst.cfg.get("default_runtime", "")
+    built = a.built_by or (row or {}).get("Runtime") or n["fm"].get("runtime") or inst.cfg.get("default_runtime", "")
     others = [rt for rt in inst.runtimes if rt != built]
-    reviewer = a.by or (others[0] if others else None)
+    kind = _m_jobs.job_class(n, explicit=a.job_class, default="review")
+    reviewer = a.by or ("claude" if "claude" in others else (others[0] if others else None))
     if not reviewer:
         _m_common.die(f"only one runtime ({built}) in instance.md: nothing to cross-review with")
     if reviewer == built:
         _m_common.die("the reviewer must run on a different runtime from the builder")
-    subscription, usage = _m_usage.usage_route(inst, [a.by] if a.by else others, preferred=reviewer, model=a.model)
-    reviewer = subscription["runtime"] if subscription else reviewer
+    pin = a.by or (n["fm"].get("runtime") if n["fm"].get("runtime") in others else None)
+    reviewer, subscription, usage = _m_usage.class_route(inst, kind, runtime=pin, model=a.model,
+        weekly_cap=n["fm"].get("route_weekly_cap", inst.cfg.get("route_weekly_cap", 60)), runtimes=others)
+    usage += " Independent review uses the other runtime from the builder."
+    _m_knowledge.launch_selection(inst, n, a, reviewer, subscription, row, kind)
     where, base = None, a.base
     if n["external"]:
         if not (n["home_path"] and n["home_path"].exists()):
@@ -67,9 +71,9 @@ def cmd_review(a):
     if base_ref.returncode:
         _m_common.die("cannot resolve review base")
     mechanical = _m_review.review_mechanical(inst, n, a, row, where, base_ref.stdout.strip(), head)
-    out = [f"Reviewer runtime: {reviewer}  (the change was built on {built})",
+    out = [f"Reviewer runtime: {reviewer}  (the change was built on {built}) · class: {kind}",
            f"Run in: {where}" + (f"  ·  model: {a.model}" if a.model else ""), "",
-           _m_guard.redact(usage, _m_guard.never_terms(n)), "",
+           a.selection_line, "", _m_guard.redact(usage, _m_guard.never_terms(n)), "",
            "Role: worker, reviewing a change you didn't write. Don't modify any file, commit or push.",
            "The rules, agents and skills where you run come first (axiom 7): if this project has its own "
            "review checklist or reviewer agents, apply them too.", ""]
@@ -77,9 +81,9 @@ def cmd_review(a):
         out += ["This project has its own owners. Write nothing into it, and keep your report free of any "
                 "reference to where this brief came from (axiom 6).", ""]
     out += _m_briefs.separation_lines(a, n, a.branch, default="Independent second-runtime review.")
-    kind = "check-fix" if check_fix else "full"
-    round_line = (f"Review round {round_number} ({kind})." if row else
-                  f"Review round not recorded ({kind}): no open job; round cap not applied.")
+    review_kind = "check-fix" if check_fix else "full"
+    round_line = (f"Review round {round_number} ({review_kind})." if row else
+                  f"Review round not recorded ({review_kind}): no open job; round cap not applied.")
     out += [round_line, ""] + mechanical
     if check_fix:
         out += fix_lines + _m_review.rehearsal_lines()
@@ -122,6 +126,7 @@ def cmd_review(a):
         _m_history.write_out(inst, n, a.out, text)
     _m_jobs.job_reviewed(inst, n, a.branch, full=not check_fix, head=head,
                          reason=getattr(a, "reason", None) or "")
+    _m_jobs.record_job_route(inst, n, a.branch, kind, reviewer, a.model, review=True, effort=a.effort)
     if not a.out:
         print(text, end="")
 

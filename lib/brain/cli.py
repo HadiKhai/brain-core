@@ -180,6 +180,8 @@ def main():
         opt("--context-file", action="append", help="embed shared findings; repeatable; recorded as job inputs on this machine"),
         opt("--why-separate", help="why this concern needs its own agent (or contract ## Why separate)"),
         opt("--allow-unexplained", action="store_true", help="allow an urgent launch without a separation reason"),
+        opt("--class", dest="job_class", choices=_m_jobs.JOB_CLASSES),
+        opt("--effort", choices=_m_jobs.JOB_EFFORTS),
         opt("--runtime"), opt("--model", help="job model for scoped usage limits"),
         opt("--to", help="the thread the worker reports to (default: the node's coordinator)"),
         opt("--peer", help="shared-commit peer thread; coordinate directly with it"), opt("--out"))
@@ -329,6 +331,8 @@ def main():
         opt("--from", dest="source", required=True), opt("--at"), "text")
     cmd("hire", _m_knowledge.cmd_hire, "print a specialist's brief for a job: brain hire <specialist> <node> --task \"...\"",
         "specialist", "node", opt("--task", required=True), opt("--items", default=""),
+        opt("--runtime"), opt("--class", dest="job_class", choices=_m_jobs.JOB_CLASSES),
+        opt("--effort", choices=_m_jobs.JOB_EFFORTS),
         opt("--model", help="job model for scoped usage limits"), opt("--out"), opt("--branch"),
         opt("--why-separate", help="why this specialist needs a separate agent; defaults to the contract"),
         opt("--allow-unexplained", action="store_true", help="allow an urgent launch without a reason"),
@@ -357,7 +361,9 @@ def main():
     cmd("reports", _m_reports.cmd_reports, "every report, newest first: brain reports [node]", opt("id", nargs="?"))
     cmd("review", _m_sync.cmd_review, "brief for a review by another runtime: brain review <node> --branch B",
         "id", opt("--branch", required=True), opt("--base"), opt("--built-by", dest="built_by"),
-        opt("--by", help="reviewer runtime (default: one the builder didn't use)"), opt("--focus"),
+        opt("--by", "--runtime", help="reviewer runtime (default: one the builder didn't use)"), opt("--focus"),
+        opt("--class", dest="job_class", choices=_m_jobs.JOB_CLASSES),
+        opt("--effort", choices=_m_jobs.JOB_EFFORTS),
         opt("--why-separate", help="reason for a separate reviewer; defaults to independent second-runtime review"),
         opt("--allow-unexplained", action="store_true", help="allow an urgent launch without a reason"),
         opt("--model", help="job model for scoped usage limits"), opt("--out"),
