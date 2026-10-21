@@ -77,7 +77,7 @@ def ready_refs(n, branch):
                  for ref in ("refs/heads/" + branch, integration_ref(home)))
 
 
-def ready_preflight(n, branch):
+def ready_preflight(n, branch, base=None):
     """Test the proposed integration against the cached remote default (local main without origin)."""
     reasons = []
     if not n["external"] or not n["home_path"] or not n["home_path"].exists():
@@ -85,6 +85,14 @@ def ready_preflight(n, branch):
     head, main = ready_refs(n, branch)
     if not head or not main:
         return ["branch or integration main is missing (origin needs a valid cached origin/HEAD)"], head, main
+    if base is not None:
+        local_main = _m_common.git("rev-parse", "--verify", "--quiet", "refs/heads/main^{commit}", cwd=n["home_path"]).stdout.strip()
+        if (n["fm"].get("merge", "local") == "pr" or not isinstance(base, str)
+                or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", base)
+                or not local_main or _m_common.git("merge-base", "--is-ancestor", base, local_main, cwd=n["home_path"]).returncode):
+            reasons.append("train requires a recorded base ancestor of local main in merge=local mode")
+        else:
+            main = base
     if branch == "main" or ("refs/heads/" + branch ==
                             integration_ref(n["home_path"]).replace("refs/remotes/origin/", "refs/heads/")):
         reasons.append("the job branch must differ from main")
@@ -104,10 +112,10 @@ def ready_preflight(n, branch):
         local = _m_common.git("rev-parse", "--verify", "--quiet", local_ref + "^{commit}", cwd=n["home_path"]).stdout.strip()
         if not local:
             reasons.append("local integration branch is missing; configure merge=pr for host merges")
-        elif _m_common.git("merge-base", "--is-ancestor", main, local, cwd=n["home_path"]).returncode:
+        elif _m_common.git("merge-base", "--is-ancestor", ready_refs(n, branch)[1], local, cwd=n["home_path"]).returncode:
             reasons.append("local default must include origin default for merge=local; coordinator must update it "
                            "in a coordinator-owned worktree, or configure merge=pr; never change the operator checkout")
-        elif _m_common.git("merge-base", "--is-ancestor", local, head, cwd=n["home_path"]).returncode:
+        elif _m_common.git("merge-base", "--is-ancestor", base or local, head, cwd=n["home_path"]).returncode:
             reasons.append("worker must rebase on current local main as well as origin default for merge=local")
     w = n["local"].get("worktrees", {}).get(branch)
     if not w or not Path(w["path"]).exists():
@@ -159,11 +167,18 @@ def packet_main_matches(n, packet, main):
             packet.get("integration_base", packet.get("main")) == base)
 
 
-def ready_state(inst, n, branch):
+def ready_state(inst, n, branch, train=False):
     reasons, head, main = ready_preflight(n, branch)
     row = _m_jobs.open_job(_m_jobs.read_jobs(n) or [], branch)
     signal = _m_jobs.read_handback(n, row) if row else None
     packet = read_ready_packet(inst, n, branch, row)
+    if train and packet:
+        reasons, head, main = ready_preflight(n, branch, base=packet.get("integration_base", packet.get("main")))
+        remote = ready_refs(n, branch)[1]
+        old_remote = packet.get("main")
+        if (not isinstance(old_remote, str) or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", old_remote)
+                or _m_common.git("merge-base", "--is-ancestor", old_remote, remote, cwd=n["home_path"]).returncode):
+            reasons.append("recorded remote base is not an ancestor of current integration main")
     if signal and signal["state"] != "done":
         reasons.append("worker hand-back is " + signal["state"])
     if row and _m_jobs.handback_file(n, row).exists() and not signal:
@@ -177,7 +192,7 @@ def ready_state(inst, n, branch):
             reasons.append("ready packet identifies a different job or format")
         if packet.get("head") != head:
             reasons.append("branch head changed; return to worker")
-        if not packet_main_matches(n, packet, main):
+        if not train and not packet_main_matches(n, packet, main):
             reasons.append("main moved; return to worker to rebase and verify again")
         w = n["local"].get("worktrees", {}).get(branch)
         if isinstance(w, dict) and w.get("path") and Path(w["path"]).exists():
