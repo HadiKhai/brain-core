@@ -144,6 +144,27 @@ After upgrading:
 - Retry rehearsals that refused a busy source. Tracked content or real ref changes
   still refuse evidence; no policy or configuration change is required.
 
+## 2026-10-21: Repository unit verification lanes
+
+For agents:
+- `tests/lanes.py` prints this repository's job lane map. Canonical test classes
+  run once across the lanes; catch-all checks the compatibility entry and map.
+- Inputs include transitive module dependencies and reused test helpers. A train
+  function-body change selects train and catch-all; shared core/support changes
+  select every lane. Import-time core changes invalidate the complete map.
+- `tests/check_lanes.py` refuses unassigned or multiply assigned tests, missing
+  classes and unknown test programs. Live runtime and browser suites are listed
+  explicitly outside the unit job lanes.
+
+After upgrading:
+- Development nodes for this repository can set
+  `verify_lanes_from=python3 -B tests/lanes.py` and
+  `verify_lanes_check=python3 -B tests/check_lanes.py`. Keep the full unit verify
+  command for trains; existing documentation/image skip rules still apply.
+- Assign new unit tests in `tests/lanes.py` and run the coverage gate. The strongly
+  connected core uses conservative dependency inputs; a test-only change can
+  reuse unrelated lanes.
+
 ## 2026-10-21: Corrections carry principle and check tags
 
 For agents:
