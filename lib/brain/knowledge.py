@@ -422,7 +422,7 @@ def cmd_hire(a):
         missing = [o for o in target["owners"] if o not in scope]
         if missing:
             _m_common.die(f"specialist '{sp['id']}' isn't scoped for {', '.join(missing)} (axiom 10)")
-    if _m_guard.find_terms((sp["dir"] / "role.md").read_text(), learning_terms(
+    if _m_guard.find_terms(str(sp["dir"] / "role.md") + "\n" + (sp["dir"] / "role.md").read_text(), learning_terms(
             inst, {"source_nodes": sp["fm"].get("source_nodes")}, [sp["node"], target])):
         _m_common.die(f"specialist '{sp['id']}' holds a never-name word of where it was learned or of {target['id']}")
     nodes = inst.nodes()
@@ -460,7 +460,10 @@ def cmd_hire(a):
         out += ["## Knowledge for this job", ""]
         for i in items:
             if i["fm"].get("id") in wanted:
-                out += [_m_briefs.reference_line(i["path"], i["fm"].get("title", i["fm"].get("id"))), ""]
+                reference = _m_briefs.reference_line(i["path"], i["fm"].get("title", i["fm"].get("id")))
+                if _m_guard.find_terms(reference, learning_terms(inst, i["fm"], [target], nodes)):
+                    _m_common.die("library reference holds a never-name word; cannot include it in the brief")
+                out += [reference, ""]
     out += knowledge_lines(inst, target, a.task, sp["id"], exclude=wanted) + node_knowledge_lines(target) + \
         recall_hint(target)
     out += handback_lines(inst, target, branch=a.branch) + report_lines(job=bool(a.branch))
@@ -545,11 +548,11 @@ def knowledge_lines(inst, n, task, specialist="", exclude=()):
     contexts = [("task", knowledge_tokens(task), 4),
                 ("labels/stack", knowledge_tokens(n["fm"].get("labels", "") + " " + n["fm"].get("stack", "")), 3),
                 ("specialist", knowledge_tokens(specialist), 3)]
-    lines, forbidden = [], _m_guard.never_terms(n)
+    lines = []
     for _, key, title, why, item in knowledge_ranked(inst, n, contexts, exclude):
         line = (f"- `{key}`: {title} — picked for {'; '.join(why)}. "
                 f"Path: `{_m_common.tilde(item['path'])}`. Read full: `brain item show {key} --node {n['id']}`.")
-        if not _m_guard.find_terms(line, forbidden):
+        if not _m_guard.find_terms(line, learning_terms(inst, item["fm"], [n])):
             lines.append(line)
     if not lines:
         return []

@@ -249,6 +249,25 @@ class BriefLimits(Scenario):
         self.assertNotIn("library-detail", out)
         self.assertIn("second context compaction", out)
 
+    def test_reference_paths_obey_source_never_name_policy(self):
+        r = self.setup_job()
+        self.b(r, "new", "source", "--title", "Source")
+        self.b(r, "specialist", "new", "qa", "--title", "QA")
+        self.b(r, "item", "add", "guide", "--from", "source", "--title", "Guide", "--kind", "method",
+               "--ref", "fixture", "--body", "Review guide")
+        # The source bans a component of the actual library path, while the target allows it.
+        (r / "nodes/source/never-name.txt").write_text("library\n")
+        out = self.b(r, "hire", "qa", "a", "--task", "Review guide", "--items", "guide", ok=False)
+        self.assertNotIn("/library/guide.md", out)
+        out = self.b(r, "brief", "a", "--task", "Review guide")
+        self.assertNotIn("/library/guide.md", out)
+        self.b(r, "specialist", "new", "reader", "--title", "Reader", "--from", "source", "--at", "root", "--proposed")
+        role = r / "specialists/reader/role.md"
+        role.write_text(role.read_text().replace("status: proposed", "status: active"))
+        (r / "nodes/source/never-name.txt").write_text("specialists\n")
+        out = self.b(r, "hire", "reader", "a", "--task", "Read", ok=False)
+        self.assertNotIn("/specialists/reader/role.md", out)
+
     def test_all_generators_enforce_size_before_output_or_records(self):
         r = self.setup_job()
         self.b(r, "specialist", "new", "qa", "--title", "QA")
