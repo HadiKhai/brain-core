@@ -37,9 +37,16 @@ class InboxNoise(Scenario):
                 contextlib.redirect_stdout(io.StringIO()):
             self.m.machine_sample(self.inst)
 
-    def machine_items(self, at):
+    def machine_items(self, at, new=False):
         with mock.patch.object(self.m.time, 'time', return_value=at):
-            return [i for i in self.m.inbox_items(self.inst)[0] if i['kind'] == 'machine-alert']
+            if not new:
+                items = self.m.inbox_items(self.inst)[0]
+            else:
+                with mock.patch.object(self.m, 'load', return_value=self.inst), \
+                        contextlib.redirect_stdout(io.StringIO()) as output:
+                    self.m.cmd_inbox(argparse.Namespace(id='root', json=True, new=True))
+                items = json.loads(output.getvalue())
+            return [i for i in items if i['kind'] == 'machine-alert']
 
     def jobs(self, n):
         base = dict.fromkeys(self.m.JOB_COLS, '')
@@ -94,17 +101,25 @@ class InboxNoise(Scenario):
         self.sample(base + 3601, high)
         long = self.machine_items(base + 3601)
         self.assertEqual(len(long), 1)
+        self.assertEqual([i['id'] for i in self.machine_items(base + 3601, new=True)], [long[0]['id']])
+        self.assertEqual(self.machine_items(base + 3601, new=True), [])
         self.sample(base + 3661, {**high, 'thermal': 'pressure'})
         hot = self.machine_items(base + 3661)
         self.assertEqual(len(hot), 1)
         self.assertEqual(hot[0]['id'], long[0]['id'])
+        self.assertEqual(self.machine_items(base + 3661, new=True), [])
         for offset in (3721, 3781, 3841):
             self.sample(base + offset, good)
         self.assertEqual(self.machine_items(base + 3841), [])
         self.assertEqual([t['state'] for t in json.loads(path.read_text())['transitions']], ['open', 'close'])
         # Thermal pressure is urgent even before the sustained admission hold opens.
         self.sample(base + 3901, {**good, 'thermal': 'pressure'})
-        self.assertEqual(len(self.machine_items(base + 3901)), 1)
+        later = self.machine_items(base + 3901)
+        self.assertEqual(len(later), 1)
+        self.assertNotEqual(later[0]['id'], long[0]['id'])
+        # No --new read occurred during recovery; a later episode still reports once.
+        self.assertEqual([i['id'] for i in self.machine_items(base + 3901, new=True)], [later[0]['id']])
+        self.assertEqual(self.machine_items(base + 3901, new=True), [])
         self.assertEqual((self.root / 'inbox.md').read_text().count('machine episode'), 0)
 
     def test_paused_node_hidden_from_human_views_but_questions_still_route(self):
@@ -164,6 +179,7 @@ class InboxNoise(Scenario):
         self.assertFalse(any(i['kind'] == 'job' for i in self.inbox(sibling['id'])))
         own = self.inbox(owner['id'])
         self.assertEqual([i['text'] for i in own if i['kind'] == 'job'], alerts)
+        self.assertTrue(all(i.get('informational') for i in own if i['kind'] == 'job'))
         due = json.loads(self.b(self.root, 'due', owner['id'], '--json'))
         self.assertEqual([i['text'] for i in due if i['kind'] == 'job'], alerts)
         self.assertTrue(all(i['informational'] for i in due if i['kind'] == 'job'))

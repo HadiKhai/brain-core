@@ -536,12 +536,13 @@ def cmd_due(a):
     if a.id == "root":
         # Retain the informational descendant backlog in the ordinary due view.
         items += [item for n in inst.nodes() if n["id"] != "root"
-                  for item in due_items(inst, n, include_stale=False) if item["kind"] == "unsettled-threads"]
+                  for item in due_items(inst, n, include_stale=False, include_advice=False)
+                  if item["kind"] == "unsettled-threads"]
     if a.id == "root":
         for n in escalation_nodes:
             if n["id"] == "root" or n["archived"]:
                 continue
-            items += [item for item in due_items(inst, n, include_stale=False)
+            items += [item for item in due_items(inst, n, include_stale=False, include_advice=False)
                       if item["kind"] == "overdue-question"]
             if any("<!-- host-question:" in line or "<!-- handback:" in line for line in inbox_lines(n)):
                 items.append({"node": n["id"], "kind": "question", "text":
@@ -591,7 +592,7 @@ def status_facts(inst, n, state, known_merges):
     if state["jobs"] is None:
         lines += ["- Legacy ledger: running jobs unknown."]
     lines += ["", f"Closed jobs with unsettled threads: {len(_m_jobs.unsettled_jobs(state['jobs']))}"]
-    due = due_items(inst, n, (state, "", ""), include_stale=False)
+    due = due_items(inst, n, (state, "", ""), include_stale=False, include_advice=False)
     lessons = sorted([r for r in state["jobs"] or [] if r["Ended"] and r["Outcome"] == "merged"], key=merge_time, reverse=True)
     lines += ["", "Lesson outcomes (merged jobs):"]
     lines += [_m_guard.redact(f"- {r['Job']}: " + (r.get("Lessons") or
@@ -688,6 +689,8 @@ def inbox_items(inst, nodes=None, reporter="root"):
     for nid, kind, text in attention:
         identity = text if kind in ("blocked", "blocked-overdue", "inbox", "core-update") else \
             re.sub(r"\d[\d.,]*[kMB]?", "#", text) if kind == "job" else kind  # growing counts aren't new
+        if kind == "machine-alert":
+            identity = (_m_machine.machine_episode_due(inst) or {}).get("episode", kind)
         key = _m_jobs.digest([nid, kind, " ".join(identity.split())])
         if key in ids:
             continue
@@ -712,6 +715,7 @@ def inbox_items(inst, nodes=None, reporter="root"):
                 source.stat().st_mtime if source.exists() else inst.now_dt().timestamp(), inst.zone()).isoformat(timespec="seconds")
         out.append({"id": key, "node": nid, "kind": kind, "text": _m_guard.redact(text, _m_guard.never_terms(n)),
                     "first_seen": first, "reported": bool(record.get("reported_at")) if isinstance(record, dict) else False,
+                    **({"informational": True} if kind == "job" else {}),
                     **blocked_metadata(inst, n, kind, text)})
     return out, reporters
 

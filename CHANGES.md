@@ -25,6 +25,10 @@ After upgrading:
   stop appearing as inbox work. Resuming a paused node reveals its unresolved needs.
 - Inspect job budget/median advice with `brain inbox <owning-node>` or
   `brain due <owning-node>`; use root due for root-owned jobs.
+- Refresh status for affected nodes once: changed human-attention counts can make
+  their generated facts stale after upgrading. This refresh-only work never wakes
+  a model. Each new exceptional machine episode has its own inbox reporting id,
+  even when no inbox check occurred while the prior episode was closed.
 
 ## 2026-10-21: Machine care transitions stay quiet
 
