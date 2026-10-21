@@ -148,12 +148,12 @@ def machine_load():
     return d
 
 
-def ui_state(inst, problems=None, scan=None, spend_budget=2.0):
+def ui_state(inst, problems=None, scan=None, spend_budget=2.0, machine_spend=None):
     with _m_spend.spend_read_only():
-        return _ui_state(inst, problems, scan, spend_budget)
+        return _ui_state(inst, problems, scan, spend_budget, machine_spend)
 
 
-def _ui_state(inst, problems=None, scan=None, spend_budget=2.0):
+def _ui_state(inst, problems=None, scan=None, spend_budget=2.0, machine_spend=None):
     """Everything the page shows, from the same files `brain` reads. Read-only."""
     now = inst.now_dt()
     nodes = inst.nodes()
@@ -311,7 +311,7 @@ def _ui_state(inst, problems=None, scan=None, spend_budget=2.0):
         "schedules": [{"id": x["id"], "when": x.get("when", ""), "node": x.get("node", ""),
                        "here": x["id"] in inst.local.get("schedules", {})} for x in _m_schedules.read_schedules(inst)],
         "machine": machine,
-        "spend": _m_spend.spend_machine(inst, budget=spend_budget),  # the live view counts a little at each refresh
+        "spend": machine_spend if machine_spend is not None else _m_spend.spend_machine(inst, budget=spend_budget),
         "usage": _m_usage.usage_ui(inst),
         "usage_other_subscriptions": _m_usage.usage_other_count(inst),
         "problems": problems,
@@ -411,13 +411,96 @@ def core_revision():
     return f"{_m_common.tilde(_m_common.CORE)} @ {head or 'no git commit'}{' (uncommitted changes)' if dirty else ''}"
 
 
+class UISpend:
+    """Continue unfinished aggregation without rebuilding the dashboard or writing caches."""
+    BUDGET = 0.05
+    PUBLISH_EVERY = 60
+
+    def __init__(self, inst):
+        from collections import deque
+        self.inst = inst
+        self.queue = deque()
+        self.pending = set()
+        self.stamps, self.aggs = {}, {}
+        self.allowed, self.forbidden = set(), set()
+        self.permissions = None
+        self.published = float('-inf')
+        self.dirty = True
+        self.revision = 0
+        self.value = {'complete': False, 'files': 0, 'read': 0, 'runtimes': {}, 'since_week': None}
+
+    def discover(self):
+        sources, allowed, forbidden = _m_spend.spend_sources(self.inst)
+        permissions = (frozenset(allowed), frozenset(forbidden))
+        if permissions != self.permissions:
+            self.aggs.clear()
+            self.stamps.clear()
+            self.queue.clear()
+            self.pending.clear()
+            self.dirty, self.published = True, float('-inf')
+        self.permissions = permissions
+        self.allowed, self.forbidden = allowed, forbidden
+        files = {}
+        for runtime, cfg in sources:
+            for name in (('projects',) if runtime == 'claude' else ('sessions', 'archived_sessions')):
+                for path in _m_spend.spend_walk(cfg / name):
+                    if runtime == 'claude' and path.parent.name != 'subagents' and path.parent.parent != (cfg / name).resolve():
+                        continue
+                    stamp = UIInputs.stamp(path)
+                    files[path] = stamp
+                    if self.stamps.get(path) != stamp and path not in self.pending:
+                        self.queue.append((runtime, path))
+                        self.pending.add(path)
+        removed = self.stamps.keys() - files.keys()
+        if removed:
+            self.published = float('-inf')
+        for path in removed:
+            self.aggs.pop(path, None)
+        if files != self.stamps:
+            self.revision += 1
+            self.dirty = True
+        self.stamps = files
+
+    def advance(self):
+        deadline = time.monotonic() + self.BUDGET
+        with _m_spend.spend_read_only():
+            while self.queue and time.monotonic() < deadline:
+                runtime, path = self.queue.popleft()
+                self.pending.discard(path)
+                if path not in self.stamps:
+                    continue
+                agg = _m_spend.spend_file(self.inst, path, runtime, self.allowed, self.forbidden,
+                                          budget=max(0.000001, deadline - time.monotonic()))
+                if agg:
+                    self.aggs[path] = agg
+                    self.dirty = True
+                    if not agg.get('complete', True):
+                        self.queue.appendleft((runtime, path))
+                        self.pending.add(path)
+                else:
+                    self.aggs.pop(path, None)
+        done = not self.queue
+        if self.dirty and (time.monotonic() - self.published >= self.PUBLISH_EVERY or done != self.value['complete']):
+            aggs = list(self.aggs.values())
+            self.value = {'complete': done, 'files': len(self.stamps), 'read': len(aggs),
+                          'runtimes': _m_spend.spend_days(self.inst, aggs),
+                          'since_week': _m_spend.spend_summary(_m_spend.spend_sum(aggs, time.time() - 7 * 86400),
+                                                             _m_spend.brain_terms(self.inst)) if done else None}
+            self.published, self.dirty = time.monotonic(), False
+            return True
+        return False
+
+
 class UIInputs:
     """Metadata only: no transcript parsing, Git status, readiness hashes or cache writes per poll."""
     def __init__(self, inst):
         self.root = inst.root
         self.files = set()
+        self.slow_files = set()
+        self.slow_at, self.slow_rows = float('-inf'), []
         self.trees = []
         self.git_dirs = set()
+        self.source_trees = []
         for n in inst.nodes():
             loc = n['local']
             homes = [n['home_path']] if n['home_path'] else []
@@ -425,15 +508,15 @@ class UIInputs:
             for home in homes:
                 # Git's index supplies tracked and non-ignored files; directory metadata detects additions.
                 result = _m_common.git('ls-files', '-z', '--cached', '--others', '--exclude-standard', cwd=home)
-                self.files.add(home)
+                self.slow_files.add(home)
                 for name in result.stdout.split('\0'):
                     if not name:
                         continue
                     path = home / name
-                    self.files.add(path)
+                    self.slow_files.add(path)
                     while path.parent != home and path.parent != path:
                         path = path.parent
-                        self.files.add(path)
+                        self.slow_files.add(path)
                 for flag in ('--git-dir', '--git-common-dir'):
                     raw = _m_common.git('rev-parse', flag, cwd=home).stdout.strip()
                     if raw:
@@ -442,6 +525,7 @@ class UIInputs:
                 reports = _m_worktrees.workbench(inst, n) / 'reports'
                 self.files.add(reports)
                 self.files.update(reports.glob('*/index.md'))
+                self.trees.extend(reports.parent / 'scratch' / name for name in ('ready', 'rehearse'))
             except SystemExit:
                 pass
         for directory in self.git_dirs | {self.root / '.git'}:
@@ -449,7 +533,7 @@ class UIInputs:
             self.trees.append(directory / 'refs')
         sources, _, _ = _m_spend.spend_sources(inst)
         for runtime, cfg in sources:
-            self.trees.extend(cfg / name for name in (('projects',) if runtime == 'claude' else ('sessions', 'archived_sessions')))
+            self.source_trees.extend(cfg / name for name in (('projects',) if runtime == 'claude' else ('sessions', 'archived_sessions')))
         self.files.update(_m_usage.usage_file(name) for name in ('usage.json', 'subscriptions.json', 'brains.json'))
 
     @staticmethod
@@ -459,6 +543,14 @@ class UIInputs:
             return (str(path), st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns)
         except OSError:
             return (str(path), None)
+
+    def source_signature(self):
+        paths = set()
+        for root in self.source_trees:
+            paths.add(root)
+            for top, dirs, files in os.walk(root):
+                paths.update(Path(top) / name for name in [*dirs, *files])
+        return tuple(sorted(self.stamp(path) for path in paths))
 
     def signature(self):
         paths = set(self.files)
@@ -479,6 +571,10 @@ class UIInputs:
         # Explicit look-back commands publish node aggregates; dashboard polls do not.
         paths.update((self.root / '.brain/spend/nodes').glob('*.json'))
         rows = [self.stamp(path) for path in paths]
+        if time.monotonic() - self.slow_at >= 15:
+            self.slow_rows = [self.stamp(path) for path in self.slow_files - paths]
+            self.slow_at = time.monotonic()
+        rows.extend(self.slow_rows)
         rows.append(('clock', int(time.time() // 300)))  # age/due boundaries, not a per-poll rebuild
         return tuple(sorted(rows))
 
@@ -514,44 +610,88 @@ def cmd_ui(a):
             return (assets / "index.html").read_bytes()
         except OSError:
             return started
-    lock, cond = threading.Lock(), threading.Condition()
+    cond = threading.Condition()
     interval = max(0.05, a.every)
-    box = {"json": b"", "version": 0, "clients": 0, "last_poll": float('-inf'), "telemetry": time.monotonic()}
+    box = {'json': b'', 'version': 0, 'clients': 0, 'last_poll': float('-inf'),
+           'telemetry': time.monotonic(), 'request': 0, 'checked': 0}
 
     def touch():
         with cond:
             box['last_poll'] = time.monotonic()
+            box['request'] += 1
+            requested = box['request']
+            cond.notify_all()
+            # An idle poll must receive the newly checked snapshot, not the previous poll's data.
+            cond.wait_for(lambda: box['checked'] >= requested, timeout=30)
+
+    def publish(st):
+        with cond:
+            box.update(state=st, json=json.dumps(st, sort_keys=True).encode(), version=box['version'] + 1)
             cond.notify_all()
 
-    def refresh(inputs, signature):
+    def refresh(inputs, signature, spend):
+        source_signature = inputs.source_signature()
+        metadata_at = float('-inf')
+        live_at, live_revision = time.monotonic(), spend.revision
         while True:
             with cond:
-                while not box['clients'] and time.monotonic() - box['last_poll'] > interval:
+                # Idle/background clients poll each minute. Keep their small aggregation slices
+                # moving between polls; a closed/no-client server sleeps after the lease expires.
+                while not box['clients'] and time.monotonic() - box['last_poll'] > 75:
                     cond.wait()
+                requested = box['request']
             try:
-                changed = inputs.signature()
-                if changed != signature:
+                cadence = interval if box['clients'] else max(interval, 15)
+                if requested > box['checked'] or time.monotonic() - metadata_at >= cadence:
+                    changed = inputs.signature()
+                    if changed != signature:
+                        i = _m_instance.Instance(inst.root)
+                        problems = len(_m_check.collect_problems(i)[0])
+                        spend.inst = i
+                        spend.discover()
+                        spend.dirty, spend.published = True, float('-inf')
+                        spend.advance()
+                        st = ui_state(i, problems, scan, machine_spend=spend.value)
+                        signature, inputs = changed, UIInputs(i)
+                        publish(st)
+                    sources = inputs.source_signature()
+                    if sources != source_signature:
+                        spend.discover()
+                        source_signature = sources
+                    metadata_at = time.monotonic()
+                if spend.advance():
+                    publish({**box['state'], 'spend': spend.value})
+                if spend.revision != live_revision and time.monotonic() - live_at >= 60:
                     i = _m_instance.Instance(inst.root)
-                    problems = len(_m_check.collect_problems(i)[0])
-                    _m_spend.spend_invalidate(i)
-                    st = ui_state(i, problems, scan)
-                    # Keep the pre-build signature: an edit during a build must be checked again.
-                    signature, inputs = changed, UIInputs(i)
-                    with cond:
-                        box.update(state=st, json=json.dumps(st, sort_keys=True).encode(), version=box['version'] + 1)
-                        cond.notify_all()
+                    nodes = {n['id']: n for n in i.nodes()}
+                    updated = []
+                    with _m_spend.spend_read_only():
+                        for n in box['state']['nodes']:
+                            real = nodes.get(n['id'])
+                            if not real:
+                                updated.append(n)
+                                continue
+                            rows = []
+                            for row in n['jobs']['open']:
+                                used = _m_spend.live_usage(i, real, row)
+                                rows.append({**row, 'usage': _m_spend.spend_summary(used, _m_guard.never_terms(real))
+                                             if used and used['sessions'] else None})
+                            updated.append({**n, 'jobs': {**n['jobs'], 'open': rows}})
+                    publish({**box['state'], 'nodes': updated})
+                    live_at, live_revision = time.monotonic(), spend.revision
                 if time.monotonic() - box['telemetry'] >= 30:
-                    # Fast-changing meters and clock do not invalidate expensive file-derived state.
-                    st = {**box['state'], 'brain': {**box['state']['brain'], 'now': inst.now_dt().isoformat(timespec='seconds')},
-                          'machine': _m_machine.machine_state(inst)}
-                    with cond:
-                        box.update(state=st, json=json.dumps(st, sort_keys=True).encode(), version=box['version'] + 1,
-                                   telemetry=time.monotonic())
-                        cond.notify_all()
-            except Exception as e:  # keep serving the last good state; retry the same signature
+                    publish({**box['state'], 'brain': {**box['state']['brain'], 'now': inst.now_dt().isoformat(timespec='seconds')},
+                             'machine': _m_machine.machine_state(inst)})
+                    box['telemetry'] = time.monotonic()
+            except Exception as e:
                 box['error'] = str(e)
+            finally:
+                with cond:
+                    box['checked'] = requested
+                    cond.notify_all()
             with cond:
-                cond.wait(timeout=interval)
+                if box['request'] == box['checked']:
+                    cond.wait(timeout=interval)
 
     class H(http.server.BaseHTTPRequestHandler):
         def log_message(self, *args):
@@ -607,19 +747,26 @@ def cmd_ui(a):
                 with cond:
                     box['clients'] += 1
                     cond.notify_all()
-                seen = -1
+                import select
+                import socket
+                seen, pinged = -1, time.monotonic()
                 try:
                     while True:
                         with cond:
                             if box["version"] == seen:
-                                cond.wait(timeout=15)
+                                cond.wait(timeout=1)
                             v, body = box["version"], box["json"]
+                        if select.select([self.connection], [], [], 0)[0] and not self.connection.recv(1, socket.MSG_PEEK):
+                            return
+                        if v == seen and time.monotonic() - pinged < 15:
+                            continue
                         if v != seen:
                             self.wfile.write(b"data: " + body + b"\n\n")
                             seen = v
                         else:
                             self.wfile.write(b": ping\n\n")
                         self.wfile.flush()
+                        pinged = time.monotonic()
                 except (BrokenPipeError, ConnectionResetError):
                     return
                 finally:
@@ -628,10 +775,13 @@ def cmd_ui(a):
                         cond.notify_all()
             self.send(404, b"not found", "text/plain")
 
-    st = ui_state(inst, len(_m_check.collect_problems(inst)[0]), scan)
+    spend = UISpend(inst)
+    spend.discover()
+    spend.advance()
+    st = ui_state(inst, len(_m_check.collect_problems(inst)[0]), scan, machine_spend=spend.value)
     box.update(json=json.dumps(st, sort_keys=True).encode(), version=1, state=st)
     inputs = UIInputs(inst)
-    threading.Thread(target=refresh, args=(inputs, inputs.signature()), daemon=True).start()
+    threading.Thread(target=refresh, args=(inputs, inputs.signature(), spend), daemon=True).start()
     port = a.port
     srv = None
     for p_ in range(port, port + 20):

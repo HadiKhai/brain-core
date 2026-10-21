@@ -297,16 +297,6 @@ def spend_read_only():
         _SPEND_READ_ONLY.reset(token)
 
 
-def spend_invalidate(inst):
-    """Changed dashboard inputs invalidate the live totals, not parsed unchanged transcripts."""
-    root = str(inst.root)
-    _MACHINE.pop(root, None)
-    _SPEND_TERMS.pop(root, None)
-    for key in list(_LIVE):
-        if key[0] == root:
-            del _LIVE[key]
-
-
 def spend_cache_dir(inst):
     return inst.root / ".brain" / "spend"
 
@@ -341,11 +331,13 @@ def spend_file(inst, path, runtime, allowed, forbidden, budget=None, window=None
             return known[1]  # unchanged, and its names still pass today's never-name words
         key = hashlib.sha256(str(real).encode()).hexdigest()[:32]
         cf = spend_cache_dir(inst) / "files" / f"{key}.json"
-        agg = None
-        try:
-            agg = json.loads(cf.read_text()) if window is None else None
-        except (OSError, ValueError):
-            pass
+        # Read-only viewers retain partial progress in memory; a disk cache is optional.
+        agg = known[1] if known and known[0][1] == list(ident) else None
+        if agg is None:
+            try:
+                agg = json.loads(cf.read_text()) if window is None else None
+            except (OSError, ValueError):
+                pass
         if not (isinstance(agg, dict) and agg.get("v") == SPEND_VERSION and agg.get("key") == key
                 and agg.get("ino") == list(ident) and agg["state"]["offset"] <= size
                 and (not packed or agg["state"]["offset"] in (0, size))):
@@ -382,6 +374,10 @@ def spend_file(inst, path, runtime, allowed, forbidden, budget=None, window=None
                                                 separators=(",", ":")))
             except OSError:
                 pass  # still right for this run; read again next time
+        # A time slice can end exactly after the final whole line. There is no next
+        # read to mark EOF in that case; the saved cursor already proves completion.
+        if agg['state']['offset'] == size:
+            agg['complete'] = True
         agg["path"] = str(real)  # this run's own, never written
         _SPEND_MEM[mem] = ((size, list(ident)), agg)
     return agg

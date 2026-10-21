@@ -38,3 +38,34 @@ test('live transport backs off when idle, pauses when hidden and resumes on acti
   await page.evaluate(() => document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' })));
   await expect.poll(openStreams).toBe(1);
 });
+
+test('opted-in notifications keep a bounded hidden-tab poll', async ({ page }) => {
+  await page.clock.install();
+  await page.addInitScript(() => {
+    const w = window as any;
+    w.notices = [];
+    w.hiddenForTest = false;
+    Object.defineProperty(document, 'hidden', { get: () => w.hiddenForTest });
+    localStorage.setItem('brain-notify', '1');
+    w.Notification = class {
+      static permission = 'granted';
+      constructor(title: string) { w.notices.push(title); }
+    };
+    w.EventSource = class { close() {} };
+  });
+  let reads = 0;
+  await page.route('**/api/state?*', async route => {
+    const data = await (await route.fetch()).json();
+    if (++reads > 1) data.inbox.push({ id: 'new-hidden-question', node: 'field-guide', text: 'A made-up review question', kind: 'inbox' });
+    await route.fulfill({ json: data });
+  });
+  await page.goto('/?k=demo');
+  await expect(page.locator('[data-page]:not([hidden])')).toBeVisible();
+  const initialNotices = await page.evaluate(() => (window as any).notices.length);
+  await page.evaluate(() => { (window as any).hiddenForTest = true; document.dispatchEvent(new Event('visibilitychange')); });
+  await page.clock.fastForward(60_001);
+  await expect.poll(() => reads).toBe(2);
+  await expect.poll(() => page.evaluate(() => (window as any).notices.length)).toBe(initialNotices + 1);
+  await page.clock.fastForward(59_000);
+  expect(reads).toBe(2);
+});

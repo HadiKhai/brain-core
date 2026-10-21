@@ -18,7 +18,7 @@ class IdleView(Scenario):
             self.stop_server(process)
         super().tearDown()
 
-    def start_server(self, transcript=False):
+    def start_server(self, transcript=False, partial=False):
         config = self.tmp / 'config'
         config.mkdir(exist_ok=True)
         self.env['BRAIN_CONFIG'] = str(config / 'brains.json')
@@ -38,23 +38,44 @@ class IdleView(Scenario):
                     'total_token_usage': {'input_tokens': 20, 'cached_input_tokens': 0, 'output_tokens': 5},
                     'last_token_usage': {'input_tokens': 20, 'cached_input_tokens': 0, 'output_tokens': 5}}}}]
             (folder / 'demo.jsonl').write_text(''.join(json.dumps(row, separators=(',', ':')) + '\n' for row in rows))
+            if partial:
+                text = (folder / 'demo.jsonl').read_text()
+                for i in range(6):
+                    (folder / f'chunk-{i}.jsonl').write_text(text * 3)
         script = '''
 import sys
 sys.path.insert(0, sys.argv[1] + '/lib')
 from brain import ui, cli
 build = ui.ui_state
+partial = sys.argv[2] == 'partial'
+if hasattr(ui, 'UISpend'):
+    ui.UISpend.PUBLISH_EVERY = 0
+    if partial:
+        ui.UISpend.BUDGET = 0.005
+if partial:
+    import time
+    from brain import spend
+    real_file = spend.spend_file
+    def bounded_file(*args, **kwargs):
+        time.sleep(0.001)  # deterministic per-file cost exceeding the injected slice
+        kwargs['budget'] = 0.000001
+        return real_file(*args, **kwargs)
+    spend.spend_file = bounded_file
 calls = 0
 def counted(*args, **kwargs):
     global calls
     calls += 1
+    if partial:
+        kwargs['spend_budget'] = 0.000001
     result = build(*args, **kwargs)
     result['_test_builds'] = calls
+    result['_test_initial_incomplete'] = not result['spend']['complete']
     return result
 ui.ui_state = counted
 sys.argv = ['brain', 'ui', '--port', '0', '--every', '0.05']
 cli.main()
 '''
-        process = subprocess.Popen([sys.executable, '-u', '-c', script, str(CORE)], cwd=root,
+        process = subprocess.Popen([sys.executable, '-u', '-c', script, str(CORE), 'partial' if partial else 'normal'], cwd=root,
                                    env=self.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         self.servers.append(process)
         self.assertTrue(process.stdout.readline().startswith('brain ui core:'))
@@ -135,8 +156,23 @@ cli.main()
         latest = before
         while time.monotonic() < deadline:
             latest = state()
-            if latest['_test_builds'] > before['_test_builds']:
+            if latest['spend']['since_week'] and latest['spend']['since_week']['processed'] > before['spend']['since_week']['processed']:
                 break
             time.sleep(0.05)
         self.assertGreater(latest['spend']['since_week']['processed'], before['spend']['since_week']['processed'])
+        self.assertEqual(latest['_test_builds'], before['_test_builds'], 'transcript append rebuilt unrelated state')
+        self.assertFalse(list((root / '.brain/spend').rglob('*.json')))
+
+    def test_partial_spend_advances_without_source_changes_or_full_rebuilds(self):
+        root, state = self.start_server(transcript=True, partial=True)
+        before = state()
+        self.assertTrue(before['_test_initial_incomplete'])
+        deadline = time.monotonic() + 15
+        latest = before
+        while not latest['spend']['complete'] and time.monotonic() < deadline:
+            time.sleep(0.05)
+            latest = state()
+        self.assertTrue(latest['spend']['complete'], 'in-memory partial spend never progressed')
+        self.assertEqual(latest['spend']['read'], 7)
+        self.assertEqual(latest['_test_builds'], before['_test_builds'])
         self.assertFalse(list((root / '.brain/spend').rglob('*.json')))

@@ -1,6 +1,6 @@
 // A visible, active dashboard streams changes. Idle tabs check once a minute;
-// hidden tabs make no requests and reconnect when they become visible again.
-export function watchLive(key: string, state: (value: any) => void, status: (value: string) => void) {
+// hidden tabs pause unless opted-in notifications need the minute check.
+export function watchLive(key: string, state: (value: any) => void, status: (value: string) => void, notify = false) {
   let source: EventSource | undefined;
   let controller: AbortController | undefined;
   let idleTimer: ReturnType<typeof setTimeout> | undefined;
@@ -15,24 +15,24 @@ export function watchLive(key: string, state: (value: any) => void, status: (val
     clearTimeout(pollTimer);
   };
   const read = async () => {
-    if (disposed || document.hidden) return;
+    if (disposed || (document.hidden && !notify)) return;
     const current = ++generation;
     controller?.abort();
     controller = new AbortController();
     try {
       const response = await fetch('/api/state?k=' + encodeURIComponent(key), { signal: controller.signal });
-      if (current !== generation || disposed || document.hidden) return;
+      if (current !== generation || disposed || (document.hidden && !notify)) return;
       if (response.status === 403) { status('Permission required'); return; }
       if (!response.ok) throw Error('state unavailable');
       const value = await response.json();
-      if (current !== generation || disposed || document.hidden) return;
+      if (current !== generation || disposed || (document.hidden && !notify)) return;
       state(value);
       status('Live');
       if (active) {
         source?.close();
         source = new EventSource('/api/events?k=' + encodeURIComponent(key));
         source.onmessage = event => {
-          if (current !== generation || disposed || document.hidden) return;
+          if (current !== generation || disposed || (document.hidden && !notify)) return;
           try { state(JSON.parse(event.data)); status('Live'); }
           catch { status('Updates interrupted'); }
         };
@@ -41,14 +41,14 @@ export function watchLive(key: string, state: (value: any) => void, status: (val
     } catch (error) {
       if (current === generation && !disposed && (error as Error).name !== 'AbortError') status('Connection failed');
     } finally {
-      if (!disposed && !active && !document.hidden && current === generation)
+      if (!disposed && !active && (!document.hidden || notify) && current === generation)
         pollTimer = setTimeout(read, 60_000);
     }
   };
   const idle = () => {
     active = false;
     close();
-    if (!document.hidden) pollTimer = setTimeout(read, 60_000);
+    if (!document.hidden || notify) pollTimer = setTimeout(read, 60_000);
   };
   const activity = () => {
     if (disposed || document.hidden) return;
@@ -61,12 +61,13 @@ export function watchLive(key: string, state: (value: any) => void, status: (val
     close();
     active = false;
     if (!document.hidden) activity();
+    else if (notify) pollTimer = setTimeout(read, 60_000);
   };
   document.addEventListener('visibilitychange', visibility);
   document.addEventListener('pointerdown', activity, { passive: true });
   document.addEventListener('keydown', activity);
   document.addEventListener('wheel', activity, { passive: true });
-  if (document.hidden) active = false;
+  if (document.hidden) { active = false; if (notify) pollTimer = setTimeout(read, 60_000); }
   else { activity(); void read(); }
   return () => {
     disposed = true;

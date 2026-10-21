@@ -128,8 +128,8 @@ function App() {
       setConnection("Permission required");
       return;
     }
-    return watchLive(key, setState, setConnection);
-  }, [retry]);
+    return watchLive(key, setState, setConnection, notify);
+  }, [retry, notify]);
   useEffect(() => {
     const t = setInterval(
       () => { if (!document.hidden) setState((prev) => (prev ? { ...prev } : prev)); },
