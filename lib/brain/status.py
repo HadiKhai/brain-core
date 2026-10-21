@@ -115,7 +115,7 @@ def code_node(n):
 
 
 def code_setup_warnings(inst, n):
-    if not code_node(n) or n["archived"]:
+    if "kind:study" in _m_common.lst(n["fm"].get("labels")) or not code_node(n) or n["archived"]:
         return []
     out = []
     if not n["fm"].get("verify", "").strip():
@@ -189,6 +189,9 @@ def dead_note_paths(inst, n):
     extensions = set(_m_nodes.LANGUAGES) | {".md", ".txt", ".json", ".yaml", ".yml", ".toml", ".ini", ".cfg",
                                    ".csv", ".tsv", ".sql", ".html", ".css", ".png", ".svg", ".pdf", ".lock"}
     filenames = {"README.md", "CHANGES.md", "AGENTS.md", "MODEL.md", "Dockerfile", "Makefile", "LICENSE"}
+    node_files = {"node.md", "brief.md", "status.md", "knowledge.md", "decisions.md", "backlog.md",
+                  "inbox.md", "direction.md", "job-ledger.md", "never-name.txt"}
+    node_folders = {"sources", "library", "specialists", "job-contracts", "job-handbacks"}
     for name in ("brief.md", "status.md", "knowledge.md"):
         source = n["dir"] / name
         if not source.is_file():
@@ -211,19 +214,32 @@ def dead_note_paths(inst, n):
                     value = (match.group(1) or match.group(2)) if match else ""
                 value = value.split("#", 1)[0]
                 value = re.sub(r":\d+(?::\d+)?$", "", value)
-                if not value or re.search(r"[?*{}$]|://|^[a-zA-Z][a-zA-Z0-9+.-]*:", value):
+                if not value or re.search(r"[?*{}$]|<[^>]*>|://|^[a-zA-Z][a-zA-Z0-9+.-]*:", value):
                     continue
                 if link:
                     value = urllib.parse.unquote(value)
                 elif re.search(r"\s", value):
+                    continue
+                # Inline slash-prefixed examples are usually routes, not filesystem claims.
+                # Markdown links still check absolute filesystem targets.
+                if not link and value.startswith("/"):
                     continue
                 path = Path(value).expanduser()
                 explicit = value.startswith(("./", "../", "/", "~")) or value.endswith("/")
                 file_shape = path.name in filenames or ("/" in value and path.suffix in extensions)
                 if not link and not (explicit or file_shape):
                     continue
-                bases = [n["dir"], inst.root] + ([n["home_path"]] if n["home_path"] else [])
-                if not any((base / path).exists() for base in bases):
+                # Links belong to the note. Inline project paths belong to its home, while
+                # explicit Brain references must still warn even on an unbound machine.
+                if path.parts and path.parts[0] in {"core", "nodes", ".brain"}:
+                    base = inst.root
+                elif link or path.as_posix() in node_files or (path.parts and path.parts[0] in node_folders):
+                    base = n["dir"]
+                else:
+                    base = n["home_path"] if n["external"] else n["dir"]
+                if base is None and not path.is_absolute():
+                    continue
+                if not (path if path.is_absolute() else base / path).exists():
                     out.append(f"{n['id']}: {name}:{number}: dead path {raw}; repair the reference or restore the file/folder")
     return sorted(set(out))
 

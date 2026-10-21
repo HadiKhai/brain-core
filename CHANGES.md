@@ -5,6 +5,21 @@ upgrading. `brain changes <node>` shows the entries this node's coordinator hasn
 `brain due <node>` lists them until `brain changes <node> --seen`. Entry headings are
 `## <date>: <title>`; once released, a heading never changes.
 
+## 2026-10-21: Check note paths in their home and exempt study setup
+
+For agents:
+- Inline project paths in node notes resolve against the bound external home, or the
+  node folder for nodes without an external home. Unbound home paths, `<placeholder>`
+  examples and slash-prefixed route examples no longer produce dead-path warnings.
+- Markdown links stay relative to the note; explicit Brain files and folders still
+  warn when missing, including on machines without a bound home.
+- `kind:study` nodes no longer need a verify command or coordinator tick merely
+  because their home is a Git repository or their metadata names a code stack.
+
+After upgrading:
+- Run `brain check` again. Use a Markdown link for a node-relative note or attachment;
+  keep inline project paths relative to the project's home. No migration is needed.
+
 ## 2026-10-21: Rehearse redacts protected probe output
 
 For agents:
