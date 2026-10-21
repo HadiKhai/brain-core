@@ -233,6 +233,11 @@ class RehearsalEvidence(Scenario):
         self.assertIn('ready', self.b(r, 'ready', 'a', '--branch', 'job', '--record', '--reviews', '1'))
         packet = json.loads(next((r / 'nodes/a/job-handbacks').glob('*.json')).read_text())['ready']
         self.assertEqual(evidence, packet['rehearsal'])
+        reused = self.b(r, 'ready', 'a', '--branch', 'job', '--record', '--reviews', '1')
+        self.assertIn('verify: reused', reused)
+        packet = json.loads(next((r / 'nodes/a/job-handbacks').glob('*.json')).read_text())['ready']
+        self.assertEqual(evidence, packet['rehearsal'])
+        self.assertIn('input_files_ref', packet)
         self.assertEqual('ready', self.b(r, 'ready', 'a', '--branch', 'job').strip())
         baseline = r / 'core/CHANGES.md'
         old = baseline.read_text()
