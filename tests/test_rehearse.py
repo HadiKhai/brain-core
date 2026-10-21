@@ -85,6 +85,18 @@ class RehearsalSandbox(Scenario):
         r = self.runner('import socket\nsocket.create_connection(("127.0.0.1", 9))\n')
         self.assertNotEqual(0, r['code'])
 
+    def test_caught_external_write_still_fails_and_empty_directory_is_seen(self):
+        outside = self.tmp / 'outside'
+        outside.write_text('unchanged')
+        script = ('from pathlib import Path\ntry:\n    Path(' + repr(str(outside)) +
+                  ').write_text("changed")\nexcept OSError:\n    pass\n')
+        r = self.runner(script)
+        self.assertEqual(0, r['code'])
+        self.assertEqual(1, r['unexpected'])
+        self.assertEqual('unchanged', outside.read_text())
+        r = self.runner('from pathlib import Path\nPath("unapproved").mkdir()\n')
+        self.assertEqual(1, r['unexpected'])
+
     def test_unexpected_copy_mutation_is_detected(self):
         r = self.runner('from pathlib import Path\nPath("node.md").write_text("changed")\n')
         self.assertEqual(0, r['code'])
@@ -221,3 +233,27 @@ class RehearsalDelivery(unittest.TestCase):
         with mock.patch.object(rehearsal._m_hosts, 'wake_probe', return_value=403, create=True) as probe:
             self.assertEqual([dict(coordinator=0, status=403)], rehearsal.probe_delivery(inst, [node]))
             probe.assert_called_once_with(inst, node)
+
+@unittest.skipUnless(sys.platform == 'darwin', 'requires macOS OS sandbox')
+class RehearsalNativeCore(Scenario):
+    def test_real_core_cli_clean_candidate_and_byte_identical_source(self):
+        import shutil
+        r = self.init('sample')
+        home = self.tmp / 'core-home'
+        shutil.copytree(CORE, home, symlinks=True, ignore=shutil.ignore_patterns('.git', '__pycache__'))
+        self.git('init', '-q', '-b', 'main', cwd=home)
+        self.git('add', '.', cwd=home)
+        self.git('commit', '-qm', 'candidate core fixture', cwd=home)
+        self.b(r, 'new', 'core', '--title', 'Core', '--home', str(home))
+        self.b(r, 'wt', 'add', 'core', 'job')
+        original_brain = rehearsal.snapshot(r)
+        original_home = rehearsal.snapshot(home)
+        output = self.b(r, 'rehearse', 'core', '--branch', 'job')
+        self.assertIn('rehearse: passed', output)
+        self.assertEqual(original_brain, rehearsal.snapshot(r))
+        self.assertEqual(original_home, rehearsal.snapshot(home))
+        files = list((self.tmp / 'core-home-work/scratch/rehearse').glob('*.json'))
+        self.assertEqual(1, len(files))
+        evidence = json.loads(files[0].read_text())
+        self.assertTrue(evidence['passed'])
+        self.assertEqual(11, evidence['commands'])

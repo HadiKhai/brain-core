@@ -68,7 +68,7 @@ def probe_delivery(inst, nodes):
     for node in nodes:
         if not node['local'].get('coordinator') and node['id'] != 'root':
             continue
-        target, address = _m_hosts.wake_target(inst, node)
+        _, address = _m_hosts.wake_target(inst, node)
         if not address.startswith(('https://', 'http://')):
             continue  # shell transports are not webhooks; never execute them here
         try:
@@ -224,7 +224,11 @@ def sandbox_prefix(folder):
 
 
 def allowed_write(rel, kind):
-    if rel.startswith('home/') or rel.startswith('tmp/'):
+    if (rel.startswith('home/.local/state/brain/') or rel.startswith('tmp/')
+            or rel.startswith('home/Library/Caches/com.apple.DeveloperTools/')
+            or rel in ('home/.local', 'home/.local/state', 'home/.local/state/brain',
+                       'home/brains.json', 'home/write-attempt', 'home/Library', 'home/Library/Caches',
+                       'home/Library/Caches/com.apple.DeveloperTools')):
         return True
     if not rel.startswith('brain/'):
         return False
@@ -315,7 +319,8 @@ runpy.run_path(entry, run_name='__main__')
         os.killpg(p.pid, signal.SIGKILL)
         out, err = p.communicate()
     finally:
-        # A detached helper must never outlive its temporary write boundary.
+        # Stop remaining processes in this command's group. Any detached helper
+        # still inherits the OS sandbox and cannot write to the live machine.
         try:
             os.killpg(p.pid, signal.SIGKILL)
         except ProcessLookupError:
@@ -371,9 +376,15 @@ def rehearse(inst, n, branch):
     with tempfile.TemporaryDirectory(prefix='brain-rehearse-') as td:
         folder = Path(td).resolve()
         subprocess.run([*sandbox_prefix(folder), '/usr/bin/true'], check=True, capture_output=True)
+        original = snapshot(inst.root)
+        frozen = folder / 'source'
+        copy_tree(inst.root, frozen)
+        materialize_git(inst.root, frozen)
+        if snapshot(inst.root) != original:
+            raise RehearsalError('live brain moved while copying; retry with a stable source')
         baseline = folder / 'installed'
-        copy_tree(inst.root / 'core', baseline)
-        materialize_git(inst.root / 'core', baseline)
+        copy_tree(frozen / 'core', baseline)
+        materialize_git(frozen / 'core', baseline)
         candidate = folder / 'candidate'
         # Clone transports only Git objects; do not run setup, hooks or a checkout
         # in the original home. No hard links and no origin survives in the copy.
@@ -385,9 +396,8 @@ def rehearse(inst, n, branch):
         if r.returncode or not (candidate / 'bin/brain').is_file():
             raise RehearsalError('candidate is not a core checkout')
         _m_common.git('remote', 'remove', 'origin', cwd=candidate)
-        original = snapshot(inst.root)
         commands = []
-        nodes = inst.nodes()
+        nodes = _m_instance.Instance(frozen).nodes()
         for i, node in enumerate(nodes):
             commands.append(('due:' + str(i), ['due', node['id'], '--json'], 'read'))
             commands.append(('brief:' + str(i), ['brief', node['id']], 'read'))
@@ -398,8 +408,8 @@ def rehearse(inst, n, branch):
             commands.append(('refresh:' + str(i), ['status', node['id'], '--refresh'], 'refresh'))
         commands += [('check', ['check'], 'read'), ('fix', ['check', '--fix'], 'fix'),
                      ('ui', ['ui', '--json'], 'read'), ('hook', ['hook', 'stop'], 'hook')]
-        old = run_lane(inst.root, baseline, folder / 'before', nodes, commands)
-        new = run_lane(inst.root, candidate, folder / 'after', nodes, commands)
+        old = run_lane(frozen, baseline, folder / 'before', nodes, commands)
+        new = run_lane(frozen, candidate, folder / 'after', nodes, commands)
         flags = compare(old, new)
         if snapshot(inst.root) != original:
             flags.append('live brain changed during rehearsal; evidence refused')
@@ -410,7 +420,7 @@ def rehearse(inst, n, branch):
         if (_m_verify.ready_refs(n, branch) != (head, main)
                 or _m_verify.integration_parent(n, main) != integration_base):
             flags.append('candidate or integration main moved during rehearsal')
-        delivery = probe_delivery(inst, nodes)
+        delivery = probe_delivery(inst, inst.nodes())
         flags.extend(delivery_regressions(delivery))
         return {'version': 1, 'node': n['id'], 'branch': branch, 'head': head, 'main': main,
                 'integration_base': integration_base,
@@ -426,6 +436,8 @@ def cmd_rehearse(a):
     inst = _m_instance.Instance(_m_nodes.find_root())
     n = inst.node(a.id)
     try:
+        if not n['external'] or not n.get('home_path'):
+            raise RehearsalError('external candidate home required')
         path = evidence_path(n, a.branch)
         # Refuse linked evidence directories, including links into a live home.
         for parent in [path, *path.parents]:
@@ -436,6 +448,8 @@ def cmd_rehearse(a):
                 raise RehearsalError('evidence must stay outside live brain and home')
         path.unlink(missing_ok=True)  # a failed repeat must not resurrect an earlier pass
         result = rehearse(inst, n, a.branch)
+        if _m_guard.find_terms(json.dumps(result), [t for node in inst.nodes() for t in _m_guard.never_terms(node)]):
+            raise RehearsalError('protected evidence refused')
     except (RehearsalError, OSError, subprocess.SubprocessError):
         # Exception messages and command output can contain protected source content.
         _m_common.die('rehearsal refused or incomplete; no passing evidence recorded')
