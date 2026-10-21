@@ -5,6 +5,25 @@ upgrading. `brain changes <node>` shows the entries this node's coordinator hasn
 `brain due <node>` lists them until `brain changes <node> --seen`. Entry headings are
 `## <date>: <title>`; once released, a heading never changes.
 
+## 2026-10-21: Named verify lanes reuse unchanged job checks
+
+For agents:
+- Nodes may set inline `verify_lanes` (`name: command | globs`, separated by semicolons),
+  or `verify_lanes_from`, a command printing the documented JSON lane map. Hand-backs
+  run affected job lanes and reuse each lane's last green on the same base. Changes to
+  map output, verify configuration, lockfiles or toolchain force every job lane.
+- Each lane records status, duration and a full private log; `brain ready` shows them.
+  Dependencies skip after failure; strict inputs and always-run lanes can force execution.
+  Optional `verify_lanes_check` checks project-owned test coverage. Nightly lanes are left
+  to the complete node `verify` command, which trains/nightlies continue to execute.
+- Train callers can check a packet against its recorded integration base with
+  `ready_state(..., train=True)`; ordinary readiness still requires current main.
+
+After upgrading:
+- Existing nodes need no migration. To opt in, keep a complete `verify` command and add
+  a lane map and coverage gate as described in the home-job skill. Inputs use tracked
+  repo-relative globs with `**`, `*`, `?` and leading `!` exclusions only.
+
 ## 2026-10-21: Core mechanics split into Python modules
 
 For agents:

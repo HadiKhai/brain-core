@@ -1,0 +1,178 @@
+"""Project-declared verify lanes. No project source parsing or third-party glob engine."""
+import hashlib
+import json
+import os
+import platform
+import re
+import shutil
+import shlex
+import subprocess
+import sys
+from pathlib import Path
+
+from . import common
+from . import jobs
+
+
+def glob_regex(pattern):
+    original = pattern
+    if pattern.startswith('!'):
+        pattern = pattern[1:]
+    if (not pattern or pattern.startswith('/') or any(x in pattern for x in '[]{}()\\!')
+            or any(p in ('', '.', '..') for p in pattern.split('/'))):
+        raise ValueError('unsupported lane glob: ' + original)
+    out, i = '', 0
+    while i < len(pattern):
+        c = pattern[i]
+        if pattern[i:i+2] == '**':
+            if (i and pattern[i-1] != '/') or (i+2 < len(pattern) and pattern[i+2] != '/'):
+                raise ValueError('unsupported lane glob: ' + original)
+            if pattern[i+2:i+3] == '/':
+                out += '(?:.*/)?'
+                i += 3
+            else:
+                out += '.*'
+                i += 2
+        else:
+            out += '[^/]*' if c == '*' else '[^/]' if c == '?' else re.escape(c)
+            i += 1
+    return re.compile('^' + out + '$')
+
+
+def matches(path, patterns):
+    positive = [p for p in patterns if not p.startswith('!')]
+    return (any(glob_regex(p).fullmatch(path) for p in positive)
+            and not any(glob_regex(p).fullmatch(path) for p in patterns if p.startswith('!')))
+
+
+def lane_map(n, w, env):
+    fm = n['fm']
+    inline, source = fm.get('verify_lanes', '').strip(), fm.get('verify_lanes_from', '').strip()
+    if inline and source:
+        raise ValueError('use only one of verify_lanes and verify_lanes_from')
+    if not inline and not source:
+        return [], ''
+    if source:
+        proc = subprocess.run(source, shell=True, cwd=w['path'], env=env, capture_output=True)
+        if proc.returncode:
+            raise ValueError('verify_lanes_from failed (exit %d)' % proc.returncode)
+        raw = proc.stdout.decode('utf-8')
+        data = json.loads(raw)
+    elif inline.startswith('['):
+        raw, data = inline, json.loads(inline)
+    else:
+        raw, data = inline, []
+        for item in inline.split(';'):
+            name, sep, rest = item.partition(':')
+            command, pipe, inputs = rest.partition('|')
+            if not sep or not pipe:
+                raise ValueError('verify_lanes needs name: command | input globs')
+            data.append(dict(name=name.strip(), command=command.strip(), inputs=common.lst(inputs)))
+    if not isinstance(data, list) or not data:
+        raise ValueError('lane map must be a nonempty JSON array')
+    lanes, names = [], set()
+    for item in data:
+        if not isinstance(item, dict) or set(item) - {'name', 'command', 'inputs', 'requires', 'strict_inputs', 'always', 'schedule'}:
+            raise ValueError('invalid lane map entry')
+        name, command = item.get('name'), item.get('command')
+        if not isinstance(name, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,119}', name) or name in names:
+            raise ValueError('lane names must be unique simple identifiers')
+        if not isinstance(command, str) or not command.strip():
+            raise ValueError('lane command must be nonempty')
+        lane = dict(name=name, command=command, inputs=item.get('inputs', []),
+                    strict_inputs=item.get('strict_inputs', []), requires=item.get('requires', []),
+                    always=item.get('always', False), schedule=item.get('schedule', 'job'))
+        for field in ('inputs', 'strict_inputs', 'requires'):
+            if not isinstance(lane[field], list) or not all(isinstance(x, str) for x in lane[field]):
+                raise ValueError('lane ' + field + ' must be a list of strings')
+        if type(lane['always']) is not bool or lane['schedule'] not in ('job', 'nightly'):
+            raise ValueError('invalid lane always or schedule')
+        for pat in lane['inputs'] + lane['strict_inputs']:
+            glob_regex(pat)
+        lanes.append(lane)
+        names.add(name)
+    ordered = []
+    while len(ordered) < len(lanes):
+        available = [l for l in lanes if l not in ordered and set(l['requires']) <= {x['name'] for x in ordered}]
+        if not available:
+            raise ValueError('lane requirements are unknown or cyclic')
+        ordered.extend(available)
+    for lane in ordered:
+        if lane['schedule'] != 'nightly' and any(l['name'] in lane['requires'] and l['schedule'] == 'nightly' for l in ordered):
+            raise ValueError('job lane cannot require a nightly lane')
+    return ordered, hashlib.sha256(raw.encode()).hexdigest()
+
+
+def tracked_files(w):
+    proc = common.git('ls-files', '--stage', '-z', cwd=w['path'])
+    if proc.returncode or '\ufffd' in proc.stdout:
+        raise ValueError('cannot enumerate lane inputs losslessly')
+    found = {}
+    for row in proc.stdout.split('\0'):
+        if not row:
+            continue
+        meta, path = row.split('\t', 1)
+        mode, oid, stage = meta.split()
+        if stage != '0':
+            raise ValueError('unmerged lane input')
+        file = Path(w['path']) / path
+        if mode == '160000':
+            value = oid
+        else:
+            try:
+                value = hashlib.sha256(file.read_bytes()).hexdigest()
+                if file.is_symlink():
+                    value += ':' + os.readlink(file)
+            except OSError:
+                raise ValueError('unreadable lane input: ' + path)
+        found[path] = [mode, value]
+    return found
+
+
+LOCK_NAMES = {'package-lock.json', 'npm-shrinkwrap.json', 'yarn.lock', 'pnpm-lock.yaml', 'bun.lock', 'bun.lockb',
+              'poetry.lock', 'uv.lock', 'Pipfile.lock', 'Cargo.lock', 'Gemfile.lock', 'composer.lock', 'go.sum',
+              '.tool-versions', '.python-version', '.node-version', '.nvmrc', 'rust-toolchain.toml',
+              'package.json', 'pyproject.toml', 'Pipfile', 'Cargo.toml', 'go.mod', 'Gemfile',
+              '.npmrc', '.yarnrc', '.yarnrc.yml', 'requirements.txt', 'requirements-dev.txt'}
+
+
+def snapshot(n, w, env, inputs):
+    lanes, map_hash = lane_map(n, w, env)
+    if not lanes:
+        return None
+    files = tracked_files(w)
+    tools = []
+    # PATH and interpreter identity are part of the toolchain, as are standard project pins.
+    commands = [lane['command'] for lane in lanes] + [n['fm'].get('verify_lanes_check', '')]
+    executables = {'sh', 'python3', 'node', 'npm', 'yarn', 'pnpm', 'cargo', 'go', 'ruby', 'java'}
+    for command in commands:
+        try:
+            words = shlex.split(command)
+            if words and '=' not in words[0] and '/' not in words[0]:
+                executables.add(words[0])
+        except ValueError:
+            pass  # The shell reports malformed commands as an ordinary lane failure.
+    for tool in sorted(executables):
+        path = shutil.which(tool, path=env.get('PATH'))
+        try:
+            stat = Path(path).stat() if path else None
+            tools.append([tool, path, [stat.st_size, stat.st_mtime_ns] if stat else None])
+        except OSError:
+            raise ValueError('cannot inspect verify toolchain')
+    context = jobs.digest([map_hash, sorted((k, v) for k, v in n['fm'].items() if k.startswith('verify')),
+                           sorted((k, v) for k, v in files.items() if Path(k).name in LOCK_NAMES or Path(k).name.endswith('.lock')),
+                           platform.platform(), sys.version, env.get('PATH'), tools,
+                           sorted((k, v) for k, v in env.items() if k in {
+                               'VIRTUAL_ENV', 'JAVA_HOME', 'RUSTUP_TOOLCHAIN', 'NODE_OPTIONS',
+                               'PYTHONPATH', 'CC', 'CXX', 'CFLAGS', 'CXXFLAGS', 'LDFLAGS'})])
+    hashes = {l['name']: jobs.digest([inputs, sorted((p, v) for p, v in files.items() if matches(p, l['inputs']))]) for l in lanes}
+    return dict(lanes=lanes, map_hash=map_hash, context=context, hashes=hashes, files=files)
+
+
+def changed_since(cwd, head, current):
+    if not isinstance(head, str) or not re.fullmatch(r'[0-9a-f]{40}|[0-9a-f]{64}', head):
+        return None
+    if common.git('merge-base', '--is-ancestor', head, current, cwd=cwd).returncode:
+        return None
+    proc = common.git('diff', '--name-only', '-z', '--no-renames', '--ignore-submodules=none', head, current, cwd=cwd)
+    return proc.stdout.rstrip('\0').split('\0') if proc.returncode == 0 else None
