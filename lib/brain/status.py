@@ -464,6 +464,20 @@ def machine_due_items(inst, nodes, state, items):
 def cmd_due(a):
     inst = _m_nodes.load()
     nodes = [inst.node(a.id)] if a.id else inst.nodes()
+    if getattr(a, 'since_wake', False):
+        from . import watch as _m_watch
+        try:
+            items = _m_watch.watch_since_wake(inst, nodes)
+        except (OSError, ValueError):
+            _m_common.die('due: invalid or unreadable wake history; retained for repair')
+        if a.quiet:
+            sys.exit(1 if items else 0)
+        if a.json:
+            print(json.dumps(items, indent=2))
+        else:
+            for i in items:
+                print(f"{i['node']}: {i['kind']}: {i['text']}")
+        return
     root_tick = (a.id or "root") == "root" and not a.quiet
     if root_tick:
         _m_upgrade.core_update(inst)  # refresh the daily answer the inbox reports
@@ -507,7 +521,7 @@ def cmd_due(a):
         items = [i for i in items if i["kind"] != "machine"] + [
             {"node": a.id or "root", "kind": "machine", "text": _m_machine.machine_summary(state)}]
     if a.id == "root":
-        # Root routes settlement backlogs; child handbacks/merges remain child-owned.
+        # Retain the informational descendant backlog in the ordinary due view.
         items += [item for n in inst.nodes() if n["id"] != "root"
                   for item in due_items(inst, n, include_stale=False) if item["kind"] == "unsettled-threads"]
     if a.id == "root":

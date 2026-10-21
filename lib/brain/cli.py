@@ -257,6 +257,7 @@ def main():
             "wins over what transcripts show"))
     cmd("rotate", _m_rotation.cmd_rotate, "prepare a file-based coordinator handover; prints host steps", "id")
     cmd("due", _m_status.cmd_due, "coordinator actions and machine holds; empty means no output",
+        opt("--since-wake", action="store_true", help="file-only wake items absent from this coordinator's last delivered wake"),
         opt("--machine", action="store_true", help="also show informational machine readings, even without node actions"),
         opt("id", nargs="?"), opt("--json", action="store_true"),
         opt("--quiet", action="store_true", help="no output; exit 1 for node actions, including its held work, 0 otherwise"))

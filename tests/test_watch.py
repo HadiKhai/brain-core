@@ -26,6 +26,150 @@ class Watcher(Scenario):
         with contextlib.redirect_stdout(io.StringIO()):
             self.m.watch_once(self.inst)
 
+    def since(self, node='root'):
+        with mock.patch.object(self.m, 'load', return_value=self.inst), \
+                mock.patch.object(self.m, 'request_wake') as request, \
+                mock.patch.object(self.m, 'core_update') as upgrade, \
+                contextlib.redirect_stdout(io.StringIO()) as output:
+            self.m.cmd_due(argparse.Namespace(id=node, since_wake=True, quiet=False, json=True))
+            request.assert_not_called()
+            upgrade.assert_not_called()
+        return json.loads(output.getvalue())
+
+    def test_delivery_history_and_since_wake_track_ids_only_after_success(self):
+        inbox = self.root / 'inbox.md'
+        inbox.write_text('- fabricated first item\n')
+        n = self.inst.node('root')
+        directory = self.m.wake_directory(self.inst, n)
+        with mock.patch.object(self.m, 'changes_due', return_value=[]), \
+                mock.patch.object(self.m, 'wake_start'), mock.patch.object(self.m, 'WAKE_INTERVAL', 0):
+            first = self.since()
+            self.assertEqual(len(first), 1)
+            self.watch()
+            self.assertEqual(self.since(), first)  # durable enqueue is not delivery
+            with mock.patch.object(self.m, 'wake_send', return_value=False):
+                self.m.wake_drain(self.inst, n, once=True)
+            self.assertEqual(self.since(), first)
+            self.assertFalse((directory / 'history.json').exists())
+            with mock.patch.object(self.m, 'wake_send', return_value=True) as send:
+                self.m.wake_drain(self.inst, n, once=True)
+                self.assertEqual(self.since(), [])
+                inbox.write_text(inbox.read_text() + '- fabricated second item\n')
+                new = self.since()
+                self.assertEqual(len(new), 1)
+                self.assertNotEqual(new[0]['id'], first[0]['id'])
+                self.watch()
+                self.m.wake_drain(self.inst, n, once=True)
+                self.assertEqual(send.call_count, 2)
+            history = self.m.wake_history(directory)
+            self.assertEqual([r['items'] for r in history], [
+                [{'id': first[0]['id'], 'kind': 'inbox'}], [{'id': new[0]['id'], 'kind': 'inbox'}]])
+            self.assertNotIn('fabricated', (directory / 'history.json').read_text())
+            self.assertEqual([i['id'] for i in self.since()], [first[0]['id']])  # last delivery, not all history
+            self.assertNotIn('.brain/', self.git('ls-files', cwd=self.root))
+
+    def test_child_local_work_never_wakes_root_but_questions_and_failures_do(self):
+        self.b(self.root, 'new', 'sample', '--title', 'Sample')
+        self.inst = self.m.Instance(self.root)
+        child, root = self.inst.node('sample'), self.inst.node('root')
+        row = {**dict.fromkeys(self.m.JOB_COLS, ''), 'Job': 'job/closed',
+               'Started': '2020-01-01T10:00Z', 'Ended': '2020-01-01T11:00Z', 'Outcome': 'closed'}
+        self.m.write_jobs(self.inst, child, [row])
+        directory = self.m.wake_directory(self.inst, root)
+        with mock.patch.object(self.m, 'changes_due', return_value=[]), \
+                mock.patch.object(self.m, 'wake_start'), mock.patch.object(self.m, 'WAKE_INTERVAL', 0), \
+                mock.patch.object(self.m, 'wake_send', return_value=True) as send:
+            self.assertIn('unsettled-threads', [i['kind'] for i in self.m.watch_items(self.inst, child)])
+            self.watch()
+            self.m.wake_drain(self.inst, root, once=True)
+            self.assertEqual(send.call_count, 0)
+            original = self.m.watch_items
+            def budget(inst, n):
+                return original(inst, n) + ([{'id': 'a' * 64, 'kind': 'budget', 'text': 'over budget'}]
+                                             if n['id'] == 'sample' else [])
+            with mock.patch.object(self.m, 'watch_items', side_effect=budget):
+                self.watch()
+                self.assertEqual(self.since(), [])
+            # A child with a coordinator receives its own settlement work.
+            self.inst.local_of('sample').update(coordinator='fixture-child', wake='fixture-send')
+            self.watch()
+            self.assertTrue(list(self.m.wake_directory(self.inst, child).glob('*.pending')))
+            self.inst.local_of('sample').pop('coordinator')
+            line = '- 2020-01-01 00:00 +00:00 from runtime: Host question: Choose blue <!-- host-question:abc -->'
+            (child['dir'] / 'inbox.md').write_text(line + '\n')
+            self.watch()
+            self.assertIn('overdue-question', [i['kind'] for i in self.since()])
+            self.m.wake_drain(self.inst, root, once=True)
+            self.assertEqual(send.call_count, 1)
+            self.watch()
+            self.m.wake_drain(self.inst, root, once=True)
+            self.assertEqual(send.call_count, 1)
+            self.assertIn('overdue-question', [i['kind'] for i in self.m.wake_history(directory)[-1]['items']])
+            (child['dir'] / 'inbox.md').write_text(line + '\n- from watcher: worker run failed (provider error)\n')
+            self.watch()
+            self.m.wake_drain(self.inst, root, once=True)
+            self.assertEqual(send.call_count, 2)
+
+    def test_overdue_block_is_one_wake_even_as_age_advances(self):
+        status = self.root / 'status.md'
+        with status.open('a') as stream:
+            stream.write('\n## Blocked\n- Choose blue; since: 2020-01-01T00:00Z; recommendation: blue; default: gray\n')
+        n = self.inst.node('root')
+        with mock.patch.object(self.m, 'changes_due', return_value=[]), \
+                mock.patch.object(self.m, 'wake_start'), mock.patch.object(self.m, 'WAKE_INTERVAL', 0), \
+                mock.patch.object(self.m, 'wake_send', return_value=True) as send:
+            self.watch()
+            self.m.wake_drain(self.inst, n, once=True)
+            self.assertEqual(send.call_count, 1)
+            import datetime
+            later = self.inst.now_dt() + datetime.timedelta(days=2)
+            with mock.patch.object(self.inst, 'now_dt', return_value=later):
+                self.watch()
+                self.m.wake_drain(self.inst, n, once=True)
+                self.assertEqual(self.since(), [])
+            self.assertEqual(send.call_count, 1)
+
+    def test_direct_question_delivery_history_and_corrupt_history(self):
+        n = self.inst.node('root')
+        episode = 'a' * 32
+        (self.root / 'inbox.md').write_text('- question <!-- wake:' + episode + ' --> <!-- host-question:abc -->\n')
+        with mock.patch.object(self.m, 'changes_due', return_value=[]), \
+                mock.patch.object(self.m, 'wake_start'), mock.patch.object(self.m, 'wake_send', return_value=True):
+            first = self.since()
+            self.assertTrue(self.m.request_wake(self.inst, n, 'wake:' + episode))
+            self.m.wake_drain(self.inst, n, once=True)
+            self.assertEqual(self.since(), [])
+            path = self.m.wake_directory(self.inst, n) / 'history.json'
+            self.assertEqual(self.m.wake_history(path.parent)[-1]['items'][0]['id'], first[0]['id'])
+            # The next direct question is handled while delivery waits. Its trigger survives.
+            (self.root / 'inbox.md').write_text('- second <!-- wake:' + 'b' * 32 + ' --> <!-- host-question:def -->\n')
+            second = self.since()
+            self.assertTrue(self.m.request_wake(self.inst, n, 'wake:' + 'b' * 32))
+            (self.root / 'inbox.md').write_text('')
+            with mock.patch.object(self.m, 'WAKE_INTERVAL', 0):
+                self.m.wake_drain(self.inst, n, once=True)
+            self.assertEqual(self.m.wake_history(path.parent)[-1]['items'],
+                             [{'id': second[0]['id'], 'kind': 'inbox'}])
+            path.write_text('{torn')
+            with self.assertRaises(SystemExit):
+                self.since()
+            self.assertEqual(path.read_text(), '{torn')
+
+    def test_history_capture_failure_cannot_block_question_delivery(self):
+        n = self.inst.node('root')
+        with mock.patch.object(self.m, 'watch_groups', side_effect=ValueError('unrelated broken node')), \
+                mock.patch.object(self.m, 'wake_start'), mock.patch.object(self.m, 'wake_send', return_value=True) as send:
+            self.assertTrue(self.m.request_wake(self.inst, n, 'wake:' + 'a' * 32))
+            directory = self.m.wake_directory(self.inst, n)
+            (directory / 'history.json').write_text('{torn')
+            self.m.wake_drain(self.inst, n, once=True)
+            self.assertEqual(send.call_count, 1)
+            self.assertFalse(list(directory.glob('*.pending')))
+            self.assertEqual(self.m.wake_history(directory)[-1]['items'], [])
+            damaged = list(directory.glob('history-invalid-*.json'))
+            self.assertEqual(len(damaged), 1)
+            self.assertEqual(damaged[0].read_text(), '{torn')
+
     def test_unchanged_new_handback_removed_and_returned_and_stale(self):
         items = [{'kind': 'handback', 'job': 'made-up-job', 'state': 'done', 'text': 'report ready'}]
         with mock.patch.object(self.m, 'due_items', return_value=items), \

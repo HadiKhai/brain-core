@@ -58,7 +58,67 @@ def wake_recorded(inst, n, reason):
     return any((directory / (key + suffix)).exists() for suffix in ('.pending', '.sent'))
 
 
-def request_wake(inst, n, reason):
+def wake_item_refs(items):
+    """Persist identities and kinds only, never excerpts or raw source identifiers."""
+    return sorted({i['id']: {'id': i['id'], 'kind': i['kind']} for i in items}.values(), key=lambda i: i['id'])
+
+
+def wake_history(directory):
+    path = directory / 'history.json'
+    if not path.exists():
+        return []
+    value = json.loads(path.read_text())
+    if not isinstance(value, dict) or value.get('version') != 1 or not isinstance(value.get('deliveries'), list):
+        raise ValueError('invalid wake history')
+    for row in value['deliveries']:
+        if (not isinstance(row, dict) or type(row.get('at')) not in (int, float)
+                or not isinstance(row.get('items'), list)
+                or any(not isinstance(i, dict) or not isinstance(i.get('kind'), str)
+                       or not re.fullmatch(r'[0-9a-f]{64}', str(i.get('id', ''))) for i in row['items'])):
+            raise ValueError('invalid wake history')
+    return value['deliveries']
+
+
+def wake_delivery_items(inst, n, pending):
+    """Legacy/direct requests have empty queue files; resolve their opaque reason keys."""
+    from . import watch as _m_watch
+    refs = []
+    names = set()
+    for path in pending:
+        text = path.read_text()
+        if text:
+            refs.extend(json.loads(text)['items'])
+        else:
+            names.add(path.stem)
+    if not names:
+        return wake_item_refs(refs)
+    try:
+        items = _m_watch.watch_groups(inst).get(n['id'], {}).get('items', [])
+    except (Exception, SystemExit):
+        items = []  # legacy metadata recovery must not block a question's transport
+    for i in items:
+        if 'reason' in i:
+            key = hashlib.sha256((i.get('source', n['id']) + '\0' + i['reason']).encode()).hexdigest()
+            if key in names:
+                refs.append(i)
+    return wake_item_refs(refs)
+
+
+def wake_reason_items(inst, n, reason):
+    """Capture a direct question/hand-back before it can be handled during rate wait."""
+    if not reason.startswith(('wake:', 'handback:', 'overdue:', '<!--')):
+        return []  # a manual reason need not correspond to a due item
+    from . import watch as _m_watch
+    target, _ = wake_target(inst, n)
+    try:
+        items = _m_watch.watch_groups(inst).get(target['id'], {}).get('items', [])
+    except (Exception, SystemExit):
+        items = []  # best-effort identity capture cannot suppress the direct wake
+    return wake_item_refs(i for i in items
+                          if i.get('source', target['id']) == n['id'] and i.get('reason') == reason)
+
+
+def request_wake(inst, n, reason, items=None):
     """Fail open, enqueue then detach; never run a transport in the hook's process."""
     try:
         target, command = wake_target(inst, n)
@@ -71,13 +131,19 @@ def request_wake(inst, n, reason):
         delivered = directory / (key + ".sent")
         if delivered.exists() and time.time() - delivered.stat().st_mtime < WAKE_DEDUP_SECONDS:
             return True
-        # Exclusive publication: repeated hooks neither overwrite nor launch more workers.
+        # Publish complete metadata exclusively; an already-running drain may scan now.
         _m_common.safe_target(pending)
+        refs = wake_item_refs(items) if items is not None else wake_reason_items(inst, n, reason)
+        fd, temporary = tempfile.mkstemp(prefix='.request-', dir=directory)
         try:
-            fd = os.open(pending, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-        except FileExistsError:
-            return True
-        os.close(fd)
+            with os.fdopen(fd, 'w') as stream:
+                stream.write(json.dumps({'items': refs}) + '\n')
+            try:
+                os.link(temporary, pending)
+            except FileExistsError:
+                return True
+        finally:
+            os.unlink(temporary)
         wake_start(inst, target)
         return True
     except (Exception, SystemExit):
@@ -260,6 +326,15 @@ def wake_drain(inst, n, once=False):
                     return
                 if not command:
                     return
+                try:
+                    history = wake_history(directory)
+                except (OSError, ValueError):
+                    # Preserve damaged evidence, but never hold a question behind log repair.
+                    broken = directory / 'history.json'
+                    if broken.exists():
+                        broken.replace(directory / ('history-invalid-' + os.urandom(8).hex() + '.json'))
+                    history = []
+                refs = wake_delivery_items(current, target, pending)
                 _m_common.atomic_write(last, str(time.time()))  # failures are rate-limited too
                 try:
                     sent = wake_send(command)
@@ -269,6 +344,9 @@ def wake_drain(inst, n, once=False):
                 except Exception:
                     sent, status = False, "transport error"
                 if sent:
+                    # Only successful transports advance the comparison baseline. Keep 100 deliveries.
+                    _m_common.atomic_write(directory / 'history.json', json.dumps({'version': 1,
+                        'deliveries': (history + [{'at': time.time(), 'items': refs}])[-100:]}) + '\n')
                     for path in pending:  # one generic tick covers all currently queued reasons
                         _m_common.atomic_write(path.with_suffix(".sent"), "delivered\n")
                         path.unlink(missing_ok=True)

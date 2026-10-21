@@ -496,6 +496,14 @@ raise SystemExit(result)
                 m.machine_sample(inst)
         self.assertFalse(json.loads(path.read_text())["episode"])
         self.assertEqual((root / "inbox.md").read_text().count("hold cleared"), 1)
+        self.assertNotIn(' open]', (root / 'inbox.md').read_text())
+        n = inst.node('root')
+        self.assertEqual([i['kind'] for i in m.due_items(inst, n, include_stale=False)], ['machine'])
+        # Handling just the close action cannot reveal the superseded open hold.
+        inbox = root / 'inbox.md'
+        inbox.write_text(''.join(line for line in inbox.read_text().splitlines(keepends=True)
+                                 if not line.rstrip().endswith(' close]')))
+        self.assertEqual(m.due_items(inst, n, include_stale=False), [])
         before = path.read_bytes()
         with mock.patch.object(m.os, "replace", side_effect=OSError("fixture interruption")):
             with self.assertRaises(OSError):

@@ -197,6 +197,38 @@ def watch_state_invalid(inst):
         return True
 
 
+def watch_groups(inst, nodes=None):
+    """The file-only wake queue, grouped by the coordinator who can act on it."""
+    nodes = nodes if nodes is not None else [n for n in inst.nodes() if not n['archived']]
+    groups = {}
+    for n in nodes:
+        # Uncoordinated nodes route actionable work to root; root needs no explicit binding.
+        target, command = _m_hosts.wake_target(inst, n)
+        group = groups.setdefault(target['id'], {'node': target, 'items': [], 'command': command})
+        group['items'].extend({**i, 'node': n['id']} for i in watch_items(inst, n)
+                              if target['id'] == n['id'] or i['kind'] not in
+                              ('unsettled-threads', 'budget', 'job-budget'))
+        root = inst.node('root')
+        for line in _m_status.overdue_questions(inst, n, _m_status.inbox_lines(n)):
+            root_group = groups.setdefault('root', {'node': root, 'items': [],
+                                            'command': _m_hosts.wake_target(inst, root)[1]})
+            root_group['items'].append({'id': watch_digest(['overdue', n['id'], line]),
+                                       'kind': 'overdue-question', 'node': n['id'],
+                                       'reason': 'overdue:' + hashlib.sha256(line.encode()).hexdigest(),
+                                       'text': 'Unanswered question past its threshold; inspect brain due root'})
+    return groups
+
+
+def watch_since_wake(inst, nodes):
+    groups = watch_groups(inst)
+    out = []
+    for n in nodes:
+        previous = _m_hosts.wake_history(_m_hosts.wake_directory(inst, n))
+        seen = {i['id'] for i in previous[-1]['items']} if previous else set()
+        out.extend(i for i in groups.get(n['id'], {}).get('items', []) if i['id'] not in seen)
+    return list({i['id']: i for i in out}.values())
+
+
 def watch_run(inst):
     path = inst.root / '.brain' / 'watch.json'
     state = watch_state(inst)  # our own acknowledgement history always fails closed
@@ -205,20 +237,7 @@ def watch_run(inst):
     failures = set(state.get('failures', []))
     warnings = set(state.get('warnings', []))
     watch_failures(inst, nodes, failures, warnings)
-    groups = {}
-    for n in nodes:
-        # Uncoordinated nodes route actionable work to root; root needs no explicit binding.
-        target, command = _m_hosts.wake_target(inst, n)
-        group = groups.setdefault(target['id'], {'node': target, 'items': [], 'command': command})
-        group['items'].extend(watch_items(inst, n))
-        root = inst.node('root')
-        for line in _m_status.overdue_questions(inst, n, _m_status.inbox_lines(n)):
-            root_group = groups.setdefault('root', {'node': root, 'items': [],
-                                            'command': _m_hosts.wake_target(inst, root)[1]})
-            root_group['items'].append({'id': watch_digest(['overdue', n['id'], line]),
-                                       'kind': 'overdue-question',
-                                       'reason': 'overdue:' + hashlib.sha256(line.encode()).hexdigest(),
-                                       'text': 'Unanswered question past its threshold; inspect brain due root'})
+    groups = watch_groups(inst, nodes)
     current = []
     count = 0
     for group in groups.values():
@@ -231,14 +250,14 @@ def watch_run(inst):
                 if 'reason' in items[key]:
                     origin = inst.node(items[key].get('source', group['node']['id']))
                     if (_m_hosts.wake_recorded(inst, origin, items[key]['reason'])
-                            or _m_hosts.request_wake(inst, origin, items[key]['reason'])):
+                            or _m_hosts.request_wake(inst, origin, items[key]['reason'], items=[items[key]])):
                         seen.add(key)
                         count += 1
                         queued = True
                     added.remove(key)
             # Include item identity in the opaque wake reason; equal counts aren't equal sets.
             reason = f'{len(added)} new items: ' + watch_digest(added)
-            if added and _m_hosts.request_wake(inst, group['node'], reason):
+            if added and _m_hosts.request_wake(inst, group['node'], reason, items=[items[k] for k in added]):
                 seen.update(added)  # acknowledgement means durable queue, not transport success
                 count += len(added)
                 queued = True

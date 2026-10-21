@@ -31,6 +31,30 @@ After upgrading:
 - Retry rehearsals that refused a busy source. Tracked content or real ref changes
   still refuse evidence; no policy or configuration change is required.
 
+## 2026-10-21: Show new wake items and keep child housekeeping local
+
+For agents:
+- `brain due <node> --since-wake` compares the actionable watcher queue with the
+  last successful wake delivery, using stable item ids. `--json` includes those ids;
+  `--quiet` exits 1 when there are new items. Before the first delivery it shows all
+  wake items. It excludes status refresh work and informational machine readings.
+- Each delivered wake records item ids and kinds in the instance's private
+  `.brain/wake/<coordinator>/history.json`, retaining 100 deliveries. Pending or
+  failed wakes do not advance this baseline. Manual wakes without matching items
+  record an empty set. Reading the flag never sends a wake or checks upgrades.
+- Child budgets and unsettled threads stay with their own coordinator. Questions,
+  blocked hand-backs, failures and overdue questions keep their wake routes.
+  An unchanged overdue block keeps its identity as it ages and wakes only once.
+- A heat episode's close notice replaces its open inbox notice. After handling
+  the close, the obsolete hold no longer appears in `due`.
+
+After upgrading:
+- No migration or service installation is needed. Delivery history starts with
+  the next wake. Ordinary `brain due` keeps its full informational view; use
+  `--since-wake` to compare with the most recent delivered set, not all past wakes.
+- For an episode cleared before upgrading, remove both old open and close inbox
+  notices when handling it.
+
 ## 2026-10-21: Corrections carry principle and check tags
 
 For agents:
