@@ -165,24 +165,27 @@ def wake_probe(inst, n, force=False):
         os.fchmod(stream.fileno(), 0o600)
         fcntl.flock(stream, fcntl.LOCK_EX)
         record = wake_read(directory, command, name)
-        if not force and record and 0 <= time.time() - record["at"] < 86400:
+        if not force and record and type(record["status"]) is int and 0 <= time.time() - record["at"] < 86400:
             return record["status"]
         try:
             status = wake_http_status(command)
         except Exception:
-            status = "transport error"
+            (directory / name).unlink(missing_ok=True)
+            return "transport error"
         wake_record(directory, command, status, name)
-        wake_record(directory, command, status)
         return status
 
 
 def wake_diagnostic(inst, n):
     target, command = wake_target(inst, n)
-    record = wake_read(wake_directory(inst, target), command)
-    if not record or type(record["status"]) is int and 200 <= record["status"] < 300:
-        return None
-    status = record["status"]
-    return "last wake delivery refused: HTTP " + str(status) if type(status) is int else "last wake delivery: " + status
+    directory = wake_directory(inst, target)
+    records = [wake_read(directory, command),
+               wake_read(directory, command, "probe-" + wake_binding(command) + ".json")]
+    for record in records:
+        if record and not (type(record["status"]) is int and 200 <= record["status"] < 300):
+            status = record["status"]
+            return "last wake delivery refused: HTTP " + str(status) if type(status) is int else "last wake delivery: " + status
+    return None
 
 
 def wake_drain(inst, n, once=False):
@@ -252,18 +255,19 @@ def wake_drain(inst, n, once=False):
                 _m_common.atomic_write(last, str(time.time()))  # failures are rate-limited too
                 try:
                     sent = wake_send(command)
+                    status = 200 if sent else "delivery failed"
                 except WakeRefused as error:
-                    sent = False
-                    wake_record(directory, command, error.args[0])
+                    sent, status = False, error.args[0]
                 except Exception:
-                    sent = False
-                    wake_record(directory, command, "transport error")
-                else:
-                    wake_record(directory, command, 200 if sent else "delivery failed")
+                    sent, status = False, "transport error"
                 if sent:
                     for path in pending:  # one generic tick covers all currently queued reasons
                         _m_common.atomic_write(path.with_suffix(".sent"), "delivered\n")
                         path.unlink(missing_ok=True)
+                try:
+                    wake_record(directory, command, status)
+                except OSError:
+                    pass  # diagnostic bookkeeping cannot undo a successful delivery
                 if once:
                     return
     except BaseException:

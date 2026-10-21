@@ -11,7 +11,9 @@ For agents:
 - Webhook wakes send a constant User-Agent and the same constant event payload.
 - Due reports the last failed delivery status once per coordinator, without the webhook URL.
 - Check probes bound coordinator webhooks, reusing each binding's result for 24 hours and
-  showing its age. `brain check --live` forces fresh delivery; non-2xx responses fail check.
+  showing its age. `brain check --live` forces fresh delivery; HTTP 4xx/5xx fail check.
+  Transport errors warn and are not cached. `check --fix` only reads cached probe results.
+- Live probes keep the drain's delivery diagnostics intact.
 - `hosts.wake_probe(inst, n)` shares this probe with rehearsal and returns a code or safe error.
 
 After upgrading:

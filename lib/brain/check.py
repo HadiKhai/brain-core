@@ -292,19 +292,33 @@ def cmd_check(a):
         if n["archived"] or target["id"] in seen or not command.startswith(("http://", "https://")):
             continue
         seen.add(target["id"])
-        status = _m_hosts.wake_probe(inst, target, force=getattr(a, "live", False))
         directory = _m_hosts.wake_directory(inst, target)
-        record = _m_hosts.wake_read(directory, command, "probe-" + _m_hosts.wake_binding(command) + ".json")
-        age = max(0, int(time.time() - record["at"])) if record else 0
+        name = "probe-" + _m_hosts.wake_binding(command) + ".json"
+        # --fix owns the instance lock: it may read results, never wait/send.
+        if a.fix:
+            record = _m_hosts.wake_read(directory, command, name)
+            status = record["status"] if record else "not probed; run brain check"
+        else:
+            status = _m_hosts.wake_probe(inst, target, force=getattr(a, "live", False))
+            record = _m_hosts.wake_read(directory, command, name)
+        age = f"result age {max(0, int(time.time() - record['at']))}s" if record else "not cached"
         result = "HTTP " + str(status) if type(status) is int else status
-        line = f"{target['id']}: wake probe {result} (result age {age}s)"
-        if type(status) is int and 200 <= status < 300:
+        line = f"{target['id']}: wake probe {result} ({age})"
+        if type(status) is int and 400 <= status < 600:
+            problems.append(line)
+        elif type(status) is int and 200 <= status < 300:
             print("✓ " + line)
+        else:
+            warnings.append(line)
+        delivery = _m_hosts.wake_read(directory, command)
+        if delivery and delivery["status"] != status and not (
+                type(delivery["status"]) is int and 200 <= delivery["status"] < 300):
             diagnostic = _m_hosts.wake_diagnostic(inst, target)
             if diagnostic:
-                problems.append(f"{target['id']}: {diagnostic}")
-        else:
-            problems.append(line)
+                if type(delivery["status"]) is int and 400 <= delivery["status"] < 600:
+                    problems.append(f"{target['id']}: {diagnostic}")
+                else:
+                    warnings.append(f"{target['id']}: {diagnostic}")
     for w in warnings:
         print(f"! {w}")
     if problems:
