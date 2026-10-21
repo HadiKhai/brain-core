@@ -5,6 +5,24 @@ upgrading. `brain changes <node>` shows the entries this node's coordinator hasn
 `brain due <node>` lists them until `brain changes <node> --seen`. Entry headings are
 `## <date>: <title>`; once released, a heading never changes.
 
+## 2026-10-21: Machine care and shared verify slots
+
+For agents:
+- New heavy work waits through sustained load, thermal pressure, low free memory or disk.
+  Worktree creation and fresh verifies gate themselves; run `brain heavy` before other heavy work.
+- Full verifies share a machine-wide FIFO queue: two by day, one at night. Waiting reports
+  progress; commands, environment, stdin and exit status stay intact. Running work is left alone.
+- Ordinary due reports only this node's held/queued work or one root episode inbox action;
+  busy-machine facts stay in `due --machine`, status snapshots and the live view. `brain machine
+  sample` records a bounded private window; active heat episodes raise one inbox notice.
+
+After upgrading:
+- Configure thresholds in `~/.local/state/brain/machine-care.json` if defaults do
+  not fit the machine. See the coordinator role's Machine care section; remove copied brief rules.
+- `brain machine install` previews the minute sampler; installation needs operator consent
+  and `--yes`. Ordinary commands do not install a service. The wake integration call site is
+  marked for the separate wake job; sampling itself never calls an LLM.
+
 ## 2026-10-20: Runtime questions reach the inbox
 
 For agents:

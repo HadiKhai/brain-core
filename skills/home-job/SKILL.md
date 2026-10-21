@@ -86,3 +86,49 @@ stated; never run a polling loop in an agent.
 
 Never merge, push to a shared branch, deploy or delete a branch without explicit consent
 (axiom 24). Several jobs can run at once; each has its own worktree and port.
+
+
+## Machine care is core behaviour
+
+Before starting heavy work outside `brain wt add` or a fresh job verify, run `brain heavy --node <node>`.
+Those two commands already wait for machine admission. Never start a replacement to bypass
+held work. Running work is left alone. A one-minute load spike does not hold work. With fresh
+sampler history, five consecutive minutes of high five-minute load, or three minutes of
+unresolved thermal warning, hold new heavy work. Without fresh samples, the current five-minute load
+and thermal warning apply immediately. Low free memory or disk also hold admission.
+
+`brain machine` and `brain due --machine` show machine readings, holds and queued work. Full verifies
+share a FIFO queue across every brain using the machine's configuration: two slots by day,
+one overnight (22:00–08:00 in the system timezone, independent of a launcher's `TZ`). They wait with progress, preserving their
+command, environment, stdin and exit status. Existing runs finish even if the limit falls.
+
+Machine policy lives in `~/.local/state/brain/machine-care.json`, outside project homes.
+It is independent of `BRAIN_CONFIG` and `XDG_CONFIG_HOME`, so separate registries share slots. It is a JSON object; omitted keys use these defaults: `load5_per_cpu: 0.8`,
+`memory_free_gb: 8`, `disk_free_gb: 40`, `verify_day: 2`, `verify_night: 1`,
+`night_start: 22`, `night_end: 8`. Default reserves are capped at 25% of total RAM and
+20% of total disk on small machines; explicit settings are honored and impossible settings
+name the configuration to adjust. Override thresholds there, once for the machine;
+do not copy resource rules into node briefs. Equal night hours disable the night interval.
+Unknown measurements are shown as unknown. An unknown thermal reading cannot clear an
+observed thermal warning; three known normal minutes clear an episode. Conservatively,
+one observed warning followed by two unknown minute readings counts as unresolved heat;
+an unavailable reading cannot establish that the warning ended. Initial unknown
+telemetry alone does not invent thermal pressure.
+
+`brain machine sample` is a local, non-LLM sampler. It keeps at most 1,440 readings over
+24 hours in the instance's private `.brain/machine.json`; guard and verify use readings no
+older than three minutes, then fall back to live measurement. A fresh but incomplete
+window uses its latest reading conservatively, so starting the sampler cannot weaken admission. `brain machine install` prints
+a one-minute launchd plist (macOS) or cron line. Only run `install --yes` after operator
+consent; `uninstall` also previews unless `--yes` is given. No service is installed by an
+ordinary command. Heat episode transitions create one committed inbox notice each (one opening, one clearing);
+ordinary `due <node>` shows a machine action only for that node's queued/held start. Root aggregates this brain's waiting work into one line. Episode transitions use the single root inbox action until handled; they never create a line per child.
+Other load and queue counts stay in `due --machine`, the live view and status snapshots. `due --quiet`
+checks the same node actions, including its own held start, so another node's load cannot wake an idle coordinator. The marked `machine_wake` call site awaits the core wake integration.
+Wait progress reports changes and a heartbeat each minute. Keep long waits and hand-backs
+in a persistent terminal session; preserve the queued process rather than letting an agent
+tool timeout kill it and starting a replacement. A busy instance minute skips sampling;
+missing/stale history still gets a live admission check. Invalid policy keeps diagnostics
+readable and holds queued heavy work in place until repaired. Episode delivery checks
+instance/Git links before committing; unsafe metadata keeps the notice pending. Tests inject fabricated readings;
+never generate load or heat to test the guard.
