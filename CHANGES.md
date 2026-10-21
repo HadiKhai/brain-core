@@ -23,6 +23,22 @@ After upgrading:
 - Transcript scanning now walks backward in chunks to the last operator message, capped at
   four MiB per stop; questions beyond that cap rely on host pending checks.
 
+## 2026-10-20: Retained verify output and progress
+
+For agents:
+- Fresh `handback --state done --reviews N` and `ready --record` verify runs print a private
+  0600 log path under the node's `job-handbacks/` folder. Never-name words are redacted as output
+  is written; logs are ignored by instance Git. Progress reports elapsed time and output counts every five seconds, including silence.
+- Failures print each failing lane's last 15 lines and the overall tail. Prefix each lane's output
+  with `[lane NAME]` and mark failure with `FAIL`, `FAILED`, `FAILURE`, `ERROR`, or `exit N`
+  (nonzero). Unmarked output falls back to the overall tail. Five logs per job are retained.
+- Verify evidence reuse is unchanged; a reused green run creates no new log or execution.
+
+After upgrading:
+- The first fresh handback adds the private-log Git exclusion. Until then, `brain check` reports
+  the missing exclusion; `brain check --fix` adds it too. Add lane prefixes to parallel verify
+  scripts to get separate tails.
+
 ## 2026-10-20: History from folders named as the node's
 
 For agents:
