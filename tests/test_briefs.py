@@ -29,6 +29,43 @@ from scenario import Scenario, AutonomyProject, shlex_quote
 
 
 class WorkerBriefs(Scenario):
+    def test_hire_branch_names_the_same_worktree_and_ports_as_brief(self):
+        r = self.init("alice")
+        home = self.repo(self.tmp / "code" / "app")
+        self.b(r, "new", "app", "--title", "App", "--home", str(home))
+        self.b(r, "set", "app", "runtime=codex")
+        self.b(r, "specialist", "new", "qa", "--title", "QA", "--runtime", "codex")
+        for ports in (1, 3):
+            with self.subTest(ports=ports):
+                self.b(r, "set", "app", f"ports={ports}")
+                branch = f"job-{ports}"
+                self.b(r, "wt", "add", "app", branch)
+                args = ("--branch", branch, "--task", "test it", "--model", "sample-model")
+                brief = self.b(r, "brief", "app", *args)
+                hire = self.b(r, "hire", "qa", "app", *args)
+                run_line = next(line for line in brief.splitlines() if line.startswith("Run in:"))
+                self.assertIn(run_line, hire.splitlines())
+                local = json.loads((r / ".brain" / "local.json").read_text())
+                port = local["nodes"]["app"]["worktrees"][branch]["port"]
+                expected_ports = f"port {port}" if ports == 1 else f"ports {port}-{port + ports - 1}"
+                self.assertTrue(run_line.endswith("  ·  " + expected_ports), run_line)
+        # Without a branch, keep the existing home-based specialist brief.
+        hire = self.b(r, "hire", "qa", "app", "--task", "test it")
+        self.assertIn(f"Run in: {home}  ·  runtime: codex", hire)
+        self.assertNotIn("  ·  branch ", hire)
+
+    def test_hire_branch_refuses_unknown_or_missing_worktrees(self):
+        r = self.init("alice")
+        home = self.repo(self.tmp / "code" / "app")
+        self.b(r, "new", "app", "--title", "App", "--home", str(home))
+        self.b(r, "specialist", "new", "qa", "--title", "QA")
+        out = self.b(r, "hire", "qa", "app", "--branch", "missing", "--task", "test it", ok=False)
+        self.assertIn("no worktree for missing", out)
+        self.b(r, "wt", "add", "app", "job")
+        shutil.rmtree(self.tmp / "code" / "app-work" / "worktrees" / "job")
+        out = self.b(r, "hire", "qa", "app", "--branch", "job", "--task", "test it", ok=False)
+        self.assertIn("the worktree for job is gone", out)
+
     def test_a_brief_carries_the_job_its_limits_and_the_hand_back(self):
         r = self.init("alice")
         home = self.repo(self.tmp / "code" / "app")

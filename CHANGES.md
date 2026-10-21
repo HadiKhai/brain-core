@@ -5,6 +5,18 @@ upgrading. `brain changes <node>` shows the entries this node's coordinator hasn
 `brain due <node>` lists them until `brain changes <node> --seen`. Entry headings are
 `## <date>: <title>`; once released, a heading never changes.
 
+## 2026-10-21: Hired specialists run in the named job worktree
+
+For agents:
+- `brain hire --branch <branch>` now names the registered job worktree, branch
+  and port block in its run line, just as `brain brief --branch` does. An unknown
+  branch or a missing worktree is refused rather than pointing at the home.
+
+After upgrading:
+- Run `brain wt add <node> <branch>` first if the job has no registered worktree.
+- Regenerate specialist briefs for branch jobs before launching them. Hires
+  without `--branch` keep their existing home-based run line.
+
 ## 2026-10-21: Route jobs by declared class and effort
 
 For agents:

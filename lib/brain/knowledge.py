@@ -14,6 +14,7 @@ from . import jobs as _m_jobs
 from . import nodes as _m_nodes
 from . import spend as _m_spend
 from . import usage as _m_usage
+from . import worktrees as _m_worktrees
 
 
 def usable(item_fm, owners):
@@ -439,10 +440,12 @@ def cmd_hire(a):
             _m_common.die(f"item '{w}' doesn't exist or isn't usable in {target['id']}")
     if target["external"] and not (target["home_path"] and target["home_path"].exists()):
         _m_common.die(f"{target['id']}'s home isn't on this machine (brain set {target['id']} home=<path>)")
-    where = target["home_path"] if target["external"] else target["dir"]
+    where, w = _m_worktrees.job_where(target, a.branch)
     runtime, usage = worker_route(inst, target, a)
+    head = _m_worktrees.job_run_line(where, w, a.branch, runtime, a.model, tilde_home=False)
+    head = head.replace(f"  ·  runtime: {runtime}", f"  ·  runtime: {runtime}  ·  class: {a.job_class}", 1)
     out = [f"Role: worker, hired as specialist `{sp['id']}` ({sp['fm'].get('title', '')}).",
-           f"Run in: {where}  ·  runtime: {runtime}  ·  class: {a.job_class}" + (f"  ·  model: {a.model}" if a.model else ""),
+           head,
            "The rules, agents and skills where you run come first (axiom 7); this brief adds to them.",
            "", a.selection_line, "", _m_guard.redact(usage, _m_guard.never_terms(target)), ""]
     if target["sealed"]:

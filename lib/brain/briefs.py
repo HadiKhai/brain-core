@@ -193,11 +193,7 @@ def cmd_brief(a):
         return import_brief(a)
     inst = _m_nodes.load()
     n = inst.node(a.id)
-    w = n["local"].get("worktrees", {}).get(a.branch) if a.branch else None
-    if a.branch and not w:
-        _m_common.die(_m_guard.redact(f"no worktree for {a.branch} in {n['id']} (brain wt add {n['id']} <branch>)", _m_guard.never_terms(n)))
-    if w and not Path(w["path"]).exists():
-        _m_common.die(f"the worktree for {a.branch} is gone ({_m_common.tilde(w['path'])}); brain wt prune {n['id']}, then add it again")
+    where, w = _m_worktrees.job_where(n, a.branch)
     if n["external"] and not (n["home_path"] and n["home_path"].exists()):
         _m_common.die(f"{n['id']}'s home isn't on this machine (brain set {n['id']} home=<path>): a worker can't run there, "
             "and never in the instance instead")
@@ -211,7 +207,6 @@ def cmd_brief(a):
         a.context_file = saved.get("context_files", [])
     if signal and signal.get("restart") and not (a.task_file or a.task):
         _m_common.die("restart brief has no recorded task; supply the original --task or --task-file")
-    where = Path(w["path"]) if w else (n["home_path"] if n["external"] else n["dir"])
     shared = separation_lines(a, n, a.branch) + peer_lines(a)
     context, context_inputs = [], []
     for name in a.context_file or []:
@@ -233,11 +228,8 @@ def cmd_brief(a):
     if context:
         shared += ["## Shared context", "", "Gathered once by the coordinator; use these findings before rereading sources.", "", *context]
     runtime, usage = _m_knowledge.worker_route(inst, n, a)
-    head = f"Run in: {_m_common.tilde(where)}" + (f"  ·  branch {a.branch}" if a.branch else "") + f"  ·  runtime: {runtime}  ·  class: {a.job_class}"
-    if a.model:
-        head += f"  ·  model: {a.model}"
-    if w:
-        head += f"  ·  {_m_worktrees.port_text(w['port'], w.get('ports', 1))}"
+    head = _m_worktrees.job_run_line(where, w, a.branch, runtime, a.model)
+    head = head.replace(f"  ·  runtime: {runtime}", f"  ·  runtime: {runtime}  ·  class: {a.job_class}", 1)
     task_path = Path(a.task_file).expanduser().resolve() if a.task_file else None
     if task_path:
         _m_guard.no_terms_in(n, str(task_path), "task file path")
