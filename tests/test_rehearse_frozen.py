@@ -113,6 +113,38 @@ class FrozenInputs(RehearsalFixture):
             (self.root / 'core/bin/brain').write_text('changed installed core')
             self.assertIsNone(read())
 
+    def test_core_submodule_metadata_cannot_advance_after_capture(self):
+        self.git('rm', '-qr', 'core', cwd=self.root)
+        nested = self.repo(self.tmp / 'versioned-core')
+        (nested / 'bin').mkdir()
+        (nested / 'bin/brain').write_text('captured core')
+        self.git('add', 'bin', cwd=nested)
+        self.git('commit', '-qm', 'core executable', cwd=nested)
+        self.git('submodule', 'add', '-q', str(nested), 'core', cwd=self.root)
+        self.git('commit', '-qam', 'versioned core', cwd=self.root)
+        original = self.git('rev-parse', 'HEAD', cwd=self.root / 'core').strip()
+        def advance():
+            (self.root / 'core/bin/brain').write_text('new live core')
+            self.git('commit', '-qam', 'upgrade core', cwd=self.root / 'core')
+        def inspect(source, core, *args):
+            self.assertEqual('captured core', (source / 'core/bin/brain').read_text())
+        outcome = self.run_rehearsal(advance, inspect_lane=inspect)
+        self.assertTrue(outcome['passed'], outcome['regressions'])
+        self.assertEqual(original, outcome['installed_core_commit'])
+        self.assertNotEqual(original, rehearsal.installed_core_commit(self.root))
+
+    def test_external_worktree_administration_is_captured_once(self):
+        worktree = self.tmp / 'source-worktree'
+        self.git('worktree', 'add', '-q', '-b', 'snapshot-fixture', str(worktree), cwd=self.root)
+        self.root = worktree
+        original = self.git('rev-parse', 'HEAD', cwd=self.root).strip()
+        def inspect(source, *args):
+            self.assertEqual(original, self.git('rev-parse', 'HEAD', cwd=source).strip())
+        outcome = self.run_rehearsal(
+            lambda: self.git('commit', '--allow-empty', '-qm', 'advance live worktree', cwd=self.root),
+            inspect_lane=inspect)
+        self.assertTrue(outcome['passed'], outcome['regressions'])
+
     def test_identical_baseline_failure_is_named_in_evidence_and_printed(self):
         old = {'brief:0': result('refused: brief limit is exceeded', code=1), 'hook': result()}
         outcome = self.run_rehearsal(outputs=[old, old])

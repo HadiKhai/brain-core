@@ -251,6 +251,58 @@ def copy_tree(source, dest):
     # copy2 creates independent inodes, including for source hard links.
     shutil.copytree(source, dest, symlinks=True)
     relocate_links(source, dest)
+    capture_gitfiles(source, dest)
+
+
+def capture_gitfiles(source, dest):
+    """Capture external administration before this copy operation returns.
+
+    Administration already copied with the tree (or another common directory)
+    must be reused, not fetched again from a moving live submodule/worktree.
+    """
+    mappings = [(Path(os.path.abspath(source)), dest)]
+    def captured(path):
+        path = Path(os.path.abspath(path))
+        for original, private in sorted(mappings, key=lambda pair: len(str(pair[0])), reverse=True):
+            try:
+                return private / path.relative_to(original)
+            except ValueError:
+                pass
+        return None
+    for dp, dirs, files in os.walk(dest, followlinks=False):
+        dirs[:] = [name for name in dirs if name != '.git']
+        metadata = Path(dp) / '.git'
+        if '.git' not in files or metadata.is_symlink():
+            continue
+        original_repo = source / Path(dp).relative_to(dest)
+        own = Path(os.path.abspath(validate_git_metadata(original_repo)))
+        common = (Path(os.path.abspath(own / (own / 'commondir').read_text().strip()))
+                  if (own / 'commondir').is_file() else own)
+        private_common = captured(common)
+        metadata.unlink()
+        if private_common is not None:
+            if not private_common.is_dir():
+                raise RehearsalError('captured Git administration unavailable')
+            copy_tree(private_common, metadata)
+        else:
+            copy_tree(common, metadata)
+            mappings.append((common, metadata))
+        private_own = captured(own)
+        for name in ('HEAD', 'index'):
+            origin = (private_own if private_own is not None else own) / name
+            if origin.is_file() and origin != metadata / name:
+                shutil.copy2(origin, metadata / name)
+        # The copied administration's old relative worktree binding is invalid
+        # at its new location. Remove it before any Git discovery in this copy.
+        for mp, md, mf in os.walk(metadata, followlinks=False):
+            if any((Path(mp) / name).is_symlink() for name in md + mf):
+                raise RehearsalError('linked Git metadata refused')
+        (metadata / 'config.worktree').unlink(missing_ok=True)
+        unset = _m_common.git('--git-dir=' + str(metadata), '--work-tree=' + str(Path(dp)),
+                              'config', '--no-includes', '--file', str(metadata / 'config'),
+                              '--unset-all', 'core.worktree', cwd=Path(dp))
+        if unset.returncode not in (0, 5):
+            raise RehearsalError('captured Git worktree binding unavailable')
 
 
 def relocate_links(source, dest):
@@ -318,7 +370,7 @@ def materialize_git(source, dest):
             if name.endswith('.lock'):
                 (Path(dp) / name).unlink()
     for name in ('HEAD', 'index'):
-        if (own / name).is_file():
+        if (own / name).is_file() and own / name != target / name:
             shutil.copy2(own / name, target / name)
     # A copied submodule config can still name its old relative worktree. Bind
     # both directories explicitly while reading it, before replacing that config.
@@ -766,7 +818,7 @@ def rehearse(inst, n, branch):
         frozen = folder / 'source'
         copy_tree(inst.root, frozen)
         validate_frozen_links(frozen)
-        materialize_git(inst.root, frozen)
+        materialize_git(frozen, frozen)
         # The copy is common fixed input, not an atomic historical snapshot.
         # Live writers are irrelevant after preparation; audit only private data.
         baseline_commit = installed_core_commit(frozen)
