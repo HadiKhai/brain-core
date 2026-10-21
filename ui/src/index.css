@@ -636,3 +636,4 @@ svg.searching .gnode:not(.match):not(.selected) { opacity: 0.28; }
 .reader-trigger { justify-content: flex-start !important; }
 [data-slot="button"].bg-primary:hover, .primary-link:hover { background: color-mix(in srgb, var(--primary) 86%, #000) !important; filter: none; }
 .dark [data-slot="button"].bg-primary:hover, .dark .primary-link:hover { background: color-mix(in srgb, var(--primary) 86%, #fff) !important; }
+[data-slot="input-group-control"]:focus-visible, .picker-search input:focus-visible { outline: none; }

@@ -129,7 +129,7 @@ export function Graph({ s, go }: { s: RecordData; go: Go }) {
             <Button size="sm" variant="outline" onClick={() => open(chosen)}>{chosen.kind === "node" ? "Open project" : chosen.kind === "specialist" ? "Open specialists" : "Open learnings"}</Button>
           </div>}
           {query.trim() ? <>
-            <p className="results-meta" role="status">{found.state === "loading" ? "Searching…" : `${found.total} ${found.total === 1 ? "match" : "matches"}`}</p>
+            <p className="results-meta" role="status">{found.state === "loading" ? "Searching…" : ((n) => `${n} ${n === 1 ? "match" : "matches"}`)(found.items.filter((f) => f.kind !== "job").length)}</p>
             <div className="rows">{found.items.filter((f) => f.kind !== "job").slice(0, 12).map((f) => (
               <Button variant="ghost" className="row match-row" data-item key={f.kind + f.id} onClick={() => focus(f.kind + ":" + f.id)}>
                 <span className={"swatch kind-" + f.kind} />
