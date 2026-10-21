@@ -42,8 +42,9 @@ After upgrading:
 
 For agents:
 - Send coordinators only start, done, blocked or question. Coordinate shared commits directly with peers named in the brief.
-- `brain msg <node> <kind> "<one line>"` formats branch/report context for host delivery. Hand-back remains available.
-- Worker Stop hooks warn once about observed other sends, without holding the turn or saving message text.
+- `brain msg <node> <kind> "<one line>"` adds known branch/report context for host delivery. Hand-back remains available.
+- Briefs state the protocol and `brain msg` rejects other kinds. Small and generic workers can format messages without a ledger job.
+- `brain brief --peer <thread>` names a direct shared-commit peer; include it in both worker briefs.
 
 After upgrading:
 - Re-read the worker/coordinator roles. Name peer threads in shared-commit briefs; no migration is needed.

@@ -67,7 +67,7 @@ def import_brief(a):
     task = Path(a.task_file).read_text() if a.task_file else (a.task or "")
     if task:
         out += [task, ""]
-    out += _m_knowledge.limits_lines(n)
+    out += peer_lines(a) + _m_knowledge.limits_lines(n)
     branch = import_job_id(home)
     if not _m_jobs.open_job(_m_jobs.read_jobs(n) or [], branch):
         out += [f"Before launching, the coordinator must run `brain jobs {shlex.quote(n['id'])} "
@@ -88,6 +88,17 @@ def import_brief(a):
 
 
 # ---------- past AI conversations about a node ----------
+
+def peer_lines(a):
+    peer = getattr(a, "peer", None)
+    if peer is None:
+        return []
+    if not peer or any(char.isspace() for char in peer):
+        _m_common.die("--peer needs one thread id")
+    if _m_nodes.SECRET_LINE.search(peer):
+        _m_common.die("unsafe peer thread")
+    return [f"Coordinate shared-commit changes directly with thread `{peer}`.", ""]
+
 
 def separation_lines(a, n, branch, default=""):
     """One launch-reason policy for workers, specialists and independent reviewers."""
@@ -126,7 +137,7 @@ def cmd_brief(a):
         _m_common.die(f"{n['id']}'s home isn't on this machine (brain set {n['id']} home=<path>): a worker can't run there, "
             "and never in the instance instead")
     where = Path(w["path"]) if w else (n["home_path"] if n["external"] else n["dir"])
-    shared = separation_lines(a, n, a.branch)
+    shared = separation_lines(a, n, a.branch) + peer_lines(a)
     context, context_inputs = [], []
     for name in a.context_file or []:
         try:
@@ -165,7 +176,7 @@ def cmd_brief(a):
                "No worktree, ledger, reviews or ready packet. Do not edit coordinator files.",
                "This may be the operator's checkout. Do not commit to main unless the task explicitly says so; "
                "shared repository changes need a full job.",
-               f"Send one line via {_m_knowledge.host_send(inst, n, a.to)}: done|blocked|question: <result>; proof: <check/output>. "
+               f"Send one line via {_m_knowledge.host_send(inst, n, a.to)}: <kind>: <result>; proof: <check/output>, using the message protocol above. "
                "Never ask the operator or wait in this thread; send questions too, then end your turn."]
         text = "\n".join(out) + "\n"
         _m_guard.no_terms_in(n, text, "the brief")

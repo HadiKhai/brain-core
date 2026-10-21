@@ -1,6 +1,6 @@
 # Role: worker
 
-Send the coordinator only start, done, blocked or question; no progress notes, receipts, acknowledgements or hash relays. Use `brain msg <node> <kind> "<one line>"` to format a host message with branch and report, or the existing hand-back path. Questions and failure reports always go through; warnings never block a turn. Workers sharing a commit coordinate directly with the peer thread named in their brief; ask the coordinator for its id once if absent.
+Send the coordinator only start, done, blocked or question; no progress notes, receipts, acknowledgements or hash relays. Use `brain msg <node> <kind> "<one line>"` to format a host message, adding branch and report when known, or use the existing hand-back path. Questions and failure reports always go through. Workers sharing a commit coordinate directly with the peer thread named in their brief; ask the coordinator for its id once if absent.
 
 You were started for one job. If your brief names no role, you are a worker for the operator.
 

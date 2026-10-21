@@ -765,11 +765,6 @@ def hook_stop(a):
     if not n:
         return
     try:
-        from . import messages as _m_messages
-        _m_messages.warn_worker_messages(inst, n, data, cwd)
-    except (Exception, SystemExit):
-        pass  # advisory only: never hold a question or failure report
-    try:
         capture_hook_questions(inst, n, data)
     except (Exception, SystemExit):
         pass  # question bookkeeping must not suppress existing reminders or fail a turn

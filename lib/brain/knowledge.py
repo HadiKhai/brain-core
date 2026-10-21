@@ -682,7 +682,7 @@ def handback_lines(inst, n, to=None, who="worker", branch=None):
             "- **Your report must have a Lessons section:** list each lesson, or `none: <reason>`.",
             f"- **A question you can't go on without:** {how} with the question{inbox}, then end your turn.",
             f"- **When you finish, fail or get blocked**, tell your coordinator straight away: {how} with "
-            "`done|blocked|question: <one line>. Report: <path>`. Then end your turn.", ""]
+            "`<kind>: <one line>. Report: <path>` using the message protocol above. Then end your turn.", ""]
 
 
 def report_lines(job=False):

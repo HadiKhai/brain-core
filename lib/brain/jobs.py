@@ -366,8 +366,8 @@ def contract_lines(inst, n, branch, who="worker"):
     budget = _m_spend.contract_budget(text)
     return ["## Contract for this job", "", text, "",
             "Within this contract, act: don't ask for what it authorizes, and use your discretion where it gives it. "
-            "Report starts, results and decisions, not acknowledgements. Hand back (question or blocked) only on a "
-            "stop condition, or for something it says needs consent.", ""] + (
+            "Record results and decisions in the report. Follow the coordinator message protocol below. "
+            "Use the hand-back path for a stop condition or something it says needs consent.", ""] + (
         [f"Its budget is {_m_spend.budget_text(budget)}. `brain jobs {shlex.quote(n['id'])} --branch {shlex.quote(branch)}` "
          "shows what this job has spent so far; check it before long steps, and say in your report how it went "
          "against the budget (`brain handback` prints it).", ""] if budget else [])

@@ -1106,7 +1106,7 @@ class Workflow(Scenario):
         brief = self.b(r, "brief", "a", "--branch", "job", "--task", "Prove it")
         self.assertIn("## Contract for this job", brief)
         self.assertIn("Repair reversible preflight defects.", brief)
-        self.assertIn("not acknowledgements", brief)
+        self.assertIn("no progress notes, receipts, acknowledgements", brief)
         self.assertNotIn("no contract", self.b(r, "jobs", "a"))
         first = self.b(r, "review", "a", "--branch", "job", "--built-by", "claude")
         self.assertNotIn("Earlier rounds", first)

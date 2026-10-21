@@ -179,7 +179,8 @@ def main():
         opt("--why-separate", help="why this concern needs its own agent (or contract ## Why separate)"),
         opt("--allow-unexplained", action="store_true", help="allow an urgent launch without a separation reason"),
         opt("--runtime"), opt("--model", help="job model for scoped usage limits"),
-        opt("--to", help="the thread the worker reports to (default: the node's coordinator)"), opt("--out"))
+        opt("--to", help="the thread the worker reports to (default: the node's coordinator)"),
+        opt("--peer", help="shared-commit peer thread; coordinate directly with it"), opt("--out"))
     cmd("scrub", _m_nodes.cmd_scrub, "filter source data without revealing never-name terms; reads paths or stdin",
         "id", opt("paths", nargs="*"), opt("--check", action="store_true"),
         opt("--metadata", action="store_true", help="file names and identities, not source content"))
