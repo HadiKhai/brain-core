@@ -223,14 +223,24 @@ def job_started(inst, n, branch, runtime):
             inst.commit([], f"{n['id']}: job started")
 
 
-def job_reviewed(inst, n, branch):
+def job_reviewed(inst, n, branch, *, full=True, head="", reason=""):
     with _m_instance.brain_lock(inst):
         rows = ledger_rows(n)
         r = open_job(rows or [], branch)
-        if r:
-            r["Reviews"] = str(int(r.get("Reviews") or 0) + 1)
-            write_jobs(inst, n, rows)
-            inst.commit([], f"{n['id']}: job reviewed")
+        if rows is None:
+            _m_common.die("cannot record review: unrecognized job ledger")
+        if not r:
+            r = {"Job": branch, "Started": inst.now_dt().isoformat(), "Reviews": "0"}
+            rows.append(r)
+        prior = int(r.get("Reviews") or 0)
+        full_prior = int(r.get("Full reviews", r.get("Reviews")) or 0)
+        r["Reviews"] = str(prior + 1)
+        r["Full reviews"] = str(full_prior + int(full))
+        r["Review head"] = head
+        r["Review kind"] = "full" if full else "check-fix"
+        r["Review reason"] = reason
+        write_jobs(inst, n, rows)
+        inst.commit([], f"{n['id']}: job reviewed")
 
 
 def job_ended(inst, n, branch, outcome, commits="", cause="", worktree=None):
@@ -713,7 +723,7 @@ def cmd_jobs(a):
                     print_thread_checklist(n, r)
 
 
-REVIEW_CAP = 3  # rounds, as the review skill says
+REVIEW_CAP = 2  # one full review and one blocker-only fix check; exceptions require a reason
 
 
 def job_advice(inst, n, row):

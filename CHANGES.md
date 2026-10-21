@@ -38,6 +38,20 @@ After upgrading:
 - Read the named paths when readiness refuses. Fix setup rather than spending another full verify
   discovering a first-run env rewrite. The next handback adds private per-path diagnostic evidence.
 
+## 2026-10-21: Reviews use one full round and a fix check
+
+For agents:
+- `brain review` records the round, kind, reviewed head and exception reason in the job ledger.
+  A second full round or any third brief requires `--reason security|schema|privacy`.
+- `--check-fix --findings <prior.json>` includes only prior blockers/majors and the fix range.
+  Findings are JSON objects with severity and text. `--fix-base` overrides the previous head.
+- Each brief reports contract-test gaps, the optional `fitness=<command>` gate and seed lint
+  using guard/scrub. Never-name evidence refuses the brief. Reviewers must report rehearsal
+  on real-shaped copies. `--contract` selects a contract instead of the recorded job contract.
+
+After upgrading:
+- Annotate Done means items with `test: tests/file.py::test_name` or `gap: explanation`.
+  Existing review counts remain counted; use the appropriate exception reason for more rounds.
 
 ## 2026-10-21: Core mechanics split into Python modules
 

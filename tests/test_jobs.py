@@ -354,7 +354,7 @@ class LedgerVersionRegressions(Scenario):
         self.assertIn('"Lessons": "none: mechanical"', self.b(r, "jobs", "a", "--branch", "job"))
         # Also migrate the 12-column v1 files emitted earlier on this feature branch.
         ledger.write_text(text.replace("brain:job-ledger v3", "brain:job-ledger v1"))
-        self.b(r, "review", "a", "--branch", "job", "--built-by", "claude")
+        self.b(r, "review", "a", "--branch", "job", "--built-by", "claude", "--reason", "security")
         out = self.b(r, "jobs", "a", "--branch", "job")
         self.assertIn('"Lessons": "none: mechanical"', out)
         self.assertIn('"Reviews": "1"', out)
@@ -374,8 +374,8 @@ class Measures(Scenario):
         jobs = (r / "nodes" / "app" / "job-ledger.md").read_text()
         self.assertIn("| job-a |", jobs)
         self.assertEqual(self.git("status", "--porcelain", "--", "nodes/app/job-ledger.md", cwd=r).strip(), "")  # committed
-        self.b(r, "review", "app", "--branch", "job-a", "--built-by", "claude")
-        self.b(r, "review", "app", "--branch", "job-a", "--built-by", "claude")
+        self.b(r, "review", "app", "--branch", "job-a", "--built-by", "claude", "--reason", "security")
+        self.b(r, "review", "app", "--branch", "job-a", "--built-by", "claude", "--reason", "security")
         wa = self.tmp / "code" / "app-work" / "worktrees" / "job-a"
         (wa / "a.txt").write_text("a\n")
         self.git("add", "a.txt", cwd=wa); self.git("commit", "-qm", "A", cwd=wa)
@@ -397,7 +397,7 @@ class Measures(Scenario):
         self.assertIn("open  job-c", self.b(r, "jobs", "app"))
         self.assertIn("✓", self.b(r, "check"))
         self.b(r, "wt", "add", "app", "job|pipe")                  # git allows it; the row must still be found
-        self.b(r, "review", "app", "--branch", "job|pipe", "--built-by", "claude")
+        self.b(r, "review", "app", "--branch", "job|pipe", "--built-by", "claude", "--reason", "security")
         self.b(r, "wt", "rm", "app", "job|pipe")
         self.assertIn("job|pipe", (r / "nodes" / "app" / "job-ledger.md").read_text().replace("\\|", "|"))
         self.assertNotIn("open  job|pipe", self.b(r, "jobs", "app"))
@@ -437,7 +437,7 @@ class Measures(Scenario):
         st = r / "nodes" / "app" / "status.md"
         st.write_text(st.read_text() + "\n- the coordinator's edit, not committed yet\n")
         ps = [subprocess.Popen([sys.executable, str(r / "core" / "bin" / "brain"), "review", "app", "--branch", "job-a",
-                                "--built-by", "claude"], cwd=r, env=self.env, stdout=subprocess.DEVNULL,
+                                "--built-by", "claude", "--reason", "security"], cwd=r, env=self.env, stdout=subprocess.DEVNULL,
                                stderr=subprocess.PIPE, text=True) for _ in range(16)]
         errs = [p.communicate()[1] for p in ps]
         self.assertEqual([p.returncode for p in ps], [0] * 16, errs)
@@ -930,7 +930,7 @@ class Workflow(Scenario):
         self.assertIn("Why a separate agent: Dedicated test expertise", self.b(r, *hire,
                       "--why-separate", "Dedicated test expertise"))
         self.assertIn("needs a reason", self.b(r, *hire, "--why-separate", "", ok=False))
-        review = ("review", "a", "--branch", "job", "--base", "main", "--built-by", "codex")
+        review = ("review", "a", "--branch", "job", "--base", "main", "--built-by", "codex", "--reason", "security")
         self.assertIn("Why a separate agent: Independent second-runtime review.", self.b(r, *review))
         self.assertIn("Why a separate agent: Check independently", self.b(r, *review,
                       "--why-separate", "Check independently"))
@@ -1108,16 +1108,16 @@ class Workflow(Scenario):
         self.assertIn("Repair reversible preflight defects.", brief)
         self.assertIn("not acknowledgements", brief)
         self.assertNotIn("no contract", self.b(r, "jobs", "a"))
-        first = self.b(r, "review", "a", "--branch", "job", "--built-by", "claude")
+        first = self.b(r, "review", "a", "--branch", "job", "--built-by", "claude", "--reason", "security")
         self.assertNotIn("Earlier rounds", first)
         self.assertIn("## The job's contract", first)
         self.assertIn("All cases pass", first)
-        second = self.b(r, "review", "a", "--branch", "job", "--built-by", "claude")
+        second = self.b(r, "review", "a", "--branch", "job", "--built-by", "claude", "--reason", "security")
         self.assertIn("This is review round 2", second)
         self.assertIn("same kind of problem everywhere", second)
         self.assertNotIn("caps reviews", second)
-        self.assertIn("caps reviews at 3 rounds", self.b(r, "review", "a", "--branch", "job", "--built-by", "claude"))
-        self.b(r, "review", "a", "--branch", "job", "--built-by", "claude")
+        self.assertIn("This is review round 3", self.b(r, "review", "a", "--branch", "job", "--built-by", "claude", "--reason", "security"))
+        self.b(r, "review", "a", "--branch", "job", "--built-by", "claude", "--reason", "security")
         self.assertIn("4 review rounds, over the cap", self.b(r, "jobs", "a"))
         status = r / "nodes/a/status.md"
         text = status.read_text()

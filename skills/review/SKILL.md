@@ -28,15 +28,28 @@ stated; never run a polling loop in an agent.
    modified its own inputs, fix setup or the writing runner before the first verify; exclude a
    file only when it cannot affect the result. Check setup completion, elapsed time and failure
    status, path/never-name screening, and that private per-file evidence never enters UI output.
+   Mechanical checks run before each brief: Done means items need an existing named
+   `test: tests/file.py::test_name` or a stated `gap: explanation` in the contract
+   (`--contract <path>` overrides the recorded job contract). Missing evidence is flagged.
+   The optional node `fitness=<command>` gate runs and reports its exit status. Seed lint
+   reuses guard/scrub and flags configured names and home paths in changed fixtures/tests;
+   never-name evidence refuses the brief without quoting it. Inspect all gaps and failures.
 3. **Run it.** Use one reviewer for the concern, not one per file or test step. State why this
    separate agent is needed (independent second-runtime review), and include shared findings
    and earlier rounds in the supplied brief so it need not gather them again. Host `delegate` on the reviewer runtime, in the job's worktree (or `launch` a
    worker there if the host's delegate can't pick a folder). The reviewer changes nothing.
+   Run `brain rehearse` when available, otherwise compare installed and candidate cores on
+   copies of real-shaped data with `BRAIN_ROOT=<copy>`: due, check and ready per open job.
+   Report exactly what ran and any new errors, ready flips or due noise; never use the original.
 4. **Address.** Send the findings to the builder (host `send`). Blockers and majors get fixed or
    answered with a reason. When a round finds a kind of problem an earlier round already found,
-   the builder audits that whole class before the next round, not only the new sites. Repeat 2-4
-   until the reviewer has no blockers, at most three rounds: a later brief tells its reviewer
-   which round it is and asks it to look for each earlier finding's whole class.
+   the builder audits that whole class before the fix check, not only the new sites. Use one full
+   round, then `brain review <id> --branch <branch> --check-fix --findings <prior.json>`.
+   The JSON is a list of objects with `severity` (`blocker`, `major`, `minor`) and `text`.
+   Only blockers/majors enter the fix brief. Its fix range starts at the previous review head;
+   `--fix-base <commit>` overrides it. Ask only whether those findings are fixed and whether
+   the fix broke anything. A second full round or any third brief requires
+   `--reason security|schema|privacy`; never let the cap suppress a review of those changes.
    The builder then records readiness, state and proposed lessons with one `brain handback`
    command. Reviewers never write or refresh the builder's job record.
 5. **Report.** In the Active work row and in what you tell the operator: reviewed by `<runtime>`,

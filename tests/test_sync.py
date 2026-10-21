@@ -47,9 +47,9 @@ class Review(Scenario):
         self.assertNotIn(str(r), out)                        # nothing from above the boundary
         self.assertIn("brain recall app", out)
         (r / "nodes/app/knowledge.md").write_text("# K\n\n- notes\n")
-        self.assertNotIn("knowledge.md", self.b(r, "review", "app", "--branch", "fix-login", "--built-by", "claude"))
+        self.assertNotIn("knowledge.md", self.b(r, "review", "app", "--branch", "fix-login", "--built-by", "claude", "--reason", "security"))
         self.assertIn("Reviewer runtime: claude",
-                      self.b(r, "review", "app", "--branch", "fix-login", "--built-by", "codex"))
+                      self.b(r, "review", "app", "--branch", "fix-login", "--built-by", "codex", "--reason", "security"))
         self.b(r, "review", "app", "--branch", "fix-login", "--built-by", "codex", "--by", "codex", ok=False)
 
 

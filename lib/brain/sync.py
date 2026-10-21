@@ -14,6 +14,7 @@ from . import instance as _m_instance
 from . import jobs as _m_jobs
 from . import knowledge as _m_knowledge
 from . import nodes as _m_nodes
+from . import review as _m_review
 from . import status as _m_status
 from . import usage as _m_usage
 from . import verify as _m_verify
@@ -24,6 +25,12 @@ def cmd_review(a):
     """Brief for a reviewer on a different runtime than the one that built the change."""
     inst = _m_nodes.load()
     n = inst.node(a.id)
+    rows = _m_jobs.read_jobs(n)
+    if rows is None:
+        _m_common.die("cannot record review: unrecognized job ledger")
+    row = _m_jobs.open_job(rows, a.branch)
+    round_number = _m_review.review_policy(a, row)
+    check_fix = getattr(a, "check_fix", False)
     built = a.built_by or n["fm"].get("runtime") or inst.cfg.get("default_runtime", "")
     others = [rt for rt in inst.runtimes if rt != built]
     reviewer = a.by or (others[0] if others else None)
@@ -50,6 +57,16 @@ def cmd_review(a):
     if d.returncode:
         _m_common.die(f"can't diff {a.branch} against {base}: {d.stderr.strip()}")
     diffstat = d.stdout.strip()
+    resolved = _m_common.git("rev-parse", "--verify", a.branch + "^{commit}", cwd=where)
+    if resolved.returncode:
+        _m_common.die("cannot resolve review branch")
+    head = resolved.stdout.strip()
+    fix_lines = _m_review.fix_check_lines(a, n, row, where, head) if check_fix else []
+    base_ref = _m_common.git("rev-parse", "--verify", base + "^{commit}",
+                             cwd=n["home_path"] if n["external"] else inst.root)
+    if base_ref.returncode:
+        _m_common.die("cannot resolve review base")
+    mechanical = _m_review.review_mechanical(inst, n, a, row, where, base_ref.stdout.strip())
     out = [f"Reviewer runtime: {reviewer}  (the change was built on {built})",
            f"Run in: {where}" + (f"  ·  model: {a.model}" if a.model else ""), "",
            _m_guard.redact(usage, _m_guard.never_terms(n)), "",
@@ -60,41 +77,48 @@ def cmd_review(a):
         out += ["This project has its own owners. Write nothing into it, and keep your report free of any "
                 "reference to where this brief came from (axiom 6).", ""]
     out += _m_briefs.separation_lines(a, n, a.branch, default="Independent second-runtime review.")
-    out += ["## Change", "", f"Branch `{a.branch}` against `{base}`. See it with `git diff {base}...{a.branch}`"
-            f" and `git log {base}..{a.branch}`.", ""]
-    if diffstat:
-        out += ["```", diffstat, "```", ""]
-    if a.focus:
-        out += ["## Focus", "", a.focus.strip(), ""]
-    row = _m_jobs.open_job(_m_jobs.read_jobs(n) or [], a.branch)
-    rounds = int(row.get("Reviews") or 0) if row and str(row.get("Reviews") or "0").isdigit() else 0
-    if rounds:
-        out += ["## Earlier rounds", "", f"This is review round {rounds + 1} of this job. Earlier rounds found problems "
-                "that the builder fixed. Check that each fix holds, then look for the same kind of problem everywhere "
-                "in the change, not only where it was found, and report each kind once with all its places."
-                + (f" The review skill caps reviews at {_m_jobs.REVIEW_CAP} rounds: report blockers only, and say for each "
-                   "whether it is a class the builder should audit as a whole." if rounds + 1 >= _m_jobs.REVIEW_CAP else ""), ""]
-    out += _m_jobs.contract_lines(inst, n, a.branch, who="reviewer")
-    out += _m_knowledge.knowledge_lines(inst, n, " ".join(filter(None, [a.branch, a.focus, diffstat])), "reviewer") + \
-        _m_knowledge.node_knowledge_lines(n) + _m_knowledge.recall_hint(n)
-    out += _m_knowledge.limits_lines(n)
-    out += ["## What to check", "",
-            "- Correctness: does it do what the commits and the task say, including edge cases?",
-            "- Breakage: run the project's own tests, type checks and linters that cover the change; report results.",
-            "- Security and data: secrets, auth, user input, destructive operations.",
-            "- The project's rules (its AGENTS.md and conventions).",
-            "- The builder finishes with one `brain handback` command carrying readiness, state and proposed lessons. "
-            "Inspect that worker-owned record when present; only the builder writes or refreshes it after review.", "",
-            "## Report", "",
-            "A list of findings, most severe first. Each: severity (blocker, major, minor), `file:line`, "
-            "the problem, and a concrete fix. Say which tests you ran and their results. If you find nothing "
-            "that matters, say so plainly.", ""] + _m_knowledge.handback_lines(inst, n, who="reviewer", branch=a.branch)
+    out += [f"Review round {round_number} ({'check-fix' if check_fix else 'full'}).", ""] + mechanical
+    if check_fix:
+        out += fix_lines + _m_review.rehearsal_lines()
+        out += ["## Report", "", "For each prior blocker/major: fixed or unresolved, with evidence. "
+                "Report regressions caused by the fix and exactly which checks you ran.", ""]
+    else:
+        out += ["## Change", "", f"Branch `{a.branch}` against `{base}`. See it with `git diff {base}...{a.branch}`"
+                f" and `git log {base}..{a.branch}`.", ""]
+        if diffstat:
+            out += ["```", diffstat, "```", ""]
+        if a.focus:
+            out += ["## Focus", "", a.focus.strip(), ""]
+        if round_number > 1:
+            out += ["## Earlier rounds", "", f"This is review round {round_number} of this job. "
+                    "Exception reason: " + (getattr(a, "reason", None) or "none") + ". "
+                    "Check earlier fixes and the same kind of problem everywhere in the change.", ""]
+        if getattr(a, "contract", None):
+            out += ["## The job's contract", "", _m_review.review_read(n, a.contract), ""]
+        else:
+            out += _m_jobs.contract_lines(inst, n, a.branch, who="reviewer")
+        out += _m_knowledge.knowledge_lines(inst, n, " ".join(filter(None, [a.branch, a.focus, diffstat])), "reviewer") + \
+            _m_knowledge.node_knowledge_lines(n) + _m_knowledge.recall_hint(n)
+        out += _m_knowledge.limits_lines(n)
+        out += ["## What to check", "",
+                "- Correctness: does it do what the commits and the task say, including edge cases?",
+                "- Breakage: run the project's own tests, type checks and linters that cover the change; report results.",
+                "- Security and data: secrets, auth, user input, destructive operations.",
+                "- The project's rules (its AGENTS.md and conventions).",
+                "- The builder finishes with one `brain handback` command carrying readiness, state and proposed lessons. "
+                "Inspect that worker-owned record when present; only the builder writes or refreshes it after review.", "",
+                "## Report", "",
+                "A list of findings, most severe first. Each: severity (blocker, major, minor), `file:line`, "
+                "the problem, and a concrete fix. Say which tests you ran and their results. If you find nothing "
+                "that matters, say so plainly.", ""] + _m_knowledge.handback_lines(inst, n, who="reviewer", branch=a.branch)
+        out += _m_review.rehearsal_lines()
     text = "\n".join(out) + "\n"
     _m_guard.no_terms_in(n, text, "the review brief")
-    _m_jobs.job_reviewed(inst, n, a.branch)
     if a.out:
         _m_history.write_out(inst, n, a.out, text)
-    else:
+    _m_jobs.job_reviewed(inst, n, a.branch, full=not check_fix, head=head,
+                         reason=getattr(a, "reason", None) or "")
+    if not a.out:
         print(text, end="")
 
 
