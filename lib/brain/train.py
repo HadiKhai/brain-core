@@ -109,7 +109,11 @@ def cmd_train(a):
         common = home / common
     lock = common / "brain-train.lock"
     _m_common.safe_target(lock)
-    with open(lock, "a+") as held:
+    try:
+        fd = os.open(lock, os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    except OSError:
+        _m_common.die("train: unsafe or unreadable repository lock")
+    with os.fdopen(fd, "a+") as held:
         if lock.is_symlink() or os.fstat(held.fileno()).st_nlink != 1:
             _m_common.die("train: unsafe repository lock")
         try:

@@ -227,3 +227,13 @@ class MergeTrain(Scenario):
         self.assertIn("these links", self.b(root, "train", "a", ok=False))
         self.assertEqual(self.git("rev-parse", "main", cwd=home), main)
         self.assertEqual(len(list(folder.glob("*.json"))), 1)
+
+    def test_repository_lock_cannot_create_a_symlink_target(self):
+        root, home = self.project()
+        self.job("one")
+        self.detach()
+        outside = self.tmp / "must-not-be-created"
+        (home / ".git/brain-train.lock").symlink_to(outside)
+        self.assertIn("repository lock", self.b(root, "train", "a", ok=False))
+        self.assertFalse(outside.exists())
+        self.assertNotIn("| merged |", self.ledger())
