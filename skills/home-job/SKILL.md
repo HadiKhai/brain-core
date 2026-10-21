@@ -76,7 +76,8 @@ stated; never run a polling loop in an agent.
    nothing: commit or discard what it changed, then hand back again.
    Input refusals name added, removed or modified worktree-relative paths, never contents or
    per-file hashes. Per-path evidence lives in ignored 0600 sidecars beside the worker record;
-   missing sidecars limit diagnostics, never the digest check. `verify modified its own inputs: <path>` means the run itself changed them:
+   maps share the five-log retention; missing sidecars limit diagnostics, never the digest check.
+   `verify modified its own inputs: <path>` means the run itself changed them:
    make `worktree-setup.sh` produce the generated settings before the first verify, or stop the
    test runner writing them. Remove a file from `verify_inputs` only if it cannot affect the result.
    `changed since the last verify` means the input changed between runs. Older packets without

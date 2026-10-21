@@ -12,6 +12,7 @@ For agents:
   content or per-file hashes. Paths are screened against never-name words. The existing digest,
   port, ref and tree rules still determine readiness and evidence reuse. Per-file fingerprints stay
   in ignored 0600 local sidecars under `job-handbacks`, outside instance Git history and UI output.
+  Each sidecar is retained with its verify log; older unpaired sidecars are pruned on the next run.
 - `verify modified its own inputs: <path>` identifies changes during the run. Make setup produce
   generated settings before the first verify, or stop the test runner writing them. Exclude a
   file from `verify_inputs` only if it cannot affect the result. Changes between runs say

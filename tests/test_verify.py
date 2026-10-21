@@ -321,6 +321,36 @@ class VerifyLogs(Scenario):
             self.run_verify(setup, 'pass')
         self.assertFalse(list(setup[3].glob('*.log')))
 
+    def test_input_maps_share_log_retention_and_replace_in_place(self):
+        setup = self.runner()
+        m, inst, n, home, wt = setup
+        maps, logs = [], []
+        for i in range(m.VERIFY_LOG_KEEP + 2):
+            _, log, _ = self.run_verify(setup, 'pass')
+            logs.append(log)
+            ref = m.write_verify_input_files(inst, n, 'job', 'fixture-digest', {'.env': 'fixture'}, str(log))
+            maps.append(log.parent / ref)
+        self.assertEqual([p.exists() for p in maps], [p.exists() for p in logs])
+        self.assertEqual(sum(p.exists() for p in maps), m.VERIFY_LOG_KEEP)
+        # Repair/reuse of a missing or invalid map never adds another map for its log.
+        ref = m.write_verify_input_files(inst, n, 'job', 'fixture-digest', {'.env': 'repaired'}, str(logs[-1]))
+        self.assertEqual(ref, maps[-1].name)
+        self.assertEqual(len(list(log.parent.glob('*-inputs-*.map'))), m.VERIFY_LOG_KEEP)
+        self.assertEqual(maps[-1].stat().st_mode & 0o777, 0o600)
+        key = log.name.split('-verify-')[0]
+        outside = self.tmp / 'outside-map'
+        outside.write_text('untouched fixture')
+        legacy = log.parent / (key + '-inputs-' + 'f'*24 + '.map')
+        legacy.symlink_to(outside)
+        other = log.parent / ('0'*24 + '-inputs-' + 'f'*24 + '.map')
+        other.write_text('other job fixture')
+        self.run_verify(setup, 'pass')  # failures/no packet still rotate logs and their maps
+        self.assertFalse(legacy.is_symlink())
+        self.assertEqual(outside.read_text(), 'untouched fixture')
+        self.assertEqual(other.read_text(), 'other job fixture')
+        self.assertFalse(maps[2].exists())
+        self.assertTrue(all(p.exists() for p in maps[3:]))
+
     def test_stdin_environment_exit_and_overall_fallback_through_handback(self):
         r, home, wt = self.job()
         code = ("import os,sys\nassert input() == 'fixture-input'\n"

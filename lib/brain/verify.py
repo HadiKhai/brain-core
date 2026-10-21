@@ -375,6 +375,13 @@ def run_verify_stream(inst, n, branch, verify, w, env, token):
             for entry in old[:max(0, len(old) - VERIFY_LOG_KEEP + 1)]:
                 check(dfd)
                 os.unlink(entry, dir_fd=dfd)
+            # One input map belongs to one retained log. Also retire legacy unpaired maps.
+            retained_maps = {verify_input_map_name(key, entry) for entry in os.listdir(dfd)
+                             if re.fullmatch(re.escape(key) + r"-verify-\d+-[0-9a-f]{12}\.log", entry)}
+            for entry in os.listdir(dfd):
+                if re.fullmatch(re.escape(key) + r"-inputs-[0-9a-f]{24}\.map", entry) and entry not in retained_maps:
+                    check(dfd)
+                    os.unlink(entry, dir_fd=dfd)
             overall, lanes, failed = deque(maxlen=15), {}, set()
             pending, lines, chars = "", 0, 0
             line_decoder = io.IncrementalNewlineDecoder(None, translate=True)
@@ -503,7 +510,7 @@ def record_ready(inst, n, branch, reviews, previous=None, reverify=False):
         _m_common.TOUCHED.discard(gi)
     if reuse:
         input_ref = (previous.get("input_files_ref") if read_verify_input_files(n, previous) == input_files
-                     else write_verify_input_files(inst, n, branch, inputs, input_files))
+                     else write_verify_input_files(inst, n, branch, inputs, input_files, previous.get("verify_log")))
         base, changed = reuse
         print(f"verify: reused the green run of {base[:12]}"
               + (f": since then only {len(changed)} file(s) under verify_skip changed" if changed else
@@ -528,7 +535,7 @@ def record_ready(inst, n, branch, reviews, previous=None, reverify=False):
                       + "); commit or discard what it changed, then hand back again"]
     if input_reasons:
         return None, input_reasons
-    input_ref = write_verify_input_files(inst, n, branch, inputs, input_files)
+    input_ref = write_verify_input_files(inst, n, branch, inputs, input_files, log_path)
     packet = {"version": 1, "node": n["id"], "branch": branch, "head": head, "main": main,
               "integration_base": integration_base, "verify_command": verify, "verify_result": result, "verify_log": log_path, "verified_head": head,
               "inputs": inputs, "input_files_ref": input_ref, "review_rounds": reviews, "checked_at": _m_jobs.stamp(inst)}
@@ -624,17 +631,31 @@ def read_verify_input_files(n, packet):
     return None
 
 
-def write_verify_input_files(inst, n, branch, inputs, files):
-    """Fresh 0600 ignored sibling: per-file fingerprints never enter instance Git history."""
+def verify_input_map_name(key, log_name):
+    return key + "-inputs-" + hashlib.sha256(log_name.encode()).hexdigest()[:24] + ".map"
+
+
+def write_verify_input_files(inst, n, branch, inputs, files, log_path):
+    """One atomic 0600 map per verify log, with the same retention as that log."""
     folder, dfd, key, check = verify_log_dir(inst, n, branch)
-    name = key + "-inputs-" + os.urandom(12).hex() + ".map"
+    temp = key + "-inputs-" + os.urandom(12).hex() + ".tmp"
     try:
+        log_name = Path(log_path).name if isinstance(log_path, str) else ""
+        if not re.fullmatch(re.escape(key) + r"-verify-\d+-[0-9a-f]{12}\.log", log_name):
+            return None  # legacy evidence without a log cannot carry a retained map
+        name = verify_input_map_name(key, log_name)
         check(dfd)
-        fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600, dir_fd=dfd)
+        fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600, dir_fd=dfd)
         with os.fdopen(fd, "w") as fh:
             os.fchmod(fh.fileno(), 0o600)
             check(dfd)
             fh.write(json.dumps({"version": 1, "inputs": inputs, "files": files}) + "\n")
+        check(dfd)
+        os.replace(temp, name, src_dir_fd=dfd, dst_dir_fd=dfd)
+        return name
     finally:
+        try:
+            os.unlink(temp, dir_fd=dfd)
+        except FileNotFoundError:
+            pass
         os.close(dfd)
-    return name
