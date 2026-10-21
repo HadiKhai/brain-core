@@ -19,6 +19,9 @@ from . import upgrade as _m_upgrade
 from . import verify as _m_verify
 
 
+WATCH_LOCAL_KINDS = ('unsettled-threads',)
+
+
 def watch_digest(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
 
@@ -207,7 +210,7 @@ def watch_groups(inst, nodes=None):
         group = groups.setdefault(target['id'], {'node': target, 'items': [], 'command': command})
         group['items'].extend({**i, 'node': n['id']} for i in watch_items(inst, n)
                               if target['id'] == n['id'] or i['kind'] not in
-                              ('unsettled-threads', 'budget', 'job-budget'))
+                              WATCH_LOCAL_KINDS)
         root = inst.node('root')
         for line in _m_status.overdue_questions(inst, n, _m_status.inbox_lines(n)):
             root_group = groups.setdefault('root', {'node': root, 'items': [],
@@ -223,9 +226,12 @@ def watch_since_wake(inst, nodes):
     groups = watch_groups(inst)
     out = []
     for n in nodes:
-        previous = _m_hosts.wake_history(_m_hosts.wake_directory(inst, n))
-        seen = {i['id'] for i in previous[-1]['items']} if previous else set()
-        out.extend(i for i in groups.get(n['id'], {}).get('items', []) if i['id'] not in seen)
+        target, _ = _m_hosts.wake_target(inst, n)
+        # The coordinator is handling the latest wake: compare with the wake before it,
+        # so the items that just woke it remain visible. Snapshots retain older due work.
+        seen = {i['id'] for i in _m_hosts.wake_previous_items(_m_hosts.wake_directory(inst, target))}
+        out.extend(i for i in groups.get(target['id'], {}).get('items', []) if i['id'] not in seen
+                   and (target['id'] == n['id'] or i['node'] == n['id']))
     return list({i['id']: i for i in out}.values())
 
 

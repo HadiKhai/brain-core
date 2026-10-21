@@ -287,6 +287,7 @@ def machine_notice(inst, data):
     inbox = inst.root / "inbox.md"
     marker = "[machine episode " + data["episode_id"] + (" open]" if data["episode"] else " close]")
     text = inbox.read_text() if inbox.exists() else ""
+    original = text
     if not data['episode']:
         # The close notice supersedes this episode's open action. Removing the handled
         # close later must not uncover an obsolete hold; unrelated inbox lines survive.
@@ -294,7 +295,8 @@ def machine_notice(inst, data):
         text = ''.join(line for line in text.splitlines(keepends=True) if not line.rstrip().endswith(opened))
     if marker not in text:
         text += f"- {inst.now()} from brain: {pending} {marker}\n"
-    machine_publish(inst, inbox, text)
+    if text != original:
+        machine_publish(inst, inbox, text)
     _m_common.touch(inbox)
     inst.commit([], "machine: " + pending)
     data = {**data, "pending_notice": None}

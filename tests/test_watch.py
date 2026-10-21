@@ -53,11 +53,10 @@ class Watcher(Scenario):
             self.assertFalse((directory / 'history.json').exists())
             with mock.patch.object(self.m, 'wake_send', return_value=True) as send:
                 self.m.wake_drain(self.inst, n, once=True)
-                self.assertEqual(self.since(), [])
+                self.assertEqual(self.since(), first)  # the item that woke us remains visible
                 inbox.write_text(inbox.read_text() + '- fabricated second item\n')
-                new = self.since()
+                new = [i for i in self.since() if i['id'] != first[0]['id']]
                 self.assertEqual(len(new), 1)
-                self.assertNotEqual(new[0]['id'], first[0]['id'])
                 self.watch()
                 self.m.wake_drain(self.inst, n, once=True)
                 self.assertEqual(send.call_count, 2)
@@ -65,7 +64,13 @@ class Watcher(Scenario):
             self.assertEqual([r['items'] for r in history], [
                 [{'id': first[0]['id'], 'kind': 'inbox'}], [{'id': new[0]['id'], 'kind': 'inbox'}]])
             self.assertNotIn('fabricated', (directory / 'history.json').read_text())
-            self.assertEqual([i['id'] for i in self.since()], [first[0]['id']])  # last delivery, not all history
+            self.assertEqual([i['id'] for i in self.since()], [new[0]['id']])
+            # Third wake still hides A and B: snapshots contain all work due at each wake.
+            inbox.write_text(inbox.read_text() + '- fabricated third item\n')
+            self.watch()
+            with mock.patch.object(self.m, 'wake_send', return_value=True):
+                self.m.wake_drain(self.inst, n, once=True)
+            self.assertEqual([i['text'] for i in self.since()], ['fabricated third item'])
             self.assertNotIn('.brain/', self.git('ls-files', cwd=self.root))
 
     def test_child_local_work_never_wakes_root_but_questions_and_failures_do(self):
@@ -83,13 +88,18 @@ class Watcher(Scenario):
             self.watch()
             self.m.wake_drain(self.inst, root, once=True)
             self.assertEqual(send.call_count, 0)
-            original = self.m.watch_items
-            def budget(inst, n):
-                return original(inst, n) + ([{'id': 'a' * 64, 'kind': 'budget', 'text': 'over budget'}]
-                                             if n['id'] == 'sample' else [])
-            with mock.patch.object(self.m, 'watch_items', side_effect=budget):
-                self.watch()
-                self.assertEqual(self.since(), [])
+            budget = {**row, 'Job': 'import:budget', 'Ended': '', 'Outcome': ''}
+            self.m.write_jobs(self.inst, child, [row, budget])
+            self.inst.local_of('sample')['worktrees'] = {budget['Job']: {'path': str(self.root)}}
+            contract = self.m.contract_file(child, budget)
+            contract.parent.mkdir(exist_ok=True)
+            contract.write_text('## Budget\n\n1 h\n')
+            self.assertTrue(any('over its 1-hour budget' in text
+                                for text in self.m.runaway_jobs(self.inst, child)))
+            self.watch()
+            self.m.wake_drain(self.inst, root, once=True)
+            self.assertEqual(send.call_count, 0)
+            self.assertEqual(self.since(), [])
             # A child with a coordinator receives its own settlement work.
             self.inst.local_of('sample').update(coordinator='fixture-child', wake='fixture-send')
             self.watch()
@@ -99,6 +109,9 @@ class Watcher(Scenario):
             (child['dir'] / 'inbox.md').write_text(line + '\n')
             self.watch()
             self.assertIn('overdue-question', [i['kind'] for i in self.since()])
+            routed = self.since('sample')
+            self.assertTrue(routed)
+            self.assertTrue(all(i['node'] == 'sample' for i in routed))
             self.m.wake_drain(self.inst, root, once=True)
             self.assertEqual(send.call_count, 1)
             self.watch()
@@ -126,7 +139,7 @@ class Watcher(Scenario):
             with mock.patch.object(self.inst, 'now_dt', return_value=later):
                 self.watch()
                 self.m.wake_drain(self.inst, n, once=True)
-                self.assertEqual(self.since(), [])
+                self.assertEqual([i['kind'] for i in self.since()], ['blocked-overdue'])
             self.assertEqual(send.call_count, 1)
 
     def test_direct_question_delivery_history_and_corrupt_history(self):
@@ -138,7 +151,7 @@ class Watcher(Scenario):
             first = self.since()
             self.assertTrue(self.m.request_wake(self.inst, n, 'wake:' + episode))
             self.m.wake_drain(self.inst, n, once=True)
-            self.assertEqual(self.since(), [])
+            self.assertEqual(self.since(), first)
             path = self.m.wake_directory(self.inst, n) / 'history.json'
             self.assertEqual(self.m.wake_history(path.parent)[-1]['items'][0]['id'], first[0]['id'])
             # The next direct question is handled while delivery waits. Its trigger survives.
@@ -169,6 +182,100 @@ class Watcher(Scenario):
             damaged = list(directory.glob('history-invalid-*.json'))
             self.assertEqual(len(damaged), 1)
             self.assertEqual(damaged[0].read_text(), '{torn')
+
+    def test_corrupt_queue_metadata_does_not_hold_other_questions(self):
+        n = self.inst.node('root')
+        with mock.patch.object(self.m, 'wake_start'), mock.patch.object(self.m, 'WAKE_INTERVAL', 0), \
+                mock.patch.object(self.m, 'wake_send', return_value=True) as send:
+            self.assertTrue(self.m.request_wake(self.inst, n, 'wake:' + 'c' * 32))
+            directory = self.m.wake_directory(self.inst, n)
+            for index, value in enumerate(('{torn', '{"items":null}', '{"items":[{}]}')):
+                (directory / (f'{index:064x}' + '.pending')).write_text(value)
+                self.m.wake_drain(self.inst, n, once=True)
+            self.assertEqual(send.call_count, 3)
+            self.assertFalse(list(directory.glob('*.pending')))
+
+    def test_history_write_failure_does_not_repeat_delivered_wake(self):
+        n = self.inst.node('root')
+        original = self.m.atomic_write
+        def fail_history(path, *args, **kwargs):
+            if path.name == 'history.json':
+                raise OSError('fixture disk failure')
+            return original(path, *args, **kwargs)
+        with mock.patch.object(self.m, 'wake_start'), mock.patch.object(self.m, 'WAKE_INTERVAL', 0), \
+                mock.patch.object(self.m, 'wake_send', return_value=True) as send:
+            self.assertTrue(self.m.request_wake(self.inst, n, 'fixture request'))
+            with mock.patch.object(self.m, 'atomic_write', side_effect=fail_history):
+                self.m.wake_drain(self.inst, n, once=True)
+            self.m.wake_drain(self.inst, n, once=True)
+            self.assertEqual(send.call_count, 1)
+            self.assertFalse(list(self.m.wake_directory(self.inst, n).glob('*.pending')))
+
+    def test_queue_publication_needs_no_hardlinks_and_pending_retry_does_not_scan(self):
+        n = self.inst.node('root')
+        with mock.patch.object(self.m, 'wake_start'), mock.patch.object(self.m.os, 'link', side_effect=OSError('unsupported')):
+            self.assertTrue(self.m.request_wake(self.inst, n, 'fixture request'))
+            with mock.patch.object(self.m, 'watch_groups') as scan:
+                self.assertTrue(self.m.request_wake(self.inst, n, 'fixture request'))
+                scan.assert_not_called()
+        self.assertEqual(len(list(self.m.wake_directory(self.inst, n).glob('*.pending'))), 1)
+
+    def test_retarget_filters_child_housekeeping_but_preserves_questions(self):
+        self.b(self.root, 'new', 'sample', '--title', 'Sample')
+        self.b(self.root, 'set', 'sample', 'coordinator=fixture-child', 'wake=fixture-send')
+        self.inst = self.m.Instance(self.root)
+        child, root = self.inst.node('sample'), self.inst.node('root')
+        housekeeping = {'id': 'a' * 64, 'kind': 'unsettled-threads'}
+        question = {'id': 'b' * 64, 'kind': 'inbox'}
+        with mock.patch.object(self.m, 'wake_start'), mock.patch.object(self.m, 'WAKE_INTERVAL', 0), \
+                mock.patch.object(self.m, 'wake_send', return_value=True) as send:
+            self.m.request_wake(self.inst, child, 'housekeeping', items=[housekeeping])
+            self.m.request_wake(self.inst, child, 'mixed', items=[housekeeping, question])
+            self.b(self.root, 'set', 'sample', 'coordinator=')
+            self.m.wake_drain(self.inst, child, once=True)
+            self.m.wake_drain(self.inst, root, once=True)
+            self.assertEqual(send.call_count, 1)
+            history = self.m.wake_history(self.m.wake_directory(self.inst, root))
+            self.assertEqual(history[-1]['items'], [question])
+
+    def test_since_wake_is_stable_while_host_starts_before_send_returns(self):
+        n = self.inst.node('root')
+        inbox = self.root / 'inbox.md'
+        inbox.write_text('- fabricated A\n')
+        with mock.patch.object(self.m, 'changes_due', return_value=[]), \
+                mock.patch.object(self.m, 'wake_start'), mock.patch.object(self.m, 'WAKE_INTERVAL', 0):
+            self.watch()
+            with mock.patch.object(self.m, 'wake_send', return_value=True):
+                self.m.wake_drain(self.inst, n, once=True)
+            inbox.write_text(inbox.read_text() + '- fabricated B\n')
+            self.watch()
+            observed = []
+            def host_starts(command):
+                observed.extend(self.since())
+                return True
+            with mock.patch.object(self.m, 'wake_send', side_effect=host_starts):
+                self.m.wake_drain(self.inst, n, once=True)
+            self.assertEqual([i['text'] for i in observed], ['fabricated B'])
+            self.assertEqual(observed, self.since())
+            directory = self.m.wake_directory(self.inst, n)
+            (directory / 'inflight.json').write_text('{"before":[]}')
+            self.assertEqual(observed, self.since())  # a stale unlocked flight cannot shift comparison
+
+    def test_first_logged_wake_preserves_preupgrade_acknowledgements(self):
+        n = self.inst.node('root')
+        inbox = self.root / 'inbox.md'
+        inbox.write_text('- fabricated old A\n')
+        with mock.patch.object(self.m, 'changes_due', return_value=[]), mock.patch.object(self.m, 'wake_start'):
+            self.watch()
+            directory = self.m.wake_directory(self.inst, n)
+            # Model an old-core delivery: watcher acknowledgement and sent receipt, no log.
+            for path in directory.glob('*.pending'):
+                path.rename(path.with_suffix('.sent'))
+            inbox.write_text(inbox.read_text() + '- fabricated new B\n')
+            self.watch()
+            with mock.patch.object(self.m, 'wake_send', return_value=True):
+                self.m.wake_drain(self.inst, n, once=True)
+            self.assertEqual([i['text'] for i in self.since()], ['fabricated new B'])
 
     def test_unchanged_new_handback_removed_and_returned_and_stale(self):
         items = [{'kind': 'handback', 'job': 'made-up-job', 'state': 'done', 'text': 'report ready'}]

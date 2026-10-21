@@ -536,12 +536,12 @@ class QuestionWake(Scenario):
         self.assertEqual(len(self.calls.read_text().splitlines()), 2)
 
     def test_delivery_racing_with_pending_creation_is_deduplicated(self):
-        original = self.module.os.open
+        original = self.module.atomic_write
         def publish_delivery(path, *args, **kwargs):
             if str(path).endswith(".pending"):
                 Path(path).with_suffix(".sent").write_text("delivered\n")
             return original(path, *args, **kwargs)
-        with mock.patch.object(self.module.os, "open", side_effect=publish_delivery):
+        with mock.patch.object(self.module, "atomic_write", side_effect=publish_delivery):
             self.enqueue("racing reason")
         self.drain()
         self.assertFalse(self.calls.exists())

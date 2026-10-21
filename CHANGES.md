@@ -34,24 +34,28 @@ After upgrading:
 ## 2026-10-21: Show new wake items and keep child housekeeping local
 
 For agents:
-- `brain due <node> --since-wake` compares the actionable watcher queue with the
-  last successful wake delivery, using stable item ids. `--json` includes those ids;
+- `brain due <node> --since-wake` shows new actionable items relative to the wake
+  before the latest delivery, using stable item ids. Items that caused the latest
+  wake stay visible while older due work is hidden. `--json` includes those ids;
   `--quiet` exits 1 when there are new items. Before the first delivery it shows all
   wake items. It excludes status refresh work and informational machine readings.
 - Each delivered wake records item ids and kinds in the instance's private
-  `.brain/wake/<coordinator>/history.json`, retaining 100 deliveries. Pending or
-  failed wakes do not advance this baseline. Manual wakes without matching items
-  record an empty set. Reading the flag never sends a wake or checks upgrades.
-- Child budgets and unsettled threads stay with their own coordinator. Questions,
+  `.brain/wake/<coordinator>/history.json`, retaining 100 deliveries and their
+  queue snapshots. Failed wakes do not advance the baseline. Manual wakes without
+  matching items record an empty trigger set. Reading the flag never sends a wake
+  or checks upgrades. A history write failure is diagnostic and never replays a wake.
+- Child unsettled threads stay with their own coordinator, including when a pending
+  wake is retargeted after that coordinator is removed. Budget displays remain
+  informational and do not generate watcher wakes. Questions,
   blocked hand-backs, failures and overdue questions keep their wake routes.
-  An unchanged overdue block keeps its identity as it ages and wakes only once.
+  Existing unchanged-overdue-block deduplication is retained and regression-tested.
 - A heat episode's close notice replaces its open inbox notice. After handling
   the close, the obsolete hold no longer appears in `due`.
 
 After upgrading:
 - No migration or service installation is needed. Delivery history starts with
   the next wake. Ordinary `brain due` keeps its full informational view; use
-  `--since-wake` to compare with the most recent delivered set, not all past wakes.
+  `--since-wake` to see what is new for the latest wake, including during delivery.
 - For an episode cleared before upgrading, remove both old open and close inbox
   notices when handling it.
 
