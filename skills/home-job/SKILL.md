@@ -104,6 +104,34 @@ stated; never run a polling loop in an agent.
    groups or named steps, prefix every line with `[lane NAME]`; a line containing `FAIL`, `FAILED`,
    `FAILURE`, `ERROR`, or `exit N` (nonzero N) marks that lane failed. Names are 1-120 characters
    without `]` or line breaks. Other output uses the overall tail; inspect the full log for more.
+   Nodes can opt into named lanes with
+   `verify_lanes=static: npm run lint | src/**,package.json; ui: npm test | src/**,tests/**`.
+   Alternatively `verify_lanes_from=<command>` prints a JSON array of objects with `name`,
+   `command`, `inputs` (list of repo-relative globs), and optional `requires` (lane names),
+   `strict_inputs` (globs), `always` (boolean), `schedule` (`job` or `nightly`). Use one source.
+   Globs support `**` as a complete path segment, `*`, `?`, and leading `!` exclusions;
+   braces, character classes, extglobs and leading `#` are refused. Positive patterns match
+   dotfiles, including hidden directories. A negative pattern excludes a dot path only when
+   each dot segment is explicit: `config/.babelrc,!config/*` keeps `.babelrc`, while
+   `!config/.*` excludes it. Inputs match Git-tracked paths; tracked symlinks hash the link
+   text, not the target. Declare target files separately when tests read them.
+   The last `|` separates an inline command from its inputs, so shell pipelines work.
+   Whitespace/`|` in a glob must name an actual tracked path. Each lane needs a positive
+   input pattern unless `always` is true, and each map needs at least one job lane.
+   Unmatched positive patterns warn. Map commands time out after five seconds and fail closed.
+   UI/status display recorded evidence without executing the map or hashing the repository;
+   explicit `ready` and train validation perform the complete check.
+   Hand-back runs affected job lanes instead of the full `verify` command. An unchanged lane's
+   last green result can be reused on the same integration base, with the same command,
+   declared file contents, ignored `verify_inputs` and ports. `strict_inputs` forces a lane
+   when a matching path changed since its green; `always` disables that lane's reuse.
+   Requirements order execution; a failed requirement skips its dependents. Nightly lanes
+   are omitted from job hand-backs. Keep `verify` as the complete train/nightly command,
+   including nightly tests. `verify_lanes_check=<command>` is an optional coverage gate:
+   the project must prove every test belongs to exactly one lane; Brain never parses source.
+   Map output, verify configuration, lockfiles and toolchain changes force all job lanes.
+   Each lane records its exit status, elapsed seconds and full private log; `brain ready`
+   displays those results and reuse. The five newest logs are kept per lane per job.
    During the job, run the checks
    the change affects; leave the full verify to this one command.
    No separate packet command, host message or Lessons section is required. Blockers/questions

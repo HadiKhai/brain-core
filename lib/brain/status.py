@@ -406,7 +406,7 @@ def due_items(inst, n, evidence=None, include_stale=True, include_ready=True):
             add("restart", f"{branch}: restart: compactions; resume with `{command}`",
                 job=_m_jobs.job_key(row), state=signal["state"])
         elif signal and not _m_briefs.restart_acknowledged(n, row, signal):
-            ready = _m_verify.ready_state(inst, n, branch) if include_ready and signal["state"] == "done" and not _m_briefs.import_job(branch) else None
+            ready = _m_verify.ready_state(inst, n, branch, display=True) if include_ready and signal["state"] == "done" and not _m_briefs.import_job(branch) else None
             detail = ("ready to merge" if ready["ready"] else
                       "finished but not ready (" + "; ".join(ready["reasons"]) + ")") if ready else (signal["state"] + "; node study, no home ready evidence required"
                                            if _m_briefs.import_job(branch) else signal["state"])

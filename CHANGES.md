@@ -5,6 +5,29 @@ upgrading. `brain changes <node>` shows the entries this node's coordinator hasn
 `brain due <node>` lists them until `brain changes <node> --seen`. Entry headings are
 `## <date>: <title>`; once released, a heading never changes.
 
+## 2026-10-21: Named verify lanes reuse unchanged job checks
+
+For agents:
+- Nodes may set inline `verify_lanes` (`name: command | globs`, separated by semicolons),
+  or `verify_lanes_from`, a command printing the documented JSON lane map. Hand-backs
+  run affected job lanes and reuse each lane's last green on the same base. Changes to
+  map output, verify configuration, lockfiles or toolchain force every job lane.
+- Lane glob matching includes newline paths and positive dotfile patterns. Exclusions require
+  explicit dot segments. Inline pipelines use the last `|` as the input separator; ambiguous
+  globs, lanes with no positive inputs (unless always), and all-nightly maps are refused.
+- Map commands time out after five seconds. UI/status use recorded lane evidence; explicit
+  readiness/train checks still execute the map and hash inputs. Nested JSON fails closed.
+- Each lane records status, duration and a full private log; `brain ready` shows them.
+  Dependencies skip after failure; strict inputs and always-run lanes can force execution.
+  Optional `verify_lanes_check` checks project-owned test coverage. Nightly lanes are left
+  to the complete node `verify` command, which trains/nightlies continue to execute.
+- Train callers can check a packet against its recorded integration base with
+  `ready_state(..., train=True)`; ordinary readiness still requires current main.
+
+After upgrading:
+- Existing nodes need no migration. To opt in, keep a complete `verify` command and add
+  a lane map and coverage gate as described in the home-job skill. Inputs use tracked
+  repo-relative globs with `**`, `*`, `?` and leading `!` exclusions only.
 ## 2026-10-21: Actionable file watcher replaces frequent AI ticks
 
 For agents:

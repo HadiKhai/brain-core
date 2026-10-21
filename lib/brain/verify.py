@@ -2,6 +2,7 @@
 import fnmatch
 import hashlib
 import json
+import math
 import os
 import re
 import subprocess
@@ -17,6 +18,7 @@ from . import jobs as _m_jobs
 from . import machine as _m_machine
 from . import nodes as _m_nodes
 from . import worktrees as _m_worktrees
+from . import verify_lanes as _m_lanes
 
 
 def ready_path(inst, n, branch):
@@ -167,7 +169,8 @@ def packet_main_matches(n, packet, main):
             packet.get("integration_base", packet.get("main")) == base)
 
 
-def ready_state(inst, n, branch, train=False):
+def ready_state(inst, n, branch, train=False, display=False):
+    display = display and not train
     reasons, head, main = ready_preflight(n, branch)
     row = _m_jobs.open_job(_m_jobs.read_jobs(n) or [], branch)
     signal = _m_jobs.read_handback(n, row) if row else None
@@ -202,7 +205,9 @@ def ready_state(inst, n, branch, train=False):
         if not train and not packet_main_matches(n, packet, main):
             reasons.append("main moved; return to worker to rebase and verify again")
         w = n["local"].get("worktrees", {}).get(branch)
-        if isinstance(w, dict) and w.get("path") and Path(w["path"]).exists():
+        lanes_configured = bool(n["fm"].get("verify_lanes") or n["fm"].get("verify_lanes_from"))
+        cheap = display and lanes_configured
+        if not cheap and isinstance(w, dict) and w.get("path") and Path(w["path"]).exists():
             files = verify_input_files(n, w)
             if packet.get("inputs") != verify_inputs(n, w, files):  # every readiness reader comes through here
                 reasons.append(verify_input_reason(n, read_verify_input_files(n, packet), files))
@@ -210,6 +215,27 @@ def ready_state(inst, n, branch, train=False):
         if not verify or packet.get("verify_command") != verify or type(packet.get("verify_result")) is not int \
                 or packet["verify_result"] != 0:
             reasons.append("node verify missing, changed or failed")
+        if cheap:
+            rows = packet.get('verify_lanes')
+            if (packet.get('lane_config_hash') != _m_lanes.lane_config_hash(n) or not isinstance(rows, list)
+                    or not rows or any(not isinstance(r, dict) or r.get('status') != 'passed'
+                                       or type(r.get('result')) is not int or r['result'] != 0 for r in rows)):
+                reasons.append('recorded verify lane evidence missing, changed or failed; hand back again')
+        elif isinstance(w, dict) and w.get("path"):
+            try:
+                snap = _m_lanes.lane_snapshot(n, w, verify_env(n, branch, w), verify_inputs(n, w))
+                if snap:
+                    snap['check'] = n['fm'].get('verify_lanes_check', '').strip()
+                    checked, current_head, current_main = ready_preflight(n, branch, base=main if train else None)
+                    reasons.extend(checked)
+                    if current_head != head or current_main != main:
+                        reasons.append('lane map command changed integration refs; hand back again')
+                if snap and not lane_packet_valid(packet, snap):
+                    reasons.append("verify lane configuration, inputs or results changed; hand back again")
+                if not snap and packet.get("verify_lanes") is not None:
+                    reasons.append("verify lane configuration removed; hand back again")
+            except (ValueError, OSError, UnicodeError, RecursionError) as error:
+                reasons.append("verify lanes invalid: " + _m_guard.redact(str(error), _m_guard.never_terms(n)))
         rounds = packet.get("review_rounds")
         if type(rounds) is not int or rounds < 1:
             reasons.append("no completed review rounds recorded")
@@ -217,7 +243,8 @@ def ready_state(inst, n, branch, train=False):
             reasons.append("packet has no valid check time")
     scrubber = VerifyScrubber(_m_guard.never_terms(n))
     reasons = [scrubber.feed(reason, final=True) for reason in reasons]
-    return {"ready": not reasons, "reasons": reasons, "packet": packet}
+    return {"ready": not reasons, "reasons": reasons, "packet": packet,
+            "validation": "recorded" if display else "full"}
 
 
 VERIFY_INPUTS = ".env,.env.*"  # files git doesn't track that verify reads, unless the node names its own
@@ -369,7 +396,7 @@ def run_verify(inst, n, branch, verify, w, env):
         _m_machine.machine_release(token)
 
 
-def run_verify_stream(inst, n, branch, verify, w, env, token):
+def run_verify_stream(inst, n, branch, verify, w, env, token, lane=None):
     """Drain the same combined stdout/stderr pipe as before; stdin, environment and shell stay unchanged.
     Only redacted text reaches disk or failure tails. Memory holds at most 15 bounded
     lines per named lane, plus an overall tail and the scrubber's protected suffix.
@@ -379,6 +406,9 @@ def run_verify_stream(inst, n, branch, verify, w, env, token):
     import selectors
     from collections import deque
     folder, dfd, key, check = verify_log_dir(inst, n, branch)
+    job_key = key
+    if lane is not None:
+        key += "-" + hashlib.sha256(lane.encode()).hexdigest()[:16]
     terms = _m_guard.never_terms(n)
     scrubber = VerifyScrubber(terms)
     say = lambda text: print(VerifyScrubber(terms).feed(text, final=True), flush=True)
@@ -398,10 +428,10 @@ def run_verify_stream(inst, n, branch, verify, w, env, token):
                 check(dfd)
                 os.unlink(entry, dir_fd=dfd)
             # One input map belongs to one retained log. Also retire legacy unpaired maps.
-            retained_maps = {verify_input_map_name(key, entry) for entry in os.listdir(dfd)
-                             if re.fullmatch(re.escape(key) + r"-verify-\d+-[0-9a-f]{12}\.log", entry)}
+            retained_maps = {verify_input_map_name(job_key, entry) for entry in os.listdir(dfd)
+                             if re.fullmatch(re.escape(job_key) + r"(?:-[0-9a-f]{16})?-verify-\d+-[0-9a-f]{12}\.log", entry)}
             for entry in os.listdir(dfd):
-                if re.fullmatch(re.escape(key) + r"-inputs-[0-9a-f]{24}\.map", entry) and entry not in retained_maps:
+                if re.fullmatch(re.escape(job_key) + r"-inputs-[0-9a-f]{24}\.map", entry) and entry not in retained_maps:
                     check(dfd)
                     os.unlink(entry, dir_fd=dfd)
             overall, lanes, failed = deque(maxlen=15), {}, set()
@@ -507,6 +537,106 @@ def run_verify_stream(inst, n, branch, verify, w, env, token):
         os.close(dfd)
 
 
+def verify_env(n, branch, w):
+    return {**os.environ, "MAIN": str(n["home_path"]), "WORKTREE": w["path"], "BRANCH": branch,
+            "NODE": n["id"], "PORT": str(w["port"]), "PORTS": str(w.get("ports", 1)),
+            "PORT_LAST": str(w["port"] + w.get("ports", 1) - 1)}
+
+
+def lane_packet_valid(packet, snap):
+    rows = packet.get("verify_lanes")
+    expected = [l for l in snap['lanes'] if l['schedule'] != 'nightly']
+    if (packet.get('lane_context_hash') != snap['context'] or packet.get('lane_map_hash') != snap['map_hash']
+            or not isinstance(rows, list) or len(rows) != len(expected)):
+        return False
+    for row, lane in zip(rows, expected):
+        if (not isinstance(row, dict) or row.get('name') != lane['name'] or row.get('command') != lane['command']
+                or row.get('input_hash') != snap['hashes'][lane['name']] or type(row.get('result')) is not int
+                or row['result'] != 0 or row.get('status') != 'passed' or not lane_evidence_valid(row)):
+            return False
+    check = packet.get('verify_lanes_check')
+    return not snap.get('check') or isinstance(check, dict) and type(check.get('result')) is int and check['result'] == 0
+
+
+def lane_evidence_valid(row):
+    duration = row.get('duration')
+    return (isinstance(duration, (int, float)) and not isinstance(duration, bool)
+            and math.isfinite(duration) and duration >= 0 and isinstance(row.get('log'), str)
+            and bool(row['log']) and isinstance(row.get('verified_head'), str)
+            and bool(re.fullmatch(r'[0-9a-f]{40}|[0-9a-f]{64}', row['verified_head'])))
+
+
+def run_lanes(inst, n, branch, w, env, snap, previous, head, main, inputs, force=False):
+    prior = previous if isinstance(previous, dict) else {}
+    eligible = (prior.get('version') == 1 and prior.get('node') == n['id']
+                and prior.get('branch') == branch and prior.get('verify_command') == n['fm'].get('verify', '').strip()
+                and isinstance(prior.get('checked_at'), str) and inst.parse_time(prior['checked_at'])
+                and packet_main_matches(n, prior, main)
+                and prior.get('lane_context_hash') == snap['context'] and prior.get('inputs') == inputs
+                and type(prior.get('review_rounds')) is int and prior['review_rounds'] >= 1)
+    history = prior.get('lane_green', prior.get('verify_lanes', []))
+    old = {r['name']: r for r in history if isinstance(r, dict) and isinstance(r.get('name'), str)} if eligible and isinstance(history, list) else {}
+    rows, results, check = [], {}, None
+    token = None
+    try:
+        command = n['fm'].get('verify_lanes_check', '').strip()
+        if command:
+            token = _m_machine.machine_wait('verify', inst, n['id'])
+            start = time.monotonic()
+            result, log = run_verify_stream(inst, n, branch, command, w, env, token, lane='fitness')
+            check = dict(command=command, result=result, duration=time.monotonic()-start, log=log)
+        for lane in snap['lanes']:
+            if lane['schedule'] == 'nightly':
+                continue
+            name = lane['name']
+            previous_lane = old.get(name, {})
+            changed = _m_lanes.changed_since(w['path'], previous_lane.get('verified_head'), head) if previous_lane else None
+            reuse = (not force and eligible and type(previous_lane.get('result')) is int and previous_lane['result'] == 0
+                     and previous_lane.get('status') == 'passed' and lane_evidence_valid(previous_lane)
+                     and Path(previous_lane['log']).is_file() and previous_lane.get('command') == lane['command']
+                     and previous_lane.get('input_hash') == snap['hashes'][name] and changed is not None
+                     and not lane['always'] and not any(_m_lanes.matches(p, lane['strict_inputs']) for p in changed))
+            row = dict(name=name, command=lane['command'], input_hash=snap['hashes'][name],
+                       result=None, duration=0, log=None, reused=False, verified_head=head, status='skipped')
+            if check and check['result'] or any(results.get(req) != 0 for req in lane['requires']):
+                pass
+            elif reuse:
+                row.update(previous_lane, reused=True)
+            else:
+                if token is None:
+                    token = _m_machine.machine_wait('verify', inst, n['id'])
+                print('verify lane: ' + name, flush=True)
+                start = time.monotonic()
+                result, log = run_verify_stream(inst, n, branch, lane['command'], w, env, token, lane=name)
+                row.update(result=result, log=log, duration=time.monotonic()-start,
+                           status='passed' if result == 0 else 'failed')
+            if row['result'] == 0:
+                old[name] = dict(row)
+            rows.append(row)
+            results[name] = row['result']
+    finally:
+        if token is not None:
+            _m_machine.machine_release(token)
+    result = next((r['result'] or 1 for r in rows if r['result'] != 0), 0)
+    if check and check['result']:
+        result = check['result']
+    return dict(verify_lanes=rows, lane_green=list(old.values()), lane_map_hash=snap['map_hash'], lane_config_hash=snap['config_hash'], lane_context_hash=snap['context'],
+                verify_lanes_check=check, verify_result=result,
+                verify_reused=bool(rows) and all(r['reused'] for r in rows) and not check)
+
+
+def show_lanes(n, packet):
+    rows = (packet or {}).get('verify_lanes', [])
+    for row in rows if isinstance(rows, list) else []:
+        if isinstance(row, dict):
+            text = 'verify lane %s: %s (exit %s)%s; %.3fs; log: %s' % (row.get('name'), row.get('status'), row.get('result'),
+                    ' (reused)' if row.get('reused') else '', row.get('duration') if isinstance(row.get('duration'), (int, float)) else 0, row.get('log') or 'none')
+            print(_m_guard.redact(text, _m_guard.never_terms(n)))
+    check = (packet or {}).get('verify_lanes_check')
+    if isinstance(check, dict):
+        print(_m_guard.redact('verify lanes check: exit %s; log: %s' % (check.get('result'), check.get('log')), _m_guard.never_terms(n)))
+
+
 def record_ready(inst, n, branch, reviews, previous=None, reverify=False):
     reasons, head, main = ready_preflight(n, branch)
     verify = n["fm"].get("verify", "").strip()
@@ -522,7 +652,17 @@ def record_ready(inst, n, branch, reviews, previous=None, reverify=False):
     integration_base = integration_parent(n, main)
     if previous and previous.get("integration_base", previous.get("main")) != integration_base:
         reverify = True
-    reuse = None if reverify else verify_reuse(n, branch, previous, head, main, verify, w["path"], inputs)
+    env = verify_env(n, branch, w)
+    try:
+        snap = _m_lanes.lane_snapshot(n, w, env, inputs)
+        if snap:
+            _m_guard.no_terms_in(n, json.dumps(snap['lanes'], ensure_ascii=False), 'verify lane map')
+            snap['check'] = n['fm'].get('verify_lanes_check', '').strip()
+            for warning in snap['warnings']:
+                print(_m_guard.redact('verify warning: ' + warning, _m_guard.never_terms(n)))
+    except (ValueError, OSError, UnicodeError, RecursionError) as error:
+        return None, ['verify lanes invalid: ' + _m_guard.redact(str(error), _m_guard.never_terms(n))]
+    reuse = None if reverify or snap or (previous or {}).get('verify_lanes') is not None else verify_reuse(n, branch, previous, head, main, verify, w["path"], inputs)
     # The CLI holds brain_lock here. Do not sweep an operator's dirty .gitignore into
     # the worker hand-back commit just because we added the local-output exclusion.
     gi = inst.root / ".gitignore"
@@ -541,15 +681,24 @@ def record_ready(inst, n, branch, reviews, previous=None, reverify=False):
                 "integration_base": integration_base, "verify_command": verify, "verify_result": 0, "verified_head": base, "verify_reused": True,
                 "inputs": inputs, "input_files_ref": input_ref, "verify_log": previous.get("verify_log"),
                 "review_rounds": reviews, "checked_at": _m_jobs.stamp(inst)}, []
-    env = {**os.environ, "MAIN": str(n["home_path"]), "WORKTREE": w["path"], "BRANCH": branch,
-           "NODE": n["id"], "PORT": str(w["port"]), "PORTS": str(w.get("ports", 1)),
-           "PORT_LAST": str(w["port"] + w.get("ports", 1) - 1)}
     _m_instance.unlock()  # verification belongs to this worker, not the instance-wide lock
-    result, log_path = run_verify(inst, n, branch, verify, w, env)
+    lane_evidence = run_lanes(inst, n, branch, w, env, snap, previous, head, main, inputs, reverify) if snap else None
+    if lane_evidence:
+        result = lane_evidence['verify_result']
+        log_path = next((r['log'] for r in reversed(lane_evidence['verify_lanes']) if r.get('log')), None)
+    else:
+        result, log_path = run_verify(inst, n, branch, verify, w, env)
     after, head_after, main_after = ready_preflight(n, branch)
     after_files = verify_input_files(n, w)
     input_reasons = ([verify_input_reason(n, input_files, after_files, during=True)]
                      if verify_inputs(n, w, after_files) != inputs else [])
+    if snap:
+        try:
+            after_snap = _m_lanes.lane_snapshot(n, w, env, verify_inputs(n, w))
+            if after_snap != {k: v for k, v in snap.items() if k != 'check'}:
+                after.append('verify lane map, toolchain or input files changed during verify')
+        except (ValueError, OSError, UnicodeError, RecursionError):
+            after.append('verify lane inputs became unreadable during verify')
     if after or head_after != head or main_after != main or integration_parent(n, main_after) != integration_base:
         # What passed isn't the commit on main that was asked about: never record it as evidence.
         return None, input_reasons + ["verify changed the job's branch, local main or worktree ("
@@ -561,6 +710,9 @@ def record_ready(inst, n, branch, reviews, previous=None, reverify=False):
     packet = {"version": 1, "node": n["id"], "branch": branch, "head": head, "main": main,
               "integration_base": integration_base, "verify_command": verify, "verify_result": result, "verify_log": log_path, "verified_head": head,
               "inputs": inputs, "input_files_ref": input_ref, "review_rounds": reviews, "checked_at": _m_jobs.stamp(inst)}
+    if lane_evidence:
+        packet.update(lane_evidence)
+        show_lanes(n, packet)
     return packet, []
 
 
@@ -574,6 +726,7 @@ def cmd_ready(a):
     main_notice(inst.node(a.id))
     n = inst.node(a.id)
     state = ready_state(inst, n, a.branch)
+    show_lanes(n, state["packet"])
     print(VerifyScrubber(_m_guard.never_terms(n)).feed(
         "ready" if state["ready"] else "not ready: " + "; ".join(state["reasons"]), final=True))
     if not state["ready"]:
@@ -663,7 +816,7 @@ def write_verify_input_files(inst, n, branch, inputs, files, log_path):
     temp = key + "-inputs-" + os.urandom(12).hex() + ".tmp"
     try:
         log_name = Path(log_path).name if isinstance(log_path, str) else ""
-        if not re.fullmatch(re.escape(key) + r"-verify-\d+-[0-9a-f]{12}\.log", log_name):
+        if not re.fullmatch(re.escape(key) + r"(?:-[0-9a-f]{16})?-verify-\d+-[0-9a-f]{12}\.log", log_name):
             return None  # legacy evidence without a log cannot carry a retained map
         name = verify_input_map_name(key, log_name)
         check(dfd)

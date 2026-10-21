@@ -24,6 +24,12 @@ stated; never run a polling loop in an agent.
    `FAIL`, `FAILED`, `FAILURE`, `ERROR`, or `exit N` (nonzero) identifies a failing lane. Missing
    lane markers do not mean a group passed. Reused evidence is an earlier green run, not a fresh
    execution; the command, refs, ignored inputs and job ports must still match the reuse rules.
+   With configured `verify_lanes` or `verify_lanes_from`, inspect the packet's `verify_lanes`
+   entries and each private log, including dependency skips and reused results. An aggregate
+   green alone is insufficient: the map/context and every job lane's input hash must still
+   match. Nightly lanes belong to the node's full `verify` command used by trains/nightlies.
+   Review the optional `verify_lanes_check` coverage gate as project-owned proof that every
+   test belongs to exactly one lane.
    Input-change refusals identify only relative paths and added/removed/modified status. If verify
    modified its own inputs, fix setup or the writing runner before the first verify; exclude a
    file only when it cannot affect the result. Check setup completion, elapsed time and failure
@@ -38,6 +44,7 @@ stated; never run a polling loop in an agent.
    and uncapped; a review never creates an uncloseable ledger job. Seed lint
    reuses guard/scrub and flags configured names and home paths in changed fixtures/tests;
    never-name evidence refuses the brief without quoting it. Inspect all gaps and failures.
+
 3. **Run it.** Use one reviewer for the concern, not one per file or test step. State why this
    separate agent is needed (independent second-runtime review), and include shared findings
    and earlier rounds in the supplied brief so it need not gather them again. Host `delegate` on the reviewer runtime, in the job's worktree (or `launch` a

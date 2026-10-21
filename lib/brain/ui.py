@@ -179,7 +179,7 @@ def ui_state(inst, problems=None, scan=None, spend_budget=2.0):
             wts = [{k: hide(v) for k, v in ui_worktree(inst, home, b, w, n).items()}
                    for b, w in sorted(loc.get("worktrees", {}).items())]
             for wt, branch in zip(wts, sorted(loc.get("worktrees", {}))):
-                state = _m_verify.ready_state(inst, n, branch)
+                state = _m_verify.ready_state(inst, n, branch, display=True)
                 wt["ready"] = {"ready": state["ready"], "reasons": [hide(x) for x in state["reasons"]],
                                "packet": {k: hide(v) for k, v in state["packet"].items() if k not in ("input_files", "input_files_ref")}
                                if state["packet"] else None}
