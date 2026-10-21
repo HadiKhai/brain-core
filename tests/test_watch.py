@@ -153,7 +153,8 @@ class Watcher(Scenario):
             self.m.wake_drain(self.inst, n, once=True)
             self.assertEqual(self.since(), first)
             path = self.m.wake_directory(self.inst, n) / 'history.json'
-            self.assertEqual(self.m.wake_history(path.parent)[-1]['items'][0]['id'], first[0]['id'])
+            self.assertEqual(self.m.wake_history(path.parent)[-1]['items'],
+                             [{'id': first[0]['id'], 'kind': 'inbox'}])
             # The next direct question is handled while delivery waits. Its trigger survives.
             (self.root / 'inbox.md').write_text('- second <!-- wake:' + 'b' * 32 + ' --> <!-- host-question:def -->\n')
             second = self.since()
@@ -210,6 +211,7 @@ class Watcher(Scenario):
             self.m.wake_drain(self.inst, n, once=True)
             self.assertEqual(send.call_count, 1)
             self.assertFalse(list(self.m.wake_directory(self.inst, n).glob('*.pending')))
+            self.assertIn('history write failed', self.m.wake_diagnostic(self.inst, n))
 
     def test_queue_publication_needs_no_hardlinks_and_pending_retry_does_not_scan(self):
         n = self.inst.node('root')

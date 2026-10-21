@@ -254,7 +254,7 @@ def wake_read(directory, command, name="delivery.json"):
         status = record["status"]
         if (record["binding"] == wake_binding(command)
                 and (type(status) is int and 100 <= status <= 599
-                     or status in ("transport error", "delivery failed"))
+                     or status in ("transport error", "delivery failed", "delivered; history write failed"))
                 and type(record["at"]) in (int, float) and math.isfinite(record["at"])):
             return record
     except (OSError, ValueError, KeyError, TypeError):
