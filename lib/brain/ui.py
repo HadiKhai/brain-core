@@ -57,7 +57,7 @@ def ui_decisions(inst, n, limit=6):
     return sorted(out, key=lambda d: d["t"] or 0, reverse=True)[:limit]
 
 
-def ui_worktree(inst, home, branch, w):
+def ui_worktree(inst, home, branch, w, n=None):
     import socket as so
     path = Path(w["path"])
     d = {"branch": branch, "path": _m_common.tilde(path), "port": w.get("port"), "ports": w.get("ports", 1),
@@ -77,10 +77,11 @@ def ui_worktree(inst, home, branch, w):
             except OSError:
                 pass
         d["wrote"] = int(max(times)) if times else None
-        if w.get("base"):
-            c = _m_common.git("rev-list", "--count", f"{w['base']}..{branch}", cwd=home).stdout.strip()
+        target = _m_worktrees.integration_target(n or {"home_path": home, "fm": {}})
+        if target:
+            c = _m_common.git("rev-list", "--count", f"{target}..refs/heads/{branch}", cwd=home).stdout.strip()
             d["ahead"] = int(c) if c.isdigit() else None
-        t = _m_common.git("log", "-1", "--format=%ct", branch, cwd=home).stdout.strip()
+        t = _m_common.git("log", "-1", "--format=%ct", "refs/heads/" + branch, cwd=home).stdout.strip()
         d["last"] = int(t) if t.isdigit() else None
     return d
 
@@ -175,7 +176,7 @@ def ui_state(inst, problems=None, scan=None, spend_budget=2.0):
         hide = lambda t: _m_guard.redact(t, terms) if terms and isinstance(t, str) else t  # noqa: E731
         if n["external"] and n["home_path"] and n["home_path"].exists():
             home = n["home_path"]
-            wts = [{k: hide(v) for k, v in ui_worktree(inst, home, b, w).items()}
+            wts = [{k: hide(v) for k, v in ui_worktree(inst, home, b, w, n).items()}
                    for b, w in sorted(loc.get("worktrees", {}).items())]
             for wt, branch in zip(wts, sorted(loc.get("worktrees", {}))):
                 state = _m_verify.ready_state(inst, n, branch)

@@ -25,6 +25,7 @@ from . import transitions as _m_transitions
 from . import upgrade as _m_upgrade
 from . import usage as _m_usage
 from . import verify as _m_verify
+from . import worktrees as _m_worktrees
 
 
 def status_line(n):
@@ -311,8 +312,9 @@ def local_job_state(n, branch, w):
     if not home or not home.exists():
         return {"exists": exists, "tip": "", "merged": False}
     tip = _m_common.git("rev-parse", "--verify", "--quiet", f"refs/heads/{branch}", cwd=home).stdout.strip()
-    merged = bool(tip and tip != w.get("start") and w.get("base")) and \
-        _m_common.git("merge-base", "--is-ancestor", tip, w["base"], cwd=home).returncode == 0
+    target = _m_worktrees.integration_target(n)
+    merged = bool(tip and tip != w.get("start") and target) and \
+        _m_common.git("merge-base", "--is-ancestor", tip, target, cwd=home).returncode == 0
     return {"exists": exists, "tip": tip, "merged": merged}
 
 

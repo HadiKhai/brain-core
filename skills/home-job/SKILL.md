@@ -28,6 +28,8 @@ stated; never run a polling loop in an agent.
    than stranding existing jobs.
 1. **Worktree.** Choose the integration mode before launching: `brain set <id> merge=pr` for
    host PR merges; `merge=local` (the default) for coordinator-owned local integration.
+   Never reuse a merged job's folder for a new branch. Create a fresh worktree for each
+   new job; leave the old folder on its recorded branch until cleanup.
    `core/bin/brain wt add <id> <branch> [--base <ref>]`. It creates the worktree
    in the node's workbench (beside the home, never inside it or the instance), runs the node's
    `worktree-setup.sh` if it has one (env files, installs), and gives the job its own port.
@@ -256,3 +258,16 @@ need coordinator inspection before cleanup; train branches and journals remain a
 Train failure logs are pinned as private 0600 ignored files in `job-trains/`; journals
 including ejections are committed even when publication stops. Published jobs closed by
 cleanup retain their Batch and merged outcome; recovery marks matching closed rows reconciled.
+
+## Retire a legacy reused-folder record
+
+Do not force cleanup of a merged job whose folder now holds a follow-up branch. The
+coordinator first moves the live checkout, preserving its files, with
+`git worktree move <reused-folder> <fresh-followup-folder>` in the home repository.
+Update only the follow-up job's machine-local worktree `path` binding to that destination;
+keep the old merged job's binding at its original, now missing path. Coordinate the move
+with the worker and re-launch its thread on the new existing worktree if needed. Preserve
+its ledger and worktree state. Mark only the finished job's Active work row terminal.
+Then inspect `brain wt prune <id> --dry-run`: the old missing record may be retired while
+the follow-up remains protected. Run prune only after confirming those exact targets.
+Never delete the live folder or switch its branch merely to satisfy the old record.
