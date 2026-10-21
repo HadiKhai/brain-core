@@ -28,6 +28,27 @@ CORE = Path(os.environ.get("BRAIN_CORE") or Path(__file__).resolve().parent.pare
 from scenario import Scenario, AutonomyProject, shlex_quote
 
 
+class FixtureGitConfig(Scenario):
+    def test_fabricated_repos_disable_automatic_maintenance(self):
+        home = self.repo(self.tmp / 'code')
+        root = self.init('alice')
+        settings = {'gc.auto': '0', 'maintenance.auto': 'false', 'gc.autoDetach': 'false'}
+        for repo in (home, root):
+            for key, value in settings.items():
+                with self.subTest(repo=repo.name, key=key):
+                    self.assertEqual(self.git('config', '--get', key, cwd=repo).strip(), value)
+                    self.assertNotIn(key.lower() + '=', self.git('config', '--local', '--list', cwd=repo).lower())
+        # A hook spawned by the CLI's Git subprocess inherits the same fixture-only settings.
+        captured = self.tmp / 'git-settings'
+        hook = root / '.git/hooks/post-commit'
+        hook.write_text('#!/bin/sh\n' + '\n'.join(
+            'git config --get ' + key + (' > ' if i == 0 else ' >> ') + shlex.quote(str(captured))
+            for i, key in enumerate(settings)) + '\n')
+        hook.chmod(0o700)
+        self.b(root, 'new', 'app', '--title', 'App')
+        self.assertEqual(captured.read_text().splitlines(), list(settings.values()))
+
+
 class AutonomyAtomicWrites(AutonomyProject):
     def failed_replace(self, r, destination, args):
         before = destination.read_bytes()
