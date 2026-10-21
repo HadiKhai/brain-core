@@ -3,6 +3,7 @@ import datetime
 from contextlib import contextmanager
 from contextvars import ContextVar
 import hashlib
+import functools
 import json
 import os
 import re
@@ -383,6 +384,25 @@ def spend_file(inst, path, runtime, allowed, forbidden, budget=None, window=None
     return agg
 
 
+_UI_DISCOVERY = ContextVar('brain_ui_session_discovery', default=None)
+
+
+def ui_discovery(fn):
+    """Share one read-only session discovery across a dashboard's job-usage batch."""
+    @functools.wraps(fn)
+    def read(*args):
+        memo = _UI_DISCOVERY.get()
+        if memo is None:
+            return fn(*args)
+        key = (fn.__name__, tuple(frozenset(arg) if isinstance(arg, set) else arg for arg in args))
+        if key not in memo:
+            value = fn(*args)
+            memo[key] = tuple(value) if fn.__name__ == 'spend_walk' else value
+        return memo[key]
+    return read
+
+
+@ui_discovery
 def spend_sources(inst):
     """[(runtime, config folder)] of every subscription this brain may read, and the folders it may not."""
     try:
@@ -399,6 +419,7 @@ def claude_folder(path):
     return re.sub(r"[^A-Za-z0-9]", "-", str(path))
 
 
+@ui_discovery
 def spend_walk(folder):
     """Transcripts below a folder, without following links into loops; each real file once."""
     seen = set()
@@ -483,6 +504,7 @@ def spend_active(minutes):
     return total
 
 
+@ui_discovery
 def spend_inside(cwd, base):
     if not isinstance(cwd, str) or not os.path.isabs(cwd):
         return False  # a transcript without its own folder is in no place (never the command's own)
@@ -506,6 +528,7 @@ def spend_session_ids():
     return out
 
 
+@ui_discovery
 def codex_meta(path, allowed, forbidden):
     """(id, cwd, parent thread) from a Codex transcript's first line, without reading the rest."""
     fh, _ = _m_history.transcript_open(path, allowed, forbidden)
@@ -527,6 +550,7 @@ def codex_meta(path, allowed, forbidden):
         _m_history.history_str(spawn.get("parent_thread_id")) if isinstance(spawn, dict) else ""
 
 
+@ui_discovery
 def claude_mark(path, allowed, forbidden):
     """The job a Claude session's first message (its brief) names, without reading the rest: "" for none."""
     fh, _ = _m_history.transcript_open(path, allowed, forbidden)
@@ -553,6 +577,7 @@ def claude_mark(path, allowed, forbidden):
     return ""
 
 
+@ui_discovery
 def claude_cwd(path, allowed, forbidden):
     """The folder a Claude session ran in, from its first records (read fresh: never kept)."""
     fh, _ = _m_history.transcript_open(path, allowed, forbidden)
@@ -560,6 +585,7 @@ def claude_cwd(path, allowed, forbidden):
     return s["cwd"] if s else ""
 
 
+@ui_discovery
 def codex_mark(path, allowed, forbidden):
     """The job a Codex session's opening user messages (its brief) name: "" for none. Stops at its first reply."""
     fh, _ = _m_history.transcript_open(path, allowed, forbidden)
@@ -822,7 +848,36 @@ def host_row_usage(row):
             "active_minutes": round(u.get("active_h", 0) * 60), "agent_minutes": round(u.get("agent_h", 0) * 60)}
 
 
+_UI_USAGE = ContextVar('brain_ui_live_usage', default=None)
+
+
+@contextmanager
+def live_usage_snapshot(values, revision):
+    """Keep unchanged UI job totals even after the ordinary CLI's one-minute cache expires."""
+    token = _UI_USAGE.set((values, revision))
+    discovery = _UI_DISCOVERY.set({})
+    try:
+        yield
+    finally:
+        _UI_USAGE.reset(token)
+        _UI_DISCOVERY.reset(discovery)
+
+
 def live_usage(inst, n, row):
+    scope = _UI_USAGE.get()
+    if scope is None:
+        return _live_usage(inst, n, row)
+    values, revision = scope
+    job = (str(inst.root), n['id'], _m_jobs.job_key(row))
+    key = (revision, json.dumps(n['local'], sort_keys=True), tuple(_m_guard.never_terms(n)),
+           tuple(row.get(name, '') for name in _m_jobs.JOB_COLS))
+    old = values.get(job)
+    if old is None or old[0] != key:
+        values[job] = (key, _read_live_usage(inst, n, row))
+    return values[job][1]
+
+
+def _live_usage(inst, n, row):
     """An open job's usage so far, read again at most once a minute in one process (the live view asks often).
     What its host reported wins over what the transcripts show."""
     if str(row.get("Usage", "")).startswith("host"):
@@ -831,12 +886,18 @@ def live_usage(inst, n, row):
     hit = _LIVE.get(key)
     if hit and time.monotonic() - hit[0] < 60:
         return hit[1]
-    try:
-        u = job_usage(inst, n, row)
-    except (OSError, ValueError, RuntimeError):
-        u = None
+    u = _read_live_usage(inst, n, row)
     _LIVE[key] = (time.monotonic(), u)
     return u
+
+
+def _read_live_usage(inst, n, row):
+    if str(row.get('Usage', '')).startswith('host'):
+        return host_row_usage(row)
+    try:
+        return job_usage(inst, n, row)
+    except (OSError, ValueError, RuntimeError):
+        return None
 
 
 def host_usage_cells(path, n):

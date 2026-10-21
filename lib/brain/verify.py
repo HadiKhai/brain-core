@@ -1,4 +1,6 @@
 """Verify mechanics for Brain."""
+import contextlib
+import contextvars
 import fnmatch
 import hashlib
 import json
@@ -169,7 +171,36 @@ def packet_main_matches(n, packet, main):
             packet.get("integration_base", packet.get("main")) == base)
 
 
+_DISPLAY_CACHE = contextvars.ContextVar('brain_ui_ready_cache', default=None)
+
+
+@contextlib.contextmanager
+def display_cache(values, keys):
+    """A dashboard can reuse display validation for unchanged job inputs; full gates never do."""
+    token = _DISPLAY_CACHE.set((values, keys))
+    try:
+        yield
+    finally:
+        _DISPLAY_CACHE.reset(token)
+
+
 def ready_state(inst, n, branch, train=False, display=False):
+    cached = _DISPLAY_CACHE.get() if display and not train else None
+    if cached is None:
+        return _ready_state(inst, n, branch, train, display)
+    values, keys = cached
+    job = (n['id'], branch)
+    key = keys.get(job)
+    if key is None:
+        return _ready_state(inst, n, branch, train, display)
+    previous = values.get(job)
+    if previous is None or previous[0] != key:
+        result = _ready_state(inst, n, branch, train, display)
+        values[job] = (key, result)
+    return values[job][1]
+
+
+def _ready_state(inst, n, branch, train=False, display=False):
     display = display and not train
     reasons, head, main = ready_preflight(n, branch)
     row = _m_jobs.open_job(_m_jobs.read_jobs(n) or [], branch)

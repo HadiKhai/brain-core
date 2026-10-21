@@ -18,11 +18,24 @@ class IdleView(Scenario):
             self.stop_server(process)
         super().tearDown()
 
-    def start_server(self, transcript=False, partial=False):
+    def start_server(self, transcript=False, partial=False, projects=False):
         config = self.tmp / 'config'
         config.mkdir(exist_ok=True)
         self.env['BRAIN_CONFIG'] = str(config / 'brains.json')
         root = self.init('demo')
+        if projects:
+            for name in ('amber', 'indigo'):
+                home = self.repo(self.tmp / name)
+                self.b(root, 'new', name, '--title', name.title(), '--home', str(home))
+                self.b(root, 'wt', 'add', name, 'job-demo')
+            import socket
+            path = root / '.brain/local.json'
+            local = json.loads(path.read_text())
+            for name in ('amber', 'indigo'):
+                with socket.socket() as reservation:
+                    reservation.bind(('127.0.0.1', 0))
+                    local['nodes'][name]['worktrees']['job-demo']['port'] = reservation.getsockname()[1]
+            path.write_text(json.dumps(local))
         if transcript:
             cfg = self.tmp / 'runtime'
             folder = cfg / 'sessions'
@@ -47,6 +60,8 @@ import sys
 sys.path.insert(0, sys.argv[1] + '/lib')
 from brain import ui, cli
 build = ui.ui_state
+if hasattr(ui, 'UI_TELEMETRY_SECONDS'):
+    ui.UI_TELEMETRY_SECONDS = 0.05
 partial = sys.argv[2] == 'partial'
 if hasattr(ui, 'UISpend'):
     ui.UISpend.PUBLISH_EVERY = 0
@@ -61,6 +76,34 @@ if partial:
         kwargs['budget'] = 0.000001
         return real_file(*args, **kwargs)
     spend.spend_file = bounded_file
+node_calls = {}
+summary = ui._m_jobs.jobs_summary
+def counted_node(inst, node):
+    import inspect
+    if inspect.currentframe().f_back.f_code.co_name in ('_ui_state', 'ui_node'):
+        node_calls[node['id']] = node_calls.get(node['id'], 0) + 1
+    return summary(inst, node)
+ui._m_jobs.jobs_summary = counted_node
+check = ui._m_check.collect_problems
+checks = 0
+def counted_check(*args, **kwargs):
+    global checks
+    checks += 1
+    return check(*args, **kwargs)
+ui._m_check.collect_problems = counted_check
+ready_calls = {}
+ready_name = '_ready_state' if hasattr(ui._m_verify, '_ready_state') else 'ready_state'
+ready = getattr(ui._m_verify, ready_name)
+def counted_ready(inst, node, branch, *args, **kwargs):
+    key = node['id'] + ':' + branch
+    ready_calls[key] = ready_calls.get(key, 0) + 1
+    return ready(inst, node, branch, *args, **kwargs)
+setattr(ui._m_verify, ready_name, counted_ready)
+signature = ui.UIInputs.signature
+def fast_signature(self):
+    self.slow_at = float('-inf')  # exercise file discovery without a 15-second test wait
+    return signature(self)
+ui.UIInputs.signature = fast_signature
 calls = 0
 def counted(*args, **kwargs):
     global calls
@@ -69,6 +112,9 @@ def counted(*args, **kwargs):
         kwargs['spend_budget'] = 0.000001
     result = build(*args, **kwargs)
     result['_test_builds'] = calls
+    result['_test_node_builds'] = dict(node_calls)
+    result['_test_checks'] = checks
+    result['_test_ready_calls'] = dict(ready_calls)
     result['_test_initial_incomplete'] = not result['spend']['complete']
     return result
 ui.ui_state = counted
@@ -176,3 +222,200 @@ cli.main()
         self.assertEqual(latest['spend']['read'], 7)
         self.assertEqual(latest['_test_builds'], before['_test_builds'])
         self.assertFalse(list((root / '.brain/spend').rglob('*.json')))
+
+    def test_a_project_edit_reuses_other_nodes_and_does_not_repeat_integrity_scan(self):
+        root, state = self.start_server(projects=True)
+        before = state()
+        (self.tmp / 'indigo/README.md').write_text('A fabricated project edit.\n')
+        latest = state()
+        self.assertGreater(latest['_test_builds'], before['_test_builds'])
+        self.assertGreater(latest['_test_node_builds']['indigo'], before['_test_node_builds']['indigo'])
+        self.assertEqual(latest['_test_node_builds']['amber'], before['_test_node_builds']['amber'],
+                         'one project edit rebuilt an unrelated project')
+        self.assertEqual(latest['_test_checks'], before['_test_checks'],
+                         'a file edit repeated the whole-brain integrity scan')
+        # New untracked paths must also reach the watch set and worktree dirty badge.
+        local = json.loads((root / '.brain/local.json').read_text())
+        worktree = Path(local['nodes']['indigo']['worktrees']['job-demo']['path'])
+        (worktree / 'new-folder').mkdir()
+        new = worktree / 'new-folder/new.txt'
+        new.write_text('made-up first revision\n')
+        latest = state()
+        indigo = next(n for n in latest['nodes'] if n['id'] == 'indigo')
+        self.assertEqual(indigo['worktrees'][0]['dirty'], 1)
+        previous = latest['_test_node_builds']['indigo']
+        new.write_text('made-up second revision, a little longer\n')
+        latest = state()
+        self.assertGreater(latest['_test_node_builds']['indigo'], previous,
+                           'newly discovered file was lost from the watched inputs')
+        self.assertEqual(latest['_test_node_builds']['amber'], before['_test_node_builds']['amber'])
+        self.assertEqual(latest['_test_ready_calls']['amber:job-demo'], before['_test_ready_calls']['amber:job-demo'])
+        # Declared ignored verify inputs affect readiness even though Git's file list omits them.
+        (worktree / '.gitignore').write_text('.env\n')
+        state()
+        previous = state()['_test_ready_calls']['indigo:job-demo']
+        (worktree / '.env').write_text('DEMO_VALUE=made-up\n')
+        self.assertGreater(state()['_test_ready_calls']['indigo:job-demo'], previous)
+
+    def test_display_readiness_cache_is_scoped_and_full_validation_is_never_cached(self):
+        import contextlib
+        import core_loader
+        from unittest import mock
+        import importlib.util
+        loader = core_loader.SourceFileLoader('brain_idle_cache_test', str(CORE / 'bin/brain'))
+        core = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+        loader.exec_module(core)
+        verify = core._owners['ready_state']
+        values, keys = {}, {('demo', 'job-demo'): ('original-inputs',)}
+        node = {'id': 'demo'}
+        implementation = '_ready_state' if hasattr(verify, '_ready_state') else 'ready_state'
+        with mock.patch.object(verify, implementation, return_value={'ready': False}) as read:
+            scope = verify.display_cache(values, keys) if hasattr(verify, 'display_cache') else contextlib.nullcontext()
+            with scope:
+                verify.ready_state(None, node, 'job-demo', display=True)
+                verify.ready_state(None, node, 'job-demo', display=True)
+                self.assertEqual(read.call_count, 1, 'unchanged display validation repeated readiness work')
+                keys[('demo', 'job-demo')] = ('changed-inputs',)
+                verify.ready_state(None, node, 'job-demo', display=True)
+                self.assertEqual(read.call_count, 2)
+                verify.ready_state(None, node, 'job-demo')
+                verify.ready_state(None, node, 'job-demo', train=True, display=True)
+                self.assertEqual(read.call_count, 4, 'full or train gate reused a display result')
+            verify.ready_state(None, node, 'job-demo', display=True)
+            self.assertEqual(read.call_count, 5, 'display cache escaped its UI scope')
+
+    def test_job_usage_snapshot_reuses_unchanged_inputs_beyond_the_cli_ttl(self):
+        import contextlib
+        import core_loader
+        import importlib.util
+        from unittest import mock
+        loader = core_loader.SourceFileLoader('brain_idle_usage_test', str(CORE / 'bin/brain'))
+        core = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+        loader.exec_module(core)
+        spend = core._owners['live_usage']
+        from types import SimpleNamespace
+        inst = SimpleNamespace(root=self.tmp)
+        node = {'id': 'demo', 'dir': self.tmp, 'parent': None, 'local': {}}
+        row = {'Job': 'job-demo', 'Started': '2026-10-21 00:00', 'Usage': ''}
+        values = {}
+        def scope(revision):
+            return spend.live_usage_snapshot(values, revision) if hasattr(spend, 'live_usage_snapshot') else contextlib.nullcontext()
+        with mock.patch.object(spend, 'job_usage', return_value={'sessions': 1}) as count, \
+             mock.patch.object(spend.time, 'monotonic', return_value=0) as clock:
+            with scope(1):
+                spend.live_usage(inst, node, row)
+                clock.return_value = 120
+                spend.live_usage(inst, node, row)
+            self.assertEqual(count.call_count, 1, 'unchanged job usage was recomputed after the CLI TTL')
+            clock.return_value = 240
+            with scope(2):
+                spend.live_usage(inst, node, row)
+            self.assertEqual(count.call_count, 2, 'changed source revision did not refresh job usage')
+
+    def test_job_usage_batch_shares_session_metadata_reads(self):
+        import contextlib
+        import core_loader
+        import importlib.util
+        import io
+        from unittest import mock
+        loader = core_loader.SourceFileLoader('brain_idle_discovery_test', str(CORE / 'bin/brain'))
+        core = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+        loader.exec_module(core)
+        spend = core._owners['live_usage']
+        text = json.dumps({'type': 'session_meta', 'payload': {'id': 'demo-session', 'cwd': '/made-up/demo'}}).encode()
+        with mock.patch.object(spend._m_history, 'transcript_open', side_effect=lambda *args: (io.BytesIO(text), None)) as read:
+            scope = spend.live_usage_snapshot({}, 1) if hasattr(spend, 'live_usage_snapshot') else contextlib.nullcontext()
+            with scope:
+                first = spend.codex_meta(self.tmp / 'demo.jsonl', set(), set())
+                self.assertEqual(spend.codex_meta(self.tmp / 'demo.jsonl', set(), set()), first)
+                self.assertEqual(read.call_count, 1, 'each job re-read the same session metadata')
+            spend.codex_meta(self.tmp / 'demo.jsonl', set(), set())
+            self.assertEqual(read.call_count, 2, 'UI batch memo escaped into ordinary CLI reads')
+
+    def test_permission_change_drops_spend_without_transcript_metadata_change(self):
+        _, state = self.start_server(transcript=True)
+        self.assertEqual(state()['spend']['read'], 1)
+        path = self.tmp / 'config/subscriptions.json'
+        config = json.loads(path.read_text())
+        config['subscriptions'].append({'id': 'separate-demo', 'runtime': 'codex',
+                                        'config_dir': str(self.tmp / 'runtime/sessions'), 'brains': ['separate-demo']})
+        path.write_text(json.dumps(config))
+        self.assertEqual(state()['spend']['read'], 0, 'cached totals retained newly forbidden transcripts')
+
+    def test_external_lookback_reports_and_new_verify_patterns_invalidate_their_inputs(self):
+        import core_loader
+        import importlib.util
+        import os
+        from unittest import mock
+        root = self.init('demo')
+        home = self.repo(self.tmp / 'app')
+        self.b(root, 'new', 'app', '--title', 'Demo app', '--home', str(home))
+        loader = core_loader.SourceFileLoader('brain_idle_inputs_test', str(CORE / 'bin/brain'))
+        core = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+        loader.exec_module(core)
+        ui = core._owners['UIInputs']
+        with mock.patch.dict(os.environ, self.env, clear=True):
+            inst = ui._m_instance.Instance(root)
+            inputs = ui.UIInputs(inst)
+            before = inputs.node_keys(inst, inputs.signature())['app']
+            node = inst.node('app')
+            lookback = ui._m_spend.spend_node_file(inst, node)
+            lookback.parent.mkdir(parents=True, exist_ok=True)
+            lookback.write_text(json.dumps({'total': {'processed': 25, 'models': {}}}))
+            self.assertNotEqual(inputs.node_keys(inst, inputs.signature())['app'], before,
+                                'external node ignored its newly published spend lookback')
+            before = inputs.node_keys(inst, inputs.signature())['app']
+            report = ui._m_worktrees.workbench(inst, node) / 'reports/new-demo/index.md'
+            report.parent.mkdir(parents=True)
+            report.write_text('# Made-up report\n')
+            signature = inputs.signature()
+            self.assertNotEqual(inputs.node_keys(inst, signature)['app'], before, 'new report was not a node input')
+            report.write_text('# Made-up report, second revision\n')
+            self.assertNotEqual(inputs.signature(), signature, 'new report index was not watched after discovery')
+            before = inputs.topology
+            self.b(root, 'set', 'app', 'verify_inputs=runtime-demo.txt')
+            self.assertNotEqual(inputs.topology_key(ui._m_instance.Instance(root)), before,
+                                'new verify-input patterns did not refresh ignored-file discovery')
+
+    def test_a_read_only_refresh_parses_nodes_and_library_only_once(self):
+        import core_loader
+        import importlib.util
+        from unittest import mock
+        loader = core_loader.SourceFileLoader('brain_idle_records_test', str(CORE / 'bin/brain'))
+        core = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+        loader.exec_module(core)
+        ui = core._owners['UIInputs']
+        base = ui._m_instance.Instance
+        display = getattr(ui, 'UIInstance', base)
+        root = self.init('demo')
+        with mock.patch.object(base, 'nodes', return_value=[]) as nodes, mock.patch.object(base, 'items', return_value=[]) as items:
+            view = display(root)
+            view.nodes(); view.nodes()
+            view.items(); view.items()
+            self.assertEqual(nodes.call_count, 1, 'every derived view re-parsed the nodes')
+            self.assertEqual(items.call_count, 1, 'every derived view re-parsed the library')
+            ordinary = base(root)
+            ordinary.items(); ordinary.items()
+            self.assertEqual(items.call_count, 3, 'read-only snapshot caching escaped into CLI instances')
+
+    def test_port_liveness_refreshes_without_rebuilding_repository_state(self):
+        import socket
+        root, state = self.start_server(projects=True)
+        before = state()
+        local = json.loads((root / '.brain/local.json').read_text())
+        port = local['nodes']['indigo']['worktrees']['job-demo']['port']
+        def listening():
+            value = state()
+            node = next(n for n in value['nodes'] if n['id'] == 'indigo')
+            self.assertEqual(value['_test_builds'], before['_test_builds'])
+            return port in node['worktrees'][0]['listening']
+        with socket.socket() as server:
+            server.bind(('127.0.0.1', port)); server.listen(16)
+            deadline = time.monotonic() + 5
+            while not listening() and time.monotonic() < deadline:
+                time.sleep(0.05)
+            self.assertTrue(listening(), 'opening a port remained stale without a file edit')
+        deadline = time.monotonic() + 5
+        while listening() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        self.assertFalse(listening(), 'closing a port remained stale without a file edit')
