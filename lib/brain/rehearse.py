@@ -46,7 +46,22 @@ def installed_core_commit(root):
             raise RehearsalError('installed core commit unavailable')
         return result.stdout.strip()
     # Fixture and manually installed cores have no commit. Still bind their bytes.
-    return 'unversioned:' + hashlib.sha256(json.dumps(snapshot(core), sort_keys=True).encode()).hexdigest()
+    return 'unversioned:' + hashlib.sha256(json.dumps(core_identity(root), sort_keys=True).encode()).hexdigest()
+
+
+def core_identity(root):
+    """Canonical internal aliases for provenance; mutation audits stay literal."""
+    core = root / 'core'
+    entries = snapshot(core)
+    for rel, value in entries.items():
+        if value.startswith('link:'):
+            try:
+                target = (core / rel).resolve()
+            except (OSError, RuntimeError):
+                raise RehearsalError('installed core link identity unavailable') from None
+            if target == root or root in target.parents:
+                entries[rel] = 'link:brain:' + target.relative_to(root).as_posix()
+    return entries
 
 
 def evidence_path(n, branch):
@@ -716,6 +731,7 @@ def run_lane(source, core, folder, nodes, commands):
     elif old_core.exists():
         shutil.rmtree(old_core)
     copy_tree(core, old_core)
+    validate_frozen_links(folder / 'brain')
     results = {}
     cache = {}
     mutations = {}
@@ -775,6 +791,7 @@ def rehearse(inst, n, branch):
                             'checkout', '--detach', '--quiet', head], env=prep_env, capture_output=True)
         if r.returncode or not (candidate / 'bin/brain').is_file():
             raise RehearsalError('candidate is not a core checkout')
+        validate_frozen_links(candidate)
         subprocess.run([*prefix, 'git', '-C', str(candidate), 'remote', 'remove', 'origin'],
                        env=prep_env, capture_output=True, check=True)
         commands = []

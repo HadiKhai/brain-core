@@ -81,6 +81,38 @@ class FrozenInputs(RehearsalFixture):
             finally:
                 link.unlink()
 
+    def test_candidate_changes_link_refused_before_notice_read(self):
+        (self.home / 'CHANGES.md').symlink_to(self.root / 'note.md')
+        self.git('add', 'CHANGES.md', cwd=self.home)
+        self.git('commit', '-qm', 'escaping candidate link', cwd=self.home)
+        self.head = self.git('rev-parse', 'HEAD', cwd=self.home).strip()
+        with self.assertRaises(rehearsal.RehearsalError):
+            self.run_rehearsal(inspect_lane=lambda *args: self.fail('unsafe candidate reached probes'))
+
+    def test_actual_core_replacement_rejects_links_before_commands(self):
+        (self.home / 'leak').symlink_to(self.root / 'note.md')
+        with mock.patch.dict(os.environ, self.env), \
+                mock.patch.object(rehearsal, 'run_command', side_effect=lambda *a: self.fail('unsafe lane executed')):
+            with self.assertRaises(rehearsal.RehearsalError):
+                rehearsal.run_lane(self.root, self.home, self.tmp / 'lane', [], [('check', ['check'], 'read')])
+
+    def test_unversioned_core_links_round_trip_through_evidence(self):
+        (self.root / 'core/alias').symlink_to(self.root / 'core/bin/brain')
+        (self.root / 'core/brain-data').symlink_to(self.root / 'note.md')
+        identity = rehearsal.installed_core_commit(self.root)
+        outcome = self.run_rehearsal()
+        self.assertTrue(outcome['passed'], outcome['regressions'])
+        self.assertEqual(identity, outcome['installed_core_commit'])
+        node = dict(id='engine', external=True, home_path=self.home)
+        path = self.tmp / 'evidence.json'
+        path.write_text(json.dumps(outcome))
+        with mock.patch.object(rehearsal, 'evidence_path', return_value=path), \
+                mock.patch.object(rehearsal, 'node_instance', return_value=SimpleNamespace(root=self.root)):
+            read = lambda: rehearsal.read_evidence(node, 'job', outcome['head'], outcome['main'], outcome['integration_base'])
+            self.assertEqual(outcome, read())
+            (self.root / 'core/bin/brain').write_text('changed installed core')
+            self.assertIsNone(read())
+
     def test_identical_baseline_failure_is_named_in_evidence_and_printed(self):
         old = {'brief:0': result('refused: brief limit is exceeded', code=1), 'hook': result()}
         outcome = self.run_rehearsal(outputs=[old, old])
