@@ -109,11 +109,11 @@ class LessonTags(Scenario):
         node = r / "nodes/editor"
         (node / "direction.md").write_text("## Principles\n### one-place: One thing\n")
         before = (folder / "lessons.md").read_bytes()
-        self.b(r, "lesson", "editor", "--node", "--from", "app", "--principle", "one-place", "node correction")
+        self.b(r, "lesson", "editor", "--node", "--from", "editor", "--principle", "one-place", "node correction")
         self.assertEqual((folder / "lessons.md").read_bytes(), before)
         lesson = self.parsed(node)[0]
         self.assertEqual((lesson["from"], lesson["scope"], lesson["principle"], lesson["enforced_by"]),
-                         ("app", ["alice"], "one-place", "wish"))
+                         ("editor", ["alice"], "one-place", "wish"))
         self.b(r, "lesson", "editor", "--node", "--at", "root", "--from", "app", "invalid", ok=False)
 
     def test_unknown_duplicate_and_example_ids_fail_without_writes(self):
@@ -173,9 +173,72 @@ class LessonTags(Scenario):
         for target, flags, folder in (("app", ["--node"], r / "nodes/app"),
                                       ("editor", [], r / "specialists/editor")):
             self.assertTrue((folder / "direction.md").is_file())
-            self.b(r, "lesson", target, *flags, "--from", "app", "--principle", "one-place", "correction", ok=False)
-            self.b(r, "lesson", target, *flags, "--from", "app", "unmatched correction")
+            source = target if flags else "app"
+            self.b(r, "lesson", target, *flags, "--from", source, "--principle", "one-place", "correction", ok=False)
+            self.b(r, "lesson", target, *flags, "--from", source, "unmatched correction")
             self.assertEqual(self.parsed(folder)[0]["principle"], "unclassified")
+
+    def test_node_lesson_rejects_foreign_or_above_boundary_source(self):
+        r, _ = self.fixture()
+        self.b(r, "principal", "add", "team")
+        self.b(r, "new", "team", "--title", "Team", "--owners", "team")
+        for target, source in (("app", "team"), ("team", "root"), ("app", "root")):
+            path = r / "nodes" / target / "lessons.md"
+            self.b(r, "lesson", target, "--node", "--from", source, "foreign correction", ok=False)
+            self.assertFalse(path.exists())
+        self.b(r, "lesson", "app", "--node", "--from", "app", "local correction")
+        path = r / "nodes/app/lessons.md"
+        before = path.read_bytes()
+        self.b(r, "lesson", "app", "--node", "--from", "team", "foreign correction", ok=False)
+        self.assertEqual(path.read_bytes(), before)
+        self.b(r, "new", "app/child", "--title", "Child")
+        self.b(r, "lesson", "app", "--node", "--from", "app/child", "descendant correction")
+        self.assertEqual(self.parsed(path.parent)[0]["from"], "app/child")
+        # Returning to the target's owners below an intervening boundary is still foreign.
+        self.b(r, "new", "app/boundary", "--title", "Boundary", "--owners", "team")
+        self.b(r, "new", "app/boundary/child", "--title", "Child", "--owners", "alice")
+        before = path.read_bytes()
+        self.b(r, "lesson", "app", "--node", "--from", "app/boundary/child", "crossed boundary", ok=False)
+        self.assertEqual(path.read_bytes(), before)
+
+    def test_source_id_holding_own_term_still_records(self):
+        r, folder = self.fixture()
+        (r / "nodes/app/never-name.txt").write_text("app\n")
+        self.b(r, "lesson", "editor", "--from", "app", "safe correction")
+        self.assertEqual(self.parsed(folder)[0]["from"], "app")
+        before = (folder / "lessons.md").read_bytes()
+        self.b(r, "lesson", "editor", "--from", "app", "app", ok=False)
+        self.assertEqual((folder / "lessons.md").read_bytes(), before)
+
+    def test_node_self_lesson_can_use_own_terms_but_not_inherited_terms(self):
+        r, _ = self.fixture()
+        node = r / "nodes/app"
+        (node / "never-name.txt").write_text("OwnFixture\n")
+        (r / "never-name.txt").write_text("AncestorFixture\n")
+        self.b(r, "lesson", "app", "--node", "--from", "app", "OwnFixture correction")
+        before = (node / "lessons.md").read_bytes()
+        self.b(r, "lesson", "app", "--node", "--from", "app", "AncestorFixture correction", ok=False)
+        self.assertEqual((node / "lessons.md").read_bytes(), before)
+
+    def test_malformed_tags_keep_source_and_are_warned_in_check(self):
+        r, folder = self.fixture()
+        broken = '- 2026-01-01 12:00 UTC · from app · tags {broken} · scope alice: correction\n'
+        (folder / "lessons.md").write_text("# Lessons\n" + broken)
+        lesson = self.parsed(folder)[0]
+        self.assertEqual((lesson["from"], lesson["principle"], lesson["scope"]), ("app", "unclassified", []))
+        self.assertIn("malformed lesson tags", self.b(r, "check"))
+        (r / "nodes/app/never-name.txt").write_text("HiddenSourceFixture\n")
+        role = folder / "role.md"
+        role.write_text(role.read_text().replace("status: active", "status: proposed") + "\nHiddenSourceFixture\n")
+        out = self.b(r, "specialist", "accept", "editor", "--reviewed-by", "alice", ok=False)
+        self.assertIn("holds a never-name word", out)
+        self.assertNotIn("HiddenSourceFixture", out)
+
+    def test_check_validates_node_lesson_sources(self):
+        r, _ = self.fixture()
+        (r / "nodes/app/lessons.md").write_text(
+            "- 2026-01-01 12:00 UTC · from nonexistent · scope alice: correction\n")
+        self.assertIn("nodes/app/lessons.md: lesson from unknown node", self.b(r, "check"))
 
 
 

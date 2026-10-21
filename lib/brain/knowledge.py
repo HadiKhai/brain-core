@@ -414,18 +414,26 @@ def parse_lessons(path):
     for line in path.read_text().splitlines():
         m = re.match(r"^- (.+?) · from (.+?) · (.*)$", line)
         if m:
-            tags, rest = {}, m.group(3)
+            tags, rest, malformed = {}, m.group(3), False
             if rest.startswith("tags "):
                 try:
                     value, end = json.JSONDecoder().raw_decode(rest[5:])
                 except (ValueError, TypeError):
-                    continue
-                if isinstance(value, dict):
-                    tags = value
-                rest = rest[5 + end:]
-                if not rest.startswith(" · "):
-                    continue
-                rest = rest[3:]
+                    malformed = True
+                else:
+                    if isinstance(value, dict):
+                        tags = value
+                    else:
+                        malformed = True
+                    rest = rest[5 + end:]
+                    if not rest.startswith(" · "):
+                        malformed = True
+                    rest = rest[3:]
+            if malformed:
+                # Retain source policy even when a damaged record cannot safely be hired.
+                out.append({"time": m.group(1), "from": m.group(2), "scope": [], "text": m.group(3),
+                            "principle": "unclassified", "enforced_by": "wish", "line": line, "malformed": True})
+                continue
             scoped = re.fullmatch(r"scope (.+?): (.+)", rest)
             if not scoped:
                 continue
@@ -455,6 +463,14 @@ def cmd_lesson(a):
             _m_common.die(f"several specialists named '{a.specialist}'; add --at <node>")
         target, folder, sources = found[0]["node"], found[0]["dir"], found[0]["fm"]
     src = inst.node(a.source)
+    if a.node:
+        current = src
+        while current and set(current["owners"]) == set(target["owners"]):
+            if current["id"] == target["id"]:
+                break
+            current = current["parent"]
+        else:
+            _m_common.die("a node lesson must come from that node or a descendant without an owner boundary")
     text = a.text.strip()
     if not text or len(text.splitlines()) != 1:
         _m_common.die("a lesson must be one nonempty line")
@@ -467,7 +483,11 @@ def cmd_lesson(a):
     tags = json.dumps({"principle": principle, "enforced_by": check}, ensure_ascii=False)
     path = folder / "lessons.md"
     line = f"- {inst.now()} · from {src['id']} · tags {tags} · scope {', '.join(src['owners'])}: {text}"
-    if _m_guard.find_terms(line, learning_terms(inst, sources, [src, target])):
+    policy_nodes = [src, target]
+    if a.node and src["id"] == target["id"]:
+        # A node's own notes may discuss its own terms, while inherited boundaries still apply.
+        policy_nodes = [target["parent"]] if target["parent"] else []
+    if _m_guard.find_terms(text + "\n" + tags, learning_terms(inst, sources, policy_nodes)):
         _m_common.die("lesson or its tags contain a never-name word of their source or target; reword before recording")
     lines = path.read_text().splitlines() if path.is_file() else ["# Lessons", ""]
     idx = next((i for i, l in enumerate(lines) if l.startswith("- ")), len(lines))

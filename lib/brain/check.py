@@ -189,9 +189,13 @@ def collect_problems(inst):
     for s in _m_knowledge.find_specialists(inst):
         if not s["fm"].get("scope"):
             p(f"{s['dir'].relative_to(inst.root)}/role.md: missing scope")
-        for l in _m_knowledge.parse_lessons(s["dir"] / "lessons.md") if (s["dir"] / "lessons.md").exists() else []:
+    lesson_folders = [n["dir"] for n in nodes] + [s["dir"] for s in _m_knowledge.find_specialists(inst)]
+    for folder in lesson_folders:
+        for l in _m_knowledge.parse_lessons(folder / "lessons.md"):
+            if l.get("malformed"):
+                warnings.append(f"{folder.relative_to(inst.root)}/lessons.md: malformed lesson tags; repair before reuse")
             if not _m_instance.resolve_ref(nodes, l["from"]):
-                warnings.append(f"{s['dir'].relative_to(inst.root)}/lessons.md: lesson from unknown node '{l['from']}'")
+                warnings.append(f"{folder.relative_to(inst.root)}/lessons.md: lesson from unknown node '{l['from']}'")
     for x in _m_schedules.read_schedules(inst):
         for f in _m_schedules.SCHEDULE_FIELDS:
             if not x.get(f):

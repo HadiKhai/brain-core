@@ -28,6 +28,8 @@ description: Capture reusable knowledge (a method, style, asset, script, lesson 
    `core/bin/brain lesson <specialist> --from <node where it happened> --principle <id> "<the lesson>"`.
    Use `--at <library node>` when the specialist id is ambiguous. For a node correction:
    `core/bin/brain lesson <node> --node --from <source node> --principle <id> "<the lesson>"`.
+   A node correction's source must be that node or a descendant with the same owners at
+   every step; corrections never cross a boundary or move into an unrelated node's state.
    If none fits (including a missing direction file), use `--principle unclassified`, the
    default. Never invent a matching principle or accept a direction diff. The operator must
    approve direction changes. Each lesson retains its source, timestamp and source-owner

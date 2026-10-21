@@ -10,9 +10,12 @@ upgrading. `brain changes <node>` shows the entries this node's coordinator hasn
 For agents:
 - `brain lesson` accepts `--principle <id>` from the target's `direction.md` and
   snapshots its `enforced_by` check (or `wish`) alongside existing provenance and scope.
-  `--node` records a node correction; `--at` still selects a specialist's library.
+  `--node` records a node correction from itself or a descendant without an owner
+  boundary; `--at` still selects a specialist's library.
 - The learn skill maps corrections to existing principles. Missing matches and old
   lessons are `unclassified`. Direction changes still require operator approval.
+- Damaged lesson tags retain source policy and warn in `brain check`, which also
+  validates node lessons' source references.
 
 After upgrading:
 - Read `skills/learn/SKILL.md`. Use the optional direction templates for stable
