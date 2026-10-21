@@ -18,6 +18,8 @@ const buildOnly = new Set([
   "BlueOak-1.0.0",
   "Python-2.0",
 ]);
+// The OFL is accepted only for these reviewed font packages, which ship their license beside the fonts.
+export const fonts = new Set(["@fontsource-variable/geist", "@fontsource-variable/geist-mono"]);
 export function licenseAllowed(
   license,
   { bundled = false, font = false } = {},
@@ -39,7 +41,7 @@ export function checkDependencies(
     if (!path) continue;
     if (
       !licenseAllowed(p.license, {
-        font: path.endsWith("/@fontsource-variable/geist"),
+        font: [...fonts].some((f) => path.endsWith("/" + f)),
       })
     )
       failures.push(`${path}: ${p.license || "MISSING"}`);
@@ -81,7 +83,7 @@ export function thirdPartyNotices() {
       }
       // CSS sources and generated CSS are also part of the shipped artifact.
       for (const name of [
-        "@fontsource-variable/geist",
+        ...fonts,
         "tw-animate-css",
         "shadcn",
         "tailwindcss",
@@ -97,7 +99,7 @@ export function thirdPartyNotices() {
         if (
           !licenseAllowed(p.license, {
             bundled: true,
-            font: p.name === "@fontsource-variable/geist",
+            font: fonts.has(p.name),
           })
         )
           throw Error("Bundled license refused: " + p.name + " " + p.license);
@@ -131,6 +133,14 @@ export function thirdPartyNotices() {
         source:
           licenseText(
             sorted.find((p) => p.name === "@fontsource-variable/geist"),
+          ) + "\n",
+      });
+      this.emitFile({
+        type: "asset",
+        fileName: "assets/GeistMono-OFL.txt",
+        source:
+          licenseText(
+            sorted.find((p) => p.name === "@fontsource-variable/geist-mono"),
           ) + "\n",
       });
     },

@@ -8,6 +8,7 @@ import {
   isValidElement,
   type ReactElement,
   type ReactNode,
+  type CSSProperties,
 } from "react";
 import ReactMarkdown from "react-markdown";
 import { createPortal } from "react-dom";
@@ -60,33 +61,44 @@ export function ScreenAction({ active, children }: { active: boolean; children: 
   useEffect(() => setHost(document.getElementById("screen-action-host")), []);
   return active && host ? createPortal(children, host) : null;
 }
-export function ActionLink({ href, children }: { href: string; children: ReactNode }) {
+// Opens a conversation in a new tab and says what happens next; the link stays to open it again.
+export function ActionLink({ href, children, primary = false }: { href: string; children: ReactNode; primary?: boolean }) {
   const [opened, setOpened] = useState(false);
-  return <span className="action-link-group"><a className="item-action" href={safeHref(href)} target="_blank" rel="noreferrer" onClick={() => setOpened(true)}>{opened ? "Open again" : children}</a>{opened && <small role="status">Continue in the conversation. Return here when you’re done.</small>}</span>;
+  return <span className="action-link-group"><a className={primary ? "primary-link" : "item-action"} href={safeHref(href)} target="_blank" rel="noreferrer" onClick={() => setOpened(true)}>{opened ? "Open again" : children}</a>{opened && <small role="status">Continue in the conversation. Return here when you’re done.</small>}</span>;
 }
 
 export function ActionDock({ children }: { children: ReactNode }) {
   return <div className="action-dock">{children}</div>;
 }
 
+export type Crumb = { label: string; onClick?: () => void };
+// One title per page. A breadcrumb appears only below the top level and never repeats the title.
 export function PageHeader({
   title,
   subtitle,
+  crumbs = [],
   actions,
 }: {
   title: string;
-  subtitle: string;
+  subtitle?: ReactNode;
+  crumbs?: Crumb[];
   actions?: ReactNode;
 }) {
   return (
     <header className="page-header">
-      <div>
-        <div className="eyebrow">
-          Workspace <ChevronRight size={12} />
-          {title}
-        </div>
-        <h1>{title}</h1>
-        <p>{subtitle}</p>
+      <div className="page-heading">
+        {crumbs.length > 0 && (
+          <nav aria-label="Breadcrumb" className="crumbs">
+            {crumbs.map((c, i) => (
+              <span key={i}>
+                {c.onClick ? <Button variant="link" size="xs" className="crumb" onClick={c.onClick}>{c.label}</Button> : c.label}
+                <ChevronRight size={12} />
+              </span>
+            ))}
+          </nav>
+        )}
+        <h1 dir="auto">{title}</h1>
+        {subtitle && <p className="page-meta">{subtitle}</p>}
       </div>
       {actions && <div className="actions">{actions}</div>}
     </header>
@@ -165,14 +177,14 @@ export function Status({ children }: { children: ReactNode }) {
     </Badge>
   );
 }
-export function Tip({ text, children }: { text: string; children: ReactNode }) {
+export function Tip({ text, children, style }: { text: string; children: ReactNode; style?: CSSProperties }) {
   return (
     <Tooltip>
       {isValidElement(children) &&
       (children.type === Button || children.type === "button") ? (
         <TooltipTrigger render={children as ReactElement} />
       ) : (
-        <TooltipTrigger render={<span tabIndex={0} className="tip-trigger" />}>
+        <TooltipTrigger render={<span tabIndex={0} className="tip-trigger" style={style} />}>
           {children}
         </TooltipTrigger>
       )}
@@ -185,9 +197,11 @@ export function Text({ children, zone }: { children: any; zone?: string }) {
   const workspaceZone = useContext(TimeZoneContext);
   const text = humanText(readable(children, zone || workspaceZone));
   const rtl = /[\u0590-\u08ff]/.test(text.match(/[A-Za-z\u0590-\u08ff]/)?.[0] || "");
+  // `inline code` reads as code, never as raw backticks.
+  const parts = text.split(/`([^`\n]+)`/);
   return (
     <span className={"readable" + (rtl ? " rtl-text" : "")} dir="auto">
-      {text}
+      {parts.map((part, i) => (i % 2 ? <code key={i} className="inline-code" dir="ltr">{part}</code> : part))}
     </span>
   );
 }
@@ -386,10 +400,12 @@ export function DataTable({
   columns,
   rows,
   name = "records",
+  details = true,
 }: {
   columns: Column[];
   rows: RecordData[];
   name?: string;
+  details?: boolean;
 }) {
   const [page, setPage] = useState(0),
     [size, setSize] = useState("10"),
@@ -468,7 +484,7 @@ export function DataTable({
                 </Button>
               </TableHead>
             ))}
-            <TableHead><span className="sr-only">Details</span></TableHead>
+            {details && <TableHead><span className="sr-only">Details</span></TableHead>}
           </TableRow>
         </TableHeader>
         <TableBody>
@@ -487,7 +503,7 @@ export function DataTable({
                   {text.length > 160 && <Reader title={c.label} text={text} />}
                 </TableCell>
               );})}
-              <TableCell data-label="Details"><Reader title={name === "hires" ? "Hire brief" : "Job details"} trigger={name === "hires" ? "Read brief" : "Check job"} text={columns.map(c => `## ${c.label}\n${nodeText(c.render ? c.render(r) : String(r[c.key] ?? "Not recorded"))}`).join("\n\n")}><TechnicalDetails values={{Job:r.Job || r.job, Started:r.Started || r.started}} /></Reader></TableCell>
+              {details && <TableCell data-label="Details"><Reader title={name === "hires" ? "Hire brief" : "Job details"} trigger={name === "hires" ? "Read brief" : "Check job"} text={columns.map(c => `## ${c.label}\n${nodeText(c.render ? c.render(r) : String(r[c.key] ?? "Not recorded"))}`).join("\n\n")}><TechnicalDetails values={{Job:r.Job || r.job, Started:r.Started || r.started}} /></Reader></TableCell>}
             </TableRow>
           ))}
         </TableBody>

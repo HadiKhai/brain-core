@@ -4,7 +4,7 @@ import { join, resolve } from "node:path";
 const fitnessSource = readFileSync(resolve('../tests/ui-fitness.js'),'utf8').trim();
 
 const scenarios = ["empty", "single", "ten", "hundred", "thousand", "longtext", "longtitle", "rtl"];
-const views = ["overview", "inbox", "learnings", "agents", "usage", "imports", "detail"];
+const views = ["overview", "inbox", "projects", "project", "specialists", "jobs", "threads", "usage", "learnings", "graph"];
 const sizes = [[1440,900],[1280,720],[390,844],[320,640]];
 const folder = process.env.UI_TOUR_DIR;
 if (folder) mkdirSync(folder, { recursive: true });
@@ -20,12 +20,13 @@ for (const scenario of scenarios) test(`seeded ${scenario}: every screen contain
     await page.goto(`/?k=${scenario}`);
     await page.waitForSelector("[data-page=overview]");
     await page.evaluate(() => document.fonts.ready);
+    const projectId = await page.evaluate(() => location.search.includes("empty") ? "" : "field-guide");
     for (const view of views) {
-      await page.evaluate(v => { location.hash = `view=${v === "detail" ? "overview&node=field-guide" : v}`; }, view);
-      if (view === "detail") await expect(page.getByRole("dialog")).toBeVisible();
-      else await expect(page.locator(`[data-page=${view}]`)).toBeVisible();
+      if (view === "project" && !projectId) continue;
+      await page.evaluate(([v, id]) => { location.hash = v === "project" ? `view=project&node=${id}` : `view=${v}`; }, [view, projectId]);
+      await expect(page.locator(`[data-page=${view}]`)).toBeVisible();
       await page.evaluate(async () => {
-        document.querySelectorAll<HTMLElement>("#workspace-content,.section-body").forEach(e => {e.scrollTop=0;});
+        document.querySelectorAll<HTMLElement>("#workspace-content").forEach(e => {e.scrollTop=0;});
         await new Promise(r => setTimeout(r,220));
         await Promise.all(document.getAnimations().filter(a => a.effect?.getTiming().iterations !== Infinity).map(a => a.finished.catch(() => {})));
       });
@@ -33,35 +34,33 @@ for (const scenario of scenarios) test(`seeded ${scenario}: every screen contain
         const visible = (e: Element) => !!e.getClientRects().length && !e.closest("[hidden],[aria-hidden=true]");
         const root = document.querySelector<HTMLElement>("#workspace-content")!;
         const cells = [...document.querySelectorAll<HTMLElement>(".cell-preview")].filter(visible);
-        const sections = [...document.querySelectorAll<HTMLElement>(".section-body")].filter(visible);
-        const primary = document.querySelector("#screen-action-host")!.getBoundingClientRect();
-        const requests = [...document.querySelectorAll(".correspondence")].filter(visible);
+        const host = document.querySelector("#screen-action-host")!, primary = host.getBoundingClientRect();
+        const requests = [...document.querySelectorAll(".row.request")].filter(visible);
         return {
           overflow: document.documentElement.scrollWidth > innerWidth || root.scrollWidth > root.clientWidth + 1,
           clippedCells: cells.filter(e => e.clientHeight > 3 * parseFloat(getComputedStyle(e).lineHeight) + 2).length,
-          unbounded: sections.filter(e => !e.closest('[data-page="inbox"]') && getComputedStyle(e).maxHeight === "none").length,
+          tallRows: [...document.querySelectorAll<HTMLElement>("[data-page]:not([hidden]) .row")].filter(e => visible(e) && innerWidth >= 768 && e.getBoundingClientRect().height > 96).length,
           requestCount: requests.length,
           missingActions: requests.filter(e => !e.querySelector("a,button")).length,
-          squeezedFilters: [...document.querySelectorAll<HTMLElement>('.filter-toolbar [data-slot=input-group],.filter-toolbar [data-slot=select-trigger]')].filter(e => visible(e) && e.getBoundingClientRect().width < 160).length,
-          primaryAboveFold: primary.height > 0 && primary.bottom <= innerHeight,
+          squeezedFilters: [...document.querySelectorAll<HTMLElement>('.filter-toolbar [data-slot=input-group],.filter-toolbar .picker-trigger')].filter(e => visible(e) && e.getBoundingClientRect().width < 160).length,
+          primaryAboveFold: !host.children.length || (primary.height > 0 && primary.bottom <= innerHeight),
           dark: document.documentElement.classList.contains("dark"),
           rtl: [...document.querySelectorAll<HTMLElement>(".readable[dir=auto]")].filter(e => visible(e) && getComputedStyle(e).direction === "rtl").length,
         };
       });
       expect(audit.overflow, `${scenario}/${view}/${width}/${colorScheme}`).toBe(false);
       expect(audit.clippedCells).toBe(0);
-      expect(audit.unbounded).toBe(0);
+      expect(audit.tallRows, `${scenario}/${view}/${width}`).toBe(0);
       expect(audit.missingActions).toBe(0);
       expect(audit.squeezedFilters).toBe(0);
-      if (view !== "detail") expect(audit.primaryAboveFold).toBe(true);
+      expect(audit.primaryAboveFold).toBe(true);
       expect(audit.dark).toBe(colorScheme === "dark");
       if (view === "overview") expect(audit.requestCount).toBeLessThanOrEqual(5);
       if (view === "inbox") expect(audit.requestCount).toBeLessThanOrEqual(10);
-      if (scenario === "rtl" && ["overview","inbox","learnings","agents"].includes(view)) expect(audit.rtl).toBeGreaterThan(0);
+      if (scenario === "rtl" && ["overview","inbox","learnings","specialists"].includes(view)) expect(audit.rtl).toBeGreaterThan(0);
       const fitness = await page.evaluate(fitnessSource);
       if (folder && (!process.env.UI_TOUR_PHONE_ONLY || width < 768)) await page.screenshot({ path:join(folder,`${scenario}-${view}-${width}x${height}-${colorScheme}.png`), animations:"disabled" });
       evidence.push({scenario,view,width,height,colorScheme,...audit,alignment:fitness.alignment,contrast:fitness.contrast});
-      if (view === "detail") await page.keyboard.press("Escape");
     }
     expect(errors).toEqual([]);
     await context.close();
@@ -71,15 +70,16 @@ for (const scenario of scenarios) test(`seeded ${scenario}: every screen contain
 
 test("one thousand requests stay reachable and have conversation feedback", async ({ page, context }) => {
   await page.goto("/?k=thousand");
-  await expect(page.locator('[data-page=overview] .correspondence')).toHaveCount(5);
-  await page.getByRole("button",{name:"Open Inbox (1000)",exact:true}).click();
+  await expect(page.locator('[data-page=overview] .row.request')).toHaveCount(5);
+  await expect(page.locator('[data-page=overview]')).toContainText("Showing 5 of 1000 requests");
+  await page.locator('[data-page=overview]').getByRole("button",{name:"View all",exact:true}).first().click();
   const inbox = page.locator('[data-page=inbox]');
-  await expect(inbox.locator(".correspondence")).toHaveCount(10);
+  await expect(inbox.locator(".row.request")).toHaveCount(10);
   await expect(inbox.locator(".table-footer")).toContainText("1–10 of 1000 requests");
   await inbox.getByRole("button",{name:"Next",exact:true}).click();
   await expect(inbox.locator(".table-footer")).toContainText("11–20 of 1000 requests");
   await page.getByRole("textbox",{name:"Search inbox"}).fill("no matching synthetic question");
-  await expect(inbox).toContainText("Nothing waiting here.");
+  await expect(inbox).toContainText("Nothing matches these filters.");
   await inbox.getByRole("button",{name:"Clear filters"}).click();
   await context.route("**/conversation", route => route.fulfill({body:"Synthetic conversation opened"}));
   const opened = page.waitForEvent("popup");
@@ -91,19 +91,20 @@ test("one thousand requests stay reachable and have conversation feedback", asyn
 });
 
 test("long hire briefs, proposal decisions and overflowing specialist options have full readers", async ({ page, context }) => {
-  await page.goto("/?k=longtext#view=agents");
-  const hire = page.locator('.specialist-entry').first();
-  await hire.getByRole("button",{name:"Read brief",exact:true}).first().click();
-  const dialog = page.getByRole("dialog");
+  await page.goto("/?k=longtext#view=specialists");
+  await page.locator('[data-page=specialists] .row.specialist').first().getByRole("button",{name:"Open specialist",exact:true}).click();
+  await page.locator(".reading-sheet").getByRole("button",{name:"Read brief",exact:true}).first().click();
+  const dialog = page.getByRole("dialog").last();
   await expect(dialog).toContainText("Review the proposed navigation");
   expect((await dialog.locator(".markdown").innerText()).split(/\s+/).length).toBeGreaterThanOrEqual(2000);
   await page.keyboard.press("Escape");
+  await page.keyboard.press("Escape");
   await page.goto("/?k=longtitle#view=learnings");
   await page.getByRole("combobox",{name:"Specialist",exact:true}).click();
-  const option = page.getByRole("option").nth(1);
-  await option.hover();
-  await expect(page.locator('[data-slot=tooltip-content][data-open]')).toContainText("thoughtful project notebook");
-  expect(await option.evaluate(e => e.getBoundingClientRect().right <= innerWidth)).toBe(true);
+  // Long names wrap inside the widened menu, up to its maximum, never past it.
+  const option = page.getByRole("option").first();
+  await expect(option).toContainText("thoughtful project notebook");
+  expect(await option.evaluate(e => e.getBoundingClientRect().right <= innerWidth && e.scrollWidth <= e.clientWidth + 1)).toBe(true);
   await page.keyboard.press("Escape");
   await page.goto("/?k=demo#view=learnings");
   await page.locator('#screen-action-host').getByRole("button",{name:"Review proposal",exact:true}).click();
@@ -156,12 +157,12 @@ test("touch decision feedback and import undo preserve the operator's place", as
   await expect(dialog.getByRole('textbox',{name:'Reviewer name'})).toHaveValue('Morgan');
   await dialog.getByRole('button',{name:'Close',exact:true}).tap();
   await page.getByRole('button',{name:'Toggle Sidebar'}).tap();
-  await page.locator('[data-mobile=true]').getByRole('button',{name:'Import checklist',exact:true}).tap();
+  await page.locator('[data-mobile=true]').getByRole('button',{name:'Add projects',exact:true}).tap();
   await page.getByRole('checkbox',{name:'Pocket Atlas',exact:true}).tap();
-  const dock=page.locator('#action-dock-host');
+  const dock=page.locator('.add-sheet .sheet-dock');
   await dock.getByRole('button',{name:'Clear',exact:true}).tap();
   await dock.getByRole('button',{name:'Undo clear',exact:true}).tap();
   await dock.getByRole('button',{name:'Review import',exact:true}).tap();
-  await expect(page.getByRole('dialog').getByRole('textbox',{name:'Command to copy'})).toHaveValue("brain adopt --parent 'root' -- '/demo/pocket-atlas'");
+  await expect(page.locator('.reading-sheet').getByRole('textbox',{name:'Command to copy'})).toHaveValue("brain adopt --parent 'root' -- '/demo/pocket-atlas'");
   await context.close();
 });

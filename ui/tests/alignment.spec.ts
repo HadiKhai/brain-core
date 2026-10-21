@@ -4,24 +4,25 @@ import { resolve, join } from "node:path";
 const audit = readFileSync(resolve('../tests/ui-fitness.js'), 'utf8').trim();
 const folder = process.env.UI_TOUR_DIR;
 
-test('section content, actions, group headers and pages share rendered alignment', async ({browser}) => {
-  test.setTimeout(180_000);
+const views = ['overview','inbox','projects','project','specialists','jobs','threads','usage','learnings','graph'];
+const hashFor = (v: string) => v === 'project' ? 'view=project&node=field-guide&tab=needs' : 'view=' + v;
+test('section rows, footers, toolbars and pages share rendered alignment', async ({browser}) => {
+  test.setTimeout(240_000);
   const evidence: unknown[] = [];
   for (const [width,height] of [[1440,900],[1280,720],[390,844],[320,640]]) for (const colorScheme of ['light','dark'] as const) {
     const context = await browser.newContext({viewport:{width,height},colorScheme});
     const page = await context.newPage();
     await page.goto('/?k=demo');
     let widthBefore = 0;
-    for (const view of ['overview','inbox','learnings','agents','usage','imports','detail']) {
-      await page.evaluate(v => { location.hash=`view=${v === 'detail' ? 'overview&node=field-guide' : v}`; }, view);
-      if (view === 'detail') await expect(page.locator('.node-sheet')).toBeVisible();
-      else await expect(page.locator(`[data-page=${view}]`)).toBeVisible();
+    for (const view of views) {
+      await page.evaluate(h => { location.hash = h; }, hashFor(view));
+      await expect(page.locator(`[data-page=${view}]`)).toBeVisible();
       await page.evaluate(async()=>{document.querySelector('#workspace-content')!.scrollTop=0;await document.fonts.ready;await new Promise(r=>setTimeout(r,300));});
       const result = await page.evaluate(audit);
-      const primary=page.locator('#screen-action-host [data-slot=button].bg-primary');
-      if(view === 'overview') await expect(primary).toHaveCount(1);
+      const primary=page.locator('#screen-action-host :is([data-slot=button].bg-primary, a.primary-link)');
+      if(view !== 'projects' && view !== 'graph') await expect(primary).toHaveCount(1);
       let hoverContrast = null;
-      if(view !== 'detail' && await primary.count()) {
+      if(await primary.count()) {
         await primary.hover();
         await page.evaluate(async()=>{await Promise.all(document.getAnimations().filter(a=>a.effect?.getTiming().iterations!==Infinity).map(a=>a.finished.catch(()=>{})));});
         hoverContrast = (await page.evaluate(audit)).contrast;
@@ -34,15 +35,13 @@ test('section content, actions, group headers and pages share rendered alignment
       if (view === 'inbox') {
         await expect(page.getByRole('button',{name:'Clear filters',exact:true})).toBeDisabled();
         await expect(page.locator('[data-page=inbox] .pager')).toHaveCount(0);
-        await expect(page.locator('[data-page=inbox] .table-footer')).toContainText('1–1 of 1 request');
-        expect(await page.getByRole('combobox',{name:'Inbox project',exact:true}).evaluate(e=>{const t=e.querySelector('[data-slot=select-value]')!;return t.scrollWidth<=t.clientWidth;})).toBe(true);
+        await expect(page.locator('[data-page=inbox] .table-footer')).toContainText('1–2 of 2 requests');
+        expect(await page.getByRole('combobox',{name:'Inbox project',exact:true}).evaluate(e=>e.scrollWidth<=e.clientWidth+1)).toBe(true);
       }
-      if (view === 'detail') {
-        const preview = page.locator('.node-sheet .text-preview');
-        await expect(preview.first()).toBeVisible();
-        await expect(page.locator('.node-sheet .preview-markdown li').first()).toContainText('Preserve keyboard focus');
-        expect((await preview.allTextContents()).join('\n')).not.toContain('- Preserve keyboard focus');
-        await page.keyboard.press('Escape');
+      if (view === 'project') {
+        const notes = page.locator('[data-page=project] [aria-label=Notes]');
+        await expect(notes.locator('.preview-markdown li').first()).toContainText('Preserve keyboard focus');
+        expect((await notes.locator('.text-preview').allTextContents()).join('\n')).not.toContain('- Preserve keyboard focus');
       }
     }
     await context.close();
@@ -50,7 +49,7 @@ test('section content, actions, group headers and pages share rendered alignment
   if (folder) {mkdirSync(folder,{recursive:true});writeFileSync(join(folder,'alignment-evidence.json'),JSON.stringify(evidence,null,2));}
 });
 
-test('fitness audit rejects a removed content inset and a shortened group header', async ({page}) => {
+test('fitness audit rejects a removed section inset', async ({page}) => {
   const evidence: {mutation:string;failure:string}[] = [];
   const rejects = async (mutation:string, message:string) => {
     let failure = '';
@@ -58,23 +57,18 @@ test('fitness audit rejects a removed content inset and a shortened group header
     expect(failure).toContain(message);
     evidence.push({mutation,failure});
   };
-  await page.goto('/?k=demo#view=overview&node=field-guide');
-  await expect(page.locator('.node-sheet')).toBeVisible();
-  await page.evaluate(()=>{document.querySelector<HTMLElement>('.node-sheet .section-content')!.style.paddingInlineStart='0px';});
-  await rejects('Remove a note row’s start padding', 'section content inset');
-  await page.evaluate(()=>{document.querySelector<HTMLElement>('.node-sheet .section-content')!.style.removeProperty('padding-inline-start');});
+  await page.goto('/?k=demo#view=inbox');
+  await expect(page.locator('[data-page=inbox] [data-item]').first()).toBeVisible();
   await page.evaluate(audit);
-  await page.keyboard.press('Escape');
-  await expect(page.locator('.node-sheet')).not.toBeVisible();
-  await page.evaluate(async()=>{await Promise.all(document.getAnimations().filter(a=>a.effect?.getTiming().iterations!==Infinity).map(a=>a.finished.catch(()=>{})));});
-  await page.evaluate(()=>{document.querySelector<HTMLElement>('.attention-split .disclosure-button')!.style.width='calc(100% - 14px)';});
-  const header=page.locator('.attention-split .disclosure-button').first();
-  await expect.poll(()=>header.evaluate(e=>e.closest('.section-body')!.clientWidth-e.getBoundingClientRect().width)).toBeGreaterThan(12);
-  await rejects('Shorten a group header by 14px', 'group header spans container');
-  await page.evaluate(()=>{document.querySelector<HTMLElement>('.attention-split .disclosure-button')!.style.removeProperty('width');});
-  await expect.poll(()=>header.evaluate(e=>Math.abs(e.closest('.section-body')!.clientWidth-e.getBoundingClientRect().width))).toBeLessThanOrEqual(1);
+  await page.evaluate(()=>{document.querySelector<HTMLElement>('[data-page=inbox] .rows')!.style.marginLeft='-14px';});
+  await rejects('Pull the rows 14px out of their section', 'section content inset');
+  await page.evaluate(()=>{document.querySelector<HTMLElement>('[data-page=inbox] .rows')!.style.removeProperty('margin-left');});
   await page.evaluate(audit);
-  if(folder) writeFileSync(join(folder,'alignment-mutations.json'),JSON.stringify(evidence,null,2));
+  await page.evaluate(()=>{document.querySelector<HTMLElement>('[data-page=inbox] .table-footer')!.style.marginLeft='14px';});
+  await rejects('Indent the list footer by 14px', 'section footer and toolbar inset');
+  await page.evaluate(()=>{document.querySelector<HTMLElement>('[data-page=inbox] .table-footer')!.style.removeProperty('margin-left');});
+  await page.evaluate(audit);
+  if(folder) {mkdirSync(folder,{recursive:true});writeFileSync(join(folder,'alignment-mutations.json'),JSON.stringify(evidence,null,2));}
 });
 
 test('overlay phone gutters stay symmetric and reject an unconditional reservation', async ({browser}) => {
@@ -85,8 +79,8 @@ test('overlay phone gutters stay symmetric and reject an unconditional reservati
     await page.goto('/?k=demo');
     await page.evaluate(async()=>{await document.fonts.ready;await new Promise(r=>setTimeout(r,300));});
     const before = await page.evaluate(audit);
-    expect(before.alignment.phoneGutters.left).toBe(20);
-    expect(before.alignment.phoneGutters.right).toBe(20);
+    expect(before.alignment.phoneGutters.left).toBe(16);
+    expect(before.alignment.phoneGutters.right).toBe(16);
     const mutation = await page.addStyleTag({content:'.inset-scroll { scrollbar-gutter: stable !important; }'});
     let failure = '';
     try { await page.evaluate(audit); } catch(error) {failure=String(error);}

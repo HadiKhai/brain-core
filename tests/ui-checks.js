@@ -7,159 +7,72 @@
     checks.push(message);
   };
   const wait = async (predicate, message) => {
-    for (let i = 0; i < 100; i++) {
+    for (let i = 0; i < 150; i++) {
       if (predicate()) return;
       await new Promise((resolve) => setTimeout(resolve, 20));
     }
     throw new Error("Timed out: " + message);
   };
-  const visible = (el) =>
-    !!el?.getClientRects().length &&
-    getComputedStyle(el).visibility !== "hidden";
+  const visible = (el) => !!el?.getClientRects().length && getComputedStyle(el).visibility !== "hidden";
   const button = (text, root = document) =>
-    [...root.querySelectorAll("button")].find(
-      (e) =>
-        visible(e) &&
-        (e.getAttribute("aria-label") === text ||
-          e.textContent.trim() === text),
-    );
-  const go = async (view) => {
-    location.hash = "view=" + view;
-    await wait(
-      () => !document.querySelector(`[data-page="${view}"]`)?.hidden,
-      "navigate " + view,
-    );
+    [...root.querySelectorAll("button, a")].find((e) => visible(e) && (e.getAttribute("aria-label") === text || e.textContent.trim() === text));
+  const page = (view) => document.querySelector(`[data-page="${view}"]`);
+  const go = async (hash, view = hash) => {
+    location.hash = "view=" + hash;
+    await wait(() => page(view) && !page(view).hidden, "navigate " + hash);
     document.querySelector("#workspace-content").scrollTop = 0;
   };
   const setInput = (el, value) => {
-    Object.getOwnPropertyDescriptor(
-      HTMLInputElement.prototype,
-      "value",
-    ).set.call(el, value);
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value").set.call(el, value);
     el.dispatchEvent(new Event("input", { bubbles: true }));
   };
+  const tab = async (root, label) => {
+    const t = [...root.querySelectorAll("[role=tab]")].find((e) => e.textContent.trim().startsWith(label));
+    t.click();
+    await wait(() => t.getAttribute("aria-selected") === "true", "tab " + label);
+  };
   const choose = async (name, text) => {
-    [...document.querySelectorAll("[role=combobox]")]
-      .find((e) => visible(e) && e.getAttribute("aria-label") === name)
-      .click();
-    await wait(
-      () =>
-        [...document.querySelectorAll("[role=option]")].some(
-          (e) => e.textContent.trim() === text,
-        ),
-      "options " + name,
-    );
-    [...document.querySelectorAll("[role=option]")]
-      .find((e) => e.textContent.trim() === text)
-      .click();
-    await new Promise((r) => setTimeout(r, 50));
+    [...document.querySelectorAll("[role=combobox]")].find((e) => visible(e) && e.getAttribute("aria-label") === name).click();
+    await wait(() => [...document.querySelectorAll("[role=option]")].some((e) => e.textContent.trim().startsWith(text)), "options " + name);
+    [...document.querySelectorAll("[role=option]")].find((e) => e.textContent.trim().startsWith(text)).click();
+    await new Promise((r) => setTimeout(r, 80));
   };
   const scroller = document.querySelector("#workspace-content");
-  await wait(() => document.querySelector("[data-page=overview]"), "state");
-  check(
-    !document.querySelector(
-      "select,details,summary,input[type=date],input[type=time],input[type=color],input[type=file]",
-    ),
-    "no stock controls or disclosures",
-  );
+  await wait(() => page("overview"), "state");
+  check(!document.querySelector("select,details,summary,input[type=date],input[type=time],input[type=color],input[type=file]"), "no stock controls or disclosures");
   check(!document.querySelector("[title]"), "no native title tooltips");
-  check(
-    getComputedStyle(document.body).overflow === "hidden" &&
-      getComputedStyle(document.documentElement).overflow === "hidden",
-    "body and html never scroll",
-  );
-  for (const view of ["overview", "inbox", "learnings", "agents", "usage", "imports"]) {
+  check(getComputedStyle(document.body).overflow === "hidden" && getComputedStyle(document.documentElement).overflow === "hidden", "body and html never scroll");
+  const titles = { inbox: "Inbox", projects: "Projects", specialists: "Specialists", jobs: "Jobs", threads: "Threads", usage: "Usage", learnings: "Learnings", graph: "Graph" };
+  for (const view of ["overview", ...Object.keys(titles)]) {
     await go(view);
-    check(
-      document.querySelector("h1").textContent ===
-        {
-          overview: "Overview",
-          inbox: "Inbox",
-          learnings: "Learnings",
-          agents: "Agents",
-          usage: "Usage",
-          imports: "Import checklist",
-        }[view],
-      "view " + view + " deep links",
-    );
-    check(
-      document.documentElement.scrollWidth <= innerWidth,
-      "no document overflow: " + view,
-    );
-    check(
-      scroller.scrollWidth <= scroller.clientWidth + 1,
-      "no inset overflow: " + view,
-    );
-    const stray = [...document.querySelectorAll("*")].filter(
-      (e) =>
-        visible(e) &&
-        e !== scroller &&
-        !e.matches(".section-body,.verbatim,.reader-body,.reader-footer") &&
-        e.scrollHeight > e.clientHeight + 2 &&
-        ["auto", "scroll"].includes(getComputedStyle(e).overflowY),
-    );
+    const h1 = [...document.querySelectorAll("h1")].filter(visible);
+    check(h1.length === 1 && (view === "overview" ? /^Good (morning|afternoon|evening)$/.test(h1[0].textContent) : h1[0].textContent === titles[view]), "view " + view + " deep links with one title");
+    check(document.documentElement.scrollWidth <= innerWidth, "no document overflow: " + view);
+    check(scroller.scrollWidth <= scroller.clientWidth + 1, "no inset overflow: " + view);
+    const stray = [...document.querySelectorAll("*")].filter((e) => visible(e) && e !== scroller && !e.closest("[role=dialog]") && e.scrollHeight > e.clientHeight + 2 && ["auto", "scroll"].includes(getComputedStyle(e).overflowY));
     check(stray.length === 0, "one active page scroller: " + view);
-    const header = document.querySelector(".topbar").getBoundingClientRect(),
-      page = document.querySelector(".page-header").getBoundingClientRect();
-    check(
-      Math.abs(
-        page.left -
-          header.left -
-          parseFloat(
-            getComputedStyle(document.querySelector(".topbar")).paddingLeft,
-          ),
-      ) < 2,
-      "matching topbar/content gutter: " + view,
-    );
+    const bar = document.querySelector(".topbar"), header = document.querySelector(".page-header").getBoundingClientRect();
+    check(Math.abs(header.left - bar.getBoundingClientRect().left - parseFloat(getComputedStyle(bar).paddingLeft)) < 2, "matching topbar/content gutter: " + view);
   }
   await go("overview");
-  check(
-    document
-      .querySelector(".flight-list")
-      .textContent.includes("narrow-screen navigation"),
-    "long job state is readable",
-  );
-  check(
-    !document
-      .querySelector(".flight-list")
-      .textContent.includes("job/complete-1"),
-    "completed rows and worktrees excluded from in-flight",
-  );
-  const projectButton = button("Field Guide");
-  projectButton.click();
-  await wait(() => document.querySelector(".node-sheet"), "node detail");
-  check(
-    document
-      .querySelector(".node-sheet")
-      .querySelector(".detail-facts dd").textContent.includes("Morgan"),
-    "node detail retains ownership",
-  );
-  check(location.hash.includes("node=field-guide"), "node details deep link");
-  document.dispatchEvent(
-    new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
-  );
-  await wait(
-    () => !visible(document.querySelector(".node-sheet")),
-    "close node detail",
-  );
+  const moving = page("overview").querySelector("[aria-label='Moving now']");
+  check(moving.textContent.includes("Navigation"), "a running thread is listed under Moving now");
+  check(!/complete 1/i.test(moving.textContent), "completed rows and worktrees excluded from in-flight");
+  check(page("overview").querySelectorAll("[data-kpi]").length >= 5 && page("overview").querySelector("[data-segmented]") && page("overview").querySelector(".pulse-strip"), "overview leads with KPIs, segmented state and the pulse strip");
+  const tree = document.querySelector("[data-slot=sidebar]");
+  if (tree) button("Field Guide", tree).click();
+  else location.hash = "view=project&node=field-guide";
+  await wait(() => location.hash.includes("node=field-guide") && page("project"), "project page");
+  check(location.hash.includes("view=project") && location.hash.includes("node=field-guide"), "project deep link");
+  await tab(page("project"), "About");
+  check(page("project").querySelector(".detail-facts").textContent.includes("Morgan"), "project page retains ownership");
+  await tab(page("project"), "Threads");
+  check(page("project").textContent.includes("narrow-screen navigation"), "long job state is readable");
   await go("learnings");
-  check(
-    document
-      .querySelector(".learning-entry")
-      .textContent.includes("awaiting review"),
-    "proposals sort first",
-  );
-  button("Review proposal", document.querySelector(".learning-results")).click();
-  await wait(
-    () => document.querySelector(".reading-sheet .markdown"),
-    "learning reader",
-  );
-  check(
-    document
-      .querySelector(".reading-sheet .markdown")
-      .textContent.includes("<script>literal, untrusted content</script>"),
-    "untrusted code stays literal",
-  );
+  check(page("learnings").querySelector("[data-item]").textContent.includes("Proposed"), "proposals sort first");
+  button("Review proposal", page("learnings").querySelector(".learning-results")).click();
+  await wait(() => document.querySelector(".reading-sheet .markdown"), "learning reader");
+  check(document.querySelector(".reading-sheet .markdown").textContent.includes("<script>literal, untrusted content</script>"), "untrusted code stays literal");
   button("View command", document.querySelector(".reading-sheet")).click();
   await wait(() => document.querySelector(".reading-sheet pre.verbatim"), "review commands");
   check(document.querySelector(".reading-sheet pre.verbatim").textContent === "brain item accept --reviewed-by 'REVIEWER' -- 'lesson-0'", "accept command preserved");
@@ -167,159 +80,72 @@
   check(document.querySelector(".reading-sheet pre.verbatim").textContent === "brain item reject -- 'lesson-0'", "reject command preserved");
   button("Close", document.querySelector(".reading-sheet")).click();
   await wait(() => !visible(document.querySelector(".reading-sheet")), "close learning reader");
-  await choose("State", "Accepted (5)");
-  check(
-    !document
-      .querySelector(".learning-results")
-      .textContent.includes("awaiting review"),
-    "custom select filters knowledge",
-  );
+  await tab(page("learnings"), "Accepted");
+  check(!page("learnings").querySelector(".learning-results .rows").textContent.includes("Proposed"), "state tabs filter knowledge");
   button("Clear filters").click();
-  const search = document.querySelector(
-    'input[placeholder="Search learnings"]',
-  );
+  const search = document.querySelector('input[placeholder="Search learnings"]');
   setInput(search, "filters");
-  await wait(
-    () => document.querySelector(".results-meta").textContent === "1 learning",
-    "search",
-  );
+  await wait(() => document.querySelector(".results-meta").textContent === "1 learning", "search");
   await go("usage");
   await go("learnings");
   check(search.value === "filters", "search survives navigation");
-  check(
-    document.querySelector(".results-meta").textContent === "1 learning",
-    "filtered results survive navigation",
-  );
+  check(document.querySelector(".results-meta").textContent === "1 learning", "filtered results survive navigation");
   button("Clear filters").click();
-  await go("agents");
-  check(
-    document
-      .querySelector("[data-page=agents]")
-      .textContent.includes("Review navigation and focus order"),
-    "specialist hires retain tasks",
-  );
-  check(
-    document
-      .querySelector("[data-page=agents]")
-      .textContent.includes("Median 1.6 h"),
-    "job medians present",
-  );
-  const table = document.querySelector(".ledger-entry .data-table");
-  check(
-    table.querySelectorAll("tbody tr").length === 10,
-    "ledger defaults to ten rows",
-  );
+  await go("specialists");
+  button("Open specialist", page("specialists")).click();
+  await wait(() => document.querySelector(".reading-sheet [data-slot=table]"), "specialist reader");
+  check(document.querySelector(".reading-sheet").textContent.includes("Review navigation and focus order"), "specialist hires retain tasks");
+  button("Close", document.querySelector(".reading-sheet")).click();
+  await wait(() => !visible(document.querySelector(".reading-sheet")), "close specialist");
+  await go("jobs");
+  check(page("jobs").textContent.includes("1.6 h"), "job medians present");
+  check(page("jobs").textContent.includes("162K"), "measured job tokens present");
+  const table = page("jobs").querySelector(".data-table");
+  check(table.querySelectorAll("tbody tr").length === 10, "ledger defaults to ten rows");
   button("Next", table).click();
-  await wait(
-    () => table.querySelectorAll("tbody tr").length === 4,
-    "ledger paging",
-  );
-  check(
-    table.querySelector(".table-footer").textContent.includes("11–14 of 14"),
-    "ledger pages the complete history",
-  );
+  await wait(() => table.querySelectorAll("tbody tr").length === 4, "ledger paging");
+  check(table.querySelector(".table-footer").textContent.includes("11–14 of 14"), "ledger pages the complete history");
   await go("usage");
-  const usage = document.querySelector("[data-page=usage]");
-  check(
-    usage.textContent.includes("Stale") &&
-      usage.textContent.includes("No window"),
-    "stale and absent subscription readings distinct",
-  );
-  check(
-    usage.textContent.includes("Design model"),
-    "per-model weekly window present",
-  );
-  check(
-    usage.querySelectorAll(".window-meter").length === 5,
-    "all subscription windows present",
-  );
-  check(
-    usage.textContent.includes("1 other subscription hidden"),
-    "only count of hidden subscriptions shown",
-  );
-  check(
-    usage.querySelectorAll(".runtime-spend").length === 2,
-    "spend per runtime",
-  );
-  check(
-    usage.textContent.includes("Jobs: time and tokens"),
-    "measured job usage preserved",
-  );
-  check(
-    usage.querySelector(".stop-line").style.left === "85%",
-    "configured stop marker",
-  );
-  await go("imports");
-  const boxes = [
-    ...document.querySelectorAll("[data-page=imports] [role=checkbox]"),
-  ];
-  check(
-    boxes.length === 3 && boxes[1].getAttribute("aria-disabled") === "true" && boxes[2].getAttribute("aria-disabled") === "true",
-    "owned repositories cannot be selected",
-  );
+  const usage = page("usage");
+  check(usage.textContent.includes("Stale") && usage.textContent.includes("No window"), "stale and absent subscription readings distinct");
+  check(usage.textContent.includes("Design model"), "per-model weekly window present");
+  check(usage.querySelectorAll(".window-meter").length === 5, "all subscription windows present");
+  check(usage.textContent.includes("1 other subscription hidden"), "only count of hidden subscriptions shown");
+  check(usage.querySelectorAll(".runtime-spend").length === 2, "spend per runtime");
+  check(usage.querySelector(".meter .tip-trigger").style.left === "85%", "configured stop marker");
+  await go("overview");
+  const addProjects = () => tree ? button("Add projects", tree).click() : (location.hash = "view=overview&add=1");
+  addProjects();
+  await wait(() => document.querySelector(".add-sheet [role=checkbox]"), "add projects sheet");
+  const boxes = [...document.querySelectorAll(".add-sheet [role=checkbox]")];
+  check(boxes.length === 3 && boxes[1].getAttribute("aria-disabled") === "true" && boxes[2].getAttribute("aria-disabled") === "true", "owned repositories cannot be selected");
   boxes[0].click();
-  await wait(() => button("Review import", document.querySelector(".action-dock")), "review import action");
-  button("Review import", document.querySelector(".action-dock")).click();
-  await wait(
-    () => document.querySelector(".reading-sheet .command input"),
-    "import selection",
-  );
-  check(
-    document.querySelector(".reading-sheet .command input").value ===
-      "brain adopt --parent 'root' -- '/demo/pocket-atlas'",
-    "adopt command preserves exact arguments",
-  );
+  const dock = () => document.querySelector(".add-sheet .sheet-dock");
+  await wait(() => button("Review import", dock()), "review import action");
+  check(!scroller.contains(dock()) && !document.querySelector(".add-sheet .sheet-body").contains(dock()), "action dock sits outside the scrolling list");
+  button("Review import", dock()).click();
+  await wait(() => document.querySelector(".reading-sheet .command input"), "import selection");
+  check(document.querySelector(".reading-sheet .command input").value === "brain adopt --parent 'root' -- '/demo/pocket-atlas'", "adopt command preserves exact arguments");
   button("Close", document.querySelector(".reading-sheet")).click();
   await wait(() => !visible(document.querySelector(".reading-sheet")), "close import reader");
-  check(
-    !scroller.contains(document.querySelector(".action-dock")),
-    "action dock sits outside scroller",
-  );
-  const dockTop = document
-    .querySelector(".action-dock-host")
-    .getBoundingClientRect().top;
-  for (const fraction of [0, 0.5, 1]) {
-    scroller.scrollTop =
-      (scroller.scrollHeight - scroller.clientHeight) * fraction;
-    await new Promise((r) => requestAnimationFrame(r));
-    check(
-      Math.abs(
-        document.querySelector(".action-dock-host").getBoundingClientRect()
-          .top - dockTop,
-      ) < 1,
-      "dock stable at scroll " + fraction,
-    );
-  }
-  await go("overview");
-  await go("imports");
-  check(document.querySelector(".action-dock").textContent.includes("1 repository selected"), "selection survives navigation");
-  button("Clear", document.querySelector(".action-dock")).click();
-  await wait(()=>!button("Review import", document.querySelector(".action-dock")),"clear import selection");
-  check(!button("Review import", document.querySelector(".action-dock")),"clear import selection");
-  check(
-    !document.querySelector("[data-ui-attack]") && !window.uiAttack,
-    "source data cannot create executable markup",
-  );
-  const remote = performance
-    .getEntriesByType("resource")
-    .filter((e) => new URL(e.name).origin !== location.origin);
+  button("Close", document.querySelector(".add-sheet")).click();
+  await wait(() => !visible(document.querySelector(".add-sheet")), "close add sheet");
+  addProjects();
+  await wait(() => dock(), "reopen add sheet");
+  check(dock().textContent.includes("1 repository selected"), "selection survives closing the sheet");
+  button("Clear", dock()).click();
+  await wait(() => !button("Review import", dock()), "clear import selection");
+  button("Close", document.querySelector(".add-sheet")).click();
+  await wait(() => !visible(document.querySelector(".add-sheet")), "close add sheet again");
+  check(!document.querySelector("[data-ui-attack]") && !window.uiAttack, "source data cannot create executable markup");
+  const remote = performance.getEntriesByType("resource").filter((e) => new URL(e.name).origin !== location.origin);
   check(remote.length === 0, "fonts scripts and styles stay local");
   await go("overview");
   const geometry = {
     viewport: [innerWidth, innerHeight],
     scrollers: 1,
     gutter: parseFloat(getComputedStyle(scroller).paddingLeft),
-    controls: [
-      ...new Set(
-        [
-          ...document.querySelectorAll(
-            "button,input,[role=combobox],[role=checkbox],a",
-          ),
-        ]
-          .filter(visible)
-          .map((e) => e.getAttribute("role") || e.tagName.toLowerCase()),
-      ),
-    ],
+    controls: [...new Set([...document.querySelectorAll("button,input,[role=combobox],[role=checkbox],a")].filter(visible).map((e) => e.getAttribute("role") || e.tagName.toLowerCase()))],
   };
   return { passed: checks.length, checks, geometry };
 })();

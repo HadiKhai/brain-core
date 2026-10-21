@@ -4,6 +4,7 @@ import { readFileSync, existsSync } from "node:fs";
 import {
   checkDependencies,
   licenseAllowed,
+  fonts,
   root,
 } from "../scripts/licenses.mjs";
 import { join } from "node:path";
@@ -64,18 +65,17 @@ test("committed bundle includes notices and the font license beside the font fil
   assert.ok(packages.some((p) => p.name === "react"));
   assert.ok(packages.some((p) => p.name === "@base-ui/react"));
   assert.ok(packages.some((p) => p.name === "@fontsource-variable/geist"));
+  assert.ok(packages.some((p) => p.name === "@fontsource-variable/geist-mono"));
   for (const p of packages) {
     assert.ok(
       licenseAllowed(p.license, {
         bundled: true,
-        font: p.name === "@fontsource-variable/geist",
+        font: fonts.has(p.name),
       }),
       p.name,
     );
     assert.ok(notices.includes(`${p.name} ${p.version}`), p.name);
   }
-  assert.match(
-    readFileSync(join(folder, "Geist-OFL.txt"), "utf8"),
-    /SIL OPEN FONT LICENSE/i,
-  );
+  for (const file of ["Geist-OFL.txt", "GeistMono-OFL.txt"])
+    assert.match(readFileSync(join(folder, file), "utf8"), /SIL OPEN FONT LICENSE/i);
 });

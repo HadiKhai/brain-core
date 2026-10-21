@@ -1,123 +1,30 @@
 import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
-import {
-  Brain,
-  Inbox as InboxIcon,
-  Bell,
-  BookOpen,
-  Bot,
-  ChartNoAxesCombined,
-  ChevronDown,
-  FolderInput,
-  LayoutDashboard,
-  Monitor,
-  Moon,
-  RefreshCw,
-  Sun,
-  ShieldCheck,
-  X,
-  ArrowUpRight,
-} from "lucide-react";
-import {
-  SidebarProvider,
-  Sidebar,
-  SidebarHeader,
-  SidebarContent,
-  SidebarFooter,
-  SidebarGroup,
-  SidebarGroupLabel,
-  SidebarMenu,
-  SidebarMenuItem,
-  SidebarMenuButton,
-  SidebarInset,
-  SidebarTrigger,
-  useSidebar,
-} from "@/components/ui/sidebar";
+import { Bell, Moon, RefreshCw, Sun } from "lucide-react";
+import { SidebarProvider, SidebarInset, SidebarTrigger } from "@/components/ui/sidebar";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Alert, AlertTitle, AlertDescription } from "@/components/ui/alert";
-import {
-  Sheet,
-  SheetContent,
-  SheetHeader,
-  SheetTitle,
-  SheetDescription,
-} from "@/components/ui/sheet";
-import {
-  DropdownMenu,
-  DropdownMenuTrigger,
-  DropdownMenuContent,
-  DropdownMenuItem,
-} from "@/components/ui/dropdown-menu";
-import {
-  TimeZoneContext,
-  PageHeader,
-  PageSection,
-  Status,
-  Text,
-  Tip,
-  DataTable,
-  Command,
-  Empty,
-  Reader,
-  Preview,
-  SectionNote,
-  SectionBodyRow,
-  TechnicalDetails,
-  ActionLink,
-} from "./shared";
+import { TimeZoneContext, PageHeader, Status, Tip, Empty, type Crumb } from "./shared";
+import { Navigation } from "./nav";
 import { InboxView } from "./inbox";
-import { Overview } from "./overview";
+import { Overview, greeting, overviewSummary } from "./overview";
 import { Learnings } from "./learnings";
-import { Agents } from "./agents";
+import { Specialists, Jobs, Threads } from "./agents";
 import { Usage } from "./usage";
-import { Imports } from "./imports";
-import { list, time, safeHref, count, quote, jobTitle, type RecordData } from "./model";
+import { AddProjects } from "./imports";
+import { Project, Projects, ancestors, projectState } from "./project";
+import { Graph } from "./graph";
+import { RecordPicker } from "./picker";
+import { readRoute, writeRoute, type Route } from "./routes";
+import { list, count, threads, learningRows, type RecordData } from "./model";
 import "./index.css";
 declare global {
   interface Window {
     __STATE__?: RecordData;
   }
 }
-const destinations = [
-  {
-    id: "overview",
-    title: "Overview",
-    icon: LayoutDashboard,
-    subtitle: "Your projects, priorities, and the work moving them forward.",
-  },
-  {
-    id: "inbox",
-    title: "Inbox",
-    icon: InboxIcon,
-    subtitle: "Questions and reviews waiting for your judgment.",
-  },
-  {
-    id: "learnings",
-    title: "Learnings",
-    icon: BookOpen,
-    subtitle: "What your projects have learned, ready for the next job.",
-  },
-  {
-    id: "agents",
-    title: "Agents",
-    icon: Bot,
-    subtitle: "Specialists, their hires, and the complete job ledger.",
-  },
-  {
-    id: "usage",
-    title: "Usage",
-    icon: ChartNoAxesCombined,
-    subtitle: "Subscription capacity, measured spend, and the cost of a job.",
-  },
-  {
-    id: "imports",
-    title: "Import checklist",
-    icon: FolderInput,
-    subtitle: "Discover repositories and choose what joins your workspace.",
-  },
-];
 const getStorage = (key: string) => {
   try {
     return localStorage.getItem(key);
@@ -132,341 +39,26 @@ const setStorage = (key: string, value: string) => {
     /* Storage may be disabled. The current session remains usable. */
   }
 };
-function readRoute() {
-  const p = new URLSearchParams(location.hash.slice(1));
-  return {
-    view: destinations.some((d) => d.id === p.get("view"))
-      ? p.get("view")!
-      : "overview",
-    node: p.get("node"),
-  };
-}
-function Navigation({
-  s,
-  view,
-  onView,
-  onNotice,
-}: {
-  s: RecordData | null;
-  view: string;
-  onView: (id: string) => void;
-  onNotice: (text: string) => void;
-}) {
-  const { setOpenMobile, isMobile } = useSidebar();
-  return (
-    <Sidebar variant="inset" collapsible="icon" className="app-sidebar">
-      <SidebarHeader>
-        {isMobile && (
-          <div className="mobile-nav-heading">
-            <strong>Workspace</strong>
-            <Button
-              variant="ghost"
-              size="icon"
-              aria-label="Close navigation"
-              onClick={() => setOpenMobile(false)}
-            >
-              <X size={18} />
-            </Button>
-          </div>
-        )}
-        <DropdownMenu>
-          <DropdownMenuTrigger
-            render={<Button variant="outline" className="workspace-switcher" />}
-          >
-            <span className="brand-tile">
-              <Brain size={20} />
-            </span>
-            <span className="workspace-name">
-              <strong>{s?.brain?.title || "Brain"}</strong>
-              <small>Personal workspace</small>
-            </span>
-            <ChevronDown size={14} />
-          </DropdownMenuTrigger>
-          <DropdownMenuContent align="start">
-            <DropdownMenuItem disabled>
-              Current workspace: {s?.brain?.title || "Brain"}
-            </DropdownMenuItem>
-            {(s?.brain?.others || []).map((name: string) => (
-              <DropdownMenuItem
-                key={name}
-                onClick={async () => {
-                  const command = "brain -b " + quote(name) + " ui";
-                  try {
-                    await navigator.clipboard.writeText(command);
-                    onNotice(
-                      "Workspace launch command copied. Run it in your terminal.",
-                    );
-                  } catch {
-                    onNotice("Run this command in your terminal: " + command);
-                  }
-                }}
-              >
-                Copy launch command · {name}
-              </DropdownMenuItem>
-            ))}
-          </DropdownMenuContent>
-        </DropdownMenu>
-      </SidebarHeader>
-      <SidebarContent>
-        <SidebarGroup>
-          <SidebarGroupLabel>Workspace</SidebarGroupLabel>
-          <nav aria-label="Workspace navigation">
-            <SidebarMenu
-              onKeyDown={(e) => {
-                const keys = [
-                  "ArrowDown",
-                  "ArrowRight",
-                  "ArrowUp",
-                  "ArrowLeft",
-                  "Home",
-                  "End",
-                ];
-                if (!keys.includes(e.key)) return;
-                const buttons = Array.from(
-                    e.currentTarget.querySelectorAll<HTMLButtonElement>(
-                      "button",
-                    ),
-                  ),
-                  index = buttons.indexOf(
-                    document.activeElement as HTMLButtonElement,
-                  );
-                if (index < 0) return;
-                e.preventDefault();
-                const next =
-                  e.key === "Home"
-                    ? 0
-                    : e.key === "End"
-                      ? buttons.length - 1
-                      : (index +
-                          (["ArrowDown", "ArrowRight"].includes(e.key)
-                            ? 1
-                            : -1) +
-                          buttons.length) %
-                        buttons.length;
-                buttons[next].click();
-                buttons[next].focus();
-              }}
-            >
-              {destinations.map((d) => (
-                <SidebarMenuItem key={d.id}>
-                  <SidebarMenuButton
-                    isActive={view === d.id}
-                    tooltip={d.title}
-                    aria-label={d.title}
-                    aria-current={view === d.id ? "page" : undefined}
-                    onClick={() => {
-                      onView(d.id);
-                      if (isMobile) setOpenMobile(false);
-                    }}
-                  >
-                    <d.icon />
-                    <span>{d.title}</span>
-                    {d.id === "inbox" && list(s?.inbox).length > 0 && (
-                      <span className="nav-count">{s!.inbox.length}</span>
-                    )}
-                  </SidebarMenuButton>
-                </SidebarMenuItem>
-              ))}
-            </SidebarMenu>
-          </nav>
-        </SidebarGroup>
-      </SidebarContent>
-      <SidebarFooter>
-        <div className="sidebar-note">
-          <ShieldCheck size={16} />
-          <div>
-            <strong>Local & read-only</strong>
-            <small>Your brain stays on this machine.</small>
-          </div>
-        </div>
-        <SidebarMenu>
-          <SidebarMenuItem>
-            <div className="workspace-user">
-              <span className="avatar">
-                <Brain size={16} />
-              </span>
-              <span>
-                <strong>{s?.brain?.title || "Workspace"}</strong>
-                <small>{s?.brain?.machine || "Local machine"}</small>
-              </span>
-            </div>
-          </SidebarMenuItem>
-        </SidebarMenu>
-      </SidebarFooter>
-    </Sidebar>
-  );
-}
-function NodeDetail({
-  s,
-  node,
-  onClose,
-}: {
-  s: RecordData;
-  node: string | null;
-  onClose: () => void;
-}) {
-  const n = list(s.nodes).find((n) => n.id === node);
-  return (
-    <Sheet
-      open={!!node}
-      onOpenChange={(open) => {
-        if (!open) onClose();
-      }}
-    >
-      <SheetContent
-        className="node-sheet"
-        side="right"
-        initialFocus={() =>
-          document.querySelector<HTMLElement>(".node-sheet [data-slot=sheet-close]")
-        }
-      >
-        <SheetHeader>
-          <SheetTitle><Tip text={n?.title || "Project details"}><Text>{n?.title || "Project details"}</Text></Tip></SheetTitle>
-          <SheetDescription>
-            Project notes, decisions, and local work
-          </SheetDescription>
-          {safeHref(n?.coordinator) && <ActionLink href={n!.coordinator}>Open coordinator <ArrowUpRight size={14} /></ActionLink>}
-        </SheetHeader>
-        {!n && <div className="detail-scroll"><Empty text="Project unavailable in this reading." action="Return to the project outline or refresh the workspace." /></div>}
-        {n && (
-          <div className="detail-scroll">
-            {list(n.blocked).length > 0 && (
-              <PageSection title="Needs you">
-                {n.blocked.map((t: string, i: number) => (
-                  <SectionNote key={i} text={t} />
-                ))}
-              </PageSection>
-            )}
-            {list(n.inbox).length > 0 && (
-              <PageSection title="Inbox">
-                {n.inbox.map((t: string, i: number) => (
-                  <SectionNote key={i} text={t} />
-                ))}
-              </PageSection>
-            )}
-            {Object.entries(n.status || {})
-              .filter(([k]) => !/^blocked/i.test(k))
-              .map(([k, v]) => (
-                <PageSection key={k} title={k}>
-                  <SectionNote text={v} title={k} />
-                </PageSection>
-              ))}
-            {list(n.limits).length > 0 && (
-              <PageSection title="Limits">
-                {n.limits.map((t: string, i: number) => (
-                  <SectionNote key={i} text={t} />
-                ))}
-              </PageSection>
-            )}
-            {list(n.decisions).length > 0 && (
-              <PageSection title="Latest decisions">
-                {n.decisions.map((d: RecordData, i: number) => (
-                  <SectionBodyRow className="note-row" key={i}>
-                    <strong>
-                      <Text>{d.title}</Text>
-                    </strong>
-                    {d.said && (
-                      <Preview text={d.said} title="Decision" />
-                    )}
-                    <small>{time(d.t || d.time, s.brain?.tz)}</small>
-                  </SectionBodyRow>
-                ))}
-              </PageSection>
-            )}
-            {list(n.jobs?.rows).length > 0 && (
-              <PageSection
-                title="Jobs"
-                description={`${n.jobs.merged || 0} merged · ${n.jobs.abandoned || 0} abandoned · median ${n.jobs.median_hours ?? "unmeasured"} h`}
-              >
-                <DataTable
-                  rows={[...n.jobs.rows].reverse()}
-                  name="jobs"
-                  columns={[
-                    { key: "Job", label: "Job", render: r => <Text>{jobTitle(r.Job)}</Text> },
-                    {
-                      key: "Started",
-                      label: "Started",
-                      render: (r) => time(r.Started, s.brain?.tz),
-                    },
-                    { key: "Hours", label: "Hours", numeric: true },
-                    {
-                      key: "Outcome",
-                      label: "Outcome",
-                      render: (r) => (
-                        <div>
-                          <Status>{r.Outcome || "Open"}</Status>
-                          <Text>{r.Cause}</Text>
-                        </div>
-                      ),
-                    },
-                    { key: "Reviews", label: "Reviews", numeric: true },
-                  ]}
-                />
-              </PageSection>
-            )}
-            {list(n.reports).length > 0 && (
-              <PageSection title="Reports">
-                {n.reports.map((r: RecordData, i: number) => (
-                  <SectionBodyRow className="note-row" key={i}>
-                    <strong>
-                      <Text>{r.title}</Text>
-                    </strong>
-                    <Reader title={r.title || "Report"} text={"Ask the coordinator to open this report for review."} trigger="Open report details"><TechnicalDetails values={{Location:r.path}} /></Reader>
-                  </SectionBodyRow>
-                ))}
-              </PageSection>
-            )}
-            <div className="detail-meta">
-              <Status>
-                {n.sealed
-                  ? "Sealed"
-                  : n.paused
-                    ? "Paused"
-                    : n.archived
-                      ? "Archived"
-                      : "Active"}
-              </Status>
-              {n.runtime && <Status>{n.runtime}</Status>}
-              <dl className="detail-facts">
-                {n.owners?.length > 0 && <><dt>Owners</dt><dd>{n.owners.join(", ")}</dd></>}
-                {n.labels?.length > 0 && <><dt>Labels</dt><dd>{n.labels.join(" · ")}</dd></>}
-                {n.updated && <><dt>Updated</dt><dd>{time(n.updated, s.brain?.tz)}</dd></>}
-                {n.home && <><dt>Home</dt><dd>On this machine</dd></>}
-              </dl>
-              {(!n.owners?.length || !n.updated || !n.home) && <small>Not recorded: {[!n.owners?.length && "owners", !n.updated && "updated", !n.home && "home"].filter(Boolean).join(", ")}</small>}
-              {safeHref(n.preview_url) && (
-                <a href={safeHref(n.preview_url)}>
-                  Open preview <ArrowUpRight size={14} />
-                </a>
-              )}
-              {n.preview && (
-                <p>
-                  Preview: <Text>{n.preview}</Text>
-                </p>
-              )}
-              {n.preview_tour && (
-                <p>
-                  Preview tour: <Text>{n.preview_tour}</Text>
-                </p>
-              )}
-              <TechnicalDetails values={{Home:n.home, Preview:n.preview, "Preview tour":n.preview_tour}} />
-            </div>
-            {n.never_name > 0 && (
-              <PageSection title="Privacy guard">
-                <SectionBodyRow>
-                  <p>
-                  {count(n.never_name, "restricted word")} must stay out of this
-                  project’s files.
-                  </p>
-                  <Reader title="Privacy instructions" text="Ask your coordinator to check restricted words before sharing this project. The command inspects the local files." trigger="Check privacy instructions" footer={<Command text={"brain guard " + n.id} />} />
-                </SectionBodyRow>
-              </PageSection>
-            )}
-          </div>
-        )}
-      </SheetContent>
-    </Sheet>
-  );
+const agentsCrumb = (go: (r: Partial<Route> & { view: string }) => void): Crumb[] => [{ label: "Agents", onClick: () => go({ view: "specialists" }) }];
+// One title per page, with a subtitle of facts that never restates it.
+function heading(s: RecordData | null, route: Route, go: (r: Partial<Route> & { view: string }) => void): { title: string; subtitle?: string; crumbs?: Crumb[] } {
+  const nodes = list(s?.nodes), open = s ? threads(nodes) : [];
+  switch (route.view) {
+    case "inbox": return { title: "Inbox", subtitle: s ? `${count(list(s.inbox).length, "request")} · ${count(list(s.due).length, "coordinator step")}` : undefined };
+    case "projects": return { title: "Projects", subtitle: s ? `${nodes.filter((n) => !n.archived).length} in this brain · ${count(open.length, "thread")} in flight` : undefined };
+    case "project": {
+      const n = nodes.find((x) => x.id === route.node);
+      return { title: n?.title || "Project", crumbs: ancestors(nodes, n).map((p) => ({ label: p.title || "Project", onClick: () => go({ view: "project", node: p.id }) })),
+        subtitle: n ? [projectState(n), n.runtime, n.owners?.length ? n.owners.join(", ") : "", n.updated_ago ? "updated " + n.updated_ago : ""].filter(Boolean).join(" · ") : undefined };
+    }
+    case "specialists": return { title: "Specialists", crumbs: agentsCrumb(go), subtitle: s ? `${count(list(s.specialists).length, "role")} · ${count(list(s.specialists).reduce((a, sp) => a + list(sp.jobs).length, 0), "hire")}` : undefined };
+    case "jobs": return { title: "Jobs", crumbs: agentsCrumb(go), subtitle: s ? `${nodes.reduce((a, n) => a + list(n.jobs?.rows).length, 0)} recorded · ${nodes.reduce((a, n) => a + list(n.jobs?.open).length, 0)} open` : undefined };
+    case "threads": return { title: "Threads", crumbs: agentsCrumb(go), subtitle: s ? `${open.length} open across ${count(new Set(open.map((f) => f.node.id)).size, "project")}` : undefined };
+    case "usage": return { title: "Usage", crumbs: agentsCrumb(go), subtitle: s ? `${count(list(s.usage).length, "subscription")} · stop line ${s.usage_policy?.stop_percent ?? "unknown"}%` : undefined };
+    case "learnings": { const rows = s ? learningRows(s) : []; return { title: "Learnings", subtitle: s ? `${count(rows.length, "item")} · ${rows.filter((r) => r.state === "proposed").length} proposed for review` : undefined }; }
+    case "graph": return { title: "Graph", subtitle: s ? `${count(nodes.filter((n) => !n.archived).length, "project")} · ${count(list(s.specialists).length, "specialist")} · ${count(list(s.items?.all).length, "learning")}` : undefined };
+    default: return { title: s ? greeting(s) : "Overview", subtitle: s ? overviewSummary(s) : undefined };
+  }
 }
 function App() {
   const [s, setState] = useState<RecordData | null>(window.__STATE__ || null),
@@ -484,7 +76,7 @@ function App() {
     );
   const scroll = useRef<HTMLDivElement>(null),
     positions = useRef<Record<string, number>>({}),
-    activeView = useRef(route.view);
+    activeView = useRef(route.view + ":" + (route.node || ""));
   useLayoutEffect(() => {
     // Overlay scrollbars need no reserved space. CSS stable alone can still
     // allocate a classic-width strip on systems whose scrollbars overlay content.
@@ -500,15 +92,16 @@ function App() {
     addEventListener("resize", measure);
     return () => removeEventListener("resize", measure);
   }, []);
+  const pageKey = route.view + ":" + (route.node || "");
   useLayoutEffect(() => {
     if (scroll.current)
-      scroll.current.scrollTop = positions.current[route.view] || 0;
-    activeView.current = route.view;
-  }, [route.view]);
+      scroll.current.scrollTop = positions.current[pageKey] || 0;
+    activeView.current = pageKey;
+  }, [pageKey]);
   useEffect(() => {
     const fn = () => {
       const next = readRoute();
-      if (next.view !== activeView.current && scroll.current)
+      if (next.view + ":" + (next.node || "") !== activeView.current && scroll.current)
         positions.current[activeView.current] = scroll.current.scrollTop;
       setRoute(next);
     };
@@ -601,16 +194,15 @@ function App() {
     }
     setStorage(key, JSON.stringify([...seen]));
   }, [s, notify]);
-  const go = (view: string) => {
-    location.hash = "view=" + view;
+  const go = (r: Partial<Route> & { view: string }) => {
+    location.hash = writeRoute(r);
   };
-  const node = (id: string | null) => {
-    const hash =
-      "view=" + route.view + (id ? "&node=" + encodeURIComponent(id) : "");
-    history.replaceState(null, "", "#" + hash);
-    setRoute({ ...route, node: id });
+  const setAdd = (open: boolean) => {
+    const hash = writeRoute({ ...route, add: open });
+    if (open) location.hash = hash;
+    else { history.replaceState(null, "", hash); setRoute({ ...route, add: false }); }
   };
-  const current = destinations.find((d) => d.id === route.view)!;
+  const head = heading(s, route, go);
   const enableNotifications = async () => {
     if (notify) {
       setNotify(false);
@@ -640,56 +232,39 @@ function App() {
         "Notifications are blocked. Allow them in browser settings or check the Inbox here.",
       );
   };
+  const refresh = () => {
+    if (window.__STATE__) setNotice("This is a saved snapshot. Open your live workspace to see updates.");
+    else setRetry(retry + 1);
+  };
+  const v = route.view;
   return (
     <TimeZoneContext.Provider value={s?.brain?.tz}>
       <TooltipProvider>
         <SidebarProvider>
-          <Navigation
-            s={s}
-            view={route.view}
-            onView={go}
-            onNotice={setNotice}
-          />
+          <Navigation s={s} route={route} go={go} onAdd={() => setAdd(true)} onNotice={setNotice} />
           <SidebarInset className="app-inset">
             <div className="topbar">
               <div className="topbar-left">
                 <SidebarTrigger />
-                <span className="topbar-divider" />
-                <span className="topbar-title">{current.title}</span>
+                {s && <div className="global-search"><RecordPicker s={s} kind="all" label="Search the brain" hideLabel value={null} allLabel="Search the brain" placeholder="Projects, specialists, learnings, jobs"
+                  onChange={(f) => {
+                    if (!f) return;
+                    if (f.kind === "node") go({ view: "project", node: f.id });
+                    else if (f.kind === "job") go({ view: "project", node: f.id.split("/")[0], tab: "jobs" });
+                    else if (f.kind === "specialist") go({ view: "specialists" });
+                    else go({ view: "learnings" });
+                  }} /></div>}
               </div>
               <div className="topbar-actions">
                 <Status>{connection}</Status>
+                <Tip text="Refresh the reading"><Button variant="ghost" size="icon" aria-label="Refresh" onClick={refresh}><RefreshCw size={16} /></Button></Tip>
                 <Tip text="Switch light and dark appearance">
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    aria-label="Toggle theme"
-                    onClick={() =>
-                      setTheme(
-                        document.documentElement.classList.contains("dark")
-                          ? "light"
-                          : "dark",
-                      )
-                    }
-                  >
+                  <Button variant="ghost" size="icon" aria-label="Toggle theme" onClick={() => setTheme(document.documentElement.classList.contains("dark") ? "light" : "dark")}>
                     {theme === "dark" ? <Sun size={17} /> : <Moon size={17} />}
                   </Button>
                 </Tip>
-                <Tip
-                  text={
-                    notify
-                      ? "Turn off notifications"
-                      : "Notify me about new inbox items"
-                  }
-                >
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    aria-label={
-                      notify ? "Turn off notifications" : "Enable notifications"
-                    }
-                    onClick={enableNotifications}
-                  >
+                <Tip text={notify ? "Turn off notifications" : "Notify me about new inbox items"}>
+                  <Button variant="ghost" size="icon" aria-label={notify ? "Turn off notifications" : "Enable notifications"} onClick={enableNotifications}>
                     <Bell size={17} />
                     {notify && <span className="notification-dot" />}
                   </Button>
@@ -697,145 +272,58 @@ function App() {
               </div>
             </div>
             <div ref={scroll} className="inset-scroll" id="workspace-content">
-              <PageHeader
-                title={current.title}
-                subtitle={
-                  route.view === "overview" && s
-                    ? `${count(list(s.inbox).length, "item")} in your inbox · ${count(list(s.nodes).filter((n) => !n.archived).length, "project")} in your workspace.`
-                    : current.subtitle
-                }
-                actions={<>
-                  <div id="screen-action-host" />
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={() => {
-                      if (window.__STATE__)
-                        setNotice(
-                          "This is a saved snapshot. Open your live workspace to see updates.",
-                        );
-                      else setRetry(retry + 1);
-                    }}
-                  >
-                    <RefreshCw size={14} />
-                    Refresh
-                  </Button></>
-                }
-              />
+              <PageHeader title={head.title} subtitle={head.subtitle} crumbs={head.crumbs} actions={<div id="screen-action-host" />} />
               {notice && (
                 <Alert className="notice" role="status">
                   <AlertTitle>Workspace notice</AlertTitle>
                   <AlertDescription>
                     {notice}
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      onClick={() => setNotice("")}
-                    >
-                      Dismiss
-                    </Button>
+                    <Button variant="ghost" size="sm" onClick={() => setNotice("")}>Dismiss</Button>
                   </AlertDescription>
                 </Alert>
               )}
-              {[
-                "Permission required",
-                "Connection failed",
-                "Updates interrupted",
-              ].includes(connection) && (
-                <Alert
-                  variant={
-                    connection === "Updates interrupted"
-                      ? "default"
-                      : "destructive"
-                  }
-                >
-                  <AlertTitle>
-                    {connection === "Permission required"
-                      ? "Open your private workspace link"
-                      : connection === "Updates interrupted"
-                        ? "Live updates interrupted"
-                        : "Could not reach your brain"}
-                  </AlertTitle>
+              {["Permission required", "Connection failed", "Updates interrupted"].includes(connection) && (
+                <Alert variant={connection === "Updates interrupted" ? "default" : "destructive"}>
+                  <AlertTitle>{connection === "Permission required" ? "Open your private workspace link" : connection === "Updates interrupted" ? "Live updates interrupted" : "Could not reach your brain"}</AlertTitle>
                   <AlertDescription>
-                    {connection === "Permission required"
-                      ? "Open the complete private address from the terminal where you started this dashboard."
-                      : connection === "Updates interrupted"
-                        ? "You are viewing the last successful reading. Updates will reconnect automatically, or you can refresh now."
-                        : "Check that your local dashboard is still running, then refresh this page."}
+                    {connection === "Permission required" ? "Open the complete private address from the terminal where you started this dashboard."
+                      : connection === "Updates interrupted" ? "You are viewing the last successful reading. Updates will reconnect automatically, or you can refresh now."
+                      : "Check that your local dashboard is still running, then refresh this page."}
                   </AlertDescription>
                 </Alert>
               )}
               {!s ? (
                 connection === "Connecting" ? (
-                  <div
-                    className="page-stack skeleton-page"
-                    aria-label="Loading workspace"
-                  >
-                    <div className="metric-grid">
-                      {[0, 1, 2, 3].map((i) => (
-                        <Skeleton key={i} className="h-32 rounded-xl" />
-                      ))}
-                    </div>
-                    <Skeleton className="h-64 rounded-2xl" />
-                    <Skeleton className="h-80 rounded-2xl" />
+                  <div className="page-stack skeleton-page" aria-label="Loading workspace">
+                    <Skeleton className="h-36 rounded-2xl" />
+                    <div className="overview-grid"><Skeleton className="h-80 rounded-2xl" /><Skeleton className="h-80 rounded-2xl" /></div>
                   </div>
                 ) : (
-                  <Empty
-                    text="Workspace unavailable."
-                    action="Open the complete private address from your terminal."
-                  />
+                  <Empty text="Workspace unavailable." action="Open the complete private address from your terminal." />
                 )
               ) : (
                 <>
-                  <div data-page="inbox" hidden={route.view !== "inbox"}><InboxView s={s} onNode={node} active={route.view === "inbox"} /></div>
-                  <div data-page="overview" hidden={route.view !== "overview"}>
-                    <Overview s={s} onNode={node} onView={go} active={route.view === "overview"} />
-                  </div>
-                  <div
-                    data-page="learnings"
-                    hidden={route.view !== "learnings"}
-                  >
-                    <Learnings s={s} active={route.view === "learnings"} />
-                  </div>
-                  <div data-page="agents" hidden={route.view !== "agents"}>
-                    <Agents s={s} active={route.view === "agents"} />
-                  </div>
-                  <div data-page="usage" hidden={route.view !== "usage"}>
-                    <Usage s={s} active={route.view === "usage"} />
-                  </div>
-                  <div data-page="imports" hidden={route.view !== "imports"}>
-                    <Imports s={s} active={route.view === "imports"} />
-                  </div>
+                  <div data-page="overview" hidden={v !== "overview"}><Overview s={s} go={go} onAdd={() => setAdd(true)} active={v === "overview"} /></div>
+                  <div data-page="inbox" hidden={v !== "inbox"}><InboxView s={s} go={go} tab={route.tab} active={v === "inbox"} /></div>
+                  <div data-page="projects" hidden={v !== "projects"}><Projects s={s} go={go} onAdd={() => setAdd(true)} /></div>
+                  {v === "project" && <div data-page="project"><Project key={route.node || ""} s={s} route={route} go={go} active /></div>}
+                  <div data-page="specialists" hidden={v !== "specialists"}><Specialists s={s} active={v === "specialists"} /></div>
+                  <div data-page="jobs" hidden={v !== "jobs"}><Jobs s={s} go={go} active={v === "jobs"} /></div>
+                  <div data-page="threads" hidden={v !== "threads"}><Threads s={s} go={go} active={v === "threads"} /></div>
+                  <div data-page="usage" hidden={v !== "usage"}><Usage s={s} active={v === "usage"} /></div>
+                  <div data-page="learnings" hidden={v !== "learnings"}><Learnings s={s} active={v === "learnings"} initialState={route.view === "learnings" ? route.state : null} /></div>
+                  {v === "graph" && <div data-page="graph"><Graph s={s} go={go} /></div>}
+                  <AddProjects s={s} open={route.add} onOpenChange={setAdd} />
                 </>
               )}
               <footer className="workspace-footer">
+                <span>Read-only view of {s?.brain?.title || "your brain"} on this machine</span>
                 <span>
-                  <Monitor size={13} />
-                  Local workspace · read-only
-                </span>
-                <span>
-                  {s?.brain?.now
-                    ? time(s.brain.now, s.brain.tz)
-                    : "Waiting for a reading"}{" "}
-                  ·{" "}
-                  <a
-                    href="/assets/THIRD_PARTY_NOTICES.txt"
-                    target="_blank"
-                    rel="noreferrer"
-                  >
-                    Third-party notices
-                  </a>
+                  {s?.brain?.now ? "Read " + new Intl.DateTimeFormat("en", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit", timeZone: s.brain.tz || undefined }).format(new Date(s.brain.now)) : "Waiting for a reading"} ·{" "}
+                  <a href="/assets/THIRD_PARTY_NOTICES.txt" target="_blank" rel="noreferrer">Third-party notices</a>
                 </span>
               </footer>
             </div>
-            <div
-              id="action-dock-host"
-              className="action-dock-host"
-              hidden={route.view !== "imports" || !s}
-            />
-            {s && (
-              <NodeDetail s={s} node={route.node} onClose={() => node(null)} />
-            )}
           </SidebarInset>
         </SidebarProvider>
       </TooltipProvider>

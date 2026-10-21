@@ -4,6 +4,7 @@ import { resolve } from "node:path";
 test("real touch activates mobile navigation, filters, paging and the fixed import dock", async ({
   browser,
 }) => {
+  test.setTimeout(90_000);
   const context = await browser.newContext({
     viewport: { width: 320, height: 640 },
     hasTouch: true,
@@ -18,12 +19,11 @@ test("real touch activates mobile navigation, filters, paging and the fixed impo
     await expect(
       sheet.getByRole("button", { name: "Close navigation" }),
     ).toBeVisible();
-    await sheet.getByRole("button", { name, exact: true }).tap();
+    await sheet.getByRole("button", { name, exact: true }).or(sheet.getByRole("link", { name: new RegExp("^" + name) })).first().tap();
     await expect(sheet).not.toBeVisible();
   };
   await nav("Learnings");
-  await page.getByRole("combobox", { name: "State", exact: true }).tap();
-  await page.getByRole("option", { name: "Accepted (5)", exact: true }).tap();
+  await page.getByRole("tab", { name: /^Accepted/ }).tap();
   await expect(page.locator(".results-meta")).toHaveText("5 learnings");
   await page.getByRole("button", { name: "Clear filters" }).tap();
   await page.getByRole("textbox", { name: "Search learnings" }).tap();
@@ -43,8 +43,8 @@ test("real touch activates mobile navigation, filters, paging and the fixed impo
     page.getByRole("textbox", { name: "Search learnings" }),
   ).toHaveValue("filters");
   await page.getByRole("button", { name: "Clear filters" }).tap();
-  await nav("Agents");
-  const ledger = page.locator(".ledger-entry .data-table").first();
+  await nav("Jobs");
+  const ledger = page.locator("[data-page=jobs] .data-table").first();
   await expect(ledger.getByRole("combobox", { name: "Sort by" })).toContainText(
     "Original order",
   );
@@ -52,25 +52,25 @@ test("real touch activates mobile navigation, filters, paging and the fixed impo
   await expect(ledger.locator(".table-footer")).toContainText("11–14 of 14");
   await ledger.getByRole("combobox", { name: "Sort by" }).tap();
   await page.getByRole("option", { name: "Job", exact: true }).tap();
-  await nav("Import checklist");
+  await page.getByRole("button", { name: "Toggle Sidebar" }).tap();
+  await page.locator("[data-mobile=true]").getByRole("button", { name: "Add projects" }).tap();
   await page.getByRole("checkbox", { name: "Pocket Atlas", exact: true }).tap();
-  const dock = page.locator("#action-dock-host");
+  const dock = page.locator(".add-sheet .sheet-dock");
   await dock.getByRole("button", {name:"Review import",exact:true}).tap();
-  await expect(page.getByRole("dialog").getByRole("textbox", { name: "Command to copy" })).toHaveValue("brain adopt --parent 'root' -- '/demo/pocket-atlas'");
-  await page.getByRole("dialog").getByRole("button",{name:"Close",exact:true}).tap();
+  await expect(page.locator(".reading-sheet").getByRole("textbox", { name: "Command to copy" })).toHaveValue("brain adopt --parent 'root' -- '/demo/pocket-atlas'");
+  await page.locator(".reading-sheet").getByRole("button",{name:"Close",exact:true}).tap();
   const before = await dock.boundingBox();
-  await page
-    .locator("#workspace-content")
-    .evaluate((e) => (e.scrollTop = e.scrollHeight));
+  await page.locator(".add-sheet .sheet-body").evaluate((e) => (e.scrollTop = e.scrollHeight));
   const after = await dock.boundingBox();
   expect(after!.y).toBe(before!.y);
   await dock.getByRole("combobox", { name: "Parent project" }).tap();
-  await page.getByRole("option", { name: "Field Guide", exact: true }).tap();
+  await page.getByRole("option", { name: /^Field Guide/ }).tap();
   await dock.getByRole("button",{name:"Review import",exact:true}).tap();
-  await expect(page.getByRole("dialog").getByRole("textbox")).toHaveValue("brain adopt --parent 'field-guide' -- '/demo/pocket-atlas'");
-  await page.getByRole("dialog").getByRole("button",{name:"Close",exact:true}).tap();
+  await expect(page.locator(".reading-sheet").getByRole("textbox")).toHaveValue("brain adopt --parent 'field-guide' -- '/demo/pocket-atlas'");
+  await page.locator(".reading-sheet").getByRole("button",{name:"Close",exact:true}).tap();
   await dock.getByRole("button", { name: "Clear", exact: true }).tap();
-  await expect(dock.getByRole("textbox")).toHaveCount(0);
+  await expect(dock.getByRole("button", { name: "Review import" })).toHaveCount(0);
+  await page.locator(".add-sheet").getByRole("button",{name:"Close",exact:true}).tap();
   await nav("Overview");
   await page.getByRole("button", { name: "Toggle theme" }).tap();
   expect(
@@ -96,15 +96,13 @@ test("keyboard navigation, visible focus, disclosures and collapsed rail stay us
   await page.goto("/?k=demo");
   const overview = page.getByRole("button", { name: "Overview", exact: true });
   await overview.focus();
-  await page.keyboard.press("ArrowRight");
+  await page.keyboard.press("ArrowDown");
   await expect(page.getByRole("button", { name: "Inbox", exact: true })).toBeFocused();
-  await page.keyboard.press("ArrowRight");
-  await expect(
-    page.getByRole("button", { name: "Learnings", exact: true }),
-  ).toBeFocused();
-  await expect(page).toHaveURL(/view=learnings/);
+  await expect(page).toHaveURL(/view=inbox/);
+  await page.keyboard.press("ArrowDown");
+  await expect(page).toHaveURL(/view=projects/);
   await page.keyboard.press("End");
-  await expect(page).toHaveURL(/view=imports/);
+  await expect(page).toHaveURL(/view=graph/);
   await page.keyboard.press("Home");
   await expect(page).toHaveURL(/view=overview/);
   await page.getByRole("button", { name: "Toggle Sidebar" }).click();
@@ -138,10 +136,15 @@ test("keyboard navigation, visible focus, disclosures and collapsed rail stay us
   await expect(
     page.getByRole("combobox", { name: "Project", exact: true }),
   ).toBeFocused();
+  // The reference picker: keyboard opens it with the most relevant records, typing searches the server.
   await page.keyboard.press("Enter");
+  await expect(page.getByRole("option").first()).toBeVisible();
+  await page.keyboard.type("guide");
+  await expect(page.getByRole("option")).toHaveCount(1);
+  await expect(page.getByRole("option").locator("mark")).toHaveText("Guide");
   await page.keyboard.press("ArrowDown");
   await page.keyboard.press("Enter");
-  await page.keyboard.press("Escape");
+  await expect(page.getByRole("combobox", { name: "Project", exact: true })).toContainText("Field Guide");
   await page.getByRole("button", { name: "Clear filters" }).click();
   await search.focus();
   await page.keyboard.type("filters");
@@ -185,10 +188,14 @@ test("long labels, missing values, untrusted markdown and exact import paths rem
     await page.waitForSelector("[data-page=overview]");
     for (const view of [
       "overview",
+      "inbox",
+      "projects",
+      "specialists",
+      "jobs",
+      "threads",
       "learnings",
-      "agents",
       "usage",
-      "imports",
+      "graph",
     ]) {
       await page.evaluate((v) => (location.hash = "view=" + v), view);
       await expect(page.locator(`[data-page=${view}]`)).toBeVisible();
@@ -211,13 +218,13 @@ test("long labels, missing values, untrusted markdown and exact import paths rem
       false,
     );
     await page.keyboard.press("Escape");
-    await page.evaluate(() => (location.hash = "view=imports"));
+    await page.evaluate(() => (location.hash = "view=overview&add=1"));
     await page
       .getByRole("checkbox", { name: "Pocket Atlas", exact: true })
       .click();
-    await page.locator("#action-dock-host").getByRole("button", {name:"Review import",exact:true}).click();
+    await page.locator(".add-sheet .sheet-dock").getByRole("button", {name:"Review import",exact:true}).click();
     await expect(
-      page.getByRole("dialog").getByRole("textbox", { name: "Command to copy" }),
+      page.locator(".reading-sheet").getByRole("textbox", { name: "Command to copy" }),
     ).toHaveValue(
       "brain adopt --parent 'root' -- '/demo/a '\\''quoted'\\''; $(touch nope)'",
     );
@@ -237,8 +244,10 @@ test("saved snapshots and loading, empty, error, permission and partial states a
           .filter((r) => r.name.includes("/api/")).length,
     ),
   ).toBe(0);
-  await page.goto("/?k=empty");
-  await expect(page.locator(".project-tree")).toContainText("No projects yet.");
+  await page.goto("/?k=empty#view=projects");
+  await expect(page.locator("[data-page=projects]")).toContainText("No projects yet.");
+  await page.goto("/?k=empty#view=overview");
+  await expect(page.locator("[data-page=overview] [data-kpi]").first()).toContainText("0");
   await page.goto("/?k=error");
   await expect(
     page.getByText("Could not reach your brain", { exact: true }),
@@ -260,32 +269,29 @@ test("saved snapshots and loading, empty, error, permission and partial states a
 test("browser Back restores each destination scroll position", async ({
   page,
 }) => {
-  await page.setViewportSize({ width: 1440, height: 900 });
-  await page.goto("/?k=demo&history=1#view=learnings");
-  await page.waitForSelector(".learning-entry");
-  const restored = await page.locator("#workspace-content").evaluate((e) => { e.scrollTop = 400; return e.scrollTop; });
-  const section = page.locator("[data-page=learnings] .section-body");
-  const inner = await section.evaluate(e => { e.scrollTop = 200; return e.scrollTop; });
-  await page.getByRole("button", { name: "Usage", exact: true }).click();
+  await page.setViewportSize({ width: 1440, height: 600 });
+  await page.goto("/?k=hundred&history=1#view=learnings");
+  await page.waitForSelector("[data-page=learnings] [data-item]");
+  const restored = await page.locator("#workspace-content").evaluate((e) => { e.scrollTop = 300; return e.scrollTop; });
+  expect(restored).toBeGreaterThan(0);
+  await page.getByRole("link", { name: /^Usage/ }).click();
   await expect(page).toHaveURL(/view=usage/);
   await page.goBack();
   await expect(page).toHaveURL(/view=learnings/);
   await expect
     .poll(() => page.locator("#workspace-content").evaluate((e) => e.scrollTop))
     .toBe(restored);
-  expect(await section.evaluate(e => e.scrollTop)).toBe(inner);
 });
 
 test("job state separates its kind from the clamped readable description", async ({ page }) => {
-  await page.goto("/?k=long&badge=1");
+  await page.goto("/?k=long&badge=1#view=threads");
   for (const width of [1440, 320]) {
     await page.setViewportSize({ width, height: 900 });
-    const row = page.locator(".flight-row").first();
+    const row = page.locator("[data-page=threads] .row.thread").first();
     await expect(row.locator(".status").first()).toHaveText("Reviewing");
     const description = row.locator(".flight-description");
     await expect(description).toContainText("complete narrow-screen navigation");
     expect(await description.evaluate(e => e.clientHeight <= 2 * parseFloat(getComputedStyle(e).lineHeight) + 1)).toBe(true);
-    await page.keyboard.press("Tab");
     await description.locator("..").focus();
     await expect(page.locator('[data-slot="tooltip-content"]')).toContainText("preserving the project context");
     await page.keyboard.press("Escape");
@@ -293,41 +299,41 @@ test("job state separates its kind from the clamped readable description", async
 });
 
 for (const [engine, browserType] of Object.entries({ chromium, webkit })) {
-  test(`${engine}: detail scrim, focus, metadata, keyboard and activity`, async () => {
+  test(`${engine}: project page, reader scrim, focus, metadata, keyboard and activity`, async () => {
     const browser = await browserType.launch();
     const page = await browser.newPage();
     for (const width of [1440, 320]) {
       await page.setViewportSize({ width, height: 900 });
       for (const theme of ["light", "dark"]) {
         await page.emulateMedia({ colorScheme: theme as "light" | "dark" });
-        await page.goto("http://127.0.0.1:4109/?k=demo#view=overview&node=field-guide");
+        // Old addresses still land: `node=` opens the project's page.
+        await page.goto("http://127.0.0.1:4109/?k=demo#view=overview&node=field-guide&tab=threads");
+        const project = page.locator("[data-page=project]");
+        await expect(page.locator(".page-header h1")).toHaveText("Field Guide");
+        await expect(page.locator('[data-slot="sidebar"]')).toHaveCount(width >= 768 ? 1 : 0);
+        await project.getByRole("button", { name: "Check job", exact: true }).first().click();
         const dialog = page.getByRole("dialog");
         await expect(dialog).toBeVisible();
         await expect(dialog.getByRole("button", { name: "Close", exact: true })).toBeFocused();
         expect(await page.locator('[data-slot="sheet-overlay"]').evaluate(e => getComputedStyle(e).backdropFilter)).toBe("none");
-        await expect(page.locator('[data-slot="sidebar"]')).toHaveCount(width >= 768 ? 1 : 0);
-        await expect(dialog.locator("dt")).toHaveText(["Owners", "Labels", "Updated", "Home"]);
-        const link = dialog.getByRole("link", { name: "Open coordinator" });
-        expect((await link.boundingBox())!.width).toBeLessThan(160);
         await expect.poll(() => dialog.evaluate(e => getComputedStyle(e).opacity)).toBe("1");
         for (let i = 0; i < 6; i++) {
           await page.keyboard.press("Tab");
           await expect.poll(() => dialog.evaluate(e => e.contains(document.activeElement))).toBe(true);
         }
-        const dots = await page.locator('.node-sheet .status').evaluateAll(es => es.map(e => {
+        await page.keyboard.press("Escape");
+        await expect(dialog).not.toBeVisible();
+        await project.getByRole("tab", { name: /^About/ }).click();
+        await expect(project.locator(".detail-facts dt")).toHaveText(["State", "Runtime", "Owners", "Labels", "Updated", "Home"]);
+        const dots = await project.locator('.status').evaluateAll(es => es.filter(e => e.getClientRects().length).map(e => {
           const a=e.getBoundingClientRect(), b=e.querySelector('.status-dot')!.getBoundingClientRect();
           return Math.abs((a.top+a.bottom)/2-(b.top+b.bottom)/2);
         }));
         expect(dots.every(d => d < 1)).toBe(true);
-        await page.keyboard.press("Escape");
-        await expect(dialog).not.toBeVisible();
-        const axis = page.locator('.heat-axis').first();
-        await axis.scrollIntoViewIfNeeded();
-        await expect(axis).toContainText("72 h ago");
-        const cell = page.locator('.heat-grid .tip-trigger').first();
-        await cell.focus();
-        await expect(page.locator('[data-slot="tooltip-content"]')).toContainText(/Oct.*commit/);
-        await page.keyboard.press("Escape");
+        await project.getByRole("tab", { name: /^Activity/ }).click();
+        await expect(project.locator("[data-item]").first()).toBeVisible();
+        const spark = project.locator('.spark').first();
+        await expect(spark).toHaveAttribute("aria-label", /Commits per hour, last 72 hours/);
       }
     }
     await browser.close();
@@ -347,9 +353,9 @@ test("a corrupt notification cache recovers without losing the workspace", async
   });
   await page.goto("/snapshot?notify=granted&cache=after");
   await expect(
-    page.getByRole("heading", { name: "Overview", exact: true }),
+    page.locator("[data-page=overview] [data-kpi]").first(),
   ).toBeVisible();
   await expect
     .poll(() => page.evaluate(() => (window as any).__notifications.length))
-    .toBe(1);
+    .toBe(2);
 });

@@ -318,4 +318,52 @@ export function machineHealth(machine: RecordData) {
   return out;
 }
 
-export const jobTitle = (value: any) => label(String(value || "Job").replace(/^job\//, "").replace(/[-_/]+/g, " "));
+export const jobTitle = (value: any) => String(value || "Job").replace(/^job\//, "").replace(/[-_/]+/g, " ").trim().replace(/^./, (c) => c.toUpperCase());
+
+// Dashboard shaping: derived only from fields the CLI already serves.
+export const stamp = (v: any) => (typeof v === "number" ? v * 1000 : Date.parse(String(v || "")));
+export const nowOf = (s: RecordData) => stamp(s.brain?.now) || Date.now();
+export const within = (v: any, now: number, hours: number) => {
+  const t = stamp(v);
+  return Number.isFinite(t) && t <= now + 60_000 && now - t <= hours * 3600_000;
+};
+export function threads(nodes: RecordData[]) {
+  return flight(nodes).filter((f) => f.job.state !== "Worktree only");
+}
+// Every open job gets one tone: ready, review, working, blocked (needs you) or idle.
+export function tone(f: { job: RecordData; wt?: RecordData }, due: RecordData[] = []) {
+  const kind = jobState(f.job.state).kind.toLowerCase();
+  if (f.wt?.ready?.ready || due.some((d) => d.ready && d.branch === f.job.branch) || kind === "ready to merge") return "ready";
+  if (/blocked|needs you|paused/.test(kind)) return "blocked";
+  if (/review/.test(kind)) return "review";
+  if (f.job.state === "Worktree only") return "idle";
+  return "working";
+}
+export const dueKinds: Record<string, string> = {
+  handback: "Hand back", "stale-status": "Update status", "lesson-outcome": "Record lessons", inbox: "Question",
+  "merged-job": "Close job", "missing-worktree": "Missing working copy", "unrecorded-worktree": "Reconcile records",
+  "blocked-overdue": "Overdue", "overdue-question": "Overdue question", "missing-preview": "Record preview",
+  "unsettled-threads": "Settle threads", "overlapping-inputs": "Overlapping jobs", "invalid-handback": "Unreadable hand-back",
+  "core-changes": "Read changes", machine: "Machine", ledger: "Reconcile ledger",
+};
+// A Due card names its job from the record's branch, then drops the branch prefix from the text.
+export function dueParts(item: RecordData) {
+  const text = String(item.text || "");
+  const branch = item.branch || "";
+  const body = branch && text.startsWith(branch + ":") ? text.slice(branch.length + 1).trim() : text;
+  return { title: branch ? jobTitle(branch) : "", label: item.ready ? "Ready to merge" : dueKinds[item.kind] || label(item.kind || "Next step"), body };
+}
+// The sender comes from the record (`from`); the kind names the source when nobody wrote it.
+export const sources: Record<string, string> = {
+  blocked: "Project status", "blocked-overdue": "Project status", job: "Job", "import-review": "Import review",
+  "core-update": "Core update", inbox: "Project inbox", stale: "Project status",
+};
+export const sender = (item: RecordData) => (typeof item.from === "string" && item.from.trim() ? item.from.trim() : sources[item.kind] || "Workspace");
+export function hourly(s: RecordData) {
+  const counts = Object.values(s.activity?.counts || {}) as number[][];
+  const hours = Math.max(0, ...counts.map((c) => c.length));
+  return Array.from({ length: hours }, (_, i) => counts.reduce((a, c) => a + (c[i] || 0), 0));
+}
+export function allJobs(nodes: RecordData[]): RecordData[] {
+  return nodes.flatMap((n) => list(n.jobs?.rows).map((r) => ({ ...r, _node: n, _open: list(n.jobs?.open).find((o) => o.Job === r.Job && o.Started === r.Started) })));
+}

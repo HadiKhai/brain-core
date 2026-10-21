@@ -30,52 +30,21 @@
     }
     return e.getBoundingClientRect().left;
   };
-  for (const row of document.querySelectorAll('.section-body .section-content')) {
-    if (!rendered(row)) continue;
-    const expected = row.getBoundingClientRect().left + 20;
-    for (const block of row.querySelectorAll(':scope > .text-preview,:scope > .prose-preview,:scope > strong,:scope > small,:scope > p'))
-      near(block.getBoundingClientRect().left, expected, 'section content inset');
-    for (const action of row.querySelectorAll(':scope > .reader-trigger,:scope > .action-link-group > .item-action,:scope > .text-preview > .reader-trigger'))
-      near(textStart(action), expected, 'section action text inset');
-    for (const preview of row.querySelectorAll(':scope > .text-preview > .prose-preview'))
-      near(preview.getBoundingClientRect().left, expected, 'section preview inset');
+  // Rows, list footers and toolbars start at their section's content edge: one column per section.
+  const surfaces = [...document.querySelectorAll('.surface, .page-section')].filter(rendered).filter(e => !e.matches('.kpi-band, .graph-layout'));
+  for (const surface of surfaces) {
+    const r = surface.getBoundingClientRect(), cs = getComputedStyle(surface);
+    const start = r.left + surface.clientLeft + parseFloat(cs.paddingLeft), end = r.right - surface.clientLeft - parseFloat(cs.paddingRight);
+    for (const row of surface.querySelectorAll(':scope > .rows > .row, :scope .learning-results > .rows > .row'))
+      if (rendered(row)) { near(row.getBoundingClientRect().right, row.closest('.learning-results') ? row.closest('.learning-results').getBoundingClientRect().right : end, 'row spans its section'); }
+    for (const row of surface.querySelectorAll(':scope > .rows > .row'))
+      if (rendered(row)) near(row.getBoundingClientRect().left, start, 'section content inset');
+    for (const footer of surface.querySelectorAll(':scope > .list-footer, :scope > .table-footer, :scope > .filter-toolbar, :scope > .surface-head'))
+      if (rendered(footer)) near(footer.getBoundingClientRect().left, start, 'section footer and toolbar inset');
   }
-  // All preview text and text-only reader actions share their local column's
-  // start; structured tables and inline action groups retain their own columns.
-  for (const preview of document.querySelectorAll('.section-body .text-preview')) {
-    if (!rendered(preview)) continue;
-    const frame = preview.getBoundingClientRect();
-    for (const block of preview.querySelectorAll('.preview-markdown .markdown :is(p,li,h1,h2,h3)')) {
-      let indent = 0;
-      for (let parent = block.parentElement; parent && !parent.classList.contains('markdown'); parent = parent.parentElement)
-        if (parent.matches('ul,ol')) indent += 20;
-      const rtl = getComputedStyle(block).direction === 'rtl';
-      near(textStart(block, rtl), rtl ? frame.right - indent : frame.left + indent, 'section rendered Markdown text inset');
-    }
-  }
-  for (const action of document.querySelectorAll('.section-body .reader-trigger'))
-    if (rendered(action)) near(textStart(action), action.getBoundingClientRect().left, 'reader action has no extra text indent');
-  for (const row of document.querySelectorAll('.section-body .correspondence')) {
-    if (!rendered(row)) continue;
-    const frame = row.getBoundingClientRect(), body = row.closest('.section-body').getBoundingClientRect();
-    near(frame.left, body.left + (innerWidth < 768 ? 16 : 20), 'correspondence section inset');
-    const start = frame.left + (innerWidth < 768 ? 14 : 18);
-    for (const block of row.querySelectorAll(':scope > .correspondence-heading,:scope > .correspondence-excerpt,:scope > .recommendation,:scope > .correspondence-actions'))
-      near(block.getBoundingClientRect().left, start, 'correspondence content and action column');
-  }
-  for (const body of document.querySelectorAll('.section-body')) {
-    if (!rendered(body)) continue;
-    for (const count of body.querySelectorAll(':scope > .table-footer > span'))
-      near(count.getBoundingClientRect().left, body.getBoundingClientRect().left + 20, 'section footer count inset');
-    for (const bare of body.querySelectorAll(':scope > .text-preview,:scope > p,:scope > .readable'))
-      alignment.failures.push({label:'section content has no padded row', text:bare.textContent.slice(0,40)});
-    for (const header of body.querySelectorAll(':scope > .disclosure > .disclosure-button')) {
-      alignment.headers++;
-      const b = body.getBoundingClientRect(), h = header.getBoundingClientRect();
-      near(h.left, b.left + body.clientLeft, 'group header start');
-      near(h.width, body.clientWidth, 'group header spans container');
-    }
-  }
+  // Text-only actions carry no extra indent of their own.
+  for (const action of document.querySelectorAll('.surface .reader-trigger'))
+    if (rendered(action)) near(textStart(action), action.getBoundingClientRect().left + parseFloat(getComputedStyle(action).paddingLeft), 'reader action text sits at its padding');
   const activePage = document.querySelector('[data-page]:not([hidden])');
   if (activePage) {
     const p = activePage.getBoundingClientRect(), h = document.querySelector('.page-header').getBoundingClientRect();
@@ -89,9 +58,6 @@
       near(left, right, 'equal phone page gutters');
     }
   }
-  const cards = [...document.querySelectorAll('.attention-split > .page-section')].filter(rendered);
-  if (cards.length === 2 && Math.abs(cards[0].getBoundingClientRect().top - cards[1].getBoundingClientRect().top) <= 1)
-    near(cards[0].getBoundingClientRect().bottom, cards[1].getBoundingClientRect().bottom, 'attention row card bottoms');
   if (alignment.failures.length) throw Error('Section alignment: ' + JSON.stringify(alignment));
   const canvas = document.createElement("canvas");
   canvas.width = canvas.height = 1;

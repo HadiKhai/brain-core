@@ -1,20 +1,23 @@
 import { useState } from "react";
-import { BookOpen, ShieldCheck } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
+import { useContext, useEffect } from "react";
 import {
-  PageSection,
   FilterToolbar,
   Choice,
   Empty,
   Status,
   Text,
   Reader,
-  PagedCollection,
   ScreenAction,
   TechnicalDetails,
   Disclosure,
+  TimeZoneContext,
 } from "./shared";
+import { SectionTabs } from "./dash";
+import { Pager } from "./inbox";
+import { RecordPicker } from "./picker";
+import type { Found } from "./search";
 import { learningRows, list, quote, time, type RecordData } from "./model";
 function DecisionFooter({ item, reviewer, setReviewer, decision, setDecision }: { item: RecordData; reviewer: string; setReviewer: (value: string) => void; decision: string; setDecision: (value: string) => void }) {
   const [feedback, setFeedback] = useState("");
@@ -30,162 +33,62 @@ function DecisionFooter({ item, reviewer, setReviewer, decision, setDecision }: 
     {feedback && <p role="status">{feedback}</p>}
   </div>;
 }
-function ProposalReader({ item: i, primary = false }: { item: RecordData; primary?: boolean }) {
+export function ProposalReader({ item: i, primary = false }: { item: RecordData; primary?: boolean }) {
   const [reviewer, setReviewer] = useState(""), [decision, setDecision] = useState("accept");
   const reviewable = i.state === "proposed" && !i.specialist;
+  const zone = useContext(TimeZoneContext);
   return <Reader title={i.title || "Learning"} text={i.body || "No additional text recorded."} trigger={reviewable ? "Review proposal" : "Read learning"} primary={primary}
     footer={reviewable ? <DecisionFooter item={i} reviewer={reviewer} setReviewer={setReviewer} decision={decision} setDecision={setDecision} /> : undefined}>
+    <dl className="detail-facts">
+      {i.scope?.length > 0 && <><dt>Scope</dt><dd>{i.scope.join(", ")}</dd></>}
+      {i.provenance?.owners?.length > 0 && <><dt>Source owners</dt><dd>{i.provenance.owners.join(", ")}</dd></>}
+      {i.accepted_at && <><dt>Accepted</dt><dd>{time(i.accepted_at, zone)} by {i.accepted_by || "reviewer not recorded"}</dd></>}
+    </dl>
     <TechnicalDetails values={{Source:i.provenance?.ref, Repository:i.provenance?.repo, Revision:i.provenance?.commit}} />
   </Reader>;
 }
-export function Learnings({ s, active }: { s: RecordData; active: boolean }) {
+const states = [["all", "All"], ["proposed", "Proposed"], ["active", "Accepted"], ["rejected", "Rejected"], ["quarantined", "Quarantined"]] as const;
+export function Learnings({ s, active, initialState }: { s: RecordData; active: boolean; initialState: string | null }) {
   const [query, setQuery] = useState(""),
-    [node, setNode] = useState("all"),
-    [specialist, setSpecialist] = useState("all"),
-    [state, setState] = useState("all");
+    [node, setNode] = useState<Found | null>(null),
+    [specialist, setSpecialist] = useState<Found | null>(null),
+    [state, setState] = useState(initialState || "all"),
+    [page, setPage] = useState(0), [size, setSize] = useState(10);
+  useEffect(() => { if (initialState) { setState(initialState); setPage(0); } }, [initialState]);
   const rows = learningRows(s),
-    filtered = rows.filter(
-      (i) =>
-        (node === "all" || node === i.node) &&
-        (specialist === "all" || specialist === i.specialist) &&
-        (state === "all" || state === i.state) &&
-        `${i.title} ${i.body || ""}`
-          .toLowerCase()
-          .includes(query.toLowerCase()),
-    );
+    scoped = rows.filter((i) => (!node || node.id === i.node) && (!specialist || specialist.id === i.specialist) &&
+      `${i.title} ${i.body || ""}`.toLowerCase().includes(query.toLowerCase())),
+    filtered = scoped.filter((i) => state === "all" || state === i.state);
+  const title = (id: string) => list(s.nodes).find((n) => n.id === id)?.title || "Source project not recorded";
+  const reset = () => { setQuery(""); setNode(null); setSpecialist(null); setState("all"); setPage(0); };
+  const first = rows.find((r) => r.state === "proposed" && !r.specialist) || rows[0];
   return (
-    <><ScreenAction active={active}>{rows[0] ? <ProposalReader item={rows[0]} primary /> : <Reader title="Shared knowledge" text="Record a lesson from a finished job to start your library. New proposals will appear here for review." trigger="Start your library" primary />}</ScreenAction><PageSection
-      title="Shared knowledge"
-      description="Library items and specialist lessons · proposed items need human review"
-    >
-      <div className="learning-layout">
-        <aside className="filter-panel">
-          <FilterToolbar
-            query={query}
-            onQuery={(v) => {
-              setQuery(v);
-            }}
-            placeholder="Search learnings"
-          />
-          <Choice
-            name="Project"
-            value={node}
-            onChange={setNode}
-            options={[
-              { value: "all", label: "All projects" },
-              ...list(s.nodes).map((n) => ({
-                value: n.id,
-                label: n.title || "Untitled project",
-              })),
-            ]}
-          />
-          <Choice
-            name="Specialist"
-            value={specialist}
-            onChange={setSpecialist}
-            options={[
-              { value: "all", label: "All specialists" },
-              ...list(s.specialists).map((sp) => ({
-                value: sp.node + "/" + sp.id,
-                label: sp.title || "Specialist",
-              })),
-            ]}
-          />
-          <Choice
-            name="State"
-            value={state}
-            onChange={setState}
-            options={[
-              { value: "all", label: "All states" },
-              ...["active", "proposed", "rejected", "quarantined"].map((v) => ({
-                value: v,
-                label: `${v === "active" ? "Accepted" : v[0].toUpperCase() + v.slice(1)} (${rows.filter((r) => r.state === v).length})`,
-              })),
-            ]}
-          />
-          <Button
-            variant="outline"
-            onClick={() => {
-              setQuery("");
-              setNode("all");
-              setSpecialist("all");
-              setState("all");
-            }}
-          >
-            Clear filters
-          </Button>
-          <div className="callout">
-            <ShieldCheck size={18} />
-            <p>
-              Lessons inform the next job. Proposed items stay inactive until a
-              person reviews their source.
-            </p>
-          </div>
-        </aside>
-        <div className="learning-results">
-          <p className="results-meta">
-            {filtered.length} {filtered.length === 1 ? "learning" : "learnings"}
-          </p>
-          <PagedCollection name="learnings">{filtered.map((i: any, k) => (
-            <article
-              className="learning-entry"
-              key={i.id + ":" + i.specialist + k}
-            >
-              <div className="entry-heading">
-                <span className="icon-tile">
-                  <BookOpen size={18} />
-                </span>
-                <div>
-                  <h3>
-                    <Text>{i.title || "Untitled learning"}</Text>
-                  </h3>
-                  <small>
-                    {i.kind || "Library item"} ·{" "}
-                    {list(s.nodes).find((n) => n.id === i.node)?.title ||
-                      "Source project not recorded"}
-                  </small>
-                </div>
-                <Status>
-                  {i.state === "active"
-                    ? "Accepted"
-                    : i.state === "proposed"
-                      ? "Proposed · awaiting review"
-                      : i.state}
-                </Status>
-              </div>
-              <div className="provenance">
-                <span>
-                  {i.provenance?.time
-                    ? time(i.provenance.time, s.brain?.tz)
-                    : "Date not recorded"}
-                </span>
-                {i.provenance?.owners?.length > 0 && (
-                  <span>Source owners: {i.provenance.owners.join(", ")}</span>
-                )}
-              </div>
+    <><ScreenAction active={active}>{first ? <ProposalReader item={first} primary /> : <Reader title="Shared knowledge" text="Record a lesson from a finished job to start your library. New proposals appear here for review." trigger="Start your library" primary />}</ScreenAction>
+    <section className="surface learning-layout" aria-label="Shared knowledge">
+      <aside className="filter-panel">
+        <FilterToolbar query={query} onQuery={(v) => { setQuery(v); setPage(0); }} placeholder="Search learnings" />
+        <RecordPicker s={s} kind="node" label="Project" value={node} onChange={(v) => { setNode(v); setPage(0); }} allLabel="All projects" placeholder="Search projects" />
+        <RecordPicker s={s} kind="specialist" label="Specialist" value={specialist} onChange={(v) => { setSpecialist(v); setPage(0); }} allLabel="All specialists" placeholder="Search specialists" />
+        <Button variant="outline" disabled={!query && !node && !specialist && state === "all"} onClick={reset}>Clear filters</Button>
+      </aside>
+      <div className="learning-results">
+        <SectionTabs value={state} onValue={(v) => { setState(v); setPage(0); }} tabs={states.map(([id, label]) => ({ id, label, count: scoped.filter((r) => id === "all" || r.state === id).length, body: null }))} />
+        <p className="results-meta" role="status">{filtered.length} {filtered.length === 1 ? "learning" : "learnings"}</p>
+        <div className="rows">{filtered.slice(page * size, (page + 1) * size).map((i: any, k) => (
+          <div className="row learning" data-item key={i.id + ":" + i.specialist + k}>
+            <div className="row-main">
+              <strong className="row-title"><Text>{i.title || "Untitled learning"}</Text></strong>
+              <small>{i.kind || "Library item"} · {title(i.node)} · {i.provenance?.time ? time(i.provenance.time, s.brain?.tz) : "date not recorded"}{i.provenance?.owners?.length ? " · " + i.provenance.owners.join(", ") : ""}</small>
+            </div>
+            <div className="row-actions">
+              <Status>{i.state === "active" ? "Accepted" : i.state === "proposed" ? "Proposed" : i.state}</Status>
               <ProposalReader item={i} />
-              <TechnicalDetails values={{Source:i.provenance?.ref, Repository:i.provenance?.repo, Revision:i.provenance?.commit}} />
-              {i.scope?.length > 0 && (
-                <p className="muted">Scope: {i.scope.join(", ")}</p>
-              )}
-              {i.accepted_at && (
-                <small>
-                  Accepted {time(i.accepted_at, s.brain?.tz)} by{" "}
-                  {i.accepted_by || "reviewer not recorded"}
-                </small>
-              )}
-
-            </article>
-          ))}</PagedCollection>
-          {!filtered.length && (
-            <Empty
-              text="No learnings match."
-              action="Clear the filters or record a lesson from a finished job."
-            />
-          )}
-
-        </div>
+            </div>
+          </div>
+        ))}</div>
+        {!filtered.length && <Empty text="No learnings match." action="Clear the filters or record a lesson from a finished job." />}
+        {filtered.length > 0 && <Pager total={filtered.length} page={page} size={size} onPage={setPage} onSize={setSize} noun="learning" />}
       </div>
-    </PageSection></>
+    </section></>
   );
 }

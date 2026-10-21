@@ -14,9 +14,8 @@ import {
   Tip,
 } from "./shared";
 import {
-  hasMeasuredUsage,
   list,
-  jobTitle,
+  machineHealth,
   windowState,
   routing,
   time,
@@ -24,7 +23,6 @@ import {
   count,
   type RecordData,
 } from "./model";
-import { totalTokens } from "./agents";
 function WindowMeter({
   name,
   w,
@@ -42,75 +40,24 @@ function WindowMeter({
     remaining = w?.resets_at
       ? Math.max(0, Math.ceil((w.resets_at - Date.now() / 1000) / 60))
       : null;
+  const reset = w?.resets_at || w?.reset_time
+    ? remaining != null ? (remaining >= 1440 ? `resets in ${Math.round(remaining / 1440)} d` : `resets in ${Math.floor(remaining / 60)} h ${remaining % 60} m`) : "reset " + time(w.reset_time || w.resets_at, zone)
+    : "reset not recorded";
   return (
     <div className="window-meter">
       <div className="meter-heading">
         <strong>{name}</strong>
-        <span className="tabular-nums">
-          {v.known ? w?.used_percent + "%" : w?.absent ? "None" : "Unknown"}
-        </span>
+        <span className="tabular-nums meter-value">{v.known ? w?.used_percent + "%" : w?.absent ? "None" : "Unknown"}</span>
       </div>
-      <div
-        className={
-          "meter " +
-          (v.stale
-            ? "stale"
-            : v.state === "At stop line"
-              ? "danger"
-              : v.state === "Near stop line"
-                ? "warning"
-                : "")
-        }
-      >
+      <div className={"meter " + (v.stale ? "stale" : v.state === "At stop line" ? "danger" : v.state === "Near stop line" ? "warning" : "")}>
         <Progress value={v.percent} aria-label={name + " · " + v.state} />
         {Number.isFinite(policy.stop_percent) && (
-          <Tip text={`Stop at ${policy.stop_percent}%`}>
-            <i
-              className="stop-line"
-              style={{
-                left: Math.min(100, Math.max(0, policy.stop_percent)) + "%",
-              }}
-            />
-          </Tip>
+          <Tip text={`Stop at ${policy.stop_percent}%`} style={{ left: Math.min(100, Math.max(0, policy.stop_percent)) + "%" }}><i className="stop-line" /></Tip>
         )}
       </div>
-      <Status>{v.state}</Status>
-      <small>
-        {w?.resets_at || w?.reset_time
-          ? time(w.reset_time || w.resets_at, zone) +
-            (remaining != null
-              ? " · " +
-                (remaining >= 1440
-                  ? `resets in ${Math.round(remaining / 1440)} d`
-                  : `resets in ${Math.floor(remaining / 60)} h ${remaining % 60} m`)
-              : "")
-          : "Reset not recorded"}
-      </small>
-      <small>
-        {v.age == null ? "Reading age unknown" : `${v.age} min old`} ·{" "}
-        {w?.source || row.source || "Source unknown"}
-      </small>
-    </div>
-  );
-}
-function UsageFlags({ n, r }: { n: RecordData; r: RecordData }) {
-  const u = r.usage,
-    b = r.budget;
-  return (
-    <div className="flag-stack">
-      {u && n.jobs.median_tokens && u.processed > 2 * n.jobs.median_tokens && (
-        <Status>Tokens over twice median</Status>
-      )}
-      {u && b?.tokens && u.processed > b.tokens && (
-        <Status>Over token budget</Status>
-      )}
-      {b?.hours && r.age_h > b.hours && <Status>Over time budget</Status>}
-      {u?.compactions >= 3 && (
-        <Status>{count(u.compactions, "compaction")}</Status>
-      )}
-      {u?.subagents && u.sub_share > 0.5 ? (
-        <Status>Sub-agents {Math.round(u.sub_share * 100)}%</Status>
-      ) : null}
+      <Tip text={`${w?.resets_at || w?.reset_time ? "Resets " + time(w.reset_time || w.resets_at, zone) : "Reset not recorded"} · ${v.age == null ? "reading age unknown" : `read ${v.age} min ago`} · ${w?.source || row.source || "source unknown"}`}>
+        <small className="meter-foot">{v.state !== "Normal" && <Status>{v.state}</Status>}<span>{reset} · {v.age == null ? "age unknown" : `${v.age} min old`}</span></small>
+      </Tip>
     </div>
   );
 }
@@ -119,12 +66,6 @@ export function Usage({ s, active }: { s: RecordData; active: boolean }) {
     route = routing(s),
     sp = s.spend || {},
     week = sp.since_week;
-  const measuredNodes = list(s.nodes).filter(
-    (n) =>
-      n.spend ||
-      list(n.jobs?.rows).some((r) => r.Usage) ||
-      list(n.jobs?.open).some((r) => r.usage),
-  );
   return (
     <div className="page-stack">
       <ScreenAction active={active}><Reader title="Capacity for the next job" trigger="Check capacity" primary text={route ? `Consider ${route.row.label || "the available subscription"} for new work. Review its current windows and the stop line before starting. Projects with a chosen runtime keep it.` : "No subscription is currently confirmed as available. Refresh the readings before starting more work."} /></ScreenAction>
@@ -158,33 +99,10 @@ export function Usage({ s, active }: { s: RecordData; active: boolean }) {
         </div>
         {list(s.usage).length ? (
           <PagedCollection name="subscriptions">{list(s.usage).map((row, i) => (
-            <article className="subscription" key={row.id || i}>
+            <article className="subscription" data-item key={row.id || i}>
               <div className="subscription-title">
-                <h3>
-                  <Text>{row.label || "Subscription"}</Text>
-                </h3>
-                <p>{row.runtime || "Runtime unknown"}</p>
-                <small>
-                  Brains: {(row.brains || []).join(", ") || "Not recorded"}
-                </small>
-                <small>
-                  {Number.isFinite(p.stop_percent)
-                    ? `Stop at ${p.stop_percent}%`
-                    : "Stop line unknown"}
-                </small>
-                {!p.autodetected &&
-                  ["five_hour", "seven_day"].some((k) => {
-                    const w = row.windows?.[k];
-                    return (
-                      w &&
-                      !w.absent &&
-                      !w.expired &&
-                      (!w.resets_at || w.resets_at > Date.now() / 1000) &&
-                      w.used_percent >= p.stop_percent
-                    );
-                  }) && <Status>Skipped for new jobs</Status>}
-                {row.note && <Preview text={row.note} title="Reading note" />}
-                <Reader title={row.label || "Subscription reading"} trigger="Inspect reading" text={[`Read ${time(row.read_at, s.brain?.tz)}`, ...Object.entries(row.windows || {}).map(([name,w]: any) => `${name === "five_hour" ? "5-hour" : "Weekly"}: ${w.used_percent ?? "Unknown"}% · ${windowState(w,row,p).state} · resets ${time(w.resets_at,s.brain?.tz)}`)].join("\n\n")} />
+                <div className="row-line"><h3><Text>{row.label || "Subscription"}</Text></h3>{!p.autodetected && ["five_hour", "seven_day"].some((k) => { const w = row.windows?.[k]; return w && !w.absent && !w.expired && (!w.resets_at || w.resets_at > Date.now() / 1000) && w.used_percent >= p.stop_percent; }) && <Status>Skipped for new jobs</Status>}</div>
+                {row.note ? <small className="row-note clamp-1"><Text>{row.note}</Text></small> : <small>{row.runtime || "Runtime unknown"}{(row.brains || []).length ? " · " + row.brains.join(", ") : ""}</small>}
               </div>
               <WindowMeter
                 name="5-hour"
@@ -214,6 +132,9 @@ export function Usage({ s, active }: { s: RecordData; active: boolean }) {
                     zone={s.brain?.tz}
                   />
                 ))}
+              <div className="row-actions">
+                <Reader title={row.label || "Subscription reading"} trigger="Inspect reading" text={[row.note || "", `Read ${time(row.read_at, s.brain?.tz)} · ${row.source || "source unknown"}`, `Brains: ${(row.brains || []).join(", ") || "Not recorded"} · ${Number.isFinite(p.stop_percent) ? `stop at ${p.stop_percent}%` : "stop line unknown"}`, ...Object.entries(row.windows || {}).map(([name, w]: any) => `${name === "five_hour" ? "5-hour" : "Weekly"}${w.models ? " · " + w.models.join(", ") : ""}: ${w.used_percent ?? "Unknown"}% · ${windowState(w, row, p).state} · resets ${time(w.resets_at, s.brain?.tz)}`)].filter(Boolean).join("\n\n")} />
+              </div>
             </article>
           ))}</PagedCollection>
         ) : (
@@ -302,152 +223,25 @@ export function Usage({ s, active }: { s: RecordData; active: boolean }) {
           />
         )}
       </PageSection>
-      <PageSection
-        title="Jobs: time and tokens"
-        description="Live jobs and measured completions, grouped by project"
-      >
-        {measuredNodes.length ? (
-          <PagedCollection name="projects">{measuredNodes.map((n) => {
-            const open = list(n.jobs.open).filter((r) => r.usage),
-              measured = list(n.jobs.rows).filter((r) => r.Usage && r.Ended),
-              back = n.spend?.total;
-            return (
-              <div className="ledger-entry" key={n.id}>
-                <div className="section-heading">
-                  <div>
-                    <h3>{n.title || "Project"}</h3>
-                    <p>
-                      {n.jobs.median_tokens
-                        ? `Median ${tokens(n.jobs.median_tokens)} tokens · ${n.jobs.median_active_h} h active · ${count(n.jobs.measured || 0, "measured job")}`
-                        : "No merged job measured yet"}
-                    </p>
-                    {back && (
-                      <p>
-                        All past sessions: {tokens(back.processed)} tokens ·{" "}
-                        {back.active_h} h active ·{" "}
-                        {count(back.compactions || 0, "compaction")} ·
-                        sub-agents {Math.round((back.sub_share || 0) * 100)}%
-                      </p>
-                    )}
-                  </div>
-                </div>
-                <Bars
-                  label="Finished jobs · processed tokens"
-                  entries={measured.slice(-24).map((r) => ({
-                    key: jobTitle(r.Job),
-                    tokens: totalTokens(r),
-                    active_h: r["Active h"],
-                  }))}
-                />
-                <DataTable
-                  name="jobs"
-                  rows={[
-                    ...open.map((r) => ({ ...r, _live: true })),
-                    ...measured.slice().reverse(),
-                  ]}
-                  columns={[
-                    {
-                      key: "Job",
-                      label: "Job",
-                      render: (r) => (
-                        <div>
-                          <Text>{jobTitle(r.Job)}</Text>
-                          <UsageFlags n={n} r={r} />
-                        </div>
-                      ),
-                    },
-                    {
-                      key: "Hours",
-                      label: "Wall / active",
-                      render: (r) => (
-                        <span>
-                          {r._live ? r.age_h : (r.Hours ?? "Unmeasured")} h
-                          {r._live ? " · open" : ""}
-                          <small>
-                            {r.usage?.active_h ?? r["Active h"] ?? "Unmeasured"}{" "}
-                            h active
-                          </small>
-                        </span>
-                      ),
-                    },
-                    {
-                      key: "tokens",
-                      label: "Tokens / fresh in + out",
-                      render: (r) => (
-                        <span>
-                          {r.usage || hasMeasuredUsage(r)
-                            ? tokens(r.usage?.processed ?? totalTokens(r))
-                            : "Unmeasured"}
-                          <small>
-                            {tokens(
-                              r.usage
-                                ? r.usage.fresh + r.usage.output
-                                : (Number(r["Fresh in"]) || 0) +
-                                    (Number(r.Output) || 0),
-                            )}{" "}
-                            fresh in + out
-                          </small>
-                        </span>
-                      ),
-                    },
-                    {
-                      key: "Compactions",
-                      label: "Compactions",
-                      render: (r) =>
-                        r.usage?.compactions ?? r.Compactions ?? "Unmeasured",
-                      numeric: true,
-                    },
-                    {
-                      key: "Sub-agents",
-                      label: "Sub-agents",
-                      render: (r) => (
-                        <span>
-                          {r.usage?.subagents ?? r["Sub-agents"] ?? 0}
-                          <small>
-                            {r.usage
-                              ? Math.round((r.usage.sub_share || 0) * 100) + "%"
-                              : r["Sub share"] || "Share unmeasured"}
-                          </small>
-                        </span>
-                      ),
-                    },
-                    {
-                      key: "Models",
-                      label: "Models",
-                      render: (r) => (
-                        <Text>
-                          {r.usage
-                            ? Object.keys(r.usage.models || {}).join(", ")
-                            : r.Models || "Not recorded"}
-                        </Text>
-                      ),
-                    },
-                    {
-                      key: "Budget",
-                      label: "Budget",
-                      render: (r) =>
-                        r.budget
-                          ? [
-                              r.budget.tokens
-                                ? tokens(r.budget.tokens) + " tokens"
-                                : "",
-                              r.budget.hours ? r.budget.hours + " h" : "",
-                            ]
-                              .filter(Boolean)
-                              .join(" · ")
-                          : r.Budget || "Not recorded",
-                    },
-                  ]}
-                />
-              </div>
-            );
-          })}</PagedCollection>
-        ) : (
-          <Empty
-            text="No jobs measured yet."
-            action="Jobs are measured when they close. Use brain spend to inspect past sessions."
-          />
-        )}
+      <PageSection title="Machine" description="Local capacity for the next job">
+        <div className="machine-grid">
+          {[
+            ["Processor load", s.machine?.load?.[0], `${s.machine?.cpus || "Unknown"} cores · 5 min ${s.machine?.load?.[1] ?? "unknown"}`],
+            ["Memory free", s.machine?.mem_free_gb, `of ${s.machine?.mem_total_gb ?? "unknown"} GB`],
+            ["Disk free", s.machine?.disk_free_gb, `of ${s.machine?.disk_total_gb ?? "unknown"} GB`],
+          ].map(([name, value, note]) => (
+            <div className="kpi" data-kpi key={name}><span className="kpi-label">{name}</span><strong className="kpi-value">{value ?? "Unknown"}</strong><span className="kpi-note">{note}</span></div>
+          ))}
+        </div>
+        <div className="machine-health">
+          {machineHealth(s.machine || {}).map((h) => (
+            <div className={h.state === "Critical pressure" ? "health-critical" : h.state === "Near capacity" ? "health-warning" : ""} key={h.name}>
+              <div className="meter-heading"><small>{h.name}</small><Status>{h.state}</Status></div>
+              <Progress value={h.percent} aria-label={h.name + " · " + h.state} />
+            </div>
+          ))}
+        </div>
+        {list(s.nodes).some((n) => n.jobs?.median_hours != null) && <p className="pace-list">Job pace: {list(s.nodes).filter((n) => n.jobs?.median_hours != null).map((n) => `${n.title} · median ${n.jobs.median_hours} h`).join(" · ")}</p>}
       </PageSection>
     </div>
   );
