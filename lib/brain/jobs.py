@@ -62,6 +62,14 @@ def read_jobs(n):
 
 
 def write_jobs(inst, n, rows):
+    # Retained worker evidence repairs old rows too; absent/invalid evidence never
+    # changes history. Readiness freshness is unrelated to completed review rounds.
+    for row in rows:
+        hb = read_handback(n, row) or {}
+        ready = hb.get("ready")
+        rounds = ready.get("review_rounds") if isinstance(ready, dict) else hb.get("review_rounds")
+        if hb.get("state") == "done" and type(rounds) is int and rounds >= 0:
+            row["Reviews"] = str(rounds)
     f = n["dir"] / JOBS_FILE
     head = (f"# Jobs: {n['id']}\n\n{JOBS_MARK}\nOne row per job, kept by `brain wt add`, `brain review`, "
             "`brain wt rm` and `brain wt prune`; times carry their UTC offset; tokens are exact counts from this "

@@ -5,6 +5,25 @@ upgrading. `brain changes <node>` shows the entries this node's coordinator hasn
 `brain due <node>` lists them until `brain changes <node> --seen`. Entry headings are
 `## <date>: <title>`; once released, a heading never changes.
 
+## 2026-10-21: Ledger review evidence and coordinator spend
+
+For agents:
+- Ledger writes repair review counts from retained, matching completed hand-backs,
+  including closed rows. Rows without valid review evidence keep their counts.
+- `brain spend root` and nodes without external homes count sessions in their exact
+  node folder. External homes retain the existing repository attribution rules.
+- Spend also counts recorded coordinator runtime session IDs from scratch folders.
+  Subscription restrictions, date filters and aggregate-only storage still apply.
+
+After upgrading:
+- The next ledger write repairs retained review evidence; deleted hand-backs cannot
+  reconstruct old counts. No manual ledger migration is needed.
+- Record runtime session IDs with `brain set <node> coordinator_sessions=id1,id2`.
+  This ordered list stays in machine-local `.brain/local.json`; retain prior IDs
+  and append the current coordinator last. An empty value clears the list.
+  Use runtime session IDs, not host thread links. No conversation text is needed.
+
+
 ## 2026-10-21: Webhook wakes identify their sender and report refusal
 
 For agents:

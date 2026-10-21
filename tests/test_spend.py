@@ -524,6 +524,41 @@ class Spend(Scenario):
         state = json.loads(self.b(self.r, "ui", "--json"))
         self.assertEqual(next(n for n in state["nodes"] if n["id"] == "app")["spend"]["total"]["fresh"], 0)
 
+    def test_homeless_nodes_and_recorded_scratch_coordinators(self):
+        scratch = self.tmp / "scratch"
+        scratch.mkdir()
+        self.cl(scratch, "aaaa1001-coord", "private", [("said", 1, "c1", (100, 0, 0, 10))])
+        self.cx(scratch, "cccc1002-coord", [(1, *self.counter((200, 0, 20, 0), (200, 0, 20, 0)))])
+        self.cl(scratch, "aaaa1003-other", "private", [("said", 1, "c2", (900, 0, 0, 90))])
+        self.cl(self.r, "aaaa1004-root", "private", [("said", 1, "r1", (30, 0, 0, 3))])
+        self.cl(self.node, "aaaa1005-node", "private", [("said", 1, "n1", (40, 0, 0, 4))])
+        ids = "aaaa1001-coord,cccc1002-coord,aaaa1001-coord"
+        self.b(self.r, "set", "root", "coordinator_sessions=" + ids)
+        local = json.loads((self.r / ".brain/local.json").read_text())
+        self.assertEqual(local["nodes"]["root"]["coordinator_sessions"], ["aaaa1001-coord", "cccc1002-coord"])
+        self.assertNotIn("coordinator_sessions", (self.r / "node.md").read_text())
+        root = json.loads(self.b(self.r, "spend", "root", "--json"))
+        self.assertEqual((root["total"]["fresh"], root["total"]["sessions"]), (330, 3))
+        self.assertIn("root: 3 sessions", self.b(self.r, "spend", "root"))
+        self.b(self.r, "set", "app", "home=none", "coordinator_sessions=" + ids)
+        node = json.loads(self.b(self.r, "spend", "app", "--json"))
+        self.assertEqual((node["total"]["fresh"], node["total"]["sessions"]), (340, 3))
+        self.b(self.r, "set", "app", "coordinator_sessions=../bad", ok=False)
+        self.b(self.r, "set", "root", "coordinator_sessions=")
+        self.assertEqual(json.loads(self.b(self.r, "spend", "root", "--json"))["total"]["fresh"], 30)
+
+    def test_external_home_adds_recorded_coordinators_without_double_counting(self):
+        scratch = self.tmp / "scratch"
+        scratch.mkdir()
+        self.cx(scratch, "cccc2001-coord", [(1, *self.counter((200, 0, 20, 0), (200, 0, 20, 0)))])
+        self.cl(self.home, "aaaa2002-home", "private", [("said", 1, "h1", (100, 0, 0, 10))])
+        self.cl(scratch, "aaaa2003-excluded", "private", [("said", 1, "x1", (900, 0, 0, 90))], config=self.other)
+        self.b(self.r, "set", "app", "coordinator_sessions=cccc2001-coord,aaaa2002-home,aaaa2003-excluded")
+        result = json.loads(self.b(self.r, "spend", "app", "--json"))
+        self.assertEqual((result["total"]["fresh"], result["total"]["sessions"]), (300, 2))
+        future = (datetime.date.today() + datetime.timedelta(days=3)).isoformat()
+        self.assertEqual(json.loads(self.b(self.r, "spend", "app", "--since", future, "--json"))["total"]["sessions"], 0)
+
     @unittest.skipUnless(shutil.which("zstd"), "zstd not installed")
     def test_compressed_codex_sessions_are_read_once(self):
         f = self.cx(self.wt, "c0000040-zst", [(1, *self.counter((400, 0, 40, 0), (400, 0, 40, 0)))])

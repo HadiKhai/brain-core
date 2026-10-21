@@ -971,7 +971,16 @@ def any_cwd(path, allowed, forbidden):
 
 def spend_lookback(inst, n, since=None, also=()):
     """Every past session about a node's home (as `brain history` finds them), as aggregates only."""
-    match_home, _ = _m_history.history_matcher(inst, n, also)
+    if n["external"]:
+        match_home, _ = _m_history.history_matcher(inst, n, also)
+    else:
+        if also:
+            _m_common.die("--also requires an external git home")
+        # Exact node folders keep a parent's spend from absorbing child nodes.
+        match_home = lambda cwd, remote: spend_inside(cwd, n["dir"]) and Path(cwd).resolve() == n["dir"].resolve()
+    recorded = n["local"].get("coordinator_sessions", [])
+    coordinators = {i for i in recorded if isinstance(i, str) and SESSION_ID.fullmatch(i)} \
+        if isinstance(recorded, list) else set()
     heads = {}
 
     def match(runtime, f, allowed, forbidden):
@@ -981,7 +990,7 @@ def spend_lookback(inst, n, since=None, also=()):
             return f.parent.parent.name in heads and bool(match_home(any_cwd(f, allowed, forbidden), ""))
         fh, why = _m_history.transcript_open(f, allowed, forbidden)
         s = _m_history.history_head(f, runtime, fh) if fh else None
-        if not s or not match_home(s["cwd"], s["repo_url"]):
+        if not s or not (s["id"] in coordinators or match_home(s["cwd"], s["repo_url"])):
             return False
         heads[f.stem if runtime == "claude" else s["id"]] = True
         return True
@@ -1074,7 +1083,7 @@ def cmd_spend(a):
     if not a.id:
         _m_common.die("brain spend <node> [--since DATE], or brain spend --machine")
     n = inst.node(a.id)
-    if not n["external"] or not n["home_path"] or not _m_nodes.repo_root(n["home_path"]):
+    if n["external"] and (not n["home_path"] or not _m_nodes.repo_root(n["home_path"])):
         _m_common.die(f"{n['id']}: spend looks back over sessions about an external git home (brain set {n['id']} home=<path>)")
     record, aggs = spend_lookback(inst, n, since, a.also)
     if a.json:
