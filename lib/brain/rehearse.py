@@ -388,14 +388,23 @@ def rehearse(inst, n, branch):
         candidate = folder / 'candidate'
         # Clone transports only Git objects; do not run setup, hooks or a checkout
         # in the original home. No hard links and no origin survives in the copy.
-        r = subprocess.run(['git', '-c', 'core.hooksPath=/dev/null', 'clone', '--no-local', '--no-hardlinks',
-                            '--no-checkout', '--quiet', str(n['home_path']), str(candidate)], capture_output=True)
+        prep_home = folder / 'prepare-home'
+        prep_home.mkdir()
+        prep_env = {k: v for k, v in os.environ.items() if k in ('PATH', 'LANG', 'LC_ALL', 'TZ')}
+        prep_env.update(HOME=str(prep_home), TMPDIR=str(folder), GIT_CONFIG_GLOBAL='/dev/null',
+                        GIT_CONFIG_NOSYSTEM='1', GIT_OPTIONAL_LOCKS='0', GIT_TERMINAL_PROMPT='0')
+        prefix = sandbox_prefix(folder)
+        r = subprocess.run([*prefix, 'git', '-c', 'core.hooksPath=/dev/null', 'clone', '--no-local', '--no-hardlinks',
+                            '--no-checkout', '--quiet', str(n['home_path']), str(candidate)],
+                           env=prep_env, capture_output=True)
         if r.returncode:
             raise RehearsalError('candidate snapshot failed')
-        r = _m_common.git('-c', 'core.hooksPath=/dev/null', 'checkout', '--detach', '--quiet', head, cwd=candidate)
+        r = subprocess.run([*prefix, 'git', '-C', str(candidate), '-c', 'core.hooksPath=/dev/null',
+                            'checkout', '--detach', '--quiet', head], env=prep_env, capture_output=True)
         if r.returncode or not (candidate / 'bin/brain').is_file():
             raise RehearsalError('candidate is not a core checkout')
-        _m_common.git('remote', 'remove', 'origin', cwd=candidate)
+        subprocess.run([*prefix, 'git', '-C', str(candidate), 'remote', 'remove', 'origin'],
+                       env=prep_env, capture_output=True, check=True)
         commands = []
         nodes = _m_instance.Instance(frozen).nodes()
         for i, node in enumerate(nodes):
