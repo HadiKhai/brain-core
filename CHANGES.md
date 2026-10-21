@@ -13,13 +13,15 @@ For agents:
   `wt rm` shares these guards, including with `--force`; prune continues with other jobs.
 - `wt add` refuses occupied or job-owned folders. Never reuse a merged job's folder for
   a follow-up branch; create a fresh worktree.
-- Creation `--base` is provenance only. Merge checks use local main, or the cached origin
-  default in PR mode, so SHA and deleted creation bases no longer strand merged worktrees.
+- Creation `--base` is provenance only. Merge checks use the local branch named by origin/HEAD (main without origin),
+  or the cached origin default in PR mode, so SHA and deleted creation bases no longer strand merged worktrees.
 
 After upgrading:
 - Mark finished Active work rows terminal before cleanup; cleanup still closes its own
   ledger row. Existing worktree records need no migration; the next prune uses the integration
-  branch automatically. See `adapters/hosts/t3.md` for recovery of dead-workspace threads.
+  branch automatically. Local status facts and UI ahead counts use the same target.
+  See `skills/home-job/SKILL.md` to retire legacy reused-folder records safely.
+  See `adapters/hosts/t3.md` for recovery of dead-workspace threads.
 
 ## 2026-10-21: Webhook wakes identify their sender and report refusal
 

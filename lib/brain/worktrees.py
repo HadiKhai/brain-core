@@ -168,12 +168,18 @@ def cmd_wt_add(a):
     print(f"  launch a worker there (host adapter: an existing worktree at this path, branch {a.branch})")
 
 
+def integration_target(n):
+    """Cached integration ref in PR mode, its local branch in local mode; never fetch."""
+    ref = _m_verify.integration_ref(n["home_path"])
+    return (ref if n["fm"].get("merge", "local") == "pr"
+            else ref.replace("refs/remotes/origin/", "refs/heads/", 1))
+
+
 def worktree_state(home, w, branch, n=None):
     """(uncommitted files or None if gone, merged?, commits ahead of integration). A branch that never moved past
     where it started isn't merged: it's new."""
     path = w["path"]
-    base = (_m_verify.integration_ref(home) if n and n["fm"].get("merge", "local") == "pr"
-            else "refs/heads/main")
+    base = integration_target(n or {"home_path": home, "fm": {}})
     dirty = len(_m_common.git("status", "--porcelain", cwd=path).stdout.splitlines()) if Path(path).exists() else None
     tip = _m_common.git("rev-parse", "--verify", "--quiet", "refs/heads/" + branch, cwd=home).stdout.strip()
     moved = bool(tip) and tip != w.get("start")
@@ -187,7 +193,7 @@ def worktree_state(home, w, branch, n=None):
             merged = r.returncode == 0 and json.loads(r.stdout or "[]") != []  # squash merges
         except (subprocess.TimeoutExpired, ValueError):
             pass
-    ahead = _m_common.git("rev-list", "--count", f"{base}..{branch}", cwd=home).stdout.strip() if base and tip else ""
+    ahead = _m_common.git("rev-list", "--count", f"{base}..refs/heads/{branch}", cwd=home).stdout.strip() if base and tip else ""
     return dirty, merged, ahead
 
 
@@ -211,7 +217,7 @@ def job_commits(home, w, branch):
     """Commits made on the job's branch since its worktree was created (still right after a merge)."""
     if not w or not w.get("start"):
         return ""
-    c = _m_common.git("rev-list", "--count", f"{w['start']}..{branch}", cwd=home).stdout.strip()
+    c = _m_common.git("rev-list", "--count", f"{w['start']}..refs/heads/{branch}", cwd=home).stdout.strip()
     return c if c.isdigit() else ""
 
 
@@ -240,7 +246,8 @@ def removal_refusal(n, branch, w):
         if row["Job"] in owners:
             return "open ledger job " + row["Job"]
     for row in _m_status.active_work(n):
-        if row[0] in owners and len(row) > 1 and row[1].strip() not in ("", "-", "—"):
+        recorded_branch = row[0].replace("`", "").split()
+        if recorded_branch and recorded_branch[0] in owners and len(row) > 1 and row[1].strip() not in ("", "-", "—"):
             return "live bound thread in Active work for " + row[0]
     return ""
 
@@ -264,6 +271,9 @@ def cmd_wt_rm(a):
     inst = _m_nodes.load()
     n, home = git_home(inst, a.id)
     w = n["local"].get("worktrees", {}).get(a.branch)
+    reason = removal_refusal(n, a.branch, w) if w else ""
+    if reason:
+        _m_common.die(f"{a.branch}: {reason}; worktree retained")
     state = worktree_state(home, w, a.branch, n) if w else (None, False, "")
     _m_jobs.print_job_handback(n, a.branch)
     remove_worktree(inst, n, a.branch, a.force)
@@ -283,6 +293,9 @@ def cmd_wt_prune(a):
         reason = removal_refusal(n, br, w)
         if reason:
             kept.append(f"{br} ({reason})")
+            continue
+        if not integration_target(n):
+            kept.append(f"{br} (origin default unavailable; run git remote set-head origin -a)")
             continue
         dirty, merged, ahead = worktree_state(home, w, br, n)
         if dirty is None or (merged and dirty == 0):

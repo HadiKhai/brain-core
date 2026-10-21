@@ -204,7 +204,13 @@ class PruneSafety(AutonomyProject):
                 self.git('commit', '-qm', 'done', cwd=wt)
                 self.git('merge', '-q', 'job-a', cwd=home)
                 self.git('branch', '-D', 'job-base', cwd=home)
-                self.close_job(r)
+                due = json.loads(self.b(r, 'due', 'app', '--json'))
+                self.assertTrue(any(item['kind'] == 'merged-job' and 'merged in local git' in item['text'] for item in due))
+                self.b(r, 'status', 'app', '--refresh')
+                self.assertIn('job-a: merged in local git', (r / 'nodes/app/status.md').read_text())
+                state = json.loads(self.b(r, 'ui', '--json'))
+                node = next(node for node in state['nodes'] if node['id'] == 'app')
+                self.assertEqual(node['worktrees'][0]['ahead'], 0)
                 self.assertIn('removed: job-a', self.b(r, 'wt', 'prune', 'app', '--offline'))
                 self.assertFalse(wt.exists())
 
@@ -232,6 +238,55 @@ class PruneSafety(AutonomyProject):
         self.assertIn('open ledger job job-a', self.b(r, 'wt', 'prune', 'app', '--offline'))
         self.assertTrue(wt.exists())
 
+    def test_local_mode_follows_origin_default_named_master(self):
+        r, home, wt = self.project()
+        self.git('branch', '-m', 'main', 'master', cwd=home)
+        origin = self.tmp / 'origin.git'
+        self.git('init', '-q', '--bare', '-b', 'master', str(origin), cwd=self.tmp)
+        self.git('remote', 'add', 'origin', str(origin), cwd=home)
+        self.git('push', '-q', 'origin', 'master', cwd=home)
+        self.git('remote', 'set-head', 'origin', 'master', cwd=home)
+        self.b(r, 'set', 'app', 'merge=local')
+        (wt / 'done').write_text('done')
+        self.git('add', '.', cwd=wt)
+        self.git('commit', '-qm', 'done', cwd=wt)
+        self.git('merge', '-q', 'job-a', cwd=home)
+        self.assertIn('merged in local git', self.b(r, 'due', 'app'))
+        self.assertIn('removed: job-a', self.b(r, 'wt', 'prune', 'app', '--offline'))
+        self.assertFalse(wt.exists())
+
+    def test_live_binding_accepts_backticks_and_branch_annotation(self):
+        r, home, wt = self.merged()
+        status = r / 'nodes/app/status.md'
+        for cell in ('`job-a`', '`job-a` (then followup)'):
+            with self.subTest(cell=cell):
+                status.write_text('## Active work\n| Branch | Thread | PR | State |\n'
+                                  + '| ' + cell + ' | fake-thread | - | working |\n')
+                self.assertIn('live bound thread', self.b(r, 'wt', 'prune', 'app', '--offline'))
+                refused = self.b(r, 'wt', 'rm', 'app', 'job-a', '--force', ok=False)
+                self.assertIn('live bound thread', refused)
+                self.assertNotIn('lessons:', refused)
+                self.assertTrue(wt.exists())
+
+    def test_refused_rm_prints_no_cleanup_handback(self):
+        r, home, wt = self.merged()
+        (r / 'nodes/app/status.md').write_text('## Active work\n| Branch | Thread | PR | State |\n'
+                                             '| job-a | fake-thread | - | working |\n')
+        out = self.b(r, 'wt', 'rm', 'app', 'job-a', '--force', ok=False)
+        self.assertIn('live bound thread', out)
+        self.assertNotIn('lessons:', out)
+        self.assertTrue(wt.exists())
+
+    def test_pr_mode_reports_missing_origin_default(self):
+        r, home, wt = self.merged()
+        origin = self.tmp / 'origin.git'
+        self.git('init', '-q', '--bare', '-b', 'main', str(origin), cwd=self.tmp)
+        self.git('remote', 'add', 'origin', str(origin), cwd=home)
+        self.b(r, 'set', 'app', 'merge=pr')
+        out = self.b(r, 'wt', 'prune', 'app', '--offline')
+        self.assertIn('origin default unavailable; run git remote set-head origin -a', out)
+        self.assertTrue(wt.exists())
+
 
 class WorktreeGuardUnits(unittest.TestCase):
     def setUp(self):
@@ -252,13 +307,29 @@ class WorktreeGuardUnits(unittest.TestCase):
         def git(*args, **kwargs):
             return subprocess.CompletedProcess(args, 1 if args[0] == 'merge-base' else 0,
                                                'tip' if args[0] == 'rev-parse' else '', '')
-        with mock.patch.object(self.core, 'git', side_effect=git), \
+        with mock.patch.object(self.core, 'git', side_effect=git) as git_calls, \
              mock.patch.object(self.core, 'remote_url', return_value='https://github.com/example/repo'), \
+             mock.patch.object(self.core, 'integration_ref', return_value='refs/remotes/origin/master'), \
              mock.patch.object(shutil, 'which', return_value='/fake/gh'), \
              mock.patch.object(subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, '[{"number": 1}]', '')) as run:
             self.assertTrue(self.core.worktree_state(CORE, {'path': str(CORE), 'base': 'obsolete', 'start': 'old'}, 'job')[1])
         args = run.call_args.args[0]
-        self.assertEqual(args[args.index('--base') + 1], 'main')
+        self.assertEqual(args[args.index('--base') + 1], 'master')
+        self.assertTrue(any(call.args == ('rev-list', '--count', 'refs/heads/master..refs/heads/job') for call in git_calls.call_args_list))
+
+    def test_existing_worktree_documentation_uses_worktree_path(self):
+        text = (CORE / 'adapters/hosts/t3.md').read_text()
+        snippets = re.findall(r'\{[^{}]*["\']type["\']\s*:\s*["\']existing_worktree["\'][^{}]*\}', text)
+        self.assertTrue(snippets)
+        for snippet in snippets:
+            with self.subTest(snippet=snippet):
+                self.assertIn('"worktreePath"', snippet)
+                self.assertNotRegex(snippet, r'"path"\s*:')
+
+    def test_commit_counts_use_explicit_branch_refs(self):
+        with mock.patch.object(self.core, 'git', return_value=subprocess.CompletedProcess([], 0, '1', '')) as git:
+            self.assertEqual(self.core.job_commits(CORE, {'start': 'old'}, 'job'), '1')
+            self.assertIn('old..refs/heads/job', git.call_args.args)
 
 
 class WorktreeSetupDiagnostics(Scenario):
