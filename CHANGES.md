@@ -5,6 +5,19 @@ upgrading. `brain changes <node>` shows the entries this node's coordinator hasn
 `brain due <node>` lists them until `brain changes <node> --seen`. Entry headings are
 `## <date>: <title>`; once released, a heading never changes.
 
+## 2026-10-21: Rehearse redacts protected probe output
+
+For agents:
+- Installed and candidate probe outputs use the same protected-term redaction
+  before comparison and digesting. Protected names in another node's output no
+  longer refuse a rehearsal; surrounding changes still affect comparisons.
+- Evidence keeps only digests, counts and fixed regression labels. Probe output
+  and protected terms stay out of evidence, printed output and refusal messages.
+
+After upgrading:
+- Retry rehearsals refused for protected probe output. No policy or configuration
+  change is required.
+
 ## 2026-10-21: Rehearse tolerates live runtime churn
 
 For agents:

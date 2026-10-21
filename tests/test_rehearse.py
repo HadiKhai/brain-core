@@ -1,6 +1,10 @@
 """Fabricated rehearsal comparisons and real sandbox mutation checks."""
+import contextlib
+import hashlib
 import importlib
+import io
 import json
+import logging
 import os
 from pathlib import Path
 import subprocess
@@ -55,6 +59,94 @@ class RehearsalComparison(unittest.TestCase):
         with mock.patch.object(rehearsal.sys, 'platform', 'linux'):
             with self.assertRaises(rehearsal.RehearsalError):
                 rehearsal.sandbox_prefix(Path('/tmp/fabricated'))
+
+
+class RehearsalRedaction(Scenario):
+    def probe(self, out, err='', code=0):
+        lane = self.tmp / 'lane'
+        (lane / 'brain').mkdir(parents=True, exist_ok=True)
+        process = mock.Mock(returncode=code, pid=123)
+        process.communicate.return_value = (out, err)
+        with mock.patch.object(rehearsal, 'sandbox_prefix', return_value=[]), \
+                mock.patch.object(rehearsal.subprocess, 'Popen', return_value=process), \
+                mock.patch.object(rehearsal.os, 'killpg'):
+            return rehearsal.run_command(lane / 'brain/core', lane, [], 'read', [],
+                                         [('invented-canary', 'term'), ('Straße', 'term')])
+
+    def test_stdout_stderr_redacted_before_comparison_and_digest(self):
+        printed = io.StringIO()
+        handler = logging.StreamHandler(printed)
+        logging.getLogger().addHandler(handler)
+        self.addCleanup(logging.getLogger().removeHandler, handler)
+        with contextlib.redirect_stdout(printed), contextlib.redirect_stderr(printed):
+            old = self.probe('[{"text":"invented-canary","kind":"hold"}]')
+            same = self.probe('[{"kind":"hold","text":"INVENTED-CANARY"}]')
+            changed = self.probe('[{"text":"invented-canary","kind":"new"}]')
+            error = self.probe('', '✗ invented-canary failed', code=1)
+        self.assertEqual([], rehearsal.compare({'due:0': old}, {'due:0': same}))
+        digest = lambda r: hashlib.sha256(r['text'].encode()).hexdigest()
+        self.assertEqual(digest(old), digest(same))
+        self.assertNotEqual(digest(old), digest(changed))
+        self.assertIn('due:0: new due items', rehearsal.compare({'due:0': old}, {'due:0': changed}))
+        self.assertIn('check: new check errors', rehearsal.compare({'check': result()}, {'check': error}))
+        self.assertEqual('', printed.getvalue())
+        for r in (old, same, changed, error):
+            self.assertNotIn('invented-canary', json.dumps(r).casefold())
+            self.assertIn('[…]', r['text'])
+
+    def test_unicode_folds_and_escaped_json_preserve_real_differences(self):
+        old = self.probe(json.dumps([{'text': 'STRASSE', 'kind': 'old'}]))
+        same = self.probe(json.dumps([{'text': 'Straße', 'kind': 'old'}]))
+        changed = self.probe(json.dumps([{'text': 'Straße', 'kind': 'new'}]))
+        self.assertEqual(old['text'], same['text'])
+        self.assertIn('due:0: new due items', rehearsal.compare({'due:0': old}, {'due:0': changed}))
+        self.assertNotIn('strasse', changed['text'].casefold())
+        split = self.probe('invented-', 'canary')
+        self.assertEqual('[…]', split['text'])
+
+    def test_json_quoted_terms_are_masked_without_losing_structure(self):
+        terms = [('fabricated-"cedar', 'one'), ('invented-\\willow', 'two')]
+        text = json.dumps({'items': [term for term, _ in terms]})
+        masked = rehearsal.redact_output(rehearsal.normalize(text), terms)
+        self.assertEqual({'items': ['[…]', '[…]']}, json.loads(masked))
+
+    def test_overlapping_terms_are_order_independent(self):
+        terms = [('fabricated-cedar', 'one'), ('cedar-project', 'two')]
+        for order in (terms, terms[::-1]):
+            self.assertEqual('keep […] changed', rehearsal.redact_output('keep fabricated-cedar-project changed', order))
+
+    def test_evidence_stdout_and_refusal_hide_probe_content(self):
+        from types import SimpleNamespace
+        node = dict(id='engine', external=True, home_path=self.tmp / 'candidate')
+        inst = SimpleNamespace(root=self.tmp / 'source', node=lambda _: node, nodes=lambda: [node])
+        path = self.tmp / 'evidence.json'
+        probe = self.probe('[{"text":"invented-canary","kind":"hold"}]')
+        evidence = dict(passed=True, commands=1, regressions=[],
+                        output_digests={'due:0': hashlib.sha256(probe['text'].encode()).hexdigest()})
+        args = SimpleNamespace(id='engine', branch='job')
+        printed = io.StringIO()
+        handler = logging.StreamHandler(printed)
+        logging.getLogger().addHandler(handler)
+        self.addCleanup(logging.getLogger().removeHandler, handler)
+        with mock.patch.object(rehearsal._m_nodes, 'find_root', return_value=inst.root), \
+                mock.patch.object(rehearsal._m_instance, 'Instance', return_value=inst), \
+                mock.patch.object(rehearsal, 'evidence_path', return_value=path), \
+                mock.patch.object(rehearsal._m_guard, 'never_terms', return_value=[('invented-canary', 'term')]), \
+                mock.patch.object(rehearsal, 'rehearse', return_value=evidence) as run, \
+                contextlib.redirect_stdout(printed), contextlib.redirect_stderr(printed):
+            rehearsal.cmd_rehearse(args)
+            saved = path.read_text()
+            self.assertEqual(evidence, json.loads(saved))
+            run.side_effect = rehearsal.RehearsalError('invented-canary raw probe output')
+            with self.assertRaises(SystemExit) as caught:
+                rehearsal.cmd_rehearse(args)
+            self.assertNotIn('invented-canary', str(caught.exception))
+            self.assertIn('rehearsal refused or incomplete', str(caught.exception))
+        self.assertFalse(path.exists())
+        for text in (saved, printed.getvalue()):
+            self.assertNotIn('invented-canary', text)
+            self.assertNotIn('raw probe output', text)
+        self.assertIn('rehearse: passed', printed.getvalue())
 
 
 class RehearsalStability(Scenario):
@@ -460,9 +552,13 @@ class RehearsalSandbox(Scenario):
         self.assertEqual(0, r['code'])
         self.assertEqual(1, r['unexpected'])
 
-    def test_never_name_output_fails_without_publishing_it(self):
-        with self.assertRaisesRegex(rehearsal.RehearsalError, '^protected output refused$'):
-            self.runner('print("invented-canary")', terms=[('invented-canary', 'term')])
+    def test_never_name_output_is_redacted_without_publishing_it(self):
+        printed = io.StringIO()
+        with contextlib.redirect_stdout(printed), contextlib.redirect_stderr(printed):
+            r = self.runner('print("invented-canary")', terms=[('invented-canary', 'term')])
+        self.assertEqual(0, r['code'])
+        self.assertEqual('[…]', r['text'])
+        self.assertEqual('', printed.getvalue())
 
 
 class RehearsalEvidence(Scenario):
@@ -571,7 +667,8 @@ class RehearsalPipeline(Scenario):
 command = sys.argv[1]
 mode = MODE
 if command == 'due':
-    print('[{"kind":"load","text":"new noise"}]' if mode else '[]')
+    print('[{"kind":"hold","text":"invented-canary"},{"kind":"load","text":"new noise"}]'
+          if mode else '[{"kind":"hold","text":"invented-canary"}]')
 elif command in ('check',):
     print('✗ upgrade cannot heal' if mode else '✓ checks pass')
     sys.exit(1 if mode else 0)
@@ -598,12 +695,17 @@ elif command == 'hook':
         self.b(r, 'wt', 'add', 'a', 'job')
         # Register a second open record to prove every ready record is exercised.
         self.b(r, 'wt', 'add', 'a', 'other')
+        self.b(r, 'new', 'b', '--title', 'B')
+        # Root and sibling probes can legitimately name another node's term.
+        (r / 'nodes/b/never-name.txt').write_text('invented-canary\n')
         (r / 'core/bin/brain').write_text(baseline)
         original = rehearsal.snapshot(r)
         inst = Instance(r)
         n = inst.node('a')
         clean = rehearsal.rehearse(inst, n, 'job')
         self.assertTrue(clean['passed'], clean['regressions'])
+        self.assertEqual(0, clean['changed_outputs'])
+        self.assertNotIn('invented-canary', json.dumps(clean))
         self.assertEqual(original, rehearsal.snapshot(r))
         wt = self.tmp / 'candidate-work/worktrees/job'
         (wt / 'bin/brain').write_text(fixture.replace('MODE', 'True'))
@@ -617,6 +719,8 @@ elif command == 'hook':
         self.assertEqual(original, rehearsal.snapshot(r))
         # No private fixture command text is retained in public evidence.
         self.assertNotIn('upgrade cannot heal', json.dumps(bad))
+        self.assertNotIn('invented-canary', json.dumps(bad))
+        self.assertNotEqual(clean['output_digests']['due:0'], bad['output_digests']['due:0'])
 
 class RehearsalDelivery(unittest.TestCase):
     def setUp(self):

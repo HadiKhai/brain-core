@@ -331,6 +331,55 @@ def normalize(text, roots=()):
         return text.strip()
 
 
+def redact_text(text, terms):
+    """Mask folded matches, keeping surrounding probe content comparable.
+
+    guard.redact can blank an entire output for full Unicode folds. Map folded
+    offsets back to source characters instead, and merge all overlapping matches
+    before replacing them so term order cannot expose or partially mask a match.
+    """
+    folded, offsets = [], []
+    for i, char in enumerate(text):
+        part = char.casefold()
+        folded.append(part)
+        offsets.extend([i] * len(part))
+    folded = ''.join(folded)
+    spans = []
+    for term, _ in terms:
+        needle = term.casefold()
+        if not needle:
+            continue
+        start = folded.find(needle)
+        while start >= 0:
+            spans.append((offsets[start], offsets[start + len(needle) - 1] + 1))
+            start = folded.find(needle, start + 1)
+    merged = []
+    for start, end in sorted(spans):
+        if merged and start <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(end, merged[-1][1]))
+        else:
+            merged.append((start, end))
+    parts, cursor = [], 0
+    for start, end in merged:
+        parts.extend((text[cursor:start], '[…]'))
+        cursor = end
+    return ''.join(parts) + text[cursor:]
+
+
+def redact_output(text, terms):
+    # Match decoded JSON strings too, including names with quotes/backslashes.
+    # Replace individual tokens rather than rebuilding dicts: protected keys
+    # may redact to the same spelling, but must not collapse distinct fields.
+    try:
+        json.loads(text)
+    except ValueError:
+        pass
+    else:
+        text = re.sub(r'"(?:[^"\\]|\\.)*"',
+                      lambda m: json.dumps(redact_text(json.loads(m[0]), terms), ensure_ascii=False), text)
+    return redact_text(text, terms)
+
+
 def compare(before, after):
     """Return content-free regression labels; exact output stays in memory only."""
     flags = []
@@ -544,11 +593,12 @@ runpy.run_path(entry, run_name='__main__')
         except ProcessLookupError:
             pass
     elapsed = time.monotonic() - start
-    if _m_guard.find_terms(out + err, terms):
-        raise RehearsalError('protected output refused')
+    # Normalize JSON escapes before redaction as well: an escaped spelling must
+    # not become a protected literal after the privacy filter has run.
+    text = redact_output(normalize(out + err, roots), terms)
     after = snapshot(lane, cache)
     changed = {k for k in before.keys() | after.keys() if before.get(k) != after.get(k)}
-    return {'text': normalize(out + err, roots), 'code': p.returncode, 'timeout': timed_out,
+    return {'text': text, 'code': p.returncode, 'timeout': timed_out,
             'seconds': elapsed, 'unexpected': sum(not allowed_write(k, kind) for k in changed) + int(violation.exists())}
 
 
