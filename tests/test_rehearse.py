@@ -181,7 +181,9 @@ class RehearsalFixture(Scenario):
                     mutation()
         def lane(*args):
             if inspect_lane:
-                inspect_lane(*args)
+                observed = inspect_lane(*args)
+                if observed is not None:
+                    return observed
             if during_run:
                 mutation()
             return outputs.pop(0) if outputs is not None else {'hook': result()}

@@ -99,6 +99,29 @@ class FrozenInputs(RehearsalFixture):
         self.assertFalse(outcome['passed'])
         self.assertIn('due:0: baseline incomplete', outcome['regressions'])
 
+    def test_path_lengths_cannot_reorder_largest_brief_sections(self):
+        from brain import briefs
+        fixed_size = []
+        orders = []
+        def inspect(source, core, folder, nodes, commands):
+            variable = '## Variable\n' + (str(folder / 'brain') + '\n') * 2 + 'x' * 3000 + '\n'
+            if not fixed_size:
+                fixed_size.append(len(variable.encode()) - 1)
+            fixed = '## Fixed\n' + 'x' * (fixed_size[0] - len('## Fixed\n'))
+            printed = io.StringIO()
+            with mock.patch.object(briefs._m_guard, 'no_terms_in'), \
+                    contextlib.redirect_stderr(printed):
+                with self.assertRaises(SystemExit) as caught:
+                    briefs.checked_brief({'fm': {'brief_max_kb': 1}}, variable + fixed, worker=False)
+            text = printed.getvalue() + str(caught.exception)
+            orders.append(text.index('Variable:') < text.index('Fixed:'))
+            return {'brief:0': result(rehearsal.normalize(text, [folder / 'brain']), code=1),
+                    'hook': result()}
+        outcome = self.run_rehearsal(inspect_lane=inspect)
+        self.assertEqual([True, True], orders)
+        self.assertTrue(outcome['passed'], outcome['regressions'])
+        self.assertIn('brief:0: identical baseline failure', outcome['warnings'])
+
 
 class StableComparisons(unittest.TestCase):
     def test_due_text_changes_preserve_identity_and_duplicates_still_flag(self):

@@ -761,8 +761,10 @@ def rehearse(inst, n, branch):
         delivery = probe_delivery(delivery_inst, delivery_inst.nodes(), frozen_inst)
         expected = expected_change_notices(frozen_inst, nodes, baseline, candidate)
         original = snapshot(frozen)
+        # Equal-length paths prevent measured sizes from changing warning
+        # thresholds, top-section selection, and section order before normalization.
         old = run_lane(frozen, baseline, folder / 'before', nodes, commands)
-        new = run_lane(frozen, candidate, folder / 'after', nodes, commands)
+        new = run_lane(frozen, candidate, folder / 'after_', nodes, commands)
         flags = compare(old, new, expected)
         if snapshot(frozen) != original:
             flags.append('frozen brain changed during rehearsal; evidence refused')
