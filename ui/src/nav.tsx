@@ -27,6 +27,10 @@ export function Navigation({ s, route, go, onAdd, onNotice }: {
   const shown = filter ? rows.filter(({ node }) => fold(node.title).includes(fold(filter))) : rows;
   const hidden = new Set<string>();
   if (!filter) for (const { node } of rows) if (closed[node.id] || hidden.has(node.id)) list(nodes).filter((c) => c.parent === node.id).forEach((c) => hidden.add(c.id));
+  const copyThread = async (link: string) => {
+    try { await navigator.clipboard.writeText(link); onNotice("Thread link copied. Paste it into your conversation host."); }
+    catch { onNotice("Copy this thread link: " + link); }
+  };
   const goto = (r: Partial<Route> & { view: string }) => { go(r); if (isMobile) setOpenMobile(false); };
   const item = (view: string, title: string, Icon: any, badge?: number, alert = false) => (
     <SidebarMenuItem key={view}>
@@ -90,9 +94,10 @@ export function Navigation({ s, route, go, onAdd, onNotice }: {
                     <RailFlyout label={n.title || "Project"} items={[
                       { key: "page", label: "Project page", icon: <FolderGit2 />, active: active && !route.thread, href: writeRoute({ view: "project", node: n.id }) },
                       ...(safeHref(n.coordinator) ? [{ key: "coordinator", label: "Coordinator", icon: <MessagesSquare />, href: safeHref(n.coordinator), external: true }] : []),
+                      ...(n.coordinator ? [{ key: "copy-coordinator", label: "Copy thread link", icon: <MessagesSquare />, onSelect: () => { void copyThread(n.coordinator); } }] : []),
                       ...work.map((f) => ({ key: f.job.branch, label: jobTitle(f.job.branch), icon: <i className={"dot tone-" + tone(f, due)} />, active: active && route.thread === f.job.branch, href: writeRoute({ view: "project", node: n.id, thread: f.job.branch, tab: "threads" }) })),
-                    ].filter((i) => i.key !== "page" || work.length || safeHref(n.coordinator))} button={
-                    <SidebarMenuButton isActive={active && !route.thread} tooltip={collapsed && (work.length || safeHref(n.coordinator)) ? undefined : n.title || "Project"} aria-current={active ? "page" : undefined} onClick={() => goto({ view: "project", node: n.id })}>
+                    ].filter((i) => i.key !== "page" || work.length || n.coordinator)} button={
+                    <SidebarMenuButton isActive={active && !route.thread} tooltip={collapsed && (work.length || n.coordinator) ? undefined : n.title || "Project"} aria-current={active ? "page" : undefined} onClick={() => goto({ view: "project", node: n.id })}>
                       <span className="tree-glyph"><FolderGit2 /><i className={"dot live-dot tone-" + (work.some((f) => tone(f, due) === "working" || tone(f, due) === "review") ? "working" : needs(n.id) ? "blocked" : "idle")} aria-hidden /></span>
                       <span className="truncate" dir="auto">{n.title || "Untitled project"}</span>
                     </SidebarMenuButton>} />
@@ -101,7 +106,7 @@ export function Navigation({ s, route, go, onAdd, onNotice }: {
                         {closed[n.id] ? <ChevronRight /> : <ChevronDown />}
                       </SidebarMenuAction>
                     ) : needs(n.id) ? <SidebarMenuBadge className="badge-alert">{needs(n.id)}</SidebarMenuBadge> : null}
-                    {(work.length > 0 || safeHref(n.coordinator)) && (
+                    {(work.length > 0 || n.coordinator) && (
                       <SidebarMenuSub>
                         {safeHref(n.coordinator) && (
                           <SidebarMenuSubItem>
@@ -110,6 +115,7 @@ export function Navigation({ s, route, go, onAdd, onNotice }: {
                             </SidebarMenuSubButton>
                           </SidebarMenuSubItem>
                         )}
+                        {n.coordinator && <SidebarMenuSubItem><SidebarMenuSubButton aria-label="Copy thread link" onClick={() => { void copyThread(n.coordinator); }}><MessagesSquare /><span className="truncate">{safeHref(n.coordinator) ? "Copy thread link" : "Copy coordinator link"}</span></SidebarMenuSubButton></SidebarMenuSubItem>}
                         {work.map((f) => (
                           <SidebarMenuSubItem key={f.job.branch}>
                             <SidebarMenuSubButton isActive={active && route.thread === f.job.branch} href={writeRoute({ view: "project", node: n.id, thread: f.job.branch, tab: "threads" })} onClick={() => isMobile && setOpenMobile(false)}>
@@ -164,7 +170,7 @@ export function Navigation({ s, route, go, onAdd, onNotice }: {
 
 // The collapsed rail keeps every sub-item reachable: hover, focus or tap on the parent opens a flyout
 // beside it. Choosing a destination navigates; the rail stays collapsed.
-type FlyItem = { key: string; label: string; icon: ReactNode; count?: number; active?: boolean; href?: string; external?: boolean };
+type FlyItem = { key: string; label: string; icon: ReactNode; count?: number; active?: boolean; href?: string; external?: boolean; onSelect?: () => void };
 function RailFlyout({ label, items, button }: { label: string; items: FlyItem[]; button: ReactElement }) {
   const { state, isMobile } = useSidebar();
   const [open, setOpen] = useState(false), closedAt = useRef(0);
@@ -180,7 +186,7 @@ function RailFlyout({ label, items, button }: { label: string; items: FlyItem[];
           <DropdownMenuLabel>{label}</DropdownMenuLabel>
           {items.map((i) => (
             <DropdownMenuItem key={i.key} data-active={i.active || undefined}
-              render={<a href={i.href} {...(i.external ? { target: "_blank", rel: "noreferrer" } : {})} />}>
+              onClick={i.onSelect} render={i.href ? <a href={i.href} {...(i.external ? { target: "_blank", rel: "noreferrer" } : {})} /> : <Button variant="ghost" />}>
               {i.icon}<span className="truncate">{i.label}</span>{i.count ? <span className="sub-count">{i.count}</span> : null}
             </DropdownMenuItem>
           ))}

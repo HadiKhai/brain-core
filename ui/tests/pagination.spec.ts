@@ -30,10 +30,10 @@ test("Inbox history tab changes reset pagination without using the tab click han
   await inbox.getByRole("tab", { name: /^Coordinator steps/ }).click();
   await inbox.getByRole("button", { name: "Next", exact: true }).click();
   await inbox.getByRole("button", { name: "Next", exact: true }).click();
-  await expect(inbox.locator(".table-footer")).toContainText("21–30 of 35 steps");
+  await expect(inbox.locator(".list-header .list-count")).toContainText("21–30 of 35 steps");
   await page.goBack();
   await expect(inbox.getByRole("tab", { name: /^Requests/ })).toHaveAttribute("aria-selected", "true");
-  await expect(inbox.locator(".table-footer")).toContainText("1–10 of 35 requests");
+  await expect(inbox.locator(".list-header .list-count")).toContainText("1–10 of 35 requests");
 });
 
 test("Overview View all coordinator steps resets a retained Inbox page", async ({ page, request, state }) => {
@@ -47,7 +47,7 @@ test("Overview View all coordinator steps resets a retained Inbox page", async (
   await overview.getByRole("tab", { name: /^Coordinator steps/ }).click();
   await overview.getByRole("tabpanel", { name: /^Coordinator steps/ }).getByRole("button", { name: "View all", exact: true }).click();
   await expect(inbox.locator(".row.due")).toHaveCount(2);
-  await expect(inbox.locator(".table-footer")).toContainText("1–2 of 2 steps");
+  await expect(inbox.locator(".list-header .list-count")).toContainText("1–2 of 2 steps");
 });
 
 test("Back to requests resets the Inbox page after coordinator steps disappear", async ({ page, request, state }) => {
@@ -57,7 +57,7 @@ test("Back to requests resets the Inbox page after coordinator steps disappear",
   await inbox.getByRole("button", { name: "Next", exact: true }).click();
   await request.post("/fixture/update", { data: { due: [] } });
   await page.locator("#screen-action-host").getByRole("button", { name: "Back to requests" }).click();
-  await expect(inbox.locator(".table-footer")).toContainText("1–10 of 35 requests");
+  await expect(inbox.locator(".list-header .list-count")).toContainText("1–10 of 35 requests");
   await expect(inbox.locator(".row.request")).toHaveCount(10);
 });
 
@@ -67,10 +67,13 @@ for (const kind of ["inbox", "specialists", "learnings", "threads", "jobs", "usa
     await page.goto("/?k=demo#" + hash);
     const root = page.locator(`[data-page=${kind}]`);
     const region = kind === "jobs" ? root.locator(".data-table").first() : root;
-    const footer = region.locator(".table-footer").first();
+    const frame = kind === "jobs" ? region : region.locator("[data-list-frame]").first();
+    const footer = frame.locator(".table-footer");
+    const range = frame.locator(".list-header .list-count");
     await region.getByRole("button", { name: "Next", exact: true }).first().click();
     await region.getByRole("button", { name: "Next", exact: true }).first().click();
-    await expect(footer).toContainText("21–30 of");
+    await expect(range).toContainText("21–30 of");
+    await expect(footer.locator(".page-position")).toHaveText("Page 3 of 4");
     const reduced = kind === "inbox" ? { inbox: state.inbox.slice(0, 2) }
       : kind === "specialists" ? { specialists: state.specialists.slice(0, 2) }
       : kind === "learnings" ? { specialists: [], items: { ...state.items, all: state.items.all.slice(0, 2), recent: [], count: 2 } }
@@ -78,16 +81,21 @@ for (const kind of ["inbox", "specialists", "learnings", "threads", "jobs", "usa
       : kind === "jobs" ? { nodes: state.nodes.map((n: any) => ({ ...n, jobs: { ...n.jobs, rows: n.jobs.rows.slice(0, 2) } })) }
       : { usage: state.usage.slice(0, 2) };
     await request.post("/fixture/update", { data: reduced });
-    if (kind === "usage" || kind === "threads") {
-      await expect(region.locator(kind === "usage" ? ".subscription" : ".row.thread")).toHaveCount(2);
-      await expect(footer).toHaveCount(0);
-    } else {
-      await expect(footer).toContainText("1–2 of 2");
-      const rows = kind === "jobs" ? region.locator("tbody tr") : region.locator(".rows > [data-item]");
-      await expect(rows).toHaveCount(2);
-    }
+    const rows = kind === "usage" ? frame.locator(".subscription")
+      : kind === "threads" ? frame.locator(".row.thread")
+      : kind === "jobs" ? frame.locator("tbody tr")
+      : frame.locator(".rows > [data-item]");
+    await expect(rows).toHaveCount(2);
+    await expect(range).toContainText("1–2 of 2");
+    // A one-page result keeps its footer; the cursor must clamp in both visible places.
+    await expect(footer).toBeVisible();
+    await expect(footer.locator(".page-position")).toHaveText("Page 1 of 1");
+    await expect(footer.getByRole("button", { name: "Previous", exact: true })).toBeDisabled();
+    await expect(footer.getByRole("button", { name: "Next", exact: true })).toBeDisabled();
     await request.post("/fixture/update", { data: state });
-    await expect(footer).toContainText("1–10 of");
+    await expect(range).toContainText("1–10 of");
+    await expect(footer.locator(".page-position")).toHaveText("Page 1 of 4");
+    await expect(footer.getByRole("button", { name: "Next", exact: true })).toBeEnabled();
   });
 }
 
@@ -98,6 +106,6 @@ test("Threads filter changes reset the page and keep the chosen row count", asyn
   await page.getByRole("option", { name: "25", exact: true }).click();
   await threads.getByRole("button", { name: "Next", exact: true }).click();
   await threads.getByRole("textbox", { name: "Search threads" }).fill("Live");
-  await expect(threads.locator(".table-footer")).toContainText("1–25 of 35 threads");
+  await expect(threads.locator(".list-header .list-count")).toContainText("1–25 of 35 threads");
   await expect(threads.locator(".row.thread")).toHaveCount(25);
 });

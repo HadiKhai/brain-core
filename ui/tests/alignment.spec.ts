@@ -34,8 +34,10 @@ test('section rows, footers, toolbars and pages share rendered alignment', async
       widthBefore=pageWidth;
       if (view === 'inbox') {
         await expect(page.getByRole('button',{name:'Clear filters',exact:true})).toBeDisabled();
-        await expect(page.locator('[data-page=inbox] .pager')).toHaveCount(0);
-        await expect(page.locator('[data-page=inbox] .table-footer')).toContainText('1–2 of 2 requests');
+        await expect(page.locator('[data-page=inbox] .pager')).toHaveCount(1);
+        await expect(page.locator('[data-page=inbox] .pager').getByRole('button', {name:'Next',exact:true})).toBeDisabled();
+        await expect(page.locator('[data-page=inbox] .table-footer .page-position')).toHaveText('Page 1 of 1');
+        await expect(page.locator('[data-page=inbox] .list-header .list-count')).toContainText('1–2 of 2 requests');
         expect(await page.getByRole('combobox',{name:'Inbox project',exact:true}).evaluate(e=>e.scrollWidth<=e.clientWidth+1)).toBe(true);
       }
       if (view === 'project') {

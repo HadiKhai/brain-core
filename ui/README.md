@@ -58,3 +58,22 @@ The first output line names the serving core and its commit (`brain ui core: <pa
 The official shadcn CLI initialized Base UI / nova with Tailwind v4. Components under `src/components/ui/` are CLI-generated. Add components through that CLI; compose them in the page files. `shared.tsx` and `dash.tsx` contain product layout compositions (page header, KPI tile, segmented bar, sparkline, section tabs), not replacement primitives. One inset content area scrolls and chains to nothing; readers and sheets have their own bounded bodies while modal.
 
 License checks run during both build and tests. All lockfile dependencies must use an approved license; the Rollup build also checks the packages that enter the bundle and emits `assets/bundled-packages.json`, `assets/THIRD_PARTY_NOTICES.txt` (including license texts), `assets/Geist-OFL.txt` and `assets/GeistMono-OFL.txt`. The OFL is accepted only for those two font packages. Missing licenses fail closed. Regenerate and commit the entire `dist/` after source changes; `npm ci && npm run build` must reproduce it.
+
+### Local proposal reviews
+
+`brain ui` starts read-only. Start `brain ui --write` to enable proposal reviews as
+the operator configured in the selected Brain's `instance.md`. Open the complete
+keyed local address printed by that process. Acceptance and rejection use the
+CLI's shared review validation and the instance lock.
+
+A decision first shows its exact proposals, grouped by node and existing scope.
+Confirmation is valid once, for five minutes; changing a proposal or its scope
+requires another review. Approval never changes scope. The receipt shows the
+Git commit and the exact file diff, with review attribution recorded as local UI.
+Only same-origin JSON requests from the local keyed dashboard can prepare or
+apply a review. No proposal is changed by a refresh or poll.
+
+Desktop thread references always offer Copy thread link. A desktop app scheme
+is not opened unless its actual thread URL handler has been verified; currently
+legacy desktop references are copy-only. Ordinary HTTP(S) conversations also open
+in a new tab.

@@ -62,6 +62,37 @@ export function audit(rule: string): Violation[] {
   const p = page();
   if (!p && rule !== "scrollbars") return [{ rule, detail: "no visible [data-page] for the current route" }];
 
+  if (rule === "spacing") {
+    const token = (name: string) => parseFloat(getComputedStyle(document.documentElement).getPropertyValue(name));
+    const near = (actual: number, expected: number, detail: string) => {
+      if (!Number.isFinite(actual) || !Number.isFinite(expected) || Math.abs(actual - expected) > 1) add(`${detail}: ${actual.toFixed(2)}px, expected ${expected}px`);
+    };
+    const top = document.querySelector<HTMLElement>(".topbar")!;
+    const toggle = top.querySelector<HTMLElement>("[data-slot=sidebar-trigger]")!;
+    const search = top.querySelector<HTMLElement>(".global-search");
+    const gutter = token("--workspace-gutter");
+    near(toggle.getBoundingClientRect().left - top.getBoundingClientRect().left, gutter, "toggle-to-edge gap must equal the gutter token");
+    if (search) near(search.getBoundingClientRect().left - toggle.getBoundingClientRect().right, token("--toolbar-gap"), "toggle-to-search gap must equal the toolbar token");
+    const side = [...document.querySelectorAll<HTMLElement>("[data-slot=sidebar]")].find(visible);
+    const group = side && [...side.querySelectorAll<HTMLElement>("[data-slot=sidebar-group]")].find((e) => !!e.querySelector("[aria-label='Add projects']"));
+    if (group) {
+      const heading = group.querySelector<HTMLElement>("[data-slot=sidebar-group-label]")!;
+      const action = group.querySelector<HTMLElement>("[data-slot=sidebar-group-action]")!;
+      const h = heading.getBoundingClientRect(), a = action.getBoundingClientRect();
+      near(a.top + a.height / 2, h.top + h.height / 2, "header action must be vertically centred with its label within 1px");
+      const filter = group.querySelector<HTMLElement>("[aria-label='Filter projects']");
+      if (filter) {
+        const f = filter.getBoundingClientRect(), icon = group.querySelector<HTMLElement>(".tree-filter > svg")!;
+        const i = icon.getBoundingClientRect();
+        near(a.right, f.right, "header action and filter right edges must align");
+        near(f.left - group.getBoundingClientRect().left, gutter, "sidebar and top-bar gutters must match");
+        near(i.left - f.left, token("--field-icon-inset"), "leading icon inset must equal its spacing token");
+        near(f.left + parseFloat(getComputedStyle(filter).paddingLeft) - i.right, token("--field-icon-gap"), "icon-to-field text gap must equal its spacing token");
+        if (i.left < f.left || i.right > f.right || i.top < f.top || i.bottom > f.bottom) add("search icon must sit inside the filter input");
+      }
+    }
+  }
+
   if (rule === "one-title") {
     const h1s = [...document.querySelectorAll("h1")].filter((e) => visible(e) && !inSidebar(e) && !inModal(e));
     if (h1s.length !== 1) add(`${h1s.length} visible h1 elements; a page has exactly one title`);
@@ -145,7 +176,7 @@ export function audit(rule: string): Violation[] {
     }
     for (const e of p!.querySelectorAll("*")) {
       if (e === scroller || !visible(e) || inModal(e) || !overflowing(e)) continue;
-      if (e.scrollHeight <= innerHeight * 1.5 && e.scrollHeight > e.clientHeight + 1)
+      if (!(e.matches(".list-scroll") && e.closest(".list-surface")) && e.scrollHeight <= innerHeight * 1.5 && e.scrollHeight > e.clientHeight + 1)
         add(`inner scroll for short content (${e.scrollHeight}px ≤ 1.5 viewports): ${describe(e)}`);
     }
   }

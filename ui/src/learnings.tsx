@@ -4,6 +4,8 @@ import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { useContext, useEffect } from "react";
 import {
+  ListFrame,
+  DetailRow,
   FilterToolbar,
   Choice,
   Empty,
@@ -16,7 +18,7 @@ import {
   TimeZoneContext,
 } from "./shared";
 import { SectionTabs } from "./dash";
-import { Pager } from "./inbox";
+import { ReviewActions } from "./review";
 import { RecordPicker } from "./picker";
 import type { Found } from "./search";
 import { learningRows, list, quote, time, type RecordData } from "./model";
@@ -34,12 +36,12 @@ function DecisionFooter({ item, reviewer, setReviewer, decision, setDecision }: 
     {feedback && <p role="status">{feedback}</p>}
   </div>;
 }
-export function ProposalReader({ item: i, primary = false }: { item: RecordData; primary?: boolean }) {
+export function ProposalReader({ item: i, primary = false, open, onOpenChange }: { item: RecordData; primary?: boolean; open?: boolean; onOpenChange?: (open: boolean) => void }) {
   const [reviewer, setReviewer] = useState(""), [decision, setDecision] = useState("accept");
   const reviewable = i.state === "proposed" && !i.specialist;
   const zone = useContext(TimeZoneContext);
-  return <Reader title={i.title || "Learning"} text={i.body || "No additional text recorded."} trigger={reviewable ? "Review proposal" : "Read learning"} primary={primary}
-    footer={reviewable ? <DecisionFooter item={i} reviewer={reviewer} setReviewer={setReviewer} decision={decision} setDecision={setDecision} /> : undefined}>
+  return <Reader open={open} onOpenChange={onOpenChange} title={i.title || "Learning"} text={i.body || "No additional text recorded."} trigger={reviewable ? "Review proposal" : "Read learning"} primary={primary}
+    footer={reviewable ? <><ReviewActions records={[{kind:"item",id:i.id,node:i.review_node || i.node || i.provenance?.node || "root"}]} /><DecisionFooter item={i} reviewer={reviewer} setReviewer={setReviewer} decision={decision} setDecision={setDecision} /></> : undefined}>
     <dl className="detail-facts">
       {i.scope?.length > 0 && <><dt>Scope</dt><dd>{i.scope.join(", ")}</dd></>}
       {i.provenance?.owners?.length > 0 && <><dt>Source owners</dt><dd>{i.provenance.owners.join(", ")}</dd></>}
@@ -49,7 +51,9 @@ export function ProposalReader({ item: i, primary = false }: { item: RecordData;
   </Reader>;
 }
 const states = [["all", "All"], ["proposed", "Proposed"], ["active", "Accepted"], ["rejected", "Rejected"], ["quarantined", "Quarantined"]] as const;
-export function Learnings({ s, active, initialState }: { s: RecordData; active: boolean; initialState: string | null }) {
+export function Learnings({ s, active, initialState, item }: { s: RecordData; active: boolean; initialState: string | null; item?: string | null }) {
+  const [selected, setSelected] = useState<string | null>(null), [dismissed, setDismissed] = useState<string | null>(null);
+  const current = selected || (item !== dismissed ? item : null);
   const [query, setQuery] = useState(""),
     [node, setNode] = useState<Found | null>(null),
     [specialist, setSpecialist] = useState<Found | null>(null),
@@ -65,7 +69,7 @@ export function Learnings({ s, active, initialState }: { s: RecordData; active: 
   const first = rows.find((r) => r.state === "proposed" && !r.specialist) || rows[0];
   return (
     <><ScreenAction active={active}>{first ? <ProposalReader item={first} primary /> : <Reader title="Shared knowledge" text="Record a lesson from a finished job to start your library. New proposals appear here for review." trigger="Start your library" primary />}</ScreenAction>
-    <section className="surface learning-layout" aria-label="Shared knowledge">
+    <section className="surface learning-layout list-surface" aria-label="Shared knowledge">
       <aside className="filter-panel">
         <FilterToolbar query={query} onQuery={(v) => { setQuery(v); setPage(0); }} placeholder="Search learnings" />
         <RecordPicker s={s} kind="node" label="Project" value={node} onChange={(v) => { setNode(v); setPage(0); }} allLabel="All projects" placeholder="Search projects" />
@@ -74,21 +78,23 @@ export function Learnings({ s, active, initialState }: { s: RecordData; active: 
       </aside>
       <div className="learning-results">
         <SectionTabs value={state} onValue={(v) => { setState(v); setPage(0); }} tabs={states.map(([id, label]) => ({ id, label, count: scoped.filter((r) => id === "all" || r.state === id).length, body: null }))} />
-        <p className="results-meta" role="status">{filtered.length} {filtered.length === 1 ? "learning" : "learnings"}</p>
+        <ReviewActions all records={filtered.filter(i => i.state === "proposed" && !i.specialist).map(i => ({kind:"item",id:i.id,node:i.review_node || i.node || "root"}))} />
+        <ListFrame total={filtered.length} page={page} size={size} onPage={setPage} onSize={setSize} noun="learning">
         <div className="rows">{filtered.slice(start, end).map((i: any, k) => (
-          <div className="row learning" data-item key={i.id + ":" + i.specialist + k}>
+          <DetailRow onOpen={() => setSelected(i.id)} className="row learning" data-item key={i.id + ":" + i.specialist + k}>
             <div className="row-main">
               <strong className="row-title"><Text>{i.title || "Untitled learning"}</Text></strong>
               <small>{i.kind || "Library item"} · {title(i.node)} · {i.provenance?.time ? time(i.provenance.time, s.brain?.tz) : "date not recorded"}{i.provenance?.owners?.length ? " · " + i.provenance.owners.join(", ") : ""}</small>
             </div>
             <div className="row-actions">
               <Status>{i.state === "active" ? "Accepted" : i.state === "proposed" ? "Proposed" : i.state}</Status>
-              <ProposalReader item={i} />
+              <ProposalReader item={i} open={current === i.id} onOpenChange={open => {setSelected(open ? i.id : null); if (!open) setDismissed(item || null);}} />
             </div>
-          </div>
+          </DetailRow>
         ))}</div>
         {!filtered.length && <Empty text="No learnings match." action="Clear the filters or record a lesson from a finished job." />}
-        {filtered.length > 0 && <Pager total={filtered.length} page={page} size={size} onPage={setPage} onSize={setSize} noun="learning" />}
+        </ListFrame>
+        {item && !filtered.slice(start, end).some(i => i.id === item) && rows.filter(i => i.id === item).map(i => <ProposalReader key={i.id} item={i} open={current === i.id} onOpenChange={open => {setSelected(open ? i.id : null);if (!open) setDismissed(item);}} />)}
       </div>
     </section></>
   );

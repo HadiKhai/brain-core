@@ -95,7 +95,7 @@ test("coordinator steps name their job and render inline code", async ({ page })
 
 test("the Inbox primary action follows the active tab", async ({ page }) => {
   await page.goto("/?k=demo#view=inbox");
-  const primary = page.locator("#screen-action-host a, #screen-action-host button");
+  const primary = page.locator("#screen-action-host a.primary-link, #screen-action-host button.bg-primary");
   await expect(primary).toHaveText(/Answer next question/);
   await page.getByRole("tab", { name: /^Coordinator steps/ }).click();
   await expect(primary).toHaveText(/Review ready job/);              // the first step is a ready job

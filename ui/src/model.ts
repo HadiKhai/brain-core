@@ -21,8 +21,14 @@ export const tokens = (n: any) =>
     maximumFractionDigits: 1,
   }).format(Number(n) || 0);
 export const quote = (s: any) => "'" + String(s).replace(/'/g, "'\\''") + "'";
-export const safeHref = (s: any) =>
-  /^(https?:|t3-thread:)/i.test(String(s)) ? String(s) : undefined;
+// Desktop protocol registration alone does not prove a thread-opening route.
+// Until a handler is verified, desktop references are copyable text, never anchors.
+export const safeHref = (s: any) => {
+  try {
+    const url = new URL(String(s));
+    return /^https?:$/.test(url.protocol) ? String(s) : undefined;
+  } catch { return undefined; }
+};
 // Operational identifiers remain available in explicit technical readers, never as task copy.
 export function humanText(value: any): string {
   const links: string[] = [];

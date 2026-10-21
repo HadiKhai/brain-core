@@ -1,3 +1,4 @@
+import { ReviewProvider } from "./review";
 import { watchLive } from "./live";
 import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
@@ -206,7 +207,7 @@ function App() {
   const v = route.view;
   return (
     <TimeZoneContext.Provider value={s?.brain?.tz}>
-      <TooltipProvider>
+      <ReviewProvider enabled={!!s?.review?.enabled} catalogKey={JSON.stringify([list(s?.items?.all).filter(i => i.status === "proposed").map(i => [i.id, i.scope]), list(s?.specialists).filter(i => i.status === "proposed").map(i => [i.id, i.node, i.scope])])}><TooltipProvider>
         <SidebarProvider>
           <Navigation s={s} route={route} go={go} onAdd={() => setAdd(true)} onNotice={setNotice} />
           <SidebarInset className="app-inset">
@@ -218,8 +219,8 @@ function App() {
                     if (!f) return;
                     if (f.kind === "node") go({ view: "project", node: f.id });
                     else if (f.kind === "job") go({ view: "project", node: f.id.split("/")[0], tab: "jobs" });
-                    else if (f.kind === "specialist") go({ view: "specialists" });
-                    else go({ view: "learnings" });
+                    else if (f.kind === "specialist") go({ view: "specialists", item: f.id });
+                    else go({ view: "learnings", item: f.id });
                   }} /></div>}
               </div>
               <div className="topbar-actions">
@@ -238,7 +239,7 @@ function App() {
                 </Tip>
               </div>
             </div>
-            <div ref={scroll} className="inset-scroll" id="workspace-content">
+            <div ref={scroll} className="inset-scroll" id="workspace-content" data-fill-page={["inbox", "specialists", "learnings", "graph", "threads", "jobs"].includes(v) || undefined}>
               <PageHeader title={head.title} subtitle={head.subtitle} crumbs={head.crumbs} actions={<div id="screen-action-host" />} />
               {notice && (
                 <Alert className="notice" role="status">
@@ -274,17 +275,17 @@ function App() {
                   <div data-page="inbox" hidden={v !== "inbox"}><InboxView s={s} go={go} tab={route.tab} active={v === "inbox"} /></div>
                   <div data-page="projects" hidden={v !== "projects"}><Projects s={s} go={go} onAdd={() => setAdd(true)} /></div>
                   {v === "project" && <div data-page="project"><Project key={route.node || ""} s={s} route={route} go={go} active /></div>}
-                  <div data-page="specialists" hidden={v !== "specialists"}><Specialists s={s} active={v === "specialists"} /></div>
+                  <div data-page="specialists" hidden={v !== "specialists"}><Specialists s={s} active={v === "specialists"} item={v === "specialists" ? route.item : null} /></div>
                   <div data-page="jobs" hidden={v !== "jobs"}><Jobs s={s} go={go} active={v === "jobs"} /></div>
                   <div data-page="threads" hidden={v !== "threads"}><Threads s={s} go={go} active={v === "threads"} /></div>
                   <div data-page="usage" hidden={v !== "usage"}><Usage s={s} active={v === "usage"} /></div>
-                  <div data-page="learnings" hidden={v !== "learnings"}><Learnings s={s} active={v === "learnings"} initialState={route.view === "learnings" ? route.state : null} /></div>
+                  <div data-page="learnings" hidden={v !== "learnings"}><Learnings s={s} item={v === "learnings" ? route.item : null} active={v === "learnings"} initialState={route.view === "learnings" ? route.state : null} /></div>
                   {v === "graph" && <div data-page="graph"><Graph s={s} go={go} /></div>}
                   <AddProjects s={s} open={route.add} onOpenChange={setAdd} />
                 </>
               )}
               <footer className="workspace-footer">
-                <span>Read-only view of {s?.brain?.title || "your brain"} on this machine</span>
+                <span>{s?.review?.enabled ? "Local proposal reviews enabled · " : "Read-only view of "}{s?.brain?.title || "your brain"} on this machine</span>
                 <span>
                   {s?.brain?.now ? "Read " + new Intl.DateTimeFormat("en", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit", timeZone: s.brain.tz || undefined }).format(new Date(s.brain.now)) : "Waiting for a reading"} ·{" "}
                   <a href="/assets/THIRD_PARTY_NOTICES.txt" target="_blank" rel="noreferrer">Third-party notices</a>
@@ -293,7 +294,7 @@ function App() {
             </div>
           </SidebarInset>
         </SidebarProvider>
-      </TooltipProvider>
+      </TooltipProvider></ReviewProvider>
     </TimeZoneContext.Provider>
   );
 }

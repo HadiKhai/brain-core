@@ -5,6 +5,7 @@ import json
 import os
 import re
 import shutil
+import shlex
 import subprocess
 import sys
 import time
@@ -24,6 +25,8 @@ from . import schedules as _m_schedules
 from . import spend as _m_spend
 from . import status as _m_status
 from . import usage as _m_usage
+from . import ui_review as _m_ui_review
+from . import ui_status as _m_ui_status
 from . import verify as _m_verify
 from . import worktrees as _m_worktrees
 
@@ -79,7 +82,12 @@ def ui_meters(inst, state, cache):
         worktrees = [{**w, 'listening': ui_listening(w)} for w in n['worktrees']]
         jobs = {**n['jobs'], 'open': [{**r, 'age_h': round(_m_status.elapsed(inst.parse_time(r['Started']), now) / 3600, 1)}
                                     for r in n['jobs']['open']]}
-        refreshed = {**n, 'worktrees': worktrees, 'jobs': jobs, 'updated_ago': _m_status.ago(inst, inst.parse_time(n['updated']))}
+        def age(row):
+            since = inst.parse_time(row.get('since'))
+            return {**row, 'age_hours': round(max(0, _m_status.elapsed(since, now) / 3600), 2)} if since else row
+        refreshed = {**n, 'worktrees': worktrees, 'jobs': jobs, 'work': [age(r) for r in n['work']],
+                     'blocked_metadata': [age(r) for r in n.get('blocked_metadata', [])],
+                     'updated_ago': _m_status.ago(inst, inst.parse_time(n['updated']))}
         nodes.append(refreshed)
         if n['id'] in cache.nodes:
             key, _, commits = cache.nodes[n['id']]
@@ -221,12 +229,13 @@ def ui_node(inst, n, since, cache=None):
     secs = md_sections(st.read_text()) if st.exists() else {}
     u = _m_status.updated_at(inst, n)
     work = []
+    work_metadata = _m_ui_status.ui_work_metadata(inst, n)
     for r in _m_status.active_work(n):
         m = LINK_RE.search(r[1] if len(r) > 1 else "")
         work.append({"branch": r[0], "thread": m.group(1) if m else (r[1] if len(r) > 1 else ""),
                      "link": m.group(2) if m else "", "runtime": (re.search(r"\((Claude|Codex|[A-Za-z]+)\)\s*$",
                      r[1]) or [None, ""])[1] if len(r) > 1 else "", "pr": r[2] if len(r) > 2 else "",
-                     "state": r[3] if len(r) > 3 else ""})
+                     "state": r[3] if len(r) > 3 else "", **work_metadata.get(r[0], {})})
     wts = []
     terms = _m_guard.never_terms(n)
     hide = lambda t: _m_guard.redact(t, terms) if terms and isinstance(t, str) else t  # noqa: E731
@@ -273,7 +282,8 @@ def ui_node(inst, n, since, cache=None):
         "updated": u.isoformat() if u else None, "updated_ago": _m_status.ago(inst, u),
         "status": {k: v for k, v in secs.items() if v and k.lower() != "active work"},
         "work": work, "worktrees": wts, "inbox": [l[2:] for l in _m_status.inbox_lines(n)],
-        "blocked": _m_status.status_section(n, "blocked"), "decisions": ui_decisions(inst, n), "limits": _m_knowledge.limits_of(n),
+        "blocked": _m_status.status_section(n, "blocked"),
+        "blocked_metadata": [_m_ui_status.ui_blocked_metadata(inst, n, t) for t in _m_status.status_section(n, "blocked")], "decisions": ui_decisions(inst, n), "limits": _m_knowledge.limits_of(n),
         "never_name": len(terms), "spend": lookback,
         "jobs": {**js, "rows": [{k: hide(v) for k, v in r.items()} for r in (_m_jobs.read_jobs(n) or [])
                               if r.get("Outcome") != "external"],
@@ -350,6 +360,7 @@ def _ui_state(inst, problems=None, scan=None, spend_budget=2.0, machine_spend=No
         fm = i["fm"]
         library.append(safe({"id": fm.get("id"), "title": fm.get("title"), "kind": fm.get("kind"),
                              "status": fm.get("status", "active"),
+                             "review_node": next((n["id"] for n in nodes if n["dir"].resolve() == i["path"].parent.parent.resolve()), ""),
                              "state": "accepted" if fm.get("status", "active") == "active" else fm.get("status"),
                              "scope": _m_common.lst(fm.get("scope")), "path": str(i["path"].relative_to(inst.root)),
                              "body": _m_common.read_fm(i["path"])[1],
@@ -361,8 +372,14 @@ def _ui_state(inst, problems=None, scan=None, spend_budget=2.0, machine_spend=No
     specialists = []
     for sp in _m_knowledge.find_specialists(inst):
         lesson_path = sp["dir"] / "lessons.md"
+        role_body = _m_common.read_fm(sp["dir"] / "role.md")[1]
+        paragraphs = [p.strip() for p in re.split(r"\n\s*\n", role_body) if p.strip() and not p.strip().startswith("#")]
+        role_sections = {k.lower(): v for k, v in md_sections(role_body).items()}
         specialists.append(safe({"id": sp["id"], "node": sp["node"]["id"],
                                  "title": sp["fm"].get("title"), "runtime": sp["fm"].get("runtime"),
+                                 "role_summary": paragraphs[0] if paragraphs else "", "role_body": role_body,
+                                 "purpose": role_sections.get("purpose", ""), "when_to_hire": role_sections.get("when to hire", ""),
+                                 "hire_command": "brain hire " + shlex.quote(sp["id"]) + " " + shlex.quote(sp["node"]["id"]) + " --task 'Describe the task'",
                                  "scope": _m_common.lst(sp["fm"].get("scope")), "status": sp["fm"].get("status", "active"),
                                  "imported": sp["fm"].get("imported") == "true",
                                  "lessons": _m_knowledge.parse_lessons(lesson_path) if lesson_path.exists() else [],
@@ -392,7 +409,18 @@ def _ui_state(inst, problems=None, scan=None, spend_budget=2.0, machine_spend=No
         if item.get("job") and (item["node"], item["job"]) in branches:
             item["branch"] = branches[(item["node"], item["job"])]
     machine_due = _m_status.machine_due_items(inst, nodes, machine, due)
+    inbox = []
+    for item in _m_status.inbox_items(inst, nodes)[0]:
+        extra = {}
+        if item['kind'] in ('blocked', 'blocked-overdue'):
+            node = next(n for n in nodes if n['id'] == item['node'])
+            terms = _m_guard.never_terms(node)
+            original = next((t for t in _m_status.status_section(node, 'blocked')
+                             if _m_guard.redact(t, terms) == item['text']), item['text'])
+            extra = _m_ui_status.ui_blocked_metadata(inst, node, original)
+        inbox.append({**item, **extra, "from": inbox_sender(item)})
     return {
+        "review": {"enabled": False},
         "due": safe(due + machine_due),
         "scan": safe(scan or []),
         "usage_policy": usage_policy,
@@ -404,9 +432,9 @@ def _ui_state(inst, problems=None, scan=None, spend_budget=2.0, machine_spend=No
                                                                        if r.resolve() != inst.root.resolve()]},
         "nodes": out_nodes,
         "attention": [safe({"node": a, "kind": k, "text": t,
-                            **_m_status.blocked_metadata(inst, next(n for n in nodes if n["id"] == a), k, t)})
+                            **(_m_ui_status.ui_blocked_metadata(inst, next(n for n in nodes if n["id"] == a), t) if k in ("blocked", "blocked-overdue") else {})})
                       for a, k, t in _m_status.attention_items(inst, nodes)],
-        "inbox": [{**i, "from": inbox_sender(i)} for i in _m_status.inbox_items(inst, nodes)[0]],
+        "inbox": inbox,
         "commits": commits[:300], "hours": UI_HOURS, "activity": {"start": start, "counts": activity},
         "commits_24h": sum(1 for c in commits if c["t"] > time.time() - 86400), "commits_total": len(commits),
         "specialists": specialists,
@@ -612,7 +640,7 @@ class UIInputs:
     """Metadata only: no transcript parsing, Git status, readiness hashes or cache writes per poll."""
     def __init__(self, inst):
         self.root = inst.root
-        self.files = set()
+        self.files = {self.root / ".brain/worker-runs.json"}
         self.slow_files = set()
         self.slow_at, self.slow_rows = float('-inf'), []
         self.trees = []
@@ -735,7 +763,7 @@ class UIInputs:
 
     def node_keys(self, inst, signature):
         rows = dict((row[0], row) for row in self.fast_rows)
-        global_rows = (self.stamp(self.root / 'instance.md'),
+        global_rows = (self.stamp(self.root / 'instance.md'), self.stamp(self.root / '.brain/worker-runs.json'),
                        json.dumps({k: v for k, v in inst.local.items() if k != 'nodes'}, sort_keys=True))
         out = {}
         for n in inst.nodes():
@@ -895,6 +923,7 @@ def cmd_ui(a):
         with contextlib.redirect_stdout(output):
             _m_nodes.cmd_scan(argparse.Namespace(dirs=a.scan, depth=4, json=True))
         scan = json.loads(output.getvalue())
+    reviews = _m_ui_review.Reviews(inst.root, enabled=getattr(a, "write", False))
     key = secrets.token_urlsafe(18)  # other accounts on this machine can reach 127.0.0.1 too; they don't get this
     if a.json:
         print(json.dumps(ui_state(inst, len(_m_check.collect_problems(inst)[0]), scan, spend_budget=None), indent=1))
@@ -923,6 +952,7 @@ def cmd_ui(a):
             cond.wait_for(lambda: box['checked'] >= requested, timeout=30)
 
     def publish(st):
+        st = {**st, "review": {"enabled": reviews.enabled}}
         with cond:
             box.update(state=st, json=json.dumps(st, sort_keys=True).encode(), version=box['version'] + 1)
             cond.notify_all()
@@ -1021,6 +1051,30 @@ def cmd_ui(a):
             self.end_headers()
             self.wfile.write(body)
 
+        def do_POST(self):
+            if not _m_ui_review.authorized_write(self.headers, self.client_address[0],
+                                                 self.server.server_address[1], key):
+                return self.send(403, b"Local same-origin review key required", "text/plain")
+            url = urllib.parse.urlsplit(self.path)
+            if url.path not in ("/api/review/prepare", "/api/review/apply"):
+                return self.send(404, b"not found", "text/plain")
+            try:
+                size = int(self.headers.get("Content-Length", "0"))
+                if not 0 < size <= 256000:
+                    raise ValueError("Review request is too large or empty")
+                self.connection.settimeout(10)
+                payload = json.loads(self.rfile.read(size))
+                if not isinstance(payload, dict):
+                    raise ValueError("A JSON object is required")
+                result = (reviews.prepare(payload) if url.path.endswith("/prepare") else reviews.apply(payload))
+            except (ValueError, OSError, SystemExit) as error:
+                # Core validation messages may carry private source text: do not echo it across HTTP.
+                message = str(error) if isinstance(error, _m_ui_review.ReviewError) else "Review failed validation; no confirmation is retained. Refresh and review again."
+                return self.send(409, json.dumps({"error": message}).encode(), "application/json")
+            if url.path.endswith("/apply"):
+                touch()
+            return self.send(200, json.dumps(result).encode(), "application/json")
+
         def do_GET(self):
             host = (self.headers.get("Host") or "").rsplit(":", 1)[0]
             if host not in ("127.0.0.1", "localhost", "[::1]"):  # no other site can read it through this browser
@@ -1043,6 +1097,12 @@ def cmd_ui(a):
                 return self.send(200, body, mimetypes.guess_type(str(path))[0] or "application/octet-stream")
             if url.path.startswith("/api/") and not hmac.compare_digest(given, key):
                 return self.send(403, b"this run's key is missing: open the address brain ui printed", "text/plain")
+            if url.path == "/api/review":
+                try:
+                    result = reviews.catalog()
+                except (ValueError, OSError, SystemExit):
+                    return self.send(409, b'{"error":"Review catalog is unavailable"}', "application/json")
+                return self.send(200, json.dumps(result).encode(), "application/json")
             if url.path == "/api/state":
                 touch()
                 return self.send(200, box["json"], "application/json")
@@ -1101,6 +1161,7 @@ def cmd_ui(a):
     cache.usage_revision = (spend.revision, spend.permissions)
     st = ui_state(inst, cache.problems_for(inst, signature), scan, machine_spend=spend.value,
                   cache=cache, node_keys=inputs.node_keys(inst, signature))
+    st = {**st, "review": {"enabled": reviews.enabled}}
     box.update(json=json.dumps(st, sort_keys=True).encode(), version=1, state=st)
     threading.Thread(target=refresh, args=(inputs, signature, spend, cache), daemon=True).start()
     port = a.port
@@ -1116,7 +1177,8 @@ def cmd_ui(a):
     srv.daemon_threads = True
     url = f"http://127.0.0.1:{srv.server_address[1]}/?k={key}"
     print(f"brain ui core: {core_revision()}", flush=True)
-    print(f"{st['brain']['title']} ({st['brain']['name']}): {url}  (read-only, this machine only; Ctrl-C stops it)",
+    mode = "local proposal reviews enabled" if reviews.enabled else "read-only"
+    print(f"{st['brain']['title']} ({st['brain']['name']}): {url}  ({mode}, this machine only; Ctrl-C stops it)",
           flush=True)
     if a.open:
         import webbrowser

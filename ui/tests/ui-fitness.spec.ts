@@ -145,3 +145,15 @@ test("§15 overview is a decision dashboard", async ({ page }) => {
   record("overview", found);
   expect(found, found.map((v) => v.detail).join("\n")).toEqual([]);
 });
+
+test("r9 gutters, header action and input icon follow their tokens at desktop and phone widths", async ({ page }) => {
+  const found: Violation[] = [];
+  for (const width of [1440, 320]) for (const theme of ["light", "dark"] as const) {
+    await open(page, "hundred", theme, width, 900);
+    if (width < 768) await page.getByRole("button", { name: "Toggle Sidebar", exact: true }).click();
+    await page.waitForTimeout(150);
+    found.push(...(await page.evaluate(audit, "spacing")).map((v) => ({ ...v, detail: `[${width}/${theme}] ${v.detail}` })));
+  }
+  record("spacing", found);
+  expect(found, found.map((v) => v.detail).join("\n")).toEqual([]);
+});

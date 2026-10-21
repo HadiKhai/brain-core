@@ -1,10 +1,14 @@
+import { useState } from "react";
 import { ArrowUpRight, FolderPlus, GitCommitHorizontal } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { DataTable, Status, Text, Empty, Reader, Preview, Command, TechnicalDetails, ActionLink, ScreenAction, Tip } from "./shared";
+import { DataTable, Status, Text, Empty, Reader, Preview, Command, TechnicalDetails, ScreenAction, Tip, DetailRow } from "./shared";
 import { Kpi, Spark, SectionTabs } from "./dash";
 import { DueRow, RequestRow, PagedRows } from "./inbox";
 import { ThreadRow } from "./agents";
 import { list, count, time, flight, threads, jobTitle, closed, safeHref, nowOf, within, type RecordData } from "./model";
+import { ThreadLink } from "./thread-link";
+import { ReaderRow } from "./detail-panel";
+import { WorkStatus } from "./work-status";
 import type { Route } from "./routes";
 
 type Go = (r: Partial<Route> & { view: string }) => void;
@@ -26,12 +30,12 @@ export function Project({ s, route, go, active }: { s: RecordData; route: Route;
     ...list(s.commits).filter((c) => c.node === n.id).map((c): RecordData => ({ t: c.t, text: c.subject, kind: c.where === "home" ? "Home commit" : "Brain commit" })),
     ...list(n.decisions).map((d) => ({ t: d.t, text: d.title, said: d.said, kind: "Decision" })),
   ].sort((a, b) => (b.t || 0) - (a.t || 0));
-  const needs = [...list(n.blocked).map((t) => ({ kind: "blocked", text: t })), ...inbox, ...due];
+  const needs = [...list(n.blocked).map((t, i) => ({ ...inbox.find(a => a.kind === "blocked" && a.text === t), ...list(n.blocked_metadata)[i], kind: "blocked", text: t })), ...inbox, ...due];
   const notes = Object.entries(n.status || {}).filter(([k]) => !/^blocked/i.test(k));
-  const coordinator = safeHref(n.coordinator);
+  const coordinator = n.coordinator;
   return (
     <>
-      <ScreenAction active={active}>{coordinator ? <ActionLink href={coordinator} primary>Open coordinator <ArrowUpRight size={14} /></ActionLink> : <Reader title="Coordinator" text="No coordinator conversation is linked to this project on this machine." trigger="Find coordinator" primary />}</ScreenAction>
+      <ScreenAction active={active}>{coordinator ? <ThreadLink href={coordinator} label="Open coordinator" primary /> : <Reader title="Set up a coordinator" text="No coordinator is linked on this machine. Open the machine-setup skill in your agent and ask it to connect this project’s coordinator. It checks the host setup, records the conversation and gives this project a place to continue work." trigger="Set up coordinator" primary />}</ScreenAction>
       <section className="surface kpi-band compact" aria-label="Project at a glance">
         <div className="kpi-row">
           <Kpi label="Needs you" value={needs.length} note={`${count(inbox.length, "request")} · ${count(due.length, "step")}`} />
@@ -48,7 +52,7 @@ export function Project({ s, route, go, active }: { s: RecordData; route: Route;
           tabs={[
             { id: "needs", label: "Needs you", count: needs.length, body: needs.length ? <PagedRows items={needs} noun="item" render={(a: RecordData, i) =>
                 a.kind === "blocked" && !a.id && typeof a.text === "string" && !("first_seen" in a)
-                  ? <div className="row" data-item key={"b" + i}><div className="row-main"><div className="row-line"><Status>Blocked</Status></div><p className="row-text"><Text>{a.text}</Text></p></div><div className="row-actions"><Reader title="Blocked" text={a.text} trigger="Read" /></div></div>
+                  ? <BlockedRow key={"b" + i} item={a} s={s} />
                   : "first_seen" in a ? <RequestRow key={a.id || i} s={s} item={a} go={go} showProject={false} /> : <DueRow key={"d" + i} s={s} item={a} go={go} showProject={false} />} /> : <Empty text="Nothing needs you here." action="Questions and coordinator steps for this project arrive here." /> },
             { id: "threads", label: "Threads", count: work.length, body: work.length ? <PagedRows resetKey={route.thread || ""} items={[...work].sort((a, b) => Number(b.job.branch === route.thread) - Number(a.job.branch === route.thread))} noun="thread" render={(f, i) => <ThreadRow key={f.job.branch + i} s={s} f={f} go={go} showProject={false} highlight={route.thread === f.job.branch} />} />
                 : <Empty text="No threads in flight." action="Start a job from this project's coordinator." /> },
@@ -60,21 +64,21 @@ export function Project({ s, route, go, active }: { s: RecordData; route: Route;
                 { key: "Reviews", label: "Reviews", numeric: true },
               ]} /> },
             { id: "activity", label: "Activity", count: feed.length, body: feed.length ? <PagedRows className="rows log" items={feed} noun="entry" render={(r, i) => (
-                <div className="row" data-item key={i}>
+                <ReaderRow key={i} title={r.kind || "Activity"} text={[r.text, r.said].filter(Boolean).join("\n\n")}>
                   <span className="row-icon"><GitCommitHorizontal size={16} /></span>
                   <div className="row-main"><strong className="row-title"><Text>{r.text}</Text></strong><small>{r.kind}</small></div>
-                  <div className="row-actions"><small className="tabular-nums">{time(r.t, s.brain?.tz)}</small>{r.said && <Reader title={r.text} text={[r.text, r.said].join("\n\n")} trigger="Read" />}</div>
-                </div>)} /> : <Empty text="No recent activity." action="Commits and decisions for this project appear here." /> },
+                  <small className="tabular-nums">{time(r.t, s.brain?.tz)}</small>
+                </ReaderRow>)} /> : <Empty text="No recent activity." action="Commits and decisions for this project appear here." /> },
           ]} />
       </section>
       <section className="surface" aria-label="Notes">
         <SectionTabs tabs={[
           ...notes.map(([k, v]) => ({ id: "note-" + k, label: k, body: <div className="note-body"><Preview text={v} title={k} /></div> })),
           ...(list(n.decisions).length ? [{ id: "decisions", label: "Decisions", count: n.decisions.length, body: <PagedRows items={n.decisions as RecordData[]} noun="decision" render={(d: RecordData, i: number) => (
-              <div className="row" data-item key={i}><div className="row-main"><strong className="row-title"><Text>{d.title}</Text></strong>{d.said && <small className="clamp-1"><Text>{d.said}</Text></small>}</div><div className="row-actions"><small className="tabular-nums">{time(d.t || d.time, s.brain?.tz)}</small>{d.said && <Reader title="Decision" text={[d.title, d.said].join("\n\n")} trigger="Read" />}</div></div>)} /> }] : []),
-          ...(list(n.limits).length ? [{ id: "limits", label: "Limits", count: n.limits.length, body: <PagedRows items={n.limits as string[]} noun="limit" render={(t: string, i: number) => <div className="row" data-item key={i}><div className="row-main"><p className="row-text plain"><Text>{t}</Text></p></div><div className="row-actions"><Reader title="Limit" text={t} trigger="Read" /></div></div>} /> }] : []),
+              <ReaderRow key={i} title="Decision" text={[d.title, d.said].filter(Boolean).join("\n\n")}><div className="row-main"><strong className="row-title"><Text>{d.title}</Text></strong>{d.said && <small className="clamp-1"><Text>{d.said}</Text></small>}</div><small className="tabular-nums">{time(d.t || d.time, s.brain?.tz)}</small></ReaderRow>)} /> }] : []),
+          ...(list(n.limits).length ? [{ id: "limits", label: "Limits", count: n.limits.length, body: <PagedRows items={n.limits as string[]} noun="limit" render={(t: string, i: number) => <ReaderRow key={i} title="Limit" text={t}><div className="row-main"><p className="row-text plain"><Text>{t}</Text></p></div></ReaderRow>} /> }] : []),
           ...(list(n.reports).length ? [{ id: "reports", label: "Reports", count: n.reports.length, body: <PagedRows items={n.reports as RecordData[]} noun="report" render={(r: RecordData, i: number) => (
-              <div className="row" data-item key={i}><div className="row-main"><strong className="row-title"><Text>{r.title}</Text></strong></div><div className="row-actions"><Reader title={r.title || "Report"} text="Ask the coordinator to open this report for review." trigger="Open report details"><TechnicalDetails values={{ Location: r.path }} /></Reader></div></div>)} /> }] : []),
+              <ReaderRow key={i} title={r.title || "Report"} text="Ask the coordinator to open this report for review." trigger="Open report details" footer={<TechnicalDetails values={{ Location: r.path }} />}><div className="row-main"><strong className="row-title"><Text>{r.title}</Text></strong></div></ReaderRow>)} /> }] : []),
           { id: "about", label: "About", body: <div className="about">
               <dl className="detail-facts">
                 <dt>State</dt><dd><Status>{projectState(n)}</Status></dd>
@@ -105,7 +109,7 @@ export function Projects({ s, go, onAdd }: { s: RecordData; go: Go; onAdd: () =>
   );
   return (
     <section className="surface" aria-label="Projects">
-      <DataTable name="projects" details={false} rows={nodes.map((n) => ({ ...n, _needs: list(s.inbox).filter((a) => a.node === n.id).length + list(s.due).filter((d) => d.node === n.id).length, _threads: open.filter((f) => f.node.id === n.id).length, _key: n.id }))}
+      <DataTable name="projects" details={false} onRowOpen={(n) => go({ view: "project", node: n.id })} rows={nodes.map((n) => ({ ...n, _needs: list(s.inbox).filter((a) => a.node === n.id).length + list(s.due).filter((d) => d.node === n.id).length, _threads: open.filter((f) => f.node.id === n.id).length, _key: n.id }))}
         columns={[
           { key: "title", label: "Project", render: (n) => <div><strong><Tip text={n.title || "Project"}><span className="clamp-1"><Text>{n.title || "Untitled project"}</Text></span></Tip></strong><small>{nodes.find((p) => p.id === n.parent)?.title || "Workspace root"}</small></div> },
           { key: "_needs", label: "Needs you", numeric: true },
@@ -116,4 +120,9 @@ export function Projects({ s, go, onAdd }: { s: RecordData; go: Go; onAdd: () =>
         ]} />
     </section>
   );
+}
+
+function BlockedRow({ item, s }: { item: RecordData; s: RecordData }) {
+  const [open, setOpen] = useState(false);
+  return <DetailRow className="row" onOpen={() => setOpen(true)}><div className="row-main"><div className="row-line"><WorkStatus item={{ state: "Blocked", ...item }} s={s} /></div><p className="row-text"><Text>{item.text}</Text></p></div><div className="row-actions"><Reader title="Blocked work" text={item.text} trigger="Read" open={open} onOpenChange={setOpen} /></div></DetailRow>;
 }

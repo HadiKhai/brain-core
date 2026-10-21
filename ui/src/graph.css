@@ -1,0 +1,33 @@
+/* The graph shares the full-height page card; the map takes the remaining space. */
+.graph-layout.graph-layout { display: flex; flex-direction: column; min-height: 0; }
+.graph-layout .graph-tools { flex: none; }
+.graph-layout .graph-body { flex: 1; min-height: 0; }
+.graph-layout .graph-canvas { height: 100%; min-height: 300px; }
+.graph-layout .graph-side { overflow-y: auto; }
+.graph-layout .graph-canvas svg:focus-visible { outline: 2px solid var(--ring); outline-offset: -3px; }
+.graph-layout .gnode:focus-visible { outline: none; }
+.graph-layout .gnode:focus-visible .dot { stroke: var(--foreground); stroke-width: 3; }
+.graph-layout .gnode.recent .halo { animation: none; opacity: 0.45; }
+.graph-label-leader { stroke: var(--muted-foreground); stroke-width: 0.7; opacity: 0.6; pointer-events: none; }
+.graph-tooltip {
+  position: absolute; z-index: 3; top: 12px; left: 12px;
+  display: flex; flex-direction: column; gap: 3px;
+  width: max-content; max-width: min(300px, calc(100% - 24px));
+  padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--radius);
+  background: var(--popover); color: var(--popover-foreground); box-shadow: 0 4px 16px #0002;
+  pointer-events: none; font-size: 12px; overflow-wrap: anywhere;
+}
+.graph-tooltip strong { font-size: 13px; line-height: 1.4; }
+.graph-tooltip small { color: var(--muted-foreground); }
+.graph-layout .graph-legend { pointer-events: none; right: 12px; }
+@media (max-width: 1000px) {
+  .graph-layout .graph-body { display: flex; flex-direction: column; }
+  .graph-layout .graph-canvas { flex: 1; height: auto; min-height: 300px; }
+  .graph-layout .graph-side { flex: none; max-height: 180px; }
+}
+@media (max-width: 640px) {
+  .graph-layout .graph-canvas { min-height: 280px; }
+  .graph-layout .graph-tools { gap: 8px; }
+  .graph-layout .graph-legend { font-size: 10px; }
+  .graph-tooltip { top: 8px; left: 8px; padding: 8px; max-width: calc(100% - 16px); }
+}

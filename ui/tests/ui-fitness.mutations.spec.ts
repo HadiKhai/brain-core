@@ -132,3 +132,18 @@ test("overview rejects a dump", async ({ page }) => {
     () => page.evaluate(() => { for (let i = 0; i < 4; i++) { const s = document.createElement("section"); s.className = "mut"; s.innerHTML = "<ul><li>a</li><li>b</li></ul>"; document.querySelector(".overview-grid")!.append(s); } }),
     () => page.evaluate(() => document.querySelectorAll(".mut").forEach((e) => e.remove())), "inline lists without");
 });
+
+test("spacing rejects off-centre header actions, loose icons and unequal gutters", async ({ page }) => {
+  await open(page, "view=overview", "hundred");
+  let tag: any;
+  for (const mutation of [
+    { name: "header action shifted down", css: "[data-slot=sidebar-group-action] { transform: translateY(3px) !important; }", expected: "vertically centred" },
+    { name: "search icon outside input", css: ".tree-filter > svg { left: -4px !important; }", expected: "leading icon inset" },
+    { name: "extra toggle gutter", css: ".topbar { padding-left: 19px !important; }", expected: "toggle-to-edge gap" },
+    { name: "extra gap before search", css: ".topbar-left { gap: 17px !important; }", expected: "toggle-to-search gap" },
+    { name: "sidebar field off the gutter", css: ".tree-filter { margin-left: 5px !important; }", expected: "gutters must match" },
+    { name: "filter text too far from icon", css: ".tree-filter input { padding-left: 45px !important; }", expected: "icon-to-field text gap" },
+  ]) await proves(page, "spacing", mutation.name,
+    async () => { tag = await style(page, mutation.css); },
+    () => tag.evaluate((e: Element) => e.remove()), mutation.expected);
+});

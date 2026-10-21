@@ -6,10 +6,14 @@ import {
   useContext,
   useState,
   useId,
+  useRef,
   isValidElement,
   type ReactElement,
   type ReactNode,
   type CSSProperties,
+  type HTMLAttributes,
+  type KeyboardEvent,
+  type MouseEvent,
 } from "react";
 import ReactMarkdown from "react-markdown";
 import { createPortal } from "react-dom";
@@ -152,9 +156,65 @@ export function Empty({
 }
 export function PagedCollection({ children, name }: { children: ReactNode; name: string }) {
   const items = Children.toArray(children);
-  const { page: current, pages, setPage, start, end } = usePage(items.length, name);
-  return <>{items.slice(start, end)}{items.length > 10 && <footer className="table-footer"><span>{current * 10 + 1}–{Math.min(items.length, current * 10 + 10)} of {items.length} {name}</span><div className="pager"><Button variant="outline" size="sm" disabled={!current} onClick={() => setPage(current - 1)}>Previous</Button><span>{current + 1} / {pages}</span><Button variant="outline" size="sm" disabled={current === pages - 1} onClick={() => setPage(current + 1)}>Next</Button></div></footer>}</>;
+  const { page, size, setPage, setSize, start, end } = usePage(items.length, name);
+  return <ListFrame total={items.length} page={page} size={size} onPage={setPage} onSize={setSize} noun={name.replace(/s$/, "")}>{items.slice(start, end)}</ListFrame>;
 }
+// All growing lists share a header, a single scrolling body and a persistent pager.
+// Controlled cursors let every list keep its existing context-reset and live-shrink behavior.
+export function ListFrame({ total, page, size, onPage, onSize, noun, children, className = "", controls }: {
+  total: number; page: number; size: number; onPage: (page: number) => void; onSize: (size: number) => void;
+  noun: string; children: ReactNode; className?: string; controls?: ReactNode;
+}) {
+  const body = useRef<HTMLDivElement>(null);
+  useEffect(() => { if (body.current) body.current.scrollTop = 0; }, [page, size, total]);
+  const pages = Math.max(1, Math.ceil(total / size));
+  const range = total ? `${page * size + 1}–${Math.min(total, (page + 1) * size)} of ${total} ${noun}${total === 1 ? "" : "s"}` : `0 ${noun}s`;
+  return <div className={`list-frame ${className}`} data-list-frame>
+    <header className="list-header">
+      <span className="list-count" aria-live="polite">{range}</span>
+      <div className="list-header-controls">{controls}<Choice name="Rows per page" value={String(size)} onChange={(v) => { onSize(Number(v)); onPage(0); }} options={["10", "25", "50"].map((value) => ({ value, label: value }))} /></div>
+    </header>
+    <div className="list-scroll" ref={body}>{children}</div>
+    <footer className="table-footer">
+      <span className="sr-only">{range}</span>
+      <span className="page-position">Page {page + 1} of {pages}</span>
+      <div className="pager">
+        <Button variant="ghost" size="sm" disabled={!page} onClick={() => onPage(0)}>First</Button>
+        <Button variant="outline" size="sm" disabled={!page} onClick={() => onPage(page - 1)}>Previous</Button>
+        <span className="tabular-nums">{page + 1} / {pages}</span>
+        <Button variant="outline" size="sm" disabled={page === pages - 1} onClick={() => onPage(page + 1)}>Next</Button>
+        <Button variant="ghost" size="sm" disabled={page === pages - 1} onClick={() => onPage(pages - 1)}>Last</Button>
+      </div>
+    </footer>
+  </div>;
+}
+
+// A row is an extra route into its existing detail sheet. Links, text selection and child controls
+// retain their own actions; Space and Enter activate only when focus is on the row itself.
+export function detailRowEvents(onOpen: () => void, opensDialog = true) {
+  return {
+    tabIndex: 0,
+    "data-detail-row": true,
+    "aria-haspopup": opensDialog ? "dialog" as const : undefined,
+    onClick: (e: MouseEvent<HTMLElement>) => {
+      const target = e.target as Element;
+      // Reader sheets are portalled: React bubbles their events through the row even outside its DOM.
+      if (!e.currentTarget.contains(target)) return;
+      if (target.closest("button, a, input, select, textarea, [role=button], [role=combobox], [role=checkbox]")) return;
+      if (window.getSelection()?.toString()) return;
+      onOpen();
+    },
+    onKeyDown: (e: KeyboardEvent<HTMLElement>) => {
+      if (e.target !== e.currentTarget || !["Enter", " "].includes(e.key)) return;
+      e.preventDefault();
+      onOpen();
+    },
+  };
+}
+export function DetailRow({ onOpen, children, ...props }: Omit<HTMLAttributes<HTMLDivElement>, "onClick" | "onKeyDown"> & { onOpen: () => void; children: ReactNode }) {
+  return <div data-item {...props} {...detailRowEvents(onOpen)}>{children}</div>;
+}
+
 export function Status({ children }: { children: ReactNode }) {
   const zone = useContext(TimeZoneContext);
   const raw = String(children || "Not recorded");
@@ -268,6 +328,7 @@ export function Command({ text, label: caption = "Copy", disabled = false }: { t
       <Button
         variant="outline"
         disabled={disabled}
+        aria-label={caption}
         onClick={async () => {
           try {
             setCopied("Copying…");
@@ -403,15 +464,17 @@ export function DataTable({
   name = "records",
   details = true,
   resetKey = "",
+  onRowOpen,
 }: {
   columns: Column[];
   rows: RecordData[];
   name?: string;
   details?: boolean;
   resetKey?: string;
+  onRowOpen?: (row: RecordData) => void;
 }) {
   const [sort, setSort] = useState({ key: "", direction: 1 });
-  const { page: actual, pages, size, setPage, setSize, start, end } = usePage(rows.length, JSON.stringify([name, resetKey, sort.key, sort.direction]));
+  const { page: actual, size, setPage, setSize, start, end } = usePage(rows.length, JSON.stringify([name, resetKey, sort.key, sort.direction]));
   const sortColumn = columns.find((c) => c.key === sort.key);
   const value = (r: RecordData) =>
     sortColumn?.sortValue ? sortColumn.sortValue(r) : (r[sort.key] ?? "");
@@ -423,10 +486,9 @@ export function DataTable({
       : 0,
   );
   const shown = sorted.slice(start, end);
-  return !rows.length ? (
-    <Empty text={"No " + name + " yet."} />
-  ) : (
-    <div className="data-table">
+  return (
+    <ListFrame total={rows.length} page={actual} size={size} onPage={setPage} onSize={setSize} noun={name.replace(/s$/, "")} className="data-table">
+      {!rows.length ? <Empty text={"No " + name + " yet."} /> : <>
       <div className="mobile-table-sort">
         <Choice
           name="Sort by"
@@ -488,66 +550,28 @@ export function DataTable({
           </TableRow>
         </TableHeader>
         <TableBody>
-          {shown.map((r, i) => (
-            <TableRow key={r._key || r.id || i}>
-              {columns.map((c) => {
-                const content = c.render ? c.render(r) : <Text>{r[c.key] ?? "Not recorded"}</Text>;
-                const text = nodeText(content);
-                return (
-                <TableCell
-                  key={c.key}
-                  data-label={c.label}
-                  className={c.numeric ? "numeric" : ""}
-                >
-                  <div className="cell-preview" dir="auto">{content}</div>
-                  {text.length > 160 && <Reader title={c.label} text={text} />}
-                </TableCell>
-              );})}
-              {details && <TableCell data-label="Details"><Reader title={name === "hires" ? "Hire brief" : "Job details"} trigger={name === "hires" ? "Read brief" : "Check job"} text={columns.map(c => `## ${c.label}\n${nodeText(c.render ? c.render(r) : String(r[c.key] ?? "Not recorded"))}`).join("\n\n")}><TechnicalDetails values={{Job:r.Job || r.job, Started:r.Started || r.started}} /></Reader></TableCell>}
-            </TableRow>
-          ))}
+          {shown.map((r, i) => <DataTableRecord key={r._key || r.id || i} row={r} columns={columns} name={name} details={details} onRowOpen={onRowOpen} />)}
         </TableBody>
       </Table>
-      <footer className="table-footer">
-        <span>
-          {actual * Number(size) + 1}–
-          {Math.min((actual + 1) * Number(size), rows.length)} of {rows.length}{" "}
-          {name}
-        </span>
-        <div className="pager">
-          <Choice
-            name="Rows"
-            value={String(size)}
-            onChange={(v) => {
-              setSize(Number(v));
-              setPage(0);
-            }}
-            options={["10", "25", "50"].map((v) => ({ value: v, label: v }))}
-          />
-          <Button
-            variant="outline"
-            size="sm"
-            disabled={!actual}
-            onClick={() => setPage(actual - 1)}
-          >
-            Previous
-          </Button>
-          <span>
-            {actual + 1} / {pages}
-          </span>
-          <Button
-            variant="outline"
-            size="sm"
-            disabled={actual === pages - 1}
-            onClick={() => setPage(actual + 1)}
-          >
-            Next
-          </Button>
-        </div>
-      </footer>
-    </div>
+      </>}
+    </ListFrame>
   );
 }
+function DataTableRecord({ row: r, columns, name, details, onRowOpen }: { row: RecordData; columns: Column[]; name: string; details: boolean; onRowOpen?: (row: RecordData) => void }) {
+  const [open, setOpen] = useState(false);
+  return <TableRow {...(onRowOpen || details ? detailRowEvents(() => onRowOpen ? onRowOpen(r) : setOpen(true), !onRowOpen) : {})}>
+    {columns.map((c) => {
+      const content = c.render ? c.render(r) : <Text>{r[c.key] ?? "Not recorded"}</Text>;
+      const text = nodeText(content);
+      return <TableCell key={c.key} data-label={c.label} className={c.numeric ? "numeric" : ""}>
+        <div className="cell-preview" dir="auto">{content}</div>
+        {text.length > 160 && <Reader title={c.label} text={text} />}
+      </TableCell>;
+    })}
+    {details && <TableCell data-label="Details"><Reader open={open} onOpenChange={setOpen} title={name === "hires" ? "Hire brief" : "Job details"} trigger={name === "hires" ? "Read brief" : "Check job"} text={columns.map(c => `## ${c.label}\n${nodeText(c.render ? c.render(r) : String(r[c.key] ?? "Not recorded"))}`).join("\n\n")}><TechnicalDetails values={{Job:r.Job || r.job, Started:r.Started || r.started}} /></Reader></TableCell>}
+  </TableRow>;
+}
+
 export function Bars({
   entries,
   label: caption,

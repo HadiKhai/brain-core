@@ -24,11 +24,11 @@ test("real touch activates mobile navigation, filters, paging and the fixed impo
   };
   await nav("Learnings");
   await page.getByRole("tab", { name: /^Accepted/ }).tap();
-  await expect(page.locator(".results-meta")).toHaveText("5 learnings");
+  await expect(page.locator("[data-page=learnings] .list-header .list-count")).toHaveText("1–5 of 5 learnings");
   await page.getByRole("button", { name: "Clear filters" }).tap();
   await page.getByRole("textbox", { name: "Search learnings" }).tap();
   await page.getByRole("textbox", { name: "Search learnings" }).fill("filters");
-  await expect(page.locator(".results-meta")).toHaveText("1 learning");
+  await expect(page.locator("[data-page=learnings] .list-header .list-count")).toHaveText("1–1 of 1 learning");
   expect(
     await page.evaluate(
       () =>
@@ -148,7 +148,7 @@ test("keyboard navigation, visible focus, disclosures and collapsed rail stay us
   await page.getByRole("button", { name: "Clear filters" }).click();
   await search.focus();
   await page.keyboard.type("filters");
-  await expect(page.locator(".results-meta")).toHaveText("1 learning");
+  await expect(page.locator("[data-page=learnings] .list-header .list-count")).toHaveText("1–1 of 1 learning");
   const focus = await search.evaluate((e) => ({
     groupShadow: getComputedStyle(e.closest("[data-slot=input-group]")!)
       .boxShadow,

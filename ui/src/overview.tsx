@@ -1,11 +1,12 @@
-import { ArrowUpRight, ChevronRight, FolderPlus } from "lucide-react";
+import { ThreadLink } from "./thread-link";
+import { ChevronRight, FolderPlus } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { Empty, ScreenAction, Tip, Text, ActionLink } from "./shared";
+import { Empty, ScreenAction, Tip, Text } from "./shared";
 import { Kpi, Segmented, SectionTabs, ListFooter, type Mark } from "./dash";
 import { RequestRow, DueRow } from "./inbox";
 import { ProposalReader } from "./learnings";
 import { adoptable } from "./imports";
-import { list, count, threads, tone, nowOf, within, stamp, allJobs, learningRows, jobTitle, jobState, safeHref, time, windowState, type RecordData } from "./model";
+import { list, count, threads, tone, nowOf, within, stamp, allJobs, learningRows, jobTitle, jobState, time, windowState, type RecordData } from "./model";
 import { graphData, layout } from "./graph";
 import { useMemo } from "react";
 import type { Route } from "./routes";
@@ -38,11 +39,11 @@ export function Overview({ s, go, onAdd, active }: { s: RecordData; go: (r: Part
   const marks: Mark[] = open.map((f) => ({ key: f.node.id + f.job.branch, tone: tone(f, due), label: `${f.node.title || "Project"} · ${jobTitle(f.job.branch)} · ${jobState(f.job.state).kind}` }));
   const proposals = learningRows(s).filter((r) => r.state === "proposed" && !r.specialist);
   const candidates = list(s.scan).filter(adoptable);
-  const nextInbox = inbox[0], conversation = nextInbox && (safeHref(nextInbox.link) || safeHref(nodes.find((n) => n.id === nextInbox.node)?.coordinator));
+  const nextInbox = inbox[0], conversation = nextInbox && (nextInbox.link || nodes.find((n) => n.id === nextInbox.node)?.coordinator);
   return (
     <div className="page-stack overview">
       <ScreenAction active={active}>
-        {conversation ? <ActionLink href={conversation} primary>{/question|\?/i.test(nextInbox.text || "") ? "Answer next question" : "Open next request"}<ArrowUpRight size={14} /></ActionLink>
+        {conversation ? <ThreadLink href={conversation} primary label={/question|\?/i.test(nextInbox.text || "") ? "Answer next question" : "Open next request"} />
           : ready.length ? <Button onClick={() => go({ view: "project", node: ready[0].node, tab: "needs" })}>Review ready job</Button>
           : <Button onClick={() => go({ view: "inbox" })}>Open Inbox</Button>}
       </ScreenAction>
