@@ -161,7 +161,7 @@ export function Threads({ s, active, go }: { s: RecordData; active: boolean; go:
         <FilterToolbar query={query} onQuery={setQuery} placeholder="Search threads">
           <RecordPicker s={s} kind="node" label="Thread project" hideLabel value={project} onChange={setProject} allLabel="All projects" placeholder="Search projects" />
         </FilterToolbar>
-        <PagedRows items={rows} noun="thread" render={(f, i) => <ThreadRow key={f.node.id + f.job.branch + i} s={s} f={f} go={go} />} />
+        <PagedRows key={JSON.stringify([query, project?.id])} items={rows} noun="thread" render={(f, i) => <ThreadRow key={f.node.id + f.job.branch + i} s={s} f={f} go={go} />} />
         {!rows.length && <Empty text={query || project ? "No thread matches." : "No threads in flight."} action={query || project ? "Clear the filters to see every thread." : "Start a job from a project coordinator."} icon={GitBranch} />}
       </section>
     </>
