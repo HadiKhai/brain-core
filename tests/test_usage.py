@@ -101,6 +101,133 @@ for line in sys.stdin:
         return {"windows": windows if source != "unknown" else {}, "source": source,
                 "read_at": time.time() - age if source != "unknown" else None, "note": ""}
 
+    def test_class_route_autodetection_never_refreshes_providers(self):
+        root = self.init("alice")
+        inst = self.m.Instance(root)
+        with mock.patch.object(self.m, "usage_refresh", side_effect=AssertionError("provider called")) as refresh:
+            for kind, expected in (("build", "codex"), ("review", "claude")):
+                routed, sub, why = self.m.class_route(inst, kind)
+                self.assertEqual(routed, expected)
+                self.assertIsNone(sub)
+                self.assertIn("Usage unknown", why)
+            refresh.assert_not_called()
+
+    def test_class_route_single_runtime_and_autodetection_stays_offline(self):
+        root = self.init("alice")
+        inst = self.m.Instance(root)
+        self.cache(self.declare(), [])
+        with mock.patch.object(self.m, "usage_refresh", side_effect=AssertionError("provider called")):
+            for runtimes, kind, expected in ((["claude"], "build", "claude"),
+                                              (["codex"], "review", "codex")):
+                inst.runtimes = runtimes
+                routed, sub, why = self.m.class_route(inst, kind)
+                self.assertEqual(routed, expected)
+                self.assertIsNone(sub)
+                self.assertIn("default unavailable", why)
+                self.assertIn("Usage unknown", why)
+            inst.runtimes = ["claude", "codex"]
+            self.assertEqual(self.m.class_route(inst, "build")[0], "codex")
+            self.assertEqual(self.m.class_route(inst, "review")[0], "claude")
+        self.b(root, "set", "root", "runtime=")
+        file = root / "instance.md"
+        file.write_text(file.read_text().replace("runtimes: claude,codex", "runtimes: claude"))
+        # CLI review refuses a same-runtime reviewer on a one-runtime instance.
+        self.git("branch", "job", cwd=root)
+        out = self.b(root, "review", "root", "--branch", "job", "--built-by", "claude", ok=False)
+        self.assertIn("nothing to cross-review", out)
+
+    def test_class_route_never_switches_to_exhausted_alternative(self):
+        root = self.init("alice")
+        inst = self.m.Instance(root)
+        config = self.declare(self.subscription("cx"), self.subscription("cl", runtime="claude"))
+        for five_hour, weekly in ((10, 97), (99, 35), (10, 70)):
+            self.cache(config, [self.reading(10, weekly=65), self.reading(five_hour, weekly=weekly)])
+            self.assertEqual(self.m.class_route(inst, "build", cached_only=True)[0], "codex")
+        self.cache(config, [self.reading(10, weekly=90), self.reading(10, weekly=70)])
+        self.assertEqual(self.m.class_route(inst, "build", cached_only=True)[0], "claude")
+
+    def test_pinned_alternative_requires_all_windows_below_stop(self):
+        root = self.init("alice")
+        inst = self.m.Instance(root)
+        config = self.declare(self.subscription("cx"), self.subscription("cl", runtime="claude"))
+        self.cache(config, [self.reading(99, weekly=99), self.reading(10, weekly=99)])
+        why = self.m.class_route(inst, "build", runtime="codex", cached_only=True)[2]
+        self.assertNotIn("Alternative:", why)
+
+    def test_later_contract_class_overrides_default_and_reports_source(self):
+        root = self.init("alice")
+        home = self.repo(self.tmp / "app")
+        self.b(root, "new", "a", "--title", "A", "--home", str(home))
+        self.b(root, "set", "a", "runtime=")
+        self.b(root, "wt", "add", "a", "job")
+        self.b(root, "brief", "a", "--branch", "job")
+        node = self.m.Instance(root).node("a")
+        row = self.m.open_job(self.m.read_jobs(node), "job")
+        contract = self.m.contract_file(node, row)
+        contract.parent.mkdir(exist_ok=True)
+        contract.write_text("## Class\ndiagnose\n")
+        text = self.b(root, "brief", "a", "--branch", "job")
+        self.assertIn("class: diagnose", text)
+        self.assertIn("runtime: claude", text)
+        contract.write_text("## Class\n`docs` because this job documents the interface\n")
+        self.assertEqual(self.m.job_class(node, row), "docs")
+        contract.write_text("## Class\nunknown\n")
+        out = self.b(root, "brief", "a", "--branch", "job", ok=False)
+        self.assertIn(contract.name, out)
+        self.assertIn("## Class: job class", out)
+        contract.unlink()
+        self.assertEqual(self.m.job_class(node, {**row, "Class": "future-class"}), "build")
+
+    def test_class_section_first_word_and_unknown_ledger_class(self):
+        root = self.init("alice")
+        node = self.m.Instance(root).node("root")
+        row = {"Job": "job", "Started": "2026-01-01", "Class": "future-class"}
+        self.assertEqual(self.m.job_class(node, row), "build")
+        path = self.m.contract_file(node, row)
+        path.parent.mkdir(exist_ok=True)
+        path.write_text("## Class\n`docs` with a short explanation\n")
+        self.assertEqual(self.m.job_class(node, row), "docs")
+        path.write_text("## Class\ninvalid explanation\n")
+        with self.assertRaises(SystemExit) as stopped:
+            self.m.job_class(node, row)
+        self.assertIn(path.name, str(stopped.exception))
+
+    def test_review_columns_survive_v1_v2_roundtrip(self):
+        root = self.init("alice")
+        inst = self.m.Instance(root)
+        node = inst.node("root")
+        ledger = node["dir"] / "job-ledger.md"
+        for version in (1, 2):
+            ledger.write_text(f"<!-- brain:job-ledger v{version} -->\n"
+                "| Job | Started | Review class | Review runtime | Review model | Future |\n"
+                "| --- | --- | --- | --- | --- | --- |\n"
+                "| job | 2026-01-01T00:00:00+00:00 | review | claude | sample-model | keep |\n")
+            rows = self.m.read_jobs(node)
+            self.m.write_jobs(inst, node, rows)
+            reread = self.m.read_jobs(node)
+            for key in ("Review class", "Review runtime", "Review model", "Future"):
+                self.assertEqual(reread[0][key], rows[0][key])
+
+    def test_specialist_defaults_and_implicit_review_are_not_pins(self):
+        root = self.init("alice")
+        self.b(root, "set", "root", "runtime=")
+        self.b(root, "specialist", "new", "qa", "--title", "QA", "--runtime", "claude")
+        config = self.declare(self.subscription("cx"), self.subscription("cl", runtime="claude"))
+        self.cache(config, [self.reading(10, weekly=10), self.reading(10, weekly=20)])
+        text = self.b(root, "hire", "qa", "root", "--class", "build", "--task", "x")
+        self.assertIn("runtime: codex", text)
+        self.assertNotIn("Runtime pin:", text)
+
+    def test_implicit_review_is_not_a_runtime_pin(self):
+        root = self.init("alice")
+        self.b(root, "set", "root", "runtime=")
+        self.git("branch", "job", cwd=root)
+        text = self.b(root, "review", "root", "--branch", "job", "--built-by", "codex")
+        self.assertIn("Reviewer runtime: claude", text)
+        self.assertNotIn("Runtime pin:", text)
+        text = self.b(root, "review", "root", "--branch", "job", "--built-by", "codex", "--by", "claude")
+        self.assertIn("Runtime pin: claude", text)
+
     def test_class_router_weekly_policy_and_pins(self):
         root = self.init("alice")
         inst = self.m.Instance(root)

@@ -33,8 +33,9 @@ def cmd_review(a):
         _m_common.die(f"only one runtime ({built}) in instance.md: nothing to cross-review with")
     if reviewer == built:
         _m_common.die("the reviewer must run on a different runtime from the builder")
-    reviewer, subscription, usage = _m_usage.class_route(inst, kind, runtime=reviewer, model=a.model,
-        weekly_cap=n["fm"].get("route_weekly_cap", inst.cfg.get("route_weekly_cap", 60)))
+    pin = a.by or (n["fm"].get("runtime") if n["fm"].get("runtime") in others else None)
+    reviewer, subscription, usage = _m_usage.class_route(inst, kind, runtime=pin, model=a.model,
+        weekly_cap=n["fm"].get("route_weekly_cap", inst.cfg.get("route_weekly_cap", 60)), runtimes=others)
     usage += " Independent review uses the other runtime from the builder."
     a.model = a.model or n["fm"].get("route_model_" + reviewer) or inst.cfg.get("route_model_" + reviewer) or "runtime default"
     where, base = None, a.base

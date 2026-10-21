@@ -81,7 +81,6 @@ def import_brief(a):
     _m_guard.no_terms_in(n, text, "the import brief")
     if _m_nodes.SECRET_META.search(text) or _m_nodes.SECRET_LINE.search(task + "\n" + "\n".join(_m_knowledge.limits_lines(n))):
         _m_common.die("unsafe import brief metadata")
-    _m_jobs.record_job_route(inst, n, branch, a.job_class, runtime, a.model)
     if a.out:
         _m_history.write_out(inst, n, a.out, text)
     else:

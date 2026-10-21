@@ -441,7 +441,6 @@ def cmd_hire(a):
     if target["external"] and not (target["home_path"] and target["home_path"].exists()):
         _m_common.die(f"{target['id']}'s home isn't on this machine (brain set {target['id']} home=<path>)")
     where = target["home_path"] if target["external"] else target["dir"]
-    a.runtime = a.runtime or target["fm"].get("runtime") or sp["fm"].get("runtime")
     runtime, usage = worker_route(inst, target, a)
     out = [f"Role: worker, hired as specialist `{sp['id']}` ({sp['fm'].get('title', '')}).",
            f"Run in: {where}  ·  runtime: {runtime}  ·  class: {a.job_class}" + (f"  ·  model: {a.model}" if a.model else ""),

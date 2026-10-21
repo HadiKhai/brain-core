@@ -220,14 +220,22 @@ JOB_CLASSES = ("build", "diagnose", "review", "ui", "migration", "docs")
 
 def job_class(n, row=None, explicit=None, default="build"):
     """Resolve declared metadata only; never inspect tasks or message text."""
-    value = explicit or (row or {}).get("Class")
+    def parse(value):
+        words = (value or "").strip().split()
+        return words[0].strip("`").lower() if words else ""
+    value, source = parse(explicit), "--class"
     if not value and row:
         f = contract_file(n, row)
         sections = _m_ui.md_sections(f.read_text()) if f.is_file() else {}
-        value = next((v.strip() for k, v in sections.items() if k.lower() == "class"), "")
-    value = (value or default).strip().strip("`").lower()
+        value = parse(next((v for k, v in sections.items() if k.lower() == "class"), ""))
+        source = str(f) + " ## Class"
+    if not value:
+        stored = parse((row or {}).get("Class"))
+        value = stored if stored in JOB_CLASSES else default
+        source = "default class"
     if value not in JOB_CLASSES:
-        _m_common.die("job class must be one of: " + ", ".join(JOB_CLASSES))
+        _m_common.die(_m_guard.redact(source, _m_guard.never_terms(n)) +
+                      ": job class must be one of: " + ", ".join(JOB_CLASSES))
     return value
 
 
