@@ -28,6 +28,8 @@ stated; never run a polling loop in an agent.
    than stranding existing jobs.
 1. **Worktree.** Choose the integration mode before launching: `brain set <id> merge=pr` for
    host PR merges; `merge=local` (the default) for coordinator-owned local integration.
+   Never reuse a merged job's folder for a new branch. Create a fresh worktree for each
+   new job; leave the old folder on its recorded branch until cleanup.
    `core/bin/brain wt add <id> <branch> [--base <ref>]`. It creates the worktree
    in the node's workbench (beside the home, never inside it or the instance), runs the node's
    `worktree-setup.sh` if it has one (env files, installs), and gives the job its own port.

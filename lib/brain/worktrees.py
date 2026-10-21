@@ -123,8 +123,11 @@ def cmd_wt_add(a):
         print("! " + warning)
     wb = workbench(inst, n, create=True)
     path = wb / "worktrees" / a.branch.replace("/", "-")
-    if path.exists():
-        _m_common.die(f"{_m_common.tilde(path)} already exists")
+    for owner, record in n["local"].get("worktrees", {}).items():
+        if owner != a.branch and Path(record["path"]).resolve() == path.resolve():
+            _m_common.die(f"{_m_common.tilde(path)} belongs to job {owner}; create a fresh worktree")
+    if path.exists() or path.is_symlink():
+        _m_common.die(f"{_m_common.tilde(path)} already exists; create a fresh worktree")
     exists = _m_common.git("rev-parse", "--verify", "--quiet", f"refs/heads/{a.branch}", cwd=home).returncode == 0
     base = a.base or default_base(home)
     args = ["worktree", "add", str(path), a.branch] if exists else ["worktree", "add", "-b", a.branch, str(path), base]
@@ -165,17 +168,21 @@ def cmd_wt_add(a):
     print(f"  launch a worker there (host adapter: an existing worktree at this path, branch {a.branch})")
 
 
-def worktree_state(home, w, branch):
-    """(uncommitted files or None if gone, merged?, commits ahead of base). A branch that never moved past
+def worktree_state(home, w, branch, n=None):
+    """(uncommitted files or None if gone, merged?, commits ahead of integration). A branch that never moved past
     where it started isn't merged: it's new."""
-    path, base = w["path"], w.get("base")
+    path = w["path"]
+    base = (_m_verify.integration_ref(home) if n and n["fm"].get("merge", "local") == "pr"
+            else "refs/heads/main")
     dirty = len(_m_common.git("status", "--porcelain", cwd=path).stdout.splitlines()) if Path(path).exists() else None
-    tip = _m_common.git("rev-parse", "--verify", "--quiet", branch, cwd=home).stdout.strip()
+    tip = _m_common.git("rev-parse", "--verify", "--quiet", "refs/heads/" + branch, cwd=home).stdout.strip()
     moved = bool(tip) and tip != w.get("start")
-    merged = moved and bool(base) and _m_common.git("merge-base", "--is-ancestor", branch, base, cwd=home).returncode == 0
-    if moved and not merged and shutil.which("gh") and "github.com" in _m_nodes.remote_url(home):
+    merged = moved and bool(base) and _m_common.git("merge-base", "--is-ancestor", "refs/heads/" + branch, base, cwd=home).returncode == 0
+    if moved and base and not merged and shutil.which("gh") and "github.com" in _m_nodes.remote_url(home):
         try:
-            r = subprocess.run(["gh", "pr", "list", "--head", branch, "--state", "merged", "--json", "number"],
+            target = base.removeprefix("refs/heads/").removeprefix("refs/remotes/origin/")
+            r = subprocess.run(["gh", "pr", "list", "--head", branch, "--base", target,
+                                "--state", "merged", "--json", "number"],
                                cwd=home, capture_output=True, text=True, timeout=30)
             merged = r.returncode == 0 and json.loads(r.stdout or "[]") != []  # squash merges
         except (subprocess.TimeoutExpired, ValueError):
@@ -194,7 +201,7 @@ def cmd_wt_list(a):
             continue
         print(n["id"])
         for br, w in sorted(wts.items()):
-            dirty, merged, ahead = worktree_state(n["home_path"], w, br)
+            dirty, merged, ahead = worktree_state(n["home_path"], w, br, n)
             state = "missing" if dirty is None else (f"{dirty} uncommitted" if dirty else "clean")
             print(f"  {br:<28} {port_text(w.get('port'), w.get('ports', 1))}  {state}  "
                   f"{'merged' if merged else (ahead + ' commit(s) ahead') if ahead else ''}  {_m_common.tilde(w['path'])}")
@@ -208,10 +215,43 @@ def job_commits(home, w, branch):
     return c if c.isdigit() else ""
 
 
+def removal_refusal(n, branch, w):
+    """File-derived live-work checks; force never overrides ownership or liveness."""
+    path = Path(w["path"]).resolve()
+    owners = {branch}
+    owners.update(br for br, record in n["local"].get("worktrees", {}).items()
+                  if Path(record["path"]).resolve() == path)
+    if path.exists():
+        actual = _m_common.git("symbolic-ref", "--quiet", "HEAD", cwd=path)
+        head = _m_common.git("rev-parse", "--verify", "HEAD", cwd=path)
+        tip = _m_common.git("rev-parse", "--verify", "refs/heads/" + branch, cwd=n["home_path"])
+        if actual.returncode or actual.stdout.strip() != "refs/heads/" + branch:
+            return "checked-out branch differs from recorded job (or HEAD is detached)"
+        if head.returncode or tip.returncode or head.stdout.strip() != tip.stdout.strip():
+            return "checked-out HEAD differs from recorded job"
+    rows = _m_jobs.read_jobs(n)
+    if rows is None:
+        return "job ledger cannot be read safely"
+    # Cleanup closes its own current row; every other claimant is live work.
+    own = _m_jobs.open_job(rows, branch)
+    for row in rows:
+        if row is own or row.get("Ended"):
+            continue
+        if row["Job"] in owners:
+            return "open ledger job " + row["Job"]
+    for row in _m_status.active_work(n):
+        if row[0] in owners and len(row) > 1 and row[1].strip() not in ("", "-", "—"):
+            return "live bound thread in Active work for " + row[0]
+    return ""
+
+
 def remove_worktree(inst, n, branch, force=False):
     w = n["local"].get("worktrees", {}).get(branch)
     if not w:
         _m_common.die(f"{n['id']}: no worktree for '{branch}' made by brain on this machine")
+    reason = removal_refusal(n, branch, w)
+    if reason:
+        _m_common.die(f"{branch}: {reason}; worktree retained")
     if Path(w["path"]).exists():
         r = _m_common.git("worktree", "remove", *(["--force"] if force else []), w["path"], cwd=n["home_path"])
         if r.returncode:
@@ -224,7 +264,7 @@ def cmd_wt_rm(a):
     inst = _m_nodes.load()
     n, home = git_home(inst, a.id)
     w = n["local"].get("worktrees", {}).get(a.branch)
-    state = worktree_state(home, w, a.branch) if w else (None, False, "")
+    state = worktree_state(home, w, a.branch, n) if w else (None, False, "")
     _m_jobs.print_job_handback(n, a.branch)
     remove_worktree(inst, n, a.branch, a.force)
     _m_jobs.job_ended(inst, n, a.branch, "merged" if state[1] else "abandoned", job_commits(home, w, a.branch), a.cause or "",
@@ -233,14 +273,18 @@ def cmd_wt_rm(a):
 
 
 def cmd_wt_prune(a):
-    """Remove clean worktrees whose branch is merged into its base. Never touches uncommitted work."""
+    """Remove clean worktrees merged into the integration branch. Never touches uncommitted work."""
     inst = _m_nodes.load()
     n, home = git_home(inst, a.id)
     if _m_common.git("remote", cwd=home).stdout.strip() and not a.offline:
         _m_common.git("fetch", "--all", "--prune", "--quiet", cwd=home)
     removed, kept = [], []
     for br, w in sorted(n["local"].get("worktrees", {}).items()):
-        dirty, merged, ahead = worktree_state(home, w, br)
+        reason = removal_refusal(n, br, w)
+        if reason:
+            kept.append(f"{br} ({reason})")
+            continue
+        dirty, merged, ahead = worktree_state(home, w, br, n)
         if dirty is None or (merged and dirty == 0):
             _m_jobs.print_job_handback(n, br)
             if not a.dry_run:

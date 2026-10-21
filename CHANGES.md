@@ -5,6 +5,22 @@ upgrading. `brain changes <node>` shows the entries this node's coordinator hasn
 `brain due <node>` lists them until `brain changes <node> --seen`. Entry headings are
 `## <date>: <title>`; once released, a heading never changes.
 
+## 2026-10-21: Worktree cleanup preserves live jobs
+
+For agents:
+- `wt prune` keeps worktrees with a different checked-out branch/HEAD, a different open ledger job
+  by branch or registered path, or a live bound Active work thread, and prints why.
+  `wt rm` shares these guards, including with `--force`; prune continues with other jobs.
+- `wt add` refuses occupied or job-owned folders. Never reuse a merged job's folder for
+  a follow-up branch; create a fresh worktree.
+- Creation `--base` is provenance only. Merge checks use local main, or the cached origin
+  default in PR mode, so SHA and deleted creation bases no longer strand merged worktrees.
+
+After upgrading:
+- Mark finished Active work rows terminal before cleanup; cleanup still closes its own
+  ledger row. Existing worktree records need no migration; the next prune uses the integration
+  branch automatically. See `adapters/hosts/t3.md` for recovery of dead-workspace threads.
+
 ## 2026-10-21: Webhook wakes identify their sender and report refusal
 
 For agents:
