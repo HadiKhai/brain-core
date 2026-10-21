@@ -5,6 +5,29 @@ upgrading. `brain changes <node>` shows the entries this node's coordinator hasn
 `brain due <node>` lists them until `brain changes <node> --seen`. Entry headings are
 `## <date>: <title>`; once released, a heading never changes.
 
+## 2026-10-21: Group agents by concern and share context
+
+For agents:
+- Gather common context once, group related investigation and implementation in one job,
+  and state why each separate agent is needed. `brain brief --context-file <file>` embeds
+  shared findings (repeatable); `--why-separate "<reason>"` or contract `## Why separate`
+  carries the reason. Hire uses the same option and contract fallback; review defaults to
+  its independent second-runtime role when no reason is supplied. Old worker/hire calls warn
+  on stderr even with `--out`, naming the flag and contract alternative; their brief neutrally
+  states that the coordinator supplied no reason. An explicitly empty reason refuses unless
+  `--allow-unexplained` is set for urgent work.
+- Optional contract `## Inputs` lists paths, one per line. Declared inputs and context files
+  recorded by branch briefs on this machine let `brain jobs` and `brain due` flag each
+  overlapping open job once, with advice to merge related work or share a context brief.
+  Sharing a context file resolves the pair and clears its due advice; jobs retains a softer
+  shared-context line. Directory descendants and globs against literal paths count; common
+  Markdown bullet styles work. Put paths on their own lines without notes. The check reads
+  local records only and never gates a launch. Old contracts still work.
+
+After upgrading:
+- Coordinators: read the updated coordinator role and home-job skill. Add inputs and a
+  separation reason when briefing new work; old jobs need no migration.
+
 ## 2026-10-21: Node hygiene and waiting decisions
 
 For agents:

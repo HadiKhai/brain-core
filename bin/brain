@@ -3837,6 +3837,7 @@ def cmd_hire(a):
         out += ["This work happens in a project with its own owners. Leave nothing in it that names "
                 "where this brief came from (axiom 6). Ask before pushing, publishing or anything "
                 "irreversible (axiom 24).", ""]
+    out += separation_lines(a, target, a.branch)
     out += ["## Task", "", a.task.strip(), ""] + contract_lines(inst, target, a.branch) + \
         [role_body.strip(), ""] + limits_lines(target)
     if lessons:
@@ -7085,6 +7086,26 @@ def cmd_connect(a):
         print("\n".join(import_text(line, terms) for line in connect_summary(n, plan, dirty)))
 
 
+def separation_lines(a, n, branch, default=""):
+    """One launch-reason policy for workers, specialists and independent reviewers."""
+    row = open_job(read_jobs(n) or [], branch) if branch else None
+    contract = contract_file(n, row).read_text() if row and contract_file(n, row).is_file() else ""
+    sections = {k.lower(): v for k, v in md_sections(contract).items()}
+    why = a.why_separate if a.why_separate is not None else (default or sections.get("why separate") or "")
+    if not why.strip():
+        if a.why_separate is not None and not a.allow_unexplained:
+            die("--why-separate needs a reason; use --allow-unexplained for an urgent job")
+        why = ("Urgent launch: separation reason explicitly waived." if a.allow_unexplained else
+               "not stated by the coordinator")
+        if not a.allow_unexplained:
+            print("warning: why separate is missing; supply --why-separate or the contract's ## Why separate "
+                  "before launching a separate agent", file=sys.stderr)
+    no_terms_in(n, why, "why separate")
+    if SECRET_LINE.search(why):
+        die("unsafe separation reason")
+    return ["Why a separate agent: " + why.strip(), ""]
+
+
 def cmd_brief(a):
     """A worker brief for one job: where it runs, the task, the node's limits, how to ask and hand back."""
     if a.small and (a.branch or a.import_study):
@@ -7102,6 +7123,26 @@ def cmd_brief(a):
         die(f"{n['id']}'s home isn't on this machine (brain set {n['id']} home=<path>): a worker can't run there, "
             "and never in the instance instead")
     where = Path(w["path"]) if w else (n["home_path"] if n["external"] else n["dir"])
+    shared = separation_lines(a, n, a.branch)
+    context, context_inputs = [], []
+    for name in a.context_file or []:
+        try:
+            path = Path(name).expanduser().resolve()
+            no_terms_in(n, str(path), "shared context path")
+            if SECRET_LINE.search(str(path)):
+                die("unsafe shared context path")
+            body = path.read_text().strip()
+        except (OSError, UnicodeError, RuntimeError):
+            die("cannot read shared context file; supply a readable UTF-8 file")
+        if not body:
+            die("shared context file is empty")
+        no_terms_in(n, str(path) + "\n" + body, "shared context")
+        if SECRET_LINE.search(str(path) + "\n" + body):
+            die("unsafe shared context text")
+        context_inputs.append(str(path))
+        context += [f"### Context from {tilde(path)}", "", body, ""]
+    if context:
+        shared += ["## Shared context", "", "Gathered once by the coordinator; use these findings before rereading sources.", "", *context]
     runtime, usage = worker_route(inst, n, a)
     head = f"Run in: {tilde(where)}" + (f"  ·  branch {a.branch}" if a.branch else "") + f"  ·  runtime: {runtime}"
     if a.model:
@@ -7112,7 +7153,7 @@ def cmd_brief(a):
                                                                           "where outputs go -->")
     if a.small:
         out = [f"Role: worker in node `{n['id']}`; small job.", head, redact(usage, never_terms(n)),
-               "Follow this node's rules. Task: " + task.strip(),
+               *shared, "Follow this node's rules. Task: " + task.strip(),
                "Clear, low risk, minutes, no shared-state changes. If that stops being true, hand back for a full job.",
                *limits_lines(n), *knowledge_lines(inst, n, task),
                f"Before hand-back or anything leaves, run `brain guard {n['id']} {tilde_shell(where)}`; require `guard: clean`.",
@@ -7155,7 +7196,7 @@ def cmd_brief(a):
                     f"packet in `{tilde(ready_path(inst, n, a.branch).parent)}/`; "
                     "it may be missing or stale. Recheck it after finishing the remaining work.",
                     "Job ledger state: " + json.dumps(row, ensure_ascii=False), ""]
-    out += ["## Task", "", task.strip(), ""] + contract_lines(inst, n, a.branch)
+    out += shared + ["## Task", "", task.strip(), ""] + contract_lines(inst, n, a.branch)
     out += knowledge_lines(inst, n, task) + node_knowledge_lines(n) + recall_hint(n)
     out += limits_lines(n)
     if never_terms(n):
@@ -7168,6 +7209,9 @@ def cmd_brief(a):
         write_out(inst, n, a.out, text)
     else:
         print(text, end="")
+    if w is not None and a.context_file:
+        inst.local_of(n["id"])["worktrees"][a.branch]["context_inputs"] = context_inputs
+        inst.save_local()
 
 # ---------- second-runtime review ----------
 
@@ -7741,6 +7785,7 @@ def cmd_review(a):
     if n["sealed"]:
         out += ["This project has its own owners. Write nothing into it, and keep your report free of any "
                 "reference to where this brief came from (axiom 6).", ""]
+    out += separation_lines(a, n, a.branch, default="Independent second-runtime review.")
     out += ["## Change", "", f"Branch `{a.branch}` against `{base}`. See it with `git diff {base}...{a.branch}`"
             f" and `git log {base}..{a.branch}`.", ""]
     if diffstat:
@@ -8490,6 +8535,68 @@ def contract_problems(text):
     return [f for f in CONTRACT_FIELDS if not sections.get(f.lower(), "").strip()]
 
 
+def job_input_path(n, value):
+    """Canonicalize declarations and recorded context with the same alias policy."""
+    import posixpath
+    path = (n.get("home_path") or n["dir"]) / Path(value).expanduser()
+    try:
+        return str(path.resolve(strict=False))
+    except (OSError, RuntimeError, ValueError):
+        return posixpath.normpath(str(path))
+
+
+def job_inputs(n, row):
+    """Explicit inputs only: prose and Git refs are not evidence of shared reads."""
+    f = contract_file(n, row)
+    text = f.read_text() if f.is_file() else ""
+    sections = {k.lower(): v for k, v in md_sections(text).items()}
+    values = [re.sub(r"^(?:[-*+]|[0-9]+[.)])\s+", "", line.strip()).strip().strip("`")
+              for line in sections.get("inputs", "").splitlines() if line.strip()]
+    values += n["local"].get("worktrees", {}).get(row["Job"], {}).get("context_inputs", [])
+    return {job_input_path(n, v) for v in values
+            if v and v.casefold() not in ("none", "n/a", "not applicable", "-")}
+
+
+def inputs_overlap(left, right, root=""):
+    """Only * and ? are patterns; brackets and the home prefix stay literal."""
+    def matches(path, pattern):
+        prefix = root if root and pattern.startswith(root.rstrip("/") + "/") else ""
+        tail = pattern[len(prefix):]
+        if "*" not in tail and "?" not in tail:
+            return False
+        regex = re.escape(prefix) + re.escape(tail).replace(r"\*", ".*").replace(r"\?", ".")
+        return re.fullmatch(regex, path) is not None
+    return any(p == q or p.startswith(q.rstrip("/") + "/") or q.startswith(p.rstrip("/") + "/")
+               or matches(p, q) or matches(q, p) for p in left for q in right)
+
+
+def job_overlaps(n, rows, include_resolved=False):
+    """Shared context resolves the advice; jobs may still show that softer fact."""
+    def context(row):
+        return {job_input_path(n, v) for v in n["local"].get("worktrees", {}).get(row["Job"], {}).get("context_inputs", [])}
+    opened = [(r, job_inputs(n, r), context(r)) for r in rows if not r["Ended"]]
+    out = {}
+    for row, inputs, shared in opened:
+        peers, resolved = set(), set()
+        for peer, other, peer_shared in opened:
+            if job_key(peer) == job_key(row) or not inputs_overlap(inputs, other, root=job_input_path(n, ".")):
+                continue
+            if shared & peer_shared:
+                resolved.add(peer["Job"])
+            else:
+                peers.add(peer["Job"])
+        lines = []
+        if peers:
+            lines.append("overlapping inputs with " + ", ".join(sorted(peers)) +
+                         ": merge related jobs or share a context brief")
+        if include_resolved and resolved:
+            lines.append("shares context with " + ", ".join(sorted(resolved)) +
+                         "; overlap advice resolved; merge if one concern")
+        if lines:
+            out[job_key(row)] = "; ".join(lines)
+    return out
+
+
 def contract_lines(inst, n, branch, who="worker"):
     row = open_job(read_jobs(n) or [], branch) if branch else None
     f = contract_file(n, row) if row else None
@@ -8827,6 +8934,7 @@ def cmd_jobs(a):
                              never_terms(n)))
             if len(backlog) > 10:
                 print(f"  … and {len(backlog) - 10} more unsettled job(s)")
+        overlaps = job_overlaps(n, j["open"], include_resolved=True)
         for r in j["open"]:
             u = live_usage(inst, n, r)
             late = j["median_hours"] is not None and r["age_h"] > 2 * j["median_hours"]
@@ -8835,6 +8943,8 @@ def cmd_jobs(a):
                          + (f"  {tokens_text(u['processed'])} tokens" if u and u["sessions"] else "")
                          + ("   (over twice the median" + (" in hours and tokens)" if heavy else ")") if late else
                             "   (over twice the median in tokens)" if heavy else ""), never_terms(n)))
+            if job_key(r) in overlaps:
+                print(redact("        " + r["Job"] + ": " + overlaps[job_key(r)], never_terms(n)))
             for line in job_advice(inst, n, r) + [usage_line(u, job_budget(n, r), r["age_h"])] + \
                     usage_advice(u, j["median_tokens"]):
                 print(redact("        " + line, never_terms(n)))
@@ -9374,7 +9484,10 @@ def due_items(inst, n, evidence=None, include_stale=True):
         add("unsettled-threads", f"{len(unsettled)} closed job(s) with unsettled threads; inspect brain jobs {n['id']}; "
             "find each job's threads through the host, check safety, settle, then record --branch <branch> --settled",
             count=len(unsettled))
+    overlaps = job_overlaps(n, state["jobs"] or [])
     for row in state["jobs"] or []:
+        if job_key(row) in overlaps:
+            add("overlapping-inputs", row["Job"] + ": " + overlaps[job_key(row)], job=job_key(row))
         if row["Ended"]:
             if row["Outcome"] == "merged" and row.get("Lesson check") == "required" and not row.get("Lessons"):
                 add("lesson-outcome", f"{row['Job']}: merged job needs a lesson outcome; learn proposed lessons "
@@ -11599,7 +11712,8 @@ def writes(a):
     if name == "cmd_connect":
         return a.action in (None, "plan") or bool(a.save)
     if name in ("cmd_brief", "cmd_hire", "cmd_history"):
-        return bool(getattr(a, "out", None) or getattr(a, "job", None))  # --out writes a file, maybe inside the instance
+        return bool(getattr(a, "out", None) or getattr(a, "job", None) or
+                    (getattr(a, "branch", None) and getattr(a, "context_file", None)))  # --out writes a file, maybe inside the instance
     if name == "cmd_check":
         return bool(a.fix)
     if name == "cmd_jobs":
@@ -11652,7 +11766,11 @@ def main():
         "id", opt("--import", dest="import_study", action="store_true", help="study an existing home"),
         opt("--small", action="store_true", help="minutes, low risk: no job ceremony"),
         opt("--branch", help="the job's worktree (brain wt add)"), opt("--task"),
-        opt("--task-file", dest="task_file"), opt("--runtime"), opt("--model", help="job model for scoped usage limits"),
+        opt("--task-file", dest="task_file"),
+        opt("--context-file", action="append", help="embed shared findings; repeatable; recorded as job inputs on this machine"),
+        opt("--why-separate", help="why this concern needs its own agent (or contract ## Why separate)"),
+        opt("--allow-unexplained", action="store_true", help="allow an urgent launch without a separation reason"),
+        opt("--runtime"), opt("--model", help="job model for scoped usage limits"),
         opt("--to", help="the thread the worker reports to (default: the node's coordinator)"), opt("--out"))
     cmd("scrub", cmd_scrub, "filter source data without revealing never-name terms; reads paths or stdin",
         "id", opt("paths", nargs="*"), opt("--check", action="store_true"),
@@ -11797,6 +11915,8 @@ def main():
     cmd("hire", cmd_hire, "print a specialist's brief for a job: brain hire <specialist> <node> --task \"...\"",
         "specialist", "node", opt("--task", required=True), opt("--items", default=""),
         opt("--model", help="job model for scoped usage limits"), opt("--out"), opt("--branch"),
+        opt("--why-separate", help="why this specialist needs a separate agent; defaults to the contract"),
+        opt("--allow-unexplained", action="store_true", help="allow an urgent launch without a reason"),
         opt("--job", help="record this hire for a branch or job id on this machine"))
 
     cmd("workbench", cmd_workbench, "a node's workbench: scripts, reports, worktrees (created if missing)", "id",
@@ -11823,6 +11943,8 @@ def main():
     cmd("review", cmd_review, "brief for a review by another runtime: brain review <node> --branch B",
         "id", opt("--branch", required=True), opt("--base"), opt("--built-by", dest="built_by"),
         opt("--by", help="reviewer runtime (default: one the builder didn't use)"), opt("--focus"),
+        opt("--why-separate", help="reason for a separate reviewer; defaults to independent second-runtime review"),
+        opt("--allow-unexplained", action="store_true", help="allow an urgent launch without a reason"),
         opt("--model", help="job model for scoped usage limits"), opt("--out"))
     cmd("ready", cmd_ready, "check a worker's ready packet against the branch and cached origin default (local main without origin)", "id",
         opt("--branch", required=True), opt("--record", action="store_true", help="worker: run node verify and record"),

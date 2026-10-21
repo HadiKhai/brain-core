@@ -14,7 +14,9 @@ stated; never run a polling loop in an agent.
 
 1. **The node's own reviewers first** (axiom 7). If the home has its own review agents or
    checklist, the builder runs them; this review adds to them.
-2. **Brief.** `core/bin/brain review <id> --branch <branch> --built-by <builder runtime>
+2. **Brief.** `brain review` supplies a separation reason from its independent
+   second-runtime review role; `--why-separate` can state a more specific reason.
+   `core/bin/brain review <id> --branch <branch> --built-by <builder runtime>
    [--focus "<what worries you>"]`. It picks a reviewer runtime the builder didn't use and says
    where to run. Add `--model <id or display name>` for model-scoped weekly limits.
    When reviewing verify failures, inspect the printed private log, each failing lane's own tail,
@@ -22,7 +24,9 @@ stated; never run a polling loop in an agent.
    `FAIL`, `FAILED`, `FAILURE`, `ERROR`, or `exit N` (nonzero) identifies a failing lane. Missing
    lane markers do not mean a group passed. Reused evidence is an earlier green run, not a fresh
    execution; the command, refs, ignored inputs and job ports must still match the reuse rules.
-3. **Run it.** Host `delegate` on the reviewer runtime, in the job's worktree (or `launch` a
+3. **Run it.** Use one reviewer for the concern, not one per file or test step. State why this
+   separate agent is needed (independent second-runtime review), and include shared findings
+   and earlier rounds in the supplied brief so it need not gather them again. Host `delegate` on the reviewer runtime, in the job's worktree (or `launch` a
    worker there if the host's delegate can't pick a folder). The reviewer changes nothing.
 4. **Address.** Send the findings to the builder (host `send`). Blockers and majors get fixed or
    answered with a reason. When a round finds a kind of problem an earlier round already found,

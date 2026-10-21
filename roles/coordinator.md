@@ -213,6 +213,24 @@ never generate load or heat to test the guard.
 
 ## Briefing workers (axiom 9)
 
+Group work by concern, not by file or step. Keep related investigation and implementation in
+one job; split only for independent ownership, distinct expertise or an independent review.
+Before launching, gather common facts once and pass them with `brain brief --context-file
+<file>` (repeatable). State `--why-separate "<reason>"` for every launch, or put that reason
+under `## Why separate` in the contract. An urgent single job may use `--allow-unexplained`;
+missing reasons in old calls warn on stderr rather than stop work, including when saving
+with `--out`. The worker brief neutrally says when the coordinator did not state a reason.
+
+Declare shared source paths under optional `## Inputs` in each contract, one path per line,
+with no annotations. Plain lines, `-`, `*`, `+` and numbered bullets work. Paths are home-relative
+or absolute; directory paths cover descendants and `*`/`?` globs match literal paths. Brackets stay literal. The check does
+not compute all intersections between different glob patterns. Only declarations count; prose and
+Git refs are not inferred as paths. Context files passed to a branch brief count on this machine;
+contract inputs travel with the node. `brain jobs` and `brain due` advise once per overlapping
+open job: merge related jobs or share a context brief. Once a pair shares a context file, its
+advice clears from `due`; `jobs` keeps a softer shared-context line. Unresolved pairs stay due.
+This is advice, not a launch gate; shared inputs alone do not make independent concerns one job.
+
 A worker sees only its brief and the rules of the node it runs in. Give it the task,
 everything it needs to know, the constraints, and who it reports to.
 
