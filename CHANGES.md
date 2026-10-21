@@ -15,6 +15,10 @@ For agents:
   Ordinary per-job readiness and PR merges retain their existing rules.
 - Batch journals retain ejections and publication recovery state. Merged ledger rows carry
   a Batch column, preserved by the v3 unknown-column rule. Train never pushes.
+- Main rebases count as occupied, including detached linked worktrees. Cleanup after a
+  published-but-unrecorded train preserves merged outcomes and Batch; recovery reconciles
+  matching closed rows. Failed logs are pinned privately; empty/aborted journals are committed.
+- A lone red full prefix is confirmed before ejection; the baseline is proved once per batch.
 
 After upgrading:
 - Use trains only with local integration and an unoccupied main branch. Never detach

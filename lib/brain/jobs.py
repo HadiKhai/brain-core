@@ -259,6 +259,29 @@ def job_reviewed(inst, n, branch):
             inst.commit([], f"{n['id']}: job reviewed")
 
 
+def published_train(n, row):
+    """Publication intent is integration evidence only when its tip actually reached main."""
+    home = n.get("home_path")
+    if not home:
+        return None
+    for path in (n["dir"] / "job-trains").glob("*.json"):
+        try:
+            data = json.loads(path.read_text())
+        except (OSError, ValueError):
+            _m_common.die("train journal unreadable; coordinator must repair it before closing a job")
+        if data.get("version") != 1 or data.get("state") != "verified":
+            continue
+        tip = data.get("tip")
+        if not isinstance(tip, str) or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", tip):
+            continue
+        if _m_common.git("merge-base", "--is-ancestor", tip, "refs/heads/main", cwd=home).returncode:
+            continue
+        for entry in data.get("accepted", []):
+            if entry.get("key") == job_key(row):
+                return data["batch"], entry
+    return None
+
+
 def job_ended(inst, n, branch, outcome, commits="", cause="", worktree=None):
     # Transcripts are read before the lock is taken: a long first read never holds up other commands.
     early = open_job(read_jobs(n) or [], branch)
@@ -274,6 +297,11 @@ def job_ended(inst, n, branch, outcome, commits="", cause="", worktree=None):
         if not r:
             return
         _m_sync.retain_integration(inst, n, r)
+        published = published_train(n, r)
+        if published:
+            batch, entry = published
+            outcome, commits = "merged", entry["commits"]
+            r.update({"Batch": batch, "Base commit": entry["base"], "Head commit": entry["head"]})
         r.update(Ended=stamp(inst), Outcome=outcome, Commits=str(commits), Cause=cause)
         if outcome == "merged":
             r["Lesson check"] = "required"  # old, already-ended rows never acquire this marker

@@ -219,3 +219,7 @@ job once with its Batch column. It prints a release command and never pushes. Re
 `brain train` reconciles an interrupted publication before starting new work. An interrupted
 staging run is never evidence for release. Retained dirty staging and its port reservation
 need coordinator inspection before cleanup; train branches and journals remain as evidence.
+
+Train failure logs are pinned as private 0600 ignored files in `job-trains/`; journals
+including ejections are committed even when publication stops. Published jobs closed by
+cleanup retain their Batch and merged outcome; recovery marks matching closed rows reconciled.

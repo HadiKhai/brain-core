@@ -3,6 +3,7 @@ import fcntl
 import json
 import os
 import shlex
+import shutil
 from pathlib import Path
 
 from . import common as _m_common
@@ -31,6 +32,24 @@ def main_unoccupied(home):
     r = _m_common.git("worktree", "list", "--porcelain", "-z", cwd=home)
     if r.returncode or "branch refs/heads/main" in r.stdout.split("\0"):
         _m_common.die("train: main is checked out or worktrees unreadable; detach main in its coordinator-owned checkout first; never change the operator checkout")
+    for token in r.stdout.split("\0"):
+        if not token.startswith("worktree "):
+            continue
+        try:
+            location = _m_common.git("rev-parse", "--absolute-git-dir", cwd=token[9:])
+        except OSError:
+            _m_common.die("train: worktrees unreadable; cannot establish main occupancy")
+        if location.returncode:
+            _m_common.die("train: worktrees unreadable; cannot establish main occupancy")
+        for state in ("rebase-merge", "rebase-apply"):
+            try:
+                name = (Path(location.stdout.removesuffix("\n")) / state / "head-name").read_text().strip()
+            except FileNotFoundError:
+                continue
+            except OSError:
+                _m_common.die("train: rebase state unreadable; cannot establish main occupancy")
+            if name == "refs/heads/main":
+                _m_common.die("train: main is checked out in a rebase; leave the operator checkout untouched")
 
 
 def save(path, data):
@@ -43,12 +62,12 @@ def finish(inst, n, path, data):
     rows = _m_jobs.read_jobs(n)
     if rows is None:
         _m_common.die("train: ledger unreadable; retain journal and repair before continuing")
+    reconciled = False
     for entry in data["accepted"]:
         row = next((r for r in rows if _m_jobs.job_key(r) == entry["key"]), None)
-        if not row or (row.get("Ended") and not (row.get("Batch") == data["batch"] and row.get("Outcome") == "merged")):
+        if not row or (row.get("Ended") and row.get("Head commit") != entry["head"]):
             _m_common.die("train: ledger job changed; retain journal for coordinator reconciliation")
-        if row.get("Ended"):
-            continue
+        reconciled = reconciled or bool(row.get("Ended"))
         started, ended = inst.parse_time(row["Started"]), inst.parse_time(data["ended"])
         if not str(row.get("Usage", "")).startswith("host"):
             row.update(entry.get("usage", {}))
@@ -60,7 +79,7 @@ def finish(inst, n, path, data):
                     "Base commit": entry["base"], "Head commit": entry["head"],
                     "Hours": f"{_m_status.elapsed(started, ended) / 3600:.1f}" if started and ended else ""})
     _m_jobs.write_jobs(inst, n, rows)  # one atomic ledger replacement, all jobs or none
-    data["state"] = "complete"
+    data["state"] = "reconciled" if reconciled else "complete"
     save(path, data)
     inst.commit([], f"{n['id']}: train merged")
     for entry in data["accepted"]:
@@ -71,6 +90,11 @@ def finish(inst, n, path, data):
 def journals(n):
     folder = n["dir"] / "job-trains"
     folder.mkdir(exist_ok=True)
+    ignore = folder / ".gitignore"
+    text = ignore.read_text() if ignore.exists() else ""
+    if "*.log" not in text.splitlines():
+        _m_common.atomic_write(ignore, text.rstrip() + "\n*.log\n")
+        _m_common.touch(ignore)
     records = []
     for path in sorted(folder.glob("*.json")):
         try:
@@ -120,7 +144,11 @@ def cmd_train(a):
             fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             _m_common.die("train: another train owns this repository")
-        run_train(inst, n, home, verify, a)
+        try:
+            run_train(inst, n, home, verify, a)
+        finally:
+            # Persist ejections/interrupted execution evidence even when publication stops.
+            inst.commit([], f"{n['id']}: train state")
 
 
 def run_train(inst, n, home, verify, a):
@@ -236,11 +264,22 @@ def run_train(inst, n, home, verify, a):
             result, log = _m_verify.run_verify(inst, n, batch, verify, w, env)
             if dirty(stage) or ref(stage, "HEAD") != head or _m_verify.verify_inputs(n, w) != inputs:
                 _m_common.die("train: verify changed staging state; no main update")
+            if result:
+                # Pin red evidence before another run can rotate the batch's source log.
+                target = folder / (path.stem + "-" + os.urandom(12).hex() + ".log")
+                _m_common.safe_target(target)
+                source_fd = os.open(log, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+                with os.fdopen(source_fd, "rb") as source:
+                    fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
+                    with os.fdopen(fd, "wb") as pinned:
+                        shutil.copyfileobj(source, pinned)
+                log = str(target)
             data["runs"].append({"jobs": [e["branch"] for e in entries], "head": head, "result": result, "log": log})
             save(path, data)
             return result, log
 
         verified_inputs = None
+        baseline_proven = False
         accepted = build(queue, conflicts=True)
         while accepted:
             result, log = check(accepted)
@@ -248,10 +287,12 @@ def run_train(inst, n, home, verify, a):
                 verified_inputs = _m_verify.verify_inputs(n, w)
                 break
             # Prefix bisection attributes an interaction to the first job making its prefix red.
-            build([])
-            baseline, baseline_log = check([])
-            if baseline:
-                _m_common.die("train: baseline verify is red; no job blamed; log " + baseline_log)
+            if not baseline_proven:
+                build([])
+                baseline, baseline_log = check([])
+                if baseline:
+                    _m_common.die("train: baseline verify is red; no job blamed; log " + baseline_log)
+                baseline_proven = True
             low, high = 0, len(accepted)
             failing_log = log
             while high - low > 1:
@@ -262,6 +303,13 @@ def run_train(inst, n, home, verify, a):
                     high, failing_log = mid, prefix_log
                 else:
                     low = mid
+            if high == len(accepted):
+                # Only the original full run was red: rule out a transient before blame.
+                build(accepted)
+                confirmed, failing_log = check(accepted)
+                if not confirmed:
+                    verified_inputs = _m_verify.verify_inputs(n, w)
+                    break
             eject(accepted[high - 1], "first failing prefix of batch", failing_log)
             accepted.pop(high - 1)
             build(accepted)
