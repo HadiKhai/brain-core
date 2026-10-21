@@ -3,6 +3,9 @@
 import sys
 from pathlib import Path
 
+# Keep module imports read-only in installed core checkouts on every Python.
+sys.dont_write_bytecode = True
+
 # Resolve symlinked installed commands before finding this checkout's modules.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
 

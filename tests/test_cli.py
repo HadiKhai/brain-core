@@ -51,6 +51,28 @@ class EntryPoints(Scenario):
         self.assertTrue((self.tmp / "ch" / "AGENTS.md").exists())
 
 
+    def test_launcher_leaves_core_clean_without_bytecode_environment(self):
+        core = self.tmp / "core-copy"
+        shutil.copytree(CORE, core, ignore=shutil.ignore_patterns(".git", "__pycache__", ".DS_Store"))
+        self.git("init", "-q", "-b", "main", cwd=core)
+        self.git("add", "-A", cwd=core)
+        self.git("commit", "-qm", "fixture core", cwd=core)
+        env = dict(self.env)
+        env.pop("PYTHONPYCACHEPREFIX", None)
+        env.pop("PYTHONDONTWRITEBYTECODE", None)
+        # Also force beside-code caches: some system Pythons redirect them even
+        # without either environment variable, hiding writes in an installed core.
+        beside_code = ("import runpy, sys; sys.pycache_prefix = None; "
+                       "sys.argv = sys.argv[1:]; runpy.run_path(sys.argv[0], run_name='__main__')")
+        for prefix in ([], ["-c", beside_code]):
+            with self.subTest(prefix=prefix):
+                result = subprocess.run([sys.executable, *prefix, str(core / "bin/brain"), "--help"],
+                                        cwd=core, env=env, capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(self.git("status", "--porcelain", "--untracked-files=all", "--ignored", cwd=core), "")
+                self.assertEqual(list((core / "lib").rglob("__pycache__")), [])
+
+
 
 if __name__ == "__main__":
     unittest.main()
