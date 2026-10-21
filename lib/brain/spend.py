@@ -1,5 +1,7 @@
 """Spend mechanics for Brain."""
 import datetime
+from contextlib import contextmanager
+from contextvars import ContextVar
 import hashlib
 import json
 import os
@@ -282,6 +284,29 @@ def brain_terms(inst):
     return list({t for n in inst.nodes() for t in _m_guard.never_terms(n)})
 
 
+# A dashboard may aggregate in memory, but viewing it must never publish spend caches.
+_SPEND_READ_ONLY = ContextVar('brain_spend_read_only', default=False)
+
+
+@contextmanager
+def spend_read_only():
+    token = _SPEND_READ_ONLY.set(True)
+    try:
+        yield
+    finally:
+        _SPEND_READ_ONLY.reset(token)
+
+
+def spend_invalidate(inst):
+    """Changed dashboard inputs invalidate the live totals, not parsed unchanged transcripts."""
+    root = str(inst.root)
+    _MACHINE.pop(root, None)
+    _SPEND_TERMS.pop(root, None)
+    for key in list(_LIVE):
+        if key[0] == root:
+            del _LIVE[key]
+
+
 def spend_cache_dir(inst):
     return inst.root / ".brain" / "spend"
 
@@ -351,7 +376,7 @@ def spend_file(inst, path, runtime, allowed, forbidden, budget=None, window=None
                 agg["state"]["offset"] = size  # read whole: what it holds is counted
             agg["models"] = [m if not _m_guard.find_terms(m, terms) else "other" for m in agg["models"]]
             try:
-                if window is None:  # counts and digests only: no path, folder, session id or text
+                if window is None and not _SPEND_READ_ONLY.get():  # explicit spend commands may persist aggregates
                     cf.parent.mkdir(parents=True, exist_ok=True)
                     _m_common.atomic_write(cf, json.dumps({k: v for k, v in agg.items() if k not in SPEND_UNKEPT},
                                                 separators=(",", ":")))

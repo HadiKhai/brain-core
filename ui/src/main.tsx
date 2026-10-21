@@ -1,3 +1,4 @@
+import { watchLive } from "./live";
 import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { Bell, Moon, RefreshCw, Sun } from "lucide-react";
@@ -127,45 +128,11 @@ function App() {
       setConnection("Permission required");
       return;
     }
-    let source: EventSource | undefined,
-      disposed = false;
-    const controller = new AbortController();
-    fetch("/api/state?k=" + encodeURIComponent(key), {
-      signal: controller.signal,
-    })
-      .then(async (r) => {
-        if (r.status === 403) {
-          setConnection("Permission required");
-          return;
-        }
-        if (!r.ok) throw Error();
-        const data = await r.json();
-        if (disposed) return;
-        setState(data);
-        setConnection("Live");
-        source = new EventSource("/api/events?k=" + encodeURIComponent(key));
-        source.onmessage = (e) => {
-          try {
-            setState(JSON.parse(e.data));
-            setConnection("Live");
-          } catch {
-            setConnection("Updates interrupted");
-          }
-        };
-        source.onerror = () => setConnection("Updates interrupted");
-      })
-      .catch((e) => {
-        if (e.name !== "AbortError") setConnection("Connection failed");
-      });
-    return () => {
-      disposed = true;
-      controller.abort();
-      source?.close();
-    };
+    return watchLive(key, setState, setConnection);
   }, [retry]);
   useEffect(() => {
     const t = setInterval(
-      () => setState((prev) => (prev ? { ...prev } : prev)),
+      () => { if (!document.hidden) setState((prev) => (prev ? { ...prev } : prev)); },
       30000,
     );
     return () => clearInterval(t);

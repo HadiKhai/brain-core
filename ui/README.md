@@ -39,7 +39,7 @@ Open `http://127.0.0.1:4109/?k=demo` for synthetic data, or `/snapshot` for a sa
 - `tests/pagination.spec.ts` checks tab and route changes, live-data shrink and regrowth across all six paged-list implementations, and retained page-size choices. Lists share `src/hooks/use-page.ts` so the displayed range and rendered rows use the same clamped page.
 - `tests/interaction.spec.ts` adds touch, keyboard, snapshots, states and the Chromium and WebKit reader scenarios; `tests/alignment.spec.ts` audits every destination at four sizes and both themes with `../tests/ui-fitness.js` (contrast, labels, field font size, section insets, phone gutters); `tests/extremes.spec.ts` renders every destination with seeded empty, single, ten, hundred, thousand, long-text, long-title and RTL data. Set `UI_TOUR_DIR` to save these synthetic screenshots.
 
-The Python scenario suite verifies serving, key protection, the search endpoint, live changes, static asset containment and the JSON contract (fields are only ever added).
+The Python scenario suite verifies serving, key protection, the search endpoint, live changes, static asset containment and the JSON contract (fields are only ever added). `tests/test_ui_idle.py` also proves that unchanged reads reuse their snapshot, real input changes invalidate it, sampler/cache output does not trigger rebuilds, and viewing spend never writes transcript aggregates. `tests/live-idle.spec.ts` verifies the client stops streaming after 30 seconds without input, checks once a minute while idle, pauses all requests when hidden, and reconnects on activity.
 
 ## Previewing a branch
 
@@ -48,6 +48,8 @@ The Python scenario suite verifies serving, key protection, the search endpoint,
 ```sh
 BRAIN_NO_REEXEC=1 python3 <worktree>/bin/brain -b <brain> ui --port <port>
 ```
+
+The server sleeps without clients and reuses its snapshot until source metadata changes. Machine meters update separately; age-dependent decisions are rechecked every five minutes while observed. Spend aggregation stays in memory when serving the dashboard.
 
 The first output line names the serving core and its commit (`brain ui core: <path> @ <commit>`); the second is the keyed address. Look at real data only through a copy of the brain (`cp -R`), never by changing the original.
 

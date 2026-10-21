@@ -149,6 +149,11 @@ def machine_load():
 
 
 def ui_state(inst, problems=None, scan=None, spend_budget=2.0):
+    with _m_spend.spend_read_only():
+        return _ui_state(inst, problems, scan, spend_budget)
+
+
+def _ui_state(inst, problems=None, scan=None, spend_budget=2.0):
     """Everything the page shows, from the same files `brain` reads. Read-only."""
     now = inst.now_dt()
     nodes = inst.nodes()
@@ -406,6 +411,78 @@ def core_revision():
     return f"{_m_common.tilde(_m_common.CORE)} @ {head or 'no git commit'}{' (uncommitted changes)' if dirty else ''}"
 
 
+class UIInputs:
+    """Metadata only: no transcript parsing, Git status, readiness hashes or cache writes per poll."""
+    def __init__(self, inst):
+        self.root = inst.root
+        self.files = set()
+        self.trees = []
+        self.git_dirs = set()
+        for n in inst.nodes():
+            loc = n['local']
+            homes = [n['home_path']] if n['home_path'] else []
+            homes += [Path(w['path']) for w in loc.get('worktrees', {}).values() if w.get('path')]
+            for home in homes:
+                # Git's index supplies tracked and non-ignored files; directory metadata detects additions.
+                result = _m_common.git('ls-files', '-z', '--cached', '--others', '--exclude-standard', cwd=home)
+                self.files.add(home)
+                for name in result.stdout.split('\0'):
+                    if not name:
+                        continue
+                    path = home / name
+                    self.files.add(path)
+                    while path.parent != home and path.parent != path:
+                        path = path.parent
+                        self.files.add(path)
+                for flag in ('--git-dir', '--git-common-dir'):
+                    raw = _m_common.git('rev-parse', flag, cwd=home).stdout.strip()
+                    if raw:
+                        self.git_dirs.add((home / raw).resolve())
+            try:
+                reports = _m_worktrees.workbench(inst, n) / 'reports'
+                self.files.add(reports)
+                self.files.update(reports.glob('*/index.md'))
+            except SystemExit:
+                pass
+        for directory in self.git_dirs | {self.root / '.git'}:
+            self.files.update(directory / name for name in ('HEAD', 'index', 'packed-refs', 'logs/HEAD'))
+            self.trees.append(directory / 'refs')
+        sources, _, _ = _m_spend.spend_sources(inst)
+        for runtime, cfg in sources:
+            self.trees.extend(cfg / name for name in (('projects',) if runtime == 'claude' else ('sessions', 'archived_sessions')))
+        self.files.update(_m_usage.usage_file(name) for name in ('usage.json', 'subscriptions.json', 'brains.json'))
+
+    @staticmethod
+    def stamp(path):
+        try:
+            st = path.stat()
+            return (str(path), st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns)
+        except OSError:
+            return (str(path), None)
+
+    def signature(self):
+        paths = set(self.files)
+        # Brain source and recorded aggregates matter. The installed core, object store,
+        # machine sampler, locks and transcript-cache output are not dashboard inputs.
+        for root in [self.root, *self.trees]:
+            paths.add(root)
+            for top, dirs, files in os.walk(root):
+                path = Path(top)
+                if path == self.root:
+                    dirs[:] = [d for d in dirs if d not in ('core', '.git')]
+                if path == self.root / '.brain':
+                    dirs[:] = [d for d in dirs if d != 'spend']
+                    files = [f for f in files if f not in ('machine.json', 'lock')]
+                dirs.sort()
+                paths.update(path / name for name in files)
+                paths.update(path / name for name in dirs if path / name != self.root / '.brain')
+        # Explicit look-back commands publish node aggregates; dashboard polls do not.
+        paths.update((self.root / '.brain/spend/nodes').glob('*.json'))
+        rows = [self.stamp(path) for path in paths]
+        rows.append(('clock', int(time.time() // 300)))  # age/due boundaries, not a per-poll rebuild
+        return tuple(sorted(rows))
+
+
 def cmd_ui(a):
     """A live view of this brain in a browser on this machine: read-only, listening on 127.0.0.1 only."""
     import hmac
@@ -413,6 +490,7 @@ def cmd_ui(a):
     import secrets
     import threading
     import urllib.parse
+    os.environ['GIT_OPTIONAL_LOCKS'] = '0'  # a view must not refresh Git indexes on disk
     inst = _m_nodes.load()
     # Scan only explicit startup directories, once. Reuse the CLI's read-only discovery.
     scan = []
@@ -437,29 +515,43 @@ def cmd_ui(a):
         except OSError:
             return started
     lock, cond = threading.Lock(), threading.Condition()
-    box = {"json": b"", "version": 0, "problems": None, "checked": 0.0}
+    interval = max(0.05, a.every)
+    box = {"json": b"", "version": 0, "clients": 0, "last_poll": float('-inf'), "telemetry": time.monotonic()}
 
-    def refresh():
-        import time
+    def touch():
+        with cond:
+            box['last_poll'] = time.monotonic()
+            cond.notify_all()
+
+    def refresh(inputs, signature):
         while True:
+            with cond:
+                while not box['clients'] and time.monotonic() - box['last_poll'] > interval:
+                    cond.wait()
             try:
-                i = _m_instance.Instance(inst.root)
-                if time.time() - box["checked"] > 30:  # the full check is slower; once every 30 s is enough
-                    box["problems"], box["checked"] = len(_m_check.collect_problems(i)[0]), time.time()
-                st = ui_state(i, box["problems"], scan)
-                body = json.dumps(st, sort_keys=True).encode()
-                plain = json.dumps({**st, "brain": {**st["brain"], "now": ""}, "machine": {}}, sort_keys=True)
-                with cond:
-                    box["state"] = st
-                    if plain != box.get("plain") or time.time() - box.get("pushed", 0) > 30:  # machine figures, too
-                        box["pushed"] = time.time()
-                        box.update(json=body, plain=plain, version=box["version"] + 1)
+                changed = inputs.signature()
+                if changed != signature:
+                    i = _m_instance.Instance(inst.root)
+                    problems = len(_m_check.collect_problems(i)[0])
+                    _m_spend.spend_invalidate(i)
+                    st = ui_state(i, problems, scan)
+                    # Keep the pre-build signature: an edit during a build must be checked again.
+                    signature, inputs = changed, UIInputs(i)
+                    with cond:
+                        box.update(state=st, json=json.dumps(st, sort_keys=True).encode(), version=box['version'] + 1)
                         cond.notify_all()
-                    else:
-                        box["json"] = body
-            except Exception as e:  # keep serving the last good state
-                box["error"] = str(e)
-            time.sleep(a.every)
+                if time.monotonic() - box['telemetry'] >= 30:
+                    # Fast-changing meters and clock do not invalidate expensive file-derived state.
+                    st = {**box['state'], 'brain': {**box['state']['brain'], 'now': inst.now_dt().isoformat(timespec='seconds')},
+                          'machine': _m_machine.machine_state(inst)}
+                    with cond:
+                        box.update(state=st, json=json.dumps(st, sort_keys=True).encode(), version=box['version'] + 1,
+                                   telemetry=time.monotonic())
+                        cond.notify_all()
+            except Exception as e:  # keep serving the last good state; retry the same signature
+                box['error'] = str(e)
+            with cond:
+                cond.wait(timeout=interval)
 
     class H(http.server.BaseHTTPRequestHandler):
         def log_message(self, *args):
@@ -496,6 +588,7 @@ def cmd_ui(a):
             if url.path.startswith("/api/") and not hmac.compare_digest(given, key):
                 return self.send(403, b"this run's key is missing: open the address brain ui printed", "text/plain")
             if url.path == "/api/state":
+                touch()
                 return self.send(200, box["json"], "application/json")
             if url.path == "/api/search":
                 q = urllib.parse.parse_qs(url.query)
@@ -511,6 +604,9 @@ def cmd_ui(a):
                 self.send_header("Content-Type", "text/event-stream")
                 self.send_header("Cache-Control", "no-store")
                 self.end_headers()
+                with cond:
+                    box['clients'] += 1
+                    cond.notify_all()
                 seen = -1
                 try:
                     while True:
@@ -526,14 +622,16 @@ def cmd_ui(a):
                         self.wfile.flush()
                 except (BrokenPipeError, ConnectionResetError):
                     return
+                finally:
+                    with cond:
+                        box['clients'] -= 1
+                        cond.notify_all()
             self.send(404, b"not found", "text/plain")
 
-    box["problems"] = len(_m_check.collect_problems(inst)[0])
-    import time
-    box["checked"] = time.time()
-    st = ui_state(inst, box["problems"], scan)
+    st = ui_state(inst, len(_m_check.collect_problems(inst)[0]), scan)
     box.update(json=json.dumps(st, sort_keys=True).encode(), version=1, state=st)
-    threading.Thread(target=refresh, daemon=True).start()
+    inputs = UIInputs(inst)
+    threading.Thread(target=refresh, args=(inputs, inputs.signature()), daemon=True).start()
     port = a.port
     srv = None
     for p_ in range(port, port + 20):
