@@ -479,6 +479,13 @@ def cmd_due(a):
                 pass
     state = _m_machine.machine_state(inst)
     items = [item for n in nodes for item in due_items(inst, n) + changes_due(inst, n)]
+    wake_seen = set()
+    for n in nodes:
+        target, _ = _m_hosts.wake_target(inst, n)
+        diagnostic = _m_hosts.wake_diagnostic(inst, n)
+        if diagnostic and target["id"] not in wake_seen:
+            wake_seen.add(target["id"])
+            items.append({"node": target["id"], "kind": "wake", "text": diagnostic})
     items += machine_due_items(inst, nodes, state, items)
     if not a.quiet and getattr(a, "machine", False):
         items = [i for i in items if i["kind"] != "machine"] + [

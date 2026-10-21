@@ -2,6 +2,7 @@
 import os
 import re
 import sys
+import time
 from pathlib import Path
 
 from . import common as _m_common
@@ -285,6 +286,25 @@ def cmd_check(a):
         inst.commit([], "check --fix")
         inst = _m_instance.Instance(inst.root)
         problems, warnings, fixable = collect_problems(inst)
+    seen = set()
+    for n in inst.nodes():
+        target, command = _m_hosts.wake_target(inst, n)
+        if n["archived"] or target["id"] in seen or not command.startswith(("http://", "https://")):
+            continue
+        seen.add(target["id"])
+        status = _m_hosts.wake_probe(inst, target, force=getattr(a, "live", False))
+        directory = _m_hosts.wake_directory(inst, target)
+        record = _m_hosts.wake_read(directory, command, "probe-" + _m_hosts.wake_binding(command) + ".json")
+        age = max(0, int(time.time() - record["at"])) if record else 0
+        result = "HTTP " + str(status) if type(status) is int else status
+        line = f"{target['id']}: wake probe {result} (result age {age}s)"
+        if type(status) is int and 200 <= status < 300:
+            print("✓ " + line)
+            diagnostic = _m_hosts.wake_diagnostic(inst, target)
+            if diagnostic:
+                problems.append(f"{target['id']}: {diagnostic}")
+        else:
+            problems.append(line)
     for w in warnings:
         print(f"! {w}")
     if problems:
