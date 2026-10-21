@@ -1,5 +1,6 @@
 """Frozen-input hotfix contracts; all brains and diagnostic text are fabricated."""
 import contextlib
+import hashlib
 import io
 import json
 import os
@@ -123,11 +124,14 @@ class FrozenInputs(RehearsalFixture):
         self.git('submodule', 'add', '-q', str(nested), 'core', cwd=self.root)
         self.git('commit', '-qam', 'versioned core', cwd=self.root)
         original = self.git('rev-parse', 'HEAD', cwd=self.root / 'core').strip()
+        index = Path(self.git('rev-parse', '--path-format=absolute', '--git-path', 'index', cwd=self.root / 'core').strip())
+        captured_index = hashlib.sha256(index.read_bytes()).hexdigest()
         def advance():
             (self.root / 'core/bin/brain').write_text('new live core')
             self.git('commit', '-qam', 'upgrade core', cwd=self.root / 'core')
         def inspect(source, core, *args):
             self.assertEqual('captured core', (source / 'core/bin/brain').read_text())
+            self.assertEqual(captured_index, hashlib.sha256((source / 'core/.git/index').read_bytes()).hexdigest())
         outcome = self.run_rehearsal(advance, inspect_lane=inspect)
         self.assertTrue(outcome['passed'], outcome['regressions'])
         self.assertEqual(original, outcome['installed_core_commit'])
@@ -144,6 +148,36 @@ class FrozenInputs(RehearsalFixture):
             lambda: self.git('commit', '--allow-empty', '-qm', 'advance live worktree', cwd=self.root),
             inspect_lane=inspect)
         self.assertTrue(outcome['passed'], outcome['regressions'])
+
+    def test_submodule_and_external_worktree_config_locks_stay_live_only(self):
+        self.git('rm', '-qr', 'core', cwd=self.root)
+        nested = self.repo(self.tmp / 'lock-core')
+        (nested / 'bin').mkdir()
+        (nested / 'bin/brain').write_text('fixture')
+        self.git('add', 'bin', cwd=nested)
+        self.git('commit', '-qm', 'core executable', cwd=nested)
+        self.git('submodule', 'add', '-q', str(nested), 'core', cwd=self.root)
+        self.git('commit', '-qam', 'versioned core', cwd=self.root)
+        worktree = self.tmp / 'locked-worktree'
+        self.git('worktree', 'add', '-q', '-b', 'lock-fixture', str(worktree), cwd=self.root)
+        self.git('submodule', 'update', '--init', cwd=worktree)
+        original_root = self.root
+        for root, repository in [(original_root, original_root / 'core'), (worktree, worktree)]:
+            self.root = root
+            common = Path(self.git('rev-parse', '--path-format=absolute', '--git-common-dir', cwd=repository).strip())
+            lock = common / 'config.lock'
+            lock.write_text('live writer lock')
+            try:
+                with self.subTest(layout=root.name):
+                    try:
+                        outcome = self.run_rehearsal()
+                    except rehearsal.RehearsalError:
+                        self.fail('copied writer lock refused a valid frozen source')
+                    self.assertTrue(outcome['passed'])
+                    self.assertEqual('live writer lock', lock.read_text())
+            finally:
+                lock.unlink()
+        self.root = original_root
 
     def test_identical_baseline_failure_is_named_in_evidence_and_printed(self):
         old = {'brief:0': result('refused: brief limit is exceeded', code=1), 'hook': result()}

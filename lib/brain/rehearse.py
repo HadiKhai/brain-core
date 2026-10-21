@@ -294,9 +294,13 @@ def capture_gitfiles(source, dest):
                 shutil.copy2(origin, metadata / name)
         # The copied administration's old relative worktree binding is invalid
         # at its new location. Remove it before any Git discovery in this copy.
+        copied_locks = []
         for mp, md, mf in os.walk(metadata, followlinks=False):
             if any((Path(mp) / name).is_symlink() for name in md + mf):
                 raise RehearsalError('linked Git metadata refused')
+            copied_locks.extend(Path(mp) / name for name in mf if name.endswith('.lock'))
+        for lock in copied_locks:
+            lock.unlink()
         (metadata / 'config.worktree').unlink(missing_ok=True)
         unset = _m_common.git('--git-dir=' + str(metadata), '--work-tree=' + str(Path(dp)),
                               'config', '--no-includes', '--file', str(metadata / 'config'),
