@@ -1,8 +1,5 @@
 """Coordinator rotation uses accounting numbers and files, never transcript text."""
 import json
-import unittest
-from unittest import mock
-from pathlib import Path
 from core_loader import SourceFileLoader
 from scenario import Scenario, CORE
 
@@ -142,13 +139,22 @@ class Rotation(Scenario):
         out = self.b(self.r, 'rotate', 'app')
         text = (self.node / 'handover.md').read_text()
         for value in ('fixture ask', 'fixture decision', 'deferred fixture item', 'unanswered fixture ask',
-                      'job/a', 'job/b', 'fixture report', 'fixture need', 'fixture tick', 'fixture-host-task', 'a' * 64):
+                      'job/a', 'job/b', 'fixture report', 'fixture need', 'fixture tick', 'Pending wakes: 1'):
             self.assertIn(value, text)
+        local = json.loads((self.r / '.brain/rotation/app.json').read_text())
+        self.assertEqual(local['coordinator'], 'host-thread')
+        self.assertEqual(local['coordinator_sessions'], [self.sid])
+        self.assertEqual(local['schedules'], {'tick': 'fixture-host-task'})
+        self.assertEqual(local['pending_wakes'], ['a' * 64])
+        self.assertNotIn('a' * 64, text)
+        self.assertNotIn('fixture-host-task', text)
+        self.assertNotIn('SECRET-CAPABILITY', json.dumps(local))
         self.assertNotIn('SECRET-CAPABILITY', text)
         self.assertNotIn('TRANSCRIPT MUST NOT BE COPIED', text)
         self.assertIn('Launch a fresh coordinator', out)
         self.assertIn('settle', out)
         self.assertIn('backlog.md', [p.name for p in self.node.iterdir()])
+        self.assertNotIn('rotation/app.json', self.git('ls-files', cwd=self.r))
 
     def test_rotation_refuses_unreadable_handback_without_overwriting_packet(self):
         m = SourceFileLoader('rotation_refusal', str(CORE / 'bin/brain')).load_module()

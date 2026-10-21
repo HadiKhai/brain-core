@@ -69,6 +69,7 @@ For agents:
   jobs/hand-backs, schedules and pending wake state, and prints the coordinator's host steps.
   It never calls the host or copies transcript text. Reconcile live host tasks and asks before
   stopping the old thread. Wake capability URLs stay in machine-local bindings.
+- Host task IDs and previous coordinator/worktree bindings stay in an ignored local sidecar.
 - Deferred items go into `backlog.md` immediately; new nodes include it.
 
 After upgrading:

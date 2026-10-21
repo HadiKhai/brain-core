@@ -407,7 +407,9 @@ These are the latest response's accounting counts, never a sum of the conversati
 Unknown/unbound usage does not prove a short thread: bind its session before relying on due.
 
 Run `brain rotate <node>` to prepare `handover.md` from node files, open jobs and hand-backs,
-asks, deferred work, schedules and wake state. Verify the packet against files and the host's
+asks, deferred work, schedules and wake state. Its ignored `.brain/rotation/<node>.json`
+sidecar retains the previous coordinator and host-task bindings; inspect it before rebinding.
+Verify the packet against files and the host's
 live pending requests and task inventory. Launch a fresh coordinator in the node's project
 with the handover, update `coordinator=`, append the new runtime session id, rebind every
 schedule and wake task, and route outstanding requests. Tell the old thread to stop, confirm
