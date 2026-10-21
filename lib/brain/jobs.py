@@ -208,6 +208,8 @@ def cmd_handback(a):
                 "at": inst.now(), "report": _m_common.tilde(a.report) if a.report is not None else previous.get("report", ""),
                 "lessons": lessons, "ready": packet, "ready_reasons": reasons,
                 "verify_runs": count("verify_runs") + fresh, "verify_reused": count("verify_reused") + reused}
+        if a.state in ("blocked", "question"):
+            data["wake_id"] = os.urandom(16).hex()
         if getattr(a, "restart", None):
             data["restart"] = a.restart
             data["restart_id"] = os.urandom(16).hex()
@@ -227,7 +229,7 @@ def cmd_handback(a):
             message = " ".join((need or ("See report " + data["report"] if data["report"] else
                                             "Coordinator choice needed; see worker hand-back")).split())
             marker = "<!-- handback:" + digest([job_key(row), a.state, message]) + " -->"
-            wake_id = os.urandom(16).hex()
+            wake_id = data["wake_id"]
             inbox = n["dir"] / "inbox.md"
             bullet = f"- {inst.now()} from worker {a.branch}: {a.state}: {message} <!-- wake:{wake_id} --> {marker}\n"
             _m_guard.no_terms_in(n, bullet, "the inbox question")
@@ -237,7 +239,7 @@ def cmd_handback(a):
     if question_created:
         _m_hosts.request_wake(inst, n, 'wake:' + wake_id)
     elif a.state == "blocked" and not need:
-        _m_hosts.request_wake(inst, n, "handback:" + digest([job_key(row), a.state]))
+        _m_hosts.request_wake(inst, n, "wake:" + data["wake_id"])
     try:
         current = open_job(read_jobs(n) or [], a.branch)
         if current:

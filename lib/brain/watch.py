@@ -51,6 +51,7 @@ def watch_items(inst, n):
         if item['kind'] == 'stale-status':
             continue
         direct_reason = None
+        handback_episode = None
         if item['kind'] == 'inbox':
             marker = re.search(r'<!-- (?:host-question|handback):[^>]+ -->', item['text'])
             direct_reason = marker.group() if marker else None
@@ -62,7 +63,11 @@ def watch_items(inst, n):
             if any(f"from worker {row['Job']}: {item['state']}:" in line
                    and '<!-- handback:' in line for line in state['inbox']):
                 continue  # the associated inbox item owns this same wake
-            direct_reason = 'handback:' + _m_jobs.digest([item['job'], item['state']])
+            episode = (signals.get(item['job']) or {}).get('wake_id')
+            if isinstance(episode, str) and re.fullmatch(r'[0-9a-f]{32}', episode):
+                handback_episode = episode
+            direct_reason = ('wake:' + handback_episode if handback_episode else
+                             'handback:' + _m_jobs.digest([item['job'], item['state']]))
         if item['kind'] == 'overdue-question':
             continue  # routed separately to root, once per source question
         if item['kind'] == 'unsettled-threads':
@@ -79,6 +84,8 @@ def watch_items(inst, n):
         identity = item.get('job') or item['text']
         if item['kind'] == 'handback':
             identity = [identity, item.get('state')]
+            if handback_episode:
+                identity.append(handback_episode)
         text = _m_nodes.import_text(item['text'], _m_guard.never_terms(n))[:400]
         entry = {'id': watch_digest([n['id'], item['kind'], identity]),
                  'kind': item['kind'], 'text': text}

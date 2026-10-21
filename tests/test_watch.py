@@ -1,5 +1,6 @@
 """Actionable watcher regressions; fabricated instances and fake transports only."""
 import contextlib
+import argparse
 import io
 import json
 import os
@@ -87,6 +88,93 @@ class Watcher(Scenario):
             self.watch()
             self.m.wake_drain(self.inst, n, once=True)
             self.assertEqual(send.call_count, 1)
+
+    def test_blocked_episodes_share_direct_and_watcher_identity(self):
+        n = self.inst.node('root')
+        row = {**dict.fromkeys(self.m.JOB_COLS, ''), 'Job': 'import:unborn', 'Started': '2026-01-01T10:00Z'}
+        self.m.write_jobs(self.inst, n, [row])
+        args = argparse.Namespace(id='root', branch=row['Job'], state='blocked', lessons='none: fixture',
+                                  report='report.md', reviews=None, need_human=None)
+        directory = self.m.wake_directory(self.inst, n)
+        episodes, identities = [], []
+        with mock.patch.object(self.m, 'load', return_value=self.inst), \
+                mock.patch.object(self.m, 'wake_start'), \
+                mock.patch.object(self.m, 'wake_send', return_value=True) as send, \
+                contextlib.redirect_stdout(io.StringIO()):
+            for count in (1, 2):
+                self.m.cmd_handback(args)
+                record = self.m.read_handback(n, row)
+                episode = record['wake_id']
+                self.assertRegex(episode, r'^[0-9a-f]{32}$')
+                item = next(i for i in self.m.watch_items(self.inst, n) if i['kind'] == 'handback')
+                self.assertEqual(item['reason'], 'wake:' + episode)
+                self.assertEqual(item['id'], self.m.watch_digest(
+                    ['root', 'handback', [self.m.job_key(row), 'blocked', episode]]))
+                episodes.append(episode)
+                identities.append(item['id'])
+                self.assertEqual(len(list(directory.glob('*.pending'))), 1)
+                if count == 2:
+                    (directory / 'last').write_text(str(time.time() - 121))
+                self.m.wake_drain(self.inst, n, once=True)
+                self.assertEqual(send.call_count, count)
+                self.watch()
+                self.watch()
+                self.m.wake_drain(self.inst, n, once=True)
+                self.assertEqual(send.call_count, count)
+                self.assertFalse(list(directory.glob('*.pending')))
+        self.assertEqual(len(set(episodes)), 2)
+        self.assertEqual(len(set(identities)), 2)
+
+    def test_legacy_blocked_handback_keeps_stable_reason_and_identity(self):
+        n = self.inst.node('root')
+        row = {**dict.fromkeys(self.m.JOB_COLS, ''), 'Job': 'import:unborn', 'Started': '2026-01-01T10:00Z'}
+        self.m.write_jobs(self.inst, n, [row])
+        signal = self.m.handback_file(n, row)
+        signal.parent.mkdir(exist_ok=True)
+        record = {'job': row['Job'], 'started': row['Started'], 'state': 'blocked', 'report': 'report.md'}
+        signal.write_text(json.dumps(record))
+        item = next(i for i in self.m.watch_items(self.inst, n) if i['kind'] == 'handback')
+        self.assertEqual(item['reason'], 'handback:' + self.m.digest([self.m.job_key(row), 'blocked']))
+        self.assertEqual(item['id'], self.m.watch_digest(['root', 'handback', [self.m.job_key(row), 'blocked']]))
+        with mock.patch.object(self.m, 'wake_start'), mock.patch.object(self.m, 'wake_send', return_value=True) as send:
+            self.watch()
+            self.m.wake_drain(self.inst, n, once=True)
+            self.assertEqual(send.call_count, 1)
+            signal.write_text(json.dumps({**record, 'report': 'another-report.md'}))
+            self.watch()
+            self.m.wake_drain(self.inst, n, once=True)
+            self.assertEqual(send.call_count, 1)
+
+    def test_question_episode_shares_inbox_wake_and_keeps_unanswered_dedup(self):
+        n = self.inst.node('root')
+        row = {**dict.fromkeys(self.m.JOB_COLS, ''), 'Job': 'import:unborn', 'Started': '2026-01-01T10:00Z'}
+        self.m.write_jobs(self.inst, n, [row])
+        args = argparse.Namespace(id='root', branch=row['Job'], state='question', lessons='none: fixture',
+                                  report='report.md', reviews=None, need_human=None)
+        directory = self.m.wake_directory(self.inst, n)
+        with mock.patch.object(self.m, 'load', return_value=self.inst), \
+                mock.patch.object(self.m, 'wake_start'), \
+                mock.patch.object(self.m, 'wake_send', return_value=True) as send, \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.m.cmd_handback(args)
+            episode = self.m.read_handback(n, row)['wake_id']
+            self.assertIn('<!-- wake:' + episode + ' -->', (self.root / 'inbox.md').read_text())
+            item = next(i for i in self.m.watch_items(self.inst, n) if i['kind'] == 'inbox')
+            self.assertEqual(item['reason'], 'wake:' + episode)
+            self.m.wake_drain(self.inst, n, once=True)
+            self.watch()
+            self.m.cmd_handback(args)  # The same unanswered question still has one inbox owner.
+            self.assertNotEqual(self.m.read_handback(n, row)['wake_id'], episode)
+            self.watch()
+            self.m.wake_drain(self.inst, n, once=True)
+            self.assertEqual(send.call_count, 1)
+            (self.root / 'inbox.md').write_text('')
+            self.m.cmd_handback(args)
+            (directory / 'last').write_text(str(time.time() - 121))
+            self.m.wake_drain(self.inst, n, once=True)
+            self.watch()
+            self.m.wake_drain(self.inst, n, once=True)
+            self.assertEqual(send.call_count, 2)
 
     def test_provider_failure_closed_job_and_screened_excerpts(self):
         n = self.inst.node('root')
