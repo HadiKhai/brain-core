@@ -37,6 +37,19 @@ test("specialist row opens a role panel with purpose, lessons, related knowledge
   await expect(panel.getByRole("button", { name: "Copy hire command", exact: true })).toBeVisible();
 });
 
+for (const width of [1440, 320]) test(`specialist hire pager follows its rows without covering them at ${width}px`, async ({ page, state }) => {
+  await page.setViewportSize({ width, height: 900 });
+  await page.goto("/?k=demo#view=specialists&item=root%2Fproduct-reviewer");
+  const panel = page.getByRole("dialog");
+  const frame = panel.locator("[data-list-frame]");
+  await expect(frame.locator("[data-slot=table-body] [data-slot=table-row]")).toHaveCount(1);
+  const body = (await frame.locator(".list-scroll").boundingBox())!;
+  const footer = (await frame.locator(".table-footer").boundingBox())!;
+  expect(footer.y).toBeGreaterThanOrEqual(body.y + body.height - 1);
+  await panel.locator(".reader-body").evaluate(e => { e.scrollTop = e.scrollHeight; });
+  await expect(frame.getByRole("button", { name: "Next", exact: true })).toBeVisible();
+});
+
 test("unverified desktop thread routes are copy-only and never dead anchors", async ({ page, context, state }) => {
   await context.grantPermissions(["clipboard-read", "clipboard-write"]);
   await page.goto("/?k=demo#view=threads");

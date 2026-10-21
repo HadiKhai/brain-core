@@ -677,6 +677,9 @@ svg.searching .gnode:not(.match):not(.selected) { opacity: 0.28; }
 .list-surface .list-scroll { flex: 1; overflow: auto; overscroll-behavior: auto; }
 .list-scroll > [data-slot="table-container"] { overflow: visible; }
 .list-frame > .table-footer { position: sticky; bottom: 0; z-index: 1; flex-shrink: 0; background: var(--card); padding: 10px 0 0; border-top: 1px solid var(--hairline); }
+/* An embedded table follows the reader's document flow. A bottom-sticky footer
+   would jump above its rows while the rest of that document is below the fold. */
+.reader-body .list-frame > .table-footer { position: static; }
 [data-detail-row] { cursor: pointer; }
 [data-detail-row]:hover { background: color-mix(in srgb, var(--foreground) 3%, transparent); }
 [data-detail-row]:focus-visible { outline-offset: -2px; }
