@@ -51,6 +51,9 @@ For agents:
   clean worktree at the reviewed head; it otherwise reports skipped. Timeout stops its process
   group after 30 seconds. Never-name evidence refuses the brief. Reviewers must report rehearsal
   on real-shaped copies. `--contract` selects a contract instead of the recorded job contract.
+- Review no longer runs the full `scan_terms` guard pass: the brief and every committed
+  evidence blob still pass through `no_terms_in`. Run `brain guard` at hand-back for the
+  complete repository guard check.
 
 After upgrading:
 - Annotate Done means items with `test: tests/file.py::test_name` or `gap: explanation`.
