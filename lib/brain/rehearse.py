@@ -88,13 +88,13 @@ def isolated_probe_instance(inst, directory):
     return _m_instance.Instance(directory)
 
 
-def probe_delivery(inst, nodes):
+def probe_delivery(inst, nodes, probe_inst=None):
     """One authorized real POST per distinct safe binding; never publish capabilities."""
-    import urllib.error
-    import urllib.request
     statuses = []
     if _m_common.outward_links(inst.root):
         raise RehearsalError('outward-linked brain cannot probe delivery')
+    if probe_inst is not None and probe_inst.root.resolve() == inst.root.resolve():
+        raise RehearsalError('delivery cache requires a private instance')
     seen = set()
     for node in nodes:
         if not node['local'].get('coordinator') and node['id'] != 'root':
@@ -104,23 +104,12 @@ def probe_delivery(inst, nodes):
             continue  # shell transports are not webhooks; never execute them here
         seen.add(address)
         try:
-            if hasattr(_m_hosts, 'wake_probe'):
+            if probe_inst is None:
                 with tempfile.TemporaryDirectory(prefix='brain-rehearse-probe-') as td:
                     private = isolated_probe_instance(inst, Path(td))
                     status = _m_hosts.wake_probe(private, private.node(node['id']), force=True)
             else:
-                # TODO(job/wake-agent): use hosts.wake_probe once it lands.
-                class NoRedirect(urllib.request.HTTPRedirectHandler):
-                    def redirect_request(self, req, fp, code, msg, headers, newurl):
-                        return None
-                opener = urllib.request.build_opener(NoRedirect)
-                request = urllib.request.Request(address, data=b'{"event":"brain-wake"}',
-                    headers={'Content-Type': 'application/json', 'User-Agent': 'brain-rehearse/1'})
-                with opener.open(request, timeout=10) as response:
-                    status = response.status
-        except urllib.error.HTTPError as error:
-            status = error.code
-            error.close()
+                status = _m_hosts.wake_probe(probe_inst, probe_inst.node(node['id']), force=True)
         except Exception:
             status = 0
         statuses.append({'coordinator': len(statuses), 'status': status if type(status) is int else 0})
@@ -528,6 +517,9 @@ def rehearse(inst, n, branch):
             commands.append(('refresh:' + str(i), ['status', node['id'], '--refresh'], 'refresh'))
         commands += [('check', ['check'], 'read'), ('fix', ['check', '--fix'], 'fix'),
                      ('ui', ['ui', '--json'], 'read'), ('hook', ['hook', 'stop'], 'hook')]
+        # Seed the same real delivery result into both command copies. Otherwise
+        # a new check's cache miss would POST inside the network-denying sandbox.
+        delivery = probe_delivery(inst, inst.nodes(), _m_instance.Instance(frozen))
         old = run_lane(frozen, baseline, folder / 'before', nodes, commands)
         new = run_lane(frozen, candidate, folder / 'after', nodes, commands)
         flags = compare(old, new)
@@ -542,7 +534,6 @@ def rehearse(inst, n, branch):
         if (_m_verify.ready_refs(n, branch) != (head, main)
                 or _m_verify.integration_parent(n, main) != integration_base):
             flags.append('candidate or integration main moved during rehearsal')
-        delivery = probe_delivery(inst, inst.nodes())
         flags.extend(delivery_regressions(delivery))
         return {'version': 1, 'node': n['id'], 'branch': branch, 'head': head, 'main': main,
                 'installed_core_commit': baseline_commit,

@@ -14,6 +14,7 @@ For agents:
   latency; private command output is never published. Each distinct bound coordinator
   webhook also receives one real constant-event POST; non-2xx statuses fail the run
   and print only their status code, never the URL.
+  Their results seed only the temporary copies so sandboxed checks reuse the real probe.
 - Evidence is stored in the external workbench and included in the ready packet.
   `rehearse=required` refuses readiness without a passing run for the current head,
   integration main and installed-core baseline. Reviewers run rehearsal for core changes.
