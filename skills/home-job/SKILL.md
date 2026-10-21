@@ -95,7 +95,17 @@ stated; never run a polling loop in an agent.
    `command`, `inputs` (list of repo-relative globs), and optional `requires` (lane names),
    `strict_inputs` (globs), `always` (boolean), `schedule` (`job` or `nightly`). Use one source.
    Globs support `**` as a complete path segment, `*`, `?`, and leading `!` exclusions;
-   braces, character classes and extglobs are refused. Inputs match Git-tracked files.
+   braces, character classes, extglobs and leading `#` are refused. Positive patterns match
+   dotfiles, including hidden directories. A negative pattern excludes a dot path only when
+   each dot segment is explicit: `config/.babelrc,!config/*` keeps `.babelrc`, while
+   `!config/.*` excludes it. Inputs match Git-tracked paths; tracked symlinks hash the link
+   text, not the target. Declare target files separately when tests read them.
+   The last `|` separates an inline command from its inputs, so shell pipelines work.
+   Whitespace/`|` in a glob must name an actual tracked path. Each lane needs a positive
+   input pattern unless `always` is true, and each map needs at least one job lane.
+   Unmatched positive patterns warn. Map commands time out after five seconds and fail closed.
+   UI/status display recorded evidence without executing the map or hashing the repository;
+   explicit `ready` and train validation perform the complete check.
    Hand-back runs affected job lanes instead of the full `verify` command. An unchanged lane's
    last green result can be reused on the same integration base, with the same command,
    declared file contents, ignored `verify_inputs` and ports. `strict_inputs` forces a lane

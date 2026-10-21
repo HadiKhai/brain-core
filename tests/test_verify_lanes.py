@@ -4,7 +4,7 @@ from pathlib import Path
 from unittest import mock
 
 import test_verify
-from scenario import Scenario
+from scenario import Scenario, CORE
 import core_loader
 
 
@@ -119,7 +119,7 @@ class VerifyLanes(Scenario):
 
     def test_glob_semantics_and_train_recorded_base(self):
         r, home, wt, lanes = self.setup_lanes()
-        m = core_loader.SourceFileLoader('lane_hooks', str(Path(__file__).resolve().parents[1] / 'bin/brain')).load_module()
+        m = core_loader.SourceFileLoader('lane_hooks', str(CORE / 'bin/brain')).load_module()
         self.assertTrue(m.snapshot.__module__.endswith('.nodes'))
         self.assertTrue(m.lane_snapshot.__module__.endswith('.verify_lanes'))
         self.assertTrue(m.matches('root.py', ['**/*.py']))
@@ -220,7 +220,7 @@ class VerifyLanes(Scenario):
     def test_all_reused_lanes_do_not_take_a_verify_slot(self):
         r, home, wt, lanes = self.setup_lanes()
         self.record(r)
-        m = core_loader.SourceFileLoader('lane_reuse_slot', str(Path(__file__).resolve().parents[1] / 'bin/brain')).load_module()
+        m = core_loader.SourceFileLoader('lane_reuse_slot', str(CORE / 'bin/brain')).load_module()
         inst = m.Instance(r)
         n = inst.node('a')
         previous = self.read_packet()
@@ -228,3 +228,158 @@ class VerifyLanes(Scenario):
             packet, reasons = m.record_ready(inst, n, 'job', 2, previous)
         self.assertEqual(reasons, [])
         self.assertTrue(all(row['reused'] for row in packet['verify_lanes']))
+
+    def test_review_newline_and_piped_inline_command_rerun(self):
+        r, home, wt = self.job()
+        (wt / 'src').mkdir()
+        name = 'src/a\nb.ts'
+        self.commit(wt, name, 'first')
+        output = self.tmp / 'pipe-output'
+        self.b(r, 'set', 'a', 'verify_lanes=unit: echo unit | tee ' + str(output) + ' | src/**')
+        self.record(r)
+        self.assertEqual(self.read_packet()['verify_lanes'][0]['command'], 'echo unit | tee ' + str(output))
+        first = self.read_packet()['verify_lanes'][0]['log']
+        self.commit(wt, name, 'second')
+        self.record(r)
+        row = self.read_packet()['verify_lanes'][0]
+        self.assertFalse(row['reused'])
+        self.assertNotEqual(row['log'], first)
+        # The ordinary pipe-command example also invalidates on a plain src path.
+        self.commit(wt, 'src/x.ts', 'third')
+        self.record(r)
+        self.assertFalse(self.read_packet()['verify_lanes'][0]['reused'])
+
+    def test_review_invalid_maps_and_unmatched_warning(self):
+        r, home, wt = self.job()
+        cases = [([dict(name='unit', command='true', inputs=[])], 'positive input'),
+                 ([dict(name='unit', command='true', inputs=['!calc.py'])], 'positive input'),
+                 ([dict(name='night', command='true', inputs=['**'], schedule='nightly')], 'job-scheduled'),
+                 ([dict(name='unit', command='true', inputs=['tee out.log | src/**'])], 'whitespace or pipe'),
+                 ([dict(name='unit', command='true', inputs=['#comment'])], 'unsupported lane glob')]
+        for lanes, reason in cases:
+            self.b(r, 'set', 'a', 'verify_lanes=' + json.dumps(lanes))
+            self.assertIn(reason, self.record(r, ok=False))
+        self.b(r, 'set', 'a', 'verify_lanes=unit: true | missing/**')
+        self.assertIn('positive glob matches no tracked files: missing/**', self.record(r))
+        self.b(r, 'set', 'a', 'verify_lanes=' + json.dumps([dict(name='unit', command='true', always=True)]))
+        self.record(r)
+        for name in ('literal file', 'literal|pipe'):
+            self.commit(wt, name)
+            self.b(r, 'set', 'a', 'verify_lanes=' + json.dumps([dict(name='unit', command='true', inputs=[name])]))
+            self.record(r)
+
+    def test_review_display_is_cheap_timeout_and_nested_json_refuse(self):
+        r, home, wt, lanes = self.setup_lanes()
+        self.commit(wt, 'lanes.json', json.dumps(lanes))
+        marker = self.tmp / 'map-called'
+        self.b(r, 'set', 'a', 'verify_lanes=', 'verify_lanes_from=touch ' + str(marker) + '; cat lanes.json')
+        self.record(r)
+        marker.unlink()
+        m = core_loader.SourceFileLoader('lane_review_display', str(CORE / 'bin/brain')).load_module()
+        inst = m.Instance(r)
+        n = inst.node('a')
+        owner = m.ready_state.__globals__['_m_lanes']
+        with mock.patch.dict('os.environ', self.env), mock.patch.object(owner, 'lane_snapshot', side_effect=AssertionError('display executes no map or repo hash')):
+            state = m.ready_state(inst, n, 'job', display=True)
+            self.assertTrue(state['ready'])
+            self.assertEqual(state['validation'], 'recorded')
+            self.assertTrue(json.loads(self.b(r, 'ui', '--json'))['nodes'])
+            self.b(r, 'due', 'a')
+            self.assertFalse(marker.exists())
+        n['fm']['verify_lanes_from'] = 'sleep 30'
+        with mock.patch.dict('os.environ', self.env), mock.patch.object(owner, 'VERIFY_LANE_MAP_TIMEOUT', .05):
+            import time
+            start = time.monotonic()
+            state = m.ready_state(inst, n, 'job')
+            self.assertLess(time.monotonic() - start, 2)
+            self.assertIn('timed out', '; '.join(state['reasons']))
+            packet, reasons = m.record_ready(inst, n, 'job', 1, self.read_packet())
+            self.assertIsNone(packet)
+            self.assertIn('timed out', '; '.join(reasons))
+        self.commit(wt, 'lanes.json', '[' * 1500 + ']' * 1500)
+        n['fm']['verify_lanes_from'] = 'cat lanes.json'
+        with mock.patch.dict('os.environ', self.env):
+            self.assertIn('verify lanes invalid', '; '.join(m.ready_state(inst, n, 'job')['reasons']))
+            packet, reasons = m.record_ready(inst, n, 'job', 1, self.read_packet())
+            self.assertIsNone(packet)
+            self.assertIn('verify lanes invalid', '; '.join(reasons))
+        n['fm']['verify_lanes_from'] = ''
+        n['fm']['verify_lanes'] = json.dumps(lanes)
+        with mock.patch.dict('os.environ', self.env):
+            snap = owner.lane_snapshot(n, n['local']['worktrees']['job'], m.verify_env(n, 'job', n['local']['worktrees']['job']), m.verify_inputs(n, n['local']['worktrees']['job']))
+            with mock.patch.object(owner, 'lane_snapshot', side_effect=[snap, RecursionError('nested map')]):
+                packet, reasons = m.record_ready(inst, n, 'job', 1)
+                self.assertIsNone(packet)
+                self.assertIn('became unreadable', '; '.join(reasons))
+
+    def test_review_symlink_hashes_link_and_pipeline_tool_identity(self):
+        r, home, wt, lanes = self.setup_lanes()
+        target = self.tmp / 'external-data'
+        target.write_text('first')
+        (wt / 'fixture-link').symlink_to(target)
+        self.git('add', 'fixture-link', cwd=wt)
+        self.git('commit', '-qm', 'symlink fixture', cwd=wt)
+        m = core_loader.SourceFileLoader('lane_review_links', str(CORE / 'bin/brain')).load_module()
+        first = m.tracked_files({'path': str(wt)})['fixture-link']
+        target.write_text('second')
+        self.assertEqual(first, m.tracked_files({'path': str(wt)})['fixture-link'])
+        target.unlink()
+        self.assertEqual(first, m.tracked_files({'path': str(wt)})['fixture-link'])
+        tools = self.tmp / 'tools'
+        tools.mkdir()
+        executable = tools / 'fixture-runner'
+        executable.write_text('#!/bin/sh\ntrue\n')
+        executable.chmod(0o755)
+        self.env['PATH'] = str(tools) + ':' + self.env['PATH']
+        lanes[0]['command'] = 'cd . && fixture-runner'
+        self.b(r, 'set', 'a', 'verify_lanes=' + json.dumps(lanes))
+        self.record(r)
+        executable.write_text('#!/bin/sh\necho new-tool\n')
+        self.record(r)
+        self.assertTrue(all(not row['reused'] for row in self.read_packet()['verify_lanes']))
+
+    def test_review_input_map_retention_with_per_lane_logs(self):
+        r, home, wt, lanes = self.setup_lanes()
+        self.record(r)
+        m = core_loader.SourceFileLoader('lane_maps_retention', str(CORE / 'bin/brain')).load_module()
+        inst = m.Instance(r)
+        n = inst.node('a')
+        previous = self.read_packet()
+        refs = []
+        with mock.patch.dict('os.environ', self.env), mock.patch.object(m.record_ready.__globals__['_m_machine'], 'machine_wait', wraps=m.machine_wait), mock.patch.object(m.run_verify_stream.__globals__['_m_common'], 'TOUCHED', set()):
+            m.VERIFY_LOG_KEEP = 2
+            for i in range(4):
+                previous, reasons = m.record_ready(inst, n, 'job', 1, previous, reverify=True)
+                self.assertEqual(reasons, [])
+                self.assertIsInstance(previous['input_files_ref'], str)
+                self.assertEqual(m.read_verify_input_files(n, previous), {})
+                refs.append(self.packet().parent / previous['input_files_ref'])
+        self.assertEqual([p.exists() for p in refs], [False, False, True, True])
+        self.assertEqual(len(list(self.packet().parent.glob('*-inputs-*.map'))), 2)
+
+
+import unittest
+
+
+class LaneGlobReviewTable(unittest.TestCase):
+    def test_known_minimatch_results_and_conservative_dot_policy(self):
+        m = core_loader.SourceFileLoader('lane_review_glob_table', str(CORE / 'bin/brain')).load_module()
+        # Known minimatch outcomes for the supported syntax (positive dot:true;
+        # exclusions dot:false). No npm runtime is needed by the Python core.
+        cases = [('src/a\nb.ts', ['src/**'], True), ('src/a\nb.ts', ['**/*'], True),
+                 ('a/x\ny/b', ['a/**/b'], True), ('a/b', ['a/**/b'], True),
+                 ('b', ['**/b'], True), ('src/a.ts', ['src/?.ts'], True),
+                 ('src/ab.ts', ['src/?.ts'], False), ('src/\n.ts', ['src/?.ts'], True),
+                 ('src/nested/a.ts', ['src/*.ts'], False),
+                 ('.hidden/a.ts', ['**/*.ts'], True),
+                 ('config/.babelrc', ['config/.babelrc', '!config/*'], True),
+                 ('.hidden/a.ts', ['**/*.ts', '!**/*.ts'], True),
+                 ('.hidden/a.ts', ['**/*.ts', '!.hidden/**'], False),
+                 ('config/.babelrc', ['**', '!config/.*'], False),
+                 ('src/a.ts', ['!src/**', '**/*.ts'], False)]
+        for path, patterns, expected in cases:
+            with self.subTest(path=path, patterns=patterns):
+                self.assertEqual(bool(m.matches(path, patterns)), expected)
+        for pattern in ('a/**b', '{}', '[]', '!!x', '#comment'):
+            with self.subTest(pattern=pattern), self.assertRaises(ValueError):
+                m.glob_regex(pattern)

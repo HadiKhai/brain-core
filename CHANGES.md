@@ -12,6 +12,11 @@ For agents:
   or `verify_lanes_from`, a command printing the documented JSON lane map. Hand-backs
   run affected job lanes and reuse each lane's last green on the same base. Changes to
   map output, verify configuration, lockfiles or toolchain force every job lane.
+- Lane glob matching includes newline paths and positive dotfile patterns. Exclusions require
+  explicit dot segments. Inline pipelines use the last `|` as the input separator; ambiguous
+  globs, lanes with no positive inputs (unless always), and all-nightly maps are refused.
+- Map commands time out after five seconds. UI/status use recorded lane evidence; explicit
+  readiness/train checks still execute the map and hash inputs. Nested JSON fails closed.
 - Each lane records status, duration and a full private log; `brain ready` shows them.
   Dependencies skip after failure; strict inputs and always-run lanes can force execution.
   Optional `verify_lanes_check` checks project-owned test coverage. Nightly lanes are left

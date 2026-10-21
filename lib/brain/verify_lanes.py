@@ -3,6 +3,7 @@ import hashlib
 import json
 import os
 import platform
+import signal
 import re
 import shutil
 import shlex
@@ -13,12 +14,14 @@ from pathlib import Path
 from . import common as _m_common
 from . import jobs as _m_jobs
 
+VERIFY_LANE_MAP_TIMEOUT = 5
+
 
 def glob_regex(pattern):
     original = pattern
     if pattern.startswith('!'):
         pattern = pattern[1:]
-    if (not pattern or pattern.startswith('/') or any(x in pattern for x in '[]{}()\\!')
+    if (not pattern or pattern.startswith(('/', '#')) or any(x in pattern for x in '[]{}()\\!')
             or any(p in ('', '.', '..') for p in pattern.split('/'))):
         raise ValueError('unsupported lane glob: ' + original)
     out, i = '', 0
@@ -36,13 +39,56 @@ def glob_regex(pattern):
         else:
             out += '[^/]*' if c == '*' else '[^/]' if c == '?' else re.escape(c)
             i += 1
-    return re.compile('^' + out + '$')
+    return re.compile('^' + out + '$', re.DOTALL)
 
 
 def matches(path, patterns):
     positive = [p for p in patterns if not p.startswith('!')]
     return (any(glob_regex(p).fullmatch(path) for p in positive)
-            and not any(glob_regex(p).fullmatch(path) for p in patterns if p.startswith('!')))
+            and not any(excludes(path, p[1:]) for p in patterns if p.startswith('!')))
+
+
+def excludes(path, pattern):
+    # Negative patterns use explicit-dot semantics, while positive patterns
+    # deliberately overinclude dotfiles. Align ** segments with a small DP.
+    parts, pats = path.split('/'), pattern.split('/')
+    memo = {}
+    def match(i, j):
+        if (i, j) in memo:
+            return memo[i, j]
+        if j == len(pats):
+            result = i == len(parts)
+        elif pats[j] == '**':
+            result = match(i, j + 1) or (i < len(parts) and not parts[i].startswith('.') and match(i + 1, j))
+        else:
+            result = (i < len(parts) and (not parts[i].startswith('.') or pats[j].startswith('.'))
+                      and bool(glob_regex(pats[j]).fullmatch(parts[i])) and match(i + 1, j + 1))
+        memo[i, j] = result
+        return result
+    return bool(glob_regex(pattern).fullmatch(path)) and match(0, 0)
+
+
+def lane_config_hash(n):
+    return _m_jobs.digest(sorted((k, v) for k, v in n['fm'].items() if k.startswith('verify')))
+
+
+def map_output(command, w, env):
+    proc = subprocess.Popen(command, shell=True, cwd=w['path'], env=env,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
+    try:
+        stdout, _ = proc.communicate(timeout=VERIFY_LANE_MAP_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        proc.stdout.close()
+        proc.stderr.close()
+        proc.wait()
+        raise ValueError('verify_lanes_from timed out')
+    if proc.returncode:
+        raise ValueError('verify_lanes_from failed (exit %d)' % proc.returncode)
+    return stdout.decode('utf-8')
 
 
 def lane_map(n, w, env):
@@ -53,10 +99,7 @@ def lane_map(n, w, env):
     if not inline and not source:
         return [], ''
     if source:
-        proc = subprocess.run(source, shell=True, cwd=w['path'], env=env, capture_output=True)
-        if proc.returncode:
-            raise ValueError('verify_lanes_from failed (exit %d)' % proc.returncode)
-        raw = proc.stdout.decode('utf-8')
+        raw = map_output(source, w, env)
         data = json.loads(raw)
     elif inline.startswith('['):
         raw, data = inline, json.loads(inline)
@@ -64,7 +107,7 @@ def lane_map(n, w, env):
         raw, data = inline, []
         for item in inline.split(';'):
             name, sep, rest = item.partition(':')
-            command, pipe, inputs = rest.partition('|')
+            command, pipe, inputs = rest.rpartition('|')
             if not sep or not pipe:
                 raise ValueError('verify_lanes needs name: command | input globs')
             data.append(dict(name=name.strip(), command=command.strip(), inputs=_m_common.lst(inputs)))
@@ -87,10 +130,14 @@ def lane_map(n, w, env):
                 raise ValueError('lane ' + field + ' must be a list of strings')
         if type(lane['always']) is not bool or lane['schedule'] not in ('job', 'nightly'):
             raise ValueError('invalid lane always or schedule')
+        if not lane['always'] and not any(not p.startswith('!') for p in lane['inputs']):
+            raise ValueError('lane needs a positive input glob unless always: ' + name)
         for pat in lane['inputs'] + lane['strict_inputs']:
             glob_regex(pat)
         lanes.append(lane)
         names.add(name)
+    if not any(l['schedule'] != 'nightly' for l in lanes):
+        raise ValueError('lane map must contain a job-scheduled lane')
     ordered = []
     while len(ordered) < len(lanes):
         available = [l for l in lanes if l not in ordered and set(l['requires']) <= {x['name'] for x in ordered}]
@@ -120,9 +167,8 @@ def tracked_files(w):
             value = oid
         else:
             try:
-                value = hashlib.sha256(file.read_bytes()).hexdigest()
-                if file.is_symlink():
-                    value += ':' + os.readlink(file)
+                data = os.fsencode(os.readlink(file)) if mode == '120000' else file.read_bytes()
+                value = hashlib.sha256(data).hexdigest()
             except OSError:
                 raise ValueError('unreadable lane input: ' + path)
         found[path] = [mode, value]
@@ -141,6 +187,14 @@ def lane_snapshot(n, w, env, inputs):
     if not lanes:
         return None
     files = tracked_files(w)
+    warnings = []
+    for lane in lanes:
+        for pat in lane['inputs'] + lane['strict_inputs']:
+            literal = pat[1:] if pat.startswith('!') else pat
+            if any(c.isspace() or c == '|' for c in literal) and literal not in files:
+                raise ValueError('whitespace or pipe in lane glob must name a tracked path: ' + pat)
+            if not pat.startswith('!') and not any(matches(path, [pat]) for path in files):
+                warnings.append('lane ' + lane['name'] + ' positive glob matches no tracked files: ' + pat)
     tools = []
     # PATH and interpreter identity are part of the toolchain, as are standard project pins.
     commands = [lane['command'] for lane in lanes] + [n['fm'].get('verify_lanes_check', '')]
@@ -148,8 +202,9 @@ def lane_snapshot(n, w, env, inputs):
     for command in commands:
         try:
             words = shlex.split(command)
-            if words and '=' not in words[0] and '/' not in words[0]:
-                executables.add(words[0])
+            # Conservatively fingerprint every PATH-resolved token, including
+            # commands after cd, pipelines, env wrappers and shell conditionals.
+            executables.update(word for word in words if '=' not in word and '/' not in word)
         except ValueError:
             pass  # The shell reports malformed commands as an ordinary lane failure.
     for tool in sorted(executables):
@@ -166,7 +221,7 @@ def lane_snapshot(n, w, env, inputs):
                                'VIRTUAL_ENV', 'JAVA_HOME', 'RUSTUP_TOOLCHAIN', 'NODE_OPTIONS',
                                'PYTHONPATH', 'CC', 'CXX', 'CFLAGS', 'CXXFLAGS', 'LDFLAGS'})])
     hashes = {l['name']: _m_jobs.digest([inputs, sorted((p, v) for p, v in files.items() if matches(p, l['inputs']))]) for l in lanes}
-    return dict(lanes=lanes, map_hash=map_hash, context=context, hashes=hashes, files=files)
+    return dict(lanes=lanes, map_hash=map_hash, config_hash=lane_config_hash(n), context=context, hashes=hashes, files=files, warnings=warnings)
 
 
 def changed_since(cwd, head, current):
