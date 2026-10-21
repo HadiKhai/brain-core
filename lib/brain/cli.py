@@ -359,7 +359,12 @@ def main():
         opt("--by", help="reviewer runtime (default: one the builder didn't use)"), opt("--focus"),
         opt("--why-separate", help="reason for a separate reviewer; defaults to independent second-runtime review"),
         opt("--allow-unexplained", action="store_true", help="allow an urgent launch without a reason"),
-        opt("--model", help="job model for scoped usage limits"), opt("--out"))
+        opt("--model", help="job model for scoped usage limits"), opt("--out"),
+        opt("--reason", choices=("security", "schema", "privacy"), help="exception for another full round or round 3+"),
+        opt("--check-fix", action="store_true", help="only check prior blockers/majors and fix regressions"),
+        opt("--findings", help="prior findings JSON: list of objects with severity and text"),
+        opt("--fix-base", help="reviewed commit before the fixes; defaults to previous review head"),
+        opt("--contract", help="contract file; defaults to the job's recorded contract"))
     cmd("train", _m_train.cmd_train, "batch ready jobs onto local main, verify once, and print the release command", "id",
         opt("--jobs", nargs="+", help="explicit job order (space or comma separated); all must be ready"))
     cmd("ready", _m_verify.cmd_ready, "check a worker's ready packet against the branch and cached origin default (local main without origin)", "id",

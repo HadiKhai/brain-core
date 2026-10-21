@@ -5,6 +5,27 @@ upgrading. `brain changes <node>` shows the entries this node's coordinator hasn
 `brain due <node>` lists them until `brain changes <node> --seen`. Entry headings are
 `## <date>: <title>`; once released, a heading never changes.
 
+## 2026-10-21: Reviews use one full round and a fix check
+
+For agents:
+- `brain review` records the round, kind, reviewed head and exception reason for existing open jobs.
+  It never creates a job for a plain branch; its brief says when rounds are unrecorded and uncapped.
+  A second full round or any third recorded brief requires `--reason security|schema|privacy`.
+- `--check-fix --findings <prior.json>` includes only prior blockers/majors and the fix range.
+  Findings are JSON objects with severity and text. `--fix-base` overrides the previous head.
+- Each brief reports contract-test gaps, the optional `fitness=<command>` gate and seed lint
+  against committed test/fixture content using guard/scrub. Fitness runs only in a registered,
+  clean worktree at the reviewed head; it otherwise reports skipped. Timeout stops its process
+  group after 30 seconds. Never-name evidence refuses the brief. Reviewers must report rehearsal
+  on real-shaped copies. `--contract` selects a contract instead of the recorded job contract.
+- Review no longer runs the full `scan_terms` guard pass: the brief and every committed
+  evidence blob still pass through `no_terms_in`. Run `brain guard` at hand-back for the
+  complete repository guard check.
+
+After upgrading:
+- Annotate Done means items with `test: tests/file.py::test_name` or `gap: explanation`.
+  Existing review counts remain counted; use the appropriate exception reason for more rounds.
+
 ## 2026-10-21: Four worker message kinds
 
 For agents:

@@ -41,15 +41,16 @@ class Review(Scenario):
         out = self.b(r, "review", "app", "--branch", "fix-login", "--built-by", "claude", "--focus", "auth")
         self.assertIn("Reviewer runtime: codex", out)
         self.assertIn(f"Run in: {wt}", out)
+        self.assertIn('"Review reason": ""', self.b(r, "jobs", "app", "--branch", "fix-login"))
         self.assertIn("login.py", out)
         self.assertIn("Don't modify any file", out)
         self.assertIn("has its own owners", out)
         self.assertNotIn(str(r), out)                        # nothing from above the boundary
         self.assertIn("brain recall app", out)
         (r / "nodes/app/knowledge.md").write_text("# K\n\n- notes\n")
-        self.assertNotIn("knowledge.md", self.b(r, "review", "app", "--branch", "fix-login", "--built-by", "claude"))
+        self.assertNotIn("knowledge.md", self.b(r, "review", "app", "--branch", "fix-login", "--built-by", "claude", "--reason", "security"))
         self.assertIn("Reviewer runtime: claude",
-                      self.b(r, "review", "app", "--branch", "fix-login", "--built-by", "codex"))
+                      self.b(r, "review", "app", "--branch", "fix-login", "--built-by", "codex", "--reason", "security"))
         self.b(r, "review", "app", "--branch", "fix-login", "--built-by", "codex", "--by", "codex", ok=False)
 
 

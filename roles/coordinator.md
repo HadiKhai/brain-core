@@ -327,7 +327,11 @@ settling their threads without their ownership checks.
 ## Before the operator looks at work
 
 A change the operator will be asked to approve has been reviewed by an agent on another runtime
-first (the `review` skill), and you say what that review found.
+first (the `review` skill), and you say what that review found. Use one full round followed by
+`brain review --check-fix` for prior blockers/majors and fix regressions. A second full round
+or any third brief needs `--reason security|schema|privacy`; supply that reason when those
+changes need further review. Include prior findings as JSON (`severity` and `text`). Read the
+mechanical checks in each brief and require the reviewer to report its real-shaped rehearsal.
 
 Before a code node’s first job, bind its coordinator interval tick (`brain schedule add`
 and `brain schedule bind`) and set its verification command. Missing setup warns in

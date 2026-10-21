@@ -427,7 +427,7 @@ class Measures(Scenario):
         self.assertIn("| job-a |", jobs)
         self.assertEqual(self.git("status", "--porcelain", "--", "nodes/app/job-ledger.md", cwd=r).strip(), "")  # committed
         self.b(r, "review", "app", "--branch", "job-a", "--built-by", "claude")
-        self.b(r, "review", "app", "--branch", "job-a", "--built-by", "claude")
+        self.b(r, "review", "app", "--branch", "job-a", "--built-by", "claude", "--reason", "security")
         wa = self.tmp / "code" / "app-work" / "worktrees" / "job-a"
         (wa / "a.txt").write_text("a\n")
         self.git("add", "a.txt", cwd=wa); self.git("commit", "-qm", "A", cwd=wa)
@@ -489,7 +489,7 @@ class Measures(Scenario):
         st = r / "nodes" / "app" / "status.md"
         st.write_text(st.read_text() + "\n- the coordinator's edit, not committed yet\n")
         ps = [subprocess.Popen([sys.executable, str(r / "core" / "bin" / "brain"), "review", "app", "--branch", "job-a",
-                                "--built-by", "claude"], cwd=r, env=self.env, stdout=subprocess.DEVNULL,
+                                "--built-by", "claude", "--reason", "security"], cwd=r, env=self.env, stdout=subprocess.DEVNULL,
                                stderr=subprocess.PIPE, text=True) for _ in range(16)]
         errs = [p.communicate()[1] for p in ps]
         self.assertEqual([p.returncode for p in ps], [0] * 16, errs)
@@ -984,7 +984,8 @@ class Workflow(Scenario):
         self.assertIn("needs a reason", self.b(r, *hire, "--why-separate", "", ok=False))
         review = ("review", "a", "--branch", "job", "--base", "main", "--built-by", "codex")
         self.assertIn("Why a separate agent: Independent second-runtime review.", self.b(r, *review))
-        self.assertIn("Why a separate agent: Check independently", self.b(r, *review,
+        self.assertIn('"Review reason": ""', self.b(r, "jobs", "a", "--branch", "job"))
+        self.assertIn("Why a separate agent: Check independently", self.b(r, *review, "--reason", "security",
                       "--why-separate", "Check independently"))
         contract = self.tmp / "contract.md"
         contract.write_text("".join("## " + field + "\nSynthetic scope.\n\n" for field in
@@ -992,10 +993,10 @@ class Workflow(Scenario):
                             "## Why separate\nDistinct expertise.\n")
         self.b(r, "jobs", "a", "--branch", "job", "--contract-file", str(contract))
         self.assertIn("Why a separate agent: Distinct expertise.", self.b(r, *hire))
-        self.assertIn("Why a separate agent: Independent second-runtime review.", self.b(r, *review))
+        self.assertIn("Why a separate agent: Independent second-runtime review.", self.b(r, *review, "--reason", "security"))
         contract.write_text(contract.read_text().replace("Distinct expertise.", ""))
         self.b(r, "jobs", "a", "--branch", "job", "--contract-file", str(contract))
-        self.assertIn("Why a separate agent: Independent second-runtime review.", self.b(r, *review))
+        self.assertIn("Why a separate agent: Independent second-runtime review.", self.b(r, *review, "--reason", "security"))
 
     def test_contract_input_overlap_normalization_and_closed_jobs(self):
         loader = core_loader.SourceFileLoader("brain_aggregation", str(CORE / "bin/brain"))
@@ -1164,12 +1165,12 @@ class Workflow(Scenario):
         self.assertNotIn("Earlier rounds", first)
         self.assertIn("## The job's contract", first)
         self.assertIn("All cases pass", first)
-        second = self.b(r, "review", "a", "--branch", "job", "--built-by", "claude")
+        second = self.b(r, "review", "a", "--branch", "job", "--built-by", "claude", "--reason", "security")
         self.assertIn("This is review round 2", second)
         self.assertIn("same kind of problem everywhere", second)
         self.assertNotIn("caps reviews", second)
-        self.assertIn("caps reviews at 3 rounds", self.b(r, "review", "a", "--branch", "job", "--built-by", "claude"))
-        self.b(r, "review", "a", "--branch", "job", "--built-by", "claude")
+        self.assertIn("This is review round 3", self.b(r, "review", "a", "--branch", "job", "--built-by", "claude", "--reason", "security"))
+        self.b(r, "review", "a", "--branch", "job", "--built-by", "claude", "--reason", "security")
         self.assertIn("4 review rounds, over the cap", self.b(r, "jobs", "a"))
         status = r / "nodes/a/status.md"
         text = status.read_text()
