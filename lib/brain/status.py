@@ -19,6 +19,7 @@ from . import knowledge as _m_knowledge
 from . import machine as _m_machine
 from . import nodes as _m_nodes
 from . import schedules as _m_schedules
+from . import rotation as _m_rotation
 from . import spend as _m_spend
 from . import transitions as _m_transitions
 from . import upgrade as _m_upgrade
@@ -323,7 +324,7 @@ def due_evidence(inst, n):
         if not r["Ended"] and not _m_jobs.handback_file(n, r).exists() and _m_verify.read_ready_packet(inst, n, r["Job"], r):
             signals[_m_jobs.job_key(r)] = {"state": "done", "report": "", "legacy_ready": True}
     # Node's own commits only, excluding status (including its generated refresh commit) and children.
-    names = ["brief.md", "decisions.md", "node.md", "inbox.md", "sources", "AGENTS.md", _m_jobs.JOBS_FILE,
+    names = ["brief.md", "decisions.md", "backlog.md", "node.md", "inbox.md", "sources", "AGENTS.md", _m_jobs.JOBS_FILE,
              "job-handbacks"]
     paths = [str((n["dir"] / name).relative_to(inst.root)) for name in names]
     last = _m_common.git("log", "-1", "--format=%H %cI", "--", *paths, cwd=inst.root).stdout.strip()
@@ -365,6 +366,9 @@ def due_items(inst, n, evidence=None, include_stale=True):
     items = []
     def add(kind, text, **extra):
         items.append({"node": n["id"], "kind": kind, "text": _m_guard.redact(text, _m_guard.never_terms(n)), **extra})
+    rotation = _m_rotation.rotation_due(inst, n)
+    if rotation:
+        add("rotate", rotation)
     for blocked in blocked_entries(inst, n):
         if blocked["escalated"]:
             add("blocked-overdue", blocked["text"], **blocked_metadata(inst, n, "blocked-overdue", blocked["text"]))

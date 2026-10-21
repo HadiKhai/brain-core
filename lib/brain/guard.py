@@ -86,7 +86,7 @@ def no_terms_in(n, text, what):
         _m_common.die(f"{what} contains {', '.join(hits)}: reword it (the term itself stays out of every brief)")
 
 
-NOTE_FILES = {"AGENTS.md", "CLAUDE.md", "brief.md", "status.md", "decisions.md", "inbox.md", "node.md",
+NOTE_FILES = {"AGENTS.md", "CLAUDE.md", "brief.md", "status.md", "decisions.md", "backlog.md", "inbox.md", "node.md",
               NEVER_FILE, "job-ledger.md", "worktree-setup.sh"}  # a node's own notes: they may discuss the rule
 
 

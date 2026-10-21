@@ -38,6 +38,14 @@ class Hardening(Scenario):
         (nd / "never-name.txt").write_text("OldCo\n")
         return nd
 
+    def test_backlog_has_the_same_note_exemption_as_decisions(self):
+        r = self.init('fixture')
+        self.b(r, 'new', 'notes', '--title', 'Notes')
+        nd = self.never(r, 'notes')
+        for name in ('decisions.md', 'backlog.md'):
+            (nd / name).write_text('Discuss the OldCo never-name rule.\n')
+        self.assertIn('guard: clean', self.b(r, 'guard', 'notes'))
+
     def test_guard_on_a_home_inside_the_brain(self):
         r = self.init("alice")
         self.b(r, "new", "notes", "--title", "Notes")

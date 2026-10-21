@@ -116,6 +116,12 @@ class InstallAndUpgrade(Scenario):
 
 
 class ReleaseNotes(Scenario):
+    def test_shipped_changes_entry_ids_are_unique(self):
+        m = core_loader.SourceFileLoader('brain_unique_changes', str(CORE / 'bin/brain')).load_module()
+        ids = [entry['id'] for entry in m.changes_entries((CORE / 'CHANGES.md').read_text())]
+        self.assertTrue(ids)
+        self.assertEqual(len(ids), len(set(ids)))
+
     def test_upgrade_notices_have_a_dated_heading(self):
         notes = (CORE / "CHANGES.md").read_text()
         module = core_loader.SourceFileLoader("brain_release_notes", str(CORE / "bin/brain")).load_module()

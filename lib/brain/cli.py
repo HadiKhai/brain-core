@@ -23,6 +23,7 @@ from . import knowledge as _m_knowledge
 from . import machine as _m_machine
 from . import nodes as _m_nodes
 from . import reports as _m_reports
+from . import rotation as _m_rotation
 from . import schedules as _m_schedules
 from . import spend as _m_spend
 from . import status as _m_status
@@ -243,6 +244,7 @@ def main():
             ", ".join(f"## {f}" for f in _m_jobs.CONTRACT_FIELDS) + "; an optional ## Budget, e.g. 20M tokens, 3 h)"),
         opt("--usage-file", dest="usage_file", help="coordinator: the job's usage as the host reports it (JSON); "
             "wins over what transcripts show"))
+    cmd("rotate", _m_rotation.cmd_rotate, "prepare a file-based coordinator handover; prints host steps", "id")
     cmd("due", _m_status.cmd_due, "coordinator actions and machine holds; empty means no output",
         opt("--machine", action="store_true", help="also show informational machine readings, even without node actions"),
         opt("id", nargs="?"), opt("--json", action="store_true"),

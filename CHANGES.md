@@ -82,6 +82,26 @@ After upgrading:
 - Read the named paths when readiness refuses. Fix setup rather than spending another full verify
   discovering a first-run env rewrite. The next handback adds private per-path diagnostic evidence.
 
+## 2026-10-21: Rotate coordinators from files
+
+For agents:
+- `brain due` raises `rotate` at 150k latest input-context tokens or 50 conversation
+  turns from Claude/Codex accounting; configure `rotate_tokens=` / `rotate_turns=` per node.
+  Tool responses do not count as turns. Unknown new-session bindings request registration.
+- `brain rotate <node>` writes `handover.md` from status, decisions, backlog, inbox, all open
+  jobs/hand-backs, schedules and pending wake state, and prints the coordinator's host steps.
+  It never calls the host or copies transcript text. Reconcile live host tasks and asks before
+  stopping the old thread. Wake capability URLs stay in machine-local bindings.
+- Host task IDs and previous coordinator/worktree bindings stay in an ignored local sidecar.
+- Deferred items go into `backlog.md` immediately; new nodes include it.
+
+After upgrading:
+- Read the coordinator role and T3 adapter. Record runtime session IDs in the ordered
+  `coordinator_sessions` machine binding with `brain set <node> coordinator_sessions=<new id>`;
+  this retains prior IDs and selects the new ID last. Host thread IDs are different.
+  Spend includes every recorded coordinator session.
+- Create `backlog.md` for older nodes when deferring work. Launch the new coordinator with
+  the handover, update the binding, rebind schedules/wakes, then stop and settle the old one.
 
 ## 2026-10-21: Core mechanics split into Python modules
 

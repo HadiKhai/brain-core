@@ -549,7 +549,7 @@ def cmd_use(a):
 
 # ---------- hooks ----------
 
-COORDINATOR_FILES = ["brief.md", "status.md", "decisions.md", "sources", "AGENTS.md"]
+COORDINATOR_FILES = ["brief.md", "status.md", "decisions.md", "backlog.md", "sources", "AGENTS.md"]
 REMIND_MINUTES = int(os.environ.get("BRAIN_HOOK_REMIND_MINUTES", "60"))
 
 
