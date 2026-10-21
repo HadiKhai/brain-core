@@ -445,7 +445,7 @@ def cmd_hire(a):
     out = [f"Role: worker, hired as specialist `{sp['id']}` ({sp['fm'].get('title', '')}).",
            f"Run in: {where}  ·  runtime: {runtime}  ·  class: {a.job_class}" + (f"  ·  model: {a.model}" if a.model else ""),
            "The rules, agents and skills where you run come first (axiom 7); this brief adds to them.",
-           "", _m_guard.redact(usage, _m_guard.never_terms(target)), ""]
+           "", a.selection_line, "", _m_guard.redact(usage, _m_guard.never_terms(target)), ""]
     if target["sealed"]:
         out += ["This work happens in a project with its own owners. Leave nothing in it that names "
                 "where this brief came from (axiom 6). Ask before pushing, publishing or anything "
@@ -465,7 +465,7 @@ def cmd_hire(a):
     out += handback_lines(inst, target, branch=a.branch) + report_lines(job=bool(a.branch))
     text = "\n".join(out) + "\n"
     _m_guard.no_terms_in(target, text, "the brief")
-    _m_jobs.record_job_route(inst, target, a.branch, a.job_class, runtime, a.model)
+    _m_jobs.record_job_route(inst, target, a.branch, a.job_class, runtime, a.model, effort=a.effort)
     if a.job:
         rows = inst.local.setdefault("hires", [])
         record = {"specialist": sp["id"], "at": sp["node"]["id"], "node": target["id"],
@@ -690,6 +690,19 @@ def report_lines(job=False):
              "Lessons: what the next job should know, or none: <reason>; ") + "and what is still open."]
 
 
+def launch_selection(inst, n, a, runtime, subscription, row, kind):
+    """Use configured model names, never invent a model or provider identity."""
+    a.model = a.model or n["fm"].get("route_model_" + runtime) or inst.cfg.get("route_model_" + runtime) or "runtime default"
+    a.effort = _m_jobs.job_effort(n, row, kind, getattr(a, "effort", None))
+    instance = (subscription or {}).get("host_provider_instance_id") or runtime
+    if a.model == "runtime default":
+        a.selection_line = (f"modelSelection: unavailable; set route_model_{runtime} or --model "
+                            f"(reasoningEffort: {a.effort}).")
+    else:
+        selection = {"instanceId": instance, "model": a.model, "options": {"reasoningEffort": a.effort}}
+        a.selection_line = "modelSelection: " + json.dumps(selection)
+
+
 def worker_route(inst, n, a):
     """Route all worker briefs with the same runtime pin and model usage limits."""
     row = _m_jobs.open_job(_m_jobs.read_jobs(n) or [], getattr(a, "branch", None))
@@ -699,5 +712,5 @@ def worker_route(inst, n, a):
         inst, kind, runtime=pin, model=a.model,
         weekly_cap=n["fm"].get("route_weekly_cap", inst.cfg.get("route_weekly_cap", 60)))
     a.job_class = kind
-    a.model = a.model or n["fm"].get("route_model_" + runtime) or inst.cfg.get("route_model_" + runtime) or "runtime default"
+    launch_selection(inst, n, a, runtime, subscription, row, kind)
     return runtime, _m_guard.redact(usage, _m_guard.never_terms(n))

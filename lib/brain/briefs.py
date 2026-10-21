@@ -40,7 +40,7 @@ def import_brief(a):
     out = [f"Role: import worker for node `{n['id']}` ({n['fm'].get('title', '')}).",
            f"Run in: {n['dir']}  ·  runtime: {runtime}  ·  class: {a.job_class}" + (f"  ·  model: {a.model}" if a.model else ""),
            "The rules, agents and skills where you run come first (axiom 7); this brief adds to them.",
-           "", usage, "",
+           "", a.selection_line, "", usage, "",
            f"Source repository (read-only): {home}", f"Snapshot commit: {head}",
            f"Read and follow: {_m_common.CORE / 'skills' / 'import' / 'SKILL.md'}", "",
            "## Task", "",
@@ -155,7 +155,7 @@ def cmd_brief(a):
     task = Path(a.task_file).read_text() if a.task_file else (a.task or "<!-- the task, what done means, "
                                                                           "where outputs go -->")
     if a.small:
-        out = [f"Role: worker in node `{n['id']}`; small job.", head, _m_guard.redact(usage, _m_guard.never_terms(n)),
+        out = [f"Role: worker in node `{n['id']}`; small job.", head, a.selection_line, _m_guard.redact(usage, _m_guard.never_terms(n)),
                *shared, "Follow this node's rules. Task: " + task.strip(),
                "Clear, low risk, minutes, no shared-state changes. If that stops being true, hand back for a full job.",
                *_m_knowledge.limits_lines(n), *_m_knowledge.knowledge_lines(inst, n, task),
@@ -175,7 +175,7 @@ def cmd_brief(a):
         return
     out = [f"Role: worker in node `{n['id']}` ({n['fm'].get('title', '')}), started by its coordinator.", head,
            "The rules, agents and skills where you run come first (axiom 7); this brief adds to them.", "",
-           _m_guard.redact(usage, _m_guard.never_terms(n)), ""]
+           a.selection_line, "", _m_guard.redact(usage, _m_guard.never_terms(n)), ""]
     if n["sealed"]:
         out += ["This work happens in a project with its own owners. Leave nothing in it that names where this "
                 "brief came from (axiom 6). Ask before pushing, publishing or anything irreversible (axiom 24).",
@@ -208,7 +208,7 @@ def cmd_brief(a):
     out += _m_knowledge.handback_lines(inst, n, a.to, branch=a.branch) + _m_knowledge.report_lines(job=bool(a.branch))
     text = "\n".join(out) + "\n"
     _m_guard.no_terms_in(n, text, "the brief")
-    _m_jobs.record_job_route(inst, n, a.branch, a.job_class, runtime, a.model)
+    _m_jobs.record_job_route(inst, n, a.branch, a.job_class, runtime, a.model, effort=a.effort)
     if a.out:
         _m_history.write_out(inst, n, a.out, text)
     else:

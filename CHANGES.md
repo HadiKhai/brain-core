@@ -38,20 +38,26 @@ After upgrading:
 - Read the named paths when readiness refuses. Fix setup rather than spending another full verify
   discovering a first-run env rewrite. The next handback adds private per-path diagnostic evidence.
 
-## 2026-10-21: Route jobs by declared class and weekly usage
+## 2026-10-21: Route jobs by declared class and effort
 
 For agents:
-- `brief`, `hire` and `review` accept `--class`; a worker also uses its contract's
-  `## Class`. Build/ui/migration/docs default to Codex, diagnose/review to Claude.
-  Above `route_weekly_cap` (60%), an unpinned build uses the other runtime if its
-  weekly reading is known. Explicit runtimes and node pins win; usage never hides a brief.
-- The v3 ledger preserves `Class` and planned `Model` alongside observed `Models`.
-  Old rows and unknown columns remain readable. Independent reviews keep the other runtime.
+- `brief`, `hire` and `review` accept `--class`; workers also use contract `## Class`.
+  Build/ui/migration/docs/mechanical use Codex; weekly usage never switches builders
+  to Claude. Diagnose/review use Claude. Explicit runtimes and node pins win. At
+  a stop line the brief keeps the runtime and names eligible alternatives for an
+  explicit `--runtime` choice. `route_weekly_cap` no longer switches builders;
+  `class_allows_fallback` disables automatic other-runtime retries, including legacy jobs.
+- Effort defaults: build/ui/migration/review high; diagnose xhigh; docs/mechanical medium.
+  Contract `## Effort` overrides the default; `--effort` wins. Briefs print exact
+  `modelSelection` using the configured model, host instance and reasoningEffort.
+- The v3 ledger preserves `Class`, planned `Model` and `Effort` alongside observed
+  `Models`. Old rows and unknown columns survive. Review metadata stays separate.
 
 After upgrading:
-- Declare job classes. Set node `route_weekly_cap` to change the threshold and
-  `route_model_codex` / `route_model_claude` to name default launch models. Without
-  a model setting, the planned model is labelled `runtime default`; `--model` overrides it.
+- Declare class and optional effort. Set node/instance `route_model_codex` and
+  `route_model_claude` to name launch models; `--model` overrides them. Without
+  a model setting, the planned model is `runtime default` and `modelSelection`
+  explicitly says unavailable. Configure it before launching.
 
 ## 2026-10-21: Core mechanics split into Python modules
 

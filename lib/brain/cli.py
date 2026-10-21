@@ -178,6 +178,7 @@ def main():
         opt("--why-separate", help="why this concern needs its own agent (or contract ## Why separate)"),
         opt("--allow-unexplained", action="store_true", help="allow an urgent launch without a separation reason"),
         opt("--class", dest="job_class", choices=_m_jobs.JOB_CLASSES),
+        opt("--effort", choices=_m_jobs.JOB_EFFORTS),
         opt("--runtime"), opt("--model", help="job model for scoped usage limits"),
         opt("--to", help="the thread the worker reports to (default: the node's coordinator)"), opt("--out"))
     cmd("scrub", _m_nodes.cmd_scrub, "filter source data without revealing never-name terms; reads paths or stdin",
@@ -323,6 +324,7 @@ def main():
     cmd("hire", _m_knowledge.cmd_hire, "print a specialist's brief for a job: brain hire <specialist> <node> --task \"...\"",
         "specialist", "node", opt("--task", required=True), opt("--items", default=""),
         opt("--runtime"), opt("--class", dest="job_class", choices=_m_jobs.JOB_CLASSES),
+        opt("--effort", choices=_m_jobs.JOB_EFFORTS),
         opt("--model", help="job model for scoped usage limits"), opt("--out"), opt("--branch"),
         opt("--why-separate", help="why this specialist needs a separate agent; defaults to the contract"),
         opt("--allow-unexplained", action="store_true", help="allow an urgent launch without a reason"),
@@ -353,6 +355,7 @@ def main():
         "id", opt("--branch", required=True), opt("--base"), opt("--built-by", dest="built_by"),
         opt("--by", "--runtime", help="reviewer runtime (default: one the builder didn't use)"), opt("--focus"),
         opt("--class", dest="job_class", choices=_m_jobs.JOB_CLASSES),
+        opt("--effort", choices=_m_jobs.JOB_EFFORTS),
         opt("--why-separate", help="reason for a separate reviewer; defaults to independent second-runtime review"),
         opt("--allow-unexplained", action="store_true", help="allow an urgent launch without a reason"),
         opt("--model", help="job model for scoped usage limits"), opt("--out"))

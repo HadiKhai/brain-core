@@ -625,8 +625,12 @@ def usage_rows(inst=None, refresh=False, before_launch=False):
 
 
 def class_allows_fallback(job_class):
-    """Missing legacy classes permit fallback; Claude-required classes do not."""
-    return job_class not in ("diagnose", "review")
+    """Automatic cross-runtime retries are disabled; explicit runtime choices still win.
+
+    Builders stay on Codex and review/diagnose stay on Claude. Missing legacy
+    classes default to build, so they cannot authorize an automatic switch either.
+    """
+    return False
 
 
 def class_route(inst, job_class, runtime=None, model=None, cached_only=False, weekly_cap=None, runtimes=None):
@@ -635,7 +639,7 @@ def class_route(inst, job_class, runtime=None, model=None, cached_only=False, we
     Usage informs this choice; even exhausted or unknown meters leave a brief available.
     The optional runtime is an explicit or node pin and always wins.
     """
-    preferred = "codex" if class_allows_fallback(job_class) else "claude"
+    preferred = "claude" if job_class in ("diagnose", "review") else "codex"
     allowed_runtimes = list(inst.runtimes if runtimes is None else runtimes)
     reason = f"Routing: class {job_class or 'build'} defaults to {preferred}."
     if preferred not in allowed_runtimes:
@@ -647,13 +651,9 @@ def class_route(inst, job_class, runtime=None, model=None, cached_only=False, we
     chosen = runtime or preferred
     if runtime:
         reason += f" Runtime pin: {runtime} wins."
-    cap = weekly_cap if weekly_cap is not None else inst.cfg.get("route_weekly_cap", 60)
-    try:
-        cap = float(cap)
-        if not 0 <= cap <= 100:
-            raise ValueError()
-    except (TypeError, ValueError):
-        _m_common.die("route_weekly_cap must be a percentage from 0 to 100")
+    if job_class not in ("diagnose", "review"):
+        reason += " Builder policy keeps Codex regardless of weekly usage; only an explicit runtime or node pin changes it."
+    # weekly_cap is retained for callers of the earlier interface; it never switches builders.
     try:
         if usage_config()["autodetected"]:
             return chosen, None, reason + " Usage unknown: no subscriptions.json; no provider refresh."
@@ -688,31 +688,20 @@ def class_route(inst, job_class, runtime=None, model=None, cached_only=False, we
     measured = [(weekly(r), r) for r in available if weekly(r) is not None]
     selected = min(measured, key=lambda x: (rank(x[1])[0], x[0], rank(x[1])))[1] if measured else next(iter(available), None)
     used = weekly(selected) if selected else None
-    if not runtime and class_allows_fallback(job_class) and used is not None and used > cap:
-        alternate = "claude" if chosen == "codex" else "codex"
-        alternatives = [(weekly(r), r) for r in rows if r["runtime"] == alternate and weekly(r) is not None
-                        and (weekly(r) <= cap or weekly(r) < used) and below_stop(r)]
-        # Unknown capacity is never presented as spare; an allowed measured alternative is advisory.
-        if alternate in allowed_runtimes and alternatives:
-            selected = min(alternatives, key=lambda x: (rank(x[1])[0], x[0], rank(x[1])))[1]
-            chosen = alternate
-            reason += f" {preferred} weekly meter {used:g}% exceeds route_weekly_cap {cap:g}%; using {chosen}."
-        else:
-            reason += f" {preferred} weekly meter {used:g}% exceeds {cap:g}%; no alternative with verified lower usage below its stop line."
-    elif used is None:
+    if used is None:
         reason += " Usage unknown: weekly reading missing/stale; keeping this runtime."
     else:
-        reason += f" Weekly meter {used:g}% (routing cap {cap:g}%)."
+        reason += f" Weekly meter {used:g}%; keeping {chosen}."
     if selected:
         active = active_windows(selected)
         if any(w["used_percent"] >= policy.get("stop_percent", 85) for w in active):
             reason += " Usage: subscription reached its stop line. Stop starting jobs; the brief remains available."
             if runtime:
                 reason += f" Pinned runtime {runtime} reached its stop line."
-                other = next((r for r in rows if r["runtime"] != runtime and
-                              r["runtime"] in allowed_runtimes and below_stop(r)), None)
-                if other:
-                    reason += f" Alternative: {other['label']} ({other['runtime']}); choose --runtime explicitly."
+            other = next((r for r in rows if r["runtime"] != chosen and
+                          r["runtime"] in allowed_runtimes and below_stop(r)), None)
+            if other:
+                reason += f" Alternative: {other['label']} ({other['runtime']}); choose --runtime explicitly."
         host = selected.get("host_provider_instance_id") or "unbound"
         reason += f" Subscription: {selected['label']} ({selected['id']}) · host instance: {host}."
     return chosen, selected, reason

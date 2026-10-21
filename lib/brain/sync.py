@@ -37,7 +37,7 @@ def cmd_review(a):
     reviewer, subscription, usage = _m_usage.class_route(inst, kind, runtime=pin, model=a.model,
         weekly_cap=n["fm"].get("route_weekly_cap", inst.cfg.get("route_weekly_cap", 60)), runtimes=others)
     usage += " Independent review uses the other runtime from the builder."
-    a.model = a.model or n["fm"].get("route_model_" + reviewer) or inst.cfg.get("route_model_" + reviewer) or "runtime default"
+    _m_knowledge.launch_selection(inst, n, a, reviewer, subscription, row, kind)
     where, base = None, a.base
     if n["external"]:
         if not (n["home_path"] and n["home_path"].exists()):
@@ -57,7 +57,7 @@ def cmd_review(a):
     diffstat = d.stdout.strip()
     out = [f"Reviewer runtime: {reviewer}  (the change was built on {built}) · class: {kind}",
            f"Run in: {where}" + (f"  ·  model: {a.model}" if a.model else ""), "",
-           _m_guard.redact(usage, _m_guard.never_terms(n)), "",
+           a.selection_line, "", _m_guard.redact(usage, _m_guard.never_terms(n)), "",
            "Role: worker, reviewing a change you didn't write. Don't modify any file, commit or push.",
            "The rules, agents and skills where you run come first (axiom 7): if this project has its own "
            "review checklist or reviewer agents, apply them too.", ""]
@@ -97,7 +97,7 @@ def cmd_review(a):
     text = "\n".join(out) + "\n"
     _m_guard.no_terms_in(n, text, "the review brief")
     _m_jobs.job_reviewed(inst, n, a.branch)
-    _m_jobs.record_job_route(inst, n, a.branch, kind, reviewer, a.model, review=True)
+    _m_jobs.record_job_route(inst, n, a.branch, kind, reviewer, a.model, review=True, effort=a.effort)
     if a.out:
         _m_history.write_out(inst, n, a.out, text)
     else:

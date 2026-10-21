@@ -101,6 +101,78 @@ for line in sys.stdin:
         return {"windows": windows if source != "unknown" else {}, "source": source,
                 "read_at": time.time() - age if source != "unknown" else None, "note": ""}
 
+    def test_builders_keep_codex_at_65_and_stop_line(self):
+        root = self.init("alice")
+        inst = self.m.Instance(root)
+        config = self.declare(self.subscription("cx"), self.subscription("cl", runtime="claude"))
+        for used in (65, 90):
+            self.cache(config, [self.reading(10, weekly=used), self.reading(10, weekly=20)])
+            for kind in ("build", "ui", "migration", "docs", "mechanical"):
+                runtime, sub, why = self.m.class_route(inst, kind, weekly_cap=1, cached_only=True)
+                self.assertEqual(runtime, "codex")
+                self.assertEqual(sub["id"], "cx")
+                self.assertIn(f"Weekly meter {used}%; keeping codex", why)
+                self.assertIn("Builder policy", why)
+                if used == 90:
+                    self.assertIn("stop line", why)
+                    self.assertIn("Alternative: cl (claude)", why)
+                    self.assertIn("choose --runtime explicitly", why)
+            self.assertEqual(self.m.class_route(inst, "review", cached_only=True)[0], "claude")
+            self.assertEqual(self.m.class_route(inst, "build", runtime="claude", cached_only=True)[0], "claude")
+        for kind in (None, *self.m.JOB_CLASSES):
+            self.assertFalse(self.m.class_allows_fallback(kind))
+
+    def test_class_effort_mappings(self):
+        root = self.init("alice")
+        node = self.m.Instance(root).node("root")
+        for kind, expected in (("build", "high"), ("ui", "high"), ("migration", "high"),
+                               ("docs", "medium"), ("mechanical", "medium"),
+                               ("review", "high"), ("diagnose", "xhigh")):
+            with self.subTest(kind=kind):
+                self.assertEqual(self.m.job_effort(node, None, kind), expected)
+
+    def test_effort_overrides_ledger_and_exact_launch_selection(self):
+        root = self.init("alice")
+        home = self.repo(self.tmp / "app")
+        self.b(root, "new", "a", "--title", "A", "--home", str(home))
+        self.b(root, "set", "a", "runtime=", "route_model_codex=configured-codex", "route_model_claude=configured-claude")
+        self.b(root, "wt", "add", "a", "job")
+        inst = self.m.Instance(root)
+        node = inst.node("a")
+        row = self.m.open_job(self.m.read_jobs(node), "job")
+        contract = self.m.contract_file(node, row)
+        contract.parent.mkdir(exist_ok=True)
+        contract.write_text("## Class\nbuild\n## Effort\nmedium\n")
+        config = self.declare(self.subscription("cx"), self.subscription("cl", runtime="claude"))
+        self.cache(config, [self.reading(10, weekly=65), self.reading(10, weekly=20)])
+        def selection(text):
+            return json.loads(next(line.split(": ", 1)[1] for line in text.splitlines()
+                                   if line.startswith("modelSelection: {")))
+        text = self.b(root, "brief", "a", "--branch", "job")
+        self.assertEqual(selection(text), {"instanceId": "host-cx", "model": "configured-codex",
+                                         "options": {"reasoningEffort": "medium"}})
+        row = self.m.open_job(self.m.read_jobs(node), "job")
+        self.assertEqual((row["Model"], row["Effort"]), ("configured-codex", "medium"))
+        text = self.b(root, "brief", "a", "--branch", "job", "--effort", "xhigh")
+        self.assertEqual(selection(text)["options"]["reasoningEffort"], "xhigh")
+        self.assertEqual(self.m.open_job(self.m.read_jobs(node), "job")["Effort"], "xhigh")
+        self.b(root, "specialist", "new", "qa", "--title", "QA")
+        text = self.b(root, "hire", "qa", "a", "--branch", "job", "--class", "docs", "--task", "x", "--effort", "low")
+        self.assertEqual(selection(text)["options"]["reasoningEffort"], "low")
+        self.assertEqual(self.m.open_job(self.m.read_jobs(node), "job")["Effort"], "low")
+        text = self.b(root, "review", "a", "--branch", "job", "--built-by", "codex", "--effort", "high")
+        self.assertEqual(selection(text), {"instanceId": "host-cl", "model": "configured-claude",
+                                         "options": {"reasoningEffort": "high"}})
+        self.assertEqual(self.m.open_job(self.m.read_jobs(node), "job")["Review effort"], "high")
+        contract.write_text("## Class\nbuild\n## Effort\ninvalid\n")
+        out = self.b(root, "brief", "a", "--branch", "job", ok=False)
+        self.assertIn(contract.name, out)
+        self.assertIn("## Effort", out)
+        self.b(root, "brief", "a", "--effort", "invalid", ok=False)
+        # Missing model config is explicit; never fabricate an exact host model.
+        self.b(root, "set", "a", "route_model_codex=")
+        self.assertIn("modelSelection: unavailable", self.b(root, "brief", "a", "--class", "docs"))
+
     def test_class_route_autodetection_never_refreshes_providers(self):
         root = self.init("alice")
         inst = self.m.Instance(root)
@@ -144,7 +216,7 @@ for line in sys.stdin:
             self.cache(config, [self.reading(10, weekly=65), self.reading(five_hour, weekly=weekly)])
             self.assertEqual(self.m.class_route(inst, "build", cached_only=True)[0], "codex")
         self.cache(config, [self.reading(10, weekly=90), self.reading(10, weekly=70)])
-        self.assertEqual(self.m.class_route(inst, "build", cached_only=True)[0], "claude")
+        self.assertEqual(self.m.class_route(inst, "build", cached_only=True)[0], "codex")
 
     def test_pinned_alternative_requires_all_windows_below_stop(self):
         root = self.init("alice")
@@ -235,9 +307,9 @@ for line in sys.stdin:
         self.cache(config, [self.reading(10, weekly=65), self.reading(20, weekly=35)])
         with mock.patch.object(self.m, "usage_refresh", side_effect=AssertionError("provider called")):
             routed, sub, why = self.m.class_route(inst, "build", cached_only=True)
-            self.assertEqual(routed, "claude")
-            self.assertEqual(sub["id"], "cl")
-            self.assertIn("65% exceeds route_weekly_cap 60%", why)
+            self.assertEqual(routed, "codex")
+            self.assertEqual(sub["id"], "cx")
+            self.assertIn("Weekly meter 65%; keeping codex", why)
             self.assertEqual(self.m.class_route(inst, "review", cached_only=True)[0], "claude")
             self.assertEqual(self.m.class_route(inst, "diagnose", cached_only=True)[0], "claude")
             self.assertEqual(self.m.class_route(inst, "build", runtime="codex", cached_only=True)[0], "codex")
@@ -247,7 +319,7 @@ for line in sys.stdin:
             self.assertEqual(self.m.class_route(inst, kind, cached_only=True)[0], "claude")
         for kind in ("build", "ui", "migration", "docs"):
             self.assertEqual(self.m.class_route(inst, kind, cached_only=True)[0], "codex")
-        self.assertTrue(self.m.class_allows_fallback(None))
+        self.assertFalse(self.m.class_allows_fallback(None))
         for kind in ("diagnose", "review"):
             self.assertFalse(self.m.class_allows_fallback(kind))
         self.cache(config, [self.reading(5, weekly=60), self.reading(1, weekly=10)])
@@ -261,7 +333,7 @@ for line in sys.stdin:
         root = self.init("alice")
         home = self.repo(self.tmp / "app")
         self.b(root, "new", "a", "--title", "A", "--home", str(home))
-        self.b(root, "set", "a", "runtime=", "route_model_claude=example-claude")
+        self.b(root, "set", "a", "runtime=", "route_model_claude=example-claude", "route_model_codex=example-codex")
         self.b(root, "wt", "add", "a", "job")
         inst = self.m.Instance(root)
         node = inst.node("a")
@@ -272,10 +344,10 @@ for line in sys.stdin:
         config = self.declare(self.subscription("cx"), self.subscription("cl", runtime="claude"))
         self.cache(config, [self.reading(10, weekly=65), self.reading(20, weekly=35)])
         text = self.b(root, "brief", "a", "--branch", "job", "--task", "review diagnose prose cannot classify")
-        for part in ("class: build", "runtime: claude", "model: example-claude", "65% exceeds"):
+        for part in ("class: build", "runtime: codex", "model: example-codex", "Weekly meter 65%; keeping codex"):
             self.assertIn(part, text)
         row = self.m.open_job(self.m.read_jobs(node), "job")
-        self.assertEqual((row["Class"], row["Runtime"], row["Model"]), ("build", "claude", "example-claude"))
+        self.assertEqual((row["Class"], row["Runtime"], row["Model"]), ("build", "codex", "example-codex"))
         self.assertEqual(self.m.job_class(node, row), "build")
         text = self.b(root, "brief", "a", "--branch", "job", "--class", "review", "--runtime", "codex", "--model", "example-codex")
         self.assertIn("runtime: codex", text)
