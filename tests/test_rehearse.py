@@ -314,7 +314,7 @@ class RehearsalDelivery(unittest.TestCase):
     def test_real_post_user_agent_status_codes_and_no_redirect_or_url_output(self):
         import http.server
         import threading
-        from types import SimpleNamespace
+        from brain.instance import Instance
         seen = []
         class Handler(http.server.BaseHTTPRequestHandler):
             def do_POST(self):
@@ -332,9 +332,15 @@ class RehearsalDelivery(unittest.TestCase):
         nodes = [dict(id='root' if i == 0 else 'n' + str(i),
                       local=dict(coordinator='thread', wake=base + '/' + str(status) + '/capability'))
                  for i, status in enumerate((204, 403, 302))]
-        inst = SimpleNamespace(root=self.root, node=lambda _: nodes[0], local_of=lambda _: {})
+        (self.root / 'instance.md').write_text('---\nname: sample\n---\n')
+        inst = Instance(self.root)
+        for node in nodes:
+            directory = self.root if node['id'] == 'root' else self.root / 'nodes' / node['id']
+            directory.mkdir(parents=True, exist_ok=True)
+            (directory / 'node.md').write_text('---\nid: ' + node['id'] + '\nhome: here\n---\n')
+            inst.local['nodes'][node['id']] = node['local']
         try:
-            statuses = rehearsal.probe_delivery(inst, nodes)
+            statuses = rehearsal.probe_delivery(inst, inst.nodes())
         finally:
             server.shutdown()
             server.server_close()
