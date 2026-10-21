@@ -1040,7 +1040,8 @@ def runaway_jobs(inst, n):
 def attention_items(inst, nodes):
     """[(node id, kind, text)]: what waits on the operator, node by node."""
     out = []
-    if any(n["id"] == "root" for n in nodes) and inst.local.get("auto_upgrade") != "on":
+    if (any(n["id"] == "root" and not n["archived"] and not paused(n) for n in nodes)
+            and inst.local.get("auto_upgrade") != "on"):
         update = _m_upgrade.core_update(inst, check=False)  # the cached answer only: listing needs never wait on a network
         if update:
             out.append(("root", "core-update", f"core update available ({update[0][:7]} -> {update[1][:7]}): "

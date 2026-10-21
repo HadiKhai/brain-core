@@ -62,6 +62,9 @@ class InboxNoise(Scenario):
                        f'- fixture from brain: heavy work hold cleared [machine episode {episode} close]']
         protected = [legacy[-1] + ' <!-- ' + marker + ':fixture -->'
                      for marker in ('host-question', 'handback', 'worker-failure')]
+        protected += [legacy[0].replace('sustained 5-minute load',
+                                       'sustained 5-minute load <!-- ' + marker + ':fixture -->')
+                      for marker in ('host-question', 'handback', 'worker-failure')]
         protected += ['- fixture from worker: heavy work hold cleared; please choose a plan']
         path = self.root / 'inbox.md'
         path.write_text('\n'.join(legacy + protected) + '\n')
@@ -137,6 +140,14 @@ class InboxNoise(Scenario):
         self.assertTrue(any(i['kind'] == 'inbox' and i['node'] == 'reading' for i in items))
         self.assertNotIn('reading: no coordinator', self.b(self.root))
         self.assertNotIn('setup', [i['kind'] for i in self.inbox('reading')])
+
+    def test_paused_root_hides_cached_update_attention(self):
+        self.b(self.root, 'relabel', 'root', 'state:paused')
+        self.inst = self.m.Instance(self.root)
+        root = self.inst.node('root')
+        with mock.patch.object(self.m, 'core_update', return_value=('a' * 40, 'b' * 40)):
+            self.assertEqual(self.m.attention_items(self.inst, [root]), [])
+            self.assertEqual(self.m.inbox_items(self.inst, [root])[0], [])
 
     def test_job_budget_and_median_advice_only_reaches_owning_coordinator(self):
         self.new('parent')
