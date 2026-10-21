@@ -677,7 +677,10 @@ raise SystemExit(result)
                 self.assertEqual(q.rows[0]["state"], "queued")
                 seen.append(q.rows[0]["token"])
             (m.machine_dir() / "machine-care.json").write_text("{}")
-        with mock.patch.object(m.time, "sleep", side_effect=repair), contextlib.redirect_stdout(io.StringIO()) as out:
+        # The global sleep mock can also intercept subprocess.run's ps polling before
+        # machine_wait publishes its row. This test owns policy repair, not OS identity.
+        with mock.patch.object(m, 'process_stamp', return_value='fixture-policy-owner'), \
+                mock.patch.object(m.time, "sleep", side_effect=repair), contextlib.redirect_stdout(io.StringIO()) as out:
             token = m.machine_wait("verify")
         self.assertEqual(seen, [token])
         self.assertIn("policy invalid", out.getvalue())
