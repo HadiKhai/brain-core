@@ -580,21 +580,30 @@ def stale_thread_warnings(n, thread=None):
     """Keep stale references useful for host inspection, but warn before sending."""
     if not n["external"]:
         return []
-    branches = {r["Job"] for r in read_jobs(n) or []}
+    rows = read_jobs(n) or []
+    branches = {r["Job"] for r in rows}
     for row in _m_status.active_work(n, include_closed=True):
         name = row[0].replace("`", "").split()
         if name:
             branches.add(name[0])
     warnings = []
     for branch in sorted(branches):
+        if _m_briefs.import_job(branch):
+            continue  # Import studies run in the node, never in a job worktree.
+        jobs = [r for r in rows if r["Job"] == branch]
+        if thread is None and jobs and all(closed_job(r) and r.get("Settled") for r in jobs):
+            continue
         refs = bound_worker_threads(n, branch)
         if not refs or (thread is not None and not any(t == thread for t, _ in refs)):
             continue
         w = n["local"].get("worktrees", {}).get(branch)
         if w and Path(w["path"]).is_dir():
             continue
-        warnings.append(f"warning: job {branch}: bound worker thread workspace is gone or no longer registered; "
-                        "do not send to the old thread. Start a fresh thread in a fresh worktree for follow-on work.")
+        state = ("is gone; do not send to the old thread" if w else
+                 "is not registered on this machine; confirm its host workspace before sending. "
+                 "If it was removed, do not send to the old thread")
+        warnings.append(f"warning: job {branch}: bound worker thread workspace {state}. "
+                        "Start a fresh thread in a fresh worktree for follow-on work after removal.")
     return warnings
 
 
@@ -602,12 +611,17 @@ def print_worktree_threads(n, branch, dry_run=False):
     lines = [f"{branch}: bound worker threads before worktree removal:"]
     refs = bound_worker_threads(n, branch)
     lines += [f"  {thread} ({source})" for thread, source in refs] or ["  none recorded; inspect the host for unrecorded job threads"]
+    if refs:
+        if dry_run:
+            lines += ["  Required order before removal: message the thread before pruning: tell it the job is done and request any final hand-back.",
+                      "  Then confirm it has stopped and reconcile pending requests; settle it through the host before removal."]
+        else:
+            lines += ["  Required order before this command: worker told the job is done and final hand-back requested; stopped and pending requests reconciled; then safely settled through the host.",
+                      "  This command removes the worktree now. Do not message these threads after removal.",
+                      "  If those steps were missed, inspect and safely settle through the host only; use a fresh thread in a fresh worktree for follow-on work."]
+        lines.append("  Inspect ownership first; never settle coordinators or other open jobs. Already settled threads need no message.")
     if dry_run:
         lines.append("  dry-run: listing only; no messages, settlement or removal performed")
-    else:
-        lines += ["  Host steps: message the thread before pruning: tell it the job is done and request any final hand-back.",
-                  "  Then confirm it has stopped and reconcile pending requests; settle it through the host before removal.",
-                  "  Inspect ownership first; never settle coordinators or other open jobs. Already settled threads need no message."]
     print(_m_guard.redact("\n".join(lines), _m_guard.never_terms(n)), flush=True)
 
 
@@ -622,7 +636,8 @@ def print_thread_checklist(n, row):
               if ambiguous else matches[0][1])
     text = (f"Threads to settle for {row['Job']} (brain-job: {job_key(row)}):\n"
             + "  Worker from Active work: " + worker + "\n"
-            + "  Message the thread before pruning: tell it the job is done and request any final hand-back, then settle it safely.\n"
+            + "  While its workspace still exists, message the thread before pruning: tell it the job is done, then settle it safely.\n"
+            + "  If its worktree is already gone, do not message it; inspect and safely settle through the host only, and use a fresh thread in a fresh worktree for follow-on work.\n"
             + "  Find delegated/sub-agent descendants by parentThreadId and reviewers by the brain-job marker.\n"
             + "  Settle only when the ledger says merged or closed (abandoned/studied count as closed), "
             "no thread is running or waiting, and no pending requests remain. "

@@ -66,8 +66,8 @@ class MergeTrain(Scenario):
         self.detach()
         out = self.b(root, 'train', 'a', '--jobs', 'one')
         self.assertIn('fixture-stage-worker (Active work)', out)
-        self.assertIn('message the thread before pruning', out)
-        self.assertIn('Then confirm it has stopped', out)
+        self.assertIn('worker told the job is done', out)
+        self.assertIn('then safely settled', out)
         batch = self.batches()[0]
         local = json.loads((root / '.brain/local.json').read_text())
         self.assertNotIn(batch['batch'], local['nodes']['a']['worktrees'])

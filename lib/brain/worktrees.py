@@ -26,7 +26,8 @@ def job_where(n, branch):
     if branch and not w:
         _m_common.die(_m_guard.redact(f"no worktree for {branch} in {n['id']} (brain wt add {n['id']} <branch>)", _m_guard.never_terms(n)))
     if w and not Path(w["path"]).exists():
-        _m_common.die(f"the worktree for {branch} is gone ({_m_common.tilde(w['path'])}); brain wt prune {n['id']}, then add it again")
+        _m_common.die(f"the worktree for {branch} is gone ({_m_common.tilde(w['path'])}); do not message its old thread; "
+                      "start a fresh thread in a fresh worktree for follow-on work")
     where = Path(w["path"]) if w else (n["home_path"] if n["external"] else n["dir"])
     return where, w
 
@@ -300,6 +301,7 @@ def cmd_wt_rm(a):
         _m_common.die(f"{a.branch}: {reason}; worktree retained")
     state = worktree_state(home, w, a.branch, n) if w else (None, False, "")
     _m_jobs.print_job_handback(n, a.branch)
+    _m_jobs.print_worktree_threads(n, a.branch)
     remove_worktree(inst, n, a.branch, a.force)
     _m_jobs.job_ended(inst, n, a.branch, "merged" if state[1] else "abandoned", job_commits(home, w, a.branch), a.cause or "",
               worktree=(w or {}).get("path"))

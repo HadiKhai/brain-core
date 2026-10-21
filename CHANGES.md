@@ -8,12 +8,16 @@ upgrading. `brain changes <node>` shows the entries this node's coordinator hasn
 ## 2026-10-21: Keep worker threads visible before pruning
 
 For agents:
-- Worktree prune and train staging cleanup list bound worker threads before removal,
+- Worktree prune/removal and train staging cleanup list bound worker threads before removal,
   with host steps to message the finished worker first, then safely settle it.
   Job-close checklists remind coordinators to message before pruning. Cleanup still
   permits already settled jobs; no host action is automatic.
+- Dry-run lists the host plan before actual cleanup. A real removal warns against
+  sending afterwards; inspect and settle missed threads through the host only.
 - Message helpers and rotation handovers warn about stale job-thread workspaces,
   naming the job and suggesting a fresh thread in a fresh worktree for follow-on work.
+  Import studies need no worktree; unregistered machine-local paths require a host
+  check. Rotation omits already settled history from its warnings.
 - `brain wt prune --dry-run` only lists candidates and bindings; it no longer fetches
   or prunes Git worktree metadata.
 

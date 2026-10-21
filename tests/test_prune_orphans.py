@@ -52,7 +52,7 @@ class PruneThreadLifecycle(AutonomyProject):
             self.assertTrue(wt.exists())
             self.assertIn('fixture-bound-worker (worker:', output.getvalue())
             self.assertIn('fixture-active-worker (Active work)', output.getvalue())
-            self.assertIn('message the thread before pruning', output.getvalue())
+            self.assertIn('Required order before this command: worker told the job is done', output.getvalue())
             return original_remove(*args, **kwargs)
 
         with mock.patch.dict(os.environ, self.env, clear=True), \
@@ -64,9 +64,11 @@ class PruneThreadLifecycle(AutonomyProject):
         self.assertIn('fixture-bound-worker (worker:', out)
         self.assertIn('fixture-active-worker (Active work)', out)
         self.assertLess(out.index('bound worker threads'), out.index('Threads to settle'))
-        self.assertLess(out.index('message the thread before pruning'), out.index('Then confirm'))
-        self.assertIn('Message the thread before pruning', out)
-        self.assertLess(out.index('Host steps'), out.index('removed: job-a'))
+        self.assertLess(out.index('worker told the job is done'), out.index('then safely settled'))
+        self.assertIn('While its workspace still exists, message the thread before pruning', out)
+        self.assertIn('This command removes the worktree now. Do not message these threads after removal.', out)
+        self.assertIn('If its worktree is already gone, do not message it', out)
+        self.assertLess(out.index('Required order before this command'), out.index('removed: job-a'))
         self.assertFalse(wt.exists())
 
     def test_dry_run_preserves_ledger_local_and_stale_git_registration(self):
@@ -83,7 +85,9 @@ class PruneThreadLifecycle(AutonomyProject):
         self.assertIn('fixture-bound-worker', out)
         self.assertIn('fixture-active-worker', out)
         self.assertIn('dry-run: listing only', out)
-        self.assertNotIn('Host steps:', out)
+        self.assertIn('Required order before removal: message the thread before pruning', out)
+        self.assertIn('Then confirm it has stopped', out)
+        self.assertNotIn('This command removes the worktree now', out)
         self.assertNotIn('Threads to settle', out)
         self.assertIn('would remove: job-a', out)
         self.assertTrue(wt.exists())
@@ -165,6 +169,68 @@ class PruneThreadLifecycle(AutonomyProject):
         packet = (root / 'nodes/app/handover.md').read_text()
         self.assertIn('warning: job job-a:', packet)
         self.assertIn('fresh thread in a fresh worktree', packet)
+
+    def test_import_study_threads_do_not_need_worktrees(self):
+        root, home, wt = self.merged()
+        branch = 'import:' + self.git('rev-parse', 'HEAD', cwd=home).strip()
+        self.b(root, 'jobs', 'app', '--branch', branch, '--start')
+        n = self.core.Instance(root).node('app')
+        row = self.core.open_job(self.core.read_jobs(n), branch)
+        self.b(root, 'set', 'app', 'worker:' + self.core.job_key(row) + '=fixture-study-worker')
+        status = root / 'nodes/app/status.md'
+        status.write_text(status.read_text() + '\n## Active work\n\n'
+                          '| Branch | Thread | PR | State |\n| --- | --- | --- | --- |\n'
+                          '| ' + branch + ' | fixture-study-worker | - | running |\n')
+        for command in (('brief', 'app', '--task', 'fixture', '--to', 'fixture-study-worker'),
+                        ('rotate', 'app')):
+            self.assertNotIn('bound worker thread workspace', self.b(root, *command))
+        self.assertNotIn('bound worker thread workspace', (root / 'nodes/app/handover.md').read_text())
+
+    def test_unknown_machine_workspace_is_not_reported_as_gone(self):
+        root, home, wt = self.merged()
+        self.bind(root, 'active')
+        local_path = root / '.brain/local.json'
+        local = json.loads(local_path.read_text())
+        local['nodes']['app']['worktrees'].pop('job-a')
+        local_path.write_text(json.dumps(local))
+        out = self.b(root, 'brief', 'app', '--task', 'fixture', '--to', 'fixture-active-worker')
+        self.assertIn('not registered on this machine; confirm its host workspace before sending', out)
+        self.assertNotIn('workspace is gone', out)
+
+    def test_rotation_omits_settled_history_but_targeted_send_still_warns(self):
+        root, home, wt = self.merged()
+        self.bind(root)
+        self.b(root, 'wt', 'prune', 'app', '--offline')
+        self.b(root, 'jobs', 'app', '--branch', 'job-a', '--settled')
+        self.assertNotIn('bound worker thread workspace', self.b(root, 'rotate', 'app'))
+        out = self.b(root, 'brief', 'app', '--task', 'fixture', '--to', 'fixture-bound-worker')
+        self.assertIn('warning: job job-a:', out)
+
+    def test_rm_lists_threads_and_post_removal_recovery(self):
+        root, home, wt = self.merged()
+        self.bind(root)
+        out = self.b(root, 'wt', 'rm', 'app', 'job-a')
+        self.assertIn('fixture-bound-worker (worker:', out)
+        self.assertLess(out.index('bound worker threads'), out.index('Threads to settle'))
+        self.assertIn('If its worktree is already gone, do not message it', out)
+        self.assertFalse(wt.exists())
+
+    def test_unbound_cleanup_lists_none_without_host_steps(self):
+        root, home, wt = self.merged()
+        out = self.b(root, 'wt', 'prune', 'app', '--offline')
+        listing = out.split('Threads to settle')[0]
+        self.assertIn('none recorded', listing)
+        self.assertNotIn('Required order before', listing)
+        self.assertNotIn('message the thread before pruning', listing)
+
+    def test_missing_own_worktree_refusals_suggest_fresh_thread(self):
+        root, home, wt = self.merged()
+        shutil.rmtree(wt)
+        for command in (('brief', 'app', '--branch', 'job-a', '--task', 'fixture'),
+                        ('review', 'app', '--branch', 'job-a', '--built-by', 'codex')):
+            out = self.b(root, *command, ok=False)
+            self.assertIn('the worktree for job-a is gone', out)
+            self.assertIn('fresh thread in a fresh worktree', out)
 
     def test_stale_warnings_are_redacted_and_internal_threads_are_valid(self):
         root, home, wt = self.merged()
