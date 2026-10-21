@@ -48,7 +48,7 @@ def watch_items(inst, n):
     state = {'jobs': rows, 'worktrees': worktrees, 'handbacks': signals, 'inbox': _m_status.inbox_lines(n)}
     # Refresh evidence generates facts, Git logs and usage displays; none belongs on this path.
     items = _m_status.due_items(inst, n, evidence=(state, '', ''), include_stale=False,
-                                include_ready=False) + _m_status.changes_due(inst, n)
+                                include_ready=False, include_advice=False) + _m_status.changes_due(inst, n)
     out = []
     for item in items:
         if item['kind'] in ('stale-status', 'machine'):

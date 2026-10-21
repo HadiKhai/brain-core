@@ -263,9 +263,18 @@ def hook_question_queue(n):
     return root / ".brain" / "host-questions" / urllib.parse.quote(n["id"], safe="")
 
 
+def machine_transition_line(n, line):
+    """Recognize only the retired autonomous writer, never a question or worker signal."""
+    return (n['id'] == 'root' and not re.search(r'<!-- (?:host-question|handback|worker-failure):', line)
+            and re.fullmatch(r'- .*? from brain: (?:hold heavy work: sustained .*|heavy work hold cleared) '
+                             r'\[machine episode [0-9a-f]{24} (?:open|close)\]', line) is not None)
+
+
 def inbox_lines(n):
     f = n["dir"] / "inbox.md"
-    lines = [l for l in f.read_text().splitlines() if l.startswith("- ")] if f.exists() else []
+    # Filter the historical record on read. Never rewrite or discard episode history.
+    lines = [l for l in f.read_text().splitlines() if l.startswith("- ")
+             and not machine_transition_line(n, l)] if f.exists() else []
     # A busy inbox never loses a stopped turn's question. The private queue is also an inbox
     # source until it can be appended; reading due/inbox retries delivery without waiting.
     queue = hook_question_queue(n)
@@ -360,7 +369,7 @@ def status_lag(inst, n, evidence=None):
     return None
 
 
-def due_items(inst, n, evidence=None, include_stale=True, include_ready=True):
+def due_items(inst, n, evidence=None, include_stale=True, include_ready=True, include_advice=True):
     if n["archived"]:
         return []
     evidence = evidence or due_evidence(inst, n)
@@ -421,12 +430,13 @@ def due_items(inst, n, evidence=None, include_stale=True, include_ready=True):
         if not _m_jobs.open_job(state["jobs"] or [], branch):
             add("unrecorded-worktree", f"{branch}: worktree has no open ledger job; reconcile the records")
     for line in state["inbox"]:
-        if (n['id'] == 'root' and not re.search(r'<!-- (?:host-question|handback|worker-failure):', line)
-                and re.fullmatch(r'- .*? from brain: (?:hold heavy work: sustained .*|heavy work hold cleared) '
-                                 r'\[machine episode [0-9a-f]{24} (?:open|close)\]', line)):
+        if machine_transition_line(n, line):
             continue  # legacy autonomous transitions are informational, never coordinator work
         else:
             add("inbox", line[2:])  # coordinator removes handled lines; remaining questions are unanswered
+    if include_advice:
+        for text in runaway_jobs(inst, n):
+            add("job", text, informational=True)
     if n['id'] == 'root':
         episode = _m_machine.machine_episode_due(inst)
         if episode:
@@ -669,7 +679,13 @@ def inbox_items(inst, nodes=None, reporter="root"):
     seen = {key: value for key, value in reporters.get(reporter, {}).items() if isinstance(value, dict)}
     by_id = {n["id"]: n for n in (nodes if nodes is not None else inst.nodes())}
     out, ids = [], set()
-    for nid, kind, text in attention_items(inst, list(by_id.values())):
+    attention = attention_items(inst, list(by_id.values()))
+    # Explicit node inboxes are coordinator views. Root's inbox is the human rollup;
+    # root-owned job advice remains available in due, never in that human rollup.
+    owner = by_id.get(reporter)
+    if reporter != "root" and owner and not owner["archived"] and not paused(owner):
+        attention += [(reporter, "job", text) for text in runaway_jobs(inst, owner)]
+    for nid, kind, text in attention:
         identity = text if kind in ("blocked", "blocked-overdue", "inbox", "core-update") else \
             re.sub(r"\d[\d.,]*[kMB]?", "#", text) if kind == "job" else kind  # growing counts aren't new
         key = _m_jobs.digest([nid, kind, " ".join(identity.split())])
@@ -1030,7 +1046,7 @@ def attention_items(inst, nodes):
             out.append(("root", "core-update", f"core update available ({update[0][:7]} -> {update[1][:7]}): "
                         "brain upgrade, or brain set root auto_upgrade=on to upgrade whenever no job is open"))
     for n in nodes:
-        if n["archived"]:
+        if n["archived"] or paused(n):
             continue
         rules, roles, items = pending_imports(inst, n)
         if rules or roles or items:
@@ -1039,14 +1055,16 @@ def attention_items(inst, nodes):
         for b in blocked_entries(inst, n):
             out.append((n["id"], "blocked-overdue" if b["escalated"] else "blocked", b["text"]))
         out += [(n["id"], "inbox", "inbox: " + l[2:]) for l in inbox_lines(n)]
-        out += [(n["id"], "job", t) for t in runaway_jobs(inst, n)]
-        if paused(n):
-            continue
+        if n["id"] == "root":
+            episode = _m_machine.machine_episode_due(inst)
+            if episode and episode["kind"] == "machine-alert":
+                out.append((n["id"], "machine-alert", episode["text"]))
         u = updated_at(inst, n)
         days = int(elapsed(u, inst.now_dt()) // 86400) if u else 0
         if u and days >= _m_common.STALE_DAYS:
             out.append((n["id"], "stale", f"status not updated for {days} days"))
-        if not (n["local"].get("coordinator") or n["fm"].get("coordinator", "none") != "none"):
+        if ("kind:study" not in _m_common.lst(n["fm"].get("labels"))
+                and not (n["local"].get("coordinator") or n["fm"].get("coordinator", "none") != "none")):
             out.append((n["id"], "setup", "no coordinator on this machine (skill: machine-setup)"))
     return out
 

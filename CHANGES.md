@@ -5,6 +5,27 @@ upgrading. `brain changes <node>` shows the entries this node's coordinator hasn
 `brain due <node>` lists them until `brain changes <node> --seen`. Entry headings are
 `## <date>: <title>`; once released, a heading never changes.
 
+## 2026-10-21: Keep the human inbox focused
+
+For agents:
+- Legacy machine hold/clear records are filtered from inbox, dashboard attention
+  and due without deleting their history. The human inbox shows at most one
+  rolling machine alert, only for fresh thermal pressure or a hold over 60 minutes.
+  The private episode log and one-wake-per-episode escalation remain unchanged.
+- Nodes labelled `state:paused` are hidden from inbox and human attention. Their
+  records remain available, and coordinator due and protected wake routes still
+  carry questions, blocked hand-backs, failures and overdue questions.
+- Nodes labelled `kind:study` do not produce a missing-coordinator setup warning.
+- Job budget and median advice stays with its owning node: its explicit inbox
+  and due show the advice; parent and root human inboxes do not. Root-owned job
+  advice appears in root due. Advice remains informational and never wakes a model.
+
+After upgrading:
+- No migration command is required. Historical machine lines remain on disk but
+  stop appearing as inbox work. Resuming a paused node reveals its unresolved needs.
+- Inspect job budget/median advice with `brain inbox <owning-node>` or
+  `brain due <owning-node>`; use root due for root-owned jobs.
+
 ## 2026-10-21: Machine care transitions stay quiet
 
 For agents:
