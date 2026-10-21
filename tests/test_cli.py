@@ -53,7 +53,9 @@ class EntryPoints(Scenario):
 
     def test_launcher_leaves_core_clean_without_bytecode_environment(self):
         core = self.tmp / "core-copy"
-        shutil.copytree(CORE, core, ignore=shutil.ignore_patterns(".git", "__pycache__", ".DS_Store"))
+        # Model an installed core: UI development dependencies and build caches do not ship.
+        shutil.copytree(CORE, core, ignore=shutil.ignore_patterns(
+            ".git", "__pycache__", ".DS_Store", "node_modules", "*.tsbuildinfo"))
         self.git("init", "-q", "-b", "main", cwd=core)
         self.git("add", "-A", cwd=core)
         self.git("commit", "-qm", "fixture core", cwd=core)
