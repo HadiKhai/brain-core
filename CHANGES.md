@@ -10,9 +10,11 @@ upgrading. `brain changes <node>` shows the entries this node's coordinator hasn
 For agents:
 - Inline project paths in node notes resolve against the bound external home, or the
   node folder for nodes without an external home. Unbound home paths, `<placeholder>`
-  examples and slash-prefixed route examples no longer produce dead-path warnings.
+  examples and slash-prefixed routes with no existing filesystem root component no
+  longer produce dead-path warnings. Absolute filesystem references still warn.
 - Markdown links stay relative to the note; explicit Brain files and folders still
-  warn when missing, including on machines without a bound home.
+  warn when missing, including on machines without a bound home. Leading `../`
+  references remain relative to the node folder.
 - `kind:study` nodes no longer need a verify command or coordinator tick merely
   because their home is a Git repository or their metadata names a code stack.
 

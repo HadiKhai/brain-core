@@ -190,8 +190,11 @@ def dead_note_paths(inst, n):
                                    ".csv", ".tsv", ".sql", ".html", ".css", ".png", ".svg", ".pdf", ".lock"}
     filenames = {"README.md", "CHANGES.md", "AGENTS.md", "MODEL.md", "Dockerfile", "Makefile", "LICENSE"}
     node_files = {"node.md", "brief.md", "status.md", "knowledge.md", "decisions.md", "backlog.md",
-                  "inbox.md", "direction.md", "job-ledger.md", "never-name.txt"}
-    node_folders = {"sources", "library", "specialists", "job-contracts", "job-handbacks"}
+                  "inbox.md", "direction.md", "job-ledger.md", "never-name.txt", "role.md",
+                  "lessons.md", "handover.md", "connections.md", "AGENTS.md", "CLAUDE.md",
+                  "worktree-setup.sh"}
+    node_folders = {"sources", "library", "specialists", "job-contracts", "job-handbacks", "job-trains"}
+    root_files = {"instance.md", "registry.md"}
     for name in ("brief.md", "status.md", "knowledge.md"):
         source = n["dir"] / name
         if not source.is_file():
@@ -220,26 +223,30 @@ def dead_note_paths(inst, n):
                     value = urllib.parse.unquote(value)
                 elif re.search(r"\s", value):
                     continue
-                # Inline slash-prefixed examples are usually routes, not filesystem claims.
-                # Markdown links still check absolute filesystem targets.
-                if not link and value.startswith("/"):
-                    continue
                 path = Path(value).expanduser()
+                # A real filesystem root component keeps absolute Brain paths checkable.
+                # Unknown slash-prefixed components are route examples, such as /api/v1.
+                if not link and value.startswith("/") and not Path(*path.parts[:2]).exists():
+                    continue
                 explicit = value.startswith(("./", "../", "/", "~")) or value.endswith("/")
                 file_shape = path.name in filenames or ("/" in value and path.suffix in extensions)
                 if not link and not (explicit or file_shape):
                     continue
                 # Links belong to the note. Inline project paths belong to its home, while
                 # explicit Brain references must still warn even on an unbound machine.
-                if path.parts and path.parts[0] in {"core", "nodes", ".brain"}:
-                    base = inst.root
-                elif link or path.as_posix() in node_files or (path.parts and path.parts[0] in node_folders):
-                    base = n["dir"]
+                if link or value.startswith("../"):
+                    bases = [n["dir"]]
+                elif path.as_posix() in root_files:
+                    bases = [inst.root]
+                elif path.parts and path.parts[0] in {"core", "nodes", ".brain"}:
+                    bases = [n["dir"], inst.root]
+                elif path.as_posix() in node_files or (path.parts and path.parts[0] in node_folders):
+                    bases = [n["dir"]]
                 else:
-                    base = n["home_path"] if n["external"] else n["dir"]
-                if base is None and not path.is_absolute():
+                    bases = [n["home_path"] if n["external"] else n["dir"]]
+                if bases == [None] and not path.is_absolute():
                     continue
-                if not (path if path.is_absolute() else base / path).exists():
+                if not any((path if path.is_absolute() else base / path).exists() for base in bases):
                     out.append(f"{n['id']}: {name}:{number}: dead path {raw}; repair the reference or restore the file/folder")
     return sorted(set(out))
 

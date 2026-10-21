@@ -866,6 +866,55 @@ class NodeHygiene(Scenario):
         problems = self.m.dead_note_paths(inst, inst.node('app'))
         self.assertEqual(len(problems), 2, problems)
 
+    def test_routes_preserve_missing_absolute_brain_files_with_bound_or_unbound_home(self):
+        r, inst, n = self.node()
+        home = self.repo(self.tmp / 'source')
+        missing = n['dir'] / 'gone.md'
+        (n['dir'] / 'knowledge.md').write_text('`/api/v1` `' + str(missing) + '`\n')
+        for bound in (True, False):
+            with self.subTest(bound=bound):
+                n.update(external=True, home_path=home if bound else None)
+                problems = self.m.dead_note_paths(inst, n)
+                self.assertEqual(len(problems), 1, problems)
+                self.assertIn('dead path ' + str(missing), problems[0])
+
+    def test_brain_note_paths_keep_child_parent_and_generated_file_checks(self):
+        r, inst, n = self.node()
+        home = self.repo(self.tmp / 'source')
+        self.b(r, 'new', 'app/kid', '--title', 'Kid')
+        self.b(r, 'new', 'sibling', '--title', 'Sibling')
+        (n['dir'] / 'knowledge.md').write_text(
+            '`nodes/kid/status.md` [child](nodes/kid/status.md)\n'
+            '`../sibling/brief.md` `../sibling/missing.md`\n'
+            '`job-trains/missing.json` `./role.md` `./lessons.md` `./handover.md`\n')
+        # Home files must not mask missing node files, including new core-generated names.
+        (home / 'job-trains').mkdir()
+        (home / 'job-trains/missing.json').write_text('{}\n')
+        for name in ('role.md', 'lessons.md', 'handover.md'):
+            (home / name).write_text('# only at home\n')
+        for bound in (True, False):
+            with self.subTest(bound=bound):
+                n.update(external=True, home_path=home if bound else None)
+                problems = self.m.dead_note_paths(inst, n)
+                self.assertEqual(len(problems), 5, problems)
+                for value in ('../sibling/missing.md', 'job-trains/missing.json',
+                              './role.md', './lessons.md', './handover.md'):
+                    self.assertTrue(any('dead path ' + value in p for p in problems), value)
+
+    def test_brain_root_metadata_is_not_masked_by_home_or_skipped_when_unbound(self):
+        r, inst, n = self.node()
+        home = self.repo(self.tmp / 'source', {'registry.md': '# home registry\n'})
+        (n['dir'] / 'knowledge.md').write_text('`./registry.md` `./instance.md`\n')
+        n.update(external=True, home_path=home)
+        self.assertEqual(self.m.dead_note_paths(inst, n), [])
+        (r / 'registry.md').unlink()
+        for bound in (True, False):
+            with self.subTest(bound=bound):
+                n['home_path'] = home if bound else None
+                problems = self.m.dead_note_paths(inst, n)
+                self.assertEqual(len(problems), 1, problems)
+                self.assertIn('dead path ./registry.md', problems[0])
+
     def test_routing_rules_keep_sync_and_design_owned(self):
         role = (CORE / 'roles/coordinator.md').read_text()
         home = (CORE / 'skills/home-job/SKILL.md').read_text()
