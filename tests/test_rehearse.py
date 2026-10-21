@@ -149,7 +149,7 @@ class RehearsalRedaction(Scenario):
         self.assertIn('rehearse: passed', printed.getvalue())
 
 
-class RehearsalStability(Scenario):
+class RehearsalFixture(Scenario):
     def setUp(self):
         super().setUp()
         self.root = self.repo(self.tmp / 'live', {'note.md': 'original\n',
@@ -166,7 +166,8 @@ class RehearsalStability(Scenario):
         self.git('commit', '-qm', 'candidate fixture', cwd=self.home)
         self.head = self.git('rev-parse', 'HEAD', cwd=self.home).strip()
 
-    def run_rehearsal(self, mutation=lambda: None, during_run=False, damage_copy=None):
+    def run_rehearsal(self, mutation=lambda: None, during_run=False, damage_copy=None,
+                      outputs=None, inspect_lane=None):
         from types import SimpleNamespace
         inst = SimpleNamespace(root=self.root, nodes=lambda: [])
         node = dict(external=True, home_path=self.home, id='engine')
@@ -179,15 +180,18 @@ class RehearsalStability(Scenario):
                 if not during_run:
                     mutation()
         def lane(*args):
+            if inspect_lane:
+                inspect_lane(*args)
             if during_run:
                 mutation()
-            return {'hook': result()}
+            return outputs.pop(0) if outputs is not None else {'hook': result()}
         with mock.patch.dict(os.environ, self.env), \
                 mock.patch.object(rehearsal, 'sandbox_self_check'), \
                 mock.patch.object(rehearsal, 'sandbox_prefix', return_value=[]), \
                 mock.patch.object(rehearsal._m_verify, 'ready_refs', return_value=(self.head, self.head)), \
                 mock.patch.object(rehearsal._m_verify, 'integration_parent', return_value=self.head), \
                 mock.patch.object(rehearsal._m_instance, 'Instance', return_value=inst), \
+                mock.patch.object(rehearsal, 'isolated_probe_instance', return_value=inst), \
                 mock.patch.object(rehearsal, 'probe_delivery', return_value=[]), \
                 mock.patch.object(rehearsal, 'copy_tree', side_effect=copying), \
                 mock.patch.object(rehearsal, 'run_lane', side_effect=lane), \
@@ -199,6 +203,8 @@ class RehearsalStability(Scenario):
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(text)
 
+
+class RehearsalStability(RehearsalFixture):
     def test_volatile_churn_during_copy_and_run_does_not_refuse(self):
         paths = ['.git/refs/t3/checkpoint', '.git/logs/HEAD', '.git/COMMIT_EDITMSG',
                  '.git/hook-once', '.git/index.lock', '.git/config.lock',
@@ -219,20 +225,18 @@ class RehearsalStability(Scenario):
                         if rel != '.git/index':
                             (self.root / rel).unlink(missing_ok=True)
 
-    def test_tracked_edits_and_real_ref_moves_during_copy_refuse(self):
+    def test_tracked_edits_and_real_ref_moves_during_copy_use_frozen_input(self):
         parent = self.git('rev-parse', 'HEAD^', cwd=self.root).strip()
         for rel, text in [('note.md', 'edited'), ('core/bin/brain', 'edited core'),
                           ('.git/refs/heads/main', parent + '\n'),
                           ('.git/refs/tags/release', self.oid + '\n'),
                           ('.git/HEAD', self.oid + '\n')]:
             with self.subTest(path=rel):
-                with self.assertRaisesRegex(rehearsal.RehearsalError, 'live brain moved while copying'):
-                    self.run_rehearsal(lambda: self.write(rel, text))
+                self.assertTrue(self.run_rehearsal(lambda: self.write(rel, text))['passed'])
 
-    def test_tracked_edit_during_run_refuses_evidence(self):
+    def test_tracked_edit_during_run_does_not_refuse_frozen_evidence(self):
         outcome = self.run_rehearsal(lambda: self.write('note.md'), during_run=True)
-        self.assertFalse(outcome['passed'])
-        self.assertIn('live brain changed during rehearsal; evidence refused', outcome['regressions'])
+        self.assertTrue(outcome['passed'], outcome['regressions'])
 
     def test_index_refresh_and_packing_refs_do_not_change_stability(self):
         with mock.patch.dict(os.environ, self.env):

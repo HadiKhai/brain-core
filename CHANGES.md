@@ -5,6 +5,21 @@ upgrading. `brain changes <node>` shows the entries this node's coordinator hasn
 `brain due <node>` lists them until `brain changes <node> --seen`. Entry headings are
 `## <date>: <title>`; once released, a heading never changes.
 
+## 2026-10-22: Rehearse compares one frozen brain snapshot
+
+For agents:
+- Installed and candidate probes start from one private snapshot. Later live
+  edits do not invalidate the comparison; snapshot writes still refuse evidence.
+- Due items compare by node, kind and id. Exact new notices attributable solely
+  to candidate CHANGES.md entries are expected. Other new due items still fail.
+- Brief warning byte counts are normalized. Identical baseline failures produce
+  named warnings in evidence and printed output without refusing the comparison.
+
+After upgrading:
+- Retry rehearsals refused for live edits, change notices or warning sizes.
+  Read any named baseline failure warnings; a passing comparison does not mean
+  those pre-existing failures have been repaired.
+
 ## 2026-10-21: Rehearse redacts protected probe output
 
 For agents:

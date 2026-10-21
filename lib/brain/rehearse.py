@@ -23,6 +23,7 @@ from . import hosts as _m_hosts
 from . import instance as _m_instance
 from . import jobs as _m_jobs
 from . import nodes as _m_nodes
+from . import upgrade as _m_upgrade
 from . import verify as _m_verify
 
 
@@ -156,13 +157,8 @@ def snapshot_entry(p, cache=None):
     return value
 
 
-def stability_snapshot(root):
-    """Bind tracked worktree bytes and real refs; ignore untracked/runtime churn.
-
-    Keep snapshot() exhaustive for the private copies' mutation audit. Index
-    timestamps, staged blob ids, reflogs and private refs are not source content.
-    Gitlinks get their own tracked snapshot, including dirty installed-core bytes.
-    """
+def validate_git_metadata(root):
+    """Refuse linked Git administration before asking Git to read it."""
     metadata = root / '.git'
     if root.is_symlink() or metadata.is_symlink():
         raise RehearsalError('linked Git metadata refused')
@@ -181,11 +177,6 @@ def stability_snapshot(root):
     if (own / 'commondir').is_symlink():
         raise RehearsalError('linked Git metadata refused')
     common = own / (own / 'commondir').read_text().strip() if (own / 'commondir').is_file() else own
-    def git(*args):
-        r = _m_common.git(*args, cwd=root)
-        if r.returncode:
-            raise RehearsalError('source stability metadata unavailable')
-        return r.stdout
     # Git itself reads these paths. Refuse links before asking it for index/refs;
     # private ref namespaces are neither read nor traversed by this check.
     for base in {own, common}:
@@ -203,6 +194,17 @@ def stability_snapshot(root):
                 for dp, dirs, files in os.walk(path, followlinks=False):
                     if any((Path(dp) / name).is_symlink() for name in dirs + files):
                         raise RehearsalError('linked Git metadata refused')
+    return own
+
+
+def stability_snapshot(root):
+    """Bind tracked bytes and refs; retained for callers inspecting fixed trees."""
+    own = validate_git_metadata(root)
+    def git(*args):
+        r = _m_common.git(*args, cwd=root)
+        if r.returncode:
+            raise RehearsalError('source stability metadata unavailable')
+        return r.stdout
     out = {}
     listing = subprocess.run(['git', '-C', str(root), 'ls-files', '--cached', '-z'], capture_output=True)
     if listing.returncode:
@@ -239,6 +241,7 @@ def materialize_git(source, dest):
     """Detach copied submodules/worktrees from their original Git administration."""
     if not (source / '.git').exists():
         return
+    validate_git_metadata(source)
     def resolve(arg):
         r = _m_common.git('rev-parse', '--path-format=absolute', arg, cwd=source)
         if r.returncode:
@@ -324,11 +327,57 @@ def normalize(text, roots=()):
     for root in sorted(map(str, roots), key=len, reverse=True):
         text = text.replace(root, '<copy>')
     text = re.sub(r'\b\d{4}-\d\d-\d\d[ T]\d\d:\d\d(?::\d\d(?:\.\d+)?)?(?:Z| ?[+-]\d\d:\d\d)?', '<time>', text)
+    # Path substitutions happen after brief measurement. Different copy paths
+    # therefore change byte totals even when the warning itself is unchanged.
+    text = '\n'.join(normalize_warning(line) if is_warning(line) else line
+                     for line in text.splitlines())
     # JSON object ordering must not create a diff; list ordering remains significant.
     try:
         return json.dumps(json.loads(text), sort_keys=True, ensure_ascii=False)
     except ValueError:
         return text.strip()
+
+
+def is_warning(line):
+    return re.search(r'warn|limit|stop|consent|✗|!', line, re.I)
+
+
+def normalize_warning(line):
+    return re.sub(r'\b\d+(?:\.\d+)?\s*(bytes?|[KMGT]i?B)\b', r'<size> \1', line, flags=re.I)
+
+
+def expected_change_notices(inst, nodes, baseline, candidate):
+    """Attribute only exact notices made solely from candidate CHANGES entries.
+
+    Stable identities handle rewritten existing notices. New notices need this
+    additional provenance check; a blanket exemption for core-changes would hide
+    scheduler regressions. Keep rendering aligned with status.changes_due.
+    """
+    def entries(core):
+        path = core / 'CHANGES.md'
+        return _m_upgrade.changes_entries(path.read_text()) if path.is_file() else []
+    old = {entry['id']: entry for entry in entries(baseline)}
+    fresh = entries(candidate)
+    changed = {entry['id'] for entry in fresh if old.get(entry['id']) != entry}
+    expected = {}
+    terms = [term for node in nodes for term in _m_guard.never_terms(node)]
+    for i, node in enumerate(nodes):
+        if node['id'] != 'root' and not node['local'].get('coordinator'):
+            continue
+        seen = inst.local.get('changes_seen', {}).get(node['id'])
+        if seen is None:
+            seen = _m_upgrade.changes_baseline(inst)
+        if seen is None:
+            continue  # A never-upgraded brain starts with no unread entries.
+        unread = [entry for entry in fresh if entry['id'] not in set(seen)]
+        if not unread or any(entry['id'] not in changed for entry in unread):
+            continue
+        text = (f"core changed: {len(unread)} unread entr{'y' if len(unread) == 1 else 'ies'} ("
+                + '; '.join(entry['id'] for entry in unread[:3]) + (' …' if len(unread) > 3 else '')
+                + f"); read them: brain changes {node['id']}, then brain changes {node['id']} --seen")
+        item = dict(node=node['id'], kind='core-changes', text=_m_nodes.import_text(text, _m_guard.never_terms(node)))
+        expected['due:' + str(i)] = json.loads(redact_output(normalize(json.dumps(item)), terms))
+    return expected
 
 
 def redact_text(text, terms):
@@ -380,7 +429,7 @@ def redact_output(text, terms):
     return redact_text(text, terms)
 
 
-def compare(before, after):
+def compare(before, after, expected_changes=None):
     """Return content-free regression labels; exact output stays in memory only."""
     flags = []
     for key, old in before.items():
@@ -395,16 +444,27 @@ def compare(before, after):
         ready = lambda x: x['code'] == 0 and x['text'].splitlines()[-1:] == ['ready']
         if key.startswith('ready:') and ready(old) and not ready(new):
             flags.append(key + ': ready became not ready')
-        if key.startswith('due:'):
+        if key.startswith('due:') and not identical_baseline_failure(old, new):
             try:
-                items = lambda x: collections.Counter(json.dumps(i, sort_keys=True) for i in json.loads(x['text']))
-                if items(new) - items(old):
+                def items(value):
+                    parsed = json.loads(value['text'])
+                    if not isinstance(parsed, list) or any(not isinstance(item, dict) for item in parsed):
+                        raise ValueError('invalid due items')
+                    return parsed
+                identity = lambda item: json.dumps([item.get(k) for k in ('node', 'kind', 'id')], sort_keys=True)
+                previous, current = items(old), items(new)
+                added = (collections.Counter(map(identity, current))
+                         - collections.Counter(map(identity, previous)))
+                expected = (expected_changes or {}).get(key)
+                if expected is not None and expected in current and added[identity(expected)]:
+                    added[identity(expected)] -= 1
+                if +added:
                     flags.append(key + ': new due items')
             except (ValueError, TypeError):
                 flags.append(key + ': invalid due output')
         if key.startswith('brief:'):
-            warnings = lambda x: collections.Counter(l for l in x['text'].splitlines()
-                                                      if re.search(r'warn|limit|stop|consent|✗|!', l, re.I))
+            warnings = lambda x: collections.Counter(normalize_warning(l) for l in x['text'].splitlines()
+                                                      if is_warning(l))
             if warnings(old) - warnings(new):
                 flags.append(key + ': brief warning disappeared')
         if new['unexpected']:
@@ -412,6 +472,12 @@ def compare(before, after):
         if key == 'hook' and new['seconds'] > 1:
             flags.append('hook: latency exceeds 1 s')
     return flags
+
+
+def identical_baseline_failure(old, new):
+    # Text is already normalized and redacted, exactly as for evidence digests.
+    return (old['code'] != 0 and old['code'] == new['code'] and old['text'] == new['text']
+            and not any(r['timeout'] or r['unexpected'] for r in (old, new)))
 
 
 def sandbox_prefix(folder):
@@ -644,13 +710,12 @@ def rehearse(inst, n, branch):
     with tempfile.TemporaryDirectory(prefix='brain-rehearse-') as td:
         folder = Path(td).resolve()
         sandbox_self_check(folder)
-        baseline_commit = installed_core_commit(inst.root)
-        original = stability_snapshot(inst.root)
         frozen = folder / 'source'
         copy_tree(inst.root, frozen)
         materialize_git(inst.root, frozen)
-        if stability_snapshot(inst.root) != original:
-            raise RehearsalError('live brain moved while copying; retry with a stable source')
+        # The copy is common fixed input, not an atomic historical snapshot.
+        # Live writers are irrelevant after preparation; audit only private data.
+        baseline_commit = installed_core_commit(frozen)
         baseline = folder / 'installed'
         copy_tree(frozen / 'core', baseline)
         materialize_git(frozen / 'core', baseline)
@@ -675,7 +740,8 @@ def rehearse(inst, n, branch):
         subprocess.run([*prefix, 'git', '-C', str(candidate), 'remote', 'remove', 'origin'],
                        env=prep_env, capture_output=True, check=True)
         commands = []
-        nodes = _m_instance.Instance(frozen).nodes()
+        frozen_inst = _m_instance.Instance(frozen)
+        nodes = frozen_inst.nodes()
         for i, node in enumerate(nodes):
             commands.append(('due:' + str(i), ['due', node['id'], '--json'], 'read'))
             commands.append(('brief:' + str(i), ['brief', node['id']], 'read'))
@@ -688,17 +754,22 @@ def rehearse(inst, n, branch):
                      ('ui', ['ui', '--json'], 'read'), ('hook', ['hook', 'stop'], 'hook')]
         # Seed the same real delivery result into both command copies. Otherwise
         # a new check's cache miss would POST inside the network-denying sandbox.
-        delivery = probe_delivery(inst, inst.nodes(), _m_instance.Instance(frozen))
+        delivery_source = folder / 'delivery-source'
+        delivery_source.mkdir()
+        delivery_inst = isolated_probe_instance(frozen_inst, delivery_source)
+        delivery = probe_delivery(delivery_inst, delivery_inst.nodes(), frozen_inst)
+        expected = expected_change_notices(frozen_inst, nodes, baseline, candidate)
+        original = snapshot(frozen)
         old = run_lane(frozen, baseline, folder / 'before', nodes, commands)
         new = run_lane(frozen, candidate, folder / 'after', nodes, commands)
-        flags = compare(old, new)
-        if stability_snapshot(inst.root) != original:
-            flags.append('live brain changed during rehearsal; evidence refused')
-        if installed_core_commit(inst.root) != baseline_commit:
-            flags.append('installed core changed during rehearsal; evidence refused')
-        # Fail closed on incomplete baseline proof, not on preexisting check/ready failures.
+        flags = compare(old, new, expected)
+        if snapshot(frozen) != original:
+            flags.append('frozen brain changed during rehearsal; evidence refused')
+        warnings = []
         for key, result in old.items():
-            if result['timeout'] or result['unexpected'] or (result['code'] and key.startswith(('due:', 'refresh:', 'brief:', 'ui', 'hook'))):
+            if identical_baseline_failure(result, new[key]):
+                warnings.append(key + ': identical baseline failure')
+            elif result['timeout'] or result['unexpected'] or result['code']:
                 flags.append(key + ': baseline incomplete')
         if (_m_verify.ready_refs(n, branch) != (head, main)
                 or _m_verify.integration_parent(n, main) != integration_base):
@@ -707,7 +778,8 @@ def rehearse(inst, n, branch):
         return {'version': 1, 'node': n['id'], 'branch': branch, 'head': head, 'main': main,
                 'installed_core_commit': baseline_commit,
                 'integration_base': integration_base,
-                'checked_at': _m_jobs.stamp(inst), 'passed': not flags, 'regressions': flags,
+                'checked_at': _m_jobs.stamp(frozen_inst), 'passed': not flags, 'regressions': flags,
+                'warnings': warnings,
                 'commands': len(commands), 'changed_outputs': sum(old[k]['text'] != new[k]['text'] for k in old),
                 'hook_seconds': new['hook']['seconds'],
                 'delivery': delivery,
@@ -742,5 +814,7 @@ def cmd_rehearse(a):
           '; commands=' + str(result['commands']) + '; regressions=' + str(len(result['regressions'])))
     for flag in result['regressions']:
         print('- ' + flag)
+    for warning in result.get('warnings', []):
+        print('warning: ' + warning)
     if not result['passed']:
         sys.exit(1)
