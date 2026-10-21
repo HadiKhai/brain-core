@@ -420,14 +420,17 @@ def due_items(inst, n, evidence=None, include_stale=True, include_ready=True):
     for branch, w in state["worktrees"].items():
         if not _m_jobs.open_job(state["jobs"] or [], branch):
             add("unrecorded-worktree", f"{branch}: worktree has no open ledger job; reconcile the records")
-    episode = None
     for line in state["inbox"]:
-        if n["id"] == "root" and re.search(r"\[machine episode [0-9a-f]{24} (?:open|close)\]$", line):
-            episode = line  # one root action, latest transition; handled by removing its inbox line
+        if (n['id'] == 'root' and not re.search(r'<!-- (?:host-question|handback|worker-failure):', line)
+                and re.fullmatch(r'- .*? from brain: (?:hold heavy work: sustained .*|heavy work hold cleared) '
+                                 r'\[machine episode [0-9a-f]{24} (?:open|close)\]', line)):
+            continue  # legacy autonomous transitions are informational, never coordinator work
         else:
             add("inbox", line[2:])  # coordinator removes handled lines; remaining questions are unanswered
-    if episode:
-        add("machine", episode[2:])
+    if n['id'] == 'root':
+        episode = _m_machine.machine_episode_due(inst)
+        if episode:
+            add(episode['kind'], episode['text'], **{k: v for k, v in episode.items() if k not in ('kind', 'text')})
     for line in overdue_questions(inst, n, state["inbox"]):
         add("overdue-question", "question unanswered past its threshold; root must follow up", escalate_to="root")
     lag = status_lag(inst, n, evidence) if include_stale else None
@@ -534,7 +537,7 @@ def cmd_due(a):
                 items.append({"node": n["id"], "kind": "question", "text":
                               "unanswered question in node inbox; follow up with its coordinator or answer for it"})
     if a.quiet:
-        sys.exit(1 if items else 0)
+        sys.exit(1 if any(not i.get('informational') for i in items) else 0)
     if a.json:
         print(json.dumps(items, indent=2))
     else:
@@ -597,7 +600,7 @@ def status_facts(inst, n, state, known_merges):
     if rules or roles or items:
         lines += ["", f"Imported, unreviewed (inactive): {rules} rule file(s), {roles} role(s), {items} proposed item(s)."]
     human = [i for i in attention_items(inst, [n]) if i[1] not in ("stale",)]
-    lines += ["", f"Due: {len(due)} · Needs the human (attention sources, excluding stale status): {len(human)}"]
+    lines += ["", f"Due: {sum(not i.get('informational') for i in due)} · Needs the human (attention sources, excluding stale status): {len(human)}"]
     compact, count = [], 0
     for line in lines:
         if line.startswith("- "):

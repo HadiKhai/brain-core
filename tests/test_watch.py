@@ -36,6 +36,122 @@ class Watcher(Scenario):
             upgrade.assert_not_called()
         return json.loads(output.getvalue())
 
+    def machine_tick(self, at, reading):
+        with mock.patch.object(self.m.time, 'time', return_value=at), \
+                mock.patch.object(self.m, 'machine_load', return_value=reading), \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.m.machine_sample(self.inst)
+            self.watch()
+            self.m.wake_drain(self.inst, self.inst.node('root'), once=True)
+
+    def test_machine_open_close_are_private_and_never_wake(self):
+        base = time.time()
+        good = json.loads(self.env['BRAIN_MACHINE_READING'])
+        high = {**good, 'load_per_cpu': [1, 1, 1]}
+        state = self.root / '.brain/machine.json'
+        self.m.refresh_status(self.inst, self.inst.node('root'))
+        state.write_text(json.dumps({'samples': [{'at': base - i * 60, 'reading': high} for i in (4, 3, 2, 1)]}))
+        before = (self.root / 'inbox.md').read_bytes()
+        head = self.git('rev-parse', 'HEAD', cwd=self.root)
+        with mock.patch.object(self.m, 'changes_due', return_value=[]), mock.patch.object(self.m, 'wake_start'), \
+                mock.patch.object(self.m, 'WAKE_INTERVAL', 0), mock.patch.object(self.m, 'wake_send', return_value=True) as send:
+            self.machine_tick(base, high)
+            episode = json.loads(state.read_text())['episode_id']
+            due = self.m.due_items(self.inst, self.inst.node('root'), include_stale=False)
+            self.assertEqual([(i['kind'], i.get('informational')) for i in due], [('machine', True)])
+            self.assertEqual(self.m.watch_items(self.inst, self.inst.node('root')), [])
+            with mock.patch.object(self.m, 'load', return_value=self.inst), self.assertRaises(SystemExit) as quiet:
+                self.m.cmd_due(argparse.Namespace(id='root', quiet=True, json=False))
+            self.assertEqual(quiet.exception.code, 0)  # telemetry cannot stale facts or wake a quiet tick
+            for offset in (60, 120, 180):
+                self.machine_tick(base + offset, good)
+            self.assertEqual(send.call_count, 0)
+        data = json.loads(state.read_text())
+        self.assertEqual([(r['episode'], r['state']) for r in data['transitions']], [(episode, 'open'), (episode, 'close')])
+        self.assertEqual((self.root / 'inbox.md').read_bytes(), before)
+        self.assertEqual(self.git('rev-parse', 'HEAD', cwd=self.root), head)
+        self.assertEqual(self.m.due_items(self.inst, self.inst.node('root'), include_stale=False), [])
+        self.assertNotIn('.brain/', self.git('ls-files', cwd=self.root))
+
+    def test_machine_hold_over_60_minutes_wakes_once_per_episode(self):
+        base = time.time()
+        high = {**json.loads(self.env['BRAIN_MACHINE_READING']), 'load_per_cpu': [1, 1, 1]}
+        state = self.root / '.brain/machine.json'
+        state.write_text(json.dumps({'samples': [{'at': base - i * 60, 'reading': high} for i in (4, 3, 2, 1)]}))
+        with mock.patch.object(self.m, 'changes_due', return_value=[]), mock.patch.object(self.m, 'wake_start'), \
+                mock.patch.object(self.m, 'WAKE_INTERVAL', 0), mock.patch.object(self.m, 'wake_send', return_value=True) as send:
+            self.machine_tick(base, high)
+            self.machine_tick(base + 3600, high)
+            self.assertEqual(send.call_count, 0)
+            self.machine_tick(base + 3601, high)
+            self.assertEqual(send.call_count, 1)
+            # Thermal pressure in the same prolonged hold does not create a second escalation.
+            self.machine_tick(base + 3661, {**high, 'thermal': 'pressure'})
+            self.machine_tick(base + 3721, high)
+            self.assertEqual(send.call_count, 1)
+            history = self.m.wake_history(self.m.wake_directory(self.inst, self.inst.node('root')))
+            self.assertEqual([i['kind'] for i in history[-1]['items']], ['machine-alert'])
+
+    def test_machine_thermal_pressure_wakes_once_and_rearms_after_recovery(self):
+        base = time.time()
+        good = json.loads(self.env['BRAIN_MACHINE_READING'])
+        hot = {**good, 'thermal': 'pressure'}
+        with mock.patch.object(self.m, 'changes_due', return_value=[]), mock.patch.object(self.m, 'wake_start'), \
+                mock.patch.object(self.m, 'WAKE_INTERVAL', 0), mock.patch.object(self.m, 'wake_send', return_value=True) as send:
+            self.machine_tick(base, hot)  # raw pressure alerts immediately, before sustained admission history
+            self.assertEqual(send.call_count, 1)
+            self.machine_tick(base + 60, {**good, 'thermal': 'unknown'})
+            self.machine_tick(base + 120, hot)
+            self.assertEqual(send.call_count, 1)
+            for offset in (180, 240, 300):
+                self.machine_tick(base + offset, good)
+            self.assertEqual(send.call_count, 1)  # clear is quiet
+            self.machine_tick(base + 360, hot)
+            self.assertEqual(send.call_count, 2)
+
+    def test_legacy_machine_lines_are_quiet_but_questions_with_markers_survive(self):
+        legacy = '- fixture from brain: heavy work hold cleared [machine episode ' + 'a' * 24 + ' close]'
+        inbox = self.root / 'inbox.md'
+        inbox.write_text(legacy + '\n')
+        with mock.patch.object(self.m, 'changes_due', return_value=[]), mock.patch.object(self.m, 'wake_start'), \
+                mock.patch.object(self.m, 'wake_send', return_value=True) as send:
+            self.watch()
+            self.m.wake_drain(self.inst, self.inst.node('root'), once=True)
+            self.assertEqual(send.call_count, 0)
+            inbox.write_text('- question <!-- host-question:fixture --> [machine episode ' + 'a' * 24 + ' close]\n')
+            self.watch()
+            self.m.wake_drain(self.inst, self.inst.node('root'), once=True)
+            self.assertEqual(send.call_count, 1)
+
+    def test_pending_machine_transitions_are_retired_and_mixed_questions_survive(self):
+        n = self.inst.node('root')
+        transition = {'id': 'a' * 64, 'kind': 'machine'}
+        question = {'id': 'b' * 64, 'kind': 'inbox'}
+        with mock.patch.object(self.m, 'wake_start'), mock.patch.object(self.m, 'WAKE_INTERVAL', 0), \
+                mock.patch.object(self.m, 'wake_send', return_value=True) as send:
+            self.m.request_wake(self.inst, n, 'old transition', items=[transition])
+            self.m.wake_drain(self.inst, n, once=True)
+            self.assertEqual(send.call_count, 0)
+            self.m.request_wake(self.inst, n, 'mixed transition and question', items=[transition, question])
+            self.m.wake_drain(self.inst, n, once=True)
+            self.assertEqual(send.call_count, 1)
+            history = self.m.wake_history(self.m.wake_directory(self.inst, n))
+            self.assertEqual(history[-1]['items'], [question])
+
+    def test_failed_machine_alert_is_retired_after_recovery(self):
+        base = time.time()
+        good = json.loads(self.env['BRAIN_MACHINE_READING'])
+        with mock.patch.object(self.m, 'changes_due', return_value=[]), mock.patch.object(self.m, 'wake_start'), \
+                mock.patch.object(self.m, 'WAKE_INTERVAL', 0):
+            with mock.patch.object(self.m, 'wake_send', return_value=False):
+                self.machine_tick(base, {**good, 'thermal': 'pressure'})
+            directory = self.m.wake_directory(self.inst, self.inst.node('root'))
+            self.assertTrue(list(directory.glob('*.pending')))
+            with mock.patch.object(self.m, 'wake_send', return_value=True) as send:
+                self.machine_tick(base + 60, good)
+            self.assertEqual(send.call_count, 0)
+            self.assertFalse(list(directory.glob('*.pending')))
+
     def test_delivery_history_and_since_wake_track_ids_only_after_success(self):
         inbox = self.root / 'inbox.md'
         inbox.write_text('- fabricated first item\n')

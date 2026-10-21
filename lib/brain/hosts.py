@@ -152,6 +152,29 @@ def wake_previous_items(directory):
     return baseline
 
 
+def wake_actionable_pending(inst, path):
+    """Retire identified old machine transitions without dropping unknown questions."""
+    try:
+        refs = wake_item_refs(json.loads(path.read_text())['items'])
+    except (OSError, ValueError, KeyError, TypeError):
+        return True  # empty legacy and damaged metadata must still carry questions through
+    from . import machine as _m_machine
+    from . import watch as _m_watch
+    data = _m_machine.machine_samples(inst, fresh=False) if any(i['kind'] == 'machine-alert' for i in refs) else None
+    recovered = data and data.get('alert_open') is False
+    identity = (_m_watch.watch_digest(['root', 'machine-alert', data['alert_id']])
+                if data and data.get('alert_open') is True
+                and re.fullmatch(r'[0-9a-f]{24}', str(data.get('alert_id', ''))) else None)
+    allowed = [i for i in refs if i['kind'] != 'machine'
+               and not (i['kind'] == 'machine-alert' and (recovered or identity and i['id'] != identity))]
+    if refs and not allowed:
+        path.unlink(missing_ok=True)
+        return False
+    if allowed != refs:
+        _m_common.atomic_write(path, json.dumps({'items': allowed}) + '\n')
+    return True
+
+
 def request_wake(inst, n, reason, items=None):
     """Fail open, enqueue then detach; never run a transport in the hook's process."""
     try:
@@ -333,7 +356,7 @@ def wake_drain(inst, n, once=False):
                     # Recheck under the delivery lock so this race cannot send the same reason twice.
                     if path.with_suffix(".sent").exists():
                         path.unlink(missing_ok=True)
-                    else:
+                    elif wake_actionable_pending(inst, path):
                         pending.append(path)
                 if not pending:
                     return

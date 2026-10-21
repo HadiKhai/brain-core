@@ -51,7 +51,7 @@ def watch_items(inst, n):
                                 include_ready=False) + _m_status.changes_due(inst, n)
     out = []
     for item in items:
-        if item['kind'] == 'stale-status':
+        if item['kind'] in ('stale-status', 'machine'):
             continue
         direct_reason = None
         handback_episode = None
@@ -84,7 +84,7 @@ def watch_items(inst, n):
                             'kind': item['kind'], 'text': 'Unread core change; run brain changes'})
             continue
         # Keep identity separate from changing display (readiness, age, counts).
-        identity = item.get('job') or item['text']
+        identity = item.get('episode') if item['kind'] == 'machine-alert' else (item.get('job') or item['text'])
         if item['kind'] == 'handback':
             identity = [identity, item.get('state')]
             if handback_episode:

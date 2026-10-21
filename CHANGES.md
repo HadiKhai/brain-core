@@ -5,6 +5,26 @@ upgrading. `brain changes <node>` shows the entries this node's coordinator hasn
 `brain due <node>` lists them until `brain changes <node> --seen`. Entry headings are
 `## <date>: <title>`; once released, a heading never changes.
 
+## 2026-10-21: Machine care transitions stay quiet
+
+For agents:
+- Machine hold/clear transitions no longer append to root's inbox or wake a
+  coordinator. The private `.brain/machine.json` keeps the latest 100 transitions;
+  an active hold appears as one informational line in `brain due root`.
+- Root receives at most one machine escalation per episode: immediately on a fresh
+  thermal-pressure reading, or once a heavy-work hold exceeds 60 minutes. Thermal
+  pressure and duration share one identity, so both conditions cannot wake twice.
+  Unknown thermal readings do not end a known episode. Recovery re-arms the next one.
+- Informational machine lines are excluded from the watcher and quiet due checks.
+  Questions, blocked hand-backs, failures and overdue questions keep their routes.
+
+After upgrading:
+- No service change is required. Old generated machine inbox lines are ignored by
+  due; identified queued transition-only wakes are retired. Unknown legacy queue
+  entries still deliver because they may contain questions.
+- Existing holds without a start time begin their duration clock at the first new
+  sample. Closed episodes remain in the private log and disappear from due.
+
 ## 2026-10-21: Rehearse redacts protected probe output
 
 For agents:
@@ -49,15 +69,15 @@ For agents:
   informational and do not generate watcher wakes. Questions,
   blocked hand-backs, failures and overdue questions keep their wake routes.
   Existing unchanged-overdue-block deduplication is retained and regression-tested.
-- A heat episode's close notice replaces its open inbox notice. After handling
-  the close, the obsolete hold no longer appears in `due`.
+- Machine care keeps transitions in private state, with one rolling active hold
+  display; see the quiet-transition entry above for escalation thresholds.
 
 After upgrading:
 - No migration or service installation is needed. Delivery history starts with
   the next wake. Ordinary `brain due` keeps its full informational view; use
   `--since-wake` to see what is new for the latest wake, including during delivery.
-- For an episode cleared before upgrading, remove both old open and close inbox
-  notices when handling it.
+- Old generated open/close inbox notices are informational; they no longer wake
+  coordinators and may be removed during normal inbox cleanup.
 
 ## 2026-10-21: Corrections carry principle and check tags
 
