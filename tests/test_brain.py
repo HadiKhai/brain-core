@@ -7691,9 +7691,11 @@ class VerifyLogs(Scenario):
         m, inst, n, home, wt = self.runner()
         m.VERIFY_PROGRESS_SECONDS = .1
         release = self.tmp / 'release-closed'
+        closed = self.tmp / 'output-closed'
         output, results, errors = io.StringIO(), [], []
         code = ("import os,time\nfrom pathlib import Path\nos.write(1,b'caf\\xc3')\n"
-                "time.sleep(.05)\nos.write(2,b'\\xa9')\nos.close(1)\nos.close(2)\n"
+                "time.sleep(.3)\nos.write(2,b'\\xa9')\nos.close(1)\nos.close(2)\n"
+                f"Path({str(closed)!r}).touch()\n"
                 f"while not Path({str(release)!r}).exists(): time.sleep(.01)\n")
 
         def run():
@@ -7706,8 +7708,15 @@ class VerifyLogs(Scenario):
             worker.start()
             try:
                 deadline = time.monotonic() + 5
-                while 'characters logged' not in output.getvalue() and time.monotonic() < deadline:
+                while not closed.exists() and time.monotonic() < deadline:
                     time.sleep(.02)
+                self.assertTrue(closed.exists())
+                # A startup heartbeat can occur between the split UTF-8 writes. Require
+                # a later heartbeat, after the child's explicit output-closed barrier.
+                previous = output.getvalue().count('characters logged')
+                while output.getvalue().count('characters logged') <= previous and time.monotonic() < deadline:
+                    time.sleep(.02)
+                self.assertGreater(output.getvalue().count('characters logged'), previous)
                 self.assertTrue(worker.is_alive())
                 self.assertIn('verify: running', output.getvalue())
                 log = next((n['dir'] / 'job-handbacks').glob('*.log'))
