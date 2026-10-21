@@ -47,7 +47,9 @@ For agents:
 - After the second context compaction, stop with a blocked hand-back carrying
   `--restart compactions`; due supplies the resume brief command and preserves commits.
   Branch briefs record task/context inputs locally and replay them on restart; successful
-  re-briefing acknowledges that restart. Review briefs keep their read-only instructions.
+  re-briefing acknowledges that restart. Automatic replay applies only when no task or
+  context flags are passed; explicit task/context flags start a new set of inputs.
+  Review briefs keep their read-only instructions.
 
 After upgrading:
 - Reload worker, hire and home-job instructions. Shorten oversized task/context text

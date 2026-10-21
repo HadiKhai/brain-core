@@ -209,3 +209,7 @@ Branch briefs retain task-file paths (or inline task text) and shared-context pa
 machine-local worktree metadata. A restart command replays them; successful re-briefing
 acknowledges that worker restart. Keep referenced input files available. Legacy restarts
 without recorded inputs require the coordinator to supply the original task explicitly.
+
+Automatic replay applies only when none of `--task`, `--task-file` or `--context-file`
+is supplied. An explicit task replaces the saved task and drops saved context unless
+context is passed again. Passing context alone also starts a new set of brief inputs.

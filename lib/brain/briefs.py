@@ -193,9 +193,10 @@ def cmd_brief(a):
     row = _m_jobs.open_job(_m_jobs.read_jobs(n) or [], a.branch) if w else None
     signal = _m_jobs.read_handback(n, row) if row else None
     saved = saved_brief_inputs(n, row)
-    if w and a.task_file is None and a.task is None:
+    reuse_inputs = w and a.task_file is None and a.task is None and a.context_file is None
+    if reuse_inputs:
         a.task_file, a.task = saved.get("task_file"), saved.get("task")
-    if w and a.context_file is None:
+    if reuse_inputs and a.context_file is None:
         a.context_file = saved.get("context_files", [])
     if signal and signal.get("restart") and not (a.task_file or a.task):
         _m_common.die("restart brief has no recorded task; supply the original --task or --task-file")

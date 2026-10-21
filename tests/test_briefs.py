@@ -334,6 +334,30 @@ class BriefLimits(Scenario):
             # A plain subsequent brief also reuses the recorded inputs.
             self.assertIn(expected, self.b(r, "brief", "a", "--branch", "job"))
 
+    def test_explicit_replacement_task_does_not_replay_old_context(self):
+        r = self.setup_job()
+        context = self.tmp / "context.md"
+        context.write_text("Old fixture findings")
+        self.b(r, "brief", "a", "--branch", "job", "--task", "Old task", "--context-file", str(context))
+        context.write_text("ForbiddenFixturePhrase")
+        (r / "nodes/a/never-name.txt").write_text("ForbiddenFixturePhrase\n")
+        out = self.b(r, "brief", "a", "--branch", "job", "--task", "Replacement task")
+        self.assertIn("Replacement task", out)
+        self.assertNotIn("## Shared context", out)
+        self.b(r, "handback", "a", "--branch", "job", "--state", "blocked", "--restart", "compactions")
+        restart = next(i for i in json.loads(self.b(r, "due", "a", "--json")) if i["kind"] == "restart")
+        self.assertNotIn("--context-file", restart["text"])
+        self.assertIn("Replacement task", restart["text"])
+
+    def test_explicit_context_does_not_replay_saved_task(self):
+        r = self.setup_job()
+        self.b(r, "brief", "a", "--branch", "job", "--task", "Previously saved fixture task")
+        context = self.tmp / "context.md"
+        context.write_text("New fixture context")
+        out = self.b(r, "brief", "a", "--branch", "job", "--context-file", str(context))
+        self.assertIn("New fixture context", out)
+        self.assertNotIn("Previously saved fixture task", out)
+
     def test_legacy_restart_requires_original_task_and_reviewer_has_no_worker_policy(self):
         r = self.setup_job()
         self.b(r, "handback", "a", "--branch", "job", "--state", "blocked", "--restart", "compactions")
