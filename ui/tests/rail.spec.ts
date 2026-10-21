@@ -54,6 +54,7 @@ test("collapsed rail: Agents and project sub-items open in a flyout by hover, fo
   await expect(page).toHaveURL(beforeCopy);
   await expect(rail).toBeVisible();
   await expect(flyout).toBeHidden();
+  await expect(rail.getByRole("button", { name: "Field Guide", exact: true })).toBeFocused();
   await page.mouse.move(900, 500);
   await rail.getByRole("button", { name: "Field Guide", exact: true }).hover();
   await expect(flyout).toBeVisible();
@@ -86,6 +87,8 @@ test("collapsed rail keeps an unverified desktop coordinator reference copyable 
     await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe(reference);
     await expect(page).toHaveURL(beforeCopy);
     await expect(rail).toBeVisible();
+    await expect(page.locator(".rail-flyout")).toBeHidden();
+    await expect(rail.getByRole("button", { name: "Field Guide", exact: true })).toBeFocused();
   } finally {
     await request.post("/fixture/update", { data: { nodes: original.nodes } });
   }

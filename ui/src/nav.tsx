@@ -173,15 +173,20 @@ export function Navigation({ s, route, go, onAdd, onNotice }: {
 type FlyItem = { key: string; label: string; icon: ReactNode; count?: number; active?: boolean; href?: string; external?: boolean; onSelect?: () => void };
 function RailFlyout({ label, items, button }: { label: string; items: FlyItem[]; button: ReactElement }) {
   const { state, isMobile } = useSidebar();
-  const [open, setOpen] = useState(false), closedAt = useRef(0);
+  const [open, setOpen] = useState(false), closedAt = useRef(0), trigger = useRef<HTMLButtonElement>(null);
   if (state !== "collapsed" || isMobile || !items.length) return button;
   return (
     <DropdownMenu open={open} onOpenChange={(o) => { if (!o) closedAt.current = Date.now(); setOpen(o); }}>
-      <DropdownMenuTrigger openOnHover delay={80} closeDelay={160} render={button} onFocus={() => {
+      <DropdownMenuTrigger ref={trigger} openOnHover delay={80} closeDelay={160} render={button} onFocus={() => {
         // Focus arriving from the rail opens it; focus returning as the flyout closes (Escape) does not.
         if (Date.now() - closedAt.current > 200) setOpen(true);
       }} />
-      <DropdownMenuContent side="right" align="start" sideOffset={8} className="rail-flyout">
+      <DropdownMenuContent side="right" align="start" sideOffset={8} className="rail-flyout" finalFocus={() => {
+        // A hover-opened menu may have another rail item as its previous focus.
+        // Return to this trigger, suppressing its focus-open handler for this return.
+        closedAt.current = Date.now();
+        return trigger.current;
+      }}>
         <DropdownMenuGroup>
           <DropdownMenuLabel>{label}</DropdownMenuLabel>
           {items.map((i) => (

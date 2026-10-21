@@ -272,7 +272,7 @@ test("browser Back restores each destination page scroll position", async ({ pag
   await expect(page.locator("[data-page=usage]")).toBeVisible();
   const restored = await page.locator("#workspace-content").evaluate((e) => { e.scrollTop = 300; return e.scrollTop; });
   expect(restored).toBeGreaterThan(0);
-  await page.getByRole("link", { name: /^Learnings/ }).click();
+  await page.getByRole("button", { name: "Learnings", exact: true }).click();
   await expect(page).toHaveURL(/view=learnings/);
   await page.goBack();
   await expect(page).toHaveURL(/view=usage/);
