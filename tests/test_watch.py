@@ -309,9 +309,11 @@ class Watcher(Scenario):
         for index, exc in enumerate((SystemExit('bad cap'), OSError('fixture'), ValueError('bad cap'))):
             run['run'] = 'bad-route-' + str(index)
             (self.root / '.brain/worker-runs.json').write_text(json.dumps({'runs': [run]}))
-            with mock.patch.object(owner._m_usage, 'class_route', create=True, side_effect=exc), \
+            with mock.patch.object(owner._m_usage, 'class_allows_fallback', return_value=True), \
+                    mock.patch.object(owner._m_usage, 'class_route', create=True, side_effect=exc) as route, \
                     mock.patch.object(self.m, 'wake_start'):
                 self.watch()
+                route.assert_called_once()
             self.assertEqual(self.m.read_jobs(n)[0]['Switches'], '')
         self.assertEqual((self.root / 'inbox.md').read_text().count('worker run failed'), 3)
 
@@ -427,7 +429,8 @@ class Watcher(Scenario):
         fm, body = self.m.read_fm(n['dir'] / 'node.md')
         fm['runtime'] = 'codex'
         self.m.write_fm(n['dir'] / 'node.md', fm, body)
-        with mock.patch.object(self.m, 'wake_start'):
+        with mock.patch.object(self.m._owners['watch_run']._m_usage, 'class_allows_fallback', return_value=True), \
+                mock.patch.object(self.m, 'wake_start'):
             self.watch()
         self.assertEqual(self.m.read_jobs(self.inst.node('root'))[0]['Switches'], '')
         self.assertNotIn('relaunch', (self.root / 'inbox.md').read_text())
