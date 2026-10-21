@@ -17,6 +17,71 @@ from . import verify as _m_verify
 from . import worktrees as _m_worktrees
 
 
+COMPACTION_POLICY = ("After your second context compaction, hand back `--state blocked` with "
+                     "`restart: compactions` and stop; your coordinator restarts you from a fresh brief "
+                     "that resumes your commits. For a ledger job, `--restart compactions` records this marker.")
+
+
+def reference_line(path, summary):
+    """Keep reference metadata on one bounded line; bodies remain in their source files."""
+    return "- `" + _m_common.tilde(path) + "`: " + " ".join(str(summary).split())[:180] + ". Read before working."
+
+
+def checked_brief(n, text, worker=True):
+    """Measure the complete UTF-8 output, without trimming mandatory safety instructions."""
+    if worker:
+        text += "\n" + COMPACTION_POLICY + "\n"
+    _m_guard.no_terms_in(n, text, "the brief")
+    try:
+        kb = float(n["fm"].get("brief_max_kb", 8))
+        if not 0 < kb < float("inf"):
+            raise ValueError
+    except (TypeError, ValueError):
+        _m_common.die("brief_max_kb must be a positive finite number in node.md")
+    size = len(text.encode("utf-8"))
+    if size > kb * 1024:
+        sections, name, count = [], "Preamble", 0
+        for line in text.splitlines(keepends=True):
+            if line.startswith("## "):
+                sections.append((count, name))
+                name, count = line[3:].strip(), 0
+            count += len(line.encode("utf-8"))
+        sections.append((count, name))
+        largest = "; ".join(f"{name}: {count} bytes" for count, name in sorted(sections, reverse=True)[:3])
+        message = (f"brief is {size} bytes (brief_max_kb={kb:g}); largest sections: {largest}. "
+                   "Shorten task/context or use path references; retain limits, guard and hand-back instructions.")
+        if size >= 2 * kb * 1024:
+            _m_common.die("refused: " + message)
+        print("warning: " + message, file=sys.stderr)
+    return text
+
+
+def restart_acknowledged(n, row, signal):
+    """A local re-brief acknowledges only the exact worker restart it consumed."""
+    return bool(signal and signal.get("restart") == "compactions" and
+                n["local"].get("worktrees", {}).get(row["Job"], {}).get("restart_ack") ==
+                _m_jobs.digest([_m_jobs.job_key(row), signal]))
+
+
+def saved_brief_inputs(n, row):
+    if not row:
+        return {}
+    saved = n["local"].get("worktrees", {}).get(row["Job"], {}).get("brief_inputs", {})
+    return saved if saved.get("job") == _m_jobs.job_key(row) else {}
+
+
+def restart_command(n, row):
+    args = ["brain", "brief", n["id"], "--branch", row["Job"]]
+    saved = saved_brief_inputs(n, row)
+    if saved.get("task_file"):
+        args += ["--task-file", saved["task_file"]]
+    elif saved.get("task"):
+        args += ["--task", saved["task"]]
+    for path in saved.get("context_files", []):
+        args += ["--context-file", path]
+    return shlex.join(args)
+
+
 def import_job_id(home):
     head = _m_common.git("rev-parse", "--verify", "-q", "HEAD", cwd=home).stdout.strip() or "unborn"
     return "import:" + head
@@ -77,7 +142,7 @@ def import_brief(a):
             "Report checks and review evidence; keep pre-existing source findings separate from output findings. "
             "Leave the source branch and history unchanged.", ""]
     out += _m_knowledge.report_lines(job=True) + _m_knowledge.handback_lines(inst, n, a.to, branch=branch)
-    text = "\n".join(out) + "\n"
+    text = checked_brief(n, "\n".join(out) + "\n")
     _m_guard.no_terms_in(n, text, "the import brief")
     if _m_nodes.SECRET_META.search(text) or _m_nodes.SECRET_LINE.search(task + "\n" + "\n".join(_m_knowledge.limits_lines(n))):
         _m_common.die("unsafe import brief metadata")
@@ -136,6 +201,16 @@ def cmd_brief(a):
     if n["external"] and not (n["home_path"] and n["home_path"].exists()):
         _m_common.die(f"{n['id']}'s home isn't on this machine (brain set {n['id']} home=<path>): a worker can't run there, "
             "and never in the instance instead")
+    row = _m_jobs.open_job(_m_jobs.read_jobs(n) or [], a.branch) if w else None
+    signal = _m_jobs.read_handback(n, row) if row else None
+    saved = saved_brief_inputs(n, row)
+    reuse_inputs = w and a.task_file is None and a.task is None and a.context_file is None
+    if reuse_inputs:
+        a.task_file, a.task = saved.get("task_file"), saved.get("task")
+    if reuse_inputs and a.context_file is None:
+        a.context_file = saved.get("context_files", [])
+    if signal and signal.get("restart") and not (a.task_file or a.task):
+        _m_common.die("restart brief has no recorded task; supply the original --task or --task-file")
     where = Path(w["path"]) if w else (n["home_path"] if n["external"] else n["dir"])
     shared = separation_lines(a, n, a.branch) + peer_lines(a)
     context, context_inputs = [], []
@@ -163,7 +238,10 @@ def cmd_brief(a):
         head += f"  ·  model: {a.model}"
     if w:
         head += f"  ·  {_m_worktrees.port_text(w['port'], w.get('ports', 1))}"
-    task = Path(a.task_file).read_text() if a.task_file else (a.task or "<!-- the task, what done means, "
+    task_path = Path(a.task_file).expanduser().resolve() if a.task_file else None
+    if task_path:
+        _m_guard.no_terms_in(n, str(task_path), "task file path")
+    task = task_path.read_text() if task_path else (a.task or "<!-- the task, what done means, "
                                                                           "where outputs go -->")
     if a.small:
         from . import messages as _m_messages
@@ -178,7 +256,7 @@ def cmd_brief(a):
                "shared repository changes need a full job.",
                f"Send one line via {_m_knowledge.host_send(inst, n, a.to)}: <kind>: <result>; proof: <check/output>, using the message protocol above. "
                "Never ask the operator or wait in this thread; send questions too, then end your turn."]
-        text = "\n".join(out) + "\n"
+        text = checked_brief(n, "\n".join(out) + "\n")
         _m_guard.no_terms_in(n, text, "the brief")
         if a.out:
             _m_history.write_out(inst, n, a.out, text)
@@ -200,7 +278,9 @@ def cmd_brief(a):
                     *("^" + ref for ref in exclude), cwd=where).stdout.strip() if exclude else ""
         row = next((r for r in reversed(_m_jobs.read_jobs(n) or []) if r["Job"] == a.branch), {})
         dirty = _m_common.git("status", "--porcelain", cwd=where).stdout.strip()
-        if (count.isdigit() and int(count)) or dirty or row.get("Switches") or row.get("Reviews", "") not in ("", "0"):
+        restart = (_m_jobs.read_handback(n, row) or {}).get("restart") if row else None
+        if ((count.isdigit() and int(count)) or dirty or restart or row.get("Switches") or
+                row.get("Reviews", "") not in ("", "0")):
             head_sha = _m_common.git("rev-parse", "HEAD", cwd=where).stdout.strip()
             out += ["## Resume existing work", "",
                     f"This job has {count or 'unknown'} own commit(s) and "
@@ -218,14 +298,19 @@ def cmd_brief(a):
         out += ["## Before you hand back", "", f"Run `brain guard {n['id']} {_m_common.tilde(where)}`. It must print "
                 "`guard: clean`; if not, remove what it lists (it names the file, never the word).", ""]
     out += _m_knowledge.handback_lines(inst, n, a.to, branch=a.branch) + _m_knowledge.report_lines(job=bool(a.branch))
-    text = "\n".join(out) + "\n"
+    text = checked_brief(n, "\n".join(out) + "\n")
     _m_guard.no_terms_in(n, text, "the brief")
     if a.out:
         _m_history.write_out(inst, n, a.out, text)
     else:
         print(text, end="")
-    if w is not None and a.context_file:
-        inst.local_of(n["id"])["worktrees"][a.branch]["context_inputs"] = context_inputs
+    if w is not None and row:
+        sys.stdout.flush()  # Do not acknowledge a failed delivery through a closed pipe.
+        w["brief_inputs"] = {"job": _m_jobs.job_key(row), "task_file": str(task_path) if task_path else None,
+                             "task": a.task if not task_path else None, "context_files": context_inputs}
+        w["context_inputs"] = context_inputs
+        if signal and signal.get("restart") == "compactions":
+            w["restart_ack"] = _m_jobs.digest([_m_jobs.job_key(row), signal])
         inst.save_local()
 
 # ---------- second-runtime review ----------

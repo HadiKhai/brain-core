@@ -123,7 +123,7 @@ def writes(a):
         return a.action in (None, "plan") or bool(a.save)
     if name in ("cmd_brief", "cmd_hire", "cmd_history"):
         return bool(getattr(a, "out", None) or getattr(a, "job", None) or
-                    (getattr(a, "branch", None) and getattr(a, "context_file", None)))  # --out writes a file, maybe inside the instance
+                    (name == "cmd_brief" and getattr(a, "branch", None)))  # Branch briefs also record replay inputs and acknowledge restarts.
     if name == "cmd_check":
         return bool(a.fix)
     if name == "cmd_jobs":
@@ -258,6 +258,7 @@ def main():
     cmd("handback", _m_jobs.cmd_handback, "done/blocked/question hand-back; worker messages are start/done/blocked/question",
         "id", opt("--branch", required=True), opt("--state", choices=["done", "failed", "blocked", "question"], required=True),
         opt("--report"), opt("--lessons", help="proposed lessons, or none: <reason>"),
+        opt("--restart", choices=["compactions"], help="request a fresh brief resuming this job (blocked only)"),
         opt("--need-human", help="question or blocked need to append to the node inbox"),
         opt("--reviews", type=int, help="completed review rounds; runs verify for done (or reuses a green run that "
             "still proves this commit)"),

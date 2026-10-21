@@ -226,5 +226,171 @@ class ResumeBriefRegressions(Scenario):
 
 
 
+class BriefLimits(Scenario):
+    def setup_job(self):
+        r = self.init("alice")
+        home = self.repo(self.tmp / "app")
+        self.b(r, "new", "a", "--title", "A", "--home", str(home))
+        self.b(r, "wt", "add", "a", "job")
+        return r
+
+    def test_large_specialist_and_item_are_referenced(self):
+        r = self.setup_job()
+        self.b(r, "specialist", "new", "qa", "--title", "QA")
+        role = r / "specialists/qa/role.md"
+        role.write_text(role.read_text() + "\n## Standards\n" + "specialist-detail " * 1300)
+        self.b(r, "item", "add", "guide", "--from", "a", "--title", "Guide", "--kind", "method",
+               "--ref", "fixture", "--body", "library-detail " * 1400)
+        out = self.b(r, "hire", "qa", "a", "--task", "Test it", "--items", "guide")
+        self.assertLess(len(out.encode()), 8192)
+        self.assertIn("specialists/qa/role.md", out)
+        self.assertIn("library/guide.md", out)
+        self.assertNotIn("specialist-detail", out)
+        self.assertNotIn("library-detail", out)
+        self.assertIn("second context compaction", out)
+
+    def test_reference_paths_obey_source_never_name_policy(self):
+        r = self.setup_job()
+        self.b(r, "new", "source", "--title", "Source")
+        self.b(r, "specialist", "new", "qa", "--title", "QA")
+        self.b(r, "item", "add", "guide", "--from", "source", "--title", "Guide", "--kind", "method",
+               "--ref", "fixture", "--body", "Review guide")
+        # The source bans a component of the actual library path, while the target allows it.
+        (r / "nodes/source/never-name.txt").write_text("library\n")
+        out = self.b(r, "hire", "qa", "a", "--task", "Review guide", "--items", "guide", ok=False)
+        self.assertNotIn("/library/guide.md", out)
+        out = self.b(r, "brief", "a", "--task", "Review guide")
+        self.assertNotIn("/library/guide.md", out)
+        self.b(r, "specialist", "new", "reader", "--title", "Reader", "--from", "source", "--at", "root", "--proposed")
+        role = r / "specialists/reader/role.md"
+        role.write_text(role.read_text().replace("status: proposed", "status: active"))
+        (r / "nodes/source/never-name.txt").write_text("specialists\n")
+        out = self.b(r, "hire", "reader", "a", "--task", "Read", ok=False)
+        self.assertNotIn("/specialists/reader/role.md", out)
+
+    def test_all_generators_enforce_size_before_output_or_records(self):
+        r = self.setup_job()
+        self.b(r, "specialist", "new", "qa", "--title", "QA")
+        for command in [("brief", "a", "--task"), ("hire", "qa", "a", "--task"),
+                        ("review", "a", "--branch", "job", "--focus")]:
+            out = self.b(r, *command, "x" * (9 * 1024))
+            self.assertIn("warning: brief", out)
+            self.assertIn("largest sections:", out)
+            destination = self.tmp / (command[0] + ".md")
+            ledger_before = (r / "nodes/a/job-ledger.md").read_bytes()
+            out = self.b(r, *command, "x" * (17 * 1024), "--out", str(destination), ok=False)
+            self.assertIn("refused:", out)
+            self.assertIn("Task" if command[0] != "review" else "Focus", out)
+            self.assertFalse(destination.exists())
+            self.assertEqual(ledger_before, (r / "nodes/a/job-ledger.md").read_bytes())
+        self.b(r, "set", "a", "brief_max_kb=32")
+        self.assertNotIn("warning: brief", self.b(r, "brief", "a", "--task", "x" * 17000))
+        self.b(r, "set", "a", "brief_max_kb=nan")
+        self.assertIn("positive finite", self.b(r, "brief", "a", ok=False))
+
+    def test_compaction_restart_due_and_fresh_brief_resume_without_commits(self):
+        r = self.setup_job()
+        self.b(r, "brief", "a", "--branch", "job", "--task", "Finish fixture work")
+        self.b(r, "handback", "a", "--branch", "job", "--state", "done", "--restart", "compactions", ok=False)
+        self.b(r, "handback", "a", "--branch", "job", "--state", "blocked", "--restart", "compactions")
+        due = json.loads(self.b(r, "due", "a", "--json"))
+        self.assertIn("restart", str(due))
+        self.assertIn("brain brief a --branch job", str(due))
+        self.assertIn("## Resume existing work", self.b(r, "brief", "a", "--branch", "job"))
+        self.b(r, "handback", "a", "--branch", "job", "--state", "blocked")
+        self.assertNotIn('"kind": "restart"', self.b(r, "due", "a", "--json"))
+
+    def test_restart_replays_exact_inputs_and_acknowledges_each_signal(self):
+        r = self.setup_job()
+        task_file = self.tmp / "task with spaces.md"
+        task_file.write_text("Complete the original fixture task.")
+        context = self.tmp / "shared context.md"
+        context.write_text("Existing fixture findings must survive restart.")
+        for task_args, expected in [
+                (["--task-file", str(task_file)], task_file.read_text()),
+                (["--task", "Finish the inline fixture's remaining work."], "Finish the inline fixture's remaining work.")]:
+            self.b(r, "brief", "a", "--branch", "job", *task_args, "--context-file", str(context))
+            self.b(r, "handback", "a", "--branch", "job", "--state", "blocked", "--restart", "compactions")
+            due = json.loads(self.b(r, "due", "a", "--json"))
+            restart = next(i for i in due if i["kind"] == "restart")
+            self.assertEqual(restart["state"], "blocked")
+            self.b(r, "status", "a", "--refresh")
+            finished = (r / "nodes/a/status.md").read_text().split("Finished jobs awaiting coordinator:", 1)[1]
+            self.assertIn("restart: compactions", finished)
+            # Refusal must preserve the old replay inputs and leave restart pending.
+            self.b(r, "brief", "a", "--branch", "job", "--task", "x" * 18000, ok=False)
+            self.assertTrue(any(i["kind"] == "restart" for i in json.loads(self.b(r, "due", "a", "--json"))))
+            command = re.search(r"resume with `([^`]+)`", restart["text"]).group(1)
+            args = shlex.split(command)
+            self.assertIn("--context-file", args)
+            self.assertIn(task_args[0], args)
+            out = self.b(r, *args[1:])  # Run the exact command due supplies, without the executable.
+            self.assertIn(expected, out)
+            self.assertIn(context.read_text(), out)
+            self.assertIn("## Resume existing work", out)
+            self.assertNotIn("<!-- the task", out)
+            self.assertFalse(any(i["kind"] in ("restart", "handback", "invalid-handback")
+                                 for i in json.loads(self.b(r, "due", "a", "--json"))))
+            # A plain subsequent brief also reuses the recorded inputs.
+            self.assertIn(expected, self.b(r, "brief", "a", "--branch", "job"))
+
+    def test_explicit_replacement_task_does_not_replay_old_context(self):
+        r = self.setup_job()
+        context = self.tmp / "context.md"
+        context.write_text("Old fixture findings")
+        self.b(r, "brief", "a", "--branch", "job", "--task", "Old task", "--context-file", str(context))
+        context.write_text("ForbiddenFixturePhrase")
+        (r / "nodes/a/never-name.txt").write_text("ForbiddenFixturePhrase\n")
+        out = self.b(r, "brief", "a", "--branch", "job", "--task", "Replacement task")
+        self.assertIn("Replacement task", out)
+        self.assertNotIn("## Shared context", out)
+        self.b(r, "handback", "a", "--branch", "job", "--state", "blocked", "--restart", "compactions")
+        restart = next(i for i in json.loads(self.b(r, "due", "a", "--json")) if i["kind"] == "restart")
+        self.assertNotIn("--context-file", restart["text"])
+        self.assertIn("Replacement task", restart["text"])
+
+    def test_explicit_context_does_not_replay_saved_task(self):
+        r = self.setup_job()
+        self.b(r, "brief", "a", "--branch", "job", "--task", "Previously saved fixture task")
+        context = self.tmp / "context.md"
+        context.write_text("New fixture context")
+        out = self.b(r, "brief", "a", "--branch", "job", "--context-file", str(context))
+        self.assertIn("New fixture context", out)
+        self.assertNotIn("Previously saved fixture task", out)
+
+    def test_legacy_restart_requires_original_task_and_reviewer_has_no_worker_policy(self):
+        r = self.setup_job()
+        self.b(r, "handback", "a", "--branch", "job", "--state", "blocked", "--restart", "compactions")
+        out = self.b(r, "brief", "a", "--branch", "job", ok=False)
+        self.assertIn("supply the original --task or --task-file", out)
+        review = self.b(r, "review", "a", "--branch", "job")
+        self.assertIn("Write no file", review)
+        self.assertNotIn("second context compaction", review)
+        self.assertNotIn("restart: compactions", review)
+
+    def test_byte_measurement_and_exact_thresholds(self):
+        sys.path.insert(0, str(CORE / "lib"))
+        from brain import briefs
+        n = {"fm": {}, "dir": self.tmp, "parent": None}
+        # Isolate only privacy lookup; retain the real formatter and byte counter.
+        with mock.patch.object(briefs._m_guard, "no_terms_in"):
+            suffix = "\n" + briefs.COMPACTION_POLICY + "\n"
+            text = "## Task\n" + "x" * (8192 - len(suffix.encode()) - 8)
+            with contextlib.redirect_stderr(io.StringIO()) as err:
+                self.assertEqual(len(briefs.checked_brief(n, text).encode()), 8192)
+            self.assertEqual(err.getvalue(), "")
+            with contextlib.redirect_stderr(io.StringIO()) as err:
+                briefs.checked_brief(n, text + "é")
+            self.assertIn("warning", err.getvalue())
+            with contextlib.redirect_stderr(io.StringIO()) as err:
+                self.assertEqual(len(briefs.checked_brief(n, text + "x" * 1024).encode()), 9216)
+            self.assertIn("Task:", err.getvalue())
+            for extra in (8192, 9216):
+                with self.assertRaises(SystemExit) as refused:
+                    briefs.checked_brief(n, text + "x" * extra)
+                self.assertIn("refused:", str(refused.exception))
+                self.assertIn("Task:", str(refused.exception))
+
+
 if __name__ == "__main__":
     unittest.main()

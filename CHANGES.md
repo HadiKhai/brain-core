@@ -5,6 +5,23 @@ upgrading. `brain changes <node>` shows the entries this node's coordinator hasn
 `brain due <node>` lists them until `brain changes <node> --seen`. Entry headings are
 `## <date>: <title>`; once released, a heading never changes.
 
+## 2026-10-21: Bounded briefs and compaction restarts
+
+For agents:
+- Brief, hire and review warn above 8 KB of UTF-8 output and refuse at 16 KB,
+  naming the largest sections. Node `brief_max_kb` changes the warning threshold.
+- Specialist standards and library items are referenced by path. Read them before work.
+- After the second context compaction, stop with a blocked hand-back carrying
+  `--restart compactions`; due supplies the resume brief command and preserves commits.
+  Branch briefs record task/context inputs locally and replay them on restart; successful
+  re-briefing acknowledges that restart. Automatic replay applies only when no task or
+  context flags are passed; explicit task/context flags start a new set of inputs.
+  Review briefs keep their read-only instructions.
+
+After upgrading:
+- Reload worker, hire and home-job instructions. Shorten oversized task/context text
+  without removing limits, guard or hand-back steps; no data migration is needed.
+
 ## 2026-10-21: Reviews use one full round and a fix check
 
 For agents:

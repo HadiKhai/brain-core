@@ -164,6 +164,8 @@ def cmd_handback(a):
         _m_common.die(_m_guard.redact(f"no open job for {a.branch} in {n['id']}", _m_guard.never_terms(n)))
     if a.state == "done":
         _m_verify.main_notice(n)
+    if getattr(a, "restart", None) and a.state != "blocked":
+        _m_common.die("--restart requires --state blocked")
     previous = read_handback(n, row) or {}
     lessons = (a.lessons if a.lessons is not None else previous.get("lessons", "")).strip()
     if a.lessons is not None and (not lessons or lessons == "none:" or lessons.lower() == "none"):
@@ -205,6 +207,9 @@ def cmd_handback(a):
                 "at": inst.now(), "report": _m_common.tilde(a.report) if a.report is not None else previous.get("report", ""),
                 "lessons": lessons, "ready": packet, "ready_reasons": reasons,
                 "verify_runs": count("verify_runs") + fresh, "verify_reused": count("verify_reused") + reused}
+        if getattr(a, "restart", None):
+            data["restart"] = a.restart
+            data["restart_id"] = os.urandom(16).hex()
         first = previous.get("first_ready") if isinstance(previous.get("first_ready"), str) else None
         if not first and packet and packet.get("verify_result") == 0 and not reasons:
             first = inst.now_dt().isoformat()

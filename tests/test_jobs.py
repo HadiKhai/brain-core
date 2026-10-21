@@ -867,6 +867,8 @@ class Workflow(Scenario):
         self.assertIn("Why a separate agent: Independent arithmetic concern", saved.read_text())
         self.assertIn("needs a reason", self.b(r, *args, "--why-separate", "  ", ok=False))
         self.assertIn("explicitly waived", self.b(r, *args, "--why-separate", "", "--allow-unexplained"))
+        # The successful replacement briefs above update their local replay inputs.
+        local = json.loads((r / ".brain/local.json").read_text())
         context.write_text("")
         self.assertIn("shared context file is empty", self.b(r, *args, "--context-file", str(context), ok=False))
         self.assertIn("cannot read shared context file", self.b(r, *args, "--context-file",

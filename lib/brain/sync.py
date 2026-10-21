@@ -116,7 +116,7 @@ def cmd_review(a):
                 "A list of findings, most severe first. Each: severity (blocker, major, minor), `file:line`, "
                 "the problem, and a concrete fix. Say which tests you ran and their results. If you find nothing "
                 "that matters, say so plainly.", ""] + _m_knowledge.handback_lines(inst, n, who="reviewer", branch=a.branch)
-    text = "\n".join(out) + "\n"
+    text = _m_briefs.checked_brief(n, "\n".join(out) + "\n", worker=False)
     _m_guard.no_terms_in(n, text, "the review brief")
     if a.out:
         _m_history.write_out(inst, n, a.out, text)
