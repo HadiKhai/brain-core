@@ -19,8 +19,22 @@ description: Capture reusable knowledge (a method, style, asset, script, lesson 
 4. **Wider use** needs everyone in the scope to agree (axiom 11):
    `core/bin/brain item scope <item-id> <new scope> --consented-by <everyone in the current scope>`.
    Never claim consent the operator didn't report.
-5. **A correction to a specialist** is a lesson:
-   `core/bin/brain lesson <specialist> --from <node where it happened> "<the lesson>"`.
+5. **A correction to a specialist or node** is a lesson. Read that target's `direction.md`
+   first. Under `## Principles`, each principle is a `### <id>: <title>` block (lowercase
+   letters, digits and hyphens, starting with a letter); `enforced_by: <check path>` names
+   its check, or `enforced_by: wish` records that no check enforces it yet. Use
+   `templates/direction.md` for the optional format (new specialists receive it).
+   Pick the existing principle that the correction breaks:
+   `core/bin/brain lesson <specialist> --from <node where it happened> --principle <id> "<the lesson>"`.
+   Use `--at <library node>` when the specialist id is ambiguous. For a node correction:
+   `core/bin/brain lesson <node> --node --from <source node> --principle <id> "<the lesson>"`.
+   A node correction's source must be that node or a descendant with the same owners at
+   every step; corrections never cross a boundary or move into an unrelated node's state.
+   If none fits (including a missing direction file), use `--principle unclassified`, the
+   default. Never invent a matching principle or accept a direction diff. The operator must
+   approve direction changes. Each lesson retains its source, timestamp and source-owner
+   scope along with the principle id and a snapshot of its `enforced_by` value (`wish` if
+   absent). Old lessons read as unclassified; do not rewrite their provenance or scope.
 6. **Closing a job:** read the worker hand-back's `lessons` field (`brain handback --lessons`),
    file its reusable proposals with step 2, then record the item ids. Only legacy reports
    need a Lessons section:
