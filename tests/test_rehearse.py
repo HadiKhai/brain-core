@@ -180,12 +180,11 @@ class RehearsalFixture(Scenario):
                 if not during_run:
                     mutation()
         def lane(*args):
-            if inspect_lane:
-                observed = inspect_lane(*args)
-                if observed is not None:
-                    return observed
+            observed = inspect_lane(*args) if inspect_lane else None
             if during_run:
                 mutation()
+            if observed is not None:
+                return observed
             return outputs.pop(0) if outputs is not None else {'hook': result()}
         with mock.patch.dict(os.environ, self.env), \
                 mock.patch.object(rehearsal, 'sandbox_self_check'), \

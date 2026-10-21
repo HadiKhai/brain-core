@@ -235,6 +235,42 @@ def stability_snapshot(root):
 def copy_tree(source, dest):
     # copy2 creates independent inodes, including for source hard links.
     shutil.copytree(source, dest, symlinks=True)
+    relocate_links(source, dest)
+
+
+def relocate_links(source, dest):
+    """Keep absolute internal aliases inside every relocated copy's own tree."""
+    for dp, dirs, files in os.walk(dest, followlinks=False):
+        for name in dirs + files:
+            link = Path(dp) / name
+            if not link.is_symlink():
+                continue
+            target = Path(os.readlink(link))
+            if not target.is_absolute():
+                continue
+            try:
+                suffix = target.relative_to(source)
+            except ValueError:
+                continue
+            # Preserve alias/.. semantics: do not resolve or normalize the suffix
+            # through either the live tree or copied links while rewriting it.
+            relative = Path(os.path.relpath(dest, link.parent)) / suffix
+            link.unlink()
+            link.symlink_to(relative)
+
+
+def validate_frozen_links(root):
+    """No surviving alias may observe an external/live target, even read-only."""
+    for dp, dirs, files in os.walk(root, followlinks=False):
+        for name in dirs + files:
+            link = Path(dp) / name
+            if link.is_symlink():
+                try:
+                    target = link.resolve()
+                except (OSError, RuntimeError):
+                    raise RehearsalError('cyclic or unavailable frozen link refused') from None
+                if target != root and root not in target.parents:
+                    raise RehearsalError('outward-linked frozen brain refused')
 
 
 def materialize_git(source, dest):
@@ -713,13 +749,14 @@ def rehearse(inst, n, branch):
         sandbox_self_check(folder)
         frozen = folder / 'source'
         copy_tree(inst.root, frozen)
+        validate_frozen_links(frozen)
         materialize_git(inst.root, frozen)
         # The copy is common fixed input, not an atomic historical snapshot.
         # Live writers are irrelevant after preparation; audit only private data.
         baseline_commit = installed_core_commit(frozen)
-        baseline = folder / 'installed'
-        copy_tree(frozen / 'core', baseline)
-        materialize_git(frozen / 'core', baseline)
+        # Keep core-relative links into the captured brain valid until the core
+        # is installed into a lane. No extra standalone baseline copy is needed.
+        baseline = frozen / 'core'
         candidate = folder / 'candidate'
         # Clone transports only Git objects; do not run setup, hooks or a checkout
         # in the original home. No hard links and no origin survives in the copy.

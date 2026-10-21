@@ -48,6 +48,39 @@ class FrozenInputs(RehearsalFixture):
         self.assertEqual('original\n', (self.root / 'note.md').read_text())
         self.assertFalse(sources[0].exists())
 
+    def test_absolute_internal_links_read_only_the_frozen_target(self):
+        (self.root / 'brief.md').symlink_to(self.root / 'note.md')
+        (self.root / 'aliases').mkdir()
+        (self.root / 'aliases/nested').symlink_to(self.root / 'brief.md')
+        (self.root / 'notes-alias').symlink_to(self.root / 'aliases', target_is_directory=True)
+        reads = []
+        def inspect(source, core, folder, *args):
+            folder.mkdir()
+            lane = folder / 'brain'
+            rehearsal.copy_tree(source, lane)
+            reads.append((source / 'brief.md').read_text())
+            self.assertEqual('original\n', (lane / 'notes-alias/nested').read_text())
+            self.assertEqual(lane / 'note.md', (lane / 'brief.md').resolve())
+            return {'brief:0': result((lane / 'brief.md').read_text()), 'hook': result()}
+        outcome = self.run_rehearsal(lambda: self.write('note.md', 'live edit'),
+                                    during_run=True, inspect_lane=inspect)
+        self.assertTrue(outcome['passed'], outcome['regressions'])
+        self.assertEqual(['original\n', 'original\n'], reads)
+        self.assertEqual(str(self.root / 'note.md'), os.readlink(self.root / 'brief.md'))
+
+    def test_link_back_to_live_tree_and_cyclic_links_refuse_before_probes(self):
+        # A relative path can leave the copied root and re-enter the live brain.
+        for target in (os.path.relpath(self.root / 'note.md', self.root), 'brief.md'):
+            link = self.root / 'brief.md'
+            if target == 'note.md':
+                target = '../live/note.md'
+            link.symlink_to(target)
+            try:
+                with self.assertRaises(rehearsal.RehearsalError):
+                    self.run_rehearsal(inspect_lane=lambda *args: self.fail('unsafe link reached a probe'))
+            finally:
+                link.unlink()
+
     def test_identical_baseline_failure_is_named_in_evidence_and_printed(self):
         old = {'brief:0': result('refused: brief limit is exceeded', code=1), 'hook': result()}
         outcome = self.run_rehearsal(outputs=[old, old])
