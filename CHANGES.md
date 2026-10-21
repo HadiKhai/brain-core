@@ -9,9 +9,10 @@ upgrading. `brain changes <node>` shows the entries this node's coordinator hasn
 
 For agents:
 - Rehearsal source stability checks bind tracked file contents, installed-core
-  gitlinks, branch and tag refs, and HEAD. Runtime caches, machine-local and
+  gitlinks, branch and tag refs, and HEAD. Runtime caches, machine-local, untracked and
   ignored files, private checkpoint refs and Git bookkeeping can change while
-  the source is copied or the rehearsal runs. Copy mutation audits remain exhaustive.
+  the source is copied or the rehearsal runs. Copied repositories must still have
+  every object reachable from HEAD, branches and tags. Copy mutation audits remain exhaustive.
 
 After upgrading:
 - Retry rehearsals that refused a busy source. Tracked content or real ref changes

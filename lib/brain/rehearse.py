@@ -157,21 +157,35 @@ def snapshot_entry(p, cache=None):
 
 
 def stability_snapshot(root):
-    """Bind tracked worktree bytes and real refs, excluding runtime/Git churn.
+    """Bind tracked worktree bytes and real refs; ignore untracked/runtime churn.
 
     Keep snapshot() exhaustive for the private copies' mutation audit. Index
     timestamps, staged blob ids, reflogs and private refs are not source content.
     Gitlinks get their own tracked snapshot, including dirty installed-core bytes.
     """
-    if root.is_symlink() or (root / '.git').is_symlink():
+    metadata = root / '.git'
+    if root.is_symlink() or metadata.is_symlink():
         raise RehearsalError('linked Git metadata refused')
+    if not metadata.exists():
+        raise RehearsalError('source stability metadata unavailable')
+    # Inspect gitfile/commondir paths before Git can canonicalize linked parents
+    # or read linked config/index/refs. Both paths may be relative to their owner.
+    own = metadata
+    if metadata.is_file():
+        pointer = metadata.read_text()
+        if not pointer.startswith('gitdir: '):
+            raise RehearsalError('source stability metadata unavailable')
+        own = root / pointer[8:].strip()
+    if any(p.is_symlink() for p in (own, *own.parents)):
+        raise RehearsalError('linked Git metadata refused')
+    if (own / 'commondir').is_symlink():
+        raise RehearsalError('linked Git metadata refused')
+    common = own / (own / 'commondir').read_text().strip() if (own / 'commondir').is_file() else own
     def git(*args):
         r = _m_common.git(*args, cwd=root)
         if r.returncode:
             raise RehearsalError('source stability metadata unavailable')
         return r.stdout
-    own = Path(git('rev-parse', '--path-format=absolute', '--git-dir').strip())
-    common = Path(git('rev-parse', '--path-format=absolute', '--git-common-dir').strip())
     # Git itself reads these paths. Refuse links before asking it for index/refs;
     # private ref namespaces are neither read nor traversed by this check.
     for base in {own, common}:
@@ -184,10 +198,17 @@ def stability_snapshot(root):
             if path.is_symlink():
                 raise RehearsalError('linked Git metadata refused')
             if rel in ('refs/heads', 'refs/tags') and path.is_dir():
-                if any(value.startswith('link:') for value in snapshot(path).values()):
-                    raise RehearsalError('linked Git metadata refused')
+                # Only inspect link types: transient ref locks may disappear and
+                # must not be opened or hashed while an unrelated writer runs.
+                for dp, dirs, files in os.walk(path, followlinks=False):
+                    if any((Path(dp) / name).is_symlink() for name in dirs + files):
+                        raise RehearsalError('linked Git metadata refused')
     out = {}
-    for rel in set(git('ls-files', '--cached', '-z').split('\0')) - {''}:
+    listing = subprocess.run(['git', '-C', str(root), 'ls-files', '--cached', '-z'], capture_output=True)
+    if listing.returncode:
+        raise RehearsalError('source stability metadata unavailable')
+    tracked = {os.fsdecode(rel) for rel in listing.stdout.split(b'\0') if rel}
+    for rel in tracked:
         path = root
         for part in Path(rel).parts:
             path = path / part
@@ -197,7 +218,14 @@ def stability_snapshot(root):
         out[key] = snapshot_entry(path)
         if not path.is_symlink() and path.is_dir() and key == rel:
             out[key] = stability_snapshot(path) if (path / '.git').exists() else snapshot(path)
-    out['.git:refs'] = git('for-each-ref', '--format=%(refname) %(objectname)', 'refs/heads', 'refs/tags')
+    # A manually installed core may be outside the parent's index, but its bytes
+    # are still executable rehearsal inputs. Preserve coverage for that layout.
+    core = root / 'core'
+    if core.exists() and not any(rel == 'core' or rel.startswith('core/') for rel in tracked):
+        out['core'] = (snapshot_entry(core) if core.is_symlink() else
+                       stability_snapshot(core) if (core / '.git').exists() else snapshot(core))
+    out['.git:refs'] = git('for-each-ref', '--format=%(refname) %(objectname) %(symref)',
+                           'refs/heads', 'refs/tags')
     out['.git:HEAD'] = (own / 'HEAD').read_text()
     return out
 
@@ -230,10 +258,19 @@ def materialize_git(source, dest):
         for name in dirs + files:
             if (Path(dp) / name).is_symlink():
                 raise RehearsalError('linked Git metadata refused')
+        # Source writers do not exist in the detached copy. Their copied lock
+        # files would otherwise prevent safe config rewriting and later probes.
+        for name in files:
+            if name.endswith('.lock'):
+                (Path(dp) / name).unlink()
     for name in ('HEAD', 'index'):
         if (own / name).is_file():
             shutil.copy2(own / name, target / name)
-    config = _m_common.git('config', '--no-includes', '--file', str(target / 'config'), '--null', '--list', cwd=dest)
+    # A copied submodule config can still name its old relative worktree. Bind
+    # both directories explicitly while reading it, before replacing that config.
+    config = _m_common.git('--git-dir=' + str(target), '--work-tree=' + str(dest),
+                           'config', '--no-includes', '--file', str(target / 'config'),
+                           '--null', '--list', cwd=dest)
     if config.returncode:
         raise RehearsalError('Git format configuration unreadable')
     formats = []
@@ -253,6 +290,34 @@ def materialize_git(source, dest):
         result = _m_common.git('config', '--file', str(target / 'config'), '--replace-all', key, value, cwd=dest)
         if result.returncode:
             raise RehearsalError('Git format configuration could not be preserved')
+
+    validate_git_objects(dest)
+    listing = subprocess.run(['git', '-C', str(source), 'ls-files', '--stage', '-z'], capture_output=True)
+    if listing.returncode:
+        raise RehearsalError('Git metadata could not be copied safely')
+    gitlinks = {os.fsdecode(entry.partition(b'\t')[2]) for entry in listing.stdout.split(b'\0')
+                if entry.startswith(b'160000 ') and entry.partition(b'\t')[2]}
+    for rel in gitlinks:
+        child = source / rel
+        if not child.is_symlink() and (child / '.git').exists():
+            materialize_git(child, dest / rel)
+    # Also detach a manual, untracked core before its copy is used as a baseline.
+    if ((source / 'core/.git').exists() and not (source / 'core').is_symlink()
+            and 'core' not in gitlinks):
+        materialize_git(source / 'core', dest / 'core')
+
+
+def validate_git_objects(root):
+    """Reject incomplete copied object stores without depending on private refs."""
+    env = {k: v for k, v in os.environ.items() if k in ('PATH', 'LANG', 'LC_ALL', 'TZ')}
+    env.update(HOME=str(root), GIT_CONFIG_GLOBAL='/dev/null', GIT_CONFIG_NOSYSTEM='1',
+               GIT_OPTIONAL_LOCKS='0', GIT_TERMINAL_PROMPT='0', GIT_NO_REPLACE_OBJECTS='1',
+               GIT_NO_LAZY_FETCH='1')
+    r = subprocess.run(['git', '-C', str(root), 'rev-list', '--quiet', '--objects',
+                        '--missing=error', 'HEAD', '--branches', '--tags'],
+                       env=env, capture_output=True)
+    if r.returncode:
+        raise RehearsalError('live brain moved while copying; retry with a stable source')
 
 
 def normalize(text, roots=()):

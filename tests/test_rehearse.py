@@ -74,15 +74,18 @@ class RehearsalStability(Scenario):
         self.git('commit', '-qm', 'candidate fixture', cwd=self.home)
         self.head = self.git('rev-parse', 'HEAD', cwd=self.home).strip()
 
-    def run_rehearsal(self, mutation, during_run=False):
+    def run_rehearsal(self, mutation=lambda: None, during_run=False, damage_copy=None):
         from types import SimpleNamespace
         inst = SimpleNamespace(root=self.root, nodes=lambda: [])
         node = dict(external=True, home_path=self.home, id='engine')
         copy = rehearsal.copy_tree
         def copying(source, dest):
             copy(source, dest)
-            if source == self.root and not during_run:
-                mutation()
+            if source == self.root:
+                if damage_copy is not None:
+                    damage_copy(dest)
+                if not during_run:
+                    mutation()
         def lane(*args):
             if during_run:
                 mutation()
@@ -180,6 +183,146 @@ class RehearsalStability(Scenario):
             (gitdir / 'COMMIT_EDITMSG').write_text('churn')
             self.assertEqual(before, rehearsal.stability_snapshot(self.root))
             (self.root / 'core/README.md').write_text('dirty core')
+            self.assertNotEqual(before, rehearsal.stability_snapshot(self.root))
+
+    def test_incomplete_git_copies_refuse_and_repacking_live_source_is_allowed(self):
+        blob = self.git('rev-parse', 'HEAD:note.md', cwd=self.root).strip()
+        def damage(dest):
+            (dest / '.git/objects' / blob[:2] / blob[2:]).unlink()
+        with self.assertRaises(rehearsal.RehearsalError):
+            self.run_rehearsal(damage_copy=damage)
+        self.assertTrue(self.run_rehearsal(
+            lambda: self.git('repack', '-adq', cwd=self.root))['passed'])
+
+    def test_connectivity_requires_branch_and_tag_objects_but_not_private_refs(self):
+        self.git('checkout', '-qb', 'other', cwd=self.root)
+        self.write('branch-only', 'branch content')
+        self.git('add', 'branch-only', cwd=self.root)
+        self.git('commit', '-qm', 'other branch', cwd=self.root)
+        blob = self.git('rev-parse', 'HEAD:branch-only', cwd=self.root).strip()
+        self.git('tag', 'release', cwd=self.root)
+        self.git('checkout', '-q', 'main', cwd=self.root)
+        self.write('.git/refs/t3/checkpoint', 'f' * 40 + '\n')
+        dest = self.tmp / 'copy'
+        rehearsal.copy_tree(self.root, dest)
+        with mock.patch.dict(os.environ, self.env):
+            rehearsal.materialize_git(self.root, dest)
+            (dest / '.git/objects' / blob[:2] / blob[2:]).unlink()
+            with self.assertRaises(rehearsal.RehearsalError):
+                rehearsal.validate_git_objects(dest)
+            (dest / '.git/refs/heads/other').unlink()
+            with self.assertRaises(rehearsal.RehearsalError):
+                rehearsal.validate_git_objects(dest)
+            (dest / '.git/refs/tags/release').unlink()
+            rehearsal.validate_git_objects(dest)
+
+    def test_copied_git_locks_do_not_block_materialization(self):
+        for rel in ['.git/config.lock', '.git/index.lock', '.git/HEAD.lock',
+                    '.git/refs/heads/main.lock']:
+            self.write(rel, 'in-progress writer')
+        self.assertTrue(self.run_rehearsal()['passed'])
+        self.assertTrue((self.root / '.git/config.lock').exists())
+
+    def test_gitlink_metadata_links_and_incomplete_copies_refuse(self):
+        import shutil
+        nested = self.repo(self.tmp / 'nested-core')
+        shutil.rmtree(self.root / 'core')
+        self.git('rm', '-qr', '--cached', 'core', cwd=self.root)
+        self.git('submodule', 'add', '-q', str(nested), 'core', cwd=self.root)
+        self.git('commit', '-qam', 'gitlink core', cwd=self.root)
+        pointer = self.root / 'core/.git'
+        original = pointer.read_text()
+        pointer.unlink()
+        pointer.symlink_to(self.root / '.git/modules/core', target_is_directory=True)
+        with mock.patch.dict(os.environ, self.env):
+            with self.assertRaises(rehearsal.RehearsalError):
+                rehearsal.stability_snapshot(self.root)
+        pointer.unlink()
+        pointer.write_text(original)
+        self.assertTrue(self.run_rehearsal()['passed'])
+        blob = self.git('rev-parse', 'HEAD:README.md', cwd=self.root / 'core').strip()
+        copy = rehearsal.copy_tree
+        def copying(source, dest):
+            copy(source, dest)
+            if dest.name == '.git' and dest.parent.name == 'core':
+                (dest / 'objects' / blob[:2] / blob[2:]).unlink()
+        with mock.patch.object(rehearsal, 'copy_tree', side_effect=copying):
+            with self.assertRaisesRegex(rehearsal.RehearsalError, 'live brain moved while copying'):
+                self.run_rehearsal()
+
+    def test_metadata_links_and_unavailable_metadata_refuse(self):
+        import shutil
+        for rel in ['root', '.git', 'gitdir-parent', '.git/config', '.git/config.worktree',
+                    '.git/index', '.git/HEAD', '.git/packed-refs', '.git/refs',
+                    '.git/refs/heads', '.git/refs/tags', '.git/refs/heads/alias',
+                    '.git/refs/tags/alias', 'unavailable']:
+            with self.subTest(path=rel):
+                root = self.tmp / 'linked-case'
+                shutil.copytree(self.root, root)
+                outside = self.tmp / 'metadata-target'
+                try:
+                    if rel == 'root':
+                        outside.symlink_to(root, target_is_directory=True)
+                        root_to_check = outside
+                    elif rel == 'unavailable':
+                        shutil.rmtree(root / '.git')
+                        root_to_check = root
+                    elif rel == 'gitdir-parent':
+                        outside.mkdir()
+                        shutil.move(str(root / '.git'), str(outside / 'admin'))
+                        alias = root / 'metadata-alias'
+                        alias.symlink_to(outside, target_is_directory=True)
+                        (root / '.git').write_text('gitdir: ' + str(alias / 'admin') + '\n')
+                        root_to_check = root
+                    else:
+                        path = root / rel
+                        path.parent.mkdir(parents=True, exist_ok=True)
+                        if path.exists():
+                            shutil.move(str(path), str(outside))
+                        else:
+                            outside.write_text(self.oid + '\n')
+                        path.symlink_to(outside, target_is_directory=outside.is_dir())
+                        root_to_check = root
+                    with mock.patch.dict(os.environ, self.env):
+                        with self.assertRaises(rehearsal.RehearsalError):
+                            rehearsal.stability_snapshot(root_to_check)
+                finally:
+                    shutil.rmtree(root)
+                    if outside.is_symlink() or outside.is_file():
+                        outside.unlink()
+                    elif outside.exists():
+                        shutil.rmtree(outside)
+
+    def test_untracked_manual_core_is_bound_and_root_must_own_its_git(self):
+        import shutil
+        self.git('rm', '-qr', 'core', cwd=self.root)
+        self.repo(self.root / 'core')
+        with mock.patch.dict(os.environ, self.env):
+            before = rehearsal.stability_snapshot(self.root)
+            (self.root / 'core/README.md').write_text('dirty manual core')
+            self.assertNotEqual(before, rehearsal.stability_snapshot(self.root))
+            child = self.root / 'non-repository'
+            child.mkdir()
+            with self.assertRaises(rehearsal.RehearsalError):
+                rehearsal.stability_snapshot(child)
+
+    def test_tracked_unusual_paths_remain_bound(self):
+        for name in ['line\nbreak', 'unicode-\u2603']:
+            self.write(name, 'tracked')
+            self.git('add', '--', name, cwd=self.root)
+            with mock.patch.dict(os.environ, self.env):
+                before = rehearsal.stability_snapshot(self.root)
+                self.write(name, 'edited')
+                self.assertNotEqual(before, rehearsal.stability_snapshot(self.root))
+
+    @unittest.skipIf(sys.platform == 'darwin', 'filesystem requires valid UTF-8 filenames')
+    def test_tracked_non_utf8_path_remains_bound(self):
+        name = os.fsdecode(b'byte-\xff')
+        self.write(name, 'tracked')
+        self.git('add', '--', name, cwd=self.root)
+        with mock.patch.dict(os.environ, self.env):
+            before = rehearsal.stability_snapshot(self.root)
+            self.write(name, 'edited')
             self.assertNotEqual(before, rehearsal.stability_snapshot(self.root))
 
     def test_exhaustive_snapshot_still_detects_runtime_mutations(self):
