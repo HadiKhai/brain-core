@@ -390,3 +390,13 @@ Question and blocked hand-backs and supported Stop-hook captures request this wa
 Treat `overdue-question` due/live items as root escalations (ten minutes by default;
 `brain set <node> question_minutes=<minutes>`). Root's tick checks every descendant and follows
 up on those unanswered lines. Remove answered inbox lines; waking does not mark them answered.
+
+## Batch local integrations
+
+For a local-merge home, use `brain train <node> [--jobs job/a job/b]` to integrate ready
+jobs in one verified batch. Main must not be checked out; leave operator checkouts alone.
+Inspect `job-trains/*.json` and route ejected conflict files or failing logs directly to
+the existing worker. Workers must hand back again before retry. Main movement alone does
+not invalidate train admission at the recorded base; normal per-job readiness is unchanged.
+The command records Batch in the ledger and prints the push command. Only the operator's
+authorized release may push. PR-mode homes keep per-job PR integration.

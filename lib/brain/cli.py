@@ -27,6 +27,7 @@ from . import schedules as _m_schedules
 from . import spend as _m_spend
 from . import status as _m_status
 from . import sync as _m_sync
+from . import train as _m_train
 from . import transitions as _m_transitions
 from . import ui as _m_ui
 from . import upgrade as _m_upgrade
@@ -353,6 +354,8 @@ def main():
         opt("--why-separate", help="reason for a separate reviewer; defaults to independent second-runtime review"),
         opt("--allow-unexplained", action="store_true", help="allow an urgent launch without a reason"),
         opt("--model", help="job model for scoped usage limits"), opt("--out"))
+    cmd("train", _m_train.cmd_train, "batch ready jobs onto local main, verify once, and print the release command", "id",
+        opt("--jobs", nargs="+", help="explicit job order (space or comma separated); all must be ready"))
     cmd("ready", _m_verify.cmd_ready, "check a worker's ready packet against the branch and cached origin default (local main without origin)", "id",
         opt("--branch", required=True), opt("--record", action="store_true", help="worker: run node verify and record"),
         opt("--reviews", type=int, help="completed review rounds, required with --record"),

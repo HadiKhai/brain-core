@@ -5,6 +5,27 @@ upgrading. `brain changes <node>` shows the entries this node's coordinator hasn
 `brain due <node>` lists them until `brain changes <node> --seen`. Entry headings are
 `## <date>: <title>`; once released, a heading never changes.
 
+## 2026-10-21: Ready jobs can merge in a local train
+
+For agents:
+- `brain train <node> [--jobs job/a job/b]` stages ready jobs in order and runs one full
+  verify for a green batch. Conflicts return file lists; red batches bisect prefixes
+  and return the failing log before releasing the remaining jobs.
+- Train admission validates each job at its recorded base even when main has advanced.
+  Ordinary per-job readiness and PR merges retain their existing rules.
+- Batch journals retain ejections and publication recovery state. Merged ledger rows carry
+  a Batch column, preserved by the v3 unknown-column rule. Train never pushes.
+- Main rebases count as occupied, including detached linked worktrees. Cleanup after a
+  published-but-unrecorded train preserves merged outcomes and Batch; recovery reconciles
+  matching closed rows. Failed logs are pinned privately; empty/aborted journals are committed.
+- A lone red full prefix is confirmed before ejection; the baseline is proved once per batch.
+
+After upgrading:
+- Use trains only with local integration and an unoccupied main branch. Never detach
+  an operator checkout. Keep PR-mode homes on the existing per-job flow.
+- Route journal ejections to the existing worker; a fresh hand-back is required before
+  retry. Review retained staging worktrees after interrupted runs. Release remains explicit.
+
 ## 2026-10-21: Webhook wakes identify their sender and report refusal
 
 For agents:
@@ -18,6 +39,7 @@ For agents:
 
 After upgrading:
 - Pending wakes drain on their own after upgrading; no requeue or binding change is needed.
+
 
 ## 2026-10-21: Name changed verify inputs and finish setup
 
