@@ -150,6 +150,10 @@ m.main()
         self.assertEqual(follow.returncode, 0, follow.stderr)
 
     def test_recover_sigkill_status_handback_inbox_and_jobs(self):
+        def vanished_entry(function, path, exc_info):
+            if not isinstance(exc_info[1], FileNotFoundError):
+                raise exc_info[1]
+
         for phase in ('before', 'after'):
             for command in ('status', 'handback', 'inbox', 'jobs'):
                 with self.subTest(phase=phase, command=command):
@@ -177,7 +181,7 @@ m.main()
                     if command == 'inbox':
                         self.assertEqual(json.loads(self.b(r, *args)), [])
                     # Reuse the helper's fixed instance name on the next case.
-                    shutil.rmtree(r)
+                    shutil.rmtree(r, onerror=vanished_entry)
                     shutil.rmtree(home.parent)
 
     def test_recover_sigkill_usage_poller_restarts_and_keeps_last_reading(self):
