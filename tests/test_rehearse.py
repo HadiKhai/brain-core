@@ -52,21 +52,105 @@ class RehearsalComparison(unittest.TestCase):
         self.assertIn('due:0: invalid due output', rehearsal.compare({'due:0': result('[]')}, {'due:0': result('oops')}))
 
     def test_sandbox_unavailable_refuses(self):
-        with mock.patch.object(rehearsal.shutil, 'which', return_value=None):
+        with mock.patch.object(rehearsal.sys, 'platform', 'linux'):
             with self.assertRaises(rehearsal.RehearsalError):
                 rehearsal.sandbox_prefix(Path('/tmp/fabricated'))
 
 
 @unittest.skipUnless(sys.platform == 'darwin', 'requires macOS OS sandbox')
 class RehearsalSandbox(Scenario):
-    def runner(self, script, args=(), terms=()):
+    def runner(self, script, args=(), terms=(), kind='read'):
         lane = self.tmp / 'lane'
         lane.mkdir(exist_ok=True)
         (lane / 'brain').mkdir(exist_ok=True)
         core = lane / 'brain/core'
         (core / 'bin').mkdir(parents=True, exist_ok=True)
         (core / 'bin/brain').write_text(script)
-        return rehearsal.run_command(core, lane, list(args), 'read', [], terms)
+        return rehearsal.run_command(core, lane, list(args), kind, [], terms)
+
+    def test_registered_hook_latency_is_measured(self):
+        r = self.runner('import json, os, time\n'
+                        'if json.load(open(os.environ["BRAIN_CONFIG"]))["brains"]:\n'
+                        '    time.sleep(1.5)\n', kind='hook')
+        self.assertEqual(0, r['code'])
+        self.assertIn('hook: latency exceeds 1 s', rehearsal.compare({'hook': result()}, {'hook': r}))
+
+    def test_read_command_cannot_rewrite_machine_bindings(self):
+        r = self.runner('from pathlib import Path\nPath(".brain").mkdir(exist_ok=True)\n'
+                        'Path(".brain/local.json").write_text("{}")\n')
+        self.assertEqual(0, r['code'])
+        self.assertEqual(1, r['unexpected'])
+        self.assertTrue(rehearsal.allowed_write('brain/.brain/local.json', 'fix'))
+        self.assertFalse(rehearsal.allowed_write('brain/.brain/unknown-cache.json', 'read'))
+
+    def test_outside_process_survives_candidate_signal(self):
+        victim = subprocess.Popen(['/bin/sleep', '10'])
+        try:
+            r = self.runner('import os, signal\nos.kill(' + str(victim.pid) + ', signal.SIGKILL)\n')
+            self.assertNotEqual(0, r['code'])
+            self.assertIsNone(victim.poll())
+        finally:
+            if victim.poll() is None:
+                victim.terminate()
+            victim.wait()
+
+    def test_detached_drain_is_reaped_before_snapshot(self):
+        script = ('import sys, time\nfrom pathlib import Path\n'
+                  'if "--drain" in sys.argv:\n'
+                  '    time.sleep(0.5)\n'
+                  '    Path("late-write").write_text("oops")\n'
+                  'else:\n'
+                  '    sys.path.insert(0, ' + repr(str(CORE / 'lib')) + ')\n'
+                  '    from brain import hosts, common\n'
+                  '    from types import SimpleNamespace\n'
+                  '    common.CORE = Path(__file__).parents[1]\n'
+                  '    hosts.wake_start(SimpleNamespace(root=Path.cwd()), {"id": "root"})\n')
+        r = self.runner(script)
+        self.assertEqual(0, r['code'], r['text'])
+        import time
+        time.sleep(0.7)
+        self.assertFalse((self.tmp / 'lane/brain/late-write').exists())
+        self.assertEqual(0, r['unexpected'])
+
+    def test_invalid_utf8_is_replaced(self):
+        r = self.runner('import os\nos.write(1, b"\\xff")\n')
+        self.assertEqual(0, r['code'])
+        self.assertEqual('\ufffd', r['text'])
+
+    def test_sandbox_self_check_and_shadow_executable_refusal(self):
+        lane = self.tmp / 'boundary'
+        lane.mkdir()
+        rehearsal.sandbox_self_check(lane)
+        tools = self.tmp / 'tools'
+        tools.mkdir()
+        fake = tools / 'sandbox-exec'
+        fake.write_text('#!/bin/sh\nexit 0\n')
+        fake.chmod(0o755)
+        with mock.patch.dict(os.environ, {'PATH': str(tools) + os.pathsep + os.environ['PATH']}):
+            with self.assertRaises(rehearsal.RehearsalError):
+                rehearsal.sandbox_self_check(lane)
+        with mock.patch.object(rehearsal, 'sandbox_prefix', return_value=[]):
+            with self.assertRaises(rehearsal.RehearsalError):
+                rehearsal.sandbox_self_check(lane)
+
+    def test_alias_escapes_are_denied_and_source_hardlinks_are_detached(self):
+        outside = self.tmp / 'outside'
+        outside.write_text('unchanged')
+        lane = self.tmp / 'lane'
+        (lane / 'brain').mkdir(parents=True)
+        (lane / 'brain/alias').symlink_to(outside)
+        r = self.runner('from pathlib import Path\nPath("alias").write_text("changed")\n')
+        self.assertNotEqual(0, r['code'])
+        self.assertEqual('unchanged', outside.read_text())
+        r = self.runner('import os\nos.link(' + repr(str(outside)) + ', "new-alias")\n')
+        self.assertNotEqual(0, r['code'])
+        self.assertEqual('unchanged', outside.read_text())
+        source = self.tmp / 'source'
+        source.mkdir()
+        os.link(outside, source / 'hardlink')
+        rehearsal.copy_tree(source, self.tmp / 'copy')
+        (self.tmp / 'copy/hardlink').write_text('copy only')
+        self.assertEqual('unchanged', outside.read_text())
 
     def test_os_boundary_preserves_live_brain_home_and_git(self):
         live = self.repo(self.tmp / 'live', {'note.md': 'original\n'})
@@ -108,6 +192,26 @@ class RehearsalSandbox(Scenario):
 
 
 class RehearsalEvidence(Scenario):
+    def test_installed_core_commit_change_invalidates_evidence(self):
+        from brain.instance import Instance
+        r = self.init('sample')
+        home = self.repo(self.tmp / 'app')
+        self.b(r, 'new', 'a', '--title', 'A', '--home', str(home))
+        self.git('branch', 'job', cwd=home)
+        self.git('init', '-q', '-b', 'main', cwd=r / 'core')
+        self.git('commit', '--allow-empty', '-qm', 'installed baseline', cwd=r / 'core')
+        n = Instance(r).node('a')
+        head = self.git('rev-parse', 'job', cwd=home).strip()
+        evidence = dict(version=1, node='a', branch='job', head=head, main=head,
+                        integration_base=head, passed=True,
+                        installed_core_commit=rehearsal.installed_core_commit(r))
+        path = rehearsal.evidence_path(n, 'job')
+        path.parent.mkdir(parents=True)
+        path.write_text(json.dumps(evidence))
+        self.assertEqual(evidence, rehearsal.read_evidence(n, 'job', head))
+        self.git('commit', '--allow-empty', '-qm', 'upgraded baseline', cwd=r / 'core')
+        self.assertIsNone(rehearsal.read_evidence(n, 'job', head))
+
     def test_required_ready_gate_and_head_main_invalidation(self):
         r = self.init('sample')
         home = self.repo(self.tmp / 'app')
@@ -123,12 +227,18 @@ class RehearsalEvidence(Scenario):
         path = self.tmp / 'app-work/scratch/rehearse' / (hashlib.sha256(b'job').hexdigest() + '.json')
         path.parent.mkdir(parents=True)
         evidence = dict(version=1, node='a', branch='job', head=head, main=main,
-                        integration_base=main, passed=True, commands=7)
+                        integration_base=main, passed=True, commands=7,
+                        installed_core_commit=rehearsal.installed_core_commit(r))
         path.write_text(json.dumps(evidence))
         self.assertIn('ready', self.b(r, 'ready', 'a', '--branch', 'job', '--record', '--reviews', '1'))
         packet = json.loads(next((r / 'nodes/a/job-handbacks').glob('*.json')).read_text())['ready']
         self.assertEqual(evidence, packet['rehearsal'])
         self.assertEqual('ready', self.b(r, 'ready', 'a', '--branch', 'job').strip())
+        baseline = r / 'core/CHANGES.md'
+        old = baseline.read_text()
+        baseline.write_text(old + '\nBaseline changed\n')
+        self.assertIn('passing rehearsal missing', self.b(r, 'ready', 'a', '--branch', 'job', ok=False))
+        baseline.write_text(old)
         self.git('commit', '--allow-empty', '-qm', 'new head', cwd=wt)
         self.assertIn('passing rehearsal missing', self.b(r, 'ready', 'a', '--branch', 'job', ok=False))
         self.git('commit', '--allow-empty', '-qm', 'new main', cwd=home)
@@ -159,6 +269,10 @@ elif command == 'ui':
     print('{}')
 elif command == 'status':
     print('updated')
+elif command == 'hook':
+    import json, os, time
+    if mode and json.load(open(os.environ['BRAIN_CONFIG']))['brains']:
+        time.sleep(1.5)
 '''
         baseline = fixture.replace('MODE', 'False')
         (home / 'bin/brain').write_text(baseline)
@@ -183,13 +297,20 @@ elif command == 'status':
         self.assertFalse(bad['passed'])
         for flag in ('fix: new check errors', 'ready:1:0: ready became not ready',
                      'ready:1:1: ready became not ready', 'due:0: new due items',
-                     'due:1: new due items', 'brief:0: brief warning disappeared'):
+                     'due:1: new due items', 'brief:0: brief warning disappeared', 'hook: latency exceeds 1 s'):
             self.assertIn(flag, bad['regressions'])
         self.assertEqual(original, rehearsal.snapshot(r))
         # No private fixture command text is retained in public evidence.
         self.assertNotIn('upgrade cannot heal', json.dumps(bad))
 
 class RehearsalDelivery(unittest.TestCase):
+    def setUp(self):
+        self.folder = tempfile.TemporaryDirectory()
+        self.root = Path(self.folder.name)
+
+    def tearDown(self):
+        self.folder.cleanup()
+
     def test_real_post_user_agent_status_codes_and_no_redirect_or_url_output(self):
         import http.server
         import threading
@@ -211,7 +332,7 @@ class RehearsalDelivery(unittest.TestCase):
         nodes = [dict(id='root' if i == 0 else 'n' + str(i),
                       local=dict(coordinator='thread', wake=base + '/' + str(status) + '/capability'))
                  for i, status in enumerate((204, 403, 302))]
-        inst = SimpleNamespace(node=lambda _: nodes[0], local_of=lambda _: {})
+        inst = SimpleNamespace(root=self.root, node=lambda _: nodes[0], local_of=lambda _: {})
         try:
             statuses = rehearsal.probe_delivery(inst, nodes)
         finally:
@@ -226,13 +347,39 @@ class RehearsalDelivery(unittest.TestCase):
         self.assertNotIn('capability', json.dumps(statuses))
         self.assertNotIn(base, json.dumps(statuses))
 
-    def test_shared_probe_is_preferred(self):
+    def test_outward_links_refuse_delivery_and_shared_addresses_are_deduplicated(self):
         from types import SimpleNamespace
         node = dict(id='root', local=dict(coordinator='t', wake='https://example.invalid/private'))
-        inst = SimpleNamespace(node=lambda _: node, local_of=lambda _: {})
-        with mock.patch.object(rehearsal._m_hosts, 'wake_probe', return_value=403, create=True) as probe:
+        other = dict(id='other', local=dict(coordinator='t2', wake=node['local']['wake']))
+        inst = SimpleNamespace(root=self.root, node=lambda _: node, local_of=lambda _: {})
+        with mock.patch.object(rehearsal._m_common, 'outward_links', return_value=['unsafe']), \
+                mock.patch('urllib.request.OpenerDirector.open') as post:
+            with self.assertRaises(rehearsal.RehearsalError):
+                rehearsal.probe_delivery(inst, [node, other])
+            post.assert_not_called()
+        with mock.patch.object(rehearsal._m_common, 'outward_links', return_value=[]), \
+                mock.patch.object(rehearsal, 'isolated_probe_instance', return_value=inst), \
+                mock.patch.object(rehearsal._m_hosts, 'wake_probe', return_value=204, create=True) as post:
+            self.assertEqual([dict(coordinator=0, status=204)], rehearsal.probe_delivery(inst, [node, other]))
+            post.assert_called_once()
+
+    def test_shared_probe_is_preferred_and_cache_is_isolated(self):
+        from brain.instance import Instance
+        (self.root / 'instance.md').write_text('---\nname: sample\n---\n')
+        (self.root / 'node.md').write_text('---\nid: root\nhome: here\n---\n')
+        inst = Instance(self.root)
+        inst.local['nodes']['root'] = dict(coordinator='t', wake='https://example.invalid/private')
+        node = inst.node('root')
+        original = rehearsal.snapshot(self.root)
+        def probe(private, target, force=False):
+            self.assertTrue(force)
+            self.assertNotEqual(inst.root, private.root)
+            (private.root / '.brain/probe-cache').write_text('cached')
+            return 403
+        with mock.patch.object(rehearsal._m_hosts, 'wake_probe', side_effect=probe, create=True) as shared:
             self.assertEqual([dict(coordinator=0, status=403)], rehearsal.probe_delivery(inst, [node]))
-            probe.assert_called_once_with(inst, node)
+            shared.assert_called_once()
+        self.assertEqual(original, rehearsal.snapshot(self.root))
 
 @unittest.skipUnless(sys.platform == 'darwin', 'requires macOS OS sandbox')
 class RehearsalNativeCore(Scenario):
@@ -257,3 +404,36 @@ class RehearsalNativeCore(Scenario):
         evidence = json.loads(files[0].read_text())
         self.assertTrue(evidence['passed'])
         self.assertEqual(11, evidence['commands'])
+
+class RehearsalGitFormats(Scenario):
+    def test_reftable_and_sha256_formats_survive_without_hooks_or_helpers(self):
+        for name, option, key, value in [('reftable', '--ref-format=reftable', 'extensions.refstorage', 'reftable'),
+                                         ('sha256', '--object-format=sha256', 'extensions.objectformat', 'sha256')]:
+            with self.subTest(format=name):
+                source = self.tmp / name
+                source.mkdir()
+                init = subprocess.run(['git', 'init', '-q', '-b', 'main', option], cwd=source,
+                                      env=self.env, capture_output=True, text=True)
+                if init.returncode and ('unknown option' in init.stderr or 'unknown ref storage format' in init.stderr):
+                    self.skipTest('installed Git does not support this repository format')
+                self.assertEqual(0, init.returncode, init.stderr)
+                (source / 'note').write_text('fixture')
+                self.git('add', '.', cwd=source)
+                self.git('commit', '-qm', 'fixture', cwd=source)
+                canary = self.tmp / (name + '-hook-ran')
+                hook = source / '.git/hooks/post-checkout'
+                hook.parent.mkdir(exist_ok=True)
+                hook.write_text('#!/bin/sh\ntouch ' + str(canary) + '\n')
+                hook.chmod(0o755)
+                self.git('config', 'core.hooksPath', str(hook.parent), cwd=source)
+                self.git('config', 'credential.helper', 'fixture-helper', cwd=source)
+                dest = self.tmp / (name + '-copy')
+                rehearsal.copy_tree(source, dest)
+                rehearsal.materialize_git(source, dest)
+                self.assertEqual(value, self.git('config', '--get', key, cwd=dest).strip())
+                self.assertEqual(self.git('rev-parse', 'HEAD', cwd=source), self.git('rev-parse', 'HEAD', cwd=dest))
+                self.git('checkout', '--detach', 'HEAD', cwd=dest)
+                self.assertFalse(canary.exists())
+                config = self.git('config', '--local', '--list', cwd=dest)
+                self.assertNotIn('fixture-helper', config)
+                self.assertIn('core.hookspath=/dev/null', config)

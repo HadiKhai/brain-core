@@ -204,10 +204,10 @@ check and an independent check --fix, ready on every open job, status refresh,
 brief warnings, UI JSON and the unrelated-folder Stop hook. Live external homes
 are read-only observations under the OS sandbox; network access is denied.
 Only summary counts and hashes leave the copies. Evidence lives in the workbench
-and is included in the ready packet. A changed job head or integration main needs
+and is included in the ready packet. A changed job head, integration main or installed core needs
 another rehearsal. Unsupported sandbox platforms refuse; never bypass isolation.
 
-Rehearsal also sends one real constant-event POST to each bound coordinator webhook.
+Rehearsal also sends one real constant-event POST per distinct bound coordinator webhook.
 It uses an explicit User-Agent, never prints the URL, and fails on any non-2xx
 status (including redirects). The temporary-copy command sandbox denies network;
 this authorized delivery probe runs separately against the real bindings.

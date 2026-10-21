@@ -30,14 +30,29 @@ class RehearsalError(Exception):
     pass
 
 
+def node_instance(n):
+    root = n
+    while root.get('parent'):
+        root = root['parent']
+    return _m_instance.Instance(root['dir'])
+
+
+def installed_core_commit(root):
+    core = root / 'core'
+    if (core / '.git').exists():
+        result = _m_common.git('rev-parse', '--verify', 'HEAD', cwd=core)
+        if result.returncode or not re.fullmatch(r'[0-9a-f]{40,64}', result.stdout.strip()):
+            raise RehearsalError('installed core commit unavailable')
+        return result.stdout.strip()
+    # Fixture and manually installed cores have no commit. Still bind their bytes.
+    return 'unversioned:' + hashlib.sha256(json.dumps(snapshot(core), sort_keys=True).encode()).hexdigest()
+
+
 def evidence_path(n, branch):
     # Evidence stays in the workbench, leaving even instance Git byte-identical.
     from . import worktrees as _m_worktrees
     key = hashlib.sha256(branch.encode()).hexdigest()
-    root = n
-    while root.get('parent'):
-        root = root['parent']
-    inst = _m_instance.Instance(root['dir'])
+    inst = node_instance(n)
     return _m_worktrees.workbench(inst, n) / 'scratch' / 'rehearse' / (key + '.json')
 
 
@@ -48,10 +63,11 @@ def read_evidence(n, branch, head):
         p = json.loads(evidence_path(n, branch).read_text())
         if (isinstance(p, dict) and p.get('version') == 1 and p.get('node') == n['id'] and p.get('branch') == branch
                 and p.get('head') == head and p.get('passed') is True
+                and p.get('installed_core_commit') == installed_core_commit(node_instance(n).root)
                 and p.get('main') == _m_verify.ready_refs(n, branch)[1]
                 and p.get('integration_base') == _m_verify.integration_parent(n, p.get('main'))):
             return p
-    except (OSError, ValueError, TypeError):
+    except (OSError, ValueError, TypeError, RehearsalError):
         pass
     return None
 
@@ -60,20 +76,38 @@ def required(n):
     return n['fm'].get('rehearse') == 'required'
 
 
+def isolated_probe_instance(inst, directory):
+    """The shared transport helper's cache belongs in a private instance."""
+    shutil.copy2(inst.root / 'instance.md', directory / 'instance.md')
+    for node in inst.nodes():
+        dest = directory / node['dir'].relative_to(inst.root)
+        dest.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(node['dir'] / 'node.md', dest / 'node.md')
+    (directory / '.brain').mkdir()
+    (directory / '.brain/local.json').write_text(json.dumps(inst.local))
+    return _m_instance.Instance(directory)
+
+
 def probe_delivery(inst, nodes):
-    """One authorized real POST per bound coordinator; never publish capabilities."""
+    """One authorized real POST per distinct safe binding; never publish capabilities."""
     import urllib.error
     import urllib.request
     statuses = []
+    if _m_common.outward_links(inst.root):
+        raise RehearsalError('outward-linked brain cannot probe delivery')
+    seen = set()
     for node in nodes:
         if not node['local'].get('coordinator') and node['id'] != 'root':
             continue
         _, address = _m_hosts.wake_target(inst, node)
-        if not address.startswith(('https://', 'http://')):
+        if not address.startswith(('https://', 'http://')) or address in seen:
             continue  # shell transports are not webhooks; never execute them here
+        seen.add(address)
         try:
             if hasattr(_m_hosts, 'wake_probe'):
-                status = _m_hosts.wake_probe(inst, node)
+                with tempfile.TemporaryDirectory(prefix='brain-rehearse-probe-') as td:
+                    private = isolated_probe_instance(inst, Path(td))
+                    status = _m_hosts.wake_probe(private, private.node(node['id']), force=True)
             else:
                 # TODO(job/wake-agent): use hosts.wake_probe once it lands.
                 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -156,7 +190,15 @@ def materialize_git(source, dest):
     for name in ('HEAD', 'index'):
         if (own / name).is_file():
             shutil.copy2(own / name, target / name)
-    for name in ('commondir', 'gitdir', 'worktrees', 'hooks'):
+    config = _m_common.git('config', '--no-includes', '--file', str(target / 'config'), '--null', '--list', cwd=dest)
+    if config.returncode:
+        raise RehearsalError('Git format configuration unreadable')
+    formats = []
+    for entry in config.stdout.split('\0'):
+        key, _, value = entry.partition('\n')
+        if key == 'core.repositoryformatversion' or key.startswith('extensions.'):
+            formats.append((key, value))
+    for name in ('commondir', 'gitdir', 'worktrees', 'hooks', 'config.worktree'):
         p = target / name
         if p.is_dir() and not p.is_symlink():
             shutil.rmtree(p)
@@ -164,6 +206,10 @@ def materialize_git(source, dest):
             p.unlink()
     # Never execute repository hooks or load include/configured external helpers.
     (target / 'config').write_text('[core]\n\trepositoryformatversion = 0\n\tbare = false\n\thooksPath = /dev/null\n')
+    for key, value in formats:
+        result = _m_common.git('config', '--file', str(target / 'config'), '--replace-all', key, value, cwd=dest)
+        if result.returncode:
+            raise RehearsalError('Git format configuration could not be preserved')
 
 
 def normalize(text, roots=()):
@@ -212,15 +258,48 @@ def compare(before, after):
 
 
 def sandbox_prefix(folder):
-    exe = shutil.which('sandbox-exec') if sys.platform == 'darwin' else None
-    if not exe:
+    exe = Path('/usr/bin/sandbox-exec')
+    if sys.platform != 'darwin' or not exe.is_file():
         raise RehearsalError('rehearsal requires an OS write/network sandbox (currently macOS sandbox-exec)')
+    # Refuse a shadow executable as well as avoiding its execution. The caller's
+    # PATH is also inherited by Git/Python helpers, so don't silently trust it.
+    found = shutil.which('sandbox-exec')
+    if found is not None and Path(found).resolve() != exe:
+        raise RehearsalError('shadowed sandbox executable refused')
     # Sandbox string literals use JSON-compatible escaping. File writes are allowed
     # only to this command's copy; even another lane's copy is read-only.
-    profile = ('(version 1)(allow default)(deny network*)(deny mach-lookup)(deny appleevent-send)(deny file-write*)'
+    profile = ('(version 1)(allow default)(deny network*)(deny mach-lookup)(deny appleevent-send)'
+               '(deny signal (target others))(deny file-write*)'
                '(allow file-write* (subpath ' + json.dumps(str(folder.resolve())) + '))'
                '(allow file-write* (literal "/dev/null"))')
-    return [exe, '-p', profile]
+    return [str(exe), '-p', profile]
+
+
+def sandbox_self_check(folder):
+    """Prove denied writes and network, not merely that a launcher exits zero."""
+    import socket
+    with tempfile.TemporaryDirectory(prefix='brain-rehearse-denied-') as other:
+        target = Path(other) / 'canary'
+        target.write_bytes(b'unchanged')
+        with socket.socket() as server:
+            server.bind(('127.0.0.1', 0))
+            server.listen(1)
+            script = '''import pathlib, socket, sys
+denied = 0
+try:
+    pathlib.Path(sys.argv[1]).write_bytes(b'changed')
+except OSError:
+    denied += 1
+try:
+    socket.create_connection(('127.0.0.1', int(sys.argv[2])), timeout=1).close()
+except OSError:
+    denied += 1
+sys.exit(0 if denied == 2 else 1)
+'''
+            result = subprocess.run([*sandbox_prefix(folder), sys.executable, '-I', '-B', '-c', script,
+                                     str(target), str(server.getsockname()[1])], capture_output=True, timeout=5)
+            if result.returncode or target.read_bytes() != b'unchanged':
+                raise RehearsalError('sandbox enforcement self-check failed')
 
 
 def allowed_write(rel, kind):
@@ -233,8 +312,12 @@ def allowed_write(rel, kind):
     if not rel.startswith('brain/'):
         return False
     rel = rel[6:]
-    if rel.startswith('.brain/'):
-        return True  # bookkeeping, registry/machine caches and instance locks
+    if (rel in ('.brain/lock', '.brain/machine.json', '.brain/core-remote.json', '.brain/hooks.json',
+                '.brain/hooks.log', '.brain/inbox-seen.json', '.brain/wake', '.brain/host-questions', '.brain/spend')
+            or rel.startswith(('.brain/wake/', '.brain/host-questions/', '.brain/spend/'))):
+        return True
+    if rel == '.brain/local.json':
+        return kind == 'fix'  # the supported migration moves machine bindings here
     if rel in ('.brain',):
         return True
     note = re.fullmatch(r'(?:nodes/[^/]+/)*([^/]+)', rel)
@@ -256,6 +339,32 @@ def run_command(core, lane, args, kind, roots, terms=(), cache=None):
     tmp.mkdir(exist_ok=True)
     unrelated = lane / 'unrelated'
     unrelated.mkdir(exist_ok=True)
+    if kind == 'hook':
+        (home / 'brains.json').write_text(json.dumps({
+            'brains': {'rehearsal': {'root': str(brain)}}, 'default': 'rehearsal'}))
+    bootstrap = lane / 'bootstrap'
+    bootstrap.mkdir(exist_ok=True)
+    # Every Python helper inherits this supervisor. Detached wake drains remain
+    # in the command's group, and each Python parent reaps its children on exit.
+    (bootstrap / 'sitecustomize.py').write_text('''import atexit, subprocess
+children = []
+original = subprocess.Popen
+class SupervisedPopen(original):
+    def __init__(self, *args, **kwargs):
+        kwargs['start_new_session'] = False
+        super().__init__(*args, **kwargs)
+        children.append(self)
+subprocess.Popen = SupervisedPopen
+def reap():
+    for child in reversed(children):
+        if child.poll() is None:
+            try:
+                child.kill()
+            except ProcessLookupError:
+                pass
+            child.wait(timeout=5)
+atexit.register(reap)
+''')
     audit = lane / 'audit.py'
     violation = home / 'write-attempt'
     violation.unlink(missing_ok=True)
@@ -299,6 +408,7 @@ runpy.run_path(entry, run_name='__main__')
     # provider credentials, registries, Python startup hooks or Git overrides.
     env = {k: v for k, v in os.environ.items() if k in ('PATH', 'LANG', 'LC_ALL', 'TZ')}
     env.update(HOME=str(home), TMPDIR=str(tmp), BRAIN_CONFIG=str(home / 'brains.json'),
+               PYTHONPATH=str(bootstrap),
                XDG_CONFIG_HOME=str(home / '.config'), BRAIN_ROOT=str(brain),
                BRAIN_NO_REEXEC='1', BRAIN_NO_UPDATE_CHECK='1', PYTHONDONTWRITEBYTECODE='1',
                BRAIN_USAGE_TEST_NO_KEYCHAIN='1', GIT_CONFIG_GLOBAL='/dev/null', GIT_CONFIG_NOSYSTEM='1',
@@ -310,7 +420,7 @@ runpy.run_path(entry, run_name='__main__')
     p = subprocess.Popen([*sandbox_prefix(lane), sys.executable, '-B', str(audit), str(lane), str(violation),
                           str(core / 'bin/brain'), *args],
                          cwd=unrelated if kind == 'hook' else brain, env=env, stdin=subprocess.PIPE,
-                         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True)
+                         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors='replace', start_new_session=True)
     timed_out = False
     try:
         out, err = p.communicate(json.dumps({'cwd': str(unrelated)}) if kind == 'hook' else '', timeout=60)
@@ -375,7 +485,8 @@ def rehearse(inst, n, branch):
     # homes even when local.json points to them; they are read-only observations.
     with tempfile.TemporaryDirectory(prefix='brain-rehearse-') as td:
         folder = Path(td).resolve()
-        subprocess.run([*sandbox_prefix(folder), '/usr/bin/true'], check=True, capture_output=True)
+        sandbox_self_check(folder)
+        baseline_commit = installed_core_commit(inst.root)
         original = snapshot(inst.root)
         frozen = folder / 'source'
         copy_tree(inst.root, frozen)
@@ -422,6 +533,8 @@ def rehearse(inst, n, branch):
         flags = compare(old, new)
         if snapshot(inst.root) != original:
             flags.append('live brain changed during rehearsal; evidence refused')
+        if installed_core_commit(inst.root) != baseline_commit:
+            flags.append('installed core changed during rehearsal; evidence refused')
         # Fail closed on incomplete baseline proof, not on preexisting check/ready failures.
         for key, result in old.items():
             if result['timeout'] or result['unexpected'] or (result['code'] and key.startswith(('due:', 'refresh:', 'brief:', 'ui', 'hook'))):
@@ -432,6 +545,7 @@ def rehearse(inst, n, branch):
         delivery = probe_delivery(inst, inst.nodes())
         flags.extend(delivery_regressions(delivery))
         return {'version': 1, 'node': n['id'], 'branch': branch, 'head': head, 'main': main,
+                'installed_core_commit': baseline_commit,
                 'integration_base': integration_base,
                 'checked_at': _m_jobs.stamp(inst), 'passed': not flags, 'regressions': flags,
                 'commands': len(commands), 'changed_outputs': sum(old[k]['text'] != new[k]['text'] for k in old),

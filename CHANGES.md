@@ -11,14 +11,15 @@ For agents:
 - `brain rehearse <node> --branch <branch>` compares the installed core with the
   committed candidate on temporary brain copies, including Git metadata. It checks
   errors, ready flips, due noise, lost brief warnings, unexpected writes and hook
-  latency; private command output is never published. Each bound coordinator's
+  latency; private command output is never published. Each distinct bound coordinator
   webhook also receives one real constant-event POST; non-2xx statuses fail the run
   and print only their status code, never the URL.
 - Evidence is stored in the external workbench and included in the ready packet.
-  `rehearse=required` refuses readiness without a passing run for the current head
-  and integration main. Reviewers run rehearsal for core changes.
+  `rehearse=required` refuses readiness without a passing run for the current head,
+  integration main and installed-core baseline. Reviewers run rehearsal for core changes.
 
 After upgrading:
+- Older rehearsal evidence without an installed-core baseline must be rerun.
 - Set `rehearse=required` on core development nodes; commit and rebase before
   rehearsing. Take machine admission and the heavy-work lock before a run.
 - Rehearsal currently requires macOS `sandbox-exec` and refuses elsewhere. Live
