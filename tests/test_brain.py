@@ -2693,6 +2693,220 @@ class Schedules(Scenario):
         self.assertNotIn("# local:", out)
 
 
+class LockHotfix(Scenario):
+    job = WorkerReadyPackets.job
+
+    def copy_brain(self, root):
+        copy = root.with_name(root.name + "-copy")
+        subprocess.run(["cp", "-R", str(root), str(copy)], check=True)
+        return copy
+
+    def start(self, root, *args):
+        return subprocess.Popen([sys.executable, str(CORE / "bin/brain"), *args], cwd=root,
+                                env={**self.env, "BRAIN_ROOT": str(root), "BRAIN_NO_UPDATE_CHECK": "1"},
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+    def wait_file(self, path, process, timeout=10):
+        deadline = time.monotonic() + timeout
+        while not path.exists() and process.poll() is None and time.monotonic() < deadline:
+            time.sleep(0.02)
+        self.assertTrue(path.exists(), "worker never reached its slow step")
+
+    def responsive(self, root):
+        for args in (("status", "other", "--refresh"), ("set", "other", "stack=fixture"),
+                     ("due", "other")):
+            started = time.monotonic()
+            p = self.start(root, *args)
+            try:
+                out, err = p.communicate(timeout=5)
+            except subprocess.TimeoutExpired:
+                p.kill()
+                p.communicate()
+                self.fail("instance lock blocked " + " ".join(args))
+            self.assertEqual(p.returncode, 0, out + err)
+            self.assertLess(time.monotonic() - started, 5)
+
+    def test_sixty_second_verify_leaves_other_commands_responsive(self):
+        r, home, wt = self.job()
+        r = self.copy_brain(r)
+        self.b(r, "new", "other", "--title", "Other")
+        marker = self.tmp / "verifying"
+        code = "from pathlib import Path; import time; Path(" + repr(str(marker)) + ").touch(); time.sleep(60)"
+        command = shlex.quote(sys.executable) + " -c " + shlex.quote(code)
+        self.b(r, "set", "a", "verify=" + command)
+        p = self.start(r, "handback", "a", "--branch", "job", "--state", "done", "--reviews", "1",
+                       "--lessons", "none: fixture")
+        try:
+            self.wait_file(marker, p)
+            self.responsive(r)
+            out, err = p.communicate(timeout=70)
+            self.assertEqual(p.returncode, 0, out + err)
+            packet = json.loads(next((r / "nodes/a/job-handbacks").glob("*.json")).read_text())["ready"]
+            self.assertEqual(packet["verify_result"], 0)
+            self.assertEqual(packet["head"], self.git("rev-parse", "HEAD", cwd=wt).strip())
+        finally:
+            if p.poll() is None:
+                p.kill()
+                p.communicate()
+
+    def test_concurrent_head_or_job_replacement_during_verify_is_refused(self):
+        for mutation in ("head", "job"):
+            with self.subTest(mutation=mutation):
+                # Each case gets an independent job and instance.
+                case = WorkerReadyPackets(methodName="runTest")
+                case.setUp()
+                try:
+                    r, home, wt = case.job()
+                    marker, release = (case.tmp / name for name in ("started", "release"))
+                    script = case.tmp / "verify.py"
+                    script.write_text("from pathlib import Path\nimport time\nPath(" + repr(str(marker)) +
+                                      ").touch()\nwhile not Path(" + repr(str(release)) +
+                                      ").exists(): time.sleep(.02)\n")
+                    case.b(r, "set", "a", "verify=" + shlex.quote(sys.executable) + " " + shlex.quote(str(script)))
+                    p = subprocess.Popen([sys.executable, str(CORE / "bin/brain"), "handback", "a", "--branch", "job",
+                                          "--state", "done", "--reviews", "1"], cwd=r,
+                                         env={**case.env, "BRAIN_ROOT": str(r), "BRAIN_NO_UPDATE_CHECK": "1"},
+                                         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                    try:
+                        self.wait_file(marker, p)
+                        if mutation == "head":
+                            case.git("commit", "--allow-empty", "-qm", "concurrent fixture", cwd=wt)
+                        else:
+                            m = importlib.machinery.SourceFileLoader("brain_changed_job", str(CORE / "bin/brain")).load_module()
+                            inst = m.Instance(r)
+                            with mock.patch.dict(os.environ, case.env, clear=True), m.brain_lock(inst):
+                                n = inst.node("a")
+                                rows = m.read_jobs(n)
+                                rows[-1]["Started"] = "2020-01-01T00:00:00+00:00"
+                                m.write_jobs(inst, n, rows)
+                                inst.commit([], "replace fixture job")
+                        release.touch()
+                        out, err = p.communicate(timeout=10)
+                        self.assertNotEqual(p.returncode, 0, out + err)
+                        self.assertIn("verify changed the job's branch" if mutation == "head" else
+                                      "job changed during verification", out + err)
+                        packets = [json.loads(f.read_text()) for f in (r / "nodes/a/job-handbacks").glob("*.json")]
+                        self.assertFalse(any(x["ready"].get("verify_result") == 0
+                                             for x in packets if isinstance(x.get("ready"), dict)))
+                    finally:
+                        release.touch()
+                        if p.poll() is None:
+                            p.kill()
+                            p.communicate()
+                finally:
+                    case.tearDown()
+
+    def test_sleeping_drain_and_second_drain_never_block_instance(self):
+        r = self.copy_brain(self.init("fixture"))
+        self.b(r, "new", "a", "--title", "Alpha")
+        self.b(r, "new", "other", "--title", "Other")
+        calls, started, release = (self.tmp / name for name in ("calls", "sending", "release"))
+        script = self.tmp / "transport.py"
+        script.write_text("from pathlib import Path\nimport sys,time\n"
+                          "Path(" + repr(str(started)) + ").touch()\n"
+                          "while not Path(" + repr(str(release)) + ").exists(): time.sleep(.02)\n"
+                          "with open(" + repr(str(calls)) + ", 'a') as f: f.write(sys.stdin.read()+'\\n')\n")
+        self.b(r, "set", "a", "coordinator=fixture-thread",
+               "wake=" + shlex.quote(sys.executable) + " " + shlex.quote(str(script)))
+        m = importlib.machinery.SourceFileLoader("brain_lock_wake", str(CORE / "bin/brain")).load_module()
+        inst = m.Instance(r)
+        with mock.patch.object(m, "wake_start"):
+            m.request_wake(inst, inst.node("a"), "first")
+            m.request_wake(inst, inst.node("a"), "second")
+        directory = m.wake_directory(inst, inst.node("a"))
+        p = self.start(r, "wake", "a", "--drain")
+        try:
+            self.wait_file(started, p)
+            self.responsive(r)
+            second = self.start(r, "wake", "a", "--drain")
+            try:
+                out, err = second.communicate(timeout=2)
+            except subprocess.TimeoutExpired:
+                second.kill()
+                second.communicate()
+                self.fail("second drain waited for the delivery lock")
+            self.assertEqual(second.returncode, 0, out + err)
+            release.touch()
+            out, err = p.communicate(timeout=10)
+            self.assertEqual(p.returncode, 0, out + err)
+            self.assertEqual(calls.read_text().splitlines(), ['{"event":"brain-wake"}'])
+            self.assertEqual(len(list(directory.glob("*.sent"))), 2)
+            self.assertFalse(list(directory.glob("*.pending")))
+        finally:
+            release.touch()
+            if p.poll() is None:
+                p.kill()
+                p.communicate()
+
+    def test_rate_wait_leaves_instance_responsive(self):
+        r = self.copy_brain(self.init("fixture"))
+        self.b(r, "new", "other", "--title", "Other")
+        self.b(r, "set", "root", "wake=exit 0")
+        directory = r / ".brain/wake/root"
+        directory.mkdir(parents=True)
+        (directory / "reason.pending").touch()
+        (directory / "last").write_text(str(time.time()))
+        p = self.start(r, "wake", "root", "--drain")
+        try:
+            # The holder pid isn't recorded for the wake lock; probe its flock instead.
+            import fcntl
+            deadline = time.monotonic() + 5
+            acquired = False
+            while time.monotonic() < deadline:
+                with (directory / "lock").open("a+") as stream:
+                    try:
+                        fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    except BlockingIOError:
+                        acquired = True
+                        break
+                time.sleep(.02)
+            self.assertTrue(acquired, "drain did not enter rate wait")
+            self.responsive(r)
+            self.assertIsNone(p.poll())
+            (directory / "last").write_text(str(time.time() - 121))
+            out, err = p.communicate(timeout=7)
+            self.assertEqual(p.returncode, 0, out + err)
+            self.assertTrue((directory / "reason.sent").exists())
+        finally:
+            if p.poll() is None:
+                p.kill()
+                p.communicate()
+
+    def test_binding_publication_failure_preserves_readable_prior_state(self):
+        r = self.init("fixture")
+        m = importlib.machinery.SourceFileLoader("brain_lock_bindings", str(CORE / "bin/brain")).load_module()
+        inst = m.Instance(r)
+        inst.save_local()
+        prior = inst.local_path.read_bytes()
+        inst.local_of("root")["wake"] = "exit 0"
+        with mock.patch.object(m.os, "fsync", side_effect=OSError("fixture disk error")):
+            with self.assertRaises(OSError):
+                inst.save_local()
+        self.assertEqual(inst.local_path.read_bytes(), prior)
+        self.assertEqual(m.Instance(r).local, json.loads(prior))
+        inst.save_local()
+        self.assertEqual(m.Instance(r).local_of("root")["wake"], "exit 0")
+
+    def test_request_does_not_wait_for_either_lock(self):
+        import fcntl
+        r = self.init("fixture")
+        self.b(r, "set", "root", "wake=exit 0")
+        directory = r / ".brain/wake/root"
+        directory.mkdir(parents=True)
+        with (r / ".brain/lock").open("a+") as instance, (directory / "lock").open("a+") as node:
+            fcntl.flock(instance, fcntl.LOCK_EX)
+            fcntl.flock(node, fcntl.LOCK_EX)
+            p = self.start(r, "wake", "root", "fixture reason")
+            try:
+                out, err = p.communicate(timeout=2)
+            except subprocess.TimeoutExpired:
+                p.kill()
+                p.communicate()
+                self.fail("request waited for a lock")
+            self.assertEqual(p.returncode, 0, out + err)
+            self.assertEqual(len(list(directory.glob("*.pending"))), 1)
+
+
 class QuestionWake(Scenario):
     def setUp(self):
         super().setUp()
@@ -2832,6 +3046,45 @@ class QuestionWake(Scenario):
         with mock.patch.object(self.module, "WAKE_INTERVAL", 0.1):
             self.module.wake_drain(self.inst, self.n)
         self.assertEqual(len(self.calls.read_text().splitlines()), 1)
+
+    def test_second_drain_exits_while_node_delivery_lock_is_held(self):
+        import fcntl
+        self.enqueue("held")
+        directory = self.module.wake_directory(self.inst, self.n)
+        with (directory / "lock").open("a+") as stream:
+            fcntl.flock(stream, fcntl.LOCK_EX)
+            p = subprocess.Popen([sys.executable, "-c",
+                "import importlib.machinery; from pathlib import Path; "
+                "m=importlib.machinery.SourceFileLoader('worker'," + repr(str(CORE / "bin/brain")) + ").load_module(); "
+                "i=m.Instance(Path(" + repr(str(self.r)) + ")); m.wake_drain(i,i.node('a'))"],
+                env=self.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            try:
+                out, err = p.communicate(timeout=2)
+            except subprocess.TimeoutExpired:
+                p.kill()
+                p.communicate()
+                self.fail("second drain blocked on the per-node lock")
+            self.assertEqual(p.returncode, 0, out + err)
+        self.assertEqual(len(list(directory.glob("*.pending"))), 1)
+        self.assertFalse(self.calls.exists())
+
+    def test_reason_arriving_during_send_is_retained_and_sent_once(self):
+        self.enqueue("first")
+        sends = []
+        def send(command):
+            sends.append(command)
+            if len(sends) == 1:
+                self.enqueue("second")
+            return True
+        with mock.patch.object(self.module, "wake_send", side_effect=send), \
+                mock.patch.object(self.module, "WAKE_INTERVAL", .01):
+            self.module.wake_drain(self.inst, self.n)
+        directory = self.module.wake_directory(self.inst, self.n)
+        self.assertEqual(len(sends), 2)
+        self.assertEqual(len(list(directory.glob("*.sent"))), 2)
+        self.assertFalse(list(directory.glob("*.pending")))
+        self.assertEqual(self.enqueue("first"), 0)
+        self.assertEqual(self.enqueue("second"), 0)
 
     def test_parallel_requests_have_one_delivery(self):
         with mock.patch.object(self.module, "wake_start"):

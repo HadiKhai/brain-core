@@ -298,7 +298,7 @@ class Instance:
     def save_local(self):
         safe_target(self.local_path)
         self.local_path.parent.mkdir(exist_ok=True)
-        self.local_path.write_text(json.dumps(self.local, indent=2, sort_keys=True) + "\n")
+        atomic_write(self.local_path, json.dumps(self.local, indent=2, sort_keys=True) + "\n")
 
     def local_of(self, nid):
         return self.local["nodes"].setdefault(nid, {})
@@ -9452,7 +9452,10 @@ def wake_drain(inst, n, once=False):
     lock = directory / "lock"
     safe_target(lock)
     with lock.open("a+") as stream:
-        fcntl.flock(stream, fcntl.LOCK_EX)  # detached workers only; callers never wait
+        try:
+            fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return  # the existing worker owns delivery, including its rate wait
         for sent in directory.glob("*.sent"):
             if time.time() - sent.stat().st_mtime >= WAKE_DEDUP_SECONDS:
                 sent.unlink(missing_ok=True)
@@ -11912,6 +11915,10 @@ READ_ONLY = {"cmd_show", "cmd_tree", "cmd_status", "cmd_now", "cmd_jobs", "cmd_s
 def writes(a):
     """Does this command, with these options, change anything in the instance?"""
     name = a.f.__name__
+    if name == "cmd_wake":
+        # Requests publish with O_EXCL; drains serialize on their own per-node lock.
+        # Neither may queue behind an instance writer, or hold it during a wait/send.
+        return False
     if name == "cmd_machine":
         return a.action == "sample" or a.yes
     if name == "cmd_status":

@@ -5,6 +5,17 @@ upgrading. `brain changes <node>` shows the entries this node's coordinator hasn
 `brain due <node>` lists them until `brain changes <node> --seen`. Entry headings are
 `## <date>: <title>`; once released, a heading never changes.
 
+## 2026-10-21: Wake delivery leaves other commands responsive
+
+For agents:
+- Wake requests never wait for the instance or delivery lock. A drain holds only its node's
+  delivery lock while waiting for the rate window or sending; a second drain exits at once.
+- Queued reasons and delivery deduplication keep their existing behavior. Machine bindings
+  publish atomically so an unlocked wake reader cannot see a half-written configuration.
+
+After upgrading:
+- Re-set `wake=` bindings that were cleared while wake delivery was disabled.
+
 ## 2026-10-21: Questions wake coordinators within minutes
 
 For agents:
