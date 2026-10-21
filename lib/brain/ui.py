@@ -640,7 +640,11 @@ class UIInputs:
     """Metadata only: no transcript parsing, Git status, readiness hashes or cache writes per poll."""
     def __init__(self, inst):
         self.root = inst.root
-        self.files = {self.root / ".brain/worker-runs.json"}
+        self.files = set()
+        self.worker_path = self.root / '.brain/worker-runs.json'
+        self.worker_stamp, self.worker_context_stamp = None, None
+        self.worker_records, self.worker_context, self.worker_nodes = [], {}, {}
+        self.worker_rows = ()
         self.slow_files = set()
         self.slow_at, self.slow_rows = float('-inf'), []
         self.trees = []
@@ -763,7 +767,7 @@ class UIInputs:
 
     def node_keys(self, inst, signature):
         rows = dict((row[0], row) for row in self.fast_rows)
-        global_rows = (self.stamp(self.root / 'instance.md'), self.stamp(self.root / '.brain/worker-runs.json'),
+        global_rows = (self.stamp(self.root / 'instance.md'),
                        json.dumps({k: v for k, v in inst.local.items() if k != 'nodes'}, sort_keys=True))
         out = {}
         for n in inst.nodes():
@@ -788,6 +792,7 @@ class UIInputs:
                 key.extend(self.stamp(parent['dir'] / name) for name in ('node.md', 'never-name.txt'))
                 parent = parent['parent']
             out[n['id']] = (global_rows, json.dumps(n['local'], sort_keys=True), homes, tuple(sorted(set(key))),
+                            self.worker_nodes.get(n['id'], ()),
                             self.core_revision if _m_rehearse.required(n) else None)
         return out
 
@@ -852,6 +857,60 @@ class UIInputs:
                 paths.update(Path(top) / name for name in [*dirs, *files])
         return tuple(sorted(self.stamp(path) for path in paths))
 
+    def worker_signature(self, rows):
+        """Cache host reads by metadata, but invalidate displays only for current worker events."""
+        local_path = str(self.root / '.brain/local.json')
+        context_stamp = tuple(sorted(row for row in rows if row[0] == local_path
+                                     or row[0].endswith('/node.md')
+                                     or row[0].endswith('/' + _m_jobs.JOBS_FILE)))
+        context_changed = context_stamp != self.worker_context_stamp
+        if context_changed:
+            self.worker_context = {}
+            for n in _m_instance.Instance(self.root).nodes():
+                workers = n['local'].get('workers', {})
+                if not isinstance(workers, dict):
+                    continue
+                opened = {row['Job']: row for row in (_m_jobs.read_jobs(n) or [])
+                          if row.get('Job') and not row.get('Ended')}
+                self.worker_context[n['id']] = {_m_jobs.job_key(row): workers.get(_m_jobs.job_key(row))
+                                                for row in opened.values()}
+            self.worker_context_stamp = context_stamp
+        stamp = self.stamp(self.worker_path)
+        if stamp == self.worker_stamp and not context_changed:
+            return self.worker_rows
+        if stamp != self.worker_stamp:
+            try:
+                data = json.loads(self.worker_path.read_text())
+                records = data.get('runs', []) if isinstance(data, dict) else []
+                self.worker_records = records if isinstance(records, list) else []
+            except (OSError, ValueError, UnicodeError):
+                self.worker_records = []
+            self.worker_stamp = stamp
+        latest = {}
+        for record in self.worker_records:
+            if not isinstance(record, dict):
+                continue
+            node, key, thread, run, state = (record.get(name) for name in
+                                             ('node', 'job_key', 'thread', 'run', 'status'))
+            if (not isinstance(node, str) or not isinstance(key, str)
+                    or not isinstance(thread, str) or not thread
+                    or self.worker_context.get(node, {}).get(key) != thread
+                    or not isinstance(run, str) or not run.strip()
+                    or not isinstance(state, str) or not state.strip()):
+                continue
+            category = ''
+            if state == 'failed':
+                error = str(record.get('error', '')).casefold()
+                category = 'at capacity' if 'at capacity' in error else (
+                    'usage limit' if 'usage limit' in error else 'provider error')
+            latest[(node, key)] = (key, thread, run, state, category)
+        self.worker_nodes = {}
+        for (node, _), record in sorted(latest.items()):
+            self.worker_nodes.setdefault(node, []).append(record)
+        self.worker_nodes = {node: tuple(records) for node, records in self.worker_nodes.items()}
+        self.worker_rows = tuple(sorted(self.worker_nodes.items()))
+        return self.worker_rows
+
     def signature(self):
         # Readiness also depends on explicitly declared ignored inputs (.env by default).
         # Discover by name/metadata here; only changed readiness reads their contents.
@@ -882,10 +941,12 @@ class UIInputs:
                 paths.update(path / name for name in dirs if path / name != self.root / '.brain')
         # Explicit look-back commands publish node aggregates; dashboard polls do not.
         paths.update((self.root / '.brain/spend/nodes').glob('*.json'))
+        paths.discard(self.worker_path)
         rows = [self.stamp(path) for path in paths]
         if time.monotonic() - self.slow_at >= 15:
             self.update_listings()
-            self.slow_rows = [self.stamp(path) for path in self.slow_files - paths]
+            self.slow_rows = [self.stamp(path) for path in self.slow_files - paths -
+                              {self.worker_path, self.root / '.brain'}]
             self.slow_at = time.monotonic()
         if self.core_required:
             clock = int(time.time() // 300)
@@ -896,6 +957,7 @@ class UIInputs:
                     self.core_revision = None
                 self.core_at = clock
             rows.append(('installed-core', self.core_revision))
+        rows.append(('worker-runs', self.worker_signature(rows)))
         self.fast_rows = tuple(rows)
         rows.extend(self.slow_rows)
         indexed = {row[0]: row for row in rows}

@@ -257,6 +257,84 @@ cli.main()
         (worktree / '.env').write_text('DEMO_VALUE=made-up\n')
         self.assertGreater(state()['_test_ready_calls']['indigo:job-demo'], previous)
 
+    def test_worker_heartbeats_keep_snapshot_and_scope_fault_changes(self):
+        import core_loader
+        import importlib.util
+        loader = core_loader.SourceFileLoader('brain_idle_worker_test', str(CORE / 'bin/brain'))
+        core = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+        loader.exec_module(core)
+        root, state = self.start_server(projects=True)
+        initial = state()
+        local_path = root / '.brain/local.json'
+        local = json.loads(local_path.read_text())
+        records = []
+        for name in ('amber', 'indigo'):
+            node = next(n for n in initial['nodes'] if n['id'] == name)
+            row = next(r for r in node['jobs']['open'] if r['Job'] == 'job-demo')
+            key = core.job_key(row)
+            local['nodes'][name]['workers'] = {key: name + '-worker'}
+            records.append({'node': name, 'job_key': key, 'thread': name + '-worker',
+                            'run': name + '-run', 'status': 'running', 'updated_at': 'first sample'})
+        local_path.write_text(json.dumps(local))
+        path = root / '.brain/worker-runs.json'
+        def write():
+            temporary = root / '.brain/next-worker-sample'
+            temporary.write_text(json.dumps({'version': 1, 'runs': records}))
+            temporary.replace(path)
+        write()
+        before = state()
+        # Atomic rewrites change inode, size and timestamps. Heartbeat fields and
+        # non-failure error excerpts are not a new worker event.
+        for i in range(4):
+            for record in records:
+                record['updated_at'] = 'heartbeat-' + str(i)
+                record['error'] = 'unused fabricated host excerpt ' + str(i)
+            write()
+            latest = state()
+            self.assertEqual(latest['_test_builds'], before['_test_builds'],
+                             'an unchanged worker heartbeat rebuilt the dashboard')
+            self.assertEqual(latest['_test_node_builds'], before['_test_node_builds'])
+            self.assertEqual(latest['_test_ready_calls'], before['_test_ready_calls'])
+            self.assertEqual(latest['_test_checks'], before['_test_checks'])
+        records[1].update(status='failed', error='model at capacity; fabricated private excerpt')
+        write()
+        failed = state()
+        self.assertGreater(failed['_test_node_builds']['indigo'], before['_test_node_builds']['indigo'])
+        self.assertEqual(failed['_test_node_builds']['amber'], before['_test_node_builds']['amber'])
+        self.assertEqual(failed['_test_node_builds']['root'], before['_test_node_builds']['root'])
+        self.assertEqual(failed['_test_ready_calls'], before['_test_ready_calls'],
+                         'a worker event reran unrelated readiness validation')
+        self.assertEqual(failed['_test_checks'], before['_test_checks'])
+        records[1]['error'] = 'at capacity; a different fabricated private excerpt'
+        records[1]['updated_at'] = 'later heartbeat'
+        records.append({'node': 'amber', 'job_key': 'unbound-job', 'thread': 'obsolete-worker',
+                        'run': 'unbound-run', 'status': 'failed', 'error': 'usage limit'})
+        write()
+        self.assertEqual(state()['_test_builds'], failed['_test_builds'],
+                         'same category or an unbound run invalidated the snapshot')
+        records[1]['error'] = 'usage limit for a fabricated plan'
+        write()
+        changed_category = state()
+        self.assertGreater(changed_category['_test_node_builds']['indigo'], failed['_test_node_builds']['indigo'])
+        self.assertEqual(changed_category['_test_node_builds']['amber'], before['_test_node_builds']['amber'])
+        self.assertEqual(changed_category['_test_ready_calls'], before['_test_ready_calls'])
+        records[1].update(status='running', run='indigo-retry')
+        write()
+        recovered = state()
+        self.assertGreater(recovered['_test_node_builds']['indigo'], failed['_test_node_builds']['indigo'])
+        self.assertEqual(recovered['_test_node_builds']['amber'], before['_test_node_builds']['amber'])
+        self.assertEqual(recovered['_test_ready_calls'], before['_test_ready_calls'])
+        # Rebinding invalidates the validation context even when the host file is
+        # unchanged. A subsequent event from the obsolete worker is irrelevant.
+        key = records[1]['job_key']
+        local['nodes']['indigo']['workers'][key] = 'replacement-worker'
+        local_path.write_text(json.dumps(local))
+        rebound = state()
+        records[1].update(status='failed', error='usage limit', run='obsolete-run')
+        write()
+        self.assertEqual(state()['_test_builds'], rebound['_test_builds'],
+                         'a replaced worker still invalidated current work')
+
     def test_display_readiness_cache_is_scoped_and_full_validation_is_never_cached(self):
         import contextlib
         import core_loader

@@ -42,6 +42,25 @@
   check(!document.querySelector("select,details,summary,input[type=date],input[type=time],input[type=color],input[type=file]"), "no stock controls or disclosures");
   check(!document.querySelector("[title]"), "no native title tooltips");
   check(getComputedStyle(document.body).overflow === "hidden" && getComputedStyle(document.documentElement).overflow === "hidden", "body and html never scroll");
+  const workspaceGutter = parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--workspace-gutter"));
+  const toolbarGap = parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--toolbar-gap"));
+  // Mobile navigation is a sheet. Measure its actual menu inset once while open, then return
+  // to the page before checking every top bar; do not infer geometry from a hidden sidebar.
+  let sidebar = [...document.querySelectorAll("[data-slot=sidebar]")].find(visible);
+  const openedSidebar = !sidebar;
+  if (openedSidebar) {
+    button("Toggle Sidebar").click();
+    await wait(() => [...document.querySelectorAll("[data-slot=sidebar]")].some(visible), "open navigation for gutter measurement");
+    sidebar = [...document.querySelectorAll("[data-slot=sidebar]")].find(visible);
+  }
+  const group = sidebar.querySelector("[data-slot=sidebar-group]");
+  const menu = group.querySelector("[data-slot=sidebar-menu]");
+  const sidebarGutter = menu.getBoundingClientRect().left - group.getBoundingClientRect().left;
+  check(Number.isFinite(workspaceGutter) && Math.abs(sidebarGutter - workspaceGutter) <= 1, "sidebar menu inset follows the workspace gutter token");
+  if (openedSidebar) {
+    button("Close navigation", sidebar).click();
+    await wait(() => !visible(sidebar), "close measured navigation");
+  }
   const titles = { inbox: "Inbox", projects: "Projects", specialists: "Specialists", jobs: "Jobs", threads: "Threads", usage: "Usage", learnings: "Learnings", graph: "Graph" };
   for (const view of ["overview", ...Object.keys(titles)]) {
     await go(view);
@@ -50,9 +69,16 @@
     check(document.documentElement.scrollWidth <= innerWidth, "no document overflow: " + view);
     check(scroller.scrollWidth <= scroller.clientWidth + 1, "no inset overflow: " + view);
     const stray = [...document.querySelectorAll("*")].filter((e) => visible(e) && e !== scroller && !e.closest("[role=dialog]") && e.scrollHeight > e.clientHeight + 2 && ["auto", "scroll"].includes(getComputedStyle(e).overflowY));
-    check(stray.length === 0, "one active page scroller: " + view);
+    const unexpected = stray.filter(e => !e.matches("[data-list-frame] > .list-scroll"));
+    check(unexpected.length === 0, "only the page and shared table body scroll: " + view);
+    check(stray.filter(e => e.matches(".list-scroll")).every(e => !/contain|none/.test(getComputedStyle(e).overscrollBehaviorY)), "shared table scroll chains to the page: " + view);
     const bar = document.querySelector(".topbar"), header = document.querySelector(".page-header").getBoundingClientRect();
-    check(Math.abs(header.left - bar.getBoundingClientRect().left - parseFloat(getComputedStyle(bar).paddingLeft)) < 2, "matching topbar/content gutter: " + view);
+    const toggle = bar.querySelector("[data-slot=sidebar-trigger]").getBoundingClientRect();
+    const searchField = bar.querySelector(".global-search").getBoundingClientRect();
+    const topbarGutter = toggle.left - bar.getBoundingClientRect().left;
+    check(Math.abs(topbarGutter - workspaceGutter) <= 1 && Math.abs(topbarGutter - sidebarGutter) <= 1, "matching sidebar/topbar gutter token: " + view);
+    check(Math.abs(searchField.left - toggle.right - toolbarGap) <= 1, "toggle-to-search gap follows its token: " + view);
+    check(Math.abs(header.left - scroller.getBoundingClientRect().left - scroller.clientLeft - parseFloat(getComputedStyle(scroller).paddingLeft)) <= 1, "page title follows its content gutter: " + view);
   }
   await go("overview");
   const moving = page("overview").querySelector("[aria-label='Moving now']");
@@ -85,11 +111,11 @@
   button("Clear filters").click();
   const search = document.querySelector('input[placeholder="Search learnings"]');
   setInput(search, "filters");
-  await wait(() => document.querySelector(".results-meta").textContent === "1 learning", "search");
+  await wait(() => page("learnings").querySelector(".list-header .list-count").textContent === "1–1 of 1 learning", "search");
   await go("usage");
   await go("learnings");
   check(search.value === "filters", "search survives navigation");
-  check(document.querySelector(".results-meta").textContent === "1 learning", "filtered results survive navigation");
+  check(page("learnings").querySelector(".list-header .list-count").textContent === "1–1 of 1 learning", "filtered results survive navigation");
   button("Clear filters").click();
   await go("specialists");
   button("Open specialist", page("specialists")).click();
@@ -143,7 +169,9 @@
   await go("overview");
   const geometry = {
     viewport: [innerWidth, innerHeight],
-    scrollers: 1,
+    scrollOwners: "page and shared table bodies",
+    sidebarGutter,
+    topbarGutter: workspaceGutter,
     gutter: parseFloat(getComputedStyle(scroller).paddingLeft),
     controls: [...new Set([...document.querySelectorAll("button,input,[role=combobox],[role=checkbox],a")].filter(visible).map((e) => e.getAttribute("role") || e.tagName.toLowerCase()))],
   };

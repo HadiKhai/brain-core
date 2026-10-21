@@ -2,12 +2,13 @@ import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type Poin
 import { Minus, Plus, Maximize2, Search } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { InputGroup, InputGroupAddon, InputGroupInput } from "@/components/ui/input-group";
-import { Empty, Text, Status } from "./shared";
+import { Empty, Text, Status, ListFrame } from "./shared";
 import { useSearch } from "./search";
 import { Highlight } from "./picker";
 import { list, count, nowOf, within, threads, learningRows, time, type RecordData } from "./model";
 import type { Route } from "./routes";
 import "./graph.css";
+import { usePage } from "./hooks/use-page";
 
 type Go = (r: Partial<Route> & { view: string; state?: string | null }) => void;
 import { layout, placeLabels, labelBox, type GNode, type GEdge, type LabelMetrics } from "./graph-layout";
@@ -91,6 +92,10 @@ export function Graph({ s, go }: { s: RecordData; go: Go }) {
     setView((v) => ({ ...v, x: (cx - p.x) * v.k, y: (cy - p.y) * v.k }));
   };
   const chosen = nodes.find((n) => n.key === selected);
+  const results = found.items.filter((f) => f.kind !== "job");
+  const projects = nodes.filter((n) => n.kind === "node").sort((a, b) => (degrees.get(b.key) || 0) - (degrees.get(a.key) || 0));
+  const sideTotal = query.trim() ? results.length : projects.length;
+  const { page, size, setPage, setSize, start, end } = usePage(sideTotal, query);
   const open = (p: GNode) => p.kind === "node" ? go({ view: "project", node: p.id }) : p.kind === "specialist" ? go({ view: "specialists", item: p.id }) : go({ view: "learnings", item: p.id });
   const tip = nodes.find((n) => n.key === (hover || focused));
   const viewRef = useRef(view);
@@ -225,33 +230,37 @@ export function Graph({ s, go }: { s: RecordData; go: Go }) {
           <p id="graph-keyboard-help" className="sr-only">Use arrow keys to pan, plus and minus to zoom, Home to fit. Tab to a record and press Enter to open it.</p>
           <div className="graph-legend"><span><i className="halo-swatch" />Glows: a search match, or activity in the last day (commits, hires, new learnings)</span></div>
         </div>
-        <aside className="graph-side" aria-label={query.trim() ? "Matches" : "Selected"}>
+        <aside className={`graph-side list-surface${query.trim() || !chosen ? " graph-has-list" : ""}`} aria-label={query.trim() ? "Matches" : "Selected"}>
           {chosen && <div className="graph-chosen">
             <small>{names[chosen.kind].slice(0, -1)}</small>
             <strong><Text>{chosen.title}</Text></strong>
-            <small>{edges.filter((e) => nodes[e.a].key === chosen.key || nodes[e.b].key === chosen.key).length} links{chosen.recent ? " · recently active" : ""}</small>
+            <small>{count(degrees.get(chosen.key) || 0, "link")}{chosen.recent ? " · recently active" : ""}</small>
             <Button size="sm" variant="outline" onClick={() => open(chosen)}>{chosen.kind === "node" ? "Open project" : chosen.kind === "specialist" ? "Open specialists" : "Open learnings"}</Button>
+            <Button size="sm" variant="ghost" onClick={() => setSelected(null)}>Show all projects</Button>
           </div>}
           {query.trim() ? <>
-            <p className="results-meta" role="status">{found.state === "loading" ? "Searching…" : ((n) => `${n} ${n === 1 ? "match" : "matches"}`)(found.items.filter((f) => f.kind !== "job").length)}</p>
-            <div className="rows">{found.items.filter((f) => f.kind !== "job").slice(0, 12).map((f) => (
-              <Button variant="ghost" className="row match-row" data-item key={f.kind + f.id} onClick={() => focus(f.kind + ":" + f.id)}>
-                <span className={"swatch kind-" + f.kind} />
-                <span className="row-main"><strong className="row-title"><Highlight text={f.title} query={query} /></strong><small>{f.secondary}</small></span>
-              </Button>
-            ))}</div>
+            {found.state === "loading" && <p className="results-meta" role="status">Searching…</p>}
+            <ListFrame total={sideTotal} page={page} size={size} onPage={setPage} onSize={setSize} noun="result">
+              <div className="rows">{results.slice(start, end).map((f) => (
+                <Button variant="ghost" className="row match-row" data-item key={f.kind + f.id} onClick={() => focus(f.kind + ":" + f.id)}>
+                  <span className={"swatch kind-" + f.kind} />
+                  <span className="row-main"><strong className="row-title"><Highlight text={f.title} query={query} /></strong><small>{f.secondary}</small></span>
+                </Button>
+              ))}</div>
+            </ListFrame>
           </> : !chosen && <>
             <div className="graph-hint">
               <p>Search to light up matching records. Select a project to see its links.</p>
               <Status>{`${nodes.filter((n) => n.recent).length} recently active`}</Status>
             </div>
-            {/* The list view beside the map: every project, by how much it links. */}
-            <div className="rows">{nodes.filter((n) => n.kind === "node").map((p) => ({ p, links: edges.filter((e) => nodes[e.a].key === p.key || nodes[e.b].key === p.key).length }))
-              .sort((a, b) => b.links - a.links).slice(0, 12).map(({ p, links }) => (
+            <ListFrame total={sideTotal} page={page} size={size} onPage={setPage} onSize={setSize} noun="project">
+              <div className="rows">{projects.slice(start, end).map((p) => (
                 <Button variant="ghost" className="row match-row" data-item key={p.key} onClick={() => focus(p.key)} onPointerEnter={() => setHover(p.key)} onPointerLeave={() => setHover(null)}>
                   <span className={"swatch kind-node" + (p.recent ? " recent" : "")} />
-                  <span className="row-main"><strong className="row-title">{p.title}</strong><small>{count(links, "link")}{p.recent ? " · active today" : ""}</small></span>
-                </Button>))}</div>
+                  <span className="row-main"><strong className="row-title">{p.title}</strong><small>{count(degrees.get(p.key) || 0, "link")}{p.recent ? " · active today" : ""}</small></span>
+                </Button>
+              ))}</div>
+            </ListFrame>
           </>}
         </aside>
       </div>

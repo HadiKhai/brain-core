@@ -73,7 +73,7 @@ test('fitness audit rejects a removed section inset', async ({page}) => {
   if(folder) {mkdirSync(folder,{recursive:true});writeFileSync(join(folder,'alignment-mutations.json'),JSON.stringify(evidence,null,2));}
 });
 
-test('overlay phone gutters stay symmetric and reject an unconditional reservation', async ({browser}) => {
+test('overlay phone gutters stay symmetric and reject a reserved strip', async ({browser}) => {
   const evidence: unknown[] = [];
   for (const [width,height] of [[390,844],[320,640]]) for (const colorScheme of ['light','dark'] as const) {
     const context = await browser.newContext({viewport:{width,height},colorScheme});
@@ -83,13 +83,15 @@ test('overlay phone gutters stay symmetric and reject an unconditional reservati
     const before = await page.evaluate(audit);
     expect(before.alignment.phoneGutters.left).toBe(16);
     expect(before.alignment.phoneGutters.right).toBe(16);
-    const mutation = await page.addStyleTag({content:'.inset-scroll { scrollbar-gutter: stable !important; }'});
+    // Simulate an incorrectly reserved 8px strip: overlay scrollbar implementations
+    // may correctly leave `stable` alone without any geometric effect.
+    const mutation = await page.addStyleTag({content:'.inset-scroll { scrollbar-gutter: stable !important; padding-right: calc(16px + 8px) !important; }'});
     let failure = '';
     try { await page.evaluate(audit); } catch(error) {failure=String(error);}
     expect(failure).toContain('equal phone page gutters');
     await mutation.evaluate(e=>e.remove());
     const restored = await page.evaluate(audit);
-    evidence.push({width,height,colorScheme,before,mutation:'Restore unconditional stable scrollbar gutter',failure,restored});
+    evidence.push({width,height,colorScheme,before,mutation:'Reserve an extra 8px strip on an overlay-scrollbar page',failure,restored});
     await context.close();
   }
   if(folder) {mkdirSync(folder,{recursive:true});writeFileSync(join(folder,'phone-gutter-mutations.json'),JSON.stringify(evidence,null,2));}

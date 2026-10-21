@@ -79,13 +79,14 @@ class LocalReviews(Scenario):
     def test_current_never_name_policy_and_link_safety_apply_to_the_whole_batch(self):
         prepared = self.select()
         (self.root / 'never-name.txt').write_text('made-up\n')
-        with self.assertRaises(SystemExit): self.reviews.apply({'token': prepared['token']})
+        with self.assertRaises(ui_review.ReviewError): self.reviews.apply({'token': prepared['token']})
         self.assertTrue(all(common.read_fm(self.root / r['path'])[0]['status'] == 'proposed' for r in prepared['records']))
         (self.root / 'never-name.txt').unlink()
         path = self.root / 'library/lesson-a.md'
         alias = self.tmp / 'alias.md'
         os.link(path, alias)
-        with self.assertRaises(SystemExit): self.reviews.catalog()
+        safe_catalog = self.reviews.catalog()
+        self.assertNotIn("lesson-a", [r["id"] for r in safe_catalog["proposals"]])
         self.assertEqual(common.read_fm(alias)[0]['status'], 'proposed')
 
     def test_default_off_and_expired_confirmations_never_write(self):
@@ -132,6 +133,50 @@ class LocalReviews(Scenario):
         self.assertIn(' M status.md', self.git('status', '--short', cwd=self.root))
         self.assertNotIn('Unrelated synthetic draft.', self.git('show', 'HEAD:status.md', cwd=self.root))
 
+    def test_failed_commit_restores_files_and_exact_previous_index_entries(self):
+        selected = self.reviews.catalog()['proposals']
+        target = self.root / selected[0]['path']
+        self.git('add', '--', str(target.relative_to(self.root)), cwd=self.root)
+        staged = self.git('show', ':' + str(target.relative_to(self.root)), cwd=self.root)
+        target.write_text(target.read_text() + '\nUnstaged synthetic draft.\n')
+        prepared = self.select()
+        before = {r['path']: (self.root / r['path']).read_bytes() for r in prepared['records']}
+        index = self.git('ls-files', '--stage', cwd=self.root)
+        hooks = self.tmp / 'hooks'
+        hooks.mkdir()
+        hook = hooks / 'pre-commit'
+        hook.write_text('#!/bin/sh\nexit 1\n'); hook.chmod(0o755)
+        self.git('config', 'core.hooksPath', str(hooks), cwd=self.root)
+        with mock.patch.dict(os.environ, self.env, clear=True):
+            with self.assertRaisesRegex(ui_review.ReviewError, 'restored'):
+                self.reviews.apply({'token': prepared['token']})
+        for name, data in before.items(): self.assertEqual((self.root / name).read_bytes(), data)
+        self.assertEqual(self.git('ls-files', '--stage', cwd=self.root), index)
+        self.assertEqual(self.git('show', ':' + str(target.relative_to(self.root)), cwd=self.root), staged)
+
+    def test_later_file_failure_restores_already_written_proposals(self):
+        prepared = self.select()
+        before = {r['path']: (self.root / r['path']).read_bytes() for r in prepared['records']}
+        real_write = common.write_fm
+        calls = []
+        def fail_second(*args):
+            calls.append(args[0])
+            if len(calls) == 2: raise OSError('synthetic second write failure')
+            return real_write(*args)
+        with mock.patch.object(common, 'write_fm', side_effect=fail_second):
+            with self.assertRaisesRegex(ui_review.ReviewError, 'restored'):
+                self.reviews.apply({'token': prepared['token']})
+        self.assertEqual(len(calls), 2)
+        for name, data in before.items(): self.assertEqual((self.root / name).read_bytes(), data)
+
+    def test_whole_instance_outward_link_precondition_matches_cli(self):
+        prepared = self.select()
+        outside = self.tmp / 'outside.txt'; outside.write_text('Synthetic outside file.\n')
+        (self.root / 'library/outside.md').symlink_to(outside)
+        with self.assertRaisesRegex(ui_review.ReviewError, 'link'):
+            self.reviews.apply({'token': prepared['token']})
+        self.assertTrue(all(common.read_fm(self.root / r['path'])[0]['status'] == 'proposed' for r in prepared['records']))
+
     def test_catalog_screens_titles_and_does_not_export_unsafe_identities(self):
         (self.root / 'never-name.txt').write_text('lesson-a\nSynthetic\n')
         value = json.dumps(self.reviews.catalog())
@@ -142,7 +187,7 @@ class LocalReviews(Scenario):
         duplicate = self.root / 'nodes/garden/library/duplicate.md'
         self.proposal(duplicate, 'lesson-a', 'Demo reviewer')
         prepared = self.select([r for r in self.reviews.catalog()['proposals'] if r['path'].endswith('duplicate.md')])
-        with self.assertRaises(SystemExit): self.reviews.apply({'token': prepared['token']})
+        with self.assertRaises(ui_review.ReviewError): self.reviews.apply({'token': prepared['token']})
         self.assertEqual(common.read_fm(duplicate)[0]['status'], 'proposed')
         self.assertEqual(common.read_fm(self.root / 'library/lesson-a.md')[0]['status'], 'proposed')
 

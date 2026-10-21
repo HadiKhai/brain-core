@@ -4,6 +4,7 @@ import hashlib
 import hmac
 import json
 import secrets
+import subprocess
 import threading
 import time
 
@@ -55,7 +56,10 @@ class Reviews:
         return {'enabled': True, 'reviewer': reviewer, 'proposals': rows}
 
     def describe(self, inst, kind, ident, node, path):
-        common.safe_target(path)
+        try:
+            common.safe_target(path)
+        except SystemExit:
+            return None
         fm, _ = common.read_fm(path)
         terms = (knowledge.learning_terms(inst, fm, [node]) if kind == 'item'
                  else knowledge.specialist_terms(inst, {'dir': path.parent}, [node]))
@@ -104,6 +108,8 @@ class Reviews:
             prepared = self.pending.pop(token, None)  # one use, including failed or stale writes
             if prepared is None or time.monotonic() - prepared['at'] >= self.TTL:
                 raise ReviewError('This confirmation expired or was already used. Review again.')
+            if common.outward_links(self.root):
+                raise ReviewError("A symbolic or hard link leads out of the brain. Run brain check and remove the link before reviewing.")
             inst = instance.Instance(self.root)
             current = self.catalog(inst)
             available = {self.identity(r): r for r in current['proposals']}
@@ -111,12 +117,41 @@ class Reviews:
                     available.get(self.identity(r)) != r for r in prepared['records']):
                 raise ReviewError('A proposal or its scope changed. Nothing was written. Review again.')
             paths = [self.root / r['path'] for r in prepared['records']]
-            before = {p: p.read_text() for p in paths}
+            before_bytes = {p: p.read_bytes() for p in paths}
+            before = {p: raw.decode('utf-8') for p, raw in before_bytes.items()}
+            names = [str(p.relative_to(self.root)) for p in paths]
+            versioned = (self.root / '.git').exists()
+            index = b''
+            if versioned:
+                snapshot = subprocess.run(['git', '-C', str(self.root), 'ls-files', '--stage', '-z', '--', *names],
+                                          capture_output=True)
+                if snapshot.returncode:
+                    raise ReviewError('Cannot snapshot the Git index. Nothing was written.')
+                index = snapshot.stdout
             previous = set(common.TOUCHED)
             try:
                 common.TOUCHED.clear()
                 knowledge.review_proposals(inst, prepared['records'], prepared['action'],
                                            prepared['reviewer'], via='local UI')
+            except (SystemExit, Exception) as error:
+                # A refused commit or a later file error must not silently leave accepted proposals.
+                # Restore each worktree file and only these paths' original index entries: unrelated
+                # drafts and even a different staged version of a proposal remain exactly as before.
+                try:
+                    for path, raw in before_bytes.items():
+                        if path.read_bytes() != raw:
+                            common.atomic_write(path, raw.decode('utf-8'))
+                    if versioned:
+                        object_format = common.git('rev-parse', '--show-object-format', cwd=self.root).stdout.strip()
+                        zero = b'0' * (64 if object_format == 'sha256' else 40)
+                        removals = b''.join(b'0 ' + zero + b'\t' + name.encode('utf-8') + b'\0' for name in names)
+                        restored = subprocess.run(['git', '-C', str(self.root), 'update-index', '-z', '--index-info'],
+                                                  input=removals + index, capture_output=True)
+                        if restored.returncode:
+                            raise OSError('index restoration failed')
+                except (SystemExit, Exception):
+                    raise ReviewError('The review stopped and restoration could not finish. Check these proposal files and the Git index before continuing: ' + ', '.join(names)) from None
+                raise ReviewError('The review could not be recorded. Your original proposal files and staged versions were restored; nothing was recorded.') from None
             finally:
                 common.TOUCHED.clear()
                 common.TOUCHED.update(previous)

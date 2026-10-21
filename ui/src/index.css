@@ -341,6 +341,7 @@ code, .inline-code, .verbatim { font-family: var(--font-mono); }
 .row-line { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .row-line strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13.5px; }
 .row-line small { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.row-line > .tabular-nums { white-space: nowrap; flex-shrink: 0; font-size: 12px; line-height: 1.5; color: var(--muted-foreground); }
 .row-title { display: block; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13.5px; font-weight: 550; }
 .row-title .readable { white-space: nowrap; }
 .row-main > small { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -672,7 +673,7 @@ svg.searching .gnode:not(.match):not(.selected) { opacity: 0.28; }
 .list-header .field { flex-direction: row; align-items: center; gap: 6px; }
 .list-header .field label { font-size: 12px; white-space: nowrap; }
 .list-header [data-slot="select-trigger"] { height: 28px; min-width: 64px; }
-.list-scroll { min-height: 0; overflow: visible; }
+.list-scroll { min-height: 0; overflow: auto; overscroll-behavior: auto; }
 .list-surface .list-scroll { flex: 1; overflow: auto; overscroll-behavior: auto; }
 .list-scroll > [data-slot="table-container"] { overflow: visible; }
 .list-frame > .table-footer { position: sticky; bottom: 0; z-index: 1; flex-shrink: 0; background: var(--card); padding: 10px 0 0; border-top: 1px solid var(--hairline); }

@@ -266,21 +266,30 @@ test("saved snapshots and loading, empty, error, permission and partial states a
   await expect(page.getByText(/14 of 42 transcripts counted/)).toBeAttached();
 });
 
-test("browser Back restores each destination scroll position", async ({
-  page,
-}) => {
+test("browser Back restores each destination page scroll position", async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 600 });
-  await page.goto("/?k=hundred&history=1#view=learnings");
-  await page.waitForSelector("[data-page=learnings] [data-item]");
+  await page.goto("/?k=hundred&history=1#view=usage");
+  await expect(page.locator("[data-page=usage]")).toBeVisible();
   const restored = await page.locator("#workspace-content").evaluate((e) => { e.scrollTop = 300; return e.scrollTop; });
   expect(restored).toBeGreaterThan(0);
-  await page.getByRole("link", { name: /^Usage/ }).click();
+  await page.getByRole("link", { name: /^Learnings/ }).click();
+  await expect(page).toHaveURL(/view=learnings/);
+  await page.goBack();
   await expect(page).toHaveURL(/view=usage/);
+  await expect.poll(() => page.locator("#workspace-content").evaluate((e) => e.scrollTop)).toBe(restored);
+});
+
+test("browser Back retains a full-height list's own scroll position", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 600 });
+  await page.goto("/?k=hundred#view=learnings");
+  const list = page.locator("[data-page=learnings] .list-scroll");
+  await expect(list).toBeVisible();
+  const restored = await list.evaluate(e => { e.scrollTop = 300; return e.scrollTop; });
+  expect(restored).toBeGreaterThan(0);
+  await page.getByRole("link", { name: /^Usage/ }).click();
   await page.goBack();
   await expect(page).toHaveURL(/view=learnings/);
-  await expect
-    .poll(() => page.locator("#workspace-content").evaluate((e) => e.scrollTop))
-    .toBe(restored);
+  await expect.poll(() => list.evaluate(e => e.scrollTop)).toBe(restored);
 });
 
 test("job state separates its kind from the clamped readable description", async ({ page }) => {

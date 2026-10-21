@@ -65,7 +65,7 @@ for (const theme of ["light", "dark"]) {
     }
     await page.keyboard.press("Escape");
     await expect(page.getByRole("tooltip")).toBeHidden();
-    await projects.first().hover();
+    await projects.first().locator(".dot").hover();
     await expect(page.getByRole("tooltip")).toBeVisible();
   });
 }
@@ -97,3 +97,25 @@ test("dense graph keeps a permanent, collision-free label for every project", as
   });
   expect(overlaps).toEqual([]);
 });
+
+for (const scenario of ["ten", "hundred"]) {
+  test(`${scenario}: graph side list shares the table frame and keeps its pager reachable`, async ({ page }) => {
+    await page.goto(`/?k=${scenario}#view=graph`);
+    const aside = page.locator("[data-page=graph] .graph-side");
+    const frame = aside.locator("[data-list-frame]");
+    await expect(frame).toBeVisible();
+    await expect(frame.locator(".list-header")).toContainText(`1–10 of ${scenario === "ten" ? 10 : 100} projects`);
+    await expect(frame.getByRole("combobox", { name: "Rows per page", exact: true })).toBeVisible();
+    expect(await aside.evaluate((e) => getComputedStyle(e).overflowY)).toBe("visible");
+    const footer = frame.locator(".table-footer");
+    const before = (await footer.boundingBox())!;
+    const bounds = (await aside.boundingBox())!;
+    expect(before.y + before.height).toBeLessThanOrEqual(bounds.y + bounds.height);
+    await frame.locator(".list-scroll").evaluate((e) => { e.scrollTop = e.scrollHeight; });
+    expect((await footer.boundingBox())!.y).toBeCloseTo(before.y, 0);
+    if (scenario === "hundred") {
+      await footer.getByRole("button", { name: "Next", exact: true }).click();
+      await expect(frame.locator(".list-header")).toContainText("11–20 of 100 projects");
+    }
+  });
+}

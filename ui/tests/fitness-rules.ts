@@ -152,7 +152,7 @@ export function audit(rule: string): Violation[] {
     const top = [...p!.querySelectorAll("section, [data-section]")].filter((e) => visible(e) && !inModal(e) && !e.parentElement!.closest("section, [data-section]"));
     if (top.length > 3) add(`${top.length} top-level sections on one page: ${top.map(describe).join(", ")}`);
     // A full list has its own pager; a preview ("Showing 5 of 31 · View all") does not count.
-    const paged = top.filter((e) => [...e.querySelectorAll("button")].some((b) => visible(b) && /^(next|previous)$/i.test(name(b))));
+    const paged = top.filter((e) => [...e.querySelectorAll("button")].some((b) => visible(b) && !(b as HTMLButtonElement).disabled && /^(next|previous)$/i.test(name(b))));
     if (paged.length > 1) add(`${paged.length} independent full lists share one page; they are sub-areas that need their own sidebar items`);
   }
 

@@ -45,8 +45,48 @@ test("collapsed rail: Agents and project sub-items open in a flyout by hover, fo
   await page.mouse.move(900, 500);
   await rail.getByRole("button", { name: "Field Guide", exact: true }).hover();
   await expect(flyout).toBeVisible();
-  await expect(flyout.getByRole("menuitem")).toHaveText([/^Project page/, /^Coordinator/, /^Navigation/]);
+  await expect(flyout.getByRole("menuitem")).toHaveText([/^Project page/, /^Coordinator/, /^Copy thread link/, /^Navigation/]);
+  await page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+  const beforeCopy = page.url();
+  const destination = await flyout.getByRole("menuitem", { name: "Coordinator", exact: true }).getAttribute("href");
+  await flyout.getByRole("menuitem", { name: "Copy thread link", exact: true }).click();
+  await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe(destination);
+  await expect(page).toHaveURL(beforeCopy);
+  await expect(rail).toBeVisible();
+  await expect(flyout).toBeHidden();
+  await page.mouse.move(900, 500);
+  await rail.getByRole("button", { name: "Field Guide", exact: true }).hover();
+  await expect(flyout).toBeVisible();
   await flyout.getByRole("menuitem", { name: /^Navigation/ }).click();
   await expect(page).toHaveURL(/view=project.*node=field-guide.*thread=job%2Fnavigation/);
   await expect(rail).toBeVisible();
+});
+
+test("collapsed rail keeps an unverified desktop coordinator reference copyable without a dead link", async ({ page, request }) => {
+  const original = await (await request.get("/api/state?k=demo")).json();
+  const nodes = structuredClone(original.nodes);
+  const reference = "t3-thread://v1/00000000-0000-4000-8000-000000000002";
+  nodes.find((n: any) => n.id === "field-guide").coordinator = reference;
+  await request.post("/fixture/update", { data: { nodes } });
+  try {
+    await page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto("/?k=demo#view=overview");
+    await page.getByRole("button", { name: "Toggle Sidebar" }).click();
+    const rail = page.locator("[data-state=collapsed][data-slot=sidebar]");
+    await rail.evaluate(async e => {
+      await Promise.all(e.getAnimations({ subtree: true }).filter(a => a.effect?.getTiming().iterations !== Infinity).map(a => a.finished.catch(() => {})));
+    });
+    await rail.getByRole("button", { name: "Field Guide", exact: true }).hover();
+    const flyout = page.locator(".rail-flyout");
+    await expect(flyout.getByRole("menuitem")).toHaveText([/^Project page/, /^Copy thread link/, /^Navigation/]);
+    await expect(flyout.locator('a[href^="t3-thread:"],a[href^="t3code:"]')).toHaveCount(0);
+    const beforeCopy = page.url();
+    await flyout.getByRole("menuitem", { name: "Copy thread link", exact: true }).click();
+    await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe(reference);
+    await expect(page).toHaveURL(beforeCopy);
+    await expect(rail).toBeVisible();
+  } finally {
+    await request.post("/fixture/update", { data: { nodes: original.nodes } });
+  }
 });

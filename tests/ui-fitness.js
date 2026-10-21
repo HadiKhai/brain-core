@@ -35,12 +35,25 @@
   for (const surface of surfaces) {
     const r = surface.getBoundingClientRect(), cs = getComputedStyle(surface);
     const start = r.left + surface.clientLeft + parseFloat(cs.paddingLeft), end = r.right - surface.clientLeft - parseFloat(cs.paddingRight);
-    for (const row of surface.querySelectorAll(':scope > .rows > .row, :scope .learning-results > .rows > .row'))
-      if (rendered(row)) { near(row.getBoundingClientRect().right, row.closest('.learning-results') ? row.closest('.learning-results').getBoundingClientRect().right : end, 'row spans its section'); }
-    for (const row of surface.querySelectorAll(':scope > .rows > .row'))
-      if (rendered(row)) near(row.getBoundingClientRect().left, start, 'section content inset');
+    // The shared table owns the rows now; inspect their rendered anchors through that frame.
+    // Keep the nearest-surface check so a nested panel never inherits the parent's inset.
+    for (const row of surface.querySelectorAll('.rows > .row')) {
+      if (!rendered(row) || row.closest('.surface, .page-section') !== surface) continue;
+      const results = row.closest('.learning-results');
+      const left = results ? results.getBoundingClientRect().left : start;
+      const scrollOwner = row.closest('.list-scroll');
+      const right = scrollOwner ? scrollOwner.getBoundingClientRect().left + scrollOwner.clientLeft + scrollOwner.clientWidth : results ? results.getBoundingClientRect().right : end;
+      near(row.getBoundingClientRect().left, left, 'section content inset');
+      near(row.getBoundingClientRect().right, right, 'row spans its section');
+    }
     for (const footer of surface.querySelectorAll(':scope > .list-footer, :scope > .table-footer, :scope > .filter-toolbar, :scope > .surface-head'))
       if (rendered(footer)) near(footer.getBoundingClientRect().left, start, 'section footer and toolbar inset');
+    for (const frame of surface.querySelectorAll('[data-list-frame]')) {
+      if (frame.closest('.surface, .page-section') !== surface) continue;
+      const edge = frame.getBoundingClientRect().left;
+      for (const chrome of frame.querySelectorAll(':scope > .list-header, :scope > .table-footer'))
+        if (rendered(chrome)) near(chrome.getBoundingClientRect().left, edge, 'section footer and toolbar inset');
+    }
   }
   // Text-only actions carry no extra indent of their own.
   for (const action of document.querySelectorAll('.surface .reader-trigger'))

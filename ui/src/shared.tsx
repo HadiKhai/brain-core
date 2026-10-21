@@ -431,7 +431,7 @@ export function Reader({ title, text, trigger = "Read full", children, footer, o
     <Button variant={primary ? "default" : "ghost"} size="sm" className={primary ? "" : "reader-trigger"} onClick={() => setOpen(true)}>{trigger}</Button>
     <Sheet open={open} onOpenChange={setOpen}>
       <SheetContent className="reading-sheet" initialFocus={() => document.querySelector<HTMLElement>(".reading-sheet [data-slot=sheet-close]")}>
-        <SheetHeader><SheetTitle><Tip text={title}><Text>{title}</Text></Tip></SheetTitle><SheetDescription>Read the full context, then return to your place.</SheetDescription></SheetHeader>
+        <SheetHeader><SheetTitle><Text>{title}</Text></SheetTitle><SheetDescription>Read the full context, then return to your place.</SheetDescription></SheetHeader>
         <div className="reader-body"><Markdown text={text} />{children}
           {humanText(readable(text, zone)) !== readable(text, zone) && <Disclosure title="Technical details"><pre className="verbatim" dir="ltr">{text}</pre></Disclosure>}
         </div>
