@@ -664,7 +664,14 @@ class TeamHomes(Scenario):
         self.assertEqual(self.b(root, "ready", "app", "--branch", "job").strip(), "ready")
 
     def test_real_old_ledger_and_handback_survive_close_lesson_cleanup_and_sync(self):
+        # The integration predates node creation. A wall-clock minute rollover
+        # can otherwise put it outside the initial status-based sync window.
+        self.env.update(GIT_AUTHOR_DATE="2001-01-02T12:00:00+03:00",
+                        GIT_COMMITTER_DATE="2001-01-02T12:00:00+03:00")
         root, origin, home, wt, old, record, base = self.old_core_job()
+        status = root / "nodes/app/status.md"
+        status.write_text(re.sub(r"^Updated:.*$", "Updated: 2001-01-01 00:00 +00:00 by fixture",
+                                 status.read_text(), flags=re.M))
         head = self.git("rev-parse", "HEAD", cwd=wt).strip()
         self.git("merge", "--no-ff", "-m", "integrate job", "job", cwd=home)
         merged = self.git("rev-parse", "HEAD", cwd=home).strip()
