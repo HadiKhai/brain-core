@@ -21,7 +21,7 @@ from . import ui as _m_ui
 # then incrementally: transcripts only grow, so the next read starts where the last one stopped.
 
 SPEND_IDLE_MIN = 5  # a gap between two events of more than this many minutes is idle time
-SPEND_VERSION = 4
+SPEND_VERSION = 5
 SPEND_FIELDS = ("events", "fresh", "cache_read", "cache_write", "output", "reasoning", "tools")
 SPEND_TOKENS = ("fresh", "cache_read", "cache_write", "output", "reasoning")  # reasoning is part of output
 JOB_MARK = "brain-job: {}"  # in every job brief: the sessions a brief starts are found again by it
@@ -52,7 +52,7 @@ def spend_count(value):
 
 def spend_new(runtime, path):
     return {"v": SPEND_VERSION, "runtime": runtime, "id": "", "parent": "", "subagent": False,
-            "context": None, "turns": 0, "counter_turns": 0, "record_turns": 0,
+            "context": None, "turns": 0, "turn_contexts": 0, "user_turns": 0,
             "job": "", "first_at": None, "last_at": None, "models": [], "m": {}, "mc": {}, "records": False, "compactions": [],
             "first": None, "last": None, "state": {"offset": 0, "prompt_done": False, "recent": [], "tools": [],
                                                    "model": -1, "last_input": 0, "prev": None, "own_start": None}}
@@ -92,7 +92,7 @@ def spend_model(agg, name):
 def spend_claude_line(agg, raw, minute, at=None):
     st = agg["state"]
     spend_add(agg, "m", minute, -1, (1, 0, 0, 0, 0, 0, 0))
-    wanted = b'"usage"' in raw or b'compact_boundary' in raw or (not st["prompt_done"] and b'"user"' in raw)
+    wanted = b'"usage"' in raw or b'compact_boundary' in raw or b'"user"' in raw
     if not wanted:
         return
     try:
@@ -103,13 +103,15 @@ def spend_claude_line(agg, raw, minute, at=None):
         return
     kind = r.get("type")
     msg = r.get("message") if isinstance(r.get("message"), dict) else {}
-    if kind == "user" and not st["prompt_done"] and not r.get("isMeta") and not r.get("isCompactSummary"):
+    if kind == "user" and not any(r.get(k) for k in ("isMeta", "isCompactSummary", "isSidechain")):
         content = msg.get("content")
         if isinstance(content, list) and any(isinstance(c, dict) and c.get("type") == "tool_result" for c in content):
             return
-        st["prompt_done"] = True  # the brief: only the first message the session was given names its job
-        m = JOB_MARK_RE.search(raw)
-        agg["job"] = m.group(1).decode() if m else ""
+        agg["turns"] += 1
+        if not st["prompt_done"]:  # only the opening prompt names the job
+            st["prompt_done"] = True
+            m = JOB_MARK_RE.search(raw)
+            agg["job"] = m.group(1).decode() if m else ""
         return
     if kind == "system" and r.get("subtype") == "compact_boundary":
         meta = r.get("compactMetadata") if isinstance(r.get("compactMetadata"), dict) else {}
@@ -140,7 +142,6 @@ def spend_claude_line(agg, raw, minute, at=None):
         windowed = st.get("lo") is not None
         spend_add(agg, "m", minute if windowed else prior[2], model if windowed else prior[3], (0, *delta, 0, tools))
         return
-    agg["turns"] += 1
     if mid:
         st["recent"] = (st["recent"] + [[mid, now, minute, model]])[-SPEND_RECENT:]
     spend_add(agg, "m", minute, model, (0, *now, 0, tools))
@@ -155,7 +156,7 @@ def spend_codex_line(agg, raw, minute, at=None):
     if at is not None and st["own_start"] is not None and at < st["own_start"]:
         return  # history a fork copied from its parent: the parent's own file counts it, its time too
     spend_add(agg, "m", minute, -1, (1, 0, 0, 0, 0, 0, 0))
-    hot = (b'"session_meta"', b'"token_usage_record"', b'"token_count"', b'"compacted"', b'"turn_context"',
+    hot = (b'"session_meta"', b'"token_usage_record"', b'"token_count"', b'"compacted"', b'"turn_context"', b'"user_message"',
            b'_call"')
     if not any(h in raw for h in hot) and not (not st["prompt_done"] and b'"user' in raw):
         return
@@ -178,6 +179,8 @@ def spend_codex_line(agg, raw, minute, at=None):
             st["own_start"] = at  # a fork's copied history is older than its own start, to the millisecond
         return
     if kind == "turn_context":
+        agg["turn_contexts"] += 1
+        agg["turns"] = agg["turn_contexts"]
         st["model"] = spend_model(agg, p.get("model"))
         return
     if kind == "compacted":
@@ -187,6 +190,10 @@ def spend_codex_line(agg, raw, minute, at=None):
     if kind == "response_item" and ptype in CODEX_TOOL_CALLS:
         spend_add(agg, "m", minute, st["model"], (0, 0, 0, 0, 0, 0, 1))
         return
+    if kind == "event_msg" and ptype == "user_message":
+        agg["user_turns"] += 1
+        if not agg["turn_contexts"]:
+            agg["turns"] = agg["user_turns"]
     if not st["prompt_done"] and ((kind == "response_item" and ptype == "message" and p.get("role") == "user") or
                                   (kind == "event_msg" and ptype == "user_message")):
         m = JOB_MARK_RE.search(raw)
@@ -206,8 +213,6 @@ def spend_codex_line(agg, raw, minute, at=None):
         inp, cached = spend_count(u.get("input_tokens")), spend_count(u.get("cached_input_tokens"))
         st["last_input"] = inp or st["last_input"]
         agg["context"] = inp  # Codex input includes cached tokens; do not count them twice.
-        agg["record_turns"] += 1
-        agg["turns"] = agg["record_turns"]
         agg["records"] = True
         spend_add(agg, "m", minute, st["model"], (0, max(0, inp - cached), cached, spend_count(u.get("cache_write_input_tokens")),
                                                    spend_count(u.get("output_tokens")),
@@ -220,13 +225,6 @@ def spend_codex_line(agg, raw, minute, at=None):
         last = info.get("last_token_usage") if isinstance(info.get("last_token_usage"), dict) else {}
         if "input_tokens" in last:
             agg["context"] = spend_count(last.get("input_tokens"))
-            signature = [spend_count(total.get(k)) for k in
-                         ("input_tokens", "cached_input_tokens", "output_tokens", "reasoning_output_tokens")] if total else None
-            if signature is not None and signature != st.get("context_total"):
-                agg["counter_turns"] += 1
-                st["context_total"] = signature
-            if not agg["records"]:
-                agg["turns"] = agg["counter_turns"]
         st["last_input"] = spend_count(last.get("input_tokens")) or st["last_input"]
         if not total:
             return
@@ -288,6 +286,11 @@ def spend_cache_dir(inst):
     return inst.root / ".brain" / "spend"
 
 
+def claude_session_id(path):
+    """Claude's live session id is its file name, even with copied leading records."""
+    return Path(path).name.removesuffix(".zst").removesuffix(".jsonl")
+
+
 def spend_file(inst, path, runtime, allowed, forbidden, budget=None, window=None):
     """One transcript's aggregate, brought up to date; None when unreadable or outside the folders this brain may
     read (checked on the open file, as `brain history` does). A file that shrank or was replaced is read again.
@@ -332,7 +335,7 @@ def spend_file(inst, path, runtime, allowed, forbidden, budget=None, window=None
         # sit below it; a Codex transcript says so in its first line.
         if runtime == "claude":
             sub = real.parent.name == "subagents"
-            agg.update(id=f"{real.parent.parent.name}/{real.stem}" if sub else real.stem, subagent=sub,
+            agg.update(id=f"{real.parent.parent.name}/{claude_session_id(real)}" if sub else claude_session_id(real), subagent=sub,
                        parent=real.parent.parent.name if sub else "")
         elif not agg.get("id"):
             meta = codex_meta(real, allowed, forbidden)
@@ -1009,11 +1012,11 @@ def spend_lookback(inst, n, since=None, also=()):
                 parent in heads and bool(match_home(any_cwd(f, allowed, forbidden), "")))
         fh, why = _m_history.transcript_open(f, allowed, forbidden)
         s = _m_history.history_head(f, runtime, fh) if fh else None
-        if not s or not (s["id"] in coordinators or match_home(s["cwd"], s["repo_url"])):
+        sid = claude_session_id(f) if runtime == "claude" else s["id"] if s else ""
+        if not s or not (sid in coordinators or match_home(s["cwd"], s["repo_url"])):
             return False
-        sid = f.stem if runtime == "claude" else s["id"]
         heads[sid] = True
-        if s["id"] in coordinators:
+        if sid in coordinators:
             coordinator_ids[runtime].add(sid)
         return True
     aggs, _, _ = spend_all(inst, match=match)
@@ -1137,22 +1140,41 @@ def cmd_spend(a):
 # ---------- coordinator accounting ----------
 
 
+_COORDINATOR_FILES = {}  # selected paths per process/sid; accounting itself memoizes unchanged files
+
+
 def coordinator_measure(inst, n):
-    """Current coordinator only, through the accounting readers. No transcript text is returned."""
+    """Current coordinator only. Reject unrelated file names before any transcript open."""
     ids = n["local"].get("coordinator_sessions", [])
     sid = ids[-1] if isinstance(ids, list) and ids else None
     if not isinstance(sid, str) or not SESSION_ID.fullmatch(sid):
         return None
-
-    def match(runtime, path, allowed, forbidden):
-        if runtime == "claude":
-            return path.parent.name != "subagents" and path.stem == sid
-        meta = codex_meta(path, allowed, forbidden)
-        return bool(meta and meta[0] == sid)
-
-    aggs, _, _ = spend_all(inst, match=match)
-    aggs = [a for a in spend_once(aggs) if a.get("complete", True)]
+    sources, allowed, forbidden = spend_sources(inst)  # recheck subscription/privacy gates every time
+    key = (str(inst.root), sid, tuple(sources), tuple(sorted(allowed)), tuple(sorted(forbidden)))
+    cached = _COORDINATOR_FILES.get(key)
+    if cached and time.monotonic() - cached[0] < 30:
+        selected = cached[1]
+    else:
+        selected = []
+        for runtime, cfg in sources:
+            roots = [cfg / "projects"] if runtime == "claude" else [cfg / "sessions", cfg / "archived_sessions"]
+            for root in roots:
+                for path in spend_walk(root) if root.is_dir() else []:
+                    if runtime == "claude":
+                        if path.parent.parent != root.resolve() or claude_session_id(path) != sid:
+                            continue
+                    elif not path.name.removesuffix(".zst").endswith("-" + sid + ".jsonl"):
+                        continue
+                    selected.append((runtime, path))
+        if selected:  # an absent file may appear at any moment after a fresh thread starts
+            _COORDINATOR_FILES[key] = (time.monotonic(), selected)
+    aggs = []
+    for runtime, path in selected:
+        agg = spend_file(inst, path, runtime, allowed, forbidden)
+        # spend_file confirms Codex identity from metadata; never trust a file name alone.
+        if agg and agg["id"] == sid and agg.get("complete", True):
+            aggs.append(agg)
     if not aggs:
         return None
-    a = max(aggs, key=lambda a: a.get("last_at") or 0)
+    a = max(spend_once(aggs), key=lambda a: a.get("last_at") or 0)
     return {"context": a.get("context"), "turns": a.get("turns", 0)}

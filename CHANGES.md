@@ -63,8 +63,9 @@ After upgrading:
 ## 2026-10-21: Rotate coordinators from files
 
 For agents:
-- `brain due` raises `rotate` at 150k latest input-context tokens or 50 assistant response
+- `brain due` raises `rotate` at 150k latest input-context tokens or 50 conversation
   turns from Claude/Codex accounting; configure `rotate_tokens=` / `rotate_turns=` per node.
+  Tool responses do not count as turns. Unknown new-session bindings request registration.
 - `brain rotate <node>` writes `handover.md` from status, decisions, backlog, inbox, all open
   jobs/hand-backs, schedules and pending wake state, and prints the coordinator's host steps.
   It never calls the host or copies transcript text. Reconcile live host tasks and asks before

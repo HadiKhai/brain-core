@@ -9,11 +9,45 @@ from . import jobs as _m_jobs
 from . import nodes as _m_nodes
 from . import schedules as _m_schedules
 from . import spend as _m_spend
+from . import status as _m_status
+
+
+def rotation_file(inst, n):
+    return inst.root / ".brain" / "rotation" / (urllib.parse.quote(n["id"], safe="") + ".json")
+
+
+def read_rotation(inst, n):
+    path = rotation_file(inst, n)
+    if not path.exists():
+        return {}
+    try:
+        state = json.loads(path.read_text())
+        if (isinstance(state, dict) and isinstance(state.get("coordinator_sessions", []), list)
+                and isinstance(state.get("previous", []), list) and all(
+                    isinstance(old, dict) for old in state.get("previous", []))):
+            return state
+    except (OSError, ValueError):
+        pass
+    return None
+
+
+def needs_session(state, n):
+    ids = n["local"].get("coordinator_sessions", [])
+    sid = ids[-1] if isinstance(ids, list) and ids else None
+    current = n["local"].get("coordinator")
+    if state.get("coordinator") == current:
+        return "pending_session" in state and sid == state["pending_session"]
+    return bool(state.get("coordinator")) and (not sid or sid in state.get("coordinator_sessions", []))
 
 
 def rotation_due(inst, n):
     if not n["local"].get("coordinator"):
         return None
+    state = read_rotation(inst, n)
+    if state is None:
+        return "rotation sidecar is unreadable; repair it before changing coordinator bindings"
+    if needs_session(state, n):
+        return "append the new coordinator's runtime session id with brain set " + n["id"] + " coordinator_sessions=<new-id>"
     measured = _m_spend.coordinator_measure(inst, n)
     if not measured:
         return None
@@ -37,10 +71,20 @@ def cmd_rotate(a):
     rows = _m_jobs.read_jobs(n)
     if rows is None:
         _m_common.die("rotation refused: unreadable job ledger; reconcile it before rotating")
-    local_file = inst.root / ".brain" / "rotation" / (urllib.parse.quote(n["id"], safe="") + ".json")
+    local_file = rotation_file(inst, n)
+    old = read_rotation(inst, n)
+    if old is None:
+        _m_common.die("rotation refused: unreadable sidecar; preserve previous coordinators before repair")
+    previous = list(old.get("previous", []))
+    if old.get("coordinator") and old["coordinator"] != n["local"].get("coordinator"):
+        previous.append({k: v for k, v in old.items() if k != "previous"})
     bindings = {"coordinator": n["local"].get("coordinator", ""),
                 "coordinator_sessions": n["local"].get("coordinator_sessions", []),
-                "worktrees": {}, "schedules": {}}
+                "worktrees": {}, "schedules": {}, "previous": previous}
+    ids = bindings["coordinator_sessions"]
+    if needs_session(old, n):
+        bindings["pending_session"] = ids[-1] if ids else None
+    inbox = _m_status.inbox_lines(n)  # includes queued asks even when inbox.md is busy
     lines = [f"# Coordinator handover: {n['id']}", "", f"Prepared: {inst.now()}", "",
              "Start from these files. Read node.md, brief.md and the coordinator role before acting.",
              "The old thread must stay available until host tasks and pending requests have been reconciled.", ""]
@@ -50,6 +94,8 @@ def cmd_rotate(a):
             body = path.read_text() if path.exists() else "(not created)"
         except (OSError, UnicodeError):
             _m_common.die(f"rotation refused: cannot read {name}")
+        if name == "inbox.md":
+            body += "\n" + "\n".join(line for line in inbox if line not in body.splitlines())
         lines += [f"## {name}", "", body, ""]
     lines += ["## Open jobs and hand-backs", ""]
     for row in rows:
@@ -76,6 +122,7 @@ def cmd_rotate(a):
     lines += ["## Wakes and host reconciliation", "",
               "Previous coordinator, worktree and host-task bindings are in the ignored machine-local sidecar "
               f"`.brain/rotation/{local_file.name}`. Inspect it before changing bindings.",
+              "Retain every previous coordinator in the sidecar until it is safely stopped and settled.",
               f"Pending wakes: {len(pending)} (digests in the local sidecar).",
               "Wake transport configured: " + ("yes" if n["local"].get("wake") or
                                                inst.local_of("root").get("wake_default") else "no") + ".",

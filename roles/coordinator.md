@@ -396,21 +396,23 @@ up on those unanswered lines. Remove answered inbox lines; waking does not mark 
 
 Keep every coordinator's runtime session id in the machine-local `coordinator_sessions` list
 (`brain set <node> coordinator_sessions=<new id>` appends and selects it). Prior IDs remain
-in order; repeating an ID moves it last. The last id is the current coordinator. Obtain the runtime id from its shell (`CODEX_THREAD_ID` or
-`CLAUDE_CODE_SESSION_ID`), never substitute a T3 host thread id. Spend counts all recorded
+in order; repeating an ID moves it last. The last id is the current coordinator. Obtain the
+runtime id from its shell (`CODEX_THREAD_ID` or `CLAUDE_CODE_SESSION_ID`), never substitute a T3 host thread id. Spend counts all recorded
 sessions, even from scratch folders, through the normal subscription/privacy gates.
 
-`brain due <node>` raises `rotate` at 150,000 input-context tokens or 50 assistant response
+`brain due <node>` raises `rotate` at 150,000 input-context tokens or 50 conversation
 turns. `rotate_tokens=` and `rotate_turns=` configure these thresholds. Claude input includes
 fresh, cache-read and cache-write tokens; Codex's input already includes its cached tokens.
 These are the latest response's accounting counts, never a sum of the conversation's text.
+Conversation turns count Claude operator inputs (excluding internal, sidechain, summary and
+tool-result records) or Codex turn_context records, with user_message as a fallback. Tool
+responses do not advance the turn threshold.
 Unknown/unbound usage does not prove a short thread: bind its session before relying on due.
 
 Run `brain rotate <node>` to prepare `handover.md` from node files, open jobs and hand-backs,
 asks, deferred work, schedules and wake state. Its ignored `.brain/rotation/<node>.json`
 sidecar retains the previous coordinator and host-task bindings; inspect it before rebinding.
-Verify the packet against files and the host's
-live pending requests and task inventory. Launch a fresh coordinator in the node's project
+Verify the packet against files and the host's live pending requests and task inventory. Launch a fresh coordinator in the node's project
 with the handover, update `coordinator=`, append the new runtime session id, rebind every
 schedule and wake task, and route outstanding requests. Tell the old thread to stop, confirm
 it stopped, then settle it. Never settle while a task or request would be lost. The CLI only

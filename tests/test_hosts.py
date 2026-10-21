@@ -764,6 +764,20 @@ class QuestionWake(Scenario):
 
 
 class StopHook(Scenario):
+    def test_backlog_edits_make_notes_lag(self):
+        r = self.init('fixture')
+        self.b(r, 'new', 'notes', '--title', 'Notes')
+        npath = r / 'nodes/notes'
+        (npath / 'backlog.md').write_text('- Deferred fixture task.\n')
+        now = time.time()
+        os.utime(npath / 'status.md', (now - 10, now - 10))
+        os.utime(npath / 'backlog.md', (now, now))
+        m = core_loader.SourceFileLoader('brain_backlog_lag', str(CORE / 'bin/brain')).load_module()
+        inst = m.Instance(r)
+        lag = m.notes_lag(inst, inst.node('notes'))
+        self.assertTrue(any('changed after status.md:' in line and 'backlog.md' in line for line in lag), lag)
+
+
     def hook(self, r, cwd, session="s1", active=False, transcript=None):
         """Run the exact command the runtimes run, as they do: hook JSON on stdin, in the session's folder."""
         cmd = json.loads((CORE / "adapters" / "runtimes" / "claude-hooks.json").read_text())["hooks"]["Stop"][0]["hooks"][0]["command"]

@@ -324,7 +324,7 @@ def due_evidence(inst, n):
         if not r["Ended"] and not _m_jobs.handback_file(n, r).exists() and _m_verify.read_ready_packet(inst, n, r["Job"], r):
             signals[_m_jobs.job_key(r)] = {"state": "done", "report": "", "legacy_ready": True}
     # Node's own commits only, excluding status (including its generated refresh commit) and children.
-    names = ["brief.md", "decisions.md", "node.md", "inbox.md", "sources", "AGENTS.md", _m_jobs.JOBS_FILE,
+    names = ["brief.md", "decisions.md", "backlog.md", "node.md", "inbox.md", "sources", "AGENTS.md", _m_jobs.JOBS_FILE,
              "job-handbacks"]
     paths = [str((n["dir"] / name).relative_to(inst.root)) for name in names]
     last = _m_common.git("log", "-1", "--format=%H %cI", "--", *paths, cwd=inst.root).stdout.strip()
