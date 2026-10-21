@@ -112,6 +112,8 @@ class Watcher(Scenario):
                     ['root', 'handback', [self.m.job_key(row), 'blocked', episode]]))
                 episodes.append(episode)
                 identities.append(item['id'])
+                self.m.cmd_handback(args)  # Re-running an undelivered blocked episode keeps its identity.
+                self.assertEqual(self.m.read_handback(n, row)['wake_id'], episode)
                 self.assertEqual(len(list(directory.glob('*.pending'))), 1)
                 if count == 2:
                     (directory / 'last').write_text(str(time.time() - 121))
@@ -164,12 +166,50 @@ class Watcher(Scenario):
             self.m.wake_drain(self.inst, n, once=True)
             self.watch()
             self.m.cmd_handback(args)  # The same unanswered question still has one inbox owner.
-            self.assertNotEqual(self.m.read_handback(n, row)['wake_id'], episode)
+            self.assertEqual(self.m.read_handback(n, row)['wake_id'], episode)
             self.watch()
             self.m.wake_drain(self.inst, n, once=True)
             self.assertEqual(send.call_count, 1)
             (self.root / 'inbox.md').write_text('')
+            self.watch()
+            (directory / 'last').write_text(str(time.time() - 121))
+            self.m.wake_drain(self.inst, n, once=True)
+            self.assertEqual(send.call_count, 1)
             self.m.cmd_handback(args)
+            (directory / 'last').write_text(str(time.time() - 121))
+            self.m.wake_drain(self.inst, n, once=True)
+            self.watch()
+            self.m.wake_drain(self.inst, n, once=True)
+            self.assertEqual(send.call_count, 2)
+
+    def test_answered_blocked_human_episode_does_not_wake_again_after_rerun(self):
+        n = self.inst.node('root')
+        row = {**dict.fromkeys(self.m.JOB_COLS, ''), 'Job': 'import:unborn', 'Started': '2026-01-01T10:00Z'}
+        self.m.write_jobs(self.inst, n, [row])
+        args = argparse.Namespace(id='root', branch=row['Job'], state='blocked', lessons='none: fixture',
+                                  report='report.md', reviews=None, need_human='Choose blue')
+        directory = self.m.wake_directory(self.inst, n)
+        with mock.patch.object(self.m, 'load', return_value=self.inst), \
+                mock.patch.object(self.m, 'wake_start'), \
+                mock.patch.object(self.m, 'wake_send', return_value=True) as send, \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.m.cmd_handback(args)
+            episode = self.m.read_handback(n, row).get('wake_id')
+            self.m.wake_drain(self.inst, n, once=True)
+            self.watch()
+            self.m.cmd_handback(args)
+            repeated = self.m.read_handback(n, row).get('wake_id')
+            self.watch()
+            (self.root / 'inbox.md').write_text('')
+            self.watch()
+            (directory / 'last').write_text(str(time.time() - 121))
+            self.m.wake_drain(self.inst, n, once=True)
+            # Behaviour first: this also fails on the pre-episode runtime without a missing-field error.
+            self.assertEqual(send.call_count, 1)
+            self.assertRegex(episode, r'^[0-9a-f]{32}$')
+            self.assertEqual(repeated, episode)
+            self.m.cmd_handback(args)
+            self.assertNotEqual(self.m.read_handback(n, row)['wake_id'], episode)
             (directory / 'last').write_text(str(time.time() - 121))
             self.m.wake_drain(self.inst, n, once=True)
             self.watch()

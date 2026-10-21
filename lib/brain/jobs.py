@@ -208,8 +208,32 @@ def cmd_handback(a):
                 "at": inst.now(), "report": _m_common.tilde(a.report) if a.report is not None else previous.get("report", ""),
                 "lessons": lessons, "ready": packet, "ready_reasons": reasons,
                 "verify_runs": count("verify_runs") + fresh, "verify_reused": count("verify_reused") + reused}
+        need = getattr(a, "need_human", None)
+        inbox_question = a.state == "question" or (a.state == "blocked" and need)
+        if inbox_question:
+            message = " ".join((need or ("See report " + data["report"] if data["report"] else
+                                            "Coordinator choice needed; see worker hand-back")).split())
+            marker = "<!-- handback:" + digest([job_key(row), a.state, message]) + " -->"
         if a.state in ("blocked", "question"):
-            data["wake_id"] = os.urandom(16).hex()
+            # Re-read under the lock: concurrent hand-backs must share the open episode.
+            episode = read_handback(n, current) or {}
+            old_id = episode.get("wake_id")
+            wake_id = None
+            if episode.get("state") == a.state and isinstance(old_id, str) and re.fullmatch(r"[0-9a-f]{32}", old_id):
+                if inbox_question:
+                    inbox = n["dir"] / "inbox.md"
+                    lines = inbox.read_text().splitlines() if inbox.exists() else []
+                    owner = next((re.search(r"<!-- wake:([0-9a-f]{32}) -->", line)
+                                  for line in lines if marker in line), None)
+                    if owner:
+                        wake_id = owner[1]  # The matching inbox line owns this episode's identity.
+                else:
+                    target, _ = _m_hosts.wake_target(inst, n)
+                    directory = _m_hosts.wake_directory(inst, target)
+                    key = hashlib.sha256((n["id"] + "\0wake:" + old_id).encode()).hexdigest()
+                    if (directory / (key + ".pending")).exists() and not (directory / (key + ".sent")).exists():
+                        wake_id = old_id
+            data["wake_id"] = wake_id or os.urandom(16).hex()
         if getattr(a, "restart", None):
             data["restart"] = a.restart
             data["restart_id"] = os.urandom(16).hex()
@@ -223,12 +247,8 @@ def cmd_handback(a):
         f.parent.mkdir(exist_ok=True)
         _m_common.atomic_write(f, json.dumps(data, indent=2) + "\n")
         _m_common.touch(f)
-        need = getattr(a, "need_human", None)
         question_created = False
-        if a.state == "question" or (a.state == "blocked" and need):
-            message = " ".join((need or ("See report " + data["report"] if data["report"] else
-                                            "Coordinator choice needed; see worker hand-back")).split())
-            marker = "<!-- handback:" + digest([job_key(row), a.state, message]) + " -->"
+        if inbox_question:
             wake_id = data["wake_id"]
             inbox = n["dir"] / "inbox.md"
             bullet = f"- {inst.now()} from worker {a.branch}: {a.state}: {message} <!-- wake:{wake_id} --> {marker}\n"
