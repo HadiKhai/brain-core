@@ -133,7 +133,9 @@ class Watcher(Scenario):
                'status': 'failed', 'runtime': 'codex', 'error': 'model at capacity secret=unpublished'}
         path = self.root / '.brain/worker-runs.json'
         path.write_text(json.dumps({'runs': [run]}))
-        with mock.patch.object(self.m, 'wake_start'):
+        # Exercise the retry mechanism independently of the no-auto-fallback policy.
+        with mock.patch.object(self.m._owners['watch_run']._m_usage, 'class_allows_fallback', return_value=True), \
+                mock.patch.object(self.m, 'wake_start'):
             self.watch()
             self.watch()
             inbox = (self.root / 'inbox.md').read_text()
@@ -332,12 +334,32 @@ class Watcher(Scenario):
     def test_capacity_switch_commits_cleanly_without_waiting_on_own_flock(self):
         n, row, run = self.failure_fixture()
         self.inst.commit([n['dir'] / self.m.JOBS_FILE], 'fixture initial job')
-        with mock.patch.object(self.m, 'LOCK_WAIT', 0), mock.patch.object(self.m, 'wake_start'):
+        with mock.patch.object(self.m._owners['watch_run']._m_usage, 'class_allows_fallback', return_value=True), \
+                mock.patch.object(self.m, 'LOCK_WAIT', 0), mock.patch.object(self.m, 'wake_start'):
             self.watch()
         self.assertEqual(self.git('status', '--porcelain', cwd=self.root), '')
         self.assertIn('runtime switch at capacity', self.git('log', '-1', '--format=%s', cwd=self.root))
         self.assertIsNone(self.m._owners['watch_run']._m_instance._LOCK['fh'])
         self.assertNotIn('BRAIN_LOCK_HELD', os.environ)
+
+    def test_real_policy_capacity_failure_only_notifies_without_retry_or_switch(self):
+        n, row, run = self.failure_fixture()
+        self.assertFalse(self.m._owners['watch_run']._m_usage.class_allows_fallback('build'))
+        self.inst.commit([n['dir'] / self.m.JOBS_FILE], 'fixture initial job')
+        before = self.git('rev-parse', 'HEAD', cwd=self.root).strip()
+        with mock.patch.object(self.m, 'wake_start'):
+            self.watch()
+            self.watch()
+        inbox = (self.root / 'inbox.md').read_text()
+        self.assertEqual(inbox.count('worker run failed (at capacity)'), 1)
+        self.assertNotIn('one retry recorded', inbox)
+        self.assertNotIn('relaunch', inbox)
+        recorded = self.m.read_jobs(n)[0]
+        self.assertEqual(recorded['Switches'], '')
+        self.assertEqual(recorded.get('Capacity retry', ''), '')
+        commits = self.git('log', before + '..HEAD', '--format=%s', cwd=self.root).splitlines()
+        self.assertEqual(commits, ['root: worker failure notice'])
+        self.assertEqual(self.git('status', '--porcelain', cwd=self.root), '')
 
     def test_worker_binding_cli_survives_unrelated_set(self):
         key = 'a' * 24

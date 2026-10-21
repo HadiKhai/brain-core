@@ -15,11 +15,12 @@ For agents:
   queue and inbox. Root receives overdue-question wakes; supported Stop-hook questions
   and question/blocked hand-backs keep their existing direct wake path.
 - The host adapter documents machine-local bound-worker failure records. A failed run
-  wakes once; an eligible capacity failure records one other-runtime switch and prints
-  the exact resume brief command. Only the coordinator relaunches through the host.
+  wakes once, including at-capacity failures. The router disables automatic other-runtime
+  retries: no switch or retry command is recorded. Builders stay on Codex; an eligible
+  alternative at the stop line requires an explicit runtime choice by the coordinator.
   There is no host exporter in this release: without a separately configured exporter, failure
   detection waits for the hourly host tick (up to one hour plus the next watcher minute).
-- Malformed host failure input is isolated; invalid routing disables only the affected retry.
+- Malformed host failure input is isolated; invalid routing still preserves the failure notice.
   Watcher acknowledgement state remains fail-closed, with a short sampler diagnostic and
   `brain due root` repair notice. Bind workers with `brain set <node> worker:<job-key>=<thread>`.
 

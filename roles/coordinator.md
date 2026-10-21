@@ -456,9 +456,9 @@ On launch/replacement, bind the worker under the instance lock with
 failed run records to `.brain/worker-runs.json`; `brain watch --once` reads only that local
 file and never queries host state. Record provider errors, usage limits and capacity failures;
 inspect bound workers on every host tick, including root's own workers. A failure inbox line
-is actionable even when no hand-back exists. The watcher records one other-runtime capacity
-retry where the router class permits it, with the exact resume brief command in the inbox.
-Confirm the old run is terminal, run that command, relaunch through the host in the existing
-worktree, and update the binding. Keep all original constraints, commits and readiness state.
-Do not relaunch twice for one switch; diagnose/review classes and a second capacity failure
-require coordinator judgement. Clear handled failure lines just like other inbox work.
+is actionable even when no hand-back exists. The router disables automatic other-runtime
+retries, so capacity failures record a notice without a switch or retry command. Builders
+stay on Codex; an eligible alternative at the stop line requires an explicit runtime choice.
+Confirm the old run is terminal before any authorized relaunch through the host in the
+existing worktree, and update the binding. Keep all original constraints, commits and
+readiness state. Clear handled failure lines just like other inbox work.
