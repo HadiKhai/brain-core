@@ -143,7 +143,7 @@ def outward_links(root):
                 continue  # sources/ and reports/: only what lies directly in them is written
             if kind == "nodes":
                 look(p)  # each node folder below nodes/
-            elif deep or e.name in (".brain", "library", "specialists", "job-handbacks", "job-contracts"):
+            elif deep or e.name in (".brain", "library", "specialists", "job-handbacks", "job-contracts", "job-trains"):
                 look(p, deep=True)
             elif e.name in ("sources", "reports"):
                 look(p, deep=True)  # merges move files in, reports write index files below

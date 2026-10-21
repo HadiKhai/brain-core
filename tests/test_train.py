@@ -213,3 +213,17 @@ class MergeTrain(Scenario):
         self.assertIn("verify changed staging state", self.b(root, "train", "a", ok=False))
         self.assertEqual(self.git("rev-parse", "main", cwd=home), main)
         self.assertNotIn("| merged |", self.ledger())
+
+    def test_train_journals_are_covered_by_instance_link_guard(self):
+        root, home = self.project()
+        self.job("one")
+        self.detach()
+        outside = self.tmp / "outside.json"
+        outside.write_text(json.dumps({"version": 1, "state": "complete", "ejected": []}))
+        folder = root / "nodes/a/job-trains"
+        folder.mkdir()
+        (folder / "old.json").symlink_to(outside)
+        main = self.git("rev-parse", "main", cwd=home)
+        self.assertIn("these links", self.b(root, "train", "a", ok=False))
+        self.assertEqual(self.git("rev-parse", "main", cwd=home), main)
+        self.assertEqual(len(list(folder.glob("*.json"))), 1)
