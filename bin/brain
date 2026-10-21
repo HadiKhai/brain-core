@@ -2639,6 +2639,10 @@ def cmd_set(a):
             inst.local_of(a.id)[k] = str(Path(v).expanduser().resolve()) if k == "workbench" else v
             fm.pop(k, None)
             print(f"  {k}: this machine (.brain/local.json)")
+        elif k == "merge":
+            if v not in ("local", "pr"):
+                die("merge must be local or pr")
+            fm[k] = v
         elif k == "home":
             bind_home(inst, a.id, fm, v)
             print(f"  home: {fm['home']}" + (f" -> {inst.local_of(a.id)['home']} on this machine"
@@ -7171,21 +7175,68 @@ def ready_path(inst, n, branch):
     return workbench(inst, n) / "scratch" / "ready" / f"{key}.json"
 
 
+def integration_ref(home):
+    """Cached remote default, never a network request or a local-branch fallback for origin."""
+    if "origin" in git("remote", cwd=home).stdout.split():
+        target = git("symbolic-ref", "refs/remotes/origin/HEAD", cwd=home).stdout.strip()
+        return target if target.startswith("refs/remotes/origin/") else ""
+    return "refs/heads/main"
+
+
+def integration_parent(n, remote_main):
+    ref = integration_ref(n["home_path"])
+    if n["fm"].get("merge", "local") != "pr" and ref.startswith("refs/remotes/origin/"):
+        local_ref = ref.replace("refs/remotes/origin/", "refs/heads/", 1)
+        return git("rev-parse", "--verify", "--quiet", local_ref + "^{commit}", cwd=n["home_path"]).stdout.strip()
+    return remote_main
+
+
+def main_notice(n):
+    home = n["home_path"]
+    if not home or not home.exists():
+        return
+    ref = integration_ref(home)
+    if ref == "":
+        print("main: origin default branch unavailable; explicitly fetch origin and run git remote set-head origin -a")
+        return
+    if not ref.startswith("refs/remotes/origin/"):
+        return
+    short = ref.removeprefix("refs/remotes/")
+    remote = git("rev-parse", "--verify", "--quiet", ref + "^{commit}", cwd=home)
+    if remote.returncode:
+        print("main: origin default branch unavailable; explicitly fetch origin and run git remote set-head origin -a")
+        return
+    name = ref.removeprefix("refs/remotes/origin/")
+    counts = git("rev-list", "--left-right", "--count", "refs/heads/" + name + "..." + ref, cwd=home)
+    if counts.returncode == 0:
+        ahead, behind = counts.stdout.split()
+        print(f"main: {short} (cached); local {name} is {behind} behind / {ahead} ahead")
+        if int(behind):
+            print(f"Leave the operator checkout untouched. In the job worktree: git rebase {short}; "
+                  "then hand back again. Fetch explicitly first to refresh cached refs.")
+            if n["fm"].get("merge", "local") != "pr":
+                print("Local merge mode also requires a current default in a coordinator-owned worktree; "
+                      "use merge=pr for host integration when the operator owns the default checkout.")
+    else:
+        print(f"main: {short} (cached); local {name} is missing")
+
+
 def ready_refs(n, branch):
     home = n["home_path"]
-    return tuple(git("rev-parse", "--verify", "--quiet", f"refs/heads/{ref}^{{commit}}", cwd=home).stdout.strip()
-                 for ref in (branch, "main"))
+    return tuple(git("rev-parse", "--verify", "--quiet", ref + "^{commit}", cwd=home).stdout.strip()
+                 for ref in ("refs/heads/" + branch, integration_ref(home)))
 
 
 def ready_preflight(n, branch):
-    """Use local main exactly: testing against an older main is not testing the proposed integration."""
+    """Test the proposed integration against the cached remote default (local main without origin)."""
     reasons = []
     if not n["external"] or not n["home_path"] or not n["home_path"].exists():
         return ["an external git home on this machine is required"], "", ""
     head, main = ready_refs(n, branch)
     if not head or not main:
-        return ["branch or local main is missing"], head, main
-    if branch == "main":
+        return ["branch or integration main is missing (origin needs a valid cached origin/HEAD)"], head, main
+    if branch == "main" or ("refs/heads/" + branch ==
+                            integration_ref(n["home_path"]).replace("refs/remotes/origin/", "refs/heads/")):
         reasons.append("the job branch must differ from main")
     if git("merge-base", "--is-ancestor", main, head, cwd=n["home_path"]).returncode:
         reasons.append("worker must rebase on current main")
@@ -7196,6 +7247,18 @@ def ready_preflight(n, branch):
             reasons.append("git is too old for merge-tree --write-tree; Git 2.38 or newer is required")
         elif result.returncode:
             reasons.append(f"merge-tree failed (exit {result.returncode}); merge cleanliness is unknown")
+    # A local merge integrates with unpublished local work too; PR mode integrates on the host.
+    ref = integration_ref(n["home_path"])
+    if n["fm"].get("merge", "local") != "pr" and ref.startswith("refs/remotes/origin/"):
+        local_ref = ref.replace("refs/remotes/origin/", "refs/heads/", 1)
+        local = git("rev-parse", "--verify", "--quiet", local_ref + "^{commit}", cwd=n["home_path"]).stdout.strip()
+        if not local:
+            reasons.append("local integration branch is missing; configure merge=pr for host merges")
+        elif git("merge-base", "--is-ancestor", main, local, cwd=n["home_path"]).returncode:
+            reasons.append("local default must include origin default for merge=local; coordinator must update it "
+                           "in a coordinator-owned worktree, or configure merge=pr; never change the operator checkout")
+        elif git("merge-base", "--is-ancestor", local, head, cwd=n["home_path"]).returncode:
+            reasons.append("worker must rebase on current local main as well as origin default for merge=local")
     w = n["local"].get("worktrees", {}).get(branch)
     if not w or not Path(w["path"]).exists():
         reasons.append("job worktree is missing")
@@ -7234,6 +7297,18 @@ def read_ready_packet(inst, n, branch, row=None):
         return None
 
 
+def packet_main_matches(n, packet, main):
+    """Old v1 packets captured local main; new v1 packets also capture the integration base.
+
+    Interpret the old evidence in place, without rewriting a worker's file. Preflight still
+    requires the current base to contain origin's default and the job to contain that base.
+    """
+    base = integration_parent(n, main)
+    expected_main = main if "integration_base" in packet else base
+    return (packet.get("main") == expected_main and
+            packet.get("integration_base", packet.get("main")) == base)
+
+
 def ready_state(inst, n, branch):
     reasons, head, main = ready_preflight(n, branch)
     row = open_job(read_jobs(n) or [], branch)
@@ -7252,7 +7327,7 @@ def ready_state(inst, n, branch):
             reasons.append("ready packet identifies a different job or format")
         if packet.get("head") != head:
             reasons.append("branch head changed; return to worker")
-        if packet.get("main") != main:
+        if not packet_main_matches(n, packet, main):
             reasons.append("main moved; return to worker to rebase and verify again")
         w = n["local"].get("worktrees", {}).get(branch)
         if isinstance(w, dict) and w.get("path") and Path(w["path"]).exists():
@@ -7299,7 +7374,7 @@ def verify_reuse(n, branch, previous, head, main, verify, cwd, inputs=None):
     sha = lambda v: isinstance(v, str) and re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", v)
     if not (p.get("version") == 1 and p.get("node") == n["id"] and p.get("branch") == branch
             and p.get("verify_command") == verify and type(p.get("verify_result")) is int and p["verify_result"] == 0
-            and p.get("main") == main and type(p.get("review_rounds")) is int and p["review_rounds"] >= 1
+            and packet_main_matches(n, p, main) and type(p.get("review_rounds")) is int and p["review_rounds"] >= 1
             and isinstance(p.get("checked_at"), str) and sha(p.get("head")) and p.get("inputs") == inputs):
         return None  # only a complete green packet, for the same inputs, can stand for a new run
     base = p.get("verified_head") or p["head"]
@@ -7573,6 +7648,9 @@ def record_ready(inst, n, branch, reviews, previous=None, reverify=False):
         return None, reasons
     w = n["local"]["worktrees"][branch]
     inputs = verify_inputs(n, w)
+    integration_base = integration_parent(n, main)
+    if previous and previous.get("integration_base", previous.get("main")) != integration_base:
+        reverify = True
     reuse = None if reverify else verify_reuse(n, branch, previous, head, main, verify, w["path"], inputs)
     if reuse:
         base, changed = reuse
@@ -7580,7 +7658,7 @@ def record_ready(inst, n, branch, reviews, previous=None, reverify=False):
               + (f": since then only {len(changed)} file(s) under verify_skip changed" if changed else
                  ": nothing changed since") + " (--reverify runs it again)")
         return {"version": 1, "node": n["id"], "branch": branch, "head": head, "main": main,
-                "verify_command": verify, "verify_result": 0, "verified_head": base, "verify_reused": True,
+                "integration_base": integration_base, "verify_command": verify, "verify_result": 0, "verified_head": base, "verify_reused": True,
                 "inputs": inputs, "verify_log": previous.get("verify_log"),
                 "review_rounds": reviews, "checked_at": stamp(inst)}, []
     env = {**os.environ, "MAIN": str(n["home_path"]), "WORKTREE": w["path"], "BRANCH": branch,
@@ -7598,12 +7676,12 @@ def record_ready(inst, n, branch, reviews, previous=None, reverify=False):
     after, head_after, main_after = ready_preflight(n, branch)
     if not after and verify_inputs(n, w) != inputs:
         after = ["files verify reads besides tracked ones (verify_inputs) changed"]
-    if after or head_after != head or main_after != main:
+    if after or head_after != head or main_after != main or integration_parent(n, main_after) != integration_base:
         # What passed isn't the commit on main that was asked about: never record it as evidence.
         return None, ["verify changed the job's branch, local main or worktree (" + "; ".join(after or ["refs moved"])
                       + "); commit or discard what it changed, then hand back again"]
     packet = {"version": 1, "node": n["id"], "branch": branch, "head": head, "main": main,
-              "verify_command": verify, "verify_result": result, "verify_log": log_path, "verified_head": head,
+              "integration_base": integration_base, "verify_command": verify, "verify_result": result, "verify_log": log_path, "verified_head": head,
               "inputs": inputs, "review_rounds": reviews, "checked_at": stamp(inst)}
     return packet, []
 
@@ -7615,6 +7693,7 @@ def cmd_ready(a):
         a.state = "done"
         return cmd_handback(a)
     inst = load()
+    main_notice(inst.node(a.id))
     state = ready_state(inst, inst.node(a.id), a.branch)
     print("ready" if state["ready"] else "not ready: " + "; ".join(state["reasons"]))
     if not state["ready"]:
@@ -7711,6 +7790,8 @@ def last_sync(inst, n):
 
 
 def cmd_sync(a):
+    if a.all and getattr(a, "reset_main", False):
+        die("--reset-main requires one node, not --all")
     inst = load()
     if a.all:
         if a.id:
@@ -7731,11 +7812,175 @@ def cmd_sync(a):
     sync_one(inst, inst.node(a.id), a)
 
 
+def packet_endpoints(n, row, packet):
+    if not isinstance(packet, dict):
+        return None
+    head, base = packet.get("head"), packet.get("integration_base", packet.get("main"))
+    if (packet.get("node") != n["id"] or packet.get("branch") != row["Job"] or
+            type(packet.get("verify_result")) is not int or packet.get("verify_result") != 0 or
+            type(packet.get("review_rounds")) is not int or packet["review_rounds"] < 1):
+        return None
+    endpoints = contribution_endpoints(base, head)
+    origin = packet.get("main")
+    if not endpoints or not isinstance(origin, str) or not re.fullmatch(r"[0-9a-f]{40,64}", origin):
+        return None
+    if n["home_path"] and n["home_path"].exists() and git(
+            "merge-base", "--is-ancestor", origin, base, cwd=n["home_path"]).returncode:
+        return None
+    return endpoints
+
+
+def contribution_endpoints(base, head):
+    if (all(isinstance(h, str) and re.fullmatch(r"[0-9a-f]{40,64}", h) for h in (base, head))
+            and base != head):
+        return base, head
+    return None
+
+
+def integration_packet(inst, n, row):
+    signal = read_handback(n, row)
+    if signal and signal.get("state") != "done":
+        return None
+    return read_ready_packet(inst, n, row["Job"], row)
+
+
+def retain_integration(inst, n, row):
+    """Publish verified identities in the coordinator's row before deleting worker evidence."""
+    if import_job(row["Job"]):  # study handbacks carry no readiness evidence
+        return False
+    if n["external"] and not (n["home_path"] or n["local"].get("workbench")):
+        hb = read_handback(n, row) or {}
+        endpoints = packet_endpoints(n, row, hb.get("ready") if hb.get("state") == "done" else None)
+    else:
+        endpoints = packet_endpoints(n, row, integration_packet(inst, n, row))
+    if endpoints:
+        base, head = endpoints
+        if (row.get("Base commit"), row.get("Head commit")) != (base, head):
+            row.update({"Base commit": base, "Head commit": head})
+            return True
+    return False
+
+
+def integration_owners(inst, n, rows):
+    """Index contributions once; ledger endpoints survive worker evidence cleanup."""
+    heads, squashes = {}, {}
+    for row in rows:
+        if row.get("Outcome") == "external" or row.get("Merge commit"):
+            continue
+        endpoints = packet_endpoints(n, row, integration_packet(inst, n, row))
+        if not endpoints:
+            endpoints = contribution_endpoints(row.get("Base commit"), row.get("Head commit"))
+        if not endpoints:
+            continue
+        base, head = endpoints
+        if git("merge-base", "--is-ancestor", base, head, cwd=n["home_path"]).returncode:
+            continue
+        tree = git("rev-parse", "--verify", "--quiet", head + "^{tree}", cwd=n["home_path"]).stdout.strip()
+        base_tree = git("rev-parse", "--verify", "--quiet", base + "^{tree}", cwd=n["home_path"]).stdout.strip()
+        if tree and base_tree and tree != base_tree:
+            heads.setdefault(head, []).append((row, base, head))
+            squashes.setdefault((base, tree), []).append((row, base, head))
+    return heads, squashes
+
+
+def sync_external_merges(inst, n, since, reset=False):
+    """Record observed default-branch integrations, without claiming they were reviewed jobs.
+
+    First-parent single commits include squash merges and direct commits: Git alone cannot
+    distinguish them. Full commit identities, not timestamps or subjects, deduplicate rows.
+    """
+    home = n["home_path"]
+    ref = integration_ref(home)
+    if not ref:
+        print("external merges: not recorded; cached origin default is unavailable; run git remote set-head origin -a")
+        return False
+    if not ref.startswith("refs/remotes/origin/"):
+        return True
+    tip = git("rev-parse", "--verify", "--quiet", ref + "^{commit}", cwd=home)
+    if tip.returncode:
+        print("external merges: not recorded; cached origin default is unavailable")
+        return False
+    tip = tip.stdout.strip()
+    cursor = n["local"].get("synced_main", "")
+    args = ["log", "--first-parent", "--reverse", "--format=%H %T %P%x09%cI", "--min-parents=1"]
+    if cursor:
+        if reset:
+            common = git("merge-base", cursor, tip, cwd=home)
+            cursor = common.stdout.strip() if common.returncode == 0 else ""
+        elif git("merge-base", "--is-ancestor", cursor, tip, cwd=home).returncode:
+            print("external merges: default history changed; inspect it, then explicitly use sync --reset-main to rescan")
+            return False
+    if cursor:
+        args += [cursor + ".." + tip]
+    else:
+        args += ["--since=" + since.isoformat(timespec="seconds"), tip]
+    result = git(*args, cwd=home)
+    if result.returncode:
+        print("external merges: history unreadable; not recorded")
+        return False
+    with brain_lock(inst):
+        rows = ledger_rows(n)
+        if rows is None:
+            return False
+        known = {r.get("Merge commit") for r in rows}
+        # Retain whole owned ranges after the handback/worktree/branch has been cleaned up.
+        for row in rows:
+            base, head = row.get("Base commit", ""), row.get("Head commit", "")
+            if row.get("Outcome") != "external" and contribution_endpoints(base, head):
+                known.update(git("rev-list", base + ".." + head, cwd=home).stdout.split())
+        heads, squashes = integration_owners(inst, n, rows)
+        records = []
+        for line in result.stdout.splitlines():
+            identity, when = line.split("\t", 1)
+            commit, tree, *parents = identity.split()
+            records.append((commit, tree, parents, when))
+        claims, claimed = {}, set()
+        for commit, tree, parents, when in records:
+            if commit in known:
+                continue
+            candidates = list(heads.get(commit, []))
+            for parent in parents[1:]:
+                candidates += heads.get(parent, [])
+            if len(parents) == 1:
+                candidates += squashes.get((parents[0], tree), [])
+            owners = {job_key(r): (r, base, head) for r, base, head in candidates
+                      if not r.get("Merge commit") and job_key(r) not in claimed}
+            if len(owners) == 1:
+                key, claim = next(iter(owners.items()))
+                claims[commit] = claim
+                claimed.add(key)
+        for row, base, head in claims.values():
+            known.update(git("rev-list", base + ".." + head, cwd=home).stdout.split())
+        added = 0
+        changed = False
+        for commit, tree, parents, when in records:
+            if commit in claims:
+                row, base, head = claims[commit]
+                row.update({"Merge commit": commit, "Base commit": base, "Head commit": head})
+                known.add(commit)
+                changed = True
+            elif commit not in known:
+                rows.append({"Job": "external:" + commit, "Started": when, "Ended": when,
+                             "Outcome": "external", "Commits": "1", "Merge commit": commit,
+                             "Cause": "Observed on origin default; merge, squash or direct commit; review/usage unknown"})
+                known.add(commit)
+                added += 1
+        if added or changed:
+            write_jobs(inst, n, rows)
+            inst.commit([], f"{n['id']}: record external integrations")
+        # Advance only after ledger publication; replay after a crash is harmless.
+        inst.local_of(n["id"])["synced_main"] = tip
+        inst.save_local()
+    print(f"external merges: {added} recorded")
+    return True
+
+
 def sync_one(inst, n, a):
     since, basis = last_sync(inst, n)
     iso = since.isoformat(timespec="seconds")
     print(f"# {n['id']}: changes since {since.strftime('%Y-%m-%d %H:%M')} ({basis})")
     home = n["home_path"]
+    can_mark = True
     if n["external"]:
         if not home or not home.exists():
             die(f"home isn't on this machine: brain set {n['id']} home=<path>")
@@ -7745,6 +7990,8 @@ def sync_one(inst, n, a):
             if has_remote and not a.offline:
                 r = git("fetch", "--all", "--prune", "--quiet", cwd=home)
                 print("fetched" if r.returncode == 0 else f"fetch failed: {r.stderr.strip()[:200]}")
+            main_notice(n)
+            can_mark = sync_external_merges(inst, n, since, getattr(a, "reset_main", False))
             br = git("branch", "--show-current", cwd=home).stdout.strip() or "(detached)"
             ab = git("rev-list", "--left-right", "--count", "HEAD...@{u}", cwd=home)
             track = ""
@@ -7792,7 +8039,9 @@ def sync_one(inst, n, a):
     inbox = [l for l in (n["dir"] / "inbox.md").read_text().splitlines() if l.startswith("- ")] \
         if (n["dir"] / "inbox.md").exists() else []
     print("\n## Inbox\n" + ("\n".join(inbox) or "empty"))
-    if a.mark:
+    if a.mark and not can_mark:
+        print("\nnot marked: external integrations could not be recorded; repair and sync again")
+    elif a.mark:
         inst.local_of(n["id"])["synced_at"] = inst.now_dt().isoformat(timespec="seconds")
         inst.save_local()
         print(f"\nmarked synced at {inst.now()}")
@@ -8080,6 +8329,8 @@ def cmd_handback(a):
     row = open_job(read_jobs(n) or [], a.branch)
     if not row:
         die(redact(f"no open job for {a.branch} in {n['id']}", never_terms(n)))
+    if a.state == "done":
+        main_notice(n)
     previous = read_handback(n, row) or {}
     lessons = (a.lessons if a.lessons is not None else previous.get("lessons", "")).strip()
     if a.lessons is not None and (not lessons or lessons == "none:" or lessons.lower() == "none"):
@@ -8094,7 +8345,7 @@ def cmd_handback(a):
         die("--reverify forces a verify run: it goes with --state done --reviews N")
     fresh = reused = 0
     if a.state == "done" and not study and (a.reviews is not None or getattr(a, "record", False)):
-        packet, reasons = record_ready(inst, n, a.branch, a.reviews, previous.get("ready"),
+        packet, reasons = record_ready(inst, n, a.branch, a.reviews, packet,
                                        getattr(a, "reverify", False))
         if packet:
             reused, fresh = (1, 0) if packet.get("verify_reused") else (0, 1)
@@ -8106,6 +8357,10 @@ def cmd_handback(a):
         current = open_job(read_jobs(n) or [], a.branch)
         if not current or job_key(current) != job_key(row):
             die("job changed during verification; hand back to its coordinator")
+        if packet and packet.get("version") == 1 and "integration_base" not in packet:
+            preflight, head, main = ready_preflight(n, a.branch)
+            if not preflight and packet.get("head") == head and packet_main_matches(n, packet, main):
+                packet = {**packet, "main": main, "integration_base": packet["main"]}
         f = handback_file(n, row)
         count = lambda k: previous.get(k) if type(previous.get(k)) is int else 0
         sessions = [i for i in previous.get("sessions", []) if isinstance(i, str) and SESSION_ID.fullmatch(i)] \
@@ -8187,10 +8442,9 @@ def job_ended(inst, n, branch, outcome, commits="", cause="", worktree=None):
     with brain_lock(inst):
         rows = ledger_rows(n)
         r = open_job(rows or [], branch)
-        if not n["external"] or n["local"].get("workbench") or n["home_path"]:
-            ready_path(inst, n, branch).unlink(missing_ok=True)
         if not r:
             return
+        retain_integration(inst, n, r)
         r.update(Ended=stamp(inst), Outcome=outcome, Commits=str(commits), Cause=cause)
         if outcome == "merged":
             r["Lesson check"] = "required"  # old, already-ended rows never acquire this marker
@@ -8202,13 +8456,17 @@ def job_ended(inst, n, branch, outcome, commits="", cause="", worktree=None):
         if usage and early and job_key(early) == job_key(r) and not str(r.get("Usage", "")).startswith("host"):
             r.update(usage)
         write_jobs(inst, n, rows)
-        cleanup_handback(n, r)
+        if not n["external"] or n["local"].get("workbench") or n["home_path"]:
+            ready_path(inst, n, branch).unlink(missing_ok=True)
+        cleanup_handback(inst, n, r, rows)
         inst.commit([], f"{n['id']}: job {outcome}")
         print_thread_checklist(n, r)
 
 
-def cleanup_handback(n, row):
+def cleanup_handback(inst, n, row, rows):
     if row.get("Ended") and (row.get("Outcome") != "merged" or row.get("Lessons")):
+        if retain_integration(inst, n, row):
+            write_jobs(inst, n, rows)
         for record in (handback_file(n, row), contract_file(n, row)):
             record.unlink(missing_ok=True)
             touch(record)
@@ -8289,7 +8547,8 @@ def print_thread_checklist(n, row):
 def jobs_summary(inst, n):
     """Finished and open jobs of one node, with medians, for `brain jobs` and the live view."""
     import statistics
-    rows = read_jobs(n) or []
+    all_rows = read_jobs(n) or []
+    rows = [r for r in all_rows if r.get("Outcome") != "external"]
     done = [r for r in rows if r["Ended"]]
     hours = [float(r["Hours"]) for r in done if r["Outcome"] == "merged" and r["Hours"]]
     reviews = [int(r["Reviews"] or 0) for r in done if r["Outcome"] == "merged"]
@@ -8303,6 +8562,7 @@ def jobs_summary(inst, n):
     open_ = [{**r, "age_h": round(elapsed(inst.parse_time(r["Started"]), now) / 3600, 1)}
              for r in rows if not r["Ended"] and inst.parse_time(r["Started"])]
     return {"rows": rows[-40:], "open": open_, "finished": len(done),
+            "external": len(all_rows) - len(rows),
             "merged": sum(1 for r in done if r["Outcome"] == "merged"),
             "abandoned": sum(1 for r in done if r["Outcome"] == "abandoned"),
             "unsettled": len(unsettled_jobs(rows)),
@@ -8534,7 +8794,7 @@ def cmd_jobs(a):
                 die("--switch needs old -> new: reason")
             r["Switches"] = "; ".join(filter(None, [r.get("Switches"), f"{stamp(inst)} {switch}"]))
         write_jobs(inst, n, rows)
-        cleanup_handback(n, r)
+        cleanup_handback(inst, n, r, rows)
         inst.commit([], f"{n['id']}: job outcome")
         if a.close:
             if not open_job(rows or [], a.branch):
@@ -10422,7 +10682,8 @@ def ui_state(inst, problems=None, scan=None, spend_budget=2.0):
             "work": work, "worktrees": wts, "inbox": [l[2:] for l in inbox_lines(n)],
             "blocked": status_section(n, "blocked"), "decisions": ui_decisions(inst, n), "limits": limits_of(n),
             "never_name": len(terms), "spend": lookback,
-            "jobs": {**js, "rows": [{k: hide(v) for k, v in r.items()} for r in (read_jobs(n) or [])],
+            "jobs": {**js, "rows": [{k: hide(v) for k, v in r.items()} for r in (read_jobs(n) or [])
+                                  if r.get("Outcome") != "external"],
                                                "open": [{k: hide(v) for k, v in r.items()} for r in js["open"]],
                                                "forecasts": [{k: hide(v) for k, v in r.items()} for r in js["forecasts"]]},
             "reports": [{"name": d.parent.name, "title": next((l[2:] for l in d.read_text().splitlines()
@@ -11393,7 +11654,7 @@ def main():
         "id", opt("--branch", required=True), opt("--base"), opt("--built-by", dest="built_by"),
         opt("--by", help="reviewer runtime (default: one the builder didn't use)"), opt("--focus"),
         opt("--model", help="job model for scoped usage limits"), opt("--out"))
-    cmd("ready", cmd_ready, "check a worker's ready packet against the branch and current local main", "id",
+    cmd("ready", cmd_ready, "check a worker's ready packet against the branch and cached origin default (local main without origin)", "id",
         opt("--branch", required=True), opt("--record", action="store_true", help="worker: run node verify and record"),
         opt("--reviews", type=int, help="completed review rounds, required with --record"),
         opt("--report"), opt("--lessons", help="proposed lessons, or none: <reason>"),
@@ -11406,6 +11667,7 @@ def main():
     cmd("sync", cmd_sync, "what changed in a node (and its home) since the last sync; --all: every external home",
         opt("id", nargs="?"), opt("--all", action="store_true"),
         opt("--offline", action="store_true"), opt("--mark", action="store_true"),
+        opt("--reset-main", action="store_true", help="rescan from the common ancestor, or last-sync window for unrelated history; one node only"),
         opt("--limit", type=int, default=20, help="uncommitted files to list"))
     s = sub.add_parser("hook", help="runtime hooks: stop (called by the runtime), approve (trust them in Codex)")
     hsub = s.add_subparsers(dest="hcmd", metavar="<action>")

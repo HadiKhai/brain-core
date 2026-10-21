@@ -44,6 +44,27 @@ After upgrading:
   node's backlog, settle only safely closed jobs and record settlement after the host checks.
   Older v3 cores preserve the new Settled column when rewriting ledgers.
 
+## 2026-10-20: Team-owned external homes
+
+For agents:
+- Ready and handback compare cached origin's default branch; stale local default branches show
+  their lag without being modified. Homes without origin still compare local main. Local/unset
+  merge mode also requires a local default containing origin; PR mode permits a stale local checkout.
+- Explicit sync records external default-branch integrations once per commit, including squash
+  merges and direct commits, without claiming review or runtime usage. Owned integration ranges
+  survive job closure and lesson cleanup, including when push or sync happens later.
+- `merge=pr` records the coordinator's explicit `gh pr merge` workflow; no automatic merge.
+
+After upgrading:
+- Existing ready evidence remains valid when its captured local integration base is unchanged
+  and contains origin's default. Reading it never rewrites worker files; the next handback
+  records the new fields and can reuse the unchanged green verify run.
+- Fetch explicitly before final readiness. If origin's cached default is missing or changed,
+  explicitly run `git remote set-head origin -a`. Until repaired, readiness and sync marking
+  refuse rather than skip integrations. After a history rewrite, inspect it and explicitly
+  use `brain sync <id> --reset-main` to rescan from the common ancestor (last-sync window for unrelated history), retaining ledger deduplication. Rebase job worktrees on that remote default and hand back again.
+- For team PR workflows, set `brain set <id> merge=pr` and follow home-job's head-pinned merge step.
+
 ## 2026-10-20: Runtime questions reach the inbox
 
 For agents:

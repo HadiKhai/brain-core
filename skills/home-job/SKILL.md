@@ -12,7 +12,9 @@ Before launching, run `brain usage`. Use only a subscription allowed for this br
 the stop line; follow the subscription and host instance in the brief. Unknown usage must be
 stated; never run a polling loop in an agent.
 
-1. **Worktree.** `core/bin/brain wt add <id> <branch> [--base <ref>]`. It creates the worktree
+1. **Worktree.** Choose the integration mode before launching: `brain set <id> merge=pr` for
+   host PR merges; `merge=local` (the default) for coordinator-owned local integration.
+   `core/bin/brain wt add <id> <branch> [--base <ref>]`. It creates the worktree
    in the node's workbench (beside the home, never inside it or the instance), runs the node's
    `worktree-setup.sh` if it has one (env files, installs), and gives the job its own port.
    If setup fails, fix the script before going on: a worker without its env files wastes its run.
@@ -43,7 +45,7 @@ stated; never run a polling loop in an agent.
    empty means stop silently. The worker's file is durable; a host notification is optional.
 4. **Review and hand back.** Review by the other runtime before the operator sees it (the
    `review` skill). Set `brain set <id> 'verify=<command>'` beforehand. The worker finishes
-   reviews, commits, rebases on `main` and runs one command:
+   reviews, commits, rebases on the integration main (`origin/<default>` when origin exists, otherwise `main`) and runs one command:
    `brain handback <id> --branch <branch> --state done --reviews <completed rounds>
    --report <path> --lessons '<proposals or none: reason>'`. This checks main, runs verify and
    records the packet, state and proposed lessons in one worker-owned `job-handbacks/<key>.json`.
@@ -65,15 +67,34 @@ stated; never run a polling loop in an agent.
    No separate packet command, host message or Lessons section is required. Blockers/questions
    use the same command with `--state blocked`/`question` and no --reviews; the report states why.
    Questions also append to inbox; a blocked human need adds `--need-human "<need>"`.
-   `ready` compares against local `main` and never fetches. Homes merging through GitHub pull
-   requests must fetch and update local `main` before `ready`; the worker then rebases and hands back again.
+   `ready` and handback use cached `origin/HEAD` when origin exists, otherwise local `main`.
+   Neither fetches. The coordinator explicitly runs `brain sync <id>` (or `git fetch origin`)
+   before the final check. If origin's default changes, explicitly run `git remote set-head origin -a`.
+   A missing cached default refuses readiness. With `merge=local` (the default), the job must
+   also include unpublished local default-branch commits, and that local default must already
+   contain origin's default. The coordinator explicitly reconciles it in a coordinator-owned
+   worktree before handing back; never update the operator checkout. Use `merge=pr` when the
+   operator owns that checkout and integration happens on the host. In PR mode, local lag is informational:
+   rebase the job on `origin/<default>` and hand back again, leaving the operator checkout alone.
+   To update a local default branch, use a separate worktree and `git merge --ff-only origin/<default>`
+   only when that branch is not checked out by the operator; otherwise leave it untouched.
 5. **Pull request.** Once pushing is allowed and the review is addressed, the worker opens it.
    Have the host watch it (host `watch`), so reviews, checks and conflicts come back to you.
    Update the Active work row.
    Before anything is merged: `core/bin/brain guard <id> <worktree>` must print `guard: clean`
    when the node (or one above it) has a `never-name.txt`.
    The coordinator runs `brain ready <id> --branch <branch>` immediately before merging and
-   merges only on `ready`. A moved main goes back to the worker for rebase and verification;
+   merges only on `ready`. For a team using host PR merges, configure `brain set <id> merge=pr`.
+   This records the workflow choice; it never automatically pushes or merges. After `ready`,
+   the coordinator explicitly runs `gh pr merge <number> --merge --match-head-commit <verified-head>`
+   in the job worktree (or the home's required squash strategy). Host checks and current base
+   rules still apply; if the base moves, rebase and hand back again before retrying.
+   Then run `brain sync <id>` to observe the merged remote default before pruning the job:
+   its verified tree and base let sync associate a squash with the existing ledger row.
+   PR mode supports merge commits and squash; do not use the host's rebase strategy, whose
+   rewritten commits cannot be associated with the verified job by Git identity. Local
+   fast-forward integrations retain the verified job's whole commit range in its ledger row.
+   A moved main goes back to the worker for rebase and verification;
    the coordinator does not repeat its tests. Only the coordinator merges to main.
 6. **Done.** When the operator (and the home's owners) merge it, set the row to `merged`, record
    the outcome in `status.md`, turn the hand-back's proposed reusable lessons into library items (the
