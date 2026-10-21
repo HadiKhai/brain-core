@@ -41,6 +41,7 @@ class Review(Scenario):
         out = self.b(r, "review", "app", "--branch", "fix-login", "--built-by", "claude", "--focus", "auth")
         self.assertIn("Reviewer runtime: codex", out)
         self.assertIn(f"Run in: {wt}", out)
+        self.assertIn('"Review reason": ""', self.b(r, "jobs", "app", "--branch", "fix-login"))
         self.assertIn("login.py", out)
         self.assertIn("Don't modify any file", out)
         self.assertIn("has its own owners", out)

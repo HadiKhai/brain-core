@@ -14,6 +14,7 @@ from . import guard as _m_guard
 from . import hosts as _m_hosts
 from . import instance as _m_instance
 from . import nodes as _m_nodes
+from . import review as _m_review
 from . import spend as _m_spend
 from . import status as _m_status
 from . import sync as _m_sync
@@ -230,10 +231,9 @@ def job_reviewed(inst, n, branch, *, full=True, head="", reason=""):
         if rows is None:
             _m_common.die("cannot record review: unrecognized job ledger")
         if not r:
-            r = {"Job": branch, "Started": inst.now_dt().isoformat(), "Reviews": "0"}
-            rows.append(r)
-        prior = int(r.get("Reviews") or 0)
-        full_prior = int(r.get("Full reviews", r.get("Reviews")) or 0)
+            return  # a review must never manufacture a job that no worktree command can close
+        prior = _m_review.review_count(r.get("Reviews"))
+        full_prior = _m_review.review_count(r.get("Full reviews") or r.get("Reviews"))
         r["Reviews"] = str(prior + 1)
         r["Full reviews"] = str(full_prior + int(full))
         r["Review head"] = head

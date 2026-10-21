@@ -354,7 +354,7 @@ class LedgerVersionRegressions(Scenario):
         self.assertIn('"Lessons": "none: mechanical"', self.b(r, "jobs", "a", "--branch", "job"))
         # Also migrate the 12-column v1 files emitted earlier on this feature branch.
         ledger.write_text(text.replace("brain:job-ledger v3", "brain:job-ledger v1"))
-        self.b(r, "review", "a", "--branch", "job", "--built-by", "claude", "--reason", "security")
+        self.b(r, "review", "a", "--branch", "job", "--built-by", "claude")
         out = self.b(r, "jobs", "a", "--branch", "job")
         self.assertIn('"Lessons": "none: mechanical"', out)
         self.assertIn('"Reviews": "1"', out)
@@ -374,7 +374,7 @@ class Measures(Scenario):
         jobs = (r / "nodes" / "app" / "job-ledger.md").read_text()
         self.assertIn("| job-a |", jobs)
         self.assertEqual(self.git("status", "--porcelain", "--", "nodes/app/job-ledger.md", cwd=r).strip(), "")  # committed
-        self.b(r, "review", "app", "--branch", "job-a", "--built-by", "claude", "--reason", "security")
+        self.b(r, "review", "app", "--branch", "job-a", "--built-by", "claude")
         self.b(r, "review", "app", "--branch", "job-a", "--built-by", "claude", "--reason", "security")
         wa = self.tmp / "code" / "app-work" / "worktrees" / "job-a"
         (wa / "a.txt").write_text("a\n")
@@ -397,7 +397,7 @@ class Measures(Scenario):
         self.assertIn("open  job-c", self.b(r, "jobs", "app"))
         self.assertIn("✓", self.b(r, "check"))
         self.b(r, "wt", "add", "app", "job|pipe")                  # git allows it; the row must still be found
-        self.b(r, "review", "app", "--branch", "job|pipe", "--built-by", "claude", "--reason", "security")
+        self.b(r, "review", "app", "--branch", "job|pipe", "--built-by", "claude")
         self.b(r, "wt", "rm", "app", "job|pipe")
         self.assertIn("job|pipe", (r / "nodes" / "app" / "job-ledger.md").read_text().replace("\\|", "|"))
         self.assertNotIn("open  job|pipe", self.b(r, "jobs", "app"))
@@ -930,9 +930,10 @@ class Workflow(Scenario):
         self.assertIn("Why a separate agent: Dedicated test expertise", self.b(r, *hire,
                       "--why-separate", "Dedicated test expertise"))
         self.assertIn("needs a reason", self.b(r, *hire, "--why-separate", "", ok=False))
-        review = ("review", "a", "--branch", "job", "--base", "main", "--built-by", "codex", "--reason", "security")
+        review = ("review", "a", "--branch", "job", "--base", "main", "--built-by", "codex")
         self.assertIn("Why a separate agent: Independent second-runtime review.", self.b(r, *review))
-        self.assertIn("Why a separate agent: Check independently", self.b(r, *review,
+        self.assertIn('"Review reason": ""', self.b(r, "jobs", "a", "--branch", "job"))
+        self.assertIn("Why a separate agent: Check independently", self.b(r, *review, "--reason", "security",
                       "--why-separate", "Check independently"))
         contract = self.tmp / "contract.md"
         contract.write_text("".join("## " + field + "\nSynthetic scope.\n\n" for field in
@@ -940,10 +941,10 @@ class Workflow(Scenario):
                             "## Why separate\nDistinct expertise.\n")
         self.b(r, "jobs", "a", "--branch", "job", "--contract-file", str(contract))
         self.assertIn("Why a separate agent: Distinct expertise.", self.b(r, *hire))
-        self.assertIn("Why a separate agent: Independent second-runtime review.", self.b(r, *review))
+        self.assertIn("Why a separate agent: Independent second-runtime review.", self.b(r, *review, "--reason", "security"))
         contract.write_text(contract.read_text().replace("Distinct expertise.", ""))
         self.b(r, "jobs", "a", "--branch", "job", "--contract-file", str(contract))
-        self.assertIn("Why a separate agent: Independent second-runtime review.", self.b(r, *review))
+        self.assertIn("Why a separate agent: Independent second-runtime review.", self.b(r, *review, "--reason", "security"))
 
     def test_contract_input_overlap_normalization_and_closed_jobs(self):
         loader = core_loader.SourceFileLoader("brain_aggregation", str(CORE / "bin/brain"))
@@ -1108,7 +1109,7 @@ class Workflow(Scenario):
         self.assertIn("Repair reversible preflight defects.", brief)
         self.assertIn("not acknowledgements", brief)
         self.assertNotIn("no contract", self.b(r, "jobs", "a"))
-        first = self.b(r, "review", "a", "--branch", "job", "--built-by", "claude", "--reason", "security")
+        first = self.b(r, "review", "a", "--branch", "job", "--built-by", "claude")
         self.assertNotIn("Earlier rounds", first)
         self.assertIn("## The job's contract", first)
         self.assertIn("All cases pass", first)

@@ -31,7 +31,11 @@ stated; never run a polling loop in an agent.
    Mechanical checks run before each brief: Done means items need an existing named
    `test: tests/file.py::test_name` or a stated `gap: explanation` in the contract
    (`--contract <path>` overrides the recorded job contract). Missing evidence is flagged.
-   The optional node `fitness=<command>` gate runs and reports its exit status. Seed lint
+   Test references and seed content come from the reviewed commit, including for internal nodes.
+   The optional node `fitness=<command>` gate runs in a registered, clean worktree at that head
+   and reports its exit status; otherwise it reports skipped. Its 30-second timeout stops the
+   process group. Reviews without an existing open job state that their rounds are unrecorded
+   and uncapped; a review never creates an uncloseable ledger job. Seed lint
    reuses guard/scrub and flags configured names and home paths in changed fixtures/tests;
    never-name evidence refuses the brief without quoting it. Inspect all gaps and failures.
 3. **Run it.** Use one reviewer for the concern, not one per file or test step. State why this

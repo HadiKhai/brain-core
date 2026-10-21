@@ -66,7 +66,7 @@ def cmd_review(a):
                              cwd=n["home_path"] if n["external"] else inst.root)
     if base_ref.returncode:
         _m_common.die("cannot resolve review base")
-    mechanical = _m_review.review_mechanical(inst, n, a, row, where, base_ref.stdout.strip())
+    mechanical = _m_review.review_mechanical(inst, n, a, row, where, base_ref.stdout.strip(), head)
     out = [f"Reviewer runtime: {reviewer}  (the change was built on {built})",
            f"Run in: {where}" + (f"  ·  model: {a.model}" if a.model else ""), "",
            _m_guard.redact(usage, _m_guard.never_terms(n)), "",
@@ -77,11 +77,15 @@ def cmd_review(a):
         out += ["This project has its own owners. Write nothing into it, and keep your report free of any "
                 "reference to where this brief came from (axiom 6).", ""]
     out += _m_briefs.separation_lines(a, n, a.branch, default="Independent second-runtime review.")
-    out += [f"Review round {round_number} ({'check-fix' if check_fix else 'full'}).", ""] + mechanical
+    kind = "check-fix" if check_fix else "full"
+    round_line = (f"Review round {round_number} ({kind})." if row else
+                  f"Review round not recorded ({kind}): no open job; round cap not applied.")
+    out += [round_line, ""] + mechanical
     if check_fix:
         out += fix_lines + _m_review.rehearsal_lines()
         out += ["## Report", "", "For each prior blocker/major: fixed or unresolved, with evidence. "
-                "Report regressions caused by the fix and exactly which checks you ran.", ""]
+                "Report regressions caused by the fix and exactly which checks you ran.", ""] + \
+            _m_knowledge.handback_lines(inst, n, who="reviewer", branch=a.branch)
     else:
         out += ["## Change", "", f"Branch `{a.branch}` against `{base}`. See it with `git diff {base}...{a.branch}`"
                 f" and `git log {base}..{a.branch}`.", ""]
@@ -89,7 +93,7 @@ def cmd_review(a):
             out += ["```", diffstat, "```", ""]
         if a.focus:
             out += ["## Focus", "", a.focus.strip(), ""]
-        if round_number > 1:
+        if round_number and round_number > 1:
             out += ["## Earlier rounds", "", f"This is review round {round_number} of this job. "
                     "Exception reason: " + (getattr(a, "reason", None) or "none") + ". "
                     "Check earlier fixes and the same kind of problem everywhere in the change.", ""]
@@ -100,6 +104,7 @@ def cmd_review(a):
         out += _m_knowledge.knowledge_lines(inst, n, " ".join(filter(None, [a.branch, a.focus, diffstat])), "reviewer") + \
             _m_knowledge.node_knowledge_lines(n) + _m_knowledge.recall_hint(n)
         out += _m_knowledge.limits_lines(n)
+        out += _m_review.rehearsal_lines()
         out += ["## What to check", "",
                 "- Correctness: does it do what the commits and the task say, including edge cases?",
                 "- Breakage: run the project's own tests, type checks and linters that cover the change; report results.",
@@ -111,7 +116,6 @@ def cmd_review(a):
                 "A list of findings, most severe first. Each: severity (blocker, major, minor), `file:line`, "
                 "the problem, and a concrete fix. Say which tests you ran and their results. If you find nothing "
                 "that matters, say so plainly.", ""] + _m_knowledge.handback_lines(inst, n, who="reviewer", branch=a.branch)
-        out += _m_review.rehearsal_lines()
     text = "\n".join(out) + "\n"
     _m_guard.no_terms_in(n, text, "the review brief")
     if a.out:

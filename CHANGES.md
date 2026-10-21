@@ -41,12 +41,15 @@ After upgrading:
 ## 2026-10-21: Reviews use one full round and a fix check
 
 For agents:
-- `brain review` records the round, kind, reviewed head and exception reason in the job ledger.
-  A second full round or any third brief requires `--reason security|schema|privacy`.
+- `brain review` records the round, kind, reviewed head and exception reason for existing open jobs.
+  It never creates a job for a plain branch; its brief says when rounds are unrecorded and uncapped.
+  A second full round or any third recorded brief requires `--reason security|schema|privacy`.
 - `--check-fix --findings <prior.json>` includes only prior blockers/majors and the fix range.
   Findings are JSON objects with severity and text. `--fix-base` overrides the previous head.
 - Each brief reports contract-test gaps, the optional `fitness=<command>` gate and seed lint
-  using guard/scrub. Never-name evidence refuses the brief. Reviewers must report rehearsal
+  against committed test/fixture content using guard/scrub. Fitness runs only in a registered,
+  clean worktree at the reviewed head; it otherwise reports skipped. Timeout stops its process
+  group after 30 seconds. Never-name evidence refuses the brief. Reviewers must report rehearsal
   on real-shaped copies. `--contract` selects a contract instead of the recorded job contract.
 
 After upgrading:
