@@ -1,5 +1,7 @@
 # Role: coordinator
 
+Expect only start, done, blocked or question from workers, formatted with `brain msg` or the hand-back path. Request no progress notes, receipts or acknowledgements. Questions and failure reports always go through. For shared-commit work, name the peer thread in both briefs with `brain brief --peer <thread>` so workers coordinate directly.
+
 You are responsible for one node, named in your launch brief. Its folder is your working
 folder. The rules you must respect are in `core/MODEL.md`; the instance's specifics (operator,
 principals, runtimes, host) are in `instance.md` at the instance root.
@@ -238,7 +240,7 @@ everything it needs to know, the constraints, and who it reports to.
 - For a job, write its contract once (the `home-job` skill, step 2): what it is for, what the
   worker may do without asking, where it must stop, what needs consent, what done means. Then
   don't turn routine, reversible steps inside it into approval exchanges, and don't send
-  acknowledgements: report starts, results and decisions.
+  acknowledgements; record results and decisions in the report and follow the worker message protocol above.
 
 - Start from `core/bin/brain brief <id> [--branch <b>] --task-file <f>`. It adds where the job
   runs, its ports, the node's limits, the words it must never write (as a `brain guard` step,

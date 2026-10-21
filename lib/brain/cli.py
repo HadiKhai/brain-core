@@ -20,6 +20,7 @@ from . import hosts as _m_hosts
 from . import instance as _m_instance
 from . import jobs as _m_jobs
 from . import knowledge as _m_knowledge
+from . import messages as _m_messages
 from . import machine as _m_machine
 from . import nodes as _m_nodes
 from . import reports as _m_reports
@@ -180,7 +181,8 @@ def main():
         opt("--why-separate", help="why this concern needs its own agent (or contract ## Why separate)"),
         opt("--allow-unexplained", action="store_true", help="allow an urgent launch without a separation reason"),
         opt("--runtime"), opt("--model", help="job model for scoped usage limits"),
-        opt("--to", help="the thread the worker reports to (default: the node's coordinator)"), opt("--out"))
+        opt("--to", help="the thread the worker reports to (default: the node's coordinator)"),
+        opt("--peer", help="shared-commit peer thread; coordinate directly with it"), opt("--out"))
     cmd("scrub", _m_nodes.cmd_scrub, "filter source data without revealing never-name terms; reads paths or stdin",
         "id", opt("paths", nargs="*"), opt("--check", action="store_true"),
         opt("--metadata", action="store_true", help="file names and identities, not source content"))
@@ -251,7 +253,9 @@ def main():
         opt("--quiet", action="store_true", help="no output; exit 1 for node actions, including its held work, 0 otherwise"))
     cmd("inbox", _m_status.cmd_inbox, "needs in a node's subtree (default: calling node); --new remembers per reporter",
         opt("id", nargs="?"), opt("--json", action="store_true"), opt("--new", action="store_true"))
-    cmd("handback", _m_jobs.cmd_handback, "worker signal and optional inbox need for one open ledger job",
+    cmd("msg", _m_messages.cmd_msg, "format start/done/blocked/question for a coordinator (does not send)",
+        "id", opt("kind", choices=_m_messages.MESSAGE_KINDS), "message", opt("--branch"), opt("--report"))
+    cmd("handback", _m_jobs.cmd_handback, "done/blocked/question hand-back; worker messages are start/done/blocked/question",
         "id", opt("--branch", required=True), opt("--state", choices=["done", "failed", "blocked", "question"], required=True),
         opt("--report"), opt("--lessons", help="proposed lessons, or none: <reason>"),
         opt("--need-human", help="question or blocked need to append to the node inbox"),

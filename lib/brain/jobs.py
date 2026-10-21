@@ -248,7 +248,11 @@ def cmd_handback(a):
         if why:
             sys.exit(1)
     else:
-        print(_m_guard.redact(f"{n['id']}: {a.branch} {a.state}; coordinator can see it with brain due", _m_guard.never_terms(n)))
+        from . import messages as _m_messages
+        kind = "blocked" if a.state == "failed" else a.state
+        print(_m_guard.redact(_m_messages.format_worker_message(
+            kind, "coordinator can see it with brain due", a.branch, data["report"] or _m_common.tilde(f)),
+            _m_guard.never_terms(n)))
 
 
 def job_started(inst, n, branch, runtime):
@@ -427,8 +431,8 @@ def contract_lines(inst, n, branch, who="worker"):
     budget = _m_spend.contract_budget(text)
     return ["## Contract for this job", "", text, "",
             "Within this contract, act: don't ask for what it authorizes, and use your discretion where it gives it. "
-            "Report starts, results and decisions, not acknowledgements. Hand back (question or blocked) only on a "
-            "stop condition, or for something it says needs consent.", ""] + (
+            "Record results and decisions in the report. Follow the coordinator message protocol below. "
+            "Use the hand-back path for a stop condition or something it says needs consent.", ""] + (
         [f"Its budget is {_m_spend.budget_text(budget)}. `brain jobs {shlex.quote(n['id'])} --branch {shlex.quote(branch)}` "
          "shows what this job has spent so far; check it before long steps, and say in your report how it went "
          "against the budget (`brain handback` prints it).", ""] if budget else [])

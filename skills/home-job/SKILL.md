@@ -59,6 +59,8 @@ stated; never run a polling loop in an agent.
    --why-separate "<independent concern>" --context-file <shared findings>`: that adds the
    worktree, port, limits, guard step and hand-back. Use `core/bin/brain hire` when a
    specialist fits; pass `--branch <branch>` so its brief has the same finishing step.
+   Workers send the coordinator only start, done, blocked or question; no progress notes, receipts, acknowledgements or hash relays.
+   Shared-commit peers coordinate directly: use `brain brief --peer <thread>` to name the peer in both briefs; ask for its id once if absent.
    Pass `--why-separate "<distinct expertise>"` to hire and include the shared findings in its task text.
    Keep a host interval tick on the coordinator: `brain due <id>` plus host pending requests;
    empty means stop silently. The worker's file is durable; a host notification is optional.

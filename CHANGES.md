@@ -5,6 +5,17 @@ upgrading. `brain changes <node>` shows the entries this node's coordinator hasn
 `brain due <node>` lists them until `brain changes <node> --seen`. Entry headings are
 `## <date>: <title>`; once released, a heading never changes.
 
+## 2026-10-21: Four worker message kinds
+
+For agents:
+- Send coordinators only start, done, blocked or question. Coordinate shared commits directly with peers named in the brief.
+- `brain msg <node> <kind> "<one line>"` adds known branch/report context for host delivery. Hand-back remains available.
+- Briefs state the protocol and `brain msg` rejects other kinds. Small and generic workers can format messages without a ledger job.
+- `brain brief --peer <thread>` names a direct shared-commit peer; include it in both worker briefs.
+
+After upgrading:
+- Re-read the worker/coordinator roles. Name peer threads in shared-commit briefs; no migration is needed.
+
 ## 2026-10-21: Ledger review evidence and coordinator spend
 
 For agents:
