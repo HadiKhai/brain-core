@@ -192,6 +192,42 @@ class RehearsalSandbox(Scenario):
 
 
 class RehearsalEvidence(Scenario):
+    def test_train_rehearsal_uses_recorded_base_after_origin_main_advances(self):
+        from brain.instance import Instance
+        from brain.verify import ready_state
+        r = self.init('sample')
+        home = self.repo(self.tmp / 'app')
+        main = self.git('rev-parse', 'main', cwd=home).strip()
+        self.git('remote', 'add', 'origin', str(home), cwd=home)
+        self.git('update-ref', 'refs/remotes/origin/main', main, cwd=home)
+        self.git('symbolic-ref', 'refs/remotes/origin/HEAD', 'refs/remotes/origin/main', cwd=home)
+        self.b(r, 'new', 'a', '--title', 'A', '--home', str(home))
+        self.b(r, 'set', 'a', 'verify=true', 'rehearse=required')
+        self.b(r, 'wt', 'add', 'a', 'job')
+        wt = self.tmp / 'app-work/worktrees/job'
+        self.git('commit', '--allow-empty', '-qm', 'job change', cwd=wt)
+        inst = Instance(r)
+        n = inst.node('a')
+        head = self.git('rev-parse', 'job', cwd=home).strip()
+        evidence = dict(version=1, node='a', branch='job', head=head, main=main,
+                        integration_base=main, passed=True,
+                        installed_core_commit=rehearsal.installed_core_commit(r))
+        path = rehearsal.evidence_path(n, 'job')
+        path.parent.mkdir(parents=True)
+        path.write_text(json.dumps(evidence))
+        self.b(r, 'ready', 'a', '--branch', 'job', '--record', '--reviews', '1')
+        self.git('commit', '--allow-empty', '-qm', 'advance origin main', cwd=home)
+        newer = self.git('rev-parse', 'HEAD', cwd=home).strip()
+        self.git('update-ref', 'refs/remotes/origin/main', newer, cwd=home)
+        with mock.patch.dict(os.environ, self.env):
+            train = ready_state(inst, n, 'job', train=True)
+            self.assertTrue(train['ready'], train['reasons'])
+            self.assertFalse(ready_state(inst, n, 'job')['ready'])
+            path.write_text(json.dumps({**evidence, 'integration_base': newer}))
+            mismatched = ready_state(inst, n, 'job', train=True)
+            self.assertFalse(mismatched['ready'])
+            self.assertIn('passing rehearsal missing', '; '.join(mismatched['reasons']))
+
     def test_installed_core_commit_change_invalidates_evidence(self):
         from brain.instance import Instance
         r = self.init('sample')

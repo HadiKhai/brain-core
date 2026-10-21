@@ -190,7 +190,11 @@ def ready_state(inst, n, branch, train=False, display=False):
         except (OSError, ValueError):
             reasons.append('train ejection evidence unreadable; refusing readiness')
     from . import rehearse as _m_rehearse
-    rehearsal = _m_rehearse.read_evidence(n, branch, head)
+    if train and packet:
+        rehearsal = _m_rehearse.read_evidence(n, branch, head, main=packet.get("main"),
+                                             integration_base=packet.get("integration_base"))
+    else:
+        rehearsal = _m_rehearse.read_evidence(n, branch, head)
     if _m_rehearse.required(n) and rehearsal is None:
         reasons.append("passing rehearsal missing for this head and main; run brain rehearse")
     if signal and signal["state"] != "done":

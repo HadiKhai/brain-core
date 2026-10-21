@@ -56,7 +56,7 @@ def evidence_path(n, branch):
     return _m_worktrees.workbench(inst, n) / 'scratch' / 'rehearse' / (key + '.json')
 
 
-def read_evidence(n, branch, head):
+def read_evidence(n, branch, head, main=None, integration_base=None):
     if not n['external'] or not n.get('home_path') or not head:
         return None
     try:
@@ -64,8 +64,9 @@ def read_evidence(n, branch, head):
         if (isinstance(p, dict) and p.get('version') == 1 and p.get('node') == n['id'] and p.get('branch') == branch
                 and p.get('head') == head and p.get('passed') is True
                 and p.get('installed_core_commit') == installed_core_commit(node_instance(n).root)
-                and p.get('main') == _m_verify.ready_refs(n, branch)[1]
-                and p.get('integration_base') == _m_verify.integration_parent(n, p.get('main'))):
+                and p.get('main') == (main if main is not None else _m_verify.ready_refs(n, branch)[1])
+                and p.get('integration_base') == (integration_base if integration_base is not None
+                                                  else _m_verify.integration_parent(n, p.get('main')))):
             return p
     except (OSError, ValueError, TypeError, RehearsalError):
         pass
