@@ -447,6 +447,21 @@ class QuestionWake(Scenario):
                 self.assertEqual(len(calls), 1)
                 self.assertEqual(self.due_without_drain().count("HTTP " + str(code)), 1)
 
+    def test_check_redirect_is_a_problem_for_probe_and_drain(self):
+        with self.webhook(302, redirect=True) as (url, calls):
+            self.bind_webhook(url)
+            check = self.b(self.r, "check", ok=False)
+            self.assertIn("✗ a: wake probe HTTP 302", check)
+            self.assertEqual(len(calls), 1)
+            self.assertNotIn(url, check)
+            directory = self.module.wake_directory(self.inst, self.n)
+            self.module.wake_record(directory, url, 302)
+            name = "probe-" + self.module.wake_binding(url) + ".json"
+            self.module.wake_record(directory, url, 202, name)
+            check = self.b(self.r, "check", ok=False)
+            self.assertIn("✗ a: last wake delivery refused: HTTP 302", check)
+            self.assertEqual(len(calls), 1)
+
     def test_probe_transport_error_warns_is_safe_and_not_cached(self):
         self.bind_webhook("http://127.0.0.1:1/synthetic-secret")
         check = self.b(self.r, "check")

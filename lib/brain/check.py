@@ -304,7 +304,7 @@ def cmd_check(a):
         age = f"result age {max(0, int(time.time() - record['at']))}s" if record else "not cached"
         result = "HTTP " + str(status) if type(status) is int else status
         line = f"{target['id']}: wake probe {result} ({age})"
-        if type(status) is int and 400 <= status < 600:
+        if type(status) is int and not 200 <= status < 300:
             problems.append(line)
         elif type(status) is int and 200 <= status < 300:
             print("✓ " + line)
@@ -315,7 +315,7 @@ def cmd_check(a):
                 type(delivery["status"]) is int and 200 <= delivery["status"] < 300):
             diagnostic = _m_hosts.wake_diagnostic(inst, target)
             if diagnostic:
-                if type(delivery["status"]) is int and 400 <= delivery["status"] < 600:
+                if type(delivery["status"]) is int and not 200 <= delivery["status"] < 300:
                     problems.append(f"{target['id']}: {diagnostic}")
                 else:
                     warnings.append(f"{target['id']}: {diagnostic}")
