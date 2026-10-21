@@ -5,6 +5,28 @@ upgrading. `brain changes <node>` shows the entries this node's coordinator hasn
 `brain due <node>` lists them until `brain changes <node> --seen`. Entry headings are
 `## <date>: <title>`; once released, a heading never changes.
 
+## 2026-10-21: Rehearse core candidates before release
+
+For agents:
+- `brain rehearse <node> --branch <branch>` compares the installed core with the
+  committed candidate on temporary brain copies, including Git metadata. It checks
+  errors, ready flips, due noise, lost brief warnings, unexpected writes and hook
+  latency; private command output is never published. Each distinct bound coordinator
+  webhook also receives one real constant-event POST; non-2xx statuses fail the run
+  and print only their status code, never the URL.
+  Their results seed only the temporary copies so sandboxed checks reuse the real probe.
+- Evidence is stored in the external workbench and included in the ready packet.
+  `rehearse=required` refuses readiness without a passing run for the current head,
+  integration main and installed-core baseline. Reviewers run rehearsal for core changes.
+
+After upgrading:
+- Older rehearsal evidence without an installed-core baseline must be rerun.
+- Set `rehearse=required` on core development nodes; commit and rebase before
+  rehearsing. Take machine admission and the heavy-work lock before a run.
+- Rehearsal currently requires macOS `sandbox-exec` and refuses elsewhere. Live
+  homes are observed read-only; subprocess writes stay in temporary copies and
+  network access is denied. No installation or migration runs on the live brain.
+
 ## 2026-10-21: Named verify lanes reuse unchanged job checks
 
 For agents:

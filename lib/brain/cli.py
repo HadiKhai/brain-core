@@ -24,6 +24,7 @@ from . import messages as _m_messages
 from . import machine as _m_machine
 from . import nodes as _m_nodes
 from . import reports as _m_reports
+from . import rehearse as _m_rehearse
 from . import rotation as _m_rotation
 from . import schedules as _m_schedules
 from . import spend as _m_spend
@@ -102,7 +103,7 @@ READ_ONLY = {"cmd_show", "cmd_tree", "cmd_status", "cmd_now", "cmd_jobs", "cmd_s
              "cmd_brief", "cmd_hire", "cmd_reports", "cmd_brains", "cmd_use", "cmd_machine", "cmd_usable",
              "cmd_item_list", "cmd_item_show", "cmd_wt_list", "cmd_selftest", "cmd_init", "cmd_hook", "cmd_hook_approve", "cmd_help",
              "cmd_dashboard", "cmd_ready", "cmd_usage", "cmd_scan", "cmd_scrub", "cmd_history",
-             "cmd_connect", "cmd_recall", "cmd_proposals", "cmd_changes", "cmd_heavy"}
+             "cmd_connect", "cmd_recall", "cmd_proposals", "cmd_changes", "cmd_heavy", "cmd_rehearse"}
 
 
 def writes(a):
@@ -157,6 +158,9 @@ def main():
         return s
 
     opt = lambda *n, **kw: (n, kw)  # noqa: E731
+
+    cmd("rehearse", _m_rehearse.cmd_rehearse, "compare installed and candidate cores on isolated brain copies",
+        "id", opt("--branch", required=True))
 
     cmd("init", _m_nodes.cmd_init, "create a new instance from this core", "dir",
         opt("--operator", required=True), opt("--title", required=True), opt("--runtimes", default="claude,codex"),

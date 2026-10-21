@@ -299,3 +299,21 @@ its ledger and worktree state. Mark only the finished job's Active work row term
 Then inspect `brain wt prune <id> --dry-run`: the old missing record may be retired while
 the follow-up remains protected. Run prune only after confirming those exact targets.
 Never delete the live folder or switch its branch merely to satisfy the old record.
+
+## Core release rehearsal
+
+For jobs changing Brain core, set `rehearse=required` on the node. After committing
+and rebasing, run `brain rehearse <id> --branch <branch>` before review and
+hand-back. Run machine admission and the node's heavy-work lock first. It compares
+installed and candidate commands on temporary copies, including due on every node,
+check and an independent check --fix, ready on every open job, status refresh,
+brief warnings, UI JSON and the unrelated-folder Stop hook. Live external homes
+are read-only observations under the OS sandbox; network access is denied.
+Only summary counts and hashes leave the copies. Evidence lives in the workbench
+and is included in the ready packet. A changed job head, integration main or installed core needs
+another rehearsal. Unsupported sandbox platforms refuse; never bypass isolation.
+
+Rehearsal also sends one real constant-event POST per distinct bound coordinator webhook.
+It uses an explicit User-Agent, never prints the URL, and fails on any non-2xx
+status (including redirects). The temporary-copy command sandbox denies network;
+this authorized delivery probe runs separately against the real bindings.

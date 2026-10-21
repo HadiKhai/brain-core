@@ -66,3 +66,14 @@ stated; never run a polling loop in an agent.
 5. **Report.** In the Active work row and in what you tell the operator: reviewed by `<runtime>`,
    what was found, what was fixed, and anything the builder and reviewer still disagree on. Give
    the operator both sides of a disagreement; don't settle it silently.
+
+For core changes, reviewers run `brain rehearse <id> --branch <branch>` from
+that job's committed worktree and inspect its regression summary as well as the
+diff. Rehearsal executes the committed branch, never uncommitted edits. It uses
+throwaway copies and requires an OS write/network sandbox (currently macOS).
+A failed or unavailable rehearsal is not passing release evidence.
+
+Rehearsal also sends one real constant-event POST per distinct bound coordinator webhook.
+It uses an explicit User-Agent, never prints the URL, and fails on any non-2xx
+status (including redirects). The temporary-copy command sandbox denies network;
+this authorized delivery probe runs separately against the real bindings.

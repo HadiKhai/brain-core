@@ -189,6 +189,10 @@ def ready_state(inst, n, branch, train=False, display=False):
                 reasons.append('train ejected this ready evidence; worker must hand back again')
         except (OSError, ValueError):
             reasons.append('train ejection evidence unreadable; refusing readiness')
+    from . import rehearse as _m_rehearse
+    rehearsal = _m_rehearse.read_evidence(n, branch, head)
+    if _m_rehearse.required(n) and rehearsal is None:
+        reasons.append("passing rehearsal missing for this head and main; run brain rehearse")
     if signal and signal["state"] != "done":
         reasons.append("worker hand-back is " + signal["state"])
     if row and _m_jobs.handback_file(n, row).exists() and not signal:
@@ -639,6 +643,10 @@ def show_lanes(n, packet):
 
 def record_ready(inst, n, branch, reviews, previous=None, reverify=False):
     reasons, head, main = ready_preflight(n, branch)
+    from . import rehearse as _m_rehearse
+    rehearsal = _m_rehearse.read_evidence(n, branch, head)
+    if _m_rehearse.required(n) and rehearsal is None:
+        reasons.append("passing rehearsal missing for this head and main; run brain rehearse")
     verify = n["fm"].get("verify", "").strip()
     if not verify:
         reasons.append("node has no verify command; coordinator must set verify=<command>")
@@ -679,7 +687,7 @@ def record_ready(inst, n, branch, reviews, previous=None, reverify=False):
                  ": nothing changed since") + " (--reverify runs it again)")
         return {"version": 1, "node": n["id"], "branch": branch, "head": head, "main": main,
                 "integration_base": integration_base, "verify_command": verify, "verify_result": 0, "verified_head": base, "verify_reused": True,
-                "inputs": inputs, "input_files_ref": input_ref, "verify_log": previous.get("verify_log"),
+                "inputs": inputs, "input_files_ref": input_ref, "verify_log": previous.get("verify_log"), "rehearsal": rehearsal,
                 "review_rounds": reviews, "checked_at": _m_jobs.stamp(inst)}, []
     _m_instance.unlock()  # verification belongs to this worker, not the instance-wide lock
     lane_evidence = run_lanes(inst, n, branch, w, env, snap, previous, head, main, inputs, reverify) if snap else None
@@ -709,7 +717,7 @@ def record_ready(inst, n, branch, reviews, previous=None, reverify=False):
     input_ref = write_verify_input_files(inst, n, branch, inputs, input_files, log_path)
     packet = {"version": 1, "node": n["id"], "branch": branch, "head": head, "main": main,
               "integration_base": integration_base, "verify_command": verify, "verify_result": result, "verify_log": log_path, "verified_head": head,
-              "inputs": inputs, "input_files_ref": input_ref, "review_rounds": reviews, "checked_at": _m_jobs.stamp(inst)}
+              "inputs": inputs, "input_files_ref": input_ref, "review_rounds": reviews, "checked_at": _m_jobs.stamp(inst), "rehearsal": rehearsal}
     if lane_evidence:
         packet.update(lane_evidence)
         show_lanes(n, packet)
