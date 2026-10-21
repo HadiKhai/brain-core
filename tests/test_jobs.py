@@ -30,6 +30,58 @@ import test_verify as _test_verify
 from scenario import Scenario, AutonomyProject, shlex_quote
 
 
+class LedgerReviewEvidence(Scenario):
+    def test_next_write_repairs_only_rows_with_retained_review_evidence(self):
+        r = self.init("alice")
+        module = core_loader.SourceFileLoader("ledger_reviews", str(CORE / "bin/brain")).load_module()
+        inst = module.Instance(r)
+        n = inst.node("root")
+        rows = []
+        cases = [("packet", 3, "3"), ("study", 2, "2"), ("missing", None, "7"),
+                 ("bool", True, "7"), ("negative", -1, "7"), ("string", "3", "7"),
+                 ("wrong-job", 3, "7"), ("blocked", 3, "7")]
+        for name, rounds, expected in cases:
+            row = {"Job": name, "Started": "2020-01-01T00:00Z", "Ended": "2020-01-01T01:00Z", "Reviews": "7"}
+            rows.append(row)
+            if rounds is None:
+                continue
+            hb = {"job": name if name != "wrong-job" else "other", "started": row["Started"],
+                  "state": "blocked" if name == "blocked" else "done"}
+            hb.update({"review_rounds": rounds} if name == "study" else {"ready": {"review_rounds": rounds}})
+            f = module.handback_file(n, row)
+            f.parent.mkdir(exist_ok=True)
+            f.write_text(json.dumps(hb))
+        module.write_jobs(inst, n, rows)
+        self.assertEqual([row["Reviews"] for row in module.read_jobs(n)], [c[2] for c in cases])
+        module.write_jobs(inst, n, module.read_jobs(n))
+        self.assertEqual([row["Reviews"] for row in module.read_jobs(n)], [c[2] for c in cases])
+
+    def test_retained_handback_never_lowers_open_review_counts(self):
+        r = self.init("alice")
+        module = core_loader.SourceFileLoader("ledger_open_reviews", str(CORE / "bin/brain")).load_module()
+        inst, n = module.Instance(r), module.Instance(r).node("root")
+        rows = [
+            {"Job": "job/open", "Started": "2020-01-01T00:00Z", "Reviews": "0", "Class": "standard", "Model": "fixture"},
+            {"Job": "job/study", "Started": "2020-01-01T00:00Z", "Reviews": "2"},
+            {"Job": "job/closed", "Started": "2020-01-01T00:00Z", "Ended": "2020-01-01T01:00Z", "Reviews": "7"},
+        ]
+        for row, rounds in zip(rows, (3, 0, 3)):
+            hb = {"job": row["Job"], "started": row["Started"], "state": "done"}
+            hb.update({"review_rounds": rounds} if row["Job"] == "job/study" else {"ready": {"review_rounds": rounds}})
+            f = module.handback_file(n, row)
+            f.parent.mkdir(exist_ok=True)
+            f.write_text(json.dumps(hb))
+        module.write_jobs(inst, n, rows)
+        with mock.patch.dict(os.environ, self.env, clear=True):
+            module.job_reviewed(inst, n, "job/open")
+        repaired = module.read_jobs(n)
+        self.assertEqual([row["Reviews"] for row in repaired], ["4", "2", "3"])
+        self.assertEqual((repaired[0]["Class"], repaired[0]["Model"]), ("standard", "fixture"))
+        with mock.patch.dict(os.environ, self.env, clear=True):
+            self.assertTrue(any("over the cap" in line for line in module.job_advice(inst, n, repaired[0])))
+
+
+
 class JobLessonOutcomes(Scenario):
     def test_merge_requires_outcome_but_historical_rows_do_not(self):
         r = self.init("alice")

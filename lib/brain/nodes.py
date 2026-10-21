@@ -570,6 +570,19 @@ def cmd_set(a):
             inst.local["auto_upgrade"] = v
             fm.pop(k, None)
             print(f"  auto_upgrade: {v} on this machine (.brain/local.json): upgrades core when no job is open")
+        elif k in ("coordinator_sessions", "coordinator_sessions:"):
+            from . import spend
+            ids = [i.strip() for i in v.split(",")] if v.strip() else []
+            if any(not spend.SESSION_ID.fullmatch(i) for i in ids):
+                _m_common.die("coordinator_sessions needs comma-separated runtime session ids")
+            previous = inst.local_of(a.id).get("coordinator_sessions", [])
+            if k == "coordinator_sessions" and ids and isinstance(previous, list):
+                ids = [i for i in previous if isinstance(i, str) and spend.SESSION_ID.fullmatch(i)] + ids
+            # The most recently selected occurrence is current, even when resuming
+            # an earlier session. ':=' replaces history; an empty value clears it.
+            inst.local_of(a.id)["coordinator_sessions"] = list(reversed(dict.fromkeys(reversed(ids))))
+            fm.pop("coordinator_sessions", None)
+            print("  coordinator_sessions: this machine (.brain/local.json)")
         elif k in _m_common.LOCAL_KEYS or k in ("synced_at", "workbench", "wake", "wake_default"):
             inst.local_of(a.id)[k] = str(Path(v).expanduser().resolve()) if k == "workbench" else v
             fm.pop(k, None)

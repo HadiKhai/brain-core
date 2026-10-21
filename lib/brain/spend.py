@@ -971,19 +971,34 @@ def any_cwd(path, allowed, forbidden):
 
 def spend_lookback(inst, n, since=None, also=()):
     """Every past session about a node's home (as `brain history` finds them), as aggregates only."""
-    match_home, _ = _m_history.history_matcher(inst, n, also)
+    if n["external"]:
+        match_home, _ = _m_history.history_matcher(inst, n, also)
+    else:
+        if also:
+            _m_common.die("--also requires an external git home")
+        # Exact node folders keep a parent's spend from absorbing child nodes.
+        match_home = lambda cwd, remote: spend_inside(cwd, n["dir"]) and Path(cwd).resolve() == n["dir"].resolve()
+    recorded = n["local"].get("coordinator_sessions", [])
+    coordinators = {i for i in recorded if isinstance(i, str) and SESSION_ID.fullmatch(i)} \
+        if isinstance(recorded, list) else set()
     heads = {}
+    coordinator_ids = {"claude": set(), "codex": set()}
 
     def match(runtime, f, allowed, forbidden):
         if runtime == "claude" and f.parent.name == "subagents":
-            # A sub-agent of a matching session (its parent is read first), and only if it ran in a place that
-            # counts on its own: a parent never vouches for a child's folder.
-            return f.parent.parent.name in heads and bool(match_home(any_cwd(f, allowed, forbidden), ""))
+            parent = f.parent.parent.name
+            # Recorded identity vouches for descendants independently of cwd. A
+            # session admitted only by its home still cannot vouch for a foreign cwd.
+            return parent in coordinator_ids["claude"] or (
+                parent in heads and bool(match_home(any_cwd(f, allowed, forbidden), "")))
         fh, why = _m_history.transcript_open(f, allowed, forbidden)
         s = _m_history.history_head(f, runtime, fh) if fh else None
-        if not s or not match_home(s["cwd"], s["repo_url"]):
+        if not s or not (s["id"] in coordinators or match_home(s["cwd"], s["repo_url"])):
             return False
-        heads[f.stem if runtime == "claude" else s["id"]] = True
+        sid = f.stem if runtime == "claude" else s["id"]
+        heads[sid] = True
+        if s["id"] in coordinators:
+            coordinator_ids[runtime].add(sid)
         return True
     aggs, _, _ = spend_all(inst, match=match)
     ids = {a["id"] for a in aggs}
@@ -997,7 +1012,15 @@ def spend_lookback(inst, n, since=None, also=()):
             for root in (cfg / "sessions", cfg / "archived_sessions"):
                 for f in spend_walk(root) if root.is_dir() else []:
                     m = codex_meta(f, allowed, forbidden)
-                    if m and m[2] in ids and m[0] not in ids and match_home(m[1], ""):
+                    if not m or m[2] not in ids:
+                        continue
+                    by_coordinator = m[2] in coordinator_ids["codex"]
+                    if by_coordinator and m[0] not in coordinator_ids["codex"]:
+                        # Propagate identity even if the child was already admitted
+                        # by home, so its scratch-folder grandchildren count too.
+                        coordinator_ids["codex"].add(m[0])
+                        grew = True
+                    if m[0] not in ids and (by_coordinator or match_home(m[1], "")):
                         agg = spend_file(inst, f, "codex", allowed, forbidden)
                         if agg:
                             aggs.append(agg)
@@ -1074,7 +1097,7 @@ def cmd_spend(a):
     if not a.id:
         _m_common.die("brain spend <node> [--since DATE], or brain spend --machine")
     n = inst.node(a.id)
-    if not n["external"] or not n["home_path"] or not _m_nodes.repo_root(n["home_path"]):
+    if n["external"] and (not n["home_path"] or not _m_nodes.repo_root(n["home_path"])):
         _m_common.die(f"{n['id']}: spend looks back over sessions about an external git home (brain set {n['id']} home=<path>)")
     record, aggs = spend_lookback(inst, n, since, a.also)
     if a.json:
