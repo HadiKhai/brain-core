@@ -383,70 +383,6 @@ class QuestionWake(Scenario):
             self.module.wake_drain(self.inst, self.n)
         self.assertEqual(len(self.calls.read_text().splitlines()), 1)
 
-    def test_parallel_requests_have_one_delivery(self):
-        with mock.patch.object(self.module, "wake_start"):
-            threads = [threading.Thread(target=self.module.request_wake,
-                       args=(self.inst, self.n, "same reason")) for _ in range(12)]
-            for thread in threads:
-                thread.start()
-            for thread in threads:
-                thread.join()
-        self.drain()
-        self.assertEqual(len(self.calls.read_text().splitlines()), 1)
-
-    def test_root_wake_tick_sees_fresh_descendant_question(self):
-        now = datetime.datetime.now(datetime.timezone.utc).isoformat()
-        (self.n["dir"] / "inbox.md").write_text("- " + now +
-            " from runtime: Host question: Choose blue? <!-- host-question:abc -->\n")
-        output = io.StringIO()
-        with mock.patch.dict(os.environ, self.env, clear=True), \
-                mock.patch.object(self.module, "load", return_value=self.inst), \
-                mock.patch.object(self.module, "core_update", return_value=None), \
-                mock.patch.object(self.module, "auto_upgrade", return_value=None), contextlib.redirect_stdout(output):
-            self.module.cmd_due(argparse.Namespace(id="root", quiet=False, json=True))
-        items = json.loads(output.getvalue())
-        self.assertTrue(any(i["kind"] == "question" and i["node"] == "a" for i in items))
-        self.assertNotIn("Choose blue", output.getvalue())
-
-    def test_root_due_escalates_without_question_text_and_live_shows_age(self):
-        old = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(minutes=11)).isoformat()
-        (self.n["dir"] / "inbox.md").write_text("- " + old +
-            " from runtime: Host question: Choose blue? <!-- host-question:abc -->\n")
-        output = io.StringIO()
-        with mock.patch.dict(os.environ, self.env, clear=True), \
-                mock.patch.object(self.module, "load", return_value=self.inst), \
-                mock.patch.object(self.module, "core_update", return_value=None), \
-                mock.patch.object(self.module, "auto_upgrade", return_value=None), \
-                mock.patch.object(self.module, "request_wake") as wake, contextlib.redirect_stdout(output):
-            self.module.cmd_due(argparse.Namespace(id="root", quiet=False, json=True))
-            live = self.module.ui_state(self.inst, spend_budget=0)
-        self.assertEqual(wake.call_args.args[1]["id"], "root")
-        self.assertNotIn("Choose blue", wake.call_args.args[2])
-        self.assertIn("overdue-question", output.getvalue())
-        self.assertTrue(any(i["kind"] == "overdue-question" for i in live["due"]))
-
-    def test_outward_state_link_is_refused(self):
-        outside = self.tmp / "outside"
-        outside.mkdir()
-        (self.r / ".brain/wake").symlink_to(outside, target_is_directory=True)
-        self.assertEqual(self.enqueue("question"), 0)
-        self.assertEqual(list(outside.iterdir()), [])
-
-    def test_overdue_question_due_live_and_clear(self):
-        inbox = self.n["dir"] / "inbox.md"
-        marker = "<!-- host-question:" + "a" * 64 + " -->"
-        old = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(minutes=11)).isoformat()
-        inbox.write_text("- " + old + " from runtime: Host question: Choose blue? " + marker + "\n")
-        out = json.loads(self.b(self.r, "due", "a", "--json"))
-        overdue = [i for i in out if i["kind"] == "overdue-question"]
-        self.assertEqual(len(overdue), 1)
-        self.assertEqual(overdue[0]["escalate_to"], "root")
-        self.b(self.r, "set", "a", "question_minutes=20")
-        self.assertNotIn("overdue-question", self.b(self.r, "due", "a", "--json"))
-        inbox.write_text("")
-        self.assertNotIn("overdue-question", self.b(self.r, "due", "a", "--json"))
-
-
     def test_wake_start_drops_parent_instance_lock_capability(self):
         with mock.patch.dict(os.environ, {"BRAIN_LOCK_HELD": "fixture|123", "FIXTURE_SETTING": "kept"}, clear=True), \
                 mock.patch.object(self.module.subprocess, "Popen") as popen:
@@ -575,6 +511,71 @@ class QuestionWake(Scenario):
         self.assertFalse(list(directory.glob("*.pending")))
         self.assertEqual(self.enqueue("first"), 0)
         self.assertEqual(self.enqueue("second"), 0)
+
+    def test_parallel_requests_have_one_delivery(self):
+        with mock.patch.object(self.module, "wake_start"):
+            threads = [threading.Thread(target=self.module.request_wake,
+                       args=(self.inst, self.n, "same reason")) for _ in range(12)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+        self.drain()
+        self.assertEqual(len(self.calls.read_text().splitlines()), 1)
+
+    def test_root_wake_tick_sees_fresh_descendant_question(self):
+        now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        (self.n["dir"] / "inbox.md").write_text("- " + now +
+            " from runtime: Host question: Choose blue? <!-- host-question:abc -->\n")
+        output = io.StringIO()
+        with mock.patch.dict(os.environ, self.env, clear=True), \
+                mock.patch.object(self.module, "load", return_value=self.inst), \
+                mock.patch.object(self.module, "core_update", return_value=None), \
+                mock.patch.object(self.module, "auto_upgrade", return_value=None), contextlib.redirect_stdout(output):
+            self.module.cmd_due(argparse.Namespace(id="root", quiet=False, json=True))
+        items = json.loads(output.getvalue())
+        self.assertTrue(any(i["kind"] == "question" and i["node"] == "a" for i in items))
+        self.assertNotIn("Choose blue", output.getvalue())
+
+    def test_root_due_escalates_without_question_text_and_live_shows_age(self):
+        old = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(minutes=11)).isoformat()
+        (self.n["dir"] / "inbox.md").write_text("- " + old +
+            " from runtime: Host question: Choose blue? <!-- host-question:abc -->\n")
+        output = io.StringIO()
+        with mock.patch.dict(os.environ, self.env, clear=True), \
+                mock.patch.object(self.module, "load", return_value=self.inst), \
+                mock.patch.object(self.module, "core_update", return_value=None), \
+                mock.patch.object(self.module, "auto_upgrade", return_value=None), \
+                mock.patch.object(self.module, "request_wake") as wake, contextlib.redirect_stdout(output):
+            self.module.cmd_due(argparse.Namespace(id="root", quiet=False, json=True))
+            live = self.module.ui_state(self.inst, spend_budget=0)
+        self.assertEqual(wake.call_args.args[1]["id"], "root")
+        self.assertNotIn("Choose blue", wake.call_args.args[2])
+        self.assertIn("overdue-question", output.getvalue())
+        self.assertTrue(any(i["kind"] == "overdue-question" for i in live["due"]))
+
+    def test_outward_state_link_is_refused(self):
+        outside = self.tmp / "outside"
+        outside.mkdir()
+        (self.r / ".brain/wake").symlink_to(outside, target_is_directory=True)
+        self.assertEqual(self.enqueue("question"), 0)
+        self.assertEqual(list(outside.iterdir()), [])
+
+    def test_overdue_question_due_live_and_clear(self):
+        inbox = self.n["dir"] / "inbox.md"
+        marker = "<!-- host-question:" + "a" * 64 + " -->"
+        old = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(minutes=11)).isoformat()
+        inbox.write_text("- " + old + " from runtime: Host question: Choose blue? " + marker + "\n")
+        out = json.loads(self.b(self.r, "due", "a", "--json"))
+        overdue = [i for i in out if i["kind"] == "overdue-question"]
+        self.assertEqual(len(overdue), 1)
+        self.assertEqual(overdue[0]["escalate_to"], "root")
+        self.b(self.r, "set", "a", "question_minutes=20")
+        self.assertNotIn("overdue-question", self.b(self.r, "due", "a", "--json"))
+        inbox.write_text("")
+        self.assertNotIn("overdue-question", self.b(self.r, "due", "a", "--json"))
+
+
 
 
 
