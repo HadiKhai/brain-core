@@ -5,6 +5,24 @@ upgrading. `brain changes <node>` shows the entries this node's coordinator hasn
 `brain due <node>` lists them until `brain changes <node> --seen`. Entry headings are
 `## <date>: <title>`; once released, a heading never changes.
 
+## 2026-10-21: Questions wake coordinators within minutes
+
+For agents:
+- `brain wake <node> "<reason>"` queues a machine-local, deduplicated wake for its coordinator
+  or root. Stop-hook questions and question/blocked hand-backs call it automatically.
+- A detached stdlib worker rate-limits attempts to two minutes, retains failures and delivers
+  held reasons without LLM polling. The payload is a constant event; no question text leaves.
+- Due and live items flag unanswered captured/hand-back questions after ten minutes and route
+  them to root. `question_minutes=` changes the threshold; answered inbox lines must be removed.
+
+After upgrading:
+- Read `adapters/hosts/t3.md`, `roles/coordinator.md` and `skills/machine-setup/SKILL.md`.
+  With consent, configure a webhook task in each existing coordinator thread and store its
+  URL in `wake=`; T3 Connect remote access is needed if no URL is returned. Hosts without
+  webhooks retain ticks. Keep root's five-minute fallback and live pending-request checks.
+- `wake=` and root's `wake_default=` stay in `.brain/local.json`. Test with made-up questions;
+  verify the inbox independently of notification success. Reapprove changed runtime hooks.
+
 ## 2026-10-21: Group agents by concern and share context
 
 For agents:

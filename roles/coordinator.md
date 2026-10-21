@@ -380,3 +380,13 @@ also requires the local default to contain origin's default and the job to inclu
 local default-branch commits. Reconcile that branch only in a coordinator-owned worktree;
 use PR mode for host integration while the operator owns the checkout. Sync after host merges records external integrations
 once by commit identity; those rows supply no review or usage proof.
+
+## Questions wake their answering coordinator
+
+Configure this machine's `wake=` using the host adapter and retain the interval tick as recovery.
+`brain wake <node> "<reason>"` queues a deduplicated notification without sending question text;
+read `brain due <node>` and the inbox on wake. Nodes without coordinators route to root.
+Question and blocked hand-backs and supported Stop-hook captures request this wake automatically.
+Treat `overdue-question` due/live items as root escalations (ten minutes by default;
+`brain set <node> question_minutes=<minutes>`). Root's tick checks every descendant and follows
+up on those unanswered lines. Remove answered inbox lines; waking does not mark them answered.

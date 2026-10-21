@@ -65,7 +65,14 @@ one machine and live in `.brain/local.json`, never in git.
    silently in unrelated folders. If user-level hooks are unsupported or the host bypasses them,
    host pending checks remain the route. Verify the unrelated-folder no-op too.
    Refresh root's tick to check every child coordinator using `brain show <child>` bindings.
-10. Run `core/bin/brain check`, then give the operator one link per coordinator
+10. **Question wakes.** With consent, from each coordinator thread create the host adapter's
+    webhook task using its normal tick prompt, bound to that existing thread. Store the returned
+    URL with `brain set <id> wake=<URL>` (machine-local; never publish it). T3 requires Connect
+    remote access when no `webhookUrl` is returned. Set `brain set root wake_default=<command-or-URL>`
+    only if one transport can wake the intended answering coordinator. Verify with a made-up
+    `brain wake <id> "setup check"`. Keep interval ticks for failure recovery and hosts without
+    webhooks; root's five-minute fallback checks every project. No CLI host API access is needed.
+11. Run `core/bin/brain check`, then give the operator one link per coordinator
     (`core/bin/brain` lists them).
 
 ## Subscriptions on this machine
