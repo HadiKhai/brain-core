@@ -214,7 +214,7 @@ def ready_state(inst, n, branch, train=False):
             reasons.append("node verify missing, changed or failed")
         if isinstance(w, dict) and w.get("path"):
             try:
-                snap = _m_lanes.snapshot(n, w, verify_env(n, branch, w), verify_inputs(n, w))
+                snap = _m_lanes.lane_snapshot(n, w, verify_env(n, branch, w), verify_inputs(n, w))
                 if snap:
                     snap['check'] = n['fm'].get('verify_lanes_check', '').strip()
                     checked, current_head, current_main = ready_preflight(n, branch, base=main if train else None)
@@ -566,10 +566,11 @@ def run_lanes(inst, n, branch, w, env, snap, previous, head, main, inputs, force
     history = prior.get('lane_green', prior.get('verify_lanes', []))
     old = {r['name']: r for r in history if isinstance(r, dict) and isinstance(r.get('name'), str)} if eligible and isinstance(history, list) else {}
     rows, results, check = [], {}, None
-    token = _m_machine.machine_wait('verify', inst, n['id'])
+    token = None
     try:
         command = n['fm'].get('verify_lanes_check', '').strip()
         if command:
+            token = _m_machine.machine_wait('verify', inst, n['id'])
             start = time.monotonic()
             result, log = run_verify_stream(inst, n, branch, command, w, env, token, lane='fitness')
             check = dict(command=command, result=result, duration=time.monotonic()-start, log=log)
@@ -591,6 +592,8 @@ def run_lanes(inst, n, branch, w, env, snap, previous, head, main, inputs, force
             elif reuse:
                 row.update(previous_lane, reused=True)
             else:
+                if token is None:
+                    token = _m_machine.machine_wait('verify', inst, n['id'])
                 print('verify lane: ' + name, flush=True)
                 start = time.monotonic()
                 result, log = run_verify_stream(inst, n, branch, lane['command'], w, env, token, lane=name)
@@ -601,7 +604,8 @@ def run_lanes(inst, n, branch, w, env, snap, previous, head, main, inputs, force
             rows.append(row)
             results[name] = row['result']
     finally:
-        _m_machine.machine_release(token)
+        if token is not None:
+            _m_machine.machine_release(token)
     result = next((r['result'] or 1 for r in rows if r['result'] != 0), 0)
     if check and check['result']:
         result = check['result']
@@ -639,7 +643,7 @@ def record_ready(inst, n, branch, reviews, previous=None, reverify=False):
         reverify = True
     env = verify_env(n, branch, w)
     try:
-        snap = _m_lanes.snapshot(n, w, env, inputs)
+        snap = _m_lanes.lane_snapshot(n, w, env, inputs)
         if snap:
             _m_guard.no_terms_in(n, json.dumps(snap['lanes'], ensure_ascii=False), 'verify lane map')
             snap['check'] = n['fm'].get('verify_lanes_check', '').strip()
@@ -676,7 +680,7 @@ def record_ready(inst, n, branch, reviews, previous=None, reverify=False):
                      if verify_inputs(n, w, after_files) != inputs else [])
     if snap:
         try:
-            after_snap = _m_lanes.snapshot(n, w, env, verify_inputs(n, w))
+            after_snap = _m_lanes.lane_snapshot(n, w, env, verify_inputs(n, w))
             if after_snap != {k: v for k, v in snap.items() if k != 'check'}:
                 after.append('verify lane map, toolchain or input files changed during verify')
         except (ValueError, OSError, UnicodeError):

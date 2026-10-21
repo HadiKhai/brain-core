@@ -120,6 +120,8 @@ class VerifyLanes(Scenario):
     def test_glob_semantics_and_train_recorded_base(self):
         r, home, wt, lanes = self.setup_lanes()
         m = core_loader.SourceFileLoader('lane_hooks', str(Path(__file__).resolve().parents[1] / 'bin/brain')).load_module()
+        self.assertTrue(m.snapshot.__module__.endswith('.nodes'))
+        self.assertTrue(m.lane_snapshot.__module__.endswith('.verify_lanes'))
         self.assertTrue(m.matches('root.py', ['**/*.py']))
         self.assertFalse(m.matches('src/nested/a.py', ['src/*.py']))
         self.assertFalse(m.matches('src/no.py', ['**/*.py', '!src/no.py']))
@@ -214,3 +216,15 @@ class VerifyLanes(Scenario):
         # of its side effect; ready must additionally report the dirty worktree.
         self.b(r, 'set', 'a', 'verify_lanes_from=echo dirty > calc.py; cat lanes.json')
         self.assertIn('dirty', self.b(r, 'ready', 'a', '--branch', 'job', ok=False))
+
+    def test_all_reused_lanes_do_not_take_a_verify_slot(self):
+        r, home, wt, lanes = self.setup_lanes()
+        self.record(r)
+        m = core_loader.SourceFileLoader('lane_reuse_slot', str(Path(__file__).resolve().parents[1] / 'bin/brain')).load_module()
+        inst = m.Instance(r)
+        n = inst.node('a')
+        previous = self.read_packet()
+        with mock.patch.dict('os.environ', self.env), mock.patch.object(m.record_ready.__globals__['_m_machine'], 'machine_wait', side_effect=AssertionError('unchanged lanes must not queue')):
+            packet, reasons = m.record_ready(inst, n, 'job', 2, previous)
+        self.assertEqual(reasons, [])
+        self.assertTrue(all(row['reused'] for row in packet['verify_lanes']))

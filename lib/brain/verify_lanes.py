@@ -10,8 +10,8 @@ import subprocess
 import sys
 from pathlib import Path
 
-from . import common
-from . import jobs
+from . import common as _m_common
+from . import jobs as _m_jobs
 
 
 def glob_regex(pattern):
@@ -67,7 +67,7 @@ def lane_map(n, w, env):
             command, pipe, inputs = rest.partition('|')
             if not sep or not pipe:
                 raise ValueError('verify_lanes needs name: command | input globs')
-            data.append(dict(name=name.strip(), command=command.strip(), inputs=common.lst(inputs)))
+            data.append(dict(name=name.strip(), command=command.strip(), inputs=_m_common.lst(inputs)))
     if not isinstance(data, list) or not data:
         raise ValueError('lane map must be a nonempty JSON array')
     lanes, names = [], set()
@@ -104,7 +104,7 @@ def lane_map(n, w, env):
 
 
 def tracked_files(w):
-    proc = common.git('ls-files', '--stage', '-z', cwd=w['path'])
+    proc = _m_common.git('ls-files', '--stage', '-z', cwd=w['path'])
     if proc.returncode or '\ufffd' in proc.stdout:
         raise ValueError('cannot enumerate lane inputs losslessly')
     found = {}
@@ -136,7 +136,7 @@ LOCK_NAMES = {'package-lock.json', 'npm-shrinkwrap.json', 'yarn.lock', 'pnpm-loc
               '.npmrc', '.yarnrc', '.yarnrc.yml', 'requirements.txt', 'requirements-dev.txt'}
 
 
-def snapshot(n, w, env, inputs):
+def lane_snapshot(n, w, env, inputs):
     lanes, map_hash = lane_map(n, w, env)
     if not lanes:
         return None
@@ -159,20 +159,20 @@ def snapshot(n, w, env, inputs):
             tools.append([tool, path, [stat.st_size, stat.st_mtime_ns] if stat else None])
         except OSError:
             raise ValueError('cannot inspect verify toolchain')
-    context = jobs.digest([map_hash, sorted((k, v) for k, v in n['fm'].items() if k.startswith('verify')),
+    context = _m_jobs.digest([map_hash, sorted((k, v) for k, v in n['fm'].items() if k.startswith('verify')),
                            sorted((k, v) for k, v in files.items() if Path(k).name in LOCK_NAMES or Path(k).name.endswith('.lock')),
-                           platform.platform(), sys.version, env.get('PATH'), tools,
+                           platform.platform(), sys.version, str(n['home_path']), str(w['path']), env.get('PATH'), tools,
                            sorted((k, v) for k, v in env.items() if k in {
                                'VIRTUAL_ENV', 'JAVA_HOME', 'RUSTUP_TOOLCHAIN', 'NODE_OPTIONS',
                                'PYTHONPATH', 'CC', 'CXX', 'CFLAGS', 'CXXFLAGS', 'LDFLAGS'})])
-    hashes = {l['name']: jobs.digest([inputs, sorted((p, v) for p, v in files.items() if matches(p, l['inputs']))]) for l in lanes}
+    hashes = {l['name']: _m_jobs.digest([inputs, sorted((p, v) for p, v in files.items() if matches(p, l['inputs']))]) for l in lanes}
     return dict(lanes=lanes, map_hash=map_hash, context=context, hashes=hashes, files=files)
 
 
 def changed_since(cwd, head, current):
     if not isinstance(head, str) or not re.fullmatch(r'[0-9a-f]{40}|[0-9a-f]{64}', head):
         return None
-    if common.git('merge-base', '--is-ancestor', head, current, cwd=cwd).returncode:
+    if _m_common.git('merge-base', '--is-ancestor', head, current, cwd=cwd).returncode:
         return None
-    proc = common.git('diff', '--name-only', '-z', '--no-renames', '--ignore-submodules=none', head, current, cwd=cwd)
+    proc = _m_common.git('diff', '--name-only', '-z', '--no-renames', '--ignore-submodules=none', head, current, cwd=cwd)
     return proc.stdout.rstrip('\0').split('\0') if proc.returncode == 0 else None
