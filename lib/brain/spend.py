@@ -982,17 +982,23 @@ def spend_lookback(inst, n, since=None, also=()):
     coordinators = {i for i in recorded if isinstance(i, str) and SESSION_ID.fullmatch(i)} \
         if isinstance(recorded, list) else set()
     heads = {}
+    coordinator_ids = {"claude": set(), "codex": set()}
 
     def match(runtime, f, allowed, forbidden):
         if runtime == "claude" and f.parent.name == "subagents":
-            # A sub-agent of a matching session (its parent is read first), and only if it ran in a place that
-            # counts on its own: a parent never vouches for a child's folder.
-            return f.parent.parent.name in heads and bool(match_home(any_cwd(f, allowed, forbidden), ""))
+            parent = f.parent.parent.name
+            # Recorded identity vouches for descendants independently of cwd. A
+            # session admitted only by its home still cannot vouch for a foreign cwd.
+            return parent in coordinator_ids["claude"] or (
+                parent in heads and bool(match_home(any_cwd(f, allowed, forbidden), "")))
         fh, why = _m_history.transcript_open(f, allowed, forbidden)
         s = _m_history.history_head(f, runtime, fh) if fh else None
         if not s or not (s["id"] in coordinators or match_home(s["cwd"], s["repo_url"])):
             return False
-        heads[f.stem if runtime == "claude" else s["id"]] = True
+        sid = f.stem if runtime == "claude" else s["id"]
+        heads[sid] = True
+        if s["id"] in coordinators:
+            coordinator_ids[runtime].add(sid)
         return True
     aggs, _, _ = spend_all(inst, match=match)
     ids = {a["id"] for a in aggs}
@@ -1006,7 +1012,15 @@ def spend_lookback(inst, n, since=None, also=()):
             for root in (cfg / "sessions", cfg / "archived_sessions"):
                 for f in spend_walk(root) if root.is_dir() else []:
                     m = codex_meta(f, allowed, forbidden)
-                    if m and m[2] in ids and m[0] not in ids and match_home(m[1], ""):
+                    if not m or m[2] not in ids:
+                        continue
+                    by_coordinator = m[2] in coordinator_ids["codex"]
+                    if by_coordinator and m[0] not in coordinator_ids["codex"]:
+                        # Propagate identity even if the child was already admitted
+                        # by home, so its scratch-folder grandchildren count too.
+                        coordinator_ids["codex"].add(m[0])
+                        grew = True
+                    if m[0] not in ids and (by_coordinator or match_home(m[1], "")):
                         agg = spend_file(inst, f, "codex", allowed, forbidden)
                         if agg:
                             aggs.append(agg)

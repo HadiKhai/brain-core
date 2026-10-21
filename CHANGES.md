@@ -9,18 +9,21 @@ upgrading. `brain changes <node>` shows the entries this node's coordinator hasn
 
 For agents:
 - Ledger writes repair review counts from retained, matching completed hand-backs,
-  including closed rows. Rows without valid review evidence keep their counts.
+  including closed rows. Open rows retain any later review increments. Rows without
+  valid review evidence keep their counts.
 - `brain spend root` and nodes without external homes count sessions in their exact
   node folder. External homes retain the existing repository attribution rules.
-- Spend also counts recorded coordinator runtime session IDs from scratch folders.
+- Spend also counts recorded coordinator runtime session IDs and their delegated
+  descendants from scratch folders.
   Subscription restrictions, date filters and aggregate-only storage still apply.
 
 After upgrading:
 - The next ledger write repairs retained review evidence; deleted hand-backs cannot
   reconstruct old counts. No manual ledger migration is needed.
 - Record runtime session IDs with `brain set <node> coordinator_sessions=id1,id2`.
-  This ordered list stays in machine-local `.brain/local.json`; retain prior IDs
-  and append the current coordinator last. An empty value clears the list.
+  This appends to the machine-local `.brain/local.json` list, retains earlier IDs,
+  and moves a repeated ID to the end so the last ID is current. Use
+  `coordinator_sessions:=id1,id2` to replace the list; an empty value clears it.
   Use runtime session IDs, not host thread links. No conversation text is needed.
 
 

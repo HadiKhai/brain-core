@@ -535,7 +535,7 @@ class Spend(Scenario):
         ids = "aaaa1001-coord,cccc1002-coord,aaaa1001-coord"
         self.b(self.r, "set", "root", "coordinator_sessions=" + ids)
         local = json.loads((self.r / ".brain/local.json").read_text())
-        self.assertEqual(local["nodes"]["root"]["coordinator_sessions"], ["aaaa1001-coord", "cccc1002-coord"])
+        self.assertEqual(local["nodes"]["root"]["coordinator_sessions"], ["cccc1002-coord", "aaaa1001-coord"])
         self.assertNotIn("coordinator_sessions", (self.r / "node.md").read_text())
         root = json.loads(self.b(self.r, "spend", "root", "--json"))
         self.assertEqual((root["total"]["fresh"], root["total"]["sessions"]), (330, 3))
@@ -558,6 +558,60 @@ class Spend(Scenario):
         self.assertEqual((result["total"]["fresh"], result["total"]["sessions"]), (300, 2))
         future = (datetime.date.today() + datetime.timedelta(days=3)).isoformat()
         self.assertEqual(json.loads(self.b(self.r, "spend", "app", "--since", future, "--json"))["total"]["sessions"], 0)
+
+    def test_recorded_claude_coordinator_includes_scratch_subagents_only(self):
+        scratch = self.tmp / "scratch"
+        scratch.mkdir()
+        sid = "aaaa3001-coord"
+        parent = self.cl(scratch, sid, "private", [("said", 1, "c1", (100, 0, 0, 10))])
+        self.cl(scratch, "aaaa3002-child", "private", [("said", 2, "c2", (50, 0, 0, 5))],
+                path=parent.parent / sid / "subagents" / "agent-1.jsonl")
+        other = self.cl(self.home, "aaaa3003-home", "private", [("said", 1, "h1", (20, 0, 0, 2))])
+        self.cl(scratch, "aaaa3004-foreign", "private", [("said", 2, "x1", (900, 0, 0, 90))],
+                path=other.parent / "aaaa3003-home" / "subagents" / "agent-2.jsonl")
+        self.b(self.r, "set", "app", "coordinator_sessions=" + sid)
+        total = json.loads(self.b(self.r, "spend", "app", "--json"))["total"]
+        self.assertEqual((total["fresh"], total["sessions"], total["subagents"]), (170, 3, 1))
+
+    def test_recorded_codex_coordinator_includes_transitive_scratch_subagents(self):
+        scratch = self.tmp / "scratch"
+        scratch.mkdir()
+        items = [(1, *self.counter((100, 0, 10, 0), (100, 0, 10, 0)))]
+        # Write descendants first so discovery must grow the lineage in more than one pass.
+        for sid, parent, cwd in [
+                ("cccc4003-grand", "cccc4002-child", scratch),
+                ("cccc4002-child", "cccc4001-coord", self.home),
+                ("cccc4001-coord", None, scratch),
+                ("cccc4004-other", None, self.home),
+                ("cccc4005-foreign", "cccc4004-other", scratch)]:
+            source = {"source": {"subagent": {"thread_spawn": {"parent_thread_id": parent}}}} if parent else {}
+            self.cx(cwd, sid, items, **source)
+        self.b(self.r, "set", "app", "coordinator_sessions=cccc4001-coord")
+        total = json.loads(self.b(self.r, "spend", "app", "--json"))["total"]
+        self.assertEqual((total["fresh"], total["sessions"], total["subagents"]), (400, 4, 2))
+
+    def test_coordinator_selection_moves_repeated_session_last(self):
+        self.b(self.r, "set", "root", "coordinator_sessions=aaaa5001-first,bbbb5002-next,aaaa5001-first")
+        local = json.loads((self.r / ".brain/local.json").read_text())
+        self.assertEqual(local["nodes"]["root"]["coordinator_sessions"], ["bbbb5002-next", "aaaa5001-first"])
+        self.b(self.r, "set", "root", "coordinator_sessions=bbbb5002-next")
+        local = json.loads((self.r / ".brain/local.json").read_text())
+        self.assertEqual(local["nodes"]["root"]["coordinator_sessions"], ["aaaa5001-first", "bbbb5002-next"])
+
+    def test_new_coordinator_appends_history_and_explicit_replace_is_available(self):
+        self.b(self.r, "set", "root", "coordinator_sessions=aaaa6001-first,bbbb6002-next")
+        self.b(self.r, "set", "root", "coordinator_sessions=cccc6003-new")
+        local = json.loads((self.r / ".brain/local.json").read_text())
+        self.assertEqual(local["nodes"]["root"]["coordinator_sessions"],
+                         ["aaaa6001-first", "bbbb6002-next", "cccc6003-new"])
+        self.b(self.r, "set", "root", "coordinator_sessions:=bbbb6002-next")
+        local = json.loads((self.r / ".brain/local.json").read_text())
+        self.assertEqual(local["nodes"]["root"]["coordinator_sessions"], ["bbbb6002-next"])
+        self.assertNotIn("coordinator_sessions", (self.r / "node.md").read_text())
+        self.b(self.r, "set", "root", "coordinator_sessions:=../bad", ok=False)
+        self.b(self.r, "set", "root", "coordinator_sessions=")
+        local = json.loads((self.r / ".brain/local.json").read_text())
+        self.assertEqual(local["nodes"]["root"]["coordinator_sessions"], [])
 
     @unittest.skipUnless(shutil.which("zstd"), "zstd not installed")
     def test_compressed_codex_sessions_are_read_once(self):

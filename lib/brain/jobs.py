@@ -69,7 +69,10 @@ def write_jobs(inst, n, rows):
         ready = hb.get("ready")
         rounds = ready.get("review_rounds") if isinstance(ready, dict) else hb.get("review_rounds")
         if hb.get("state") == "done" and type(rounds) is int and rounds >= 0:
-            row["Reviews"] = str(rounds)
+            current = int(row.get("Reviews") or 0) if str(row.get("Reviews") or "0").isdigit() else 0
+            # A coordinator can start another review after this hand-back. Retained
+            # evidence repairs undercounts, but cannot undo an open job's new rounds.
+            row["Reviews"] = str(rounds if row.get("Ended") else max(current, rounds))
     f = n["dir"] / JOBS_FILE
     head = (f"# Jobs: {n['id']}\n\n{JOBS_MARK}\nOne row per job, kept by `brain wt add`, `brain review`, "
             "`brain wt rm` and `brain wt prune`; times carry their UTC offset; tokens are exact counts from this "
