@@ -278,7 +278,9 @@ class BriefLimits(Scenario):
             self.assertIn("largest sections:", out)
             destination = self.tmp / (command[0] + ".md")
             ledger_before = (r / "nodes/a/job-ledger.md").read_bytes()
-            out = self.b(r, *command, "x" * (17 * 1024), "--out", str(destination), ok=False)
+            # Permit the fixture's second full review to reach the size refusal.
+            reason = ("--reason", "security") if command[0] == "review" else ()
+            out = self.b(r, *command, "x" * (17 * 1024), "--out", str(destination), *reason, ok=False)
             self.assertIn("refused:", out)
             self.assertIn("Task" if command[0] != "review" else "Focus", out)
             self.assertFalse(destination.exists())
