@@ -8,6 +8,13 @@ test("collapsed rail: Agents and project sub-items open in a flyout by hover, fo
   await page.getByRole("button", { name: "Toggle Sidebar" }).click();
   const rail = page.locator("[data-state=collapsed][data-slot=sidebar]");
   await expect(rail).toBeVisible();
+  // The state attribute changes before the collapsing groups finish moving. Hover the settled
+  // trigger: an early pointer can otherwise end up outside it as the group labels slide away.
+  await rail.evaluate(async (e) => {
+    await Promise.all(e.getAnimations({ subtree: true })
+      .filter((a) => a.effect?.getTiming().iterations !== Infinity)
+      .map((a) => a.finished.catch(() => {})));
+  });
   const agents = rail.getByRole("button", { name: "Agents", exact: true });
   const flyout = page.locator(".rail-flyout");
 
