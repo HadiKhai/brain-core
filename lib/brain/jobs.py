@@ -183,16 +183,17 @@ def cmd_handback(a):
             message = " ".join((need or ("See report " + data["report"] if data["report"] else
                                             "Coordinator choice needed; see worker hand-back")).split())
             marker = "<!-- handback:" + digest([job_key(row), a.state, message]) + " -->"
+            wake_id = os.urandom(16).hex()
             inbox = n["dir"] / "inbox.md"
-            bullet = f"- {inst.now()} from worker {a.branch}: {a.state}: {message} {marker}\n"
+            bullet = f"- {inst.now()} from worker {a.branch}: {a.state}: {message} <!-- wake:{wake_id} --> {marker}\n"
             _m_guard.no_terms_in(n, bullet, "the inbox question")
             question_created = _m_transitions.inbox_append(n["dir"], bullet, marker)
             _m_common.touch(inbox)
         inst.commit([], f"{n['id']}: worker hand-back")
     if question_created:
-        _m_hosts.request_wake(inst, n, "handback:" + os.urandom(16).hex())
+        _m_hosts.request_wake(inst, n, 'wake:' + wake_id)
     elif a.state == "blocked" and not need:
-        _m_hosts.request_wake(inst, n, "handback:" + os.urandom(16).hex())
+        _m_hosts.request_wake(inst, n, "handback:" + digest([job_key(row), a.state]))
     try:
         current = open_job(read_jobs(n) or [], a.branch)
         if current:

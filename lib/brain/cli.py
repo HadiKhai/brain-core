@@ -446,7 +446,7 @@ def main():
         token = _m_machine.machine_wait(inst=inst, node=node["id"])
         _m_machine.machine_release(token)
     if a.f == _m_machine.cmd_machine and a.action == "sample":
-        a.f(a)  # short nonblocking instance lock, no whole-brain scan
+        a.f(a)  # sampler and watcher each take a short nonblocking instance lock
         return
     root = _m_nodes.try_find_root() if writes(a) else None
     if root:

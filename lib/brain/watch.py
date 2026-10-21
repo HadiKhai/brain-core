@@ -8,6 +8,7 @@ import shlex
 from . import common as _m_common
 from . import guard as _m_guard
 from . import hosts as _m_hosts
+from . import instance as _m_instance
 from . import jobs as _m_jobs
 from . import machine as _m_machine
 from . import nodes as _m_nodes
@@ -49,10 +50,19 @@ def watch_items(inst, n):
     for item in items:
         if item['kind'] == 'stale-status':
             continue
-        if item['kind'] == 'inbox' and ('<!-- host-question:' in item['text'] or '<!-- handback:' in item['text']):
-            continue  # Stop/handback already enqueued these question wakes
+        direct_reason = None
+        if item['kind'] == 'inbox':
+            marker = re.search(r'<!-- (?:host-question|handback):[^>]+ -->', item['text'])
+            direct_reason = marker.group() if marker else None
+            episode = re.search(r'<!-- wake:([0-9a-f]{32}) -->', item['text'])
+            if episode and marker:
+                direct_reason = 'wake:' + episode[1]
         if item['kind'] == 'handback' and item.get('state') in ('question', 'blocked'):
-            continue  # direct question-wake owns these signals
+            row = next(r for r in rows if _m_jobs.job_key(r) == item['job'])
+            if any(f"from worker {row['Job']}: {item['state']}:" in line
+                   and '<!-- handback:' in line for line in state['inbox']):
+                continue  # the associated inbox item owns this same wake
+            direct_reason = 'handback:' + _m_jobs.digest([item['job'], item['state']])
         if item['kind'] == 'overdue-question':
             continue  # routed separately to root, once per source question
         if item['kind'] == 'unsettled-threads':
@@ -70,17 +80,60 @@ def watch_items(inst, n):
         if item['kind'] == 'handback':
             identity = [identity, item.get('state')]
         text = _m_nodes.import_text(item['text'], _m_guard.never_terms(n))[:400]
-        out.append({'id': watch_digest([n['id'], item['kind'], identity]),
-                    'kind': item['kind'], 'text': text})
+        entry = {'id': watch_digest([n['id'], item['kind'], identity]),
+                 'kind': item['kind'], 'text': text}
+        if direct_reason:
+            entry.update(reason=direct_reason, source=n['id'])
+        out.append(entry)
     return out
 
 
-def watch_failures(inst, nodes, acknowledged):
-    """Host adapter owns worker-runs.json; accept only currently bound, open jobs."""
-    data = watch_read(inst.root / '.brain' / 'worker-runs.json', {})
-    records = data.get('runs', [])
-    if not isinstance(records, list):
-        raise ValueError('worker runs must be a list')
+def watch_route_allows_switch(reason):
+    # TODO(router): replace prose compatibility with the requested structured eligibility flag.
+    return 'Stop starting jobs' not in reason
+
+
+def watch_retry(inst, n, row, record, marker):
+    old = record.get('runtime')
+    new = next((r for r in inst.runtimes if r != old and r in ('codex', 'claude')), None)
+    # A node pin is an explicit operator choice, never silently overridden for recovery.
+    pin = n['fm'].get('runtime')
+    if old not in ('codex', 'claude') or not new or (pin and pin != new):
+        return ''
+    klass = (_m_jobs.job_class(n, row) if hasattr(_m_jobs, 'job_class')
+             else row.get('Class', '').strip().lower() or 'build')
+    allowed = (_m_usage.class_allows_fallback(klass) if hasattr(_m_usage, 'class_allows_fallback')
+               else klass not in ('review', 'diagnose'))
+    if not allowed:
+        return ''
+    if hasattr(_m_usage, 'class_route'):
+        selected, subscription, reason = _m_usage.class_route(inst, klass, runtime=new, cached_only=True)
+        if selected != new or not watch_route_allows_switch(reason):
+            return ''
+    if (not row.get('Capacity retry')
+            and not re.search(r' -> [^:;]+: at capacity(?:;|$)', row.get('Switches', ''))):
+        switch = f'{old} -> {new}: at capacity'
+        row['Switches'] = '; '.join(filter(None, [row.get('Switches'), _m_jobs.stamp(inst) + ' ' + switch]))
+        row['Capacity retry'] = marker
+    if row.get('Capacity retry') != marker:
+        return ''
+    command = 'brain brief ' + shlex.quote(n['id']) + ' --branch ' + shlex.quote(row['Job']) + ' --runtime ' + shlex.quote(new)
+    return '; one retry recorded; coordinator: relaunch through host in existing worktree after `' + command + '`'
+
+
+def watch_failures(inst, nodes, acknowledged, warnings):
+    """Untrusted host input cannot suppress unrelated actionable work."""
+    try:
+        data = watch_read(inst.root / '.brain' / 'worker-runs.json', {})
+        records = data.get('runs', [])
+        if not isinstance(records, list):
+            raise ValueError('worker runs must be a list')
+    except (OSError, ValueError):
+        if 'worker-runs-invalid' not in warnings:
+            print('watch: worker-runs invalid; failure processing skipped')
+        warnings.add('worker-runs-invalid')
+        return
+    warnings.discard('worker-runs-invalid')
     for n in nodes:
         rows = _m_jobs.read_jobs(n) or []
         workers = n['local'].get('workers', {})
@@ -100,49 +153,54 @@ def watch_failures(inst, nodes, acknowledged):
             marker = '<!-- worker-failure:' + watch_digest([key, record['thread'], record['run']]) + ' -->'
             if marker in acknowledged:
                 continue
-            # Only fixed categories persist; raw provider diagnostics can contain secrets.
             error = str(record.get('error', '')).lower()
             capacity = 'at capacity' in error
             category = 'at capacity' if capacity else ('usage limit' if 'usage limit' in error else 'provider error')
             retry = ''
-            klass = (_m_jobs.job_class(n, row) if hasattr(_m_jobs, 'job_class')
-                     else row.get('Class', '').strip().lower() or 'build')
-            allowed = (_m_usage.class_allows_fallback(klass) if hasattr(_m_usage, 'class_allows_fallback')
-                       else klass not in ('review', 'diagnose'))
-            old = record.get('runtime')
-            new = next((r for r in inst.runtimes if r != old and r in ('codex', 'claude')), None)
-            if capacity and allowed and new and hasattr(_m_usage, 'class_route'):
-                selected, subscription, reason = _m_usage.class_route(inst, klass, runtime=new, cached_only=True)
-                new = selected if selected != old and selected in inst.runtimes and 'Stop starting jobs' not in reason else None
-            if (capacity and allowed and old in ('codex', 'claude') and new
-                    and not row.get('Capacity retry')
-                    and not re.search(r' -> [^:;]+: at capacity(?:;|$)', row.get('Switches', ''))):
-                switch = f'{old} -> {new}: at capacity'
-                row['Switches'] = '; '.join(filter(None, [row.get('Switches'), _m_jobs.stamp(inst) + ' ' + switch]))
-                row['Capacity retry'] = marker
+            previous = dict(row)
+            try:
+                if capacity:
+                    retry = watch_retry(inst, n, row, record, marker)
+            except (SystemExit, OSError, ValueError):
+                row.clear()
+                row.update(previous)  # invalid routing disables only this automatic switch
+            if row != previous:
                 _m_jobs.write_jobs(inst, n, rows)
-            # Recover the relaunch notice even after interruption following the ledger write.
-            if capacity and old in ('codex', 'claude') and new and row.get('Capacity retry') == marker:
-                command = 'brain brief ' + shlex.quote(n['id']) + ' --branch ' + shlex.quote(row['Job']) + ' --runtime ' + shlex.quote(new)
-                retry = '; one retry recorded; coordinator: relaunch through host in existing worktree after `' + command + '`'
             text = _m_nodes.import_text(f"{row['Job']}: worker run failed ({category}){retry}", _m_guard.never_terms(n))
             _m_transitions.inbox_append(n['dir'], f'- {inst.now()} from watcher: {text} {marker}\n', marker)
+            # Persist the switch and its actionable notice together; other dirty files stay untouched.
+            inst.commit([n['dir'] / _m_jobs.JOBS_FILE, n['dir'] / 'inbox.md'],
+                        f"{n['id']}: " + ('runtime switch at capacity' if retry else 'worker failure notice'))
             acknowledged.add(marker)
+
+
+def watch_state(inst):
+    path = inst.root / '.brain' / 'watch.json'
+    state = watch_read(path, {})
+    if path.exists() and (state.get('version') != 1 or not isinstance(state.get('seen'), list)):
+        raise ValueError('invalid watcher fingerprint')
+    for key in ('seen', 'failures', 'warnings'):
+        if not isinstance(state.get(key, []), list) or not all(isinstance(x, str) for x in state.get(key, [])):
+            raise ValueError('invalid watcher acknowledgement')
+    return state
+
+
+def watch_state_invalid(inst):
+    try:
+        watch_state(inst)
+        return False
+    except (OSError, ValueError):
+        return True
 
 
 def watch_run(inst):
     path = inst.root / '.brain' / 'watch.json'
-    state = watch_read(path, {})
-    if path.exists() and (state.get('version') != 1 or not isinstance(state.get('seen'), list)
-                  or not all(isinstance(x, str) for x in state['seen'])):
-        raise ValueError('invalid watcher fingerprint; restore state before watching')
+    state = watch_state(inst)  # our own acknowledgement history always fails closed
     seen = set(state.get('seen', []))
     nodes = [n for n in inst.nodes() if not n['archived']]
-    failures = state.get('failures', [])
-    if not isinstance(failures, list) or not all(isinstance(x, str) for x in failures):
-        raise ValueError('invalid failure acknowledgement')
-    failures = set(failures)
-    watch_failures(inst, nodes, failures)
+    failures = set(state.get('failures', []))
+    warnings = set(state.get('warnings', []))
+    watch_failures(inst, nodes, failures, warnings)
     groups = {}
     for n in nodes:
         # Uncoordinated nodes route actionable work to root; root needs no explicit binding.
@@ -167,7 +225,9 @@ def watch_run(inst):
         if added and group['command']:
             for key in added[:]:
                 if 'reason' in items[key]:
-                    if _m_hosts.request_wake(inst, group['node'], items[key]['reason']):
+                    origin = inst.node(items[key].get('source', group['node']['id']))
+                    if (_m_hosts.wake_recorded(inst, origin, items[key]['reason'])
+                            or _m_hosts.request_wake(inst, origin, items[key]['reason'])):
                         seen.add(key)
                         count += 1
                         queued = True
@@ -184,7 +244,7 @@ def watch_run(inst):
             _m_hosts.wake_start(inst, target)  # retries queued failures without another model tick
     # Screened current excerpts are recomputed; historical acknowledgement stores only digests.
     _m_machine.machine_publish(inst, path, json.dumps({'version': 1, 'at': inst.now(),
-                                'seen': sorted(seen), 'failures': sorted(failures), 'items': current}, sort_keys=True) + '\n')
+                                'seen': sorted(seen), 'failures': sorted(failures), 'warnings': sorted(warnings), 'items': current}, sort_keys=True) + '\n')
     print(f'watch: {count} new item(s) queued')
 
 
@@ -204,7 +264,17 @@ def watch_once(inst):
         except BlockingIOError:
             print('watch: skipped; instance busy')
             return
-        watch_run(inst)
+        stream.seek(0)
+        stream.truncate()
+        stream.write(str(os.getpid()))
+        stream.flush()
+        _m_instance._LOCK['fh'], _m_instance._LOCK['depth'] = stream, 1
+        os.environ['BRAIN_LOCK_HELD'] = f'{inst.root.resolve()}|{os.getpid()}'
+        try:
+            watch_run(inst)
+        finally:
+            _m_instance._LOCK['depth'] = 0
+            _m_instance.unlock()
 
 
 def cmd_watch(a):

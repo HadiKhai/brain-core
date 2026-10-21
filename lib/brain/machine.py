@@ -698,7 +698,10 @@ def cmd_machine(a):
     if a.action == "sample":
         machine_sample_once(inst)
         from . import watch as _m_watch
-        _m_watch.watch_once(inst)  # same minute timer; sampler has released its instance lock
+        try:
+            _m_watch.watch_once(inst)  # same minute timer; sampler has released its instance lock
+        except (OSError, ValueError):
+            print('watch: watcher state invalid; retained for repair (brain due root)')
         return
     if a.action in ("install", "uninstall"):
         machine_service(inst, a.action, a.yes)

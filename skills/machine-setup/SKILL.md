@@ -73,7 +73,9 @@ one machine and live in `.brain/local.json`, never in git.
     `brain wake <id> "setup check"`. An existing machine-care minute unit picks up the watcher on core upgrade.
     If it is missing, get operator consent before `brain machine install --yes`;
     `brain machine sample` also runs `brain watch --once`.
-    Test an unchanged due set, a new fabricated item, a repeated item and failed delivery.
+    The first run treats the existing actionable backlog as new and may wake each coordinator
+    once; review that backlog before enabling delivery. Test an unchanged due set, a new
+    fabricated item, a repeated item and failed delivery.
     The watcher persists fingerprints in `.brain/watch.json` and retries pending transports;
     never delete its acknowledgement state to repair a transport. After this works, ask the
     operator before replacing fifteen-minute coordinator and five-minute root AI ticks with

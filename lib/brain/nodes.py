@@ -564,6 +564,18 @@ def cmd_set(a):
             inst.local["fallback"] = order
             fm.pop(k, None)
             print("  fallback: this machine (.brain/local.json)")
+        elif k.startswith("worker:"):
+            key = k[len("worker:"):]
+            if not re.fullmatch(r'[0-9a-f]{24}', key):
+                _m_common.die('worker binding needs worker:<24-character brain-job key>=<thread>')
+            workers = inst.local_of(a.id).setdefault('workers', {})
+            if not isinstance(workers, dict):
+                _m_common.die('worker bindings are invalid; repair local.json before binding')
+            if v:
+                workers[key] = v
+            else:
+                workers.pop(key, None)
+            print('  worker binding: this machine (.brain/local.json)')
         elif k == "auto_upgrade":
             if a.id != "root" or v not in ("on", "off"):
                 _m_common.die("auto_upgrade is per machine: brain set root auto_upgrade=on|off")

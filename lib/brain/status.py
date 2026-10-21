@@ -486,6 +486,11 @@ def cmd_due(a):
         if diagnostic and target["id"] not in wake_seen:
             wake_seen.add(target["id"])
             items.append({"node": target["id"], "kind": "wake", "text": diagnostic})
+    if any(n['id'] == 'root' for n in nodes):
+        from . import watch as _m_watch
+        if _m_watch.watch_state_invalid(inst):
+            items.append({'node': 'root', 'kind': 'watcher',
+                          'text': 'watcher state invalid; restore .brain/watch.json before watching'})
     items += machine_due_items(inst, nodes, state, items)
     if not a.quiet and getattr(a, "machine", False):
         items = [i for i in items if i["kind"] != "machine"] + [

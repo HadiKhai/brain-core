@@ -395,8 +395,8 @@ up on those unanswered lines. Remove answered inbox lines; waking does not mark 
 
 ## Failed worker wakes
 
-On launch/replacement, bind the worker's exact job key to its host thread in machine-local
-`nodes[<node>].workers` (host adapter). The host integration or safety-net tick writes terminal
+On launch/replacement, bind the worker under the instance lock with
+`brain set <node> worker:<brain-job-key>=<thread-id>` (machine-local; host adapter). The host integration or safety-net tick writes terminal
 failed run records to `.brain/worker-runs.json`; `brain watch --once` reads only that local
 file and never queries host state. Record provider errors, usage limits and capacity failures;
 inspect bound workers on every host tick, including root's own workers. A failure inbox line

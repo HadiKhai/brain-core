@@ -17,6 +17,11 @@ For agents:
 - The host adapter documents machine-local bound-worker failure records. A failed run
   wakes once; an eligible capacity failure records one other-runtime switch and prints
   the exact resume brief command. Only the coordinator relaunches through the host.
+  There is no host exporter in this release: without a separately configured exporter, failure
+  detection waits for the hourly host tick (up to one hour plus the next watcher minute).
+- Malformed host failure input is isolated; invalid routing disables only the affected retry.
+  Watcher acknowledgement state remains fail-closed, with a short sampler diagnostic and
+  `brain due root` repair notice. Bind workers with `brain set <node> worker:<job-key>=<thread>`.
 
 After upgrading:
 - Read the T3 adapter, coordinator role and machine-setup skill. With operator consent,
