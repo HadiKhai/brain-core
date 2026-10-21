@@ -193,3 +193,29 @@ missing/stale history still gets a live admission check. Invalid policy keeps di
 readable and holds queued heavy work in place until repaired. Episode delivery checks
 instance/Git links before committing; unsafe metadata keeps the notice pending. Tests inject fabricated readings;
 never generate load or heat to test the guard.
+
+## Local merge train
+
+For `merge=local`, the coordinator may run `brain train <node>` after worker reviews and
+hand-backs. It queues ready open jobs by their first-ready timestamp, or in the exact order
+`--jobs job/a job/b` gives. Explicit lists refuse as a whole if any job is not ready.
+Per-job readiness uses affected verify lanes when configured, otherwise the full verify.
+Train admission checks the recorded base, so main advancing does not require another
+worker verify while queued. Ordinary `brain ready` and per-job merges keep their current-base rules.
+
+Main must be unoccupied: detach it only in a coordinator-owned checkout; never change the
+operator checkout to make a train run. PR-mode homes use the existing per-job flow. A train
+uses a new `train/<date>-<n>` branch and separate staging worktree, runs the node setup script,
+and reserves its own ports. The green batch needs one full verify. Conflicts eject a job
+with file names. Red batches verify the baseline and bisect prefixes; the first job making
+a green prefix red returns to its worker with the failing log. This also assigns an
+interaction to its later job. A red baseline stops without blaming any job.
+
+Read the node's `job-trains/*.json` journal for the queue, ejections, full run logs and final
+tip. Ejected jobs remain open and need a new worker hand-back before another train will
+admit them. Pass the reason/log to the existing worker thread using the host adapter.
+A green train fast-forwards local main with a compare-and-swap and records each accepted
+job once with its Batch column. It prints a release command and never pushes. Re-running
+`brain train` reconciles an interrupted publication before starting new work. An interrupted
+staging run is never evidence for release. Retained dirty staging and its port reservation
+need coordinator inspection before cleanup; train branches and journals remain as evidence.

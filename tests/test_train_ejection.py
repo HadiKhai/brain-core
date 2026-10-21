@@ -24,6 +24,9 @@ class TrainEjections(Scenario):
         data = {'version': 1, 'ejected': [{'key': m.job_key(row), 'packet': m.ready_fingerprint(n, row, packet)}]}
         path.write_text(json.dumps(data))
         self.assertIn('previously ejected', m.train_ejection(n, row, packet))
+        with mock.patch.dict('os.environ', self.env):
+            self.assertFalse(m.ready_state(inst, n, 'job')['ready'])
+            self.assertFalse(m.ready_state(inst, n, 'job', train=True)['ready'])
         self.assertIsNone(m.train_ejection(n, {**row, 'Started': '2020-01-01T00:00:00Z'}, packet))
         self.assertIsNone(m.train_ejection(n, row, {**packet, 'head': '0' * 40}))
         # Normal re-handback reuses valid verify evidence, incrementing the reuse counter.
