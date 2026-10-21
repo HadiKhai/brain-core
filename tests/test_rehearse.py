@@ -57,6 +57,137 @@ class RehearsalComparison(unittest.TestCase):
                 rehearsal.sandbox_prefix(Path('/tmp/fabricated'))
 
 
+class RehearsalStability(Scenario):
+    def setUp(self):
+        super().setUp()
+        self.root = self.repo(self.tmp / 'live', {'note.md': 'original\n',
+                                                '.gitignore': '.brain/\nignored/\n'})
+        (self.root / 'core/bin').mkdir(parents=True)
+        (self.root / 'core/bin/brain').write_text('fixture')
+        self.git('add', 'core', cwd=self.root)
+        self.git('commit', '-qm', 'core fixture', cwd=self.root)
+        self.oid = self.git('rev-parse', 'HEAD', cwd=self.root).strip()
+        self.home = self.repo(self.tmp / 'candidate', {'README.md': 'candidate'})
+        (self.home / 'bin').mkdir()
+        (self.home / 'bin/brain').write_text('fixture')
+        self.git('add', 'bin', cwd=self.home)
+        self.git('commit', '-qm', 'candidate fixture', cwd=self.home)
+        self.head = self.git('rev-parse', 'HEAD', cwd=self.home).strip()
+
+    def run_rehearsal(self, mutation, during_run=False):
+        from types import SimpleNamespace
+        inst = SimpleNamespace(root=self.root, nodes=lambda: [])
+        node = dict(external=True, home_path=self.home, id='engine')
+        copy = rehearsal.copy_tree
+        def copying(source, dest):
+            copy(source, dest)
+            if source == self.root and not during_run:
+                mutation()
+        def lane(*args):
+            if during_run:
+                mutation()
+            return {'hook': result()}
+        with mock.patch.dict(os.environ, self.env), \
+                mock.patch.object(rehearsal, 'sandbox_self_check'), \
+                mock.patch.object(rehearsal, 'sandbox_prefix', return_value=[]), \
+                mock.patch.object(rehearsal._m_verify, 'ready_refs', return_value=(self.head, self.head)), \
+                mock.patch.object(rehearsal._m_verify, 'integration_parent', return_value=self.head), \
+                mock.patch.object(rehearsal._m_instance, 'Instance', return_value=inst), \
+                mock.patch.object(rehearsal, 'probe_delivery', return_value=[]), \
+                mock.patch.object(rehearsal, 'copy_tree', side_effect=copying), \
+                mock.patch.object(rehearsal, 'run_lane', side_effect=lane), \
+                mock.patch.object(rehearsal._m_jobs, 'stamp', return_value='fixture'):
+            return rehearsal.rehearse(inst, node, 'job')
+
+    def write(self, rel, text='changed'):
+        p = self.root / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(text)
+
+    def test_volatile_churn_during_copy_and_run_does_not_refuse(self):
+        paths = ['.git/refs/t3/checkpoint', '.git/logs/HEAD', '.git/COMMIT_EDITMSG',
+                 '.git/hook-once', '.git/index.lock', '.git/config.lock',
+                 '.brain/spend.json', '.brain/spend/usage.json', '.brain/watch.json',
+                 '.brain/a.lock', '.brain/lock', '.brain/machine.json', '.brain/hooks.log',
+                 '.brain/hooks.json', '.brain/local.json', 'ignored/cache', 'untracked.tmp']
+        for during_run in (False, True):
+            for rel in paths + ['.git/index']:
+                with self.subTest(path=rel, during_run=during_run):
+                    def mutate():
+                        if rel == '.git/index':
+                            os.utime(self.root / rel, None)
+                        else:
+                            self.write(rel, self.oid + '\n' if rel.startswith('.git/refs/') else 'churn')
+                    try:
+                        self.assertTrue(self.run_rehearsal(mutate, during_run)['passed'])
+                    finally:
+                        if rel != '.git/index':
+                            (self.root / rel).unlink(missing_ok=True)
+
+    def test_tracked_edits_and_real_ref_moves_during_copy_refuse(self):
+        parent = self.git('rev-parse', 'HEAD^', cwd=self.root).strip()
+        for rel, text in [('note.md', 'edited'), ('core/bin/brain', 'edited core'),
+                          ('.git/refs/heads/main', parent + '\n'),
+                          ('.git/refs/tags/release', self.oid + '\n'),
+                          ('.git/HEAD', self.oid + '\n')]:
+            with self.subTest(path=rel):
+                with self.assertRaisesRegex(rehearsal.RehearsalError, 'live brain moved while copying'):
+                    self.run_rehearsal(lambda: self.write(rel, text))
+
+    def test_tracked_edit_during_run_refuses_evidence(self):
+        outcome = self.run_rehearsal(lambda: self.write('note.md'), during_run=True)
+        self.assertFalse(outcome['passed'])
+        self.assertIn('live brain changed during rehearsal; evidence refused', outcome['regressions'])
+
+    def test_index_refresh_and_packing_refs_do_not_change_stability(self):
+        with mock.patch.dict(os.environ, self.env):
+            before = rehearsal.stability_snapshot(self.root)
+            self.git('update-index', '--refresh', cwd=self.root)
+            self.git('update-ref', 'refs/t3/checkpoint', self.oid, cwd=self.root)
+            self.git('pack-refs', '--all', cwd=self.root)
+            self.assertEqual(before, rehearsal.stability_snapshot(self.root))
+            self.git('commit', '--allow-empty', '-qm', 'move head', cwd=self.root)
+            self.assertNotEqual(before, rehearsal.stability_snapshot(self.root))
+
+    def test_tracked_links_and_replaced_parents_never_read_targets(self):
+        outside = self.tmp / 'outside'
+        outside.mkdir()
+        (outside / 'secret').write_text('original')
+        self.write('nested/secret', 'tracked')
+        (self.root / 'alias').symlink_to(outside / 'secret')
+        self.git('add', 'alias', 'nested', cwd=self.root)
+        (self.root / 'nested/secret').unlink()
+        (self.root / 'nested').rmdir()
+        (self.root / 'nested').symlink_to(outside, target_is_directory=True)
+        with mock.patch.dict(os.environ, self.env):
+            before = rehearsal.stability_snapshot(self.root)
+            (outside / 'secret').write_text('target changed')
+            self.assertEqual(before, rehearsal.stability_snapshot(self.root))
+            self.assertTrue(before['alias'].startswith('link:'))
+            self.assertTrue(before['nested'].startswith('link:'))
+            self.assertNotIn('nested/secret', before)
+
+    def test_gitlink_tracks_nested_dirty_content_and_refs_not_private_churn(self):
+        nested = self.repo(self.tmp / 'nested-core')
+        import shutil
+        shutil.rmtree(self.root / 'core')
+        self.git('rm', '-qr', '--cached', 'core', cwd=self.root)
+        self.git('submodule', 'add', '-q', str(nested), 'core', cwd=self.root)
+        self.git('commit', '-qam', 'gitlink core', cwd=self.root)
+        with mock.patch.dict(os.environ, self.env):
+            before = rehearsal.stability_snapshot(self.root)
+            gitdir = Path(self.git('rev-parse', '--absolute-git-dir', cwd=self.root / 'core').strip())
+            (gitdir / 'COMMIT_EDITMSG').write_text('churn')
+            self.assertEqual(before, rehearsal.stability_snapshot(self.root))
+            (self.root / 'core/README.md').write_text('dirty core')
+            self.assertNotEqual(before, rehearsal.stability_snapshot(self.root))
+
+    def test_exhaustive_snapshot_still_detects_runtime_mutations(self):
+        before = rehearsal.snapshot(self.root)
+        self.write('.brain/watch.json')
+        self.assertNotEqual(before, rehearsal.snapshot(self.root))
+
+
 @unittest.skipUnless(sys.platform == 'darwin', 'requires macOS OS sandbox')
 class RehearsalSandbox(Scenario):
     def runner(self, script, args=(), terms=(), kind='read'):

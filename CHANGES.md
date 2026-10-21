@@ -5,6 +5,18 @@ upgrading. `brain changes <node>` shows the entries this node's coordinator hasn
 `brain due <node>` lists them until `brain changes <node> --seen`. Entry headings are
 `## <date>: <title>`; once released, a heading never changes.
 
+## 2026-10-21: Rehearse tolerates live runtime churn
+
+For agents:
+- Rehearsal source stability checks bind tracked file contents, installed-core
+  gitlinks, branch and tag refs, and HEAD. Runtime caches, machine-local and
+  ignored files, private checkpoint refs and Git bookkeeping can change while
+  the source is copied or the rehearsal runs. Copy mutation audits remain exhaustive.
+
+After upgrading:
+- Retry rehearsals that refused a busy source. Tracked content or real ref changes
+  still refuse evidence; no policy or configuration change is required.
+
 ## 2026-10-21: Corrections carry principle and check tags
 
 For agents:

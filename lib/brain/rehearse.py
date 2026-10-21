@@ -129,23 +129,76 @@ def snapshot(root, cache=None):
         for name in dirs + files:
             p = Path(dp) / name
             rel = p.relative_to(root).as_posix()
-            if p.is_symlink():
-                out[rel] = 'link:' + os.readlink(p)
-            elif p.is_dir():
-                out[rel] = 'dir:' + str(p.stat().st_mode)
-            elif p.is_file():
-                st = p.stat()
-                identity = (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns, st.st_mode)
-                if cache is not None and cache.get(str(p), (None,))[0] == identity:
-                    out[rel] = cache[str(p)][1]
-                    continue
-                h = hashlib.sha256()
-                with p.open('rb') as f:
-                    for chunk in iter(lambda: f.read(1024 * 1024), b''):
-                        h.update(chunk)
-                out[rel] = str(st.st_mode) + ':' + h.hexdigest()
-                if cache is not None:
-                    cache[str(p)] = (identity, out[rel])
+            if p.is_symlink() or p.is_dir() or p.is_file():
+                out[rel] = snapshot_entry(p, cache)
+    return out
+
+
+def snapshot_entry(p, cache=None):
+    """Read one entry; callers must keep its parent directories link-free."""
+    if p.is_symlink():
+        return 'link:' + os.readlink(p)
+    if p.is_dir():
+        return 'dir:' + str(p.stat().st_mode)
+    if not p.is_file():
+        return 'missing'
+    st = p.stat()
+    identity = (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns, st.st_mode)
+    if cache is not None and cache.get(str(p), (None,))[0] == identity:
+        return cache[str(p)][1]
+    h = hashlib.sha256()
+    with p.open('rb') as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b''):
+            h.update(chunk)
+    value = str(st.st_mode) + ':' + h.hexdigest()
+    if cache is not None:
+        cache[str(p)] = (identity, value)
+    return value
+
+
+def stability_snapshot(root):
+    """Bind tracked worktree bytes and real refs, excluding runtime/Git churn.
+
+    Keep snapshot() exhaustive for the private copies' mutation audit. Index
+    timestamps, staged blob ids, reflogs and private refs are not source content.
+    Gitlinks get their own tracked snapshot, including dirty installed-core bytes.
+    """
+    if root.is_symlink() or (root / '.git').is_symlink():
+        raise RehearsalError('linked Git metadata refused')
+    def git(*args):
+        r = _m_common.git(*args, cwd=root)
+        if r.returncode:
+            raise RehearsalError('source stability metadata unavailable')
+        return r.stdout
+    own = Path(git('rev-parse', '--path-format=absolute', '--git-dir').strip())
+    common = Path(git('rev-parse', '--path-format=absolute', '--git-common-dir').strip())
+    # Git itself reads these paths. Refuse links before asking it for index/refs;
+    # private ref namespaces are neither read nor traversed by this check.
+    for base in {own, common}:
+        for parent in (base, *base.parents):
+            if parent.is_symlink():
+                raise RehearsalError('linked Git metadata refused')
+        for rel in ('config', 'config.worktree', 'index', 'HEAD', 'packed-refs', 'refs',
+                    'refs/heads', 'refs/tags'):
+            path = base / rel
+            if path.is_symlink():
+                raise RehearsalError('linked Git metadata refused')
+            if rel in ('refs/heads', 'refs/tags') and path.is_dir():
+                if any(value.startswith('link:') for value in snapshot(path).values()):
+                    raise RehearsalError('linked Git metadata refused')
+    out = {}
+    for rel in set(git('ls-files', '--cached', '-z').split('\0')) - {''}:
+        path = root
+        for part in Path(rel).parts:
+            path = path / part
+            if path.is_symlink() or not path.is_dir():
+                break  # do not read a tracked descendant through a replaced parent
+        key = path.relative_to(root).as_posix()
+        out[key] = snapshot_entry(path)
+        if not path.is_symlink() and path.is_dir() and key == rel:
+            out[key] = stability_snapshot(path) if (path / '.git').exists() else snapshot(path)
+    out['.git:refs'] = git('for-each-ref', '--format=%(refname) %(objectname)', 'refs/heads', 'refs/tags')
+    out['.git:HEAD'] = (own / 'HEAD').read_text()
     return out
 
 
@@ -477,11 +530,11 @@ def rehearse(inst, n, branch):
         folder = Path(td).resolve()
         sandbox_self_check(folder)
         baseline_commit = installed_core_commit(inst.root)
-        original = snapshot(inst.root)
+        original = stability_snapshot(inst.root)
         frozen = folder / 'source'
         copy_tree(inst.root, frozen)
         materialize_git(inst.root, frozen)
-        if snapshot(inst.root) != original:
+        if stability_snapshot(inst.root) != original:
             raise RehearsalError('live brain moved while copying; retry with a stable source')
         baseline = folder / 'installed'
         copy_tree(frozen / 'core', baseline)
@@ -524,7 +577,7 @@ def rehearse(inst, n, branch):
         old = run_lane(frozen, baseline, folder / 'before', nodes, commands)
         new = run_lane(frozen, candidate, folder / 'after', nodes, commands)
         flags = compare(old, new)
-        if snapshot(inst.root) != original:
+        if stability_snapshot(inst.root) != original:
             flags.append('live brain changed during rehearsal; evidence refused')
         if installed_core_commit(inst.root) != baseline_commit:
             flags.append('installed core changed during rehearsal; evidence refused')
