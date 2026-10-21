@@ -29,3 +29,15 @@ class TrainReadyHooks(Scenario):
         n['fm']['merge'] = 'local'
         for invalid in ('not-a-commit', '0' * 40):
             self.assertIn('train requires', '; '.join(m.ready_preflight(n, 'job', base=invalid)[0]))
+
+    def test_ejected_evidence_refuses_ordinary_and_train_readiness(self):
+        r, home, wt = self.job()
+        self.record(r)
+        m = core_loader.SourceFileLoader('train_ejection_hook', str(CORE / 'bin/brain')).load_module()
+        inst = m.Instance(r)
+        jobs = m.ready_state.__globals__['_m_jobs']
+        with mock.patch.dict('os.environ', self.env), mock.patch.object(jobs, 'train_ejection', return_value={'reason': 'fixture'}, create=True):
+            for train in (False, True):
+                state = m.ready_state(inst, inst.node('a'), 'job', train=train)
+                self.assertFalse(state['ready'])
+                self.assertIn('train ejected', '; '.join(state['reasons']))
