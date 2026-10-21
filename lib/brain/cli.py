@@ -251,6 +251,7 @@ def main():
     cmd("handback", _m_jobs.cmd_handback, "worker signal and optional inbox need for one open ledger job",
         "id", opt("--branch", required=True), opt("--state", choices=["done", "failed", "blocked", "question"], required=True),
         opt("--report"), opt("--lessons", help="proposed lessons, or none: <reason>"),
+        opt("--restart", choices=["compactions"], help="request a fresh brief resuming this job (blocked only)"),
         opt("--need-human", help="question or blocked need to append to the node inbox"),
         opt("--reviews", type=int, help="completed review rounds; runs verify for done (or reuses a green run that "
             "still proves this commit)"),

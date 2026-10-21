@@ -46,3 +46,9 @@ You were started for one job. If your brief names no role, you are a worker for 
 For a `--small` brief, follow its one-line hand-back and guard step. Create no worktree,
 ledger row, review or ready packet. Hand back for a full job if scope or risk grows.
 Read and apply the relevant library items supplied in your brief before doing the task.
+
+After your second context compaction, hand back `--state blocked` with
+`restart: compactions` and stop; your coordinator restarts you from a fresh brief
+that resumes your commits. Record the marker with `brain handback <node> --branch
+<branch> --state blocked --restart compactions --report <path>`. The coordinator
+uses the exact `brain brief --branch` command in `brain due` and the existing resume section.

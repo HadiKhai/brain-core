@@ -3,6 +3,7 @@ import datetime
 import hashlib
 import json
 import re
+import shlex
 import sys
 import urllib.parse
 from pathlib import Path
@@ -394,6 +395,10 @@ def due_items(inst, n, evidence=None, include_stale=True):
         if w and w["merged"]:
             add("merged-job", f"{branch}: merged in local git; record brain jobs {n['id']} --branch {branch} --lessons "
                 "first, then close the ledger and prune; " + _m_jobs.handback_detail(n, row), job=_m_jobs.job_key(row))
+        elif signal and signal.get("restart") == "compactions" and signal["state"] == "blocked":
+            command = f"brain brief {shlex.quote(n['id'])} --branch {shlex.quote(branch)}"
+            add("restart", f"{branch}: restart: compactions; resume with `{command}`",
+                job=_m_jobs.job_key(row))
         elif signal:
             ready = _m_verify.ready_state(inst, n, branch) if signal["state"] == "done" and not _m_briefs.import_job(branch) else None
             detail = ("ready to merge" if ready["ready"] else

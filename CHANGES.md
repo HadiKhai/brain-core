@@ -38,6 +38,18 @@ After upgrading:
 - Read the named paths when readiness refuses. Fix setup rather than spending another full verify
   discovering a first-run env rewrite. The next handback adds private per-path diagnostic evidence.
 
+## 2026-10-21: Bounded briefs and compaction restarts
+
+For agents:
+- Brief, hire and review warn above 8 KB of UTF-8 output and refuse at 16 KB,
+  naming the largest sections. Node `brief_max_kb` changes the warning threshold.
+- Specialist standards and library items are referenced by path. Read them before work.
+- After the second context compaction, stop with a blocked hand-back carrying
+  `--restart compactions`; due supplies the resume brief command and preserves commits.
+
+After upgrading:
+- Reload worker, hire and home-job instructions. Shorten oversized task/context text
+  without removing limits, guard or hand-back steps; no data migration is needed.
 
 ## 2026-10-21: Core mechanics split into Python modules
 

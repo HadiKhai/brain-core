@@ -17,6 +17,44 @@ from . import verify as _m_verify
 from . import worktrees as _m_worktrees
 
 
+COMPACTION_POLICY = ("After your second context compaction, hand back `--state blocked` with "
+                     "`restart: compactions` and stop; your coordinator restarts you from a fresh brief "
+                     "that resumes your commits. For a ledger job, `--restart compactions` records this marker.")
+
+
+def reference_line(path, summary):
+    """Keep reference metadata on one bounded line; bodies remain in their source files."""
+    return "- `" + _m_common.tilde(path) + "`: " + " ".join(str(summary).split())[:180] + ". Read before working."
+
+
+def checked_brief(n, text):
+    """Measure the complete UTF-8 output, without trimming mandatory safety instructions."""
+    text += "\n" + COMPACTION_POLICY + "\n"
+    _m_guard.no_terms_in(n, text, "the brief")
+    try:
+        kb = float(n["fm"].get("brief_max_kb", 8))
+        if not 0 < kb < float("inf"):
+            raise ValueError
+    except (TypeError, ValueError):
+        _m_common.die("brief_max_kb must be a positive finite number in node.md")
+    size = len(text.encode("utf-8"))
+    if size > kb * 1024:
+        sections, name, count = [], "Preamble", 0
+        for line in text.splitlines(keepends=True):
+            if line.startswith("## "):
+                sections.append((count, name))
+                name, count = line[3:].strip(), 0
+            count += len(line.encode("utf-8"))
+        sections.append((count, name))
+        largest = "; ".join(f"{name}: {count} bytes" for count, name in sorted(sections, reverse=True)[:3])
+        message = (f"brief is {size} bytes (brief_max_kb={kb:g}); largest sections: {largest}. "
+                   "Shorten task/context or use path references; retain limits, guard and hand-back instructions.")
+        if size >= 2 * kb * 1024:
+            _m_common.die("refused: " + message)
+        print("warning: " + message, file=sys.stderr)
+    return text
+
+
 def import_job_id(home):
     head = _m_common.git("rev-parse", "--verify", "-q", "HEAD", cwd=home).stdout.strip() or "unborn"
     return "import:" + head
@@ -77,7 +115,7 @@ def import_brief(a):
             "Report checks and review evidence; keep pre-existing source findings separate from output findings. "
             "Leave the source branch and history unchanged.", ""]
     out += _m_knowledge.report_lines(job=True) + _m_knowledge.handback_lines(inst, n, a.to, branch=branch)
-    text = "\n".join(out) + "\n"
+    text = checked_brief(n, "\n".join(out) + "\n")
     _m_guard.no_terms_in(n, text, "the import brief")
     if _m_nodes.SECRET_META.search(text) or _m_nodes.SECRET_LINE.search(task + "\n" + "\n".join(_m_knowledge.limits_lines(n))):
         _m_common.die("unsafe import brief metadata")
@@ -166,7 +204,7 @@ def cmd_brief(a):
                "shared repository changes need a full job.",
                f"Send one line via {_m_knowledge.host_send(inst, n, a.to)}: done|blocked|question: <result>; proof: <check/output>. "
                "Never ask the operator or wait in this thread; send questions too, then end your turn."]
-        text = "\n".join(out) + "\n"
+        text = checked_brief(n, "\n".join(out) + "\n")
         _m_guard.no_terms_in(n, text, "the brief")
         if a.out:
             _m_history.write_out(inst, n, a.out, text)
@@ -188,7 +226,9 @@ def cmd_brief(a):
                     *("^" + ref for ref in exclude), cwd=where).stdout.strip() if exclude else ""
         row = next((r for r in reversed(_m_jobs.read_jobs(n) or []) if r["Job"] == a.branch), {})
         dirty = _m_common.git("status", "--porcelain", cwd=where).stdout.strip()
-        if (count.isdigit() and int(count)) or dirty or row.get("Switches") or row.get("Reviews", "") not in ("", "0"):
+        restart = (_m_jobs.read_handback(n, row) or {}).get("restart") if row else None
+        if ((count.isdigit() and int(count)) or dirty or restart or row.get("Switches") or
+                row.get("Reviews", "") not in ("", "0")):
             head_sha = _m_common.git("rev-parse", "HEAD", cwd=where).stdout.strip()
             out += ["## Resume existing work", "",
                     f"This job has {count or 'unknown'} own commit(s) and "
@@ -206,7 +246,7 @@ def cmd_brief(a):
         out += ["## Before you hand back", "", f"Run `brain guard {n['id']} {_m_common.tilde(where)}`. It must print "
                 "`guard: clean`; if not, remove what it lists (it names the file, never the word).", ""]
     out += _m_knowledge.handback_lines(inst, n, a.to, branch=a.branch) + _m_knowledge.report_lines(job=bool(a.branch))
-    text = "\n".join(out) + "\n"
+    text = checked_brief(n, "\n".join(out) + "\n")
     _m_guard.no_terms_in(n, text, "the brief")
     if a.out:
         _m_history.write_out(inst, n, a.out, text)

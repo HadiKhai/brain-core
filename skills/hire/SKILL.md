@@ -31,3 +31,14 @@ stated; never run a polling loop in an agent.
 
 To create a specialist: `core/bin/brain specialist new <id> --title "…" [--at <node>] [--scope a,b]`,
 then fill in its `role.md`.
+
+After your second context compaction, hand back `--state blocked` with
+`restart: compactions` and stop; your coordinator restarts you from a fresh brief
+that resumes your commits. Record the marker with `brain handback <node> --branch
+<branch> --state blocked --restart compactions --report <path>`. The coordinator
+uses the exact `brain brief --branch` command in `brain due` and the existing resume section.
+
+Generated briefs warn above `brief_max_kb` in node.md (8 KB by default) and refuse
+at twice that size, naming the largest sections. Follow referenced role/standards
+and library paths before working; their bodies stay out of the brief. Shorten task
+or shared context, preserving node limits, never-name guard and ask/hand-back steps.

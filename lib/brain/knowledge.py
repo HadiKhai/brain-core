@@ -425,7 +425,6 @@ def cmd_hire(a):
     if _m_guard.find_terms((sp["dir"] / "role.md").read_text(), learning_terms(
             inst, {"source_nodes": sp["fm"].get("source_nodes")}, [sp["node"], target])):
         _m_common.die(f"specialist '{sp['id']}' holds a never-name word of where it was learned or of {target['id']}")
-    _, role_body = _m_common.read_fm(sp["dir"] / "role.md")
     nodes = inst.nodes()
     lessons = [l for l in parse_lessons(sp["dir"] / "lessons.md")
                if ("*" in l["scope"] or all(o in l["scope"] for o in target["owners"])) and
@@ -454,18 +453,18 @@ def cmd_hire(a):
                 "irreversible (axiom 24).", ""]
     out += _m_briefs.separation_lines(a, target, a.branch)
     out += ["## Task", "", a.task.strip(), ""] + _m_jobs.contract_lines(inst, target, a.branch) + \
-        [role_body.strip(), ""] + limits_lines(target)
+        ["## Specialist standards", "", _m_briefs.reference_line(sp["dir"] / "role.md", sp["fm"].get("title", sp["id"])), ""] + limits_lines(target)
     if lessons:
         out += ["## Lessons from earlier jobs", ""] + [f"- {l['text']}" for l in lessons] + [""]
     if wanted:
         out += ["## Knowledge for this job", ""]
         for i in items:
             if i["fm"].get("id") in wanted:
-                out += [f"### {i['fm'].get('title')}", "", _m_common.read_fm(i["path"])[1].strip(), ""]
+                out += [_m_briefs.reference_line(i["path"], i["fm"].get("title", i["fm"].get("id"))), ""]
     out += knowledge_lines(inst, target, a.task, sp["id"], exclude=wanted) + node_knowledge_lines(target) + \
         recall_hint(target)
     out += handback_lines(inst, target, branch=a.branch) + report_lines(job=bool(a.branch))
-    text = "\n".join(out) + "\n"
+    text = _m_briefs.checked_brief(target, "\n".join(out) + "\n")
     _m_guard.no_terms_in(target, text, "the brief")
     if a.job:
         rows = inst.local.setdefault("hires", [])
@@ -547,8 +546,9 @@ def knowledge_lines(inst, n, task, specialist="", exclude=()):
                 ("labels/stack", knowledge_tokens(n["fm"].get("labels", "") + " " + n["fm"].get("stack", "")), 3),
                 ("specialist", knowledge_tokens(specialist), 3)]
     lines, forbidden = [], _m_guard.never_terms(n)
-    for _, key, title, why, _ in knowledge_ranked(inst, n, contexts, exclude):
-        line = f"- `{key}`: {title} — picked for {'; '.join(why)}. Read full: `brain item show {key} --node {n['id']}`."
+    for _, key, title, why, item in knowledge_ranked(inst, n, contexts, exclude):
+        line = (f"- `{key}`: {title} — picked for {'; '.join(why)}. "
+                f"Path: `{_m_common.tilde(item['path'])}`. Read full: `brain item show {key} --node {n['id']}`.")
         if not _m_guard.find_terms(line, forbidden):
             lines.append(line)
     if not lines:
