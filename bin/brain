@@ -9385,8 +9385,10 @@ def wake_directory(inst, n):
 
 
 def wake_start(inst, n):
+    env = {**os.environ, "BRAIN_ROOT": str(inst.root), "BRAIN_NO_REEXEC": "1"}
+    env.pop("BRAIN_LOCK_HELD", None)  # a detached worker never inherits its requester's lock bypass
     subprocess.Popen([sys.executable, str(CORE / "bin" / "brain"), "wake", n["id"], "--drain"],
-                     cwd=inst.root, env={**os.environ, "BRAIN_ROOT": str(inst.root), "BRAIN_NO_REEXEC": "1"},
+                     cwd=inst.root, env=env,
                      stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                      start_new_session=True, close_fds=True)
 
@@ -9451,67 +9453,81 @@ def wake_drain(inst, n, once=False):
         return
     lock = directory / "lock"
     safe_target(lock)
-    with lock.open("a+") as stream:
-        try:
-            fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            return  # the existing worker owns delivery, including its rate wait
-        for sent in directory.glob("*.sent"):
-            if time.time() - sent.stat().st_mtime >= WAKE_DEDUP_SECONDS:
-                sent.unlink(missing_ok=True)
-        deadline = time.monotonic() + 600
-        while time.monotonic() < deadline:
-            if outward_links(inst.root):
-                return
-            pending = []
-            for path in sorted(directory.glob("*.pending")):
-                # A requester may have checked .sent just before another worker published it.
-                # Recheck under the delivery lock so this race cannot send the same reason twice.
-                if path.with_suffix(".sent").exists():
-                    path.unlink(missing_ok=True)
-                else:
-                    pending.append(path)
-            if not pending:
-                return
-            last = directory / "last"
+    attempted, owned = set(), False
+    try:
+        with lock.open("a+") as stream:
             try:
-                previous, now = float(last.read_text()), time.time()
-                if previous > now:
-                    atomic_write(last, str(now))  # bound deferral after a clock rollback
-                    previous = now
-                delay = max(0, WAKE_INTERVAL - (now - previous))
-            except (OSError, ValueError):
-                delay = 0
-            if delay:
+                fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return  # the existing worker owns delivery, including its rate wait
+            owned = True
+            for sent in directory.glob("*.sent"):
+                if time.time() - sent.stat().st_mtime >= WAKE_DEDUP_SECONDS:
+                    sent.unlink(missing_ok=True)
+            deadline = time.monotonic() + 600
+            while time.monotonic() < deadline:
+                if outward_links(inst.root):
+                    return
+                pending = []
+                for path in sorted(directory.glob("*.pending")):
+                    # A requester may have checked .sent just before another worker published it.
+                    # Recheck under the delivery lock so this race cannot send the same reason twice.
+                    if path.with_suffix(".sent").exists():
+                        path.unlink(missing_ok=True)
+                    else:
+                        pending.append(path)
+                if not pending:
+                    return
+                last = directory / "last"
+                try:
+                    previous, now = float(last.read_text()), time.time()
+                    if previous > now:
+                        atomic_write(last, str(now))  # bound deferral after a clock rollback
+                        previous = now
+                    delay = max(0, WAKE_INTERVAL - (now - previous))
+                except (OSError, ValueError):
+                    delay = 0
+                if delay:
+                    if once:
+                        return
+                    time.sleep(min(delay, 5))
+                    continue
+                attempted.update(path.name for path in pending)
+                # Reload bindings so removed/changed transport capabilities take effect.
+                current = Instance(inst.root)
+                target, command = wake_target(current, current.node(n["id"]))
+                if target["id"] != n["id"]:
+                    destination = wake_directory(current, target)
+                    destination.mkdir(parents=True, exist_ok=True)
+                    for path in pending:
+                        safe_target(destination / path.name)
+                        path.replace(destination / path.name)
+                    if command:
+                        wake_start(current, target)
+                    return
+                if not command:
+                    return
+                atomic_write(last, str(time.time()))  # failures are rate-limited too
+                try:
+                    sent = wake_send(command)
+                except Exception:
+                    sent = False
+                if sent:
+                    for path in pending:  # one generic tick covers all currently queued reasons
+                        atomic_write(path.with_suffix(".sent"), "delivered\n")
+                        path.unlink(missing_ok=True)
                 if once:
                     return
-                time.sleep(min(delay, 5))
-                continue
-            # Reload bindings so removed/changed transport capabilities take effect.
-            current = Instance(inst.root)
-            target, command = wake_target(current, current.node(n["id"]))
-            if target["id"] != n["id"]:
-                destination = wake_directory(current, target)
-                destination.mkdir(parents=True, exist_ok=True)
-                for path in pending:
-                    safe_target(destination / path.name)
-                    path.replace(destination / path.name)
-                if command:
-                    wake_start(current, target)
-                return
-            if not command:
-                return
-            atomic_write(last, str(time.time()))  # failures are rate-limited too
-            try:
-                sent = wake_send(command)
-            except Exception:
-                sent = False
-            if sent:
-                for path in pending:  # one generic tick covers all currently queued reasons
-                    atomic_write(path.with_suffix(".sent"), "delivered\n")
-                    path.unlink(missing_ok=True)
-            if once:
-                return
+    except BaseException:
+        owned = False  # unexpected errors leave durable pending state for due, not a crash loop
+        raise
+    finally:
+        # A requester can publish after our final scan and lose its worker to LOCK_NB.
+        # Recheck only after releasing the flock so the replacement can take over.
+        # Reasons already attempted stay pending on failure, without a respawn loop.
+        if owned and not once and not outward_links(inst.root) and any(
+                path.name not in attempted for path in directory.glob("*.pending")):
+            wake_start(inst, n)
 
 
 def cmd_wake(a):

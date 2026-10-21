@@ -10,6 +10,9 @@ upgrading. `brain changes <node>` shows the entries this node's coordinator hasn
 For agents:
 - Wake requests never wait for the instance or delivery lock. A drain holds only its node's
   delivery lock while waiting for the rate window or sending; a second drain exits at once.
+- A drain hands late reasons to a replacement after releasing its delivery lock, including
+  when its deadline expires or its coordinator changes. Failed attempts do not respawn forever.
+- Detached drains discard the requester's instance-lock bypass capability.
 - Queued reasons and delivery deduplication keep their existing behavior. Machine bindings
   publish atomically so an unlocked wake reader cannot see a half-written configuration.
 
