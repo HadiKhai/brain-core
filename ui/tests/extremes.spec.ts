@@ -193,3 +193,30 @@ test("a hundred threads, schedules and project items stay paged, never an unboun
   }
   expect(await height()).toBeLessThan(2.5);
 });
+
+test("changing thread filters starts at the first matching page", async ({ page }) => {
+  await page.goto("/?k=hundred#view=threads");
+  const threads = page.locator("[data-page=threads]");
+  await threads.getByRole("button", { name: "Last", exact: true }).click();
+  await expect(threads.locator(".table-footer")).toContainText("91–100 of 100 threads");
+  await threads.getByRole("textbox", { name: "Search threads" }).fill("Project notebook");
+  await expect(threads.locator(".table-footer")).toContainText("1–10 of");
+  await expect(threads.locator(".row.thread")).toHaveCount(10);
+});
+
+test("selecting a project thread from the tree reveals it after paging", async ({ page, request }) => {
+  const state = await (await request.get("/api/state?k=demo")).json();
+  const node = state.nodes.find((n: { id: string }) => n.id === "field-guide");
+  node.work = Array.from({ length: 30 }, (_, i) => ({
+    ...node.work[0], branch: `job/selection-${i}`, thread: `synthetic-thread-${i}`,
+  }));
+  node.worktrees = [];
+  await page.addInitScript((s) => { (window as any).__STATE__ = s; }, state);
+  await page.goto("/?k=demo#view=project&node=field-guide&tab=threads");
+  const work = page.locator("[data-page=project] [aria-label=Work]");
+  await work.getByRole("button", { name: "Next", exact: true }).click();
+  await expect(work.locator(".table-footer")).toContainText("11–20 of 30 threads");
+  await page.locator('[data-slot=sidebar-menu-sub-button][href*="thread=job%2Fselection-25"]').click();
+  await expect(work.locator('.row.thread.highlighted[data-thread="job/selection-25"]')).toBeVisible();
+  await expect(work.locator(".table-footer")).toContainText("1–10 of 30 threads");
+});
