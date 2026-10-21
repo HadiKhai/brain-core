@@ -310,7 +310,7 @@ def cmd_wt_prune(a):
     """Remove clean worktrees merged into the integration branch. Never touches uncommitted work."""
     inst = _m_nodes.load()
     n, home = git_home(inst, a.id)
-    if _m_common.git("remote", cwd=home).stdout.strip() and not a.offline:
+    if not a.dry_run and _m_common.git("remote", cwd=home).stdout.strip() and not a.offline:
         _m_common.git("fetch", "--all", "--prune", "--quiet", cwd=home)
     removed, kept = [], []
     for br, w in sorted(n["local"].get("worktrees", {}).items()):
@@ -324,6 +324,7 @@ def cmd_wt_prune(a):
         dirty, merged, ahead = worktree_state(home, w, br, n)
         if dirty is None or (merged and dirty == 0):
             _m_jobs.print_job_handback(n, br)
+            _m_jobs.print_worktree_threads(n, br, dry_run=a.dry_run)
             if not a.dry_run:
                 remove_worktree(inst, inst.node(n["id"]), br)
                 _m_jobs.job_ended(inst, n, br, "merged" if merged else "abandoned", job_commits(home, w, br),
@@ -331,7 +332,8 @@ def cmd_wt_prune(a):
             removed.append(br)
         else:
             kept.append(f"{br} ({'uncommitted work' if dirty else 'not merged'})")
-    _m_common.git("worktree", "prune", cwd=home)
+    if not a.dry_run:
+        _m_common.git("worktree", "prune", cwd=home)
     print(f"{'would remove' if a.dry_run else 'removed'}: {', '.join(removed) or 'none'}")
     if kept:
         print(f"kept: {', '.join(kept)}")

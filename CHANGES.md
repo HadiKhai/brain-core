@@ -5,6 +5,22 @@ upgrading. `brain changes <node>` shows the entries this node's coordinator hasn
 `brain due <node>` lists them until `brain changes <node> --seen`. Entry headings are
 `## <date>: <title>`; once released, a heading never changes.
 
+## 2026-10-21: Keep worker threads visible before pruning
+
+For agents:
+- Worktree prune and train staging cleanup list bound worker threads before removal,
+  with host steps to message the finished worker first, then safely settle it.
+  Job-close checklists remind coordinators to message before pruning. Cleanup still
+  permits already settled jobs; no host action is automatic.
+- Message helpers and rotation handovers warn about stale job-thread workspaces,
+  naming the job and suggesting a fresh thread in a fresh worktree for follow-on work.
+- `brain wt prune --dry-run` only lists candidates and bindings; it no longer fetches
+  or prunes Git worktree metadata.
+
+After upgrading:
+- Read prune's thread list before cleanup. Finish host messages and settlement while
+  the workspace exists; use a new thread and worktree for later work after pruning.
+
 ## 2026-10-21: Rehearse redacts protected probe output
 
 For agents:

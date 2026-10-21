@@ -729,6 +729,9 @@ def limits_lines(n):
 
 def host_send(inst, n, to=None):
     to = to or n["local"].get("coordinator")
+    if to:
+        for warning in _m_jobs.stale_thread_warnings(n, to):
+            print(_m_guard.redact(warning, _m_guard.never_terms(n)), file=sys.stderr)
     send = inst.host_adapter().get("SEND")
     return f"host `send` to thread `{to}`" + (f" ({send.replace('{id}', to)})" if send else "") if to else \
         "host `send` to whoever started you (their thread is in your launch message)"

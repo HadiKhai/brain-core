@@ -558,6 +558,59 @@ def unsettled_jobs(rows):
     return [r for r in rows or [] if closed_job(r) and not r.get("Settled")]
 
 
+def bound_worker_threads(n, branch):
+    """Recorded references only, not proof that a host thread is safe to settle."""
+    refs = []
+    workers = n["local"].get("workers", {})
+    if isinstance(workers, dict):
+        for row in read_jobs(n) or []:
+            key = job_key(row)
+            if row["Job"] == branch and workers.get(key):
+                refs.append((workers[key], "worker:" + key))
+    for row in _m_status.active_work(n, include_closed=True):
+        name = row[0].replace("`", "").split()
+        if name and name[0] == branch and len(row) > 1:
+            thread = row[1].strip()
+            if thread not in ("", "-", "—"):
+                refs.append((thread, "Active work"))
+    return list(dict.fromkeys(refs))
+
+
+def stale_thread_warnings(n, thread=None):
+    """Keep stale references useful for host inspection, but warn before sending."""
+    if not n["external"]:
+        return []
+    branches = {r["Job"] for r in read_jobs(n) or []}
+    for row in _m_status.active_work(n, include_closed=True):
+        name = row[0].replace("`", "").split()
+        if name:
+            branches.add(name[0])
+    warnings = []
+    for branch in sorted(branches):
+        refs = bound_worker_threads(n, branch)
+        if not refs or (thread is not None and not any(t == thread for t, _ in refs)):
+            continue
+        w = n["local"].get("worktrees", {}).get(branch)
+        if w and Path(w["path"]).is_dir():
+            continue
+        warnings.append(f"warning: job {branch}: bound worker thread workspace is gone or no longer registered; "
+                        "do not send to the old thread. Start a fresh thread in a fresh worktree for follow-on work.")
+    return warnings
+
+
+def print_worktree_threads(n, branch, dry_run=False):
+    lines = [f"{branch}: bound worker threads before worktree removal:"]
+    refs = bound_worker_threads(n, branch)
+    lines += [f"  {thread} ({source})" for thread, source in refs] or ["  none recorded; inspect the host for unrecorded job threads"]
+    if dry_run:
+        lines.append("  dry-run: listing only; no messages, settlement or removal performed")
+    else:
+        lines += ["  Host steps: message the thread before pruning: tell it the job is done and request any final hand-back.",
+                  "  Then confirm it has stopped and reconcile pending requests; settle it through the host before removal.",
+                  "  Inspect ownership first; never settle coordinators or other open jobs. Already settled threads need no message."]
+    print(_m_guard.redact("\n".join(lines), _m_guard.never_terms(n)), flush=True)
+
+
 def print_thread_checklist(n, row):
     if not closed_job(row):
         return
@@ -569,6 +622,7 @@ def print_thread_checklist(n, row):
               if ambiguous else matches[0][1])
     text = (f"Threads to settle for {row['Job']} (brain-job: {job_key(row)}):\n"
             + "  Worker from Active work: " + worker + "\n"
+            + "  Message the thread before pruning: tell it the job is done and request any final hand-back, then settle it safely.\n"
             + "  Find delegated/sub-agent descendants by parentThreadId and reviewers by the brain-job marker.\n"
             + "  Settle only when the ledger says merged or closed (abandoned/studied count as closed), "
             "no thread is running or waiting, and no pending requests remain. "
