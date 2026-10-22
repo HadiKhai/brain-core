@@ -29,6 +29,12 @@ LANE_TESTS = {name: ('test_' + name + '.py',) for name in MODULE_LANES}
 LANE_TESTS.update({
     'train': ('test_train.py', 'test_train_review.py'),
     'jobs': ('test_jobs.py', 'test_train_ejection.py'),
+    'status': ('test_status.py', 'test_inbox_noise.py'),
+    'worktrees': ('test_worktrees.py', 'test_prune_orphans.py', 'test_prune_states.py',
+                  'test_prune_thread_targets.py'),
+    'rehearse': ('test_rehearse.py', 'test_rehearse_frozen.py'),
+    'ui': ('test_ui.py', 'test_ui_idle.py', 'test_ui_review.py', 'test_ui_status.py'),
+    'watch': ('test_watch.py', 'test_watch_extension.py'),
     'verify': ('test_verify.py', 'test_verify_train_hooks.py'),
     'review': ('test_review_discipline.py',),
     'catch-all': ('test_repo_lanes.py',),
@@ -37,20 +43,21 @@ COMPATIBILITY = 'test_brain.py'
 OUTSIDE_JOB_LANES = {
     'live.py': 'real runtime/model calls; separate live verification',
     'ui-checks.js': 'browser assertions; separate browser verification',
+    'ui-fitness.js': 'browser layout assertions; separate browser verification',
 }
 SUPPORT = ('scenario.py', 'core_loader.py', 'conftest.py', 'lanes.py', 'check_lanes.py')
 # Only these modules have separately audited dispatch/call selection. The gate
 # requires all remaining core modules in every lane, even after import refactors.
 SELECTIVE_MODULES = ('train',)
-EXTRA_INPUTS = {'ui': ('tests/live.py',)}  # a unit test imports its runtime adapter
+EXTRA_INPUTS = {'ui': ('tests/live.py', 'tests/ui-checks.js', 'tests/ui-fitness.js')}
 # Mirror the development node's existing documentation/image skip policy.
-OUTSIDE_INPUTS = ('README.md', 'docs/**', 'ui/**/*.png', 'LICENSE', 'tests/ui-checks.js')
+OUTSIDE_INPUTS = ('README.md', 'docs/**', 'ui/**/*.png', 'LICENSE')
 SHARED_INPUTS = (
     'lib/brain/common.py', 'lib/brain/instance.py', 'lib/brain/cli.py',
     'lib/brain/__init__.py', 'tests/scenario.py', 'tests/core_loader.py',
     'tests/conftest.py', 'tests/lanes.py', 'tests/check_lanes.py',
     'bin/**', 'templates/**', 'skills/**', 'roles/**', 'adapters/**', 'ui/**', '!ui/**/*.png',
-    'install.sh', 'MODEL.md', 'CHANGES.md',
+    'install.sh', 'MODEL.md', 'CHANGES.md', '.gitignore', 'requirements-test.txt',
 )
 
 

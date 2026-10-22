@@ -15,6 +15,22 @@ import lanes
 
 
 class RepositoryLanes(unittest.TestCase):
+    def test_test_tool_pin_and_browser_assets_have_inputs(self):
+        mapping = lanes.lane_map()
+        sys.path.insert(0, str(lanes.ROOT / 'lib'))
+        from brain.verify_lanes import matches
+        for path in ('requirements-test.txt', '.gitignore'):
+            with self.subTest(path=path):
+                self.assertTrue(all(matches(path, lane['inputs']) for lane in mapping))
+        ui = next(lane for lane in mapping if lane['name'] == 'ui')
+        for path in ('tests/live.py', 'tests/ui-checks.js', 'tests/ui-fitness.js'):
+            with self.subTest(path=path):
+                self.assertTrue(matches(path, ui['inputs']))
+        changed = copy.deepcopy(mapping)
+        changed[0]['inputs'].remove('requirements-test.txt')
+        with self.assertRaisesRegex(ValueError, 'missing shared inputs: .*requirements-test.txt'):
+            check_lanes.check(mapping=changed)
+
     def test_runtime_assets_and_imported_fixture_select_consumers(self):
         mapping = {lane['name']: lane for lane in lanes.lane_map()}
         sys.path.insert(0, str(lanes.ROOT / 'lib'))
@@ -89,7 +105,7 @@ class RepositoryLanes(unittest.TestCase):
         result = check_lanes.check(mapping=mapping)
         self.assertEqual(result['unit_files'], len(list((lanes.ROOT / 'tests').glob('test_*.py'))))
         self.assertGreater(result['lanes'], 1)
-        self.assertEqual(set(result['outside_job_lanes']), {'live.py', 'ui-checks.js'})
+        self.assertEqual(set(result['outside_job_lanes']), {'live.py', 'ui-checks.js', 'ui-fitness.js'})
         sys.path.insert(0, str(lanes.ROOT / 'lib'))
         from brain.verify_lanes import matches
         self.assertTrue(all(matches('lib/brain/common.py', lane['inputs']) for lane in mapping))

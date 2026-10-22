@@ -5,6 +5,21 @@ upgrading. `brain changes <node>` shows the entries this node's coordinator hasn
 `brain due <node>` lists them until `brain changes <node> --seen`. Entry headings are
 `## <date>: <title>`; once released, a heading never changes.
 
+## 2026-10-22: Refresh repository lane ownership after batch integration
+
+For agents:
+- Repository lanes include the inbox, prune, frozen-rehearsal, UI and watcher
+  regression files added by the integrated batch. The coverage gate still refuses
+  any new unassigned test or asset.
+- The pinned test requirements and Git ignore configuration are shared inputs of
+  every lane. Browser check scripts belong to the UI lane's inputs while their
+  standalone execution remains separate from unit verification.
+
+After upgrading:
+- Run `python3 -B tests/check_lanes.py` when adding tests or test assets, and assign
+  their lane ownership before handing back. Keep the full configured parallel
+  unit command for integration verification.
+
 ## 2026-10-22: Parallel test verification
 
 For agents:
