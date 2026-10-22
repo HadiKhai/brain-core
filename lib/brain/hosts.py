@@ -165,7 +165,17 @@ def wake_actionable_pending(inst, path):
     identity = (_m_watch.watch_digest(['root', 'machine-alert', data['alert_id']])
                 if data and data.get('alert_open') is True
                 and re.fullmatch(r'[0-9a-f]{24}', str(data.get('alert_id', ''))) else None)
+    current_holds = None
+    if any(i['kind'] == 'machine-hold' for i in refs):
+        try:
+            holds = _m_machine.machine_hold_items(inst)
+            current_holds = {_m_watch.watch_digest([n['id'], 'machine-hold', holds[scope]['episode']])
+                             for n in inst.nodes() if not n['archived']
+                             for scope in [_m_machine.machine_scope(inst, n['id'])[1]] if scope in holds}
+        except (Exception, SystemExit):
+            pass  # unknown state must not retire an undelivered hold or mixed question
     allowed = [i for i in refs if i['kind'] != 'machine'
+               and not (i['kind'] == 'machine-hold' and current_holds is not None and i['id'] not in current_holds)
                and not (i['kind'] == 'machine-alert' and (recovered or identity and i['id'] != identity))]
     if any(i['kind'] in ('job-ready', 'job-landed') for i in allowed):
         unknown = set()

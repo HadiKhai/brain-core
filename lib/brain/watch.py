@@ -360,6 +360,14 @@ def watch_groups(inst, nodes=None):
         group = groups.setdefault('root', {'node': root, 'items': [],
                                           'command': _m_hosts.wake_target(inst, root)[1]})
         group['items'].extend(completions)
+    state = _m_machine.machine_state(inst)
+    for group in groups.values():
+        for item in _m_status.machine_due_items(inst, [group['node']], state, []):
+            if item['kind'] == 'machine-repair':
+                group['items'].append({**item, 'id': watch_digest(['root', item['kind']])})
+                continue
+            group['items'].append({**item, 'kind': 'machine-hold',
+                                   'id': watch_digest([item['node'], 'machine-hold', item['episode']])})
     return groups
 
 
@@ -394,7 +402,24 @@ def watch_run(inst):
         queued = False
         if added and group['command']:
             for key in added[:]:
-                if 'reason' in items[key]:
+                if key not in added:
+                    continue
+                item = items[key]
+                if item['kind'] == 'machine-hold':
+                    # Publish simultaneous escalation with its hold before detaching a drain.
+                    bundle = [key] + [k for k in added if items[k]['kind'] == 'machine-alert']
+                    accepted = _m_machine.machine_hold_claim(
+                        inst, item['episode'], item['scope'],
+                        deliver=lambda: _m_hosts.request_wake(inst, group['node'], 'machine-hold:' + item['episode'],
+                                                             items=[items[k] for k in bundle]))
+                    if accepted:
+                        seen.update(bundle)
+                        count += len(bundle)
+                        queued = True
+                        for k in bundle[1:]:
+                            added.remove(k)
+                    added.remove(key)
+                elif 'reason' in items[key]:
                     origin = inst.node(items[key].get('source', group['node']['id']))
                     if (_m_hosts.wake_recorded(inst, origin, items[key]['reason'])
                             or _m_hosts.request_wake(inst, origin, items[key]['reason'], items=[items[key]])):

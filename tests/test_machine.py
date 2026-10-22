@@ -191,7 +191,7 @@ class MachineCare(Scenario):
         with m.machine_queue() as q:
             q.rows += [row(2, inst, "maple"), row(3, inst, "maple"), row(4, inst, "ash", "running")]
         self.assertEqual(len(due("maple")), 1)
-        self.assertEqual(due("maple", quiet=True), 1)
+        self.assertEqual(due("maple", quiet=True), 0)  # the ordinary due result consumed this episode
         self.assertEqual(due("ash"), [])  # running work is left alone
         self.assertEqual(due("ash", quiet=True), 0)
         self.assertEqual(len([i for i in due() if i["kind"] == "machine"]), 1)
@@ -536,6 +536,7 @@ raise SystemExit(result)
                                 cwd=home, env=self.env, capture_output=True).returncode, 0)
             inst = m.Instance(root)
             with mock.patch.object(m, "load", return_value=inst), mock.patch.object(m, "due_items", return_value=[]), \
+                    mock.patch.object(m, "machine_reading", return_value=json.loads(readings.read_text())), \
                     mock.patch.object(m, "changes_due", return_value=[]):
                 with self.assertRaises(SystemExit) as result:
                     m.cmd_due(argparse.Namespace(id="root", quiet=True, json=False))

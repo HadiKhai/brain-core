@@ -508,15 +508,19 @@ def changes_due(inst, n):
 
 
 def machine_due_items(inst, nodes, state, items):
-    """An idle node never wakes for another node's load or queue. Root aggregates once."""
-    target = next((n for n in nodes if n["id"] == "root"), nodes[0] if nodes else None)
-    if target is None or target["archived"] or any(i.get("kind") == "machine" for i in items):
+    """Waiting starts share one episode across due, watch and pending-wake validation."""
+    try:
+        holds = _m_machine.machine_hold_items(inst, state)
+    except (OSError, ValueError):
+        return [{'node': 'root', 'kind': 'machine-repair',
+                 'text': 'Machine hold state unreadable; retain private wake state for repair'}]
+    target = next((n for n in nodes if n['id'] == 'root'), nodes[0] if nodes else None)
+    if target is None or target['archived']:
         return []
-    scope = _m_machine.machine_scope(inst, target["id"])
-    waiting = any(s[0] == scope[0] and (target["id"] == "root" or s == scope)
-                  for s in state.get("waiting_scopes", []))
-    return ([{"node": target["id"], "kind": "machine", "text": _m_machine.machine_summary(state)}]
-            if waiting else [])
+    scope = _m_machine.machine_scope(inst, target['id'])[1]
+    hold = holds.get(scope)
+    return ([{'node': target['id'], 'kind': 'machine', 'episode': hold['episode'],
+              'scope': scope, 'text': _m_machine.machine_summary(state)}] if hold else [])
 
 
 def cmd_due(a):
@@ -592,6 +596,9 @@ def cmd_due(a):
             if any("<!-- host-question:" in line or "<!-- handback:" in line for line in inbox_lines(n)):
                 items.append({"node": n["id"], "kind": "question", "text":
                               "unanswered question in node inbox; follow up with its coordinator or answer for it"})
+    # Ordinary ticks report each hold once. Explicit telemetry remains available at any time.
+    items = [i for i in items if i['kind'] != 'machine' or not i.get('episode') or
+             _m_machine.machine_hold_claim(inst, i['episode'], i['scope'])]
     if a.quiet:
         sys.exit(1 if any(not i.get('informational') for i in items) else 0)
     if a.json:

@@ -44,6 +44,156 @@ class Watcher(Scenario):
             self.watch()
             self.m.wake_drain(self.inst, self.inst.node('root'), once=True)
 
+    def queued_machine_work(self):
+        with self.m.machine_queue() as queue:
+            queue.rows = [{'token': 'a' * 32, 'owner': [os.getpid(), self.m.process_stamp(os.getpid())],
+                           'kind': 'verify', 'state': 'queued',
+                           'scope': self.m.machine_scope(self.inst, 'root')}]
+
+    def test_queued_hold_wakes_once_for_four_ticks_and_changing_numbers(self):
+        self.queued_machine_work()
+        reading = json.loads(self.env['BRAIN_MACHINE_READING'])
+        with mock.patch.object(self.m, 'machine_reading', return_value=reading), \
+                mock.patch.object(self.m, 'changes_due', return_value=[]), mock.patch.object(self.m, 'wake_start'), \
+                mock.patch.object(self.m, 'WAKE_INTERVAL', 0), mock.patch.object(self.m, 'wake_send', return_value=True) as send:
+            for load in (1.5, 1.5, 1.5, 1.5, 1.6, 1.9):
+                reading['load_per_cpu'] = [load] * 3
+                self.watch()
+                self.m.wake_drain(self.inst, self.inst.node('root'), once=True)
+            self.assertEqual(send.call_count, 1)
+            history = self.m.wake_history(self.m.wake_directory(self.inst, self.inst.node('root')))
+            self.assertEqual([i['kind'] for i in history[-1]['items']], ['machine-hold'])
+
+    def test_queued_hold_releases_rearms_changes_reason_and_keeps_questions(self):
+        self.queued_machine_work()
+        good = json.loads(self.env['BRAIN_MACHINE_READING'])
+        reading = dict(good)
+        with mock.patch.object(self.m, 'machine_reading', return_value=reading), \
+                mock.patch.object(self.m, 'changes_due', return_value=[]), mock.patch.object(self.m, 'wake_start'), \
+                mock.patch.object(self.m, 'WAKE_INTERVAL', 0), mock.patch.object(self.m, 'wake_send', return_value=True) as send:
+            def tick(expected):
+                self.watch()
+                self.m.wake_drain(self.inst, self.inst.node('root'), once=True)
+                self.assertEqual(send.call_count, expected)
+            reading['load_per_cpu'] = [1.5] * 3
+            tick(1)
+            reading.update(good)
+            tick(1)  # release is quiet
+            reading['load_per_cpu'] = [1.5] * 3
+            tick(2)
+            reading.update(good, thermal='pressure')
+            tick(3)  # a different reason opens another episode
+            (self.root / 'inbox.md').write_text('- fixture: choose a plan <!-- host-question:fixture -->\n')
+            tick(4)  # real work still wakes under an unchanged hold
+
+    def test_recovered_pending_queue_hold_keeps_mixed_question(self):
+        self.queued_machine_work()
+        good = json.loads(self.env['BRAIN_MACHINE_READING'])
+        reading = {**good, 'load_per_cpu': [1.5] * 3}
+        with mock.patch.object(self.m, 'machine_reading', return_value=reading), \
+                mock.patch.object(self.m, 'changes_due', return_value=[]), mock.patch.object(self.m, 'wake_start'), \
+                mock.patch.object(self.m, 'WAKE_INTERVAL', 0), mock.patch.object(self.m, 'wake_send', return_value=True) as send:
+            self.watch()  # queued, not delivered yet
+            directory = self.m.wake_directory(self.inst, self.inst.node('root'))
+            pending = list(directory.glob('*.pending'))
+            self.assertEqual(len(pending), 1)
+            value = json.loads(pending[0].read_text())
+            question = {'id': 'b' * 64, 'kind': 'inbox'}
+            value['items'].append(question)
+            pending[0].write_text(json.dumps(value))
+            reading.update(good)
+            self.m.wake_drain(self.inst, self.inst.node('root'), once=True)
+            self.assertEqual(send.call_count, 1)
+            self.assertEqual(self.m.wake_history(directory)[-1]['items'], [question])
+
+    def test_due_quiet_claims_queue_hold_once_and_shares_watcher_receipt(self):
+        self.queued_machine_work()
+        reading = {**json.loads(self.env['BRAIN_MACHINE_READING']), 'load_per_cpu': [1.5] * 3}
+        results = []
+        self.m.refresh_status(self.inst, self.inst.node('root'))
+        with mock.patch.object(self.m, 'machine_reading', return_value=reading), \
+                mock.patch.object(self.m, 'changes_due', return_value=[]), mock.patch.object(self.m, 'load', return_value=self.inst), \
+                mock.patch.object(self.m, 'wake_start'), mock.patch.object(self.m, 'wake_send', return_value=True) as send:
+            for _ in range(4):
+                with self.assertRaises(SystemExit) as result:
+                    self.m.cmd_due(argparse.Namespace(id='root', quiet=True, json=False))
+                results.append(result.exception.code)
+            self.assertEqual(results, [1, 0, 0, 0])
+            self.watch()
+            self.m.wake_drain(self.inst, self.inst.node('root'), once=True)
+            send.assert_not_called()
+            (self.root / 'inbox.md').write_text('- fixture: choose a plan <!-- host-question:fixture -->\n')
+            with self.assertRaises(SystemExit) as result:
+                self.m.cmd_due(argparse.Namespace(id='root', quiet=True, json=False))
+            self.assertEqual(result.exception.code, 1)
+
+    def test_queue_hold_identity_survives_restarts_and_sustained_readings(self):
+        self.queued_machine_work()
+        good = json.loads(self.env['BRAIN_MACHINE_READING'])
+        reading = {**good, 'load_per_cpu': [1.5] * 3}
+        with mock.patch.object(self.m, 'machine_reading', return_value=reading):
+            first = self.m.machine_hold_items(self.inst)
+            # A reader in another process gets the persisted episode, independent of text values.
+            restarted = self.m.Instance(self.root)
+            reading['sample_reasons'] = ['sustained 5-minute load']
+            self.assertEqual(self.m.machine_hold_items(restarted), first)
+            reading.pop('sample_reasons')
+            reading['load_per_cpu'] = [1.9] * 3
+            self.assertEqual(self.m.machine_hold_items(restarted), first)
+            reading.update(good)
+            self.assertEqual(self.m.machine_hold_items(restarted), {})
+            reading['load_per_cpu'] = [1.5] * 3
+            second = self.m.machine_hold_items(restarted)
+            self.assertNotEqual(first, second)
+            self.assertFalse(next(iter(second.values()))['reported'])
+
+    def test_queue_hold_enqueue_failure_retries_and_recovery_retires_pending(self):
+        self.queued_machine_work()
+        good = json.loads(self.env['BRAIN_MACHINE_READING'])
+        reading = {**good, 'load_per_cpu': [1.5] * 3}
+        with mock.patch.object(self.m, 'machine_reading', return_value=reading), \
+                mock.patch.object(self.m, 'changes_due', return_value=[]), mock.patch.object(self.m, 'wake_start'), \
+                mock.patch.object(self.m, 'wake_send', return_value=True) as send:
+            with mock.patch.object(self.m, 'request_wake', return_value=False):
+                self.watch()
+            self.assertFalse(next(iter(self.m.machine_hold_items(self.inst).values()))['reported'])
+            self.watch()
+            directory = self.m.wake_directory(self.inst, self.inst.node('root'))
+            self.assertEqual(len(list(directory.glob('*.pending'))), 1)
+            reading.update(good)
+            self.m.wake_drain(self.inst, self.inst.node('root'), once=True)
+            send.assert_not_called()
+            self.assertFalse(list(directory.glob('*.pending')))
+
+    def test_broken_hold_state_preserves_real_work_and_pending_questions(self):
+        self.queued_machine_work()
+        reading = {**json.loads(self.env['BRAIN_MACHINE_READING']), 'load_per_cpu': [1.5] * 3}
+        with mock.patch.object(self.m, 'machine_reading', return_value=reading), \
+                mock.patch.object(self.m, 'changes_due', return_value=[]), mock.patch.object(self.m, 'wake_start'), \
+                mock.patch.object(self.m, 'WAKE_INTERVAL', 0), mock.patch.object(self.m, 'wake_send', return_value=True) as send:
+            self.watch()
+            state = self.root / '.brain/wake/machine-holds.json'
+            state.write_text('broken')
+            (self.root / 'inbox.md').write_text('- fixture: choose a plan <!-- host-question:fixture -->\n')
+            self.watch()
+            self.m.wake_drain(self.inst, self.inst.node('root'), once=True)
+            self.assertEqual(send.call_count, 1)
+            self.assertEqual(state.read_text(), 'broken')
+            history = self.m.wake_history(self.m.wake_directory(self.inst, self.inst.node('root')))
+            self.assertIn('inbox', [i['kind'] for i in history[-1]['items']])
+
+    def test_queued_thermal_hold_and_alert_enqueue_one_wake(self):
+        self.queued_machine_work()
+        hot = {**json.loads(self.env['BRAIN_MACHINE_READING']), 'thermal': 'pressure'}
+        with mock.patch.object(self.m, 'machine_reading', return_value=hot), \
+                mock.patch.object(self.m, 'changes_due', return_value=[]), mock.patch.object(self.m, 'wake_start'), \
+                mock.patch.object(self.m, 'WAKE_INTERVAL', 0), mock.patch.object(self.m, 'wake_send', return_value=True), \
+                mock.patch.object(self.m, 'request_wake', wraps=self.m.request_wake) as request:
+            self.machine_tick(time.time(), hot)
+            self.assertEqual(request.call_count, 1)  # no detach window between hold and immediate thermal alert
+            self.assertEqual({i['kind'] for i in request.call_args.kwargs['items']},
+                             {'machine-hold', 'machine-alert'})
+
     def test_machine_open_close_are_private_and_never_wake(self):
         base = time.time()
         good = json.loads(self.env['BRAIN_MACHINE_READING'])

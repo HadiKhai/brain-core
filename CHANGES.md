@@ -5,6 +5,21 @@ upgrading. `brain changes <node>` shows the entries this node's coordinator hasn
 `brain due <node>` lists them until `brain changes <node> --seen`. Entry headings are
 `## <date>: <title>`; once released, a heading never changes.
 
+## 2026-10-23: Wake once per queued machine-hold episode
+
+For agents:
+- Queued machine holds share a private episode receipt across ordinary `due` ticks
+  and watcher wakes. Changing timestamps, load readings or queue counts does not
+  reopen a hold; recovery or a different reason does. Thermal and long-hold
+  alerts retain their existing escalation behavior.
+- Pending recovered holds retire without dropping mixed questions or other work.
+  Routine sampler transitions remain private and quiet.
+
+After upgrading:
+- Ordinary `due` reports each queued hold once; `due --quiet` consumes that same
+  receipt. Use `due --machine` for current readings without consuming a receipt.
+  No service or policy change is needed.
+
 ## 2026-10-22: Refresh repository lane ownership after batch integration
 
 For agents:

@@ -1,4 +1,5 @@
 """Machine mechanics for Brain."""
+import contextlib
 import datetime
 import hashlib
 import json
@@ -204,6 +205,8 @@ def machine_publish(inst, path, text):
     """Publish only in the pinned instance root or its private state directory."""
     _m_common.safe_target(path)
     expected = inst.root.resolve() / (".brain" if path.parent.name == ".brain" else "")
+    if path.parent == inst.root / '.brain/wake':
+        expected = inst.root.resolve() / '.brain/wake'
     fd = os.open(str(path.parent), _m_history.HISTORY_DIR_FLAGS)
     name = ".machine-" + os.urandom(12).hex() + ".tmp"
     try:
@@ -716,6 +719,76 @@ def machine_state(inst=None):
     except (OSError, ValueError, KeyError, TypeError, AttributeError):
         reading.update(queued=None, verifying=None, waiting_scopes=[])
     return reading
+
+
+@contextlib.contextmanager
+def machine_hold_store(inst):
+    """Short private transaction shared by due ticks and watcher delivery receipts."""
+    import fcntl
+    path = inst.root / '.brain/wake/machine-holds.json'
+    lock = path.with_suffix('.lock')
+    if _m_common.outward_links(inst.root):
+        raise ValueError('unsafe machine hold state')
+    path.parent.mkdir(exist_ok=True)
+    _m_common.safe_target(lock)
+    fd = os.open(lock, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(fd, 'a+') as stream:
+        if os.fstat(stream.fileno()).st_nlink != 1:
+            raise ValueError('linked machine hold lock')
+        fcntl.flock(stream, fcntl.LOCK_EX)
+        _m_common.safe_target(path)
+        data = json.loads(path.read_text()) if path.exists() else {'version': 1, 'holds': {}}
+        if (not isinstance(data, dict) or data.get('version') != 1 or not isinstance(data.get('holds'), dict)
+                or any(not re.fullmatch(r'[0-9a-f]{64}', key) or not isinstance(row, dict)
+                       or not re.fullmatch(r'[0-9a-f]{64}', str(row.get('reason', '')))
+                       or not re.fullmatch(r'[0-9a-f]{32}', str(row.get('episode', '')))
+                       or type(row.get('reported')) is not bool for key, row in data['holds'].items())):
+            raise ValueError('invalid machine hold state')
+        before = json.dumps(data, sort_keys=True)
+        yield data
+        if json.dumps(data, sort_keys=True) != before:
+            machine_publish(inst, path, json.dumps(data, sort_keys=True) + '\n')
+
+
+def machine_hold_items(inst, state=None):
+    """One opaque episode per waiting scope and reason class, never per load reading."""
+    state = machine_state(inst) if state is None else state
+    if state.get('queued') is None:
+        raise ValueError('machine queue unreadable')
+    own = machine_scope(inst, 'root')
+    scopes = {s[1] for s in state.get('waiting_scopes', []) if s[0] == own[0]}
+    reasons = state.get('held', [])
+    if not reasons and state.get('queued') and state.get('verifying', 0) >= state['verify_limit']:
+        reasons = ['verify slots busy']
+    def reason_class(text):
+        if '5-minute load' in text:
+            return 'load'
+        if 'thermal' in text:
+            return 'thermal'
+        return re.sub(r'\d+(?:\.\d+)?', '#', text)
+    # Raw and sustained readings describe the same reason class.
+    reason = hashlib.sha256(json.dumps(sorted(set(map(reason_class, reasons)))).encode()).hexdigest()
+    active = scopes | {own[1]} if scopes and reasons else set()
+    if not active and not (inst.root / '.brain/wake/machine-holds.json').exists():
+        return {}
+    with machine_hold_store(inst) as data:
+        previous = data['holds']
+        data['holds'] = {scope: previous[scope] if scope in previous and previous[scope]['reason'] == reason
+                         else {'reason': reason, 'episode': os.urandom(16).hex(), 'reported': False}
+                         for scope in active}
+        return {scope: dict(row) for scope, row in data['holds'].items()}
+
+
+def machine_hold_claim(inst, episode, scope, deliver=None):
+    """A due result or durable wake enqueue acknowledges the same episode exactly once."""
+    with machine_hold_store(inst) as data:
+        row = data['holds'].get(scope)
+        if not row or row['episode'] != episode or row['reported']:
+            return False
+        if deliver is not None and not deliver():
+            return False
+        row['reported'] = True
+        return True
 
 
 def machine_summary(reading):
