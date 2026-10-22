@@ -472,7 +472,7 @@ You mostly talk to coordinators, and they run `brain` for you. By hand:
 | `brain usage` | allowed subscriptions, account-wide windows, age and resets |
 | `brain stale <node> <host time>` | is a node's status behind its thread? Compares moments, whatever the timezones |
 | `brain sync <node>` / `--all` | what happened in a node and its home since the last sync |
-| `brain check [--fix]` | verify the axioms that can be checked mechanically; repair the safe things |
+| `brain check [--fix] [--live]` | check mechanically and read cached webhook results; repair safe things with `--fix`; only `--live` sends a real probe |
 | `brain machine` | this machine's bindings |
 </details>
 

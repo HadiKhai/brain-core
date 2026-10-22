@@ -401,10 +401,34 @@ class QuestionWake(Scenario):
             self.assertNotIn("made-up question", state)
             self.assertEqual((directory / "delivery.json").stat().st_mode & 0o777, 0o600)
 
+    def test_check_cached_only_until_explicit_live_even_when_stale(self):
+        with self.webhook(403) as (url, calls):
+            self.bind_webhook(url)
+            first = self.b(self.r, "check")
+            self.assertIn("not probed; run brain check --live", first)
+            self.assertEqual(calls, [])
+            directory = self.module.wake_directory(self.inst, self.n)
+            self.module.wake_record(directory, url, 202)
+            cached = self.b(self.r, "check")
+            self.assertIn("wake probe HTTP 202", cached)
+            self.assertEqual(calls, [])
+            name = "probe-" + self.module.wake_binding(url) + ".json"
+            self.module.wake_record(directory, url, 403, name)
+            path = directory / name
+            value = json.loads(path.read_text())
+            value['at'] -= 86401
+            path.write_text(json.dumps(value))
+            stale = self.b(self.r, "check", ok=False)
+            self.assertIn("wake probe HTTP 403", stale)
+            self.assertIn("result age 864", stale)
+            self.assertEqual(calls, [])
+            self.b(self.r, "check", "--live", ok=False)
+            self.assertEqual(len(calls), 1)
+
     def test_check_real_probe_caches_for_day_force_reprobes_and_due_agrees(self):
         with self.webhook(403) as (url, calls):
             self.bind_webhook(url)
-            first = self.b(self.r, "check", ok=False)
+            first = self.b(self.r, "check", "--live", ok=False)
             self.assertIn("wake probe HTTP 403", first)
             self.assertIn("result age", first)
             self.assertNotIn(url, first)
@@ -421,10 +445,12 @@ class QuestionWake(Scenario):
             record["at"] -= 86401
             cache.write_text(json.dumps(record))
             self.b(self.r, "check", ok=False)
+            self.assertEqual(len(calls), 2)  # even an expired result is read-only by default
+            self.b(self.r, "check", "--live", ok=False)
             self.assertEqual(len(calls), 3)
         with self.webhook() as (url, calls):
             self.bind_webhook(url)
-            success = self.b(self.r, "check")
+            success = self.b(self.r, "check", "--live")
             self.assertIn("wake probe HTTP 202", success)
             self.assertEqual(len(calls), 1)
             self.assertNotIn("last wake delivery", self.due_without_drain())
@@ -432,7 +458,7 @@ class QuestionWake(Scenario):
     def test_cached_success_does_not_hide_new_drain_refusal(self):
         with self.webhook() as (url, calls):
             self.bind_webhook(url)
-            self.b(self.r, "check")
+            self.b(self.r, "check", "--live")
             directory = self.module.wake_directory(self.inst, self.n)
             self.module.wake_record(directory, url, 403)
             check = self.b(self.r, "check", ok=False)
@@ -450,7 +476,7 @@ class QuestionWake(Scenario):
     def test_check_redirect_is_a_problem_for_probe_and_drain(self):
         with self.webhook(302, redirect=True) as (url, calls):
             self.bind_webhook(url)
-            check = self.b(self.r, "check", ok=False)
+            check = self.b(self.r, "check", "--live", ok=False)
             self.assertIn("✗ a: wake probe HTTP 302", check)
             self.assertEqual(len(calls), 1)
             self.assertNotIn(url, check)
@@ -464,7 +490,7 @@ class QuestionWake(Scenario):
 
     def test_probe_transport_error_warns_is_safe_and_not_cached(self):
         self.bind_webhook("http://127.0.0.1:1/synthetic-secret")
-        check = self.b(self.r, "check")
+        check = self.b(self.r, "check", "--live")
         self.assertIn("! a: wake probe transport error (not cached)", check)
         self.assertNotIn("synthetic-secret", check)
         directory = self.module.wake_directory(self.inst, self.n)

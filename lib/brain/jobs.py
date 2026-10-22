@@ -208,6 +208,8 @@ def cmd_handback(a):
                 "at": inst.now(), "report": _m_common.tilde(a.report) if a.report is not None else previous.get("report", ""),
                 "lessons": lessons, "ready": packet, "ready_reasons": reasons,
                 "verify_runs": count("verify_runs") + fresh, "verify_reused": count("verify_reused") + reused}
+        if a.state == "done":
+            data["wake_id"] = os.urandom(16).hex()  # each publication is a fresh completion, even after a rebase
         need = getattr(a, "need_human", None)
         inbox_question = a.state == "question" or (a.state == "blocked" and need)
         if inbox_question:

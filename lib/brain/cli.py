@@ -423,7 +423,7 @@ def main():
             help="with --global: the config folders that get this brain's pointer, e.g. claude=~/.claude-work"))
     cmd("check", _m_check.cmd_check, "verify what can be checked mechanically; --fix repairs the safe things",
         opt("--fix", action="store_true"),
-        opt("--live", action="store_true", help="force real webhook probes, bypassing the 24-hour cache"))
+        opt("--live", action="store_true", help="send real webhook probes; default check only reads cached results"))
     cmd("heavy", _m_machine.cmd_heavy, "wait until the machine admits new heavy work",
         opt("--node", help="coordinator whose work is waiting (default root)"))
     cmd("machine", _m_machine.cmd_machine, "machine state, sampler and bindings",

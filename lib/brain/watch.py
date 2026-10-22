@@ -4,6 +4,7 @@ import json
 import os
 import re
 import shlex
+from pathlib import Path
 
 from . import common as _m_common
 from . import guard as _m_guard
@@ -17,6 +18,7 @@ from . import transitions as _m_transitions
 from . import usage as _m_usage
 from . import upgrade as _m_upgrade
 from . import verify as _m_verify
+from . import worktrees as _m_worktrees
 
 
 WATCH_LOCAL_KINDS = ('unsettled-threads',)
@@ -85,8 +87,19 @@ def watch_items(inst, n):
             continue
         # Keep identity separate from changing display (readiness, age, counts).
         identity = item.get('episode') if item['kind'] == 'machine-alert' else (item.get('job') or item['text'])
+        if item['kind'] == 'rotate':
+            sessions = n['local'].get('coordinator_sessions', [])
+            category = ('repair' if item['text'].startswith('rotation sidecar') else
+                        'session' if item['text'].startswith('append the new coordinator') else 'limit')
+            identity = [n['local'].get('coordinator'), sessions[-1] if isinstance(sessions, list) and sessions else None,
+                        category]
         if item['kind'] == 'handback':
             identity = [identity, item.get('state')]
+            if item.get('state') == 'done':
+                signal = signals.get(item.get('job')) or {}
+                episode = signal.get('wake_id')
+                handback_episode = (episode if isinstance(episode, str) and re.fullmatch(r'[0-9a-f]{32}', episode)
+                                    else watch_digest([signal.get('at'), signal.get('ready')]))
             if handback_episode:
                 identity.append(handback_episode)
         text = _m_nodes.import_text(item['text'], _m_guard.never_terms(n))[:400]
@@ -95,6 +108,91 @@ def watch_items(inst, n):
         if direct_reason:
             entry.update(reason=direct_reason, source=n['id'])
         out.append(entry)
+    return out
+
+
+def watch_recorded_ready(inst, n, row, signal):
+    """Validate a stored success for notification, never run a readiness/verify path.
+
+    Cached refs fence stale evidence. This notification is not merge authority and
+    does not replace the coordinator's full readiness/input/rehearsal checks.
+    """
+    if _m_jobs.handback_file(n, row).exists():
+        if not signal or signal.get('version') != 2 or signal.get('state') != 'done' or signal.get('ready_reasons') != []:
+            return None
+        packet = signal.get('ready')
+    else:
+        # This existing reader only loads legacy stored evidence; a newer signal
+        # (even damaged or blocked) always wins and can never resurrect the old file.
+        packet = _m_verify.read_ready_packet(inst, n, row['Job'], row)
+    if not isinstance(packet, dict):
+        return None
+    checked = inst.parse_time(packet.get('checked_at')) if isinstance(packet.get('checked_at'), str) else None
+    started = inst.parse_time(row.get('Started'))
+    sha = lambda value: isinstance(value, str) and re.fullmatch(r'[0-9a-f]{40}|[0-9a-f]{64}', value)
+    if (type(packet.get('version')) is not int or packet['version'] != 1
+            or packet.get('node') != n['id'] or packet.get('branch') != row['Job']
+            or type(packet.get('verify_result')) is not int or packet['verify_result'] != 0
+            or type(packet.get('review_rounds')) is not int or packet['review_rounds'] < 1
+            or not checked or not started or checked < started or checked > inst.now_dt()
+            or not n['fm'].get('verify', '').strip() or packet.get('verify_command') != n['fm']['verify'].strip()
+            or not isinstance(packet.get('inputs'), str) or not re.fullmatch(r'[0-9a-f]{64}', packet['inputs'])
+            or not all(sha(packet.get(k)) for k in ('head', 'main'))):
+        return None
+    lanes = packet.get('verify_lanes')
+    if lanes is not None and (not isinstance(lanes, list) or not lanes or any(
+            not isinstance(lane, dict) or lane.get('status') != 'passed'
+            or type(lane.get('result')) is not int or lane['result'] != 0 for lane in lanes)):
+        return None
+    check = packet.get('verify_lanes_check')
+    if check is not None and (not isinstance(check, dict) or type(check.get('result')) is not int or check['result'] != 0):
+        return None
+    home = n['home_path']
+    w = n['local'].get('worktrees', {}).get(row['Job'])
+    if not home or not home.exists() or not isinstance(w, dict) or not w.get('path') or not Path(w['path']).is_dir():
+        return None
+    target = _m_worktrees.integration_target(n)
+    ref = target if n['fm'].get('merge', 'local') == 'pr' else target.replace('refs/heads/', 'refs/remotes/origin/', 1)
+    if 'origin' not in _m_common.git('remote', cwd=home).stdout.split():
+        ref = target
+    def tip(name):
+        return _m_common.git('rev-parse', '--verify', '--quiet', name + '^{commit}', cwd=home).stdout.strip() if name else ''
+    head, main, base = tip('refs/heads/' + row['Job']), tip(ref), tip(target)
+    if (packet['head'] != head or not main or not base
+            or packet.get('integration_base', packet['main']) != base
+            or packet['main'] != (main if 'integration_base' in packet else base)):
+        return None
+    if _m_jobs.train_ejection(n, row, packet):
+        return None
+    return packet
+
+
+def watch_completion_items(inst, nodes=None):
+    """Opaque per-packet/per-ledger-transaction root notices, batched by watch_run."""
+    out = []
+    for n in nodes if nodes is not None else inst.nodes():
+        if n['archived']:
+            continue
+        for row in _m_jobs.read_jobs(n) or []:
+            kind, evidence = None, None
+            if row['Ended']:
+                start, end = inst.parse_time(row['Started']), inst.parse_time(row['Ended'])
+                if row['Outcome'] == 'merged' and start and end and end >= start:
+                    kind = 'job-landed'
+                    evidence = [row['Ended'], row.get('Head commit'), row.get('Batch')]
+            else:
+                try:
+                    packet = watch_recorded_ready(inst, n, row, _m_jobs.read_handback(n, row))
+                except (OSError, ValueError, TypeError, AttributeError):
+                    packet = None  # invalid completion evidence cannot block unrelated protected wakes
+                if packet:
+                    kind, evidence = 'job-ready', packet
+            if kind:
+                out.append({'id': watch_digest([n['id'], _m_jobs.job_key(row), kind, evidence]),
+                            'node': 'root', 'kind': kind,
+                            'text': ('A job has new recorded ready evidence; inspect coordinator due queues'
+                                     if kind == 'job-ready' else
+                                     'A job has landed in its ledger; inspect coordinator due queues')})
     return out
 
 
@@ -219,6 +317,12 @@ def watch_groups(inst, nodes=None):
                                        'kind': 'overdue-question', 'node': n['id'],
                                        'reason': 'overdue:' + hashlib.sha256(line.encode()).hexdigest(),
                                        'text': 'Unanswered question past its threshold; inspect brain due root'})
+    completions = watch_completion_items(inst, nodes)
+    if completions:
+        root = inst.node('root')
+        group = groups.setdefault('root', {'node': root, 'items': [],
+                                          'command': _m_hosts.wake_target(inst, root)[1]})
+        group['items'].extend(completions)
     return groups
 
 

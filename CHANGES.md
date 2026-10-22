@@ -5,6 +5,33 @@ upgrading. `brain changes <node>` shows the entries this node's coordinator hasn
 `brain due <node>` lists them until `brain changes <node> --seen`. Entry headings are
 `## <date>: <title>`; once released, a heading never changes.
 
+## 2026-10-22: Stable completion wakes and explicit live checks
+
+For agents:
+- Rotation wake ids follow the coordinator/session and reason category, so live
+  token and turn counts do not wake it again. A new coordinator/session rearms it.
+- Each done hand-back publication gets a fresh completion episode, including a
+  second hand-back after rebasing. Display-only changes do not replay it.
+- Root receives deduplicated notices for new recorded successful ready packets
+  and merged ledger transactions. Several completions share one queued root wake;
+  private child reports and branch names do not enter these notices. Inspect
+  `brain due root --since-wake` after a completion wake, then the owning queues.
+  These are notifications, never permission to land: the watcher checks stored
+  result/identity fields and cached refs, never runs readiness, verification,
+  rehearsal, lane commands or host queries. Done alone never implies ready.
+- Queued completion notices are checked again before sending. Stale notices are
+  dropped while questions and other protected requests in the same wake survive.
+- `brain check` reads cached webhook probe/delivery results, even when stale.
+  Only `brain check --live` sends a real POST. `--fix` never sends, even with
+  `--live`. The shared explicit live-probe helper is unchanged.
+
+After upgrading:
+- Existing recorded ready packets and merged ledger transactions notify root once
+  on the first watch tick; existing needs are not silently baselined away. Private
+  wake acknowledgements deduplicate later ticks. No new service is required.
+- Default check reports untested bindings and result age. Use `--live` when an
+  actual delivery probe is intended. Normal checks never wake a coordinator.
+
 ## 2026-10-21: Keep the human inbox focused
 
 For agents:

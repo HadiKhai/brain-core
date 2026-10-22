@@ -298,10 +298,12 @@ def cmd_check(a):
         seen.add(target["id"])
         directory = _m_hosts.wake_directory(inst, target)
         name = "probe-" + _m_hosts.wake_binding(command) + ".json"
-        # --fix owns the instance lock: it may read results, never wait/send.
-        if a.fix:
-            record = _m_hosts.wake_read(directory, command, name)
-            status = record["status"] if record else "not probed; run brain check"
+        # Default/--fix only read cached results. Only explicit --live may POST;
+        # --fix owns the instance lock and must never wait/send, even with --live.
+        if a.fix or not getattr(a, "live", False):
+            record = (_m_hosts.wake_read(directory, command, name)
+                      or _m_hosts.wake_read(directory, command))
+            status = record["status"] if record else "not probed; run brain check --live"
         else:
             status = _m_hosts.wake_probe(inst, target, force=getattr(a, "live", False))
             record = _m_hosts.wake_read(directory, command, name)
