@@ -345,16 +345,24 @@ class WatchExtension(Scenario):
                 raise PermissionError('fixture other job unreadable')
             return original(path, *args, **kwargs)
         root, question = self.inst.node('root'), {'id': 'd' * 64, 'kind': 'inbox'}
+        original_packet = self.m.watch_recorded_ready
+        def unavailable(inst, node, job, signal, **kwargs):
+            if job['Job'] == other['Job']:
+                raise SystemExit('fixture per-job reader exit')
+            return original_packet(inst, node, job, signal, **kwargs)
         with mock.patch.object(self.m, 'wake_start'), mock.patch.object(self.m, 'WAKE_INTERVAL', 0), \
                 mock.patch.object(self.m, 'wake_send', return_value=True) as send:
-            self.m.request_wake(self.inst, root, 'two jobs and a question', items=[stale, unknown, question])
-            with mock.patch.object(Path, 'read_text', denied):
-                self.m.wake_drain(self.inst, root, once=True)
-            self.assertEqual(send.call_count, 1)
-            refs = self.m.wake_history(self.m.wake_directory(self.inst, root))[-1]['items']
-            self.assertNotIn(stale['id'], [i['id'] for i in refs])
-            self.assertIn(unknown['id'], [i['id'] for i in refs])
-            self.assertIn(question, refs)
+            failures = [mock.patch.object(Path, 'read_text', denied),
+                        mock.patch.object(self.m, 'watch_recorded_ready', side_effect=unavailable)]
+            for index, failure in enumerate(failures):
+                self.m.request_wake(self.inst, root, 'two jobs and a question ' + str(index), items=[stale, unknown, question])
+                with failure:
+                    self.m.wake_drain(self.inst, root, once=True)
+                self.assertEqual(send.call_count, index + 1)
+                refs = self.m.wake_history(self.m.wake_directory(self.inst, root))[-1]['items']
+                self.assertNotIn(stale['id'], [i['id'] for i in refs])
+                self.assertIn(unknown['id'], [i['id'] for i in refs])
+                self.assertIn(question, refs)
 
     def test_unknown_unrelated_ledger_does_not_keep_stale_ready_notice(self):
         home, n, w, row = self.project()
