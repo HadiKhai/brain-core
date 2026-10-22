@@ -367,6 +367,36 @@ class BaselineDiagnostics(RehearsalFixture):
         for warning in outcome['warnings']:
             self.assertIn('warning: ' + warning, printed)
 
+    def test_unquoted_spaced_path_and_never_name_are_private_at_publication(self):
+        for key in ('check', 'fix'):
+            for protect_prefix in (False, True):
+                with self.subTest(key=key, protect_prefix=protect_prefix):
+                    lane = self.tmp / (key + str(protect_prefix))
+                    (lane / 'brain').mkdir(parents=True)
+                    raw = ('✗ engine: invented-canary home /fabricated/private-client '
+                           'alpha-private report not found on this machine')
+                    terms = [('invented-canary', 'term')]
+                    if protect_prefix:
+                        # Redaction must not erase the path marker before we
+                        # recognize its ambiguous, whitespace-containing span.
+                        terms.append(('/fabricated/private-client', 'path term'))
+                    process = mock.Mock(returncode=1, pid=123)
+                    process.communicate.return_value = (raw, '')
+                    with mock.patch.object(rehearsal, 'sandbox_prefix', return_value=[]), \
+                            mock.patch.object(rehearsal.subprocess, 'Popen', return_value=process), \
+                            mock.patch.object(rehearsal.os, 'killpg'):
+                        new = rehearsal.run_command(lane / 'brain/core', lane, [], 'read', [], terms)
+                    outcome = self.run_rehearsal(outputs=[
+                        {key: result('healthy'), 'hook': result()}, {key: new, 'hook': result()}])
+                    self.assertFalse(outcome['passed'])
+                    self.assertIn(key + ': new check errors', outcome['regressions'])
+                    saved_and_printed = self.publish(outcome)
+                    for private in ('invented-canary', '/fabricated', 'private-client',
+                                    'alpha-private', 'report not found', 'engine:'):
+                        self.assertNotIn(private, saved_and_printed)
+                    self.assertIn(dict(command=key, reason='new check errors',
+                        added_errors=['✗ <redacted path diagnostic>']), outcome['diagnostics'])
+
 
 class StableComparisons(unittest.TestCase):
     def test_diagnostic_paths_and_short_private_ids_preserve_error_meaning(self):

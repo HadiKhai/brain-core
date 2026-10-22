@@ -546,10 +546,14 @@ def added_check_errors(old, new):
 
 
 def diagnostic_line(line, terms, identifiers=()):
-    # Probe text is already normalized/redacted. Publication additionally masks
-    # private identifiers and whole path tokens, including normalized copy paths.
-    # Do this after comparison so redaction cannot hide a newly added error.
+    # Publication masks private identifiers and whole path tokens, including
+    # normalized copy paths, before protected terms can obscure path markers.
+    # Keep this rendering separate from comparison so it cannot hide a delta.
     line = re.sub(r'''(?<!\w)(["'])(?=[^"'\n]*[/\\])[^"'\n]*\1''', '<path>', line)
+    # There is no safe delimiter between an unquoted path containing spaces
+    # and the surrounding message. Refuse to publish any part of that line.
+    if re.search(r'[/\\].*\s+\S', line):
+        return '✗ <redacted path diagnostic>'
     line = re.sub(r'''[^\s"'(),;]*[/\\][^\s"'(),;]*''', '<path>', line)
     line = re.sub(r'''[^\s"'(),;<>]*\.[A-Za-z][\w.-]*''', '<path>', line)
     # Invalid references (unknown nodes, principals, schedules) need not occur
@@ -840,10 +844,17 @@ runpy.run_path(entry, run_name='__main__')
         raise RehearsalError('probe frozen clock binding failed')
     # Normalize JSON escapes before redaction as well: an escaped spelling must
     # not become a protected literal after the privacy filter has run.
-    text = redact_output(normalize(out + err, roots), terms)
+    normalized = normalize(out + err, roots)
+    text = redact_output(normalized, terms)
+    # Capture safe renderings before protected-term redaction can erase a path
+    # marker and strand its whitespace-separated private suffix. Only these
+    # values, never the lookup keys, may be published as error diagnostics.
+    error_diagnostics = {redact_output(line, terms): diagnostic_line(line, terms)
+                         for line in normalized.splitlines() if '✗' in line}
     after = snapshot(lane, cache)
     changed = {k for k in before.keys() | after.keys() if before.get(k) != after.get(k)}
-    return {'text': text, 'code': p.returncode, 'timeout': timed_out,
+    return {'text': text, 'error_diagnostics': error_diagnostics,
+            'code': p.returncode, 'timeout': timed_out,
             'seconds': elapsed, 'unexpected': sum(not allowed_write(k, kind) for k in changed) + int(violation.exists())}
 
 
@@ -978,7 +989,8 @@ def rehearse(inst, n, branch):
                 added = added_check_errors(result, new[key])
                 if added:
                     diagnostics.append(dict(command=key, reason='new check errors',
-                        added_errors=[diagnostic_line(line, diagnostic_terms, diagnostic_ids) for line in added]))
+                        added_errors=[diagnostic_line(new[key].get('error_diagnostics', {}).get(line, line),
+                                                     diagnostic_terms, diagnostic_ids) for line in added]))
             if identical_baseline_failure(result, new[key]):
                 warnings.append(key + ': identical baseline failure')
             conditions = (['timeout'] if result['timeout'] else []) + (
