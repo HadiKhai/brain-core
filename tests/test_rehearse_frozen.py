@@ -1,18 +1,33 @@
 """Frozen-input hotfix contracts; all brains and diagnostic text are fabricated."""
 import contextlib
+import datetime
 import hashlib
 import io
 import json
 import os
+import shutil
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 import unittest
 from unittest import mock
 
 from test_rehearse import RehearsalFixture, rehearsal, result
+from scenario import CORE, Scenario
 
 
 class FrozenInputs(RehearsalFixture):
+    def test_snapshot_records_one_clock_before_lanes(self):
+        clock = datetime.datetime(2035, 1, 2, 12, 0, tzinfo=datetime.timezone.utc)
+        seen = []
+        def inspect(source, *args):
+            clock_file = source.parent / 'rehearse-clock'
+            self.assertTrue(clock_file.is_file(), 'snapshot clock missing')
+            seen.append(clock_file.read_text())
+        outcome = self.run_rehearsal(inspect_lane=inspect, now=clock)
+        self.assertEqual([clock.isoformat(), clock.isoformat()], seen)
+        self.assertEqual(clock.isoformat(), outcome['frozen_now'])
+
     def test_one_snapshot_survives_live_edits_and_is_cleaned_up(self):
         sources = []
         copies = []
@@ -354,3 +369,81 @@ class CandidateNotices(RehearsalFixture):
         self.git('commit', '-qam', 'no candidate notice', cwd=self.home)
         self.head = self.git('rev-parse', 'HEAD', cwd=self.home).strip()
         self.assertIn('due:0: new due items', run([notice])['regressions'])
+
+
+@unittest.skipUnless(sys.platform == 'darwin', 'requires macOS OS sandbox')
+class FrozenClock(Scenario):
+    def setUp(self):
+        super().setUp()
+        self.source = self.repo(self.tmp / 'source', {'instance.md': '---\ntimezone: UTC\n---\n',
+            'status.md': '## Blocked\n- sample hold; since: 2035-01-01 00:00 +00:00; recommendation: ask; default: wait\n'})
+        self.old = self.source / 'core'
+        self.new = self.tmp / 'candidate'
+        for index, core in enumerate((self.old, self.new)):
+            shutil.copytree(CORE / 'lib', core / 'lib', ignore=shutil.ignore_patterns('__pycache__'))
+            (core / 'bin').mkdir()
+            # Model two real wall-clock readings ten minutes apart, without sleeping.
+            path = core / 'lib/brain/instance.py'
+            text = path.read_text().replace('datetime.datetime.now(z)',
+                'datetime.datetime(2035, 1, 3, 0, ' + str(index * 10 + 1) + ', tzinfo=z)')
+            path.write_text(text)
+            (core / 'bin/brain').write_text('''import json, subprocess, sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'lib'))
+from brain.instance import Instance
+from brain import status
+inst = Instance(Path.cwd())
+n = dict(id='sample', dir=Path.cwd(), archived=False)
+rows = status.blocked_entries(inst, n)
+if sys.argv[1] == 'age':
+    child = subprocess.check_output([sys.executable, '-B', '-c',
+        'import sys; from pathlib import Path; sys.path.insert(0, str(Path.cwd() / "core/lib")); from brain.instance import Instance; print(Instance(Path.cwd()).now_dt().timestamp())'], text=True).strip()
+    print(json.dumps(dict(age=rows[0]['age_hours'], escalated=rows[0]['escalated'], child_epoch=float(child))))
+else:
+    print(json.dumps([dict(node='sample', kind='blocked-overdue', id='hold',
+        age_hours=row['age_hours'], escalated=row['escalated']) for row in rows if row['escalated']]))
+''')
+        self.clock = datetime.datetime(2035, 1, 2, 12, tzinfo=datetime.timezone.utc)
+        (self.source.parent / 'rehearse-clock').write_text(self.clock.isoformat())
+
+    def pair(self, command):
+        with mock.patch.dict(os.environ, self.env):
+            return [rehearsal.run_lane(self.source, core, self.tmp / name, [],
+                       [('due:0', [command], 'read')])['due:0']
+                    for core, name in ((self.old, 'before'), (self.new, 'after_'))]
+
+    def test_probes_minutes_apart_have_identical_age_fields_and_helper_clock(self):
+        before, after = self.pair('age')
+        for row in (before, after):
+            self.assertEqual(0, row['code'], row['text'])
+            self.assertFalse(row['timeout'])
+            self.assertEqual(0, row['unexpected'])
+        self.assertEqual(before['text'], after['text'])
+        fields = json.loads(before['text'])
+        self.assertEqual(36.0, fields['age'])
+        self.assertFalse(fields['escalated'])
+        # Numeric epoch survives path/time normalization, proving helper pinning too.
+        self.assertEqual(self.clock.timestamp(), fields['child_epoch'])
+
+    def test_changed_escalation_threshold_still_flags_a_real_regression(self):
+        path = self.new / 'lib/brain/status.py'
+        path.write_text(path.read_text().replace('BLOCKED_HOURS = 48', 'BLOCKED_HOURS = 24'))
+        before, after = self.pair('due')
+        self.assertEqual(0, before['code'], before['text'])
+        self.assertEqual(0, after['code'], after['text'])
+        self.assertEqual([], json.loads(before['text']))
+        self.assertTrue(json.loads(after['text'])[0]['escalated'])
+        self.assertEqual(36.0, json.loads(after['text'])[0]['age_hours'])
+        self.assertIn('due:0: new due items', rehearsal.compare({'due:0': before}, {'due:0': after}))
+
+    def test_clock_binding_failure_refuses_instead_of_becoming_shared_baseline_failure(self):
+        for core in (self.old, self.new):
+            (core / 'lib/brain/instance.py').write_text('Instance = None\n')
+        with self.assertRaisesRegex(rehearsal.RehearsalError, 'probe frozen clock binding failed'):
+            self.pair('age')
+
+    def test_invalid_snapshot_clock_refuses_before_probes(self):
+        (self.source.parent / 'rehearse-clock').write_text('2035-01-02T12:00:00')
+        with self.assertRaises(rehearsal.RehearsalError), \
+                mock.patch.object(rehearsal, 'run_command', side_effect=AssertionError('must not probe')):
+            self.pair('age')

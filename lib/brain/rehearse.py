@@ -5,6 +5,7 @@ platforms refuse until they have an equivalent OS-enforced write/network boundar
 Only counts, fixed labels and digests leave the private temporary directory.
 """
 import collections
+import datetime
 import hashlib
 import json
 import os
@@ -639,7 +640,8 @@ def allowed_write(rel, kind):
     if (rel.startswith('home/.local/state/brain/') or rel.startswith('tmp/')
             or rel.startswith('home/Library/Caches/com.apple.DeveloperTools/')
             or rel in ('home/.local', 'home/.local/state', 'home/.local/state/brain',
-                       'home/brains.json', 'home/write-attempt', 'home/Library', 'home/Library/Caches',
+                       'home/brains.json', 'home/write-attempt', 'home/rehearsal-clock-bound',
+                       'home/Library', 'home/Library/Caches',
                        'home/Library/Caches/com.apple.DeveloperTools')):
         return True
     if not rel.startswith('brain/'):
@@ -677,9 +679,29 @@ def run_command(core, lane, args, kind, roots, terms=(), cache=None):
             'brains': {'rehearsal': {'root': str(brain)}}, 'default': 'rehearsal'}))
     bootstrap = lane / 'bootstrap'
     bootstrap.mkdir(exist_ok=True)
+    clock_file = lane / 'rehearse-clock'
+    clock = read_clock(clock_file) if clock_file.exists() else None
+    # Bind the existing Instance clock, not status/age logic or elapsed timers.
+    # Helpers inherit the same startup hook and instant as the probe itself.
+    (bootstrap / 'rehearsal_clock.py').write_text('''import datetime, os, sys
+from pathlib import Path
+def pin():
+    sys.path.insert(0, str(Path(os.environ['BRAIN_ROOT']) / 'core/lib'))
+    from brain.instance import Instance
+    instant = datetime.datetime.fromisoformat(os.environ['BRAIN_REHEARSAL_NOW'])
+    def now_dt(self):
+        return instant.astimezone(self.zone())
+    Instance.now_dt = now_dt
+''')
     # Every Python helper inherits this supervisor. Detached wake drains remain
     # in the command's group, and each Python parent reaps its children on exit.
-    (bootstrap / 'sitecustomize.py').write_text('''import atexit, subprocess
+    (bootstrap / 'sitecustomize.py').write_text('''import atexit, os, subprocess
+if os.environ.get('BRAIN_REHEARSAL_NOW'):
+    try:
+        from rehearsal_clock import pin
+        pin()
+    except BaseException:
+        os._exit(70)
 children = []
 original = subprocess.Popen
 class SupervisedPopen(original):
@@ -701,6 +723,8 @@ atexit.register(reap)
     audit = lane / 'audit.py'
     violation = home / 'write-attempt'
     violation.unlink(missing_ok=True)
+    clock_bound = home / 'rehearsal-clock-bound'
+    clock_bound.unlink(missing_ok=True)
     # OS sandboxing is the enforcement boundary. The audit hook additionally
     # observes Python attempts even when candidate code catches a denied write.
     audit.write_text('''import os, pathlib, runpy, sys
@@ -735,6 +759,12 @@ def audit(event, args):
     finally:
         busy = False
 sys.addaudithook(audit)
+# Repeat explicitly: Python reports sitecustomize errors but continues startup.
+# A broken clock binding must fail the probe instead of silently using wall time.
+if os.environ.get('BRAIN_REHEARSAL_NOW'):
+    from rehearsal_clock import pin
+    pin()
+    (pathlib.Path(os.environ['HOME']) / 'rehearsal-clock-bound').write_text(os.environ['BRAIN_REHEARSAL_NOW'])
 runpy.run_path(entry, run_name='__main__')
 ''')
     # Deliberately build an allowlisted environment. No inherited Brain lock,
@@ -748,6 +778,8 @@ runpy.run_path(entry, run_name='__main__')
                GIT_OPTIONAL_LOCKS='0', GIT_TERMINAL_PROMPT='0',
                GIT_AUTHOR_NAME='Rehearsal', GIT_AUTHOR_EMAIL='rehearsal@example.invalid',
                GIT_COMMITTER_NAME='Rehearsal', GIT_COMMITTER_EMAIL='rehearsal@example.invalid')
+    if clock is not None:
+        env['BRAIN_REHEARSAL_NOW'] = clock
     before = snapshot(lane, cache)
     start = time.monotonic()
     p = subprocess.Popen([*sandbox_prefix(lane), sys.executable, '-B', str(audit), str(lane), str(violation),
@@ -769,6 +801,8 @@ runpy.run_path(entry, run_name='__main__')
         except ProcessLookupError:
             pass
     elapsed = time.monotonic() - start
+    if clock is not None and (not clock_bound.is_file() or clock_bound.read_text() != clock):
+        raise RehearsalError('probe frozen clock binding failed')
     # Normalize JSON escapes before redaction as well: an escaped spelling must
     # not become a protected literal after the privacy filter has run.
     text = redact_output(normalize(out + err, roots), terms)
@@ -776,6 +810,17 @@ runpy.run_path(entry, run_name='__main__')
     changed = {k for k in before.keys() | after.keys() if before.get(k) != after.get(k)}
     return {'text': text, 'code': p.returncode, 'timeout': timed_out,
             'seconds': elapsed, 'unexpected': sum(not allowed_write(k, kind) for k in changed) + int(violation.exists())}
+
+
+def read_clock(path):
+    try:
+        text = path.read_text()
+        instant = datetime.datetime.fromisoformat(text)
+        if instant.utcoffset() is None:
+            raise ValueError('naive clock')
+        return instant.isoformat()
+    except (OSError, ValueError):
+        raise RehearsalError('frozen rehearsal clock unavailable') from None
 
 
 def run_lane(source, core, folder, nodes, commands):
@@ -790,6 +835,8 @@ def run_lane(source, core, folder, nodes, commands):
         shutil.rmtree(old_core)
     copy_tree(core, old_core)
     validate_frozen_links(folder / 'brain')
+    clock = read_clock(source.parent / 'rehearse-clock')
+    (folder / 'rehearse-clock').write_text(clock)
     results = {}
     cache = {}
     mutations = {}
@@ -801,6 +848,7 @@ def run_lane(source, core, folder, nodes, commands):
             if kind not in mutations:
                 lane.mkdir()
                 copy_tree(folder / 'brain', lane / 'brain')
+                (lane / 'rehearse-clock').write_text(clock)
                 mutations[kind] = lane
         else:
             lane = folder
@@ -822,6 +870,8 @@ def rehearse(inst, n, branch):
         folder = Path(td).resolve()
         sandbox_self_check(folder)
         frozen = folder / 'source'
+        (folder / 'rehearse-clock').write_text(inst.now_dt().isoformat())
+        frozen_now = read_clock(folder / 'rehearse-clock')
         copy_tree(inst.root, frozen)
         validate_frozen_links(frozen)
         materialize_git(frozen, frozen)
@@ -892,6 +942,7 @@ def rehearse(inst, n, branch):
         flags.extend(delivery_regressions(delivery))
         return {'version': 1, 'node': n['id'], 'branch': branch, 'head': head, 'main': main,
                 'installed_core_commit': baseline_commit,
+                'frozen_now': frozen_now,
                 'integration_base': integration_base,
                 'checked_at': _m_jobs.stamp(frozen_inst), 'passed': not flags, 'regressions': flags,
                 'warnings': warnings,

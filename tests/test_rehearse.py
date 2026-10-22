@@ -1,5 +1,6 @@
 """Fabricated rehearsal comparisons and real sandbox mutation checks."""
 import contextlib
+import datetime
 import hashlib
 import importlib
 import io
@@ -167,9 +168,10 @@ class RehearsalFixture(Scenario):
         self.head = self.git('rev-parse', 'HEAD', cwd=self.home).strip()
 
     def run_rehearsal(self, mutation=lambda: None, during_run=False, damage_copy=None,
-                      outputs=None, inspect_lane=None):
+                      outputs=None, inspect_lane=None, now=None):
         from types import SimpleNamespace
-        inst = SimpleNamespace(root=self.root, nodes=lambda: [])
+        inst = SimpleNamespace(root=self.root, nodes=lambda: [],
+                               now_dt=lambda: now or datetime.datetime(2035, 1, 3, tzinfo=datetime.timezone.utc))
         node = dict(external=True, home_path=self.home, id='engine')
         copy = rehearsal.copy_tree
         def copying(source, dest):
@@ -693,6 +695,9 @@ elif command == 'hook':
 '''
         baseline = fixture.replace('MODE', 'False')
         (home / 'bin/brain').write_text(baseline)
+        (home / 'lib/brain').mkdir(parents=True)
+        (home / 'lib/brain/__init__.py').write_text('')
+        (home / 'lib/brain/instance.py').write_text('class Instance:\n    pass\n')
         self.git('init', '-q', '-b', 'main', cwd=home)
         self.git('add', '.', cwd=home)
         self.git('commit', '-qm', 'fixture', cwd=home)

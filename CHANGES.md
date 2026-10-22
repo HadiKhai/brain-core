@@ -10,6 +10,9 @@ upgrading. `brain changes <node>` shows the entries this node's coordinator hasn
 For agents:
 - Installed and candidate probes start from one private snapshot. Later live
   edits do not invalidate the comparison; snapshot writes still refuse evidence.
+- Both lanes and their Python helpers use the snapshot's single captured time
+  through the instance clock, keeping age metadata equal without masking real
+  age or escalation changes.
 - Due items compare by node, kind and id. Exact new notices attributable solely
   to candidate CHANGES.md entries are expected. Other new due items still fail.
 - Brief warning byte counts are normalized. Identical baseline failures produce
