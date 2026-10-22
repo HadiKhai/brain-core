@@ -169,7 +169,7 @@ def wake_actionable_pending(inst, path):
                and not (i['kind'] == 'machine-alert' and (recovered or identity and i['id'] != identity))]
     if any(i['kind'] in ('job-ready', 'job-landed') for i in allowed):
         try:
-            current = {i['id'] for i in _m_watch.watch_completion_items(inst)}
+            current = {i['id'] for i in _m_watch.watch_completion_items(_m_instance.Instance(inst.root), strict=True)}
         except (Exception, SystemExit):
             current = None  # best-effort revalidation must never hold a queued question behind repair
         if current is not None:

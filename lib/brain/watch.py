@@ -18,7 +18,6 @@ from . import transitions as _m_transitions
 from . import usage as _m_usage
 from . import upgrade as _m_upgrade
 from . import verify as _m_verify
-from . import worktrees as _m_worktrees
 
 
 WATCH_LOCAL_KINDS = ('unsettled-threads',)
@@ -111,7 +110,7 @@ def watch_items(inst, n):
     return out
 
 
-def watch_recorded_ready(inst, n, row, signal):
+def watch_recorded_ready(inst, n, row, signal, strict=False):
     """Validate a stored success for notification, never run a readiness/verify path.
 
     Cached refs fence stale evidence. This notification is not merge authority and
@@ -122,9 +121,18 @@ def watch_recorded_ready(inst, n, row, signal):
             return None
         packet = signal.get('ready')
     else:
-        # This existing reader only loads legacy stored evidence; a newer signal
-        # (even damaged or blocked) always wins and can never resurrect the old file.
-        packet = _m_verify.read_ready_packet(inst, n, row['Job'], row)
+        # Load only legacy stored evidence; a newer signal always wins. Strict
+        # pending reads preserve unknown I/O failures instead of retiring notices.
+        if not n['external'] or not n['home_path']:
+            return None
+        try:
+            packet = json.loads(_m_verify.ready_path(inst, n, row['Job']).read_text())
+        except FileNotFoundError:
+            return None
+        except (OSError, ValueError):
+            if strict:
+                raise
+            return None
     if not isinstance(packet, dict):
         return None
     checked = inst.parse_time(packet.get('checked_at')) if isinstance(packet.get('checked_at'), str) else None
@@ -151,29 +159,42 @@ def watch_recorded_ready(inst, n, row, signal):
     w = n['local'].get('worktrees', {}).get(row['Job'])
     if not home or not home.exists() or not isinstance(w, dict) or not w.get('path') or not Path(w['path']).is_dir():
         return None
-    target = _m_worktrees.integration_target(n)
-    ref = target if n['fm'].get('merge', 'local') == 'pr' else target.replace('refs/heads/', 'refs/remotes/origin/', 1)
-    if 'origin' not in _m_common.git('remote', cwd=home).stdout.split():
-        ref = target
+    def cached_git(*args, allowed=(0,)):
+        result = _m_common.git(*args, cwd=home)
+        if result.returncode not in allowed:
+            raise OSError('cached Git evidence unreadable')
+        return result
+    if 'origin' in cached_git('remote').stdout.split():
+        ref = cached_git('symbolic-ref', '--quiet', 'refs/remotes/origin/HEAD', allowed=(0, 1)).stdout.strip()
+        if not ref.startswith('refs/remotes/origin/'):
+            return None
+    else:
+        ref = 'refs/heads/main'
+    target = ref if n['fm'].get('merge', 'local') == 'pr' else ref.replace('refs/remotes/origin/', 'refs/heads/', 1)
     def tip(name):
-        return _m_common.git('rev-parse', '--verify', '--quiet', name + '^{commit}', cwd=home).stdout.strip() if name else ''
+        return cached_git('rev-parse', '--verify', '--quiet', name + '^{commit}', allowed=(0, 1)).stdout.strip()
     head, main, base = tip('refs/heads/' + row['Job']), tip(ref), tip(target)
     if (packet['head'] != head or not main or not base
             or packet.get('integration_base', packet['main']) != base
             or packet['main'] != (main if 'integration_base' in packet else base)):
         return None
-    if _m_jobs.train_ejection(n, row, packet):
+    if cached_git('merge-base', '--is-ancestor', main, base, allowed=(0, 1)).returncode:
+        return None  # legacy local bases must still contain the current cached origin default
+    if _m_jobs.train_ejection(n, row, packet, strict=strict):
         return None
     return packet
 
 
-def watch_completion_items(inst, nodes=None):
+def watch_completion_items(inst, nodes=None, strict=False):
     """Opaque per-packet/per-ledger-transaction root notices, batched by watch_run."""
     out = []
     for n in nodes if nodes is not None else inst.nodes():
         if n['archived']:
             continue
-        for row in _m_jobs.read_jobs(n) or []:
+        rows = _m_jobs.read_jobs(n)
+        if rows is None and strict:
+            raise ValueError('completion ledger unreadable')
+        for row in rows or []:
             kind, evidence = None, None
             if row['Ended']:
                 start, end = inst.parse_time(row['Started']), inst.parse_time(row['Ended'])
@@ -182,8 +203,10 @@ def watch_completion_items(inst, nodes=None):
                     evidence = [row['Ended'], row.get('Head commit'), row.get('Batch')]
             else:
                 try:
-                    packet = watch_recorded_ready(inst, n, row, _m_jobs.read_handback(n, row))
+                    packet = watch_recorded_ready(inst, n, row, _m_jobs.read_handback(n, row, strict=strict), strict=strict)
                 except (OSError, ValueError, TypeError, AttributeError):
+                    if strict:
+                        raise
                     packet = None  # invalid completion evidence cannot block unrelated protected wakes
                 if packet:
                     kind, evidence = 'job-ready', packet

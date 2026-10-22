@@ -115,7 +115,7 @@ def handback_file(n, row):
     return n["dir"] / "job-handbacks" / (job_key(row) + ".json")
 
 
-def read_handback(n, row):
+def read_handback(n, row, strict=False):
     f = handback_file(n, row)
     try:
         data = json.loads(f.read_text())
@@ -125,8 +125,11 @@ def read_handback(n, row):
                 (isinstance(data.get("lessons"), str) and isinstance(data.get("ready_reasons", []), list) and
                  (data.get("ready") is None or isinstance(data["ready"], dict))))):
             return data
-    except (OSError, ValueError):
+    except FileNotFoundError:
         pass
+    except (OSError, ValueError):
+        if strict:
+            raise  # pending revalidation must distinguish unknown reads from confirmed stale state
     return None
 
 
@@ -136,7 +139,7 @@ def ready_fingerprint(n, row, packet):
     return digest([packet, signal.get("verify_runs"), signal.get("verify_reused"), signal.get("at")])
 
 
-def train_ejection(n, row, packet):
+def train_ejection(n, row, packet, strict=False):
     """Shared admission guard for both ordinary readiness and train retries."""
     if not row or not packet:
         return None
@@ -145,13 +148,19 @@ def train_ejection(n, row, packet):
         try:
             data = json.loads(path.read_text())
             if not isinstance(data, dict) or data.get("version") != 1 or not isinstance(data.get("ejected"), list):
+                if strict:
+                    raise ValueError("train journal unreadable")
                 return "train journal unreadable; coordinator must repair it"
             for entry in data["ejected"]:
                 if not isinstance(entry, dict):
+                    if strict:
+                        raise ValueError("train journal unreadable")
                     return "train journal unreadable; coordinator must repair it"
                 if entry.get("key") == key and entry.get("packet") == fingerprint:
                     return "previously ejected from train; worker must hand back again"
         except (OSError, ValueError):
+            if strict:
+                raise
             return "train journal unreadable; coordinator must repair it"
     return None
 

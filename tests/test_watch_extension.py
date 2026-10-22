@@ -235,3 +235,93 @@ class WatchExtension(Scenario):
             self.assertEqual(send.call_count, 1)
             history = self.m.wake_history(self.m.wake_directory(self.inst, root))
             self.assertIn(question, history[-1]['items'])
+
+    def test_active_drain_reloads_new_child_bindings_before_filtering(self):
+        old_inst, root = self.inst, self.inst.node('root')
+        calls = []
+        def send(command):
+            calls.append(command)
+            if len(calls) == 1:
+                home, n, w, row = self.project()
+                self.signal(n, row)
+                self.watch()  # new binding and completion arrive during the previous send
+            return True
+        with mock.patch.object(self.m, 'changes_due', return_value=[]), mock.patch.object(self.m, 'wake_start'), \
+                mock.patch.object(self.m, 'WAKE_INTERVAL', 0), mock.patch.object(self.m, 'wake_send', side_effect=send):
+            self.m.request_wake(old_inst, root, 'first unrelated request', items=[{'id': 'f' * 64, 'kind': 'inbox'}])
+            self.m.wake_drain(old_inst, root)
+            self.assertEqual(len(calls), 2)
+            history = self.m.wake_history(self.m.wake_directory(self.inst, root))
+            self.assertEqual([[i['kind'] for i in h['items']] for h in history], [['inbox'], ['job-ready']])
+            self.watch()
+            self.assertFalse(list(self.m.wake_directory(self.inst, root).glob('*.pending')))
+
+    def assert_unknown_completion_survives(self, mixed):
+        from pathlib import Path
+        home, n, w, row = self.project()
+        root = self.inst.node('root')
+        original = Path.read_text
+        def denied(path, *args, **kwargs):
+            if path == self.m.handback_file(n, row):
+                raise PermissionError('fixture handback temporarily unreadable')
+            return original(path, *args, **kwargs)
+        question = {'id': 'd' * 64, 'kind': 'inbox'}
+        for mode in ('handback', 'packet'):
+            with self.subTest(mode=mode), mock.patch.object(self.m, 'changes_due', return_value=[]), \
+                    mock.patch.object(self.m, 'wake_start'), mock.patch.object(self.m, 'WAKE_INTERVAL', 0), \
+                    mock.patch.object(self.m, 'wake_send', return_value=True) as send:
+                self.signal(n, row)
+                self.watch()  # acknowledge a valid notice before the transient read failure
+                if mixed:
+                    self.m.request_wake(self.inst, root, 'protected mixed ' + mode, items=self.root_events() + [question])
+                failure = (mock.patch.object(Path, 'read_text', denied) if mode == 'handback' else
+                           mock.patch.object(self.m, 'watch_recorded_ready', side_effect=OSError('fixture read failure')))
+                with failure:
+                    self.m.wake_drain(self.inst, root, once=True)
+                self.assertEqual(send.call_count, 1)
+                history = self.m.wake_history(self.m.wake_directory(self.inst, root))
+                self.assertIn('job-ready', [i['kind'] for i in history[-1]['items']])
+                if mixed:
+                    self.assertIn(question, history[-1]['items'])
+                self.watch()
+                self.assertFalse(list(self.m.wake_directory(self.inst, root).glob('*.pending')))
+
+    def test_unknown_completion_read_preserves_pure_notice(self):
+        self.assert_unknown_completion_survives(False)
+
+    def test_unknown_completion_read_preserves_notice_and_question(self):
+        self.assert_unknown_completion_survives(True)
+
+    def test_legacy_packet_fences_cached_origin_advance_and_keeps_local_ahead(self):
+        home, n, w, row = self.project()
+        signal = self.signal(n, row)
+        self.m.handback_file(n, row).unlink()
+        packet = signal['ready']
+        packet.pop('integration_base')
+        path = self.m.ready_path(self.inst, n, row['Job'])
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(packet))
+        base = packet['main']
+        self.git('remote', 'add', 'origin', 'https://example.invalid/source.git', cwd=home)
+        self.git('symbolic-ref', 'refs/remotes/origin/HEAD', 'refs/remotes/origin/main', cwd=home)
+        self.git('update-ref', 'refs/remotes/origin/main', base, cwd=home)
+        tree = self.git('rev-parse', base + '^{tree}', cwd=home).strip()
+        advanced = self.git('commit-tree', tree, '-p', base, '-m', 'cached advance', cwd=home).strip()
+        root = self.inst.node('root')
+        with mock.patch.object(self.m, 'changes_due', return_value=[]), mock.patch.object(self.m, 'wake_start'), \
+                mock.patch.object(self.m, 'WAKE_INTERVAL', 0), mock.patch.object(self.m, 'wake_send', return_value=True) as send, \
+                mock.patch.object(self.m, 'ready_state', side_effect=AssertionError('no readiness execution')):
+            self.assertEqual(len(self.root_events()), 1)
+            self.watch()
+            self.git('update-ref', 'refs/remotes/origin/main', advanced, cwd=home)
+            self.assertEqual(self.root_events(), [])
+            self.m.wake_drain(self.inst, root, once=True)
+            self.assertEqual(send.call_count, 0)
+            self.assertFalse(list(self.m.wake_directory(self.inst, root).glob('*.pending')))
+            # A valid local integration branch ahead of cached origin remains eligible.
+            self.git('update-ref', 'refs/heads/main', advanced, cwd=home)
+            self.git('rebase', advanced, cwd=w['path'])
+            packet.update(main=advanced, head=self.git('rev-parse', row['Job'], cwd=home).strip())
+            path.write_text(json.dumps(packet))
+            self.git('update-ref', 'refs/remotes/origin/main', base, cwd=home)
+            self.assertEqual(len(self.root_events()), 1)
