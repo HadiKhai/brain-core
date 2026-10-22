@@ -266,10 +266,13 @@ class VerifyLogs(Scenario):
         setup = self.runner()
         m, inst, n, home, wt = setup
         m.VERIFY_PROGRESS_SECONDS = .1
+        begin_output = self.tmp / 'begin-output'
         release = self.tmp / 'release'
         output = io.StringIO()
         result, errors = [], []
-        code = ("import os,time\nfrom pathlib import Path\nos.write(1,b'partial-output')\n"
+        code = ("import os,time\nfrom pathlib import Path\n"
+                f"while not Path({str(begin_output)!r}).exists(): time.sleep(.01)\n"
+                "os.write(1,b'partial-output')\n"
                 f"while not Path({str(release)!r}).exists(): time.sleep(.01)\n")
 
         def run():
@@ -288,8 +291,17 @@ class VerifyLogs(Scenario):
                 self.assertIn('verify: running', output.getvalue())
                 logs = list((n['dir'] / 'job-handbacks').glob('*.log'))
                 self.assertEqual(len(logs), 1)
+                # A heartbeat can precede child startup. Force that ordering, then
+                # wait for actual streamed bytes while the child stays alive.
+                self.assertIn('0 lines, 0 characters logged', output.getvalue())
+                self.assertEqual(logs[0].read_text(), '')
+                begin_output.touch()
+                while not logs[0].read_text() and time.monotonic() < deadline:
+                    time.sleep(.02)
+                self.assertTrue(worker.is_alive())
                 self.assertEqual(logs[0].read_text(), 'partial-output')
             finally:
+                begin_output.touch()
                 release.touch()
                 worker.join(5)
         self.assertFalse(worker.is_alive())
