@@ -727,8 +727,8 @@ elif command == 'hook':
                      'due:1: new due items', 'brief:0: brief warning disappeared', 'hook: latency exceeds 1 s'):
             self.assertIn(flag, bad['regressions'])
         self.assertEqual(original, rehearsal.snapshot(r))
-        # No private fixture command text is retained in public evidence.
-        self.assertNotIn('upgrade cannot heal', json.dumps(bad))
+        # Only the redacted error diagnostic is retained; no path or private id.
+        self.assertIn('✗ upgrade cannot heal', bad['diagnostics'][0]['added_errors'])
         self.assertNotIn('invented-canary', json.dumps(bad))
         self.assertNotEqual(clean['output_digests']['due:0'], bad['output_digests']['due:0'])
 

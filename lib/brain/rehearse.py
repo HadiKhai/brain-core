@@ -2,7 +2,8 @@
 
 The macOS sandbox is a prerequisite, not an optional best-effort safeguard. Other
 platforms refuse until they have an equivalent OS-enforced write/network boundary.
-Only counts, fixed labels and digests leave the private temporary directory.
+Only counts, fixed labels, digests and redacted error diagnostics leave the
+private temporary directory.
 """
 import collections
 import datetime
@@ -539,6 +540,27 @@ def redact_output(text, terms):
     return redact_text(text, terms)
 
 
+def added_check_errors(old, new):
+    errors = lambda x: collections.Counter(line for line in x['text'].splitlines() if '✗' in line)
+    return list((errors(new) - errors(old)).elements())
+
+
+def diagnostic_line(line, terms, identifiers=()):
+    # Probe text is already normalized/redacted. Publication additionally masks
+    # private identifiers and whole path tokens, including normalized copy paths.
+    # Do this after comparison so redaction cannot hide a newly added error.
+    line = re.sub(r'''(?<!\w)(["'])(?=[^"'\n]*[/\\])[^"'\n]*\1''', '<path>', line)
+    line = re.sub(r'''[^\s"'(),;]*[/\\][^\s"'(),;]*''', '<path>', line)
+    line = re.sub(r'''[^\s"'(),;<>]*\.[A-Za-z][\w.-]*''', '<path>', line)
+    # Invalid references (unknown nodes, principals, schedules) need not occur
+    # in the snapshot's id lists. Check reports these values in quotes.
+    line = re.sub(r'''(?<!\w)(["'])[^"'\n]*\1''', '[…]', line)
+    for identifier in sorted(set(identifiers), key=len, reverse=True):
+        line = re.sub(r'(?<![\w.-])' + re.escape(identifier) + r'(?![\w.-])',
+                      '[…]', line, flags=re.I)
+    return redact_text(line, terms)
+
+
 def compare(before, after, expected_changes=None):
     """Return content-free regression labels; exact output stays in memory only."""
     flags = []
@@ -548,8 +570,7 @@ def compare(before, after, expected_changes=None):
             flags.append(key + ': timeout')
         if new['code'] != 0 and (old['code'] == 0 or new['code'] != old['code']):
             flags.append(key + ': new command failure')
-        errors = lambda x: collections.Counter(l for l in x['text'].splitlines() if '✗' in l)
-        if errors(new) - errors(old):
+        if added_check_errors(old, new):
             flags.append(key + ': new check errors')
         ready = lambda x: x['code'] == 0 and x['text'].splitlines()[-1:] == ['ready']
         if key.startswith('ready:') and ready(old) and not ready(new):
@@ -919,10 +940,17 @@ def rehearse(inst, n, branch):
         commands = []
         frozen_inst = _m_instance.Instance(frozen)
         nodes = frozen_inst.nodes()
+        diagnostic_terms = []
+        diagnostic_ids = [n['id'], branch]
+        for node in nodes:
+            diagnostic_terms.extend(_m_guard.never_terms(node))
+            diagnostic_ids.extend(value for value in
+                                  [node['id'], node['fm'].get('id'), *node.get('owners', [])] if value)
         for i, node in enumerate(nodes):
             commands.append(('due:' + str(i), ['due', node['id'], '--json'], 'read'))
             commands.append(('brief:' + str(i), ['brief', node['id']], 'read'))
             for j, row in enumerate(_m_jobs.read_jobs(node) or []):
+                diagnostic_ids.append(row['Job'])
                 if not row.get('Ended'):
                     commands.append(('ready:' + str(i) + ':' + str(j),
                                      ['ready', node['id'], '--branch', row['Job']], 'read'))
@@ -944,12 +972,21 @@ def rehearse(inst, n, branch):
         flags = compare(old, new, expected)
         if snapshot(frozen) != original:
             flags.append('frozen brain changed during rehearsal; evidence refused')
-        warnings = []
+        warnings, diagnostics = [], []
         for key, result in old.items():
+            if key in ('check', 'fix'):
+                added = added_check_errors(result, new[key])
+                if added:
+                    diagnostics.append(dict(command=key, reason='new check errors',
+                        added_errors=[diagnostic_line(line, diagnostic_terms, diagnostic_ids) for line in added]))
             if identical_baseline_failure(result, new[key]):
                 warnings.append(key + ': identical baseline failure')
-            elif result['timeout'] or result['unexpected'] or result['code']:
+            conditions = (['timeout'] if result['timeout'] else []) + (
+                          ['unexpected writes'] if result['unexpected'] else [])
+            if conditions:
                 flags.append(key + ': baseline incomplete')
+                diagnostics.append(dict(command=key, reason='baseline incomplete', conditions=conditions,
+                                        exit_codes=dict(baseline=result['code'], candidate=new[key]['code'])))
         if (_m_verify.ready_refs(n, branch) != (head, main)
                 or _m_verify.integration_parent(n, main) != integration_base):
             flags.append('candidate or integration main moved during rehearsal')
@@ -959,7 +996,7 @@ def rehearse(inst, n, branch):
                 'frozen_now': frozen_now,
                 'integration_base': integration_base,
                 'checked_at': _m_jobs.stamp(frozen_inst), 'passed': not flags, 'regressions': flags,
-                'warnings': warnings,
+                'warnings': warnings, 'diagnostics': diagnostics,
                 'commands': len(commands), 'changed_outputs': sum(old[k]['text'] != new[k]['text'] for k in old),
                 'hook_seconds': new['hook']['seconds'],
                 'delivery': delivery,
@@ -994,6 +1031,8 @@ def cmd_rehearse(a):
           '; commands=' + str(result['commands']) + '; regressions=' + str(len(result['regressions'])))
     for flag in result['regressions']:
         print('- ' + flag)
+    for diagnostic in result.get('diagnostics', []):
+        print('diagnostic: ' + json.dumps(diagnostic, ensure_ascii=False))
     for warning in result.get('warnings', []):
         print('warning: ' + warning)
     if not result['passed']:

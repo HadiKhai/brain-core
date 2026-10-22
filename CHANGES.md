@@ -5,6 +5,21 @@ upgrading. `brain changes <node>` shows the entries this node's coordinator hasn
 `brain due <node>` lists them until `brain changes <node> --seen`. Entry headings are
 `## <date>: <title>`; once released, a heading never changes.
 
+## 2026-10-22: Rehearse attributes check regressions and completed baseline failures
+
+For agents:
+- Completed nonzero baseline checks no longer count as incomplete solely because
+  advisory text changed. Baseline timeouts and unexpected writes still refuse.
+- Evidence and printed diagnostics include newly added check/fix error lines
+  after normalization and redaction of protected terms, paths and private ids.
+  Incomplete baselines identify timeout or unexpected writes and both exit codes.
+- Identical baseline failures still produce named warnings.
+
+After upgrading:
+- Retry rehearsals refused only for changed advisory text on an existing failed
+  check. Use diagnostics to attribute remaining regressions; pre-existing failures
+  still need attention even when the comparison passes.
+
 ## 2026-10-22: Rehearse compares one frozen brain snapshot
 
 For agents:

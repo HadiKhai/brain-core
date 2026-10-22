@@ -214,15 +214,12 @@ class FrozenInputs(RehearsalFixture):
         self.assertIn('warning: ' + warning, printed.getvalue())
         self.assertNotIn('refused: brief limit is exceeded', evidence.read_text() + printed.getvalue())
 
-    def test_baseline_timeouts_writes_and_different_failures_still_refuse(self):
-        for field, value in [('timeout', True), ('unexpected', 1), ('text', 'different failure'), ('code', 2)]:
+    def test_baseline_timeouts_and_writes_still_refuse(self):
+        for field, value in [('timeout', True), ('unexpected', 1)]:
             with self.subTest(field=field):
                 old = {'brief:0': result('failure', code=1), 'hook': result()}
                 new = {'brief:0': result('failure', code=1), 'hook': result()}
-                if field in ('timeout', 'unexpected'):
-                    old['brief:0'][field] = value
-                else:
-                    new['brief:0'][field] = value
+                old['brief:0'][field] = value
                 outcome = self.run_rehearsal(outputs=[old, new])
                 self.assertFalse(outcome['passed'])
                 self.assertIn('brief:0: baseline incomplete', outcome['regressions'])
@@ -243,7 +240,8 @@ class FrozenInputs(RehearsalFixture):
         new = {'due:0': result('[]'), 'hook': result()}
         outcome = self.run_rehearsal(outputs=[old, new])
         self.assertFalse(outcome['passed'])
-        self.assertIn('due:0: baseline incomplete', outcome['regressions'])
+        self.assertIn('due:0: invalid due output', outcome['regressions'])
+        self.assertNotIn('due:0: baseline incomplete', outcome['regressions'])
 
     def test_path_lengths_cannot_reorder_largest_brief_sections(self):
         from brain import briefs
@@ -269,7 +267,118 @@ class FrozenInputs(RehearsalFixture):
         self.assertIn('brief:0: identical baseline failure', outcome['warnings'])
 
 
+class BaselineDiagnostics(RehearsalFixture):
+    def publish(self, outcome):
+        node = dict(id='engine', external=True, home_path=self.home)
+        inst = SimpleNamespace(root=self.root, nodes=lambda: [], node=lambda _: node)
+        evidence = self.tmp / 'evidence.json'
+        printed = io.StringIO()
+        with mock.patch.object(rehearsal._m_nodes, 'find_root', return_value=self.root), \
+                mock.patch.object(rehearsal._m_instance, 'Instance', return_value=inst), \
+                mock.patch.object(rehearsal, 'evidence_path', return_value=evidence), \
+                mock.patch.object(rehearsal, 'rehearse', return_value=outcome), \
+                contextlib.redirect_stdout(printed):
+            if outcome['passed']:
+                rehearsal.cmd_rehearse(SimpleNamespace(id='engine', branch='job'))
+            else:
+                with self.assertRaises(SystemExit) as caught:
+                    rehearsal.cmd_rehearse(SimpleNamespace(id='engine', branch='job'))
+                self.assertEqual(1, caught.exception.code)
+        self.assertEqual(outcome, json.loads(evidence.read_text()))
+        for diagnostic in outcome['diagnostics']:
+            self.assertIn('diagnostic: ' + json.dumps(diagnostic, ensure_ascii=False), printed.getvalue())
+        return evidence.read_text() + printed.getvalue()
+
+    def test_completed_failed_baselines_allow_advisory_changes(self):
+        for key in ('check', 'fix', 'ready:0:0'):
+            with self.subTest(key=key):
+                old = {key: result('✗ unchanged error\nold advisory', code=1), 'hook': result()}
+                new = {key: result('✗ unchanged error\nnew advisory', code=1), 'hook': result()}
+                outcome = self.run_rehearsal(outputs=[old, new])
+                self.assertTrue(outcome['passed'], outcome['regressions'])
+                self.assertEqual([], outcome['warnings'])
+                self.assertEqual([], outcome['diagnostics'])
+
+    def test_changed_exit_code_still_refuses_without_incomplete_baseline(self):
+        outcome = self.run_rehearsal(outputs=[
+            {'fix': result('✗ unchanged error', code=1), 'hook': result()},
+            {'fix': result('✗ unchanged error', code=2), 'hook': result()}])
+        self.assertFalse(outcome['passed'])
+        self.assertEqual(['fix: new command failure'], outcome['regressions'])
+        self.assertEqual([], outcome['diagnostics'])
+
+    def test_incomplete_baseline_records_conditions_and_exit_codes(self):
+        for conditions in (['timeout'], ['unexpected writes'], ['timeout', 'unexpected writes']):
+            with self.subTest(conditions=conditions):
+                old = result('private baseline output', code=7)
+                old['timeout'] = 'timeout' in conditions
+                old['unexpected'] = 2 if 'unexpected writes' in conditions else 0
+                outcome = self.run_rehearsal(outputs=[{'fix': old, 'hook': result()},
+                    {'fix': result('private candidate output', code=3), 'hook': result()}])
+                self.assertFalse(outcome['passed'])
+                expected = dict(command='fix', reason='baseline incomplete', conditions=conditions,
+                                exit_codes=dict(baseline=7, candidate=3))
+                self.assertIn(expected, outcome['diagnostics'])
+                saved_and_printed = self.publish(outcome)
+                self.assertIn(json.dumps(expected, ensure_ascii=False), saved_and_printed)
+                self.assertNotIn('private baseline output', saved_and_printed)
+                self.assertNotIn('private candidate output', saved_and_printed)
+
+    def test_added_errors_are_redacted_in_evidence_and_output(self):
+        # Real run_command normalization/redaction, then real evidence generation/publication.
+        terms = [('invented-canary', 'term'), ('STRASSE', 'term')]
+        for key in ('check', 'fix'):
+            with self.subTest(key=key):
+                lane = self.tmp / key
+                (lane / 'brain').mkdir(parents=True)
+                raw = ('✗ unchanged error\n'
+                       '✗ engine: invented-canary Straße failed /fabricated/private/report.md\n'
+                       '✗ engine: added error at ' + str(lane / 'brain/nodes/engine/status.md') + '\n'
+                       '✗ engine: added error at ' + str(lane / 'brain/nodes/engine/status.md') + '\n'
+                       'advisory must stay private')
+                process = mock.Mock(returncode=1, pid=123)
+                process.communicate.return_value = (raw, '')
+                with mock.patch.object(rehearsal, 'sandbox_prefix', return_value=[]), \
+                        mock.patch.object(rehearsal.subprocess, 'Popen', return_value=process), \
+                        mock.patch.object(rehearsal.os, 'killpg'):
+                    new = rehearsal.run_command(lane / 'brain/core', lane, [], 'read', [lane / 'brain'], terms)
+                outcome = self.run_rehearsal(outputs=[
+                    {key: result('✗ unchanged error', code=1), 'hook': result()},
+                    {key: new, 'hook': result()}])
+                self.assertIn(key + ': new check errors', outcome['regressions'])
+                expected_lines = ['✗ […]: […] […] failed <path>',
+                                  '✗ […]: added error at <path>', '✗ […]: added error at <path>']
+                self.assertIn(dict(command=key, reason='new check errors', added_errors=expected_lines),
+                              outcome['diagnostics'])
+                saved_and_printed = self.publish(outcome)
+                for line in expected_lines:
+                    self.assertIn(line, saved_and_printed)
+                for private in ('engine:', 'invented-canary', 'Straße', '/fabricated', str(lane),
+                                'nodes/engine', 'status.md', 'advisory must stay private', '✗ unchanged error'):
+                    self.assertNotIn(private.casefold(), saved_and_printed.casefold())
+
+    def test_identical_failed_check_and_fix_keep_named_warnings(self):
+        old = dict(check=result('✗ existing', code=1), fix=result('✗ existing', code=1), hook=result())
+        outcome = self.run_rehearsal(outputs=[old, old])
+        self.assertTrue(outcome['passed'], outcome['regressions'])
+        self.assertEqual(['check: identical baseline failure', 'fix: identical baseline failure'], outcome['warnings'])
+        self.assertEqual([], outcome['diagnostics'])
+        printed = self.publish(outcome)
+        for warning in outcome['warnings']:
+            self.assertIn('warning: ' + warning, printed)
+
+
 class StableComparisons(unittest.TestCase):
+    def test_diagnostic_paths_and_short_private_ids_preserve_error_meaning(self):
+        for path in ('"/private/path with spaces/report.md"', "'~/private/report.md'",
+                     'nodes/private/status.md', '<copy>/nodes/private/status.md',
+                     r'C:\private\report.md', 'private.md'):
+            with self.subTest(path=path):
+                self.assertEqual('✗ […]: cannot heal <path>',
+                    rehearsal.diagnostic_line('✗ a: cannot heal ' + path, [], ['a']))
+        self.assertEqual('✗ […]: unknown principal […]',
+            rehearsal.diagnostic_line("✗ a: unknown principal 'fabricated-owner'", [], ['a']))
+
     def test_due_text_changes_preserve_identity_and_duplicates_still_flag(self):
         item = dict(node='sample', kind='hold', id='one', text='old description')
         changed = {**item, 'text': 'rewritten description'}
