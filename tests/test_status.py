@@ -449,7 +449,7 @@ class AutonomyFacts(AutonomyProject):
                                 cwd=r, env=self.env, input=json.dumps({'cwd': str(r), 'session_id': 'old-judgement'}),
                                 capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn('status.md was last updated', json.loads(result.stdout)['reason'])
+        self.assertEqual(result.stdout, '', 'an unchanged read-only turn is not held for age alone')
         # Older generated Updated lines are never mistaken for coordinator judgement.
         st.write_text(st.read_text().replace('Facts refreshed:', 'Updated:').replace(
             'Updated: 2020-01-01 00:00 +00:00', 'No coordinator timestamp'))
