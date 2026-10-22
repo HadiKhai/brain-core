@@ -200,7 +200,7 @@ def watch_completion_items(inst, nodes=None, strict=False, unknown=None):
             continue
         try:
             rows = _m_jobs.read_jobs(n)
-        except (OSError, ValueError, TypeError, AttributeError):
+        except (Exception, SystemExit):
             rows = None
         if rows is None:
             if strict:
@@ -208,27 +208,28 @@ def watch_completion_items(inst, nodes=None, strict=False, unknown=None):
             continue
         for row in rows or []:
             kind, evidence = None, None
-            if row['Ended']:
-                start, end = inst.parse_time(row['Started']), inst.parse_time(row['Ended'])
-                if row['Outcome'] == 'merged' and start and end and end >= start:
-                    kind = 'job-landed'
-                    evidence = [row['Ended'], row.get('Head commit'), row.get('Batch')]
-            else:
-                try:
+            try:
+                if row['Ended']:
+                    start, end = inst.parse_time(row['Started']), inst.parse_time(row['Ended'])
+                    if row['Outcome'] == 'merged' and start and end and end >= start:
+                        kind = 'job-landed'
+                        evidence = [row['Ended'], row.get('Head commit'), row.get('Batch')]
+                else:
                     packet = watch_recorded_ready(inst, n, row, _m_jobs.read_handback(n, row, strict=strict), strict=strict)
-                except (OSError, ValueError, TypeError, AttributeError):
-                    if strict:
-                        unknown.add(watch_completion_scope(n['id'], row, 'job-ready'))
-                    packet = None  # invalid completion evidence cannot block unrelated protected wakes
-                if packet:
-                    kind, evidence = 'job-ready', packet
-            if kind:
-                identity = watch_completion_scope(n['id'], row, kind) + watch_digest([n['id'], _m_jobs.job_key(row), kind, evidence])[:32]
-                out.append({'id': identity,
-                            'node': 'root', 'kind': kind,
-                            'text': ('A job has new recorded ready evidence; inspect coordinator due queues'
-                                     if kind == 'job-ready' else
-                                     'A job has landed in its ledger; inspect coordinator due queues')})
+                    if packet:
+                        kind, evidence = 'job-ready', packet
+                if kind:
+                    identity = watch_completion_scope(n['id'], row, kind) + watch_digest([n['id'], _m_jobs.job_key(row), kind, evidence])[:32]
+                    out.append({'id': identity,
+                                'node': 'root', 'kind': kind,
+                                'text': ('A job has new recorded ready evidence; inspect coordinator due queues'
+                                         if kind == 'job-ready' else
+                                         'A job has landed in its ledger; inspect coordinator due queues')})
+            except (Exception, SystemExit):
+                # Reader exits and unexpected errors belong to this job, not the
+                # whole inventory. KeyboardInterrupt still stops the process.
+                if strict:
+                    unknown.add(watch_completion_scope(n['id'], row, 'job-landed' if row['Ended'] else 'job-ready'))
     return out
 
 

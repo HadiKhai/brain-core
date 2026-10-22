@@ -346,14 +346,17 @@ class WatchExtension(Scenario):
             return original(path, *args, **kwargs)
         root, question = self.inst.node('root'), {'id': 'd' * 64, 'kind': 'inbox'}
         original_packet = self.m.watch_recorded_ready
-        def unavailable(inst, node, job, signal, **kwargs):
-            if job['Job'] == other['Job']:
-                raise SystemExit('fixture per-job reader exit')
-            return original_packet(inst, node, job, signal, **kwargs)
+        def unavailable(error):
+            def read(inst, node, job, signal, **kwargs):
+                if job['Job'] == other['Job']:
+                    raise error('fixture per-job reader failure')
+                return original_packet(inst, node, job, signal, **kwargs)
+            return read
         with mock.patch.object(self.m, 'wake_start'), mock.patch.object(self.m, 'WAKE_INTERVAL', 0), \
                 mock.patch.object(self.m, 'wake_send', return_value=True) as send:
             failures = [mock.patch.object(Path, 'read_text', denied),
-                        mock.patch.object(self.m, 'watch_recorded_ready', side_effect=unavailable)]
+                        mock.patch.object(self.m, 'watch_recorded_ready', side_effect=unavailable(SystemExit)),
+                        mock.patch.object(self.m, 'watch_recorded_ready', side_effect=unavailable(RuntimeError))]
             for index, failure in enumerate(failures):
                 self.m.request_wake(self.inst, root, 'two jobs and a question ' + str(index), items=[stale, unknown, question])
                 with failure:
@@ -372,12 +375,45 @@ class WatchExtension(Scenario):
         self.b(self.root, 'new', 'unrelated', '--title', 'Unrelated')
         self.inst = self.m.Instance(self.root)
         other = self.inst.node('unrelated')
+        landed = {**row, 'Ended': '2099-01-01T00:00Z', 'Outcome': 'merged'}
+        self.m.write_jobs(self.inst, other, [landed])
+        unknown = self.root_events()[0]
         (other['dir'] / self.m.JOBS_FILE).write_text('unreadable legacy ledger\n')
         root, question = self.inst.node('root'), {'id': 'd' * 64, 'kind': 'inbox'}
+        original = self.m.read_jobs
+        def unavailable(error):
+            def read(node):
+                if node['id'] == other['id']:
+                    raise error('fixture per-ledger reader failure')
+                return original(node)
+            return read
         with mock.patch.object(self.m, 'wake_start'), mock.patch.object(self.m, 'WAKE_INTERVAL', 0), \
                 mock.patch.object(self.m, 'wake_send', return_value=True) as send:
-            self.m.request_wake(self.inst, root, 'stale job and a question', items=[stale, question])
-            self.m.wake_drain(self.inst, root, once=True)
-            self.assertEqual(send.call_count, 1)
-            refs = self.m.wake_history(self.m.wake_directory(self.inst, root))[-1]['items']
-            self.assertEqual(refs, [question])
+            for index, error in enumerate((None, SystemExit, RuntimeError)):
+                self.m.request_wake(self.inst, root, 'stale job and a question ' + str(index), items=[stale, unknown, question])
+                failure = (mock.patch.object(self.m, 'read_jobs', side_effect=unavailable(error))
+                           if error else contextlib.nullcontext())
+                with failure:
+                    self.m.wake_drain(self.inst, root, once=True)
+                self.assertEqual(send.call_count, index + 1)
+                refs = self.m.wake_history(self.m.wake_directory(self.inst, root))[-1]['items']
+                self.assertNotIn(stale['id'], [i['id'] for i in refs])
+                self.assertIn(unknown['id'], [i['id'] for i in refs])
+                self.assertIn(question, refs)
+
+    def test_completion_owned_envelopes_preserve_process_interrupts(self):
+        n = self.inst.node('root')
+        row = {'Job': 'job/fixture', 'Started': '2020-01-01T00:00Z',
+               'Ended': '2020-01-02T00:00Z', 'Outcome': 'merged'}
+        for error in (RuntimeError, SystemExit):
+            unknown = set()
+            with mock.patch.object(self.m, 'read_jobs', return_value=[row]), \
+                    mock.patch.object(self.inst, 'parse_time', side_effect=error('fixture landed reader')):
+                self.assertEqual(self.m.watch_completion_items(self.inst, nodes=[n], strict=True, unknown=unknown), [])
+            self.assertEqual(unknown, {self.m.watch_completion_scope(n['id'], row, 'job-landed')})
+        for method in ('read_jobs', 'watch_recorded_ready'):
+            open_row = {**row, 'Ended': ''}
+            with mock.patch.object(self.m, 'read_jobs', return_value=[open_row]), \
+                    mock.patch.object(self.m, method, side_effect=KeyboardInterrupt), \
+                    self.assertRaises(KeyboardInterrupt):
+                self.m.watch_completion_items(self.inst, nodes=[n], strict=True)
