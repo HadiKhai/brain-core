@@ -374,6 +374,28 @@ For agents:
 After upgrading:
 - Pending wakes drain on their own after upgrading; no requeue or binding change is needed.
 
+## 2026-10-21: A new local dashboard
+
+For agents:
+- `brain ui` now serves a React and shadcn dashboard: dark first with a light mode, phone layouts and
+  keyboard navigation. The sidebar holds the brain's tree (projects, their coordinators and live
+  threads), Agents (Specialists, Jobs, Threads, Usage), Learnings and a searchable brain graph.
+  Overview is a decision dashboard: what needs you, what moved, what is running.
+- Every existing capability stays; the import checklist became the Add projects sheet beside the
+  tree, and old addresses (`#view=agents`, `#view=imports`) still land.
+- `ui --json` adds `from` to Inbox items and `branch` to Due items. `/api/search` (keyed) pages and
+  ranks projects, specialists, learnings and jobs for the dashboard's pickers.
+- A core worktree's `brain ui` serves that worktree's build; its first output line names the core
+  path and commit.
+- Python serves the committed build; running the dashboard still needs only Python 3.9. Dashboard
+  sources, the ui-fitness gate and build instructions are in `ui/README.md`; dependency licenses and
+  bundled notices are checked.
+
+After upgrading:
+- Reopen `brain ui --open`. Scripts that read the first line of `brain ui` output for the address
+  should read the line that contains `?k=` instead.
+- Developers: run the documented UI checks, including the ui-fitness gate, with made-up data before
+  changing the dashboard.
 
 ## 2026-10-21: Name changed verify inputs and finish setup
 
@@ -736,6 +758,7 @@ For agents:
 After upgrading:
 - Nothing, unless a node's history was made mostly outside its home: then ask the operator which
   folders to name, and extract again with `--fresh --also <folder>`.
+
 
 ## 2026-10-20: Time and tokens per job
 

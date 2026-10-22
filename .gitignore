@@ -1,0 +1,3 @@
+ui/node_modules/
+ui/*.tsbuildinfo
+__pycache__/

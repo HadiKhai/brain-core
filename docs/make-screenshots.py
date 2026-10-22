@@ -22,8 +22,8 @@ CHROME = next((p for p in ["/Applications/Google Chrome.app/Contents/MacOS/Googl
               None)
 random.seed(7)
 NOW = dt.datetime.now(dt.timezone.utc).replace(second=0, microsecond=0)
-ENV = {**os.environ, "BRAIN_NO_REEXEC": "1", "GIT_AUTHOR_NAME": "sam", "GIT_AUTHOR_EMAIL": "sam@example.com",
-       "GIT_COMMITTER_NAME": "sam", "GIT_COMMITTER_EMAIL": "sam@example.com", "GIT_CONFIG_GLOBAL": "/dev/null", "BRAIN_USAGE_TESTING": "1", "BRAIN_USAGE_TEST_NO_KEYCHAIN": "1"}
+ENV = {**os.environ, "BRAIN_NO_REEXEC": "1", "GIT_AUTHOR_NAME": "demo", "GIT_AUTHOR_EMAIL": "demo@example.com",
+       "GIT_COMMITTER_NAME": "demo", "GIT_COMMITTER_EMAIL": "demo@example.com", "GIT_CONFIG_GLOBAL": "/dev/null", "BRAIN_USAGE_TESTING": "1", "BRAIN_USAGE_TEST_NO_KEYCHAIN": "1"}
 
 
 def run(*args, cwd, env=None, check=True):
@@ -68,8 +68,8 @@ def build(base):
     os.environ["BRAIN_CONFIG"] = str(base / "brains.json")
     ENV["BRAIN_CONFIG"] = os.environ["BRAIN_CONFIG"]
     root = base / "Brain"
-    run(sys.executable, CORE / "bin" / "brain", "init", root, "--operator", "sam", "--title", "Sam's Brain",
-        "--tz", "Europe/Lisbon", "--name", "sam", cwd=base)
+    run(sys.executable, CORE / "bin" / "brain", "init", root, "--operator", "demo", "--title", "Demo Brain",
+        "--tz", "Europe/Lisbon", "--name", "demo", cwd=base)
     b = lambda *a: run(sys.executable, root / "core" / "bin" / "brain", *a, cwd=root)  # noqa: E731
     code = base / "code"
     web = home_repo(code / "website", {"README.md": "# Studio website\n", "package.json": "{}\n", "src/index.ts": "export const title = 'Studio website';\n", "src/style.css": "body { margin: 0; }\n"})
@@ -78,7 +78,7 @@ def build(base):
     b("principal", "add", "northwind")
     b("new", "website", "--title", "Studio website", "--home", web, "--labels", "kind:code,area:studio", "--runtime", "claude")
     b("new", "mobile-app", "--title", "Field app", "--home", app, "--labels", "kind:code,area:studio", "--runtime", "codex")
-    b("new", "northwind", "--title", "Northwind portal", "--owners", "sam,northwind", "--home", nw,
+    b("new", "northwind", "--title", "Northwind portal", "--owners", "demo,northwind", "--home", nw,
       "--labels", "kind:code,area:clients")
     b("new", "research", "--title", "Research", "--labels", "kind:research")
     b("new", "research/pricing", "--title", "Pricing study", "--labels", "kind:research")
@@ -144,7 +144,7 @@ def build(base):
     section(brief, "Limits", [
         "- At most 3 worktrees at once. Why: each runs a dev server and a browser. Lift when: the CI runners take "
         "the browser tests.",
-        "- No deploys without Sam. Why: the site takes payments. Lift when: never."])
+        "- No deploys without the demo reviewer. Why: the site takes payments. Lift when: never."])
     (nodes["northwind"] / "never-name.txt").write_text("# other clients\nAcme\n")
 
     for nid, h in [("website", web), ("mobile-app", app)]:
@@ -205,7 +205,7 @@ def build(base):
     home_repo(code / "garden-notes", {"README.md": "# Garden notes\n", "notes.py": "# Planting calendar\n", "AGENTS.md": "# Editorial checklist\n"})
     home_repo(code / "atlas-kit", {"README.md": "# Atlas kit\n", "map.ts": "// Map legend\n"})
     other = base / "other-brain"
-    run(sys.executable, CORE / "bin" / "brain", "init", other, "--operator", "sam", "--title", "Workshop Brain", "--name", "workshop", cwd=base)
+    run(sys.executable, CORE / "bin" / "brain", "init", other, "--operator", "demo", "--title", "Workshop Brain", "--name", "workshop", cwd=base)
     workshop = home_repo(code / "workshop-tools", {"README.md": "# Workshop tools\n", "tools.py": "# Inventory\n"})
     run(sys.executable, CORE / "bin" / "brain", "new", "tools", "--title", "Workshop tools", "--home", workshop, cwd=other)
     # Seed worker hand-backs and a missing lesson outcome using the normal data files.
@@ -248,10 +248,10 @@ def build(base):
     run("git", "commit", "-qm", "demo: notes", cwd=root, check=False)
     # Fake account-wide readings; no provider calls or credentials are used.
     config = {"stop_percent":85, "subscriptions":[
-        {"id":"studio-codex", "label":"Studio", "runtime":"codex", "config_dir":str(base / "fake-codex"), "host_provider_instance_id":"demo-codex", "brains":["sam"]},
-        {"id":"studio-claude", "label":"Research", "runtime":"claude", "config_dir":str(base / "fake-claude"), "host_provider_instance_id":"demo-claude", "brains":["sam"]},
-        {"id":"studio-overflow", "label":"Overflow", "runtime":"codex", "config_dir":str(base / "fake-overflow"), "host_provider_instance_id":"demo-overflow", "brains":["sam"]},
-        {"id":"travel-claude", "label":"Travel", "runtime":"claude", "config_dir":str(base / "fake-travel"), "host_provider_instance_id":"demo-travel", "brains":["sam"]}]}
+        {"id":"studio-codex", "label":"Studio", "runtime":"codex", "config_dir":str(base / "fake-codex"), "host_provider_instance_id":"demo-codex", "brains":["demo"]},
+        {"id":"studio-claude", "label":"Research", "runtime":"claude", "config_dir":str(base / "fake-claude"), "host_provider_instance_id":"demo-claude", "brains":["demo"]},
+        {"id":"studio-overflow", "label":"Overflow", "runtime":"codex", "config_dir":str(base / "fake-overflow"), "host_provider_instance_id":"demo-overflow", "brains":["demo"]},
+        {"id":"travel-claude", "label":"Travel", "runtime":"claude", "config_dir":str(base / "fake-travel"), "host_provider_instance_id":"demo-travel", "brains":["demo"]}]}
     (base / "subscriptions.json").write_text(json.dumps(config))
     inst = brain_mod.Instance(root)
     for hire in inst.local.get("hires", []):
@@ -376,10 +376,10 @@ def main():
             return
         snapshot(root, b, "dark", OUT / "ui-dark.png", size=(1440, 1270))
         snapshot(root, b, "light", OUT / "ui-light.png", size=(1440, 1270))
-        snapshot(root, b, "dark", OUT / "ui-project.png", "#node=website", size=(1440, 1000))
-        for view in ("learnings", "agents", "usage", "imports"):
+        snapshot(root, b, "dark", OUT / "ui-project.png", "#view=project&node=website", size=(1440, 1000))
+        for view in ("inbox", "learnings", "jobs", "usage", "graph"):
             for theme in ("dark", "light"):
-                snapshot(root, b, theme, OUT / f"ui-{view}-{theme}.png", "#view=" + view, size=(1440, 1450 if view == "agents" else 1280 if view == "learnings" else 1200))
+                snapshot(root, b, theme, OUT / f"ui-{view}-{theme}.png", "#view=" + view, size=(1440, 1000))
         snapshot(root, b, "dark", OUT / "ui-stress-dark.png", "#view=learnings", size=(1440, 1200), stress=True)
         snapshot(root, b, "light", OUT / "ui-stress-mobile.png", "#view=learnings", size=(600, 1000), stress=True)
         check_ui(root, b)

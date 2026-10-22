@@ -1,6 +1,9 @@
 """Spend mechanics for Brain."""
 import datetime
+from contextlib import contextmanager
+from contextvars import ContextVar
 import hashlib
+import functools
 import json
 import os
 import re
@@ -282,6 +285,19 @@ def brain_terms(inst):
     return list({t for n in inst.nodes() for t in _m_guard.never_terms(n)})
 
 
+# A dashboard may aggregate in memory, but viewing it must never publish spend caches.
+_SPEND_READ_ONLY = ContextVar('brain_spend_read_only', default=False)
+
+
+@contextmanager
+def spend_read_only():
+    token = _SPEND_READ_ONLY.set(True)
+    try:
+        yield
+    finally:
+        _SPEND_READ_ONLY.reset(token)
+
+
 def spend_cache_dir(inst):
     return inst.root / ".brain" / "spend"
 
@@ -316,11 +332,13 @@ def spend_file(inst, path, runtime, allowed, forbidden, budget=None, window=None
             return known[1]  # unchanged, and its names still pass today's never-name words
         key = hashlib.sha256(str(real).encode()).hexdigest()[:32]
         cf = spend_cache_dir(inst) / "files" / f"{key}.json"
-        agg = None
-        try:
-            agg = json.loads(cf.read_text()) if window is None else None
-        except (OSError, ValueError):
-            pass
+        # Read-only viewers retain partial progress in memory; a disk cache is optional.
+        agg = known[1] if known and known[0][1] == list(ident) else None
+        if agg is None:
+            try:
+                agg = json.loads(cf.read_text()) if window is None else None
+            except (OSError, ValueError):
+                pass
         if not (isinstance(agg, dict) and agg.get("v") == SPEND_VERSION and agg.get("key") == key
                 and agg.get("ino") == list(ident) and agg["state"]["offset"] <= size
                 and (not packed or agg["state"]["offset"] in (0, size))):
@@ -351,17 +369,40 @@ def spend_file(inst, path, runtime, allowed, forbidden, budget=None, window=None
                 agg["state"]["offset"] = size  # read whole: what it holds is counted
             agg["models"] = [m if not _m_guard.find_terms(m, terms) else "other" for m in agg["models"]]
             try:
-                if window is None:  # counts and digests only: no path, folder, session id or text
+                if window is None and not _SPEND_READ_ONLY.get():  # explicit spend commands may persist aggregates
                     cf.parent.mkdir(parents=True, exist_ok=True)
                     _m_common.atomic_write(cf, json.dumps({k: v for k, v in agg.items() if k not in SPEND_UNKEPT},
                                                 separators=(",", ":")))
             except OSError:
                 pass  # still right for this run; read again next time
+        # A time slice can end exactly after the final whole line. There is no next
+        # read to mark EOF in that case; the saved cursor already proves completion.
+        if agg['state']['offset'] == size:
+            agg['complete'] = True
         agg["path"] = str(real)  # this run's own, never written
         _SPEND_MEM[mem] = ((size, list(ident)), agg)
     return agg
 
 
+_UI_DISCOVERY = ContextVar('brain_ui_session_discovery', default=None)
+
+
+def ui_discovery(fn):
+    """Share one read-only session discovery across a dashboard's job-usage batch."""
+    @functools.wraps(fn)
+    def read(*args):
+        memo = _UI_DISCOVERY.get()
+        if memo is None:
+            return fn(*args)
+        key = (fn.__name__, tuple(frozenset(arg) if isinstance(arg, set) else arg for arg in args))
+        if key not in memo:
+            value = fn(*args)
+            memo[key] = tuple(value) if fn.__name__ == 'spend_walk' else value
+        return memo[key]
+    return read
+
+
+@ui_discovery
 def spend_sources(inst):
     """[(runtime, config folder)] of every subscription this brain may read, and the folders it may not."""
     try:
@@ -378,6 +419,7 @@ def claude_folder(path):
     return re.sub(r"[^A-Za-z0-9]", "-", str(path))
 
 
+@ui_discovery
 def spend_walk(folder):
     """Transcripts below a folder, without following links into loops; each real file once."""
     seen = set()
@@ -462,6 +504,7 @@ def spend_active(minutes):
     return total
 
 
+@ui_discovery
 def spend_inside(cwd, base):
     if not isinstance(cwd, str) or not os.path.isabs(cwd):
         return False  # a transcript without its own folder is in no place (never the command's own)
@@ -485,6 +528,7 @@ def spend_session_ids():
     return out
 
 
+@ui_discovery
 def codex_meta(path, allowed, forbidden):
     """(id, cwd, parent thread) from a Codex transcript's first line, without reading the rest."""
     fh, _ = _m_history.transcript_open(path, allowed, forbidden)
@@ -506,6 +550,7 @@ def codex_meta(path, allowed, forbidden):
         _m_history.history_str(spawn.get("parent_thread_id")) if isinstance(spawn, dict) else ""
 
 
+@ui_discovery
 def claude_mark(path, allowed, forbidden):
     """The job a Claude session's first message (its brief) names, without reading the rest: "" for none."""
     fh, _ = _m_history.transcript_open(path, allowed, forbidden)
@@ -532,6 +577,7 @@ def claude_mark(path, allowed, forbidden):
     return ""
 
 
+@ui_discovery
 def claude_cwd(path, allowed, forbidden):
     """The folder a Claude session ran in, from its first records (read fresh: never kept)."""
     fh, _ = _m_history.transcript_open(path, allowed, forbidden)
@@ -539,6 +585,7 @@ def claude_cwd(path, allowed, forbidden):
     return s["cwd"] if s else ""
 
 
+@ui_discovery
 def codex_mark(path, allowed, forbidden):
     """The job a Codex session's opening user messages (its brief) name: "" for none. Stops at its first reply."""
     fh, _ = _m_history.transcript_open(path, allowed, forbidden)
@@ -801,7 +848,36 @@ def host_row_usage(row):
             "active_minutes": round(u.get("active_h", 0) * 60), "agent_minutes": round(u.get("agent_h", 0) * 60)}
 
 
+_UI_USAGE = ContextVar('brain_ui_live_usage', default=None)
+
+
+@contextmanager
+def live_usage_snapshot(values, revision):
+    """Keep unchanged UI job totals even after the ordinary CLI's one-minute cache expires."""
+    token = _UI_USAGE.set((values, revision))
+    discovery = _UI_DISCOVERY.set({})
+    try:
+        yield
+    finally:
+        _UI_USAGE.reset(token)
+        _UI_DISCOVERY.reset(discovery)
+
+
 def live_usage(inst, n, row):
+    scope = _UI_USAGE.get()
+    if scope is None:
+        return _live_usage(inst, n, row)
+    values, revision = scope
+    job = (str(inst.root), n['id'], _m_jobs.job_key(row))
+    key = (revision, json.dumps(n['local'], sort_keys=True), tuple(_m_guard.never_terms(n)),
+           tuple(row.get(name, '') for name in _m_jobs.JOB_COLS))
+    old = values.get(job)
+    if old is None or old[0] != key:
+        values[job] = (key, _read_live_usage(inst, n, row))
+    return values[job][1]
+
+
+def _live_usage(inst, n, row):
     """An open job's usage so far, read again at most once a minute in one process (the live view asks often).
     What its host reported wins over what the transcripts show."""
     if str(row.get("Usage", "")).startswith("host"):
@@ -810,12 +886,18 @@ def live_usage(inst, n, row):
     hit = _LIVE.get(key)
     if hit and time.monotonic() - hit[0] < 60:
         return hit[1]
-    try:
-        u = job_usage(inst, n, row)
-    except (OSError, ValueError, RuntimeError):
-        u = None
+    u = _read_live_usage(inst, n, row)
     _LIVE[key] = (time.monotonic(), u)
     return u
+
+
+def _read_live_usage(inst, n, row):
+    if str(row.get('Usage', '')).startswith('host'):
+        return host_row_usage(row)
+    try:
+        return job_usage(inst, n, row)
+    except (OSError, ValueError, RuntimeError):
+        return None
 
 
 def host_usage_cells(path, n):

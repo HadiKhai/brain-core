@@ -91,16 +91,66 @@ class LiveView(Scenario):
         p = subprocess.Popen([sys.executable, str(r / "core" / "bin" / "brain"), "ui", "--port", str(free),
                               "--every", "0.5"], cwd=r, env=self.env, stdout=subprocess.PIPE, text=True)
         try:
+            core = p.stdout.readline()   # the first line names the core that serves the page, and its commit
+            self.assertTrue(core.startswith("brain ui core: "), core)
+            self.assertIn(" @ ", core)
             line = p.stdout.readline()
             full = line.split(": ", 1)[1].split()[0]
             self.assertTrue(full.startswith("http://127.0.0.1:"))
             url, key = full.split("?k=")
-            self.assertIn(b"<title>", urllib.request.urlopen(url, timeout=5).read())
+            page = urllib.request.urlopen(url, timeout=5).read()
+            self.assertIn(b"<title>", page)
+            self.assertIn(b'<div id="root">', page)
+            self.assertNotIn(b"The API key", page)  # public shell contains no brain snapshot
+            assets = re.findall(rb'(?:src|href)="(\./assets/[^"?]+)"', page)
+            self.assertGreaterEqual(len(assets), 2)
+            for asset in assets:
+                response = urllib.request.urlopen(url + asset.decode()[2:], timeout=5)
+                self.assertEqual(response.headers["Cache-Control"], "no-store")
+                self.assertGreater(len(response.read()), 0)
+            # Runtime notices and font license ship alongside the static assets.
+            notices = urllib.request.urlopen(url + "assets/THIRD_PARTY_NOTICES.txt", timeout=5).read()
+            self.assertIn(b"react ", notices)
+            self.assertIn(b"SIL OPEN FONT LICENSE", urllib.request.urlopen(url + "assets/Geist-OFL.txt", timeout=5).read())
+            # A rebuild while serving: the shell follows the files on disk, never stale asset names.
+            shell = r / "core/ui/dist/index.html"
+            rebuilt = page.replace(b"<title>", b"<title>Rebuilt ")
+            shell.write_bytes(rebuilt)
+            self.assertEqual(urllib.request.urlopen(url, timeout=5).read(), rebuilt)
+            shell.write_bytes(page)
+            script = next(a for a in assets if a.endswith(b".js"))
+            self.assertIn(b"__STATE__", urllib.request.urlopen(url + script.decode()[2:], timeout=5).read())
+            for path in ("assets/../index.html", "assets/%2e%2e%2findex.html", "assets/%2e%2e%5cindex.html", "assets/.hidden", "assets/nope.js", "assets/%00.js", "assets/a%00b", "assets/%0A.js", "assets/%FF.js"):
+                with self.assertRaises(urllib.error.HTTPError) as e:
+                    urllib.request.urlopen(url + path, timeout=5)
+                self.assertEqual(e.exception.code, 404)
+            outside = self.tmp / "private.txt"
+            outside.write_text("must not be served")
+            (r / "core/ui/dist/assets/outside.txt").symlink_to(outside)
+            with self.assertRaises(urllib.error.HTTPError) as e:
+                urllib.request.urlopen(url + "assets/outside.txt", timeout=5)
+            self.assertEqual(e.exception.code, 404)
+            for endpoint in ("api/events", "api/events?k=wrong", "api/state?k=wrong"):
+                with self.assertRaises(urllib.error.HTTPError) as e:
+                    urllib.request.urlopen(url + endpoint, timeout=5)
+                self.assertEqual(e.exception.code, 403)
             with self.assertRaises(urllib.error.HTTPError) as e:   # another account on this machine has no key
                 urllib.request.urlopen(url + "api/state", timeout=5)
             self.assertEqual(e.exception.code, 403)
             state = json.loads(urllib.request.urlopen(url + "api/state?k=" + key, timeout=5).read())
             self.assertEqual(state["brain"]["name"], "alice")
+            found = json.loads(urllib.request.urlopen(url + "api/search?kind=node&q=ap&k=" + key, timeout=5).read())
+            self.assertEqual([i["id"] for i in found["items"]], ["app"])          # the picker's server search
+            for endpoint in ("api/search?q=ap", "api/search?q=ap&k=wrong"):
+                with self.assertRaises(urllib.error.HTTPError) as e:
+                    urllib.request.urlopen(url + endpoint, timeout=5)
+                self.assertEqual(e.exception.code, 403)
+            with self.assertRaises(urllib.error.HTTPError) as e:
+                urllib.request.urlopen(url + "api/search?offset=x&k=" + key, timeout=5)
+            self.assertEqual(e.exception.code, 400)
+            self.assertEqual(set(state), set(port))  # --json contract and live snapshot agree
+            first_snapshot = state
+
             req = urllib.request.Request(url + "api/state?k=" + key, headers={"Host": "evil.example"})
             with self.assertRaises(urllib.error.HTTPError) as e:
                 urllib.request.urlopen(req, timeout=5)
@@ -108,6 +158,9 @@ class LiveView(Scenario):
             ev = urllib.request.urlopen(url + "api/events?k=" + key, timeout=10)
             first = ev.readline()
             self.assertTrue(first.startswith(b"data: {"))
+            streamed = json.loads(first[len(b"data: "):])
+            self.assertEqual(set(streamed), set(first_snapshot))
+            self.assertEqual(streamed["brain"]["name"], first_snapshot["brain"]["name"])
             ev.readline()
             # a change in the files reaches an open page without a reload
             (r / "nodes" / "app" / "inbox.md").write_text("- 2026-01-01 00:00 from worker: question: which key?\n")
@@ -121,7 +174,6 @@ class LiveView(Scenario):
             p.terminate()
             p.wait(timeout=5)
             p.stdout.close()
-
 
 
 class ExpandedUI(Scenario):
@@ -169,7 +221,66 @@ class ExpandedUI(Scenario):
         self.assertEqual(len(ui_node["jobs"]["rows"]), 65)
         self.assertEqual(ui_node["jobs"]["median_reviews"], 2)
         self.assertEqual(len([d for d in state["due"] if d["kind"] == "lesson-outcome"]), 65)
-        self.assertEqual(state["due"], json.loads(self.b(root, "due", "--json")))
+        # The live view adds only each job's branch name; everything else is `brain due --json`.
+        self.assertEqual([d.get("branch") for d in state["due"] if d["kind"] == "lesson-outcome"][:2], ["job-0", "job-1"])
+        self.assertEqual([{k: v for k, v in d.items() if k != "branch"} for d in state["due"]], json.loads(self.b(root, "due", "--json")))
+
+    def test_ui_search_ranks_folds_and_pages(self):
+        names = ["Mariana", "Bruno Ana", "Ánalyst", "Ana Lima", "ana", "Zed"]
+        state = {"nodes": [{"id": f"n{i}", "title": t, "updated": f"2026-01-0{i + 1}"} for i, t in enumerate(names)]}
+        found = self.m.ui_search(state, "node", "ana")
+        # exact, then name starts (accent-insensitive, ties alphabetical), then a later word, then contains
+        self.assertEqual([i["title"] for i in found["items"]], ["ana", "Ana Lima", "Ánalyst", "Bruno Ana", "Mariana"])
+        self.assertEqual(found["total"], 5)
+        self.assertEqual(self.m.ui_search(state, "node", "LIMA")["items"][0]["title"], "Ana Lima")
+        self.assertEqual(self.m.ui_search(state, "node", "nothing like it")["items"], [])
+        self.assertEqual([i["title"] for i in self.m.ui_search(state, "node", "")["items"]][:2], ["Zed", "ana"])  # recent first
+        arabic = {"nodes": [{"id": "a", "title": "مدرسة أحمد"}]}
+        self.assertEqual(len(self.m.ui_search(arabic, "node", "مدرسه احمد")["items"]), 1)  # ta marbuta and alef forms
+        many = {"nodes": [{"id": f"p{i:02}", "title": f"Project {i:02}"} for i in range(45)],
+                "specialists": [{"id": "rev", "node": "p00", "title": "Project reviewer", "jobs": []}]}
+        pages = [self.m.ui_search(many, "node", "project", offset, 20) for offset in (0, 20, 40)]
+        self.assertEqual([p["next"] for p in pages], [20, 40, None])
+        self.assertEqual(sum(len(p["items"]) for p in pages), 45)
+        self.assertEqual({i["kind"] for i in self.m.ui_search(many, "all", "project", 0, 100)["items"]}, {"node", "specialist"})
+        self.assertEqual(self.m.ui_search(many, "specialist", "rev")["items"][0]["secondary"], "Project 00 · 0 hires")
+
+    def test_ui_sender_comes_from_the_record_and_due_names_its_job(self):
+        sender = self.m.inbox_sender
+        self.assertEqual(sender({"kind": "inbox", "text": "2026-01-01 09:30 +01:00 from worker: question: which key?"}), "worker")
+        self.assertEqual(sender({"kind": "blocked", "text": "Waiting from Morgan: a review"}), "")
+        self.assertEqual(sender({"kind": "inbox", "text": "a question with no record of who from x: y"}), "")
+        root = self.init("alice")
+        self.b(root, "new", "project", "--title", "Project")
+        inst = self.m.Instance(root)
+        row = {"Job": "job-a", "Started": "2026-01-01T00:00:00+00:00", "Ended": "", "Hours": "", "Reviews": "0", "Outcome": ""}
+        self.m.write_jobs(inst, inst.node("project"), [row])
+        due = [{"node": "project", "kind": "handback", "text": "job-a: ready to merge", "job": self.m.job_key(row)}]
+        with mock.patch.object(self.m, "due_items", side_effect=lambda inst, n, *a, **k: due if n["id"] == "project" else []):
+            state = self.m.ui_state(self.m.Instance(root))
+        self.assertEqual([d.get("branch") for d in state["due"] if d.get("job")], ["job-a"])
+        (root / "nodes/project/inbox.md").write_text("- 2026-01-01 00:00 from worker: question: which key?\n")
+        state = self.m.ui_state(self.m.Instance(root))
+        self.assertEqual([i["from"] for i in state["inbox"] if i["kind"] == "inbox"], ["worker"])
+
+    def test_ui_from_a_core_worktree_serves_that_worktree(self):
+        other = self.tmp / "instance"
+        (other / "core" / "bin").mkdir(parents=True)
+        (other / "core" / "bin" / "brain").write_text("# the instance's own core\n")
+        worktree = self.tmp / "core-worktree"
+        worktree.mkdir()
+        calls = []
+        with mock.patch.object(self.m, "try_find_root", return_value=other), \
+                mock.patch.object(self.m.os, "execv", side_effect=lambda *a: calls.append(a)), \
+                mock.patch.dict(os.environ, {"BRAIN_NO_REEXEC": ""}):
+            for git_entry, command, expected in (("file", "ui", 0), ("dir", "ui", 1), ("file", "status", 2)):
+                os.environ["BRAIN_NO_REEXEC"] = ""   # a re-exec sets it for the process it starts
+                shutil.rmtree(worktree / ".git", ignore_errors=True)
+                (worktree / ".git").unlink() if (worktree / ".git").is_file() else None
+                (worktree / ".git").write_text("gitdir: elsewhere\n") if git_entry == "file" else (worktree / ".git").mkdir()
+                with mock.patch.object(self.m, "CORE", worktree), mock.patch.object(self.m.sys, "argv", ["brain", command]):
+                    self.m.reexec_into_instance_core()
+                self.assertEqual(len(calls), expected, (git_entry, command))
 
     def test_ui_policy_and_new_data_redact_home_terms(self):
         root = self.init("alice")

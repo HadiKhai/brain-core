@@ -88,6 +88,8 @@ def reexec_into_instance_core():
     """`brain` on PATH points at one core; for another instance, use that instance's own core."""
     if os.environ.get("BRAIN_NO_REEXEC") or (len(sys.argv) > 1 and sys.argv[1] in ("init", "selftest")):
         return
+    if len(sys.argv) > 1 and sys.argv[1] == "ui" and (_m_common.CORE / ".git").is_file():
+        return  # a core worktree (a dashboard in development) serves its own build
     root = _m_nodes.try_find_root()
     if not root:
         return
@@ -237,8 +239,9 @@ def main():
         opt("--also", action="append", metavar="FOLDER", help="also sessions run in this folder (repeatable)"),
         opt("--json", action="store_true"))
     cmd("ui", _m_ui.cmd_ui, "a live view of this brain in your browser: projects, work in flight, worktrees, activity "
-        "(read-only, this machine only)", opt("--port", type=int, default=_m_ui.UI_PORT),
+        "(read-only by default, this machine only)", opt("--port", type=int, default=_m_ui.UI_PORT),
         opt("--every", type=float, default=3.0, help="seconds between refreshes"),
+        opt("--write", action="store_true", help="allow explicit keyed local proposal reviews as the configured operator"),
         opt("--scan", nargs="+", action="extend", default=[], help="discover import candidates in DIR... (read-only)"),
         opt("--open", action="store_true", help="open it in the browser"),
         opt("--json", action="store_true", help="print the state once, as JSON"))

@@ -39,6 +39,20 @@ class Basics(Scenario):
         self.assertTrue((r / ".agents" / "skills").is_symlink())
         self.assertIn(".brain/", (r / ".gitignore").read_text())
 
+    def test_init_excludes_ui_development_dependencies_and_keeps_built_runtime(self):
+        with tempfile.TemporaryDirectory(prefix="brain-ui-core-") as scratch:
+            core = Path(scratch) / "core"
+            shutil.copytree(CORE, core, ignore=shutil.ignore_patterns(".git", "node_modules", "__pycache__"))
+            (core / "ui/node_modules/demo").mkdir(parents=True)
+            (core / "ui/node_modules/demo/private.txt").write_text("build only")
+            (core / "ui/tsconfig.tsbuildinfo").write_text("build cache")
+            root = self.tmp / "copied"
+            self.run_(["init", str(root), "--operator", "demo", "--title", "Demo", "--tz", "UTC"], cwd=self.tmp, brain=core / "bin/brain")
+            self.assertFalse((root / "core/ui/node_modules").exists())
+            self.assertFalse((root / "core/ui/tsconfig.tsbuildinfo").exists())
+            self.assertTrue((root / "core/ui/dist/index.html").exists())
+            self.assertTrue((root / "core/ui/dist/assets/THIRD_PARTY_NOTICES.txt").exists())
+
     def test_nesting_and_relabel_touch_only_labels(self):
         r = self.init("alice")
         self.b(r, "new", "a", "--title", "A", "--labels", "area:x")

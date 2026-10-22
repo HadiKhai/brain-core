@@ -149,7 +149,7 @@ def cmd_init(a):
                 "use an empty folder")
     root.mkdir(parents=True, exist_ok=True)
     if _m_common.CORE.resolve() != (root / "core").resolve():
-        shutil.copytree(_m_common.CORE, root / "core", ignore=shutil.ignore_patterns("__pycache__", ".DS_Store", ".git"))
+        shutil.copytree(_m_common.CORE, root / "core", ignore=shutil.ignore_patterns("__pycache__", ".DS_Store", ".git", "node_modules", "*.tsbuildinfo"))
     runtimes = a.runtimes
     values = {"OPERATOR": a.operator, "RUNTIMES": runtimes, "DEFAULT_RUNTIME": _m_common.lst(runtimes)[0],
               "HOST": a.host, "TZ": a.tz, "ROOT": _m_common.tilde(root), "TITLE": a.title,

@@ -242,51 +242,75 @@ def review_principal(inst, reviewer):
     return reviewer
 
 
-def cmd_item_accept(a):
-    """Accept one or several reviewed proposals: all are checked before any changes, then one commit."""
-    inst = _m_nodes.load()
-    review_principal(inst, a.reviewed_by)
-    if _m_nodes.SECRET_META.search(a.reviewed_by):
-        _m_common.die("unsafe review attribution")
-    todo = []
-    for iid in dict.fromkeys(a.id):
-        it = inst.item(iid)
-        fm, body = _m_common.read_fm(it["path"])
+def review_proposals(inst, records, action, reviewer=None, via=None):
+    """Shared CLI/UI review path: validate every proposal before changing any scope-preserving file."""
+    if action not in ("accept", "reject"):
+        _m_common.die("unknown review action")
+    if action == "accept" or reviewer is not None:
+        review_principal(inst, reviewer)
+        if _m_nodes.SECRET_META.search(reviewer):
+            _m_common.die("unsafe review attribution")
+    todo, seen = [], set()
+    for record in records:
+        kind, ident, node = record["kind"], record["id"], record.get("node", "root")
+        key = (kind, node, ident)
+        if key in seen:
+            continue
+        seen.add(key)
+        if kind == "item":
+            it = inst.item(ident)
+            path = it["path"]
+            if record.get("path") and str(path.relative_to(inst.root)) != record["path"]:
+                _m_common.die("ambiguous proposal id; review one unique id")
+            fm, body = _m_common.read_fm(path)
+            terms = learning_terms(inst, fm, [n for n in inst.nodes()
+                                      if n["dir"].resolve() == path.parent.parent.resolve()])
+            text = path.read_text()
+        elif kind == "specialist":
+            at = inst.node(node)
+            # Select an existing role, never construct a path from a request's id.
+            sp = next((s for s in find_specialists(inst, ident) if s["node"]["id"] == at["id"]), None)
+            if sp is None:
+                _m_common.die(f"no specialist '{ident}' at {at['id']}")
+            path = sp["dir"] / "role.md"
+            fm, body = _m_common.read_fm(path)
+            terms = specialist_terms(inst, sp, [at])
+            text = specialist_text(sp)
+        else:
+            _m_common.die("unknown proposal kind")
+        _m_common.safe_target(path)
         if fm.get("status") != "proposed":
-            _m_common.die(f"{iid}: only a proposed item can be accepted")
-        terms = learning_terms(inst, fm, [n for n in inst.nodes() if n["dir"].resolve() == it["path"].parent.parent.resolve()])
-        if _m_guard.find_terms(a.reviewed_by, terms):
+            _m_common.die(f"{ident}: only a proposed {kind} can be {action}ed")
+        if action == "accept" and _m_guard.find_terms(text + "\n" + reviewer, terms):
+            _m_common.die(f"{ident}: holds a never-name word of where it was learned; edit it before accepting")
+        if reviewer and _m_guard.find_terms(reviewer, terms):
             _m_common.die("the review attribution holds a never-name word")
-        if _m_guard.find_terms(it["path"].read_text(), terms):
-            _m_common.die(f"{iid}: holds a never-name word of a node it was learned from; edit it before accepting")
-        todo.append((iid, it, fm, body))
+        todo.append((ident, path, fm, body))
     when = inst.now()
-    for iid, it, fm, body in todo:
-        fm["status"] = "active"
-        fm["accepted_at"] = when
-        fm["accepted_by"] = a.reviewed_by
-        _m_common.write_fm(it["path"], fm, body)
-    inst.commit([t[1]["path"] for t in todo], "accept: " + ", ".join(t[0] for t in todo))
-    for iid, *_ in todo:
+    for ident, path, fm, body in todo:
+        fm.update(status="active" if action == "accept" else "rejected")
+        prefix = "accepted" if action == "accept" else "rejected"
+        fm[prefix + "_at"] = when
+        if reviewer:
+            fm[prefix + "_by"] = reviewer
+        if via:
+            fm[prefix + "_via"] = via
+        _m_common.write_fm(path, fm, body)
+    inst.commit([t[1] for t in todo], action + (" via " + via if via else "") + ": " + ", ".join(t[0] for t in todo))
+    return [t[1] for t in todo]
+
+
+def cmd_item_accept(a):
+    inst = _m_nodes.load()
+    review_proposals(inst, [{"kind": "item", "id": i} for i in a.id], "accept", a.reviewed_by)
+    for iid in dict.fromkeys(a.id):
         print(f"{iid}: accepted")
 
 
 def cmd_item_reject(a):
     inst = _m_nodes.load()
-    todo = []
+    review_proposals(inst, [{"kind": "item", "id": i} for i in a.id], "reject")
     for iid in dict.fromkeys(a.id):
-        it = inst.item(iid)
-        fm, body = _m_common.read_fm(it["path"])
-        if fm.get("status") != "proposed":
-            _m_common.die(f"{iid}: only a proposed item can be rejected")
-        todo.append((iid, it, fm, body))
-    when = inst.now()
-    for iid, it, fm, body in todo:
-        fm["status"] = "rejected"
-        fm["rejected_at"] = when
-        _m_common.write_fm(it["path"], fm, body)
-    inst.commit([t[1]["path"] for t in todo], "reject: " + ", ".join(t[0] for t in todo))
-    for iid, *_ in todo:
         print(f"{iid}: rejected")
 
 
@@ -350,26 +374,9 @@ def cmd_specialist_new(a):
 
 def cmd_specialist_accept(a):
     inst = _m_nodes.load()
-    review_principal(inst, a.reviewed_by)
-    at = inst.node(a.at or "root")
-    todo = []
+    review_proposals(inst, [{"kind": "specialist", "id": i, "node": a.at or "root"} for i in a.id],
+                     "accept", a.reviewed_by)
     for sid in dict.fromkeys(a.id):
-        path = at["dir"] / "specialists" / sid / "role.md"
-        if not path.is_file():
-            _m_common.die(f"no specialist '{sid}' at {at['id']}")
-        fm, body = _m_common.read_fm(path)
-        if fm.get("status") != "proposed":
-            _m_common.die(f"{sid}: only a proposed specialist can be accepted")
-        if _m_guard.find_terms(specialist_text({"dir": path.parent}) + "\n" + a.reviewed_by,
-                      specialist_terms(inst, {"dir": path.parent}, [at])):
-            _m_common.die(f"{sid}: holds a never-name word of where it was learned; edit it before accepting")
-        todo.append((sid, path, fm, body))
-    when = inst.now()
-    for sid, path, fm, body in todo:
-        fm.update(status="active", accepted_at=when, accepted_by=a.reviewed_by)
-        _m_common.write_fm(path, fm, body)
-    inst.commit([t[1] for t in todo], "accept specialist: " + ", ".join(t[0] for t in todo))
-    for sid, *_ in todo:
         print(f"{sid}: accepted")
 
 
