@@ -459,6 +459,21 @@ else:
     def test_helper_clock_import_caught_write_is_audited(self):
         self.import_write_attempt(True)
 
+    def helper_binding_failure(self, ignored=False):
+        for core in (self.old, self.new):
+            path = core / 'lib/brain/instance.py'
+            path.write_text(path.read_text() + '\nimport sys\nif sys.argv[0] == "-c":\n    Instance = None\n')
+            if ignored:
+                (core / 'bin/brain').write_text('import subprocess, sys\nsubprocess.run([sys.executable, "-B", "-c", "pass"])\nprint("healthy")\n')
+        with self.assertRaisesRegex(rehearsal.RehearsalError, 'clock binding failed'):
+            self.pair('age')
+
+    def test_helper_binding_failure_cannot_be_shared_baseline_failure(self):
+        self.helper_binding_failure()
+
+    def test_ignored_helper_binding_failure_still_refuses(self):
+        self.helper_binding_failure(ignored=True)
+
     def test_clock_binding_failure_refuses_instead_of_becoming_shared_baseline_failure(self):
         for core in (self.old, self.new):
             (core / 'lib/brain/instance.py').write_text('Instance = None\n')

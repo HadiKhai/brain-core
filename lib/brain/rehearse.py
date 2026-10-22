@@ -719,6 +719,12 @@ try:
         from rehearsal_clock import pin
         pin()
 except BaseException:
+    # Sticky across helpers: an ignored helper failure must still refuse evidence.
+    try:
+        fd = os.open(os.environ['BRAIN_REHEARSAL_FAILURE'], os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        os.close(fd)
+    except OSError:
+        pass
     os._exit(70)
 ''')
     audit = lane / 'audit.py'
@@ -726,6 +732,8 @@ except BaseException:
     violation.unlink(missing_ok=True)
     clock_bound = home / 'rehearsal-clock-bound'
     clock_bound.unlink(missing_ok=True)
+    startup_failed = home / 'rehearsal-startup-failed'
+    startup_failed.unlink(missing_ok=True)
     # OS sandboxing is the enforcement boundary. The audit hook additionally
     # observes Python attempts even when candidate code catches a denied write.
     (bootstrap / 'rehearsal_audit.py').write_text('''import os, pathlib, sys
@@ -776,6 +784,7 @@ runpy.run_path(entry, run_name='__main__')
     env.update(HOME=str(home), TMPDIR=str(tmp), BRAIN_CONFIG=str(home / 'brains.json'),
                PYTHONPATH=str(bootstrap), BRAIN_REHEARSAL_BOUNDARY=str(lane),
                BRAIN_REHEARSAL_MARKER=str(violation),
+               BRAIN_REHEARSAL_FAILURE=str(startup_failed),
                XDG_CONFIG_HOME=str(home / '.config'), BRAIN_ROOT=str(brain),
                BRAIN_NO_REEXEC='1', BRAIN_NO_UPDATE_CHECK='1', PYTHONDONTWRITEBYTECODE='1',
                BRAIN_USAGE_TEST_NO_KEYCHAIN='1', GIT_CONFIG_GLOBAL='/dev/null', GIT_CONFIG_NOSYSTEM='1',
@@ -805,7 +814,8 @@ runpy.run_path(entry, run_name='__main__')
         except ProcessLookupError:
             pass
     elapsed = time.monotonic() - start
-    if clock is not None and (not clock_bound.is_file() or clock_bound.read_text() != clock):
+    if startup_failed.exists() or startup_failed.is_symlink() or (clock is not None and
+                                  (not clock_bound.is_file() or clock_bound.read_text() != clock)):
         raise RehearsalError('probe frozen clock binding failed')
     # Normalize JSON escapes before redaction as well: an escaped spelling must
     # not become a protected literal after the privacy filter has run.
