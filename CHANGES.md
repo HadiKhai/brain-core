@@ -5,6 +5,20 @@ upgrading. `brain changes <node>` shows the entries this node's coordinator hasn
 `brain due <node>` lists them until `brain changes <node> --seen`. Entry headings are
 `## <date>: <title>`; once released, a heading never changes.
 
+## 2026-10-22: Prune finished jobs with annotated terminal states
+
+For agents:
+- Active work accepts terminal labels such as `merged — shipped` and `closed: retired`,
+  including case and surrounding whitespace differences. Cleanup checks the row's
+  state explicitly instead of treating every recorded thread as live. Unknown or
+  nonterminal states stay protected and refusals name the state to reconcile.
+- Notes do not override dirty work, unmerged commits, checkout identity or another
+  open job claiming the folder. Cleanup still lists recorded worker references.
+
+After upgrading:
+- A finished job's terminal state may keep its explanatory note. Confirm the worker
+  is done before marking it terminal; a displayed state is not a host activity check.
+
 ## 2026-10-21: Keep worker threads visible before pruning
 
 For agents:

@@ -270,10 +270,15 @@ def removal_refusal(n, branch, w):
             continue
         if row["Job"] in owners:
             return "open ledger job " + row["Job"]
-    for row in _m_status.active_work(n):
+    for row in _m_status.active_work(n, include_closed=True):
         recorded_branch = row[0].replace("`", "").split()
         if recorded_branch and recorded_branch[0] in owners and len(row) > 1 and row[1].strip() not in ("", "-", "—"):
-            return "live bound thread in Active work for " + row[0]
+            if _m_status.active_work_closed(row):
+                continue
+            state = row[3].strip() if len(row) > 3 else "missing"
+            reason = ("live bound thread in Active work for " + row[0] +
+                      f" (state: {state or 'missing'}; reconcile the thread and row before cleanup)")
+            return _m_guard.redact(reason, _m_guard.never_terms(n))
     return ""
 
 

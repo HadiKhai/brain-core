@@ -631,7 +631,7 @@ def print_thread_checklist(n, row):
     matches = [r for r in _m_status.active_work(n, include_closed=True) if r[0] == row["Job"]]
     branch_jobs = [r for r in read_jobs(n) or [] if r["Job"] == row["Job"]]
     ambiguous = (len(branch_jobs) != 1 or len(matches) != 1 or
-                 len(matches[0]) < 4 or matches[0][3].lower() not in ("merged", "closed", "done", "abandoned"))
+                 not _m_status.active_work_closed(matches[0]))
     worker = ("ownership ambiguous or not recorded; confirm by job marker; no thread selected"
               if ambiguous else matches[0][1])
     text = (f"Threads to settle for {row['Job']} (brain-job: {job_key(row)}):\n"
