@@ -266,6 +266,13 @@ def dead_note_paths(inst, n):
     return sorted(set(out))
 
 
+def active_work_closed(row):
+    """A terminal label may have a note after a spaced dash or a colon."""
+    return len(row) > 3 and bool(re.fullmatch(
+        r"(?:merged|closed|done|abandoned)(?:(?:[ \t]+[—–-]|:)[ \t]+.+)?",
+        row[3].strip().casefold()))
+
+
 def active_work(n, include_closed=False):
     """Rows of the 'Active work' table in status.md (branch, thread, PR, state), minus the header."""
     f = n["dir"] / "status.md"
@@ -279,7 +286,7 @@ def active_work(n, include_closed=False):
             cells = [c.strip() for c in line.strip().strip("|").split("|")]
             if cells and not set("".join(cells)) <= set("-: ") and cells[0].lower() != "branch":
                 rows.append(cells)
-    return [r for r in rows if include_closed or not (len(r) > 3 and r[3].lower() in ("merged", "closed", "done", "abandoned"))]
+    return [r for r in rows if include_closed or not active_work_closed(r)]
 
 
 def overdue_questions(inst, n, lines):

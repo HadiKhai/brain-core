@@ -87,6 +87,23 @@ After upgrading:
 - Default check reports untested bindings and result age. Use `--live` when an
   actual delivery probe is intended. Normal checks never wake a coordinator.
 
+## 2026-10-22: Prune finished jobs with annotated terminal states
+
+For agents:
+- Active work accepts terminal labels such as `merged — shipped` and `closed: retired`,
+  including case and surrounding whitespace differences. Cleanup checks the row's
+  state explicitly instead of treating every recorded thread as live. Unknown or
+  nonterminal states stay protected and refusals name the state to reconcile.
+- Notes do not override dirty work, unmerged commits, checkout identity or another
+  open job claiming the folder. Cleanup still lists recorded worker references.
+- Stale-target warnings match thread links and annotated references by exact ID.
+  A reused branch's current worktree only establishes a worker's workspace when
+  its binding identifies the current job; historical or ambiguous targets warn.
+
+After upgrading:
+- A finished job's terminal state may keep its explanatory note. Confirm the worker
+  is done before marking it terminal; a displayed state is not a host activity check.
+
 ## 2026-10-21: Rehearse redacts protected probe output
 
 For agents:
@@ -607,6 +624,26 @@ After upgrading:
   `--since-wake` to see what is new for the latest wake, including during delivery.
 - Old generated open/close inbox notices are informational; they no longer wake
   coordinators and may be removed during normal inbox cleanup.
+
+## 2026-10-21: Keep worker threads visible before pruning
+
+For agents:
+- Worktree prune/removal and train staging cleanup list bound worker threads before removal,
+  with host steps to message the finished worker first, then safely settle it.
+  Job-close checklists remind coordinators to message before pruning. Cleanup still
+  permits already settled jobs; no host action is automatic.
+- Dry-run lists the host plan before actual cleanup. A real removal warns against
+  sending afterwards; inspect and settle missed threads through the host only.
+- Message helpers and rotation handovers warn about stale job-thread workspaces,
+  naming the job and suggesting a fresh thread in a fresh worktree for follow-on work.
+  Import studies need no worktree; unregistered machine-local paths require a host
+  check. Rotation omits already settled history from its warnings.
+- `brain wt prune --dry-run` only lists candidates and bindings; it no longer fetches
+  or prunes Git worktree metadata.
+
+After upgrading:
+- Read prune's thread list before cleanup. Finish host messages and settlement while
+  the workspace exists; use a new thread and worktree for later work after pruning.
 
 ## 2026-10-20: Settle closed jobs' host threads
 

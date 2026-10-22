@@ -1,5 +1,6 @@
 """Local train scenarios use made-up Git homes and isolated brains only."""
 import json
+import shlex
 from pathlib import Path
 
 from scenario import Scenario
@@ -51,6 +52,27 @@ class MergeTrain(Scenario):
         self.assertEqual(self.ledger().count(batch["batch"]), 3)
         self.assertIn("no ready jobs", self.b(root, "train", "a"))
         self.assertEqual(self.ledger().count("| merged |"), 3)
+
+    def test_staging_cleanup_lists_bound_threads_and_host_steps(self):
+        root, home = self.project()
+        self.job('one')
+        # Only staging setup runs after this point; bind its dynamic train branch.
+        status = root / 'nodes/a/status.md'
+        status.write_text(status.read_text() + '\n## Active work\n\n'
+                          '| Branch | Thread | PR | State |\n| --- | --- | --- | --- |\n')
+        (root / 'nodes/a/worktree-setup.sh').write_text(
+            'printf "| %s | fixture-stage-worker | - | done |\\n" "$BRANCH" >> ' +
+            shlex.quote(str(status)) + '\n')
+        self.detach()
+        out = self.b(root, 'train', 'a', '--jobs', 'one')
+        self.assertIn('fixture-stage-worker (Active work)', out)
+        self.assertIn('worker told the job is done', out)
+        self.assertIn('then safely settled', out)
+        batch = self.batches()[0]
+        local = json.loads((root / '.brain/local.json').read_text())
+        self.assertNotIn(batch['batch'], local['nodes']['a']['worktrees'])
+        self.assertTrue(all('branch refs/heads/' + batch['batch'] not in line
+                            for line in self.git('worktree', 'list', '--porcelain', cwd=home).splitlines()))
 
     def test_conflict_ejected_and_rest_release(self):
         root, home = self.project()

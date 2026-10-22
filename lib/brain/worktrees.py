@@ -26,7 +26,8 @@ def job_where(n, branch):
     if branch and not w:
         _m_common.die(_m_guard.redact(f"no worktree for {branch} in {n['id']} (brain wt add {n['id']} <branch>)", _m_guard.never_terms(n)))
     if w and not Path(w["path"]).exists():
-        _m_common.die(f"the worktree for {branch} is gone ({_m_common.tilde(w['path'])}); brain wt prune {n['id']}, then add it again")
+        _m_common.die(f"the worktree for {branch} is gone ({_m_common.tilde(w['path'])}); do not message its old thread; "
+                      "start a fresh thread in a fresh worktree for follow-on work")
     where = Path(w["path"]) if w else (n["home_path"] if n["external"] else n["dir"])
     return where, w
 
@@ -269,10 +270,15 @@ def removal_refusal(n, branch, w):
             continue
         if row["Job"] in owners:
             return "open ledger job " + row["Job"]
-    for row in _m_status.active_work(n):
+    for row in _m_status.active_work(n, include_closed=True):
         recorded_branch = row[0].replace("`", "").split()
         if recorded_branch and recorded_branch[0] in owners and len(row) > 1 and row[1].strip() not in ("", "-", "—"):
-            return "live bound thread in Active work for " + row[0]
+            if _m_status.active_work_closed(row):
+                continue
+            state = row[3].strip() if len(row) > 3 else "missing"
+            reason = ("live bound thread in Active work for " + row[0] +
+                      f" (state: {state or 'missing'}; reconcile the thread and row before cleanup)")
+            return _m_guard.redact(reason, _m_guard.never_terms(n))
     return ""
 
 
@@ -300,6 +306,7 @@ def cmd_wt_rm(a):
         _m_common.die(f"{a.branch}: {reason}; worktree retained")
     state = worktree_state(home, w, a.branch, n) if w else (None, False, "")
     _m_jobs.print_job_handback(n, a.branch)
+    _m_jobs.print_worktree_threads(n, a.branch)
     remove_worktree(inst, n, a.branch, a.force)
     _m_jobs.job_ended(inst, n, a.branch, "merged" if state[1] else "abandoned", job_commits(home, w, a.branch), a.cause or "",
               worktree=(w or {}).get("path"))
@@ -310,7 +317,7 @@ def cmd_wt_prune(a):
     """Remove clean worktrees merged into the integration branch. Never touches uncommitted work."""
     inst = _m_nodes.load()
     n, home = git_home(inst, a.id)
-    if _m_common.git("remote", cwd=home).stdout.strip() and not a.offline:
+    if not a.dry_run and _m_common.git("remote", cwd=home).stdout.strip() and not a.offline:
         _m_common.git("fetch", "--all", "--prune", "--quiet", cwd=home)
     removed, kept = [], []
     for br, w in sorted(n["local"].get("worktrees", {}).items()):
@@ -324,6 +331,7 @@ def cmd_wt_prune(a):
         dirty, merged, ahead = worktree_state(home, w, br, n)
         if dirty is None or (merged and dirty == 0):
             _m_jobs.print_job_handback(n, br)
+            _m_jobs.print_worktree_threads(n, br, dry_run=a.dry_run)
             if not a.dry_run:
                 remove_worktree(inst, inst.node(n["id"]), br)
                 _m_jobs.job_ended(inst, n, br, "merged" if merged else "abandoned", job_commits(home, w, br),
@@ -331,7 +339,8 @@ def cmd_wt_prune(a):
             removed.append(br)
         else:
             kept.append(f"{br} ({'uncommitted work' if dirty else 'not merged'})")
-    _m_common.git("worktree", "prune", cwd=home)
+    if not a.dry_run:
+        _m_common.git("worktree", "prune", cwd=home)
     print(f"{'would remove' if a.dry_run else 'removed'}: {', '.join(removed) or 'none'}")
     if kept:
         print(f"kept: {', '.join(kept)}")

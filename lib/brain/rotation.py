@@ -129,6 +129,9 @@ def cmd_rotate(a):
               "Inspect machine-local wake bindings without copying capability URLs into notes.",
               "Enumerate host schedules, webhook tasks and pending requests on the old coordinator and all open workers; "
               "the CLI cannot see unrecorded host state. Reconcile each before stopping the old thread.", ""]
+    warnings = _m_jobs.stale_thread_warnings(n)
+    if warnings:
+        lines += ["## Stale worker workspaces", "", *warnings, ""]
     path = n["dir"] / "handover.md"
     _m_common.safe_target(path)
     _m_common.safe_target(local_file)
@@ -137,6 +140,8 @@ def cmd_rotate(a):
     _m_common.atomic_write(path, _m_guard.redact("\n".join(lines), _m_guard.never_terms(n)))
     inst.commit([path], f"{n['id']}: prepare coordinator handover")
     print(f"handover: {_m_common.tilde(path)}")
+    for warning in warnings:
+        print(_m_guard.redact(warning, _m_guard.never_terms(n)))
     print("1. Launch a fresh coordinator thread in the node's project with this handover.")
     print(f"2. brain set {n['id']} coordinator=<new>; brain set {n['id']} coordinator_sessions=<new runtime session id> (appends and selects it).")
     print("3. Rebind every schedule and wake task; reconcile host pending requests and open workers.")

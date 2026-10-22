@@ -51,7 +51,8 @@ def cmd_review(a):
                 "there, and never in the instance instead")
         w = n["local"].get("worktrees", {}).get(a.branch)
         if w and not Path(w["path"]).exists():
-            _m_common.die(f"the worktree for {a.branch} is gone ({_m_common.tilde(w['path'])}); brain wt prune {n['id']}")
+            _m_common.die(f"the worktree for {a.branch} is gone ({_m_common.tilde(w['path'])}); do not message its old thread; "
+                          "start a fresh thread in a fresh worktree for follow-on work")
         where = Path(w["path"]) if w else n["home_path"]
         base = base or (w.get("base") if w else None) or _m_worktrees.default_base(n["home_path"])
         d = _m_common.git("diff", "--stat", f"{base}...{a.branch}", cwd=n["home_path"])

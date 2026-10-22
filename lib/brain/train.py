@@ -352,6 +352,7 @@ def run_train(inst, n, home, verify, a):
     finally:
         # Keep the train branch and journals. Failed/dirty staging stays for diagnosis.
         if not dirty(stage):
+            _m_jobs.print_worktree_threads(n, batch)
             removed = _m_common.git("worktree", "remove", str(stage), cwd=home)
             if removed.returncode == 0:
                 with _m_instance.brain_lock(inst):
