@@ -764,6 +764,100 @@ class QuestionWake(Scenario):
 
 
 class StopHook(Scenario):
+    def test_hygiene_extension_old_unchanged_notes_do_not_hold_read_only_turns(self):
+        r = self.init('maple')
+        st = r / 'status.md'
+        st.write_text(st.read_text().replace(st.read_text().splitlines()[0],
+                                            'Updated: 2020-01-01 00:00 +00:00'))
+        self.git('commit', '-qam', 'old but unchanged judgement', cwd=r)
+        before = st.read_bytes()
+        self.assertIsNone(self.hook(r, r, 'reader-one'))
+        self.assertIsNone(self.hook(r, r, 'reader-two'))
+        self.assertEqual(st.read_bytes(), before)
+        self.assertFalse((r / '.brain/hooks.log').exists())
+
+    def test_hygiene_extension_names_handbacks_and_ignores_rewritten_bookkeeping(self):
+        r = self.init('maple')
+        self.assertIsNone(self.hook(r, r))
+        folder = r / 'job-handbacks'
+        folder.mkdir()
+        signal = folder / 'fixture.json'
+        payload = {'job': 'job-finish', 'state': 'done', 'report': 'reports/finish.md',
+                   'ready': {'head': 'a' * 40, 'verify_result': 0}, 'sessions': ['fixture-one']}
+        def publish():
+            signal.write_text(json.dumps(payload))
+            newer = (r / 'status.md').stat().st_mtime + 10
+            os.utime(signal, (newer, newer))
+        publish()
+        out = self.hook(r, r)
+        self.assertIn('hand-back job-finish: done', out['reason'])
+        self.assertNotIn('job or inbox files changed', out['reason'])
+        payload.update(sessions=['fixture-two'], verify_runs=2, verify_reused=1)
+        publish()
+        self.assertIsNone(self.hook(r, r, 'other-reader'))
+        payload['ready']['head'] = 'b' * 40
+        publish()
+        self.assertIn('hand-back job-finish: done', self.hook(r, r)['reason'])
+        # A fresh hand-back episode on the same head is still a completion event.
+        payload['at'] = '2020-01-02T00:00:00+00:00'
+        publish()
+        fresh = self.hook(r, r)
+        self.assertIsNotNone(fresh)
+        self.assertIn('hand-back job-finish: done', fresh['reason'])
+
+    def test_hygiene_extension_empty_events_do_not_hold_but_inbox_and_questions_do(self):
+        r = self.init('maple')
+        self.assertIsNone(self.hook(r, r))
+        folder = r / 'job-handbacks'
+        folder.mkdir()
+        (folder / 'empty.json').write_text('{}\n')
+        future = (r / 'status.md').stat().st_mtime + 10
+        os.utime(folder / 'empty.json', (future, future))
+        (r / 'inbox.md').touch()
+        os.utime(r / 'inbox.md', (future, future))
+        self.assertIsNone(self.hook(r, r))
+        (r / 'inbox.md').write_text('- 2020-01-01 from worker: Review the finished job.\n')
+        os.utime(r / 'inbox.md', (future, future))
+        self.assertIn('inbox: 1 pending entry', self.hook(r, r)['reason'])
+        self.assertIsNone(self.hook(r, r))
+        # Captured host questions must still be recorded and shown as a new inbox event.
+        out = self.hook(r, r, transcript=self.question_log([self.question_call()]))
+        self.assertIn('host-question:', (r / 'inbox.md').read_text())
+        self.assertIn('inbox: 2 pending entries', out['reason'])
+
+    def test_hygiene_extension_guard_cache_survives_session_timestamp_trimming(self):
+        r = self.init('maple')
+        (r / 'job-handbacks').mkdir()
+        signal = r / 'job-handbacks/fixture.json'
+        signal.write_text(json.dumps({'job': 'job-finish', 'state': 'done'}))
+        newer = (r / 'status.md').stat().st_mtime + 10
+        os.utime(signal, (newer, newer))
+        self.assertIn('hand-back job-finish: done', self.hook(r, r)['reason'])
+        state_path = r / '.brain/hooks.json'
+        state = json.loads(state_path.read_text())
+        state_path.write_text(json.dumps({'_note_events': state['_note_events'],
+            **{'session-' + str(i): '2020-01-01T00:00:00+00:00' for i in range(199)}}))
+        brief = r / 'brief.md'
+        original = brief.read_bytes()
+        brief.write_bytes(original + b'\nChanged note.\n')
+        self.assertIn('not committed', self.hook(r, r, 'new-session')['reason'])
+        brief.write_bytes(original)
+        older = (r / 'status.md').stat().st_mtime - 2
+        os.utime(brief, (older, older))
+        self.assertIsNone(self.hook(r, r, 'new-session'))
+        self.assertIn('_note_events', json.loads(state_path.read_text()))
+
+    def test_hygiene_extension_guard_nested_event_does_not_silence_upgrade_notice(self):
+        r = self.init('maple')
+        self.git('commit', '-q', '--allow-empty', '-m', 'Upgrade core abc1234 -> def5678', cwd=r)
+        (r / 'job-handbacks').mkdir()
+        signal = r / 'job-handbacks/fixture.json'
+        signal.write_text('[' * 2000 + '0' + ']' * 2000)
+        out = self.hook(r, r)
+        self.assertIsNotNone(out)
+        self.assertIn('core was upgraded', out['reason'])
+        self.assertIn('unreadable event: fixture.json', out['reason'])
+
     def test_backlog_edits_make_notes_lag(self):
         r = self.init('fixture')
         self.b(r, 'new', 'notes', '--title', 'Notes')
@@ -1131,7 +1225,7 @@ class StopHook(Scenario):
         self.assertIn("stop a s1", (r / ".brain" / "hooks.log").read_text())
         self.assertNotIn("hooks", self.git("ls-files", ".brain", cwd=r))
 
-    def test_old_notes_get_one_reminder_per_session(self):
+    def test_old_notes_do_not_hold_an_unchanged_turn_in_any_session(self):
         r = self.init("alice")
         self.b(r, "new", "a", "--title", "A")
         a, st = r / "nodes" / "a", r / "nodes" / "a" / "status.md"
@@ -1139,9 +1233,9 @@ class StopHook(Scenario):
         lines[0] = "Updated: 2020-01-01 00:00 by a coordinator (claude)"
         st.write_text("\n".join(lines) + "\n")
         self.git("commit", "-qam", "a: old", cwd=r)
-        self.assertIn("last updated", self.hook(r, a, "s1")["reason"])
-        self.assertIsNone(self.hook(r, a, "s1"), "reminded once this hour")
-        self.assertIsNotNone(self.hook(r, a, "s2"), "another session gets its own reminder")
+        self.assertIsNone(self.hook(r, a, "s1"))
+        self.assertIsNone(self.hook(r, a, "s1"))
+        self.assertIsNone(self.hook(r, a, "s2"))
 
 
 

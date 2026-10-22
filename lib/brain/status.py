@@ -43,7 +43,7 @@ def updated_at(inst, n):
 
 
 def future_entries(inst, n):
-    """Only absolute dates are evidence: an old bare clock time has no known day."""
+    """Entry timestamps are evidence; planned dates in prose and examples are not."""
     problems, warnings = [], []
     now = inst.now_dt()
     date = r"\b\d{4}-\d{2}-\d{2}"
@@ -55,18 +55,33 @@ def future_entries(inst, n):
         if f.is_symlink() or not f.is_file():
             continue
         try:
-            lines = f.read_text(errors="replace").splitlines()
+            text = f.read_text(errors="replace")
         except OSError:
             continue
-        for line_no, line in enumerate(lines, 1):
-            for m in re.finditer(pattern, line):
-                text = m.group()
-                when = inst.parse_time(text if len(text) > 10 else text + " 00:00")
-                if when and elapsed(now, when) > 5 * 60:
-                    updated = f.name == "status.md" and bool(re.match(r"^Updated:\s*$", line[:m.start()]))
-                    target = problems if updated else warnings
-                    target.append(f"{n['id']}: {f.name}:{line_no}: future "
-                                  + ("Updated: time; fix it with brain now" if updated else "dated entry"))
+        text = re.sub(r"<!-- brain:facts v1 -->.*?<!-- /brain:facts -->|<!--.*?-->",
+                      lambda m: "\n" * m.group().count("\n"), text, flags=re.S)
+        fence = None
+        for line_no, line in enumerate(text.splitlines(), 1):
+            marker = re.match(r"^ {0,3}(`{3,}|~{3,})(.*)$", line)
+            if marker:
+                run, suffix = marker.groups()
+                if fence is None:
+                    fence = run
+                elif run[0] == fence[0] and len(run) >= len(fence) and not suffix.strip():
+                    fence = None
+                continue
+            if fence:
+                continue
+            m = re.match(r"^ {0,3}(?:Updated:\s*|#{1,6}\s+|[-*+]\s+)(" + pattern + r")(?=$|[\s:])", line)
+            if not m:
+                continue
+            stamp = m.group(1)
+            when = inst.parse_time(stamp if len(stamp) > 10 else stamp + " 00:00")
+            if when and elapsed(now, when) > 5 * 60:
+                updated = f.name == "status.md" and bool(re.match(r"^Updated:\s*$", line[:m.start(1)]))
+                target = problems if updated else warnings
+                target.append(f"{n['id']}: {f.name}:{line_no}: future "
+                              + ("Updated: time; fix it with brain now" if updated else "dated entry"))
     return problems, warnings
 
 
@@ -115,7 +130,7 @@ def code_node(n):
 
 
 def code_setup_warnings(inst, n):
-    if not code_node(n) or n["archived"]:
+    if "kind:study" in _m_common.lst(n["fm"].get("labels")) or not code_node(n) or n["archived"]:
         return []
     out = []
     if not n["fm"].get("verify", "").strip():
@@ -189,6 +204,12 @@ def dead_note_paths(inst, n):
     extensions = set(_m_nodes.LANGUAGES) | {".md", ".txt", ".json", ".yaml", ".yml", ".toml", ".ini", ".cfg",
                                    ".csv", ".tsv", ".sql", ".html", ".css", ".png", ".svg", ".pdf", ".lock"}
     filenames = {"README.md", "CHANGES.md", "AGENTS.md", "MODEL.md", "Dockerfile", "Makefile", "LICENSE"}
+    node_files = {"node.md", "brief.md", "status.md", "knowledge.md", "decisions.md", "backlog.md",
+                  "inbox.md", "direction.md", "job-ledger.md", "never-name.txt", "role.md",
+                  "lessons.md", "handover.md", "connections.md", "AGENTS.md", "CLAUDE.md",
+                  "worktree-setup.sh"}
+    node_folders = {"sources", "library", "specialists", "job-contracts", "job-handbacks", "job-trains"}
+    root_files = {"instance.md", "registry.md"}
     for name in ("brief.md", "status.md", "knowledge.md"):
         source = n["dir"] / name
         if not source.is_file():
@@ -211,19 +232,36 @@ def dead_note_paths(inst, n):
                     value = (match.group(1) or match.group(2)) if match else ""
                 value = value.split("#", 1)[0]
                 value = re.sub(r":\d+(?::\d+)?$", "", value)
-                if not value or re.search(r"[?*{}$]|://|^[a-zA-Z][a-zA-Z0-9+.-]*:", value):
+                if not value or re.search(r"[?*{}$]|<[^>]*>|://|^[a-zA-Z][a-zA-Z0-9+.-]*:", value):
                     continue
                 if link:
                     value = urllib.parse.unquote(value)
                 elif re.search(r"\s", value):
                     continue
                 path = Path(value).expanduser()
+                # A real filesystem root component keeps absolute Brain paths checkable.
+                # Unknown slash-prefixed components are route examples, such as /api/v1.
+                if not link and value.startswith("/") and not Path(*path.parts[:2]).exists():
+                    continue
                 explicit = value.startswith(("./", "../", "/", "~")) or value.endswith("/")
                 file_shape = path.name in filenames or ("/" in value and path.suffix in extensions)
                 if not link and not (explicit or file_shape):
                     continue
-                bases = [n["dir"], inst.root] + ([n["home_path"]] if n["home_path"] else [])
-                if not any((base / path).exists() for base in bases):
+                # Links belong to the note. Inline project paths belong to its home, while
+                # explicit Brain references must still warn even on an unbound machine.
+                if link or value.startswith("../"):
+                    bases = [n["dir"]]
+                elif path.as_posix() in root_files:
+                    bases = [inst.root]
+                elif path.parts and path.parts[0] in {"core", "nodes", ".brain"}:
+                    bases = [n["dir"], inst.root]
+                elif path.as_posix() in node_files or (path.parts and path.parts[0] in node_folders):
+                    bases = [n["dir"]]
+                else:
+                    bases = [n["home_path"] if n["external"] else n["dir"]]
+                if bases == [None] and not path.is_absolute():
+                    continue
+                if not any((path if path.is_absolute() else base / path).exists() for base in bases):
                     out.append(f"{n['id']}: {name}:{number}: dead path {raw}; repair the reference or restore the file/folder")
     return sorted(set(out))
 

@@ -38,6 +38,26 @@ After upgrading:
   Read any named baseline failure warnings; a passing comparison does not mean
   those pre-existing failures have been repaired.
 
+## 2026-10-22: Stop hooks distinguish new events from old notes
+
+For agents:
+- Future-date diagnostics inspect `Updated:` lines and timestamps at the start of
+  dated headings or list entries. Planned dates in prose, fenced examples, comments
+  and generated facts no longer warn; future recorded entries still do.
+- An old judgement timestamp alone no longer holds a read-only turn at stop.
+  Changed notes, future `Updated:` times, upgrade notices and question capture keep
+  their existing handling.
+- Stop reminders name the changed hand-back and its state, inbox entry count or
+  job ledger. Empty records and unchanged runtime bookkeeping do not trigger a
+  new reminder. Fresh hand-back timestamps and changed completion data still do.
+  Hook-local content hashes deduplicate diagnostics without changing facts or
+  readiness evidence.
+
+After upgrading:
+- No migration is needed. Keep entry timestamps at the start of dated headings or
+  list entries, and keep planned dates in their descriptive text. Coordinators
+  still handle real job/inbox events and refresh generated facts when needed.
+
 ## 2026-10-21: Rehearse redacts protected probe output
 
 For agents:
@@ -466,6 +486,23 @@ After upgrading:
 - `brain machine install` previews the minute sampler; installation needs operator consent
   and `--yes`. Ordinary commands do not install a service. The wake integration call site is
   marked for the separate wake job; sampling itself never calls an LLM.
+
+## 2026-10-21: Check note paths in their home and exempt study setup
+
+For agents:
+- Inline project paths in node notes resolve against the bound external home, or the
+  node folder for nodes without an external home. Unbound home paths, `<placeholder>`
+  examples and slash-prefixed routes with no existing filesystem root component no
+  longer produce dead-path warnings. Absolute filesystem references still warn.
+- Markdown links stay relative to the note; explicit Brain files and folders still
+  warn when missing, including on machines without a bound home. Leading `../`
+  references remain relative to the node folder.
+- `kind:study` nodes no longer need a verify command or coordinator tick merely
+  because their home is a Git repository or their metadata names a code stack.
+
+After upgrading:
+- Run `brain check` again. Use a Markdown link for a node-relative note or attachment;
+  keep inline project paths relative to the project's home. No migration is needed.
 
 ## 2026-10-20: Settle closed jobs' host threads
 

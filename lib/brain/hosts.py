@@ -573,7 +573,51 @@ def node_at(inst, cwd):
     return best
 
 
-def notes_lag(inst, n):
+def hook_note_events(n):
+    """Hook-only diagnostics: stable content fingerprints, never readiness/facts evidence."""
+    d = n["dir"]
+    events = {}
+    files = [d / _m_jobs.JOBS_FILE, d / "inbox.md", *(d / "job-handbacks").glob("*.json")]
+    for f in files:
+        if not f.is_file() or f.is_symlink():
+            continue
+        try:
+            text = f.read_text()
+            if f.name == "inbox.md":
+                content = [line for line in text.splitlines() if line.startswith("- ")
+                           and re.sub(r"<!--.*?-->", "", line[2:]).strip()]
+                label = f"inbox: {len(content)} pending entr{'y' if len(content) == 1 else 'ies'}"
+            elif f.name == _m_jobs.JOBS_FILE:
+                rows = _m_jobs.read_jobs(n)
+                fields = ("Job", "Started", "Ended", "Outcome", "Commits", "Reviews", "Cause", "Lessons", "Settled")
+                content = [{k: row.get(k, "") for k in fields} for row in rows] if rows is not None else text
+                label = "job ledger: " + (", ".join(row["Job"] for row in rows[:5]) if rows else "changed")
+            else:
+                data = json.loads(text)
+                # Rewrites of runtime/cost bookkeeping do not announce another completion.
+                bookkeeping = {"sessions", "verify_runs", "verify_reused", "first_ready"}
+                content = ({k: v for k, v in data.items() if k not in bookkeeping}
+                           if isinstance(data, dict) else {"invalid": data})
+                label = (f"hand-back {data.get('job') or f.stem}: {data.get('state') or 'changed'}"
+                         if isinstance(data, dict) else "hand-back " + f.stem + ": invalid record")
+        except (OSError, ValueError, UnicodeError, RecursionError):
+            content, label = "unreadable", "unreadable event: " + f.name
+        if not content:
+            continue
+        try:
+            modified = f.stat().st_mtime
+        except OSError:
+            continue  # a concurrently removed event cannot suppress upgrade/notes reminders
+        try:
+            fingerprint = _m_jobs.digest(content)
+        except (TypeError, ValueError, RecursionError):
+            fingerprint, label = _m_jobs.digest("unreadable"), "unreadable event: " + f.name
+        key = hashlib.sha256(str(f.relative_to(d)).encode()).hexdigest()
+        events[key] = {"fingerprint": fingerprint, "label": label, "mtime": modified}
+    return events
+
+
+def notes_lag(inst, n, events=None, previous=None):
     """Why this node's notes may be behind: coordinator files changed after status.md, or uncommitted."""
     d = n["dir"]
     st = d / "status.md"
@@ -587,9 +631,10 @@ def notes_lag(inst, n):
         if newer:
             out.append("changed after status.md: " + ", ".join(sorted(str(x.relative_to(d)) for x in newer)[:5]))
         if _m_status.FACTS_START in st.read_text():
-            events = [d / _m_jobs.JOBS_FILE, d / "inbox.md", *(d / "job-handbacks").glob("*.json")]
-            if any(f.exists() and f.stat().st_mtime > st.stat().st_mtime for f in events):
-                out.append(f"job or inbox files changed after facts; run brain status {n['id']} --refresh")
+            events = hook_note_events(n) if events is None else events
+            for key, event in sorted(events.items()):
+                if event["mtime"] > st.stat().st_mtime and (previous or {}).get(key) != event["fingerprint"]:
+                    out.append(event["label"] + f" changed after facts; run brain status {n['id']} --refresh")
     rel = d.relative_to(inst.root)
     paths = [str(rel / name) for name in COORDINATOR_FILES]
     dirty = _m_common.git("status", "--porcelain", "--", *paths, cwd=inst.root).stdout.split("\n")
@@ -793,7 +838,6 @@ def hook_stop(a):
         f"{shlex.quote(str(inst.root / 'core' / 'roles' / 'coordinator.md'))} and every skill the entries name, do "
         f"what their 'After upgrading' asks of this node, then run `{brain} changes {n['id']} --seen`. If you are a "
         "worker or any other session, don't mark them read: tell your coordinator, and go on") if unread else ""
-    why = notes_lag(inst, n)
     future = bool(_m_status.future_entries(inst, n)[0])
     state_f = inst.root / ".brain" / "hooks.json"
     try:
@@ -806,23 +850,32 @@ def hook_stop(a):
     except (OSError, ValueError):
         state = {}  # unreadable or half-written: start over (it only spaces out reminders)
     sid = data.get("session_id") or "?"
+    # Keep event hashes separate from legacy session reminder timestamps.
+    if sid == "_note_events":
+        sid = "_note_events_session"
+    event_cache = state.get("_note_events", {})
+    event_cache = event_cache if isinstance(event_cache, dict) else {}
+    node_key = hashlib.sha256(n["id"].encode()).hexdigest()
+    events = hook_note_events(n)
+    fingerprints = {key: event["fingerprint"] for key, event in events.items()}
+    previous = event_cache.get(node_key)
+    previous = previous if isinstance(previous, dict) else {}
+    why = notes_lag(inst, n, events, previous)
     now = inst.now_dt()
     last = state.get(sid)
-    last = inst.parse_time(last) if last else None
+    last = inst.parse_time(last) if isinstance(last, str) else None
     remind = last is None or _m_status.elapsed(last, now) > REMIND_MINUTES * 60
     if not remind:
         upgrade = ""  # once per session per reminder interval: a worker in a node folder isn't held every turn
     if future and remind:
         why.append("status.md has a future Updated: time; fix it with `brain now` if you are its coordinator; "
                    "if you are a worker, tell your coordinator")
-    if not why:
-        u = _m_status.updated_at(inst, n)
-        stale = u is None or _m_status.elapsed(u, now) > REMIND_MINUTES * 60
-        if stale and remind:
-            why.append(f"status.md was last updated {_m_status.ago(inst, u)}")
-    if not why and not upgrade:
+    if not why and not upgrade and previous == fingerprints:
         return
-    state[sid] = now.isoformat(timespec="seconds")
+    if why or upgrade:
+        state[sid] = now.isoformat(timespec="seconds")
+    event_cache[node_key] = fingerprints
+    state["_note_events"] = dict(list(event_cache.items())[-200:])
     try:
         log = inst.root / ".brain" / "hooks.log"
         if not contained or any(f.is_file() and not f.is_symlink() and f.stat().st_nlink > 1 for f in (state_f, log)):
@@ -831,15 +884,21 @@ def hook_stop(a):
         fd, name = tempfile.mkstemp(prefix=".hooks.", suffix=".json", dir=state_f.parent)  # new, never one planted
         tmp = Path(name)
         with os.fdopen(fd, "w") as out:
-            out.write(json.dumps(dict(list(state.items())[-200:]), indent=1))
+            reminders = {key: value for key, value in state.items() if key != "_note_events"}
+            saved = dict(list(reminders.items())[-200:])
+            saved["_note_events"] = state["_note_events"]
+            out.write(json.dumps(saved, indent=1))
         os.replace(tmp, state_f)  # whole or not at all: another session's hook never reads half a file
         held = why + ([f"upgrade notice ({len(unread)} unread change entr{'y' if len(unread) == 1 else 'ies'})"]
                       if upgrade else [])
-        with open(log, "a") as fh:
-            fh.write(f"{now.isoformat(timespec='seconds')} stop {n['id']} {sid}: "
-                     f"{_m_guard.redact('; '.join(held), _m_guard.never_terms(n))}\n")
+        if held:
+            with open(log, "a") as fh:
+                fh.write(f"{now.isoformat(timespec='seconds')} stop {n['id']} {sid}: "
+                         f"{_m_guard.redact('; '.join(held), _m_guard.never_terms(n))}\n")
     except OSError:
         pass  # the reminder still goes out; only its bookkeeping is lost
+    if not why and not upgrade:
+        return
     if not why:  # only the upgrade: one notice, then the session goes on
         print(json.dumps({"decision": "block", "reason": _m_guard.redact(f"Before you stop, node `{n['id']}`: {upgrade}.",
                                                                  _m_guard.never_terms(n))}))

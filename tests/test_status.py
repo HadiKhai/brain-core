@@ -118,6 +118,23 @@ class Housekeeping(Scenario):
 
 
 class FutureTimestamps(Scenario):
+    def test_hygiene_extension_plans_and_examples_are_not_entry_timestamps(self):
+        r = self.init('maple')
+        (r / 'decisions.md').write_text(
+            '## 2020-01-01 10:00: Recorded decision\n'
+            'Deliver by 2999-01-01; discussed 2999-01-02 as an alternative.\n'
+            '- Planned review: 2999-01-03\n'
+            '## Schedule for 2999-01-04\n'
+            '```md\n## 2999-01-05 10:00: Example only\n```\n'
+            '<!--\n## 2999-01-06 10:00: Comment example\n-->\n'
+            '## 2999-01-07 10:00: Future recorded decision\n'
+            '- 2999-01-08 from worker: Future inbox-style entry\n')
+        out = self.b(r, 'check')
+        for number in range(2, 11):
+            self.assertNotIn('decisions.md:' + str(number) + ': future', out)
+        self.assertIn('decisions.md:11: future dated entry', out)
+        self.assertIn('decisions.md:12: future dated entry', out)
+
     def test_five_minute_skew_uses_elapsed_time_across_dst(self):
         import datetime as dt
         from core_loader import SourceFileLoader
@@ -432,7 +449,7 @@ class AutonomyFacts(AutonomyProject):
                                 cwd=r, env=self.env, input=json.dumps({'cwd': str(r), 'session_id': 'old-judgement'}),
                                 capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn('status.md was last updated', json.loads(result.stdout)['reason'])
+        self.assertEqual(result.stdout, '', 'an unchanged read-only turn is not held for age alone')
         # Older generated Updated lines are never mistaken for coordinator judgement.
         st.write_text(st.read_text().replace('Facts refreshed:', 'Updated:').replace(
             'Updated: 2020-01-01 00:00 +00:00', 'No coordinator timestamp'))
@@ -774,7 +791,7 @@ class NodeHygiene(Scenario):
         home = self.repo(self.tmp / 'source', {'present.py': '# file\n'})
         self.b(r, 'set', 'app', 'home=' + str(home))
         (n['dir'] / 'local').mkdir()
-        (n['dir'] / 'brief.md').write_text('`present.py` `local/` `gone/file.py:12`\n'
+        (n['dir'] / 'brief.md').write_text('`present.py` [local](local/) `gone/file.py:12`\n'
             '[lost](missing.md#heading) [web](https://example.test/x)\n'
             '`*.py` `src/{a,b}.py` `brain check` `https://example.test`\n')
         (n['dir'] / 'knowledge.md').write_text('[gone folder](absent/)\n')
@@ -787,6 +804,133 @@ class NodeHygiene(Scenario):
         self.assertNotIn('dead path https:', out)
         self.assertNotIn('dead path *.py', out)
         self.assertNotIn('dead path brain check', out)
+
+    def test_study_skips_code_setup_even_with_stack_and_git_home(self):
+        r, inst, n = self.node()
+        home = self.repo(self.tmp / 'source')
+        self.b(r, 'set', 'app', 'home=' + str(home), 'stack=python')
+        self.b(r, 'relabel', 'app', 'kind:study', 'type:code')
+        out = self.b(r, 'check')
+        self.assertNotIn('needs verify=<command>', out)
+        self.assertNotIn('needs a coordinator tick', out)
+        # Changing only the kind restores both warnings, despite the same home and stack.
+        self.b(r, 'relabel', 'app', 'kind:code')
+        out = self.b(r, 'check')
+        self.assertIn('needs verify=<command>', out)
+        self.assertIn('needs a coordinator tick', out)
+
+    def test_inline_home_paths_skip_templates_routes_but_keep_missing_brain_files(self):
+        r, inst, n = self.node()
+        home = self.repo(self.tmp / 'source')
+        (home / 'src').mkdir()
+        (home / 'src/exists.py').write_text('# present\n')
+        (home / 'sources').mkdir()
+        (home / 'sources/missing.md').write_text('# only in home\n')
+        (home / 'lost.md').write_text('# only in home\n')
+        self.b(r, 'set', 'app', 'home=' + str(home))
+        text = ('`src/domain/<agg>/` `src/<module>.py` `/api/v1` `/api/config.json`\n'
+                '`src/exists.py:12` `./src/exists.py` `sources/missing.md`\n'
+                '[lost Brain note](lost.md) `core/missing.md` `./knowledge.md`\n')
+        for name in ('brief.md', 'knowledge.md'):
+            (n['dir'] / name).write_text(text)
+        out = self.b(r, 'check')
+        for name in ('brief.md', 'knowledge.md'):
+            for line, value in ((2, 'sources/missing.md'), (3, 'lost.md'), (3, 'core/missing.md')):
+                self.assertIn(name + ':' + str(line) + ': dead path ' + value, out)
+        for value in ('src/domain/<agg>/', 'src/<module>.py', '/api/v1', '/api/config.json',
+                      'src/exists.py:12', './src/exists.py', './knowledge.md'):
+            self.assertNotIn('dead path ' + value, out)
+        # Removing the home file must turn the same references into warnings.
+        (home / 'src/exists.py').unlink()
+        out = self.b(r, 'check')
+        self.assertIn('dead path src/exists.py:12', out)
+        self.assertIn('dead path ./src/exists.py', out)
+
+    def test_unbound_home_skips_project_paths_and_still_checks_brain_targets(self):
+        r, inst, n = self.node()
+        self.b(r, 'set', 'app', 'home=' + str(self.tmp / 'unbound'))
+        local_path = r / '.brain/local.json'
+        local = json.loads(local_path.read_text())
+        local['nodes']['app'].pop('home')
+        local_path.write_text(json.dumps(local))
+        (n['dir'] / 'knowledge.md').write_text(
+            '`src/missing.py` `./src/missing.py` `README.md` `sources/lost.md`\n'
+            '[lost](lost.md) `nodes/app/missing.md`\n')
+        inst = self.m.Instance(r)
+        self.assertIsNone(inst.node('app')['home_path'])
+        problems = self.m.dead_note_paths(inst, inst.node('app'))
+        self.assertEqual(len(problems), 3, problems)
+        self.assertTrue(any('dead path sources/lost.md' in p for p in problems))
+        self.assertTrue(any('dead path lost.md' in p for p in problems))
+        self.assertTrue(any('dead path nodes/app/missing.md' in p for p in problems))
+
+    def test_home_paths_use_their_own_root_without_unrelated_fallbacks(self):
+        r, inst, n = self.node()
+        (n['dir'] / 'src').mkdir()
+        (n['dir'] / 'src/only-node.py').write_text('# node file\n')
+        (r / 'src').mkdir()
+        (r / 'src/only-root.py').write_text('# root file\n')
+        (n['dir'] / 'knowledge.md').write_text('`src/only-node.py` `src/only-root.py`\n')
+        for home_setting in ('here', 'none'):
+            self.b(r, 'set', 'app', 'home=' + home_setting)
+            inst = self.m.Instance(r)
+            problems = self.m.dead_note_paths(inst, inst.node('app'))
+            self.assertEqual(len(problems), 1, problems)
+            self.assertIn('dead path src/only-root.py', problems[0])
+        home = self.repo(self.tmp / 'source')
+        self.b(r, 'set', 'app', 'home=' + str(home))
+        inst = self.m.Instance(r)
+        problems = self.m.dead_note_paths(inst, inst.node('app'))
+        self.assertEqual(len(problems), 2, problems)
+
+    def test_routes_preserve_missing_absolute_brain_files_with_bound_or_unbound_home(self):
+        r, inst, n = self.node()
+        home = self.repo(self.tmp / 'source')
+        missing = n['dir'] / 'gone.md'
+        (n['dir'] / 'knowledge.md').write_text('`/api/v1` `' + str(missing) + '`\n')
+        for bound in (True, False):
+            with self.subTest(bound=bound):
+                n.update(external=True, home_path=home if bound else None)
+                problems = self.m.dead_note_paths(inst, n)
+                self.assertEqual(len(problems), 1, problems)
+                self.assertIn('dead path ' + str(missing), problems[0])
+
+    def test_brain_note_paths_keep_child_parent_and_generated_file_checks(self):
+        r, inst, n = self.node()
+        home = self.repo(self.tmp / 'source')
+        self.b(r, 'new', 'app/kid', '--title', 'Kid')
+        self.b(r, 'new', 'sibling', '--title', 'Sibling')
+        (n['dir'] / 'knowledge.md').write_text(
+            '`nodes/kid/status.md` [child](nodes/kid/status.md)\n'
+            '`../sibling/brief.md` `../sibling/missing.md`\n'
+            '`job-trains/missing.json` `./role.md` `./lessons.md` `./handover.md`\n')
+        # Home files must not mask missing node files, including new core-generated names.
+        (home / 'job-trains').mkdir()
+        (home / 'job-trains/missing.json').write_text('{}\n')
+        for name in ('role.md', 'lessons.md', 'handover.md'):
+            (home / name).write_text('# only at home\n')
+        for bound in (True, False):
+            with self.subTest(bound=bound):
+                n.update(external=True, home_path=home if bound else None)
+                problems = self.m.dead_note_paths(inst, n)
+                self.assertEqual(len(problems), 5, problems)
+                for value in ('../sibling/missing.md', 'job-trains/missing.json',
+                              './role.md', './lessons.md', './handover.md'):
+                    self.assertTrue(any('dead path ' + value in p for p in problems), value)
+
+    def test_brain_root_metadata_is_not_masked_by_home_or_skipped_when_unbound(self):
+        r, inst, n = self.node()
+        home = self.repo(self.tmp / 'source', {'registry.md': '# home registry\n'})
+        (n['dir'] / 'knowledge.md').write_text('`./registry.md` `./instance.md`\n')
+        n.update(external=True, home_path=home)
+        self.assertEqual(self.m.dead_note_paths(inst, n), [])
+        (r / 'registry.md').unlink()
+        for bound in (True, False):
+            with self.subTest(bound=bound):
+                n['home_path'] = home if bound else None
+                problems = self.m.dead_note_paths(inst, n)
+                self.assertEqual(len(problems), 1, problems)
+                self.assertIn('dead path ./registry.md', problems[0])
 
     def test_routing_rules_keep_sync_and_design_owned(self):
         role = (CORE / 'roles/coordinator.md').read_text()
