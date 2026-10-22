@@ -576,6 +576,16 @@ def bound_worker_threads(n, branch):
     return list(dict.fromkeys(refs))
 
 
+def thread_reference_ids(reference):
+    """Match supported thread displays without changing their listing text."""
+    value = reference.strip()
+    links = set(re.findall(r"t3-thread://v1/([^\s)\]<>`]+)", value))
+    if links:
+        return links
+    raw = re.fullmatch(r"(?:`([^`\s]+)`|([^\s`]+))(?:\s+\([^)]*\))*", value)
+    return {raw.group(1) or raw.group(2)} if raw else {value}
+
+
 def stale_thread_warnings(n, thread=None):
     """Keep stale references useful for host inspection, but warn before sending."""
     if not n["external"]:
@@ -587,6 +597,7 @@ def stale_thread_warnings(n, thread=None):
         if name:
             branches.add(name[0])
     warnings = []
+    targets = thread_reference_ids(thread) if thread is not None else None
     for branch in sorted(branches):
         if _m_briefs.import_job(branch):
             continue  # Import studies run in the node, never in a job worktree.
@@ -594,14 +605,29 @@ def stale_thread_warnings(n, thread=None):
         if thread is None and jobs and all(closed_job(r) and r.get("Settled") for r in jobs):
             continue
         refs = bound_worker_threads(n, branch)
-        if not refs or (thread is not None and not any(t == thread for t, _ in refs)):
+        if targets is not None:
+            refs = [(ref, source) for ref, source in refs if thread_reference_ids(ref) & targets]
+        if not refs:
             continue
         w = n["local"].get("worktrees", {}).get(branch)
         if w and Path(w["path"]).is_dir():
-            continue
-        state = ("is gone; do not send to the old thread" if w else
-                 "is not registered on this machine; confirm its host workspace before sending. "
-                 "If it was removed, do not send to the old thread")
+            if len(jobs) == 1:
+                continue
+            current = [row for row in jobs if not row.get("Ended")]
+            if len(current) == 1:
+                current_source = "worker:" + job_key(current[0])
+                sources = {source for _, source in refs if source.startswith("worker:")}
+                current_ids = set().union(*(thread_reference_ids(ref) for ref, source in refs if source == current_source))
+                all_ids = set().union(*(thread_reference_ids(ref) for ref, _ in refs))
+                if (sum(job_key(row) == job_key(current[0]) for row in jobs) == 1 and
+                        sources == {current_source} and len(current_ids) == 1 and all_ids == current_ids):
+                    continue
+            state = ("has historical or ambiguous job ownership; do not send until its original workspace "
+                     "is confirmed through the host. The current branch worktree does not establish this target's workspace")
+        else:
+            state = ("is gone; do not send to the old thread" if w else
+                     "is not registered on this machine; confirm its host workspace before sending. "
+                     "If it was removed, do not send to the old thread")
         warnings.append(f"warning: job {branch}: bound worker thread workspace {state}. "
                         "Start a fresh thread in a fresh worktree for follow-on work after removal.")
     return warnings

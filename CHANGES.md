@@ -14,6 +14,9 @@ For agents:
   nonterminal states stay protected and refusals name the state to reconcile.
 - Notes do not override dirty work, unmerged commits, checkout identity or another
   open job claiming the folder. Cleanup still lists recorded worker references.
+- Stale-target warnings match thread links and annotated references by exact ID.
+  A reused branch's current worktree only establishes a worker's workspace when
+  its binding identifies the current job; historical or ambiguous targets warn.
 
 After upgrading:
 - A finished job's terminal state may keep its explanatory note. Confirm the worker
