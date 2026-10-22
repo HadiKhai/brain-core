@@ -600,7 +600,7 @@ def hook_note_events(n):
                            if isinstance(data, dict) else {"invalid": data})
                 label = (f"hand-back {data.get('job') or f.stem}: {data.get('state') or 'changed'}"
                          if isinstance(data, dict) else "hand-back " + f.stem + ": invalid record")
-        except (OSError, ValueError, UnicodeError):
+        except (OSError, ValueError, UnicodeError, RecursionError):
             content, label = "unreadable", "unreadable event: " + f.name
         if not content:
             continue
@@ -608,8 +608,12 @@ def hook_note_events(n):
             modified = f.stat().st_mtime
         except OSError:
             continue  # a concurrently removed event cannot suppress upgrade/notes reminders
+        try:
+            fingerprint = _m_jobs.digest(content)
+        except (TypeError, ValueError, RecursionError):
+            fingerprint, label = _m_jobs.digest("unreadable"), "unreadable event: " + f.name
         key = hashlib.sha256(str(f.relative_to(d)).encode()).hexdigest()
-        events[key] = {"fingerprint": _m_jobs.digest(content), "label": label, "mtime": modified}
+        events[key] = {"fingerprint": fingerprint, "label": label, "mtime": modified}
     return events
 
 
@@ -880,7 +884,10 @@ def hook_stop(a):
         fd, name = tempfile.mkstemp(prefix=".hooks.", suffix=".json", dir=state_f.parent)  # new, never one planted
         tmp = Path(name)
         with os.fdopen(fd, "w") as out:
-            out.write(json.dumps(dict(list(state.items())[-200:]), indent=1))
+            reminders = {key: value for key, value in state.items() if key != "_note_events"}
+            saved = dict(list(reminders.items())[-200:])
+            saved["_note_events"] = state["_note_events"]
+            out.write(json.dumps(saved, indent=1))
         os.replace(tmp, state_f)  # whole or not at all: another session's hook never reads half a file
         held = why + ([f"upgrade notice ({len(unread)} unread change entr{'y' if len(unread) == 1 else 'ies'})"]
                       if upgrade else [])

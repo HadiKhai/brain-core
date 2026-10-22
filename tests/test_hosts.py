@@ -825,6 +825,39 @@ class StopHook(Scenario):
         self.assertIn('host-question:', (r / 'inbox.md').read_text())
         self.assertIn('inbox: 2 pending entries', out['reason'])
 
+    def test_hygiene_extension_guard_cache_survives_session_timestamp_trimming(self):
+        r = self.init('maple')
+        (r / 'job-handbacks').mkdir()
+        signal = r / 'job-handbacks/fixture.json'
+        signal.write_text(json.dumps({'job': 'job-finish', 'state': 'done'}))
+        newer = (r / 'status.md').stat().st_mtime + 10
+        os.utime(signal, (newer, newer))
+        self.assertIn('hand-back job-finish: done', self.hook(r, r)['reason'])
+        state_path = r / '.brain/hooks.json'
+        state = json.loads(state_path.read_text())
+        state_path.write_text(json.dumps({'_note_events': state['_note_events'],
+            **{'session-' + str(i): '2020-01-01T00:00:00+00:00' for i in range(199)}}))
+        brief = r / 'brief.md'
+        original = brief.read_bytes()
+        brief.write_bytes(original + b'\nChanged note.\n')
+        self.assertIn('not committed', self.hook(r, r, 'new-session')['reason'])
+        brief.write_bytes(original)
+        older = (r / 'status.md').stat().st_mtime - 2
+        os.utime(brief, (older, older))
+        self.assertIsNone(self.hook(r, r, 'new-session'))
+        self.assertIn('_note_events', json.loads(state_path.read_text()))
+
+    def test_hygiene_extension_guard_nested_event_does_not_silence_upgrade_notice(self):
+        r = self.init('maple')
+        self.git('commit', '-q', '--allow-empty', '-m', 'Upgrade core abc1234 -> def5678', cwd=r)
+        (r / 'job-handbacks').mkdir()
+        signal = r / 'job-handbacks/fixture.json'
+        signal.write_text('[' * 2000 + '0' + ']' * 2000)
+        out = self.hook(r, r)
+        self.assertIsNotNone(out)
+        self.assertIn('core was upgraded', out['reason'])
+        self.assertIn('unreadable event: fixture.json', out['reason'])
+
     def test_backlog_edits_make_notes_lag(self):
         r = self.init('fixture')
         self.b(r, 'new', 'notes', '--title', 'Notes')
