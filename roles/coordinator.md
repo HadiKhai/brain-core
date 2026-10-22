@@ -79,7 +79,10 @@ moment.
 
 The root reports new needs to the human with `core/bin/brain inbox root --new`. Other
 coordinators run `core/bin/brain inbox <id> --new` for their own subtree only, resolve what
-their rules settle, and route unresolved needs to their parent (Reporting up). Never consume
+their rules settle, and route unresolved needs to their parent (Reporting up).
+Job budget and median advice is informational and belongs only to its owning coordinator;
+resolve it locally, never route it to a parent or the root's human inbox. Root-owned job advice
+is in `brain due root` rather than the human inbox. Never consume
 another coordinator's queue. Each reporter has independent machine-local reported ids; a
 child's check cannot suppress the root's report. The sources are the UI's needs-you sources,
 limited to operator-side node records, including a sealed node's view, never its home.
@@ -274,7 +277,8 @@ with operator consent. On wake, run
 `core/bin/brain due <id>` and check host pending requests for yourself and your workers.
 Root also checks every descendant coordinator: read each binding with `brain show <child>`
 and list its host pending requests, including nested nodes and nodes without open jobs.
-A missing binding is a setup gap. Runtime questions reach the inbox when a supported stop
+A missing binding is a setup gap except for nodes labelled `kind:study`, which need no coordinator.
+Runtime questions reach the inbox when a supported stop
 hook runs; live host requests still need the host check. If both are empty, end the turn at once, saying nothing and changing no files.
 If only `blocked-overdue` items remain and no host request needs action, run
 `brain inbox <id> --new` and route only new escalations, then end without refreshing or

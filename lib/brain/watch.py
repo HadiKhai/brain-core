@@ -4,6 +4,7 @@ import json
 import os
 import re
 import shlex
+from pathlib import Path
 
 from . import common as _m_common
 from . import guard as _m_guard
@@ -17,6 +18,9 @@ from . import transitions as _m_transitions
 from . import usage as _m_usage
 from . import upgrade as _m_upgrade
 from . import verify as _m_verify
+
+
+WATCH_LOCAL_KINDS = ('unsettled-threads',)
 
 
 def watch_digest(value):
@@ -45,10 +49,10 @@ def watch_items(inst, n):
     state = {'jobs': rows, 'worktrees': worktrees, 'handbacks': signals, 'inbox': _m_status.inbox_lines(n)}
     # Refresh evidence generates facts, Git logs and usage displays; none belongs on this path.
     items = _m_status.due_items(inst, n, evidence=(state, '', ''), include_stale=False,
-                                include_ready=False) + _m_status.changes_due(inst, n)
+                                include_ready=False, include_advice=False) + _m_status.changes_due(inst, n)
     out = []
     for item in items:
-        if item['kind'] == 'stale-status':
+        if item['kind'] in ('stale-status', 'machine'):
             continue
         direct_reason = None
         handback_episode = None
@@ -81,9 +85,20 @@ def watch_items(inst, n):
                             'kind': item['kind'], 'text': 'Unread core change; run brain changes'})
             continue
         # Keep identity separate from changing display (readiness, age, counts).
-        identity = item.get('job') or item['text']
+        identity = item.get('episode') if item['kind'] == 'machine-alert' else (item.get('job') or item['text'])
+        if item['kind'] == 'rotate':
+            sessions = n['local'].get('coordinator_sessions', [])
+            category = ('repair' if item['text'].startswith('rotation sidecar') else
+                        'session' if item['text'].startswith('append the new coordinator') else 'limit')
+            identity = [n['local'].get('coordinator'), sessions[-1] if isinstance(sessions, list) and sessions else None,
+                        category]
         if item['kind'] == 'handback':
             identity = [identity, item.get('state')]
+            if item.get('state') == 'done':
+                signal = signals.get(item.get('job')) or {}
+                episode = signal.get('wake_id')
+                handback_episode = (episode if isinstance(episode, str) and re.fullmatch(r'[0-9a-f]{32}', episode)
+                                    else watch_digest([signal.get('at'), signal.get('ready')]))
             if handback_episode:
                 identity.append(handback_episode)
         text = _m_nodes.import_text(item['text'], _m_guard.never_terms(n))[:400]
@@ -92,6 +107,129 @@ def watch_items(inst, n):
         if direct_reason:
             entry.update(reason=direct_reason, source=n['id'])
         out.append(entry)
+    return out
+
+
+def watch_recorded_ready(inst, n, row, signal, strict=False):
+    """Validate a stored success for notification, never run a readiness/verify path.
+
+    Cached refs fence stale evidence. This notification is not merge authority and
+    does not replace the coordinator's full readiness/input/rehearsal checks.
+    """
+    if _m_jobs.handback_file(n, row).exists():
+        if not signal or signal.get('version') != 2 or signal.get('state') != 'done' or signal.get('ready_reasons') != []:
+            return None
+        packet = signal.get('ready')
+    else:
+        # Load only legacy stored evidence; a newer signal always wins. Strict
+        # pending reads preserve unknown I/O failures instead of retiring notices.
+        if not n['external'] or not n['home_path']:
+            return None
+        try:
+            packet = json.loads(_m_verify.ready_path(inst, n, row['Job']).read_text())
+        except FileNotFoundError:
+            return None
+        except (OSError, ValueError):
+            if strict:
+                raise
+            return None
+    if not isinstance(packet, dict):
+        return None
+    checked = inst.parse_time(packet.get('checked_at')) if isinstance(packet.get('checked_at'), str) else None
+    started = inst.parse_time(row.get('Started'))
+    sha = lambda value: isinstance(value, str) and re.fullmatch(r'[0-9a-f]{40}|[0-9a-f]{64}', value)
+    if (type(packet.get('version')) is not int or packet['version'] != 1
+            or packet.get('node') != n['id'] or packet.get('branch') != row['Job']
+            or type(packet.get('verify_result')) is not int or packet['verify_result'] != 0
+            or type(packet.get('review_rounds')) is not int or packet['review_rounds'] < 1
+            or not checked or not started or checked < started or checked > inst.now_dt()
+            or not n['fm'].get('verify', '').strip() or packet.get('verify_command') != n['fm']['verify'].strip()
+            or not isinstance(packet.get('inputs'), str) or not re.fullmatch(r'[0-9a-f]{64}', packet['inputs'])
+            or not all(sha(packet.get(k)) for k in ('head', 'main'))):
+        return None
+    lanes = packet.get('verify_lanes')
+    if lanes is not None and (not isinstance(lanes, list) or not lanes or any(
+            not isinstance(lane, dict) or lane.get('status') != 'passed'
+            or type(lane.get('result')) is not int or lane['result'] != 0 for lane in lanes)):
+        return None
+    check = packet.get('verify_lanes_check')
+    if check is not None and (not isinstance(check, dict) or type(check.get('result')) is not int or check['result'] != 0):
+        return None
+    home = n['home_path']
+    w = n['local'].get('worktrees', {}).get(row['Job'])
+    if not home or not home.exists() or not isinstance(w, dict) or not w.get('path') or not Path(w['path']).is_dir():
+        return None
+    def cached_git(*args, allowed=(0,)):
+        result = _m_common.git(*args, cwd=home)
+        if result.returncode not in allowed:
+            raise OSError('cached Git evidence unreadable')
+        return result
+    if 'origin' in cached_git('remote').stdout.split():
+        ref = cached_git('symbolic-ref', '--quiet', 'refs/remotes/origin/HEAD', allowed=(0, 1)).stdout.strip()
+        if not ref.startswith('refs/remotes/origin/'):
+            return None
+    else:
+        ref = 'refs/heads/main'
+    target = ref if n['fm'].get('merge', 'local') == 'pr' else ref.replace('refs/remotes/origin/', 'refs/heads/', 1)
+    def tip(name):
+        return cached_git('rev-parse', '--verify', '--quiet', name + '^{commit}', allowed=(0, 1)).stdout.strip()
+    head, main, base = tip('refs/heads/' + row['Job']), tip(ref), tip(target)
+    if (packet['head'] != head or not main or not base
+            or packet.get('integration_base', packet['main']) != base
+            or packet['main'] != (main if 'integration_base' in packet else base)):
+        return None
+    if cached_git('merge-base', '--is-ancestor', main, base, allowed=(0, 1)).returncode:
+        return None  # legacy local bases must still contain the current cached origin default
+    if _m_jobs.train_ejection(n, row, packet, strict=strict):
+        return None
+    return packet
+
+
+def watch_completion_scope(nid, row=None, kind=None):
+    """Opaque node/job-kind prefixes keep unknown reads local without queue-schema changes."""
+    node = watch_digest(['completion-node', nid])[:16]
+    return node if row is None else node + watch_digest(['completion-job', _m_jobs.job_key(row), kind])[:16]
+
+
+def watch_completion_items(inst, nodes=None, strict=False, unknown=None):
+    """Opaque per-packet/per-ledger-transaction root notices, batched by watch_run."""
+    out = []
+    unknown = unknown if unknown is not None else set()
+    for n in nodes if nodes is not None else inst.nodes():
+        if n['archived']:
+            continue
+        try:
+            rows = _m_jobs.read_jobs(n)
+        except (Exception, SystemExit):
+            rows = None
+        if rows is None:
+            if strict:
+                unknown.add(watch_completion_scope(n['id']))
+            continue
+        for row in rows or []:
+            kind, evidence = None, None
+            try:
+                if row['Ended']:
+                    start, end = inst.parse_time(row['Started']), inst.parse_time(row['Ended'])
+                    if row['Outcome'] == 'merged' and start and end and end >= start:
+                        kind = 'job-landed'
+                        evidence = [row['Ended'], row.get('Head commit'), row.get('Batch')]
+                else:
+                    packet = watch_recorded_ready(inst, n, row, _m_jobs.read_handback(n, row, strict=strict), strict=strict)
+                    if packet:
+                        kind, evidence = 'job-ready', packet
+                if kind:
+                    identity = watch_completion_scope(n['id'], row, kind) + watch_digest([n['id'], _m_jobs.job_key(row), kind, evidence])[:32]
+                    out.append({'id': identity,
+                                'node': 'root', 'kind': kind,
+                                'text': ('A job has new recorded ready evidence; inspect coordinator due queues'
+                                         if kind == 'job-ready' else
+                                         'A job has landed in its ledger; inspect coordinator due queues')})
+            except (Exception, SystemExit):
+                # Reader exits and unexpected errors belong to this job, not the
+                # whole inventory. KeyboardInterrupt still stops the process.
+                if strict:
+                    unknown.add(watch_completion_scope(n['id'], row, 'job-landed' if row['Ended'] else 'job-ready'))
     return out
 
 
@@ -197,6 +335,47 @@ def watch_state_invalid(inst):
         return True
 
 
+def watch_groups(inst, nodes=None):
+    """The file-only wake queue, grouped by the coordinator who can act on it."""
+    nodes = nodes if nodes is not None else [n for n in inst.nodes() if not n['archived']]
+    groups = {}
+    for n in nodes:
+        # Uncoordinated nodes route actionable work to root; root needs no explicit binding.
+        target, command = _m_hosts.wake_target(inst, n)
+        group = groups.setdefault(target['id'], {'node': target, 'items': [], 'command': command})
+        group['items'].extend({**i, 'node': n['id']} for i in watch_items(inst, n)
+                              if target['id'] == n['id'] or i['kind'] not in
+                              WATCH_LOCAL_KINDS)
+        root = inst.node('root')
+        for line in _m_status.overdue_questions(inst, n, _m_status.inbox_lines(n)):
+            root_group = groups.setdefault('root', {'node': root, 'items': [],
+                                            'command': _m_hosts.wake_target(inst, root)[1]})
+            root_group['items'].append({'id': watch_digest(['overdue', n['id'], line]),
+                                       'kind': 'overdue-question', 'node': n['id'],
+                                       'reason': 'overdue:' + hashlib.sha256(line.encode()).hexdigest(),
+                                       'text': 'Unanswered question past its threshold; inspect brain due root'})
+    completions = watch_completion_items(inst, nodes)
+    if completions:
+        root = inst.node('root')
+        group = groups.setdefault('root', {'node': root, 'items': [],
+                                          'command': _m_hosts.wake_target(inst, root)[1]})
+        group['items'].extend(completions)
+    return groups
+
+
+def watch_since_wake(inst, nodes):
+    groups = watch_groups(inst)
+    out = []
+    for n in nodes:
+        target, _ = _m_hosts.wake_target(inst, n)
+        # The coordinator is handling the latest wake: compare with the wake before it,
+        # so the items that just woke it remain visible. Snapshots retain older due work.
+        seen = {i['id'] for i in _m_hosts.wake_previous_items(_m_hosts.wake_directory(inst, target))}
+        out.extend(i for i in groups.get(target['id'], {}).get('items', []) if i['id'] not in seen
+                   and (target['id'] == n['id'] or i['node'] == n['id']))
+    return list({i['id']: i for i in out}.values())
+
+
 def watch_run(inst):
     path = inst.root / '.brain' / 'watch.json'
     state = watch_state(inst)  # our own acknowledgement history always fails closed
@@ -205,20 +384,7 @@ def watch_run(inst):
     failures = set(state.get('failures', []))
     warnings = set(state.get('warnings', []))
     watch_failures(inst, nodes, failures, warnings)
-    groups = {}
-    for n in nodes:
-        # Uncoordinated nodes route actionable work to root; root needs no explicit binding.
-        target, command = _m_hosts.wake_target(inst, n)
-        group = groups.setdefault(target['id'], {'node': target, 'items': [], 'command': command})
-        group['items'].extend(watch_items(inst, n))
-        root = inst.node('root')
-        for line in _m_status.overdue_questions(inst, n, _m_status.inbox_lines(n)):
-            root_group = groups.setdefault('root', {'node': root, 'items': [],
-                                            'command': _m_hosts.wake_target(inst, root)[1]})
-            root_group['items'].append({'id': watch_digest(['overdue', n['id'], line]),
-                                       'kind': 'overdue-question',
-                                       'reason': 'overdue:' + hashlib.sha256(line.encode()).hexdigest(),
-                                       'text': 'Unanswered question past its threshold; inspect brain due root'})
+    groups = watch_groups(inst, nodes)
     current = []
     count = 0
     for group in groups.values():
@@ -231,14 +397,14 @@ def watch_run(inst):
                 if 'reason' in items[key]:
                     origin = inst.node(items[key].get('source', group['node']['id']))
                     if (_m_hosts.wake_recorded(inst, origin, items[key]['reason'])
-                            or _m_hosts.request_wake(inst, origin, items[key]['reason'])):
+                            or _m_hosts.request_wake(inst, origin, items[key]['reason'], items=[items[key]])):
                         seen.add(key)
                         count += 1
                         queued = True
                     added.remove(key)
             # Include item identity in the opaque wake reason; equal counts aren't equal sets.
             reason = f'{len(added)} new items: ' + watch_digest(added)
-            if added and _m_hosts.request_wake(inst, group['node'], reason):
+            if added and _m_hosts.request_wake(inst, group['node'], reason, items=[items[k] for k in added]):
                 seen.update(added)  # acknowledgement means durable queue, not transport success
                 count += len(added)
                 queued = True

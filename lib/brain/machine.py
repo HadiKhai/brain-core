@@ -2,6 +2,7 @@
 import datetime
 import hashlib
 import json
+import math
 import os
 import re
 import shlex
@@ -43,7 +44,7 @@ def machine_valid_sample(sample):
     return reading.get("thermal", "unknown") in ("unknown", "normal", "pressure")
 
 
-def machine_samples(inst):
+def machine_samples(inst, fresh=True):
     try:
         data = json.loads((inst.root / ".brain/machine.json").read_text())
         samples = data["samples"]
@@ -52,7 +53,7 @@ def machine_samples(inst):
                 any(a["at"] > b["at"] for a, b in zip(samples, samples[1:]))):
             return None
         age = time.time() - samples[-1]["at"]
-        if not 0 <= age <= 180:
+        if fresh and not 0 <= age <= 180:
             return None
         prior = data.get("heat_reasons", [])
         if (type(data.get("episode", False)) is not bool or not isinstance(prior, list) or any(r not in ("sustained 5-minute load", "sustained thermal pressure") for r in prior)
@@ -163,10 +164,40 @@ def machine_recovered(samples, policy, prior_heat):
     return False
 
 
-def machine_wake(inst, active):
-    # MACHINE_WAKE_INTEGRATION: job/question-wake wires this one call site to brain wake.
-    # The sampler must never launch a runtime directly.
-    pass
+def machine_timestamp(value):
+    return type(value) in (int, float) and math.isfinite(value) and value >= 0
+
+
+def machine_transitions(data):
+    rows = data.get('transitions', [])
+    return [{'at': r['at'], 'episode': r['episode'], 'state': r['state']}
+            for r in rows if isinstance(r, dict) and machine_timestamp(r.get('at'))
+            and re.fullmatch(r'[0-9a-f]{24}', str(r.get('episode', '')))
+            and r.get('state') in ('open', 'close')][-100:] if isinstance(rows, list) else []
+
+
+def machine_episode_due(inst):
+    """One rolling display; only exceptional episodes belong in the wake queue."""
+    data = machine_samples(inst, fresh=False)
+    if not data:
+        return None
+    now = time.time()
+    sample = data['samples'][-1]
+    fresh = 0 <= now - sample['at'] <= 180
+    hot = fresh and sample['reading'].get('thermal') == 'pressure'
+    started = data.get('episode_started')
+    prolonged = (data.get('episode') is True and machine_timestamp(started)
+                 and 0 <= started <= now and now - started > 3600)
+    identity = data.get('alert_id')
+    if (data.get('alert_open') is True and re.fullmatch(r'[0-9a-f]{24}', str(identity))
+            and (hot or prolonged)):
+        return {'kind': 'machine-alert', 'episode': identity,
+                'text': 'Machine thermal pressure; inspect machine care' if hot else
+                        'Machine heavy-work hold exceeds 60 minutes; inspect machine care'}
+    if data.get('episode') is True:
+        return {'kind': 'machine', 'text': 'Heavy work held: ' + '; '.join(data['heat_reasons']),
+                'informational': True}
+    return None
 
 
 def machine_publish(inst, path, text):
@@ -284,16 +315,15 @@ def machine_notice(inst, data):
     if not pending:
         return data
     machine_commit_check(inst)
-    inbox = inst.root / "inbox.md"
-    marker = "[machine episode " + data["episode_id"] + (" open]" if data["episode"] else " close]")
-    text = inbox.read_text() if inbox.exists() else ""
-    if marker not in text:
-        machine_publish(inst, inbox, text + f"- {inst.now()} from brain: {pending} {marker}\n")
-    _m_common.touch(inbox)
-    inst.commit([], "machine: " + pending)
-    data = {**data, "pending_notice": None}
+    rows = machine_transitions(data)
+    state = 'open' if data['episode'] else 'close'
+    if not rows or (rows[-1]['episode'], rows[-1]['state']) != (data['episode_id'], state):
+        at = data.get('pending_at')
+        rows.append({'at': at if machine_timestamp(at) else time.time(),
+                     'episode': data['episode_id'], 'state': state})
+    # Machine care acts autonomously. Transitions never append to an inbox or wake a model.
+    data = {**data, 'transitions': rows[-100:], 'pending_notice': None, 'pending_at': None}
     machine_publish(inst, inst.root / ".brain/machine.json", json.dumps(data) + "\n")
-    machine_wake(inst, data["episode"])
     return data
 
 
@@ -315,7 +345,8 @@ def machine_sample(inst):
                        (pending == "heavy work hold cleared" or pending.startswith("hold heavy work: sustained"))
                        and bool(re.fullmatch(r"[0-9a-f]{24}", str(data.get("episode_id", "")))))
     if not metadata_ok:
-        data = {**data, "episode": False, "heat_reasons": [], "pending_notice": None, "episode_id": ""}
+        data = {**data, "episode": False, "heat_reasons": [], "pending_notice": None, "episode_id": "",
+                'alert_open': False, 'alert_id': None, 'episode_started': None}
     if (data.get("pending_notice") and isinstance(data.get("pending_notice"), str) and
             re.fullmatch(r"[0-9a-f]{24}", str(data.get("episode_id", "")))):
         data = machine_notice(inst, data)  # deliver old transition before it can be superseded
@@ -341,10 +372,22 @@ def machine_sample(inst):
     episode_id = data.get("episode_id", "")
     if changed:
         if active or not re.fullmatch(r"[0-9a-f]{24}", str(episode_id)):
-            episode_id = os.urandom(12).hex()
+            previous_alert = data.get('alert_id') if data.get('alert_open') is True else None
+            episode_id = previous_alert if re.fullmatch(r'[0-9a-f]{24}', str(previous_alert)) else os.urandom(12).hex()
         pending = ("hold heavy work: " + "; ".join(heat)) if active else "heavy work hold cleared"
+    started = data.get('episode_started')
+    started = (started if data.get('episode') is True and machine_timestamp(started)
+               and started <= now else now) if active else None
+    thermal = samples[-1]['reading'].get('thermal', 'unknown')
+    alert_open = active or thermal == 'pressure' or (data.get('alert_open') is True and thermal == 'unknown'
+                                                    and data.get('episode') is not True)
+    alert_id = data.get('alert_id') if data.get('alert_open') is True else None
+    if alert_open and not re.fullmatch(r'[0-9a-f]{24}', str(alert_id)):
+        alert_id = episode_id if active else os.urandom(12).hex()
     result = {"samples": samples, "episode": active, "episode_id": episode_id,
-              "pending_notice": pending, "heat_reasons": heat}
+              "episode_started": started, "alert_open": alert_open, "alert_id": alert_id if alert_open else None,
+              "pending_notice": pending, "pending_at": now if pending else None,
+              "transitions": machine_transitions(data), "heat_reasons": heat}
     machine_publish(inst, path, json.dumps(result) + "\n")
     if pending:
         machine_notice(inst, result)

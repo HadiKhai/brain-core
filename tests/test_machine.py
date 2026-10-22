@@ -204,18 +204,20 @@ class MachineCare(Scenario):
             line = "- fixture from brain: " + ("hold heavy work: sustained 5-minute load" if transition == "open"
                                                else "heavy work hold cleared")
             inbox.write_text(initial + line + " [machine episode " + "a" * 24 + " " + transition + "]\n")
-            # Node hygiene creates facts at init; changing the inbox legitimately stales them.
-            self.assertTrue(any(i["kind"] == "stale-status" for i in due("root")))
+            # Retired machine records do not change inbox attention or stale the facts.
+            self.assertFalse(any(i["kind"] == "stale-status" for i in due("root")))
             m.refresh_status(inst, inst.node("root"))
-            self.assertEqual(len(due("root")), 1)
-            self.assertEqual(due("root")[0]["kind"], "machine")
+            self.assertEqual(due("root"), [])  # old sampler lines no longer create coordinator work
             self.assertEqual(due("maple"), [])
             self.assertEqual(due("ash"), [])
-            self.assertEqual(len([i for i in due() if i["kind"] == "machine"]), 1)
-            inbox.write_text(initial)  # coordinator handles the one matching inbox action
-            self.assertTrue(any(i["kind"] == "stale-status" for i in due("root")))
+            self.assertEqual(len([i for i in due() if i["kind"] == "machine"]), 0)
+            inbox.write_text(initial)  # Removing historical noise is equally quiet.
+            self.assertFalse(any(i["kind"] == "stale-status" for i in due("root")))
             m.refresh_status(inst, inst.node("root"))
             self.assertEqual(due("root"), [])  # heat still high, no repeated synthetic episode
+        inbox.write_text(initial + "- fixture question: choose a plan\n")
+        self.assertTrue(any(i["kind"] == "stale-status" for i in due("root")))
+        self.assertTrue(any(i["kind"] == "inbox" for i in due("root")))
         # Snapshot telemetry never makes a quiet node's status stale as load varies.
         n = inst.node("maple")
         with mock.patch.object(m, "machine_reading", return_value=dict(high)):
@@ -462,7 +464,7 @@ raise SystemExit(result)
         path.write_text(json.dumps({"samples": samples, "episode": False}))
         # Repeated sample calls inside one minute cannot inflate sustained duration.
         with mock.patch.object(m, "machine_load", return_value=high), contextlib.redirect_stdout(io.StringIO()):
-            with mock.patch.object(inst, "commit", side_effect=KeyboardInterrupt("fixture crash after inbox publication")):
+            with mock.patch.object(m, "machine_notice", side_effect=KeyboardInterrupt("fixture crash before private log")):
                 with self.assertRaises(KeyboardInterrupt):
                     m.machine_sample(inst)
             self.assertIsNotNone(json.loads(path.read_text())["pending_notice"])
@@ -472,7 +474,8 @@ raise SystemExit(result)
         self.assertTrue(data["episode"])
         self.assertLessEqual(len(data["samples"]), 1440)
         self.assertTrue(all(time.time() - s["at"] < 86401 for s in data["samples"]))
-        self.assertEqual((root / "inbox.md").read_text().count("hold heavy work:"), 1)
+        self.assertEqual([r['state'] for r in data['transitions']], ['open'])
+        self.assertNotIn('hold heavy work:', (root / 'inbox.md').read_text())
         with mock.patch.dict(os.environ, {"BRAIN_MACHINE_TESTING": "0"}):
             state = m.ui_state(inst, spend_budget=0)
             self.assertIn("sustained 5-minute load", state["machine"]["held"])
@@ -484,7 +487,7 @@ raise SystemExit(result)
                 m.cmd_due(argparse.Namespace(id="root", json=True, quiet=False))
             self.assertEqual(len([r for r in json.loads(output.getvalue()) if r["kind"] == "machine"]), 1)
             self.env["BRAIN_MACHINE_TESTING"] = "1"
-        self.assertIn("hold heavy work:", self.git("show", "HEAD:inbox.md", cwd=root))
+        self.assertNotIn("hold heavy work:", self.git("show", "HEAD:inbox.md", cwd=root))
         self.assertEqual(self.git("status", "--porcelain", "--", "inbox.md", cwd=root), "")
         base = time.time()
         with mock.patch.object(m, "machine_load", return_value=self.good), contextlib.redirect_stdout(io.StringIO()):
@@ -495,7 +498,11 @@ raise SystemExit(result)
             with mock.patch.object(m.time, "time", return_value=base + 180):
                 m.machine_sample(inst)
         self.assertFalse(json.loads(path.read_text())["episode"])
-        self.assertEqual((root / "inbox.md").read_text().count("hold cleared"), 1)
+        self.assertEqual([r['state'] for r in json.loads(path.read_text())['transitions']], ['open', 'close'])
+        self.assertNotIn("hold cleared", (root / "inbox.md").read_text())
+        self.assertNotIn(' open]', (root / 'inbox.md').read_text())
+        n = inst.node('root')
+        self.assertEqual(m.due_items(inst, n, include_stale=False), [])
         before = path.read_bytes()
         with mock.patch.object(m.os, "replace", side_effect=OSError("fixture interruption")):
             with self.assertRaises(OSError):
@@ -651,7 +658,8 @@ raise SystemExit(result)
                 with mock.patch.object(m, "machine_load", return_value=high), contextlib.redirect_stdout(io.StringIO()):
                     m.machine_sample_once(inst)
                 self.assertIsNone(json.loads(state.read_text())["pending_notice"])
-                self.assertEqual((root / "inbox.md").read_text().count("hold heavy work:"), 1)
+                self.assertEqual([r['state'] for r in json.loads(state.read_text())['transitions']], ['open'])
+                self.assertEqual((root / "inbox.md").read_bytes(), before_inbox)
 
     def test_invalid_policy_preserves_diagnostics_and_fails_closed_for_admission(self):
         m = self.m
@@ -672,7 +680,10 @@ raise SystemExit(result)
                 self.assertEqual(q.rows[0]["state"], "queued")
                 seen.append(q.rows[0]["token"])
             (m.machine_dir() / "machine-care.json").write_text("{}")
-        with mock.patch.object(m.time, "sleep", side_effect=repair), contextlib.redirect_stdout(io.StringIO()) as out:
+        # The global sleep mock can also intercept subprocess.run's ps polling before
+        # machine_wait publishes its row. This test owns policy repair, not OS identity.
+        with mock.patch.object(m, 'process_stamp', return_value='fixture-policy-owner'), \
+                mock.patch.object(m.time, "sleep", side_effect=repair), contextlib.redirect_stdout(io.StringIO()) as out:
             token = m.machine_wait("verify")
         self.assertEqual(seen, [token])
         self.assertIn("policy invalid", out.getvalue())

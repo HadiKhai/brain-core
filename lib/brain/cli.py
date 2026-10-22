@@ -257,6 +257,7 @@ def main():
             "wins over what transcripts show"))
     cmd("rotate", _m_rotation.cmd_rotate, "prepare a file-based coordinator handover; prints host steps", "id")
     cmd("due", _m_status.cmd_due, "coordinator actions and machine holds; empty means no output",
+        opt("--since-wake", action="store_true", help="new file-only wake items compared with the wake before the latest delivery"),
         opt("--machine", action="store_true", help="also show informational machine readings, even without node actions"),
         opt("id", nargs="?"), opt("--json", action="store_true"),
         opt("--quiet", action="store_true", help="no output; exit 1 for node actions, including its held work, 0 otherwise"))
@@ -422,7 +423,7 @@ def main():
             help="with --global: the config folders that get this brain's pointer, e.g. claude=~/.claude-work"))
     cmd("check", _m_check.cmd_check, "verify what can be checked mechanically; --fix repairs the safe things",
         opt("--fix", action="store_true"),
-        opt("--live", action="store_true", help="force real webhook probes, bypassing the 24-hour cache"))
+        opt("--live", action="store_true", help="send real webhook probes; default check only reads cached results"))
     cmd("heavy", _m_machine.cmd_heavy, "wait until the machine admits new heavy work",
         opt("--node", help="coordinator whose work is waiting (default root)"))
     cmd("machine", _m_machine.cmd_machine, "machine state, sampler and bindings",

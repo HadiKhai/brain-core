@@ -58,6 +58,35 @@ After upgrading:
   list entries, and keep planned dates in their descriptive text. Coordinators
   still handle real job/inbox events and refresh generated facts when needed.
 
+## 2026-10-22: Stable completion wakes and explicit live checks
+
+For agents:
+- Rotation wake ids follow the coordinator/session and reason category, so live
+  token and turn counts do not wake it again. A new coordinator/session rearms it.
+- Each done hand-back publication gets a fresh completion episode, including a
+  second hand-back after rebasing. Display-only changes do not replay it.
+- Root receives deduplicated notices for new recorded successful ready packets
+  and merged ledger transactions. Several completions share one queued root wake;
+  private child reports and branch names do not enter these notices. Inspect
+  `brain due root --since-wake` after a completion wake, then the owning queues.
+  These are notifications, never permission to land: the watcher checks stored
+  result/identity fields and cached refs, never runs readiness, verification,
+  rehearsal, lane commands or host queries. Done alone never implies ready.
+- Queued completion notices are checked again before sending. Stale notices are
+  dropped while questions and other protected requests in the same wake survive.
+  Unreadable evidence preserves only its own opaque job/ledger scope; it cannot
+  exempt another job's known-stale notice from filtering.
+- `brain check` reads cached webhook probe/delivery results, even when stale.
+  Only `brain check --live` sends a real POST. `--fix` never sends, even with
+  `--live`. The shared explicit live-probe helper is unchanged.
+
+After upgrading:
+- Existing recorded ready packets and merged ledger transactions notify root once
+  on the first watch tick; existing needs are not silently baselined away. Private
+  wake acknowledgements deduplicate later ticks. No new service is required.
+- Default check reports untested bindings and result age. Use `--live` when an
+  actual delivery probe is intended. Normal checks never wake a coordinator.
+
 ## 2026-10-21: Rehearse redacts protected probe output
 
 For agents:
@@ -503,6 +532,81 @@ For agents:
 After upgrading:
 - Run `brain check` again. Use a Markdown link for a node-relative note or attachment;
   keep inline project paths relative to the project's home. No migration is needed.
+
+## 2026-10-21: Keep the human inbox focused
+
+For agents:
+- Legacy machine hold/clear records are filtered from inbox, dashboard attention
+  and due without deleting their history. The human inbox shows at most one
+  rolling machine alert, only for fresh thermal pressure or a hold over 60 minutes.
+  The private episode log and one-wake-per-episode escalation remain unchanged.
+- Nodes labelled `state:paused` are hidden from inbox and human attention. Their
+  records remain available, and coordinator due and protected wake routes still
+  carry questions, blocked hand-backs, failures and overdue questions.
+- Nodes labelled `kind:study` do not produce a missing-coordinator setup warning.
+- Job budget and median advice stays with its owning node: its explicit inbox
+  and due show the advice; parent and root human inboxes do not. Root-owned job
+  advice appears in root due. Advice remains informational and never wakes a model.
+  The live dashboard's attention view retains job advice for each owning node.
+
+After upgrading:
+- No migration command is required. Historical machine lines remain on disk but
+  stop appearing as inbox work. Resuming a paused node reveals its unresolved needs.
+- Inspect job budget/median advice with `brain inbox <owning-node>` or
+  `brain due <owning-node>`; use root due for root-owned jobs.
+- Refresh status for affected nodes once: changed human-attention counts can make
+  their generated facts stale after upgrading. This refresh-only work never wakes
+  a model. Each new exceptional machine episode has its own inbox reporting id,
+  even when no inbox check occurred while the prior episode was closed.
+
+## 2026-10-21: Machine care transitions stay quiet
+
+For agents:
+- Machine hold/clear transitions no longer append to root's inbox or wake a
+  coordinator. The private `.brain/machine.json` keeps the latest 100 transitions;
+  an active hold appears as one informational line in `brain due root`.
+- Root receives at most one machine escalation per episode: immediately on a fresh
+  thermal-pressure reading, or once a heavy-work hold exceeds 60 minutes. Thermal
+  pressure and duration share one identity, so both conditions cannot wake twice.
+  Unknown thermal readings do not clear observed thermal pressure. A recovered
+  load-only hold re-arms the next episode even when thermal telemetry is unavailable.
+- Informational machine lines are excluded from the watcher and quiet due checks.
+  Questions, blocked hand-backs, failures and overdue questions keep their routes.
+
+After upgrading:
+- No service change is required. Old generated machine inbox lines are ignored by
+  due; identified queued transition-only wakes are retired. Unknown legacy queue
+  entries still deliver because they may contain questions.
+- Existing holds without a start time begin their duration clock at the first new
+  sample. Closed episodes remain in the private log and disappear from due.
+
+## 2026-10-21: Show new wake items and keep child housekeeping local
+
+For agents:
+- `brain due <node> --since-wake` shows new actionable items relative to the wake
+  before the latest delivery, using stable item ids. Items that caused the latest
+  wake stay visible while older due work is hidden. `--json` includes those ids;
+  `--quiet` exits 1 when there are new items. Before the first delivery it shows all
+  wake items. It excludes status refresh work and informational machine readings.
+- Each delivered wake records item ids and kinds in the instance's private
+  `.brain/wake/<coordinator>/history.json`, retaining 100 deliveries and their
+  queue snapshots. Failed wakes do not advance the baseline. Manual wakes without
+  matching items record an empty trigger set. Reading the flag never sends a wake
+  or checks upgrades. A history write failure is diagnostic and never replays a wake.
+- Child unsettled threads stay with their own coordinator, including when a pending
+  wake is retargeted after that coordinator is removed. Budget displays remain
+  informational and do not generate watcher wakes. Questions,
+  blocked hand-backs, failures and overdue questions keep their wake routes.
+  Existing unchanged-overdue-block deduplication is retained and regression-tested.
+- Machine care keeps transitions in private state, with one rolling active hold
+  display; see the quiet-transition entry above for escalation thresholds.
+
+After upgrading:
+- No migration or service installation is needed. Delivery history starts with
+  the next wake. Ordinary `brain due` keeps its full informational view; use
+  `--since-wake` to see what is new for the latest wake, including during delivery.
+- Old generated open/close inbox notices are informational; they no longer wake
+  coordinators and may be removed during normal inbox cleanup.
 
 ## 2026-10-20: Settle closed jobs' host threads
 

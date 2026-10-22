@@ -466,12 +466,13 @@ You mostly talk to coordinators, and they run `brain` for you. By hand:
 | `brain spend <node> [--since DATE] [--json]` | time and tokens of every past session about a node's home: opt-in, aggregates only, kept in `.brain/spend/` |
 | `brain spend --machine [--since DATE] [--json]` | every session on this machine, per runtime, per day and week |
 | `brain due [node]` | coordinator actions from files and local git; empty means silence |
+| `brain due <node> --since-wake [--json]` | new file-only items for the latest wake, compared with the preceding wake's queue snapshot |
 | `brain inbox [node] [--new]` | one needs-you list; stable ids, only-new reporting per machine and reporter |
 | `brain status <node> --refresh` | regenerate facts without advancing judgement freshness |
 | `brain usage` | allowed subscriptions, account-wide windows, age and resets |
 | `brain stale <node> <host time>` | is a node's status behind its thread? Compares moments, whatever the timezones |
 | `brain sync <node>` / `--all` | what happened in a node and its home since the last sync |
-| `brain check [--fix]` | verify the axioms that can be checked mechanically; repair the safe things |
+| `brain check [--fix] [--live]` | check mechanically and read cached webhook results; repair safe things with `--fix`; only `--live` sends a real probe |
 | `brain machine` | this machine's bindings |
 </details>
 

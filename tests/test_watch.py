@@ -26,6 +26,421 @@ class Watcher(Scenario):
         with contextlib.redirect_stdout(io.StringIO()):
             self.m.watch_once(self.inst)
 
+    def since(self, node='root'):
+        with mock.patch.object(self.m, 'load', return_value=self.inst), \
+                mock.patch.object(self.m, 'request_wake') as request, \
+                mock.patch.object(self.m, 'core_update') as upgrade, \
+                contextlib.redirect_stdout(io.StringIO()) as output:
+            self.m.cmd_due(argparse.Namespace(id=node, since_wake=True, quiet=False, json=True))
+            request.assert_not_called()
+            upgrade.assert_not_called()
+        return json.loads(output.getvalue())
+
+    def machine_tick(self, at, reading):
+        with mock.patch.object(self.m.time, 'time', return_value=at), \
+                mock.patch.object(self.m, 'machine_load', return_value=reading), \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.m.machine_sample(self.inst)
+            self.watch()
+            self.m.wake_drain(self.inst, self.inst.node('root'), once=True)
+
+    def test_machine_open_close_are_private_and_never_wake(self):
+        base = time.time()
+        good = json.loads(self.env['BRAIN_MACHINE_READING'])
+        high = {**good, 'load_per_cpu': [1, 1, 1]}
+        state = self.root / '.brain/machine.json'
+        self.m.refresh_status(self.inst, self.inst.node('root'))
+        state.write_text(json.dumps({'samples': [{'at': base - i * 60, 'reading': high} for i in (4, 3, 2, 1)]}))
+        before = (self.root / 'inbox.md').read_bytes()
+        head = self.git('rev-parse', 'HEAD', cwd=self.root)
+        with mock.patch.object(self.m, 'changes_due', return_value=[]), mock.patch.object(self.m, 'wake_start'), \
+                mock.patch.object(self.m, 'WAKE_INTERVAL', 0), mock.patch.object(self.m, 'wake_send', return_value=True) as send:
+            self.machine_tick(base, high)
+            episode = json.loads(state.read_text())['episode_id']
+            due = self.m.due_items(self.inst, self.inst.node('root'), include_stale=False)
+            self.assertEqual([(i['kind'], i.get('informational')) for i in due], [('machine', True)])
+            self.assertEqual(self.m.watch_items(self.inst, self.inst.node('root')), [])
+            with mock.patch.object(self.m, 'load', return_value=self.inst), self.assertRaises(SystemExit) as quiet:
+                self.m.cmd_due(argparse.Namespace(id='root', quiet=True, json=False))
+            self.assertEqual(quiet.exception.code, 0)  # telemetry cannot stale facts or wake a quiet tick
+            for offset in (60, 120, 180):
+                self.machine_tick(base + offset, good)
+            self.assertEqual(send.call_count, 0)
+        data = json.loads(state.read_text())
+        self.assertEqual([(r['episode'], r['state']) for r in data['transitions']], [(episode, 'open'), (episode, 'close')])
+        self.assertEqual((self.root / 'inbox.md').read_bytes(), before)
+        self.assertEqual(self.git('rev-parse', 'HEAD', cwd=self.root), head)
+        self.assertEqual(self.m.due_items(self.inst, self.inst.node('root'), include_stale=False), [])
+        self.assertNotIn('.brain/', self.git('ls-files', cwd=self.root))
+
+    def test_machine_hold_over_60_minutes_wakes_once_per_episode(self):
+        base = time.time()
+        high = {**json.loads(self.env['BRAIN_MACHINE_READING']), 'load_per_cpu': [1, 1, 1]}
+        state = self.root / '.brain/machine.json'
+        state.write_text(json.dumps({'samples': [{'at': base - i * 60, 'reading': high} for i in (4, 3, 2, 1)]}))
+        with mock.patch.object(self.m, 'changes_due', return_value=[]), mock.patch.object(self.m, 'wake_start'), \
+                mock.patch.object(self.m, 'WAKE_INTERVAL', 0), mock.patch.object(self.m, 'wake_send', return_value=True) as send:
+            self.machine_tick(base, high)
+            self.machine_tick(base + 3600, high)
+            self.assertEqual(send.call_count, 0)
+            self.machine_tick(base + 3601, high)
+            self.assertEqual(send.call_count, 1)
+            # Thermal pressure in the same prolonged hold does not create a second escalation.
+            self.machine_tick(base + 3661, {**high, 'thermal': 'pressure'})
+            self.machine_tick(base + 3721, high)
+            self.assertEqual(send.call_count, 1)
+            history = self.m.wake_history(self.m.wake_directory(self.inst, self.inst.node('root')))
+            self.assertEqual([i['kind'] for i in history[-1]['items']], ['machine-alert'])
+
+    def test_machine_thermal_pressure_wakes_once_and_rearms_after_recovery(self):
+        base = time.time()
+        good = json.loads(self.env['BRAIN_MACHINE_READING'])
+        hot = {**good, 'thermal': 'pressure'}
+        with mock.patch.object(self.m, 'changes_due', return_value=[]), mock.patch.object(self.m, 'wake_start'), \
+                mock.patch.object(self.m, 'WAKE_INTERVAL', 0), mock.patch.object(self.m, 'wake_send', return_value=True) as send:
+            self.machine_tick(base, hot)  # raw pressure alerts immediately, before sustained admission history
+            self.assertEqual(send.call_count, 1)
+            self.machine_tick(base + 60, {**good, 'thermal': 'unknown'})
+            self.machine_tick(base + 120, hot)
+            self.assertEqual(send.call_count, 1)
+            for offset in (180, 240, 300):
+                self.machine_tick(base + offset, good)
+            self.assertEqual(send.call_count, 1)  # clear is quiet
+            self.machine_tick(base + 360, hot)
+            self.assertEqual(send.call_count, 2)
+
+    def test_legacy_machine_lines_are_quiet_but_questions_with_markers_survive(self):
+        legacy = '- fixture from brain: heavy work hold cleared [machine episode ' + 'a' * 24 + ' close]'
+        inbox = self.root / 'inbox.md'
+        inbox.write_text(legacy + '\n')
+        with mock.patch.object(self.m, 'changes_due', return_value=[]), mock.patch.object(self.m, 'wake_start'), \
+                mock.patch.object(self.m, 'wake_send', return_value=True) as send:
+            self.watch()
+            self.m.wake_drain(self.inst, self.inst.node('root'), once=True)
+            self.assertEqual(send.call_count, 0)
+            inbox.write_text('- question <!-- host-question:fixture --> [machine episode ' + 'a' * 24 + ' close]\n')
+            self.watch()
+            self.m.wake_drain(self.inst, self.inst.node('root'), once=True)
+            self.assertEqual(send.call_count, 1)
+
+    def test_pending_machine_transitions_are_retired_and_mixed_questions_survive(self):
+        n = self.inst.node('root')
+        transition = {'id': 'a' * 64, 'kind': 'machine'}
+        question = {'id': 'b' * 64, 'kind': 'inbox'}
+        with mock.patch.object(self.m, 'wake_start'), mock.patch.object(self.m, 'WAKE_INTERVAL', 0), \
+                mock.patch.object(self.m, 'wake_send', return_value=True) as send:
+            self.m.request_wake(self.inst, n, 'old transition', items=[transition])
+            self.m.wake_drain(self.inst, n, once=True)
+            self.assertEqual(send.call_count, 0)
+            self.m.request_wake(self.inst, n, 'mixed transition and question', items=[transition, question])
+            self.m.wake_drain(self.inst, n, once=True)
+            self.assertEqual(send.call_count, 1)
+            history = self.m.wake_history(self.m.wake_directory(self.inst, n))
+            self.assertEqual(history[-1]['items'], [question])
+
+    def test_failed_machine_alert_is_retired_after_recovery(self):
+        base = time.time()
+        good = json.loads(self.env['BRAIN_MACHINE_READING'])
+        with mock.patch.object(self.m, 'changes_due', return_value=[]), mock.patch.object(self.m, 'wake_start'), \
+                mock.patch.object(self.m, 'WAKE_INTERVAL', 0):
+            with mock.patch.object(self.m, 'wake_send', return_value=False):
+                self.machine_tick(base, {**good, 'thermal': 'pressure'})
+            directory = self.m.wake_directory(self.inst, self.inst.node('root'))
+            self.assertTrue(list(directory.glob('*.pending')))
+            with mock.patch.object(self.m, 'wake_send', return_value=True) as send:
+                self.machine_tick(base + 60, good)
+            self.assertEqual(send.call_count, 0)
+            self.assertFalse(list(directory.glob('*.pending')))
+
+    def test_machine_unknown_thermal_rearms_recovered_load_holds(self):
+        base = time.time()
+        good = {**json.loads(self.env['BRAIN_MACHINE_READING']), 'thermal': 'unknown'}
+        high = {**good, 'load_per_cpu': [1, 1, 1]}
+        state = self.root / '.brain/machine.json'
+        state.write_text(json.dumps({'samples': [{'at': base - i * 60, 'reading': high} for i in (4, 3, 2, 1)]}))
+        with mock.patch.object(self.m, 'changes_due', return_value=[]), mock.patch.object(self.m, 'wake_start'), \
+                mock.patch.object(self.m, 'WAKE_INTERVAL', 0), mock.patch.object(self.m, 'wake_send', return_value=True) as send:
+            self.machine_tick(base, high)
+            first = json.loads(state.read_text())['episode_id']
+            self.machine_tick(base + 3601, high)
+            self.assertEqual(send.call_count, 1)
+            for offset in (3661, 3721, 3781):
+                self.machine_tick(base + offset, good)
+            self.assertFalse(json.loads(state.read_text())['alert_open'])
+            for offset in (3841, 3901, 3961, 4021, 4081):
+                self.machine_tick(base + offset, high)
+            self.assertNotEqual(json.loads(state.read_text())['episode_id'], first)
+            self.assertEqual(send.call_count, 1)
+            self.machine_tick(base + 7682, high)
+            self.machine_tick(base + 7742, high)
+            self.assertEqual(send.call_count, 2)
+
+    def test_failed_machine_load_alert_retires_with_unknown_thermal_recovery(self):
+        base = time.time()
+        good = {**json.loads(self.env['BRAIN_MACHINE_READING']), 'thermal': 'unknown'}
+        high = {**good, 'load_per_cpu': [1, 1, 1]}
+        state = self.root / '.brain/machine.json'
+        state.write_text(json.dumps({'samples': [{'at': base - i * 60, 'reading': high} for i in (4, 3, 2, 1)]}))
+        with mock.patch.object(self.m, 'changes_due', return_value=[]), mock.patch.object(self.m, 'wake_start'), \
+                mock.patch.object(self.m, 'WAKE_INTERVAL', 0):
+            with mock.patch.object(self.m, 'wake_send', return_value=False):
+                self.machine_tick(base, high)
+                self.machine_tick(base + 3601, high)
+            directory = self.m.wake_directory(self.inst, self.inst.node('root'))
+            self.assertTrue(list(directory.glob('*.pending')))
+            for offset in (3661, 3721, 3781):
+                with mock.patch.object(self.m.time, 'time', return_value=base + offset), \
+                        mock.patch.object(self.m, 'machine_load', return_value=good), contextlib.redirect_stdout(io.StringIO()):
+                    self.m.machine_sample(self.inst)
+            with mock.patch.object(self.m, 'wake_send', return_value=True) as send:
+                self.watch()
+                self.m.wake_drain(self.inst, self.inst.node('root'), once=True)
+            self.assertEqual(send.call_count, 0)
+            self.assertFalse(list(directory.glob('*.pending')))
+
+    def test_delivery_history_and_since_wake_track_ids_only_after_success(self):
+        inbox = self.root / 'inbox.md'
+        inbox.write_text('- fabricated first item\n')
+        n = self.inst.node('root')
+        directory = self.m.wake_directory(self.inst, n)
+        with mock.patch.object(self.m, 'changes_due', return_value=[]), \
+                mock.patch.object(self.m, 'wake_start'), mock.patch.object(self.m, 'WAKE_INTERVAL', 0):
+            first = self.since()
+            self.assertEqual(len(first), 1)
+            self.watch()
+            self.assertEqual(self.since(), first)  # durable enqueue is not delivery
+            with mock.patch.object(self.m, 'wake_send', return_value=False):
+                self.m.wake_drain(self.inst, n, once=True)
+            self.assertEqual(self.since(), first)
+            self.assertFalse((directory / 'history.json').exists())
+            with mock.patch.object(self.m, 'wake_send', return_value=True) as send:
+                self.m.wake_drain(self.inst, n, once=True)
+                self.assertEqual(self.since(), first)  # the item that woke us remains visible
+                inbox.write_text(inbox.read_text() + '- fabricated second item\n')
+                new = [i for i in self.since() if i['id'] != first[0]['id']]
+                self.assertEqual(len(new), 1)
+                self.watch()
+                self.m.wake_drain(self.inst, n, once=True)
+                self.assertEqual(send.call_count, 2)
+            history = self.m.wake_history(directory)
+            self.assertEqual([r['items'] for r in history], [
+                [{'id': first[0]['id'], 'kind': 'inbox'}], [{'id': new[0]['id'], 'kind': 'inbox'}]])
+            self.assertNotIn('fabricated', (directory / 'history.json').read_text())
+            self.assertEqual([i['id'] for i in self.since()], [new[0]['id']])
+            # Third wake still hides A and B: snapshots contain all work due at each wake.
+            inbox.write_text(inbox.read_text() + '- fabricated third item\n')
+            self.watch()
+            with mock.patch.object(self.m, 'wake_send', return_value=True):
+                self.m.wake_drain(self.inst, n, once=True)
+            self.assertEqual([i['text'] for i in self.since()], ['fabricated third item'])
+            self.assertNotIn('.brain/', self.git('ls-files', cwd=self.root))
+
+    def test_child_local_work_never_wakes_root_but_questions_and_failures_do(self):
+        self.b(self.root, 'new', 'sample', '--title', 'Sample')
+        self.inst = self.m.Instance(self.root)
+        child, root = self.inst.node('sample'), self.inst.node('root')
+        row = {**dict.fromkeys(self.m.JOB_COLS, ''), 'Job': 'job/closed',
+               'Started': '2020-01-01T10:00Z', 'Ended': '2020-01-01T11:00Z', 'Outcome': 'closed'}
+        self.m.write_jobs(self.inst, child, [row])
+        directory = self.m.wake_directory(self.inst, root)
+        with mock.patch.object(self.m, 'changes_due', return_value=[]), \
+                mock.patch.object(self.m, 'wake_start'), mock.patch.object(self.m, 'WAKE_INTERVAL', 0), \
+                mock.patch.object(self.m, 'wake_send', return_value=True) as send:
+            self.assertIn('unsettled-threads', [i['kind'] for i in self.m.watch_items(self.inst, child)])
+            self.watch()
+            self.m.wake_drain(self.inst, root, once=True)
+            self.assertEqual(send.call_count, 0)
+            budget = {**row, 'Job': 'import:budget', 'Ended': '', 'Outcome': ''}
+            self.m.write_jobs(self.inst, child, [row, budget])
+            self.inst.local_of('sample')['worktrees'] = {budget['Job']: {'path': str(self.root)}}
+            contract = self.m.contract_file(child, budget)
+            contract.parent.mkdir(exist_ok=True)
+            contract.write_text('## Budget\n\n1 h\n')
+            self.assertTrue(any('over its 1-hour budget' in text
+                                for text in self.m.runaway_jobs(self.inst, child)))
+            self.watch()
+            self.m.wake_drain(self.inst, root, once=True)
+            self.assertEqual(send.call_count, 0)
+            self.assertEqual(self.since(), [])
+            # A child with a coordinator receives its own settlement work.
+            self.inst.local_of('sample').update(coordinator='fixture-child', wake='fixture-send')
+            self.watch()
+            self.assertTrue(list(self.m.wake_directory(self.inst, child).glob('*.pending')))
+            self.inst.local_of('sample').pop('coordinator')
+            line = '- 2020-01-01 00:00 +00:00 from runtime: Host question: Choose blue <!-- host-question:abc -->'
+            (child['dir'] / 'inbox.md').write_text(line + '\n')
+            self.watch()
+            self.assertIn('overdue-question', [i['kind'] for i in self.since()])
+            routed = self.since('sample')
+            self.assertTrue(routed)
+            self.assertTrue(all(i['node'] == 'sample' for i in routed))
+            self.m.wake_drain(self.inst, root, once=True)
+            self.assertEqual(send.call_count, 1)
+            self.watch()
+            self.m.wake_drain(self.inst, root, once=True)
+            self.assertEqual(send.call_count, 1)
+            self.assertIn('overdue-question', [i['kind'] for i in self.m.wake_history(directory)[-1]['items']])
+            (child['dir'] / 'inbox.md').write_text(line + '\n- from watcher: worker run failed (provider error)\n')
+            self.watch()
+            self.m.wake_drain(self.inst, root, once=True)
+            self.assertEqual(send.call_count, 2)
+
+    def test_overdue_block_is_one_wake_even_as_age_advances(self):
+        status = self.root / 'status.md'
+        with status.open('a') as stream:
+            stream.write('\n## Blocked\n- Choose blue; since: 2020-01-01T00:00Z; recommendation: blue; default: gray\n')
+        n = self.inst.node('root')
+        with mock.patch.object(self.m, 'changes_due', return_value=[]), \
+                mock.patch.object(self.m, 'wake_start'), mock.patch.object(self.m, 'WAKE_INTERVAL', 0), \
+                mock.patch.object(self.m, 'wake_send', return_value=True) as send:
+            self.watch()
+            self.m.wake_drain(self.inst, n, once=True)
+            self.assertEqual(send.call_count, 1)
+            import datetime
+            later = self.inst.now_dt() + datetime.timedelta(days=2)
+            with mock.patch.object(self.inst, 'now_dt', return_value=later):
+                self.watch()
+                self.m.wake_drain(self.inst, n, once=True)
+                self.assertEqual([i['kind'] for i in self.since()], ['blocked-overdue'])
+            self.assertEqual(send.call_count, 1)
+
+    def test_direct_question_delivery_history_and_corrupt_history(self):
+        n = self.inst.node('root')
+        episode = 'a' * 32
+        (self.root / 'inbox.md').write_text('- question <!-- wake:' + episode + ' --> <!-- host-question:abc -->\n')
+        with mock.patch.object(self.m, 'changes_due', return_value=[]), \
+                mock.patch.object(self.m, 'wake_start'), mock.patch.object(self.m, 'wake_send', return_value=True):
+            first = self.since()
+            self.assertTrue(self.m.request_wake(self.inst, n, 'wake:' + episode))
+            self.m.wake_drain(self.inst, n, once=True)
+            self.assertEqual(self.since(), first)
+            path = self.m.wake_directory(self.inst, n) / 'history.json'
+            self.assertEqual(self.m.wake_history(path.parent)[-1]['items'],
+                             [{'id': first[0]['id'], 'kind': 'inbox'}])
+            # The next direct question is handled while delivery waits. Its trigger survives.
+            (self.root / 'inbox.md').write_text('- second <!-- wake:' + 'b' * 32 + ' --> <!-- host-question:def -->\n')
+            second = self.since()
+            self.assertTrue(self.m.request_wake(self.inst, n, 'wake:' + 'b' * 32))
+            (self.root / 'inbox.md').write_text('')
+            with mock.patch.object(self.m, 'WAKE_INTERVAL', 0):
+                self.m.wake_drain(self.inst, n, once=True)
+            self.assertEqual(self.m.wake_history(path.parent)[-1]['items'],
+                             [{'id': second[0]['id'], 'kind': 'inbox'}])
+            path.write_text('{torn')
+            with self.assertRaises(SystemExit):
+                self.since()
+            self.assertEqual(path.read_text(), '{torn')
+
+    def test_history_capture_failure_cannot_block_question_delivery(self):
+        n = self.inst.node('root')
+        with mock.patch.object(self.m, 'watch_groups', side_effect=ValueError('unrelated broken node')), \
+                mock.patch.object(self.m, 'wake_start'), mock.patch.object(self.m, 'wake_send', return_value=True) as send:
+            self.assertTrue(self.m.request_wake(self.inst, n, 'wake:' + 'a' * 32))
+            directory = self.m.wake_directory(self.inst, n)
+            (directory / 'history.json').write_text('{torn')
+            self.m.wake_drain(self.inst, n, once=True)
+            self.assertEqual(send.call_count, 1)
+            self.assertFalse(list(directory.glob('*.pending')))
+            self.assertEqual(self.m.wake_history(directory)[-1]['items'], [])
+            damaged = list(directory.glob('history-invalid-*.json'))
+            self.assertEqual(len(damaged), 1)
+            self.assertEqual(damaged[0].read_text(), '{torn')
+
+    def test_corrupt_queue_metadata_does_not_hold_other_questions(self):
+        n = self.inst.node('root')
+        with mock.patch.object(self.m, 'wake_start'), mock.patch.object(self.m, 'WAKE_INTERVAL', 0), \
+                mock.patch.object(self.m, 'wake_send', return_value=True) as send:
+            self.assertTrue(self.m.request_wake(self.inst, n, 'wake:' + 'c' * 32))
+            directory = self.m.wake_directory(self.inst, n)
+            for index, value in enumerate(('{torn', '{"items":null}', '{"items":[{}]}')):
+                (directory / (f'{index:064x}' + '.pending')).write_text(value)
+                self.m.wake_drain(self.inst, n, once=True)
+            self.assertEqual(send.call_count, 3)
+            self.assertFalse(list(directory.glob('*.pending')))
+
+    def test_history_write_failure_does_not_repeat_delivered_wake(self):
+        n = self.inst.node('root')
+        original = self.m.atomic_write
+        def fail_history(path, *args, **kwargs):
+            if path.name == 'history.json':
+                raise OSError('fixture disk failure')
+            return original(path, *args, **kwargs)
+        with mock.patch.object(self.m, 'wake_start'), mock.patch.object(self.m, 'WAKE_INTERVAL', 0), \
+                mock.patch.object(self.m, 'wake_send', return_value=True) as send:
+            self.assertTrue(self.m.request_wake(self.inst, n, 'fixture request'))
+            with mock.patch.object(self.m, 'atomic_write', side_effect=fail_history):
+                self.m.wake_drain(self.inst, n, once=True)
+            self.m.wake_drain(self.inst, n, once=True)
+            self.assertEqual(send.call_count, 1)
+            self.assertFalse(list(self.m.wake_directory(self.inst, n).glob('*.pending')))
+            self.assertIn('history write failed', self.m.wake_diagnostic(self.inst, n))
+
+    def test_queue_publication_needs_no_hardlinks_and_pending_retry_does_not_scan(self):
+        n = self.inst.node('root')
+        with mock.patch.object(self.m, 'wake_start'), mock.patch.object(self.m.os, 'link', side_effect=OSError('unsupported')):
+            self.assertTrue(self.m.request_wake(self.inst, n, 'fixture request'))
+            with mock.patch.object(self.m, 'watch_groups') as scan:
+                self.assertTrue(self.m.request_wake(self.inst, n, 'fixture request'))
+                scan.assert_not_called()
+        self.assertEqual(len(list(self.m.wake_directory(self.inst, n).glob('*.pending'))), 1)
+
+    def test_retarget_filters_child_housekeeping_but_preserves_questions(self):
+        self.b(self.root, 'new', 'sample', '--title', 'Sample')
+        self.b(self.root, 'set', 'sample', 'coordinator=fixture-child', 'wake=fixture-send')
+        self.inst = self.m.Instance(self.root)
+        child, root = self.inst.node('sample'), self.inst.node('root')
+        housekeeping = {'id': 'a' * 64, 'kind': 'unsettled-threads'}
+        question = {'id': 'b' * 64, 'kind': 'inbox'}
+        with mock.patch.object(self.m, 'wake_start'), mock.patch.object(self.m, 'WAKE_INTERVAL', 0), \
+                mock.patch.object(self.m, 'wake_send', return_value=True) as send:
+            self.m.request_wake(self.inst, child, 'housekeeping', items=[housekeeping])
+            self.m.request_wake(self.inst, child, 'mixed', items=[housekeeping, question])
+            self.b(self.root, 'set', 'sample', 'coordinator=')
+            self.m.wake_drain(self.inst, child, once=True)
+            self.m.wake_drain(self.inst, root, once=True)
+            self.assertEqual(send.call_count, 1)
+            history = self.m.wake_history(self.m.wake_directory(self.inst, root))
+            self.assertEqual(history[-1]['items'], [question])
+
+    def test_since_wake_is_stable_while_host_starts_before_send_returns(self):
+        n = self.inst.node('root')
+        inbox = self.root / 'inbox.md'
+        inbox.write_text('- fabricated A\n')
+        with mock.patch.object(self.m, 'changes_due', return_value=[]), \
+                mock.patch.object(self.m, 'wake_start'), mock.patch.object(self.m, 'WAKE_INTERVAL', 0):
+            self.watch()
+            with mock.patch.object(self.m, 'wake_send', return_value=True):
+                self.m.wake_drain(self.inst, n, once=True)
+            inbox.write_text(inbox.read_text() + '- fabricated B\n')
+            self.watch()
+            observed = []
+            def host_starts(command):
+                observed.extend(self.since())
+                return True
+            with mock.patch.object(self.m, 'wake_send', side_effect=host_starts):
+                self.m.wake_drain(self.inst, n, once=True)
+            self.assertEqual([i['text'] for i in observed], ['fabricated B'])
+            self.assertEqual(observed, self.since())
+            directory = self.m.wake_directory(self.inst, n)
+            (directory / 'inflight.json').write_text('{"before":[]}')
+            self.assertEqual(observed, self.since())  # a stale unlocked flight cannot shift comparison
+
+    def test_first_logged_wake_preserves_preupgrade_acknowledgements(self):
+        n = self.inst.node('root')
+        inbox = self.root / 'inbox.md'
+        inbox.write_text('- fabricated old A\n')
+        with mock.patch.object(self.m, 'changes_due', return_value=[]), mock.patch.object(self.m, 'wake_start'):
+            self.watch()
+            directory = self.m.wake_directory(self.inst, n)
+            # Model an old-core delivery: watcher acknowledgement and sent receipt, no log.
+            for path in directory.glob('*.pending'):
+                path.rename(path.with_suffix('.sent'))
+            inbox.write_text(inbox.read_text() + '- fabricated new B\n')
+            self.watch()
+            with mock.patch.object(self.m, 'wake_send', return_value=True):
+                self.m.wake_drain(self.inst, n, once=True)
+            self.assertEqual([i['text'] for i in self.since()], ['fabricated new B'])
+
     def test_unchanged_new_handback_removed_and_returned_and_stale(self):
         items = [{'kind': 'handback', 'job': 'made-up-job', 'state': 'done', 'text': 'report ready'}]
         with mock.patch.object(self.m, 'due_items', return_value=items), \

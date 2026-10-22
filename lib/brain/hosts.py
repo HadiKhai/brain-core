@@ -58,7 +58,133 @@ def wake_recorded(inst, n, reason):
     return any((directory / (key + suffix)).exists() for suffix in ('.pending', '.sent'))
 
 
-def request_wake(inst, n, reason):
+def wake_item_refs(items):
+    """Persist identities and kinds only, never excerpts or raw source identifiers."""
+    return sorted({i['id']: {'id': i['id'], 'kind': i['kind']} for i in items}.values(), key=lambda i: i['id'])
+
+
+def wake_history(directory):
+    path = directory / 'history.json'
+    if not path.exists():
+        return []
+    value = json.loads(path.read_text())
+    if not isinstance(value, dict) or value.get('version') != 1 or not isinstance(value.get('deliveries'), list):
+        raise ValueError('invalid wake history')
+    for row in value['deliveries']:
+        if (not isinstance(row, dict) or type(row.get('at')) not in (int, float)
+                or not isinstance(row.get('items'), list)
+                or any(not isinstance(row.get(key, []), list) for key in ('before', 'snapshot'))
+                or any(not isinstance(i, dict) or not isinstance(i.get('kind'), str)
+                       or not re.fullmatch(r'[0-9a-f]{64}', str(i.get('id', '')))
+                       for key in ('items', 'before', 'snapshot') for i in row.get(key, []))):
+            raise ValueError('invalid wake history')
+    return value['deliveries']
+
+
+def wake_delivery_items(inst, n, pending):
+    """Legacy/direct requests have empty queue files; resolve their opaque reason keys."""
+    from . import watch as _m_watch
+    refs = []
+    names = set()
+    for path in pending:
+        try:
+            value = json.loads(path.read_text())
+            items = value['items']
+            if not isinstance(items, list):
+                raise ValueError('invalid wake metadata')
+            refs.extend(wake_item_refs(items))
+        except (OSError, ValueError, KeyError, TypeError):
+            names.add(path.stem)
+    if not names:
+        return wake_item_refs(refs)
+    try:
+        items = _m_watch.watch_groups(inst).get(n['id'], {}).get('items', [])
+    except (Exception, SystemExit):
+        items = []  # legacy metadata recovery must not block a question's transport
+    for i in items:
+        if 'reason' in i:
+            key = hashlib.sha256((i.get('source', n['id']) + '\0' + i['reason']).encode()).hexdigest()
+            if key in names:
+                refs.append(i)
+    return wake_item_refs(refs)
+
+
+def wake_reason_items(inst, n, reason):
+    """Capture a direct question/hand-back before it can be handled during rate wait."""
+    if not reason.startswith(('wake:', 'handback:', 'overdue:', '<!--')):
+        return []  # a manual reason need not correspond to a due item
+    from . import watch as _m_watch
+    target, _ = wake_target(inst, n)
+    try:
+        items = _m_watch.watch_groups(inst).get(target['id'], {}).get('items', [])
+    except (Exception, SystemExit):
+        items = []  # best-effort identity capture cannot suppress the direct wake
+    return wake_item_refs(i for i in items
+                          if i.get('source', target['id']) == n['id'] and i.get('reason') == reason)
+
+
+def wake_snapshot(inst, n, refs):
+    from . import watch as _m_watch
+    try:
+        items = _m_watch.watch_groups(inst).get(n['id'], {}).get('items', [])
+    except (Exception, SystemExit):
+        items = []  # a display snapshot must never gate delivery
+    return wake_item_refs(items + refs)
+
+
+def wake_previous_items(directory):
+    """Use the same baseline while a host starts its turn and after send returns."""
+    import fcntl
+    history = wake_history(directory)
+    baseline = history[-1].get('before', []) if history else []
+    try:
+        with (directory / 'lock').open('r') as lock:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                # Only trust an in-flight comparison while a drain owns delivery.
+                value = json.loads((directory / 'inflight.json').read_text())
+                refs = value['before']
+                if isinstance(refs, list) and wake_item_refs(refs) == refs:
+                    return refs
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+    return baseline
+
+
+def wake_actionable_pending(inst, path):
+    """Retire identified old machine transitions without dropping unknown questions."""
+    try:
+        refs = wake_item_refs(json.loads(path.read_text())['items'])
+    except (OSError, ValueError, KeyError, TypeError):
+        return True  # empty legacy and damaged metadata must still carry questions through
+    from . import machine as _m_machine
+    from . import watch as _m_watch
+    data = _m_machine.machine_samples(inst, fresh=False) if any(i['kind'] == 'machine-alert' for i in refs) else None
+    recovered = data and data.get('alert_open') is False
+    identity = (_m_watch.watch_digest(['root', 'machine-alert', data['alert_id']])
+                if data and data.get('alert_open') is True
+                and re.fullmatch(r'[0-9a-f]{24}', str(data.get('alert_id', ''))) else None)
+    allowed = [i for i in refs if i['kind'] != 'machine'
+               and not (i['kind'] == 'machine-alert' and (recovered or identity and i['id'] != identity))]
+    if any(i['kind'] in ('job-ready', 'job-landed') for i in allowed):
+        unknown = set()
+        try:
+            current = {i['id'] for i in _m_watch.watch_completion_items(_m_instance.Instance(inst.root), strict=True, unknown=unknown)}
+        except (Exception, SystemExit):
+            current = None  # best-effort revalidation must never hold a queued question behind repair
+        if current is not None:
+            allowed = [i for i in allowed if i['kind'] not in ('job-ready', 'job-landed') or i['id'] in current
+                       or any(i['id'].startswith(scope) for scope in unknown)]
+    if refs and not allowed:
+        path.unlink(missing_ok=True)
+        return False
+    if allowed != refs:
+        _m_common.atomic_write(path, json.dumps({'items': allowed}) + '\n')
+    return True
+
+
+def request_wake(inst, n, reason, items=None):
     """Fail open, enqueue then detach; never run a transport in the hook's process."""
     try:
         target, command = wake_target(inst, n)
@@ -71,13 +197,25 @@ def request_wake(inst, n, reason):
         delivered = directory / (key + ".sent")
         if delivered.exists() and time.time() - delivered.stat().st_mtime < WAKE_DEDUP_SECONDS:
             return True
-        # Exclusive publication: repeated hooks neither overwrite nor launch more workers.
-        _m_common.safe_target(pending)
-        try:
-            fd = os.open(pending, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-        except FileExistsError:
+        if pending.exists():
             return True
-        os.close(fd)
+        # Publish complete metadata exclusively; an already-running drain may scan now.
+        import fcntl
+        _m_common.safe_target(pending)
+        publish_lock = directory / 'publish.lock'
+        _m_common.safe_target(publish_lock)
+        lock_fd = os.open(publish_lock, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(lock_fd, 'a+') as lock:
+            if os.fstat(lock.fileno()).st_nlink != 1:
+                return False
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return pending.exists()  # the durable inbox lets the watcher retry otherwise
+            if pending.exists():
+                return True
+            refs = wake_item_refs(items) if items is not None else wake_reason_items(inst, n, reason)
+            _m_common.atomic_write(pending, json.dumps({'items': refs}) + '\n')
         wake_start(inst, target)
         return True
     except (Exception, SystemExit):
@@ -148,7 +286,7 @@ def wake_read(directory, command, name="delivery.json"):
         status = record["status"]
         if (record["binding"] == wake_binding(command)
                 and (type(status) is int and 100 <= status <= 599
-                     or status in ("transport error", "delivery failed"))
+                     or status in ("transport error", "delivery failed", "delivered; history write failed"))
                 and type(record["at"]) in (int, float) and math.isfinite(record["at"])):
             return record
     except (OSError, ValueError, KeyError, TypeError):
@@ -227,7 +365,7 @@ def wake_drain(inst, n, once=False):
                     # Recheck under the delivery lock so this race cannot send the same reason twice.
                     if path.with_suffix(".sent").exists():
                         path.unlink(missing_ok=True)
-                    else:
+                    elif wake_actionable_pending(inst, path):
                         pending.append(path)
                 if not pending:
                     return
@@ -250,9 +388,20 @@ def wake_drain(inst, n, once=False):
                 current = _m_instance.Instance(inst.root)
                 target, command = wake_target(current, current.node(n["id"]))
                 if target["id"] != n["id"]:
+                    from . import watch as _m_watch
                     destination = wake_directory(current, target)
                     destination.mkdir(parents=True, exist_ok=True)
                     for path in pending:
+                        try:
+                            refs = wake_item_refs(json.loads(path.read_text())['items'])
+                        except (OSError, ValueError, KeyError, TypeError):
+                            refs = []  # unknown/legacy requests must still carry questions through
+                        allowed = [i for i in refs if i['kind'] not in _m_watch.WATCH_LOCAL_KINDS]
+                        if refs and not allowed:
+                            path.unlink(missing_ok=True)
+                            continue
+                        if allowed != refs:
+                            _m_common.atomic_write(path, json.dumps({'items': allowed}) + '\n')
                         _m_common.safe_target(destination / path.name)
                         path.replace(destination / path.name)
                     if command:
@@ -260,7 +409,33 @@ def wake_drain(inst, n, once=False):
                     return
                 if not command:
                     return
+                try:
+                    history = wake_history(directory)
+                except (OSError, ValueError):
+                    # Preserve damaged evidence, but never hold a question behind log repair.
+                    broken = directory / 'history.json'
+                    if broken.exists():
+                        broken.replace(directory / ('history-invalid-' + os.urandom(8).hex() + '.json'))
+                    history = []
+                refs = wake_delivery_items(current, target, pending)
+                snapshot = wake_snapshot(current, target, refs)
+                if history:
+                    before = history[-1].get('snapshot', history[-1]['items'])
+                else:
+                    # An upgraded watcher already knows old queued/delivered identities.
+                    # Do not bring those back merely because delivery logs are new.
+                    from . import watch as _m_watch
+                    try:
+                        known = set(_m_watch.watch_state(current).get('seen', [])) - {i['id'] for i in refs}
+                    except (OSError, ValueError):
+                        known = set()
+                    before = [i for i in snapshot if i['id'] in known]
                 _m_common.atomic_write(last, str(time.time()))  # failures are rate-limited too
+                inflight = directory / 'inflight.json'
+                try:
+                    _m_common.atomic_write(inflight, json.dumps({'before': before}) + '\n')
+                except OSError:
+                    pass  # comparison bookkeeping cannot suppress a question
                 try:
                     sent = wake_send(command)
                     status = 200 if sent else "delivery failed"
@@ -272,6 +447,17 @@ def wake_drain(inst, n, once=False):
                     for path in pending:  # one generic tick covers all currently queued reasons
                         _m_common.atomic_write(path.with_suffix(".sent"), "delivered\n")
                         path.unlink(missing_ok=True)
+                    # Logging cannot undo delivery and cause another model wake on retry.
+                    try:
+                        _m_common.atomic_write(directory / 'history.json', json.dumps({'version': 1,
+                            'deliveries': (history + [{'at': time.time(), 'items': refs,
+                                'before': before, 'snapshot': snapshot}])[-100:]}) + '\n')
+                    except OSError:
+                        status = 'delivered; history write failed'
+                try:
+                    inflight.unlink(missing_ok=True)
+                except OSError:
+                    pass  # an unlocked in-flight file is ignored by readers
                 try:
                     wake_record(directory, command, status)
                 except OSError:
