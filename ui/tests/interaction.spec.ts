@@ -254,11 +254,11 @@ test("saved snapshots and loading, empty, error, permission and partial states a
   ).toBeVisible();
   await page.goto("/");
   await expect(
-    page.getByText("Open your private workspace link", { exact: true }),
+    page.getByText("This link is missing its access key", { exact: true }),
   ).toBeVisible();
   await page.goto("/?k=loading");
-  await expect(page.locator(".skeleton-page")).toBeVisible();
-  await expect(page.locator("[data-slot=skeleton]").first()).toBeVisible();
+  await expect(page.locator("[data-initial-load]")).toBeVisible();
+  await expect(page.locator("[data-initial-load]")).toContainText(/Loading live state… \d+s/);
   await page.goto("/?k=partial#view=usage");
   await expect(
     page.getByText("Partial reading", { exact: true }),

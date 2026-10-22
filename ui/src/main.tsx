@@ -6,9 +6,8 @@ import { Bell, Moon, RefreshCw, Sun } from "lucide-react";
 import { SidebarProvider, SidebarInset, SidebarTrigger } from "@/components/ui/sidebar";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { Button } from "@/components/ui/button";
-import { Skeleton } from "@/components/ui/skeleton";
 import { Alert, AlertTitle, AlertDescription } from "@/components/ui/alert";
-import { TimeZoneContext, PageHeader, Status, Tip, Empty, type Crumb } from "./shared";
+import { TimeZoneContext, PageHeader, Status, Tip, type Crumb } from "./shared";
 import { Navigation } from "./nav";
 import { InboxView } from "./inbox";
 import { Overview, greeting, overviewSummary } from "./overview";
@@ -68,6 +67,8 @@ function App() {
       window.__STATE__ ? "Snapshot" : "Connecting",
     ),
     [retry, setRetry] = useState(0),
+    [loadError, setLoadError] = useState<"missing-key" | "rejected-key" | "connection" | null>(null),
+    [elapsed, setElapsed] = useState(0),
     [route, setRoute] = useState(readRoute),
     [theme, setTheme] = useState(getStorage("brain-ui-theme") || "system"),
     [notice, setNotice] = useState(""),
@@ -124,13 +125,33 @@ function App() {
   }, [theme]);
   useEffect(() => {
     if (window.__STATE__) return;
+    setLoadError(null);
+    setConnection("Connecting");
     const key = new URLSearchParams(location.search).get("k");
     if (!key) {
+      setLoadError("missing-key");
       setConnection("Permission required");
       return;
     }
-    return watchLive(key, setState, setConnection, notify);
+    return watchLive(key, value => {
+      setState(value);
+      setLoadError(null);
+    }, value => {
+      setConnection(value);
+      // Transport idleness is independent of whether the first reading arrived.
+      // Keep failures visible even after the transport's five-second idle timer.
+      if (value === "Permission required") setLoadError("rejected-key");
+      else if (value === "Connection failed") setLoadError("connection");
+    }, notify);
   }, [retry, notify]);
+  const loading = !s && !loadError;
+  useEffect(() => {
+    if (!loading) return;
+    const start = performance.now();
+    setElapsed(0);
+    const timer = setInterval(() => setElapsed(Math.floor((performance.now() - start) / 1000)), 1000);
+    return () => clearInterval(timer);
+  }, [loading, retry]);
   useEffect(() => {
     const t = setInterval(
       () => { if (!document.hidden) setState((prev) => (prev ? { ...prev } : prev)); },
@@ -224,7 +245,7 @@ function App() {
                   }} /></div>}
               </div>
               <div className="topbar-actions">
-                <Status>{connection}</Status>
+                <Status>{loading ? "Loading live state" : !s && loadError ? (loadError === "connection" ? "Connection failed" : "Permission required") : connection}</Status>
                 <Tip text="Refresh the reading"><Button variant="ghost" size="icon" aria-label="Refresh" onClick={refresh}><RefreshCw size={16} /></Button></Tip>
                 <Tip text="Switch light and dark appearance">
                   <Button variant="ghost" size="icon" aria-label="Toggle theme" onClick={() => setTheme(document.documentElement.classList.contains("dark") ? "light" : "dark")}>
@@ -250,7 +271,7 @@ function App() {
                   </AlertDescription>
                 </Alert>
               )}
-              {["Permission required", "Connection failed", "Updates interrupted"].includes(connection) && (
+              {s && ["Permission required", "Connection failed", "Updates interrupted"].includes(connection) && (
                 <Alert variant={connection === "Updates interrupted" ? "default" : "destructive"}>
                   <AlertTitle>{connection === "Permission required" ? "Open your private workspace link" : connection === "Updates interrupted" ? "Live updates interrupted" : "Could not reach your brain"}</AlertTitle>
                   <AlertDescription>
@@ -261,13 +282,23 @@ function App() {
                 </Alert>
               )}
               {!s ? (
-                connection === "Connecting" ? (
-                  <div className="page-stack skeleton-page" aria-label="Loading workspace">
-                    <Skeleton className="h-36 rounded-2xl" />
-                    <div className="overview-grid"><Skeleton className="h-80 rounded-2xl" /><Skeleton className="h-80 rounded-2xl" /></div>
-                  </div>
+                loading ? (
+                  <Alert data-initial-load role="status">
+                    <RefreshCw size={18} aria-hidden="true" />
+                    <AlertTitle>{elapsed >= 20 ? "Still loading: the server is busy" : `Loading live state… ${elapsed}s`}</AlertTitle>
+                    <AlertDescription>
+                      {elapsed >= 20 ? `Waiting for the first live reading (${elapsed}s). You can keep waiting or retry.` : "Fetching the first reading from your local brain. Your overview will appear here."}
+                      {elapsed >= 20 && <Button variant="outline" size="sm" onClick={() => setRetry(value => value + 1)}>Retry loading</Button>}
+                    </AlertDescription>
+                  </Alert>
                 ) : (
-                  <Empty text="Workspace unavailable." action="Open the complete private address from your terminal." />
+                  <Alert variant="destructive">
+                    <AlertTitle>{loadError === "missing-key" ? "This link is missing its access key" : loadError === "rejected-key" ? "This access key was not accepted" : "Could not reach your brain"}</AlertTitle>
+                    <AlertDescription>
+                      {loadError === "connection" ? "Check that your local dashboard is still running, then retry loading." : <>Open the full link from your brief or <code>brain show</code>.</>}
+                      {loadError === "connection" && <Button variant="outline" size="sm" onClick={() => setRetry(value => value + 1)}>Retry loading</Button>}
+                    </AlertDescription>
+                  </Alert>
                 )
               ) : (
                 <>
@@ -287,7 +318,7 @@ function App() {
               <footer className="workspace-footer">
                 <span>{s?.review?.enabled ? "Local proposal reviews enabled · " : "Read-only view of "}{s?.brain?.title || "your brain"} on this machine</span>
                 <span>
-                  {s?.brain?.now ? "Read " + new Intl.DateTimeFormat("en", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit", timeZone: s.brain.tz || undefined }).format(new Date(s.brain.now)) : "Waiting for a reading"} ·{" "}
+                  {s?.brain?.now ? "Read " + new Intl.DateTimeFormat("en", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit", timeZone: s.brain.tz || undefined }).format(new Date(s.brain.now)) : loading ? "Loading live state…" : "No reading loaded"} ·{" "}
                   <a href="/assets/THIRD_PARTY_NOTICES.txt" target="_blank" rel="noreferrer">Third-party notices</a>
                 </span>
               </footer>

@@ -134,6 +134,7 @@ test("§15 scroll chains to the page", async ({ page }) => {
   expect(found, found.map((v) => v.detail).join("\n")).toEqual([]);
 });
 
+// Opt-in live keyed coverage is beside this gate in live-overview.spec.ts.
 test("§15 overview is a decision dashboard", async ({ page }) => {
   const found: Violation[] = [];
   for (const scenario of ["demo", "hundred"]) {
