@@ -680,7 +680,8 @@ def inbox_items(inst, nodes=None, reporter="root"):
     seen = {key: value for key, value in reporters.get(reporter, {}).items() if isinstance(value, dict)}
     by_id = {n["id"]: n for n in (nodes if nodes is not None else inst.nodes())}
     out, ids = [], set()
-    attention = attention_items(inst, list(by_id.values()))
+    # The live attention view retains advice; delivery queues filter it separately.
+    attention = [item for item in attention_items(inst, list(by_id.values())) if item[1] != "job"]
     # Explicit node inboxes are coordinator views. Root's inbox is the human rollup;
     # root-owned job advice remains available in due, never in that human rollup.
     owner = by_id.get(reporter)
@@ -1060,6 +1061,7 @@ def attention_items(inst, nodes):
         for b in blocked_entries(inst, n):
             out.append((n["id"], "blocked-overdue" if b["escalated"] else "blocked", b["text"]))
         out += [(n["id"], "inbox", "inbox: " + l[2:]) for l in inbox_lines(n)]
+        out += [(n["id"], "job", text) for text in runaway_jobs(inst, n)]
         if n["id"] == "root":
             episode = _m_machine.machine_episode_due(inst)
             if episode and episode["kind"] == "machine-alert":

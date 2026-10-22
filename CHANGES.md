@@ -48,6 +48,7 @@ For agents:
 - Job budget and median advice stays with its owning node: its explicit inbox
   and due show the advice; parent and root human inboxes do not. Root-owned job
   advice appears in root due. Advice remains informational and never wakes a model.
+  The live dashboard's attention view retains job advice for each owning node.
 
 After upgrading:
 - No migration command is required. Historical machine lines remain on disk but

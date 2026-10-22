@@ -186,19 +186,26 @@ class InboxNoise(Scenario):
         root_due = json.loads(self.b(self.root, 'due', 'root', '--json'))
         self.assertFalse(any(i['kind'] == 'job' for i in root_due))
         state = json.loads(self.b(self.root, 'ui', '--json'))
-        self.assertFalse(any(i['kind'] == 'job' for i in state['attention'] + state['inbox']))
+        self.assertEqual([(i['node'], i['text']) for i in state['attention'] if i['kind'] == 'job'],
+                         [(owner['id'], alert) for alert in alerts])
+        self.assertFalse(any(i['kind'] == 'job' for i in state['inbox']))
         # Advice must not add expensive usage scans or fallback wakes to the watcher.
         with mock.patch.object(self.m, 'runaway_jobs', side_effect=AssertionError('watcher scanned usage')), \
                 mock.patch.object(self.m, 'changes_due', return_value=[]):
             self.assertNotIn('job', [i['kind'] for i in self.m.watch_items(self.inst, owner)])
 
-    def test_root_owned_job_advice_is_in_due_only(self):
+    def test_root_owned_job_advice_stays_visible_without_waking(self):
         root = self.inst.node('root')
         self.jobs(root)
         self.assertTrue(self.m.runaway_jobs(self.inst, root))
         self.assertFalse(any(i['kind'] == 'job' for i in self.inbox()))
         due = json.loads(self.b(self.root, 'due', 'root', '--json'))
         self.assertTrue(any(i['kind'] == 'job' for i in due))
+        state = json.loads(self.b(self.root, 'ui', '--json'))
+        self.assertEqual([i['text'] for i in state['attention'] if i['kind'] == 'job' and i['node'] == 'root'],
+                         self.m.runaway_jobs(self.inst, root))
+        with mock.patch.object(self.m, 'changes_due', return_value=[]):
+            self.assertNotIn('job', [i['kind'] for i in self.m.watch_items(self.inst, root)])
         # Advice alone is informational and does not make a quiet tick actionable.
         with mock.patch.object(self.m, 'load', return_value=self.inst), \
                 mock.patch.object(self.m, 'changes_due', return_value=[]), \
