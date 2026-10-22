@@ -168,12 +168,14 @@ def wake_actionable_pending(inst, path):
     allowed = [i for i in refs if i['kind'] != 'machine'
                and not (i['kind'] == 'machine-alert' and (recovered or identity and i['id'] != identity))]
     if any(i['kind'] in ('job-ready', 'job-landed') for i in allowed):
+        unknown = set()
         try:
-            current = {i['id'] for i in _m_watch.watch_completion_items(_m_instance.Instance(inst.root), strict=True)}
+            current = {i['id'] for i in _m_watch.watch_completion_items(_m_instance.Instance(inst.root), strict=True, unknown=unknown)}
         except (Exception, SystemExit):
             current = None  # best-effort revalidation must never hold a queued question behind repair
         if current is not None:
-            allowed = [i for i in allowed if i['kind'] not in ('job-ready', 'job-landed') or i['id'] in current]
+            allowed = [i for i in allowed if i['kind'] not in ('job-ready', 'job-landed') or i['id'] in current
+                       or any(i['id'].startswith(scope) for scope in unknown)]
     if refs and not allowed:
         path.unlink(missing_ok=True)
         return False

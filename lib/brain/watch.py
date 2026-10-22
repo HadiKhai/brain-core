@@ -185,15 +185,27 @@ def watch_recorded_ready(inst, n, row, signal, strict=False):
     return packet
 
 
-def watch_completion_items(inst, nodes=None, strict=False):
+def watch_completion_scope(nid, row=None, kind=None):
+    """Opaque node/job-kind prefixes keep unknown reads local without queue-schema changes."""
+    node = watch_digest(['completion-node', nid])[:16]
+    return node if row is None else node + watch_digest(['completion-job', _m_jobs.job_key(row), kind])[:16]
+
+
+def watch_completion_items(inst, nodes=None, strict=False, unknown=None):
     """Opaque per-packet/per-ledger-transaction root notices, batched by watch_run."""
     out = []
+    unknown = unknown if unknown is not None else set()
     for n in nodes if nodes is not None else inst.nodes():
         if n['archived']:
             continue
-        rows = _m_jobs.read_jobs(n)
-        if rows is None and strict:
-            raise ValueError('completion ledger unreadable')
+        try:
+            rows = _m_jobs.read_jobs(n)
+        except (OSError, ValueError, TypeError, AttributeError):
+            rows = None
+        if rows is None:
+            if strict:
+                unknown.add(watch_completion_scope(n['id']))
+            continue
         for row in rows or []:
             kind, evidence = None, None
             if row['Ended']:
@@ -206,12 +218,13 @@ def watch_completion_items(inst, nodes=None, strict=False):
                     packet = watch_recorded_ready(inst, n, row, _m_jobs.read_handback(n, row, strict=strict), strict=strict)
                 except (OSError, ValueError, TypeError, AttributeError):
                     if strict:
-                        raise
+                        unknown.add(watch_completion_scope(n['id'], row, 'job-ready'))
                     packet = None  # invalid completion evidence cannot block unrelated protected wakes
                 if packet:
                     kind, evidence = 'job-ready', packet
             if kind:
-                out.append({'id': watch_digest([n['id'], _m_jobs.job_key(row), kind, evidence]),
+                identity = watch_completion_scope(n['id'], row, kind) + watch_digest([n['id'], _m_jobs.job_key(row), kind, evidence])[:32]
+                out.append({'id': identity,
                             'node': 'root', 'kind': kind,
                             'text': ('A job has new recorded ready evidence; inspect coordinator due queues'
                                      if kind == 'job-ready' else

@@ -21,6 +21,8 @@ For agents:
   rehearsal, lane commands or host queries. Done alone never implies ready.
 - Queued completion notices are checked again before sending. Stale notices are
   dropped while questions and other protected requests in the same wake survive.
+  Unreadable evidence preserves only its own opaque job/ledger scope; it cannot
+  exempt another job's known-stale notice from filtering.
 - `brain check` reads cached webhook probe/delivery results, even when stale.
   Only `brain check --live` sends a real POST. `--fix` never sends, even with
   `--live`. The shared explicit live-probe helper is unchanged.

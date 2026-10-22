@@ -312,6 +312,7 @@ class WatchExtension(Scenario):
                 mock.patch.object(self.m, 'WAKE_INTERVAL', 0), mock.patch.object(self.m, 'wake_send', return_value=True) as send, \
                 mock.patch.object(self.m, 'ready_state', side_effect=AssertionError('no readiness execution')):
             self.assertEqual(len(self.root_events()), 1)
+
             self.watch()
             self.git('update-ref', 'refs/remotes/origin/main', advanced, cwd=home)
             self.assertEqual(self.root_events(), [])
@@ -325,3 +326,50 @@ class WatchExtension(Scenario):
             path.write_text(json.dumps(packet))
             self.git('update-ref', 'refs/remotes/origin/main', base, cwd=home)
             self.assertEqual(len(self.root_events()), 1)
+
+    def test_unknown_job_does_not_keep_other_jobs_stale_ready_notice(self):
+        from pathlib import Path
+        home, n, w, row = self.project()
+        self.b(self.root, 'wt', 'add', 'app', 'job/other', '--no-setup')
+        self.inst = self.m.Instance(self.root)
+        n = self.inst.node('app')
+        other = self.m.open_job(self.m.read_jobs(n), 'job/other')
+        first = self.signal(n, row)
+        stale = self.root_events()[0]
+        self.signal(n, other, episode='b' * 32)
+        unknown = next(i for i in self.root_events() if i['id'] != stale['id'])
+        self.save_signal(n, row, {**first, 'state': 'blocked'})
+        original = Path.read_text
+        def denied(path, *args, **kwargs):
+            if path == self.m.handback_file(n, other):
+                raise PermissionError('fixture other job unreadable')
+            return original(path, *args, **kwargs)
+        root, question = self.inst.node('root'), {'id': 'd' * 64, 'kind': 'inbox'}
+        with mock.patch.object(self.m, 'wake_start'), mock.patch.object(self.m, 'WAKE_INTERVAL', 0), \
+                mock.patch.object(self.m, 'wake_send', return_value=True) as send:
+            self.m.request_wake(self.inst, root, 'two jobs and a question', items=[stale, unknown, question])
+            with mock.patch.object(Path, 'read_text', denied):
+                self.m.wake_drain(self.inst, root, once=True)
+            self.assertEqual(send.call_count, 1)
+            refs = self.m.wake_history(self.m.wake_directory(self.inst, root))[-1]['items']
+            self.assertNotIn(stale['id'], [i['id'] for i in refs])
+            self.assertIn(unknown['id'], [i['id'] for i in refs])
+            self.assertIn(question, refs)
+
+    def test_unknown_unrelated_ledger_does_not_keep_stale_ready_notice(self):
+        home, n, w, row = self.project()
+        first = self.signal(n, row)
+        stale = self.root_events()[0]
+        self.save_signal(n, row, {**first, 'state': 'blocked'})
+        self.b(self.root, 'new', 'unrelated', '--title', 'Unrelated')
+        self.inst = self.m.Instance(self.root)
+        other = self.inst.node('unrelated')
+        (other['dir'] / self.m.JOBS_FILE).write_text('unreadable legacy ledger\n')
+        root, question = self.inst.node('root'), {'id': 'd' * 64, 'kind': 'inbox'}
+        with mock.patch.object(self.m, 'wake_start'), mock.patch.object(self.m, 'WAKE_INTERVAL', 0), \
+                mock.patch.object(self.m, 'wake_send', return_value=True) as send:
+            self.m.request_wake(self.inst, root, 'stale job and a question', items=[stale, question])
+            self.m.wake_drain(self.inst, root, once=True)
+            self.assertEqual(send.call_count, 1)
+            refs = self.m.wake_history(self.m.wake_directory(self.inst, root))[-1]['items']
+            self.assertEqual(refs, [question])
