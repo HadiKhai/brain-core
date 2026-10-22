@@ -1,0 +1,3 @@
+# Test tools only; the core runtime remains Python 3.9 and stdlib-only.
+pytest==8.4.2
+pytest-xdist==3.8.0

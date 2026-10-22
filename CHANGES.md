@@ -5,6 +5,20 @@ upgrading. `brain changes <node>` shows the entries this node's coordinator hasn
 `brain due <node>` lists them until `brain changes <node> --seen`. Entry headings are
 `## <date>: <title>`; once released, a heading never changes.
 
+## 2026-10-22: Parallel test verification
+
+For agents:
+- Test tools are pinned in `requirements-test.txt`, including pytest-xdist. The
+  complete compatibility suite can run across worker processes with `-n auto` or
+  an explicit worker count. The core runtime remains Python 3.9 and stdlib-only.
+- Keep the same test selection and disable worker restarts with
+  `--max-worker-restart=0` so crashed workers fail verification.
+
+After upgrading:
+- For development, install tools with `python3 -m pip install -r requirements-test.txt`
+  and run `python3 -m pytest -q -p no:cacheprovider -n auto --max-worker-restart=0 tests/test_brain.py`.
+  End users need no additional packages.
+
 ## 2026-10-22: Rehearse attributes check regressions and completed baseline failures
 
 For agents:
