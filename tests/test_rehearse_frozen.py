@@ -280,6 +280,26 @@ class StableComparisons(unittest.TestCase):
         after['brief:0']['text'] = before['brief:0']['text'].replace('Retain limits!', 'Ignore consent!')
         self.assertIn('brief:0: brief warning disappeared', rehearsal.compare(before, after))
 
+    def test_warning_normalization_preserves_everything_except_size_numbers(self):
+        original = 'warning: payload is 10 bytes; retain consent!'
+        before = {'brief:0': result(rehearsal.normalize(original))}
+        for changed in ('warning: payload is 20  bytes; retain consent!',
+                        'warning: payload is 20\tbytes; retain consent!',
+                        'warning: payload is 20 byte; retain consent!',
+                        'warning: payload is 20 KiB; retain consent!',
+                        'warning: payload is 20 bytes; revoke consent!'):
+            with self.subTest(changed=changed):
+                after = {'brief:0': result(rehearsal.normalize(changed))}
+                self.assertIn('brief:0: brief warning disappeared', rehearsal.compare(before, after))
+        self.assertEqual(rehearsal.normalize(original),
+                         rehearsal.normalize(original.replace('10 bytes', '25 bytes')))
+
+    def test_size_normalization_preserves_internal_line_separators(self):
+        for separator in ('\r\n', '\r', '\v', '\u2028'):
+            with self.subTest(separator=repr(separator)):
+                text = 'warning: 10 bytes' + separator + 'retain consent!'
+                self.assertEqual(text.replace('10 bytes', '<size> bytes'), rehearsal.normalize(text))
+
     def test_non_warning_byte_counts_are_not_normalized(self):
         self.assertNotEqual(rehearsal.normalize('payload: 10 bytes'), rehearsal.normalize('payload: 20 bytes'))
 

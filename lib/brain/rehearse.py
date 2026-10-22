@@ -436,8 +436,8 @@ def normalize(text, roots=()):
     text = re.sub(r'\b\d{4}-\d\d-\d\d[ T]\d\d:\d\d(?::\d\d(?:\.\d+)?)?(?:Z| ?[+-]\d\d:\d\d)?', '<time>', text)
     # Path substitutions happen after brief measurement. Different copy paths
     # therefore change byte totals even when the warning itself is unchanged.
-    text = '\n'.join(normalize_warning(line) if is_warning(line) else line
-                     for line in text.splitlines())
+    text = ''.join(normalize_warning(line) if is_warning(line) else line
+                   for line in text.splitlines(keepends=True))
     # JSON object ordering must not create a diff; list ordering remains significant.
     try:
         return json.dumps(json.loads(text), sort_keys=True, ensure_ascii=False)
@@ -450,7 +450,9 @@ def is_warning(line):
 
 
 def normalize_warning(line):
-    return re.sub(r'\b\d+(?:\.\d+)?\s*(bytes?|[KMGT]i?B)\b', r'<size> \1', line, flags=re.I)
+    # Replace only the number, preserving its unit, spacing and line endings.
+    return re.sub(r'(?<![\w.+-])\d+(?:\.\d+)?(?=[ \t]*(?:bytes?|[KMGT]i?B)\b)',
+                  '<size>', line, flags=re.I)
 
 
 def expected_change_notices(inst, nodes, baseline, candidate):
