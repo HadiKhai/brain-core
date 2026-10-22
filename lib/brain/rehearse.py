@@ -696,12 +696,6 @@ def pin():
     # Every Python helper inherits this supervisor. Detached wake drains remain
     # in the command's group, and each Python parent reaps its children on exit.
     (bootstrap / 'sitecustomize.py').write_text('''import atexit, os, subprocess
-if os.environ.get('BRAIN_REHEARSAL_NOW'):
-    try:
-        from rehearsal_clock import pin
-        pin()
-    except BaseException:
-        os._exit(70)
 children = []
 original = subprocess.Popen
 class SupervisedPopen(original):
@@ -719,6 +713,13 @@ def reap():
                 pass
             child.wait(timeout=5)
 atexit.register(reap)
+try:
+    import rehearsal_audit
+    if os.environ.get('BRAIN_REHEARSAL_NOW'):
+        from rehearsal_clock import pin
+        pin()
+except BaseException:
+    os._exit(70)
 ''')
     audit = lane / 'audit.py'
     violation = home / 'write-attempt'
@@ -727,11 +728,9 @@ atexit.register(reap)
     clock_bound.unlink(missing_ok=True)
     # OS sandboxing is the enforcement boundary. The audit hook additionally
     # observes Python attempts even when candidate code catches a denied write.
-    audit.write_text('''import os, pathlib, runpy, sys
-boundary = pathlib.Path(sys.argv[1]).resolve()
-marker = pathlib.Path(sys.argv[2])
-entry = sys.argv[3]
-sys.argv = sys.argv[3:]
+    (bootstrap / 'rehearsal_audit.py').write_text('''import os, pathlib, sys
+boundary = pathlib.Path(os.environ['BRAIN_REHEARSAL_BOUNDARY']).resolve()
+marker = pathlib.Path(os.environ['BRAIN_REHEARSAL_MARKER'])
 busy = False
 def audit(event, args):
     global busy
@@ -759,8 +758,12 @@ def audit(event, args):
     finally:
         busy = False
 sys.addaudithook(audit)
-# Repeat explicitly: Python reports sitecustomize errors but continues startup.
-# A broken clock binding must fail the probe instead of silently using wall time.
+''')
+    audit.write_text('''import os, pathlib, runpy, sys
+entry = sys.argv[3]
+sys.argv = sys.argv[3:]
+# The startup hook installs supervision and auditing before lane-owned imports.
+import rehearsal_audit
 if os.environ.get('BRAIN_REHEARSAL_NOW'):
     from rehearsal_clock import pin
     pin()
@@ -771,7 +774,8 @@ runpy.run_path(entry, run_name='__main__')
     # provider credentials, registries, Python startup hooks or Git overrides.
     env = {k: v for k, v in os.environ.items() if k in ('PATH', 'LANG', 'LC_ALL', 'TZ')}
     env.update(HOME=str(home), TMPDIR=str(tmp), BRAIN_CONFIG=str(home / 'brains.json'),
-               PYTHONPATH=str(bootstrap),
+               PYTHONPATH=str(bootstrap), BRAIN_REHEARSAL_BOUNDARY=str(lane),
+               BRAIN_REHEARSAL_MARKER=str(violation),
                XDG_CONFIG_HOME=str(home / '.config'), BRAIN_ROOT=str(brain),
                BRAIN_NO_REEXEC='1', BRAIN_NO_UPDATE_CHECK='1', PYTHONDONTWRITEBYTECODE='1',
                BRAIN_USAGE_TEST_NO_KEYCHAIN='1', GIT_CONFIG_GLOBAL='/dev/null', GIT_CONFIG_NOSYSTEM='1',

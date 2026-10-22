@@ -341,7 +341,8 @@ class CandidateNotices(RehearsalFixture):
             'read them: brain changes root, then brain changes root --seen'))
         fixture_node = dict(id='root', local={}, dir=self.root, fm={})
         inst = SimpleNamespace(root=self.root, local={'changes_seen': {'root': ['2026-01-01: Existing entry']}},
-                               nodes=lambda: [fixture_node])
+                               nodes=lambda: [fixture_node],
+                               now_dt=lambda: datetime.datetime(2035, 1, 3, tzinfo=datetime.timezone.utc))
         node = dict(id='engine', external=True, home_path=self.home)
         def run(items):
             with mock.patch.dict(os.environ, self.env), \
@@ -435,6 +436,28 @@ else:
         self.assertTrue(json.loads(after['text'])[0]['escalated'])
         self.assertEqual(36.0, json.loads(after['text'])[0]['age_hours'])
         self.assertIn('due:0: new due items', rehearsal.compare({'due:0': before}, {'due:0': after}))
+
+    def import_write_attempt(self, helper_only):
+        outside = self.tmp / 'outside-note'
+        outside.write_text('unchanged')
+        for core in (self.old, self.new):
+            path = core / 'lib/brain/instance.py'
+            path.write_text(path.read_text() + '\nimport sys\nif ' +
+                ('sys.argv[0] == "-c"' if helper_only else 'True') + ':\n' +
+                '    try:\n        open(' + repr(str(outside)) + ', "w").write("attempt")\n' +
+                '    except OSError:\n        pass\n')
+        before, after = self.pair('age')
+        self.assertEqual('unchanged', outside.read_text())
+        for row in (before, after):
+            self.assertEqual(0, row['code'], row['text'])
+            self.assertGreater(row['unexpected'], 0)
+        self.assertIn('due:0: unexpected writes', rehearsal.compare({'due:0': before}, {'due:0': after}))
+
+    def test_clock_import_caught_write_is_audited(self):
+        self.import_write_attempt(False)
+
+    def test_helper_clock_import_caught_write_is_audited(self):
+        self.import_write_attempt(True)
 
     def test_clock_binding_failure_refuses_instead_of_becoming_shared_baseline_failure(self):
         for core in (self.old, self.new):
