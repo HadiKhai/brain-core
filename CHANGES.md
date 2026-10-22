@@ -5,6 +5,26 @@ upgrading. `brain changes <node>` shows the entries this node's coordinator hasn
 `brain due <node>` lists them until `brain changes <node> --seen`. Entry headings are
 `## <date>: <title>`; once released, a heading never changes.
 
+## 2026-10-22: Stop hooks distinguish new events from old notes
+
+For agents:
+- Future-date diagnostics inspect `Updated:` lines and timestamps at the start of
+  dated headings or list entries. Planned dates in prose, fenced examples, comments
+  and generated facts no longer warn; future recorded entries still do.
+- An old judgement timestamp alone no longer holds a read-only turn at stop.
+  Changed notes, future `Updated:` times, upgrade notices and question capture keep
+  their existing handling.
+- Stop reminders name the changed hand-back and its state, inbox entry count or
+  job ledger. Empty records and unchanged runtime bookkeeping do not trigger a
+  new reminder. Fresh hand-back timestamps and changed completion data still do.
+  Hook-local content hashes deduplicate diagnostics without changing facts or
+  readiness evidence.
+
+After upgrading:
+- No migration is needed. Keep entry timestamps at the start of dated headings or
+  list entries, and keep planned dates in their descriptive text. Coordinators
+  still handle real job/inbox events and refresh generated facts when needed.
+
 ## 2026-10-21: Check note paths in their home and exempt study setup
 
 For agents:

@@ -118,6 +118,23 @@ class Housekeeping(Scenario):
 
 
 class FutureTimestamps(Scenario):
+    def test_hygiene_extension_plans_and_examples_are_not_entry_timestamps(self):
+        r = self.init('maple')
+        (r / 'decisions.md').write_text(
+            '## 2020-01-01 10:00: Recorded decision\n'
+            'Deliver by 2999-01-01; discussed 2999-01-02 as an alternative.\n'
+            '- Planned review: 2999-01-03\n'
+            '## Schedule for 2999-01-04\n'
+            '```md\n## 2999-01-05 10:00: Example only\n```\n'
+            '<!--\n## 2999-01-06 10:00: Comment example\n-->\n'
+            '## 2999-01-07 10:00: Future recorded decision\n'
+            '- 2999-01-08 from worker: Future inbox-style entry\n')
+        out = self.b(r, 'check')
+        for number in range(2, 11):
+            self.assertNotIn('decisions.md:' + str(number) + ': future', out)
+        self.assertIn('decisions.md:11: future dated entry', out)
+        self.assertIn('decisions.md:12: future dated entry', out)
+
     def test_five_minute_skew_uses_elapsed_time_across_dst(self):
         import datetime as dt
         from core_loader import SourceFileLoader
