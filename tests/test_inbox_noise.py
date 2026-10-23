@@ -186,6 +186,7 @@ class InboxNoise(Scenario):
         with mock.patch.object(self.inst, 'now_dt', return_value=instant):
             alerts = self.m.runaway_jobs(self.inst, owner)
         self.assertEqual(len(alerts), 1)
+        self.assertIn('open 36.0 h, over twice the median of 1.0 h', alerts[0])
         self.assertIn('over its 10M-token budget', alerts[0])
         self.assertIn('over twice the median', alerts[0])
         # Human rollups and ancestors cannot act on the child's job advice.
