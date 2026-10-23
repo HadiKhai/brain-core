@@ -6,6 +6,8 @@ import io
 import json
 import os
 import shutil
+import stat
+import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -17,6 +19,111 @@ from scenario import CORE, Scenario
 
 
 class FrozenInputs(RehearsalFixture):
+    def test_plain_copy_and_native_copy_keep_independent_inodes(self):
+        source = self.tmp / 'source'
+        source.mkdir()
+        (source / 'note').write_text('original')
+        os.link(source / 'note', source / 'second')
+        original = rehearsal.snapshot(source)
+        for platform, name in [('linux', 'plain'), (sys.platform, 'native')]:
+            dest = self.tmp / name
+            with mock.patch.object(rehearsal.sys, 'platform', platform):
+                rehearsal.copy_tree(source, dest)
+            self.assertNotEqual((source / 'note').stat().st_ino, (dest / 'note').stat().st_ino)
+            self.assertNotEqual((dest / 'note').stat().st_ino, (dest / 'second').stat().st_ino)
+            (dest / 'note').write_text('private mutation')
+            self.assertEqual('original', (dest / 'second').read_text())
+            self.assertEqual(original, rehearsal.snapshot(source))
+        self.assertFalse(list(self.tmp.glob('.rehearse-copy-*')))
+
+    def test_macos_attempts_copy_on_write_then_falls_back_without_live_writes(self):
+        source = self.repo(self.tmp / 'source', {'note': 'original'})
+        (source / 'alias').symlink_to(source / 'note')
+        original = rehearsal.snapshot(source)
+        dest = self.tmp / 'private/copy'
+        dest.parent.mkdir()
+        def unavailable(args, **kwargs):
+            self.assertEqual('/bin/cp', args[0])
+            self.assertIn('-c', args)
+            partial = Path(args[-1])
+            partial.mkdir()
+            (partial / 'incomplete').write_text('partial clone')
+            return subprocess.CompletedProcess(args, 1, b'', b'unsupported')
+        with mock.patch.object(rehearsal.sys, 'platform', 'darwin'), \
+                mock.patch.object(rehearsal.subprocess, 'run', side_effect=unavailable) as cp:
+            rehearsal.copy_tree(source, dest)
+        cp.assert_called_once()
+        self.assertFalse((dest / 'incomplete').exists())
+        self.assertEqual('original', (dest / 'alias').read_text())
+        (dest / 'note').write_text('candidate write')
+        self.assertEqual(original, rehearsal.snapshot(source))
+        self.assertEqual([dest], list(dest.parent.iterdir()))
+
+    def test_existing_destination_is_never_removed(self):
+        source = self.repo(self.tmp / 'source')
+        dest = self.tmp / 'existing'
+        dest.mkdir()
+        (dest / 'keep').write_text('untouched')
+        with self.assertRaises(FileExistsError):
+            rehearsal.copy_tree(source, dest)
+        self.assertEqual('untouched', (dest / 'keep').read_text())
+
+    def test_successful_output_change_still_fails(self):
+        flags = rehearsal.compare({'ready:0:0': result('ready')},
+                                  {'ready:0:0': result('not ready: changed reason')})
+        self.assertIn('ready:0:0: ready became not ready', flags)
+
+    def test_parsed_ui_ready_reason_change_fails(self):
+        def ui(reason):
+            return result(json.dumps({'nodes': [{'id': 'engine', 'worktrees': [
+                {'branch': 'job', 'ready': {'ready': False, 'reasons': [reason], 'packet': None}}]}]}))
+        flags = rehearsal.compare({'ui': ui('existing reason')}, {'ui': ui('candidate regression')})
+        self.assertIn('ui: readiness changed', flags)
+
+    def test_parsed_ui_key_loss_and_invalid_output_fail(self):
+        for new in ('{}', 'not JSON'):
+            with self.subTest(new=new):
+                flags = rehearsal.compare({'ui': result('{"nodes": []}')}, {'ui': result(new)})
+                self.assertTrue(flags)
+
+    def test_local_diff_retains_newline_only_delta_and_refuses_public_directory(self):
+        inst = SimpleNamespace(root=self.tmp / 'source')
+        node = dict(home_path=self.tmp / 'candidate')
+        directory = self.tmp / 'local-only'
+        row = dict(stdout='same\n', stderr='', code=0, timeout=False)
+        rehearsal.write_local_diff(inst, node, directory, {'check': row},
+                                   {'check': dict(row, stdout='same')})
+        raw = next(directory.glob('*.diff')).read_text()
+        self.assertIn('No newline at end of stdout', raw)
+        directory.chmod(0o755)
+        with self.assertRaises(rehearsal.RehearsalError):
+            rehearsal.write_local_diff(inst, node, directory, {}, {})
+
+
+    def test_normalized_differences_are_named_without_publishing_values(self):
+        outputs = []
+        for side, date, size in [('before', '2035-01-01 12:00', '10'),
+                                 ('after_', '2035-01-02 12:00', '20')]:
+            trace = {}
+            raw = 'warning: /private/' + side + ' ' + date + ' ' + size + ' bytes'
+            text = rehearsal.normalize(raw, ['/private/' + side], trace=trace)
+            outputs.append({'brief:0': dict(result(text), normalization_tokens=trace), 'hook': result()})
+        outcome = self.run_rehearsal(outputs=outputs)
+        self.assertTrue(outcome['passed'], outcome['regressions'])
+        self.assertEqual([dict(command='brief:0', patterns=['copy-paths', 'timestamps', 'warning-byte-sizes'])],
+                         outcome['normalized_differences'])
+        self.assertNotIn('/private/', json.dumps(outcome))
+
+    def test_json_encoding_difference_is_named(self):
+        outputs = []
+        for raw in ('{"b": 2, "a": 1}', '{"a":1,"b":2}'):
+            trace = {}
+            text = rehearsal.normalize(raw, trace=trace)
+            outputs.append({'ui': dict(result(text), normalization_tokens=trace), 'hook': result()})
+        outcome = self.run_rehearsal(outputs=outputs)
+        self.assertTrue(outcome['passed'], outcome['regressions'])
+        self.assertEqual([dict(command='ui', patterns=['json-encoding'])], outcome['normalized_differences'])
+
     def test_snapshot_records_one_clock_before_lanes(self):
         clock = datetime.datetime(2035, 1, 2, 12, 0, tzinfo=datetime.timezone.utc)
         seen = []
@@ -513,6 +620,108 @@ class CandidateNotices(RehearsalFixture):
 
 @unittest.skipUnless(sys.platform == 'darwin', 'requires macOS OS sandbox')
 class FrozenClock(Scenario):
+    def prepare_private_fixture(self):
+        from brain.instance import Instance
+        self.root = self.init('sample')
+        self.home = self.tmp / 'diagnostic-candidate'
+        (self.home / 'bin').mkdir(parents=True)
+        self.fixture = '''import os, sys
+if sys.argv[1] == 'due':
+    print('[]')
+elif sys.argv[1] == 'ui':
+    print('{}')
+else:
+    print('PREFIXinvented-canary: ' + sys.argv[1] + ' MODE')
+'''
+        (self.home / 'bin/brain').write_text(self.fixture.replace('MODE', 'baseline').replace('PREFIX', ''))
+        (self.home / 'lib/brain').mkdir(parents=True)
+        (self.home / 'lib/brain/__init__.py').write_text('')
+        (self.home / 'lib/brain/instance.py').write_text('class Instance:\n    pass\n')
+        self.git('init', '-q', '-b', 'main', cwd=self.home)
+        self.git('add', '.', cwd=self.home)
+        self.git('commit', '-qm', 'fixture', cwd=self.home)
+        self.b(self.root, 'new', 'engine', '--title', 'Engine', '--home', str(self.home))
+        self.b(self.root, 'wt', 'add', 'engine', 'job')
+        (self.root / 'never-name.txt').write_text('invented-canary\n')
+        (self.root / 'core/bin/brain').write_text(self.fixture.replace('MODE', 'baseline').replace('PREFIX', ''))
+        self.inst = Instance(self.root)
+        self.node = self.inst.node('engine')
+        self.evidence = self.tmp / 'workbench/scratch/rehearse/evidence.json'
+
+    def publish_private_diff(self, passed=True):
+        printed = io.StringIO()
+        with mock.patch.dict(os.environ, self.env), \
+                mock.patch.object(rehearsal._m_nodes, 'find_root', return_value=self.root), \
+                mock.patch.object(rehearsal, 'evidence_path', return_value=self.evidence), \
+                contextlib.redirect_stdout(printed), contextlib.redirect_stderr(printed):
+            if passed:
+                rehearsal.cmd_rehearse(SimpleNamespace(id='engine', branch='job'))
+            else:
+                with self.assertRaises(SystemExit) as caught:
+                    rehearsal.cmd_rehearse(SimpleNamespace(id='engine', branch='job'))
+                self.assertEqual(1, caught.exception.code)
+        return printed.getvalue()
+
+    def test_raw_diff_is_private_external_and_never_published(self):
+        self.prepare_private_fixture()
+        worktree = self.tmp / 'diagnostic-candidate-work/worktrees/job'
+        (worktree / 'bin/brain').write_text(self.fixture.replace('MODE', 'candidate').replace('PREFIX', '✗ '))
+        self.git('commit', '-qam', 'candidate regression', cwd=worktree)
+        original = rehearsal.snapshot(self.root)
+        printed = self.publish_private_diff(passed=False)
+        evidence = self.evidence.read_text()
+        files = list((self.evidence.parent / 'local-only').glob('*.diff'))
+        self.assertEqual(1, len(files))
+        raw = files[0].read_text()
+        self.assertIn('-invented-canary: check baseline', raw)
+        self.assertIn('+✗ invented-canary: check candidate', raw)
+        self.assertNotIn('invented-canary', printed + evidence)
+        self.assertNotIn(str(files[0]), printed + evidence)
+        self.assertEqual(0o600, stat.S_IMODE(files[0].stat().st_mode))
+        self.assertEqual(0o700, stat.S_IMODE(files[0].parent.stat().st_mode))
+        self.assertEqual(original, rehearsal.snapshot(self.root))
+        self.assertFalse(json.loads(evidence)['passed'])
+
+    def test_default_lanes_are_private_and_live_commit_does_not_change_result(self):
+        self.prepare_private_fixture()
+        original = rehearsal.snapshot(self.root)
+        lane = rehearsal.run_lane
+        seen = []
+        def inspect(source, core, folder, nodes, commands):
+            seen.append((source, folder))
+            self.assertNotEqual(self.root, source)
+            self.assertEqual(source.parent, folder.parent)
+            if len(seen) == 1:
+                self.assertEqual(original, rehearsal.snapshot(self.root))
+                (self.root / 'live-only').write_text('concurrent writer')
+                self.git('add', 'live-only', cwd=self.root)
+                self.git('commit', '-qm', 'live-only drift', cwd=self.root)
+            return lane(source, core, folder, nodes, commands)
+        with mock.patch.object(rehearsal, 'run_lane', side_effect=inspect):
+            printed = self.publish_private_diff()
+        self.assertIn('rehearse: passed', printed)
+        self.assertEqual(2, len(seen))
+        self.assertEqual(seen[0][0], seen[1][0])
+        self.assertTrue(all(not path.exists() for pair in seen for path in pair))
+        self.assertEqual('concurrent writer', (self.root / 'live-only').read_text())
+
+    def test_linked_or_repository_local_diff_directory_refuses(self):
+        self.prepare_private_fixture()
+        # A sidecar must never follow a link or live within any repository.
+        for target in (self.root, self.home, CORE):
+            with self.subTest(target=target):
+                outside = rehearsal.snapshot(target)
+                with self.assertRaises(rehearsal.RehearsalError):
+                    rehearsal.write_local_diff(self.inst, self.node, target / 'local-only', {}, {})
+                self.assertEqual(outside, rehearsal.snapshot(target))
+        self.evidence.parent.mkdir(parents=True)
+        (self.evidence.parent / 'local-only').symlink_to(self.root, target_is_directory=True)
+        outside = rehearsal.snapshot(self.root)
+        with self.assertRaises(rehearsal.RehearsalError):
+            rehearsal.write_local_diff(self.inst, self.node, self.evidence.parent / 'local-only', {}, {})
+        self.assertEqual(outside, rehearsal.snapshot(self.root))
+
+
     def setUp(self):
         super().setUp()
         self.source = self.repo(self.tmp / 'source', {'instance.md': '---\ntimezone: UTC\n---\n',
@@ -564,6 +773,51 @@ else:
         self.assertFalse(fields['escalated'])
         # Numeric epoch survives path/time normalization, proving helper pinning too.
         self.assertEqual(self.clock.timestamp(), fields['child_epoch'])
+
+    def test_git_relative_cutoffs_in_parent_and_helper_use_the_snapshot_clock(self):
+        script = '''import json, subprocess, sys
+cutoff = subprocess.check_output(['git', 'rev-parse', '--since=24 hours ago'], text=True, stderr=subprocess.PIPE).strip()
+child = subprocess.check_output([sys.executable, '-B', '-c',
+    "import subprocess; print(subprocess.check_output(['git', 'rev-parse', '--since=24 hours ago'], text=True, stderr=subprocess.PIPE).strip())"], text=True).strip()
+print(json.dumps(dict(cutoff=cutoff, child=child)))
+'''
+        for core in (self.old, self.new):
+            (core / 'bin/brain').write_text(script)
+        before, after = self.pair('cutoff')
+        expected = '--max-age=' + str(int(self.clock.timestamp()) - 86400)
+        for row in (before, after):
+            self.assertEqual(0, row['code'], row['text'])
+            self.assertEqual(dict(cutoff=expected, child=expected), json.loads(row['text']))
+
+    def test_data_wall_clocks_are_frozen_but_lock_and_elapsed_clocks_stay_real(self):
+        script = '''import json, time
+from brain import instance, ui, jobs, usage
+print(json.dumps(dict(ui=ui.time.time(), jobs=jobs.time.time(), usage=usage.time.time(),
+    lock=instance.time.time(), elapsed=ui.time.monotonic(), monotonic=time.monotonic())))
+'''
+        for core in (self.old, self.new):
+            (core / 'bin/brain').write_text(script)
+        before, after = self.pair('clocks')
+        for row in (before, after):
+            self.assertEqual(0, row['code'], row['text'])
+            fields = json.loads(row['text'])
+            for key in ('ui', 'jobs', 'usage'):
+                self.assertEqual(self.clock.timestamp(), fields[key])
+            self.assertNotEqual(self.clock.timestamp(), fields['lock'])
+            self.assertGreaterEqual(fields['monotonic'], fields['elapsed'])
+            self.assertLess(fields['monotonic'] - fields['elapsed'], 1)
+
+    def test_unsupported_git_clock_refuses_before_probing(self):
+        run = rehearsal.subprocess.run
+        def unsupported(args, **kwargs):
+            if '--since=24 hours ago' in args:
+                return rehearsal.subprocess.CompletedProcess(args, 0, '--max-age=1\n', '')
+            return run(args, **kwargs)
+        with mock.patch.object(rehearsal.subprocess, 'run', side_effect=unsupported), \
+                mock.patch.object(rehearsal.subprocess, 'Popen', wraps=rehearsal.subprocess.Popen) as popen:
+            with self.assertRaisesRegex(rehearsal.RehearsalError, 'Git frozen clock binding failed'):
+                self.pair('age')
+        self.assertFalse(any('audit.py' in str(call) for call in popen.call_args_list))
 
     def test_changed_escalation_threshold_still_flags_a_real_regression(self):
         path = self.new / 'lib/brain/status.py'

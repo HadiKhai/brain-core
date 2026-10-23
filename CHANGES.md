@@ -24,6 +24,28 @@ After upgrading:
   node to change the default 15-minute threshold (minimum one minute). No host
   service change is needed; the existing watcher and wake binding deliver it.
 
+## 2026-10-23: Rehearse clones inputs and keeps private local diffs
+
+For agents:
+- Rehearsal copies use APFS copy-on-write when available, with independent plain
+  copies elsewhere. Installed and candidate probes share one frozen snapshot.
+- Git relative date cutoffs use the same captured clock as the instance and its
+  helpers, as do data clocks for UI activity, usage and cache ages. Lock deadlines
+  and elapsed timers stay live. A Git that cannot bind the clock refuses rehearsal.
+- Parsed UI readiness values and reasons, and the top-level UI key set, are
+  compared alongside the existing error, due-item, ready and brief-warning checks.
+- Evidence names differences handled by the existing copy-path, timestamp,
+  warning-byte-size and JSON-encoding normalizations. No volatile UI keys are
+  normalized away.
+- Raw stdout/stderr diffs stay in owner-only files under `local-only/` beside the
+  workbench's redacted rehearsal evidence, outside the instance and repositories.
+  Raw content and sidecar paths are never printed or included in evidence.
+
+After upgrading:
+- Retry rehearsals affected by live writes or relative Git date cutoffs. Inspect
+  the local sidecar to attribute regressions; keep those files on this machine.
+  The OS write/network sandbox remains required.
+
 ## 2026-10-23: Readiness uses the recorded verify environment
 
 For agents:

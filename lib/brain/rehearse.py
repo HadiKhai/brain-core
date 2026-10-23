@@ -2,17 +2,18 @@
 
 The macOS sandbox is a prerequisite, not an optional best-effort safeguard. Other
 platforms refuse until they have an equivalent OS-enforced write/network boundary.
-Only counts, fixed labels, digests and redacted error diagnostics leave the
-private temporary directory.
+Published evidence is redacted. Optional raw diffs stay in a private local sidecar.
 """
 import collections
 import datetime
+import difflib
 import hashlib
 import json
 import os
 import re
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -250,8 +251,20 @@ def stability_snapshot(root):
 
 
 def copy_tree(source, dest):
-    # copy2 creates independent inodes, including for source hard links.
-    shutil.copytree(source, dest, symlinks=True)
+    if dest.exists() or dest.is_symlink():
+        raise FileExistsError(str(dest))
+    if sys.platform == 'darwin':
+        # Unsupported cloning can leave a partial tree. Only clean up the tree
+        # inside this operation's own temporary directory, never its destination.
+        with tempfile.TemporaryDirectory(prefix='.rehearse-copy-', dir=dest.parent) as td:
+            cloned = Path(td) / 'tree'
+            r = subprocess.run(['/bin/cp', '-c', '-p', '-R', '-P', str(source), str(cloned)],
+                               capture_output=True)
+            if not r.returncode:
+                cloned.rename(dest)
+    if not dest.exists():
+        # Independent inodes, including for source hard links; never hardlink.
+        shutil.copytree(source, dest, symlinks=True)
     relocate_links(source, dest)
     capture_gitfiles(source, dest)
 
@@ -432,17 +445,38 @@ def validate_git_objects(root):
         raise RehearsalError('live brain moved while copying; retry with a stable source')
 
 
-def normalize(text, roots=()):
+OUTPUT_NORMALIZATION_PATTERNS = {
+    'timestamps': r'\b\d{4}-\d\d-\d\d[ T]\d\d:\d\d(?::\d\d(?:\.\d+)?)?(?:Z| ?[+-]\d\d:\d\d)?',
+    'warning-byte-sizes': r'(?<![\w.+-])\d+(?:\.\d+)?(?=[ \t]*(?:bytes?|[KMGT]i?B)\b)',
+}
+
+# These modules read wall time as data (cache ages, activity, policy windows).
+# Instance lock deadlines retain real time; all monotonic/elapsed timers do too.
+FROZEN_WALL_CLOCK_MODULES = ('check', 'hosts', 'jobs', 'machine', 'spend', 'ui', 'upgrade', 'usage')
+
+
+def normalize(text, roots=(), trace=None):
+    def record(name, values):
+        if trace is not None and values:
+            trace[name] = hashlib.sha256(json.dumps(values, ensure_ascii=False).encode()).hexdigest()
+    paths = []
     for root in sorted(map(str, roots), key=len, reverse=True):
+        paths.extend([root] * text.count(root))
         text = text.replace(root, '<copy>')
-    text = re.sub(r'\b\d{4}-\d\d-\d\d[ T]\d\d:\d\d(?::\d\d(?:\.\d+)?)?(?:Z| ?[+-]\d\d:\d\d)?', '<time>', text)
+    record('copy-paths', paths)
+    record('timestamps', re.findall(OUTPUT_NORMALIZATION_PATTERNS['timestamps'], text))
+    text = re.sub(OUTPUT_NORMALIZATION_PATTERNS['timestamps'], '<time>', text)
     # Path substitutions happen after brief measurement. Different copy paths
     # therefore change byte totals even when the warning itself is unchanged.
+    record('warning-byte-sizes', [token for line in text.splitlines() if is_warning(line)
+           for token in re.findall(OUTPUT_NORMALIZATION_PATTERNS['warning-byte-sizes'], line, re.I)])
     text = ''.join(normalize_warning(line) if is_warning(line) else line
                    for line in text.splitlines(keepends=True))
     # JSON object ordering must not create a diff; list ordering remains significant.
     try:
-        return json.dumps(json.loads(text), sort_keys=True, ensure_ascii=False)
+        canonical = json.dumps(json.loads(text), sort_keys=True, ensure_ascii=False)
+        record('json-encoding', text)
+        return canonical
     except ValueError:
         return text.strip()
 
@@ -453,7 +487,7 @@ def is_warning(line):
 
 def normalize_warning(line):
     # Replace only the number, preserving its unit, spacing and line endings.
-    return re.sub(r'(?<![\w.+-])\d+(?:\.\d+)?(?=[ \t]*(?:bytes?|[KMGT]i?B)\b)',
+    return re.sub(OUTPUT_NORMALIZATION_PATTERNS['warning-byte-sizes'],
                   '<size>', line, flags=re.I)
 
 
@@ -565,6 +599,29 @@ def diagnostic_line(line, terms, identifiers=()):
     return redact_text(line, terms)
 
 
+def ui_readiness(value):
+    """Compare the parsed readiness contract, including reasons on blocked jobs."""
+    rows = {}
+    nodes = value.get('nodes', [])
+    if not isinstance(nodes, list):
+        raise ValueError('invalid UI nodes')
+    for node in nodes:
+        if not isinstance(node, dict) or not isinstance(node.get('worktrees', []), list):
+            raise ValueError('invalid UI node')
+        for worktree in node.get('worktrees', []):
+            if not isinstance(worktree, dict):
+                raise ValueError('invalid UI worktree')
+            ready = worktree.get('ready')
+            if ready is not None and not isinstance(ready, dict):
+                raise ValueError('invalid UI readiness')
+            identity = json.dumps([node.get('id'), worktree.get('branch')], sort_keys=True)
+            if identity in rows:
+                raise ValueError('duplicate UI worktree')
+            rows[identity] = ({k: ready.get(k) for k in ('ready', 'reasons')}
+                              if ready is not None else None)
+    return rows
+
+
 def compare(before, after, expected_changes=None):
     """Return content-free regression labels; exact output stays in memory only."""
     flags = []
@@ -603,6 +660,17 @@ def compare(before, after, expected_changes=None):
                                                       if is_warning(l))
             if warnings(old) - warnings(new):
                 flags.append(key + ': brief warning disappeared')
+        if key == 'ui' and old['code'] == new['code'] == 0:
+            try:
+                previous, current = json.loads(old['text']), json.loads(new['text'])
+                if not isinstance(previous, dict) or not isinstance(current, dict):
+                    raise ValueError('invalid UI object')
+                if previous.keys() != current.keys():
+                    flags.append('ui: output keys changed')
+                if ui_readiness(previous) != ui_readiness(current):
+                    flags.append('ui: readiness changed')
+            except (ValueError, TypeError):
+                flags.append('ui: invalid output')
         if new['unexpected']:
             flags.append(key + ': unexpected writes')
         if key == 'hook' and new['seconds'] > 1:
@@ -691,7 +759,19 @@ def allowed_write(rel, kind):
     return False
 
 
-def run_command(core, lane, args, kind, roots, terms=(), cache=None):
+def bind_git_executable(env):
+    # Apple's /usr/bin/git is a developer-tool launcher. Its first use under a
+    # sandbox can run xcodebuild and wait on denied system services. Resolve the
+    # actual selected Git before admission; probes and helpers still sandbox it.
+    if sys.platform == 'darwin' and shutil.which('git', path=env.get('PATH')) == '/usr/bin/git':
+        r = subprocess.run(['/usr/bin/xcrun', '--find', 'git'], capture_output=True, text=True, timeout=5)
+        git = Path(r.stdout.strip())
+        if r.returncode or not git.is_absolute() or not git.is_file():
+            raise RehearsalError('Git executable unavailable')
+        env['PATH'] = str(git.parent) + os.pathsep + env.get('PATH', '')
+
+
+def run_command(core, lane, args, kind, roots, terms=(), cache=None, raw_output=None):
     brain = lane / 'brain'
     home = lane / 'home'
     home.mkdir(exist_ok=True)
@@ -706,9 +786,9 @@ def run_command(core, lane, args, kind, roots, terms=(), cache=None):
     bootstrap.mkdir(exist_ok=True)
     clock_file = lane / 'rehearse-clock'
     clock = read_clock(clock_file) if clock_file.exists() else None
-    # Bind the existing Instance clock, not status/age logic or elapsed timers.
+    # Bind input clocks, never thresholds, lock deadlines or elapsed timers.
     # Helpers inherit the same startup hook and instant as the probe itself.
-    (bootstrap / 'rehearsal_clock.py').write_text('''import datetime, os, sys
+    (bootstrap / 'rehearsal_clock.py').write_text('''import datetime, importlib, importlib.util, os, sys, time
 from pathlib import Path
 def pin():
     sys.path.insert(0, str(Path(os.environ['BRAIN_ROOT']) / 'core/lib'))
@@ -717,7 +797,19 @@ def pin():
     def now_dt(self):
         return instant.astimezone(self.zone())
     Instance.now_dt = now_dt
-''')
+    class WallClock:
+        def time(self):
+            return instant.timestamp()
+        def __getattr__(self, name):
+            return getattr(time, name)
+    wall = WallClock()
+    for name in __CLOCK_MODULES__:
+        qualified = 'brain.' + name
+        if importlib.util.find_spec(qualified) is not None:
+            module = importlib.import_module(qualified)
+            if getattr(module, 'time', None) is time:
+                module.time = wall
+'''.replace('__CLOCK_MODULES__', repr(FROZEN_WALL_CLOCK_MODULES)))
     # Every Python helper inherits this supervisor. Detached wake drains remain
     # in the command's group, and each Python parent reaps its children on exit.
     (bootstrap / 'sitecustomize.py').write_text('''import atexit, os, subprocess
@@ -817,7 +909,17 @@ runpy.run_path(entry, run_name='__main__')
                GIT_AUTHOR_NAME='Rehearsal', GIT_AUTHOR_EMAIL='rehearsal@example.invalid',
                GIT_COMMITTER_NAME='Rehearsal', GIT_COMMITTER_EMAIL='rehearsal@example.invalid')
     if clock is not None:
+        bind_git_executable(env)
         env['BRAIN_REHEARSAL_NOW'] = clock
+        epoch = int(datetime.datetime.fromisoformat(clock).timestamp())
+        env['GIT_TEST_DATE_NOW'] = str(epoch)
+        # Git parses relative --since dates itself. Prove this executable honors
+        # the reference instant; unsupported Git must refuse, not compare drift.
+        check = subprocess.run([*sandbox_prefix(lane), 'git', '-C', str(brain),
+                                'rev-parse', '--since=24 hours ago'],
+                               env=env, capture_output=True, text=True, timeout=5)
+        if check.returncode or check.stdout.strip() != '--max-age=' + str(epoch - 86400):
+            raise RehearsalError('Git frozen clock binding failed')
     before = snapshot(lane, cache)
     start = time.monotonic()
     p = subprocess.Popen([*sandbox_prefix(lane), sys.executable, '-B', str(audit), str(lane), str(violation),
@@ -844,7 +946,8 @@ runpy.run_path(entry, run_name='__main__')
         raise RehearsalError('probe frozen clock binding failed')
     # Normalize JSON escapes before redaction as well: an escaped spelling must
     # not become a protected literal after the privacy filter has run.
-    normalized = normalize(out + err, roots)
+    normalization_tokens = {}
+    normalized = normalize(out + err, roots, trace=normalization_tokens)
     text = redact_output(normalized, terms)
     # Capture safe renderings before protected-term redaction can erase a path
     # marker and strand its whitespace-separated private suffix. Only these
@@ -853,7 +956,9 @@ runpy.run_path(entry, run_name='__main__')
                          for line in normalized.splitlines() if '✗' in line}
     after = snapshot(lane, cache)
     changed = {k for k in before.keys() | after.keys() if before.get(k) != after.get(k)}
-    return {'text': text, 'error_diagnostics': error_diagnostics,
+    if raw_output is not None:
+        raw_output.append(dict(stdout=out, stderr=err, code=p.returncode, timeout=timed_out))
+    return {'text': text, 'error_diagnostics': error_diagnostics, 'normalization_tokens': normalization_tokens,
             'code': p.returncode, 'timeout': timed_out,
             'seconds': elapsed, 'unexpected': sum(not allowed_write(k, kind) for k in changed) + int(violation.exists())}
 
@@ -887,6 +992,7 @@ def run_lane(source, core, folder, nodes, commands):
     cache = {}
     mutations = {}
     terms = [t for node in nodes for t in _m_guard.never_terms(node)]
+    raw_outputs = {}
     for key, args, kind in commands:
         if kind in ('fix', 'refresh'):
             # Mutating probes get independent copies, never mask errors in later probes.
@@ -898,12 +1004,56 @@ def run_lane(source, core, folder, nodes, commands):
                 mutations[kind] = lane
         else:
             lane = folder
+        raw = []
         results[key] = run_command(lane / 'brain/core', lane, args, kind,
-                                   [lane / 'brain', folder / 'brain', source, core, folder, lane], terms, cache)
+                                   [lane / 'brain', folder / 'brain', source, core, folder, lane], terms, cache,
+                                   raw_output=raw)
+        raw_outputs[key] = raw[0]
+    # This intermediate never leaves the rehearsal's private temporary directory.
+    with (folder / 'probe-outputs.json').open('x') as stream:
+        os.fchmod(stream.fileno(), 0o600)
+        json.dump(raw_outputs, stream)
     return results
 
 
-def rehearse(inst, n, branch):
+def write_local_diff(inst, n, directory, before, after, metadata=None):
+    """Retain raw diagnostics outside every repository; never return their path."""
+    directory = Path(directory)
+    for path in (directory, *directory.parents):
+        if path.is_symlink():
+            raise RehearsalError('linked local diagnostic path refused')
+        if ((path / '.git').exists() or (path / '.git').is_symlink()
+                or ((path / 'HEAD').is_file() and (path / 'objects').is_dir())):
+            raise RehearsalError('local diagnostics must stay outside repositories')
+    for root in (inst.root, n['home_path'], Path(__file__).resolve().parents[2]):
+        root = root.resolve()
+        if directory.resolve() == root or root in directory.resolve().parents:
+            raise RehearsalError('local diagnostics must stay outside brain and core home')
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    permissions = directory.stat()
+    if permissions.st_uid != os.getuid() or stat.S_IMODE(permissions.st_mode) != 0o700:
+        raise RehearsalError('local diagnostic directory is not private')
+    fd, _ = tempfile.mkstemp(prefix='rehearse-', suffix='.diff', dir=directory)
+    with os.fdopen(fd, 'w') as stream:
+        stream.write('# Local rehearsal diff\n' + json.dumps(metadata or {}, sort_keys=True) + '\n')
+        for key in sorted(before.keys() | after.keys()):
+            def lines(value):
+                if value is None:
+                    return ['missing command\n']
+                rendered = ['exit=' + str(value['code']) + ' timeout=' + str(value['timeout']) + '\n']
+                for channel in ('stdout', 'stderr'):
+                    rendered.append(channel + ':\n')
+                    parts = value[channel].splitlines(keepends=True)
+                    if parts and not parts[-1].endswith('\n'):
+                        parts[-1] += '\n'
+                        parts.append('\\ No newline at end of ' + channel + '\n')
+                    rendered.extend(parts)
+                return rendered
+            stream.writelines(difflib.unified_diff(lines(before.get(key)), lines(after.get(key)),
+                                                  fromfile='installed/' + key, tofile='candidate/' + key))
+
+
+def rehearse(inst, n, branch, local_diff_dir=None):
     if not n['external']:
         raise RehearsalError('rehearsal needs an external core home and workbench')
     head, main = _m_verify.ready_refs(n, branch)
@@ -935,6 +1085,7 @@ def rehearse(inst, n, branch):
         prep_env = {k: v for k, v in os.environ.items() if k in ('PATH', 'LANG', 'LC_ALL', 'TZ')}
         prep_env.update(HOME=str(prep_home), TMPDIR=str(folder), GIT_CONFIG_GLOBAL='/dev/null',
                         GIT_CONFIG_NOSYSTEM='1', GIT_OPTIONAL_LOCKS='0', GIT_TERMINAL_PROMPT='0')
+        bind_git_executable(prep_env)
         prefix = sandbox_prefix(folder)
         r = subprocess.run([*prefix, 'git', '-c', 'core.hooksPath=/dev/null', 'clone', '--no-local', '--no-hardlinks',
                             '--no-checkout', '--quiet', str(n['home_path']), str(candidate)],
@@ -1003,12 +1154,26 @@ def rehearse(inst, n, branch):
                 or _m_verify.integration_parent(n, main) != integration_base):
             flags.append('candidate or integration main moved during rehearsal')
         flags.extend(delivery_regressions(delivery))
+        normalized_differences = []
+        for key in old:
+            before_tokens, after_tokens = (row.get('normalization_tokens', {}) for row in (old[key], new[key]))
+            patterns = sorted(name for name in before_tokens.keys() | after_tokens.keys()
+                              if before_tokens.get(name) != after_tokens.get(name)
+                              and (name != 'json-encoding' or old[key]['text'] == new[key]['text']))
+            if patterns:
+                normalized_differences.append(dict(command=key, patterns=patterns))
+        if local_diff_dir is not None:
+            raw = [json.loads((folder / name / 'probe-outputs.json').read_text())
+                   for name in ('before', 'after_')]
+            write_local_diff(inst, n, local_diff_dir, *raw,
+                             metadata=dict(branch=branch, head=head, frozen_now=frozen_now))
         return {'version': 1, 'node': n['id'], 'branch': branch, 'head': head, 'main': main,
                 'installed_core_commit': baseline_commit,
                 'frozen_now': frozen_now,
                 'integration_base': integration_base,
                 'checked_at': _m_jobs.stamp(frozen_inst), 'passed': not flags, 'regressions': flags,
                 'warnings': warnings, 'diagnostics': diagnostics,
+                'normalized_differences': normalized_differences,
                 'commands': len(commands), 'changed_outputs': sum(old[k]['text'] != new[k]['text'] for k in old),
                 'hook_seconds': new['hook']['seconds'],
                 'delivery': delivery,
@@ -1031,7 +1196,7 @@ def cmd_rehearse(a):
             if path.resolve() == protected or protected in path.resolve().parents:
                 raise RehearsalError('evidence must stay outside live brain and home')
         path.unlink(missing_ok=True)  # a failed repeat must not resurrect an earlier pass
-        result = rehearse(inst, n, a.branch)
+        result = rehearse(inst, n, a.branch, local_diff_dir=path.parent / 'local-only')
         if _m_guard.find_terms(json.dumps(result), [t for node in inst.nodes() for t in _m_guard.never_terms(node)]):
             raise RehearsalError('protected evidence refused')
     except (RehearsalError, OSError, subprocess.SubprocessError):
