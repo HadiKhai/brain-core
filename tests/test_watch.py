@@ -1023,17 +1023,16 @@ class Watcher(Scenario):
             sample.assert_called_once_with(self.inst)
             watch.assert_called_once_with(self.inst)
 
-    def test_corrupt_state_fails_closed_and_external_links_refused(self):
+    def test_corrupt_state_wakes_current_work_and_external_links_refused(self):
         state = self.root / '.brain/watch.json'
-        state.write_text('{broken')
-        with mock.patch.object(self.m, 'request_wake') as wake:
-            with self.assertRaises(ValueError):
+        for damaged in ('{broken', '{}'):
+            state.write_text(damaged)
+            (self.root / 'inbox.md').write_text('- new work ' + damaged + '\n')
+            with mock.patch.object(self.m, 'changes_due', return_value=[]), \
+                    mock.patch.object(self.m, 'request_wake', return_value=True) as wake:
                 self.watch()
-            wake.assert_not_called()
-        self.assertEqual(state.read_text(), '{broken')
-        state.write_text('{}')
-        with self.assertRaises(ValueError):
-            self.watch()
+                wake.assert_called()
+            self.assertEqual(state.read_text(), damaged)
         state.unlink()
         sentinel = self.tmp / 'outside'
         sentinel.write_text('sentinel')
@@ -1567,6 +1566,98 @@ class WakeNoise(Scenario):
 
     watch = Watcher.watch
     queued_machine_work = Watcher.queued_machine_work
+
+    def file_evidence(self, inst, node):
+        # These receipt fixtures have no jobs or generated status facts. Avoid
+        # unrelated Git/status display work while retaining the real inbox source.
+        return ({'jobs': [], 'worktrees': {}, 'handbacks': {}, 'inbox': self.m.inbox_lines(node)}, '', '')
+
+    def test_corrupt_wake_receipts_preserve_evidence_and_wake_new_work(self):
+        root = self.inst.node('root')
+        inbox = self.root / 'inbox.md'
+        with mock.patch.object(self.m, 'due_evidence', side_effect=self.file_evidence), \
+                mock.patch.object(self.m, 'changes_due', return_value=[]), \
+                mock.patch.object(self.m, 'core_update'), mock.patch.object(self.m, 'auto_upgrade', return_value=None), \
+                mock.patch.object(self.m, 'load', return_value=self.inst), \
+                mock.patch.object(self.m, 'wake_start'), mock.patch.object(self.m, 'WAKE_INTERVAL', 0), \
+                mock.patch.object(self.m, 'wake_send', return_value=True) as send:
+            for name in ('wake/due-seen.json', 'wake/due-episodes.json', 'watch.json'):
+                path = self.root / '.brain' / name
+                path.parent.mkdir(exist_ok=True)
+                for damaged in ('{broken', '{"version":1,"seen":"invalid","open":[]}'):
+                    with self.subTest(name=name, damaged=damaged):
+                        path.write_text(damaged)
+                        before = send.call_count
+                        inbox.write_text('- 2020-01-01 00:00 +00:00 from runtime: Host question: '
+                                         'new decision ' + str(before) + ' <!-- host-question:new -->\n')
+                        with contextlib.redirect_stdout(io.StringIO()) as output:
+                            self.m.cmd_due(argparse.Namespace(id='root', quiet=False, json=True))
+                        self.assertIn('overdue-question', output.getvalue())
+                        self.m.wake_drain(self.inst, root, once=True)
+                        self.assertEqual(send.call_count, before + 1)
+                        inbox.write_text('- another new inbox item ' + str(before) + '\n')
+                        self.watch()
+                        self.m.wake_drain(self.inst, root, once=True)
+                        self.assertEqual(send.call_count, before + 2)
+                        self.assertEqual(path.read_text(), damaged)
+            original_read = self.m.watch_read
+            def unreadable(path, default):
+                if path.name in ('watch.json', 'due-seen.json', 'due-episodes.json'):
+                    raise OSError('fabricated receipt I/O failure')
+                return original_read(path, default)
+            with mock.patch.object(self.m, 'watch_read', side_effect=unreadable):
+                before = send.call_count
+                inbox.write_text('- 2020-01-01 00:00 +00:00 from runtime: Host question: '
+                                 'new unreadable decision <!-- host-question:unreadable -->\n')
+                with contextlib.redirect_stdout(io.StringIO()):
+                    self.m.cmd_due(argparse.Namespace(id='root', quiet=False, json=True))
+                self.m.wake_drain(self.inst, root, once=True)
+                self.assertEqual(send.call_count, before + 1)
+                inbox.write_text('- new inbox work with unreadable receipts\n')
+                self.watch()
+                self.m.wake_drain(self.inst, root, once=True)
+                self.assertEqual(send.call_count, before + 2)
+
+            before = send.call_count
+            repeated = '- 2020-01-01 00:00 +00:00 from runtime: Host question: '
+            repeated += 'reopened while receipts are corrupt <!-- host-question:reopen -->\n'
+            for text, expected in ((repeated, before + 1), ('', before + 1), (repeated, before + 2)):
+                inbox.write_text(text)
+                with contextlib.redirect_stdout(io.StringIO()):
+                    self.m.cmd_due(argparse.Namespace(id='root', quiet=False, json=True))
+                self.m.wake_drain(self.inst, root, once=True)
+                self.assertEqual(send.call_count, expected)
+
+    def test_closed_episode_acknowledgements_are_pruned_and_pending_work_retained(self):
+        root = self.inst.node('root')
+        inbox = self.root / 'inbox.md'
+        line = '- 2020-01-01 00:00 +00:00 from runtime: Host question: choose blue <!-- host-question:blue -->\n'
+        with mock.patch.object(self.m, 'due_evidence', side_effect=self.file_evidence), \
+                mock.patch.object(self.m, 'changes_due', return_value=[]), \
+                mock.patch.object(self.m, 'core_update'), mock.patch.object(self.m, 'auto_upgrade', return_value=None), \
+                mock.patch.object(self.m, 'load', return_value=self.inst), \
+                mock.patch.object(self.m, 'wake_start'), mock.patch.object(self.m, 'WAKE_INTERVAL', 0), \
+                mock.patch.object(self.m, 'wake_send', return_value=True) as send:
+            for index in range(8):
+                for text in (line, ''):
+                    inbox.write_text(text)
+                    with contextlib.redirect_stdout(io.StringIO()):
+                        self.m.cmd_due(argparse.Namespace(id='root', quiet=False, json=True))
+                    self.m.wake_drain(self.inst, root, once=True)
+                self.assertEqual(send.call_count, index + 1)
+                self.assertEqual(json.loads((self.root / '.brain/wake/due-seen.json').read_text())['seen'], [])
+            self.watch()
+            self.assertEqual(json.loads((self.root / '.brain/watch.json').read_text())['seen'], [])
+            inbox.write_text('- a queued decision\n')
+            self.watch()  # durable pending inbox work remains protected after its source clears
+            pending_ids = set(json.loads((self.root / '.brain/watch.json').read_text())['seen'])
+            self.assertTrue(pending_ids)
+            inbox.write_text('')
+            self.watch()
+            self.assertEqual(set(json.loads((self.root / '.brain/watch.json').read_text())['seen']), pending_ids)
+            self.m.wake_drain(self.inst, root, once=True)
+            self.watch()
+            self.assertEqual(json.loads((self.root / '.brain/watch.json').read_text())['seen'], [])
 
     def test_due_escalation_survives_transport_expiry_with_operator_block_and_hold(self):
         self.queued_machine_work()

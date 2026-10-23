@@ -55,6 +55,9 @@ For agents:
   a new-or-changed or escalation-tier cause. No question text or node names leave
   the instance. Manual requests without item metadata carry an opaque request key.
 - Due output and machine hold episode handling retain their existing behavior.
+- Unreadable wake receipts retain their evidence and let current work wake.
+  Corrupt episode state can repeat a wake until repaired. Healthy acknowledgements
+  retain only open needs and durable pending requests, retiring closed episodes.
 
 After upgrading:
 - Keep private wake receipts. Inspect the wake reason and `.brain/wake/` delivery
