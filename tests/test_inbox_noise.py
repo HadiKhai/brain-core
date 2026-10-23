@@ -169,23 +169,38 @@ class InboxNoise(Scenario):
         owner = self.new('parent/project')
         sibling = self.new('peer')
         self.jobs(owner)
-        alerts = self.m.runaway_jobs(self.inst, owner)
+        instant = self.inst.parse_time('2020-01-03T12:00Z')
+        entry = self.tmp / 'clocked-brain.py'
+        # The parent and real CLI subprocesses must render the same elapsed age.
+        entry.write_text('import datetime, sys\n'
+                         'sys.dont_write_bytecode = True\n'
+                         'sys.path.insert(0, ' + repr(str(self.root / 'core/lib')) + ')\n'
+                         'from brain.instance import Instance\n'
+                         'Instance.now_dt = lambda self: datetime.datetime.fromisoformat('
+                         + repr(instant.isoformat()) + ')\n'
+                         'from brain.cli import main\nmain()\n')
+
+        def read_json(*args):
+            return json.loads(self.run_(list(args), cwd=self.root, brain=entry))
+
+        with mock.patch.object(self.inst, 'now_dt', return_value=instant):
+            alerts = self.m.runaway_jobs(self.inst, owner)
         self.assertEqual(len(alerts), 1)
         self.assertIn('over its 10M-token budget', alerts[0])
         self.assertIn('over twice the median', alerts[0])
         # Human rollups and ancestors cannot act on the child's job advice.
-        self.assertFalse(any(i['kind'] == 'job' for i in self.inbox()))
-        self.assertFalse(any(i['kind'] == 'job' for i in self.inbox('parent')))
-        self.assertFalse(any(i['kind'] == 'job' for i in self.inbox(sibling['id'])))
-        own = self.inbox(owner['id'])
+        self.assertFalse(any(i['kind'] == 'job' for i in read_json('inbox', 'root', '--json')))
+        self.assertFalse(any(i['kind'] == 'job' for i in read_json('inbox', 'parent', '--json')))
+        self.assertFalse(any(i['kind'] == 'job' for i in read_json('inbox', sibling['id'], '--json')))
+        own = read_json('inbox', owner['id'], '--json')
         self.assertEqual([i['text'] for i in own if i['kind'] == 'job'], alerts)
         self.assertTrue(all(i.get('informational') for i in own if i['kind'] == 'job'))
-        due = json.loads(self.b(self.root, 'due', owner['id'], '--json'))
+        due = read_json('due', owner['id'], '--json')
         self.assertEqual([i['text'] for i in due if i['kind'] == 'job'], alerts)
         self.assertTrue(all(i['informational'] for i in due if i['kind'] == 'job'))
-        root_due = json.loads(self.b(self.root, 'due', 'root', '--json'))
+        root_due = read_json('due', 'root', '--json')
         self.assertFalse(any(i['kind'] == 'job' for i in root_due))
-        state = json.loads(self.b(self.root, 'ui', '--json'))
+        state = read_json('ui', '--json')
         self.assertEqual([(i['node'], i['text']) for i in state['attention'] if i['kind'] == 'job'],
                          [(owner['id'], alert) for alert in alerts])
         self.assertFalse(any(i['kind'] == 'job' for i in state['inbox']))
