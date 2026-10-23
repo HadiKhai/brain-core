@@ -37,6 +37,18 @@ class MergeTrain(Scenario):
 
     def test_three_jobs_one_full_run_and_no_push(self):
         root, home = self.project()
+        for key in ('PORT', 'PORTS', 'PORT_LAST'):
+            self.env.pop(key, None)
+        self.b(root, 'set', 'a', 'ports=3')
+        checks = ("import os\ne = os.environ\n"
+                  "assert not any(k in e for k in ('PORT', 'PORTS', 'PORT_LAST'))\n"
+                  "assert e['BRAIN_PORTS'] == '3'\n"
+                  "assert int(e['BRAIN_PORT_LAST']) == int(e['BRAIN_PORT']) + 2\n")
+        (home / 'verify.py').write_text((home / 'verify.py').read_text() + checks)
+        self.git('commit', '-qam', 'port environment assertions', cwd=home)
+        (root / 'nodes/a/worktree-setup.sh').write_text(
+            'set -eu\n[ "${PORT+x}${PORTS+x}${PORT_LAST+x}" = "" ]\n'
+            '[ "$BRAIN_PORTS" = 3 ]\n[ "$BRAIN_PORT_LAST" = "$((BRAIN_PORT + 2))" ]\n')
         for branch in ("one", "two", "three"):
             self.job(branch)
         self.detach()
@@ -55,12 +67,22 @@ class MergeTrain(Scenario):
 
     def test_staging_cleanup_lists_bound_threads_and_host_steps(self):
         root, home = self.project()
+        self.b(root, 'set', 'a', 'verify_export_port=true')
+        self.env['PORT'] = '9200'
+        for key in ('PORTS', 'PORT_LAST'):
+            self.env.pop(key, None)
+        (home / 'verify.py').write_text((home / 'verify.py').read_text() +
+            "import os\ne = os.environ\nassert e['PORT'] == '9200'\n"
+            "assert e['PORTS'] == e['BRAIN_PORTS']\nassert e['PORT_LAST'] == e['BRAIN_PORT_LAST']\n")
+        self.git('commit', '-qam', 'opt-in environment assertions', cwd=home)
         self.job('one')
         # Only staging setup runs after this point; bind its dynamic train branch.
         status = root / 'nodes/a/status.md'
         status.write_text(status.read_text() + '\n## Active work\n\n'
                           '| Branch | Thread | PR | State |\n| --- | --- | --- | --- |\n')
         (root / 'nodes/a/worktree-setup.sh').write_text(
+            'set -eu\n[ "$PORT" = 9200 ]\n[ "$PORTS" = "$BRAIN_PORTS" ]\n'
+            '[ "$PORT_LAST" = "$BRAIN_PORT_LAST" ]\n' +
             'printf "| %s | fixture-stage-worker | - | done |\\n" "$BRANCH" >> ' +
             shlex.quote(str(status)) + '\n')
         self.detach()

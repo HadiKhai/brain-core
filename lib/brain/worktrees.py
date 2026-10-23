@@ -240,8 +240,8 @@ def cmd_wt_add(a):
         _m_common.die(_m_guard.redact(str(error) + "; worktree retained; resolve before starting a worker",
                                    _m_guard.never_terms(n)))
     if setup.exists() and not a.no_setup:
-        env = {**os.environ, "MAIN": str(home), "WORKTREE": str(path), "PORT": str(port), "PORTS": str(count),
-               "PORT_LAST": str(port + count - 1), "BRANCH": a.branch, "NODE": n["id"], "WORKBENCH": str(wb)}
+        env = _m_verify.verify_env(n, a.branch, {"path": str(path), "port": port, "ports": count})
+        env["WORKBENCH"] = str(wb)
         print("  setup: running; waiting for completion", flush=True)
         started = time.monotonic()
         r = subprocess.run(["sh", str(setup)], cwd=path, env=env, capture_output=True, text=True)

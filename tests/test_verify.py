@@ -29,6 +29,29 @@ from scenario import Scenario, AutonomyProject, shlex_quote
 
 
 class WorkerReadyPackets(Scenario):
+    def test_reserved_port_environment_defaults_opt_in_and_operator_values(self):
+        m = core_loader.SourceFileLoader('brain_port_env', str(CORE / 'bin/brain')).load_module()
+        n = {'id': 'app', 'home_path': Path('/fixture/app'), 'fm': {}}
+        for setting in (None, 'false', 'true'):
+            n['fm'] = {} if setting is None else {'verify_export_port': setting}
+            for count in (1, 3):
+                w = {'path': '/fixture/job', 'port': 4100}
+                if count != 1:
+                    w['ports'] = count
+                reserved = {'PORT': '4100', 'PORTS': str(count), 'PORT_LAST': str(4100 + count - 1)}
+                for inherited in ({}, {'PORT': '9200'}, {'PORT': '', 'PORTS': '8', 'PORT_LAST': '9207'}):
+                    with self.subTest(setting=setting, count=count, inherited=inherited):
+                        original = {**inherited, 'UNRELATED': 'kept', 'BRAIN_PORT': 'stale'}
+                        with mock.patch.dict(os.environ, original, clear=True):
+                            env = m.verify_env(n, 'job', w)
+                            self.assertEqual(dict(os.environ), original)
+                        self.assertEqual({k: env['BRAIN_' + k] for k in reserved}, reserved)
+                        expected = {**(reserved if setting == 'true' else {}), **inherited}
+                        self.assertEqual({k: env[k] for k in reserved if k in env}, expected)
+                        self.assertEqual(env['UNRELATED'], 'kept')
+                        self.assertEqual((env['MAIN'], env['WORKTREE'], env['BRANCH'], env['NODE']),
+                                         ('/fixture/app', '/fixture/job', 'job', 'app'))
+
     def job(self):
         r = self.init("alice")
         home = self.repo(self.tmp / "app", {"calc.py": "value = 1\n",
@@ -401,7 +424,7 @@ class VerifyLogs(Scenario):
     def test_stdin_environment_exit_and_overall_fallback_through_handback(self):
         r, home, wt = self.job()
         code = ("import os,sys\nassert input() == 'fixture-input'\n"
-                "assert os.environ['PORT'] == '4100'\nassert os.environ['BRANCH'] == 'job'\n"
+                "assert os.environ['BRAIN_PORT'] == '4100'\nassert os.environ['BRANCH'] == 'job'\n"
                 "assert os.environ['MAIN'] == " + repr(str(home)) + "\n"
                 "assert os.environ['WORKTREE'] == " + repr(str(wt)) + "\n"
                 "assert os.environ['NODE'] == 'a'\nprint('plain failure detail')\nsys.exit(9)")

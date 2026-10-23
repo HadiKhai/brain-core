@@ -5,6 +5,19 @@ upgrading. `brain changes <node>` shows the entries this node's coordinator hasn
 `brain due <node>` lists them until `brain changes <node> --seen`. Entry headings are
 `## <date>: <title>`; once released, a heading never changes.
 
+## 2026-10-24: Namespace reserved worktree ports in child environments
+
+For agents:
+- Verify, worktree setup and train commands receive reserved ports as `BRAIN_PORT`,
+  `BRAIN_PORTS` and `BRAIN_PORT_LAST`. Raw `PORT`, `PORTS` and `PORT_LAST` are no
+  longer added by default. Port reservations and allocation are unchanged.
+- Set `verify_export_port: true` on a node to also export the raw names. Existing
+  operator environment values, including an empty value, always pass through untouched.
+
+After upgrading:
+- A node whose scripts read `PORT`, `PORTS` or `PORT_LAST` must either set
+  `verify_export_port=true` with `brain set`, or switch to the `BRAIN_PORT` names.
+
 ## 2026-10-24: Configure worker runtime and model defaults per job class
 
 rehearsal evidence waived (root decision A, 2026-10-24); re-rehearsed natively before the release 1 tag

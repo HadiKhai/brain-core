@@ -598,9 +598,15 @@ def run_verify_stream(inst, n, branch, verify, w, env, token, lane=None):
 
 
 def verify_env(n, branch, w):
-    return {**os.environ, "MAIN": str(n["home_path"]), "WORKTREE": w["path"], "BRANCH": branch,
-            "NODE": n["id"], "PORT": str(w["port"]), "PORTS": str(w.get("ports", 1)),
-            "PORT_LAST": str(w["port"] + w.get("ports", 1) - 1)}
+    """Expose reserved ports without claiming generic application environment names."""
+    ports = {"PORT": str(w["port"]), "PORTS": str(w.get("ports", 1)),
+             "PORT_LAST": str(w["port"] + w.get("ports", 1) - 1)}
+    env = {**os.environ, "MAIN": str(n["home_path"]), "WORKTREE": w["path"], "BRANCH": branch,
+           "NODE": n["id"], **{"BRAIN_" + key: value for key, value in ports.items()}}
+    if n["fm"].get("verify_export_port") == "true":
+        for key, value in ports.items():
+            env.setdefault(key, value)  # An operator's explicit value always wins, even if empty.
+    return env
 
 
 def lane_packet_valid(packet, snap):

@@ -246,7 +246,7 @@ class SeveralBrains(Scenario):
         self.b(me, "new", "a", "--title", "A", "--owners", "club", "--home", str(a))
         self.b(work, "new", "w", "--title", "W", "--owners", "acme", "--home", str(w))
         self.b(me, "set", "a", "ports=3")
-        (me / "nodes" / "a" / "worktree-setup.sh").write_text('echo "$PORT $PORTS $PORT_LAST" > ports.txt\n')
+        (me / "nodes" / "a" / "worktree-setup.sh").write_text('echo "$BRAIN_PORT $BRAIN_PORTS $BRAIN_PORT_LAST" > ports.txt\n')
         self.assertIn("ports ", self.b(me, "wt", "add", "a", "j1"))
         p, n, last = map(int, (self.tmp / "a-work" / "worktrees" / "j1" / "ports.txt").read_text().split())
         self.assertEqual((n, last), (3, p + 2))

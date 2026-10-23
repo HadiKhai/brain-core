@@ -33,7 +33,13 @@ class Workbench(Scenario):
         r = self.init("alice")
         home = self.repo(self.tmp / "code" / "app")
         self.b(r, "new", "app", "--title", "App", "--home", str(home))
-        (r / "nodes" / "app" / "worktree-setup.sh").write_text('echo partial > partial.txt\nexit 7\n')
+        self.b(r, 'set', 'app', 'verify_export_port=true')
+        self.env['PORT'] = '9200'
+        self.env.pop('PORTS', None)
+        self.env.pop('PORT_LAST', None)
+        (r / "nodes" / "app" / "worktree-setup.sh").write_text(
+            'set -eu\n[ "$PORT" = 9200 ]\n[ "$PORTS" = "$BRAIN_PORTS" ]\n'
+            '[ "$PORT_LAST" = "$BRAIN_PORT_LAST" ]\necho partial > partial.txt\nexit 7\n')
         p = subprocess.run([sys.executable, str(r / "core" / "bin" / "brain"), "wt", "add", "app", "job-fails"],
                            cwd=r, env=self.env, capture_output=True, text=True)
         self.assertEqual(p.returncode, 7, p.stdout + p.stderr)
@@ -55,7 +61,11 @@ class Workbench(Scenario):
         self.git("remote", "set-head", "origin", "main", cwd=home)
         (home / ".env").write_text("SECRET=1\n")
         self.b(r, "new", "app", "--title", "App", "--owners", "team", "--home", str(home))
-        (r / "nodes" / "app" / "worktree-setup.sh").write_text('cp "$MAIN/.env" .env\necho "PORT=$PORT" >> .env\n')
+        for key in ('PORT', 'PORTS', 'PORT_LAST'):
+            self.env.pop(key, None)
+        (r / "nodes" / "app" / "worktree-setup.sh").write_text(
+            'set -eu\n[ "${PORT+x}${PORTS+x}${PORT_LAST+x}" = "" ]\n'
+            'cp "$MAIN/.env" .env\necho "PORT=$BRAIN_PORT" >> .env\n')
 
         out = self.b(r, "wt", "add", "app", "feat-a")
         wa = self.tmp / "code" / "app-work" / "worktrees" / "feat-a"

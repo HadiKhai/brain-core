@@ -218,8 +218,8 @@ def run_train(inst, n, home, verify, a):
     count = _m_worktrees.port_count(n)
     port = _m_worktrees.free_port(inst, count)
     w = {"path": str(stage), "port": port, "ports": count}
-    env = {**os.environ, "MAIN": str(home), "WORKTREE": str(stage), "BRANCH": batch,
-           "NODE": n["id"], "PORT": str(port), "PORTS": str(count), "PORT_LAST": str(port + count - 1), "WORKBENCH": str(wb)}
+    env = _m_verify.verify_env(n, batch, w)
+    env["WORKBENCH"] = str(wb)
     added = _m_common.git("worktree", "add", "-b", batch, str(stage), main, cwd=home)
     if added.returncode:
         _m_common.die("train: can't create staging worktree: " + _m_guard.redact(added.stderr, _m_guard.never_terms(n)))
