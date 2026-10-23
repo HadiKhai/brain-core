@@ -47,17 +47,14 @@ def watch_text_identity(item):
     return ' '.join(text.split())
 
 
-def watch_due_episodes(inst, groups):
+def watch_due_episodes(inst, scan):
     """Persist opaque receipts while ordinary due needs remain open.
 
-    Readers and drains share this short transaction, so a restart or snapshot
-    cannot manufacture another episode. A complete scan closes absent needs.
+    Readers and drains serialize the source scan and reconciliation together,
+    so an older scan cannot erase a newer receipt. A scan closes absent needs.
     Machine and direct producer episodes already have their own receipts.
     """
     import fcntl
-    entries = [i for group in groups.values() for i in group['items']
-               if 'reason' not in i and i['kind'] not in
-               ('machine-hold', 'machine-alert', 'machine-repair', 'job-ready', 'job-landed', 'rotate')]
     path = inst.root / '.brain/wake/due-episodes.json'
     lock = path.with_suffix('.lock')
     if _m_common.outward_links(inst.root):
@@ -69,6 +66,10 @@ def watch_due_episodes(inst, groups):
         if os.fstat(stream.fileno()).st_nlink != 1:
             raise ValueError('linked due episode lock')
         fcntl.flock(stream, fcntl.LOCK_EX)
+        groups = scan()
+        entries = [i for group in groups.values() for i in group['items']
+                   if 'reason' not in i and i['kind'] not in
+                   ('machine-hold', 'machine-alert', 'machine-repair', 'job-ready', 'job-landed', 'rotate')]
         _m_common.safe_target(path)
         data = watch_read(path, {'version': 1, 'open': {}})
         if (data.get('version') != 1 or not isinstance(data.get('open'), dict)
@@ -394,6 +395,11 @@ def watch_state_invalid(inst):
 
 def watch_groups(inst, nodes=None):
     """The file-only wake queue, grouped by the coordinator who can act on it."""
+    return watch_due_episodes(inst, lambda: watch_scan(inst, nodes))
+
+
+def watch_scan(inst, nodes=None):
+    """Collect source facts only while the due receipt transaction owns its lock."""
     nodes = nodes if nodes is not None else [n for n in inst.nodes() if not n['archived']]
     groups = {}
     for n in nodes:
@@ -425,7 +431,7 @@ def watch_groups(inst, nodes=None):
                 continue
             group['items'].append({**item, 'kind': 'machine-hold',
                                    'id': watch_digest([item['node'], 'machine-hold', item['episode']])})
-    return watch_due_episodes(inst, groups)
+    return groups
 
 
 def watch_since_wake(inst, nodes):

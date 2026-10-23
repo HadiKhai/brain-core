@@ -4,6 +4,7 @@ import argparse
 import io
 import json
 import os
+import threading
 import time
 from unittest import mock
 
@@ -490,6 +491,45 @@ class Watcher(Scenario):
             self.m.wake_drain(self.inst, root, once=True)
             self.assertEqual(send.call_count, 2)
             self.assertEqual([i['text'] for i in self.since()], ['Choose blue'])
+
+    def test_stale_concurrent_scan_cannot_rearm_delivered_due_episode(self):
+        root = self.inst.node('root')
+        inbox = self.root / 'inbox.md'
+        inbox.write_text('')
+        scanned, resume = threading.Event(), threading.Event()
+        original = self.m.watch_due_episodes
+        errors = []
+        def paused(inst, scan):
+            if threading.current_thread().name == 'old-reader':
+                scanned.set()
+                if not resume.wait(10):
+                    raise RuntimeError('fixture scan timeout')
+            return original(inst, scan)
+        def old_reader():
+            try:
+                self.m.watch_groups(self.m.Instance(self.root))
+            except BaseException as error:
+                errors.append(error)
+        with mock.patch.object(self.m, 'changes_due', return_value=[]), \
+                mock.patch.object(self.m, 'wake_start'), mock.patch.object(self.m, 'WAKE_INTERVAL', 0), \
+                mock.patch.object(self.m, 'wake_send', return_value=True) as send, \
+                mock.patch.object(self.m, 'watch_due_episodes', side_effect=paused):
+            reader = threading.Thread(target=old_reader, name='old-reader')
+            reader.start()
+            try:
+                self.assertTrue(scanned.wait(10))
+                inbox.write_text('- Decision needed: choose blue\n')
+                self.watch()
+                self.m.wake_drain(self.inst, root, once=True)
+                self.assertEqual(send.call_count, 1)
+            finally:
+                resume.set()
+                reader.join(10)
+            self.assertFalse(reader.is_alive())
+            self.assertEqual(errors, [])
+            self.watch()
+            self.m.wake_drain(self.inst, root, once=True)
+            self.assertEqual(send.call_count, 1)
 
     def test_due_job_text_and_state_changes_wake_but_display_metadata_does_not(self):
         root = self.inst.node('root')
