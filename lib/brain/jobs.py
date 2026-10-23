@@ -133,6 +133,19 @@ def read_handback(n, row, strict=False):
     return None
 
 
+def job_signal(inst, n, row, strict=False):
+    """Effective worker signal, including supported legacy completion evidence.
+
+    Any newer hand-back file takes precedence, including an unreadable one.
+    Consumers decide whether an acknowledged compaction restart is still blocking.
+    """
+    signal = read_handback(n, row, strict=strict)
+    if (not row['Ended'] and not handback_file(n, row).exists()
+            and _m_verify.read_ready_packet(inst, n, row['Job'], row)):
+        return {'state': 'done', 'report': '', 'legacy_ready': True}
+    return signal
+
+
 def ready_fingerprint(n, row, packet):
     """A new reviewed hand-back permits retry without changing a worker-owned file externally."""
     signal = read_handback(n, row) or {}

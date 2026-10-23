@@ -38,176 +38,6 @@ class Watcher(Scenario):
             upgrade.assert_not_called()
         return json.loads(output.getvalue())
 
-    def stall_fixture(self, state='frozen'):
-        self.b(self.root, 'new', 'mill', '--title', 'Mill')
-        self.b(self.root, 'set', 'mill', 'coordinator=fixture-mill', 'wake=fixture-send')
-        self.inst = self.m.Instance(self.root)
-        n = self.inst.node('mill')
-        row = {**dict.fromkeys(self.m.JOB_COLS, ''), 'Job': 'job/river',
-               'Started': '2026-01-01T10:00Z', 'Reviews': '0'}
-        self.m.write_jobs(self.inst, n, [row])
-        self.stall_status(n, state)
-        self.inst.local_of('mill')['worktrees'] = {row['Job']: {'path': str(n['dir']),
-            'start': self.git('rev-parse', 'HEAD', cwd=self.root).strip()}}
-        self.inst.save_local()
-        return n, row
-
-    def stall_status(self, n, state):
-        (n['dir'] / 'status.md').write_text('## Active work\n\n'
-            '| Branch | Thread | PR | State |\n| --- | --- | --- | --- |\n'
-            '| job/river | fixture-worker | - | ' + state + ' |\n')
-
-    @contextlib.contextmanager
-    def stall_transport(self):
-        with mock.patch.object(self.m, 'changes_due', return_value=[]), \
-                mock.patch.object(self.m, 'wake_start'), mock.patch.object(self.m, 'WAKE_INTERVAL', 0), \
-                mock.patch.object(self.m, 'wake_send', return_value=True) as send:
-            yield send
-
-    def stall_tick(self, minute, n):
-        now = datetime.datetime(2026, 1, 1, 10, tzinfo=datetime.timezone.utc) + datetime.timedelta(minutes=minute)
-        with mock.patch.object(type(self.inst), 'now_dt', return_value=now):
-            self.watch()
-            self.m.wake_drain(self.inst, n, once=True)
-            return [i for i in self.since(n['id']) if i['kind'] == 'job-stall']
-
-    def test_stall_fifteen_minutes_wakes_named_coordinator_once(self):
-        n, _ = self.stall_fixture()
-        with self.stall_transport() as send:
-            self.assertEqual(self.stall_tick(0, n), [])
-            send.reset_mock()  # initial unrelated due work is outside the stall episode
-            self.assertEqual(self.stall_tick(14, n), [])
-            send.assert_not_called()
-            items = self.stall_tick(15, n)
-            self.assertEqual(len(items), 1)
-            self.assertIn('job/river frozen 15 min', items[0]['text'])
-            self.assertEqual(send.call_count, 1)
-            first = items[0]['id']
-            for minute in (16, 25, 60):
-                self.assertEqual(self.stall_tick(minute, n)[0]['id'], first)
-            self.assertEqual(send.call_count, 1)
-            root_items = self.m.watch_groups(self.inst)['root']['items']
-            self.assertFalse(any(i['kind'] == 'job-stall' for i in root_items))
-
-    def test_stall_event_resets_and_second_stall_wakes_again(self):
-        n, row = self.stall_fixture('queued')
-        with self.stall_transport() as send:
-            self.stall_tick(0, n)
-            send.reset_mock()
-            first = self.stall_tick(15, n)[0]['id']
-            row['Reviews'] = '1'
-            self.m.write_jobs(self.inst, n, [row])
-            self.assertEqual(self.stall_tick(16, n), [])
-            self.assertEqual(self.stall_tick(30, n), [])
-            second = self.stall_tick(31, n)[0]
-            self.assertNotEqual(second['id'], first)
-            self.assertIn('job/river queued 15 min', second['text'])
-            self.stall_tick(32, n)
-            self.assertEqual(send.call_count, 2)
-
-    def test_stall_event_at_fourteen_minutes_prevents_wake(self):
-        n, row = self.stall_fixture()
-        with self.stall_transport() as send:
-            self.stall_tick(0, n)
-            send.reset_mock()
-            row['Review head'] = 'a' * 40
-            self.m.write_jobs(self.inst, n, [row])
-            self.assertEqual(self.stall_tick(14, n), [])
-            self.assertEqual(self.stall_tick(15, n), [])
-            send.assert_not_called()
-            self.assertEqual(len(self.stall_tick(29, n)), 1)
-
-    def test_stall_parked_blocked_and_human_handbacks_do_not_stall(self):
-        n, row = self.stall_fixture()
-        with self.stall_transport():
-            for state in ('parked: waiting for human', 'blocked: human choice', 'running'):
-                self.stall_status(n, state)
-                self.stall_tick(0, n)
-                self.assertEqual(self.stall_tick(30, n), [])
-            self.stall_status(n, 'frozen: waiting for human')
-            self.stall_tick(31, n)
-            self.assertEqual(self.stall_tick(60, n), [])
-            self.stall_status(n, 'queued')
-            path = self.m.handback_file(n, row)
-            path.parent.mkdir(exist_ok=True)
-            for state in ('blocked', 'question', 'done'):
-                path.write_text(json.dumps({'job': row['Job'], 'started': row['Started'], 'state': state}))
-                self.stall_tick(61, n)
-                self.assertEqual(self.stall_tick(90, n), [])
-
-    def test_stall_queue_move_and_commit_reset_silence(self):
-        n, _ = self.stall_fixture()
-        with self.stall_transport() as send:
-            self.stall_tick(0, n)
-            send.reset_mock()
-            self.stall_status(n, 'queued: verify lane')
-            self.assertEqual(self.stall_tick(14, n), [])
-            self.assertEqual(self.stall_tick(15, n), [])
-            parent = self.git('rev-parse', 'HEAD', cwd=self.root).strip()
-            tip = self.git('commit-tree', 'HEAD^{tree}', '-p', parent, '-m', 'Fixture progress', cwd=self.root).strip()
-            self.git('update-ref', 'refs/heads/job/river', tip, cwd=self.root)
-            self.assertEqual(self.stall_tick(28, n), [])
-            self.assertEqual(self.stall_tick(29, n), [])
-            send.assert_not_called()
-            self.assertEqual(len(self.stall_tick(43, n)), 1)
-
-    def test_stall_verify_log_activity_resets_and_threshold_is_configurable(self):
-        n, row = self.stall_fixture('queued')
-        self.b(self.root, 'set', 'mill', 'job_stall_minutes=5')
-        self.inst = self.m.Instance(self.root)
-        n = self.inst.node('mill')
-        with self.stall_transport() as send:
-            self.stall_tick(0, n)
-            send.reset_mock()
-            folder = n['dir'] / 'job-handbacks'
-            folder.mkdir(exist_ok=True)
-            log = folder / (self.m.job_key(row) + '-verify-1-abcdef123456.log')
-            log.write_text('verify started\n')
-            self.assertEqual(self.stall_tick(4, n), [])
-            self.assertEqual(self.stall_tick(5, n), [])
-            log.write_text('verify finished\n')
-            self.assertEqual(self.stall_tick(8, n), [])
-            self.assertEqual(self.stall_tick(12, n), [])
-            send.assert_not_called()
-            self.assertEqual(len(self.stall_tick(13, n)), 1)
-
-    def test_stall_pending_retires_on_event_without_dropping_question(self):
-        n, row = self.stall_fixture()
-        with self.stall_transport() as send:
-            self.stall_tick(0, n)
-            send.reset_mock()
-            # Queue without delivering, then resolve before the drain can send it.
-            with mock.patch.object(self.m, 'wake_drain'):
-                self.stall_tick(15, n)
-            directory = self.m.wake_directory(self.inst, n)
-            pending = list(directory.glob('*.pending'))
-            self.assertEqual(len(pending), 1)
-            value = json.loads(pending[0].read_text())
-            question = {'kind': 'inbox', 'id': 'c' * 64}
-            value['items'].append(question)
-            pending[0].write_text(json.dumps(value))
-            row['Reviews'] = '1'
-            self.m.write_jobs(self.inst, n, [row])
-            self.assertEqual(self.stall_tick(16, n), [])
-            self.assertEqual(send.call_count, 1)
-            self.assertEqual(self.m.wake_history(directory)[-1]['items'], [question])
-
-    def test_stall_due_event_observation_rearms_even_between_watcher_ticks(self):
-        n, row = self.stall_fixture()
-        with self.stall_transport() as send:
-            self.stall_tick(0, n)
-            send.reset_mock()
-            first = self.stall_tick(15, n)[0]['id']
-            row['Reviews'] = '1'
-            self.m.write_jobs(self.inst, n, [row])
-            now = datetime.datetime(2026, 1, 1, 10, 16, tzinfo=datetime.timezone.utc)
-            with mock.patch.object(type(self.inst), 'now_dt', return_value=now):
-                self.assertEqual(self.m.watch_job_stalls(self.inst, n), [])
-            self.inst = self.m.Instance(self.root)  # use persisted observations after a process restart
-            second = self.stall_tick(31, self.inst.node('mill'))[0]['id']
-            self.assertNotEqual(first, second)
-            self.assertEqual(send.call_count, 2)
-
     def machine_tick(self, at, reading):
         with mock.patch.object(self.m.time, 'time', return_value=at), \
                 mock.patch.object(self.m, 'machine_load', return_value=reading), \
@@ -1416,3 +1246,302 @@ class Watcher(Scenario):
             self.watch()
         self.assertEqual(self.m.read_jobs(self.inst.node('root'))[0]['Switches'], '')
         self.assertNotIn('relaunch', (self.root / 'inbox.md').read_text())
+
+
+class StallWatcher(Scenario):
+    """Small file/Git fixtures; no CLI installation, sleeps, host or provider calls."""
+    def setUp(self):
+        super().setUp()
+        env = mock.patch.dict(os.environ, self.env)
+        env.start()
+        self.addCleanup(env.stop)
+        self.m = core_loader.SourceFileLoader('stall_fixture', str(CORE / 'bin/brain')).load_module()
+        self.root = self.tmp / 'oak'
+        self.root.mkdir()
+        for name, value in {
+            'instance.md': '---\nprincipals: oak\nruntimes: codex\ntimezone: UTC\n---\n',
+            'node.md': '---\nid: root\nowners: oak\nhome: here\n---\n',
+            '.gitignore': '.brain/\n',
+        }.items():
+            (self.root / name).write_text(value)
+        (self.root / '.brain').mkdir()
+        self.inst = self.m.Instance(self.root)
+        self.inst.local_of('root').update(coordinator='fixture-root', wake='fixture-send')
+        self.inst.save_local()
+
+    def watch(self):
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.m.watch_once(self.inst)
+
+    def since(self, node='root'):
+        with mock.patch.object(self.m, 'load', return_value=self.inst), \
+                mock.patch.object(self.m, 'request_wake') as request, \
+                mock.patch.object(self.m, 'core_update') as upgrade, \
+                contextlib.redirect_stdout(io.StringIO()) as output:
+            self.m.cmd_due(argparse.Namespace(id=node, since_wake=True, quiet=False, json=True))
+            request.assert_not_called()
+            upgrade.assert_not_called()
+        return json.loads(output.getvalue())
+
+    def stall_fixture(self, state='frozen'):
+        folder = self.root / 'nodes/mill'
+        folder.mkdir(parents=True)
+        (folder / 'node.md').write_text('---\nid: mill\nhome: none\nverify: true\n---\n')
+        self.inst.local_of('mill').update(coordinator='fixture-mill', wake='fixture-send')
+        self.inst.save_local()
+        n = self.inst.node('mill')
+        row = {**dict.fromkeys(self.m.JOB_COLS, ''), 'Job': 'job/river',
+               'Started': '2026-01-01T10:00Z', 'Reviews': '0'}
+        self.m.write_jobs(self.inst, n, [row])
+        self.stall_status(n, state)
+        self.inst.local_of('mill')['worktrees'] = {row['Job']: {'path': str(n['dir']),
+            'start': '', 'port': 4500}}
+        self.inst.save_local()
+        return n, row
+
+    def stall_git_home(self, n):
+        home = self.repo(self.tmp / 'source')
+        node_file = n['dir'] / 'node.md'
+        node_file.write_text(node_file.read_text().replace('home: none', 'home: external'))
+        self.inst.local_of(n['id'])['home'] = str(home)
+        self.inst.save_local()
+        return self.inst.node(n['id'])
+
+    def stall_status(self, n, state):
+        (n['dir'] / 'status.md').write_text('## Active work\n\n'
+            '| Branch | Thread | PR | State |\n| --- | --- | --- | --- |\n'
+            '| job/river | fixture-worker | - | ' + state + ' |\n')
+
+    @contextlib.contextmanager
+    def stall_transport(self):
+        with mock.patch.object(self.m, 'changes_due', return_value=[]), \
+                mock.patch.object(self.m, 'watch_completion_items', return_value=[]), \
+                mock.patch.object(self.m, 'local_job_state', return_value={'exists': True, 'tip': '', 'merged': False}), \
+                mock.patch.object(self.m, 'wake_start'), mock.patch.object(self.m, 'WAKE_INTERVAL', 0), \
+                mock.patch.object(self.m, 'wake_send', return_value=True) as send:
+            yield send
+
+    def stall_tick(self, minute, n):
+        now = datetime.datetime(2026, 1, 1, 10, tzinfo=datetime.timezone.utc) + datetime.timedelta(minutes=minute)
+        with mock.patch.object(type(self.inst), 'now_dt', return_value=now):
+            self.watch()
+            self.m.wake_drain(self.inst, n, once=True)
+            return [i for i in self.m.watch_state(self.inst)['items']
+                    if i['kind'] == 'job-stall' and i['node'] == n['id']]
+
+    def test_stall_fifteen_minutes_wakes_named_coordinator_once(self):
+        n, _ = self.stall_fixture()
+        with self.stall_transport() as send:
+            self.assertEqual(self.stall_tick(0, n), [])
+            send.reset_mock()  # initial unrelated due work is outside the stall episode
+            self.assertEqual(self.stall_tick(14, n), [])
+            send.assert_not_called()
+            items = self.stall_tick(15, n)
+            self.assertEqual(len(items), 1)
+            self.assertIn('job/river frozen 15 min', items[0]['text'])
+            self.assertEqual(send.call_count, 1)
+            first = items[0]['id']
+            self.assertEqual(self.since(n['id'])[0]['id'], first)
+            for minute in (16, 25, 60):
+                self.assertEqual(self.stall_tick(minute, n)[0]['id'], first)
+            self.assertEqual(send.call_count, 1)
+            root_items = self.m.watch_groups(self.inst)['root']['items']
+            self.assertFalse(any(i['kind'] == 'job-stall' for i in root_items))
+
+    def test_stall_event_resets_and_second_stall_wakes_again(self):
+        n, row = self.stall_fixture('queued')
+        with self.stall_transport() as send:
+            self.stall_tick(0, n)
+            send.reset_mock()
+            first = self.stall_tick(15, n)[0]['id']
+            row['Reviews'] = '1'
+            self.m.write_jobs(self.inst, n, [row])
+            self.assertEqual(self.stall_tick(16, n), [])
+            self.assertEqual(self.stall_tick(30, n), [])
+            second = self.stall_tick(31, n)[0]
+            self.assertNotEqual(second['id'], first)
+            self.assertIn('job/river queued 15 min', second['text'])
+            self.stall_tick(32, n)
+            self.assertEqual(send.call_count, 2)
+
+    def test_stall_event_at_fourteen_minutes_prevents_wake(self):
+        n, row = self.stall_fixture()
+        with self.stall_transport() as send:
+            self.stall_tick(0, n)
+            send.reset_mock()
+            row['Review head'] = 'a' * 40
+            self.m.write_jobs(self.inst, n, [row])
+            self.assertEqual(self.stall_tick(14, n), [])
+            self.assertEqual(self.stall_tick(15, n), [])
+            send.assert_not_called()
+            self.assertEqual(len(self.stall_tick(29, n)), 1)
+
+    def test_stall_parked_blocked_and_human_handbacks_do_not_stall(self):
+        n, row = self.stall_fixture()
+        with self.stall_transport():
+            for state in ('parked: waiting for human', 'blocked: human choice', 'running'):
+                self.stall_status(n, state)
+                self.stall_tick(0, n)
+                self.assertEqual(self.stall_tick(30, n), [])
+            self.stall_status(n, 'frozen: waiting for human')
+            self.stall_tick(31, n)
+            self.assertEqual(self.stall_tick(60, n), [])
+            self.stall_status(n, 'queued')
+            path = self.m.handback_file(n, row)
+            path.parent.mkdir(exist_ok=True)
+            for state in ('blocked', 'question', 'done'):
+                path.write_text(json.dumps({'job': row['Job'], 'started': row['Started'], 'state': state}))
+                self.stall_tick(61, n)
+                self.assertEqual(self.stall_tick(90, n), [])
+
+    def test_stall_queue_move_and_commit_reset_silence(self):
+        n, _ = self.stall_fixture()
+        n = self.stall_git_home(n)
+        with self.stall_transport() as send:
+            self.stall_tick(0, n)
+            send.reset_mock()
+            self.stall_status(n, 'queued: verify lane')
+            self.assertEqual(self.stall_tick(14, n), [])
+            self.assertEqual(self.stall_tick(15, n), [])
+            parent = self.git('rev-parse', 'HEAD', cwd=n['home_path']).strip()
+            tip = self.git('commit-tree', 'HEAD^{tree}', '-p', parent, '-m', 'Fixture progress', cwd=n['home_path']).strip()
+            self.git('update-ref', 'refs/heads/job/river', tip, cwd=n['home_path'])
+            self.assertEqual(self.stall_tick(28, n), [])
+            self.assertEqual(self.stall_tick(29, n), [])
+            send.assert_not_called()
+            self.assertEqual(len(self.stall_tick(43, n)), 1)
+
+    def test_stall_verify_log_activity_resets_and_threshold_is_configurable(self):
+        n, row = self.stall_fixture('queued')
+        node_file = n['dir'] / 'node.md'
+        node_file.write_text(node_file.read_text().replace('verify: true', 'verify: true\njob_stall_minutes: 5'))
+        self.inst = self.m.Instance(self.root)
+        n = self.inst.node('mill')
+        with self.stall_transport() as send:
+            self.stall_tick(0, n)
+            send.reset_mock()
+            folder = n['dir'] / 'job-handbacks'
+            folder.mkdir(exist_ok=True)
+            log = folder / (self.m.job_key(row) + '-verify-1-abcdef123456.log')
+            log.write_text('verify started\n')
+            self.assertEqual(self.stall_tick(4, n), [])
+            self.assertEqual(self.stall_tick(5, n), [])
+            log.write_text('verify finished\n')
+            self.assertEqual(self.stall_tick(8, n), [])
+            self.assertEqual(self.stall_tick(12, n), [])
+            send.assert_not_called()
+            self.assertEqual(len(self.stall_tick(13, n)), 1)
+
+    def test_stall_pending_retires_on_event_without_dropping_question(self):
+        n, row = self.stall_fixture()
+        with self.stall_transport() as send:
+            self.stall_tick(0, n)
+            send.reset_mock()
+            # Queue without delivering, then resolve before the drain can send it.
+            with mock.patch.object(self.m, 'wake_drain'):
+                self.stall_tick(15, n)
+            directory = self.m.wake_directory(self.inst, n)
+            pending = list(directory.glob('*.pending'))
+            self.assertEqual(len(pending), 1)
+            value = json.loads(pending[0].read_text())
+            question = {'kind': 'inbox', 'id': 'c' * 64}
+            value['items'].append(question)
+            pending[0].write_text(json.dumps(value))
+            row['Reviews'] = '1'
+            self.m.write_jobs(self.inst, n, [row])
+            self.assertEqual(self.stall_tick(16, n), [])
+            self.assertEqual(send.call_count, 1)
+            self.assertEqual(self.m.wake_history(directory)[-1]['items'], [question])
+
+    def test_stall_due_event_observation_rearms_even_between_watcher_ticks(self):
+        n, row = self.stall_fixture()
+        with self.stall_transport() as send:
+            self.stall_tick(0, n)
+            send.reset_mock()
+            first = self.stall_tick(15, n)[0]['id']
+            row['Reviews'] = '1'
+            self.m.write_jobs(self.inst, n, [row])
+            now = datetime.datetime(2026, 1, 1, 10, 16, tzinfo=datetime.timezone.utc)
+            with mock.patch.object(type(self.inst), 'now_dt', return_value=now):
+                self.assertEqual(self.m.watch_job_stalls(self.inst, n), [])
+            self.inst = self.m.Instance(self.root)  # use persisted observations after a process restart
+            second = self.stall_tick(31, self.inst.node('mill'))[0]['id']
+            self.assertNotEqual(first, second)
+            self.assertEqual(send.call_count, 2)
+
+    def test_stall_acknowledged_compaction_restart_rearms_each_resumed_run(self):
+        n, row = self.stall_fixture('running')
+        path = self.m.handback_file(n, row)
+        path.parent.mkdir(exist_ok=True)
+        signal = {'version': 2, 'job': row['Job'], 'started': row['Started'],
+                  'state': 'blocked', 'restart': 'compactions', 'restart_id': 'a' * 32,
+                  'lessons': 'none: fixture', 'ready': None, 'ready_reasons': []}
+        path.write_text(json.dumps(signal))
+        with self.stall_transport() as send:
+            self.stall_tick(0, n)
+            send.reset_mock()
+            n['local']['worktrees'][row['Job']]['restart_ack'] = self.m.digest([self.m.job_key(row), signal])
+            self.inst.save_local()
+            self.assertTrue(self.m.restart_acknowledged(n, row, signal))
+            self.stall_status(n, 'frozen')
+            self.assertEqual(self.stall_tick(1, n), [])
+            self.assertEqual(len(self.stall_tick(16, n)), 1)
+            self.assertEqual(send.call_count, 1)
+            signal['restart_id'] = 'b' * 32  # an acknowledgement never consumes a later restart
+            path.write_text(json.dumps(signal))
+            self.assertFalse(self.m.restart_acknowledged(n, row, signal))
+            n['local']['worktrees'][row['Job']]['restart_ack'] = self.m.digest([self.m.job_key(row), signal])
+            self.inst.save_local()
+            # Even when restart/ack happen between ticks and the label stays frozen,
+            # the new acknowledged signal starts a fresh silence clock.
+            self.assertEqual(self.stall_tick(18, n), [])
+            self.assertEqual(len(self.stall_tick(33, n)), 1)
+            self.assertEqual(len(self.stall_tick(34, n)), 1)
+            signal['restart_id'] = 'c' * 32
+            path.write_text(json.dumps(signal))
+            self.assertEqual(self.stall_tick(35, n), [])
+            self.assertEqual(self.stall_tick(60, n), [])
+            history = self.m.wake_history(self.m.wake_directory(self.inst, n))
+            stalls = [i for delivery in history for i in delivery['items'] if i['kind'] == 'job-stall']
+            self.assertEqual(len(stalls), 2)
+            self.assertEqual(len({i['id'] for i in stalls}), 2)
+
+    def test_stall_legacy_completed_job_does_not_wake_and_new_signal_wins(self):
+        n, row = self.stall_fixture()
+        n = self.stall_git_home(n)
+        head = self.git('rev-parse', 'HEAD', cwd=n['home_path']).strip()
+        self.git('branch', row['Job'], head, cwd=n['home_path'])
+        packet = {'version': 1, 'node': n['id'], 'branch': row['Job'],
+                  'head': head, 'main': head, 'integration_base': head,
+                  'verify_command': 'true', 'verify_result': 0, 'review_rounds': 1,
+                  'inputs': 'c' * 64, 'checked_at': row['Started']}
+        legacy = self.m.ready_path(self.inst, n, row['Job'])
+        legacy.parent.mkdir(parents=True)
+        legacy.write_text(json.dumps(packet))
+        with self.stall_transport() as send:
+            now = datetime.datetime(2026, 1, 1, 10, tzinfo=datetime.timezone.utc)
+            with mock.patch.object(type(self.inst), 'now_dt', return_value=now):
+                self.assertEqual(self.m.read_ready_packet(self.inst, n, row['Job'], row), packet)
+                self.assertEqual(self.m.watch_recorded_ready(self.inst, n, row, None), packet)
+                self.assertEqual(self.m.due_evidence(self.inst, n)[0]['handbacks'][self.m.job_key(row)],
+                                 {'state': 'done', 'report': '', 'legacy_ready': True})
+            self.stall_tick(0, n)
+            send.reset_mock()
+            self.assertEqual(self.stall_tick(15, n), [])
+            send.assert_not_called()
+            # A retained legacy success must not override a newer acknowledged restart.
+            signal = {'job': row['Job'], 'started': row['Started'], 'state': 'blocked',
+                      'restart': 'compactions', 'restart_id': 'a' * 32}
+            handback = self.m.handback_file(n, row)
+            handback.parent.mkdir(exist_ok=True)
+            handback.write_text(json.dumps(signal))
+            n['local']['worktrees'][row['Job']]['restart_ack'] = self.m.digest([self.m.job_key(row), signal])
+            self.inst.save_local()
+            self.assertEqual(self.stall_tick(16, n), [])
+            self.assertEqual(len(self.stall_tick(31, n)), 1)
+            handback.write_text('{}')  # unknown current signals still fence the legacy packet
+            self.assertIsNone(self.m.job_signal(self.inst, n, row))
+            self.assertEqual(self.stall_tick(32, n), [])
+            handback.write_text('{torn')
+            with self.assertRaises(ValueError):
+                self.m.watch_job_stalls(self.inst, n)

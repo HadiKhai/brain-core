@@ -11,8 +11,10 @@ For agents:
 - An open ledger job marked `frozen` or `queued` in the Active work table wakes
   its coordinator once after 15 minutes without observed activity. The due item
   names the job. A local commit, recorded review, queue-state change, or verifier
-  log activity resets the clock; a hand-back ends monitoring. Parked, blocked,
-  and explicitly human-waiting jobs do not produce stall wakes.
+  log activity resets the clock; a current hand-back or legacy completion ends
+  monitoring. An acknowledged compaction restart resumes monitoring with a new
+  silence clock. Parked, blocked, and explicitly human-waiting jobs do not
+  produce stall wakes.
 - Job stalls reuse the ordinary due episode receipts. Silence starts when the
   state is first observed, so an upgrade does not guess the age of old labels.
   Coordinator-run escalation awaits a host activity/queued-wake source.

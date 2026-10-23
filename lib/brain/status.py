@@ -375,10 +375,7 @@ def local_job_state(n, branch, w):
 def due_evidence(inst, n):
     rows = _m_jobs.read_jobs(n)
     wts = {b: {**w, **local_job_state(n, b, w)} for b, w in sorted(n["local"].get("worktrees", {}).items())}
-    signals = {_m_jobs.job_key(r): _m_jobs.read_handback(n, r) for r in rows or []}
-    for r in rows or []:
-        if not r["Ended"] and not _m_jobs.handback_file(n, r).exists() and _m_verify.read_ready_packet(inst, n, r["Job"], r):
-            signals[_m_jobs.job_key(r)] = {"state": "done", "report": "", "legacy_ready": True}
+    signals = {_m_jobs.job_key(r): _m_jobs.job_signal(inst, n, r) for r in rows or []}
     # Node's own commits only, excluding status (including its generated refresh commit) and children.
     names = ["brief.md", "decisions.md", "backlog.md", "node.md", "inbox.md", "sources", "AGENTS.md", _m_jobs.JOBS_FILE,
              "job-handbacks"]

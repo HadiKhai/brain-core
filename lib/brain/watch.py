@@ -7,6 +7,7 @@ import re
 import shlex
 from pathlib import Path
 
+from . import briefs as _m_briefs
 from . import common as _m_common
 from . import guard as _m_guard
 from . import hosts as _m_hosts
@@ -93,9 +94,12 @@ def watch_job_stalls(inst, n):
             if (not match or re.search(r'\bwait(?:ing)? (?:on|for) (?:a |the )?(?:human|operator)\b', state)
                     or re.search(r'\b(?:human|operator) (?:choice|decision|approval)\b', state)):
                 continue
-            handback = _m_jobs.read_handback(n, row, strict=True)
-            if handback or _m_jobs.handback_file(n, row).exists():
-                continue  # stopped workers and unknown hand-backs already have their own due path
+            handback = _m_jobs.job_signal(inst, n, row, strict=True)
+            if handback:
+                if not _m_briefs.restart_acknowledged(n, row, handback):
+                    continue  # current terminal/blocking signals already have their own due path
+            elif _m_jobs.handback_file(n, row).exists():
+                continue  # an invalid file cannot resurrect legacy evidence or imply a resumed worker
             home = n.get('home_path')
             tip = ''
             if home and home.is_dir():
@@ -110,7 +114,7 @@ def watch_job_stalls(inst, n):
                     stat = log.stat()
                     logs.append([log.name, stat.st_mtime_ns, stat.st_size])
             event = watch_digest([state, tip, row.get('Reviews'), row.get('Review head'),
-                                  row.get('Review kind'), row.get('Switches'), sorted(logs)])
+                                  row.get('Review kind'), row.get('Switches'), sorted(logs), handback])
             identity = watch_digest([n['id'], key])
             previous = data['jobs'].get(identity)
             since = previous['since'] if previous and previous['event'] == event else now
@@ -184,10 +188,7 @@ def watch_items(inst, n):
     rows = _m_jobs.read_jobs(n)
     worktrees = {b: {**w, **_m_status.local_job_state(n, b, w)}
                  for b, w in n['local'].get('worktrees', {}).items()}
-    signals = {_m_jobs.job_key(r): _m_jobs.read_handback(n, r) for r in rows or []}
-    for r in rows or []:
-        if not r['Ended'] and not _m_jobs.handback_file(n, r).exists() and _m_verify.read_ready_packet(inst, n, r['Job'], r):
-            signals[_m_jobs.job_key(r)] = {'state': 'done', 'report': '', 'legacy_ready': True}
+    signals = {_m_jobs.job_key(r): _m_jobs.job_signal(inst, n, r) for r in rows or []}
     state = {'jobs': rows, 'worktrees': worktrees, 'handbacks': signals, 'inbox': _m_status.inbox_lines(n)}
     # Refresh evidence generates facts, Git logs and usage displays; none belongs on this path.
     items = _m_status.due_items(inst, n, evidence=(state, '', ''), include_stale=False,
