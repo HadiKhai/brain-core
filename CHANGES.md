@@ -5,6 +5,20 @@ upgrading. `brain changes <node>` shows the entries this node's coordinator hasn
 `brain due <node>` lists them until `brain changes <node> --seen`. Entry headings are
 `## <date>: <title>`; once released, a heading never changes.
 
+## 2026-10-23: Release verify admission between lane commands
+
+For agents:
+- Each lane command and lane fitness check releases its machine-care slot when
+  it finishes. The next command joins the FIFO queue afresh, behind verifies
+  already waiting, instead of holding one slot across the entire lane sequence.
+- A single verify command keeps its reservation for its whole run, including
+  any parallel children it starts. Slot limits and crashed-owner cleanup remain
+  unchanged.
+
+After upgrading:
+- No configuration change is needed. Start a new hand-back or gate process to
+  use the per-command admission behavior.
+
 ## 2026-10-23: Wake once per queued machine-hold episode
 
 For agents:

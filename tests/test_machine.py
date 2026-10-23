@@ -328,6 +328,138 @@ raise SystemExit(result)
                         p.kill()
                     p.wait()
                     p.stderr.close()
+
+    def test_lane_owner_requeues_behind_waiting_verify(self):
+        m = self.m
+        root, home, wt = _test_verify.WorkerReadyPackets.job(self)
+        inst = m.Instance(root)
+        n = inst.node('a')
+        w, env = {'path': str(wt)}, dict(os.environ)
+        stream = m.run_verify_stream
+        for fitness in (False, True):
+            with self.subTest(fitness=fitness):
+                started, tokens, errors, threads = [], [], [], []
+                first = 'fitness' if fitness else 'first'
+                n['fm']['verify_lanes_check'] = 'true' if fitness else ''
+                lanes = [dict(name=name, command='true', schedule='job', requires=[], always=False)
+                         for name in (["second"] if fitness else ["first", "second"])]
+                snap = dict(lanes=lanes, hashes={l['name']: 'fixture' for l in lanes},
+                            context='fixture', map_hash='fixture', config_hash='fixture')
+
+                def waiting():
+                    try:
+                        m.run_verify(inst, n, 'waiting', 'true', w, env)
+                    except BaseException as e:
+                        errors.append(e)
+
+                def observe(inst, n, branch, command, w, env, token, lane=None):
+                    started.append(lane or 'waiting')
+                    tokens.append(token)
+                    if lane == first:
+                        thread = threading.Thread(target=waiting)
+                        threads.append(thread)
+                        thread.start()
+                        deadline = time.monotonic() + 5
+                        while time.monotonic() < deadline:
+                            with m.machine_queue() as q:
+                                if len(q.rows) == 2:
+                                    self.assertEqual([r['state'] for r in q.rows], ['running', 'queued'])
+                                    break
+                            time.sleep(.002)
+                        else:
+                            self.fail('waiting verify did not join the queue')
+                    return stream(inst, n, branch, command, w, env, token, lane=lane)
+
+                with mock.patch.object(m, 'machine_limit', return_value=1), \
+                        mock.patch.object(m, 'run_verify_stream', side_effect=observe), \
+                        contextlib.redirect_stdout(io.StringIO()):
+                    try:
+                        result = m.run_lanes(inst, n, 'job', w, env, snap, None, 'head', 'main', {})
+                    finally:
+                        for thread in threads:
+                            thread.join(10)
+                            self.assertFalse(thread.is_alive())
+                self.assertEqual(errors, [])
+                self.assertEqual(result['verify_result'], 0)
+                self.assertEqual(started, [first, 'waiting', 'second'])
+                self.assertEqual(len(set(tokens)), 3)
+                with m.machine_queue() as q:
+                    self.assertEqual(q.rows, [])
+
+    def test_one_verify_keeps_slot_until_all_parallel_children_finish(self):
+        m = self.m
+        root, home, wt = _test_verify.WorkerReadyPackets.job(self)
+        inst = m.Instance(root)
+        n = inst.node('a')
+        starts = [self.tmp / ('start-' + str(i)) for i in range(2)]
+        finishes = [self.tmp / ('finish-' + str(i)) for i in range(2)]
+        done = [self.tmp / ('done-' + str(i)) for i in range(2)]
+        child = ("import sys,time; from pathlib import Path; Path(sys.argv[1]).touch()\n"
+                 "while not Path(sys.argv[2]).exists(): time.sleep(.01)\n"
+                 "Path(sys.argv[3]).touch()\n")
+        code = ('import subprocess,sys; children=[subprocess.Popen([sys.executable,"-c",' +
+                repr(child) + ',start,finish,done]) for start,finish,done in ' +
+                repr([(str(s), str(f), str(d)) for s, f, d in zip(starts, finishes, done)]) +
+                ']; results=[p.wait() for p in children]; raise SystemExit(any(results))')
+        command = 'exec ' + shlex.quote(sys.executable) + ' -c ' + shlex.quote(code)
+        result, errors = [], []
+
+        def run():
+            try:
+                result.append(m.run_verify(inst, n, 'job', command, {'path': str(wt)}, dict(os.environ))[0])
+            except BaseException as e:
+                errors.append(e)
+
+        thread = threading.Thread(target=run)
+        thread.start()
+        try:
+            deadline = time.monotonic() + 5
+            while not all(p.exists() for p in starts) and time.monotonic() < deadline:
+                time.sleep(.002)
+            self.assertTrue(all(p.exists() for p in starts))
+            with m.machine_queue() as q:
+                self.assertEqual(len(q.rows), 1)
+                reservation = dict(q.rows[0])
+                self.assertEqual(reservation['state'], 'running')
+            finishes[0].touch()
+            deadline = time.monotonic() + 5
+            while not done[0].exists() and time.monotonic() < deadline:
+                time.sleep(.002)
+            self.assertTrue(done[0].exists())
+            self.assertFalse(done[1].exists())
+            # The second child keeps the command, and thus its sole reservation, alive.
+            self.assertTrue(thread.is_alive())
+            with m.machine_queue() as q:
+                self.assertEqual(q.rows, [reservation])
+        finally:
+            for path in finishes:
+                path.touch()
+            thread.join(10)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(errors, [])
+        self.assertEqual(result, [0])
+        with m.machine_queue() as q:
+            self.assertEqual(q.rows, [])
+
+    def test_lane_reservation_releases_on_exception(self):
+        m = self.m
+        root, home, wt = _test_verify.WorkerReadyPackets.job(self)
+        inst = m.Instance(root)
+        n = inst.node('a')
+        lane = dict(name='fixture', command='true', schedule='job', requires=[], always=False)
+        snap = dict(lanes=[lane], hashes={'fixture': 'fixture'},
+                    context='fixture', map_hash='fixture', config_hash='fixture')
+        for fitness in (False, True):
+            with self.subTest(fitness=fitness):
+                n['fm']['verify_lanes_check'] = 'true' if fitness else ''
+                with mock.patch.object(m, 'run_verify_stream', side_effect=KeyboardInterrupt), \
+                        contextlib.redirect_stdout(io.StringIO()):
+                    with self.assertRaises(KeyboardInterrupt):
+                        m.run_lanes(inst, n, 'job', {'path': str(wt)}, dict(os.environ),
+                                    snap, None, 'head', 'main', {})
+                with m.machine_queue() as q:
+                    self.assertEqual(q.rows, [])
+
     def test_runner_publication_barrier_and_daemon_reclamation(self):
         m = self.m
         root, home, wt = _test_verify.WorkerReadyPackets.job(self)
