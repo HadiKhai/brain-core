@@ -5,6 +5,23 @@ upgrading. `brain changes <node>` shows the entries this node's coordinator hasn
 `brain due <node>` lists them until `brain changes <node> --seen`. Entry headings are
 `## <date>: <title>`; once released, a heading never changes.
 
+## 2026-10-23: Wake once for a silent frozen or queued job
+
+For agents:
+- An open ledger job marked `frozen` or `queued` in the Active work table wakes
+  its coordinator once after 15 minutes without observed activity. The due item
+  names the job. A local commit, recorded review, queue-state change, or verifier
+  log activity resets the clock; a hand-back ends monitoring. Parked, blocked,
+  and explicitly human-waiting jobs do not produce stall wakes.
+- Job stalls reuse the ordinary due episode receipts. Silence starts when the
+  state is first observed, so an upgrade does not guess the age of old labels.
+  Coordinator-run escalation awaits a host activity/queued-wake source.
+
+After upgrading:
+- Keep the Active work state current. Set `job_stall_minutes=<minutes>` on a
+  node to change the default 15-minute threshold (minimum one minute). No host
+  service change is needed; the existing watcher and wake binding deliver it.
+
 ## 2026-10-23: Readiness uses the recorded verify environment
 
 For agents:

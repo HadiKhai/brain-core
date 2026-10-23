@@ -1,6 +1,7 @@
 """File-only actionable-work watcher; no host queries, provider calls or model turns."""
 import hashlib
 import json
+import math
 import os
 import re
 import shlex
@@ -35,6 +36,94 @@ def watch_read(path, default):
     if not isinstance(data, type(default)):
         raise ValueError("invalid watcher state")
     return data
+
+
+def watch_job_stalls(inst, n):
+    """Observe silent frozen/queued jobs; delivery uses the ordinary due episode receipt.
+
+    Only local source facts are read. The first observation starts the clock rather
+    than guessing when an old free-form status label was applied. Verifier log
+    activity also counts as progress, so a streaming verify is never called frozen.
+    """
+    import fcntl
+    if n['archived']:
+        return []
+    try:
+        minutes = float(n['fm'].get('job_stall_minutes', 15))
+        if not math.isfinite(minutes) or minutes < 1:
+            raise ValueError('invalid stall threshold')
+    except (TypeError, ValueError):
+        minutes = 15
+    directory = inst.root / '.brain/wake'
+    path = directory / ('job-stalls-' + watch_digest(n['id']) + '.json')
+    lock = path.with_suffix('.lock')
+    if not path.exists() and not any(len(r) > 3 and re.match(r'^(frozen|queued)\b', r[3].casefold())
+                                     for r in _m_status.active_work(n)):
+        return []  # do not create private watcher state for ordinary nodes, including init
+    if _m_common.outward_links(inst.root):
+        raise ValueError('unsafe job stall state')
+    directory.mkdir(parents=True, exist_ok=True)
+    _m_common.safe_target(lock)
+    fd = os.open(lock, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(fd, 'a+') as stream:
+        if os.fstat(stream.fileno()).st_nlink != 1:
+            raise ValueError('linked job stall lock')
+        fcntl.flock(stream, fcntl.LOCK_EX)
+        _m_common.safe_target(path)
+        data = watch_read(path, {'version': 1, 'jobs': {}})
+        if (data.get('version') != 1 or not isinstance(data.get('jobs'), dict)
+                or any(not re.fullmatch(r'[0-9a-f]{64}', key) or not isinstance(value, dict)
+                       or not re.fullmatch(r'[0-9a-f]{64}', str(value.get('event', '')))
+                       or type(value.get('since')) not in (int, float)
+                       or not math.isfinite(value['since'])
+                       for key, value in data['jobs'].items())):
+            raise ValueError('invalid job stall state')
+        # Read sources under the observation lock; stale readers cannot restore an old clock.
+        states = {r[0]: r[3] for r in _m_status.active_work(n) if len(r) > 3}
+        rows = _m_jobs.read_jobs(n)
+        if rows is None:
+            return []  # a legacy ledger has no attributable jobs; preserve prior observations
+        current, items = {}, []
+        now = inst.now_dt().timestamp()
+        for row in rows:
+            if row['Ended']:
+                continue
+            state = states.get(row['Job'], '').strip().casefold()
+            match = re.match(r'^(frozen|queued)\b', state)
+            if (not match or re.search(r'\bwait(?:ing)? (?:on|for) (?:a |the )?(?:human|operator)\b', state)
+                    or re.search(r'\b(?:human|operator) (?:choice|decision|approval)\b', state)):
+                continue
+            handback = _m_jobs.read_handback(n, row, strict=True)
+            if handback or _m_jobs.handback_file(n, row).exists():
+                continue  # stopped workers and unknown hand-backs already have their own due path
+            home = n.get('home_path')
+            tip = ''
+            if home and home.is_dir():
+                result = _m_common.git('rev-parse', '--verify', '--quiet', 'refs/heads/' + row['Job'], cwd=home)
+                if result.returncode not in (0, 1):
+                    raise OSError('job stall Git evidence unreadable')
+                tip = result.stdout.strip()
+            key = _m_jobs.job_key(row)
+            logs = []
+            for log in (n['dir'] / 'job-handbacks').glob(key + '*-verify-*.log'):
+                if re.fullmatch(re.escape(key) + r'(?:-[0-9a-f]{16})?-verify-\d+-[0-9a-f]{12}\.log', log.name):
+                    stat = log.stat()
+                    logs.append([log.name, stat.st_mtime_ns, stat.st_size])
+            event = watch_digest([state, tip, row.get('Reviews'), row.get('Review head'),
+                                  row.get('Review kind'), row.get('Switches'), sorted(logs)])
+            identity = watch_digest([n['id'], key])
+            previous = data['jobs'].get(identity)
+            since = previous['since'] if previous and previous['event'] == event else now
+            current[identity] = {'event': event, 'since': since}
+            if now - since >= minutes * 60:
+                items.append({'node': n['id'], 'kind': 'job-stall', 'job': key,
+                              'state': match[1], 'episode': watch_digest([identity, event, since]),
+                              'text': _m_nodes.import_text(
+                                  f"{row['Job']} {match[1]} {minutes:g} min without an event; inspect the job",
+                                  _m_guard.never_terms(n))})
+        if current != data['jobs'] or not path.exists():
+            _m_machine.machine_publish(inst, path, json.dumps({'version': 1, 'jobs': current}, sort_keys=True) + '\n')
+    return items
 
 
 def watch_text_identity(item):
@@ -138,7 +227,7 @@ def watch_items(inst, n):
                             'kind': item['kind'], 'text': 'Unread core change; run brain changes'})
             continue
         # Keep identity separate from changing display (readiness, age, counts).
-        identity = (item.get('episode') if item['kind'] == 'machine-alert' else
+        identity = (item.get('episode') if item['kind'] in ('machine-alert', 'job-stall') else
                     [item.get('job'), item.get('state'), watch_text_identity(item)] if item.get('job') else
                     watch_text_identity(item))
         if item['kind'] == 'rotate':

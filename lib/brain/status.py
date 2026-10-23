@@ -491,6 +491,8 @@ def due_items(inst, n, evidence=None, include_stale=True, include_ready=True, in
     lag = status_lag(inst, n, evidence) if include_stale else None
     if lag:
         add("stale-status", lag + "; update judgement sections, then brain status <node> --refresh")
+    from . import watch as _m_watch
+    items.extend(_m_watch.watch_job_stalls(inst, n))
     return items
 
 
