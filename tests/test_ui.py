@@ -188,6 +188,207 @@ class ExpandedUI(Scenario):
         self.m = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
         loader.exec_module(self.m)
 
+    def first_paint_root(self):
+        root = self.tmp / "alice"
+        root.mkdir()
+        (root / "instance.md").write_text("---\nname: alice\nprincipals: alice\ntimezone: UTC\n---\n")
+        (root / "node.md").write_text("---\nid: root\ntitle: Alice workspace\nowners: alice\nhome: here\n---\n")
+        (root / "status.md").write_text("## Now\nA synthetic first reading.\n")
+        (root / '.brain').mkdir()
+        (root / '.brain/local.json').write_text('{"machine":"demo","nodes":{}}')
+        return root
+
+    def test_first_paint_reads_real_nodes_without_waiting_for_subprocesses(self):
+        root = self.first_paint_root()
+        inst = self.m.UIInstance(root)
+        start = time.monotonic()
+        with mock.patch.object(subprocess, "run", side_effect=AssertionError("slow subprocess layer")):
+            state = self.m.ui_initial_state(inst)
+        self.assertLess(time.monotonic() - start, 0.5)
+        self.assertEqual(state["brain"]["name"], "alice")
+        self.assertEqual(state["nodes"][0]["title"], inst.nodes()[0]["fm"]["title"])
+        self.assertTrue(state["brain"]["filling_in"])
+
+    def test_git_snapshot_reuses_only_reads_and_expires_after_each_build(self):
+        owner = self.m._owners["git"]
+        result = subprocess.CompletedProcess([], 0, "abc", "")
+        with mock.patch.object(subprocess, "run", return_value=result) as run:
+            with owner.git_read_snapshot():
+                self.assertEqual(owner.git("rev-parse", "HEAD").stdout, "abc")
+                self.assertEqual(owner.git("rev-parse", "HEAD").stdout, "abc")
+                owner.git("update-ref", "refs/test", "abc")
+                owner.git("update-ref", "refs/test", "abc")
+                for query in (("remote",), ("symbolic-ref", "--short", "HEAD"),
+                              ("-c", "diff.ignoreSubmodules=none", "status", "--porcelain")):
+                    owner.git(*query)
+                    owner.git(*query)
+            self.assertEqual(run.call_count, 6)
+            owner.git("rev-parse", "HEAD")
+            self.assertEqual(run.call_count, 7)
+
+    def test_snapshot_age_is_visible_until_a_successful_full_refresh(self):
+        box = {"partial": True, "built_at": 100, "building": True, "error": ""}
+        self.assertEqual(self.m.ui_loading(box, now=112),
+                         {"filling_in": True, "age_seconds": 12, "refreshing": True, "failed": False, "version": 0})
+        box.update(partial=False, building=False)
+        self.assertFalse(self.m.ui_loading(box, now=120)["refreshing"])
+        box.update(building=True)
+        self.assertEqual(self.m.ui_loading(box, now=130)["age_seconds"], 30)
+        box.update(building=False, error="private failure")
+        status = self.m.ui_loading(box, now=140)
+        self.assertTrue(status["failed"])
+        self.assertNotIn("private", json.dumps(status))
+        box.update(error='', request=2, checked=1)
+        self.assertTrue(self.m.ui_loading(box, now=140)['refreshing'])
+
+    def test_server_publishes_real_partial_state_then_the_unchanged_full_state(self):
+        import http.server
+        import urllib.request
+        root = self.first_paint_root()
+        inst = self.m.UIInstance(root)
+        fixed = inst.now_dt()
+        ready, entered, release = threading.Event(), threading.Event(), threading.Event()
+        servers, errors = [], []
+        real_server, real_run = http.server.ThreadingHTTPServer, subprocess.run
+        def server(*args, **kwargs):
+            value = real_server(*args, **kwargs)
+            servers.append(value)
+            ready.set()
+            return value
+        def slowed(args, *a, **kw):
+            if args[0] == "git":
+                entered.set()
+                if not release.wait(2):
+                    raise RuntimeError("subprocess fixture was not released")
+            return real_run(args, *a, **kw)
+        def run():
+            try:
+                self.m.cmd_ui(argparse.Namespace(json=False, scan=[], open=False, write=False, port=0, every=0.05))
+            except BaseException as error:
+                errors.append(error)
+        with mock.patch.object(self.m.UIInstance, "now_dt", return_value=fixed):
+            expected = self.m.ui_state(inst, len(self.m.collect_problems(inst)[0]), machine_spend={})
+            spend = mock.Mock(inst=inst, value={}, revision=0, permissions=None)
+            spend.advance.return_value = False
+            spend.refresh_view.return_value = False
+            with mock.patch.object(self.m, "load", return_value=inst), \
+                 mock.patch.object(self.m, "UISpend", return_value=spend), \
+                 mock.patch.object(http.server, "ThreadingHTTPServer", side_effect=server), \
+                 mock.patch.object(subprocess, "run", side_effect=slowed), \
+                 contextlib.redirect_stdout(io.StringIO()):
+                start = time.monotonic()
+                thread = threading.Thread(target=run, daemon=True)
+                thread.start()
+                stream = None
+                try:
+                    self.assertTrue(ready.wait(0.5), "server waited for the slow subprocess layer")
+                    self.assertTrue(entered.wait(0.5))
+                    port = servers[0].server_address[1]
+                    record = json.loads((root / '.brain/ui-servers' / (str(port) + '.json')).read_text())
+                    base = 'http://127.0.0.1:' + str(port)
+                    def get(path):
+                        return urllib.request.urlopen(base + path + '?k=' + record['key'], timeout=2)
+                    with get('/api/state') as response:
+                        self.assertEqual(response.headers['X-Brain-UI-Version'], '1')
+                        first = json.load(response)
+                    self.assertTrue(first['brain']['filling_in'])
+                    self.assertEqual(first['nodes'][0]['title'], expected['nodes'][0]['title'])
+                    self.assertLess(time.monotonic() - start, 1)
+                    stream = get('/api/events')
+                    initial = json.loads(stream.readline()[6:])
+                    self.assertEqual(initial, first)
+                    self.assertEqual(stream.readline(), b'id: 1\n')
+                    with get('/api/loading') as response:
+                        self.assertTrue(json.load(response)['refreshing'])
+                    release.set()
+                    full = initial
+                    while full['brain'].get('filling_in'):
+                        line = stream.readline()
+                        if line.startswith(b'data: '):
+                            full = json.loads(line[6:])
+                    self.assertEqual(full, expected)
+                    # Finish the initial pending metadata check before asserting it is settled.
+                    with get('/api/state') as response:
+                        self.assertEqual(json.load(response), expected)
+                    with get('/api/loading') as response:
+                        self.assertFalse(json.load(response)['refreshing'])
+                finally:
+                    release.set()
+                    if stream:
+                        stream.close()
+                    if servers:
+                        servers[0].shutdown()
+                    thread.join(2)
+                self.assertFalse(thread.is_alive())
+                self.assertEqual(errors, [])
+
+    def test_open_reuses_matching_version_and_stops_only_an_identified_old_server(self):
+        root = self.first_paint_root()
+        inst = self.m.UIInstance(root)
+        module = self.m._owners['ui_reuse_server']
+        (root / 'lib/brain').mkdir(parents=True)
+        source = root / 'lib/brain/ui.py'
+        source.write_text('old source')
+        with mock.patch.object(module.common, 'CORE', root):
+            old = module.ui_code_version()
+            source.write_text('new source')
+            self.assertNotEqual(module.ui_code_version(), old)
+        record = {'pid': 12345, 'root': str(root), 'version': 'current', 'write': False, 'key': 'demo-key'}
+        module.ui_server_record(inst, 4747, record)
+        identity = {k: record[k] for k in ('pid', 'root', 'version', 'write')}
+        with mock.patch.object(module, 'ui_server_request', return_value=identity) as request, \
+             mock.patch.object(os, 'kill') as kill:
+            self.assertEqual(module.ui_reuse_server(inst, 4747, 'current'),
+                             'http://127.0.0.1:4747/?k=demo-key')
+            self.assertEqual(request.call_count, 1)
+            self.assertIsNone(module.ui_reuse_server(inst, 4747, 'new'))
+            self.assertEqual(request.call_args.args, (4747, 'demo-key'))
+            self.assertEqual(request.call_args.kwargs, {'stop': True})
+            kill.assert_not_called()
+        result = subprocess.CompletedProcess([], 0, '12345\n', '')
+        with mock.patch.object(module, 'ui_server_request', side_effect=OSError), \
+             mock.patch.object(subprocess, 'run', return_value=result), \
+             mock.patch.object(module, 'ui_legacy_owner', return_value=False), \
+             mock.patch.object(os, 'kill') as kill:
+            self.assertIsNone(module.ui_reuse_server(inst, 4747, 'new'))
+            kill.assert_not_called()
+
+    def test_legacy_server_ownership_requires_python_brain_ui_and_the_same_brain(self):
+        module = self.m._owners['ui_legacy_owner']
+        root = self.first_paint_root()
+        command = str(os.getuid()) + ' ' + shlex.quote(sys.executable) + ' -B ' + shlex.quote(str(CORE / 'bin/brain')) + ' -b alice ui --open'
+        def result(text):
+            return subprocess.CompletedProcess([], 0, text, '')
+        with mock.patch.object(subprocess, 'run', side_effect=[result(command), result('p12345\nn' + str(root) + '\n')]):
+            self.assertTrue(module.ui_legacy_owner(12345, root))
+        child = root / 'nodes/meadow'
+        child.mkdir(parents=True)
+        with mock.patch.object(subprocess, 'run', side_effect=[result(command), result('n' + str(child))]):
+            self.assertTrue(module.ui_legacy_owner(12345, root))
+        for command in ('0 /usr/bin/python3 -c "print(1)"',
+                        str(os.getuid()) + ' /usr/bin/python3 -c "brain ui"',
+                        str(os.getuid()) + ' ' + shlex.quote(sys.executable) + ' ' + shlex.quote(str(CORE / 'bin/brain')) + ' check'):
+            with mock.patch.object(subprocess, 'run', return_value=result(command)):
+                self.assertFalse(module.ui_legacy_owner(12345, root))
+        with mock.patch.object(subprocess, 'run', side_effect=[result(str(os.getuid()) + ' ' + shlex.quote(sys.executable) + ' ' + shlex.quote(str(CORE / 'bin/brain')) + ' ui'), result('n/another-brain')]):
+            self.assertFalse(module.ui_legacy_owner(12345, root))
+
+    def test_open_does_not_fall_back_to_another_port_for_an_unrelated_listener(self):
+        import http.server
+        import webbrowser
+        inst = self.m.UIInstance(self.first_paint_root())
+        clock = iter(range(0, 100, 10))
+        with mock.patch.object(self.m, 'load', return_value=inst), \
+             mock.patch.object(self.m._owners['ui_reuse_server'], 'ui_reuse_server', return_value=None), \
+             mock.patch.object(http.server, 'ThreadingHTTPServer', side_effect=OSError('busy')) as server, \
+             mock.patch.object(webbrowser, 'open') as opened, \
+             mock.patch.object(time, 'monotonic', side_effect=lambda: next(clock)), \
+             self.assertRaisesRegex(SystemExit, 'port 4747 is busy'):
+            self.m.cmd_ui(argparse.Namespace(json=False, scan=[], open=True, write=False, port=4747, every=1))
+        self.assertEqual(server.call_count, 1)
+        self.assertEqual(server.call_args.args[0], ('127.0.0.1', 4747))
+        opened.assert_not_called()
+
     def test_ui_scan_matches_cli_and_does_not_write(self):
         root = self.init("alice")
         first = self.repo(self.tmp / "code" / "first")

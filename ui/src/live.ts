@@ -1,11 +1,30 @@
 // A visible, active dashboard streams changes. Idle tabs check once a minute;
 // hidden tabs pause unless opted-in notifications need the minute check.
+export type ReadingProgress = { version: number; refreshing?: boolean; failed?: boolean };
+
+export function readingMarker(value: any, progress: ReadingProgress | null, connection: string, now = Date.now()): string | null {
+  const partial = !!value?.brain?.filling_in;
+  const version = value?.__ui_version;
+  if (!partial && version == null) return null; // Older servers and saved snapshots have no delivery metadata.
+  const confirmed = progress && String(progress.version) === version;
+  if (!partial && confirmed && !progress.refreshing && !progress.failed &&
+      !['Connection failed', 'Updates interrupted', 'Permission required'].includes(connection)) return null;
+  const at = Date.parse(value?.brain?.now);
+  const age = Number.isFinite(at) ? `reading ${Math.max(0, Math.floor((now - at) / 1000))}s old` : 'reading age unknown';
+  return `${partial ? 'Filling in…' : progress?.failed ? 'Refresh failed' : 'Refreshing…'} · ${age}`;
+}
+
 export function watchLive(key: string, state: (value: any) => void, status: (value: string) => void, notify = false) {
   let source: EventSource | undefined;
   let controller: AbortController | undefined;
   let idleTimer: ReturnType<typeof setTimeout> | undefined;
   let pollTimer: ReturnType<typeof setTimeout> | undefined;
-  let active = true, disposed = false, generation = 0;
+  let active = true, disposed = false, generation = 0, filling = false;
+  const delay = () => filling ? 1_000 : 60_000;
+  const deliver = (value: any, version: string | null) => {
+    filling = !!value?.brain?.filling_in;
+    state({ ...value, __ui_version: version });
+  };
   const close = () => {
     generation++;
     controller?.abort();
@@ -26,14 +45,14 @@ export function watchLive(key: string, state: (value: any) => void, status: (val
       if (!response.ok) throw Error('state unavailable');
       const value = await response.json();
       if (current !== generation || disposed || (document.hidden && !notify)) return;
-      state(value);
+      deliver(value, response.headers.get('X-Brain-UI-Version'));
       status(active ? 'Live' : 'Updates each minute');
       if (active) {
         source?.close();
         source = new EventSource('/api/events?k=' + encodeURIComponent(key));
         source.onmessage = event => {
           if (!active || current !== generation || disposed || (document.hidden && !notify)) return;
-          try { state(JSON.parse(event.data)); status('Live'); }
+          try { deliver(JSON.parse(event.data), event.lastEventId || null); status('Live'); }
           catch { status('Updates interrupted'); }
         };
         source.onerror = () => { if (active && current === generation) status('Updates interrupted'); };
@@ -44,7 +63,7 @@ export function watchLive(key: string, state: (value: any) => void, status: (val
       if (current === generation) {
         controller = undefined;
         if (!disposed && !active && (!document.hidden || notify))
-          pollTimer = setTimeout(read, 60_000);
+          pollTimer = setTimeout(read, delay());
       }
     }
   };
@@ -56,7 +75,7 @@ export function watchLive(key: string, state: (value: any) => void, status: (val
     source = undefined;
     clearTimeout(pollTimer);
     status('Updates each minute');
-    if (!controller && (!document.hidden || notify)) pollTimer = setTimeout(read, 60_000);
+    if (!controller && (!document.hidden || notify)) pollTimer = setTimeout(read, delay());
   };
   const activity = () => {
     if (disposed || document.hidden) return;

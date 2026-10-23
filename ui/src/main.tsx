@@ -1,5 +1,5 @@
 import { ReviewProvider } from "./review";
-import { watchLive } from "./live";
+import { watchLive, readingMarker, type ReadingProgress } from "./live";
 import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { Bell, Moon, RefreshCw, Sun } from "lucide-react";
@@ -80,6 +80,41 @@ function App() {
   const scroll = useRef<HTMLDivElement>(null),
     positions = useRef<Record<string, number>>({}),
     activeView = useRef(route.view + ":" + (route.node || ""));
+  const [progress, setProgress] = useState<ReadingProgress | null>(null);
+  const [, readingTick] = useState(0);
+  const marker = readingMarker(s, progress, connection);
+  const hasReading = s?.__ui_version != null;
+  useEffect(() => {
+    if (!hasReading || window.__STATE__) return;
+    const key = new URLSearchParams(location.search).get("k");
+    if (!key) return;
+    const controller = new AbortController();
+    let timer: ReturnType<typeof setTimeout>;
+    const poll = async () => {
+      try {
+        if (!document.hidden) {
+          const response = await fetch('/api/loading?k=' + encodeURIComponent(key), { signal: controller.signal });
+          if (!response.ok) throw Error('Reading status unavailable');
+          const next: ReadingProgress = await response.json();
+          if (typeof next.version !== 'number') throw Error('Reading status unavailable');
+          if (!controller.signal.aborted) setProgress(prev => prev?.version === next.version &&
+            !!prev.refreshing === !!next.refreshing && !!prev.failed === !!next.failed ? prev : next);
+        }
+      } catch {
+        if (!controller.signal.aborted) setProgress(null);
+      } finally {
+        if (!controller.signal.aborted) timer = setTimeout(poll, 1000);
+      }
+    };
+    void poll();
+    return () => { controller.abort(); clearTimeout(timer); };
+  }, [hasReading, retry]);
+  const showMarker = !!marker;
+  useEffect(() => {
+    if (!showMarker) return;
+    const timer = setInterval(() => { if (!document.hidden) readingTick(value => value + 1); }, 1000);
+    return () => clearInterval(timer);
+  }, [showMarker]);
   useLayoutEffect(() => {
     // Overlay scrollbars need no reserved space. CSS stable alone can still
     // allocate a classic-width strip on systems whose scrollbars overlay content.
@@ -230,6 +265,7 @@ function App() {
     <TimeZoneContext.Provider value={s?.brain?.tz}>
       <ReviewProvider enabled={!!s?.review?.enabled} catalogKey={JSON.stringify([list(s?.items?.all).filter(i => i.status === "proposed").map(i => [i.id, i.scope]), list(s?.specialists).filter(i => i.status === "proposed").map(i => [i.id, i.node, i.scope])])}><TooltipProvider>
         <SidebarProvider>
+          {marker && <div data-reading-progress role="status" style={{ position: "fixed", bottom: 12, right: 12, zIndex: 9999, padding: "8px 12px", borderRadius: 8, background: "Canvas", color: "CanvasText", border: "1px solid GrayText", font: "13px system-ui" }}>{marker}</div>}
           <Navigation s={s} route={route} go={go} onAdd={() => setAdd(true)} onNotice={setNotice} />
           <SidebarInset className="app-inset">
             <div className="topbar">

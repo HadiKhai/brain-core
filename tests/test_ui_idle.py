@@ -144,6 +144,14 @@ cli.main()
         def state():
             with urllib.request.urlopen(base + 'api/state?k=' + key, timeout=10) as response:
                 return json.load(response)
+        # These tests exercise settled-state caching, after the file-only first reading.
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            if not state()['brain'].get('filling_in'):
+                break
+            time.sleep(0.01)
+        else:
+            self.fail('full dashboard state was not published')
         return root, state
 
     @staticmethod

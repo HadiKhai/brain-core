@@ -5,6 +5,20 @@ upgrading. `brain changes <node>` shows the entries this node's coordinator hasn
 `brain due <node>` lists them until `brain changes <node> --seen`. Entry headings are
 `## <date>: <title>`; once released, a heading never changes.
 
+## 2026-10-24: Open the dashboard before slow repository checks finish
+
+For agents:
+- The dashboard first serves real node and job files with a filling-in marker,
+  then publishes the complete reading. Refreshing and failed readings show their age.
+- Repeated read-only Git queries share one build's results. Explicit checks and
+  later builds still read Git again.
+- `brain ui --open` reuses a matching local server or replaces an identified old
+  dashboard on the requested port. An unrelated listener is left running; the
+  command reports the busy port instead of silently choosing another one.
+
+After upgrading:
+- Run `brain ui --open` again to replace an older dashboard. No setup is needed.
+
 ## 2026-10-23: Rehearse JSON probes without collapsing private identities
 
 For agents:

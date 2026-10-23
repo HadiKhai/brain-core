@@ -6,6 +6,8 @@ this machine's bindings (.brain/local.json, never committed).
 Judgment work (what goes in a brief, how to split state) lives in core/skills, not here.
 """
 import argparse
+import contextlib
+import contextvars
 import datetime
 import fnmatch
 import hashlib
@@ -203,9 +205,44 @@ def fill(text, values):
     return text
 
 
+_GIT_READS = contextvars.ContextVar('brain_git_reads', default=None)
+
+
+@contextlib.contextmanager
+def git_read_snapshot():
+    """Share repeated display reads within one build, never across threads or builds."""
+    if _GIT_READS.get() is not None:
+        yield
+        return
+    token = _GIT_READS.set({})
+    try:
+        yield
+    finally:
+        _GIT_READS.reset(token)
+
+
 def git(*args, cwd=None, check=False):
-    return subprocess.run(["git", *(["-C", str(cwd)] if cwd else []), *args],
-                          capture_output=True, text=True, errors="replace", check=check)
+    reads = _GIT_READS.get()
+    key = (str(Path(cwd or Path.cwd()).absolute()), args)
+    query = args
+    while len(query) >= 2 and query[0] == '-c':
+        query = query[2:]
+    read_only = (query and (query[0] in
+                 ('rev-parse', 'log', 'status', 'diff', 'ls-files', 'merge-base', 'rev-list', 'for-each-ref')
+                 or query == ('remote',)
+                 or (query[0] == 'symbolic-ref' and len([x for x in query[1:] if not x.startswith('-')]) == 1
+                     and all(not x.startswith('-') or x in ('--short', '--quiet', '-q') for x in query[1:]))))
+    cacheable = (reads is not None and read_only
+                 and not any(str(a).startswith('--output') for a in args))
+    result = reads.get(key) if cacheable else None
+    if result is None:
+        result = subprocess.run(["git", *(["-C", str(cwd)] if cwd else []), *args],
+                                capture_output=True, text=True, errors="replace", check=False)
+        if cacheable:
+            reads[key] = result
+    if check:
+        result.check_returncode()
+    return result
 
 
 def die(msg):
