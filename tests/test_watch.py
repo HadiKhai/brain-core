@@ -454,6 +454,84 @@ class Watcher(Scenario):
                 self.assertEqual([i['kind'] for i in self.since()], ['blocked-overdue'])
             self.assertEqual(send.call_count, 1)
 
+    def test_due_episode_ignores_child_commits_and_block_timestamp_churn(self):
+        self.b(self.root, 'new', 'sample', '--title', 'Sample')
+        self.inst = self.m.Instance(self.root)
+        root, child = self.inst.node('root'), self.inst.node('sample')
+        status = self.root / 'status.md'
+        original = status.read_text()
+        with mock.patch.object(self.m, 'changes_due', return_value=[]), \
+                mock.patch.object(self.m, 'wake_start'), mock.patch.object(self.m, 'WAKE_INTERVAL', 0), \
+                mock.patch.object(self.m, 'wake_send', return_value=True) as send:
+            for index in range(6):
+                status.write_text(original + '\n## Blocked\n- Choose blue; since: 2020-01-0'
+                                  + str(index + 1) + 'T00:00Z; recommendation: blue; default: gray\n')
+                if index:
+                    (child['dir'] / 'status.md').write_text('Updated: fixture ' + str(index) + '\n')
+                    self.git('add', str(child['dir'] / 'status.md'), cwd=self.root)
+                    self.git('commit', '-qm', 'child status fixture ' + str(index), cwd=self.root)
+                self.watch()
+                self.m.wake_drain(self.inst, root, once=True)
+            self.assertEqual(send.call_count, 1)
+
+    def test_due_item_resolution_rearms_same_item_without_expiring_sent_receipt(self):
+        root = self.inst.node('root')
+        inbox = self.root / 'inbox.md'
+        with mock.patch.object(self.m, 'changes_due', return_value=[]), \
+                mock.patch.object(self.m, 'wake_start'), mock.patch.object(self.m, 'WAKE_INTERVAL', 0), \
+                mock.patch.object(self.m, 'wake_send', return_value=True) as send:
+            inbox.write_text('- Choose blue\n')
+            self.watch()
+            self.m.wake_drain(self.inst, root, once=True)
+            inbox.write_text('')
+            self.watch()
+            inbox.write_text('- Choose blue\n')
+            self.watch()
+            self.m.wake_drain(self.inst, root, once=True)
+            self.assertEqual(send.call_count, 2)
+            self.assertEqual([i['text'] for i in self.since()], ['Choose blue'])
+
+    def test_due_job_text_and_state_changes_wake_but_display_metadata_does_not(self):
+        root = self.inst.node('root')
+        item = {'node': 'root', 'kind': 'overlapping-inputs', 'job': 'fixture-job',
+                'text': 'job/fixture: review waiting inputs'}
+        with mock.patch.object(self.m, 'due_items', side_effect=lambda *a, **k: [dict(item)]), \
+                mock.patch.object(self.m, 'changes_due', return_value=[]), \
+                mock.patch.object(self.m, 'wake_start'), mock.patch.object(self.m, 'WAKE_INTERVAL', 0), \
+                mock.patch.object(self.m, 'wake_send', return_value=True) as send:
+            self.watch()
+            self.m.wake_drain(self.inst, root, once=True)
+            item.update(count=9, at='2099-01-01T00:00Z', head='a' * 40)
+            self.watch()
+            self.m.wake_drain(self.inst, root, once=True)
+            self.assertEqual(send.call_count, 1)
+            item['text'] = 'job/fixture: conflicting inputs need repair'
+            self.watch()
+            self.m.wake_drain(self.inst, root, once=True)
+            self.assertEqual(send.call_count, 2)
+            item['state'] = 'blocked'
+            self.watch()
+            self.m.wake_drain(self.inst, root, once=True)
+            self.assertEqual(send.call_count, 3)
+
+    def test_resolved_due_episode_pending_retires_but_inbox_decision_still_delivers(self):
+        root = self.inst.node('root')
+        status = self.root / 'status.md'
+        original = status.read_text()
+        status.write_text(original + '\n## Blocked\n- Choose blue; since: 2020-01-01T00:00Z\n')
+        with mock.patch.object(self.m, 'changes_due', return_value=[]), \
+                mock.patch.object(self.m, 'wake_start'), mock.patch.object(self.m, 'WAKE_INTERVAL', 0), \
+                mock.patch.object(self.m, 'wake_send', return_value=True) as send:
+            self.watch()
+            (self.root / 'inbox.md').write_text('- Decision needed: choose green\n')
+            self.watch()
+            status.write_text(original)
+            self.m.wake_drain(self.inst, root, once=True)
+            self.assertEqual(send.call_count, 1)
+            refs = self.m.wake_history(self.m.wake_directory(self.inst, root))[-1]['items']
+            self.assertEqual([i['kind'] for i in refs], ['inbox'])
+            self.assertFalse(list(self.m.wake_directory(self.inst, root).glob('*.pending')))
+
     def test_direct_question_delivery_history_and_corrupt_history(self):
         n = self.inst.node('root')
         episode = 'a' * 32

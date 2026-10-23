@@ -37,6 +37,58 @@ def watch_read(path, default):
     return data
 
 
+def watch_text_identity(item):
+    """Keep the need, not its timestamp metadata or generated display counters."""
+    text = item['text']
+    if item['kind'] == 'blocked-overdue':
+        text = re.sub(r';\s*since:\s*[^;]*', '', text, flags=re.I)
+    if item['kind'] == 'inbox':
+        text = re.sub(r'^\d{4}-\d\d-\d\d[ T][0-9:.]+(?:Z|\s*[+-]\d\d:\d\d)?\s+', '', text)
+    return ' '.join(text.split())
+
+
+def watch_due_episodes(inst, groups):
+    """Persist opaque receipts while ordinary due needs remain open.
+
+    Readers and drains share this short transaction, so a restart or snapshot
+    cannot manufacture another episode. A complete scan closes absent needs.
+    Machine and direct producer episodes already have their own receipts.
+    """
+    import fcntl
+    entries = [i for group in groups.values() for i in group['items']
+               if 'reason' not in i and i['kind'] not in
+               ('machine-hold', 'machine-alert', 'machine-repair', 'job-ready', 'job-landed')]
+    path = inst.root / '.brain/wake/due-episodes.json'
+    lock = path.with_suffix('.lock')
+    if _m_common.outward_links(inst.root):
+        raise ValueError('unsafe due episode state')
+    path.parent.mkdir(exist_ok=True)
+    _m_common.safe_target(lock)
+    fd = os.open(lock, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(fd, 'a+') as stream:
+        if os.fstat(stream.fileno()).st_nlink != 1:
+            raise ValueError('linked due episode lock')
+        fcntl.flock(stream, fcntl.LOCK_EX)
+        _m_common.safe_target(path)
+        data = watch_read(path, {'version': 1, 'open': {}})
+        if (data.get('version') != 1 or not isinstance(data.get('open'), dict)
+                or any(not re.fullmatch(r'[0-9a-f]{64}', k)
+                       or not isinstance(v, str) or not re.fullmatch(r'[0-9a-f]{64}', v)
+                       for k, v in data['open'].items())):
+            raise ValueError('invalid due episode state')
+        # Preserve pre-upgrade acknowledgements rather than replaying the backlog.
+        seen = set(watch_state(inst).get('seen', [])) if not path.exists() else set()
+        current = {}
+        for item in entries:
+            key = item['id']
+            current.setdefault(key, data['open'].get(key) or (key if key in seen else
+                               watch_digest(['due-episode'])[:16] + os.urandom(24).hex()))
+            item['id'] = current[key]
+        if current != data['open'] or not path.exists():
+            _m_machine.machine_publish(inst, path, json.dumps({'version': 1, 'open': current}, sort_keys=True) + '\n')
+    return groups
+
+
 def watch_items(inst, n):
     """Due semantics, excluding refresh-only work. Never runs cmd_due's upgrade/network path."""
     rows = _m_jobs.read_jobs(n)
@@ -85,7 +137,9 @@ def watch_items(inst, n):
                             'kind': item['kind'], 'text': 'Unread core change; run brain changes'})
             continue
         # Keep identity separate from changing display (readiness, age, counts).
-        identity = item.get('episode') if item['kind'] == 'machine-alert' else (item.get('job') or item['text'])
+        identity = (item.get('episode') if item['kind'] == 'machine-alert' else
+                    [item.get('job'), item.get('state'), watch_text_identity(item)] if item.get('job') else
+                    watch_text_identity(item))
         if item['kind'] == 'rotate':
             sessions = n['local'].get('coordinator_sessions', [])
             category = ('repair' if item['text'].startswith('rotation sidecar') else
@@ -93,12 +147,12 @@ def watch_items(inst, n):
             identity = [n['local'].get('coordinator'), sessions[-1] if isinstance(sessions, list) and sessions else None,
                         category]
         if item['kind'] == 'handback':
-            identity = [identity, item.get('state')]
+            identity = [item.get('job') or watch_text_identity(item), item.get('state')]
             if item.get('state') == 'done':
                 signal = signals.get(item.get('job')) or {}
                 episode = signal.get('wake_id')
                 handback_episode = (episode if isinstance(episode, str) and re.fullmatch(r'[0-9a-f]{32}', episode)
-                                    else watch_digest([signal.get('at'), signal.get('ready')]))
+                                    else 'legacy')
             if handback_episode:
                 identity.append(handback_episode)
         text = _m_nodes.import_text(item['text'], _m_guard.never_terms(n))[:400]
@@ -213,11 +267,14 @@ def watch_completion_items(inst, nodes=None, strict=False, unknown=None):
                     start, end = inst.parse_time(row['Started']), inst.parse_time(row['Ended'])
                     if row['Outcome'] == 'merged' and start and end and end >= start:
                         kind = 'job-landed'
-                        evidence = [row['Ended'], row.get('Head commit'), row.get('Batch')]
+                        evidence = 'landed'  # the job key owns this transaction, not bookkeeping
                 else:
-                    packet = watch_recorded_ready(inst, n, row, _m_jobs.read_handback(n, row, strict=strict), strict=strict)
+                    signal = _m_jobs.read_handback(n, row, strict=strict)
+                    packet = watch_recorded_ready(inst, n, row, signal, strict=strict)
                     if packet:
-                        kind, evidence = 'job-ready', packet
+                        episode = (signal or {}).get('wake_id')
+                        kind, evidence = 'job-ready', (episode if isinstance(episode, str) and
+                            re.fullmatch(r'[0-9a-f]{32}', episode) else 'legacy')
                 if kind:
                     identity = watch_completion_scope(n['id'], row, kind) + watch_digest([n['id'], _m_jobs.job_key(row), kind, evidence])[:32]
                     out.append({'id': identity,
@@ -368,7 +425,7 @@ def watch_groups(inst, nodes=None):
                 continue
             group['items'].append({**item, 'kind': 'machine-hold',
                                    'id': watch_digest([item['node'], 'machine-hold', item['episode']])})
-    return groups
+    return watch_due_episodes(inst, groups)
 
 
 def watch_since_wake(inst, nodes):
@@ -393,6 +450,10 @@ def watch_run(inst):
     warnings = set(state.get('warnings', []))
     watch_failures(inst, nodes, failures, warnings)
     groups = watch_groups(inst, nodes)
+    current_ids = {i['id'] for group in groups.values() for i in group['items']}
+    for group in groups.values():
+        for pending in _m_hosts.wake_directory(inst, group['node']).glob('*.pending'):
+            _m_hosts.wake_retire_due_pending(pending, current_ids)
     current = []
     count = 0
     for group in groups.values():

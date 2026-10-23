@@ -123,6 +123,56 @@ class WatchExtension(Scenario):
         self.signal(n, row, episode='b' * 32)
         self.assertNotEqual(self.root_events()[0]['id'], events[0]['id'])
 
+    def test_ready_episode_ignores_five_child_commits_and_packet_bookkeeping(self):
+        home, n, w, row = self.project()
+        signal = self.signal(n, row)
+        (self.root / 'status.md').write_text(
+            '## Blocked\n- Choose blue; since: 2020-01-01T00:00Z; recommendation: blue; default: gray\n')
+        root = self.inst.node('root')
+        with mock.patch.object(self.m, 'changes_due', return_value=[]), mock.patch.object(self.m, 'wake_start'), \
+                mock.patch.object(self.m, 'WAKE_INTERVAL', 0), mock.patch.object(self.m, 'wake_send', return_value=True) as send:
+            for index in range(6):
+                if index:
+                    self.tip(w['path'], 'child fixture ' + str(index))
+                    signal['ready'].update(head=self.git('rev-parse', row['Job'], cwd=home).strip(),
+                                           review_rounds=index + 1,
+                                           checked_at=self.inst.now_dt().isoformat())
+                    self.save_signal(n, row, signal)
+                self.watch()
+                self.m.wake_drain(self.inst, root, once=True)
+            self.assertEqual(send.call_count, 1)
+            signal['ready']['checked_at'] = self.inst.now_dt().isoformat()
+            self.save_signal(n, row, signal)
+            self.watch()
+            self.m.wake_drain(self.inst, root, once=True)
+            self.assertEqual(send.call_count, 1)  # same wake_id, only checked_at changed
+            signal['wake_id'] = 'b' * 32
+            self.save_signal(n, row, signal)
+            self.watch()
+            self.m.wake_drain(self.inst, root, once=True)
+            self.assertEqual(send.call_count, 2)
+
+    def test_landed_episode_ignores_end_head_and_batch_bookkeeping(self):
+        self.b(self.root, 'new', 'app', '--title', 'App')
+        self.inst = self.m.Instance(self.root)
+        n, root = self.inst.node('app'), self.inst.node('root')
+        row = {**dict.fromkeys(self.m.JOB_COLS, ''), 'Job': 'job/fixture',
+               'Started': '2020-01-01T00:00Z', 'Ended': '2020-01-02T00:00Z', 'Outcome': 'merged'}
+        with mock.patch.object(self.m, 'changes_due', return_value=[]), mock.patch.object(self.m, 'wake_start'), \
+                mock.patch.object(self.m, 'WAKE_INTERVAL', 0), mock.patch.object(self.m, 'wake_send', return_value=True) as send:
+            for index in range(6):
+                row.update(Ended='2020-01-0' + str(index + 2) + 'T00:00Z',
+                           Batch='fixture-' + str(index), **{'Head commit': str(index) * 40})
+                self.m.write_jobs(self.inst, n, [row])
+                self.watch()
+                self.m.wake_drain(self.inst, root, once=True)
+            self.assertEqual(send.call_count, 1)
+            other = {**row, 'Job': 'job/other'}
+            self.m.write_jobs(self.inst, n, [row, other])
+            self.watch()
+            self.m.wake_drain(self.inst, root, once=True)
+            self.assertEqual(send.call_count, 2)
+
     def test_malformed_failed_or_wrong_job_ready_never_notifies_root(self):
         home, n, w, row = self.project()
         good = self.signal(n, row)
@@ -243,7 +293,7 @@ class WatchExtension(Scenario):
             calls.append(command)
             if len(calls) == 1:
                 home, n, w, row = self.project()
-                self.signal(n, row)
+                self.signal(n, row, episode=('a' if mode == 'handback' else 'b') * 32)
                 self.watch()  # new binding and completion arrive during the previous send
             return True
         with mock.patch.object(self.m, 'changes_due', return_value=[]), mock.patch.object(self.m, 'wake_start'), \

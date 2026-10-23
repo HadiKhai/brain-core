@@ -32,6 +32,21 @@ After upgrading:
 - No configuration change is needed. Start a new hand-back or gate process to
   use the per-command admission behavior.
 
+## 2026-10-23: Wake once per changed due episode
+
+For agents:
+- Ordinary due needs keep private open-episode receipts. Unchanged needs stay quiet
+  through child activity; a changed need or one resolved and later seen again wakes.
+- Ready notifications use the worker's wake episode; landed notifications use the
+  job episode. Verification timestamps, counts, commits and batch bookkeeping do
+  not create new completion notices. Genuine new completions still wake once.
+- Resolved pending due work retires without dropping inbox questions or decisions.
+  Machine hold and escalation receipts keep their existing behavior.
+
+After upgrading:
+- No configuration change is needed. Keep private wake receipts when restarting
+  the watcher; do not clear them to refresh displayed facts.
+
 ## 2026-10-23: Wake once per queued machine-hold episode
 
 For agents:

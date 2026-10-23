@@ -153,6 +153,26 @@ def wake_previous_items(directory):
     return baseline
 
 
+def wake_due_refs(refs, current):
+    from . import watch as _m_watch
+    prefix = _m_watch.watch_digest(['due-episode'])[:16]
+    return [i for i in refs if i['kind'] in ('inbox', 'rotate') or not i['id'].startswith(prefix)
+            or i['id'] in current]
+
+
+def wake_retire_due_pending(path, current):
+    """A completed watcher scan can retire resolved due work before another enqueue."""
+    try:
+        refs = wake_item_refs(json.loads(path.read_text())['items'])
+    except (OSError, ValueError, KeyError, TypeError):
+        return  # unknown and direct legacy requests remain deliverable
+    allowed = wake_due_refs(refs, current)
+    if refs and not allowed:
+        path.unlink(missing_ok=True)
+    elif allowed != refs:
+        _m_common.atomic_write(path, json.dumps({'items': allowed}) + '\n')
+
+
 def wake_actionable_pending(inst, path):
     """Retire identified old machine transitions without dropping unknown questions."""
     try:
@@ -187,6 +207,18 @@ def wake_actionable_pending(inst, path):
         if current is not None:
             allowed = [i for i in allowed if i['kind'] not in ('job-ready', 'job-landed') or i['id'] in current
                        or any(i['id'].startswith(scope) for scope in unknown)]
+    # Ordinary due receipts close when the need disappears. Inbox requests stay
+    # protected even if answered while the transport is rate-limited.
+    prefix = _m_watch.watch_digest(['due-episode'])[:16]
+    protected = ('inbox', 'rotate')
+    if any(i['kind'] not in protected and i['id'].startswith(prefix) for i in allowed):
+        try:
+            groups = _m_watch.watch_groups(_m_instance.Instance(inst.root))
+            current = {i['id'] for group in groups.values() for i in group['items']}
+        except (Exception, SystemExit):
+            current = None  # unknown state cannot discard a real need
+        if current is not None:
+            allowed = wake_due_refs(allowed, current)
     if refs and not allowed:
         path.unlink(missing_ok=True)
         return False
