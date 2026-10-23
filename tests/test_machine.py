@@ -921,7 +921,9 @@ class DockerLeftovers(unittest.TestCase):
         self.env = mock.patch.dict(os.environ, {'DOCKER_HOST': 'unix:///tmp/fixture.sock', 'DOCKER_CONTEXT': ''})
         self.env.start()
         self.addCleanup(self.env.stop)
-        self.patches = [mock.patch.object(self.m.shutil, 'which', return_value='/fake/docker'),
+        self.original_process_stamp = self.m.process_stamp
+        self.patches = [mock.patch.object(self.m, 'process_stamp', return_value=None),
+                        mock.patch.object(self.m.shutil, 'which', return_value='/fake/docker'),
                         mock.patch.object(self.m.subprocess, 'run', side_effect=self.command),
                         mock.patch.object(self.m.time, 'monotonic', side_effect=lambda: self.clock),
                         mock.patch.object(self.m.os, 'kill', side_effect=ProcessLookupError),
@@ -938,13 +940,14 @@ class DockerLeftovers(unittest.TestCase):
 
     def command(self, args, **kw):
         self.calls.append((args, kw))
-        self.assertFalse({'stop', 'rm', 'prune', 'down', 'kill', 'volume'} & set(args))
+        self.assertFalse({'stop', 'rm', 'prune', 'down', 'kill', 'volume', 'restart', 'exec'} & set(args))
         self.assertGreater(kw['timeout'], 0)
         self.assertLessEqual(kw['timeout'], 5)
-        if 'ps' in args:
+        host = ['/fake/docker', '--host', 'unix:///tmp/fixture.sock']
+        if args == host + ['ps', '--all', '--quiet', '--no-trunc']:
             output = '\n'.join(r['Id'] for r in self.rows)
-        elif 'inspect' in args:
-            output = json.dumps([r for r in self.rows if r['Id'] in args])
+        elif len(args) == 5 and args[:4] == host + ['inspect'] and any(r['Id'] == args[4] for r in self.rows):
+            output = json.dumps([r for r in self.rows if r['Id'] == args[4]])
         else:
             self.fail('unexpected Docker command: ' + repr(args))
         return subprocess.CompletedProcess(args, 0, output, '')
@@ -958,8 +961,13 @@ class DockerLeftovers(unittest.TestCase):
         log = self.root / 'argv.jsonl'
         row = self.row(**{'brain.owner-pid': '987654'})
         binary.write_text('#!/usr/bin/python3\nimport json, sys\n'
-                          'with open(' + repr(str(log)) + ', "a") as f: f.write(json.dumps(sys.argv[1:]) + "\\n")\n'
-                          'print(' + repr(row['Id']) + ' if "ps" in sys.argv else ' + repr(json.dumps([row])) + ')\n')
+                          'args = sys.argv[1:]\n'
+                          'with open(' + repr(str(log)) + ', "a") as f: f.write(json.dumps(args) + "\\n")\n'
+                          'host = ["--host", "unix:///tmp/fixture.sock"]\n'
+                          'if args == host + ["ps", "--all", "--quiet", "--no-trunc"]: print(' + repr(row['Id']) + ')\n'
+                          'elif args == host + ["inspect", ' + repr(row['Id']) + ']: print(' + repr(json.dumps([row])) + ')\n'
+                          'elif args == ["context", "inspect"]: print(' + repr('[{"Endpoints":{"docker":{"Host":"unix:///tmp/fixture.sock"}}}]') + ')\n'
+                          'else: print("unexpected argv", file=sys.stderr); sys.exit(64)\n')
         binary.chmod(0o755)
         with mock.patch.object(self.m.subprocess, 'run', side_effect=self.real_run):
             with mock.patch.object(self.m.shutil, 'which', return_value=str(binary)):
@@ -967,7 +975,7 @@ class DockerLeftovers(unittest.TestCase):
         self.assertEqual(len(result['leftovers']), 1)
         argv = [json.loads(s) for s in log.read_text().splitlines()]
         self.assertEqual(len(argv), 2)
-        self.assertFalse({'stop', 'rm', 'prune', 'down', 'kill', 'volume'} & {a for row in argv for a in row})
+        self.assertFalse({'stop', 'rm', 'prune', 'down', 'kill', 'volume', 'restart', 'exec'} & {a for row in argv for a in row})
 
     real_run = staticmethod(subprocess.run)
 
@@ -1147,7 +1155,7 @@ class DockerLeftovers(unittest.TestCase):
         self.assertEqual(run.call_count, 1)
 
     def test_readonly_command_guard_refuses_mutations_before_cli(self):
-        for word in ('stop', 'rm', 'prune', 'down', 'kill', 'volume'):
+        for word in ('stop', 'rm', 'prune', 'down', 'kill', 'volume', 'restart', 'exec'):
             with self.assertRaises(ValueError):
                 self.m.leftover_command('/fake/docker', ['--host', 'unix:///tmp/fixture.sock', word], 15)
         self.assertEqual(self.calls, [])
@@ -1174,6 +1182,140 @@ class DockerLeftovers(unittest.TestCase):
                      self.row(3, 'maple-job-foreign', **{'brain.docker-scope': 'foreign'})]
         self.rows[0]['Name'] = '/preview-current'
         self.assertEqual(self.scan()['leftovers'], [])
+
+
+    def test_reservation_birth_identity_and_parent_child_liveness(self):
+        record = {'token': 'a' * 32, 'scope': self.m.machine_scope(self.inst, self.node['id']),
+                  'owner': [101, 'parent-stamp'], 'child': [102, 'child-stamp'],
+                  'kind': 'verify', 'state': 'running'}
+        self.rows = [self.row(**{'brain.reservation': record['token']})]
+        cases = [({101: None, 102: None}, False, 102),
+                 ({101: 'parent-stamp', 102: None}, True, None),
+                 ({101: None, 102: 'child-stamp'}, True, None),
+                 ({101: 'reused-stamp', 102: None}, False, 'unknown'),
+                 ({101: 'unknown', 102: None}, False, 'unknown'),
+                 ({101: None, 102: 'unknown'}, False, 'unknown'),
+                 ({101: 'unknown', 102: 'child-stamp'}, False, 'unknown')]
+        for stamps, alive, owner in cases:
+            with self.subTest(stamps=stamps), \
+                    mock.patch.object(self.m, 'leftover_records', return_value=[record]), \
+                    mock.patch.object(self.m, 'process_stamp', side_effect=lambda pid, **kw: stamps[pid]) as probe, \
+                    mock.patch.object(self.m.os, 'kill', return_value=None):
+                rows = self.scan()['leftovers']
+                self.assertEqual(bool(rows), not alive)
+                self.assertEqual({c.args[0] for c in probe.call_args_list}, {101, 102})
+                if rows:
+                    if owner == 'unknown':
+                        self.assertEqual(rows[0]['owner'], 'unknown')
+                    else:
+                        self.assertEqual(rows[0]['owner']['pid'], owner)
+        # With no child, a reused PID is still unknown, never an alive recorded owner.
+        record.pop('child')
+        with mock.patch.object(self.m, 'leftover_records', return_value=[record]), \
+                mock.patch.object(self.m, 'process_stamp', return_value='different-birth'), \
+                mock.patch.object(self.m.os, 'kill', return_value=None):
+            self.assertEqual(self.scan()['leftovers'][0]['owner'], 'unknown')
+
+    def test_pid_label_record_disagreement_and_unknown_birth_are_unknown(self):
+        record = {'token': 'a' * 32, 'scope': self.m.machine_scope(self.inst, self.node['id']),
+                  'owner': [101, 'parent-stamp'], 'kind': 'verify', 'state': 'running'}
+        self.rows = [self.row(**{'brain.reservation': record['token'], 'brain.owner-pid': '999'})]
+        with mock.patch.object(self.m, 'leftover_records', return_value=[record]), \
+                mock.patch.object(self.m, 'process_stamp', return_value='parent-stamp'), \
+                mock.patch.object(self.m.os, 'kill', return_value=None):
+            self.assertEqual(self.scan()['leftovers'][0]['owner'], 'unknown')
+        record['owner'][1] = 'unknown'
+        self.rows[0]['Config']['Labels']['brain.owner-pid'] = '101'
+        with mock.patch.object(self.m, 'leftover_records', return_value=[record]), \
+                mock.patch.object(self.m, 'process_stamp', return_value='parent-stamp'), \
+                mock.patch.object(self.m.os, 'kill', return_value=None):
+            self.assertEqual(self.scan()['leftovers'][0]['owner'], 'unknown')
+
+        for error in (PermissionError('fixture denied'), OSError('fixture unknown')):
+            self.rows = [self.row(**{'brain.owner-pid': '101'})]
+            with mock.patch.object(self.m.os, 'kill', side_effect=error):
+                self.assertEqual(self.scan()['leftovers'][0]['owner'], 'unknown')
+        # Bad PID metadata cannot make an explicitly foreign reservation ours.
+        record['scope'] = ['f' * 64, 'f' * 64]
+        self.rows = [self.row(**{'brain.reservation': record['token'], 'brain.owner-pid': 'bad'})]
+        with mock.patch.object(self.m, 'leftover_records', return_value=[record]):
+            self.assertEqual(self.scan()['leftovers'], [])
+
+    def test_identity_probe_uses_remaining_deadline_and_aborts_later_nodes(self):
+        record = {'token': 'a' * 32, 'scope': self.m.machine_scope(self.inst, self.node['id']),
+                  'owner': [101, 'parent-stamp'], 'kind': 'verify', 'state': 'running'}
+        self.rows = [self.row(**{'brain.reservation': record['token']})]
+        original = self.command
+        probes = []
+        def bounded(args, **kw):
+            if args[0] == 'ps':
+                probes.append(kw['timeout'])
+                raise subprocess.TimeoutExpired(args, .01)
+            result = original(args, **kw)
+            self.clock += 2
+            return result
+        with mock.patch.object(self.m, 'leftover_records', return_value=[record]), \
+                mock.patch.object(self.m.sys, 'platform', 'darwin'), \
+                mock.patch.object(self.m, 'process_stamp', side_effect=self.original_process_stamp), \
+                mock.patch.object(self.m.os, 'kill', return_value=None), \
+                mock.patch.object(self.m.subprocess, 'run', side_effect=bounded):
+            result = self.scan([self.node, {**self.node, 'id': 'cedar'}])
+        self.assertEqual(probes, [1])
+        self.assertTrue(result['partial'])
+        self.assertEqual(len(self.calls), 2)
+        self.assertEqual(result['leftovers'][0]['owner'], 'unknown')
+
+    def test_unscoped_session_peers_never_borrow_scope_in_either_order(self):
+        scope = self.m.leftover_scope(self.inst, self.node)
+        for alias in ('org.testcontainers.session-id', 'org.testcontainers.sessionId'):
+            scoped = self.row(1, '', **{alias: 'shared', 'brain.scope': scope})
+            unscoped = self.row(2, '', **{alias: 'shared'})
+            other_alias = 'org.testcontainers.sessionId' if alias.endswith('session-id') else 'org.testcontainers.session-id'
+            bridge = self.row(3, 'maple-job-bridge', **{alias: 'shared', other_alias: 'linked'})
+            transitive = self.row(4, '', **{other_alias: 'linked'})
+            for rows in ([scoped, unscoped], [unscoped, scoped],
+                         [scoped, bridge, transitive], [transitive, bridge, scoped]):
+                self.rows = rows
+                self.assertEqual(self.scan()['leftovers'], [])
+            unscoped['Config']['Labels']['brain.scope'] = scope
+            self.rows = [scoped, unscoped]
+            self.assertEqual(self.scan()['leftovers'][0]['containers'], [scoped['Id'], unscoped['Id']])
+
+    def test_executable_fake_rejects_every_unknown_argv_and_records_attempts(self):
+        self.test_report_only_fake_cli_records_every_argv()
+        binary, log = self.root / 'docker', self.root / 'argv.jsonl'
+        host = ['--host', 'unix:///tmp/fixture.sock']
+        attempts = [host + [word] for word in ('stop', 'rm', 'prune', 'down', 'kill', 'volume', 'restart', 'exec')]
+        attempts += [['ps'], host + ['inspect', 'bad-id'], ['context', 'inspect', '--format', 'anything']]
+        for args in attempts:
+            completed = self.real_run([str(binary)] + args, capture_output=True, text=True, timeout=1)
+            self.assertNotEqual(completed.returncode, 0, args)
+        argv = [json.loads(line) for line in log.read_text().splitlines()]
+        self.assertEqual(argv[2:], attempts)
+
+    def test_falsey_non_object_labels_do_not_retire_known_leftovers(self):
+        for invalid in (None, [], False, 0, ''):
+            self.rows = [self.row()]
+            self.scan()
+            self.rows[0]['Config']['Labels'] = invalid
+            result = self.scan()
+            self.assertTrue(result['partial'])
+            self.assertEqual(len(result['leftovers']), 1)
+        # Also cover falsey/wrong shapes for every enclosing object and required
+        # Docker identity/state field. Non-object Labels, including null, fail.
+        for field in ('Config', 'State', 'Id'):
+            for invalid in (None, [], False, 0, ''):
+                self.rows = [self.row()]
+                self.scan()
+                original = self.command
+                def malformed(args, **kw):
+                    if 'inspect' in args:
+                        return subprocess.CompletedProcess(args, 0, json.dumps([{**self.rows[0], field: invalid}]), '')
+                    return original(args, **kw)
+                with mock.patch.object(self.m.subprocess, 'run', side_effect=malformed):
+                    result = self.scan()
+                self.assertTrue(result['partial'])
+                self.assertEqual(len(result['leftovers']), 1)
 
 
 class DockerLeftoverHooks(unittest.TestCase):

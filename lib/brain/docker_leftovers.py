@@ -96,50 +96,72 @@ def leftover_command(binary, args, deadline):
     return result.stdout
 
 
-def leftover_owner(labels, records, scope):
-    """Return identity, liveness, and affirmative/foreign reservation scope evidence."""
-    identities, proof, foreign, ambiguous = [], False, False, False
-    pid = labels.get('brain.owner-pid')
-    if pid is not None:
-        if re.fullmatch(r'[1-9][0-9]{0,9}', pid):
-            identities.append(int(pid))
-        else:
-            ambiguous = True
+def leftover_owner(labels, records, scope, deadline, observations):
+    """Only positive identity/liveness proof may suppress a report.
+
+    Reservation parent and child have separate birth identities. A reused PID or
+    unknown probe is unknown ownership, even if the numeric PID currently exists.
+    """
+    proof, foreign = False, False
+    label = labels.get('brain.owner-pid')
+    valid_label = label is None or re.fullmatch(r'[1-9][0-9]{0,9}', label) is not None
     token = labels.get('brain.reservation')
+    record = None
     if token is not None:
         matches = [r for r in records if isinstance(r, dict) and r.get('token') == token]
         if len(matches) != 1 or not _m_machine.machine_queue.valid(matches[0]):
-            ambiguous = True
-        else:
-            record = matches[0]
-            proof = record.get('scope') == scope
-            foreign = 'scope' in record and not proof
-            who = record.get('child', record['owner'])
-            identities.append(who[0])
-    if ambiguous or not identities or len(set(identities)) != 1:
+            return 'unknown', False, proof, foreign
+        record = matches[0]
+        proof = record.get('scope') == scope
+        foreign = 'scope' in record and not proof
+        identities = [record['owner']] + ([record['child']] if 'child' in record else [])
+        if (not valid_label or any(who[0] > 2147483647 for who in identities) or
+                (label is not None and int(label) not in [who[0] for who in identities])):
+            return 'unknown', False, proof, foreign
+        states = []
+        for pid, expected in identities:
+            key = (pid, expected)
+            if key not in observations['cache']:
+                state = 'unknown'
+                if expected != 'unknown' and observations['error'] is None:
+                    try:
+                        current = _m_machine.process_stamp(pid, deadline=deadline)
+                        state = 'gone' if current is None else 'alive' if current == expected else 'unknown'
+                    except _LEFTOVER_ERRORS as error:
+                        observations['error'] = error
+                observations['cache'][key] = state
+            states.append(observations['cache'][key])
+        if 'unknown' in states:
+            return 'unknown', False, proof, foreign
+        pid = int(label) if label is not None else record.get('child', record['owner'])[0]
+        alive = 'alive' in states
+    elif not valid_label:
         return 'unknown', False, proof, foreign
-    pid = identities[0]
-    try:
-        os.kill(pid, 0)
-        alive = True
-    except ProcessLookupError:
-        alive = False
-    except (OSError, OverflowError):
+    elif label is not None:
+        pid = int(label)
+        try:
+            os.kill(pid, 0)
+            alive = True
+        except ProcessLookupError:
+            alive = False
+        except (OSError, OverflowError):
+            return 'unknown', False, proof, foreign
+    else:
         return 'unknown', False, proof, foreign
     owner = {'pid': pid}
-    if token:
+    if record:
         owner['record'] = token
     if labels.get('brain.job'):
         owner['job'] = labels['brain.job']
     return owner, alive, proof, foreign
 
 
-def leftover_groups(inst, n, rows, records, host):
+def leftover_groups(inst, n, rows, records, host, deadline, observations):
     scope = _m_machine.machine_scope(inst, n['id'])
     patterns, groups, metadata = leftover_patterns(n), {}, {}
     for row in rows:
         labels = row['Config']['Labels']
-        metadata[row['Id']] = leftover_owner(labels, records, scope)
+        metadata[row['Id']] = leftover_owner(labels, records, scope, deadline, observations)
         if labels.get(_LEFTOVER_PROJECT):
             groups.setdefault(('compose', labels[_LEFTOVER_PROJECT]), []).append(row)
         for session in {labels[k] for k in _LEFTOVER_SESSIONS if labels.get(k)}:
@@ -174,7 +196,8 @@ def leftover_groups(inst, n, rows, records, host):
             owner, alive, proof, foreign = metadata[r['Id']]
             identity = '/'.join([project, str(r.get('Name', '')), labels.get('com.docker.compose.service', ''),
                                  *[labels[k] for k in _LEFTOVER_SESSIONS if labels.get(k)]])
-            if (alive or foreign or any(k in labels and labels[k] != ':'.join(scope) for k in _LEFTOVER_SCOPES) or
+            scoped = any(labels.get(k) == ':'.join(scope) for k in _LEFTOVER_SCOPES) or proof
+            if ((not project and not scoped) or alive or foreign or any(k in labels and labels[k] != ':'.join(scope) for k in _LEFTOVER_SCOPES) or
                     labels.get('brain.preview', '').lower() not in ('', 'false', '0') or
                     re.search(r'(?:^|[-_/])preview(?:$|[-_/])', identity, re.I) or
                     (project and not any(fnmatch.fnmatchcase(project, p) for p in patterns))):
@@ -200,6 +223,7 @@ def leftover_groups(inst, n, rows, records, host):
 
 def leftover_scan(inst, n, binary, deadline, result):
     rows = []
+    observations = {'cache': {}, 'error': None}
     try:
         records = leftover_records()
         if not isinstance(records, list):
@@ -224,14 +248,19 @@ def leftover_scan(inst, n, binary, deadline, result):
         row = inspected[0]
         if row.get('Id') != identity or not isinstance(row.get('State'), dict):
             raise ValueError('invalid Docker container')
-        labels = row.get('Config', {}).get('Labels') or {}
+        config = row.get('Config')
+        if not isinstance(config, dict):
+            raise ValueError('invalid Docker Config')
+        labels = config.get('Labels')
         if (not isinstance(labels, dict) or any(not isinstance(k, str) or not isinstance(v, str) for k, v in labels.items()) or
                 not isinstance(row['State'].get('Status', 'unknown'), str)):
             raise ValueError('invalid Docker metadata')
         row['Config']['Labels'] = labels
         rows.append(row)
         # Retain each successful inspection even if the next JSON document fails.
-        result['leftovers'] = leftover_groups(inst, n, rows, records, host)
+        result['leftovers'] = leftover_groups(inst, n, rows, records, host, deadline, observations)
+        if observations['error'] is not None:
+            raise observations['error']
         leftover_check(deadline)
     return result
 

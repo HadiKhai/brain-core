@@ -523,8 +523,14 @@ def machine_limit(policy, hour=None):
     return policy["verify_night" if night else "verify_day"]
 
 
-def process_stamp(pid):
+def process_stamp(pid, deadline=None):
     """PID plus OS start time prevents reclaiming a recycled PID as our worker."""
+    def remaining():
+        budget = 2 if deadline is None else min(2, deadline - time.monotonic())
+        if budget <= 0:
+            raise subprocess.TimeoutExpired('process identity', 0)
+        return budget
+    budget = remaining()
     try:
         if sys.platform.startswith("linux"):
             raw = Path(f"/proc/{pid}/stat").read_text().rsplit(") ", 1)[1].split()
@@ -533,10 +539,12 @@ def process_stamp(pid):
             boot = Path("/proc/sys/kernel/random/boot_id").read_text().strip()
             if not raw[19].isdigit() or not re.fullmatch(r"[0-9a-fA-F-]{36}", boot):
                 return "unknown"
+            remaining()
             return "linux:" + boot + ":" + raw[19]
         r = subprocess.run(["ps", "-p", str(pid), "-o", "lstart=", "-o", "stat="],
-                           capture_output=True, text=True, timeout=2,
+                           capture_output=True, text=True, timeout=budget,
                            env={**os.environ, "LC_ALL": "C", "TZ": "UTC0"})
+        remaining()
         value = r.stdout.strip()
         if r.returncode == 0 and value:
             return None if value.split()[-1].startswith("Z") else " ".join(value.split()[:-1])
@@ -547,7 +555,9 @@ def process_stamp(pid):
         except PermissionError:
             return "unknown"
         return "unknown"
-    except (OSError, ValueError, IndexError, subprocess.SubprocessError):
+    except (OSError, ValueError, IndexError, subprocess.SubprocessError) as error:
+        if deadline is not None and isinstance(error, subprocess.TimeoutExpired):
+            raise
         try:
             os.kill(pid, 0)
         except ProcessLookupError:
