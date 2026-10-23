@@ -121,7 +121,8 @@ def wake_reason_items(inst, n, reason):
     except (Exception, SystemExit):
         items = []  # best-effort identity capture cannot suppress the direct wake
     return wake_item_refs(i for i in items
-                          if i.get('source', target['id']) == n['id'] and i.get('reason') == reason)
+                          if i.get('source', target['id']) == n['id']
+                          and reason in (i.get('reason'), i.get('legacy_reason')))
 
 
 def wake_snapshot(inst, n, refs):
@@ -235,6 +236,10 @@ def request_wake(inst, n, reason, items=None):
             return False
         directory = wake_directory(inst, target)
         directory.mkdir(parents=True, exist_ok=True)
+        if items is None and reason.startswith('overdue:'):
+            items = wake_reason_items(inst, n, reason)
+            if len(items) == 1:
+                reason = 'overdue:' + items[0]['id']
         key = hashlib.sha256((n["id"] + "\0" + reason).encode()).hexdigest()
         pending = directory / (key + ".pending")
         delivered = directory / (key + ".sent")
@@ -265,8 +270,27 @@ def request_wake(inst, n, reason, items=None):
         return False  # the inbox remains durable; the watcher retries unacknowledged work
 
 
-def wake_http_status(command):
-    """Send only the constant event; return the HTTP code, never a response body."""
+def wake_payload(reason):
+    """Only opaque item keys and fixed cause labels may leave the instance."""
+    return json.dumps({'event': 'brain-wake', 'reason': reason},
+                      separators=(',', ':')).encode()
+
+
+def wake_delivery_reason(refs, pending):
+    reasons = []
+    for item in refs:
+        key = item['id']
+        key = key if re.fullmatch(r'[0-9a-f]{64}', key) else hashlib.sha256(key.encode()).hexdigest()
+        cause = ('escalation tier' if item['kind'] in ('overdue-question', 'blocked-overdue', 'machine-alert')
+                 else 'new or changed')
+        reasons.append(cause + ' item ' + key)
+    return '; '.join(reasons or ['new request ' + (path.stem if re.fullmatch(r'[0-9a-f]{64}', path.stem)
+                                                  else hashlib.sha256(path.stem.encode()).hexdigest())
+                                 for path in pending])
+
+
+def wake_http_status(command, reason=None):
+    """Send an opaque wake reason; return the HTTP code, never a response body."""
     import urllib.error
     import urllib.request
 
@@ -276,7 +300,7 @@ def wake_http_status(command):
             return None
 
     opener = urllib.request.build_opener(NoRedirect)
-    request = urllib.request.Request(command, data=b'{"event":"brain-wake"}',
+    request = urllib.request.Request(command, data=wake_payload(reason or 'new request ' + wake_binding(command)),
                                     headers={"Content-Type": "application/json", "User-Agent": WAKE_USER_AGENT})
     try:
         with opener.open(request, timeout=WAKE_TIMEOUT) as response:
@@ -287,11 +311,11 @@ def wake_http_status(command):
         return code
 
 
-def wake_send(command):
-    """The sole outward payload is a constant event. Discard all transport output."""
-    payload = b'{"event":"brain-wake"}'
+def wake_send(command, reason=None):
+    """Send the event and opaque cause, discarding all transport output."""
+    payload = wake_payload(reason or 'new request ' + wake_binding(command))
     if command.startswith(("https://", "http://")):
-        status = wake_http_status(command)
+        status = wake_http_status(command, reason)
         if not 200 <= status < 300:
             # Internal exception carries only a code; callers never expose transport errors.
             raise WakeRefused(status)
@@ -480,7 +504,8 @@ def wake_drain(inst, n, once=False):
                 except OSError:
                     pass  # comparison bookkeeping cannot suppress a question
                 try:
-                    sent = wake_send(command)
+                    reason = wake_delivery_reason(refs, pending)
+                    sent = wake_send(command, reason=reason)
                     status = 200 if sent else "delivery failed"
                 except WakeRefused as error:
                     sent, status = False, error.args[0]
@@ -493,7 +518,7 @@ def wake_drain(inst, n, once=False):
                     # Logging cannot undo delivery and cause another model wake on retry.
                     try:
                         _m_common.atomic_write(directory / 'history.json', json.dumps({'version': 1,
-                            'deliveries': (history + [{'at': WAKE_CLOCK.time(), 'items': refs,
+                            'deliveries': (history + [{'at': WAKE_CLOCK.time(), 'items': refs, 'reason': reason,
                                 'before': before, 'snapshot': snapshot}])[-100:]}) + '\n')
                     except OSError:
                         status = 'delivered; history write failed'

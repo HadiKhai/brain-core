@@ -683,7 +683,7 @@ class Watcher(Scenario):
             inbox.write_text(inbox.read_text() + '- fabricated B\n')
             self.watch()
             observed = []
-            def host_starts(command):
+            def host_starts(command, reason=None):
                 observed.extend(self.since())
                 return True
             with mock.patch.object(self.m, 'wake_send', side_effect=host_starts):
@@ -1546,3 +1546,156 @@ class StallWatcher(Scenario):
             handback.write_text('{torn')
             with self.assertRaises(ValueError):
                 self.m.watch_job_stalls(self.inst, n)
+
+
+class WakeNoise(Scenario):
+    """Fabricated file/Git instances without an unused installed core or host setup."""
+    def setUp(self):
+        super().setUp()
+        patch = mock.patch.dict(os.environ, self.env)
+        patch.start()
+        self.addCleanup(patch.stop)
+        self.m = core_loader.SourceFileLoader('wake_noise_fixture', str(CORE / 'bin/brain')).load_module()
+        self.root = self.repo(self.tmp / 'oak', {
+            'instance.md': '---\nname: oak\ntimezone: UTC\nruntimes: codex\nhost: t3\n---\n',
+            '.gitignore': '.brain/\n'})
+        self.inst = self.m.Instance(self.root)
+        owner = self.m._owners['cmd_init']
+        owner._make_node(self.inst, self.root, 'root', 'Oak', 'oak', '', 'here', 'codex', None)
+        self.inst.local_of('root').update(wake='fixture-send', coordinator='fixture-root')
+        self.inst.save_local()
+
+    watch = Watcher.watch
+    queued_machine_work = Watcher.queued_machine_work
+
+    def test_due_escalation_survives_transport_expiry_with_operator_block_and_hold(self):
+        self.queued_machine_work()
+        root = self.inst.node('root')
+        child = self.root / 'nodes/sample'
+        self.m._owners['cmd_init']._make_node(self.inst, child, 'sample', 'Sample', 'oak', '', 'here', 'codex', [])
+        status = self.root / 'status.md'
+        status.write_text(status.read_text() + '\n## Blocked\n- Waiting on the operator to approve deployment; '
+                          'since: 2020-01-01T00:00Z; recommendation: approve; default: wait\n')
+        (self.root / 'inbox.md').write_text('- 2020-01-01 00:00 +00:00 from runtime: '
+                                          'Host question: approve deployment <!-- host-question:deploy -->\n')
+        reading = {**json.loads(self.env['BRAIN_MACHINE_READING']), 'load_per_cpu': [1.5] * 3}
+        outputs = []
+        directory = self.m.wake_directory(self.inst, root)
+        with mock.patch.object(self.m, 'machine_reading', return_value=reading), \
+                mock.patch.object(self.m, 'changes_due', return_value=[]), \
+                mock.patch.object(self.m, 'core_update'), mock.patch.object(self.m, 'auto_upgrade', return_value=None), \
+                mock.patch.object(self.m, 'load', return_value=self.inst), \
+                mock.patch.object(self.m, 'wake_start'), mock.patch.object(self.m, 'WAKE_INTERVAL', 0), \
+                mock.patch.object(self.m, 'wake_send', return_value=True) as send:
+            for index in range(6):
+                for sent in directory.glob('*.sent'):
+                    old = time.time() - self.m.WAKE_DEDUP_SECONDS - 1
+                    os.utime(sent, (old, old))
+                if index:
+                    (child / 'backlog.md').write_text('Child activity fixture ' + str(index) + '\n')
+                    self.git('add', 'nodes/sample/backlog.md', cwd=self.root)
+                    self.git('commit', '-qm', 'activity fixture', cwd=self.root)
+                with contextlib.redirect_stdout(io.StringIO()) as output:
+                    self.m.cmd_due(argparse.Namespace(id='root', quiet=False, json=True, machine=True))
+                outputs.append(json.loads(output.getvalue()))
+                self.watch()
+                self.m.wake_drain(self.inst, root, once=True)
+            self.assertTrue(all(any(i['kind'] == 'blocked-overdue' for i in out) for out in outputs))
+            self.assertTrue(all(any(i['kind'] == 'machine' for i in out) for out in outputs))
+            self.assertEqual(send.call_count, 1, 'six unchanged ticks must deliver only one wake')
+
+    def test_due_escalation_changed_and_reopened_question_wakes_again(self):
+        inbox = self.root / 'inbox.md'
+        original = '- 2020-01-01 00:00 +00:00 from runtime: Host question: choose blue <!-- host-question:blue -->\n'
+        inbox.write_text(original)
+        root = self.inst.node('root')
+        with mock.patch.object(self.m, 'changes_due', return_value=[]), \
+                mock.patch.object(self.m, 'core_update'), mock.patch.object(self.m, 'auto_upgrade', return_value=None), \
+                mock.patch.object(self.m, 'load', return_value=self.inst), \
+                mock.patch.object(self.m, 'wake_start'), mock.patch.object(self.m, 'WAKE_INTERVAL', 0), \
+                mock.patch.object(self.m, 'wake_send', return_value=True) as send:
+            for text, expected in [(original, 1), (original.replace('2020-01-01', '2020-01-02'), 1),
+                                   (original, 1), ('', 1), (original, 2),
+                                   (original.replace('choose blue', 'choose green'), 3)]:
+                inbox.write_text(text)
+                with contextlib.redirect_stdout(io.StringIO()):
+                    self.m.cmd_due(argparse.Namespace(id='root', quiet=False, json=True))
+                self.m.wake_drain(self.inst, root, once=True)
+                self.assertEqual(send.call_count, expected)
+
+    def test_delivered_wake_reason_names_opaque_item_and_cause(self):
+        (self.root / 'inbox.md').write_text('- confidential fixture decision\n')
+        root = self.inst.node('root')
+        with mock.patch.object(self.m, 'changes_due', return_value=[]), \
+                mock.patch.object(self.m, 'wake_start'), mock.patch.object(self.m, 'WAKE_INTERVAL', 0), \
+                mock.patch.object(self.m, 'wake_send', return_value=True) as send:
+            self.watch()
+            self.m.wake_drain(self.inst, root, once=True)
+            reason = send.call_args.kwargs['reason']
+            item = self.m.wake_history(self.m.wake_directory(self.inst, root))[-1]['items'][0]
+            self.assertIn(item['id'], reason)
+            self.assertIn('new', reason)
+            self.assertNotIn('confidential', reason)
+
+    def test_due_escalation_receipt_is_an_exact_rehearsal_write(self):
+        (self.root / 'inbox.md').write_text('- 2020-01-01 00:00 +00:00 from runtime: Host question: choose blue '
+                                          '<!-- host-question:blue -->\n')
+        with mock.patch.object(self.m, 'load', return_value=self.inst), \
+                mock.patch.object(self.m, 'changes_due', return_value=[]), \
+                mock.patch.object(self.m, 'core_update'), mock.patch.object(self.m, 'auto_upgrade', return_value=None), \
+                mock.patch.object(self.m, 'wake_start'), contextlib.redirect_stdout(io.StringIO()):
+            self.m.cmd_due(argparse.Namespace(id='root', quiet=False, json=True))
+        self.assertTrue((self.root / '.brain/wake/due-seen.json').is_file())
+        self.assertFalse((self.root / '.brain/watch.json').exists())
+        self.assertTrue(self.m.allowed_write('brain/.brain/wake/due-seen.json', 'read'))
+        self.assertFalse(self.m.allowed_write('brain/.brain/other-watch.json', 'read'))
+
+    def test_old_escalation_acknowledgement_migrates_without_replaying_backlog(self):
+        inbox = self.root / 'inbox.md'
+        inbox.write_text('- 2020-01-01 00:00 +00:00 from runtime: Host question: choose blue '
+                         '<!-- host-question:blue -->\n')
+        with mock.patch.object(self.m, 'changes_due', return_value=[]), \
+                mock.patch.object(self.m, 'wake_start'), mock.patch.object(self.m, 'WAKE_INTERVAL', 0), \
+                mock.patch.object(self.m, 'wake_send', return_value=True) as send:
+            key = self.m.watch_digest(['overdue', 'root', inbox.read_text().strip()])
+            (self.root / '.brain/watch.json').write_text(json.dumps({'version': 1, 'seen': [key]}))
+            (self.root / '.brain/wake').mkdir(exist_ok=True)
+            (self.root / '.brain/wake/due-episodes.json').write_text(json.dumps({'version': 1, 'open': {}}))
+            self.watch()
+            root = self.inst.node('root')
+            self.m.wake_drain(self.inst, root, once=True)
+            self.assertFalse(any(i['kind'] == 'overdue-question'
+                                 for i in self.m.wake_history(self.m.wake_directory(self.inst, root))[-1]['items']))
+            first = send.call_count  # the independent inbox item may still be new
+            original = inbox.read_text()
+            inbox.write_text('')
+            self.watch()
+            inbox.write_text(original)
+            self.watch()
+            self.m.wake_drain(self.inst, root, once=True)
+            self.assertEqual(send.call_count, first + 1)
+
+    def test_question_crossing_escalation_tier_keeps_new_item_wakes(self):
+        inbox = self.root / 'inbox.md'
+        at = self.inst.now_dt()
+        inbox.write_text('- ' + at.isoformat() + ' from runtime: Host question: choose blue '
+                         '<!-- host-question:blue -->\n')
+        root = self.inst.node('root')
+        with mock.patch.object(self.m, 'changes_due', return_value=[]), \
+                mock.patch.object(self.m, 'core_update'), mock.patch.object(self.m, 'auto_upgrade', return_value=None), \
+                mock.patch.object(self.m, 'load', return_value=self.inst), \
+                mock.patch.object(self.m, 'wake_start'), mock.patch.object(self.m, 'WAKE_INTERVAL', 0), \
+                mock.patch.object(self.m, 'wake_send', return_value=True) as send:
+            self.watch()
+            self.m.wake_drain(self.inst, root, once=True)
+            self.assertEqual(send.call_count, 1)
+            with mock.patch.object(self.m.Instance, 'now_dt', return_value=at + datetime.timedelta(minutes=11)):
+                with contextlib.redirect_stdout(io.StringIO()):
+                    self.m.cmd_due(argparse.Namespace(id='root', quiet=False, json=True))
+                self.m.wake_drain(self.inst, root, once=True)
+                self.assertEqual(send.call_count, 2)
+                self.assertIn('escalation tier item ', send.call_args.kwargs['reason'])
+                inbox.write_text(inbox.read_text() + '- a genuinely new decision\n')
+                self.watch()
+                self.m.wake_drain(self.inst, root, once=True)
+                self.assertEqual(send.call_count, 3)

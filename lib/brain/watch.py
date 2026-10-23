@@ -161,25 +161,33 @@ def watch_due_episodes(inst, scan):
         fcntl.flock(stream, fcntl.LOCK_EX)
         groups = scan()
         entries = [i for group in groups.values() for i in group['items']
-                   if 'reason' not in i and i['kind'] not in
+                   if ('reason' not in i or i['kind'] == 'overdue-question') and i['kind'] not in
                    ('machine-hold', 'machine-alert', 'machine-repair', 'job-ready', 'job-landed', 'rotate')]
         _m_common.safe_target(path)
         data = watch_read(path, {'version': 1, 'open': {}})
         if (data.get('version') != 1 or not isinstance(data.get('open'), dict)
+                or type(data.get('overdue_episodes', False)) is not bool
                 or any(not re.fullmatch(r'[0-9a-f]{64}', k)
                        or not isinstance(v, str) or not re.fullmatch(r'[0-9a-f]{64}', v)
                        for k, v in data['open'].items())):
             raise ValueError('invalid due episode state')
         # Preserve pre-upgrade acknowledgements rather than replaying the backlog.
         seen = set(watch_state(inst).get('seen', [])) if not path.exists() else set()
+        overdue_seen = set(watch_state(inst).get('seen', [])) if not data.get('overdue_episodes') else set()
         current = {}
         for item in entries:
             key = item['id']
-            current.setdefault(key, data['open'].get(key) or (key if key in seen else
+            acknowledged = key in seen or (item['kind'] == 'overdue-question' and
+                           item.get('legacy_id', key) in overdue_seen)
+            current.setdefault(key, data['open'].get(key) or (item.get('legacy_id', key) if acknowledged else
                                watch_digest(['due-episode'])[:16] + os.urandom(24).hex()))
             item['id'] = current[key]
-        if current != data['open'] or not path.exists():
-            _m_machine.machine_publish(inst, path, json.dumps({'version': 1, 'open': current}, sort_keys=True) + '\n')
+            if item['kind'] == 'overdue-question':
+                item['legacy_reason'] = item['reason']
+                item['reason'] = 'overdue:' + item['id']
+        if current != data['open'] or not path.exists() or not data.get('overdue_episodes'):
+            _m_machine.machine_publish(inst, path, json.dumps(
+                {'version': 1, 'open': current, 'overdue_episodes': True}, sort_keys=True) + '\n')
     return groups
 
 
@@ -464,8 +472,8 @@ def watch_failures(inst, nodes, acknowledged, warnings):
             acknowledged.add(marker)
 
 
-def watch_state(inst):
-    path = inst.root / '.brain' / 'watch.json'
+def watch_state(inst, path=None):
+    path = path if path is not None else inst.root / '.brain' / 'watch.json'
     state = watch_read(path, {})
     if path.exists() and (state.get('version') != 1 or not isinstance(state.get('seen'), list)):
         raise ValueError('invalid watcher fingerprint')
@@ -503,7 +511,9 @@ def watch_scan(inst, nodes=None):
         for line in _m_status.overdue_questions(inst, n, _m_status.inbox_lines(n)):
             root_group = groups.setdefault('root', {'node': root, 'items': [],
                                             'command': _m_hosts.wake_target(inst, root)[1]})
-            root_group['items'].append({'id': watch_digest(['overdue', n['id'], line]),
+            identity = watch_text_identity({'kind': 'inbox', 'text': line[2:]})
+            root_group['items'].append({'id': watch_digest(['overdue', n['id'], identity]),
+                                       'legacy_id': watch_digest(['overdue', n['id'], line]),
                                        'kind': 'overdue-question', 'node': n['id'],
                                        'reason': 'overdue:' + hashlib.sha256(line.encode()).hexdigest(),
                                        'text': 'Unanswered question past its threshold; inspect brain due root'})
@@ -537,14 +547,17 @@ def watch_since_wake(inst, nodes):
     return list({i['id']: i for i in out}.values())
 
 
-def watch_run(inst):
+def watch_run(inst, kinds=None, quiet=False, sources=None):
     path = inst.root / '.brain' / 'watch.json'
     state = watch_state(inst)  # our own acknowledgement history always fails closed
     seen = set(state.get('seen', []))
+    due_seen_path = inst.root / '.brain/wake/due-seen.json'
+    seen.update(watch_state(inst, due_seen_path).get('seen', []))
     nodes = [n for n in inst.nodes() if not n['archived']]
     failures = set(state.get('failures', []))
     warnings = set(state.get('warnings', []))
-    watch_failures(inst, nodes, failures, warnings)
+    if kinds is None:
+        watch_failures(inst, nodes, failures, warnings)
     groups = watch_groups(inst, nodes)
     current_ids = {i['id'] for group in groups.values() for i in group['items']}
     for group in groups.values():
@@ -555,7 +568,9 @@ def watch_run(inst):
     for group in groups.values():
         items = {i['id']: i for i in group['items']}
         current.extend(items.values())
-        added = sorted(set(items) - seen)
+        added = sorted(key for key in set(items) - seen
+                       if (kinds is None or items[key]['kind'] in kinds)
+                       and (sources is None or items[key]['node'] in sources))
         queued = False
         if added and group['command']:
             for key in added[:]:
@@ -595,12 +610,16 @@ def watch_run(inst):
         if not queued and group['command'] and directory.is_dir() and any(directory.glob('*.pending')):
             _m_hosts.wake_start(inst, target)  # retries queued failures without another model tick
     # Screened current excerpts are recomputed; historical acknowledgement stores only digests.
-    _m_machine.machine_publish(inst, path, json.dumps({'version': 1, 'at': inst.now(),
-                                'seen': sorted(seen), 'failures': sorted(failures), 'warnings': sorted(warnings), 'items': current}, sort_keys=True) + '\n')
-    print(f'watch: {count} new item(s) queued')
+    if kinds is None:
+        _m_machine.machine_publish(inst, path, json.dumps({'version': 1, 'at': inst.now(),
+                                    'seen': sorted(seen), 'failures': sorted(failures), 'warnings': sorted(warnings), 'items': current}, sort_keys=True) + '\n')
+    else:
+        _m_machine.machine_publish(inst, due_seen_path, json.dumps({'version': 1, 'seen': sorted(seen)}) + '\n')
+    if not quiet:
+        print(f'watch: {count} new item(s) queued')
 
 
-def watch_once(inst):
+def watch_once(inst, kinds=None, quiet=False, sources=None):
     """Share the sampler's short, nonblocking instance-lock discipline."""
     import fcntl
     folder = inst.root / '.brain'
@@ -614,7 +633,8 @@ def watch_once(inst):
         try:
             fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
-            print('watch: skipped; instance busy')
+            if not quiet:
+                print('watch: skipped; instance busy')
             return
         stream.seek(0)
         stream.truncate()
@@ -623,7 +643,7 @@ def watch_once(inst):
         _m_instance._LOCK['fh'], _m_instance._LOCK['depth'] = stream, 1
         os.environ['BRAIN_LOCK_HELD'] = f'{inst.root.resolve()}|{os.getpid()}'
         try:
-            watch_run(inst)
+            watch_run(inst, kinds=kinds, quiet=quiet, sources=sources)
         finally:
             _m_instance._LOCK['depth'] = 0
             _m_instance.unlock()

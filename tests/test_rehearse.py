@@ -785,7 +785,9 @@ class RehearsalDelivery(unittest.TestCase):
         self.assertEqual(['wake:1: HTTP 403', 'wake:2: HTTP 302'], rehearsal.delivery_regressions(statuses))
         self.assertEqual(3, len(seen))
         self.assertTrue(all(agent and 'Python-urllib' not in agent for _, agent, _ in seen))
-        self.assertTrue(all(body == b'{"event":"brain-wake"}' for _, _, body in seen))
+        for path, _, body in seen:
+            self.assertEqual(json.loads(body), {'event': 'brain-wake',
+                             'reason': 'new request ' + hashlib.sha256((base + path).encode()).hexdigest()})
         self.assertNotIn('capability', json.dumps(statuses))
         self.assertNotIn(base, json.dumps(statuses))
 

@@ -45,6 +45,21 @@ After upgrading:
 - Existing stop lines keep their behavior. Set `stop_percent` on a subscription
   only when it needs a different threshold. No other configuration change is needed.
 
+## 2026-10-24: Keep overdue escalation wakes quiet until the item changes
+
+For agents:
+- Ordinary due ticks and the watcher share persistent receipts for overdue
+  questions. An unchanged escalation stays quiet after transport receipts expire;
+  a changed question or a cleared and reopened question can wake again.
+- Coordinator wake payloads include a non-empty `reason`: opaque item keys and
+  a new-or-changed or escalation-tier cause. No question text or node names leave
+  the instance. Manual requests without item metadata carry an opaque request key.
+- Due output and machine hold episode handling retain their existing behavior.
+
+After upgrading:
+- Keep private wake receipts. Inspect the wake reason and `.brain/wake/` delivery
+  history when diagnosing a repeat; no new configuration is needed.
+
 ## 2026-10-23: Rehearse JSON probes without collapsing private identities
 
 For agents:

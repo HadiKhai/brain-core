@@ -289,7 +289,7 @@ class WatchExtension(Scenario):
     def test_active_drain_reloads_new_child_bindings_before_filtering(self):
         old_inst, root = self.inst, self.inst.node('root')
         calls = []
-        def send(command):
+        def send(command, reason=None):
             calls.append(command)
             if len(calls) == 1:
                 home, n, w, row = self.project()

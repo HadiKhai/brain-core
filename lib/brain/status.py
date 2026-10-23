@@ -555,11 +555,17 @@ def cmd_due(a):
         return
     # Root's explicit tick also sees descendant escalations, without exposing their text.
     escalation_nodes = inst.nodes() if a.id == "root" else nodes
+    from . import watch as _m_watch
+    # Transport receipt expiry must not turn an unchanged escalation into new work.
+    try:
+        if not _m_common.outward_links(inst.root):
+            _m_watch.watch_once(inst, kinds=('overdue-question',), quiet=True,
+                                sources={n['id'] for n in escalation_nodes})
+    except (OSError, ValueError):
+        pass  # keep display available; invalid acknowledgements never replay the backlog
     for n in escalation_nodes:
         if n["archived"]:
             continue
-        for line in overdue_questions(inst, n, inbox_lines(n)):
-            _m_hosts.request_wake(inst, inst.node("root"), "overdue:" + hashlib.sha256(line.encode()).hexdigest())
         target, command = _m_hosts.wake_target(inst, n)
         if command and _m_hosts.wake_directory(inst, target).is_dir() and any(_m_hosts.wake_directory(inst, target).glob("*.pending")):
             try:
