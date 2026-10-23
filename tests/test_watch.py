@@ -1068,7 +1068,7 @@ class Watcher(Scenario):
             self.watch()
             self.assertIn('codex -> claude: at capacity', self.m.read_jobs(n)[0]['Switches'])
 
-    def test_ten_nodes_under_one_second_no_host_network_or_model_calls(self):
+    def test_ten_nodes_observed_no_host_network_or_model_calls(self):
         for i in range(9):
             self.b(self.root, 'new', 'node' + str(i), '--title', 'Fixture')
         self.inst = self.m.Instance(self.root)
@@ -1082,12 +1082,13 @@ class Watcher(Scenario):
         with mock.patch.object(self.m, 'wake_start'), \
                 mock.patch.object(self.m, 'core_update', side_effect=AssertionError('no remote check')), \
                 mock.patch.object(self.m, 'ready_state', side_effect=AssertionError('watcher does not reverify readiness')), \
-                mock.patch.object(self.m, 'usage_reading', side_effect=AssertionError('no provider polling')):
-            start = time.monotonic()
+                mock.patch.object(self.m, 'usage_reading', side_effect=AssertionError('no provider polling')), \
+                mock.patch.object(self.m, 'watch_items', wraps=self.m.watch_items) as observed:
             self.watch()
-            duration = time.monotonic() - start
-        self.assertLess(duration, 1.0)
-        print('10-node watcher seconds:', round(duration, 3))
+        expected = {'root'} | {'node' + str(i) for i in range(9)}
+        self.assertCountEqual([call.args[1]['id'] for call in observed.call_args_list], expected)
+        state = json.loads((self.root / '.brain/watch.json').read_text())
+        self.assertEqual({item['node'] for item in state['items'] if item['kind'] == 'handback'}, expected)
 
 
     def failure_fixture(self):

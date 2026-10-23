@@ -442,10 +442,17 @@ class RehearsalSandbox(Scenario):
         return rehearsal.run_command(core, lane, list(args), kind, [], terms)
 
     def test_registered_hook_latency_is_measured(self):
-        r = self.runner('import json, os, time\n'
-                        'if json.load(open(os.environ["BRAIN_CONFIG"]))["brains"]:\n'
-                        '    time.sleep(1.5)\n', kind='hook')
+        clock = mock.Mock()
+        clock.monotonic.side_effect = [100, 101.5]
+        with mock.patch.object(rehearsal, 'time', clock):
+            r = self.runner('import json, os\n'
+                            'assert json.load(open(os.environ["BRAIN_CONFIG"]))["brains"]\n'
+                            'print("registered hook ran")\n', kind='hook')
         self.assertEqual(0, r['code'])
+        self.assertIn('registered hook ran', r['text'])
+        self.assertEqual(1.5, r['seconds'])
+        self.assertFalse(r['timeout'])
+        self.assertEqual(2, clock.monotonic.call_count)
         self.assertIn('hook: latency exceeds 1 s', rehearsal.compare({'hook': result()}, {'hook': r}))
 
     def test_read_command_cannot_rewrite_machine_bindings(self):
@@ -893,7 +900,18 @@ class RehearsalNativeCore(Scenario):
         original_brain = rehearsal.snapshot(r)
         original_home = rehearsal.snapshot(home)
         try:
-            output = self.b(r, 'rehearse', 'engine', '--branch', 'job')
+            import argparse
+            # Control only the parent's elapsed timer; the real CLI subprocesses,
+            # sandbox, delivery probe and their timeout clocks still run normally.
+            ticks = iter(range(100))
+            clock = mock.Mock()
+            clock.monotonic.side_effect = lambda: next(ticks) / 4
+            with mock.patch.dict(os.environ, self.env), \
+                    mock.patch.object(rehearsal, 'time', clock), \
+                    mock.patch.object(rehearsal._m_nodes, 'find_root', return_value=r), \
+                    contextlib.redirect_stdout(io.StringIO()) as stdout:
+                rehearsal.cmd_rehearse(argparse.Namespace(id='engine', branch='job'))
+            output = stdout.getvalue()
             self.assertIn('rehearse: passed', output)
             self.assertEqual(1, len(posts))
             self.assertEqual(original_brain, rehearsal.snapshot(r))
@@ -903,6 +921,8 @@ class RehearsalNativeCore(Scenario):
             evidence = json.loads(files[0].read_text())
             self.assertTrue(evidence['passed'])
             self.assertEqual(11, evidence['commands'])
+            self.assertEqual(.25, evidence['hook_seconds'])
+            self.assertEqual(44, clock.monotonic.call_count)  # before/after for both lanes
         finally:
             server.shutdown()
             server.server_close()

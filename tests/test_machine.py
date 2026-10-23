@@ -232,6 +232,9 @@ class MachineCare(Scenario):
             started, ended, results, errors = [], [], [], []
             active = [0, 0]
             mutex = threading.Lock()
+            entered = [threading.Event() for _ in range(3)]
+            release = [threading.Event() for _ in range(3)]
+            finished = [threading.Event() for _ in range(3)]
             def worker(i):
                 try:
                     token = m.machine_wait("verify")
@@ -240,7 +243,11 @@ class MachineCare(Scenario):
                             started.append(i)
                             active[0] += 1
                             active[1] = max(active)
-                        r = subprocess.run([sys.executable, "-c", "import time; time.sleep(.12); raise SystemExit(" + str(i) + ")"])
+                        entered[i].set()
+                        # Hold the slot until the controller has observed admission.
+                        # These timeouts detect deadlocks, not scheduler performance.
+                        self.assertTrue(release[i].wait(10), "controller did not release worker")
+                        r = subprocess.run([sys.executable, "-c", "raise SystemExit(" + str(i) + ")"])
                         with mutex:
                             results.append((i, r.returncode))
                             ended.append(i)
@@ -249,22 +256,37 @@ class MachineCare(Scenario):
                         m.machine_release(token)
                 except BaseException as e:
                     errors.append(e)
+                finally:
+                    finished[i].set()
             with mock.patch.object(m, "machine_limit", return_value=limit), contextlib.redirect_stdout(io.StringIO()):
                 threads = []
-                for i in range(3):
-                    t = threading.Thread(target=worker, args=(i,))
-                    t.start()
-                    threads.append(t)
-                    # Wait for each fixture to join the durable queue before starting the next.
-                    deadline = time.monotonic() + 5
-                    while time.monotonic() < deadline:
-                        with m.machine_queue() as q:
-                            if len(q.rows) >= i + 1:
-                                break
-                        time.sleep(.002)
-                for t in threads:
-                    t.join(10)
-                    self.assertFalse(t.is_alive())
+                try:
+                    for i in range(3):
+                        t = threading.Thread(target=worker, args=(i,))
+                        t.start()
+                        threads.append(t)
+                        # Earlier slots stay occupied, so queued rows cannot disappear.
+                        deadline = time.monotonic() + 5
+                        while time.monotonic() < deadline:
+                            with m.machine_queue() as q:
+                                if len(q.rows) == i + 1:
+                                    break
+                            time.sleep(.002)
+                        else:
+                            self.fail("worker did not join the durable queue")
+                        if i < limit:
+                            self.assertTrue(entered[i].wait(10), "available slot was not admitted")
+                    self.assertEqual(started, list(range(limit)))
+                    for i in range(3):
+                        self.assertTrue(entered[i].wait(10), "FIFO worker was not admitted")
+                        release[i].set()
+                        self.assertTrue(finished[i].wait(10), "worker did not finish")
+                finally:
+                    for event in release:
+                        event.set()
+                    for t in threads:
+                        t.join(10)
+                    self.assertFalse(any(t.is_alive() for t in threads))
             self.assertEqual(errors, [])
             self.assertEqual(started, [0, 1, 2])
             self.assertEqual(ended if limit == 1 else sorted(ended), [0, 1, 2])
