@@ -10,6 +10,7 @@ from pathlib import Path
 from . import briefs as _m_briefs
 from . import check as _m_check
 from . import common as _m_common
+from . import docker_leftovers as _m_docker_leftovers
 from . import guard as _m_guard
 from . import history as _m_history
 from . import hosts as _m_hosts
@@ -563,6 +564,7 @@ def cmd_due(a):
                 _m_hosts.wake_start(inst, target)
             except OSError:
                 pass
+    _m_docker_leftovers.docker_leftover_nodes(inst, nodes)
     state = _m_machine.machine_state(inst)
     items = [item for n in nodes for item in due_items(inst, n) + changes_due(inst, n)]
     wake_seen = set()

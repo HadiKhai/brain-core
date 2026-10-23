@@ -13,6 +13,7 @@ import time
 from pathlib import Path
 
 from . import common as _m_common
+from . import docker_leftovers as _m_docker_leftovers
 from . import guard as _m_guard
 from . import history as _m_history
 from . import instance as _m_instance
@@ -441,6 +442,7 @@ def verify_reservation(inst, n):
         yield token
     finally:
         _m_machine.machine_release(token)
+        _m_docker_leftovers.docker_leftover_nodes(inst, [n])
 
 
 def run_verify(inst, n, branch, verify, w, env):

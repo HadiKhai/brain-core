@@ -10,6 +10,7 @@ from pathlib import Path
 
 from . import briefs as _m_briefs
 from . import common as _m_common
+from . import docker_leftovers as _m_docker_leftovers
 from . import guard as _m_guard
 from . import hosts as _m_hosts
 from . import instance as _m_instance
@@ -457,6 +458,7 @@ def job_ended(inst, n, branch, outcome, commits="", cause="", worktree=None):
         cleanup_handback(inst, n, r, rows)
         inst.commit([], f"{n['id']}: job {outcome}")
         print_thread_checklist(n, r)
+    _m_docker_leftovers.docker_leftover_nodes(inst, [n])
 
 
 def cleanup_handback(inst, n, row, rows):

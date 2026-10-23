@@ -5,6 +5,28 @@ upgrading. `brain changes <node>` shows the entries this node's coordinator hasn
 `brain due <node>` lists them until `brain changes <node> --seen`. Entry headings are
 `## <date>: <title>`; once released, a heading never changes.
 
+## 2026-10-23: Report abandoned test Docker resources without changing them
+
+For agents:
+- Verify/gate completion, job closure, train closure and ordinary node ticks can
+  report abandoned test Compose projects and Testcontainers sessions to the node
+  inbox. Docker commands only inspect and list; containers are never stopped or
+  removed. Known live owners and preview/dev/foreign resources are excluded.
+- Reports include owner PID/job/reservation when unambiguous, age and state.
+  Unknown owners stay explicitly unknown. Invalid timestamps retain the resource
+  with an unknown age. One five-second deadline covers all Docker commands and
+  nodes in a tick; failure stops further checks and reports a partial result.
+- Private episode receipts suppress repeated inbox appends. Incomplete scans keep
+  known leftovers and receipts; a complete disappearance rearms a later episode.
+
+After upgrading:
+- Set `docker_leftover_prefixes=maple-verify-*,maple-job-*` on a node, using its
+  own literal test namespace. Without valid prefixes no Docker check runs.
+  Testcontainers sessions also need `brain.scope` or `brain.docker-scope` (the
+  colon-joined machine scope hashes) or a matching `brain.reservation`; a session label alone is insufficient.
+  Optional `brain.owner-pid` and `brain.job` labels identify the owner. Keep the
+  private `.brain/docker-leftovers.json` receipt across restarts.
+
 ## 2026-10-23: Wake once for a silent frozen or queued job
 
 For agents:

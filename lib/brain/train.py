@@ -7,6 +7,7 @@ import shutil
 from pathlib import Path
 
 from . import common as _m_common
+from . import docker_leftovers as _m_docker_leftovers
 from . import guard as _m_guard
 from . import instance as _m_instance
 from . import jobs as _m_jobs
@@ -148,7 +149,10 @@ def cmd_train(a):
             run_train(inst, n, home, verify, a)
         finally:
             # Persist ejections/interrupted execution evidence even when publication stops.
-            inst.commit([], f"{n['id']}: train state")
+            try:
+                inst.commit([], f"{n['id']}: train state")
+            finally:
+                _m_docker_leftovers.docker_leftover_nodes(inst, [n])
 
 
 def run_train(inst, n, home, verify, a):
