@@ -293,7 +293,7 @@ class WatchExtension(Scenario):
             calls.append(command)
             if len(calls) == 1:
                 home, n, w, row = self.project()
-                self.signal(n, row, episode=('a' if mode == 'handback' else 'b') * 32)
+                self.signal(n, row)
                 self.watch()  # new binding and completion arrive during the previous send
             return True
         with mock.patch.object(self.m, 'changes_due', return_value=[]), mock.patch.object(self.m, 'wake_start'), \
@@ -320,7 +320,7 @@ class WatchExtension(Scenario):
             with self.subTest(mode=mode), mock.patch.object(self.m, 'changes_due', return_value=[]), \
                     mock.patch.object(self.m, 'wake_start'), mock.patch.object(self.m, 'WAKE_INTERVAL', 0), \
                     mock.patch.object(self.m, 'wake_send', return_value=True) as send:
-                self.signal(n, row)
+                self.signal(n, row, episode=('a' if mode == 'handback' else 'b') * 32)
                 self.watch()  # acknowledge a valid notice before the transient read failure
                 if mixed:
                     self.m.request_wake(self.inst, root, 'protected mixed ' + mode, items=self.root_events() + [question])

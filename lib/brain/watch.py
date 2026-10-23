@@ -57,7 +57,7 @@ def watch_due_episodes(inst, groups):
     import fcntl
     entries = [i for group in groups.values() for i in group['items']
                if 'reason' not in i and i['kind'] not in
-               ('machine-hold', 'machine-alert', 'machine-repair', 'job-ready', 'job-landed')]
+               ('machine-hold', 'machine-alert', 'machine-repair', 'job-ready', 'job-landed', 'rotate')]
     path = inst.root / '.brain/wake/due-episodes.json'
     lock = path.with_suffix('.lock')
     if _m_common.outward_links(inst.root):
