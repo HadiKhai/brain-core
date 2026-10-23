@@ -536,6 +536,25 @@ def comparison_text(row):
     return row.get('semantic_text', row['text'])
 
 
+def comparison_stdout(row):
+    return row.get('semantic_stdout', comparison_text(row))
+
+
+def comparison_digest(value):
+    # semantic_ui uses a structural sentinel for volatile numbers. Its encoding
+    # cannot collide with a raw scalar, which carries an explicit type tag.
+    def structural_token(item):
+        if item is _VOLATILE_NUMBER:
+            return ['volatile-number']
+        raise TypeError('unsupported comparison value')
+    encoded = json.dumps(value, sort_keys=True, ensure_ascii=False, default=structural_token)
+    return hashlib.sha256(encoded.encode()).hexdigest()
+
+
+def stderr_comparison(row):
+    return row.get('stderr_digest', comparison_digest(''))
+
+
 def normalize(text, roots=(), trace=None):
     def record(name, values):
         if trace is not None and values:
@@ -606,8 +625,8 @@ def expected_change_notices(inst, nodes, baseline, candidate):
     return expected
 
 
-def redact_text(text, terms):
-    """Mask folded matches, keeping surrounding probe content comparable.
+def redaction_spans(text, terms):
+    """Locate folded matches, merging overlaps before replacing content.
 
     guard.redact can blank an entire output for full Unicode folds. Map folded
     offsets back to source characters instead, and merge all overlapping matches
@@ -634,11 +653,25 @@ def redact_text(text, terms):
             merged[-1] = (merged[-1][0], max(end, merged[-1][1]))
         else:
             merged.append((start, end))
+    return merged
+
+
+def redact_text(text, terms):
     parts, cursor = [], 0
-    for start, end in merged:
+    for start, end in redaction_spans(text, terms):
         parts.extend((text[cursor:start], '[…]'))
         cursor = end
     return ''.join(parts) + text[cursor:]
+
+
+def redact_channel_boundary(stdout, stderr, terms):
+    # Separating channels must not expose a term split across their boundary.
+    # Each channel's remaining JSON strings are decoded/redacted independently.
+    boundary = len(stdout)
+    for start, end in redaction_spans(stdout + stderr, terms):
+        if start < boundary < end:
+            return stdout[:start] + '[…]', '[…]' + stderr[end - boundary:]
+    return stdout, stderr
 
 
 def redact_output(text, terms):
@@ -710,6 +743,20 @@ def ui_readiness(value):
     return rows
 
 
+def ui_comparison(text, trace=None):
+    """Validate original identities; retain only content-free comparison data."""
+    try:
+        value = json.loads(text)
+        if not isinstance(value, dict):
+            raise ValueError('invalid UI object')
+        readiness = ui_readiness(value)
+        semantic = semantic_ui(value, trace)
+    except (ValueError, TypeError):
+        return dict(valid=False)
+    return dict(valid=True, keys=comparison_digest(sorted(value)),
+                readiness=comparison_digest(readiness), semantic=comparison_digest(semantic))
+
+
 def compare(before, after, expected_changes=None):
     """Return content-free regression labels from private comparison views."""
     flags = []
@@ -721,6 +768,8 @@ def compare(before, after, expected_changes=None):
             flags.append(key + ': new command failure')
         if added_check_errors(old, new):
             flags.append(key + ': new check errors')
+        if stderr_comparison(old) != stderr_comparison(new):
+            flags.append(key + ': stderr changed')
         ready = lambda x: x['code'] == 0 and x['text'].splitlines()[-1:] == ['ready']
         if key.startswith('ready:') and ready(old) and not ready(new):
             flags.append(key + ': ready became not ready')
@@ -731,7 +780,7 @@ def compare(before, after, expected_changes=None):
         if key.startswith('due:') and not identical_baseline_failure(old, new):
             try:
                 def items(value):
-                    parsed = json.loads(comparison_text(value))
+                    parsed = json.loads(comparison_stdout(value))
                     if not isinstance(parsed, list) or any(not isinstance(item, dict) for item in parsed):
                         raise ValueError('invalid due items')
                     return parsed
@@ -758,18 +807,17 @@ def compare(before, after, expected_changes=None):
                     and key + ': brief warning disappeared' not in flags):
                 flags.append(key + ': brief warning disappeared')
         if key == 'ui' and old['code'] == new['code'] == 0:
-            try:
-                previous, current = json.loads(comparison_text(old)), json.loads(comparison_text(new))
-                if not isinstance(previous, dict) or not isinstance(current, dict):
-                    raise ValueError('invalid UI object')
-                if previous.keys() != current.keys():
-                    flags.append('ui: output keys changed')
-                if ui_readiness(previous) != ui_readiness(current):
-                    flags.append('ui: readiness changed')
-                if semantic_ui(previous) != semantic_ui(current):
-                    flags.append('ui: semantic output changed')
-            except (ValueError, TypeError):
+            previous, current = (row['ui_comparison'] if 'ui_comparison' in row else
+                                 ui_comparison(comparison_stdout(row)) for row in (old, new))
+            if not previous['valid'] or not current['valid']:
                 flags.append('ui: invalid output')
+            else:
+                if previous['keys'] != current['keys']:
+                    flags.append('ui: output keys changed')
+                if previous['readiness'] != current['readiness']:
+                    flags.append('ui: readiness changed')
+                if previous['semantic'] != current['semantic']:
+                    flags.append('ui: semantic output changed')
         if new['unexpected']:
             flags.append(key + ': unexpected writes')
         if key == 'hook' and new['seconds'] > 1:
@@ -780,6 +828,7 @@ def compare(before, after, expected_changes=None):
 def identical_baseline_failure(old, new):
     # Publication formatting cannot turn changed operands into a shared failure.
     return (old['code'] != 0 and old['code'] == new['code'] and comparison_text(old) == comparison_text(new)
+            and stderr_comparison(old) == stderr_comparison(new)
             and not any(r['timeout'] or r['unexpected'] for r in (old, new)))
 
 
@@ -840,7 +889,8 @@ def allowed_write(rel, kind):
         return False
     rel = rel[6:]
     if (rel in ('.brain/lock', '.brain/machine.json', '.brain/core-remote.json', '.brain/hooks.json',
-                '.brain/hooks.log', '.brain/inbox-seen.json', '.brain/wake', '.brain/host-questions', '.brain/spend')
+                '.brain/hooks.log', '.brain/inbox-seen.json', '.brain/wake', '.brain/host-questions', '.brain/spend',
+                '.brain/docker-leftovers.json', '.brain/docker-leftovers.lock')
             or rel.startswith(('.brain/wake/', '.brain/host-questions/', '.brain/spend/'))):
         return True
     if rel == '.brain/local.json':
@@ -1050,11 +1100,17 @@ runpy.run_path(entry, run_name='__main__')
     text = redact_output(normalized, terms)
     semantic = semantic_output(out + err, roots)
     semantic_text = redact_output(semantic, terms)
-    if args[:1] == ['ui']:
-        try:
-            semantic_ui(json.loads(semantic), normalization_tokens)
-        except ValueError:
-            pass
+    stdout_semantic, stderr_semantic = semantic_output(out, roots), semantic_output(err, roots)
+    # Compute UI validity and semantic identities before publication redaction
+    # merges protected names. Neither raw JSON nor identities leave this process.
+    ui_summary = ui_comparison(stdout_semantic, normalization_tokens) if args[:1] == ['ui'] else None
+    stderr_value = ([semantic_brief_warning(line) for line in stderr_semantic.splitlines()]
+                    if args[:1] == ['brief'] else stderr_semantic)
+    stderr_digest = comparison_digest(stderr_value)
+    safe_out, safe_err = redact_channel_boundary(out, err, terms)
+    stdout = redact_output(normalize(safe_out, roots), terms)
+    stderr = redact_output(normalize(safe_err, roots), terms)
+    semantic_stdout = redact_output(semantic_output(safe_out, roots), terms)
     if args[:1] == ['brief']:
         for line in semantic.splitlines():
             semantic_brief_warning(line, normalization_tokens)
@@ -1067,10 +1123,14 @@ runpy.run_path(entry, run_name='__main__')
     changed = {k for k in before.keys() | after.keys() if before.get(k) != after.get(k)}
     if raw_output is not None:
         raw_output.append(dict(stdout=out, stderr=err, code=p.returncode, timeout=timed_out))
-    return {'text': text, 'semantic_text': semantic_text,
+    result = {'text': text, 'semantic_text': semantic_text,
+            'stdout': stdout, 'stderr': stderr, 'semantic_stdout': semantic_stdout, 'stderr_digest': stderr_digest,
             'error_diagnostics': error_diagnostics, 'normalization_tokens': normalization_tokens,
             'code': p.returncode, 'timeout': timed_out,
             'seconds': elapsed, 'unexpected': sum(not allowed_write(k, kind) for k in changed) + int(violation.exists())}
+    if ui_summary is not None:
+        result['ui_comparison'] = ui_summary
+    return result
 
 
 def read_clock(path):

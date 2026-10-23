@@ -1,5 +1,6 @@
 """Frozen-input hotfix contracts; all brains and diagnostic text are fabricated."""
 import contextlib
+import copy
 import datetime
 import hashlib
 import io
@@ -22,6 +23,14 @@ from scenario import CORE, Scenario
 # selected real Git, without invoking developer-tool discovery for each probe.
 _TINY_PATH = None
 TINY_INPUT_TESTS = {
+    'test_json_stdout_with_shared_stderr_warning_is_valid',
+    'test_new_changed_and_removed_stderr_cannot_hide_behind_json',
+    'test_protected_terms_split_between_channels_stay_private',
+    'test_only_exact_due_receipt_transaction_is_an_allowed_read_write',
+    'test_arbitrary_inbox_and_outward_writes_still_fail',
+    'test_ui_identities_remain_distinct_before_redaction',
+    'test_ui_duplicates_readiness_reasons_types_and_keys_still_fail',
+    'test_test_only_candidate_rehearses_with_no_regressions_or_raw_publication',
     'test_plain_copy_and_native_copy_keep_independent_inodes',
     'test_macos_attempts_copy_on_write_then_falls_back_without_live_writes',
     'test_existing_destination_is_never_removed', 'test_successful_output_change_still_fails',
@@ -107,12 +116,185 @@ def tiny_bindings(case):
 
 
 class FrozenInputs(RehearsalFixture):
+    terms = [('invented-canary', 'node'), ('invented-willow', 'node'),
+             ('private-branch-a', 'branch'), ('private-branch-b', 'branch')]
+
     def setUp(self):
         if self._testMethodName in TINY_INPUT_TESTS:
             Scenario.setUp(self)
             tiny_environment(self)
+            self.probes = 0
         else:
             super().setUp()
+
+    def probe(self, stdout, stderr='', command='ui', mutation=None):
+        self.probes += 1
+        lane = self.tmp / ('probe-' + str(self.probes))
+        (lane / 'brain').mkdir(parents=True)
+        process = mock.Mock(returncode=0, pid=123)
+        def communicate(*args, **kwargs):
+            if mutation:
+                mutation(lane)
+            return stdout, stderr
+        process.communicate.side_effect = communicate
+        with mock.patch.object(rehearsal, 'sandbox_prefix', return_value=[]), \
+                mock.patch.object(rehearsal.subprocess, 'Popen', return_value=process), \
+                mock.patch.object(rehearsal.os, 'killpg'):
+            return rehearsal.run_command(lane / 'brain/core', lane, [command], 'read', [], self.terms)
+
+    def ui(self):
+        def job(branch, ready):
+            return dict(branch=branch, ready=dict(ready=ready, reasons=[] if ready else ['held']))
+        return dict(nodes=[dict(id='invented-canary', worktrees=[job('private-branch-a', True),
+                                                               job('private-branch-b', False)]),
+                           dict(id='invented-willow', worktrees=[])], commits_total=7)
+
+    def test_json_stdout_with_shared_stderr_warning_is_valid(self):
+        for command, stdout in [('due:0', '[]'), ('ui', json.dumps(self.ui()))]:
+            with self.subTest(command=command):
+                old = self.probe(stdout, 'warning: invented-canary scan partial\n', command.split(':')[0])
+                new = self.probe(stdout, 'warning: invented-canary scan partial\n', command.split(':')[0])
+                self.assertEqual([], rehearsal.compare({command: old}, {command: new}))
+                self.assertEqual(json.loads(rehearsal.redact_output(stdout, self.terms)), json.loads(new['stdout']))
+                self.assertEqual('warning: […] scan partial', new['stderr'])
+                self.assertNotIn('invented-canary', json.dumps(new))
+
+    def test_new_changed_and_removed_stderr_cannot_hide_behind_json(self):
+        for command, stdout in [('due:0', '[]'), ('ui', '{}'), ('check', '✓ good')]:
+            old = self.probe(stdout, 'warning: old\n', command.split(':')[0])
+            for warning in ('warning: old\nwarning: new\n', 'warning: changed\n', ''):
+                with self.subTest(command=command, warning=warning):
+                    new = self.probe(stdout, warning, command.split(':')[0])
+                    self.assertIn(command + ': stderr changed', rehearsal.compare({command: old}, {command: new}))
+        old = self.probe('[]', command='due')
+        malformed = self.probe('not JSON', 'warning: scan partial', command='due')
+        self.assertIn('due:0: invalid due output', rehearsal.compare({'due:0': old}, {'due:0': malformed}))
+        old = self.probe('[]', 'warning: invented-canary', command='due')
+        changed = self.probe('[]', 'warning: invented-willow', command='due')
+        self.assertEqual(old['stderr'], changed['stderr'])
+        self.assertIn('due:0: stderr changed', rehearsal.compare({'due:0': old}, {'due:0': changed}))
+
+    def test_protected_terms_split_between_channels_stay_private(self):
+        row = self.probe('invented-', 'canary', command='check')
+        self.assertEqual('[…]', row['text'])
+        self.assertNotIn('invented-', row['stdout'])
+        self.assertNotIn('canary', row['stderr'])
+        self.assertNotIn('invented-canary', json.dumps(row))
+
+    def test_only_exact_due_receipt_transaction_is_an_allowed_read_write(self):
+        def transaction(lane):
+            state = lane / 'brain/.brain'
+            state.mkdir()
+            (state / 'docker-leftovers.json').write_text('{}')
+            (state / 'docker-leftovers.lock').touch()
+        row = self.probe('[]', command='due', mutation=transaction)
+        self.assertEqual(0, row['unexpected'])
+        for rel in ('brain/.brain/docker-leftovers.json.bak', 'brain/.brain/docker-leftovers.lock/child',
+                    'brain/inbox.md', 'brain/nodes/sample/inbox.md', 'home/docker-leftovers.json',
+                    'brain/.brain/unknown.json'):
+            with self.subTest(path=rel):
+                self.assertFalse(rehearsal.allowed_write(rel, 'read'))
+
+    def test_arbitrary_inbox_and_outward_writes_still_fail(self):
+        lane = self.tmp / 'sandbox'
+        core = lane / 'brain/core'
+        (core / 'bin').mkdir(parents=True)
+        outside = self.tmp / 'outside'
+        outside.write_text('unchanged')
+        script = ('from pathlib import Path\nPath("inbox.md").write_text("unexpected")\n'
+                  'try:\n    Path(' + repr(str(outside)) + ').write_text("changed")\n'
+                  'except OSError:\n    pass\nprint("[]")\n')
+        (core / 'bin/brain').write_text(script)
+        with mock.patch.dict(os.environ, self.env):
+            row = rehearsal.run_command(core, lane, ['due'], 'read', [])
+        self.assertEqual(0, row['code'])
+        self.assertEqual('unchanged', outside.read_text())
+        self.assertEqual(2, row['unexpected'])
+        self.assertIn('due:0: unexpected writes', rehearsal.compare({'due:0': row}, {'due:0': row}))
+
+    def test_ui_identities_remain_distinct_before_redaction(self):
+        raw = json.dumps(self.ui())
+        old, new = self.probe(raw), self.probe(raw)
+        self.assertEqual([], rehearsal.compare({'ui': old}, {'ui': new}))
+        for term, _ in self.terms:
+            self.assertNotIn(term, json.dumps(new))
+
+    def test_ui_duplicates_readiness_reasons_types_and_keys_still_fail(self):
+        value = self.ui()
+        old = self.probe(json.dumps(value))
+        duplicate_node = copy.deepcopy(value)
+        duplicate_node['nodes'].append(copy.deepcopy(value['nodes'][0]))
+        duplicate_branch = copy.deepcopy(value)
+        duplicate_branch['nodes'][0]['worktrees'][1]['branch'] = 'private-branch-a'
+        swapped = copy.deepcopy(value)
+        jobs = swapped['nodes'][0]['worktrees']
+        jobs[0]['ready'], jobs[1]['ready'] = jobs[1]['ready'], jobs[0]['ready']
+        changed_reason = copy.deepcopy(value)
+        changed_reason['nodes'][0]['worktrees'][1]['ready']['reasons'] = ['invented-willow']
+        previous_reason = copy.deepcopy(value)
+        previous_reason['nodes'][0]['worktrees'][1]['ready']['reasons'] = ['invented-canary']
+        renamed = copy.deepcopy(value)
+        renamed['nodes'][0]['id'], renamed['nodes'][1]['id'] = 'invented-willow', 'invented-canary'
+        for current in (duplicate_node, duplicate_branch):
+            row = self.probe(json.dumps(current))
+            self.assertIn('ui: invalid output', rehearsal.compare({'ui': row}, {'ui': row}))
+        for current in (swapped, changed_reason, renamed, dict(value, commits_total=True),
+                        dict(nodes=value['nodes'])):
+            with self.subTest(current=current):
+                new = self.probe(json.dumps(current))
+                flags = rehearsal.compare({'ui': old}, {'ui': new})
+                self.assertIn('ui: semantic output changed', flags)
+                self.assertNotIn('ui: invalid output', flags)
+        swapped_row = self.probe(json.dumps(swapped))
+        self.assertIn('ui: readiness changed', rehearsal.compare({'ui': old}, {'ui': swapped_row}))
+        before = self.probe(json.dumps(previous_reason))
+        after = self.probe(json.dumps(changed_reason))
+        self.assertIn('ui: readiness changed', rehearsal.compare({'ui': before}, {'ui': after}))
+
+    def test_test_only_candidate_rehearses_with_no_regressions_or_raw_publication(self):
+        """Same runtime, two warning/receipt due probes and protected UI rows."""
+        tiny_rehearsal_fixture(self)
+        (self.root / 'never-name.txt').write_text('\n'.join(term for term, _ in self.terms) + '\n')
+        fixture = '''import json, sys
+from pathlib import Path
+if sys.argv[1] == 'due':
+    Path('.brain').mkdir(exist_ok=True)
+    Path('.brain/docker-leftovers.json').write_text('{}')
+    Path('.brain/docker-leftovers.lock').touch()
+    print('[]')
+    print('Docker leftover report partial: ValueError', file=sys.stderr)
+elif sys.argv[1] == 'ui':
+    print(UI)
+'''.replace('UI', repr(json.dumps(self.ui())))
+        for core in (self.root / 'core', self.home):
+            (core / 'bin/brain').write_text(fixture)
+        self.git('commit', '-qam', 'runtime fixture', cwd=self.home)
+        runtime = self.git('rev-parse', 'HEAD:bin', cwd=self.home).strip()
+        (self.home / 'tests').mkdir()
+        (self.home / 'tests/test_fixture.py').write_text('# test-only change\n')
+        self.git('add', 'tests', cwd=self.home)
+        self.git('commit', '-qm', 'test-only candidate', cwd=self.home)
+        self.head = self.git('rev-parse', 'HEAD', cwd=self.home).strip()
+        self.assertEqual(runtime, self.git('rev-parse', 'HEAD:bin', cwd=self.home).strip())
+        commands = [('due:1', ['due'], 'read'), ('due:4', ['due'], 'read'),
+                    ('ui', ['ui', '--json'], 'read'), ('hook', ['hook', 'stop'], 'hook')]
+        printed = io.StringIO()
+        with tiny_bindings(self), \
+                mock.patch.object(rehearsal, 'rehearsal_commands', return_value=(commands, [])), \
+                mock.patch.object(rehearsal._m_nodes, 'find_root', return_value=self.root), \
+                mock.patch.object(rehearsal, 'evidence_path', return_value=self.evidence), \
+                contextlib.redirect_stdout(printed), contextlib.redirect_stderr(printed):
+            rehearsal.cmd_rehearse(SimpleNamespace(id='engine', branch='job'))
+        evidence = json.loads(self.evidence.read_text())
+        self.assertTrue(evidence['passed'], evidence['regressions'])
+        self.assertEqual([], evidence['regressions'])
+        self.assertEqual(0, evidence['changed_outputs'])
+        self.assertEqual(4, evidence['commands'])
+        publication = self.evidence.read_text() + printed.getvalue()
+        self.assertIn('regressions=0', printed.getvalue())
+        for secret in [*(term for term, _ in self.terms), 'Docker leftover report partial',
+                       'commits_total', 'worktrees', str(self.tmp)]:
+            self.assertNotIn(secret, publication)
 
     def run_rehearsal(self, *args, **kwargs):
         if self._testMethodName in {'test_normalized_differences_are_named_without_publishing_values',

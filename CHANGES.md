@@ -5,6 +5,21 @@ upgrading. `brain changes <node>` shows the entries this node's coordinator hasn
 `brain due <node>` lists them until `brain changes <node> --seen`. Entry headings are
 `## <date>: <title>`; once released, a heading never changes.
 
+## 2026-10-23: Rehearse JSON probes without collapsing private identities
+
+For agents:
+- JSON probes parse stdout separately from stderr. Shared warnings remain valid;
+  changed stderr still fails comparison, including changes hidden by redaction.
+- Due scans may write their exact private Docker receipt and lock files.
+  Unrelated inbox writes and outward writes still fail rehearsal.
+- UI structure and duplicate identities are checked before protected names are
+  redacted. Content-free digests preserve distinct nodes, branches, readiness
+  and reasons without publishing raw JSON.
+
+After upgrading:
+- Retry rehearsals refused by shared scan warnings, private receipt updates or
+  protected UI identity collisions. No configuration change is needed.
+
 ## 2026-10-23: Report abandoned test Docker resources without changing them
 
 For agents:
