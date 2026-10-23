@@ -9,6 +9,7 @@ import datetime
 import difflib
 import hashlib
 import json
+import math
 import os
 import re
 import shutil
@@ -454,6 +455,86 @@ OUTPUT_NORMALIZATION_PATTERNS = {
 # Instance lock deadlines retain real time; all monotonic/elapsed timers do too.
 FROZEN_WALL_CLOCK_MODULES = ('check', 'hosts', 'jobs', 'machine', 'spend', 'ui', 'upgrade', 'usage')
 
+# Only these live numeric observations and the exact spans below are volatile.
+# Presence, types, policy thresholds, reason membership and other values compare.
+UI_VOLATILE_NUMBERS = (
+    ('machine', 'load', 0), ('machine', 'load', 1), ('machine', 'load', 2),
+    ('machine', 'load_per_cpu', 0), ('machine', 'load_per_cpu', 1), ('machine', 'load_per_cpu', 2),
+    ('machine', 'mem_free_gb'), ('machine', 'disk_free_gb'),
+)
+_VOLATILE_NUMBER = object()
+UI_VOLATILE_MACHINE_SPANS = (
+    ('load5-observation', r'^(5-minute load/CPU )(\d+(?:\.\d+)?)( > \d+(?:\.\d+)?)$'),
+    ('free-memory-observation', r'^(free memory )(\d+(?:\.\d+)?)( GB < \d+(?:\.\d+)? GB'
+     r'(?:; threshold exceeds machine; adjust machine-care\.json)?)$'),
+    ('free-disk-observation', r'^(free disk )(\d+(?:\.\d+)?)( GB < \d+(?:\.\d+)? GB'
+     r'(?:; threshold exceeds machine; adjust machine-care\.json)?)$'),
+)
+
+
+def semantic_output(text, roots=()):
+    """Preserve operands; standardize copy roots, JSON and outer whitespace.
+
+    Publication's timestamp/size substitutions must never erase policy operands.
+    The caller redacts protected terms before keeping this private representation.
+    """
+    for root in sorted(map(str, roots), key=len, reverse=True):
+        text = text.replace(root, '<copy>')
+    try:
+        return json.dumps(json.loads(text), sort_keys=True, ensure_ascii=False)
+    except ValueError:
+        return text.strip()
+
+
+def semantic_ui(value, trace=None, path=()):
+    if (path in UI_VOLATILE_NUMBERS and type(value) in (int, float) and value >= 0
+            and (type(value) is int or math.isfinite(value))):
+        if trace is not None:
+            name = 'ui.' + '.'.join(map(str, path))
+            trace[name] = hashlib.sha256(json.dumps(value).encode()).hexdigest()
+        return _VOLATILE_NUMBER
+    if (len(path) == 3 and path[0] == 'machine' and path[1] in ('held', 'sample_reasons')
+            and type(path[2]) is int and isinstance(value, str)):
+        for name, pattern in UI_VOLATILE_MACHINE_SPANS:
+            match = re.fullmatch(pattern, value)
+            if match:
+                if trace is not None:
+                    trace['ui.' + '.'.join(map(str, path)) + '.' + name] = hashlib.sha256(match[2].encode()).hexdigest()
+                # A structural token cannot collide with any unrecognized raw
+                # string (including a candidate that prints our placeholder).
+                return ('str', ('observation', name, match[1], match[3]))
+    if isinstance(value, dict):
+        return {key: semantic_ui(item, trace, path + (key,)) for key, item in value.items()}
+    if isinstance(value, list):
+        return [semantic_ui(item, trace, path + (i,)) for i, item in enumerate(value)]
+    return (type(value).__name__, value)
+
+
+def semantic_brief_warning(line, trace=None):
+    # This is the renderer's measured-size diagnostic, not arbitrary limits or
+    # quotas. The configured brief_max_kb, section names and instructions survive.
+    ending = '. Shorten task/context or use path references; retain limits, guard and hand-back instructions.'
+    pattern = (r'^((?:warning: |brain: )?)brief is (\d+) bytes (\(brief_max_kb=[\d.]+\); largest sections: )'
+               r'([^\n]+)' + re.escape(ending) + r'$')
+    match = re.fullmatch(pattern, line)
+    if not match:
+        return line
+    sections = match[4].split('; ')
+    if any(not re.fullmatch(r'.+: \d+ bytes', section) for section in sections):
+        return line
+    if trace is not None:
+        counts = [match[2], *[section.rsplit(': ', 1)[1] for section in sections]]
+        previous = trace.get('brief-rendered-byte-counts', '')
+        trace['brief-rendered-byte-counts'] = hashlib.sha256((previous + json.dumps(counts)).encode()).hexdigest()
+    # Keep the normalized form structurally distinct from unrecognized text,
+    # including a candidate that literally prints publication placeholders.
+    return ('brief-rendered-byte-counts', match[1], match[3],
+            tuple(section.rsplit(': ', 1)[0] for section in sections), ending)
+
+
+def comparison_text(row):
+    return row.get('semantic_text', row['text'])
+
 
 def normalize(text, roots=(), trace=None):
     def record(name, values):
@@ -521,7 +602,7 @@ def expected_change_notices(inst, nodes, baseline, candidate):
                 + '; '.join(entry['id'] for entry in unread[:3]) + (' …' if len(unread) > 3 else '')
                 + f"); read them: brain changes {node['id']}, then brain changes {node['id']} --seen")
         item = dict(node=node['id'], kind='core-changes', text=_m_nodes.import_text(text, _m_guard.never_terms(node)))
-        expected['due:' + str(i)] = json.loads(redact_output(normalize(json.dumps(item)), terms))
+        expected['due:' + str(i)] = json.loads(redact_output(semantic_output(json.dumps(item)), terms))
     return expected
 
 
@@ -575,7 +656,7 @@ def redact_output(text, terms):
 
 
 def added_check_errors(old, new):
-    errors = lambda x: collections.Counter(line for line in x['text'].splitlines() if '✗' in line)
+    errors = lambda x: collections.Counter(line for line in comparison_text(x).splitlines() if '✗' in line)
     return list((errors(new) - errors(old)).elements())
 
 
@@ -605,15 +686,22 @@ def ui_readiness(value):
     nodes = value.get('nodes', [])
     if not isinstance(nodes, list):
         raise ValueError('invalid UI nodes')
+    identities = set()
     for node in nodes:
-        if not isinstance(node, dict) or not isinstance(node.get('worktrees', []), list):
+        if (not isinstance(node, dict) or not isinstance(node.get('id'), str) or not node['id']
+                or not isinstance(node.get('worktrees'), list) or node['id'] in identities):
             raise ValueError('invalid UI node')
+        identities.add(node['id'])
         for worktree in node.get('worktrees', []):
             if not isinstance(worktree, dict):
                 raise ValueError('invalid UI worktree')
             ready = worktree.get('ready')
             if ready is not None and not isinstance(ready, dict):
                 raise ValueError('invalid UI readiness')
+            if ready is not None and (type(ready.get('ready')) is not bool
+                    or not isinstance(ready.get('reasons'), list)
+                    or any(not isinstance(reason, str) for reason in ready['reasons'])):
+                raise ValueError('invalid UI readiness values')
             identity = json.dumps([node.get('id'), worktree.get('branch')], sort_keys=True)
             if identity in rows:
                 raise ValueError('duplicate UI worktree')
@@ -623,7 +711,7 @@ def ui_readiness(value):
 
 
 def compare(before, after, expected_changes=None):
-    """Return content-free regression labels; exact output stays in memory only."""
+    """Return content-free regression labels from private comparison views."""
     flags = []
     for key, old in before.items():
         new = after[key]
@@ -636,10 +724,14 @@ def compare(before, after, expected_changes=None):
         ready = lambda x: x['code'] == 0 and x['text'].splitlines()[-1:] == ['ready']
         if key.startswith('ready:') and ready(old) and not ready(new):
             flags.append(key + ': ready became not ready')
+        if (key.startswith('ready:') and comparison_text(old) != comparison_text(new)
+                and comparison_text(old).startswith('not ready:')
+                and comparison_text(new).startswith('not ready:')):
+            flags.append(key + ': ready reason changed')
         if key.startswith('due:') and not identical_baseline_failure(old, new):
             try:
                 def items(value):
-                    parsed = json.loads(value['text'])
+                    parsed = json.loads(comparison_text(value))
                     if not isinstance(parsed, list) or any(not isinstance(item, dict) for item in parsed):
                         raise ValueError('invalid due items')
                     return parsed
@@ -660,15 +752,22 @@ def compare(before, after, expected_changes=None):
                                                       if is_warning(l))
             if warnings(old) - warnings(new):
                 flags.append(key + ': brief warning disappeared')
+            semantic_warnings = lambda row: collections.Counter(semantic_brief_warning(line)
+                for line in comparison_text(row).splitlines() if is_warning(line))
+            if (semantic_warnings(old) - semantic_warnings(new)
+                    and key + ': brief warning disappeared' not in flags):
+                flags.append(key + ': brief warning disappeared')
         if key == 'ui' and old['code'] == new['code'] == 0:
             try:
-                previous, current = json.loads(old['text']), json.loads(new['text'])
+                previous, current = json.loads(comparison_text(old)), json.loads(comparison_text(new))
                 if not isinstance(previous, dict) or not isinstance(current, dict):
                     raise ValueError('invalid UI object')
                 if previous.keys() != current.keys():
                     flags.append('ui: output keys changed')
                 if ui_readiness(previous) != ui_readiness(current):
                     flags.append('ui: readiness changed')
+                if semantic_ui(previous) != semantic_ui(current):
+                    flags.append('ui: semantic output changed')
             except (ValueError, TypeError):
                 flags.append('ui: invalid output')
         if new['unexpected']:
@@ -679,8 +778,8 @@ def compare(before, after, expected_changes=None):
 
 
 def identical_baseline_failure(old, new):
-    # Text is already normalized and redacted, exactly as for evidence digests.
-    return (old['code'] != 0 and old['code'] == new['code'] and old['text'] == new['text']
+    # Publication formatting cannot turn changed operands into a shared failure.
+    return (old['code'] != 0 and old['code'] == new['code'] and comparison_text(old) == comparison_text(new)
             and not any(r['timeout'] or r['unexpected'] for r in (old, new)))
 
 
@@ -949,16 +1048,27 @@ runpy.run_path(entry, run_name='__main__')
     normalization_tokens = {}
     normalized = normalize(out + err, roots, trace=normalization_tokens)
     text = redact_output(normalized, terms)
+    semantic = semantic_output(out + err, roots)
+    semantic_text = redact_output(semantic, terms)
+    if args[:1] == ['ui']:
+        try:
+            semantic_ui(json.loads(semantic), normalization_tokens)
+        except ValueError:
+            pass
+    if args[:1] == ['brief']:
+        for line in semantic.splitlines():
+            semantic_brief_warning(line, normalization_tokens)
     # Capture safe renderings before protected-term redaction can erase a path
     # marker and strand its whitespace-separated private suffix. Only these
     # values, never the lookup keys, may be published as error diagnostics.
-    error_diagnostics = {redact_output(line, terms): diagnostic_line(line, terms)
-                         for line in normalized.splitlines() if '✗' in line}
+    error_diagnostics = {redact_output(line, terms): diagnostic_line(normalize(line), terms)
+                         for line in [*normalized.splitlines(), *semantic.splitlines()] if '✗' in line}
     after = snapshot(lane, cache)
     changed = {k for k in before.keys() | after.keys() if before.get(k) != after.get(k)}
     if raw_output is not None:
         raw_output.append(dict(stdout=out, stderr=err, code=p.returncode, timeout=timed_out))
-    return {'text': text, 'error_diagnostics': error_diagnostics, 'normalization_tokens': normalization_tokens,
+    return {'text': text, 'semantic_text': semantic_text,
+            'error_diagnostics': error_diagnostics, 'normalization_tokens': normalization_tokens,
             'code': p.returncode, 'timeout': timed_out,
             'seconds': elapsed, 'unexpected': sum(not allowed_write(k, kind) for k in changed) + int(violation.exists())}
 
@@ -1053,6 +1163,22 @@ def write_local_diff(inst, n, directory, before, after, metadata=None):
                                                   fromfile='installed/' + key, tofile='candidate/' + key))
 
 
+def rehearsal_commands(nodes):
+    commands, jobs = [], []
+    for i, node in enumerate(nodes):
+        commands.append(('due:' + str(i), ['due', node['id'], '--json'], 'read'))
+        commands.append(('brief:' + str(i), ['brief', node['id']], 'read'))
+        for j, row in enumerate(_m_jobs.read_jobs(node) or []):
+            jobs.append(row['Job'])
+            if not row.get('Ended'):
+                commands.append(('ready:' + str(i) + ':' + str(j),
+                                 ['ready', node['id'], '--branch', row['Job']], 'read'))
+        commands.append(('refresh:' + str(i), ['status', node['id'], '--refresh'], 'refresh'))
+    commands += [('check', ['check'], 'read'), ('fix', ['check', '--fix'], 'fix'),
+                 ('ui', ['ui', '--json'], 'read'), ('hook', ['hook', 'stop'], 'hook')]
+    return commands, jobs
+
+
 def rehearse(inst, n, branch, local_diff_dir=None):
     if not n['external']:
         raise RehearsalError('rehearsal needs an external core home and workbench')
@@ -1099,7 +1225,6 @@ def rehearse(inst, n, branch, local_diff_dir=None):
         validate_frozen_links(candidate)
         subprocess.run([*prefix, 'git', '-C', str(candidate), 'remote', 'remove', 'origin'],
                        env=prep_env, capture_output=True, check=True)
-        commands = []
         frozen_inst = _m_instance.Instance(frozen)
         nodes = frozen_inst.nodes()
         diagnostic_terms = []
@@ -1108,17 +1233,8 @@ def rehearse(inst, n, branch, local_diff_dir=None):
             diagnostic_terms.extend(_m_guard.never_terms(node))
             diagnostic_ids.extend(value for value in
                                   [node['id'], node['fm'].get('id'), *node.get('owners', [])] if value)
-        for i, node in enumerate(nodes):
-            commands.append(('due:' + str(i), ['due', node['id'], '--json'], 'read'))
-            commands.append(('brief:' + str(i), ['brief', node['id']], 'read'))
-            for j, row in enumerate(_m_jobs.read_jobs(node) or []):
-                diagnostic_ids.append(row['Job'])
-                if not row.get('Ended'):
-                    commands.append(('ready:' + str(i) + ':' + str(j),
-                                     ['ready', node['id'], '--branch', row['Job']], 'read'))
-            commands.append(('refresh:' + str(i), ['status', node['id'], '--refresh'], 'refresh'))
-        commands += [('check', ['check'], 'read'), ('fix', ['check', '--fix'], 'fix'),
-                     ('ui', ['ui', '--json'], 'read'), ('hook', ['hook', 'stop'], 'hook')]
+        commands, job_ids = rehearsal_commands(nodes)
+        diagnostic_ids.extend(job_ids)
         # Seed the same real delivery result into both command copies. Otherwise
         # a new check's cache miss would POST inside the network-denying sandbox.
         delivery_source = folder / 'delivery-source'

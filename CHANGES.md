@@ -32,11 +32,14 @@ For agents:
 - Git relative date cutoffs use the same captured clock as the instance and its
   helpers, as do data clocks for UI activity, usage and cache ages. Lock deadlines
   and elapsed timers stay live. A Git that cannot bind the clock refuses rehearsal.
-- Parsed UI readiness values and reasons, and the top-level UI key set, are
-  compared alongside the existing error, due-item, ready and brief-warning checks.
-- Evidence names differences handled by the existing copy-path, timestamp,
-  warning-byte-size and JSON-encoding normalizations. No volatile UI keys are
-  normalized away.
+- Comparison preserves semantic dates, quantities, due identities and error
+  operands before publication formatting. The complete parsed UI is compared,
+  including node membership, value types, readiness reasons and numeric values.
+- Exact, named exceptions cover live machine load/free-memory/free-disk readings,
+  their observed numbers inside machine reasons, and the brief renderer's measured
+  byte counts. Policy thresholds, units, reason membership and field structure
+  still compare. Evidence names every normalized difference; publication-only
+  timestamp/size substitutions cannot erase a semantic regression.
 - Raw stdout/stderr diffs stay in owner-only files under `local-only/` beside the
   workbench's redacted rehearsal evidence, outside the instance and repositories.
   Raw content and sidecar paths are never printed or included in evidence.

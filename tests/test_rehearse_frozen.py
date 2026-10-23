@@ -18,7 +18,226 @@ from test_rehearse import RehearsalFixture, rehearsal, result
 from scenario import CORE, Scenario
 
 
+# Resolve Apple's launcher once. Tiny fixtures and their subprocesses share the
+# selected real Git, without invoking developer-tool discovery for each probe.
+_TINY_PATH = None
+TINY_INPUT_TESTS = {
+    'test_plain_copy_and_native_copy_keep_independent_inodes',
+    'test_macos_attempts_copy_on_write_then_falls_back_without_live_writes',
+    'test_existing_destination_is_never_removed', 'test_successful_output_change_still_fails',
+    'test_parsed_ui_ready_reason_change_fails', 'test_parsed_ui_key_loss_and_invalid_output_fail',
+    'test_local_diff_retains_newline_only_delta_and_refuses_public_directory',
+    'test_normalized_differences_are_named_without_publishing_values',
+    'test_json_encoding_difference_is_named', 'test_semantic_operands_survive_the_real_output_pipeline',
+    'test_ui_complete_semantics_and_structure_are_compared',
+    'test_ui_volatility_allowlist_is_exact_and_reported',
+    'test_only_rendered_brief_measurements_are_volatile',
+    'test_machine_reason_observations_preserve_policy_and_structure',
+}
+TINY_PRIVATE_TESTS = {
+    'test_raw_diff_is_private_external_and_never_published',
+    'test_default_lanes_are_private_and_live_commit_does_not_change_result',
+    'test_linked_or_repository_local_diff_directory_refuses',
+}
+TINY_CLOCK_TESTS = {
+    'test_git_relative_cutoffs_in_parent_and_helper_use_the_snapshot_clock',
+    'test_data_wall_clocks_are_frozen_but_lock_and_elapsed_clocks_stay_real',
+    'test_unsupported_git_clock_refuses_before_probing',
+}
+TINY_INSTANCE = """import datetime, time
+class Instance:
+    def __init__(self, root): pass
+    def zone(self): return datetime.timezone.utc
+    def now_dt(self): return datetime.datetime.now(datetime.timezone.utc)
+"""
+
+
+def tiny_environment(case):
+    global _TINY_PATH
+    if _TINY_PATH is None:
+        env = {'PATH': case.env.get('PATH', '')}
+        rehearsal.bind_git_executable(env)
+        _TINY_PATH = env['PATH']
+    case.env['PATH'] = _TINY_PATH
+
+
+def tiny_rehearsal_fixture(case):
+    case.root = case.tmp / 'live'
+    case.root.mkdir()
+    (case.root / 'instance.md').write_text('---\ntimezone: UTC\n---\n')
+    (case.root / 'node.md').write_text('---\nid: root\n---\n')
+    (case.root / 'never-name.txt').write_text('invented-canary\n')
+    case.fixture = """import sys
+print('PREFIXinvented-canary: ' + sys.argv[1] + ' MODE')
+"""
+    for core in (case.root / 'core', case.tmp / 'diagnostic-candidate'):
+        (core / 'bin').mkdir(parents=True)
+        (core / 'bin/brain').write_text(case.fixture.replace('MODE', 'baseline').replace('PREFIX', ''))
+        (core / 'lib/brain').mkdir(parents=True)
+        (core / 'lib/brain/__init__.py').write_text('')
+        (core / 'lib/brain/instance.py').write_text(TINY_INSTANCE)
+    case.home = case.tmp / 'diagnostic-candidate'
+    case.git('init', '-q', '-b', 'main', cwd=case.home)
+    case.git('add', '.', cwd=case.home)
+    case.git('commit', '-qm', 'tiny fixture', cwd=case.home)
+    case.head = case.git('rev-parse', 'HEAD', cwd=case.home).strip()
+    case.git('init', '-q', '-b', 'main', cwd=case.root)
+    case.git('add', '.', cwd=case.root)
+    case.git('commit', '-qm', 'live snapshot', cwd=case.root)
+    case.node = dict(id='engine', external=True, home_path=case.home)
+    case.instant = datetime.datetime(2035, 1, 2, 12, tzinfo=datetime.timezone.utc)
+    case.instance_at = lambda root: SimpleNamespace(root=root, local={'changes_seen': {'root': []}},
+        now_dt=lambda: case.instant, node=lambda _: case.node,
+        nodes=lambda: [dict(id='root', dir=root, fm={}, local={}, owners=[], parent=None)])
+    case.inst = case.instance_at(case.root)
+    case.evidence = case.tmp / 'workbench/scratch/rehearse/evidence.json'
+
+
+@contextlib.contextmanager
+def tiny_bindings(case):
+    with mock.patch.dict(os.environ, case.env), \
+            mock.patch.object(rehearsal._m_instance, 'Instance', side_effect=case.instance_at), \
+            mock.patch.object(rehearsal._m_verify, 'ready_refs', return_value=(case.head, case.head)), \
+            mock.patch.object(rehearsal._m_verify, 'integration_parent', return_value=case.head), \
+            mock.patch.object(rehearsal._m_jobs, 'stamp', return_value='fixture'), \
+            mock.patch.object(rehearsal, 'probe_delivery', return_value=[]), \
+            mock.patch.object(rehearsal, 'rehearsal_commands', return_value=([
+                ('check', ['check'], 'read'), ('hook', ['hook', 'stop'], 'hook')], [])):
+        yield
+
+
 class FrozenInputs(RehearsalFixture):
+    def setUp(self):
+        if self._testMethodName in TINY_INPUT_TESTS:
+            Scenario.setUp(self)
+            tiny_environment(self)
+        else:
+            super().setUp()
+
+    def run_rehearsal(self, *args, **kwargs):
+        if self._testMethodName in {'test_normalized_differences_are_named_without_publishing_values',
+                                    'test_json_encoding_difference_is_named',
+                                    'test_ui_volatility_allowlist_is_exact_and_reported',
+                                    'test_machine_reason_observations_preserve_policy_and_structure'}:
+            tiny_rehearsal_fixture(self)
+            with tiny_bindings(self), mock.patch.object(rehearsal, 'sandbox_self_check'), \
+                    mock.patch.object(rehearsal, 'run_lane', side_effect=kwargs['outputs']):
+                return rehearsal.rehearse(self.inst, self.node, 'job')
+        return super().run_rehearsal(*args, **kwargs)
+
+    def probe_output(self, text, name, command='ui'):
+        lane = self.tmp / name
+        (lane / 'brain').mkdir(parents=True)
+        process = mock.Mock(returncode=0, pid=123)
+        process.communicate.return_value = (text, '')
+        with mock.patch.object(rehearsal, 'sandbox_prefix', return_value=[]), \
+                mock.patch.object(rehearsal.subprocess, 'Popen', return_value=process), \
+                mock.patch.object(rehearsal.os, 'killpg'):
+            return rehearsal.run_command(lane / 'brain/core', lane, [command], 'read', [lane / 'brain'])
+
+    def test_semantic_operands_survive_the_real_output_pipeline(self):
+        operands = [('2035-01-01 12:00', '2035-01-02 12:00'), ('10 bytes', '20 bytes')]
+        for index, (before, after) in enumerate(operands):
+            for command in ('ui', 'check', 'fix', 'brief:0', 'ready:0:0', 'due:0'):
+                with self.subTest(command=command, operand=before):
+                    def render(value):
+                        reason = 'limit deadline or quota: ' + value
+                        if command == 'ui':
+                            return json.dumps({'nodes': [{'id': 'engine', 'worktrees': [
+                                {'branch': 'job', 'ready': {'ready': False, 'reasons': [reason]}}]}]})
+                        if command.startswith('due:'):
+                            return json.dumps([{'node': 'root', 'kind': 'limit', 'id': value}])
+                        if command.startswith('ready:'):
+                            return 'not ready: ' + reason
+                        return ('✗ ' if command in ('check', 'fix') else 'warning: ') + reason
+                    old = self.probe_output(render(before), 'old-' + command.replace(':', '-') + str(index), command)
+                    new = self.probe_output(render(after), 'new-' + command.replace(':', '-') + str(index), command)
+                    self.assertTrue(rehearsal.compare({command: old}, {command: new}))
+                    if command in ('check', 'fix'):
+                        self.assertNotIn(after, json.dumps(list(new['error_diagnostics'].values())))
+
+    def test_ui_complete_semantics_and_structure_are_compared(self):
+        old = {'nodes': [{'id': 'engine', 'worktrees': [], 'jobs': {'open': 7}}], 'commits_total': 7}
+        mutations = [dict(old, nodes=[]), dict(old, nodes=[dict(old['nodes'][0], id='other')]),
+                     dict(old, nodes=old['nodes'] * 2), dict(old, commits_total=0),
+                     dict(old, nodes=[dict(old['nodes'][0], jobs={'open': 0})]),
+                     dict(old, nodes=[dict(old['nodes'][0], jobs={'open': True})]),
+                     dict(old, nodes=[dict(old['nodes'][0], worktrees=None)])]
+        for index, current in enumerate(mutations):
+            with self.subTest(current=current):
+                before = self.probe_output(json.dumps(old), 'before-ui-' + str(index))
+                after = self.probe_output(json.dumps(current), 'after-ui-' + str(index))
+                self.assertTrue(rehearsal.compare({'ui': before}, {'ui': after}))
+
+    def test_ui_volatility_allowlist_is_exact_and_reported(self):
+        old = {'nodes': [], 'machine': {'load': [1, 2, 3], 'load_per_cpu': [0.1, 0.2, 0.3],
+               'mem_free_gb': 10, 'disk_free_gb': 20, 'thermal': 'normal', 'held': [], 'cpus': 7}}
+        current = dict(old, machine=dict(old['machine'], load=[2, 3, 4], load_per_cpu=[0.2, 0.3, 0.4],
+                                         mem_free_gb=11, disk_free_gb=21))
+        before = self.probe_output(json.dumps(old), 'volatile-before')
+        after = self.probe_output(json.dumps(current), 'volatile-after')
+        outcome = self.run_rehearsal(outputs=[dict(ui=before, hook=result()), dict(ui=after, hook=result())])
+        self.assertTrue(outcome['passed'], outcome['regressions'])
+        expected = ['ui.machine.disk_free_gb', 'ui.machine.load.0', 'ui.machine.load.1', 'ui.machine.load.2',
+                    'ui.machine.load_per_cpu.0', 'ui.machine.load_per_cpu.1', 'ui.machine.load_per_cpu.2',
+                    'ui.machine.mem_free_gb']
+        self.assertEqual([dict(command='ui', patterns=expected)], outcome['normalized_differences'])
+        for mutation in [dict(old['machine'], cpus=0), dict(old['machine'], thermal='pressure'),
+                         dict(old['machine'], held=['limit']), dict(old['machine'], load=[1, 2, 3, 4]),
+                         dict(old['machine'], mem_free_gb=None), dict(old['machine'], mem_free_gb=-1),
+                         dict(old['machine'], mem_free_gb=float('nan')),
+                         {key: value for key, value in old['machine'].items() if key != 'mem_free_gb'}]:
+            with self.subTest(mutation=mutation):
+                self.assertNotEqual(rehearsal.semantic_ui(old), rehearsal.semantic_ui(dict(old, machine=mutation)))
+        nested = dict(old, policy={'load': 7}, brain={'now': '2035-01-01 12:00'})
+        for current in (dict(nested, policy={'load': 0}),
+                        dict(nested, brain={'now': '2035-01-02 12:00'})):
+            self.assertNotEqual(rehearsal.semantic_ui(nested), rehearsal.semantic_ui(current))
+
+    def test_only_rendered_brief_measurements_are_volatile(self):
+        ending = '. Shorten task/context or use path references; retain limits, guard and hand-back instructions.'
+        old = 'warning: brief is 10 bytes (brief_max_kb=8); largest sections: Task: 7 bytes' + ending
+        new = old.replace('10 bytes', '11 bytes').replace('7 bytes', '8 bytes')
+        before = self.probe_output(old, 'measured-old', 'brief')
+        after = self.probe_output(new, 'measured-new', 'brief')
+        self.assertEqual([], rehearsal.compare({'brief:0': before}, {'brief:0': after}))
+        self.assertIn('brief-rendered-byte-counts', before['normalization_tokens'])
+        self.assertNotEqual(before['normalization_tokens']['brief-rendered-byte-counts'],
+                            after['normalization_tokens']['brief-rendered-byte-counts'])
+        for prefix in ('', 'warning: ', 'brain: '):
+            self.assertEqual(rehearsal.semantic_brief_warning(prefix + old.removeprefix('warning: ')),
+                             rehearsal.semantic_brief_warning(prefix + new.removeprefix('warning: ')))
+        for index, changed in enumerate((new.replace('brief_max_kb=8', 'brief_max_kb=9'),
+                                          new.replace('retain limits', 'ignore limits'),
+                                          new.replace('Task:', 'Policy:'),
+                                          new.replace('11 bytes', '<size> bytes'),
+                                          old.replace('10 bytes', '<size> bytes').replace('7 bytes', '<size> bytes'))):
+            with self.subTest(changed=changed):
+                after = self.probe_output(changed, 'measured-changed-' + str(index), 'brief')
+                self.assertIn('brief:0: brief warning disappeared',
+                              rehearsal.compare({'brief:0': before}, {'brief:0': after}))
+
+    def test_machine_reason_observations_preserve_policy_and_structure(self):
+        reasons = ['5-minute load/CPU 2.00 > 1.3', 'free memory 3 GB < 6 GB', 'free disk 4 GB < 10 GB']
+        newer = ['5-minute load/CPU 3.00 > 1.3', 'free memory 4 GB < 6 GB', 'free disk 5 GB < 10 GB']
+        old = dict(nodes=[], machine=dict(held=reasons, sample_reasons=reasons))
+        current = dict(nodes=[], machine=dict(held=newer, sample_reasons=newer))
+        before = self.probe_output(json.dumps(old), 'reasons-before')
+        after = self.probe_output(json.dumps(current), 'reasons-after')
+        outcome = self.run_rehearsal(outputs=[dict(ui=before, hook=result()), dict(ui=after, hook=result())])
+        self.assertTrue(outcome['passed'], outcome['regressions'])
+        patterns = sorted('ui.machine.' + field + '.' + str(i) + '.' + name
+                          for field in ('held', 'sample_reasons')
+                          for i, name in enumerate(('load5-observation', 'free-memory-observation', 'free-disk-observation')))
+        self.assertEqual([dict(command='ui', patterns=patterns)], outcome['normalized_differences'])
+        for changed in ([newer[0].replace('> 1.3', '> 9'), *newer[1:]],
+                        [newer[0], newer[1].replace('< 6', '< 8'), newer[2]],
+                        [newer[0], newer[1], newer[2].replace('GB', 'MB')],
+                        ['thermal pressure'], newer[:2], [newer[0].replace('3.00', '<reading>'), *newer[1:]]):
+            with self.subTest(changed=changed):
+                candidate = dict(old, machine=dict(held=changed, sample_reasons=newer))
+                self.assertNotEqual(rehearsal.semantic_ui(old), rehearsal.semantic_ui(candidate))
+
     def test_plain_copy_and_native_copy_keep_independent_inodes(self):
         source = self.tmp / 'source'
         source.mkdir()
@@ -621,36 +840,14 @@ class CandidateNotices(RehearsalFixture):
 @unittest.skipUnless(sys.platform == 'darwin', 'requires macOS OS sandbox')
 class FrozenClock(Scenario):
     def prepare_private_fixture(self):
-        from brain.instance import Instance
-        self.root = self.init('sample')
-        self.home = self.tmp / 'diagnostic-candidate'
-        (self.home / 'bin').mkdir(parents=True)
-        self.fixture = '''import os, sys
-if sys.argv[1] == 'due':
-    print('[]')
-elif sys.argv[1] == 'ui':
-    print('{}')
-else:
-    print('PREFIXinvented-canary: ' + sys.argv[1] + ' MODE')
-'''
-        (self.home / 'bin/brain').write_text(self.fixture.replace('MODE', 'baseline').replace('PREFIX', ''))
-        (self.home / 'lib/brain').mkdir(parents=True)
-        (self.home / 'lib/brain/__init__.py').write_text('')
-        (self.home / 'lib/brain/instance.py').write_text('class Instance:\n    pass\n')
-        self.git('init', '-q', '-b', 'main', cwd=self.home)
-        self.git('add', '.', cwd=self.home)
-        self.git('commit', '-qm', 'fixture', cwd=self.home)
-        self.b(self.root, 'new', 'engine', '--title', 'Engine', '--home', str(self.home))
-        self.b(self.root, 'wt', 'add', 'engine', 'job')
-        (self.root / 'never-name.txt').write_text('invented-canary\n')
-        (self.root / 'core/bin/brain').write_text(self.fixture.replace('MODE', 'baseline').replace('PREFIX', ''))
-        self.inst = Instance(self.root)
-        self.node = self.inst.node('engine')
-        self.evidence = self.tmp / 'workbench/scratch/rehearse/evidence.json'
+        tiny_rehearsal_fixture(self)
+        worktree = self.tmp / 'diagnostic-candidate-work/worktrees/job'
+        worktree.parent.mkdir(parents=True)
+        self.git('worktree', 'add', '-q', '-b', 'job', str(worktree), cwd=self.home)
 
     def publish_private_diff(self, passed=True):
         printed = io.StringIO()
-        with mock.patch.dict(os.environ, self.env), \
+        with tiny_bindings(self), \
                 mock.patch.object(rehearsal._m_nodes, 'find_root', return_value=self.root), \
                 mock.patch.object(rehearsal, 'evidence_path', return_value=self.evidence), \
                 contextlib.redirect_stdout(printed), contextlib.redirect_stderr(printed):
@@ -667,6 +864,7 @@ else:
         worktree = self.tmp / 'diagnostic-candidate-work/worktrees/job'
         (worktree / 'bin/brain').write_text(self.fixture.replace('MODE', 'candidate').replace('PREFIX', '✗ '))
         self.git('commit', '-qam', 'candidate regression', cwd=worktree)
+        self.head = self.git('rev-parse', 'HEAD', cwd=worktree).strip()
         original = rehearsal.snapshot(self.root)
         printed = self.publish_private_diff(passed=False)
         evidence = self.evidence.read_text()
@@ -708,11 +906,15 @@ else:
     def test_linked_or_repository_local_diff_directory_refuses(self):
         self.prepare_private_fixture()
         # A sidecar must never follow a link or live within any repository.
-        for target in (self.root, self.home, CORE):
+        core_fixture = self.tmp / 'running-core'
+        (core_fixture / 'lib/brain').mkdir(parents=True)
+        (core_fixture / 'lib/brain/rehearse.py').write_text('tiny running core')
+        for target in (self.root, self.home, core_fixture):
             with self.subTest(target=target):
                 outside = rehearsal.snapshot(target)
                 with self.assertRaises(rehearsal.RehearsalError):
-                    rehearsal.write_local_diff(self.inst, self.node, target / 'local-only', {}, {})
+                    with mock.patch.object(rehearsal, '__file__', str(core_fixture / 'lib/brain/rehearse.py')):
+                        rehearsal.write_local_diff(self.inst, self.node, target / 'local-only', {}, {})
                 self.assertEqual(outside, rehearsal.snapshot(target))
         self.evidence.parent.mkdir(parents=True)
         (self.evidence.parent / 'local-only').symlink_to(self.root, target_is_directory=True)
@@ -724,12 +926,22 @@ else:
 
     def setUp(self):
         super().setUp()
+        tiny_environment(self)
+        if self._testMethodName in TINY_PRIVATE_TESTS:
+            return
         self.source = self.repo(self.tmp / 'source', {'instance.md': '---\ntimezone: UTC\n---\n',
             'status.md': '## Blocked\n- sample hold; since: 2035-01-01 00:00 +00:00; recommendation: ask; default: wait\n'})
         self.old = self.source / 'core'
         self.new = self.tmp / 'candidate'
         for index, core in enumerate((self.old, self.new)):
-            shutil.copytree(CORE / 'lib', core / 'lib', ignore=shutil.ignore_patterns('__pycache__'))
+            if self._testMethodName in TINY_CLOCK_TESTS:
+                (core / 'lib/brain').mkdir(parents=True)
+                (core / 'lib/brain/__init__.py').write_text('')
+                (core / 'lib/brain/instance.py').write_text(TINY_INSTANCE)
+                for module in ('ui', 'jobs', 'usage'):
+                    (core / ('lib/brain/' + module + '.py')).write_text('import time\n')
+            else:
+                shutil.copytree(CORE / 'lib', core / 'lib', ignore=shutil.ignore_patterns('__pycache__'))
             (core / 'bin').mkdir()
             # Model two real wall-clock readings ten minutes apart, without sleeping.
             path = core / 'lib/brain/instance.py'
