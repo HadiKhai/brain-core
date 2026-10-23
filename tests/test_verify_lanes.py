@@ -1,6 +1,8 @@
 """Lane selection and evidence regression scenarios, using only fabricated nodes."""
 import importlib
 import json
+import os
+import shutil
 from pathlib import Path
 from unittest import mock
 
@@ -210,6 +212,141 @@ class VerifyLanes(Scenario):
         local.write_text(json.dumps(data))
         self.record(r)
         self.assertTrue(all(not x['reused'] for x in self.read_packet()['verify_lanes']))
+
+    def setup_tool_lane(self):
+        r, home, wt, lanes = self.setup_lanes()
+        tools = self.tmp / 'tools'
+        tools.mkdir()
+        executable = tools / 'lane-tool'
+        executable.write_text('#!/bin/sh\necho fixture-tool\n')
+        executable.chmod(0o755)
+        self.env['PATH'] = str(tools) + os.pathsep + self.env['PATH']
+        lanes[0]['command'] = 'lane-tool'
+        self.b(r, 'set', 'a', 'verify_lanes=' + json.dumps(lanes))
+        return r, executable
+
+    def test_ready_uses_recorded_environment_and_rehandback_changes_context(self):
+        r, executable = self.setup_tool_lane()
+        self.record(r)
+        first = self.read_packet()
+        empty = self.tmp / 'empty-bin'
+        empty.mkdir()
+        original_path = self.env['PATH']
+        for path in (str(empty) + os.pathsep + original_path,
+                     original_path + os.pathsep + str(empty)):
+            with self.subTest(path=path):
+                self.env['PATH'] = path
+                self.env['CFLAGS'] = '-DCOORDINATOR_FIXTURE'
+                self.assertEqual(shutil.which('lane-tool', path=path), str(executable))
+                self.assertEqual(self.b(r, 'ready', 'a', '--branch', 'job').strip().splitlines()[-1], 'ready')
+                self.record(r)
+                packet = self.read_packet()
+                self.assertNotEqual(packet['lane_context_hash'], first['lane_context_hash'])
+                self.assertEqual(packet['verify_lane_env']['PATH'], path)
+                self.assertTrue(all(not row['reused'] for row in packet['verify_lanes']))
+
+    def test_different_tool_resolution_changes_context_and_refuses_ready(self):
+        r, executable = self.setup_tool_lane()
+        self.record(r)
+        first = self.read_packet()
+        alternate = self.tmp / 'alternate-bin'
+        alternate.mkdir()
+        shutil.copy2(executable, alternate / executable.name)
+        self.env['PATH'] = str(alternate) + os.pathsep + self.env['PATH']
+        self.assertEqual(self.b(r, 'ready', 'a', '--branch', 'job').strip().splitlines()[-1], 'ready')
+        record = json.loads(self.packet().read_text())
+        record['ready']['verify_lane_env']['PATH'] = self.env['PATH']
+        self.packet().write_text(json.dumps(record))
+        self.assertIn('lane configuration', self.b(r, 'ready', 'a', '--branch', 'job', ok=False))
+        self.record(r)
+        self.assertNotEqual(self.read_packet()['lane_context_hash'], first['lane_context_hash'])
+        self.assertTrue(all(not row['reused'] for row in self.read_packet()['verify_lanes']))
+
+    def test_tool_size_or_mtime_changes_context_and_refuses_ready(self):
+        r, executable = self.setup_tool_lane()
+        self.record(r)
+        for change in ('size', 'mtime'):
+            with self.subTest(change=change):
+                before = self.read_packet()['lane_context_hash']
+                stat = executable.stat()
+                if change == 'size':
+                    executable.write_text(executable.read_text() + '\n')
+                    os.utime(executable, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+                    self.assertEqual(executable.stat().st_mtime_ns, stat.st_mtime_ns)
+                else:
+                    os.utime(executable, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000_000))
+                    self.assertEqual(executable.stat().st_size, stat.st_size)
+                self.assertIn('lane configuration', self.b(r, 'ready', 'a', '--branch', 'job', ok=False))
+                self.record(r)
+                self.assertNotEqual(self.read_packet()['lane_context_hash'], before)
+                self.assertTrue(all(not row['reused'] for row in self.read_packet()['verify_lanes']))
+
+    def test_missing_tool_refuses_ready_and_fails_verification(self):
+        r, executable = self.setup_tool_lane()
+        self.record(r)
+        executable.unlink()
+        self.assertIn('lane configuration', self.b(r, 'ready', 'a', '--branch', 'job', ok=False))
+        self.record(r, ok=False)
+        packet = self.read_packet()
+        self.assertEqual(packet['verify_result'], 127)
+        self.assertEqual(packet['verify_lanes'][0]['status'], 'failed')
+        self.assertFalse(packet['verify_lanes'][0]['reused'])
+        self.assertIn('not ready', self.b(r, 'ready', 'a', '--branch', 'job', ok=False))
+
+    def assert_indirect_tool_path_change_refused(self, kind):
+        r, home, wt, lanes = self.setup_lanes()
+        stable, first, second = [self.tmp / name for name in ('stable-bin', 'first-bin', 'second-bin')]
+        for directory in (stable, first, second):
+            directory.mkdir()
+        helper = 'fixture-interpreter' if kind == 'shebang' else 'fixture-helper'
+        for directory, code in ((first, 0), (second, 19)):
+            executable = directory / helper
+            executable.write_text('#!/bin/sh\nexit %d\n' % code)
+            executable.chmod(0o755)
+        if kind == 'shebang':
+            executable = stable / 'lane-tool'
+            executable.write_text('#!/usr/bin/env fixture-interpreter\n')
+            executable.chmod(0o755)
+            lanes[0]['command'] = 'lane-tool'
+        else:
+            self.commit(wt, 'lane_module.py',
+                        'import subprocess, sys\nsys.exit(subprocess.call(["fixture-helper"]))\n')
+            lanes[0]['command'] = 'python3 -B -m lane_module'
+        original_path = self.env['PATH']
+        self.env['PATH'] = os.pathsep.join((str(stable), str(first), original_path))
+        self.b(r, 'set', 'a', 'verify_lanes=' + json.dumps(lanes))
+        self.record(r)
+        changed_path = os.pathsep.join((str(stable), str(second), original_path))
+        record = json.loads(self.packet().read_text())
+        record['ready']['verify_lane_env']['PATH'] = changed_path
+        self.packet().write_text(json.dumps(record))
+        self.assertIn('lane configuration', self.b(r, 'ready', 'a', '--branch', 'job', ok=False))
+        self.env['PATH'] = changed_path
+        self.record(r, ok=False)
+        packet = self.read_packet()
+        self.assertEqual(packet['verify_result'], 19)
+        self.assertFalse(packet['verify_lanes'][0]['reused'])
+
+    def test_env_shebang_path_change_refuses_ready_and_reuse(self):
+        self.assert_indirect_tool_path_change_refused('shebang')
+
+    def test_module_subprocess_path_change_refuses_ready_and_reuse(self):
+        self.assert_indirect_tool_path_change_refused('module')
+
+    def test_missing_or_invalid_recorded_environment_refuses_ready(self):
+        r, executable = self.setup_tool_lane()
+        self.record(r)
+        original = self.packet().read_text()
+        for value in (None, {}, [], {'PATH': 7}):
+            with self.subTest(value=value):
+                record = json.loads(original)
+                if value is None:
+                    record['ready'].pop('verify_lane_env', None)
+                else:
+                    record['ready']['verify_lane_env'] = value
+                self.packet().write_text(json.dumps(record))
+                self.assertIn('recorded verify lane environment',
+                              self.b(r, 'ready', 'a', '--branch', 'job', ok=False))
 
     def test_dynamic_map_cannot_mutate_unselected_files_during_readiness(self):
         r, home, wt, lanes = self.setup_lanes()

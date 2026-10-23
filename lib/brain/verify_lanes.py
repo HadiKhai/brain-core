@@ -15,6 +15,23 @@ from . import common as _m_common
 from . import jobs as _m_jobs
 
 VERIFY_LANE_MAP_TIMEOUT = 5
+LANE_ENV_KEYS = {'VIRTUAL_ENV', 'JAVA_HOME', 'RUSTUP_TOOLCHAIN', 'NODE_OPTIONS',
+                 'PYTHONPATH', 'CC', 'CXX', 'CFLAGS', 'CXXFLAGS', 'LDFLAGS'}
+
+
+def lane_environment(env):
+    # Capture only the fingerprinted environment; None preserves an unset variable.
+    return {key: env.get(key) for key in sorted(LANE_ENV_KEYS | {'PATH'})}
+
+
+def recorded_lane_environment(env, recorded):
+    if (not isinstance(recorded, dict) or set(recorded) != LANE_ENV_KEYS | {'PATH'}
+            or any(value is not None and (not isinstance(value, str) or '\0' in value)
+                   for value in recorded.values())):
+        raise ValueError('recorded verify lane environment missing or invalid; hand back again')
+    restored = {key: value for key, value in env.items() if key not in recorded}
+    restored.update((key, value) for key, value in recorded.items() if value is not None)
+    return restored
 
 
 def glob_regex(pattern):
@@ -208,7 +225,7 @@ def lane_snapshot(n, w, env, inputs):
         except ValueError:
             pass  # The shell reports malformed commands as an ordinary lane failure.
     for tool in sorted(executables):
-        path = shutil.which(tool, path=env.get('PATH'))
+        path = shutil.which(tool, path=env.get('PATH', os.defpath))
         try:
             stat = Path(path).stat() if path else None
             tools.append([tool, path, [stat.st_size, stat.st_mtime_ns] if stat else None])
@@ -217,9 +234,7 @@ def lane_snapshot(n, w, env, inputs):
     context = _m_jobs.digest([map_hash, sorted((k, v) for k, v in n['fm'].items() if k.startswith('verify')),
                            sorted((k, v) for k, v in files.items() if Path(k).name in LOCK_NAMES or Path(k).name.endswith('.lock')),
                            platform.platform(), sys.version, str(n['home_path']), str(w['path']), env.get('PATH'), tools,
-                           sorted((k, v) for k, v in env.items() if k in {
-                               'VIRTUAL_ENV', 'JAVA_HOME', 'RUSTUP_TOOLCHAIN', 'NODE_OPTIONS',
-                               'PYTHONPATH', 'CC', 'CXX', 'CFLAGS', 'CXXFLAGS', 'LDFLAGS'})])
+                           sorted((k, v) for k, v in env.items() if k in LANE_ENV_KEYS)])
     hashes = {l['name']: _m_jobs.digest([inputs, sorted((p, v) for p, v in files.items() if matches(p, l['inputs']))]) for l in lanes}
     return dict(lanes=lanes, map_hash=map_hash, config_hash=lane_config_hash(n), context=context, hashes=hashes, files=files, warnings=warnings)
 

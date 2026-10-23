@@ -254,6 +254,10 @@ def _ready_state(inst, n, branch, train=False, display=False):
                 or packet["verify_result"] != 0:
             reasons.append("node verify missing, changed or failed")
         if cheap:
+            try:
+                _m_lanes.recorded_lane_environment({}, packet.get('verify_lane_env'))
+            except ValueError as error:
+                reasons.append(str(error))
             rows = packet.get('verify_lanes')
             if (packet.get('lane_config_hash') != _m_lanes.lane_config_hash(n) or not isinstance(rows, list)
                     or not rows or any(not isinstance(r, dict) or r.get('status') != 'passed'
@@ -261,7 +265,10 @@ def _ready_state(inst, n, branch, train=False, display=False):
                 reasons.append('recorded verify lane evidence missing, changed or failed; hand back again')
         elif isinstance(w, dict) and w.get("path"):
             try:
-                snap = _m_lanes.lane_snapshot(n, w, verify_env(n, branch, w), verify_inputs(n, w))
+                env = verify_env(n, branch, w)
+                if lanes_configured or packet.get('verify_lanes') is not None:
+                    env = _m_lanes.recorded_lane_environment(env, packet.get('verify_lane_env'))
+                snap = _m_lanes.lane_snapshot(n, w, env, verify_inputs(n, w))
                 if snap:
                     snap['check'] = n['fm'].get('verify_lanes_check', '').strip()
                     checked, current_head, current_main = ready_preflight(n, branch, base=main if train else None)
@@ -660,6 +667,7 @@ def run_lanes(inst, n, branch, w, env, snap, previous, head, main, inputs, force
     if check and check['result']:
         result = check['result']
     return dict(verify_lanes=rows, lane_green=list(old.values()), lane_map_hash=snap['map_hash'], lane_config_hash=snap['config_hash'], lane_context_hash=snap['context'],
+                verify_lane_env=_m_lanes.lane_environment(env),
                 verify_lanes_check=check, verify_result=result,
                 verify_reused=bool(rows) and all(r['reused'] for r in rows) and not check)
 

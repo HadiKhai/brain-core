@@ -5,6 +5,18 @@ upgrading. `brain changes <node>` shows the entries this node's coordinator hasn
 `brain due <node>` lists them until `brain changes <node> --seen`. Entry headings are
 `## <date>: <title>`; once released, a heading never changes.
 
+## 2026-10-23: Readiness uses the recorded verify environment
+
+For agents:
+- Lane hand-backs record the PATH and selected environment variables used by
+  verification. Readiness rechecks tool identities under that recorded environment,
+  so a different coordinator shell does not invalidate evidence. PATH changes in
+  verification still invalidate reuse, including tools invoked indirectly.
+
+After upgrading:
+- Existing lane hand-backs lack the recorded environment and refuse readiness.
+  Run one new hand-back to refresh them before checking readiness.
+
 ## 2026-10-23: Release verify admission between lane commands
 
 For agents:
