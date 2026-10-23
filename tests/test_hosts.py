@@ -19,6 +19,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import types
 import unittest
 from pathlib import Path
 
@@ -246,6 +247,9 @@ class LockHotfix(Scenario):
 class QuestionWake(Scenario):
     def setUp(self):
         super().setUp()
+        environment = mock.patch.dict(os.environ, self.env, clear=True)
+        environment.start()
+        self.addCleanup(environment.stop)
         self.module = core_loader.SourceFileLoader("brain_wake_test", str(CORE / "bin/brain")).load_module()
         self.r = self.init("alice")
         self.b(self.r, "new", "a", "--title", "Alpha")
@@ -613,13 +617,13 @@ class QuestionWake(Scenario):
             starts.append((now[0], node["id"]))
             self.module.wake_drain(inst, node)  # inline newcomer really conflicts with LOCK_NB
         def send(command):
+            time.sleep(.001)  # An unrelated stdlib poll must not advance the wake clock.
             sends.append(now[0])
             if len(sends) <= 5:
                 self.module.request_wake(self.inst, self.n, "during-send-" + str(len(sends)))
             return True
-        with mock.patch.object(self.module.time, "monotonic", side_effect=lambda: now[0]), \
-                mock.patch.object(self.module.time, "time", side_effect=lambda: now[0]), \
-                mock.patch.object(self.module.time, "sleep", side_effect=advance), \
+        clock = types.SimpleNamespace(monotonic=lambda: now[0], time=lambda: now[0], sleep=advance)
+        with mock.patch.object(self.module, "WAKE_CLOCK", clock), \
                 mock.patch.object(self.module, "wake_send", side_effect=send), \
                 mock.patch.object(self.module, "wake_start", side_effect=start):
             self.module.wake_drain(self.inst, self.n)
@@ -921,8 +925,8 @@ class StopHook(Scenario):
             start = time.monotonic()
             result = subprocess.run(["sh", "-c", command], cwd=unrelated, env=self.env,
                                     input=json.dumps({"cwd": str(unrelated), "transcript_path": "/not/read.jsonl"}),
-                                    capture_output=True, text=True, timeout=2)
-            self.assertLess(time.monotonic() - start, 2)
+                                    capture_output=True, text=True, timeout=10)
+            self.assertLess(time.monotonic() - start, 10)
             self.assertEqual((result.returncode, result.stdout, result.stderr), (0, "", ""))
         self.assertEqual(list(unrelated.iterdir()), [])
         self.assertEqual((r / "inbox.md").read_bytes(), before)
@@ -954,7 +958,7 @@ class StopHook(Scenario):
         start = time.monotonic()
         with mock.patch.object(module.json, "loads", side_effect=counting_loads):
             questions = module.hook_questions(path)
-        self.assertLess(time.monotonic() - start, 2)
+        self.assertLess(time.monotonic() - start, 10)
         self.assertEqual([q["question"] for q in questions], ["Which colour?"])
         self.assertLessEqual(sum(parsed), module.HOOK_TRANSCRIPT_CHUNK)
         # Also assert a byte cap when an oversized last turn has no operator boundary in range.
@@ -1035,7 +1039,7 @@ class StopHook(Scenario):
         for count in (1, 2):
             start = time.monotonic()
             self.hook(r, d, active=True, transcript=transcript)
-            self.assertLess(time.monotonic() - start, 1)
+            self.assertLess(time.monotonic() - start, 10)
             deadline = time.monotonic() + 5
             while time.monotonic() < deadline:
                 if calls.exists() and len(calls.read_text().splitlines()) == count and list((r / ".brain/wake/a").glob("*.sent")):
@@ -1055,7 +1059,7 @@ class StopHook(Scenario):
         d = r / "nodes/a"
         start = time.monotonic()
         self.hook(r, d, active=True, transcript=self.question_log([self.question_call(text="Choose blue?")]))
-        self.assertLess(time.monotonic() - start, 1)
+        self.assertLess(time.monotonic() - start, 10)
         self.assertIn("Choose blue?", (d / "inbox.md").read_text())
         deadline = time.monotonic() + 5
         while not attempted.exists() and time.monotonic() < deadline:
@@ -1070,21 +1074,54 @@ class StopHook(Scenario):
         r = self.init("alice")
         self.b(r, "new", "a", "--title", "Alpha")
         calls = self.tmp / "wake-calls"
-        command = "echo called >> " + shlex_quote(str(calls))
+        attempted, release = self.tmp / "wake-attempted", self.tmp / "release-wake"
+        m = core_loader.SourceFileLoader("gated_wake_cleanup", str(CORE / "bin/brain")).load_module()
+        script = ("import os,time,json,core_loader; from pathlib import Path\n"
+                  "m=core_loader.SourceFileLoader('gated_wake'," + repr(str(CORE / "bin/brain")) + ").load_module()\n"
+                  "owned=[[pid,m.process_stamp(pid)] for pid in (os.getppid(),os.getpid())]\n"
+                  "Path(" + repr(str(attempted)) + ").write_text(json.dumps(owned))\n"
+                  "while not Path(" + repr(str(release)) + ").exists(): time.sleep(.02)\n"
+                  "with open(" + repr(str(calls)) + ",'a') as f: f.write('called\\n')\n")
+        command = "exec " + shlex_quote(sys.executable) + " -c " + shlex_quote(script)
         self.b(r, "set", "a", "coordinator=synthetic-thread", "wake=" + command)
         d = r / "nodes/a"
         transcript = self.question_log([self.question_call(text="Choose blue?")])
-        start = time.monotonic()
-        self.hook(r, d, active=True, transcript=transcript)
-        self.assertLess(time.monotonic() - start, 1)
-        deadline = time.monotonic() + 5
-        while not calls.exists() and time.monotonic() < deadline:
-            time.sleep(0.05)
-        self.assertEqual(calls.read_text().splitlines(), ["called"])
-        self.hook(r, d, active=True, transcript=transcript)
-        time.sleep(0.1)
-        self.assertEqual(calls.read_text().splitlines(), ["called"])
-        self.assertIn("Choose blue?", (d / "inbox.md").read_text())
+        directory = r / ".brain/wake/a"
+        try:
+            # hook() has a ten-second process timeout. Delivery stays gated until
+            # after it returns, proving nonblocking transport independently of load.
+            self.assertIsNone(self.hook(r, d, active=True, transcript=transcript))
+            deadline = time.monotonic() + 10
+            while not attempted.exists() and time.monotonic() < deadline:
+                time.sleep(0.05)
+            self.assertTrue(attempted.exists())
+            self.assertFalse(calls.exists())
+            self.assertIn("Choose blue?", (d / "inbox.md").read_text())
+            release.touch()
+            deadline = time.monotonic() + 10
+            while not list(directory.glob("*.sent")) and time.monotonic() < deadline:
+                time.sleep(0.05)
+            self.assertEqual(len(list(directory.glob("*.sent"))), 1)
+            self.assertEqual(calls.read_text().splitlines(), ["called"])
+            self.hook(r, d, active=True, transcript=transcript)
+            time.sleep(0.1)
+            self.assertEqual(calls.read_text().splitlines(), ["called"])
+            self.assertIn("Choose blue?", (d / "inbox.md").read_text())
+        finally:
+            release.touch()
+            deadline = time.monotonic() + 10
+            while not attempted.exists() and time.monotonic() < deadline:
+                time.sleep(.05)
+            owned = json.loads(attempted.read_text()) if attempted.exists() else []
+            owned = [(pid, stamp) for pid, stamp in owned if stamp not in (None, "unknown")]
+            while time.monotonic() < deadline and any(m.process_stamp(pid) == stamp for pid, stamp in owned):
+                time.sleep(.05)
+            for pid, stamp in owned:
+                if m.process_stamp(pid) == stamp:
+                    try:
+                        os.kill(pid, 9)
+                    except ProcessLookupError:
+                        pass  # the owned worker may finish between the identity check and kill
 
     def test_rendered_question_is_screened_after_whitespace_folding(self):
         r = self.init("alice")

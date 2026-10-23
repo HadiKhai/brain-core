@@ -14,6 +14,7 @@ For agents:
 - A single verify command keeps its reservation for its whole run, including
   any parallel children it starts. Slot limits and crashed-owner cleanup remain
   unchanged.
+- Host regressions use a gated transport, an isolated wake clock, and fixture machine state.
 
 After upgrading:
 - No configuration change is needed. Start a new hand-back or gate process to

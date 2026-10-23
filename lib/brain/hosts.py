@@ -31,6 +31,7 @@ WAKE_INTERVAL = 120
 WAKE_TIMEOUT = 10
 WAKE_DEDUP_SECONDS = 86400
 WAKE_USER_AGENT = "brain-wake/1"
+WAKE_CLOCK = time  # Tests can replace this binding without changing stdlib polling clocks.
 
 
 def wake_target(inst, n):
@@ -363,10 +364,10 @@ def wake_drain(inst, n, once=False):
                 return  # the existing worker owns delivery, including its rate wait
             owned = True
             for sent in directory.glob("*.sent"):
-                if time.time() - sent.stat().st_mtime >= WAKE_DEDUP_SECONDS:
+                if WAKE_CLOCK.time() - sent.stat().st_mtime >= WAKE_DEDUP_SECONDS:
                     sent.unlink(missing_ok=True)
-            deadline = time.monotonic() + 600
-            while time.monotonic() < deadline:
+            deadline = WAKE_CLOCK.monotonic() + 600
+            while WAKE_CLOCK.monotonic() < deadline:
                 if _m_common.outward_links(inst.root):
                     return
                 pending = []
@@ -381,7 +382,7 @@ def wake_drain(inst, n, once=False):
                     return
                 last = directory / "last"
                 try:
-                    previous, now = float(last.read_text()), time.time()
+                    previous, now = float(last.read_text()), WAKE_CLOCK.time()
                     if previous > now:
                         _m_common.atomic_write(last, str(now))  # bound deferral after a clock rollback
                         previous = now
@@ -391,7 +392,7 @@ def wake_drain(inst, n, once=False):
                 if delay:
                     if once:
                         return
-                    time.sleep(min(delay, 5))
+                    WAKE_CLOCK.sleep(min(delay, 5))
                     continue
                 attempted.update(path.name for path in pending)
                 # Reload bindings so removed/changed transport capabilities take effect.
@@ -440,7 +441,7 @@ def wake_drain(inst, n, once=False):
                     except (OSError, ValueError):
                         known = set()
                     before = [i for i in snapshot if i['id'] in known]
-                _m_common.atomic_write(last, str(time.time()))  # failures are rate-limited too
+                _m_common.atomic_write(last, str(WAKE_CLOCK.time()))  # failures are rate-limited too
                 inflight = directory / 'inflight.json'
                 try:
                     _m_common.atomic_write(inflight, json.dumps({'before': before}) + '\n')
@@ -460,7 +461,7 @@ def wake_drain(inst, n, once=False):
                     # Logging cannot undo delivery and cause another model wake on retry.
                     try:
                         _m_common.atomic_write(directory / 'history.json', json.dumps({'version': 1,
-                            'deliveries': (history + [{'at': time.time(), 'items': refs,
+                            'deliveries': (history + [{'at': WAKE_CLOCK.time(), 'items': refs,
                                 'before': before, 'snapshot': snapshot}])[-100:]}) + '\n')
                     except OSError:
                         status = 'delivered; history write failed'
