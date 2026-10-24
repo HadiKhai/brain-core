@@ -495,6 +495,24 @@ class R2BriefInputs(Scenario):
             with self.assertRaises(SystemExit):
                 briefs.checked_brief(n, "x" * (256 * 1024), inputs=[])
 
+    def test_p18_library_metadata_charged_in_worker_small_and_specialist(self):
+        r = self.init("sample")
+        self.b(r, "specialist", "new", "qa", "--title", "QA")
+        self.b(r, "item", "add", "guide", "--from", "root", "--title", "Inspect " + "é" * 4500,
+               "--kind", "method", "--ref", "fixture", "--body", "Inspect fixture")
+        for command in (("brief", "root"), ("brief", "root", "--small"), ("hire", "qa", "root")):
+            out = self.b(r, *command, "--task", "Inspect")
+            self.assertIn("warning: brief", out)
+            self.assertIn("Library metadata", out)
+            charge = int(re.search(r"Brief bytes: chargeable=(\d+)", out).group(1))
+            self.assertGreater(charge, 9000)
+        m = core_loader.SourceFileLoader("r2_library_provenance", str(CORE / "bin/brain")).load_module()
+        inst = m.Instance(r)
+        inputs = []
+        lines = m.knowledge_lines(inst, inst.node("root"), "Inspect", inputs=inputs)
+        self.assertEqual(inputs, [("Library metadata", "guide"), ("Library metadata", "Inspect " + "é" * 4500)])
+        self.assertGreater(len("\n".join(lines).encode()), sum(len(body.encode()) for _, body in inputs))
+
 
 if __name__ == "__main__":
     unittest.main()

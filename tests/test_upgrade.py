@@ -158,7 +158,7 @@ class R2VersionAndUpgrade(Scenario):
         self.assertEqual(info["behind"], 1)
         self.assertEqual(info["cache_age_seconds"], 2000000000 - 1577836800)
         self.assertEqual(info["status"], "behind")
-        self.assertFalse(any(any(x in str(c) for x in ("fetch", "ls-remote", "pull")) for c in run.call_args_list))
+        self.assertFalse(any(any(x in str(c) for x in ("fetch", "ls-remote", "pull")) for c in (call.args[0] for call in run.call_args_list)))
         self.git("commit", "--allow-empty", "-qm", "fork", cwd=core)
         self.assertEqual(m.core_version(core)["status"], "diverged")
         self.assertEqual(m.core_version(core, ref="refs/remotes/origin/missing")["status"], "unknown")
@@ -187,12 +187,12 @@ class R2VersionAndUpgrade(Scenario):
         m = self.module()
         inst = mock.Mock()
         for worktrees in ({"job": None}, {"job": {}}, ["damaged"]):
-            inst.nodes.return_value = [{"id": "sample", "local": {"worktrees": worktrees}}]
+            inst.nodes.return_value = [{"id": "sample", "dir": self.tmp, "local": {"worktrees": worktrees}}]
             with mock.patch.object(m, "read_jobs", return_value=[]):
                 busy = m.open_jobs_anywhere(inst)
             self.assertTrue(busy)
             self.assertIn("unreadable", str(busy))
-        inst.nodes.return_value = [{"id": "sample", "local": {"worktrees": {"job": {"path": str(self.tmp)}}}}]
+        inst.nodes.return_value = [{"id": "sample", "dir": self.tmp, "local": {"worktrees": {"job": {"path": str(self.tmp)}}}}]
         with mock.patch.object(m, "read_jobs", return_value=[]), mock.patch.object(Path, "stat", side_effect=PermissionError):
             self.assertIn("unreadable", str(m.open_jobs_anywhere(inst)))
 
@@ -220,6 +220,58 @@ class R2VersionAndUpgrade(Scenario):
             self.assertFalse(any("submodule" in str(c) for c in run.call_args_list))
             self.assertEqual(self.git("rev-parse", "HEAD", cwd=core).strip(), old)
         fake.commit.assert_not_called()
+
+    def test_m7_marked_but_unparseable_ledger_refuses_upgrade(self):
+        m = self.module()
+        root = self.repo(self.tmp / "instance", {".gitmodules": "[submodule \"core\"]\npath = core\n"})
+        self.repo(root / "core", {"CHANGES.md": "## 2026-01-01: Fixture\n"})
+        ledger = root / "job-ledger.md"
+        ledger.write_text(m.JOBS_MARK + "\nDamaged table for an active import job\n")
+        n = {"id": "sample", "dir": root, "local": {}}
+        fake = mock.Mock(root=root)
+        fake.nodes.return_value = [n]
+        self.assertEqual(m.read_jobs(n), [])  # The permissive reader alone cannot establish idle.
+        mutations = []
+        real_run = subprocess.run
+        def run(args, **kwargs):
+            if "submodule" in args:
+                mutations.append(args)
+                return subprocess.CompletedProcess(args, 0, "", "")
+            return real_run(args, **kwargs)
+        with mock.patch.object(m, "find_root", return_value=root), mock.patch.object(m, "Instance", return_value=fake), \
+             mock.patch.object(m.subprocess, "run", side_effect=run):
+            with self.assertRaises(SystemExit) as refused:
+                m.cmd_upgrade(argparse.Namespace())
+        self.assertIn("unreadable job ledger", str(refused.exception))
+        self.assertIn("idle", str(refused.exception))
+        self.assertEqual(mutations, [])
+        fake.commit.assert_not_called()
+        header = "| Job | Started | Ended |\n| --- | --- | --- |\n"
+        ledger.write_text(m.JOBS_MARK + "\n" + header)
+        self.assertEqual(m.open_jobs_anywhere(fake), [])  # A structured empty ledger is idle.
+        for damaged in ("| Job | Started | Ended |\n", header + "import:active | unreadable row\n",
+                        header + "| import:active | missing-end-cell |\n"):
+            ledger.write_text(m.JOBS_MARK + "\n" + damaged)
+            self.assertIn("unreadable job ledger", str(m.open_jobs_anywhere(fake)))
+
+    def test_m6_promisor_version_suppresses_descendant_fetches(self):
+        root = self.tmp / "instance"
+        core = self.repo(root / "core")
+        (root / "instance.md").write_text("fixture\n")
+        (root / "node.md").write_text("fixture\n")
+        self.git("remote", "add", "origin", str(self.tmp / "absent.git"), cwd=core)
+        self.git("config", "remote.origin.promisor", "true", cwd=core)
+        ref = core / ".git/refs/remotes/origin/main"
+        ref.parent.mkdir(parents=True)
+        ref.write_text("f" * 40 + "\n")
+        trace = self.tmp / "git.trace"
+        env = {**self.env, "BRAIN_ROOT": str(root), "GIT_TRACE": str(trace), "GIT_NO_LAZY_FETCH": "0"}
+        result = subprocess.run([sys.executable, str(CORE / "bin/brain"), "version", "--json"], cwd=root,
+                                env=env, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)["status"], "unknown")
+        self.assertTrue(trace.exists())
+        self.assertNotRegex(trace.read_text(), r"(?:run_command:|built-in:|exec:).*\b(?:fetch|upload-pack)\b")
 
 
 if __name__ == "__main__":

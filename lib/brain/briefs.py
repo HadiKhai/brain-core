@@ -23,9 +23,12 @@ COMPACTION_POLICY = ("After your second context compaction, hand back `--state b
                      "that resumes your commits. For a ledger job, `--restart compactions` records this marker.")
 
 
-def reference_line(path, summary):
+def reference_line(path, summary, inputs=None):
     """Keep reference metadata on one bounded line; bodies remain in their source files."""
-    return "- `" + _m_common.tilde(path) + "`: " + " ".join(str(summary).split())[:180] + ". Read before working."
+    summary = " ".join(str(summary).split())[:180]
+    if inputs is not None:
+        inputs.append(("Library metadata", summary))
+    return "- `" + _m_common.tilde(path) + "`: " + summary + ". Read before working."
 
 
 # Independent of the coordinator's task/context allowance; mandatory instructions are retained.
@@ -274,7 +277,7 @@ def cmd_brief(a):
         out = [f"Role: worker in node `{n['id']}`; small job.", head, a.selection_line, _m_guard.redact(usage, _m_guard.never_terms(n)),
                *shared, _m_messages.MESSAGE_PROTOCOL, "Follow this node's rules. Task: " + task.strip(),
                "Clear, low risk, minutes, no shared-state changes. If that stops being true, hand back for a full job.",
-               *attribution_lines(runtime, a.model), *_m_knowledge.limits_lines(n), *_m_knowledge.knowledge_lines(inst, n, task),
+               *attribution_lines(runtime, a.model), *_m_knowledge.limits_lines(n), *_m_knowledge.knowledge_lines(inst, n, task, inputs=inputs),
                f"Before hand-back or anything leaves, run `brain guard {n['id']} {_m_common.tilde_shell(where)}`; require `guard: clean`.",
                "Ask before publishing, pushing or irreversible actions. Keep boundary context out of project files.",
                "No worktree, ledger, reviews or ready packet. Do not edit coordinator files.",
@@ -321,7 +324,7 @@ def cmd_brief(a):
     inputs += contract_inputs(n, a.branch)
     contract = _m_jobs.contract_lines(inst, n, a.branch)
     out += attribution_lines(runtime, a.model) + shared + ["## Task", "", task.strip(), ""] + contract
-    out += _m_knowledge.knowledge_lines(inst, n, task) + _m_knowledge.node_knowledge_lines(n) + _m_knowledge.recall_hint(n)
+    out += _m_knowledge.knowledge_lines(inst, n, task, inputs=inputs) + _m_knowledge.node_knowledge_lines(n) + _m_knowledge.recall_hint(n)
     out += _m_knowledge.limits_lines(n)
     if _m_guard.never_terms(n):
         out += ["## Before you hand back", "", f"Run `brain guard {n['id']} {_m_common.tilde(where)}`. It must print "

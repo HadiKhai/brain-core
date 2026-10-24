@@ -1182,9 +1182,13 @@ class R2SettingsBatch(Scenario):
         self.assertNotIn("sample-thread", self.git("show", "HEAD:node.md", cwd=r))
         self.assertEqual(json.loads((r / ".brain/local.json").read_text())["nodes"]["root"]["coordinator"], "sample-thread")
         self.assertIn("daily-check", (r / "schedules.md").read_text())
+        self._assert_batch_local_only_keeps_head_and_dirty_shared_targets_refuse(r)
+        self._assert_batch_publication_failure_retains_recovery_packet()
 
-    def test_batch_publication_failure_retains_recovery_packet(self):
-        r = self.init("sample")
+    def _assert_batch_publication_failure_retains_recovery_packet(self):
+        r = self.repo(self.tmp / "publication", {
+            "instance.md": "---\nprincipals: sample\nruntimes: codex\n---\n",
+            "node.md": "---\nid: root\ntitle: Sample\n---\n"})
         m = core_loader.SourceFileLoader("r2_batch_failure", str(CORE / "bin/brain")).load_module()
         inst = m.Instance(r)
         before = (r / "node.md").read_text()
@@ -1207,8 +1211,7 @@ class R2SettingsBatch(Scenario):
         self.assertEqual((r / "node.md").read_text(), planned[r / "node.md"])
         self.assertFalse((r / "schedules.md").exists())
 
-    def test_batch_local_only_keeps_head_and_dirty_shared_targets_refuse(self):
-        r = self.init("sample")
+    def _assert_batch_local_only_keeps_head_and_dirty_shared_targets_refuse(self, r):
         head = self.git("rev-parse", "HEAD", cwd=r).strip()
         batch = self.tmp / "batch.json"
         batch.write_text(json.dumps([{"op": "set", "pairs": ["coordinator=fixture-thread"]}]))

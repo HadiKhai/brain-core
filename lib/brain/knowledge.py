@@ -564,7 +564,7 @@ def cmd_hire(a):
     contract = _m_jobs.contract_lines(inst, target, a.branch)
     out += _m_briefs.attribution_lines(runtime, a.model)
     out += ["## Task", "", a.task.strip(), ""] + contract + \
-        ["## Specialist standards", "", _m_briefs.reference_line(sp["dir"] / "role.md", sp["fm"].get("title", sp["id"])), ""] + limits_lines(target)
+        ["## Specialist standards", "", _m_briefs.reference_line(sp["dir"] / "role.md", sp["fm"].get("title", sp["id"]), inputs=inputs), ""] + limits_lines(target)
     if lessons:
         inputs.append(("Lessons", "\n".join(l["text"] for l in lessons)))
         out += ["## Lessons from earlier jobs", ""] + [f"- {l['text']}" for l in lessons] + [""]
@@ -572,11 +572,11 @@ def cmd_hire(a):
         out += ["## Knowledge for this job", ""]
         for i in items:
             if i["fm"].get("id") in wanted:
-                reference = _m_briefs.reference_line(i["path"], i["fm"].get("title", i["fm"].get("id")))
+                reference = _m_briefs.reference_line(i["path"], i["fm"].get("title", i["fm"].get("id")), inputs=inputs)
                 if _m_guard.find_terms(reference, learning_terms(inst, i["fm"], [target], nodes)):
                     _m_common.die("library reference holds a never-name word; cannot include it in the brief")
                 out += [reference, ""]
-    out += knowledge_lines(inst, target, a.task, sp["id"], exclude=wanted) + node_knowledge_lines(target) + \
+    out += knowledge_lines(inst, target, a.task, sp["id"], exclude=wanted, inputs=inputs) + node_knowledge_lines(target) + \
         recall_hint(target)
     out += handback_lines(inst, target, branch=a.branch) + report_lines(job=bool(a.branch))
     text = _m_briefs.checked_brief(target, "\n".join(out) + "\n", inputs=inputs)
@@ -656,7 +656,7 @@ def knowledge_ranked(inst, n, contexts, exclude=(), states=("active",), required
     return sorted(ranked, key=lambda r: r[:2])
 
 
-def knowledge_lines(inst, n, task, specialist="", exclude=()):
+def knowledge_lines(inst, n, task, specialist="", exclude=(), inputs=None):
     """Up to five usable items for a brief, each with why it was picked."""
     contexts = [("task", knowledge_tokens(task), 4),
                 ("labels/stack", knowledge_tokens(n["fm"].get("labels", "") + " " + n["fm"].get("stack", "")), 3),
@@ -667,6 +667,10 @@ def knowledge_lines(inst, n, task, specialist="", exclude=()):
                 f"Path: `{_m_common.tilde(item['path'])}`. Read full: `brain item show {key} --node {n['id']}`.")
         if not _m_guard.find_terms(line, learning_terms(inst, item["fm"], [n])):
             lines.append(line)
+            if inputs is not None:
+                inputs += [("Library metadata", key), ("Library metadata", title)]
+            if len(lines) == 5:
+                break
     if not lines:
         return []
     return ["## Relevant library items", ""] + lines[:5] + [""]
