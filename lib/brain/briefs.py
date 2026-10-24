@@ -276,8 +276,9 @@ def cmd_brief(a):
         from . import messages as _m_messages
         out = [f"Role: worker in node `{n['id']}`; small job.", head, a.selection_line, _m_guard.redact(usage, _m_guard.never_terms(n)),
                *shared, _m_messages.MESSAGE_PROTOCOL, "Follow this node's rules. Task: " + task.strip(),
-               "Clear, low risk, minutes, no shared-state changes. If that stops being true, hand back for a full job.",
-               *attribution_lines(runtime, a.model), *_m_knowledge.limits_lines(n), *_m_knowledge.knowledge_lines(inst, n, task, inputs=inputs),
+               "Clear, low risk, minutes, no shared-state changes. If that stops being true, hand back for a full job. "
+               + " ".join(attribution_lines(runtime, a.model)).strip(),
+               *_m_knowledge.limits_lines(n), *_m_knowledge.knowledge_lines(inst, n, task, inputs=inputs),
                f"Before hand-back or anything leaves, run `brain guard {n['id']} {_m_common.tilde_shell(where)}`; require `guard: clean`.",
                "Ask before publishing, pushing or irreversible actions. Keep boundary context out of project files.",
                "No worktree, ledger, reviews or ready packet. Do not edit coordinator files.",
