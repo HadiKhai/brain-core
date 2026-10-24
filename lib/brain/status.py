@@ -538,6 +538,8 @@ def due_items(inst, n, evidence=None, include_stale=True, include_ready=True, in
                 reasons=ready["reasons"] if ready else signal.get('ready_reasons', []),
                 episode=signal.get('wake_id') or _m_jobs.digest([_m_jobs.job_key(row), {
                     k: signal.get(k) for k in ('state', 'summary', 'question', 'report', 'lessons', 'restart')}]),
+                need=_m_jobs.digest({k: signal.get(k) for k in
+                                     ('state', 'summary', 'question', 'report', 'lessons', 'restart')}),
                 protected=bool(signal.get('restart') or signal.get('question') or
                                any(f'from worker {branch}: blocked:' in line and '<!-- handback:' in line
                                    for line in state['inbox'])))

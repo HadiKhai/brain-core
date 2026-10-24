@@ -115,6 +115,17 @@ class DueLifecycle(Scenario):
                                until='2026-01-15T13:00:00Z', resume_condition='Dependency ready')
         self.now += datetime.timedelta(hours=1)
         self.assertEqual(len(self.m.reminder_items(self.inst, self.n, raw)), 1)
+        row = {**dict.fromkeys(self.m.JOB_COLS, ''), 'Job': 'import:fixture',
+               'Started': '2026-01-15T09:00Z'}
+        signal = {'state': 'blocked', 'summary': 'First dependency', 'report': 'fixture.md', 'wake_id': 'a' * 32}
+        state = {'jobs': [row], 'worktrees': {}, 'handbacks': {self.m.job_key(row): signal}, 'inbox': []}
+        due = self.m.due_items(self.inst, self.n, (state, '', ''), include_stale=False, include_advice=False)
+        item = next(i for i in due if i['kind'] == 'handback')
+        self.m.record_reminder(self.inst, self.n, due, item['id'], 'ack', 'Handled first dependency',
+                               resume_condition='Dependency ready')
+        signal['summary'] = 'A different dependency with the same pending wake ID'
+        changed = self.m.due_items(self.inst, self.n, (state, '', ''), include_stale=False, include_advice=False)
+        self.assertTrue(any(i['kind'] == 'handback' for i in changed))
 
     def test_p14_deferral_expires_and_changed_need_reappears(self):
         raw = [{'node': 'root', 'kind': 'missing-preview', 'episode': 'merge-one', 'text': 'Preview required'}]
