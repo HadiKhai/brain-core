@@ -23,11 +23,15 @@ After upgrading:
 
 ## 2026-10-24: M6: Inspect installed core without fetching
 
+rehearsal evidence waived (release 1 waiver pattern; rehearse sandbox self-check refuses)
+
 For agents: brain version reports the installed SHA/date, named cached origin ref, local behind count or unknown/diverged ancestry, and cache age. Existing update notices remain intact.
 
 After upgrading: No migration. Use --ref to choose an origin cache ref. Fresh remote discovery remains outside this command.
 
 ## 2026-10-24: B11: Briefs explicitly omit commit attribution
+
+rehearsal evidence waived (release 1 waiver pattern; rehearse sandbox self-check refuses)
 
 For agents: Worker, import, small-job and specialist briefs supply no co-author trailer for any selected runtime/model, including explicit overrides and unknown runtimes.
 
@@ -35,17 +39,23 @@ After upgrading: No migration or historical rewriting. Configurable attribution 
 
 ## 2026-10-24: M7: Refuse explicit upgrades while jobs are open
 
+rehearsal evidence waived (release 1 waiver pattern; rehearse sandbox self-check refuses)
+
 For agents: brain upgrade checks job/worktree inventories before changing core and refuses unreadable inventory as busy. The refusal lists affected jobs and locally cached change entries, with an idle retry instruction.
 
 After upgrading: Finish jobs and release their worktrees before retrying. Idle upgrades retain their existing behavior. Deferred upgrades and cross-machine migration remain outside this change.
 
 ## 2026-10-24: M9: Apply an explicit settings batch once
 
+rehearsal evidence waived (release 1 waiver pattern; rehearse sandbox self-check refuses)
+
 For agents: brain settings batch accepts set and schedule-add operations, validates the complete list before publication, keeps machine-local settings private, and commits only named shared paths once. Unrelated staged work is preserved.
 
 After upgrading: No migration; single commands remain available. Dirty target paths are refused. Interrupted publication retains a private pending/failure packet for coordinator recovery; automatic rollback and hourly squashing remain outside scope.
 
 ## 2026-10-24: P18: Charge brief inputs by provenance
+
+rehearsal evidence waived (release 1 waiver pattern; rehearse sandbox self-check refuses)
 
 For agents: Brief allowances charge task and embedded context UTF-8 bytes captured before assembly. Fixed generated instructions are excluded; both input and total bytes are reported, and diagnostics name coordinator-controlled sections.
 
