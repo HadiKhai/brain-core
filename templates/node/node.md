@@ -19,6 +19,16 @@ the worker's worktree before hand-back.
 `runtime` pins worker briefs to that engine. At its subscription stop line, the brief keeps the
 pin and names an alternative; choose `brain brief --runtime <runtime>` explicitly to use it.
 
+Optional `route_runtime_<class>` and `route_model_<runtime>_<class>` fields choose a
+runtime/model for a job class; `route_model_<runtime>` is the node's default model.
+Classes: `build`, `diagnose`, `review`, `ui`, `migration`, `docs`, `mechanical`.
+Unknown class suffixes are errors. For example, `brain set <id>
+route_runtime_review=codex route_model_codex_review=example-review-model`.
+Explicit brief flags win, followed by node per-class, node default, instance per-class,
+instance default, and the existing class/runtime fallback. Empty fields fall through.
+The full key reference is in `instance.md`. Per-class routing prints the deciding sources;
+files without per-class settings retain legacy brief output.
+
 Code projects record `preview=<URL/path>` and `preview_tour=<path>` via `brain set` after
 running them. These bindings stay in `.brain/local.json`; never copy them into shared files.
 `preview=none` clears the reminder when no preview applies. Only `preview_url=<deployed URL>`

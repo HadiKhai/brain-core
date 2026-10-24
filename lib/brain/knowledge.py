@@ -806,9 +806,47 @@ def report_lines(job=False):
              "Lessons: what the next job should know, or none: <reason>; ") + "and what is still open."]
 
 
+def class_routing_config(inst, n):
+    """Validate flat routing keys; no keys means byte-compatible legacy routing."""
+    found = False
+    for source, cfg in (("node.md", n["fm"]), ("instance.md", inst.cfg)):
+        for key in cfg:
+            kind = None
+            if key.startswith("route_runtime_"):
+                kind = key[len("route_runtime_"):]
+            elif key.startswith("route_model_"):
+                suffix = key[len("route_model_"):]
+                # Existing runtime-wide model keys are still defaults.
+                if suffix in inst.runtimes:
+                    continue
+                if "_" in suffix:
+                    kind = suffix.rsplit("_", 1)[1]
+            if kind is not None:
+                if kind not in _m_jobs.JOB_CLASSES:
+                    _m_common.die(_m_guard.redact(f"{source} {key}: unknown routing class", _m_guard.never_terms(n)))
+                found = True
+    return found
+
+
+def route_setting(inst, n, explicit, flag, class_key, node_key, instance_key):
+    for value, source in ((explicit, flag),
+                          (n["fm"].get(class_key), "node.md " + class_key),
+                          (n["fm"].get(node_key), "node.md " + node_key),
+                          (inst.cfg.get(class_key), "instance.md " + class_key),
+                          (inst.cfg.get(instance_key), "instance.md " + instance_key)):
+        if value:
+            return value, source
+    return None, "default"
+
+
 def launch_selection(inst, n, a, runtime, subscription, row, kind):
     """Use configured model names, never invent a model or provider identity."""
-    a.model = a.model or n["fm"].get("route_model_" + runtime) or inst.cfg.get("route_model_" + runtime) or "runtime default"
+    if class_routing_config(inst, n):
+        key = "route_model_" + runtime
+        a.model, a.model_source = route_setting(inst, n, a.model, "--model", key + "_" + kind, key, key)
+        a.model = a.model or "runtime default"
+    else:
+        a.model = a.model or n["fm"].get("route_model_" + runtime) or inst.cfg.get("route_model_" + runtime) or "runtime default"
     a.effort = _m_jobs.job_effort(n, row, kind, getattr(a, "effort", None))
     instance = (subscription or {}).get("host_provider_instance_id") or runtime
     if a.model == "runtime default":
@@ -823,10 +861,17 @@ def worker_route(inst, n, a):
     """Route all worker briefs with the same runtime pin and model usage limits."""
     row = _m_jobs.open_job(_m_jobs.read_jobs(n) or [], getattr(a, "branch", None))
     kind = _m_jobs.job_class(n, row, getattr(a, "job_class", None))
-    pin = getattr(a, "runtime", None) or n["fm"].get("runtime")
+    per_class = class_routing_config(inst, n)
+    if per_class:
+        pin, runtime_source = route_setting(inst, n, getattr(a, "runtime", None), "--runtime",
+                                            "route_runtime_" + kind, "runtime", "default_runtime")
+    else:
+        pin = getattr(a, "runtime", None) or n["fm"].get("runtime")
     runtime, subscription, usage = _m_usage.class_route(
         inst, kind, runtime=pin, model=a.model,
         weekly_cap=n["fm"].get("route_weekly_cap", inst.cfg.get("route_weekly_cap", 60)))
     a.job_class = kind
     launch_selection(inst, n, a, runtime, subscription, row, kind)
+    if per_class:
+        usage += f" Routing sources: runtime={runtime_source}; model={a.model_source}."
     return runtime, _m_guard.redact(usage, _m_guard.never_terms(n))

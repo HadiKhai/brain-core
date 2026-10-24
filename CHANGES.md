@@ -5,6 +5,19 @@ upgrading. `brain changes <node>` shows the entries this node's coordinator hasn
 `brain due <node>` lists them until `brain changes <node> --seen`. Entry headings are
 `## <date>: <title>`; once released, a heading never changes.
 
+## 2026-10-24: Configure worker runtime and model defaults per job class
+
+For agents:
+- Briefs accept `route_runtime_<class>` and `route_model_<runtime>_<class>` in
+  node.md and instance.md for every supported job class. Explicit flags win, then
+  node per-class, node default, instance per-class, and instance default settings.
+- Per-class routing names the deciding sources. Unknown class suffixes fail rather
+  than silently falling back. Files without per-class keys retain legacy output.
+
+After upgrading:
+- No migration is needed. Add optional class keys to opt into per-class defaults;
+  see the settings references in instance.md and node.md.
+
 ## 2026-10-23: Rehearse JSON probes without collapsing private identities
 
 For agents:

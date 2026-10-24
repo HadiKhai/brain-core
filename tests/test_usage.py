@@ -173,6 +173,128 @@ for line in sys.stdin:
         self.b(root, "set", "a", "route_model_codex=")
         self.assertIn("modelSelection: unavailable", self.b(root, "brief", "a", "--class", "docs"))
 
+    def test_per_class_routing_precedence_and_sources(self):
+        root = self.init("alice")
+        inst = self.m.Instance(root)
+        node = inst.node("root")
+        inst.cfg.update(default_runtime="claude", route_runtime_build="codex",
+                        route_model_codex="instance-default", route_model_codex_build="instance-build")
+        node["fm"].update(runtime="claude", route_runtime_build="codex",
+                          route_model_codex="node-default", route_model_codex_build="node-build")
+        def route(runtime=None, model=None):
+            args = argparse.Namespace(branch=None, job_class="build", runtime=runtime, model=model, effort=None)
+            chosen, why = self.m.worker_route(inst, node, args)
+            return chosen, args.model, why
+        with mock.patch.object(self.m, "usage_config", return_value={"autodetected": True}):
+            for remove, runtime, model, source in (
+                    (None, "codex", "node-build", "node.md route_model_codex_build"),
+                    ("route_model_codex_build", "codex", "node-default", "node.md route_model_codex"),
+                    ("route_model_codex", "codex", "instance-build", "instance.md route_model_codex_build")):
+                if remove:
+                    node["fm"].pop(remove)
+                with self.subTest(source=source):
+                    chosen, selected, why = route()
+                    self.assertEqual((chosen, selected), (runtime, model))
+                    self.assertIn(source, why)
+            inst.cfg.pop("route_model_codex_build")
+            self.assertEqual(route()[:2], ("codex", "instance-default"))
+            self.assertIn("instance.md route_model_codex", route()[2])
+            self.assertEqual(route("claude", "flag-model")[:2], ("claude", "flag-model"))
+            self.assertIn("--model", route("claude", "flag-model")[2])
+            self.assertIn("--runtime", route("claude", "flag-model")[2])
+            self.assertEqual(route("claude")[:2], ("claude", "runtime default"))
+            node["fm"]["route_model_codex_build"] = ""
+            self.assertEqual(route()[:2], ("codex", "instance-default"))
+            node["fm"].pop("route_runtime_build")
+            self.assertEqual(route()[0], "claude")
+            self.assertIn("node.md runtime", route()[2])
+            node["fm"].pop("runtime")
+            self.assertEqual(route()[0], "codex")
+            self.assertIn("instance.md route_runtime_build", route()[2])
+            inst.cfg.pop("route_runtime_build")
+            # Another class keeps class routing enabled, while build falls back.
+            inst.cfg["route_runtime_docs"] = "codex"
+            self.assertEqual(route()[0], "claude")
+            self.assertIn("instance.md default_runtime", route()[2])
+            inst.cfg.pop("default_runtime")
+            self.assertEqual(route()[0], "codex")
+            self.assertIn("default", route()[2])
+
+    def test_per_class_routing_all_classes_and_unknown_keys(self):
+        root = self.init("alice")
+        inst = self.m.Instance(root)
+        node = inst.node("root")
+        node["fm"].pop("runtime", None)
+        with mock.patch.object(self.m, "usage_config", return_value={"autodetected": True}):
+            for kind in self.m.JOB_CLASSES:
+                with self.subTest(kind=kind):
+                    node["fm"]["route_runtime_" + kind] = "codex"
+                    inst.cfg["route_model_codex_" + kind] = "model-" + kind
+                    args = argparse.Namespace(branch=None, job_class=kind, runtime=None, model=None, effort=None)
+                    runtime, why = self.m.worker_route(inst, node, args)
+                    self.assertEqual((runtime, args.model), ("codex", "model-" + kind))
+                    self.assertIn("node.md route_runtime_" + kind, why)
+                    self.assertIn("instance.md route_model_codex_" + kind, why)
+            inst.cfg.pop("route_model_codex_build")
+            args = argparse.Namespace(branch=None, job_class="build", runtime=None, model=None, effort=None)
+            _, why = self.m.worker_route(inst, node, args)
+            self.assertEqual(args.model, "runtime default")
+            self.assertIn("model=default", why)
+            for cfg in (node["fm"], inst.cfg):
+                for key in ("route_runtime_buid", "route_model_codex_revew"):
+                    with self.subTest(key=key), contextlib.redirect_stderr(io.StringIO()) as err:
+                        cfg[key] = "codex"
+                        args = argparse.Namespace(branch=None, job_class="build", runtime="codex", model="explicit", effort=None)
+                        with self.assertRaises(SystemExit) as exc:
+                            self.m.worker_route(inst, node, args)
+                        self.assertIn(key, str(exc.exception))
+                        self.assertIn("class", str(exc.exception))
+                        cfg.pop(key)
+
+    def test_per_class_brief_cli_and_legacy_bytes(self):
+        root = self.init("alice")
+        self.b(root, "new", "a", "--title", "A")
+        self.b(root, "set", "a", "route_model_codex=legacy-model")
+        # Render the entire legacy brief using the pre-change resolver as an oracle.
+        owner = self.m._owners["cmd_brief"]
+        args = argparse.Namespace(id="a", job_class="build", task="x", branch=None, runtime=None, model=None,
+            effort=None, import_study=False, small=False, task_file=None, context_file=None, why_separate=None,
+            allow_unexplained=False, to=None, peer=None, out=None)
+        def legacy_route(inst, node, a):
+            row = self.m.open_job(self.m.read_jobs(node) or [], a.branch)
+            kind = self.m.job_class(node, row, a.job_class)
+            runtime, sub, usage = self.m.class_route(inst, kind, runtime=a.runtime or node["fm"].get("runtime"),
+                model=a.model, weekly_cap=node["fm"].get("route_weekly_cap", inst.cfg.get("route_weekly_cap", 60)))
+            a.job_class = kind
+            a.model = a.model or node["fm"].get("route_model_" + runtime) or inst.cfg.get("route_model_" + runtime) or "runtime default"
+            a.effort = self.m.job_effort(node, row, kind, a.effort)
+            if a.model == "runtime default":
+                a.selection_line = f"modelSelection: unavailable; set route_model_{runtime} or --model (reasoningEffort: {a.effort})."
+            else:
+                a.selection_line = "modelSelection: " + json.dumps({"instanceId": (sub or {}).get("host_provider_instance_id") or runtime,
+                    "model": a.model, "options": {"reasoningEffort": a.effort}})
+            return runtime, usage
+        with mock.patch.dict(os.environ, {"BRAIN_ROOT": str(root)}):
+            with mock.patch.object(owner._m_knowledge, "worker_route", side_effect=legacy_route), contextlib.redirect_stdout(io.StringIO()) as out, contextlib.redirect_stderr(io.StringIO()) as err:
+                self.m.cmd_brief(args)
+            expected = out.getvalue() + err.getvalue()
+        self.assertEqual(self.b(root, "brief", "a", "--class", "build", "--task", "x"), expected)
+        self.assertNotIn("Routing sources:", expected)
+        self.b(root, "set", "a", "route_runtime_build=codex", "route_model_codex_build=class-model")
+        text = self.b(root, "brief", "a", "--class", "build", "--task", "x")
+        self.assertIn('"model": "class-model"', text)
+        self.assertIn("model=node.md route_model_codex_build", text)
+        self.assertIn("runtime=node.md route_runtime_build", text)
+        self.b(root, "set", "a", "runtime=", "route_runtime_build=", "route_model_codex_build=", "route_model_codex=")
+        file = root / "instance.md"
+        file.write_text(file.read_text().replace("---\n", "---\nroute_runtime_build: codex\nroute_model_codex_build: instance-class-model\n", 1))
+        text = self.b(root, "brief", "a", "--class", "build", "--task", "x")
+        self.assertIn('"model": "instance-class-model"', text)
+        self.assertIn("model=instance.md route_model_codex_build", text)
+        self.assertIn("runtime=instance.md route_runtime_build", text)
+        self.b(root, "set", "a", "route_runtime_unknown=codex")
+        self.assertIn("unknown routing class", self.b(root, "brief", "a", ok=False))
+
     def test_class_route_autodetection_never_refreshes_providers(self):
         root = self.init("alice")
         inst = self.m.Instance(root)
