@@ -192,13 +192,21 @@ stated; never run a polling loop in an agent.
    delegated/sub-agent descendants and reviewers by `brain-job: <key>`. Settle only when the
    ledger is merged or closed; never coordinators, open-job threads, running/waiting threads,
    or threads with pending requests. Unknown state or ownership means leave unsettled.
-   After all job threads are confirmed settled through the host, record
-   `brain jobs <id> --branch <branch> --settled`. Preserve the Active work thread reference.
+   After closing the job, settle each job thread through the host with one explicit thread ID
+   per call and confirm each is settled. Save a fresh version 1 JSON export following the
+   host adapter's schema, then record
+   `brain jobs <id> --branch <branch> --settled --attestation-file <export.json>`.
+   Use the printed `--job-key <key>` for a reused branch. The export must be at most five
+   minutes old, cover both bound host/home projects and nested threads, and contain exactly
+   the selected job keys with terminal settled threads and no pending requests. This is
+   coordinator-supplied evidence; core does not independently query or settle host threads.
+   Preserve the Active work thread reference.
    Legacy jobs missing markers or worker references use the host adapter's complete-project
    sweep: exhaust unsettled thread lists, protect open/active/coordinator threads and settle
    safely done closed work. After no attributable unsettled closed-work threads remain,
-   `brain jobs <id> --settled --all-closed` records all closed rows together; branches with
-   open ledger jobs cause refusal. A later job never inherits an old settlement stamp.
+   `brain jobs <id> --settled --all-closed --attestation-file <export.json>` records all closed
+   rows together using a fresh exhaustive export for every selected job and both project lists;
+   branches with open ledger jobs cause refusal. A later job never inherits an old settlement stamp.
    `brain due` counts closed-but-unsettled jobs; `brain due root` includes child settlement counts.
 
 Never merge, push to a shared branch, deploy or delete a branch without explicit consent

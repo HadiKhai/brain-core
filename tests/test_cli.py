@@ -28,6 +28,33 @@ CORE = Path(os.environ.get("BRAIN_CORE") or Path(__file__).resolve().parent.pare
 from scenario import Scenario, AutonomyProject, shlex_quote
 
 
+class SettlementDocsHelp(unittest.TestCase):
+    def test_settlement_guides_require_export_for_each_recording_command(self):
+        for name in ('roles/coordinator.md', 'skills/home-job/SKILL.md',
+                     'adapters/hosts/t3.md', 'README.md', 'CHANGES.md'):
+            text = (CORE / name).read_text()
+            commands = re.findall(r'`(brain jobs [^`]*--settled[^`]*)`', text)
+            self.assertTrue(commands, name)
+            for command in commands:
+                with self.subTest(document=name, command=command):
+                    self.assertIn('--attestation-file', command)
+        for name in ('roles/coordinator.md', 'skills/home-job/SKILL.md'):
+            text = (CORE / name).read_text()
+            self.assertIn('version 1', text)
+            self.assertIn('five minutes', ' '.join(text.split()))
+            self.assertIn('--job-key <key>', text)
+
+    def test_jobs_help_describes_settlement_export_and_selection(self):
+        result = subprocess.run([sys.executable, str(CORE / 'bin/brain'), 'jobs', '--help'],
+                                cwd=CORE, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        help_text = ' '.join(result.stdout.split())
+        for clause in ('--settled', '--all-closed', '--attestation-file',
+                       'fresh version 1 coordinator export',
+                       'exhaustive per-job/thread/project coverage', '--job-key'):
+            self.assertIn(clause, help_text)
+
+
 class EntryPoints(Scenario):
     def test_global_pointer_is_added_once_and_removable(self):
         r = self.init("alice")

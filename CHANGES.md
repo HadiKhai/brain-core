@@ -15,6 +15,9 @@ jobs and retained worktrees no longer prevent upgrades; a one-line notice counts
 idle open jobs/worktrees. Dead or recycled-PID admission leases are idle and remain
 untouched.
 
+Documentation: Coordinator and home-job settlement instructions now require a fresh version 1
+`--attestation-file <export.json>` after closing the job and confirming each host thread settled.
+
 After upgrading: No migration. Retry after in-flight work stops; idle jobs and
 worktrees can stay in place. Admission and lock ownership rules are unchanged.
 
@@ -1241,12 +1244,15 @@ After upgrading:
 For agents:
 - Closing a job prints its worker reference, job marker and thread-settlement checklist.
   The coordinator discovers and checks threads through the host, then records
-  `brain jobs <node> --branch <branch> --settled`. Brain never calls the host API.
+  `brain jobs <node> --branch <branch> --settled --attestation-file <export.json>`
+  with a fresh version 1 export (required since the 2026-10-24 P2 update). Brain never calls
+  the host API.
 - Never settle coordinators, open jobs, running/waiting threads or threads with pending
   requests. Unknown ownership or activity leaves the job unsettled; partial cleanup does too.
 - Legacy jobs without markers or worker references can be cleared after the host adapter's
-  exhaustive project-list sweep: `brain jobs <node> --settled --all-closed` records all closed
-  rows together, refuses any target branch with open work, and leaves open rows untouched.
+  exhaustive project-list sweep: `brain jobs <node> --settled --all-closed --attestation-file <export.json>`
+  records all closed rows together with the same fresh exhaustive evidence, refuses any target
+  branch with open work, and leaves open rows untouched.
   List exhaustion proves no attributable unsettled threads remain; search only finds candidates.
 - `brain jobs` shows at most ten unsettled rows, then the remaining count.
 - `brain due`, generated facts and live state count closed jobs with unsettled threads,

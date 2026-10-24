@@ -337,13 +337,23 @@ For a finished study, mark its Active work row `closed` (keep the worker thread)
 and safety checks. Find the worker in Active work (keep its thread reference after closure),
 its descendants and marker-matched reviewers. Settle only explicit ledger-closed jobs, never
 coordinators, open-job threads, running/waiting threads or threads with pending requests.
-Unknown ownership or activity means leave unsettled. After all threads are safely settled,
-record `brain jobs <id> --branch <branch> --settled`; this is your host attestation.
+Unknown ownership or activity means leave unsettled. Settle each thread through the host,
+one explicit thread ID per call, and confirm each is settled. Then save a fresh version 1
+JSON export as described in the host adapter and record
+`brain jobs <id> --branch <branch> --settled --attestation-file <export.json>`.
+For a reused branch, include the printed `--job-key <key>` to select the exact ledger row.
+The export needs `node`, ISO `observed_at` at most five minutes old, `project_ids` covering
+both bound host/home projects, `coverage: {"project": true, "nested": true, "complete": true}`,
+and exactly the selected `jobs`. Each job has `job_key` and `threads`; each thread has
+singular `threadId`, matching `job_key`, terminal `state`, `settled: true` and
+`pending_requests: []`. Include reviewers and nested descendants. Core validates these
+coordinator-supplied observations; it does not independently query or settle host threads.
 For legacy jobs missing thread references or markers, exhaust both host projects' unsettled
 thread lists and follow the host adapter's sweep. No attributable unsettled thread remaining
 is sufficient proof; a bounded search is not. Record the completed sweep with
-`brain jobs <id> --settled --all-closed`; it never stamps open jobs and refuses branches with
-open work. Leave doubtful or unsafe closed-work threads unrecorded until resolved.
+`brain jobs <id> --settled --all-closed --attestation-file <export.json>`, using a fresh export
+covering every selected job and both project lists. It never stamps open jobs and refuses
+branches with open work. Leave doubtful or unsafe closed-work threads unrecorded until resolved.
 `brain due` counts closed jobs still awaiting this step, including old rows. The root's
 `brain due root` includes child settlement counts: route their backlog to their coordinators rather than
 settling their threads without their ownership checks.
