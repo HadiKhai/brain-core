@@ -126,7 +126,7 @@ class InstallAndUpgrade(Scenario):
         self.b(root, "new", "project", "--title", "Project", "--home", str(home))
         self.b(root, "wt", "add", "project", "parked")
         self.b(root, "handback", "project", "--branch", "parked", "--state", "blocked",
-               "--lessons", "none: fixture")
+               "--summary", "Fixture job is blocked", "--lessons", "none: fixture")
         ledger = root / "nodes/project/job-ledger.md"
         before = ledger.read_bytes()
         worktree = json.loads((root / ".brain/local.json").read_text())["nodes"]["project"]["worktrees"]["parked"]
