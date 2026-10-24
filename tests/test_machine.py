@@ -1027,6 +1027,42 @@ class DockerLeftovers(unittest.TestCase):
     def scan(self, nodes=None):
         return self.m.docker_leftover_nodes(self.inst, nodes or [self.node])
 
+    def test_running_ten_second_project_has_no_report(self):
+        self.rows = [self.row()]
+        with mock.patch.object(self.m.time, 'time', return_value=self.m.leftover_timestamp(self.rows[0]['Created']) + 10):
+            self.scan()
+        self.assertFalse((self.node['dir'] / 'inbox.md').exists())
+
+    def test_exited_old_unknown_project_reports_once_and_timeout_is_respected(self):
+        self.rows = [self.row()]
+        self.rows[0]['State'] = {'Running': False, 'Status': 'exited'}
+        created = self.m.leftover_timestamp(self.rows[0]['Created'])
+        self.node['fm']['docker_leftover_timeout_seconds'] = '2400'
+        with mock.patch.object(self.m.time, 'time', return_value=created + 2000):
+            self.scan()
+        self.assertFalse((self.node['dir'] / 'inbox.md').exists())
+        with mock.patch.object(self.m.time, 'time', return_value=created + 2401):
+            self.scan()
+            self.scan()
+        self.assertEqual((self.node['dir'] / 'inbox.md').read_text().count('Docker leftovers'), 1)
+
+    def test_old_running_and_known_owner_never_publish(self):
+        self.rows = [self.row(1, 'maple-verify-active'),
+                     self.row(2, 'maple-verify-known', **{'brain.owner-pid': '987654'})]
+        self.rows[1]['State'] = {'Running': False, 'Status': 'exited'}
+        self.scan()
+        self.assertFalse((self.node['dir'] / 'inbox.md').exists())
+
+    def test_young_peer_and_minimum_timeout_prevent_reports(self):
+        self.rows = [self.row(1), self.row(2)]
+        for row in self.rows:
+            row['State'] = {'Running': False, 'Status': 'exited'}
+        self.rows[1]['Created'] = '2020-01-01T00:29:50Z'
+        self.node['fm']['docker_leftover_timeout_seconds'] = '1'
+        with mock.patch.object(self.m.time, 'time', return_value=self.m.leftover_timestamp('2020-01-01T00:30:00Z')):
+            self.scan()
+        self.assertFalse((self.node['dir'] / 'inbox.md').exists())
+
     def test_report_only_fake_cli_records_every_argv(self):
         # A real subprocess invokes only a fabricated CLI, never a Docker daemon.
         binary = self.root / 'docker'
@@ -1145,12 +1181,13 @@ class DockerLeftovers(unittest.TestCase):
 
     def test_delivery_once_per_episode_partial_preserves_and_reappearance_rearms(self):
         self.rows = [self.row()]
+        self.rows[0]['State'] = {'Running': False, 'Status': 'exited'}
         self.scan()
         inbox = self.node['dir'] / 'inbox.md'
         first = inbox.read_text()
         self.assertIn('owner: unknown', first)
         self.assertIn('age:', first)
-        self.assertIn('state: running', first)
+        self.assertIn('state: exited', first)
         self.scan()
         self.assertEqual(inbox.read_text(), first)
         # A failed scan cannot retire the episode or discard known facts.
@@ -1163,6 +1200,7 @@ class DockerLeftovers(unittest.TestCase):
         self.rows = []
         self.scan()
         self.rows = [self.row()]
+        self.rows[0]['State'] = {'Running': False, 'Status': 'exited'}
         self.scan()
         self.assertEqual(inbox.read_text().count('Docker leftovers'), 2)
 
@@ -1235,6 +1273,8 @@ class DockerLeftovers(unittest.TestCase):
 
     def test_partial_membership_does_not_open_second_project_episode(self):
         self.rows = [self.row(1), self.row(2)]
+        for row in self.rows:
+            row['State'] = {'Running': False, 'Status': 'exited'}
         self.scan()
         original = self.command
         def broken(args, **kw):

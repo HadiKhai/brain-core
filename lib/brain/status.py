@@ -519,7 +519,7 @@ def due_items(inst, n, evidence=None, include_stale=True, include_ready=True, in
             if row["Outcome"] == "merged" and row.get("Lesson check") == "required" and not row.get("Lessons"):
                 add("lesson-outcome", f"{row['Job']}: merged job needs a lesson outcome; learn proposed lessons "
                     f"and record item ids or none: <reason> with brain jobs {n['id']} --branch {row['Job']} --lessons; "
-                    + _m_jobs.handback_detail(n, row), job=_m_jobs.job_key(row))
+                    + _m_jobs.handback_detail(n, row), job=_m_jobs.job_key(row), condition='missing-lesson-outcome')
             continue
         branch = row["Job"]
         w = state["worktrees"].get(branch)
@@ -529,7 +529,8 @@ def due_items(inst, n, evidence=None, include_stale=True, include_ready=True, in
         signal = projection['signal']
         if w and w["merged"]:
             add("merged-job", f"{branch}: merged in local git; record brain jobs {n['id']} --branch {branch} --lessons "
-                "first, then close the ledger and prune; " + _m_jobs.handback_detail(n, row), job=_m_jobs.job_key(row))
+                "first, then close the ledger and prune; " + _m_jobs.handback_detail(n, row),
+                job=_m_jobs.job_key(row), condition='close-merged-ledger')
         elif (signal and signal.get("restart") == "compactions" and signal["state"] == "blocked"
               and not _m_briefs.restart_acknowledged(n, row, signal)):
             command = _m_briefs.restart_command(n, row)
@@ -573,10 +574,13 @@ def due_items(inst, n, evidence=None, include_stale=True, include_ready=True, in
         if machine_transition_line(n, line):
             continue  # legacy autonomous transitions are informational, never coordinator work
         else:
-            add("inbox", line[2:])  # coordinator removes handled lines; remaining questions are unanswered
+            add("inbox", line[2:], informational=_m_docker_leftovers.leftover_report_line(line))
     if include_advice:
-        for text in runaway_jobs(inst, n):
-            add("job", text, informational=True)
+        for advice in runaway_jobs(inst, n, structured=True):
+            if isinstance(advice, str):  # legacy callers supplying display-only advice
+                add("job", advice, informational=True)
+            else:
+                items.append(advice)
     if n['id'] == 'root':
         episode = _m_machine.machine_episode_due(inst)
         if episode:
@@ -892,14 +896,19 @@ def inbox_items(inst, nodes=None, reporter="root", readonly=False, requests_only
     # Explicit node inboxes are coordinator views. Root's inbox is the human rollup;
     # root-owned job advice remains available in due, never in that human rollup.
     owner = by_id.get(reporter)
+    advice_keys = {}
     if not requests_only and reporter != "root" and owner and not owner["archived"] and not paused(owner):
-        attention += [(reporter, "job", text) for text in runaway_jobs(inst, owner)]
+        for advice in runaway_jobs(inst, owner, structured=True, readonly=readonly):
+            if isinstance(advice, str):
+                attention.append((reporter, 'job', advice))
+            else:
+                attention.append((reporter, 'job', advice['text']))
+                advice_keys[(reporter, advice['text'])] = _m_reminders.reminder_key(advice)
     for nid, kind, text in attention:
-        identity = text if kind in ("blocked", "blocked-overdue", "inbox", "core-update") else \
-            re.sub(r"\d[\d.,]*[kMB]?", "#", text) if kind == "job" else kind  # growing counts aren't new
+        identity = text if kind in ("blocked", "blocked-overdue", "inbox", "core-update", "job") else kind
         if kind == "machine-alert":
             identity = (_m_machine.machine_episode_due(inst) or {}).get("episode", kind)
-        key = _m_jobs.digest([nid, kind, " ".join(identity.split())])
+        key = advice_keys.get((nid, text)) or _m_jobs.digest([nid, kind, " ".join(identity.split())])
         if kind == 'inbox':
             key = _m_reminders.request_episode_id(inst, by_id[nid], '- ' + text.removeprefix('inbox: '),
                                                    lifecycle_data=lifecycle_data)
@@ -933,7 +942,8 @@ def inbox_items(inst, nodes=None, reporter="root", readonly=False, requests_only
                     "first_seen": first, "reported": bool(record.get("reported_at")) if isinstance(record, dict) else False,
                     'age_days': round(max(0, elapsed(inst.parse_time(first), inst.now_dt()) / 86400), 2)
                     if inst.parse_time(first) else None,
-                    **({"informational": True} if kind == "job" else {}),
+                    **({"informational": True} if kind == "job" or
+                       (kind == "inbox" and _m_docker_leftovers.leftover_report_line('- ' + text.removeprefix('inbox: '))) else {}),
                     **blocked_metadata(inst, n, kind, text)})
     return sorted(out, key=lambda i: i['node']), reporters
 
@@ -1269,7 +1279,7 @@ def pending_imports(inst, n):
     return int(rules_pending), roles, items
 
 
-def runaway_jobs(inst, n):
+def runaway_jobs(inst, n, structured=False, readonly=False):
     """Open jobs past what this node's jobs usually take: twice the median in hours or tokens, over budget,
     compacting again and again, or mostly spent by sub-agents."""
     rows = _m_jobs.read_jobs(n) or []
@@ -1278,22 +1288,24 @@ def runaway_jobs(inst, n):
     j, out = _m_jobs.jobs_summary(inst, n), []
     for r in j["open"]:
         u = _m_spend.live_usage(inst, n, r)
-        why = []
+        why = {}
         if j["median_hours"] is not None and r["age_h"] > 2 * j["median_hours"]:
-            why.append(f"open {r['age_h']} h, over twice the median of {j['median_hours']} h")
+            why['median-age'] = f"open {r['age_h']} h, over twice the median of {j['median_hours']} h"
         if u and j["median_tokens"] and u["processed"] > 2 * j["median_tokens"]:
-            why.append(f"{_m_spend.tokens_text(u['processed'])} tokens, over twice the median of {_m_spend.tokens_text(j['median_tokens'])}")
+            why['median-tokens'] = f"{_m_spend.tokens_text(u['processed'])} tokens, over twice the median of {_m_spend.tokens_text(j['median_tokens'])}"
         b = _m_spend.job_budget(n, r)
         if b and u and b.get("tokens") and u["processed"] > b["tokens"]:
-            why.append(f"over its {_m_spend.tokens_text(b['tokens'])}-token budget")
+            why['budget-tokens'] = f"over its {_m_spend.tokens_text(b['tokens'])}-token budget"
         if b and b.get("hours") and r["age_h"] > b["hours"]:
-            why.append(f"over its {b['hours']:g}-hour budget")
+            why['budget-hours'] = f"over its {b['hours']:g}-hour budget"
         if u and u["compactions"] >= 3:
-            why.append(f"{u['compactions']} compactions")
+            why['compaction-limit'] = f"{u['compactions']} compactions"
         if u and u["subagents"] and u["sub_share"] > 0.5:
-            why.append(f"sub-agents spent {round(100 * u['sub_share'])}% of its tokens")
-        if why:
-            out.append(_m_guard.redact(f"job {r['Job']}: " + "; ".join(why), _m_guard.never_terms(n)))
+            why['subagent-share'] = f"sub-agents spent {round(100 * u['sub_share'])}% of its tokens"
+        if structured:
+            out.extend(_m_reminders.latch_job_advice(inst, n, r, why, readonly=readonly))
+        elif why:
+            out.append(_m_guard.redact(f"job {r['Job']}: " + "; ".join(why.values()), _m_guard.never_terms(n)))
     return out
 
 

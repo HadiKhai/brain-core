@@ -5,6 +5,14 @@ upgrading. `brain changes <node>` shows the entries this node's coordinator hasn
 `brain due <node>` lists them until `brain changes <node> --seen`. Entry headings are
 `## <date>: <title>`; once released, a heading never changes.
 
+## 2026-10-24: Stable job reminder identities and quiet Docker reports
+
+Merged-ledger and lesson-outcome needs ignore hand-back wording. Job advice latches each
+condition until a successful rebrief; live counters remain display-only and advice never
+wakes. Docker inbox reports require stopped containers, unknown ownership and age beyond
+`docker_leftover_timeout_seconds` (default/minimum 1800); reports remain informational.
+After upgrading: no action required.
+
 ## 2026-10-24: M7: Upgrade around idle retained jobs and worktrees
 
 rehearsal evidence waived (coordinator instruction, 2026-10-24)

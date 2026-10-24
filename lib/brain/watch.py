@@ -15,6 +15,7 @@ from . import instance as _m_instance
 from . import jobs as _m_jobs
 from . import machine as _m_machine
 from . import nodes as _m_nodes
+from . import reminders as _m_reminders
 from . import status as _m_status
 from . import transitions as _m_transitions
 from . import usage as _m_usage
@@ -227,7 +228,7 @@ def watch_items(inst, n):
                                 include_ready=False, include_advice=False) + _m_status.changes_due(inst, n)
     out = []
     for item in items:
-        if item['kind'] in ('stale-status', 'machine'):
+        if item['kind'] in ('stale-status', 'machine') or (item['kind'] == 'inbox' and item.get('informational')):
             continue
         direct_reason = None
         handback_episode = None
@@ -279,7 +280,8 @@ def watch_items(inst, n):
             if handback_episode:
                 identity.append(handback_episode)
         text = _m_nodes.import_text(item['text'], _m_guard.never_terms(n))[:400]
-        entry = {'id': watch_digest([n['id'], item['kind'], identity]),
+        semantic = _m_reminders.semantic_item_key(item)
+        entry = {'id': watch_digest(semantic if semantic is not None else [n['id'], item['kind'], identity]),
                  'kind': item['kind'], 'text': text}
         if direct_reason:
             entry.update(reason=direct_reason, source=n['id'])

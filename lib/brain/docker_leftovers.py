@@ -212,11 +212,18 @@ def leftover_groups(inst, n, rows, records, host, deadline, observations):
                 created.append(leftover_timestamp(row.get('Created')))
             except ValueError:
                 errors.append('invalid Created timestamp')
+        try:
+            youngest = max(leftover_timestamp(r.get('Created')) for r in components[root(members[0]['Id'])])
+        except ValueError:
+            youngest = None
         ids = sorted(r['Id'] for r in members)
         key = hashlib.sha256(json.dumps([host, kind, name]).encode()).hexdigest()
         out.append({'key': key, 'kind': kind, 'name': name, 'containers': ids, 'owner': owner,
                     'age_seconds': max(0, int(time.time() - min(created))) if len(created) == len(members) else None,
                     'state': ','.join(sorted({r['State'].get('Status', 'unknown') for r in members})),
+                    'stopped': all(r['State'].get('Running') is False and r['State'].get('Status') in
+                                   ('exited', 'dead') for r in components[root(members[0]['Id'])]),
+                    'youngest_age_seconds': max(0, int(time.time() - youngest)) if youngest is not None else None,
                     'errors': sorted(set(errors))})
     return out
 
@@ -271,6 +278,23 @@ def leftover_text(row):
     age = str(row['age_seconds']) + 's' if row['age_seconds'] is not None else 'unknown (invalid Created timestamp)'
     return (f"{row['kind']} {row['name']}; owner: {who}; age: {age}; state: {row['state']}; "
             f"containers: {','.join(row['containers'])}")
+
+
+def leftover_report_line(line):
+    """Recognize only this report-only writer; worker questions remain actionable."""
+    return (re.fullmatch(r'- Docker leftovers \(report only\): .* <!-- docker-leftover:[0-9a-f]{24} -->', line) is not None
+            and not re.search(r'<!-- (?:host-question|handback|worker-failure):', line))
+
+
+def leftover_reportable(n, row):
+    # Inventory remains diagnostic. Publishing an inbox item requires positive
+    # evidence that every container has stopped and the newest is beyond timeout.
+    try:
+        timeout = max(1800, float(n.get('fm', {}).get('docker_leftover_timeout_seconds', 1800)))
+    except (TypeError, ValueError):
+        return False
+    return (row['owner'] == 'unknown' and row.get('stopped') is True and
+            row.get('youngest_age_seconds') is not None and row['youngest_age_seconds'] > timeout)
 
 
 def docker_leftover_nodes(inst, nodes):
@@ -334,7 +358,7 @@ def docker_leftover_nodes(inst, nodes):
                 _m_common.atomic_write(path, json.dumps(store))
                 for entry in active.values():
                     result['leftovers'].append(entry['row'])
-                    if not entry['delivered']:
+                    if not entry['delivered'] and not failed and leftover_reportable(n, entry['row']):
                         marker = '<!-- docker-leftover:' + entry['episode'] + ' -->'
                         text = _m_guard.redact(' '.join(leftover_text(entry['row']).split()), _m_guard.never_terms(n))
                         try:

@@ -29,6 +29,139 @@ class DueLifecycle(Scenario):
         clock.start()
         self.addCleanup(clock.stop)
 
+    def identity_row(self, **fields):
+        return {**dict.fromkeys(self.m.JOB_COLS, ''), 'Job': 'job/palette',
+                'Started': '2026-01-15T08:00Z', **fields}
+
+    def ledger_need(self, row, kind):
+        self.m.write_jobs(self.inst, self.n, [row])
+        self.n['local']['worktrees'] = {row['Job']: {'path': str(self.root)}} if not row['Ended'] else {}
+        with mock.patch.object(self.m, 'local_job_state', return_value={'exists': True, 'merged': True}), \
+                mock.patch.object(self.m, 'handback_detail', return_value=self.detail), \
+                mock.patch.object(self.m, 'changes_due', return_value=[]):
+            due = next(i for i in self.m.due_items(self.inst, self.n, include_advice=False) if i['kind'] == kind)
+            watch = next(i for i in self.m.watch_items(self.inst, self.n) if i['kind'] == kind)
+        return due['id'], watch['id']
+
+    def test_merged_ledger_need_ignores_handback_display(self):
+        row = self.identity_row()
+        self.detail = 'summary: drew 12 circles; lessons: compare colors; report: reports/first.md'
+        first = self.ledger_need(row, 'merged-job')
+        self.detail = 'summary: drew 24 squares; lessons: compare shapes; report: reports/second.md'
+        self.assertEqual(self.ledger_need(row, 'merged-job'), first)
+        self.assertNotEqual(self.ledger_need(self.identity_row(Started='2026-01-15T09:00Z'), 'merged-job'), first)
+
+    def test_lesson_outcome_ignores_handback_display(self):
+        row = self.identity_row(Ended='2026-01-15T10:00Z', Outcome='merged', **{'Lesson check': 'required'})
+        self.detail = 'summary one; lessons one; report: reports/first.md'
+        first = self.ledger_need(row, 'lesson-outcome')
+        self.detail = 'summary two; lessons two; report: reports/second.md'
+        self.assertEqual(self.ledger_need(row, 'lesson-outcome'), first)
+        self.assertNotEqual(self.ledger_need({**row, 'Job': 'job/brush'}, 'lesson-outcome'), first)
+        self.m.write_jobs(self.inst, self.n, [{**row, 'Lessons': 'none: routine change'}])
+        self.assertNotIn('lesson-outcome', [i['kind'] for i in self.m.due_items(self.inst, self.n)])
+
+    def advice_setup(self):
+        self.row = self.identity_row()
+        self.m.write_jobs(self.inst, self.n, [self.row])
+        self.stats = {'open': [{**self.row, 'age_h': 4}], 'median_hours': 1, 'median_tokens': 10}
+        self.usage = {'processed': 30, 'compactions': 3, 'subagents': 1, 'sub_share': .6}
+        for patch in (mock.patch.object(self.m, 'jobs_summary', side_effect=lambda *a: self.stats),
+                      mock.patch.object(self.m, 'live_usage', side_effect=lambda *a: self.usage),
+                      mock.patch.object(self.m, 'job_budget', return_value={'hours': 1, 'tokens': 10})):
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def advice(self):
+        return [i for i in self.m.due_items(self.inst, self.n, include_stale=False) if i['kind'] == 'job']
+
+    def test_hourly_aging_never_rekeys_or_wakes(self):
+        self.advice_setup()
+        self.inst.local_of('root').update(coordinator='fixture-root', wake='fixture-send')
+        self.inst.save_local()
+        (self.root / 'inbox.md').write_text('- Choose a fabricated paint color\n')
+        first_ids, displays = None, set()
+        with mock.patch.object(self.m, 'changes_due', return_value=[]), \
+                mock.patch.object(self.m, 'wake_start'), mock.patch.object(self.m, 'WAKE_INTERVAL', 0), \
+                mock.patch.object(self.m, 'wake_send', return_value=True) as send:
+            for hour in range(6):
+                self.now += datetime.timedelta(hours=1)
+                self.stats['open'][0]['age_h'] += 1
+                self.stats['median_hours'] += .1
+                self.stats['median_tokens'] += 1
+                self.usage['processed'] += 5
+                self.usage['compactions'] += 1
+                advice = self.advice()
+                identities = {i['id'] for i in advice}
+                if first_ids is None:
+                    first_ids = identities
+                self.assertEqual(identities, first_ids)
+                displays.add(tuple(i['text'] for i in advice))
+                with contextlib.redirect_stdout(io.StringIO()):
+                    self.m.watch_once(self.inst)
+                self.m.wake_drain(self.inst, self.n, once=True)
+                self.assertEqual(send.call_count, 1)
+            self.assertEqual(len(first_ids), 6)
+            self.assertGreater(len(displays), 1)
+            history = self.m.wake_history(self.m.wake_directory(self.inst, self.n))
+            self.assertTrue(history)
+            self.assertFalse(any(i['kind'] in ('job', 'stale-status') for h in history for i in h['items']))
+
+    def test_advice_latches_threshold_dips_and_distinguishes_conditions_jobs_and_rebrief(self):
+        self.advice_setup()
+        first = {i['condition']: i['id'] for i in self.advice()}
+        self.assertEqual(set(first), {'median-age', 'median-tokens', 'budget-hours', 'budget-tokens',
+                                      'compaction-limit', 'subagent-share'})
+        self.stats.update(median_hours=100, median_tokens=1000)
+        self.usage['sub_share'] = .1
+        dipped = {i['condition']: i['id'] for i in self.advice()}
+        self.assertEqual(dipped, first)
+        self.m.acknowledge_usage_restart(self.inst, self.n, self.row)
+        after = {i['condition']: i['id'] for i in self.advice()}
+        self.assertEqual(set(after), {'budget-hours', 'budget-tokens', 'compaction-limit'})
+        self.assertTrue(set(after.values()).isdisjoint(first.values()))
+        self.stats['open'][0]['Job'] = 'job/brush'
+        self.m.write_jobs(self.inst, self.n, [{**self.row, 'Job': 'job/brush'}])
+        new = {i['id'] for i in self.advice()}
+        self.assertTrue(new.isdisjoint(after.values()))
+
+    def test_advice_first_crossing_and_state_change(self):
+        self.advice_setup()
+        self.stats.update(median_hours=100, median_tokens=1000)
+        self.stats['open'][0]['age_h'] = .1
+        self.usage.update(processed=0, compactions=0, subagents=0, sub_share=0)
+        self.assertEqual(self.advice(), [])
+        self.usage['processed'] = 11
+        first = self.advice()
+        self.assertEqual([i['condition'] for i in first], ['budget-tokens'])
+        self.usage['compactions'] = 3
+        second = self.advice()
+        self.assertEqual(len(second), 2)
+        self.assertIn(first[0]['id'], {i['id'] for i in second})
+        lifecycle = self.root / '.brain/wake/lifecycle.json'
+        before = lifecycle.read_bytes()
+        projection = self.m.runaway_jobs(self.inst, self.n, structured=True, readonly=True)
+        self.assertEqual({self.m.reminder_key(i) for i in projection}, {i['id'] for i in second})
+        self.assertEqual(lifecycle.read_bytes(), before)
+        with mock.patch.object(self.m, 'job_signal', return_value={'state': 'blocked'}):
+            changed = self.advice()
+        self.assertTrue({i['id'] for i in changed}.isdisjoint(i['id'] for i in second))
+
+    def test_docker_report_only_inbox_never_wakes(self):
+        self.inst.local_of('root').update(coordinator='fixture-root', wake='fixture-send')
+        self.inst.save_local()
+        line = '- Docker leftovers (report only): compose oak-verify-demo; owner: unknown; age: 1900s; state: exited <!-- docker-leftover:' + 'a' * 24 + ' -->\n'
+        (self.root / 'inbox.md').write_text(line)
+        with mock.patch.object(self.m, 'changes_due', return_value=[]), \
+                mock.patch.object(self.m, 'wake_start'), mock.patch.object(self.m, 'WAKE_INTERVAL', 0), \
+                mock.patch.object(self.m, 'wake_send', return_value=True) as send:
+            self.assertFalse(self.m.watch_items(self.inst, self.n))
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.m.watch_once(self.inst)
+            self.m.wake_drain(self.inst, self.n, once=True)
+            self.assertEqual(send.call_count, 0)
+        self.assertEqual((self.root / 'inbox.md').read_text(), line)
+
     def request(self, text='Choose a color?', stamp='2026-01-07 12:00 +00:00'):
         line = '- ' + stamp + ' from worker: ' + text + '\n'
         with (self.root / 'inbox.md').open('a') as f:

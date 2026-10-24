@@ -15,6 +15,8 @@ from . import spend as _m_spend
 
 LIFECYCLE_LIMIT = 2000
 LIFECYCLE_BYTES = 2 * 1024 * 1024
+ADVICE_CONDITIONS = ('median-age', 'median-tokens', 'budget-tokens', 'budget-hours',
+                     'compaction-limit', 'subagent-share')
 
 
 def lifecycle_empty():
@@ -121,6 +123,9 @@ def acknowledge_usage_restart(inst, n, row):
         return
     key = _m_jobs.digest([n['id'], _m_jobs.job_key(row)])
     with lifecycle_store(inst) as data:
+        advice = data.get('advice', {})
+        if key in advice:
+            advice[key] = {'episode': os.urandom(12).hex(), 'conditions': {}}
         record = data['usage'].get(key)
         if not isinstance(record, dict) or not record.get('episode'):
             return
@@ -254,7 +259,46 @@ def record_answer(inst, n, line, item_id, text, lifecycle_data=None):
                             'source': line[2:], 'answer': text, 'at': inst.now()})
 
 
+def semantic_item_key(item):
+    """Only producer-supplied semantics; display numbers and prose never enter these keys."""
+    if item.get('job') and item.get('condition'):
+        return [item['node'], item['job'], item['condition'], item.get('state'), item.get('episode')]
+    return None
+
+
+def latch_job_advice(inst, n, row, conditions, readonly=False):
+    """Keep each first crossing open until a successful rebrief, even if medians move."""
+    key = _m_jobs.digest([n['id'], _m_jobs.job_key(row)])
+    with lifecycle_store(inst, readonly=readonly) as data:
+        advice = data.setdefault('advice', {})
+        if not isinstance(advice, dict) or (key not in advice and len(advice) >= LIFECYCLE_LIMIT):
+            raise ValueError('invalid or oversized job advice state')
+        record = advice.get(key)
+        if record is None:
+            if not conditions:
+                return []
+            record = {'episode': _m_jobs.digest([key, 'initial-advice-baseline']), 'conditions': {}}
+        if (not isinstance(record, dict) or not re.fullmatch(r'[0-9a-f]{24}', str(record.get('episode'))) or
+                not isinstance(record.get('conditions'), dict) or
+                any(code not in ADVICE_CONDITIONS or not isinstance(text, str)
+                    for code, text in record['conditions'].items())):
+            raise ValueError('invalid job advice baseline')
+        for code, text in conditions.items():
+            record['conditions'].setdefault(code, text)
+        advice[key] = record
+        signal = _m_jobs.job_signal(inst, n, row) or {}
+        state = signal.get('state', 'open')
+        return [{'node': n['id'], 'kind': 'job', 'job': _m_jobs.job_key(row), 'condition': code,
+                 'state': state, 'episode': record['episode'], 'informational': True,
+                 'text': _m_guard.redact(f"job {row['Job']}: " + (conditions[code] if code in conditions else
+                          'crossed since brief: ' + record['conditions'][code]), _m_guard.never_terms(n))}
+                for code in ADVICE_CONDITIONS if code in record['conditions']]
+
+
 def reminder_key(item):
+    semantic = semantic_item_key(item)
+    if semantic is not None:
+        return _m_jobs.digest(semantic)
     need = item.get('need')
     if need is None and item['kind'] in ('handback', 'missing-preview'):
         need = ' '.join(item['text'].split())
