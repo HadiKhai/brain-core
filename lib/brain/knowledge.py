@@ -791,12 +791,13 @@ def handback_lines(inst, n, to=None, who="worker", branch=None):
                 "- **A choice** the brief or rules settle: make it and record it under Decisions I made.",
                 "- **Before handing back**, " + prepare +
                 f"Run `brain handback {shlex.quote(n['id'])} --branch {shlex.quote(branch)} "
-                "--state done --reviews <completed rounds> --report <path> --lessons '<proposed lessons or none: reason>'`. "
+                "--state done --summary '<one-line result>' --reviews <completed rounds> --report <path> --lessons '<proposed lessons or none: reason>'`. "
                 + evidence + "State and proposed lessons live in your one worker-owned job-handbacks/<key>.json. "
                 "Do not edit the ledger" + (". " if study else " or status. ") +
                 "Use `none: <reason>` when there is no reusable lesson.",
                 "- **Blocked or need a choice:** use the same command with `--state blocked` or `--state question`, "
-                "omit --reviews, and describe the blocker/question in --report. Questions also append to inbox; "
+                "omit --reviews, supply --summary '<one-line result>', and describe the blocker/question in --report. "
+                "For question state also supply --question '<one-line choice>'. Questions also append to inbox; "
                 "for a blocked human need add `--need-human '<need>'`. Legacy failed is also accepted.",
                 "- End your turn after recording the hand-back. The coordinator reads it with brain due; "
                 f"a host message is optional notification ({how}) and need only link the record. Do not duplicate Lessons "
