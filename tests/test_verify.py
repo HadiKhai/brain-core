@@ -276,7 +276,14 @@ class WorkerReadyPackets(Scenario):
                      {**original, 'verify_port_context': {'export_port': True, 'digest': '0' * 24}},
                      {**original, 'verify_port_context': {'export_port': False, 'digest': 'invalid'}}):
             path.write_text(json.dumps({**record, "ready": data}))
-            self.assertIn("not ready", self.b(r, "ready", "a", "--branch", "job", ok=False))
+            out = self.b(r, "ready", "a", "--branch", "job", ok=False)
+            self.assertIn("not ready", out)
+            if (isinstance(data, dict) and data.get('node') == 'a' and data.get('review_rounds') == 2
+                    and data.get('verify_port_context') != original['verify_port_context']):
+                self.assertIn('run brain handback a --branch job --state done --reviews 2 --reverify', out)
+                self.assertNotIn('Traceback', out)
+                if 'verify_port_context' not in data:
+                    self.assertIn('recorded verify port environment missing or invalid; run ', out)
         path.write_text("{")
         self.assertIn("unreadable", self.b(r, "ready", "a", "--branch", "job", ok=False))
 

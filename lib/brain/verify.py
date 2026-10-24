@@ -7,6 +7,7 @@ import json
 import math
 import os
 import re
+import shlex
 import subprocess
 import sys
 import time
@@ -261,13 +262,17 @@ def _ready_state(inst, n, branch, train=False, display=False):
                 or packet["verify_result"] != 0:
             reasons.append("node verify missing, changed or failed")
         port_context = packet.get('verify_port_context')
+        rounds = packet.get('review_rounds')
+        reverify = shlex.join(['brain', 'handback', n['id'], '--branch', branch, '--state', 'done',
+                              '--reviews', str(rounds if type(rounds) is int and rounds >= 1 else 0),
+                              '--reverify'])
         if (not isinstance(port_context, dict) or set(port_context) != {'export_port', 'digest'}
                 or type(port_context.get('export_port')) is not bool
                 or not isinstance(port_context.get('digest'), str)
                 or not re.fullmatch(r'[0-9a-f]{24}', port_context['digest'])):
-            reasons.append('recorded verify port environment missing or invalid; hand back again')
+            reasons.append('recorded verify port environment missing or invalid; run ' + reverify)
         elif port_context['export_port'] != (n['fm'].get('verify_export_port') == 'true'):
-            reasons.append('verify port export policy changed; hand back again')
+            reasons.append('verify port export policy changed; run ' + reverify)
         if cheap:
             try:
                 _m_lanes.recorded_lane_environment({}, packet.get('verify_lane_env'))
