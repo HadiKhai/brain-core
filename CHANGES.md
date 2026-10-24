@@ -82,6 +82,8 @@ After upgrading:
 
 ## 2026-10-24: B5 Reviewed publication policy at settings and instruction boundaries
 
+rehearsal evidence waived (coordinator decision A, 2026-10-24); direct admitted full verify passed
+
 For agents: `merge=pr` refuses a conflicting or unmapped current reviewed Limits snapshot,
 quoting its rule/source. Briefs and `brain policy` distinguish allow/deny/unknown; merge
 selection grants no push/PR consent. Explicit policy is supplied review evidence, not a
@@ -94,6 +96,8 @@ mode or outward steps. Legacy ambiguous limits require their decision. Arbitrary
 commands and a general action guard remain outside this slice.
 
 ## 2026-10-24: B6 Complete supplied rules-snapshot activation
+
+rehearsal evidence waived (coordinator decision A, 2026-10-24); direct admitted full verify passed
 
 For agents: one protected due item follows each pending rules snapshot. Explicit
 `brain proposals <node> --approve-all --review-manifest <file>` atomically activates its
@@ -108,6 +112,8 @@ never authenticated identity. No automatic import activation; bulk roles/items a
 imports remain outside this rules-only slice.
 
 ## 2026-10-24: P10 Exact-candidate land-check receipts
+
+rehearsal evidence waived (coordinator decision A, 2026-10-24); direct admitted full verify passed
 
 For agents: configured `land_check` runs through one reusable explicit candidate check,
 retains passing/failing job-ledger receipts, and blocks supported landing/push instructions
