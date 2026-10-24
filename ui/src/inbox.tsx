@@ -6,7 +6,7 @@ import { Button } from "@/components/ui/button";
 import { FilterToolbar, Text, Reader, Empty, ScreenAction, Status, ListFrame, DetailRow } from "./shared";
 import { SectionTabs } from "./dash";
 import { RecordPicker } from "./picker";
-import { list, time, sender, dueParts, readable, type RecordData } from "./model";
+import { list, time, sender, dueParts, readable, needAsk, needsView, type RecordData } from "./model";
 import type { Found } from "./search";
 import type { Route } from "./routes";
 
@@ -14,7 +14,7 @@ type Go = (r: Partial<Route> & { view: string }) => void;
 const body = (item: RecordData) => String(item.text || "").replace(/^(?:inbox:\s*)?\d{4}-\d{2}-\d{2}[^\n]*? from [^:]+:\s*(?:question:\s*)?/i, "");
 
 // One request, one line of context, one action: the sender comes from the record, never the text.
-export function RequestRow({ s, item, go, showProject = true }: { s: RecordData; item: RecordData; go: Go; showProject?: boolean }) {
+export function RequestRow({ s, item, go, showProject = true, compact = false }: { s: RecordData; item: RecordData; go: Go; showProject?: boolean; compact?: boolean }) {
   const [open, setOpen] = useState(false);
   const project = list(s.nodes).find((n) => n.id === item.node);
   const conversation = item.link || project?.coordinator;
@@ -26,12 +26,12 @@ export function RequestRow({ s, item, go, showProject = true }: { s: RecordData;
     <DetailRow className="row request" data-item onOpen={() => setOpen(true)}>
       <div className="row-main">
         <div className="row-line">{showProject && <strong dir="auto"><Text>{project?.title || "Workspace"}</Text></strong>}<small>{sender(item)} · {time(item.first_seen, s.brain?.tz)}</small><WorkStatus item={{ ...item, state: item.state || "waiting", waiting_on_operator: true }} s={s} /></div>
-        <p className="row-text" dir="auto"><Text>{body(item)}</Text></p>
-        {recommendation && <p className="row-note" dir="auto">Recommended: <Text>{recommendation}</Text></p>}
+        <p className="row-text" dir="auto"><Text>{compact ? needAsk(body(item)) : body(item)}</Text></p>
+        {!compact && recommendation && <p className="row-note" dir="auto">Recommended: <Text>{recommendation}</Text></p>}
       </div>
       <div className="row-actions">
-        {conversation ? <ThreadLink href={conversation} label={nextAction || (question ? "Answer" : "Open conversation")} />
-          : project ? <Button variant="outline" size="sm" onClick={() => go({ view: "project", node: project.id })}><Text>{nextAction || "Open project"}</Text></Button>
+        {conversation ? <ThreadLink href={conversation} label={(!compact && nextAction) || (question ? "Answer" : "Open conversation")} />
+          : project ? <Button variant="outline" size="sm" onClick={() => go({ view: "project", node: project.id })}><Text>{(!compact && nextAction) || "Open project"}</Text></Button>
           : null}
         <Reader open={open} onOpenChange={setOpen} title="Request" text={full} trigger="Read request" />
       </div>
@@ -77,7 +77,8 @@ export function InboxView({ s, go, tab, active }: { s: RecordData; go: Go; tab: 
   const [query, setQuery] = useState(""), [project, setProject] = useState<Found | null>(null);
   const nodes = list(s.nodes), title = (id: string) => nodes.find((n) => n.id === id)?.title || "";
   const match = (a: RecordData) => (!project || a.node === project.id) && `${readable(a.text)} ${a.branch || ""} ${title(a.node)}`.toLowerCase().includes(query.toLowerCase());
-  const requests = list(s.inbox).filter(match), steps = list(s.due).filter(match).sort((a, b) => Number(!!b.ready) - Number(!!a.ready));
+  const needs = needsView(s);
+  const requests = needs.inbox.filter(match), steps = needs.due.filter(match).sort((a, b) => Number(!!b.ready) - Number(!!a.ready));
   const current = tab === "due" ? "due" : "inbox", rows = current === "due" ? steps : requests;
   const { page, size, setPage, setSize, start, end } = usePage(rows.length, JSON.stringify([current, query, project?.id]));
   const shown = rows.slice(start, end);

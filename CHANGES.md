@@ -18,6 +18,33 @@ After upgrading:
 - No migration is needed. Add optional class keys to opt into per-class defaults;
   see the settings references in instance.md and node.md.
 
+## 2026-10-24: Clear worker messages and small workflow fixes
+
+For agents:
+- Ready rejects unfinished WIP, fixup! and squash! commit titles anywhere in the
+  job's commit range. Verify refusals name moved refs with their old and new
+  commits; every main move still invalidates verification.
+- `brain msg` prepares text and prints `NOT SENT: use the host send`. Deliver the
+  prepared message through the host explicitly.
+- `wt add` reuses cached submodule objects with independent checkout metadata
+  before setup, without fetching. `wt prune` reports submodule worktrees and
+  retains them and their shared module data.
+- Read-only stop-hook relays may finish with `relay only`, without repeating a
+  previous answer. Unanswered questions are still captured.
+- Subscriptions may override `stop_percent`; otherwise they inherit the existing
+  machine-wide default (85 when omitted). Routing and meters use each value.
+- Needs-you lists deduplicate source item IDs and keep informational advice out;
+  recommendation and default details remain available in the request reader.
+- A wake bound to a coordinator satisfies the code-node tick diagnostic.
+
+After upgrading:
+- Finish or squash unfinished commits before handing back. Send formatted worker
+  messages through the host. Cached submodules need no extra setup; uncached
+  modules remain the setup script's responsibility. Submodule worktrees reported
+  by prune are retained for explicit cleanup.
+- Existing stop lines keep their behavior. Set `stop_percent` on a subscription
+  only when it needs a different threshold. No other configuration change is needed.
+
 ## 2026-10-23: Rehearse JSON probes without collapsing private identities
 
 For agents:

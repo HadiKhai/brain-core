@@ -5,7 +5,7 @@ import { DataTable, Status, Text, Empty, Reader, Preview, Command, TechnicalDeta
 import { Kpi, Spark, SectionTabs } from "./dash";
 import { DueRow, RequestRow, PagedRows } from "./inbox";
 import { ThreadRow } from "./agents";
-import { list, count, time, flight, threads, jobTitle, closed, safeHref, nowOf, within, type RecordData } from "./model";
+import { list, needsView, needRows, needAsk, count, time, flight, threads, jobTitle, closed, safeHref, nowOf, within, type RecordData } from "./model";
 import { ThreadLink } from "./thread-link";
 import { ReaderRow } from "./detail-panel";
 import { WorkStatus } from "./work-status";
@@ -23,14 +23,15 @@ export const ancestors = (nodes: RecordData[], n: RecordData | undefined) => {
 export function Project({ s, route, go, active }: { s: RecordData; route: Route; go: Go; active: boolean }) {
   const nodes = list(s.nodes), n = nodes.find((x) => x.id === route.node);
   if (!n) return <section className="surface"><Empty text="Project unavailable in this reading." action="Choose a project in the sidebar, or refresh the workspace." /></section>;
-  const now = nowOf(s), inbox = list(s.inbox).filter((a) => a.node === n.id), due = list(s.due).filter((d) => d.node === n.id);
+  const now = nowOf(s);
+  const { inbox, due } = needsView(s, n.id);
   const work = flight([n]), open = threads([n]), rows = [...list(n.jobs?.rows)].reverse();
   const activity: number[] = s.activity?.counts?.[n.id] || [];
   const feed = [
     ...list(s.commits).filter((c) => c.node === n.id).map((c): RecordData => ({ t: c.t, text: c.subject, kind: c.where === "home" ? "Home commit" : "Brain commit" })),
     ...list(n.decisions).map((d) => ({ t: d.t, text: d.title, said: d.said, kind: "Decision" })),
   ].sort((a, b) => (b.t || 0) - (a.t || 0));
-  const needs = [...list(n.blocked).map((t, i) => ({ ...inbox.find(a => a.kind === "blocked" && a.text === t), ...list(n.blocked_metadata)[i], kind: "blocked", text: t })), ...inbox, ...due];
+  const needs = needRows([...list(n.blocked).map((t, i) => ({ ...inbox.find(a => ["blocked", "blocked-overdue"].includes(a.kind) && a.text === t), ...list(n.blocked_metadata)[i], kind: "blocked", text: t })), ...inbox, ...due]);
   const notes = Object.entries(n.status || {}).filter(([k]) => !/^blocked/i.test(k));
   const coordinator = n.coordinator;
   return (
@@ -53,7 +54,7 @@ export function Project({ s, route, go, active }: { s: RecordData; route: Route;
             { id: "needs", label: "Needs you", count: needs.length, body: needs.length ? <PagedRows items={needs} noun="item" render={(a: RecordData, i) =>
                 a.kind === "blocked" && !a.id && typeof a.text === "string" && !("first_seen" in a)
                   ? <BlockedRow key={"b" + i} item={a} s={s} />
-                  : "first_seen" in a ? <RequestRow key={a.id || i} s={s} item={a} go={go} showProject={false} /> : <DueRow key={"d" + i} s={s} item={a} go={go} showProject={false} />} /> : <Empty text="Nothing needs you here." action="Questions and coordinator steps for this project arrive here." /> },
+                  : "first_seen" in a ? <RequestRow key={a.id || i} s={s} item={a} go={go} showProject={false} compact /> : <DueRow key={"d" + i} s={s} item={a} go={go} showProject={false} />} /> : <Empty text="Nothing needs you here." action="Questions and coordinator steps for this project arrive here." /> },
             { id: "threads", label: "Threads", count: work.length, body: work.length ? <PagedRows resetKey={route.thread || ""} items={[...work].sort((a, b) => Number(b.job.branch === route.thread) - Number(a.job.branch === route.thread))} noun="thread" render={(f, i) => <ThreadRow key={f.job.branch + i} s={s} f={f} go={go} showProject={false} highlight={route.thread === f.job.branch} />} />
                 : <Empty text="No threads in flight." action="Start a job from this project's coordinator." /> },
             { id: "jobs", label: "Jobs", count: rows.length, body: <DataTable rows={rows} name="jobs" columns={[
@@ -109,7 +110,7 @@ export function Projects({ s, go, onAdd }: { s: RecordData; go: Go; onAdd: () =>
   );
   return (
     <section className="surface" aria-label="Projects">
-      <DataTable name="projects" details={false} onRowOpen={(n) => go({ view: "project", node: n.id })} rows={nodes.map((n) => ({ ...n, _needs: list(s.inbox).filter((a) => a.node === n.id).length + list(s.due).filter((d) => d.node === n.id).length, _threads: open.filter((f) => f.node.id === n.id).length, _key: n.id }))}
+      <DataTable name="projects" details={false} onRowOpen={(n) => go({ view: "project", node: n.id })} rows={nodes.map((n) => ({ ...n, _needs: needsView(s, n.id).items.length, _threads: open.filter((f) => f.node.id === n.id).length, _key: n.id }))}
         columns={[
           { key: "title", label: "Project", render: (n) => <div><strong><Tip text={n.title || "Project"}><span className="clamp-1"><Text>{n.title || "Untitled project"}</Text></span></Tip></strong><small>{nodes.find((p) => p.id === n.parent)?.title || "Workspace root"}</small></div> },
           { key: "_needs", label: "Needs you", numeric: true },
@@ -124,5 +125,5 @@ export function Projects({ s, go, onAdd }: { s: RecordData; go: Go; onAdd: () =>
 
 function BlockedRow({ item, s }: { item: RecordData; s: RecordData }) {
   const [open, setOpen] = useState(false);
-  return <DetailRow className="row" onOpen={() => setOpen(true)}><div className="row-main"><div className="row-line"><WorkStatus item={{ state: "Blocked", ...item }} s={s} /></div><p className="row-text"><Text>{item.text}</Text></p></div><div className="row-actions"><Reader title="Blocked work" text={item.text} trigger="Read" open={open} onOpenChange={setOpen} /></div></DetailRow>;
+  return <DetailRow className="row" onOpen={() => setOpen(true)}><div className="row-main"><div className="row-line"><WorkStatus item={{ state: "Blocked", ...item }} s={s} /></div><p className="row-text"><Text>{needAsk(item.text)}</Text></p></div><div className="row-actions"><Reader title="Blocked work" text={item.text} trigger="Read" open={open} onOpenChange={setOpen} /></div></DetailRow>;
 }

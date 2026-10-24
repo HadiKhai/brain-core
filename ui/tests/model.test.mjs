@@ -228,3 +228,19 @@ test("subscription stop lines override the default in meters and routing", () =>
   assert.equal(m.routing(state).row.id, "two");
   assert.equal(m.windowState({ used_percent: 85 }, { read_at: now }, policy, now).state, "At stop line");
 });
+
+test("Needs you keeps one item per id and leaves advice out", () => {
+  const request = { id: "one", kind: "inbox", node: "demo", text: "Which color?" };
+  const another = { ...request, id: "two" };
+  const state = { inbox: [request, { ...request }, another], due: [
+    { ...request }, { id: "step", node: "demo", kind: "handback", text: "Review the report" },
+    { id: "advice", node: "demo", kind: "job", informational: true, text: "Consider a smaller job" },
+  ] };
+  const view = m.needsView(state, "demo");
+  assert.deepEqual(view.items.map(i => i.id), ["one", "two", "step"]);
+  assert.deepEqual(view.inbox.map(i => i.id), ["one", "two"]);
+  assert.deepEqual(view.due.map(i => i.id), ["step"]);
+  assert.equal(m.needAsk("Choose a color; waiting on operator; clears when chosen; since: 2020-01-01; recommendation: blue; default: gray"),
+    "Choose a color; waiting on operator; clears when chosen");
+  assert.equal(state.inbox.length, 3);
+});

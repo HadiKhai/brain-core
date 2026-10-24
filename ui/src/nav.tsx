@@ -10,7 +10,7 @@ import {
 } from "@/components/ui/sidebar";
 import { Button } from "@/components/ui/button";
 import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem, DropdownMenuGroup, DropdownMenuLabel } from "@/components/ui/dropdown-menu";
-import { list, quote, safeHref, treeRows, threads, tone, jobTitle, learningRows, type RecordData } from "./model";
+import { list, needsView, quote, safeHref, treeRows, threads, tone, jobTitle, learningRows, type RecordData } from "./model";
 import { fold } from "./search";
 import { writeRoute, type Route } from "./routes";
 
@@ -21,8 +21,9 @@ export function Navigation({ s, route, go, onAdd, onNotice }: {
 }) {
   const { setOpenMobile, isMobile } = useSidebar();
   const [filter, setFilter] = useState(""), [closed, setClosed] = useState<Record<string, boolean>>({});
-  const nodes = list(s?.nodes), open = threads(nodes), due = list(s?.due);
-  const needs = (id: string) => list(s?.inbox).filter((a) => a.node === id).length;
+  const nodes = list(s?.nodes), open = threads(nodes);
+  const { inbox, due } = needsView(s || {});
+  const needs = (id: string) => inbox.filter((a) => a.node === id).length;
   const rows = treeRows(nodes), long = rows.length > 8;
   const shown = filter ? rows.filter(({ node }) => fold(node.title).includes(fold(filter))) : rows;
   const hidden = new Set<string>();
@@ -76,7 +77,7 @@ export function Navigation({ s, route, go, onAdd, onNotice }: {
           <SidebarGroup>
             <SidebarMenu>
               {item("overview", "Overview", LayoutDashboard)}
-              {item("inbox", "Inbox", InboxIcon, list(s?.inbox).length + due.length, true)}
+              {item("inbox", "Inbox", InboxIcon, inbox.length + due.length, true)}
             </SidebarMenu>
           </SidebarGroup>
           <SidebarGroup>

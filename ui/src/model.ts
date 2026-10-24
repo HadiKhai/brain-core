@@ -380,3 +380,24 @@ export function hourly(s: RecordData) {
 export function allJobs(nodes: RecordData[]): RecordData[] {
   return nodes.flatMap((n) => list(n.jobs?.rows).map((r) => ({ ...r, _node: n, _open: list(n.jobs?.open).find((o) => o.Job === r.Job && o.Started === r.Started) })));
 }
+
+// One source item can appear in status, inbox and coordinator steps.
+export function needRows(items: RecordData[]) {
+  const seen = new Set<string>();
+  return items.filter((item) => {
+    if (item.informational || ["job", "advice"].includes(item.kind)) return false;
+    if (typeof item.id !== "string" || !item.id) return true;
+    if (seen.has(item.id)) return false;
+    seen.add(item.id);
+    return true;
+  });
+}
+export function needsView(s: RecordData, node?: string) {
+  const inScope = (item: RecordData) => node === undefined || item.node === node;
+  const requests = new Set(list(s.inbox).filter(inScope));
+  const items = needRows([...requests, ...list(s.due).filter(inScope)]);
+  return { items, inbox: items.filter(i => requests.has(i)), due: items.filter(i => !requests.has(i)) };
+}
+export const needAsk = (text: unknown) => String(text || "")
+  .replace(/(?:^|;\s*)(?:since|recommendation|default):\s*[^;]*/gi, "")
+  .replace(/^;\s*/, "").trim();

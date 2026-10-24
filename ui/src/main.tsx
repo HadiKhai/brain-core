@@ -19,7 +19,7 @@ import { Project, Projects, ancestors, projectState } from "./project";
 import { Graph } from "./graph";
 import { RecordPicker } from "./picker";
 import { readRoute, writeRoute, type Route } from "./routes";
-import { list, count, threads, learningRows, type RecordData } from "./model";
+import { list, needsView, count, threads, learningRows, type RecordData } from "./model";
 import "./index.css";
 declare global {
   interface Window {
@@ -45,7 +45,7 @@ const agentsCrumb = (go: (r: Partial<Route> & { view: string }) => void): Crumb[
 function heading(s: RecordData | null, route: Route, go: (r: Partial<Route> & { view: string }) => void): { title: string; subtitle?: string; crumbs?: Crumb[] } {
   const nodes = list(s?.nodes), open = s ? threads(nodes) : [];
   switch (route.view) {
-    case "inbox": return { title: "Inbox", subtitle: s ? `${count(list(s.inbox).length, "request")} · ${count(list(s.due).length, "coordinator step")}` : undefined };
+    case "inbox": return { title: "Inbox", subtitle: s ? `${count(needsView(s).inbox.length, "request")} · ${count(needsView(s).due.length, "coordinator step")}` : undefined };
     case "projects": return { title: "Projects", subtitle: s ? `${nodes.filter((n) => !n.archived).length} in this brain · ${count(open.length, "thread")} in flight` : undefined };
     case "project": {
       const n = nodes.find((x) => x.id === route.node);
