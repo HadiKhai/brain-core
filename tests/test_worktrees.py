@@ -83,6 +83,39 @@ class Workbench(Scenario):
         self.b(r, "wt", "rm", "app", "feat-b", ok=False)        # uncommitted work is never discarded silently
         self.assertIn("feat-c", self.b(r, "wt", "list"))
 
+    def test_add_reuses_cached_submodule_gitdir_before_setup_without_remote(self):
+        r = self.init("alice")
+        source = self.repo(self.tmp / "module-source")
+        home = self.repo(self.tmp / "app")
+        self.git("submodule", "add", "--name", "cached-module", str(source), "vendor/module", cwd=home)
+        self.git("commit", "-qam", "Cache submodule", cwd=home)
+        cached = home / ".git/modules/cached-module"
+        before = (cached / "HEAD").read_bytes()
+        before_config = (cached / "config").read_bytes()
+        source.rename(self.tmp / "remote-unavailable")
+        self.b(r, "new", "app", "--title", "App", "--home", str(home))
+        (r / "nodes/app/worktree-setup.sh").write_text("git submodule update --init --recursive\n")
+        out = self.b(r, "wt", "add", "app", "job-cached")
+        wt = self.tmp / "app-work/worktrees/job-cached"
+        self.assertIn("reused submodule: vendor/module", out)
+        self.assertIn("setup: ok", out)
+        self.assertEqual((wt / "vendor/module/README.md").read_text(), "hello\n")
+        common = self.git("rev-parse", "--git-common-dir", cwd=wt / "vendor/module").strip()
+        module_gitdir = (wt / "vendor/module" / common).resolve()
+        self.assertNotEqual(module_gitdir, cached.resolve())
+        self.assertEqual((module_gitdir / "objects/info/alternates").read_text().strip(), str(cached / "objects"))
+        self.assertEqual((cached / "HEAD").read_bytes(), before)
+        self.assertEqual(self.git("status", "--porcelain", cwd=wt), "")
+        # A second job gets independent metadata and the requested detached commit.
+        self.b(r, "wt", "add", "app", "job-second", "--no-setup")
+        other = wt.parent / "job-second/vendor/module"
+        self.assertEqual(self.git("rev-parse", "HEAD", cwd=other),
+                         self.git("rev-parse", "HEAD", cwd=home / "vendor/module"))
+        self.assertNotEqual(self.git("rev-parse", "--git-dir", cwd=other),
+                            self.git("rev-parse", "--git-dir", cwd=wt / "vendor/module"))
+        self.assertEqual((cached / "HEAD").read_bytes(), before)
+        self.assertEqual((cached / "config").read_bytes(), before_config)
+
     def test_prune_reports_submodules_and_retains_shared_module_data(self):
         r = self.init("alice")
         source = self.repo(self.tmp / "module-source")
