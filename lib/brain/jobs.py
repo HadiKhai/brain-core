@@ -31,6 +31,7 @@ JOBS_LEGACY_MARKS = ("<!-- brain:job-ledger v2 -->", "<!-- brain:job-ledger v1 -
 JOB_COLS = ["Job", "Started", "Ended", "Hours", "Outcome", "Commits", "Reviews", "Runtime", "Cause"]
 JOB_COLS += ["Class", "Model", "Effort"]
 JOB_COLS += ["Lessons", "Lesson check", "Switches", "Settled"]
+JOB_COLS += ["Land check"]
 JOB_COLS += ["Active h", "Agent h", "Fresh in", "Cache read", "Cache write", "Output", "Reasoning", "Tool calls",
              "Compactions", "Sub-agents", "Sub share", "Models", "Budget", "Usage"]
 
@@ -1024,3 +1025,34 @@ def job_advice(inst, n, row):
         out.append("no contract: brain jobs <node> --branch <branch> --contract-file <file> says what the worker may do "
                    "without asking")
     return out
+
+
+def read_land_check(n, row):
+    try:
+        receipt = json.loads(row.get('Land check') or 'null')
+        return receipt if isinstance(receipt, dict) and receipt.get('version') == 1 else None
+    except (ValueError, TypeError):
+        return None
+
+
+def record_land_check(inst, n, key, receipt):
+    with _m_instance.brain_lock(inst):
+        rows = ledger_rows(n)
+        matches = [r for r in rows or [] if job_key(r) == key and not r.get('Ended')]
+        if len(matches) != 1:
+            raise ValueError('land-check job changed or closed')
+        row = matches[0]
+        if (not isinstance(receipt, dict) or receipt.get('version') != 1 or receipt.get('node') != n['id']
+                or receipt.get('job_key') != key or receipt.get('branch') != row['Job']
+                or receipt.get('result') not in ('passed', 'failed') or type(receipt.get('returncode')) is not int
+                or (receipt['result'] == 'passed') != (receipt['returncode'] == 0)
+                or any(not isinstance(receipt.get(k), str) or not receipt[k] for k in
+                       ('head', 'command', 'config_digest', 'checked_at'))):
+            raise ValueError('invalid land-check receipt')
+        checked = inst.parse_time(receipt['checked_at'])
+        if not checked or not 0 <= (inst.now_dt() - checked).total_seconds() <= 300:
+            raise ValueError('stale land-check receipt')
+        row['Land check'] = json.dumps(receipt, sort_keys=True, separators=(',', ':'))
+        _m_guard.no_terms_in(n, row['Land check'], 'land-check receipt')
+        write_jobs(inst, n, rows)
+        inst.commit([], f"{n['id']}: land-check evidence")
