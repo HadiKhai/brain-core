@@ -42,7 +42,10 @@ def attempt_binding(n, row):
     base = _m_verify.ready_refs(n, branch)[1] if home else ''
     return {'head': head, 'base': base, 'inputs': _m_verify.verify_inputs(n, w) if w else '',
             'integration_base': _m_verify.integration_parent(n, base) if home else '',
-            'verify_command': n['fm'].get('verify', '')}
+            'verify_command': n['fm'].get('verify', ''),
+            'input_selection': _m_jobs.digest(_m_common.lst(n['fm'].get('verify_inputs'))
+                                              or _m_common.lst(_m_verify.VERIFY_INPUTS)),
+            'port_reservation': _m_jobs.digest([w.get('port'), w.get('ports', 1)]) if w else ''}
 
 
 def current_attempt(n, row, strict=True):

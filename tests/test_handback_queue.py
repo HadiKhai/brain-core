@@ -5,6 +5,7 @@ import datetime
 import io
 import json
 import os
+import shlex
 import subprocess
 import sys
 import threading
@@ -138,7 +139,8 @@ class HandbackLifecycle(Scenario):
 
     def test_failed_native_input_check_retains_diagnostics_without_stale_readiness(self):
         m, inst, n, row = self.fixture()
-        initial = dict(head='a', base='b', inputs='before', integration_base='b', verify_command='true')
+        initial = dict(head='a', base='b', inputs='before', integration_base='b', verify_command='true',
+                       input_selection='original selection', port_reservation='4100/1')
         args = argparse.Namespace(id='root', branch=row['Job'], state='done', summary='Synthetic result',
                                   question=None, lessons='none: fixture', report=None, reviews=1)
         cases = [('negative inputs', {'inputs': 'after'}, None, True),
@@ -146,7 +148,9 @@ class HandbackLifecycle(Scenario):
                  ('head', {'inputs': 'after', 'head': 'changed'}, None, False),
                  ('base', {'inputs': 'after', 'base': 'changed'}, None, False),
                  ('integration base', {'inputs': 'after', 'integration_base': 'changed'}, None, False),
-                 ('command', {'inputs': 'after', 'verify_command': 'changed'}, None, False)]
+                 ('command', {'inputs': 'after', 'verify_command': 'changed'}, None, False),
+                 ('port', {'inputs': 'after', 'port_reservation': '4101/1'}, None, False),
+                 ('selection', {'inputs': 'after', 'input_selection': 'changed'}, None, False)]
         path = m.handback_file(n, row)
         with mock.patch.dict(os.environ, self.env, clear=True), \
                 mock.patch.object(m, 'load', return_value=inst), mock.patch.object(m.Instance, 'commit'), \
@@ -171,6 +175,49 @@ class HandbackLifecycle(Scenario):
                     else:
                         self.assertEqual(path.read_bytes() if path.exists() else None, before)
                         self.assertEqual(m.current_attempt(n, row)['state'], 'interrupted')
+
+    def native_input_failure_with_configuration_drift(self, change):
+        from test_verify import VerifyInputDiagnostics
+        case = VerifyInputDiagnostics()
+        case.setUp()
+        try:
+            root, home, wt = case.inputs_job()
+            source = wt / 'apps/web/.env.local'
+            source.write_text('FIXTURE_VALUE=before\n')
+            script = case.tmp / 'native-input-drift.py'
+            code = ('import json\nfrom pathlib import Path\n'
+                    + f'p = Path({str(source)!r})\np.write_text(p.read_text() + "changed\\n")\n')
+            if change == 'port':
+                local = root / '.brain/local.json'
+                code += (f'p = Path({str(local)!r})\ndata = json.loads(p.read_text())\n'
+                         'data["nodes"]["a"]["worktrees"]["job"]["port"] = 4101\n'
+                         'p.write_text(json.dumps(data))\n')
+            else:
+                node = root / 'nodes/a/node.md'
+                code += (f'p = Path({str(node)!r})\ntext = p.read_text()\n'
+                         'assert text.count("apps/web/.env.*") == 1\n'
+                         'p.write_text(text.replace("apps/web/.env.*", "apps/web/.env.other"))\n')
+            script.write_text(code)
+            case.b(root, 'set', 'a', 'verify=' + shlex.join([sys.executable, '-B', str(script)]))
+            output = case.finish(root, ok=False)
+            m = core_loader.SourceFileLoader('native_configuration_drift', str(CORE / 'bin/brain')).load_module()
+            n = m.Instance(root).node('a')
+            row = m.open_job(m.read_jobs(n), 'job')
+            if change == 'port':
+                self.assertEqual(n['local']['worktrees']['job']['port'], 4101)
+            else:
+                self.assertEqual(n['fm']['verify_inputs'], 'apps/web/.env.other')
+            self.assertFalse(m.handback_file(n, row).exists())
+            self.assertEqual(m.current_attempt(n, row)['state'], 'interrupted')
+            self.assertIn('no stale handback published', output)
+        finally:
+            case.tearDown()
+
+    def test_native_input_failure_refuses_port_drift(self):
+        self.native_input_failure_with_configuration_drift('port')
+
+    def test_native_input_failure_refuses_selection_drift(self):
+        self.native_input_failure_with_configuration_drift('selection')
 
     def test_p6_enqueue_claim_and_terminal_are_single_owner(self):
         m, inst, n, row = self.fixture()
