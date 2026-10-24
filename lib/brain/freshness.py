@@ -51,7 +51,7 @@ def freshness_hash(inst, n, name):
                           if p and home != p.resolve() and p.resolve() not in home.parents]
     stream, identity = _m_history.history_open(path, [home], forbidden)
     if stream is None:
-        if not path.exists() and name == n['fm'].get('upstream_output'):
+        if not path.exists() and not path.is_symlink() and name == n['fm'].get('upstream_output'):
             raise FileNotFoundError('index output missing')
         raise ValueError('declared file is unavailable or outside its allowed scope')
     with stream:
@@ -73,6 +73,9 @@ def freshness_hash(inst, n, name):
             raise ValueError('declared file changed while fingerprinting')
         if _m_history.history_fd_path(stream.fileno()) != str(path.resolve()):
             raise ValueError('declared file moved while fingerprinting')
+        attached = os.stat(path, follow_symlinks=False)
+        if (attached.st_dev, attached.st_ino) != identity:
+            raise ValueError('declared file was replaced while fingerprinting')
         return digest.hexdigest()
 
 

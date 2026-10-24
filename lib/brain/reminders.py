@@ -22,8 +22,8 @@ def lifecycle_empty():
 
 
 def lifecycle_read(inst):
-    path = inst.root / '.brain/lifecycle.json'
-    if path.parent.resolve() != inst.root.resolve() / '.brain':
+    path = inst.root / '.brain/wake/lifecycle.json'
+    if path.parent.resolve() != inst.root.resolve() / '.brain/wake':
         raise ValueError('unsafe lifecycle state directory')
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
@@ -50,10 +50,10 @@ def lifecycle_store(inst, readonly=False):
     if readonly:
         yield lifecycle_read(inst)
         return
-    folder = inst.root / '.brain'
-    if folder.resolve() != inst.root.resolve() / '.brain':
+    folder = inst.root / '.brain/wake'
+    if folder.resolve() != inst.root.resolve() / '.brain/wake':
         raise ValueError('unsafe lifecycle state directory')
-    folder.mkdir(exist_ok=True)
+    folder.mkdir(parents=True, exist_ok=True)
     path = folder / 'lifecycle.lock'
     fd = os.open(path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
     with os.fdopen(fd, 'a+') as lock:
@@ -213,8 +213,11 @@ def record_answer(inst, n, line, item_id, text):
 
 
 def reminder_key(item):
+    need = item.get('need')
+    if need is None and item['kind'] in ('handback', 'missing-preview'):
+        need = ' '.join(item['text'].split())
     return _m_jobs.digest([item['node'], item['kind'], item.get('job'),
-                           item.get('episode') or ' '.join(item['text'].split())])
+                           item.get('episode') or ' '.join(item['text'].split()), need])
 
 
 def reminder_reconcile(inst, n, items, data):

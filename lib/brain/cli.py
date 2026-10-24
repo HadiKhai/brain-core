@@ -23,6 +23,7 @@ from . import knowledge as _m_knowledge
 from . import land_checks as _m_land_checks
 from . import messages as _m_messages
 from . import machine as _m_machine
+from . import freshness as _m_freshness
 from . import nodes as _m_nodes
 from . import policy as _m_policy
 from . import reports as _m_reports
@@ -104,7 +105,7 @@ def reexec_into_instance_core():
 
 # Commands that change nothing in the instance: they never wait for the lock.
 READ_ONLY = {"cmd_show", "cmd_tree", "cmd_status", "cmd_now", "cmd_jobs", "cmd_stale", "cmd_ui", "cmd_guard",
-             "cmd_due", "cmd_inbox",
+             "cmd_due", "cmd_inbox", "cmd_index",
              "cmd_brief", "cmd_hire", "cmd_reports", "cmd_brains", "cmd_use", "cmd_machine", "cmd_usable",
              "cmd_item_list", "cmd_item_show", "cmd_wt_list", "cmd_selftest", "cmd_init", "cmd_hook", "cmd_hook_approve", "cmd_help",
              "cmd_dashboard", "cmd_ready", "cmd_usage", "cmd_scan", "cmd_scrub", "cmd_history",
@@ -130,6 +131,10 @@ def writes(a):
         return a.refresh
     if name == "cmd_inbox":
         return a.new
+    if name == 'cmd_index':
+        return a.record
+    if name == 'cmd_due':
+        return bool(getattr(a, 'defer', None) or getattr(a, 'ack', None))
     if name == "cmd_changes":
         return a.seen
     if name == "cmd_connect":
@@ -276,10 +281,21 @@ def main():
     cmd("due", _m_status.cmd_due, "coordinator actions and machine holds; empty means no output",
         opt("--since-wake", action="store_true", help="new file-only wake items compared with the wake before the latest delivery"),
         opt("--machine", action="store_true", help="also show informational machine readings, even without node actions"),
+        opt('--defer', nargs=2, metavar=('ITEM_ID', 'UNTIL'), help='defer an eligible reminder until an absolute timestamp'),
+        opt('--ack', metavar='ITEM_ID', help='acknowledge a current parked/blocked handback episode'),
+        opt('--reason', help='required recorded reason for --defer or --ack'),
+        opt('--resume', help='required resume condition for --ack'),
+        opt('--until', help='optional absolute resume time for --ack'),
+        opt('--handled', action='store_true', help='also show current handled reminders and their reasons'),
         opt("id", nargs="?"), opt("--json", action="store_true"),
         opt("--quiet", action="store_true", help="no output; exit 1 for node actions, including its held work, 0 otherwise"))
     cmd("inbox", _m_status.cmd_inbox, "needs in a node's subtree (default: calling node); --new remembers per reporter",
-        opt("id", nargs="?"), opt("--json", action="store_true"), opt("--new", action="store_true"))
+        opt("id", nargs="?"), opt("--json", action="store_true"), opt("--new", action="store_true"),
+        opt('--weekly', action='store_true', help='read-only sweep of unresolved requests aged at least seven days'))
+    cmd('answer', _m_status.cmd_answer, 'record text for exactly one current inbox episode, retaining source/history',
+        'item_id', 'text')
+    cmd('index', _m_freshness.cmd_index, 'configured upstream index freshness; never runs a generator', 'id',
+        opt('--record', action='store_true', help='explicitly record current input/output fingerprints after regeneration'))
     cmd("msg", _m_messages.cmd_msg, "format start/done/blocked/question for a coordinator (does not send)",
         "id", opt("kind", choices=_m_messages.MESSAGE_KINDS), "message", opt("--branch"), opt("--report"))
     cmd("handback", _m_jobs.cmd_handback, "done/blocked/question hand-back; worker messages are start/done/blocked/question",
@@ -449,7 +465,7 @@ def main():
     cmd("heavy", _m_machine.cmd_heavy, "wait until the machine admits new heavy work",
         opt("--node", help="coordinator whose work is waiting (default root)"))
     cmd("machine", _m_machine.cmd_machine, "machine state, sampler and bindings",
-        opt("action", nargs="?", choices=["sample", "install", "uninstall"]),
+        opt("action", nargs="?", choices=["sample", "install", "uninstall", 'wake-setup']), opt('id', nargs='?'),
         opt("--yes", action="store_true", help="install/remove the sampler with operator consent"),
         opt("--missing-homes", action="store_true", dest="missing_homes"))
     cmd("brains", _m_hosts.cmd_brains, "the brains on this machine: brain brains [forget <name>]",

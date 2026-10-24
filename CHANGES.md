@@ -124,6 +124,74 @@ After upgrading: configure `land_check=<command>` where needed and use `brain la
 before each supported outward step. Missing settings add no check or permission. Receipts
 do not establish readiness or consent; arbitrary external pushes and host publication
 enforcement remain outside core's supported-path boundary.
+## 2026-10-24: M8 answer inbox request episodes and report weekly age
+
+For agents:
+- Inbox output groups stable request IDs and age by node. `brain answer <id> "<text>"`
+  records an answer to one current episode, retaining its original source and history.
+- `brain inbox --weekly` reports unanswered requests at least seven days old without
+  discarding them. `--new` remains reporting acknowledgement, separate from answers.
+
+After upgrading:
+- No migration is required. Answer receipts are bounded machine-local state under
+  `.brain/wake/`; no new host schedule or automatic age-based resolution is installed.
+
+## 2026-10-24: P4 acknowledge a specific parked handback episode
+
+For agents:
+- `brain due --ack <id> --reason "<text>" --resume "<condition>" [--until <time>]`
+  handles one eligible blocked handback. Changed episodes and expired resume times
+  reappear; unanswered human questions, failures and restart needs stay visible.
+- `brain due --handled` and generated status retain the parked state and handling reason.
+
+After upgrading:
+- Existing handbacks remain readable; no migration or automatic resume execution.
+  Receipts are local and never replace the underlying worker signal.
+
+## 2026-10-24: P14 defer eligible reminders until absolute expiry
+
+For agents:
+- `brain due --defer <id> <absolute-until> --reason "<text>"` defers a missing-preview
+  episode. Changed needs and expiry rearm it; protected questions and failures cannot
+  be deferred. A `preview=none` setting and the preview requirement remain intact.
+
+After upgrading:
+- No migration is required. Deferrals use bounded local receipts and never edit
+  readiness, verification or preview requirements. Other reminder kinds remain protected.
+
+## 2026-10-24: P15 opt in to explicit upstream index fingerprints
+
+For agents:
+- Configure `upstream_inputs` and `upstream_output` as explicit files within a node's
+  allowed home. `brain check` flags missing, stale or unknown indexes; unreadable
+  inputs never count as fresh. `brain index <node> --record` records current fingerprints.
+
+After upgrading:
+- Unconfigured nodes are unchanged. No script is run; explicitly regenerate the
+  index before recording. Automatic regeneration remains outside this freshness slice.
+
+## 2026-10-24: M12 print coordinator-thread wake provisioning plans
+
+For agents:
+- `brain machine wake-setup <node>` names the current bound coordinator, prints the
+  structured T3 webhook payload to run from that thread, and gives local bind steps.
+  Unsupported hosts and missing coordinators produce explicit setup gaps.
+
+After upgrading:
+- No bindings migrate and no host call occurs. Re-run the plan after rebinding;
+  keep returned capabilities private. Actual host provisioning remains separate.
+
+## 2026-10-24: R1 request a fresh brief at sustained context or token limits
+
+For agents:
+- Due raises one stable `restart from brief` item at three compactions or twice
+  the job's token budget, naming both measures. It never automatically stops a job.
+- Successful rebrief delivery records a job-scoped usage baseline so pre-restart
+  counters do not immediately alert again. Only the coordinator restarts the worker.
+
+After upgrading:
+- No migration is required. Initial briefs do not reset budgets; restart baselines
+  are bounded machine-local receipts. Automatic worker termination remains outside scope.
 
 ## 2026-10-24: Configure worker runtime and model defaults per job class
 

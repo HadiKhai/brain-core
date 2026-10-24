@@ -5,6 +5,7 @@ import datetime
 import io
 import json
 import os
+import sys
 from unittest import mock
 
 import core_loader
@@ -14,6 +15,7 @@ from scenario import CORE, Scenario
 class DueLifecycle(Scenario):
     def setUp(self):
         super().setUp()
+        self.env['BRAIN_NO_UPDATE_CHECK'] = '1'
         env = mock.patch.dict(os.environ, self.env)
         env.start()
         self.addCleanup(env.stop)
@@ -40,7 +42,7 @@ class DueLifecycle(Scenario):
         line = self.request()
         item = self.requests()[0]
         self.assertEqual(item['age_days'], 8)
-        saved = {p.name: p.read_bytes() for p in (self.root / '.brain').iterdir() if p.is_file()}
+        saved = {str(p.relative_to(self.root)): p.read_bytes() for p in (self.root / '.brain').rglob('*') if p.is_file()}
         with mock.patch.object(self.m, 'machine_episode_due', side_effect=AssertionError('machine scan')), \
                 mock.patch.object(self.m, 'pending_imports', side_effect=AssertionError('import scan')), \
                 mock.patch.object(self.m, 'runaway_jobs', side_effect=AssertionError('job scan')):
@@ -49,7 +51,7 @@ class DueLifecycle(Scenario):
         with mock.patch.object(self.m, 'load', return_value=self.inst), contextlib.redirect_stdout(io.StringIO()) as output:
             self.m.cmd_inbox(argparse.Namespace(id='root', new=False, json=True, weekly=True))
         self.assertEqual([i['id'] for i in json.loads(output.getvalue())], [item['id']])
-        self.assertEqual({p.name: p.read_bytes() for p in (self.root / '.brain').iterdir() if p.is_file()}, saved)
+        self.assertEqual({str(p.relative_to(self.root)): p.read_bytes() for p in (self.root / '.brain').rglob('*') if p.is_file()}, saved)
         self.now -= datetime.timedelta(days=2)
         with mock.patch.object(self.m, 'load', return_value=self.inst), contextlib.redirect_stdout(io.StringIO()) as output:
             self.m.cmd_inbox(argparse.Namespace(id='root', new=False, json=True, weekly=True))
@@ -58,17 +60,17 @@ class DueLifecycle(Scenario):
         with mock.patch.object(self.m, 'load', return_value=self.inst), contextlib.redirect_stdout(io.StringIO()):
             self.m.cmd_inbox(argparse.Namespace(id='root', new=True, json=True, weekly=False))
         self.assertEqual(self.requests()[0]['id'], item['id'])  # reporting is not answering
-        state = (self.root / '.brain/lifecycle.json').read_bytes()
+        state = (self.root / '.brain/wake/lifecycle.json').read_bytes()
         with mock.patch.object(self.m, 'inbox_items', return_value=([
                 {**item, 'id': 'abcdef111111111111111111'}, {**item, 'id': 'abcdef222222222222222222'}], {})):
             with self.assertRaises(SystemExit):
                 self.m.answer_inbox(self.inst, 'abcdef', 'Ambiguous answer')
-        self.assertEqual((self.root / '.brain/lifecycle.json').read_bytes(), state)
+        self.assertEqual((self.root / '.brain/wake/lifecycle.json').read_bytes(), state)
         before = (self.root / 'inbox.md').read_text()
         self.m.answer_inbox(self.inst, item['id'][:8], 'Blue; this is recorded text.')
         self.assertEqual((self.root / 'inbox.md').read_text(), before)
         self.assertEqual(self.requests(), [])
-        records = json.loads((self.root / '.brain/lifecycle.json').read_text())['answers']
+        records = json.loads((self.root / '.brain/wake/lifecycle.json').read_text())['answers']
         self.assertEqual(records[-1]['answer'], 'Blue; this is recorded text.')
         self.assertIn(line.strip()[2:], records[-1]['source'])
         (self.root / 'inbox.md').write_text('')
@@ -90,6 +92,8 @@ class DueLifecycle(Scenario):
         self.assertEqual(self.m.reminder_items(self.inst, self.n, raw), [])
         handled = self.m.reminder_items(self.inst, self.n, raw, include_handled=True)[0]
         self.assertEqual(handled['handling']['resume_condition'], 'Fixture becomes available')
+        changed_need = [{**raw[0], 'text': 'Waiting for a different dependency'}]
+        self.assertEqual(len(self.m.reminder_items(self.inst, self.n, changed_need)), 1)
         changed = [{**raw[0], 'episode': 'second'}]
         self.assertEqual(len(self.m.reminder_items(self.inst, self.n, changed)), 1)
         question = [{**raw[0], 'state': 'question', 'episode': 'question'}]
@@ -101,11 +105,11 @@ class DueLifecycle(Scenario):
                                {**raw[0], 'protected': True},
                                {**raw[0], 'kind': 'restart'}, {**raw[0], 'state': 'failed'}):
             current = self.m.reminder_items(self.inst, self.n, [protected_item])[0]
-            before = (self.root / '.brain/lifecycle.json').read_bytes()
+            before = (self.root / '.brain/wake/lifecycle.json').read_bytes()
             with self.assertRaises(SystemExit):
                 self.m.record_reminder(self.inst, self.n, [protected_item], current['id'], 'ack',
                                        'Handled', resume_condition='Later')
-            self.assertEqual((self.root / '.brain/lifecycle.json').read_bytes(), before)
+            self.assertEqual((self.root / '.brain/wake/lifecycle.json').read_bytes(), before)
         item = self.m.reminder_items(self.inst, self.n, raw)[0]
         self.m.record_reminder(self.inst, self.n, raw, item['id'], 'ack', 'Waiting',
                                until='2026-01-15T13:00:00Z', resume_condition='Dependency ready')
@@ -142,6 +146,18 @@ class DueLifecycle(Scenario):
         self.assertFalse(any(i['kind'] == 'missing-preview' for i in self.m.watch_items(self.inst, self.n)))
         self.now += datetime.timedelta(days=1)
         self.assertTrue(any(i['kind'] == 'missing-preview' for i in self.m.watch_items(self.inst, self.n)))
+        receipt = self.root / '.brain/wake/lifecycle.json'
+        receipt.write_text('{damaged receipt')
+        self.assertEqual(self.m.reminder_items(self.inst, self.n, raw)[0]['kind'], 'missing-preview')
+        self.assertEqual(receipt.read_text(), '{damaged receipt')
+        self.request('A live protected question')
+        self.assertTrue(self.m.inbox_lines(self.n))
+        receipt.unlink()
+        outside = self.tmp / 'outside-receipts.json'
+        outside.write_text('retain outside')
+        receipt.symlink_to(outside)
+        self.assertTrue(self.m.reminder_items(self.inst, self.n, raw))
+        self.assertEqual(outside.read_text(), 'retain outside')
 
     def test_p15_freshness_requires_recorded_inputs_and_output(self):
         self.assertIsNone(self.m.freshness_state(self.inst, self.n))
@@ -167,10 +183,18 @@ class DueLifecycle(Scenario):
         (self.root / 'source.txt').symlink_to(outside)
         self.n['fm']['upstream_inputs'] = 'source.txt'
         self.assertEqual(self.m.freshness_state(self.inst, self.n)['state'], 'unknown')
-        before = (self.root / '.brain/lifecycle.json').read_bytes()
+        before = (self.root / '.brain/wake/lifecycle.json').read_bytes()
         with self.assertRaises(SystemExit):
             self.m.record_freshness(self.inst, self.n)
-        self.assertEqual((self.root / '.brain/lifecycle.json').read_bytes(), before)
+        self.assertEqual((self.root / '.brain/wake/lifecycle.json').read_bytes(), before)
+        (self.root / 'source.txt').unlink()
+        (self.root / 'source.txt').write_text('input three')
+        fm, body = self.m.read_fm(self.root / 'node.md')
+        self.m.write_fm(self.root / 'node.md', {**fm, **self.n['fm']}, body)
+        problems = self.m.collect_problems(self.inst)[0]
+        self.assertTrue(any('upstream index stale' in p for p in problems))
+        self.m.record_freshness(self.inst, self.n)
+        self.assertFalse(any('upstream index' in p for p in self.m.collect_problems(self.inst)[0]))
 
     def test_m12_wake_setup_targets_bound_coordinator_without_capability(self):
         self.inst.cfg['host'] = 't3'
@@ -224,3 +248,53 @@ class DueLifecycle(Scenario):
             self.assertEqual(next(i for i in due if i['kind'] == 'restart')['episode'], again['episode'])
             self.assertEqual(row['Ended'], '')
             self.assertIsNone(self.m.usage_restart_item(self.inst, self.n, {**row, 'Ended': '2026-01-15T11:00Z'}))
+        args = argparse.Namespace(id='root', small=False, branch=None, import_study=False,
+            task='Inspect a fixture', task_file=None, context_file=None, why_separate='fixture work',
+            allow_unexplained=False, peer=None, runtime='codex', model='fixture-model', job_class='build',
+            effort=None, to=None, out=None)
+        with mock.patch.object(self.m, 'load', return_value=self.inst), \
+                mock.patch.object(self.m, 'acknowledge_usage_restart') as ack:
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.m.cmd_brief(args)
+            ack.assert_called_once()
+            ack.reset_mock()
+            stream = mock.Mock(wraps=io.StringIO())
+            stream.flush.side_effect = BrokenPipeError('fixture delivery failure')
+            with mock.patch.object(sys, 'stdout', stream), self.assertRaises(BrokenPipeError):
+                self.m.cmd_brief(args)
+            ack.assert_not_called()
+
+    def test_cli_lifecycle_commands_use_fixture_state_only(self):
+        self.request()
+        asks = [i for i in json.loads(self.b(self.root, 'inbox', 'root', '--weekly', '--json'))
+                if i['kind'] == 'inbox']
+        self.assertEqual(len(asks), 1)
+        self.assertIn('answer recorded', self.b(self.root, 'answer', asks[0]['id'], 'Fixture answer'))
+        self.assertEqual(json.loads(self.b(self.root, 'inbox', 'root', '--weekly', '--json')), [])
+        fm, body = self.m.read_fm(self.root / 'node.md')
+        self.m.write_fm(self.root / 'node.md', {**fm, 'labels': 'kind:code'}, body)
+        closed = {**dict.fromkeys(self.m.JOB_COLS, ''), 'Job': 'job-merged',
+                  'Started': '2026-01-01T10:00Z', 'Ended': '2026-01-01T11:00Z',
+                  'Outcome': 'merged', 'Settled': 'yes'}
+        parked = {**dict.fromkeys(self.m.JOB_COLS, ''), 'Job': 'import:fixture',
+                  'Started': '2026-01-15T09:00Z'}
+        self.m.write_jobs(self.inst, self.n, [closed, parked])
+        handback = self.m.handback_file(self.n, parked)
+        handback.parent.mkdir(exist_ok=True)
+        handback.write_text(json.dumps({'version': 2, 'job': parked['Job'], 'started': parked['Started'],
+            'state': 'blocked', 'lessons': 'none: fixture', 'report': 'fixture-report.md',
+            'ready': None, 'ready_reasons': [], 'wake_id': 'a' * 32}))
+        due = json.loads(self.b(self.root, 'due', 'root', '--json'))
+        preview = next(i for i in due if i['kind'] == 'missing-preview')
+        blocked = next(i for i in due if i['kind'] == 'handback')
+        self.assertIn('deferred', self.b(self.root, 'due', 'root', '--defer', preview['id'],
+                                        '2999-01-01T00:00:00Z', '--reason', 'Fixture preview later'))
+        self.assertIn('acknowledged', self.b(self.root, 'due', 'root', '--ack', blocked['id'],
+            '--reason', 'Dependency handled', '--resume', 'Fixture dependency ready'))
+        due = json.loads(self.b(self.root, 'due', 'root', '--json'))
+        self.assertNotIn('missing-preview', [i['kind'] for i in due])
+        self.assertNotIn('handback', [i['kind'] for i in due])
+        handled = json.loads(self.b(self.root, 'due', 'root', '--handled', '--json'))
+        self.assertEqual(len([i for i in handled if i.get('handling')]), 2)
+        self.assertIn('unconfigured', self.b(self.root, 'index', 'root'))
+        self.assertIn('gap', json.loads(self.b(self.root, 'machine', 'wake-setup', 'root')))

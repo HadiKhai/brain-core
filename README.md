@@ -179,10 +179,45 @@ silently and changes no files. The host supplies the wake-up; the CLI supplies e
 merges and attention counts. The coordinator writes the judgement around it. Refreshing facts
 never makes old judgement look fresh.
 
-`brain inbox root` is the human's one needs-you list. Items have stable ids;
+`brain inbox root` is the human's one needs-you list. Items are grouped by node with stable ids and age;
 `brain inbox root --new` reports each once per machine and reporter until resolved. Child
 coordinators handle their own subtree and route unresolved needs upward. **The root reports to
 the human.**
+
+`brain answer <item-id> "<answer text>"` records an answer to exactly that current
+inbox episode. It retains the source line and answer history in private machine-local
+receipts; it never executes the answer. Unknown, ambiguous and obsolete IDs refuse.
+`--new` acknowledges reporting only. `brain inbox root --weekly` is a read-only sweep
+of unanswered requests at least seven days old; age never discards a request.
+
+For a handled blocked handback, use `brain due <node> --ack <item-id> --reason
+"<reason>" --resume "<resume condition>" [--until <absolute timestamp>]`.
+`brain due <node> --handled` retains the parked state, reason and resume condition
+in the operator view. `brain due <node> --defer <item-id> 2026-12-01T09:00:00Z
+--reason "<reason>"` defers an eligible missing-preview reminder until expiry.
+The preview requirement and a `preview=none` setting remain intact. A changed or
+recurrent need reappears; questions, failures, restart markers and unreadable evidence
+remain visible. These receipts are local to this machine in `.brain/wake/lifecycle.json`.
+
+An open job raises one protected `restart from brief` item at three compactions or
+twice its configured token budget, naming both measures. The coordinator restarts
+it from a successfully delivered brief; that records a usage baseline so old counters
+do not immediately re-alert. Brain never automatically stops the worker.
+
+For an opt-in upstream index check, set explicit home-relative file paths, for example
+`brain set <node> 'upstream_inputs=["source.txt","metadata.json"]' upstream_output=index.md`.
+`brain index <node>` reports missing, stale, unknown or fresh; `brain check` flags
+configured nonfresh indexes. After explicitly regenerating the index, run
+`brain index <node> --record` to record its input/output fingerprints. Recording
+observations does not establish that a generator ran. Inputs must be readable,
+scope-allowed regular files (at most 64, 16 MiB each); no globbing, cross-node paths,
+scripts or automatic regeneration. Unconfigured nodes retain existing behavior.
+
+`brain machine wake-setup <node>` prints a credential-free plan for the currently
+bound coordinator. Run its structured webhook `schedule_task` payload in that
+coordinator's thread, then use the returned capability only in the printed local
+binding command. A missing coordinator or unsupported host is an explicit setup gap.
+Printing the plan performs no host call and does not provision a wake.
 
 <details>
 <summary><b>Inside a generated worker brief</b> (excerpt; <a href="docs/img/brief.txt">full demo capture</a>)</summary>
@@ -481,12 +516,18 @@ You mostly talk to coordinators, and they run `brain` for you. By hand:
 | `brain due [node]` | coordinator actions from files and local git; empty means silence |
 | `brain due <node> --since-wake [--json]` | new file-only items for the latest wake, compared with the preceding wake's queue snapshot |
 | `brain inbox [node] [--new]` | one needs-you list; stable ids, only-new reporting per machine and reporter |
+| `brain inbox [node] --weekly` | read-only list of unanswered requests at least seven days old |
+| `brain answer <item-id> "<text>"` | answer one current request episode; retain source and history |
+| `brain due [node] --defer <item-id> <absolute-until> --reason "<text>"` | defer an eligible reminder until expiry |
+| `brain due [node] --ack <item-id> --reason "<text>" --resume "<condition>" [--until <absolute-time>]` | acknowledge a blocked episode; `--handled` shows its retained reason |
+| `brain index <node> [--record]` | inspect configured input/output freshness; explicitly record regenerated output |
 | `brain status <node> --refresh` | regenerate facts without advancing judgement freshness |
 | `brain usage` | allowed subscriptions, account-wide windows, age and resets |
 | `brain stale <node> <host time>` | is a node's status behind its thread? Compares moments, whatever the timezones |
 | `brain sync <node>` / `--all` | what happened in a node and its home since the last sync |
 | `brain check [--fix] [--live]` | check mechanically and read cached webhook results; repair safe things with `--fix`; only `--live` sends a real probe |
 | `brain machine` | this machine's bindings |
+| `brain machine wake-setup <node>` | print a target-coordinator webhook provisioning plan |
 </details>
 
 <details>
