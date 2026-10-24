@@ -126,6 +126,8 @@ do not establish readiness or consent; arbitrary external pushes and host public
 enforcement remain outside core's supported-path boundary.
 ## 2026-10-24: M8 answer inbox request episodes and report weekly age
 
+rehearsal evidence waived (release 1 waiver pattern; rehearse sandbox self-check refuses)
+
 For agents:
 - Inbox output groups stable request IDs and age by node. `brain answer <id> "<text>"`
   records an answer to one current episode, retaining its original source and history.
@@ -137,6 +139,8 @@ After upgrading:
   `.brain/wake/`; no new host schedule or automatic age-based resolution is installed.
 
 ## 2026-10-24: P4 acknowledge a specific parked handback episode
+
+rehearsal evidence waived (release 1 waiver pattern; rehearse sandbox self-check refuses)
 
 For agents:
 - `brain due --ack <id> --reason "<text>" --resume "<condition>" [--until <time>]`
@@ -150,6 +154,8 @@ After upgrading:
 
 ## 2026-10-24: P14 defer eligible reminders until absolute expiry
 
+rehearsal evidence waived (release 1 waiver pattern; rehearse sandbox self-check refuses)
+
 For agents:
 - `brain due --defer <id> <absolute-until> --reason "<text>"` defers a missing-preview
   episode. Changed needs and expiry rearm it; protected questions and failures cannot
@@ -160,6 +166,8 @@ After upgrading:
   readiness, verification or preview requirements. Other reminder kinds remain protected.
 
 ## 2026-10-24: P15 opt in to explicit upstream index fingerprints
+
+rehearsal evidence waived (release 1 waiver pattern; rehearse sandbox self-check refuses)
 
 For agents:
 - Configure `upstream_inputs` and `upstream_output` as explicit files within a node's
@@ -172,6 +180,8 @@ After upgrading:
 
 ## 2026-10-24: M12 print coordinator-thread wake provisioning plans
 
+rehearsal evidence waived (release 1 waiver pattern; rehearse sandbox self-check refuses)
+
 For agents:
 - `brain machine wake-setup <node>` names the current bound coordinator, prints the
   structured T3 webhook payload to run from that thread, and gives local bind steps.
@@ -182,6 +192,8 @@ After upgrading:
   keep returned capabilities private. Actual host provisioning remains separate.
 
 ## 2026-10-24: R1 request a fresh brief at sustained context or token limits
+
+rehearsal evidence waived (release 1 waiver pattern; rehearse sandbox self-check refuses)
 
 For agents:
 - Due raises one stable `restart from brief` item at three compactions or twice
