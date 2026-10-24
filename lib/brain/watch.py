@@ -143,6 +143,7 @@ def watch_text_identity(item):
 def watch_untracked(groups):
     """Unknown episode state must not reuse a transport key and hide a new need."""
     for group in groups.values():
+        group['episodes_known'] = False
         for item in group['items']:
             if (('reason' not in item or item['kind'] == 'overdue-question') and item['kind'] not in
                     ('machine-hold', 'machine-alert', 'machine-repair', 'job-ready', 'job-landed', 'rotate')):
@@ -210,7 +211,7 @@ def watch_due_episodes(inst, scan):
                 _m_machine.machine_publish(inst, path, json.dumps(
                     {'version': 1, 'open': current, 'overdue_episodes': True}, sort_keys=True) + '\n')
             except OSError:
-                pass  # an unwritable receipt must not suppress current work
+                return watch_untracked(groups)  # unpublished identities cannot prove resolution
     return groups
 
 
@@ -597,8 +598,9 @@ def watch_run(inst, kinds=None, quiet=False, sources=None):
     groups = watch_groups(inst, nodes)
     current_ids = {i['id'] for group in groups.values() for i in group['items']}
     for group in groups.values():
-        for pending in _m_hosts.wake_directory(inst, group['node']).glob('*.pending'):
-            _m_hosts.wake_retire_due_pending(pending, current_ids)
+        if group.get('episodes_known', True):
+            for pending in _m_hosts.wake_directory(inst, group['node']).glob('*.pending'):
+                _m_hosts.wake_retire_due_pending(pending, current_ids)
     pending_ids = set()
     for pending in (inst.root / '.brain/wake').glob('*/*.pending'):
         try:

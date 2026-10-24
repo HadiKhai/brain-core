@@ -1572,6 +1572,71 @@ class WakeNoise(Scenario):
         # unrelated Git/status display work while retaining the real inbox source.
         return ({'jobs': [], 'worktrees': {}, 'handbacks': {}, 'inbox': self.m.inbox_lines(node)}, '', '')
 
+    def test_failed_episode_publication_keeps_queued_wake_for_next_tick(self):
+        status = self.root / 'status.md'
+        status.write_text(status.read_text() + '\n## Blocked\n- Waiting on operator; '
+                          'since: 2020-01-01T00:00Z; recommendation: approve; default: wait\n')
+        root = self.inst.node('root')
+        directory = self.m.wake_directory(self.inst, root)
+        publish = self.m.machine_publish
+        def failed_episode(inst, path, text):
+            if path.name == 'due-episodes.json':
+                raise OSError('fabricated episode publication failure')
+            return publish(inst, path, text)
+        with mock.patch.object(self.m, 'machine_publish', side_effect=failed_episode), \
+                mock.patch.object(self.m, 'changes_due', return_value=[]), \
+                mock.patch.object(self.m, 'wake_start'), mock.patch.object(self.m, 'WAKE_INTERVAL', 0), \
+                mock.patch.object(self.m, 'wake_send', side_effect=[False, True]) as send:
+            self.watch()
+            pending = list(directory.glob('*.pending'))
+            self.assertEqual(len(pending), 1)
+            self.m.wake_drain(self.inst, root, once=True)
+            self.assertTrue(pending[0].exists(), 'failed delivery must retain the accepted wake')
+            self.assertEqual(send.call_count, 1)
+            self.watch()
+            self.assertTrue(pending[0].exists(), 'the next scan must not retire unknown episode work')
+            self.m.wake_drain(self.inst, root, once=True)
+            self.assertEqual(send.call_count, 2)
+            self.assertFalse(list(directory.glob('*.pending')))
+            self.assertTrue(self.m.wake_history(directory)[-1]['items'])
+
+    def test_unknown_episode_state_preserves_pending_open_blocker(self):
+        status = self.root / 'status.md'
+        status.write_text(status.read_text() + '\n## Blocked\n- Waiting on operator; '
+                          'since: 2020-01-01T00:00Z; recommendation: approve; default: wait\n')
+        root = self.inst.node('root')
+        directory = self.m.wake_directory(self.inst, root)
+        episodes = self.root / '.brain/wake/due-episodes.json'
+        with mock.patch.object(self.m, 'load', return_value=self.inst), \
+                mock.patch.object(self.m, 'due_evidence', side_effect=self.file_evidence), \
+                mock.patch.object(self.m, 'changes_due', return_value=[]), \
+                mock.patch.object(self.m, 'core_update'), mock.patch.object(self.m, 'auto_upgrade', return_value=None), \
+                mock.patch.object(self.m, 'wake_start'), mock.patch.object(self.m, 'WAKE_INTERVAL', 0), \
+                mock.patch.object(self.m, 'wake_send', return_value=True) as send:
+            for fault in ('corrupt', 'unreadable'):
+                with self.subTest(fault=fault):
+                    episodes.unlink(missing_ok=True)
+                    self.watch()
+                    pending = list(directory.glob('*.pending'))
+                    self.assertEqual(len(pending), 1)
+                    healthy = episodes.read_text()
+                    original = self.m.watch_read
+                    def read(path, default):
+                        if path == episodes and fault == 'unreadable':
+                            raise OSError('fabricated episode read failure')
+                        return original(path, default)
+                    if fault == 'corrupt':
+                        episodes.write_text('{broken')
+                    with mock.patch.object(self.m, 'watch_read', side_effect=read):
+                        with contextlib.redirect_stdout(io.StringIO()) as output:
+                            self.m.cmd_due(argparse.Namespace(id='root', quiet=False, json=True))
+                        self.assertIn('blocked-overdue', output.getvalue())
+                        self.assertTrue(pending[0].exists(), 'filtered due must retain a still-open blocker')
+                        self.m.wake_drain(self.inst, root, once=True)
+                    self.assertEqual(send.call_count, 1 if fault == 'corrupt' else 2)
+                    self.assertEqual(episodes.read_text(), '{broken' if fault == 'corrupt' else healthy)
+                    self.assertFalse(list(directory.glob('*.pending')))
+
     def test_corrupt_wake_receipts_preserve_evidence_and_wake_new_work(self):
         root = self.inst.node('root')
         inbox = self.root / 'inbox.md'

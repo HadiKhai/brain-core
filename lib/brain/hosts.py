@@ -215,7 +215,8 @@ def wake_actionable_pending(inst, path):
     if any(i['kind'] not in protected and i['id'].startswith(prefix) for i in allowed):
         try:
             groups = _m_watch.watch_groups(_m_instance.Instance(inst.root))
-            current = {i['id'] for group in groups.values() for i in group['items']}
+            current = ({i['id'] for group in groups.values() for i in group['items']}
+                       if all(g.get('episodes_known', True) for g in groups.values()) else None)
         except (Exception, SystemExit):
             current = None  # unknown state cannot discard a real need
         if current is not None:
