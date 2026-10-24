@@ -690,6 +690,9 @@ class TeamHomes(Scenario):
         self.assertNotIn('Traceback', refusal)
         self.b(root, *shlex.split(refusal.strip().split('; run ', 1)[1])[1:])
         self.assertTrue(self.b(root, "ready", "app", "--branch", "job").strip().endswith("ready"))
+        (root / 'nodes/app/publication-policy.json').write_text(json.dumps({
+            'version': 1, 'node': 'app', 'reviewer': 'alice', 'reviewed_at': '2026-01-01 00:00 +00:00',
+            'rules': [], 'consent': {'node': 'app', 'actions': ['pr']}}))
         self.b(root, "set", "app", "merge=pr")
         self.assertIn("main moved", self.b(root, "ready", "app", "--branch", "job", ok=False))
         self.b(root, "set", "app", "merge=local")
@@ -781,6 +784,9 @@ class TeamHomes(Scenario):
         home = self.tmp / "app"
         self.git("clone", str(origin), str(home), cwd=self.tmp)
         self.b(root, "new", "app", "--title", "App", "--home", str(home))
+        (root / 'nodes/app/publication-policy.json').write_text(json.dumps({
+            'version': 1, 'node': 'app', 'reviewer': 'alice', 'reviewed_at': '2026-01-01 00:00 +00:00',
+            'rules': [], 'consent': {'node': 'app', 'actions': ['pr']}}))
         self.b(root, "set", "app", "verify=python3 -c 'pass'", "merge=pr")
         return root, seed, origin, home
 
@@ -1276,3 +1282,66 @@ class PublicationPolicy(unittest.TestCase):
             (root / 'brief.md').write_text('## Limits\n- Ask before any outward action.\n')
             with self.assertRaisesRegex(ValueError, 'coordinator'):
                 policy.validate_merge(inst, n, 'pr')
+
+
+    def _assert_publication_limits_stop_at_boundary(self, target_id):
+        from brain import policy
+        from brain.instance import Instance
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / 'instance.md').write_text('---\noperator: alice\nprincipals: alice, bob\ntimezone: UTC\n---\n')
+            (root / 'node.md').write_text('---\nid: root\nowners: alice\n---\n')
+            (root / 'brief.md').write_text('## Limits\n- Parent-only-confidential-sentinel.\n')
+            boundary = root / 'nodes/boundary'
+            child = boundary / 'nodes/child'
+            child.mkdir(parents=True)
+            (boundary / 'node.md').write_text('---\nid: boundary\nowners: bob\n---\n')
+            (boundary / 'brief.md').write_text('## Limits\n- Boundary rule.\n')
+            (child / 'node.md').write_text('---\nid: boundary/child\n---\n')
+            (child / 'brief.md').write_text('## Limits\n- Descendant rule.\n')
+            inst = Instance(root)
+            for nid in (target_id,):
+                with self.subTest(node=nid):
+                    node = inst.node(nid)
+                    self.assertEqual(node['sealed'], nid == 'boundary')
+                    expected = [{'source': 'boundary/brief.md#Limits:1', 'text': 'Boundary rule.'}]
+                    if nid.endswith('/child'):
+                        expected.append({'source': 'boundary/child/brief.md#Limits:1', 'text': 'Descendant rule.'})
+                    self.assertEqual(policy.limit_snapshot(node), expected)
+                    generated = '\n'.join(policy.publication_instructions(inst, node))
+                    self.assertNotIn('Parent-only-confidential-sentinel', generated)
+                    self.assertNotIn('root/brief.md', generated)
+                    record = {'version': 1, 'node': nid, 'reviewer': 'bob', 'reviewed_at': inst.now(),
+                              'rules': [{**r, 'actions': {'pr': 'allow', 'push': 'deny'}} for r in expected]}
+                    (node['dir'] / 'publication-policy.json').write_text(json.dumps(record))
+                    self.assertIsNone(policy.validate_merge(inst, node, 'pr'))
+
+    def test_empty_publication_policy_refuses_pr_before_any_setting_write(self):
+        from brain import policy, nodes
+        from brain.instance import Instance
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / 'instance.md').write_text('---\noperator: alice\nprincipals: alice\ntimezone: UTC\n---\n')
+            (root / 'node.md').write_text('---\nid: root\nowners: alice\n---\n')
+            inst = Instance(root)
+            node = inst.node('root')
+            self.assertEqual(policy.publication_decision(inst, node, 'pr')['decision'], 'unknown')
+            self.assertIsNone(policy.validate_merge(inst, node, 'local'))
+            with self.assertRaisesRegex(ValueError, 'coordinator'):
+                policy.validate_merge(inst, node, 'pr')
+            before = {p.name: p.read_bytes() for p in root.iterdir() if p.is_file()}
+            with mock.patch.object(nodes, 'load', return_value=inst), self.assertRaises(SystemExit) as refusal:
+                nodes.cmd_set(argparse.Namespace(id='root', pairs=['coordinator=demo-thread', 'merge=pr']))
+            self.assertIn('coordinator', str(refusal.exception))
+            self.assertEqual(before, {p.name: p.read_bytes() for p in root.iterdir() if p.is_file()})
+            self.assertFalse((root / '.brain/local.json').exists())
+            record = {'version': 1, 'node': 'root', 'reviewer': 'alice', 'reviewed_at': inst.now(),
+                      'rules': [], 'consent': {'node': 'root', 'actions': ['pr']}}
+            (root / 'publication-policy.json').write_text(json.dumps(record))
+            self.assertIsNone(policy.validate_merge(inst, node, 'pr'))
+
+    def test_publication_limits_stop_at_a_sealed_target(self):
+        self._assert_publication_limits_stop_at_boundary('boundary')
+
+    def test_publication_limits_stop_above_a_boundary_descendant(self):
+        self._assert_publication_limits_stop_at_boundary('boundary/child')

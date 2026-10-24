@@ -7,11 +7,11 @@ from scenario import Scenario
 
 
 class MergeTrain(Scenario):
-    def project(self, command="python3 -B verify.py"):
+    def project(self, command="python3 -B verify.py", settings=()):
         root = self.init("alice")
         home = self.repo(self.tmp / "app", {"verify.py": "from pathlib import Path\nassert not Path('bad').exists()\n", "shared": "base\n"})
         self.b(root, "new", "a", "--title", "A", "--home", str(home))
-        self.b(root, "set", "a", "verify=" + command)
+        self.b(root, "set", "a", "verify=" + command, *settings)
         self.root, self.home = root, home
         return root, home
 
@@ -66,11 +66,10 @@ class MergeTrain(Scenario):
         self.assertEqual(self.ledger().count("| merged |"), 3)
 
     def test_configured_land_check_blocks_then_records_exact_integration_tip(self):
-        root, home = self.project()
-        self.b(root, 'set', 'a', 'land_check=false')
+        root, home = self.project(settings=('land_check=false',))
         node = root / 'nodes/a'
         (node / 'publication-policy.json').write_text(json.dumps({
-            'version': 1, 'node': 'a', 'reviewer': 'alice', 'reviewed_at': self.b(root, 'now').strip(),
+            'version': 1, 'node': 'a', 'reviewer': 'alice', 'reviewed_at': '2026-01-01 00:00 +00:00',
             'rules': [], 'consent': {'node': 'a', 'actions': ['push']}}))
         self.job('one')
         self.detach()
@@ -178,6 +177,9 @@ class MergeTrain(Scenario):
         self.job("one")
         main = self.git("rev-parse", "main", cwd=home)
         self.assertIn("main is checked out", self.b(root, "train", "a", ok=False))
+        (root / 'nodes/a/publication-policy.json').write_text(json.dumps({
+            'version': 1, 'node': 'a', 'reviewer': 'alice', 'reviewed_at': '2026-01-01 00:00 +00:00',
+            'rules': [], 'consent': {'node': 'a', 'actions': ['pr']}}))
         self.b(root, "set", "a", "merge=pr")
         self.assertIn("merge=pr", self.b(root, "train", "a", ok=False))
         self.assertEqual(self.git("rev-parse", "main", cwd=home), main)

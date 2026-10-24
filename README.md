@@ -716,8 +716,10 @@ After any change:
 
 `merge=local|pr` selects a workflow; it grants no push or PR permission. Before storing
 `merge=pr`, core checks the node's reviewed publication policy against every current
-inherited/node `## Limits` bullet. A deny quotes its rule and source. An unmapped,
-changed or unsupported limit refuses and refers the choice to the coordinator.
+inherited/node `## Limits` bullet within its ownership boundary. The nearest sealed
+ancestor's own limits are included; its parents' limits and source references are not read.
+A deny quotes its rule and source. Every PR-mode decision other than `allow` refuses
+and refers the choice to the coordinator, including a node with no limits or policy file.
 
 The coordinator prepares node-local `publication-policy.json`. `brain policy <node>
 --json` prints a template with exact rule texts/source references; fill every action
@@ -747,11 +749,14 @@ external `git push`, or enforce host publication policy after someone leaves tha
 
 ## Rules-only activation review
 
-A nonempty `sources/import-proposals.md` snapshot has one protected
+A nonempty, unrejected `sources/import-proposals.md` snapshot has one protected
 `rule-activation-review` due episode, stable until its byte digest changes. Importing
 never activates it. Legacy prose stays pending; the coordinator must prepare the
 explicit rules-only JSON format before bulk activation. A `status: reviewed` label
-acknowledges a historical review but does not constitute activation.
+acknowledges a historical review but does not constitute activation. A legacy explicit
+`status: rejected` acknowledgement resolves the reminder when `reviewed_by` is a current
+non-revoked operator/principal and `reviewed_at` is valid and not in the future. A rejected
+snapshot activates nothing; an invalid rejection remains pending.
 
 Example snapshot (the `.md` file contains this JSON object, without fences):
 

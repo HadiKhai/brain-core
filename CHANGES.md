@@ -86,6 +86,8 @@ For agents: `merge=pr` refuses a conflicting or unmapped current reviewed Limits
 quoting its rule/source. Briefs and `brain policy` distinguish allow/deny/unknown; merge
 selection grants no push/PR consent. Explicit policy is supplied review evidence, not a
 natural-language authorization engine.
+Limits stop at the nearest sealed node, including that node's own rules. Empty PR policy
+also refuses; parent rules beyond an ownership boundary never appear in generated output.
 
 After upgrading: coordinators map current limits in `publication-policy.json` before PR
 mode or outward steps. Legacy ambiguous limits require their decision. Arbitrary external
@@ -97,6 +99,8 @@ For agents: one protected due item follows each pending rules snapshot. Explicit
 `brain proposals <node> --approve-all --review-manifest <file>` atomically activates its
 complete independently reviewed rules with attribution/provenance in native instructions;
 changed/partial/revoked/self-approved evidence refuses without partial writes.
+A valid explicit legacy rejection resolves its activation reminder without activating rules;
+reviewed-but-unactivated snapshots still require the activation decision.
 
 After upgrading: legacy prose stays pending until the coordinator prepares the documented
 rules-only JSON snapshot and complete manifest. Review records are supplied evidence,

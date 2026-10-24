@@ -286,6 +286,9 @@ class PruneSafety(AutonomyProject):
         self.git('remote', 'add', 'origin', str(origin), cwd=home)
         self.git('push', '-q', 'origin', 'main', cwd=home)
         self.git('remote', 'set-head', 'origin', 'main', cwd=home)
+        (r / 'nodes/app/publication-policy.json').write_text(json.dumps({
+            'version': 1, 'node': 'app', 'reviewer': 'alice', 'reviewed_at': '2026-01-01 00:00 +00:00',
+            'rules': [], 'consent': {'node': 'app', 'actions': ['pr']}}))
         self.b(r, 'set', 'app', 'merge=pr')
         (wt / 'done').write_text('done')
         self.git('add', '.', cwd=wt)
@@ -347,6 +350,9 @@ class PruneSafety(AutonomyProject):
         origin = self.tmp / 'origin.git'
         self.git('init', '-q', '--bare', '-b', 'main', str(origin), cwd=self.tmp)
         self.git('remote', 'add', 'origin', str(origin), cwd=home)
+        (r / 'nodes/app/publication-policy.json').write_text(json.dumps({
+            'version': 1, 'node': 'app', 'reviewer': 'alice', 'reviewed_at': '2026-01-01 00:00 +00:00',
+            'rules': [], 'consent': {'node': 'app', 'actions': ['pr']}}))
         self.b(r, 'set', 'app', 'merge=pr')
         out = self.b(r, 'wt', 'prune', 'app', '--offline')
         self.assertIn('origin default unavailable; run git remote set-head origin -a', out)

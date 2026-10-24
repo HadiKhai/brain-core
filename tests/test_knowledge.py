@@ -570,3 +570,36 @@ class RuleSnapshotActivation(unittest.TestCase):
             with self.assertRaises(ValueError):
                 proposals.activate_rules(inst, n, {}, commit=False)
             self.assertFalse((root / 'AGENTS.md').exists())
+
+
+    def test_valid_legacy_rejection_resolves_only_rejection_not_inactive_review(self):
+        from brain import proposals, status
+        from brain.instance import Instance
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / 'instance.md').write_text('---\noperator: alice\nprincipals: alice, bob\ntimezone: UTC\n---\n')
+            (root / 'node.md').write_text('---\nid: root\nowners: alice\n---\n')
+            (root / 'sources').mkdir()
+            source = root / 'sources/import-proposals.md'
+            inst = Instance(root)
+            node = inst.node('root')
+            when = '2026-01-01 10:00 +00:00'
+            with mock.patch.object(inst, 'now_dt', return_value=datetime.datetime(2026, 1, 2, tzinfo=datetime.timezone.utc)):
+                text = '---\nstatus: rejected\nreviewed_by: alice\nreviewed_at: ' + when + '\n---\nUnstructured rules.\n'
+                source.write_text(text)
+                before = source.read_bytes()
+                self.assertEqual(status.pending_imports(inst, node)[0], 0)
+                self.assertIsNone(proposals.pending_rule_snapshot(inst, node))
+                self.assertEqual(source.read_bytes(), before)
+                self.assertFalse((root / 'AGENTS.md').exists())
+                source.write_text(text.replace('status: rejected', 'status: reviewed'))
+                self.assertEqual(proposals.pending_rule_snapshot(inst, node)['count'], 1)
+                for invalid in (text.replace('reviewed_by: alice', 'reviewed_by: nobody'),
+                                text.replace(when, 'not-a-time'), text.replace(when, '2027-01-01 10:00 +00:00')):
+                    source.write_text(invalid)
+                    self.assertIsNotNone(proposals.pending_rule_snapshot(inst, node))
+                source.write_text(text)
+                with mock.patch.object(inst, 'revoked', ['alice']):
+                    self.assertIsNotNone(proposals.pending_rule_snapshot(inst, node))
+                source.write_text(text.replace('reviewed_by: alice', 'reviewed_by: bob'))
+                self.assertIsNone(proposals.pending_rule_snapshot(inst, node))

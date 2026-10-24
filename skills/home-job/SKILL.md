@@ -28,7 +28,8 @@ stated; never run a polling loop in an agent.
    than stranding existing jobs.
 1. **Worktree.** Choose the integration mode before launching: `brain set <id> merge=pr` for
    host PR merges; `merge=local` (the default) for coordinator-owned local integration.
-   `merge=pr` refuses conflicting or unmapped reviewed limits and quotes their rule/source.
+   `merge=pr` refuses every policy decision other than allow, including empty policy;
+   conflicting or unmapped reviewed limits are quoted with their rule/source.
    Have the coordinator prepare the explicit `publication-policy.json` mapping described in
    README; core never interprets prose as an authorization engine. A mode is a workflow choice,
    and grants no push or PR consent. Unknown policy goes to the coordinator.

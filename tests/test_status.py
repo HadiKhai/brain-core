@@ -1100,3 +1100,9 @@ class RuleActivationDue(unittest.TestCase):
                     self.assertEqual(rule_items(), first)
                     source.write_text('A different unreviewed snapshot.\n')
                     self.assertNotEqual(rule_items()[0]['episode'], expected)
+                    rejected = ('---\nstatus: rejected\nreviewed_by: alice\nreviewed_at: ' + inst.now() +
+                                '\n---\nA rejected snapshot.\n')
+                    source.write_text(rejected)
+                    self.assertEqual(rule_items(), [])
+                    source.write_text(rejected.replace('status: rejected', 'status: reviewed'))
+                    self.assertEqual(len(rule_items()), 1)

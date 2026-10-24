@@ -99,6 +99,22 @@ def _activation_block(manifest):
     return '\n'.join(lines + [RULES_END])
 
 
+def _legacy_rule_rejection(inst, raw):
+    """Preserve the legacy explicit rejection acknowledgement, without activating rules."""
+    try:
+        match = re.match(r'^---\n(.*?)\n---\n?', raw.decode('utf-8'), re.S)
+    except UnicodeError:
+        return False
+    if not match:
+        return False
+    fields = dict(line.split(':', 1) for line in match[1].splitlines() if ':' in line)
+    fields = {key.strip(): value.strip() for key, value in fields.items()}
+    actor = fields.get('reviewed_by')
+    when = inst.parse_time(fields.get('reviewed_at', ''))
+    authorized = ({inst.cfg.get('operator')} | set(inst.principals)) - set(inst.revoked)
+    return bool(fields.get('status') == 'rejected' and actor in authorized and when and when <= inst.now_dt())
+
+
 def pending_rule_snapshot(inst, n):
     try:
         snapshot = _read_snapshot(n)
@@ -106,7 +122,9 @@ def pending_rule_snapshot(inst, n):
         return {'digest': 'unreadable', 'count': 1, 'path': str(rule_source(n).relative_to(inst.root))}
     if snapshot is None:
         return None
-    _, digest, data = snapshot
+    raw, digest, data = snapshot
+    if _legacy_rule_rejection(inst, raw):
+        return None
     count = len(data['rules']) if isinstance(data, dict) and isinstance(data.get('rules'), list) else 1
     path = n['dir'] / 'AGENTS.md'
     text = path.read_text() if path.exists() else ''

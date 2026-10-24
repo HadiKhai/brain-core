@@ -14,6 +14,8 @@ def limit_snapshot(n):
     chain, out = [], []
     while n:
         chain.append(n)
+        if n.get('sealed'):
+            break
         n = n.get('parent')
     for node in reversed(chain):
         for index, text in enumerate(_m_knowledge.limits_of(node), 1):
@@ -73,7 +75,7 @@ def validate_merge(inst, n, mode):
     if mode == 'local':
         return
     decision = publication_decision(inst, n, 'pr')
-    if decision['decision'] != 'allow' and (limit_snapshot(n) or (n['dir'] / 'publication-policy.json').exists()):
+    if decision['decision'] != 'allow':
         raise ValueError(_m_guard.redact(decision['reason'], _m_guard.never_terms(n)))
 
 

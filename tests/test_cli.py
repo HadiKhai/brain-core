@@ -82,7 +82,8 @@ class EntryPoints(Scenario):
         node = r / 'nodes/demo'
         (node / 'brief.md').write_text('## Limits\n- Never open a pull request.\n')
         policy = json.loads(self.b(r, 'policy', 'demo', '--json'))
-        policy.update(reviewer='alice', reviewed_at=self.b(r, 'now').strip())
+        reviewed_at = '2026-01-01 00:00 +00:00'  # fixed synthetic review evidence
+        policy.update(reviewer='alice', reviewed_at=reviewed_at)
         for rule in policy['rules']:
             rule['actions'] = {'push': 'deny', 'pr': 'deny'}
         (node / 'publication-policy.json').write_text(json.dumps(policy))
@@ -108,7 +109,7 @@ class EntryPoints(Scenario):
         activation = [i for i in due if i['kind'] == 'rule-activation-review']
         self.assertEqual(len(activation), 1)
         manifest = {**snapshot, 'snapshot_hash': digest, 'reviewer': 'alice',
-                    'reviewer_runtime': 'claude', 'reviewed_at': self.b(r, 'now').strip()}
+                    'reviewer_runtime': 'claude', 'reviewed_at': reviewed_at}
         review = r / 'review.json'
         review.write_text(json.dumps(manifest))
         original = source.read_bytes()

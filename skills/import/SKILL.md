@@ -125,3 +125,5 @@ and current owner scope must match; changed, partial, missing, revoked or self-a
 (same importer identity or runtime) refuses with no partial activation. A name alone, imported
 `status: reviewed`, or a successful import never authorizes activation. Roles/items and future
 imports need their own explicit reviews. Due shows one protected activation-review snapshot item.
+A valid explicit legacy rejection resolves that reminder and activates nothing; a reviewed
+label without activation still leaves the activation decision pending.
