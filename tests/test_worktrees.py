@@ -126,98 +126,27 @@ class Workbench(Scenario):
         self.assertEqual((cached / "HEAD").read_bytes(), before)
         self.assertEqual((cached / "config").read_bytes(), before_config)
 
-    def submodule_prune_fixture(self):
+    def test_prune_reports_submodules_and_retains_shared_module_data(self):
         r = self.init("alice")
-        leaf = self.repo(self.tmp / "leaf-source")
         source = self.repo(self.tmp / "module-source")
-        self.git("submodule", "add", str(leaf), "nested/leaf", cwd=source)
-        self.git("commit", "-qam", "Nested module", cwd=source)
         home = self.repo(self.tmp / "app")
         self.git("submodule", "add", "--name", "shared-name", str(source), "vendor/module", cwd=home)
-        self.git("submodule", "update", "--init", "--recursive", cwd=home)
         self.git("commit", "-qam", "Add module", cwd=home)
         self.b(r, "new", "app", "--title", "App", "--home", str(home))
         self.b(r, "wt", "add", "app", "job-module")
         wt = self.tmp / "app-work/worktrees/job-module"
+        self.git("submodule", "update", "--init", cwd=wt)
         self.git("commit", "--allow-empty", "-qm", "Finish job", cwd=wt)
         self.git("merge", "--ff-only", "job-module", cwd=home)
-        return r, home, wt
-
-    def test_prune_clean_nested_submodules_preserves_shared_stores(self):
-        r, home, wt = self.submodule_prune_fixture()
         shared = home / ".git/modules/shared-name"
-        snapshots = {p: p.read_bytes() for p in shared.rglob("*") if p.is_file()}
-        out = self.b(r, "wt", "prune", "app", "--offline", "--dry-run")
-        self.assertIn("would remove: job-module", out)
-        self.assertTrue((wt / "vendor/module/nested/leaf/README.md").exists())
-        out = self.b(r, "wt", "prune", "app", "--offline")
-        self.assertIn("removed: job-module", out)
-        self.assertFalse(wt.exists())
-        self.assertEqual({p: p.read_bytes() for p in shared.rglob("*") if p.is_file()}, snapshots)
-        self.assertEqual(self.git("status", "--porcelain", cwd=home), "")
-        self.assertIn("merged", self.b(r, "jobs", "app", "--branch", "job-module"))
-
-    def test_prune_retains_hidden_nested_module_dirt(self):
-        r, home, wt = self.submodule_prune_fixture()
-        module = wt / "vendor/module/nested/leaf"
-        self.git("config", "submodule.shared-name.ignore", "all", cwd=wt)
-        self.git("config", "status.showUntrackedFiles", "no", cwd=module)
-        for relative in ("README.md", "untracked.txt", "ignored.txt"):
-            with self.subTest(relative=relative):
-                target = module / relative
-                original = target.read_bytes() if target.exists() else None
-                if relative == "ignored.txt":
-                    exclude = Path(self.git("rev-parse", "--absolute-git-dir", cwd=module).strip()) / "info/exclude"
-                    exclude.write_text("ignored.txt\n")
-                target.write_text("operator data\n")
-                self.assertEqual(self.git("status", "--porcelain", cwd=wt), "")
-                out = self.b(r, "wt", "prune", "app", "--offline")
-                self.assertIn("kept: job-module", out)
-                self.assertEqual(target.read_text(), "operator data\n")
-                if original is None:
-                    target.unlink()
-                else:
-                    target.write_bytes(original)
-
-    def test_prune_retains_module_commits_and_uncertain_gitdir(self):
-        r, home, wt = self.submodule_prune_fixture()
-        module = wt / "vendor/module/nested/leaf"
-        self.git("commit", "--allow-empty", "-qm", "Unmerged module work", cwd=module)
-        self.git("checkout", "--detach", "HEAD~1", cwd=module)
-        self.assertIn("unmerged submodule commits", self.b(r, "wt", "prune", "app", "--offline"))
-        self.assertTrue(wt.exists())
-        self.git("reflog", "expire", "--expire=all", "--all", cwd=module)
-        gitdir = Path(self.git("rev-parse", "--absolute-git-dir", cwd=module).strip())
-        moved = self.tmp / "operator-module-metadata"
-        gitdir.rename(moved)
-        (module / ".git").write_text("gitdir: " + str(moved) + "\n")
-        self.assertIn("submodule ownership uncertain", self.b(r, "wt", "prune", "app", "--offline"))
-        self.assertTrue((moved / "HEAD").exists())
-
-    def test_prune_retains_module_metadata_used_by_another_checkout(self):
-        r, home, wt = self.submodule_prune_fixture()
-        module = wt / "vendor/module/nested/leaf"
-        other = self.tmp / "other-module-checkout"
-        self.git("worktree", "add", "--detach", str(other), "HEAD", cwd=module)
-        before = self.git("rev-parse", "HEAD", cwd=other)
-        self.assertIn("submodule ownership uncertain", self.b(r, "wt", "prune", "app", "--offline"))
-        self.assertTrue(wt.exists())
-        self.assertEqual(self.git("rev-parse", "HEAD", cwd=other), before)
-
-    def test_prune_retains_uninitialized_module_metadata(self):
-        r, home, wt = self.submodule_prune_fixture()
-        self.git("submodule", "deinit", "--all", cwd=wt)
-        self.assertIn("uninitialized submodule metadata retained", self.b(r, "wt", "prune", "app", "--offline"))
-        self.assertTrue(wt.exists())
-
-    def test_prune_clean_uninitialized_modules_without_private_metadata(self):
-        r, home, wt = self.submodule_prune_fixture()
-        self.git("submodule", "deinit", "--all", cwd=wt)
-        metadata = Path(self.git("rev-parse", "--absolute-git-dir", cwd=wt).strip())
-        shutil.rmtree(metadata / "modules")  # Fabricated, clean metadata only: simulate a cold checkout.
-        self.assertIn("removed: job-module", self.b(r, "wt", "prune", "app", "--offline"))
-        self.assertFalse(wt.exists())
-        self.assertTrue((home / "vendor/module/nested/leaf/README.md").exists())
+        before = (shared / "HEAD").read_bytes()
+        for flags in (("--dry-run",), ()):
+            out = self.b(r, "wt", "prune", "app", "--offline", *flags)
+            self.assertIn("job-module (submodules retained: vendor/module)", out)
+            self.assertIn("none", out)
+            self.assertTrue((wt / "vendor/module/README.md").exists())
+            self.assertEqual((shared / "HEAD").read_bytes(), before)
+        self.assertIn("job-module", self.b(r, "wt", "list", "app"))
 
     def test_reports_have_a_predictable_place(self):
         r = self.init("alice")

@@ -348,85 +348,7 @@ def removal_refusal(n, branch, w):
     return ""
 
 
-def submodule_prune_check(home, path):
-    """Return (has modules, refusal); force is safe only for owned, lossless metadata.
-
-    Never deinitialize modules or follow their alternates: cached object stores may
-    serve other checkouts. Independent metadata must belong to this worktree.
-    """
-    path = Path(path)
-    root_dir = _m_common.git("rev-parse", "--absolute-git-dir", cwd=path)
-    common = _m_common.git("rev-parse", "--git-common-dir", cwd=home)
-    if root_dir.returncode or common.returncode:
-        return False, "submodule ownership uncertain"
-    metadata = Path(root_dir.stdout.strip()).resolve()
-    shared = (Path(home) / common.stdout.strip()).resolve()
-    seen = set()
-
-    def inspect(folder):
-        entries = _m_common.git("ls-files", "--stage", "-z", cwd=folder)
-        if entries.returncode:
-            return False, "submodule inventory unreadable"
-        links = [entry.split("\t", 1) for entry in entries.stdout.split("\0")
-                 if entry.startswith("160000 ") and "\t" in entry]
-        for entry, relative in links:
-            target = folder / relative
-            if target.is_symlink() or path.resolve() not in target.resolve().parents:
-                return True, "submodule ownership uncertain"
-            if not (target / ".git").exists():
-                # An uninitialized module is safe only when its checkout is empty.
-                if target.exists() and (not target.is_dir() or any(target.iterdir())):
-                    return True, "untracked submodule data"
-                continue
-            gd = _m_common.git("rev-parse", "--absolute-git-dir", cwd=target)
-            cd = _m_common.git("rev-parse", "--git-common-dir", cwd=target)
-            if gd.returncode or cd.returncode:
-                return True, "submodule ownership uncertain"
-            gitdir = Path(gd.stdout.strip()).resolve()
-            module_common = (target / cd.stdout.strip()).resolve()
-            worktree = _m_common.git("config", "--path", "--get", "core.worktree", cwd=target)
-            if (gitdir in seen or gitdir != module_common or (gitdir / "worktrees").exists()
-                    or metadata / "modules" not in gitdir.parents
-                    or worktree.returncode or (gitdir / worktree.stdout.strip()).resolve() != target.resolve()):
-                return True, "submodule ownership uncertain"
-            seen.add(gitdir)
-            _, reason = inspect(target)
-            if reason:
-                return True, reason
-            commit = entry.split()[1]
-            head = _m_common.git("rev-parse", "HEAD", cwd=target)
-            status = _m_common.git("status", "--porcelain", "--ignore-submodules=none",
-                                   "--untracked-files=all", "--ignored", cwd=target)
-            if head.returncode or status.returncode:
-                return True, "submodule state unreadable"
-            if head.stdout.strip() != commit or status.stdout.strip():
-                return True, "uncommitted submodule work"
-            extra = _m_common.git("rev-list", "--all", "--reflog", "--not", commit, cwd=target)
-            if extra.returncode or extra.stdout.strip():
-                return True, "unmerged submodule commits"
-        return bool(links), ""
-
-    modules, reason = inspect(path)
-    if not reason:
-        # Deinitialized or removed modules can still hold private commits in the
-        # worktree's metadata. Retain any store we could not inspect above.
-        stores = metadata / "modules"
-        if stores.exists() and any(config.parent.resolve() not in seen for config in stores.rglob("config")):
-            return True, "uninitialized submodule metadata retained"
-    if modules and not reason:
-        backlink = metadata / "gitdir"
-        if (path.is_symlink() or not (path / ".git").is_file()
-                or shared / "worktrees" not in metadata.parents or not backlink.is_file()
-                or Path(backlink.read_text().strip()).resolve() != (path / ".git").resolve()):
-            return True, "submodule ownership uncertain"
-        status = _m_common.git("status", "--porcelain", "--ignore-submodules=none",
-                               "--untracked-files=all", "--ignored", cwd=path)
-        if status.returncode or status.stdout.strip():
-            return True, "uncommitted work (including ignored files)"
-    return modules, reason
-
-
-def remove_worktree(inst, n, branch, force=False, prune_submodules=False):
+def remove_worktree(inst, n, branch, force=False):
     w = n["local"].get("worktrees", {}).get(branch)
     if not w:
         _m_common.die(f"{n['id']}: no worktree for '{branch}' made by brain on this machine")
@@ -434,11 +356,6 @@ def remove_worktree(inst, n, branch, force=False, prune_submodules=False):
     if reason:
         _m_common.die(f"{branch}: {reason}; worktree retained")
     if Path(w["path"]).exists():
-        if prune_submodules:
-            modules, reason = submodule_prune_check(n["home_path"], w["path"])
-            if reason:
-                _m_common.die(f"{branch}: {reason}; worktree retained")
-            force = modules
         r = _m_common.git("worktree", "remove", *(["--force"] if force else []), w["path"], cwd=n["home_path"])
         if r.returncode:
             _m_common.die(f"{branch}: {r.stderr.strip()} (uncommitted work? --force discards it)")
@@ -480,14 +397,21 @@ def cmd_wt_prune(a):
         dirty, merged, ahead = worktree_state(home, w, br, n)
         if dirty is None or (merged and dirty == 0):
             if dirty is not None:
-                _, reason = submodule_prune_check(home, w["path"])
-                if reason:
-                    kept.append(f"{br} ({reason}; worktree retained)")
+                entries = _m_common.git("ls-files", "--stage", "-z", cwd=w["path"])
+                if entries.returncode:
+                    kept.append(f"{br} (submodule inventory unreadable; worktree retained)")
+                    continue
+                modules = [entry.split("\t", 1)[1] for entry in entries.stdout.split("\0")
+                           if entry.startswith("160000 ") and "\t" in entry]
+                if modules:
+                    # Git refuses removing populated submodules; their gitdirs can belong
+                    # to another checkout. Report them without deinitializing or deleting.
+                    kept.append(f"{br} (submodules retained: {', '.join(modules)})")
                     continue
             _m_jobs.print_job_handback(n, br)
             _m_jobs.print_worktree_threads(n, br, dry_run=a.dry_run)
             if not a.dry_run:
-                remove_worktree(inst, inst.node(n["id"]), br, prune_submodules=True)
+                remove_worktree(inst, inst.node(n["id"]), br)
                 _m_jobs.job_ended(inst, n, br, "merged" if merged else "abandoned", job_commits(home, w, br),
                           "" if merged else "worktree was gone", worktree=w.get("path"))
             removed.append(br)

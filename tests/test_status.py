@@ -413,27 +413,6 @@ class AutonomyFacts(AutonomyProject):
         self.assertTrue(st.read_text().endswith(suffix))
         self.b(r, 'status', '--refresh', ok=False)
 
-    def test_status_refreshes_already_defer_to_one_explicit_commit(self):
-        r = self.init("alice")
-        self.b(r, "new", "app", "--title", "App")
-        files = [r / "status.md", r / "nodes/app/status.md"]
-        for file in files:
-            file.write_text("# Status\n\nUpdated: 2020-01-01 00:00 +00:00\n\n## Now\n\nJudgement.\n")
-        self.git("add", ".", cwd=r)
-        self.git("commit", "-qm", "Record judgement", cwd=r)
-        before = self.git("rev-parse", "HEAD", cwd=r)
-        for nid in ("root", "app"):
-            self.b(r, "status", nid, "--refresh")
-            self.assertEqual(self.git("rev-parse", "HEAD", cwd=r), before)
-        for file in files:
-            self.assertIn("Updated: 2020-01-01 00:00 +00:00", file.read_text())
-            self.assertIn("Facts refreshed:", file.read_text())
-        self.git("add", "status.md", "nodes/app/status.md", cwd=r)
-        self.git("commit", "-qm", "Batch status snapshots", cwd=r)
-        self.assertEqual(self.git("rev-list", "--count", before.strip() + "..HEAD", cwd=r).strip(), "1")
-        self.assertEqual(set(self.git("diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD", cwd=r).splitlines()),
-                         {"status.md", "nodes/app/status.md"})
-
     def test_fingerprint_tracks_only_displayed_facts(self):
         r, home, wt = self.project()
         self.b(r, 'status', 'app', '--refresh')

@@ -832,7 +832,7 @@ def routing_node_configs(n):
 
 
 def class_routing_config(inst, n):
-    """Validate flat routing keys; no keys means byte-compatible legacy routing."""
+    """Validate inherited keys; only local/instance keys enable class runtime policy."""
     found = False
     for source, cfg in [*routing_node_configs(n), ("instance.md", inst.cfg)]:
         for key in cfg:
@@ -854,7 +854,9 @@ def class_routing_config(inst, n):
             if kind is not None:
                 if kind not in _m_jobs.JOB_CLASSES:
                     _m_common.die(_m_guard.redact(f"{source} {key}: unknown routing class", _m_guard.never_terms(n)))
-                found = True
+                # Inherited models must not activate a different runtime policy.
+                if cfg is n["fm"] or cfg is inst.cfg:
+                    found = True
     return found
 
 
@@ -902,15 +904,14 @@ def worker_route(inst, n, a):
                                             "route_runtime_" + kind, "runtime", "default_runtime")
     else:
         pin = getattr(a, "runtime", None) or n["fm"].get("runtime")
-    model_selection = None
-    if per_class:
-        runtime, _ = _m_usage.class_runtime(inst, kind, runtime=pin)
-        model_selection = class_model_selection(inst, n, a, runtime, kind)
+        runtime_source = "--runtime" if getattr(a, "runtime", None) else "node.md runtime" if pin else "default"
+    runtime, _ = _m_usage.class_runtime(inst, kind, runtime=pin)
+    model_selection = class_model_selection(inst, n, a, runtime, kind)
     runtime, subscription, usage = _m_usage.class_route(
         inst, kind, runtime=pin, model=model_selection[0] if model_selection else a.model,
         weekly_cap=n["fm"].get("route_weekly_cap", inst.cfg.get("route_weekly_cap", 60)))
     a.job_class = kind
     launch_selection(inst, n, a, runtime, subscription, row, kind, model_selection=model_selection)
-    if per_class:
+    if per_class or " node.md " in a.model_source:
         usage += f" Routing sources: runtime={runtime_source}; model={a.model_source}."
     return runtime, _m_guard.redact(usage, _m_guard.never_terms(n))

@@ -220,6 +220,89 @@ for line in sys.stdin:
             self.assertEqual(route()[0], "codex")
             self.assertIn("default", route()[2])
 
+    def test_inherited_models_preserve_runtime_policy_before_quota(self):
+        inst = self.routing_instance()
+        inst.cfg["default_runtime"] = "claude"
+        root = inst.node("root")
+        root_file = self.tmp / "node.md"
+        child_file = inst.node_dir("child") / "node.md"
+        child_file.parent.mkdir(parents=True)
+        # Local class keys retain their old activation of per-class runtime policy.
+        cases = [
+            ({"route_model_codex_build": "ancestor-class"}, {}, "codex", "ancestor-class"),
+            ({"route_model_codex": "ancestor-global"}, {}, "codex", "ancestor-global"),
+            ({"route_runtime_build": "claude", "route_model_codex_build": "ancestor-class"}, {}, "codex", "ancestor-class"),
+            ({"route_model_codex_build": "ancestor-class"}, {"route_model_codex": "local-global"}, "codex", "local-global"),
+            ({"route_model_claude_build": "ancestor-other"}, {"runtime": "claude"}, "claude", "ancestor-other"),
+            ({"route_model_codex_build": "ancestor-class"}, {"route_runtime_build": "codex"}, "codex", "ancestor-class"),
+            ({"route_model_claude_build": "ancestor-other"}, {"route_model_codex_build": "local-class"}, "claude", "ancestor-other"),
+            ({"route_model_claude_build": "ancestor-other"}, {"route_model_claude_build": "local-class"}, "claude", "local-class"),
+        ]
+        owner = self.m._owners["worker_route"]
+        original = owner._m_usage.class_route
+        with mock.patch.object(self.m, "usage_config", return_value={"autodetected": True}):
+            for ancestor, local, expected_runtime, expected_model in cases:
+                with self.subTest(ancestor=ancestor, local=local):
+                    self.m.write_fm(root_file, {"id": "root", "owners": "alice", **ancestor}, "")
+                    self.m.write_fm(child_file, {"id": "child", **local}, "")
+                    args = argparse.Namespace(branch=None, job_class="build", runtime=None, model=None, effort=None)
+                    with mock.patch.object(owner._m_usage, "class_route", wraps=original) as route:
+                        runtime, _ = self.m.worker_route(inst, inst.node("child"), args)
+                    self.assertEqual((runtime, args.model), (expected_runtime, expected_model))
+                    self.assertEqual(route.call_args.kwargs["model"], expected_model)
+            # CLI choices still win over both local class and inherited model defaults.
+            args = argparse.Namespace(branch=None, job_class="build", runtime="codex", model="flag-model", effort=None)
+            self.assertEqual(self.m.worker_route(inst, inst.node("child"), args)[0], "codex")
+            self.assertEqual(args.model, "flag-model")
+
+    def test_inherited_model_quota_selects_subscription_after_runtime(self):
+        inst = self.routing_instance()
+        inst.cfg["default_runtime"] = "claude"
+        child = inst.node_dir("child")
+        child.mkdir(parents=True)
+        self.m.write_fm(child / "node.md", {"id": "child"}, "")
+        config = self.declare(self.subscription("a"), self.subscription("b"))
+        readings = [self.reading(5, weekly=5), self.reading(20, weekly=20)]
+        for reading, used in zip(readings, (95, 30)):
+            reading["windows"]["seven_day_model:Ancestor"] = {
+                "used_percent": used, "resets_at": time.time() + 86400, "models": ["Ancestor"]}
+        self.cache(config, readings)
+        for key in ("route_model_codex_build", "route_model_codex"):
+            with self.subTest(key=key):
+                self.m.write_fm(self.tmp / "node.md", {"id": "root", "owners": "alice", key: "Ancestor"}, "")
+                args = argparse.Namespace(branch=None, job_class="build", runtime=None, model=None, effort=None)
+                runtime, why = self.m.worker_route(inst, inst.node("child"), args)
+                selection = json.loads(args.selection_line.split(": ", 1)[1])
+                self.assertEqual((runtime, args.model, selection["instanceId"]), ("codex", "Ancestor", "host-b"))
+                self.assertNotIn("reached its stop line", why)
+
+    def test_review_inherited_model_reaches_quota_without_runtime_activation(self):
+        root = self.repo(self.tmp / "review-inherited")
+        inst = self.routing_instance(root)
+        child = inst.node_dir("child")
+        child.mkdir(parents=True)
+        self.m.write_fm(root / "node.md", {"id": "root", "owners": "alice", "route_model_claude_review": "ancestor-review"}, "")
+        self.m.write_fm(child / "node.md", {"id": "child"}, "")
+        node = inst.node("child")
+        self.assertFalse(self.m.class_routing_config(inst, node))
+        owner = self.m._owners["cmd_review"]
+        original = owner._m_usage.class_route
+        args = argparse.Namespace(id="child", branch="main", built_by="codex", by=None,
+            job_class=None, model=None, effort=None, base="main", out=None, focus=None,
+            contract=None, why_separate=None, allow_unexplained=False)
+        with mock.patch.object(owner._m_nodes, "load", return_value=inst), \
+                mock.patch.object(self.m, "usage_config", return_value={"autodetected": True}), \
+                mock.patch.object(self.m, "review_mechanical", return_value=[]), \
+                mock.patch.object(self.m, "job_reviewed"), \
+                mock.patch.object(self.m, "record_job_route"), \
+                mock.patch.object(owner._m_usage, "class_route", wraps=original) as route, \
+                contextlib.redirect_stdout(io.StringIO()) as output:
+            self.m.cmd_review(args)
+        self.assertEqual(route.call_args.kwargs["model"], "ancestor-review")
+        self.assertEqual(route.call_args.kwargs["runtimes"], ["claude"])
+        self.assertIn('"model": "ancestor-review"', output.getvalue())
+        self.assertIn("model=root node.md route_model_claude_review", output.getvalue())
+
     def test_root_node_models_reach_descendants_with_overrides_and_boundary(self):
         inst = self.routing_instance()
         (self.tmp / "node.md").write_text("---\nid: root\nowners: alice\nroute_runtime_build: codex\nroute_model_codex_build: root-build\nroute_model_claude_build: root-other\n---\n")
@@ -265,12 +348,21 @@ for line in sys.stdin:
         self.b(root, "new", "child", "--title", "Child")
         self.b(root, "new", "child/leaf", "--title", "Leaf")
         self.b(root, "set", "root", "route_model_codex_build=root-model")
+        self.b(root, "set", "child", "runtime=")
+        self.b(root, "set", "child/leaf", "runtime=")
+        cfg, body = self.m.read_fm(root / "instance.md")
+        cfg.update(default_runtime="claude", runtimes="claude,codex")
+        self.m.write_fm(root / "instance.md", cfg, body)
         children = [root / "nodes/child/node.md", root / "nodes/child/nodes/leaf/node.md"]
         before = [file.read_bytes() for file in children]
         for nid in ("child", "child/leaf"):
             out = self.b(root, "brief", nid, "--runtime", "codex", "--class", "build", "--task", "Fixture work")
             self.assertIn('"model": "root-model"', out)
             self.assertIn("model=root node.md route_model_codex_build", out)
+            automatic = self.b(root, "brief", nid, "--class", "build", "--task", "Fixture work")
+            self.assertIn("runtime: codex", automatic)
+            self.assertIn('"model": "root-model"', automatic)
+            self.assertIn("runtime=default; model=root node.md route_model_codex_build", automatic)
         self.assertEqual([file.read_bytes() for file in children], before)
         self.b(root, "set", "child", "route_model_codex=child-model")
         out = self.b(root, "brief", "child/leaf", "--runtime", "codex", "--class", "build", "--task", "Fixture work")
