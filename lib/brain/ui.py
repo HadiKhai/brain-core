@@ -447,6 +447,16 @@ def _ui_state(inst, problems=None, scan=None, spend_budget=2.0, machine_spend=No
                              if _m_guard.redact(t, terms) == item['text']), item['text'])
             extra = _m_ui_status.ui_blocked_metadata(inst, node, original)
         inbox.append({**item, **extra, "from": inbox_sender(item)})
+    def need_key(item):
+        text = item.get("text", "")
+        if item.get("kind") == "inbox":
+            text = text.removeprefix("inbox: ")
+        return item.get("node"), item.get("kind"), " ".join(text.split())
+    inbox_ids = {need_key(item): item["id"] for item in inbox}
+    for item in due + machine_due:
+        # Shared inbox cards retain their action ID; other needs keep lifecycle IDs.
+        item["id"] = (inbox_ids.get(need_key(item)) or item.get("id")
+                      or _m_jobs.digest(["ui-due", *need_key(item)]))
     return {
         "review": {"enabled": False},
         "due": safe(due + machine_due),

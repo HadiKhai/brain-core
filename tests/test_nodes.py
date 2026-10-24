@@ -246,7 +246,7 @@ class SeveralBrains(Scenario):
         self.b(me, "new", "a", "--title", "A", "--owners", "club", "--home", str(a))
         self.b(work, "new", "w", "--title", "W", "--owners", "acme", "--home", str(w))
         self.b(me, "set", "a", "ports=3")
-        (me / "nodes" / "a" / "worktree-setup.sh").write_text('echo "$PORT $PORTS $PORT_LAST" > ports.txt\n')
+        (me / "nodes" / "a" / "worktree-setup.sh").write_text('echo "$BRAIN_PORT $BRAIN_PORTS $BRAIN_PORT_LAST" > ports.txt\n')
         self.assertIn("ports ", self.b(me, "wt", "add", "a", "j1"))
         p, n, last = map(int, (self.tmp / "a-work" / "worktrees" / "j1" / "ports.txt").read_text().split())
         self.assertEqual((n, last), (3, p + 2))
@@ -627,44 +627,77 @@ class TeamHomes(Scenario):
 
     def test_real_old_ready_survives_upgrade_and_reuses_verify_on_next_write(self):
         root, origin, home, wt, old, record, base = self.old_core_job()
-        before = record.read_bytes()
+        legacy = record.read_bytes()
+        self.assertNotIn('verify_port_context', json.loads(legacy)['ready'])
         ledger = (root / "nodes/app/job-ledger.md").read_bytes()
+        command = "brain handback app --branch job --state done --reviews 1 --reverify --summary 'Reverified port environment'"
+        refusal = self.b(root, "ready", "app", "--branch", "job", ok=False)
+        self.assertEqual(refusal.strip().splitlines()[-1],
+                         'not ready: recorded verify port environment missing or invalid; run ' + command)
+        self.assertNotIn('Traceback', refusal)
+        self.assertEqual(record.read_bytes(), legacy)
+        self.assertEqual((root / "nodes/app/job-ledger.md").read_bytes(), ledger)
+        self.b(root, *shlex.split(refusal.strip().split('; run ', 1)[1])[1:])
         self.assertTrue(self.b(root, "ready", "app", "--branch", "job").strip().endswith("ready"))
+        before = record.read_bytes()
+        self.assertIn('verify_port_context', json.loads(before)['ready'])
         self.assertIn("ready to merge", self.b(root, "due", "app"))
         self.assertEqual(record.read_bytes(), before)
         self.assertEqual((root / "nodes/app/job-ledger.md").read_bytes(), ledger)
-        # Even a report-only worker write lazily upgrades the packet without verification.
-        self.b(root, "handback", "app", "--branch", "job", "--state", "done", "--report", "fixture report")
+        # A report-only worker write reuses the refreshed packet without verification.
+        self.b(root, "handback", "--summary", "Synthetic result", "app", "--branch", "job", "--state", "done", "--report", "fixture report")
         updated = json.loads(record.read_text())["ready"]
         self.assertEqual(updated["integration_base"], base)
         self.assertNotEqual(updated["main"], base)
-        self.assertEqual((wt.parent / "verify-count").read_text(), "x")
-        record.write_bytes(before)
-        # Refreshing origin within the unchanged integration base also preserves old evidence.
+        self.assertEqual((wt.parent / "verify-count").read_text(), "xx")
+        record.write_bytes(legacy)
+        # Restore the original old-core state, which had no replacement-attempt sidecar.
+        module = core_loader.SourceFileLoader('historical_attempt_fixture', str(CORE / 'bin/brain')).load_module()
+        node = module.Instance(root).node('app')
+        job = module.open_job(module.read_jobs(node), 'job')
+        module.attempt_path(node,job).unlink()
+        # Refreshing origin keeps the legacy base valid, but its port proof still needs migration.
         self.git("push", "origin", "main", cwd=home)
         self.git("fetch", "origin", cwd=home)
-        self.assertTrue(self.b(root, "ready", "app", "--branch", "job").strip().endswith("ready"))
-        # Keep distinct remote/base identities for the lazy upgrade and verify reuse check.
+        refusal = self.b(root, "ready", "app", "--branch", "job", ok=False)
+        self.assertEqual(refusal.strip().splitlines()[-1],
+                         'not ready: recorded verify port environment missing or invalid; run ' + command)
+        self.assertNotIn('Traceback', refusal)
+        # Keep distinct remote/base identities before migrating and checking subsequent reuse.
         self.git("update-ref", "refs/remotes/origin/main", base + "^", cwd=home)
-        out = self.b(root, "handback", "app", "--branch", "job", "--state", "done", "--reviews", "2")
+        self.b(root, *shlex.split(refusal.strip().split('; run ', 1)[1])[1:])
+        self.assertTrue(self.b(root, "ready", "app", "--branch", "job").strip().endswith("ready"))
+        before = record.read_bytes()
+        out = self.b(root, "handback", "--summary", "Synthetic result", "app", "--branch", "job", "--state", "done", "--reviews", "2")
         self.assertIn("verify: reused", out)
         packet = json.loads(record.read_text())["ready"]
         self.assertEqual(packet["integration_base"], base)
         self.assertNotEqual(packet["main"], base)
         count = wt.parent / "verify-count"
-        self.assertEqual(count.read_text(), "x")
+        self.assertEqual(count.read_text(), "xxx")
         # Rebase keeps preflight green: the old base itself must invalidate the record.
         record.write_bytes(before)
         self.git("commit", "--allow-empty", "-qm", "new integration base", cwd=home)
         self.git("rebase", "main", cwd=wt)
         self.assertIn("main moved", self.b(root, "ready", "app", "--branch", "job", ok=False))
-        self.b(root, "handback", "app", "--branch", "job", "--state", "done", "--reviews", "2")
-        self.assertEqual(count.read_text(), "xx")
+        self.b(root, "handback", "--summary", "Synthetic result", "app", "--branch", "job", "--state", "done", "--reviews", "2")
+        self.assertEqual(count.read_text(), "xxxx")
 
     def test_real_old_ready_no_origin_and_pr_base_change(self):
         root, origin, home, wt, old, record, base = self.old_core_job()
+        legacy = record.read_bytes()
+        self.assertNotIn('verify_port_context', json.loads(legacy)['ready'])
         self.b(root, "set", "app", "merge=local")
+        command = "brain handback app --branch job --state done --reviews 1 --reverify --summary 'Reverified port environment'"
+        refusal = self.b(root, "ready", "app", "--branch", "job", ok=False)
+        self.assertEqual(refusal.strip().splitlines()[-1],
+                         'not ready: recorded verify port environment missing or invalid; run ' + command)
+        self.assertNotIn('Traceback', refusal)
+        self.b(root, *shlex.split(refusal.strip().split('; run ', 1)[1])[1:])
         self.assertTrue(self.b(root, "ready", "app", "--branch", "job").strip().endswith("ready"))
+        (root / 'nodes/app/publication-policy.json').write_text(json.dumps({
+            'version': 1, 'node': 'app', 'reviewer': 'alice', 'reviewed_at': '2026-01-01 00:00 +00:00',
+            'rules': [], 'consent': {'node': 'app', 'actions': ['pr']}}))
         self.b(root, "set", "app", "merge=pr")
         self.assertIn("main moved", self.b(root, "ready", "app", "--branch", "job", ok=False))
         self.b(root, "set", "app", "merge=local")
@@ -675,6 +708,17 @@ class TeamHomes(Scenario):
         self.assertIn("local default must include origin default",
                       self.b(root, "ready", "app", "--branch", "job", ok=False))
         self.git("remote", "remove", "origin", cwd=home)
+        record.write_bytes(legacy)  # Exercise the actual old packet with no origin as well.
+        # Restore the complete old-core state after the synthetic re-verification.
+        module = core_loader.SourceFileLoader('historical_no_origin_attempt_fixture', str(CORE / 'bin/brain')).load_module()
+        node = module.Instance(root).node('app')
+        job = module.open_job(module.read_jobs(node), 'job')
+        module.attempt_path(node, job).unlink()
+        refusal = self.b(root, "ready", "app", "--branch", "job", ok=False)
+        self.assertEqual(refusal.strip().splitlines()[-1],
+                         'not ready: recorded verify port environment missing or invalid; run ' + command)
+        self.assertNotIn('Traceback', refusal)
+        self.b(root, *shlex.split(refusal.strip().split('; run ', 1)[1])[1:])
         self.assertEqual(self.b(root, "ready", "app", "--branch", "job").strip(), "ready")
 
     def test_real_old_ledger_and_handback_survive_close_lesson_cleanup_and_sync(self):
@@ -711,18 +755,26 @@ class TeamHomes(Scenario):
         import hashlib
         root, origin, home, wt, old, record, base = self.old_core_job()
         packet = json.loads(record.read_text())["ready"]
+        self.assertNotIn('verify_port_context', packet)
         packet["checked_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
         cache = self.tmp / "app-work/scratch/ready" / (hashlib.sha256(b"job").hexdigest() + ".json")
         cache.parent.mkdir(parents=True)
         cache.write_text(json.dumps(packet))
         record.unlink()
         before = cache.read_bytes()
+        command = "brain handback app --branch job --state done --reviews 1 --reverify --summary 'Reverified port environment'"
+        refusal = self.b(root, "ready", "app", "--branch", "job", ok=False)
+        self.assertEqual(refusal.strip().splitlines()[-1],
+                         'not ready: recorded verify port environment missing or invalid; run ' + command)
+        self.assertNotIn('Traceback', refusal)
+        self.assertEqual(cache.read_bytes(), before)
+        self.b(root, *shlex.split(refusal.strip().split('; run ', 1)[1])[1:])
         self.assertTrue(self.b(root, "ready", "app", "--branch", "job").strip().endswith("ready"))
         self.assertIn("ready to merge", self.b(root, "due", "app"))
         self.assertEqual(cache.read_bytes(), before)
-        self.assertIn("verify: reused", self.b(root, "handback", "app", "--branch", "job",
+        self.assertIn("verify: reused", self.b(root, "handback", "--summary", "Synthetic result", "app", "--branch", "job",
                       "--state", "done", "--reviews", "2"))
-        self.assertEqual((wt.parent / "verify-count").read_text(), "x")
+        self.assertEqual((wt.parent / "verify-count").read_text(), "xx")
         self.assertEqual(json.loads(record.read_text())["ready"]["integration_base"], base)
         record.unlink()  # continue with only the old standalone evidence for the cleanup probe
         self.git("merge", "--no-ff", "-m", "integrate job", "job", cwd=home)
@@ -742,6 +794,9 @@ class TeamHomes(Scenario):
         home = self.tmp / "app"
         self.git("clone", str(origin), str(home), cwd=self.tmp)
         self.b(root, "new", "app", "--title", "App", "--home", str(home))
+        (root / 'nodes/app/publication-policy.json').write_text(json.dumps({
+            'version': 1, 'node': 'app', 'reviewer': 'alice', 'reviewed_at': '2026-01-01 00:00 +00:00',
+            'rules': [], 'consent': {'node': 'app', 'actions': ['pr']}}))
         self.b(root, "set", "app", "verify=python3 -c 'pass'", "merge=pr")
         return root, seed, origin, home
 
@@ -760,7 +815,7 @@ class TeamHomes(Scenario):
         self.git("branch", "main", cwd=home)  # a plausible stale local main must not hide origin's default
         self.b(root, "wt", "add", "app", "job")
         wt = self.tmp / "app-work/worktrees/job"
-        self.b(root, "handback", "app", "--branch", "job", "--state", "done", "--reviews", "1")
+        self.b(root, "handback", "--summary", "Synthetic result", "app", "--branch", "job", "--state", "done", "--reviews", "1")
         old = self.git("rev-parse", "HEAD", cwd=home)
         (home / "operator.txt").write_text("unfinished made-up work")
         merge = self.advance(seed, origin)
@@ -772,10 +827,10 @@ class TeamHomes(Scenario):
         self.assertIn("In the job worktree: git rebase origin/trunk", out)
         self.assertIn("main moved", out)
         self.assertIn("rebase on current main", out)
-        out = self.b(root, "handback", "app", "--branch", "job", "--state", "done", "--reviews", "1", ok=False)
+        out = self.b(root, "handback", "--summary", "Synthetic result", "app", "--branch", "job", "--state", "done", "--reviews", "1", ok=False)
         self.assertIn("local trunk is 2 behind", out)
         self.git("rebase", "origin/trunk", cwd=wt)
-        out = self.b(root, "handback", "app", "--branch", "job", "--state", "done", "--reviews", "1")
+        out = self.b(root, "handback", "--summary", "Synthetic result", "app", "--branch", "job", "--state", "done", "--reviews", "1")
         self.assertIn("local trunk is 2 behind", out)
         record = json.loads(next((root / "nodes/app/job-handbacks").glob("*.json")).read_text())
         self.assertEqual(record["ready"]["main"], merge)
@@ -820,7 +875,7 @@ class TeamHomes(Scenario):
         (wt / "fix").write_text("made-up change")
         self.git("add", "-A", cwd=wt)
         self.git("commit", "-qm", "fix", cwd=wt)
-        self.b(root, "handback", "app", "--branch", "job", "--state", "done", "--reviews", "1")
+        self.b(root, "handback", "--summary", "Synthetic result", "app", "--branch", "job", "--state", "done", "--reviews", "1")
         self.git("fetch", str(home), "job:job", cwd=seed)
         self.git("merge", "--no-ff", "-m", "Merge owned job", "job", cwd=seed)
         merge = self.git("rev-parse", "HEAD", cwd=seed).strip()
@@ -859,7 +914,7 @@ class TeamHomes(Scenario):
         wt=self.tmp/'app-work/worktrees/job'
         (wt/'fix').write_text('fake fix')
         self.git('add','-A',cwd=wt); self.git('commit','-qm','fix',cwd=wt)
-        self.b(root,'handback','app','--branch','job','--state','done','--reviews','1')
+        self.b(root,'handback', "--summary", "Synthetic result",'app','--branch','job','--state','done','--reviews','1')
         self.git('fetch',str(home),'job:job',cwd=seed)
         self.git('merge','--squash','job',cwd=seed);self.git('commit','-qm','fix (#5)',cwd=seed)
         self.git('push',str(origin),'trunk',cwd=seed)
@@ -876,7 +931,7 @@ class TeamHomes(Scenario):
         self.git("fetch", "origin", cwd=home)
         self.git("remote", "set-head", "origin", "-a", cwd=home)
         self.b(root, "wt", "add", "app", "job")
-        out = self.b(root, "handback", "app", "--branch", "job", "--state", "done", "--reviews", "1")
+        out = self.b(root, "handback", "--summary", "Synthetic result", "app", "--branch", "job", "--state", "done", "--reviews", "1")
         self.assertIn("origin/stable", out)
         packet = json.loads(next((root / "nodes/app/job-handbacks").glob("*.json")).read_text())["ready"]
         self.assertEqual(packet["main"], self.git("rev-parse", "stable", cwd=seed).strip())
@@ -906,7 +961,7 @@ class TeamHomes(Scenario):
         root, seed, origin, home = self.team()
         self.b(root, "wt", "add", "app", "job")
         self.git("symbolic-ref", "refs/remotes/origin/HEAD", "refs/heads/trunk", cwd=home)
-        self.assertIn("integration main is missing", self.b(root, "handback", "app", "--branch", "job",
+        self.assertIn("integration main is missing", self.b(root, "handback", "--summary", "Synthetic result", "app", "--branch", "job",
                       "--state", "done", "--reviews", "1", ok=False))
         out = self.b(root, "sync", "app", "--offline", "--mark")
         self.assertIn("not marked", out)
@@ -922,10 +977,10 @@ class TeamHomes(Scenario):
         self.git("commit", "-qm", "local integration", cwd=home)
         self.b(root, "wt", "add", "app", "job", "--base", "origin/trunk")
         wt = self.tmp / "app-work/worktrees/job"
-        self.assertIn("current local main", self.b(root, "handback", "app", "--branch", "job", "--state", "done",
+        self.assertIn("current local main", self.b(root, "handback", "--summary", "Synthetic result", "app", "--branch", "job", "--state", "done",
                       "--reviews", "1", ok=False))
         self.git("rebase", "trunk", cwd=wt)
-        self.b(root, "handback", "app", "--branch", "job", "--state", "done", "--reviews", "1")
+        self.b(root, "handback", "--summary", "Synthetic result", "app", "--branch", "job", "--state", "done", "--reviews", "1")
         (home / "second-local-work").write_text("another unpublished integration")
         self.git("add", "-A", cwd=home)
         self.git("commit", "-qm", "another local integration", cwd=home)
@@ -940,7 +995,7 @@ class TeamHomes(Scenario):
             (wt / "fix").write_text(str(i))
             self.git("add", "-A", cwd=wt)
             self.git("commit", "-qm", "made-up fix", cwd=wt)
-        self.b(root, "handback", "app", "--branch", "job", "--state", "done", "--reviews", "1")
+        self.b(root, "handback", "--summary", "Synthetic result", "app", "--branch", "job", "--state", "done", "--reviews", "1")
         self.git("fetch", str(home), "job:job", cwd=seed)
         self.git("merge", "--ff-only", "job", cwd=seed)
         self.git("push", str(origin), "trunk", cwd=seed)
@@ -963,7 +1018,7 @@ class TeamHomes(Scenario):
             (wt / "fix").write_text(str(i))
             self.git("add", "-A", cwd=wt)
             self.git("commit", "-qm", "made-up change", cwd=wt)
-        self.b(root, "handback", "app", "--branch", "job", "--state", "done", "--reviews", "1")
+        self.b(root, "handback", "--summary", "Synthetic result", "app", "--branch", "job", "--state", "done", "--reviews", "1")
         if legacy:
             import hashlib
             record = next((root / "nodes/app/job-handbacks").glob("*.json"))
@@ -1032,7 +1087,7 @@ class TeamHomes(Scenario):
         (wt / "fix").write_text("job contribution")
         self.git("add", "-A", cwd=wt)
         self.git("commit", "-qm", "fix", cwd=wt)
-        self.b(root, "handback", "app", "--branch", "job", "--state", "done", "--reviews", "1")
+        self.b(root, "handback", "--summary", "Synthetic result", "app", "--branch", "job", "--state", "done", "--reviews", "1")
         self.git("merge", "--no-ff", "-m", "job integration", "job", cwd=home)
         self.git("push", "origin", "trunk", cwd=home)
         self.b(root, "wt", "rm", "app", "job")
@@ -1051,11 +1106,11 @@ class TeamHomes(Scenario):
         (wt / "fix").write_text("worker change")
         self.git("add", "-A", cwd=wt)
         self.git("commit", "-qm", "fix", cwd=wt)
-        self.assertIn("local default must include origin default", self.b(root, "handback", "app", "--branch", "job",
+        self.assertIn("local default must include origin default", self.b(root, "handback", "--summary", "Synthetic result", "app", "--branch", "job",
                       "--state", "done", "--reviews", "1", ok=False))
         # The fixture owns this checkout; production code never updates an operator checkout.
         self.git("merge", "--ff-only", "origin/trunk", cwd=home)
-        self.b(root, "handback", "app", "--branch", "job", "--state", "done", "--reviews", "1")
+        self.b(root, "handback", "--summary", "Synthetic result", "app", "--branch", "job", "--state", "done", "--reviews", "1")
         self.git("merge", "--no-ff", "-m", "made-up job merge", "job", cwd=home)
         self.git("push", "origin", "trunk", cwd=home)
         self.assertIn("1 recorded", self.b(root, "sync", "app"))
@@ -1081,7 +1136,7 @@ class TeamHomes(Scenario):
     def test_main_job_branch_is_still_refused_with_another_remote_default(self):
         root, seed, origin, home = self.team()
         self.b(root, "wt", "add", "app", "main")
-        self.assertIn("job branch must differ from main", self.b(root, "handback", "app", "--branch", "main",
+        self.assertIn("job branch must differ from main", self.b(root, "handback", "--summary", "Synthetic result", "app", "--branch", "main",
                       "--state", "done", "--reviews", "1", ok=False))
 
     def test_failed_ledger_import_cannot_mark_past_unrecorded_merges(self):
@@ -1103,11 +1158,200 @@ class TeamHomes(Scenario):
         self.git("branch", "main", cwd=home)
         self.b(root, "wt", "add", "app", "job")
         self.git("symbolic-ref", "--delete", "refs/remotes/origin/HEAD", cwd=home)
-        out = self.b(root, "handback", "app", "--branch", "job", "--state", "done", "--reviews", "1", ok=False)
+        out = self.b(root, "handback", "--summary", "Synthetic result", "app", "--branch", "job", "--state", "done", "--reviews", "1", ok=False)
         self.assertIn("origin default branch unavailable", out)
         self.assertIn("integration main is missing", out)
 
 
 
+class R2SettingsBatch(Scenario):
+    def test_m9_mixed_batch_one_commit_prevalidates_and_preserves_index(self):
+        r = self.init("sample")
+        unrelated = r / "unrelated.txt"
+        unrelated.write_text("staged operator work\n")
+        self.git("add", "unrelated.txt", cwd=r)
+        before_index = self.git("diff", "--cached", "--binary", cwd=r)
+        head = self.git("rev-parse", "HEAD", cwd=r).strip()
+        batch = self.tmp / "batch.json"
+        operations = [{"op": "set", "node": "root", "pairs": ["rotate_turns=42", "coordinator=sample-thread"]},
+                      {"op": "schedule-add", "id": "daily-check", "node": "root", "when": "daily 09:00", "brief": "Inspect fixture"}]
+        tracked = {p: (r / p).read_bytes() if (r / p).exists() else None
+                   for p in ("node.md", "registry.md", ".brain/local.json")}
+        for refused, diagnostic in [
+                ({"op": "schedule-add", "id": "BAD", "when": "daily", "brief": "Bad"}, "schedule ids"),
+                ({"op": "schedule-add", "id": "daily-check", "when": "daily", "brief": "Bad"}, "exists"),
+                ({"op": "set", "pairs": ["fallback=codex,codex"]}, "distinct"),
+                ({"op": "set", "pairs": ["owners=other"]}, "brain owners")]:
+            batch.write_text(json.dumps(operations + [refused]))
+            out = self.b(r, "settings", "batch", str(batch), ok=False)
+            self.assertIn(diagnostic, out)
+            self.assertEqual(self.git("rev-parse", "HEAD", cwd=r).strip(), head)
+            self.assertFalse((r / "schedules.md").exists())
+            for p, data in tracked.items():
+                self.assertEqual((r / p).read_bytes() if (r / p).exists() else None, data)
+        batch.write_text(json.dumps(operations))
+        self.b(r, "settings", "batch", str(batch))
+        self.assertEqual(self.git("rev-list", "--count", head + "..HEAD", cwd=r).strip(), "1")
+        self.assertEqual(self.git("diff", "--cached", "--binary", cwd=r), before_index)
+        self.assertNotIn("unrelated.txt", self.git("show", "--format=", "--name-only", "HEAD", cwd=r))
+        self.assertIn("rotate_turns: 42", (r / "node.md").read_text())
+        self.assertNotIn("sample-thread", self.git("show", "HEAD:node.md", cwd=r))
+        self.assertEqual(json.loads((r / ".brain/local.json").read_text())["nodes"]["root"]["coordinator"], "sample-thread")
+        self.assertIn("daily-check", (r / "schedules.md").read_text())
+        self._assert_batch_local_only_keeps_head_and_dirty_shared_targets_refuse(r)
+        self._assert_batch_publication_failure_retains_recovery_packet()
+
+    def _assert_batch_publication_failure_retains_recovery_packet(self):
+        r = self.repo(self.tmp / "publication", {
+            "instance.md": "---\nprincipals: sample\nruntimes: codex\n---\n",
+            "node.md": "---\nid: root\ntitle: Sample\n---\n"})
+        m = core_loader.SourceFileLoader("r2_batch_failure", str(CORE / "bin/brain")).load_module()
+        inst = m.Instance(r)
+        before = (r / "node.md").read_text()
+        planned = {r / "node.md": before + "\nNew fixture data\n", r / "schedules.md": "# Fixture\n"}
+        original_write = m.atomic_write
+        def fail_schedule(path, text):
+            if path == r / "schedules.md":
+                raise OSError("synthetic disk failure")
+            return original_write(path, text)
+        with mock.patch.object(m, "atomic_write", side_effect=fail_schedule), \
+             mock.patch.object(inst, "commit_settings_batch") as commit:
+            with self.assertRaises(SystemExit) as refused:
+                m.publish_settings_batch(inst, planned, 2)
+        self.assertIn("ask the coordinator", str(refused.exception))
+        commit.assert_not_called()
+        record = json.loads(next((r / ".brain/settings-batches").glob("*.json")).read_text())
+        self.assertEqual(record["state"], "failed")
+        self.assertEqual(record["before"]["node.md"], before)
+        self.assertEqual(record["after"]["node.md"], planned[r / "node.md"])
+        self.assertEqual((r / "node.md").read_text(), planned[r / "node.md"])
+        self.assertFalse((r / "schedules.md").exists())
+
+    def _assert_batch_local_only_keeps_head_and_dirty_shared_targets_refuse(self, r):
+        head = self.git("rev-parse", "HEAD", cwd=r).strip()
+        batch = self.tmp / "batch.json"
+        batch.write_text(json.dumps([{"op": "set", "pairs": ["coordinator=fixture-thread"]}]))
+        self.b(r, "settings", "batch", str(batch))
+        self.assertEqual(self.git("rev-parse", "HEAD", cwd=r).strip(), head)
+        node = r / "node.md"
+        node.write_text(node.read_text() + "\nOperator data\n")
+        self.git("add", "node.md", cwd=r)
+        index = self.git("diff", "--cached", "--binary", cwd=r)
+        batch.write_text(json.dumps([{"op": "set", "pairs": ["rotate_turns=4"]}]))
+        self.assertIn("existing edits", self.b(r, "settings", "batch", str(batch), ok=False))
+        self.assertEqual(self.git("diff", "--cached", "--binary", cwd=r), index)
+        self.assertIn("Operator data", node.read_text())
+
+
 if __name__ == "__main__":
     unittest.main()
+
+
+class PublicationPolicy(unittest.TestCase):
+    def setUp(self):
+        patch = mock.patch.object(sys, "path", [str(CORE / "lib"), *sys.path])
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def test_b5_explicit_policy_denies_conflicts_and_unknown_limits(self):
+        from brain import policy
+        from brain.instance import Instance
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / 'instance.md').write_text('---\noperator: alice\nprincipals: alice\n---\n')
+            (root / 'node.md').write_text('---\nid: root\nowners: alice\n---\n')
+            (root / 'brief.md').write_text('## Limits\n- Never open a pull request.\n  Why: local review only.\n')
+            inst = Instance(root)
+            n = inst.node('root')
+            before = {p.name: p.read_bytes() for p in root.iterdir() if p.is_file()}
+            with self.assertRaisesRegex(ValueError, 'coordinator'):
+                policy.validate_merge(inst, n, 'pr')
+            self.assertEqual(before, {p.name: p.read_bytes() for p in root.iterdir() if p.is_file()})
+            self.assertIsNone(policy.validate_merge(inst, n, 'local'))
+            rules = policy.limit_snapshot(n)
+            record = {'version': 1, 'node': 'root', 'reviewer': 'alice', 'reviewed_at': inst.now(),
+                      'rules': [{**r, 'actions': {'pr': 'deny', 'push': 'unknown'}} for r in rules]}
+            (root / 'publication-policy.json').write_text(json.dumps(record))
+            with self.assertRaisesRegex(ValueError, 'Never open a pull request.*') as denied:
+                policy.validate_merge(inst, n, 'pr')
+            self.assertIn('brief.md', str(denied.exception))
+            from brain import nodes
+            command_before = {p.name: p.read_bytes() for p in root.iterdir() if p.is_file()}
+            errors = io.StringIO()
+            with mock.patch.object(nodes, 'load', return_value=inst), contextlib.redirect_stderr(errors):
+                with self.assertRaises(SystemExit) as refusal:
+                    nodes.cmd_set(argparse.Namespace(id='root', pairs=['coordinator=demo-thread', 'merge=pr']))
+            self.assertIn('Never open a pull request.', str(refusal.exception))
+            self.assertIn('brief.md', str(refusal.exception))
+            self.assertFalse((root / '.brain/local.json').exists())
+            self.assertEqual(command_before, {p.name: p.read_bytes() for p in root.iterdir() if p.is_file()})
+            self.assertIn('Never open a pull request.', '\n'.join(policy.publication_instructions(inst, n)))
+            record['rules'][0]['actions']['pr'] = 'allow'
+            (root / 'publication-policy.json').write_text(json.dumps(record))
+            self.assertIsNone(policy.validate_merge(inst, n, 'pr'))
+            (root / 'brief.md').write_text('## Limits\n- Ask before any outward action.\n')
+            with self.assertRaisesRegex(ValueError, 'coordinator'):
+                policy.validate_merge(inst, n, 'pr')
+
+
+    def _assert_publication_limits_stop_at_boundary(self, target_id):
+        from brain import policy
+        from brain.instance import Instance
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / 'instance.md').write_text('---\noperator: alice\nprincipals: alice, bob\ntimezone: UTC\n---\n')
+            (root / 'node.md').write_text('---\nid: root\nowners: alice\n---\n')
+            (root / 'brief.md').write_text('## Limits\n- Parent-only-confidential-sentinel.\n')
+            boundary = root / 'nodes/boundary'
+            child = boundary / 'nodes/child'
+            child.mkdir(parents=True)
+            (boundary / 'node.md').write_text('---\nid: boundary\nowners: bob\n---\n')
+            (boundary / 'brief.md').write_text('## Limits\n- Boundary rule.\n')
+            (child / 'node.md').write_text('---\nid: boundary/child\n---\n')
+            (child / 'brief.md').write_text('## Limits\n- Descendant rule.\n')
+            inst = Instance(root)
+            for nid in (target_id,):
+                with self.subTest(node=nid):
+                    node = inst.node(nid)
+                    self.assertEqual(node['sealed'], nid == 'boundary')
+                    expected = [{'source': 'boundary/brief.md#Limits:1', 'text': 'Boundary rule.'}]
+                    if nid.endswith('/child'):
+                        expected.append({'source': 'boundary/child/brief.md#Limits:1', 'text': 'Descendant rule.'})
+                    self.assertEqual(policy.limit_snapshot(node), expected)
+                    generated = '\n'.join(policy.publication_instructions(inst, node))
+                    self.assertNotIn('Parent-only-confidential-sentinel', generated)
+                    self.assertNotIn('root/brief.md', generated)
+                    record = {'version': 1, 'node': nid, 'reviewer': 'bob', 'reviewed_at': inst.now(),
+                              'rules': [{**r, 'actions': {'pr': 'allow', 'push': 'deny'}} for r in expected]}
+                    (node['dir'] / 'publication-policy.json').write_text(json.dumps(record))
+                    self.assertIsNone(policy.validate_merge(inst, node, 'pr'))
+
+    def test_empty_publication_policy_refuses_pr_before_any_setting_write(self):
+        from brain import policy, nodes
+        from brain.instance import Instance
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / 'instance.md').write_text('---\noperator: alice\nprincipals: alice\ntimezone: UTC\n---\n')
+            (root / 'node.md').write_text('---\nid: root\nowners: alice\n---\n')
+            inst = Instance(root)
+            node = inst.node('root')
+            self.assertEqual(policy.publication_decision(inst, node, 'pr')['decision'], 'unknown')
+            self.assertIsNone(policy.validate_merge(inst, node, 'local'))
+            with self.assertRaisesRegex(ValueError, 'coordinator'):
+                policy.validate_merge(inst, node, 'pr')
+            before = {p.name: p.read_bytes() for p in root.iterdir() if p.is_file()}
+            with mock.patch.object(nodes, 'load', return_value=inst), self.assertRaises(SystemExit) as refusal:
+                nodes.cmd_set(argparse.Namespace(id='root', pairs=['coordinator=demo-thread', 'merge=pr']))
+            self.assertIn('coordinator', str(refusal.exception))
+            self.assertEqual(before, {p.name: p.read_bytes() for p in root.iterdir() if p.is_file()})
+            self.assertFalse((root / '.brain/local.json').exists())
+            record = {'version': 1, 'node': 'root', 'reviewer': 'alice', 'reviewed_at': inst.now(),
+                      'rules': [], 'consent': {'node': 'root', 'actions': ['pr']}}
+            (root / 'publication-policy.json').write_text(json.dumps(record))
+            self.assertIsNone(policy.validate_merge(inst, node, 'pr'))
+
+    def test_publication_limits_stop_at_a_sealed_target(self):
+        self._assert_publication_limits_stop_at_boundary('boundary')
+
+    def test_publication_limits_stop_above_a_boundary_descendant(self):
+        self._assert_publication_limits_stop_at_boundary('boundary/child')

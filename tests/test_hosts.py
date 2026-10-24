@@ -71,7 +71,7 @@ class LockHotfix(Scenario):
         code = "from pathlib import Path; import time; Path(" + repr(str(marker)) + ").touch(); time.sleep(10)"
         command = shlex.quote(sys.executable) + " -c " + shlex.quote(code)
         self.b(r, "set", "a", "verify=" + command)
-        p = self.start(r, "handback", "a", "--branch", "job", "--state", "done", "--reviews", "1",
+        p = self.start(r, "handback", "--summary", "Synthetic result", "a", "--branch", "job", "--state", "done", "--reviews", "1",
                        "--lessons", "none: fixture")
         try:
             self.wait_file(marker, p)
@@ -100,7 +100,7 @@ class LockHotfix(Scenario):
                                       ").touch()\nwhile not Path(" + repr(str(release)) +
                                       ").exists(): time.sleep(.02)\n")
                     case.b(r, "set", "a", "verify=" + shlex.quote(sys.executable) + " " + shlex.quote(str(script)))
-                    p = subprocess.Popen([sys.executable, str(CORE / "bin/brain"), "handback", "a", "--branch", "job",
+                    p = subprocess.Popen([sys.executable, str(CORE / "bin/brain"), "handback", "--summary", "Synthetic result", "a", "--branch", "job",
                                           "--state", "done", "--reviews", "1"], cwd=r,
                                          env={**case.env, "BRAIN_ROOT": str(r), "BRAIN_NO_UPDATE_CHECK": "1"},
                                          stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
@@ -166,7 +166,12 @@ class LockHotfix(Scenario):
             release.touch()
             out, err = p.communicate(timeout=20)
             self.assertEqual(p.returncode, 0, out + err)
-            self.assertEqual(calls.read_text().splitlines(), ['{"event":"brain-wake"}'])
+            self.assertEqual(len(calls.read_text().splitlines()), 1)
+            self.assertTrue(json.loads(calls.read_text())['reason'])
+            self.assertEqual(json.loads(calls.read_text())['event'], 'brain-wake')
+            self.assertEqual(set(json.loads(calls.read_text())), {'event', 'reason'})
+            self.assertRegex(json.loads(calls.read_text())['reason'],
+                             r'^new request [0-9a-f]{64}(; new request [0-9a-f]{64})*$')
             self.assertEqual(len(list(directory.glob("*.sent"))), 2)
             self.assertFalse(list(directory.glob("*.pending")))
         finally:
@@ -273,7 +278,11 @@ class QuestionWake(Scenario):
     def test_dedup_rate_window_and_delayed_delivery(self):
         self.assertEqual(self.enqueue("first question"), 1)
         self.drain()
-        self.assertEqual(self.calls.read_text().splitlines(), ['{"event":"brain-wake"}'])
+        self.assertEqual(len(self.calls.read_text().splitlines()), 1)
+        self.assertTrue(json.loads(self.calls.read_text())['reason'])
+        self.assertEqual(json.loads(self.calls.read_text())['event'], 'brain-wake')
+        self.assertEqual(set(json.loads(self.calls.read_text())), {'event', 'reason'})
+        self.assertRegex(json.loads(self.calls.read_text())['reason'], r'^new request [0-9a-f]{64}$')
         self.assertEqual(self.enqueue("first question"), 0)
         self.assertEqual(self.enqueue("second question"), 1)
         self.drain()
@@ -336,7 +345,8 @@ class QuestionWake(Scenario):
         with mock.patch.object(urllib.request, "build_opener", return_value=opener) as build:
             self.assertTrue(self.module.wake_send("https://wake.invalid/synthetic-capability"))
         request = opener.open.call_args.args[0]
-        self.assertEqual(request.data, b'{"event":"brain-wake"}')
+        self.assertEqual(json.loads(request.data), {'event': 'brain-wake',
+                         'reason': 'new request ' + self.module.wake_binding('https://wake.invalid/synthetic-capability')})
         self.assertEqual(opener.open.call_args.kwargs["timeout"], 10)
         handler = build.call_args.args[0]()
         self.assertIsNone(handler.redirect_request(None, None, 302, "redirect", {}, "https://other.invalid/"))
@@ -388,7 +398,12 @@ class QuestionWake(Scenario):
             directory = self.module.wake_directory(self.inst, self.n)
             self.assertFalse(list(directory.glob("*.pending")))
             self.assertEqual(len(list(directory.glob("*.sent"))), 1)
-            self.assertEqual(calls, [("/synthetic-capability", "brain-wake/1", b'{"event":"brain-wake"}')])
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(calls[0][:2], ("/synthetic-capability", "brain-wake/1"))
+            payload = json.loads(calls[0][2])
+            self.assertEqual(set(payload), {'event', 'reason'})
+            self.assertEqual(payload['event'], 'brain-wake')
+            self.assertRegex(payload['reason'], r'^new request [0-9a-f]{64}$')
 
     def test_refused_drain_stays_pending_and_due_reports_code_once(self):
         with self.webhook(403) as (url, calls):
@@ -616,7 +631,7 @@ class QuestionWake(Scenario):
         def start(inst, node):
             starts.append((now[0], node["id"]))
             self.module.wake_drain(inst, node)  # inline newcomer really conflicts with LOCK_NB
-        def send(command):
+        def send(command, reason=None):
             time.sleep(.001)  # An unrelated stdlib poll must not advance the wake clock.
             sends.append(now[0])
             if len(sends) <= 5:
@@ -711,7 +726,7 @@ class QuestionWake(Scenario):
     def test_reason_arriving_during_send_is_retained_and_sent_once(self):
         self.enqueue("first")
         sends = []
-        def send(command):
+        def send(command, reason=None):
             sends.append(command)
             if len(sends) == 1:
                 self.enqueue("second")
@@ -752,6 +767,7 @@ class QuestionWake(Scenario):
         self.assertNotIn("Choose blue", output.getvalue())
 
     def test_root_due_escalates_without_question_text_and_live_shows_age(self):
+        self.inst.local_of('root').update(coordinator='synthetic-root', wake=self.command)
         old = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(minutes=11)).isoformat()
         (self.n["dir"] / "inbox.md").write_text("- " + old +
             " from runtime: Host question: Choose blue? <!-- host-question:abc -->\n")
@@ -771,6 +787,8 @@ class QuestionWake(Scenario):
     def test_outward_state_link_is_refused(self):
         outside = self.tmp / "outside"
         outside.mkdir()
+        # Lifecycle scans legitimately create the private state directory already.
+        (self.r / ".brain/wake").rename(self.r / ".brain/wake-original")
         (self.r / ".brain/wake").symlink_to(outside, target_is_directory=True)
         self.assertEqual(self.enqueue("question"), 0)
         self.assertEqual(list(outside.iterdir()), [])
@@ -794,6 +812,23 @@ class QuestionWake(Scenario):
 
 
 class StopHook(Scenario):
+    def test_relay_only_exit_captures_questions_but_skips_note_reminders(self):
+        r = self.init("alice")
+        (r / "brief.md").write_text("Changed notes\n")
+        loader = core_loader.SourceFileLoader("brain_relay_exit", str(CORE / "bin/brain"))
+        module = loader.load_module()
+        payload = {"cwd": str(r), "last_assistant_message": "relay only"}
+        with mock.patch.object(sys, "stdin", io.StringIO(json.dumps(payload))), \
+                mock.patch.object(module, "capture_hook_questions") as capture, \
+                mock.patch.object(module, "notes_lag", side_effect=AssertionError("relay inspected notes")), \
+                contextlib.redirect_stdout(io.StringIO()) as output:
+            module.hook_stop(argparse.Namespace(event="stop"))
+        capture.assert_called_once()
+        self.assertEqual(output.getvalue(), "")
+        reason = self.hook(r, r)["reason"]
+        self.assertIn("relay only", reason)
+        self.assertNotIn("repeating your previous answer", reason)
+
     def test_hygiene_extension_old_unchanged_notes_do_not_hold_read_only_turns(self):
         r = self.init('maple')
         st = r / 'status.md'

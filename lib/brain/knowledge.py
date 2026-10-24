@@ -557,23 +557,29 @@ def cmd_hire(a):
         out += ["This work happens in a project with its own owners. Leave nothing in it that names "
                 "where this brief came from (axiom 6). Ask before pushing, publishing or anything "
                 "irreversible (axiom 24).", ""]
-    out += _m_briefs.separation_lines(a, target, a.branch)
-    out += ["## Task", "", a.task.strip(), ""] + _m_jobs.contract_lines(inst, target, a.branch) + \
-        ["## Specialist standards", "", _m_briefs.reference_line(sp["dir"] / "role.md", sp["fm"].get("title", sp["id"])), ""] + limits_lines(target)
+    why_lines = _m_briefs.separation_lines(a, target, a.branch)
+    out += why_lines
+    inputs = [("Task", a.task), ("Limits", "\n".join(limits_of(target))),
+              ("Why separate", a.why_separate or "")] + _m_briefs.contract_inputs(target, a.branch)
+    contract = _m_jobs.contract_lines(inst, target, a.branch)
+    out += _m_briefs.attribution_lines(runtime, a.model)
+    out += ["## Task", "", a.task.strip(), ""] + contract + \
+        ["## Specialist standards", "", _m_briefs.reference_line(sp["dir"] / "role.md", sp["fm"].get("title", sp["id"]), inputs=inputs), ""] + limits_lines(target)
     if lessons:
+        inputs.append(("Lessons", "\n".join(l["text"] for l in lessons)))
         out += ["## Lessons from earlier jobs", ""] + [f"- {l['text']}" for l in lessons] + [""]
     if wanted:
         out += ["## Knowledge for this job", ""]
         for i in items:
             if i["fm"].get("id") in wanted:
-                reference = _m_briefs.reference_line(i["path"], i["fm"].get("title", i["fm"].get("id")))
+                reference = _m_briefs.reference_line(i["path"], i["fm"].get("title", i["fm"].get("id")), inputs=inputs)
                 if _m_guard.find_terms(reference, learning_terms(inst, i["fm"], [target], nodes)):
                     _m_common.die("library reference holds a never-name word; cannot include it in the brief")
                 out += [reference, ""]
-    out += knowledge_lines(inst, target, a.task, sp["id"], exclude=wanted) + node_knowledge_lines(target) + \
+    out += knowledge_lines(inst, target, a.task, sp["id"], exclude=wanted, inputs=inputs) + node_knowledge_lines(target) + \
         recall_hint(target)
     out += handback_lines(inst, target, branch=a.branch) + report_lines(job=bool(a.branch))
-    text = _m_briefs.checked_brief(target, "\n".join(out) + "\n")
+    text = _m_briefs.checked_brief(target, "\n".join(out) + "\n", inputs=inputs)
     _m_guard.no_terms_in(target, text, "the brief")
     _m_jobs.record_job_route(inst, target, a.branch, a.job_class, runtime, a.model, effort=a.effort)
     if a.job:
@@ -650,7 +656,7 @@ def knowledge_ranked(inst, n, contexts, exclude=(), states=("active",), required
     return sorted(ranked, key=lambda r: r[:2])
 
 
-def knowledge_lines(inst, n, task, specialist="", exclude=()):
+def knowledge_lines(inst, n, task, specialist="", exclude=(), inputs=None):
     """Up to five usable items for a brief, each with why it was picked."""
     contexts = [("task", knowledge_tokens(task), 4),
                 ("labels/stack", knowledge_tokens(n["fm"].get("labels", "") + " " + n["fm"].get("stack", "")), 3),
@@ -661,9 +667,15 @@ def knowledge_lines(inst, n, task, specialist="", exclude=()):
                 f"Path: `{_m_common.tilde(item['path'])}`. Read full: `brain item show {key} --node {n['id']}`.")
         if not _m_guard.find_terms(line, learning_terms(inst, item["fm"], [n])):
             lines.append(line)
+            if inputs is not None:
+                inputs += [("Library metadata", key), ("Library metadata", title)]
+            if len(lines) == 5:
+                break
+    from . import policy as _m_policy
+    publication = _m_policy.publication_instructions(inst, n)
     if not lines:
-        return []
-    return ["## Relevant library items", ""] + lines[:5] + [""]
+        return publication
+    return publication + ["## Relevant library items", ""] + lines[:5] + [""]
 
 
 def node_knowledge_lines(n):
@@ -779,12 +791,13 @@ def handback_lines(inst, n, to=None, who="worker", branch=None):
                 "- **A choice** the brief or rules settle: make it and record it under Decisions I made.",
                 "- **Before handing back**, " + prepare +
                 f"Run `brain handback {shlex.quote(n['id'])} --branch {shlex.quote(branch)} "
-                "--state done --reviews <completed rounds> --report <path> --lessons '<proposed lessons or none: reason>'`. "
+                "--state done --summary '<one-line result>' --reviews <completed rounds> --report <path> --lessons '<proposed lessons or none: reason>'`. "
                 + evidence + "State and proposed lessons live in your one worker-owned job-handbacks/<key>.json. "
                 "Do not edit the ledger" + (". " if study else " or status. ") +
                 "Use `none: <reason>` when there is no reusable lesson.",
                 "- **Blocked or need a choice:** use the same command with `--state blocked` or `--state question`, "
-                "omit --reviews, and describe the blocker/question in --report. Questions also append to inbox; "
+                "omit --reviews, supply --summary '<one-line result>', and describe the blocker/question in --report. "
+                "For question state also supply --question '<one-line choice>'. Questions also append to inbox; "
                 "for a blocked human need add `--need-human '<need>'`. Legacy failed is also accepted.",
                 "- End your turn after recording the hand-back. The coordinator reads it with brain due; "
                 f"a host message is optional notification ({how}) and need only link the record. Do not duplicate Lessons "
@@ -806,9 +819,56 @@ def report_lines(job=False):
              "Lessons: what the next job should know, or none: <reason>; ") + "and what is still open."]
 
 
-def launch_selection(inst, n, a, runtime, subscription, row, kind):
+def class_routing_config(inst, n):
+    """Validate flat routing keys; no keys means byte-compatible legacy routing."""
+    found = False
+    for source, cfg in (("node.md", n["fm"]), ("instance.md", inst.cfg)):
+        for key in cfg:
+            kind = None
+            if key.startswith("route_runtime_"):
+                kind = key[len("route_runtime_"):]
+            elif key.startswith("route_model_"):
+                suffix = key[len("route_model_"):]
+                # Existing runtime-wide model keys are still defaults.
+                if suffix in inst.runtimes:
+                    continue
+                for runtime in sorted(inst.runtimes, key=len, reverse=True):
+                    if suffix.startswith(runtime + "_"):
+                        kind = suffix[len(runtime) + 1:]
+                        break
+                else:
+                    if "_" in suffix:
+                        _m_common.die(_m_guard.redact(f"{source} {key}: unknown routing runtime/class", _m_guard.never_terms(n)))
+            if kind is not None:
+                if kind not in _m_jobs.JOB_CLASSES:
+                    _m_common.die(_m_guard.redact(f"{source} {key}: unknown routing class", _m_guard.never_terms(n)))
+                found = True
+    return found
+
+
+def route_setting(inst, n, explicit, flag, class_key, node_key, instance_key):
+    for value, source in ((explicit, flag),
+                          (n["fm"].get(class_key), "node.md " + class_key),
+                          (n["fm"].get(node_key), "node.md " + node_key),
+                          (inst.cfg.get(class_key), "instance.md " + class_key),
+                          (inst.cfg.get(instance_key), "instance.md " + instance_key)):
+        if value:
+            return value, source
+    return None, "default"
+
+
+def class_model_selection(inst, n, a, runtime, kind):
+    key = "route_model_" + runtime
+    model, source = route_setting(inst, n, a.model, "--model", key + "_" + kind, key, key)
+    return model or "runtime default", source
+
+
+def launch_selection(inst, n, a, runtime, subscription, row, kind, model_selection=None):
     """Use configured model names, never invent a model or provider identity."""
-    a.model = a.model or n["fm"].get("route_model_" + runtime) or inst.cfg.get("route_model_" + runtime) or "runtime default"
+    if class_routing_config(inst, n):
+        a.model, a.model_source = model_selection or class_model_selection(inst, n, a, runtime, kind)
+    else:
+        a.model = a.model or n["fm"].get("route_model_" + runtime) or inst.cfg.get("route_model_" + runtime) or "runtime default"
     a.effort = _m_jobs.job_effort(n, row, kind, getattr(a, "effort", None))
     instance = (subscription or {}).get("host_provider_instance_id") or runtime
     if a.model == "runtime default":
@@ -823,10 +883,21 @@ def worker_route(inst, n, a):
     """Route all worker briefs with the same runtime pin and model usage limits."""
     row = _m_jobs.open_job(_m_jobs.read_jobs(n) or [], getattr(a, "branch", None))
     kind = _m_jobs.job_class(n, row, getattr(a, "job_class", None))
-    pin = getattr(a, "runtime", None) or n["fm"].get("runtime")
+    per_class = class_routing_config(inst, n)
+    if per_class:
+        pin, runtime_source = route_setting(inst, n, getattr(a, "runtime", None), "--runtime",
+                                            "route_runtime_" + kind, "runtime", "default_runtime")
+    else:
+        pin = getattr(a, "runtime", None) or n["fm"].get("runtime")
+    model_selection = None
+    if per_class:
+        runtime, _ = _m_usage.class_runtime(inst, kind, runtime=pin)
+        model_selection = class_model_selection(inst, n, a, runtime, kind)
     runtime, subscription, usage = _m_usage.class_route(
-        inst, kind, runtime=pin, model=a.model,
+        inst, kind, runtime=pin, model=model_selection[0] if model_selection else a.model,
         weekly_cap=n["fm"].get("route_weekly_cap", inst.cfg.get("route_weekly_cap", 60)))
     a.job_class = kind
-    launch_selection(inst, n, a, runtime, subscription, row, kind)
+    launch_selection(inst, n, a, runtime, subscription, row, kind, model_selection=model_selection)
+    if per_class:
+        usage += f" Routing sources: runtime={runtime_source}; model={a.model_source}."
     return runtime, _m_guard.redact(usage, _m_guard.never_terms(n))

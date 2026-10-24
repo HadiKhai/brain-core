@@ -33,7 +33,13 @@ class Workbench(Scenario):
         r = self.init("alice")
         home = self.repo(self.tmp / "code" / "app")
         self.b(r, "new", "app", "--title", "App", "--home", str(home))
-        (r / "nodes" / "app" / "worktree-setup.sh").write_text('echo partial > partial.txt\nexit 7\n')
+        self.b(r, 'set', 'app', 'verify_export_port=true')
+        self.env['PORT'] = '9200'
+        self.env.pop('PORTS', None)
+        self.env.pop('PORT_LAST', None)
+        (r / "nodes" / "app" / "worktree-setup.sh").write_text(
+            'set -eu\n[ "$PORT" = 9200 ]\n[ "$PORTS" = "$BRAIN_PORTS" ]\n'
+            '[ "$PORT_LAST" = "$BRAIN_PORT_LAST" ]\necho partial > partial.txt\nexit 7\n')
         p = subprocess.run([sys.executable, str(r / "core" / "bin" / "brain"), "wt", "add", "app", "job-fails"],
                            cwd=r, env=self.env, capture_output=True, text=True)
         self.assertEqual(p.returncode, 7, p.stdout + p.stderr)
@@ -55,7 +61,11 @@ class Workbench(Scenario):
         self.git("remote", "set-head", "origin", "main", cwd=home)
         (home / ".env").write_text("SECRET=1\n")
         self.b(r, "new", "app", "--title", "App", "--owners", "team", "--home", str(home))
-        (r / "nodes" / "app" / "worktree-setup.sh").write_text('cp "$MAIN/.env" .env\necho "PORT=$PORT" >> .env\n')
+        for key in ('PORT', 'PORTS', 'PORT_LAST'):
+            self.env.pop(key, None)
+        (r / "nodes" / "app" / "worktree-setup.sh").write_text(
+            'set -eu\n[ "${PORT+x}${PORTS+x}${PORT_LAST+x}" = "" ]\n'
+            'cp "$MAIN/.env" .env\necho "PORT=$BRAIN_PORT" >> .env\n')
 
         out = self.b(r, "wt", "add", "app", "feat-a")
         wa = self.tmp / "code" / "app-work" / "worktrees" / "feat-a"
@@ -82,6 +92,61 @@ class Workbench(Scenario):
         self.assertTrue((wb_ / "wip.txt").exists())
         self.b(r, "wt", "rm", "app", "feat-b", ok=False)        # uncommitted work is never discarded silently
         self.assertIn("feat-c", self.b(r, "wt", "list"))
+
+    def test_add_reuses_cached_submodule_gitdir_before_setup_without_remote(self):
+        r = self.init("alice")
+        source = self.repo(self.tmp / "module-source")
+        home = self.repo(self.tmp / "app")
+        self.git("submodule", "add", "--name", "cached-module", str(source), "vendor/module", cwd=home)
+        self.git("commit", "-qam", "Cache submodule", cwd=home)
+        cached = home / ".git/modules/cached-module"
+        before = (cached / "HEAD").read_bytes()
+        before_config = (cached / "config").read_bytes()
+        source.rename(self.tmp / "remote-unavailable")
+        self.b(r, "new", "app", "--title", "App", "--home", str(home))
+        (r / "nodes/app/worktree-setup.sh").write_text("git submodule update --init --recursive\n")
+        out = self.b(r, "wt", "add", "app", "job-cached")
+        wt = self.tmp / "app-work/worktrees/job-cached"
+        self.assertIn("reused submodule: vendor/module", out)
+        self.assertIn("setup: ok", out)
+        self.assertEqual((wt / "vendor/module/README.md").read_text(), "hello\n")
+        common = self.git("rev-parse", "--git-common-dir", cwd=wt / "vendor/module").strip()
+        module_gitdir = (wt / "vendor/module" / common).resolve()
+        self.assertNotEqual(module_gitdir, cached.resolve())
+        self.assertEqual((module_gitdir / "objects/info/alternates").read_text().strip(), str(cached / "objects"))
+        self.assertEqual((cached / "HEAD").read_bytes(), before)
+        self.assertEqual(self.git("status", "--porcelain", cwd=wt), "")
+        # A second job gets independent metadata and the requested detached commit.
+        self.b(r, "wt", "add", "app", "job-second", "--no-setup")
+        other = wt.parent / "job-second/vendor/module"
+        self.assertEqual(self.git("rev-parse", "HEAD", cwd=other),
+                         self.git("rev-parse", "HEAD", cwd=home / "vendor/module"))
+        self.assertNotEqual(self.git("rev-parse", "--git-dir", cwd=other),
+                            self.git("rev-parse", "--git-dir", cwd=wt / "vendor/module"))
+        self.assertEqual((cached / "HEAD").read_bytes(), before)
+        self.assertEqual((cached / "config").read_bytes(), before_config)
+
+    def test_prune_reports_submodules_and_retains_shared_module_data(self):
+        r = self.init("alice")
+        source = self.repo(self.tmp / "module-source")
+        home = self.repo(self.tmp / "app")
+        self.git("submodule", "add", "--name", "shared-name", str(source), "vendor/module", cwd=home)
+        self.git("commit", "-qam", "Add module", cwd=home)
+        self.b(r, "new", "app", "--title", "App", "--home", str(home))
+        self.b(r, "wt", "add", "app", "job-module")
+        wt = self.tmp / "app-work/worktrees/job-module"
+        self.git("submodule", "update", "--init", cwd=wt)
+        self.git("commit", "--allow-empty", "-qm", "Finish job", cwd=wt)
+        self.git("merge", "--ff-only", "job-module", cwd=home)
+        shared = home / ".git/modules/shared-name"
+        before = (shared / "HEAD").read_bytes()
+        for flags in (("--dry-run",), ()):
+            out = self.b(r, "wt", "prune", "app", "--offline", *flags)
+            self.assertIn("job-module (submodules retained: vendor/module)", out)
+            self.assertIn("none", out)
+            self.assertTrue((wt / "vendor/module/README.md").exists())
+            self.assertEqual((shared / "HEAD").read_bytes(), before)
+        self.assertIn("job-module", self.b(r, "wt", "list", "app"))
 
     def test_reports_have_a_predictable_place(self):
         r = self.init("alice")
@@ -221,6 +286,9 @@ class PruneSafety(AutonomyProject):
         self.git('remote', 'add', 'origin', str(origin), cwd=home)
         self.git('push', '-q', 'origin', 'main', cwd=home)
         self.git('remote', 'set-head', 'origin', 'main', cwd=home)
+        (r / 'nodes/app/publication-policy.json').write_text(json.dumps({
+            'version': 1, 'node': 'app', 'reviewer': 'alice', 'reviewed_at': '2026-01-01 00:00 +00:00',
+            'rules': [], 'consent': {'node': 'app', 'actions': ['pr']}}))
         self.b(r, 'set', 'app', 'merge=pr')
         (wt / 'done').write_text('done')
         self.git('add', '.', cwd=wt)
@@ -282,6 +350,9 @@ class PruneSafety(AutonomyProject):
         origin = self.tmp / 'origin.git'
         self.git('init', '-q', '--bare', '-b', 'main', str(origin), cwd=self.tmp)
         self.git('remote', 'add', 'origin', str(origin), cwd=home)
+        (r / 'nodes/app/publication-policy.json').write_text(json.dumps({
+            'version': 1, 'node': 'app', 'reviewer': 'alice', 'reviewed_at': '2026-01-01 00:00 +00:00',
+            'rules': [], 'consent': {'node': 'app', 'actions': ['pr']}}))
         self.b(r, 'set', 'app', 'merge=pr')
         out = self.b(r, 'wt', 'prune', 'app', '--offline')
         self.assertIn('origin default unavailable; run git remote set-head origin -a', out)
@@ -334,7 +405,7 @@ class WorktreeGuardUnits(unittest.TestCase):
 
 class WorktreeSetupDiagnostics(Scenario):
     def finish(self, r):
-        return self.b(r, "handback", "a", "--branch", "job", "--state", "done", "--reviews", "1")
+        return self.b(r, "handback", "--summary", "Synthetic result", "a", "--branch", "job", "--state", "done", "--reviews", "1")
 
     def test_setup_completes_before_return_and_first_verify(self):
         r = self.init('alice')

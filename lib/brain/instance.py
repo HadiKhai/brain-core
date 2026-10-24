@@ -180,6 +180,24 @@ class Instance:
         with brain_lock(self):
             self._commit(root, sorted(set(want)), msg)
 
+    def commit_settings_batch(self, paths, msg):
+        """Explicit named-path boundary: no ambient TOUCHED paths enter a settings batch.
+
+        The caller validates every target is clean before publication; Git's path-limited
+        commit keeps unrelated staged entries intact. Default commit behavior is unchanged.
+        """
+        root = self.root.resolve()
+        want = []
+        for path in paths:
+            target = Path(path).absolute()
+            relative = target.relative_to(root)
+            if ".brain" in relative.parts or target.is_dir():
+                _m_common.die("settings batch commit accepts shared file paths only")
+            want.append(str(relative))
+        if want and (root / ".git").exists():
+            with brain_lock(self):
+                self._commit(root, sorted(set(want)), msg)
+
     def _commit(self, root, want, msg):
         import time
         for attempt in range(8):  # a git command outside brain may hold git's index.lock for a moment  # another brain command may be committing at this moment (git's index.lock)

@@ -113,3 +113,17 @@ in `sources/import-proposals.md`: `status: reviewed` (or `rejected`), `reviewed_
 non-revoked principal>` and `reviewed_at: <timestamp from brain now>`. This acknowledges the review;
 only explicitly selected rules are promoted into active instructions. The worker never writes
 that acknowledgement. Accept roles and accept or reject items with their explicit commands.
+
+For rules-only bulk activation, use the explicit JSON snapshot and review-manifest schema in
+README. Legacy prose remains pending until the coordinator prepares that rules-only snapshot;
+the importing worker never selects an interpretation or converts a review label into activation.
+`brain proposals <node> --approve-all --review-manifest <file>` consumes the complete,
+snapshot-bound coordinator-supplied decision. It records rules, reviewer/runtime, time and
+provenance with acknowledgement together in one atomic node `AGENTS.md` replacement. The
+review record is labelled **supplied evidence**, never authenticated identity. The full snapshot
+and current owner scope must match; changed, partial, missing, revoked or self-approved evidence
+(same importer identity or runtime) refuses with no partial activation. A name alone, imported
+`status: reviewed`, or a successful import never authorizes activation. Roles/items and future
+imports need their own explicit reviews. Due shows one protected activation-review snapshot item.
+A valid explicit legacy rejection resolves that reminder and activates nothing; a reviewed
+label without activation still leaves the activation decision pending.

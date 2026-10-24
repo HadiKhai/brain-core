@@ -30,23 +30,33 @@ def read_schedules(inst):
     return out
 
 
+def prepare_schedule(inst, sid, when, node, brief, existing=None):
+    """Validate an addition and return its text, without creating files or bindings."""
+    if not all(isinstance(x, str) and x.strip() for x in (sid, when, node, brief)):
+        _m_common.die("schedule add needs id, when, node and brief strings")
+    if not re.fullmatch(r"[a-z0-9][a-z0-9-]*", sid):
+        _m_common.die("schedule ids are lowercase words with dashes")
+    existing = {x["id"] for x in read_schedules(inst)} if existing is None else existing
+    if sid in existing:
+        _m_common.die(f"schedule '{sid}' exists")
+    inst.node(node)
+    return f"\n## {sid}\n\nwhen: {when}\nnode: {node}\nbrief: {brief.strip()}\n"
+
+
+SCHEDULE_PREAMBLE = ("# Schedules\n\nRecurring work. Shared by every machine; each schedule runs on "
+                     "one machine only (`brain schedule list` shows which).\n")
+
+
 def cmd_schedule(a):
     inst = _m_nodes.load()
     bound = inst.local.setdefault("schedules", {})
     if a.action == "add":
-        if not (a.id and a.when and a.brief):
-            _m_common.die("brain schedule add <id> --when \"daily 09:00\" --node <node> --brief \"...\"")
-        if not re.fullmatch(r"[a-z0-9][a-z0-9-]*", a.id):
-            _m_common.die("schedule ids are lowercase words with dashes")
-        if any(x["id"] == a.id for x in read_schedules(inst)):
-            _m_common.die(f"schedule '{a.id}' exists")
-        inst.node(a.node)
+        addition = prepare_schedule(inst, a.id, a.when, a.node, a.brief)
         f = inst.root / "schedules.md"
-        head = "" if f.exists() else ("# Schedules\n\nRecurring work. Shared by every machine; each schedule runs on "
-                                      "one machine only (`brain schedule list` shows which).\n")
+        head = "" if f.exists() else SCHEDULE_PREAMBLE
         _m_common.safe_target(f)
         with open(f, "a") as fh:
-            fh.write(f"{head}\n## {a.id}\n\nwhen: {a.when}\nnode: {a.node}\nbrief: {a.brief.strip()}\n")
+            fh.write(head + addition)
         _m_common.touch(f)
         inst.commit([f], f"schedule: {a.id}")
         print(f"{a.id}: added; create it in the host, then: brain schedule bind {a.id} <host id>")

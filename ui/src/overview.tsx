@@ -6,7 +6,7 @@ import { Kpi, Segmented, SectionTabs, ListFooter, type Mark } from "./dash";
 import { RequestRow, DueRow } from "./inbox";
 import { ProposalReader } from "./learnings";
 import { adoptable } from "./imports";
-import { list, count, threads, tone, nowOf, within, stamp, allJobs, learningRows, jobTitle, jobState, time, windowState, type RecordData } from "./model";
+import { list, count, needsView, threads, tone, nowOf, within, stamp, allJobs, learningRows, jobTitle, jobState, time, windowState, type RecordData } from "./model";
 import { graphData, layout } from "./graph";
 import { useMemo } from "react";
 import type { Route } from "./routes";
@@ -18,7 +18,7 @@ export const greeting = (s: RecordData) => {
 };
 // One sentence of what needs the operator, built from counts, never from prose.
 export function overviewSummary(s: RecordData) {
-  const inbox = list(s.inbox), ready = list(s.due).filter((d) => d.ready), questions = inbox.filter((i) => /question|\?/i.test(i.text || "")).length;
+  const { inbox, due } = needsView(s), ready = due.filter((d) => d.ready), questions = inbox.filter((i) => /question|\?/i.test(i.text || "")).length;
   const parts = [
     inbox.length ? `${count(inbox.length, "item")} wait for you${questions ? `, ${questions} of them questions` : ""}.` : "Nothing waits for you.",
     ready.length ? `${count(ready.length, "job")} ${ready.length === 1 ? "is" : "are"} ready to merge.` : "",
@@ -28,7 +28,8 @@ export function overviewSummary(s: RecordData) {
 }
 
 export function Overview({ s, go, onAdd, active }: { s: RecordData; go: (r: Partial<Route> & { view: string }) => void; onAdd: () => void; active: boolean }) {
-  const nodes = list(s.nodes), now = nowOf(s), due = list(s.due), inbox = list(s.inbox);
+  const nodes = list(s.nodes), now = nowOf(s);
+  const { inbox, due } = needsView(s);
   const open = threads(nodes), ready = due.filter((d) => d.ready);
   const jobs = allJobs(nodes);
   const merged = (from: number, to: number) => jobs.filter((r) => /merged/i.test(r.Outcome || "") && stamp(r.Ended) <= now - from * 3600_000 && stamp(r.Ended) > now - to * 3600_000).length;
@@ -66,7 +67,7 @@ export function Overview({ s, go, onAdd, active }: { s: RecordData; go: (r: Part
           <SectionTabs
             tabs={[
               { id: "inbox", label: "Inbox", count: inbox.length, body: inbox.length ? <>
-                  <div className="rows">{inbox.slice(0, 5).map((a, i) => <RequestRow key={a.id || i} s={s} item={a} go={go} />)}</div>
+                  <div className="rows">{inbox.slice(0, 5).map((a, i) => <RequestRow key={a.id || i} s={s} item={a} go={go} compact />)}</div>
                   <ListFooter shown={Math.min(5, inbox.length)} total={inbox.length} noun="requests" action={<Button variant="ghost" size="sm" onClick={() => go({ view: "inbox" })}>View all <ChevronRight size={14} /></Button>} />
                 </> : <Empty text="Nothing waits for you." action="Questions from your projects arrive here." /> },
               { id: "due", label: "Coordinator steps", count: due.length, body: due.length ? <>

@@ -16,7 +16,8 @@ from . import jobs as _m_jobs
 
 VERIFY_LANE_MAP_TIMEOUT = 5
 LANE_ENV_KEYS = {'VIRTUAL_ENV', 'JAVA_HOME', 'RUSTUP_TOOLCHAIN', 'NODE_OPTIONS',
-                 'PYTHONPATH', 'CC', 'CXX', 'CFLAGS', 'CXXFLAGS', 'LDFLAGS'}
+                 'PYTHONPATH', 'CC', 'CXX', 'CFLAGS', 'CXXFLAGS', 'LDFLAGS',
+                 'PORT', 'PORTS', 'PORT_LAST'}
 
 
 def lane_environment(env):

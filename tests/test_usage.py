@@ -21,6 +21,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 CORE = Path(os.environ.get("BRAIN_CORE") or Path(__file__).resolve().parent.parent)
 
@@ -172,6 +173,205 @@ for line in sys.stdin:
         # Missing model config is explicit; never fabricate an exact host model.
         self.b(root, "set", "a", "route_model_codex=")
         self.assertIn("modelSelection: unavailable", self.b(root, "brief", "a", "--class", "docs"))
+
+    def test_per_class_routing_precedence_and_sources(self):
+        inst = self.routing_instance()
+        node = inst.node("root")
+        inst.cfg.update(default_runtime="claude", route_runtime_build="codex",
+                        route_model_codex="instance-default", route_model_codex_build="instance-build")
+        node["fm"].update(runtime="claude", route_runtime_build="codex",
+                          route_model_codex="node-default", route_model_codex_build="node-build")
+        def route(runtime=None, model=None):
+            args = argparse.Namespace(branch=None, job_class="build", runtime=runtime, model=model, effort=None)
+            chosen, why = self.m.worker_route(inst, node, args)
+            return chosen, args.model, why
+        with mock.patch.object(self.m, "usage_config", return_value={"autodetected": True}):
+            for remove, runtime, model, source in (
+                    (None, "codex", "node-build", "node.md route_model_codex_build"),
+                    ("route_model_codex_build", "codex", "node-default", "node.md route_model_codex"),
+                    ("route_model_codex", "codex", "instance-build", "instance.md route_model_codex_build")):
+                if remove:
+                    node["fm"].pop(remove)
+                with self.subTest(source=source):
+                    chosen, selected, why = route()
+                    self.assertEqual((chosen, selected), (runtime, model))
+                    self.assertIn(source, why)
+            inst.cfg.pop("route_model_codex_build")
+            self.assertEqual(route()[:2], ("codex", "instance-default"))
+            self.assertIn("instance.md route_model_codex", route()[2])
+            self.assertEqual(route("claude", "flag-model")[:2], ("claude", "flag-model"))
+            self.assertIn("--model", route("claude", "flag-model")[2])
+            self.assertIn("--runtime", route("claude", "flag-model")[2])
+            self.assertEqual(route("claude")[:2], ("claude", "runtime default"))
+            node["fm"]["route_model_codex_build"] = ""
+            self.assertEqual(route()[:2], ("codex", "instance-default"))
+            node["fm"].pop("route_runtime_build")
+            self.assertEqual(route()[0], "claude")
+            self.assertIn("node.md runtime", route()[2])
+            node["fm"].pop("runtime")
+            self.assertEqual(route()[0], "codex")
+            self.assertIn("instance.md route_runtime_build", route()[2])
+            inst.cfg.pop("route_runtime_build")
+            # Another class keeps class routing enabled, while build falls back.
+            inst.cfg["route_runtime_docs"] = "codex"
+            self.assertEqual(route()[0], "claude")
+            self.assertIn("instance.md default_runtime", route()[2])
+            inst.cfg.pop("default_runtime")
+            self.assertEqual(route()[0], "codex")
+            self.assertIn("default", route()[2])
+
+    def test_per_class_routing_all_classes_and_unknown_keys(self):
+        inst = self.routing_instance()
+        node = inst.node("root")
+        node["fm"].pop("runtime", None)
+        with mock.patch.object(self.m, "usage_config", return_value={"autodetected": True}):
+            for kind in self.m.JOB_CLASSES:
+                with self.subTest(kind=kind):
+                    node["fm"]["route_runtime_" + kind] = "codex"
+                    inst.cfg["route_model_codex_" + kind] = "model-" + kind
+                    args = argparse.Namespace(branch=None, job_class=kind, runtime=None, model=None, effort=None)
+                    runtime, why = self.m.worker_route(inst, node, args)
+                    self.assertEqual((runtime, args.model), ("codex", "model-" + kind))
+                    self.assertIn("node.md route_runtime_" + kind, why)
+                    self.assertIn("instance.md route_model_codex_" + kind, why)
+            inst.cfg.pop("route_model_codex_build")
+            args = argparse.Namespace(branch=None, job_class="build", runtime=None, model=None, effort=None)
+            _, why = self.m.worker_route(inst, node, args)
+            self.assertEqual(args.model, "runtime default")
+            self.assertIn("model=default", why)
+            for cfg in (node["fm"], inst.cfg):
+                for key in ("route_runtime_buid", "route_model_codex_revew"):
+                    with self.subTest(key=key), contextlib.redirect_stderr(io.StringIO()) as err:
+                        cfg[key] = "codex"
+                        args = argparse.Namespace(branch=None, job_class="build", runtime="codex", model="explicit", effort=None)
+                        with self.assertRaises(SystemExit) as exc:
+                            self.m.worker_route(inst, node, args)
+                        self.assertIn(key, str(exc.exception))
+                        self.assertIn("class", str(exc.exception))
+                        cfg.pop(key)
+
+    def routing_instance(self, root=None):
+        root = root or self.tmp
+        (root / "instance.md").write_text("---\nname: alice\nruntimes: claude,codex\nhost: t3\n---\n")
+        (root / "node.md").write_text("---\nid: root\ntitle: Example\n---\n")
+        return self.m.Instance(root)
+
+    def test_class_model_quota_before_subscription_selection(self):
+        # No initialized brain or Git repository is needed for cached routing.
+        inst = self.routing_instance()
+        inst.cfg.update(name="alice", route_runtime_review="claude", route_model_claude_review="Fable")
+        inst.runtimes = ["claude", "codex"]
+        node = inst.node("root")
+        config = self.declare(self.subscription("a", runtime="claude"), self.subscription("b", runtime="claude"))
+        readings = [self.reading(5, weekly=5), self.reading(20, weekly=20)]
+        for reading, used in zip(readings, (95, 30)):
+            reading["windows"]["seven_day_model:Fable"] = {
+                "used_percent": used, "resets_at": time.time() + 86400, "models": ["Fable"]}
+        self.cache(config, readings)
+        def route(model=None):
+            a = argparse.Namespace(branch=None, job_class="review", runtime=None, model=model, effort=None)
+            _, why = self.m.worker_route(inst, node, a)
+            return json.loads(a.selection_line.split(": ", 1)[1]), why
+        selection, why = route()
+        self.assertEqual(selection["instanceId"], "host-b")
+        self.assertEqual(selection["model"], "Fable")
+        self.assertIn("model=instance.md route_model_claude_review", why)
+        self.assertNotIn("reached its stop line", why)
+        self.assertEqual(route("Fable")[0], selection)
+        readings[1]["windows"]["seven_day_model:Fable"]["used_percent"] = 95
+        self.cache(config, readings)
+        self.assertIn("reached its stop line", route()[1])
+
+    def test_review_class_model_source_label(self):
+        root = self.repo(self.tmp / "review")
+        inst = self.routing_instance(root)
+        inst.runtimes = ["claude", "codex"]
+        inst.cfg["route_model_claude_review"] = "instance-review"
+        node = inst.node("root")
+        owner = self.m._owners["cmd_review"]
+        def render(model=None):
+            a = argparse.Namespace(id="root", branch="main", built_by="codex", by=None,
+                job_class=None, model=model, effort=None, base="main", out=None, focus=None,
+                contract=None, why_separate=None, allow_unexplained=False)
+            with contextlib.redirect_stdout(io.StringIO()) as out:
+                self.m.cmd_review(a)
+            return out.getvalue()
+        with mock.patch.object(owner._m_nodes, "load", return_value=inst), \
+                mock.patch.object(inst, "node", return_value=node), \
+                mock.patch.object(self.m, "review_mechanical", return_value=[]), \
+                mock.patch.object(self.m, "job_reviewed"), \
+                mock.patch.object(self.m, "record_job_route"):
+            for cfg, model, source in ((inst.cfg, "instance-review", "instance.md"),
+                                       (node["fm"], "node-review", "node.md")):
+                cfg["route_model_claude_review"] = model
+                text = render()
+                self.assertIn('"model": "' + model + '"', text)
+                self.assertIn("model=" + source + " route_model_claude_review", text)
+            self.assertIn("model=--model", render("explicit-review"))
+            node["fm"].clear()
+            inst.cfg.clear()
+            self.assertNotIn("Routing sources:", render())
+
+    def test_compound_unknown_class_keys_rejected(self):
+        inst = self.routing_instance()
+        inst.runtimes = ["claude", "codex", "custom_engine"]
+        node = inst.node("root")
+        for cfg in (inst.cfg, node["fm"]):
+            for key in ("route_model_codex_code_review", "route_model_custom_engine_code_review"):
+                cfg[key] = "typo-model"
+                with self.subTest(key=key), self.assertRaises(SystemExit) as exc:
+                    self.m.class_routing_config(inst, node)
+                self.assertIn(key, str(exc.exception))
+                cfg.pop(key)
+            cfg["route_model_custom_engine"] = "runtime-default"
+            self.assertFalse(self.m.class_routing_config(inst, node))
+            cfg["route_model_custom_engine_review"] = "class-review"
+            self.assertTrue(self.m.class_routing_config(inst, node))
+            cfg.clear()
+
+    def test_per_class_brief_cli_and_legacy_bytes(self):
+        root = self.init("alice")
+        self.b(root, "new", "a", "--title", "A")
+        self.b(root, "set", "a", "route_model_codex=legacy-model")
+        # Render the entire legacy brief using the pre-change resolver as an oracle.
+        owner = self.m._owners["cmd_brief"]
+        args = argparse.Namespace(id="a", job_class="build", task="x", branch=None, runtime=None, model=None,
+            effort=None, import_study=False, small=False, task_file=None, context_file=None, why_separate=None,
+            allow_unexplained=False, to=None, peer=None, out=None)
+        def legacy_route(inst, node, a):
+            row = self.m.open_job(self.m.read_jobs(node) or [], a.branch)
+            kind = self.m.job_class(node, row, a.job_class)
+            runtime, sub, usage = self.m.class_route(inst, kind, runtime=a.runtime or node["fm"].get("runtime"),
+                model=a.model, weekly_cap=node["fm"].get("route_weekly_cap", inst.cfg.get("route_weekly_cap", 60)))
+            a.job_class = kind
+            a.model = a.model or node["fm"].get("route_model_" + runtime) or inst.cfg.get("route_model_" + runtime) or "runtime default"
+            a.effort = self.m.job_effort(node, row, kind, a.effort)
+            if a.model == "runtime default":
+                a.selection_line = f"modelSelection: unavailable; set route_model_{runtime} or --model (reasoningEffort: {a.effort})."
+            else:
+                a.selection_line = "modelSelection: " + json.dumps({"instanceId": (sub or {}).get("host_provider_instance_id") or runtime,
+                    "model": a.model, "options": {"reasoningEffort": a.effort}})
+            return runtime, usage
+        with mock.patch.dict(os.environ, {"BRAIN_ROOT": str(root)}):
+            with mock.patch.object(owner._m_knowledge, "worker_route", side_effect=legacy_route), contextlib.redirect_stdout(io.StringIO()) as out, contextlib.redirect_stderr(io.StringIO()) as err:
+                self.m.cmd_brief(args)
+            expected = out.getvalue() + err.getvalue()
+        self.assertEqual(self.b(root, "brief", "a", "--class", "build", "--task", "x"), expected)
+        self.assertNotIn("Routing sources:", expected)
+        self.b(root, "set", "a", "route_runtime_build=codex", "route_model_codex_build=class-model")
+        text = self.b(root, "brief", "a", "--class", "build", "--task", "x")
+        self.assertIn('"model": "class-model"', text)
+        self.assertIn("model=node.md route_model_codex_build", text)
+        self.assertIn("runtime=node.md route_runtime_build", text)
+        self.b(root, "set", "a", "runtime=", "route_runtime_build=", "route_model_codex_build=", "route_model_codex=")
+        file = root / "instance.md"
+        file.write_text(file.read_text().replace("---\n", "---\nroute_runtime_build: codex\nroute_model_codex_build: instance-class-model\n", 1))
+        text = self.b(root, "brief", "a", "--class", "build", "--task", "x")
+        self.assertIn('"model": "instance-class-model"', text)
+        self.assertIn("model=instance.md route_model_codex_build", text)
+        self.assertIn("runtime=instance.md route_runtime_build", text)
+        self.b(root, "set", "a", "route_runtime_unknown=codex")
+        self.assertIn("unknown routing class", self.b(root, "brief", "a", ok=False))
 
     def test_class_route_autodetection_never_refreshes_providers(self):
         root = self.init("alice")
@@ -373,6 +573,30 @@ for line in sys.stdin:
         self.assertEqual(final["Review runtime"], "claude")
         self.assertEqual(final["Review model"], "example-claude")
 
+    def test_subscription_stop_percent_defaults_validation_and_routing(self):
+        root = self.init("alice")
+        inst = self.m.Instance(root)
+        one = {**self.subscription(), "stop_percent": 50}
+        two = self.subscription("two")
+        config = self.declare(one, two, stop_percent=80)
+        self.assertEqual([s["stop_percent"] for s in config["subscriptions"]], [50, 80])
+        self.cache(config, [self.reading(50, weekly=50), self.reading(60, weekly=60)])
+        selected, _ = self.m.usage_route(inst, ["codex"], cached_only=True)
+        self.assertEqual(selected["id"], "two")
+        selected = self.m.class_route(inst, "build", cached_only=True)[1]
+        self.assertEqual(selected["id"], "two")
+        self.declare({**one, "stop_percent": 95}, two, stop_percent=80)
+        with mock.patch.object(self.m, "usage_refresh", side_effect=AssertionError("policy change refreshed readings")):
+            rows, _ = self.m.usage_rows(inst, before_launch=True)
+        self.assertEqual(rows[0]["windows"]["seven_day"]["used_percent"], 50)
+        self.assertEqual(rows[0]["stop_percent"], 95)
+        self.assertEqual(self.m.usage_route(inst, ["codex"], cached_only=True)[0]["id"], "one")
+        output = self.b(root, "usage", "--json")
+        self.assertEqual([s["stop_percent"] for s in json.loads(output)["subscriptions"]], [95, 80])
+        for value in (0, -1, 101, True, "70", None, float("nan")):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                self.declare({**one, "stop_percent": value})
+
     def test_usage_defaults_and_config_isolation(self):
         with mock.patch.object(self.m.shutil, "which", return_value="installed"):
             config = self.m.usage_config()
@@ -419,7 +643,7 @@ for line in sys.stdin:
         config = self.declare(one, missing)
         self.m.usage_refresh(config)
         text = self.b(root, "usage")
-        self.assertRegex(text, r"codex\s+one\s+none\s+24%")
+        self.assertRegex(text, r"codex\s+one\s+85%\s+none\s+24%")
         self.assertIn("missing: no reading yet: run `brain usage --refresh`", text)
         selected, reason = self.m.usage_route(self.m.Instance(root), ["codex"])
         self.assertEqual(selected["id"], "one")
@@ -803,13 +1027,40 @@ for line in sys.stdin:
         file = root / "instance.md"; file.write_text(file.read_text().replace("timezone: UTC", "timezone: Asia/Beirut"))
         out = json.loads(self.b(root, "usage", "--json"))
         self.assertEqual(out["scope"], "account-wide")
-        self.assertIn("+03:00", out["subscriptions"][0]["windows"]["five_hour"]["reset_time"])
+        window = out["subscriptions"][0]["windows"]["five_hour"]
+        reset = datetime.datetime.fromisoformat(window["reset_time"])
+        expected = datetime.datetime.fromtimestamp(window["resets_at"], ZoneInfo("Asia/Beirut"))
+        self.assertEqual(reset.utcoffset(), expected.utcoffset())
+        self.assertEqual(reset.timestamp(), int(window["resets_at"]))
         self.assertNotIn("machine_share", out["subscriptions"][0])
         text = self.b(root, "usage")
         self.assertIn("Account-wide", text); self.assertIn("share: unavailable", text)
         self.assertIn("source", text)
         (self.cfg / "subscriptions.json").write_text("invalid")
         self.assertIn("Usage unknown", self.b(root, "brief", "root"))
+
+    def test_usage_reset_timezone_across_dst_boundary(self):
+        root = self.init("alice")
+        file = root / "instance.md"
+        file.write_text(file.read_text().replace("timezone: UTC", "timezone: Asia/Beirut"))
+        inst = self.m.Instance(root)
+        config = self.declare(self.subscription())
+        zone = ZoneInfo("Asia/Beirut")
+        # The second one-hour window crosses the rollback; reset uses winter time
+        # even though the reading and current clock still use summer time.
+        for hour, offset in ((19, 3), (20, 2)):
+            now = datetime.datetime(2026, 10, 24, hour, 30, tzinfo=datetime.timezone.utc).timestamp()
+            with self.subTest(hour=hour), mock.patch.object(self.m.time, "time", return_value=now):
+                self.cache(config, [self.reading()])
+                rows, _ = self.m.usage_rows(inst)
+                window = rows[0]["windows"]["five_hour"]
+                reset = datetime.datetime.fromisoformat(window["reset_time"])
+                expected = datetime.datetime.fromtimestamp(window["resets_at"], zone)
+                self.assertEqual(reset.isoformat(), expected.isoformat())
+                self.assertEqual(reset.timestamp(), now + 3600)
+                self.assertEqual(reset.utcoffset(), datetime.timedelta(hours=offset))
+                self.assertEqual(datetime.datetime.fromtimestamp(now, zone).utcoffset(),
+                                 datetime.timedelta(hours=3))
 
     def test_usage_corrupt_cache_is_unknown_and_ui_redacts_values_safely(self):
         root = self.init("alice")

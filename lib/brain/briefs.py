@@ -12,6 +12,7 @@ from . import instance as _m_instance
 from . import jobs as _m_jobs
 from . import knowledge as _m_knowledge
 from . import nodes as _m_nodes
+from . import reminders as _m_reminders
 from . import ui as _m_ui
 from . import verify as _m_verify
 from . import worktrees as _m_worktrees
@@ -22,13 +23,37 @@ COMPACTION_POLICY = ("After your second context compaction, hand back `--state b
                      "that resumes your commits. For a ledger job, `--restart compactions` records this marker.")
 
 
-def reference_line(path, summary):
+def reference_line(path, summary, inputs=None):
     """Keep reference metadata on one bounded line; bodies remain in their source files."""
-    return "- `" + _m_common.tilde(path) + "`: " + " ".join(str(summary).split())[:180] + ". Read before working."
+    summary = " ".join(str(summary).split())[:180]
+    if inputs is not None:
+        inputs.append(("Library metadata", summary))
+    return "- `" + _m_common.tilde(path) + "`: " + summary + ". Read before working."
 
 
-def checked_brief(n, text, worker=True):
-    """Measure the complete UTF-8 output, without trimming mandatory safety instructions."""
+# Independent of the coordinator's task/context allowance; mandatory instructions are retained.
+BRIEF_ABSOLUTE_BYTES = 256 * 1024
+
+
+def attribution_lines(runtime, model):
+    """No runtime/model is assigned an invented identity or co-author trailer."""
+    return ["Commit attribution: omitted for this brief; no co-author trailer is supplied.", ""]
+
+
+def contract_inputs(n, branch):
+    """Capture only coordinator-authored contract text, before fixed wrappers are generated."""
+    row = _m_jobs.open_job(_m_jobs.read_jobs(n) or [], branch) if branch else None
+    path = _m_jobs.contract_file(n, row) if row else None
+    if path and path.is_file():
+        return [("Contract", _m_guard.redact(path.read_text().strip(), _m_guard.never_terms(n)))]
+    return []
+
+
+def checked_brief(n, text, worker=True, inputs=None):
+    """Charge source inputs captured before assembly, never headings found in task Markdown.
+
+    Legacy callers without provenance conservatively charge the entire output.
+    """
     if worker:
         text += "\n" + COMPACTION_POLICY + "\n"
     _m_guard.no_terms_in(n, text, "the brief")
@@ -38,22 +63,28 @@ def checked_brief(n, text, worker=True):
             raise ValueError
     except (TypeError, ValueError):
         _m_common.die("brief_max_kb must be a positive finite number in node.md")
-    size = len(text.encode("utf-8"))
-    if size > kb * 1024:
-        sections, name, count = [], "Preamble", 0
-        for line in text.splitlines(keepends=True):
-            if line.startswith("## "):
-                sections.append((count, name))
-                name, count = line[3:].strip(), 0
-            count += len(line.encode("utf-8"))
-        sections.append((count, name))
-        largest = "; ".join(f"{name}: {count} bytes" for count, name in sorted(sections, reverse=True)[:3])
-        message = (f"brief is {size} bytes (brief_max_kb={kb:g}); largest sections: {largest}. "
-                   "Shorten task/context or use path references; retain limits, guard and hand-back instructions.")
-        if size >= 2 * kb * 1024:
-            _m_common.die("refused: " + message)
+    inputs = [("Unclassified task/context", text)] if inputs is None else inputs
+    sections = [(len(body.encode("utf-8")), name) for name, body in inputs]
+    charge = sum(size for size, name in sections)
+    total = len(text.encode("utf-8"))
+    # Include the accounting line itself in the absolute byte total.
+    while True:
+        note = f"\nBrief bytes: chargeable={charge}; total={total}; absolute ceiling={BRIEF_ABSOLUTE_BYTES}.\n"
+        measured = len((text + note).encode("utf-8"))
+        if measured == total:
+            break
+        total = measured
+    largest = "; ".join(f"{name}: {size} bytes" for size, name in sorted(sections, reverse=True)[:3]) or "none"
+    message = (f"brief is {charge} chargeable bytes, {total} total bytes (brief_max_kb={kb:g}); "
+               f"largest sections: {largest}. Coordinator controls these task/context inputs; "
+               "shorten them or use path references; retain limits, guard and hand-back instructions.")
+    if total >= BRIEF_ABSOLUTE_BYTES:
+        _m_common.die(f"refused: absolute brief ceiling is {BRIEF_ABSOLUTE_BYTES} bytes; " + message)
+    if charge >= 2 * kb * 1024:
+        _m_common.die("refused: " + message)
+    if charge > kb * 1024:
         print("warning: " + message, file=sys.stderr)
-    return text
+    return text + note
 
 
 def restart_acknowledged(n, row, signal):
@@ -130,11 +161,14 @@ def import_brief(a):
            "Only the operator/coordinator confirms activation after review. Filter outputs with brain scrub before writing; omit unsafe "
            "facts and report only omission counts. Validate the node files, not dirty historical source files.", ""]
     task = Path(a.task_file).read_text() if a.task_file else (a.task or "")
+    inputs = [("Task", task), ("Limits", "\n".join(_m_knowledge.limits_of(n)))]
+    out += attribution_lines(runtime, a.model)
     if task:
         out += [task, ""]
     out += peer_lines(a) + _m_knowledge.limits_lines(n)
     branch = import_job_id(home)
-    if not _m_jobs.open_job(_m_jobs.read_jobs(n) or [], branch):
+    row = _m_jobs.open_job(_m_jobs.read_jobs(n) or [], branch)
+    if not row:
         out += [f"Before launching, the coordinator must run `brain jobs {shlex.quote(n['id'])} "
                 f"--branch {shlex.quote(branch)} --start` to record this study.", ""]
     out += ["## Before you hand back", "",
@@ -142,7 +176,7 @@ def import_brief(a):
             "Report checks and review evidence; keep pre-existing source findings separate from output findings. "
             "Leave the source branch and history unchanged.", ""]
     out += _m_knowledge.report_lines(job=True) + _m_knowledge.handback_lines(inst, n, a.to, branch=branch)
-    text = checked_brief(n, "\n".join(out) + "\n")
+    text = checked_brief(n, "\n".join(out) + "\n", inputs=inputs)
     _m_guard.no_terms_in(n, text, "the import brief")
     if _m_nodes.SECRET_META.search(text) or _m_nodes.SECRET_LINE.search(task + "\n" + "\n".join(_m_knowledge.limits_lines(n))):
         _m_common.die("unsafe import brief metadata")
@@ -150,6 +184,8 @@ def import_brief(a):
         _m_history.write_out(inst, n, a.out, text)
     else:
         print(text, end="")
+    sys.stdout.flush()  # A failed import-brief delivery must not acknowledge a restart.
+    _m_reminders.acknowledge_usage_restart(inst, n, row)
 
 
 # ---------- past AI conversations about a node ----------
@@ -207,8 +243,9 @@ def cmd_brief(a):
         a.context_file = saved.get("context_files", [])
     if signal and signal.get("restart") and not (a.task_file or a.task):
         _m_common.die("restart brief has no recorded task; supply the original --task or --task-file")
-    shared = separation_lines(a, n, a.branch) + peer_lines(a)
-    context, context_inputs = [], []
+    why_lines = separation_lines(a, n, a.branch)
+    shared = why_lines + peer_lines(a)
+    context, context_inputs, inputs = [], [], []
     for name in a.context_file or []:
         try:
             path = Path(name).expanduser().resolve()
@@ -223,6 +260,7 @@ def cmd_brief(a):
         _m_guard.no_terms_in(n, str(path) + "\n" + body, "shared context")
         if _m_nodes.SECRET_LINE.search(str(path) + "\n" + body):
             _m_common.die("unsafe shared context text")
+        inputs.append(("Shared context", body))
         context_inputs.append(str(path))
         context += [f"### Context from {_m_common.tilde(path)}", "", body, ""]
     if context:
@@ -233,14 +271,17 @@ def cmd_brief(a):
     task_path = Path(a.task_file).expanduser().resolve() if a.task_file else None
     if task_path:
         _m_guard.no_terms_in(n, str(task_path), "task file path")
-    task = task_path.read_text() if task_path else (a.task or "<!-- the task, what done means, "
-                                                                          "where outputs go -->")
+    task_input = task_path.read_text() if task_path else (a.task or "")
+    task = task_input or "<!-- the task, what done means, where outputs go -->"
+    inputs += [("Task", task_input), ("Why separate", a.why_separate or ""),
+               ("Limits", "\n".join(_m_knowledge.limits_of(n)))]
     if a.small:
         from . import messages as _m_messages
         out = [f"Role: worker in node `{n['id']}`; small job.", head, a.selection_line, _m_guard.redact(usage, _m_guard.never_terms(n)),
                *shared, _m_messages.MESSAGE_PROTOCOL, "Follow this node's rules. Task: " + task.strip(),
-               "Clear, low risk, minutes, no shared-state changes. If that stops being true, hand back for a full job.",
-               *_m_knowledge.limits_lines(n), *_m_knowledge.knowledge_lines(inst, n, task),
+               "Clear, low risk, minutes, no shared-state changes. If that stops being true, hand back for a full job. "
+               + " ".join(attribution_lines(runtime, a.model)).strip(),
+               *_m_knowledge.limits_lines(n), *_m_knowledge.knowledge_lines(inst, n, task, inputs=inputs),
                f"Before hand-back or anything leaves, run `brain guard {n['id']} {_m_common.tilde_shell(where)}`; require `guard: clean`.",
                "Ask before publishing, pushing or irreversible actions. Keep boundary context out of project files.",
                "No worktree, ledger, reviews or ready packet. Do not edit coordinator files.",
@@ -248,7 +289,7 @@ def cmd_brief(a):
                "shared repository changes need a full job.",
                f"Send one line via {_m_knowledge.host_send(inst, n, a.to)}: <kind>: <result>; proof: <check/output>, using the message protocol above. "
                "Never ask the operator or wait in this thread; send questions too, then end your turn."]
-        text = checked_brief(n, "\n".join(out) + "\n")
+        text = checked_brief(n, "\n".join(out) + "\n", inputs=inputs)
         _m_guard.no_terms_in(n, text, "the brief")
         if a.out:
             _m_history.write_out(inst, n, a.out, text)
@@ -283,22 +324,26 @@ def cmd_brief(a):
                     f"packet in `{_m_common.tilde(_m_verify.ready_path(inst, n, a.branch).parent)}/`; "
                     "it may be missing or stale. Recheck it after finishing the remaining work.",
                     "Job ledger state: " + json.dumps(row, ensure_ascii=False), ""]
-    out += shared + ["## Task", "", task.strip(), ""] + _m_jobs.contract_lines(inst, n, a.branch)
-    out += _m_knowledge.knowledge_lines(inst, n, task) + _m_knowledge.node_knowledge_lines(n) + _m_knowledge.recall_hint(n)
+            inputs.append(("Resume context", json.dumps(row, ensure_ascii=False)))
+    inputs += contract_inputs(n, a.branch)
+    contract = _m_jobs.contract_lines(inst, n, a.branch)
+    out += attribution_lines(runtime, a.model) + shared + ["## Task", "", task.strip(), ""] + contract
+    out += _m_knowledge.knowledge_lines(inst, n, task, inputs=inputs) + _m_knowledge.node_knowledge_lines(n) + _m_knowledge.recall_hint(n)
     out += _m_knowledge.limits_lines(n)
     if _m_guard.never_terms(n):
         out += ["## Before you hand back", "", f"Run `brain guard {n['id']} {_m_common.tilde(where)}`. It must print "
                 "`guard: clean`; if not, remove what it lists (it names the file, never the word).", ""]
     out += _m_knowledge.handback_lines(inst, n, a.to, branch=a.branch) + _m_knowledge.report_lines(job=bool(a.branch))
-    text = checked_brief(n, "\n".join(out) + "\n")
+    text = checked_brief(n, "\n".join(out) + "\n", inputs=inputs)
     _m_guard.no_terms_in(n, text, "the brief")
     _m_jobs.record_job_route(inst, n, a.branch, a.job_class, runtime, a.model, effort=a.effort)
     if a.out:
         _m_history.write_out(inst, n, a.out, text)
     else:
         print(text, end="")
+    sys.stdout.flush()  # Do not acknowledge a failed delivery through a closed pipe.
+    _m_reminders.acknowledge_usage_restart(inst, n, row)
     if w is not None and row:
-        sys.stdout.flush()  # Do not acknowledge a failed delivery through a closed pipe.
         w["brief_inputs"] = {"job": _m_jobs.job_key(row), "task_file": str(task_path) if task_path else None,
                              "task": a.task if not task_path else None, "context_files": context_inputs}
         w["context_inputs"] = context_inputs

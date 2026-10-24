@@ -11,6 +11,7 @@ from . import docker_leftovers as _m_docker_leftovers
 from . import guard as _m_guard
 from . import instance as _m_instance
 from . import jobs as _m_jobs
+from . import land_checks as _m_land_checks
 from . import nodes as _m_nodes
 from . import spend as _m_spend
 from . import status as _m_status
@@ -218,8 +219,8 @@ def run_train(inst, n, home, verify, a):
     count = _m_worktrees.port_count(n)
     port = _m_worktrees.free_port(inst, count)
     w = {"path": str(stage), "port": port, "ports": count}
-    env = {**os.environ, "MAIN": str(home), "WORKTREE": str(stage), "BRANCH": batch,
-           "NODE": n["id"], "PORT": str(port), "PORTS": str(count), "PORT_LAST": str(port + count - 1), "WORKBENCH": str(wb)}
+    env = _m_verify.verify_env(n, batch, w)
+    env["WORKBENCH"] = str(wb)
     added = _m_common.git("worktree", "add", "-b", batch, str(stage), main, cwd=home)
     if added.returncode:
         _m_common.die("train: can't create staging worktree: " + _m_guard.redact(added.stderr, _m_guard.never_terms(n)))
@@ -323,6 +324,15 @@ def run_train(inst, n, home, verify, a):
             print("train: no jobs released; main unchanged")
             return
         tip = ref(stage, "HEAD")
+        # One configured check on the exact integration candidate, attributed to every accepted job.
+        landing_rows = [_m_jobs.open_job(_m_jobs.read_jobs(n) or [], entry['branch']) for entry in accepted]
+        if n['fm'].get('land_check', '').strip():
+            try:
+                receipt = _m_land_checks.run_check(inst, n, landing_rows[0], w, env, related=landing_rows[1:])
+                if receipt and receipt['result'] != 'passed':
+                    _m_common.die('train: land-check failed; no landing or push step')
+            except (OSError, ValueError) as error:
+                _m_common.die('train: ' + _m_guard.redact(str(error), _m_guard.never_terms(n)))
         # As in per-job closure, accounting is best-effort and never holds the Brain lock.
         for entry in accepted:
             row = _m_jobs.open_job(_m_jobs.read_jobs(n) or [], entry["branch"])
@@ -345,6 +355,27 @@ def run_train(inst, n, home, verify, a):
             main_unoccupied(home)
             if ref(home, "refs/heads/main") != main or not ancestor(home, main, tip):
                 _m_common.die("train: main moved; no update")
+            if current['fm'].get('land_check', '').strip():
+                try:
+                    for landing_row in landing_rows:
+                        _m_land_checks.require_current(fresh, current, landing_row, w)
+                except (OSError, ValueError) as error:
+                    _m_common.die('train: ' + _m_guard.redact(str(error), _m_guard.never_terms(n)))
+            # Consume receipts while their original job/base bindings are current. The
+            # generated command pins the checked SHA, even after this local CAS lands it.
+            try:
+                from . import policy as _m_policy
+                if (not current['fm'].get('land_check', '').strip() and not _m_policy.limit_snapshot(current)
+                        and not (current['dir'] / 'publication-policy.json').exists()):
+                    # Preserve the existing unconfigured advisory; "when ready" is not consent.
+                    release_step = 'git -C ' + shlex.quote(str(home)) + ' push origin main'
+                else:
+                    release_step = _m_land_checks.push_step(fresh, current, landing_rows[0], w,
+                                                          ref='main', home=home, expected_base=main)
+                release_note = None
+            except (OSError, ValueError) as error:
+                release_step = None
+                release_note = _m_guard.redact(str(error), _m_guard.never_terms(n))
             data.update(state="verified", tip=tip, accepted=accepted, ended=_m_jobs.stamp(inst))
             save(path, data)  # write-ahead intent makes crash recovery unambiguous
             result = _m_common.git("update-ref", "-m", batch, "refs/heads/main", tip, main, cwd=home)
@@ -352,7 +383,7 @@ def run_train(inst, n, home, verify, a):
                 _m_common.die("train: main changed during publication; journal retained")
             finish(fresh, current, path, data)
         print(f"train: {batch} merged {len(accepted)} job(s); {len(data['runs'])} full verify run(s)")
-        print("Release when ready: git -C " + shlex.quote(str(home)) + " push origin main")
+        print('Release when ready: ' + release_step if release_step else 'No push step: ' + release_note)
     finally:
         # Keep the train branch and journals. Failed/dirty staging stays for diagnosis.
         if not dirty(stage):

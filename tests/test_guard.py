@@ -559,7 +559,7 @@ class SmallFixes(Scenario):
         hb = r / "nodes/a/job-handbacks"
         shutil.rmtree(hb, ignore_errors=True)
         hb.symlink_to(home)
-        out = self.b(r, "handback", "a", "--branch", "job", "--state", "blocked", "--report", "r.md",
+        out = self.b(r, "handback", "--summary", "Synthetic result", "a", "--branch", "job", "--state", "blocked", "--report", "r.md",
                      "--lessons", "none: none", ok=False)
         self.assertIn("out of the brain", out)
         self.assertEqual([p.name for p in home.iterdir() if p.suffix == ".json"], [])
@@ -568,7 +568,7 @@ class SmallFixes(Scenario):
         inbox.unlink()
         inbox.symlink_to(home / "calc.py")
         before = (home / "calc.py").read_text()
-        self.b(r, "handback", "a", "--branch", "job", "--state", "question", "--report", "r.md",
+        self.b(r, "handback", "--summary", "Synthetic result", "--question", "Synthetic choice?", "a", "--branch", "job", "--state", "question", "--report", "r.md",
                "--lessons", "none: none", ok=False)
         self.assertEqual((home / "calc.py").read_text(), before)
 

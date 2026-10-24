@@ -26,13 +26,14 @@ You were started for one job. If your brief names no role, you are a worker for 
   conflict, ask.
 - **Finish a home job in one step.** Finish reviews, commit, then `git rebase main`; resolve
   conflicts yourself. Run `brain handback <node> --branch <branch> --state done
-  --reviews <completed rounds> --report <path> --lessons '<proposals or none: reason>'`.
+  --summary '<one-line result>' --reviews <completed rounds> --report <path> --lessons '<proposals or none: reason>'`.
   It checks local main, runs the node's verify command and writes readiness, state and proposed
   lessons to your one `job-handbacks/<key>.json`. Only you write this file; only the coordinator
   writes the ledger and merges main. If main moves, rebase and hand back again.
   For a blocker or question, use the same command with `--state blocked` or `--state question`,
-  omit --reviews, and put the issue in the report. Questions also reach inbox; add
-  `--need-human "<need>"` for a blocked human need or a concise question. Legacy `failed` is accepted too.
+  omit --reviews, and put the issue in the report. Every publication needs --summary;
+  questions also require `--question '<one-line choice>'` and reach inbox. Add
+  `--need-human "<need>"` for a blocked human need. Legacy `failed` is accepted too.
   End your turn after recording; a host message may link the record but is optional.
   Do not repeat Lessons in another message or report. Report paths are workbench-relative or
   `~`-prefixed. Run the instance CLI without writing an upward path into a sealed home.
@@ -52,5 +53,5 @@ Read and apply the relevant library items supplied in your brief before doing th
 After your second context compaction, hand back `--state blocked` with
 `restart: compactions` and stop; your coordinator restarts you from a fresh brief
 that resumes your commits. Record the marker with `brain handback <node> --branch
-<branch> --state blocked --restart compactions --report <path>`. The coordinator
+<branch> --state blocked --summary 'Restart after compactions' --restart compactions --report <path>`. The coordinator
 uses the exact `brain brief --branch` command in `brain due` and the existing resume section.

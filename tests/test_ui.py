@@ -29,6 +29,20 @@ from scenario import Scenario, AutonomyProject, shlex_quote
 
 
 class LiveView(Scenario):
+    def test_shared_needs_sources_have_the_same_item_id(self):
+        root = self.init("alice")
+        self.b(root, "new", "app", "--title", "App")
+        status = root / "nodes/app/status.md"
+        with status.open("a") as f:
+            f.write("\n## Blocked\n\n- Choose a color; waiting on operator; clears when chosen; "
+                    "since: 2020-01-01 00:00 +00:00; recommendation: blue; default: gray\n")
+        with (root / "nodes/app/inbox.md").open("a") as f:
+            f.write("\n- 2026-01-01 00:00 +00:00 from worker: question: Which shape?\n")
+        state = json.loads(self.b(root, "ui", "--json"))
+        for item in (i for i in state["inbox"] if i["node"] == "app" and i["kind"] in ("blocked-overdue", "inbox")):
+            due = next(d for d in state["due"] if d["node"] == "app" and d["kind"] == item["kind"])
+            self.assertEqual(due.get("id"), item["id"])
+
     def test_unavailable_live_runtime_stops_new_calls_and_keeps_a_failed_gate(self):
         import contextlib
         import importlib.util
@@ -465,7 +479,7 @@ class ExpandedUI(Scenario):
         self.assertEqual(len(ui_node["jobs"]["rows"]), 65)
         self.assertEqual(ui_node["jobs"]["median_reviews"], 2)
         self.assertEqual(len([d for d in state["due"] if d["kind"] == "lesson-outcome"]), 65)
-        # The live view adds only each job's branch name; everything else is `brain due --json`.
+        # The live view adds branch names; stable item IDs also appear in `brain due --json`.
         self.assertEqual([d.get("branch") for d in state["due"] if d["kind"] == "lesson-outcome"][:2], ["job-0", "job-1"])
         self.assertEqual([{k: v for k, v in d.items() if k != "branch"} for d in state["due"]], json.loads(self.b(root, "due", "--json")))
 

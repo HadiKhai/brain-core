@@ -281,7 +281,7 @@ class AutonomyDue(AutonomyProject):
         self.git('add', '-A', cwd=wt); self.git('commit', '-qm', 'result', cwd=wt)
         before = (r / 'nodes/app/status.md').read_bytes()
         ledger = (r / 'nodes/app/job-ledger.md').read_bytes()
-        self.b(r, 'handback', 'app', '--branch', 'job-a', '--state', 'done', '--report', 'reports/result.md')
+        self.b(r, 'handback', "--summary", "Synthetic result", 'app', '--branch', 'job-a', '--state', 'done', '--report', 'reports/result.md')
         self.assertEqual((r / 'nodes/app/status.md').read_bytes(), before)
         self.assertEqual((r / 'nodes/app/job-ledger.md').read_bytes(), ledger)
         self.assertEqual([i['state'] for i in self.due(r) if i['kind'] == 'handback'], ['done'])
@@ -311,7 +311,7 @@ class AutonomyDue(AutonomyProject):
 
     def test_legacy_and_missing_worktrees_and_failed_handback(self):
         r, home, wt = self.project()
-        self.b(r, 'handback', 'app', '--branch', 'job-a', '--state', 'failed')
+        self.b(r, 'handback', "--summary", "Synthetic result", 'app', '--branch', 'job-a', '--state', 'failed')
         self.assertEqual([i['state'] for i in self.due(r) if i['kind'] == 'handback'], ['failed'])
         self.git('worktree', 'remove', str(wt), cwd=home)
         self.assertIn('missing-worktree', [i['kind'] for i in self.due(r)])
@@ -320,7 +320,7 @@ class AutonomyDue(AutonomyProject):
         self.assertIn('ledger', kinds)
         self.assertIn('unrecorded-worktree', kinds)
         self.assertEqual((r / 'nodes/app/job-ledger.md').read_text(), '# Old job notes\n')
-        self.b(r, 'handback', 'app', '--branch', 'missing', '--state', 'done', ok=False)
+        self.b(r, 'handback', "--summary", "Synthetic result", 'app', '--branch', 'missing', '--state', 'done', ok=False)
 
     def test_old_status_is_due_and_refresh_resolves_only_staleness(self):
         r, home, wt = self.project()
@@ -332,7 +332,7 @@ class AutonomyDue(AutonomyProject):
         # The status-only commit must not create a self-sustaining due loop.
         self.git('add', 'nodes/app/status.md', cwd=r); self.git('commit', '-qm', 'app: refresh', cwd=r)
         self.assertEqual(self.due(r), [])
-        self.b(r, 'handback', 'app', '--branch', 'job-a', '--state', 'blocked', '--report', 'report.md')
+        self.b(r, 'handback', "--summary", "Synthetic result", 'app', '--branch', 'job-a', '--state', 'blocked', '--report', 'report.md')
         self.assertIn('stale-status', [i['kind'] for i in self.due(r)])
         self.b(r, 'status', 'app', '--refresh')
         self.assertEqual([i['kind'] for i in self.due(r)], ['handback'])
@@ -353,23 +353,23 @@ class AutonomyDue(AutonomyProject):
 
     def test_reused_branch_has_a_distinct_signal(self):
         r, home, wt = self.project()
-        self.b(r, 'handback', 'app', '--branch', 'job-a', '--state', 'done')
+        self.b(r, 'handback', "--summary", "Synthetic result", 'app', '--branch', 'job-a', '--state', 'done')
         self.b(r, 'wt', 'rm', 'app', 'job-a', '--cause', 'restart')
         self.b(r, 'wt', 'add', 'app', 'job-a')
         self.assertNotIn('handback', [i['kind'] for i in self.due(r)])
-        self.b(r, 'handback', 'app', '--branch', 'job-a', '--state', 'blocked')
+        self.b(r, 'handback', "--summary", "Synthetic result", 'app', '--branch', 'job-a', '--state', 'blocked')
         self.assertEqual(len(list((r / 'nodes/app/job-handbacks').glob('*.json'))), 1)
 
     def test_corrupt_worker_signal_is_due_rather_than_a_crash(self):
         r, home, wt = self.project()
-        self.b(r, 'handback', 'app', '--branch', 'job-a', '--state', 'done')
+        self.b(r, 'handback', "--summary", "Synthetic result", 'app', '--branch', 'job-a', '--state', 'done')
         signal = next((r / 'nodes/app/job-handbacks').glob('*.json'))
         signal.write_text('{broken')
         self.assertIn('invalid-handback', [i['kind'] for i in self.due(r)])
 
     def test_handback_record_cannot_be_moved_into_a_sealed_home(self):
         r, home, wt = self.project()
-        self.b(r, 'handback', 'app', '--branch', 'job-a', '--state', 'done')
+        self.b(r, 'handback', "--summary", "Synthetic result", 'app', '--branch', 'job-a', '--state', 'done')
         self.b(r, 'principal', 'add', 'bob')
         sealed_home = self.tmp / 'sealed-app'
         out = self.b(r, 'seal', 'app', '--owners', 'bob', '--home', str(sealed_home),
@@ -381,7 +381,7 @@ class AutonomyDue(AutonomyProject):
     def test_due_redacts_and_never_calls_the_network(self):
         r, home, wt = self.project()
         (r / 'nodes/app/never-name.txt').write_text('OldCo\n')
-        self.b(r, 'handback', 'app', '--branch', 'job-a', '--state', 'done', '--report', 'OldCo/report.md')
+        self.b(r, 'handback', "--summary", "Synthetic result", 'app', '--branch', 'job-a', '--state', 'done', '--report', 'OldCo/report.md')
         fakebin = self.tmp / 'fakebin'; fakebin.mkdir()
         gh = fakebin / 'gh'; gh.write_text('#!/bin/sh\ntouch "' + str(self.tmp / 'network-called') + '"\nexit 1\n'); gh.chmod(0o755)
         self.git('remote', 'add', 'origin', 'https://github.com/example/example', cwd=home)
@@ -427,7 +427,7 @@ class AutonomyFacts(AutonomyProject):
         self.b(r, 'status', 'app', '--refresh')
         after = st.read_text().split('<!-- brain:facts-state ', 1)[1].split(' -->', 1)[0]
         self.assertEqual(json.loads(before)['fingerprint'], json.loads(after)['fingerprint'])
-        self.b(r, 'handback', 'app', '--branch', 'job-a', '--state', 'done')
+        self.b(r, 'handback', "--summary", "Synthetic result", 'app', '--branch', 'job-a', '--state', 'done')
         self.assertIn('stale-status', [i['kind'] for i in self.due(r)])
         self.b(r, 'status', 'app', '--refresh')
         self.assertNotIn('stale-status', [i['kind'] for i in self.due(r)])
@@ -1008,6 +1008,17 @@ class NodeHygiene(Scenario):
         self.assertIn('dead path ./missing.py', problems[0])
         self.assertIn('dead path lost.md', problems[1])
 
+    def test_bound_coordinator_wake_satisfies_tick_warning_without_a_schedule(self):
+        r, inst, n = self.node()
+        self.b(r, 'set', 'app', 'stack=python', 'verify=python3 -c "pass"', 'wake=exit 0')
+        self.assertIn('needs a coordinator tick', self.b(r, 'check'))
+        self.b(r, 'set', 'app', 'coordinator=fixture-coordinator')
+        self.assertNotIn('needs a coordinator tick', self.b(r, 'check'))
+        self.b(r, 'set', 'app', 'wake=')
+        self.assertIn('needs a coordinator tick', self.b(r, 'check'))
+        self.b(r, 'set', 'root', 'wake_default=exit 0')
+        self.assertNotIn('needs a coordinator tick', self.b(r, 'check'))
+
     def test_second_machine_uses_recorded_tick_without_duplicate_binding(self):
         r, inst, n = self.node()
         self.b(r, 'set', 'app', 'stack=python', 'verify=python3 -c "pass"')
@@ -1058,3 +1069,44 @@ class NodeHygiene(Scenario):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RuleActivationDue(unittest.TestCase):
+    def test_b6_one_stable_snapshot_due_episode(self):
+        patch = mock.patch.object(sys, 'path', [str(CORE / 'lib'), *sys.path])
+        with patch:
+            from brain import status, jobs, proposals, watch
+            from brain.instance import Instance
+            with tempfile.TemporaryDirectory() as folder:
+                root = Path(folder)
+                (root / 'instance.md').write_text('---\noperator: alice\nprincipals: alice\n---\n')
+                (root / 'node.md').write_text('---\nid: root\nowners: alice\n---\n')
+                (root / 'sources').mkdir()
+                source = root / 'sources/import-proposals.md'
+                source.write_text('Unreviewed rules.\n')
+                inst = Instance(root)
+                n = inst.node('root')
+                state = {'jobs': [], 'worktrees': {}, 'handbacks': {}, 'inbox': []}
+                evidence = (state, None, None)
+                with mock.patch.object(status._m_rotation, 'rotation_due', return_value=None), \
+                     mock.patch.object(status, 'blocked_entries', return_value=[]), \
+                     mock.patch.object(watch, 'watch_job_stalls', return_value=[]):
+                    def rule_items():
+                        return [i for i in status.due_items(inst, n, evidence=evidence) if i['kind'] == 'rule-activation-review']
+                    first = rule_items()
+                    self.assertEqual(len(first), 1)
+                    expected = jobs.digest(['root', 'rule-activation-review', proposals.pending_rule_snapshot(inst, n)['digest']])
+                    self.assertEqual(first[0]['episode'], expected)
+                    self.assertEqual(rule_items(), first)
+                    source.write_text('A different unreviewed snapshot.\n')
+                    self.assertNotEqual(rule_items()[0]['episode'], expected)
+                    rejected = ('---\nstatus: rejected\nreviewed_by: alice\nreviewed_at: ' + inst.now() +
+                                '\n---\nA rejected snapshot.\n')
+                    source.write_text(rejected)
+                    self.assertEqual(rule_items(), [])
+                    source.write_text(rejected.replace('status: rejected', 'status: reviewed'))
+                    self.assertEqual(len(rule_items()), 1)
+                    crlf = rejected.replace('\n', '\r\n').encode('utf-8')
+                    source.write_bytes(crlf)
+                    self.assertEqual(rule_items(), [])
+                    self.assertEqual(source.read_bytes(), crlf)

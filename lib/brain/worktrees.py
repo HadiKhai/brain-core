@@ -139,6 +139,66 @@ def port_text(port, count):
     return f"port {port}" if count == 1 else f"ports {port}-{port + count - 1}"
 
 
+def reuse_submodules(home, path, seen=None):
+    """Reuse cached module objects with independent checkout metadata, without fetching.
+
+    Git's submodule setup rewrites core.worktree, so a linked worktree would alter
+    the original checkout's config. Share objects only; uncached modules stay in setup.
+    """
+    if not (path / ".gitmodules").is_file():
+        return []
+    common = _m_common.git("rev-parse", "--git-common-dir", cwd=home)
+    if common.returncode:
+        raise ValueError("cannot locate the cached submodule directory")
+    common_dir = (home / common.stdout.strip()).resolve()
+    seen = set() if seen is None else seen
+    identity = (str(common_dir), _m_common.git("rev-parse", "HEAD", cwd=path).stdout.strip())
+    if identity in seen:
+        raise ValueError("recursive submodule cache cycle; worktree retained")
+    seen = seen | {identity}
+    config = _m_common.git("config", "-z", "-f", ".gitmodules", "--get-regexp", r"^submodule\..*\.path$", cwd=path)
+    if config.returncode not in (0, 1):
+        raise ValueError("cannot read submodule paths")
+    entries = _m_common.git("ls-files", "--stage", "-z", cwd=path)
+    if entries.returncode:
+        raise ValueError("cannot read submodule commits")
+    links = {entry.split("\t", 1)[1]: entry.split()[1] for entry in entries.stdout.split("\0")
+             if entry.startswith("160000 ") and "\t" in entry}
+    reused = []
+    for record in config.stdout.split("\0"):
+        if not record:
+            continue
+        key, relative = record.split("\n", 1)
+        name = key[len("submodule."):-len(".path")]
+        store = (common_dir / "modules" / name).resolve()
+        target = (path / relative).resolve()
+        if (not name or Path(name).is_absolute() or ".." in Path(name).parts
+                or common_dir / "modules" not in store.parents or path.resolve() not in target.parents):
+            raise ValueError("unsafe cached submodule path; worktree retained")
+        commit = links.get(relative)
+        if not commit or not store.is_dir():
+            continue
+        if _m_common.git("--git-dir", str(store), "cat-file", "-e", commit + "^{commit}", cwd=home).returncode:
+            continue  # setup may fetch an uncached commit explicitly
+        result = _m_common.git("clone", "--shared", "--no-checkout", "--", str(store), str(target), cwd=path)
+        if result.returncode:
+            raise ValueError("cached submodule checkout failed: " + result.stderr.strip())
+        origin = _m_common.git("--git-dir", str(store), "config", "--get", "remote.origin.url", cwd=home)
+        commands = [("checkout", "--detach", commit)]
+        if origin.returncode == 0 and origin.stdout.strip():
+            commands.append(("remote", "set-url", "origin", origin.stdout.strip()))
+        for command in commands:
+            result = _m_common.git(*command, cwd=target)
+            if result.returncode:
+                raise ValueError("cached submodule setup failed: " + result.stderr.strip())
+        result = _m_common.git("submodule", "absorbgitdirs", "--", relative, cwd=path)
+        if result.returncode:
+            raise ValueError("cached submodule metadata setup failed: " + result.stderr.strip())
+        reused.append(relative)
+        reused.extend(relative + "/" + child for child in reuse_submodules(store, target, seen))
+    return reused
+
+
 def cmd_wt_add(a):
     inst = _m_nodes.load()
     n, home = git_home(inst, a.id)
@@ -173,9 +233,15 @@ def cmd_wt_add(a):
           f"{port_text(port, count)}")
     setup = n["dir"] / SETUP_FILE
     _m_instance.unlock()  # the setup can take minutes and touches only the worktree
+    try:
+        for module in reuse_submodules(home, path):
+            print(_m_guard.redact("  reused submodule: " + module, _m_guard.never_terms(n)))
+    except (OSError, ValueError) as error:
+        _m_common.die(_m_guard.redact(str(error) + "; worktree retained; resolve before starting a worker",
+                                   _m_guard.never_terms(n)))
     if setup.exists() and not a.no_setup:
-        env = {**os.environ, "MAIN": str(home), "WORKTREE": str(path), "PORT": str(port), "PORTS": str(count),
-               "PORT_LAST": str(port + count - 1), "BRANCH": a.branch, "NODE": n["id"], "WORKBENCH": str(wb)}
+        env = _m_verify.verify_env(n, a.branch, {"path": str(path), "port": port, "ports": count})
+        env["WORKBENCH"] = str(wb)
         print("  setup: running; waiting for completion", flush=True)
         started = time.monotonic()
         r = subprocess.run(["sh", str(setup)], cwd=path, env=env, capture_output=True, text=True)
@@ -330,6 +396,18 @@ def cmd_wt_prune(a):
             continue
         dirty, merged, ahead = worktree_state(home, w, br, n)
         if dirty is None or (merged and dirty == 0):
+            if dirty is not None:
+                entries = _m_common.git("ls-files", "--stage", "-z", cwd=w["path"])
+                if entries.returncode:
+                    kept.append(f"{br} (submodule inventory unreadable; worktree retained)")
+                    continue
+                modules = [entry.split("\t", 1)[1] for entry in entries.stdout.split("\0")
+                           if entry.startswith("160000 ") and "\t" in entry]
+                if modules:
+                    # Git refuses removing populated submodules; their gitdirs can belong
+                    # to another checkout. Report them without deinitializing or deleting.
+                    kept.append(f"{br} (submodules retained: {', '.join(modules)})")
+                    continue
             _m_jobs.print_job_handback(n, br)
             _m_jobs.print_worktree_threads(n, br, dry_run=a.dry_run)
             if not a.dry_run:

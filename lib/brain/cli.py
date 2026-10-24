@@ -19,14 +19,20 @@ from . import history as _m_history
 from . import hosts as _m_hosts
 from . import instance as _m_instance
 from . import jobs as _m_jobs
+from . import handback_queue as _m_handback_queue
+from . import dispatcher as _m_dispatcher
 from . import knowledge as _m_knowledge
+from . import land_checks as _m_land_checks
 from . import messages as _m_messages
 from . import machine as _m_machine
+from . import freshness as _m_freshness
 from . import nodes as _m_nodes
+from . import policy as _m_policy
 from . import reports as _m_reports
 from . import rehearse as _m_rehearse
 from . import rotation as _m_rotation
 from . import schedules as _m_schedules
+from . import settings_batch as _m_settings_batch
 from . import spend as _m_spend
 from . import status as _m_status
 from . import sync as _m_sync
@@ -101,16 +107,22 @@ def reexec_into_instance_core():
 
 # Commands that change nothing in the instance: they never wait for the lock.
 READ_ONLY = {"cmd_show", "cmd_tree", "cmd_status", "cmd_now", "cmd_jobs", "cmd_stale", "cmd_ui", "cmd_guard",
-             "cmd_due", "cmd_inbox",
+             "cmd_due", "cmd_inbox", "cmd_index",
              "cmd_brief", "cmd_hire", "cmd_reports", "cmd_brains", "cmd_use", "cmd_machine", "cmd_usable",
              "cmd_item_list", "cmd_item_show", "cmd_wt_list", "cmd_selftest", "cmd_init", "cmd_hook", "cmd_hook_approve", "cmd_help",
              "cmd_dashboard", "cmd_ready", "cmd_usage", "cmd_scan", "cmd_scrub", "cmd_history",
-             "cmd_connect", "cmd_recall", "cmd_proposals", "cmd_changes", "cmd_heavy", "cmd_rehearse"}
+             "cmd_version", "cmd_connect", "cmd_recall", "cmd_proposals", "cmd_changes", "cmd_heavy", "cmd_rehearse", "cmd_policy"}
 
 
 def writes(a):
     """Does this command, with these options, change anything in the instance?"""
     name = a.f.__name__
+    if name == 'cmd_proposals':
+        return bool(getattr(a, 'approve_all', False))
+    if name == 'cmd_land_check':
+        return False  # the explicit runner takes short owned locks around execution
+    if name == 'cmd_dispatch':
+        return False
     if name == "cmd_watch":
         return False  # takes a short nonblocking instance lock itself
     if name == "cmd_wake":
@@ -123,6 +135,10 @@ def writes(a):
         return a.refresh
     if name == "cmd_inbox":
         return a.new
+    if name == 'cmd_index':
+        return a.record
+    if name == 'cmd_due':
+        return bool(getattr(a, 'defer', None) or getattr(a, 'ack', None))
     if name == "cmd_changes":
         return a.seen
     if name == "cmd_connect":
@@ -229,7 +245,14 @@ def main():
         opt("--limit", type=int, default=10), opt("--json", action="store_true"))
     cmd("proposals", _m_status.cmd_proposals, "everything waiting for review, node by node, with full text and the commands "
         "to accept or reject several at once", opt("id", nargs="?"),
-        opt("--only", help="only these nodes (comma-separated)"), opt("--json", action="store_true"))
+        opt("--only", help="only these nodes (comma-separated)"), opt("--json", action="store_true"),
+        opt('--approve-all', action='store_true', help='activate one complete independently reviewed rules snapshot'),
+        opt('--review-manifest', help='complete coordinator-supplied snapshot review JSON'))
+    cmd('policy', _m_policy.cmd_policy, 'inspect explicit reviewed publication policy; never publishes', 'id',
+        opt('--action', choices=['push', 'pr']), opt('--json', action='store_true', help='print a current limits mapping template'))
+    cmd('land-check', _m_land_checks.cmd_land_check, 'record/check exact-candidate evidence; only prints supported push steps', 'id',
+        opt('--branch', required=True), opt('--run', action='store_true', help='run the configured check explicitly'),
+        opt('--push-step', action='store_true', help='print a policy-allowed SHA-pinned push step with current evidence'))
     cmd("guard", _m_guard.cmd_guard, f"check a home and its worktrees for the terms in {_m_guard.NEVER_FILE} (and, if sealed, "
         "upward traces); exits 1 if any", "id", opt("paths", nargs="*"))
     cmd("spend", _m_spend.cmd_spend, "time and tokens from this machine's transcripts: a node's past sessions (opt-in, "
@@ -251,9 +274,12 @@ def main():
         opt("id", nargs="?"), opt("--branch"), opt("--job-key", help="select one ledger job when a branch was reused"), opt("--lessons", help="learned item ids, or none: <reason>"),
         opt("--switch", help="record provider switch: old -> new: reason"),
         opt("--start", action="store_true", help="coordinator: start an import:<snapshot> study"),
-        opt("--close", action="store_true", help="coordinator: close a processed import study"),
+        opt("--close", action="store_true", help="coordinator: close a processed study, manually landed job, or parked job with --reason"),
+        opt("--reason", help="one-line reason to explicitly close parked work"),
+        opt("--live", action="store_true", help="read-only JSON rows joining ledger, hand-back, attempts and recorded queues; host activity unknown"),
         opt("--settled", action="store_true", help="coordinator: record all closed job threads safely settled through the host"),
         opt("--all-closed", action="store_true", help="with --settled: attest a complete host sweep for all closed ledger jobs"),
+        opt("--attestation-file", help="fresh version 1 coordinator export with exhaustive per-job/thread/project coverage"),
         opt("--contract-file", dest="contract_file", help="coordinator: the job's contract (" +
             ", ".join(f"## {f}" for f in _m_jobs.CONTRACT_FIELDS) + "; an optional ## Budget, e.g. 20M tokens, 3 h)"),
         opt("--usage-file", dest="usage_file", help="coordinator: the job's usage as the host reports it (JSON); "
@@ -262,23 +288,46 @@ def main():
     cmd("due", _m_status.cmd_due, "coordinator actions and machine holds; empty means no output",
         opt("--since-wake", action="store_true", help="new file-only wake items compared with the wake before the latest delivery"),
         opt("--machine", action="store_true", help="also show informational machine readings, even without node actions"),
+        opt('--defer', nargs=2, metavar=('ITEM_ID', 'UNTIL'), help='defer an eligible reminder until an absolute timestamp'),
+        opt('--ack', metavar='ITEM_ID', help='acknowledge a current parked/blocked handback episode'),
+        opt('--reason', help='required recorded reason for --defer or --ack'),
+        opt('--resume', help='required resume condition for --ack'),
+        opt('--until', help='optional absolute resume time for --ack'),
+        opt('--handled', action='store_true', help='also show current handled reminders and their reasons'),
         opt("id", nargs="?"), opt("--json", action="store_true"),
         opt("--quiet", action="store_true", help="no output; exit 1 for node actions, including its held work, 0 otherwise"))
     cmd("inbox", _m_status.cmd_inbox, "needs in a node's subtree (default: calling node); --new remembers per reporter",
-        opt("id", nargs="?"), opt("--json", action="store_true"), opt("--new", action="store_true"))
+        opt("id", nargs="?"), opt("--json", action="store_true"), opt("--new", action="store_true"),
+        opt('--weekly', action='store_true', help='read-only sweep of unresolved requests aged at least seven days'))
+    cmd('answer', _m_status.cmd_answer, 'record text for exactly one current inbox episode, retaining source/history',
+        'item_id', 'text')
+    cmd('index', _m_freshness.cmd_index, 'configured upstream index freshness; never runs a generator', 'id',
+        opt('--record', action='store_true', help='explicitly record current input/output fingerprints after regeneration'))
     cmd("msg", _m_messages.cmd_msg, "format start/done/blocked/question for a coordinator (does not send)",
         "id", opt("kind", choices=_m_messages.MESSAGE_KINDS), "message", opt("--branch"), opt("--report"))
     cmd("handback", _m_jobs.cmd_handback, "done/blocked/question hand-back; worker messages are start/done/blocked/question",
         "id", opt("--branch", required=True), opt("--state", choices=["done", "failed", "blocked", "question"], required=True),
+        opt("--summary", required=True, help="nonempty one-line worker result"),
+        opt("--question", help="one-line choice, required for question state"),
+        opt("--enqueue", action="store_true", help="durably queue this request and return its ID; explicit foreground runner required"),
         opt("--report"), opt("--lessons", help="proposed lessons, or none: <reason>"),
         opt("--restart", choices=["compactions"], help="request a fresh brief resuming this job (blocked only)"),
         opt("--need-human", help="question or blocked need to append to the node inbox"),
         opt("--reviews", type=int, help="completed review rounds; runs verify for done (or reuses a green run that "
             "still proves this commit)"),
         opt("--reverify", action="store_true", help="run verify even when an earlier green run still proves it"))
+    cmd("queue", _m_handback_queue.cmd_queue, "explicit foreground hand-back request runner; no service or recovery",
+        opt("action", choices=['run']), 'id', opt('--once', action='store_true'), opt('--request-id'))
+    cmd("dispatch", _m_dispatcher.cmd_dispatch, "bounded read-only plan of explicit root/operator asks; empty scan is silent",
+        opt('--limit', type=int, default=50), opt('--node-limit', type=int, default=200))
     cmd("show", _m_status.cmd_show, "everything about one node, including this machine's bindings", "id")
     cmd("set", _m_nodes.cmd_set, "set fields: brain set <id> key=value ... (host IDs and home paths stay on this machine)",
         "id", opt("pairs", nargs="+"))
+    s = sub.add_parser("settings", help="apply an explicit validated settings batch")
+    settings_sub = s.add_subparsers(dest="settings_action", required=True)
+    t = settings_sub.add_parser("batch", help="JSON array of set/schedule-add operations; one bookkeeping commit")
+    t.add_argument("file", help="UTF-8 JSON batch file")
+    t.set_defaults(f=_m_settings_batch.cmd_settings_batch)
     cmd("relabel", _m_nodes.cmd_relabel, "brain relabel <id> key:value ... (key:- removes)", "id", opt("labels", nargs="+"))
     cmd("owners", _m_nodes.cmd_owners, "change owners: brain owners <id> a,b  ('' = same as parent)", "id", "owners")
     cmd("seal", _m_guard.cmd_seal, "give a node new owners and an external home (the sealing procedure's mechanics)",
@@ -389,6 +438,8 @@ def main():
         opt("--jobs", nargs="+", help="explicit job order (space or comma separated); all must be ready"))
     cmd("ready", _m_verify.cmd_ready, "check a worker's ready packet against the branch and cached origin default (local main without origin)", "id",
         opt("--branch", required=True), opt("--record", action="store_true", help="worker: run node verify and record"),
+        opt("--summary", help="one-line hand-back result (required for --record with schema v3)"),
+        opt("--question", help="one-line coordinator choice for a question hand-back"),
         opt("--reviews", type=int, help="completed review rounds, required with --record"),
         opt("--report"), opt("--lessons", help="proposed lessons, or none: <reason>"),
         opt("--reverify", action="store_true", help="with --record: run verify even if a green run still proves it"))
@@ -430,12 +481,15 @@ def main():
     cmd("heavy", _m_machine.cmd_heavy, "wait until the machine admits new heavy work",
         opt("--node", help="coordinator whose work is waiting (default root)"))
     cmd("machine", _m_machine.cmd_machine, "machine state, sampler and bindings",
-        opt("action", nargs="?", choices=["sample", "install", "uninstall"]),
+        opt("action", nargs="?", choices=["sample", "install", "uninstall", 'wake-setup']), opt('id', nargs='?'),
         opt("--yes", action="store_true", help="install/remove the sampler with operator consent"),
         opt("--missing-homes", action="store_true", dest="missing_homes"))
     cmd("brains", _m_hosts.cmd_brains, "the brains on this machine: brain brains [forget <name>]",
         opt("action", nargs="?", choices=["list", "forget"], default="list"), opt("name", nargs="?"))
     cmd("use", _m_hosts.cmd_use, "set this machine's default brain: brain use <name>", "name")
+    cmd("version", _m_upgrade.cmd_version, "installed core SHA/date and cached origin ancestry; never fetches",
+        opt("--ref", help="cached origin ref (default origin/HEAD or refs/remotes/origin/main)"),
+        opt("--json", action="store_true"))
     cmd("upgrade", _m_upgrade.cmd_upgrade, "update core/ to the latest version, then link and check")
     cmd("changes", _m_upgrade.cmd_changes, "what changed in core for agents: unread entries (default), --all, --seen",
         opt("id", nargs="?"), opt("--seen", action="store_true", help="mark every entry read on this machine"),

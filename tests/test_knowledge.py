@@ -371,7 +371,8 @@ class ImportAutonomy(Scenario):
         self.assertNotIn("git rebase", brief)
         self.assertNotIn("must have a Lessons section", brief)
         for state in ("blocked", "question", "done"):
-            self.b(r, "handback", "source", "--branch", job, "--state", state, "--reviews", "0",
+            self.b(r, "handback", "--summary", "Synthetic result", "source", "--branch", job, "--state", state, "--reviews", "0",
+                   *(("--question", "Synthetic choice?") if state == "question" else ()),
                    "--report", "sources/study.md", "--lessons", "bounded")
             due = json.loads(self.b(r, "due", "source", "--json"))
             signal = next(i for i in due if i["kind"] == "handback")
@@ -392,7 +393,7 @@ class ImportAutonomy(Scenario):
         self.assertNotIn("handback", [i["kind"] for i in json.loads(self.b(r, "due", "source", "--json"))])
         self.assertIn("status: proposed", (node / "library/bounded.md").read_text())
         self.assertNotIn("has no lesson outcome", self.b(r, "check"))
-        self.b(r, "handback", "source", "--branch", job, "--state", "done", ok=False)
+        self.b(r, "handback", "--summary", "Synthetic result", "source", "--branch", job, "--state", "done", ok=False)
 
     def test_existing_node_study_start_is_explicit_and_snapshot_bound(self):
         r = self.init("alice")
@@ -406,7 +407,7 @@ class ImportAutonomy(Scenario):
         self.b(r, "jobs", "source", "--branch", "job/wrong", "--start", ok=False)
         self.b(r, "jobs", "source", "--branch", "import:" + "0" * 40, "--start", ok=False)
         self.b(r, "jobs", "source", "--branch", job, "--start")
-        self.b(r, "handback", "source", "--branch", job, "--state", "done", "--lessons", "none: empty study")
+        self.b(r, "handback", "--summary", "Synthetic result", "source", "--branch", job, "--state", "done", "--lessons", "none: empty study")
         self.assertIn("no home ready evidence required", self.b(r, "due", "source"))
         self.b(r, "jobs", "source", "--branch", job, "--lessons", "none: empty study", "--close")
 
@@ -448,7 +449,7 @@ class ImportAutonomy(Scenario):
     def test_proposed_ids_are_valid_outcomes_for_merged_home_jobs(self):
         r, home, wt = _test_verify.WorkerReadyPackets.job(self)
         self.proposal(r, source="a")
-        self.b(r, "handback", "a", "--branch", "job", "--state", "done", "--reviews", "1",
+        self.b(r, "handback", "--summary", "Synthetic result", "a", "--branch", "job", "--state", "done", "--reviews", "1",
                "--report", "report.md", "--lessons", "bounded")
         self.b(r, "jobs", "a", "--branch", "job", "--lessons", "bounded")
         self.git("merge", "--no-edit", "job", cwd=home)
@@ -475,3 +476,159 @@ class AutonomyHire(AutonomyProject):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RuleSnapshotActivation(unittest.TestCase):
+    def setUp(self):
+        patch = mock.patch.object(sys, "path", [str(CORE / "lib"), *sys.path])
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    """Rules-only bulk activation consumes supplied independent review evidence."""
+    def test_b6_complete_snapshot_activation_and_refusals(self):
+        from brain import proposals
+        from brain.instance import Instance
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / '.brain').mkdir()
+            (root / 'instance.md').write_text('---\noperator: alice\nprincipals: alice, bob\nruntimes: codex, claude\ntimezone: UTC\n---\n')
+            (root / 'node.md').write_text('---\nid: root\nowners: alice\n---\n')
+            (root / 'sources').mkdir()
+            agents = root / 'AGENTS.md'
+            agents.write_text('# Instructions\n')
+            snapshot = {'version': 1, 'node': 'root', 'scope': ['alice'],
+                        'importer': 'worker-1', 'importer_runtime': 'codex', 'provenance': 'demo@abc',
+                        'rules': [{'id': 'one', 'text': 'Use fabricated examples.', 'source': 'demo@abc:1'},
+                                  {'id': 'two', 'text': 'Keep artifacts local.', 'source': 'demo@abc:2'}]}
+            source = root / 'sources/import-proposals.md'
+            source.write_text(json.dumps(snapshot))
+            inst = Instance(root)
+            n = inst.node('root')
+            pending = proposals.pending_rule_snapshot(inst, n)
+            self.assertEqual(pending['count'], 2)
+            self.assertEqual(pending, proposals.pending_rule_snapshot(inst, n))
+            manifest = {**snapshot, 'snapshot_hash': pending['digest'], 'reviewer': 'alice',
+                        'reviewer_runtime': 'claude', 'reviewed_at': inst.now()}
+            before = agents.read_bytes(), source.read_bytes()
+            invalid = [dict(manifest, snapshot_hash='0' * 64), dict(manifest, reviewer='worker-1'),
+                       dict(manifest, reviewer_runtime='codex'), dict(manifest, rules=snapshot['rules'][:1]),
+                       dict(manifest, scope=['alice', 'bob']), dict(manifest, provenance=''),
+                       {k: v for k, v in manifest.items() if k != 'importer'}]
+            for bad in invalid:
+                with self.subTest(bad=bad), self.assertRaises(ValueError):
+                    proposals.activate_rules(inst, n, bad, commit=False)
+                self.assertEqual(before, (agents.read_bytes(), source.read_bytes()))
+            # A self-consistent manifest still cannot widen the source snapshot's owner scope.
+            widened = {**snapshot, 'scope': ['alice', 'bob']}
+            source.write_text(json.dumps(widened))
+            widened_review = {**manifest, **widened, 'snapshot_hash': proposals.pending_rule_snapshot(inst, n)['digest']}
+            with self.assertRaises(ValueError):
+                proposals.activate_rules(inst, n, widened_review, commit=False)
+            self.assertEqual(agents.read_bytes(), before[0])
+            source.write_bytes(before[1])
+            validate = proposals._validate_review
+            def changed_during_validation(*args):
+                validate(*args)
+                source.write_bytes(before[1] + b'\n')
+            with mock.patch.object(proposals, '_validate_review', side_effect=changed_during_validation):
+                with self.assertRaisesRegex(ValueError, 'changed'):
+                    proposals.activate_rules(inst, n, manifest, commit=False)
+            self.assertEqual(agents.read_bytes(), before[0])
+            source.write_bytes(before[1])
+            config = root / 'instance.md'
+            original_config = config.read_text()
+            config.write_text(original_config.replace('principals:', 'revoked: alice\nprincipals:'))
+            with self.assertRaises(ValueError):
+                proposals.activate_rules(inst, n, manifest, commit=False)
+            config.write_text(original_config)
+            self.assertEqual(before, (agents.read_bytes(), source.read_bytes()))
+            from brain import nodes, status
+            manifest_path = root / 'review.json'
+            manifest_path.write_text(json.dumps(manifest))
+            with mock.patch.object(nodes, 'load', return_value=inst), contextlib.redirect_stdout(io.StringIO()):
+                proposals.cmd_proposal_activation(argparse.Namespace(id='root', only=None, json=False, review_manifest=str(manifest_path)))
+            self.assertEqual(status.pending_imports(inst, n)[0], 0)
+            self.assertIn('Use fabricated examples.', agents.read_text())
+            self.assertIn('supplied evidence', agents.read_text())
+            self.assertIn('demo@abc:2', agents.read_text())
+            self.assertIsNone(proposals.pending_rule_snapshot(inst, n))
+            self.assertEqual(source.read_bytes(), before[1])
+            source.write_text(json.dumps({**snapshot, 'provenance': 'demo@new'}))
+            self.assertIsNotNone(proposals.pending_rule_snapshot(inst, n))
+
+    def test_b6_legacy_and_forged_review_stay_pending(self):
+        from brain import proposals
+        from brain.instance import Instance
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / 'instance.md').write_text('---\noperator: alice\nprincipals: alice\nruntimes: codex, claude\n---\n')
+            (root / 'node.md').write_text('---\nid: root\nowners: alice\n---\n')
+            (root / 'sources').mkdir()
+            (root / 'sources/import-proposals.md').write_text('---\nstatus: reviewed\nreviewed_by: alice\nreviewed_at: 2026-01-01 10:00 +00:00\n---\nUnstructured rule summaries\n')
+            inst = Instance(root)
+            n = inst.node('root')
+            self.assertEqual(proposals.pending_rule_snapshot(inst, n)['count'], 1)
+            with self.assertRaises(ValueError):
+                proposals.activate_rules(inst, n, {}, commit=False)
+            self.assertFalse((root / 'AGENTS.md').exists())
+
+
+    def test_valid_legacy_rejection_resolves_only_rejection_not_inactive_review(self):
+        from brain import proposals, status
+        from brain.instance import Instance
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / 'instance.md').write_text('---\noperator: alice\nprincipals: alice, bob\ntimezone: UTC\n---\n')
+            (root / 'node.md').write_text('---\nid: root\nowners: alice\n---\n')
+            (root / 'sources').mkdir()
+            source = root / 'sources/import-proposals.md'
+            inst = Instance(root)
+            node = inst.node('root')
+            when = '2026-01-01 10:00 +00:00'
+            with mock.patch.object(inst, 'now_dt', return_value=datetime.datetime(2026, 1, 2, tzinfo=datetime.timezone.utc)):
+                text = '---\nstatus: rejected\nreviewed_by: alice\nreviewed_at: ' + when + '\n---\nUnstructured rules.\n'
+                source.write_text(text)
+                before = source.read_bytes()
+                self.assertEqual(status.pending_imports(inst, node)[0], 0)
+                self.assertIsNone(proposals.pending_rule_snapshot(inst, node))
+                self.assertEqual(source.read_bytes(), before)
+                self.assertFalse((root / 'AGENTS.md').exists())
+                source.write_text(text.replace('status: rejected', 'status: reviewed'))
+                self.assertEqual(proposals.pending_rule_snapshot(inst, node)['count'], 1)
+                for invalid in (text.replace('reviewed_by: alice', 'reviewed_by: nobody'),
+                                text.replace(when, 'not-a-time'), text.replace(when, '2027-01-01 10:00 +00:00')):
+                    source.write_text(invalid)
+                    self.assertIsNotNone(proposals.pending_rule_snapshot(inst, node))
+                source.write_text(text)
+                with mock.patch.object(inst, 'revoked', ['alice']):
+                    self.assertIsNotNone(proposals.pending_rule_snapshot(inst, node))
+                source.write_text(text.replace('reviewed_by: alice', 'reviewed_by: bob'))
+                self.assertIsNone(proposals.pending_rule_snapshot(inst, node))
+
+    def test_legacy_rejection_accepts_universal_newlines_without_changing_snapshot(self):
+        from brain import proposals, status
+        from brain.instance import Instance
+        import hashlib
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / 'instance.md').write_text('---\noperator: alice\nprincipals: alice\ntimezone: UTC\n---\n')
+            (root / 'node.md').write_text('---\nid: root\nowners: alice\n---\n')
+            (root / 'sources').mkdir()
+            source = root / 'sources/import-proposals.md'
+            inst = Instance(root)
+            node = inst.node('root')
+            text = '---\nstatus: rejected\nreviewed_by: alice\nreviewed_at: 2026-01-01 10:00 +00:00\n---\nUnstructured rules.\n'
+            with mock.patch.object(inst, 'now_dt', return_value=datetime.datetime(2026, 1, 2, tzinfo=datetime.timezone.utc)):
+                for newline in ('\r\n', '\r'):
+                    with self.subTest(newline=repr(newline)):
+                        raw = text.replace('\n', newline).encode('utf-8')
+                        source.write_bytes(raw)
+                        self.assertEqual(status.pending_imports(inst, node)[0], 0)
+                        self.assertIsNone(proposals.pending_rule_snapshot(inst, node))
+                        self.assertEqual(source.read_bytes(), raw)
+                        self.assertFalse((root / 'AGENTS.md').exists())
+                        reviewed = raw.replace(b'status: rejected', b'status: reviewed')
+                        source.write_bytes(reviewed)
+                        pending = proposals.pending_rule_snapshot(inst, node)
+                        self.assertEqual(pending['digest'], hashlib.sha256(reviewed).hexdigest())
+                        self.assertEqual(source.read_bytes(), reviewed)

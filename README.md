@@ -146,14 +146,38 @@ The worker builds in its worktree, gets review on another runtime, fixes finding
 rebases on local `main`. One command finishes its part:
 
 ```sh
-brain handback website --branch job/blog-search --state done --reviews 2 \
+brain handback website --branch job/blog-search --state done --summary "Search is implemented" --reviews 2 \
   --report reports/blog-search/index.md --lessons "Use title matches before recency."
 ```
 
 It runs the node's configured verification, checks local main and stores the worker's state,
 ready packet and proposed lessons together. For a blocker or question, use `--state blocked`
-or `--state question`, omit `--reviews`, and describe it in the report. Questions reach the
+or `--state question`, keep a one-line `--summary`, omit `--reviews`, and describe it in the report.
+Question state also requires a one-line `--question`. Questions reach the
 inbox; a blocked human need adds `--need-human "<need>"`.
+
+Hand-back schema v3 stores summary and question explicitly. Older records remain readable
+and are labelled when these fields are missing; report contents never supply a guessed summary.
+An active replacement attempt makes the previous hand-back historical until an exact-bound
+terminal publication replaces it. `--enqueue` returns a durable request ID and requires an
+explicit `brain queue run website --once`; abandoned running leases stay unknown. P6
+cancellation/crash recovery is deferred until the heavy-run ownership redesign.
+
+`brain jobs website --live` and generated Active work join the same recorded projection.
+They show current state, historical summary when relevant, queue position/owner when known,
+and next action. They never establish live host activity or readiness. `brain dispatch`
+uses only explicit request sources, returns stable episode IDs and node targets, and
+acknowledges nothing. Limits bound output and nodes processed after local node enumeration;
+the plan labels partial coverage, and an empty bounded scan prints nothing.
+
+Settlement requires a version 1 JSON export with `node`, ISO `observed_at` within five
+minutes, `project_ids` covering bound host/home projects, exhaustive
+`coverage: {"project": true, "nested": true, "complete": true}`, and exactly the selected
+`jobs`. Each job has `job_key` and `threads`; every thread has singular `threadId`, matching
+`job_key`, terminal `state`, `settled: true`, and `pending_requests: []`. See the host adapter
+for terminal states and nested coverage. Pass it with `jobs --settled --attestation-file F`;
+`--all-closed` requires the same exhaustive evidence. This records coordinator-supplied
+observations rather than independent live host verification, and core never settles host threads.
 
 The coordinator runs `brain ready website --branch job/blog-search` immediately before merging.
 It compares the worker’s packet with the branch and current local main; it does not rerun tests.
@@ -179,10 +203,45 @@ silently and changes no files. The host supplies the wake-up; the CLI supplies e
 merges and attention counts. The coordinator writes the judgement around it. Refreshing facts
 never makes old judgement look fresh.
 
-`brain inbox root` is the human's one needs-you list. Items have stable ids;
+`brain inbox root` is the human's one needs-you list. Items are grouped by node with stable ids and age;
 `brain inbox root --new` reports each once per machine and reporter until resolved. Child
 coordinators handle their own subtree and route unresolved needs upward. **The root reports to
 the human.**
+
+`brain answer <item-id> "<answer text>"` records an answer to exactly that current
+inbox episode. It retains the source line and answer history in private machine-local
+receipts; it never executes the answer. Unknown, ambiguous and obsolete IDs refuse.
+`--new` acknowledges reporting only. `brain inbox root --weekly` is a read-only sweep
+of unanswered requests at least seven days old; age never discards a request.
+
+For a handled blocked handback, use `brain due <node> --ack <item-id> --reason
+"<reason>" --resume "<resume condition>" [--until <absolute timestamp>]`.
+`brain due <node> --handled` retains the parked state, reason and resume condition
+in the operator view. `brain due <node> --defer <item-id> 2026-12-01T09:00:00Z
+--reason "<reason>"` defers an eligible missing-preview reminder until expiry.
+The preview requirement and a `preview=none` setting remain intact. A changed or
+recurrent need reappears; questions, failures, restart markers and unreadable evidence
+remain visible. These receipts are local to this machine in `.brain/wake/lifecycle.json`.
+
+An open job raises one protected `restart from brief` item at three compactions or
+twice its configured token budget, naming both measures. The coordinator restarts
+it from a successfully delivered brief; that records a usage baseline so old counters
+do not immediately re-alert. Brain never automatically stops the worker.
+
+For an opt-in upstream index check, set explicit home-relative file paths, for example
+`brain set <node> 'upstream_inputs=["source.txt","metadata.json"]' upstream_output=index.md`.
+`brain index <node>` reports missing, stale, unknown or fresh; `brain check` flags
+configured nonfresh indexes. After explicitly regenerating the index, run
+`brain index <node> --record` to record its input/output fingerprints. Recording
+observations does not establish that a generator ran. Inputs must be readable,
+scope-allowed regular files (at most 64, 16 MiB each); no globbing, cross-node paths,
+scripts or automatic regeneration. Unconfigured nodes retain existing behavior.
+
+`brain machine wake-setup <node>` prints a credential-free plan for the currently
+bound coordinator. Run its structured webhook `schedule_task` payload in that
+coordinator's thread, then use the returned capability only in the printed local
+binding command. A missing coordinator or unsupported host is an explicit setup gap.
+Printing the plan performs no host call and does not provision a wake.
 
 <details>
 <summary><b>Inside a generated worker brief</b> (excerpt; <a href="docs/img/brief.txt">full demo capture</a>)</summary>
@@ -481,12 +540,18 @@ You mostly talk to coordinators, and they run `brain` for you. By hand:
 | `brain due [node]` | coordinator actions from files and local git; empty means silence |
 | `brain due <node> --since-wake [--json]` | new file-only items for the latest wake, compared with the preceding wake's queue snapshot |
 | `brain inbox [node] [--new]` | one needs-you list; stable ids, only-new reporting per machine and reporter |
+| `brain inbox [node] --weekly` | read-only list of unanswered requests at least seven days old |
+| `brain answer <item-id> "<text>"` | answer one current request episode; retain source and history |
+| `brain due [node] --defer <item-id> <absolute-until> --reason "<text>"` | defer an eligible reminder until expiry |
+| `brain due [node] --ack <item-id> --reason "<text>" --resume "<condition>" [--until <absolute-time>]` | acknowledge a blocked episode; `--handled` shows its retained reason |
+| `brain index <node> [--record]` | inspect configured input/output freshness; explicitly record regenerated output |
 | `brain status <node> --refresh` | regenerate facts without advancing judgement freshness |
 | `brain usage` | allowed subscriptions, account-wide windows, age and resets |
 | `brain stale <node> <host time>` | is a node's status behind its thread? Compares moments, whatever the timezones |
 | `brain sync <node>` / `--all` | what happened in a node and its home since the last sync |
 | `brain check [--fix] [--live]` | check mechanically and read cached webhook results; repair safe things with `--fix`; only `--live` sends a real probe |
 | `brain machine` | this machine's bindings |
+| `brain machine wake-setup <node>` | print a target-coordinator webhook provisioning plan |
 </details>
 
 <details>
@@ -512,7 +577,13 @@ You mostly talk to coordinators, and they run `brain` for you. By hand:
 | `brain wt add/list/rm/prune` | one worktree per job beside the project's repo, with setup and a block of ports |
 | `brain brief <id> [--branch B] --task-file F` | task, limits, routing, resume state and ranked usable lessons |
 | `brain brief <id> --small --task "..."` | a minutes-long, low-risk task without job ceremony |
-| `brain handback <id> --branch B --state done --reviews N --report P --lessons "..."` | one worker finishing step: verify, readiness, state and proposed lessons; also accepts blocked/question |
+| `brain handback <id> --branch B --state done --summary "..." --reviews N --report P --lessons "..."` | one worker finishing step; every publication needs a one-line summary, question state also needs `--question` |
+| `brain handback <id> ... --enqueue` | durably enqueue a hand-back and print its request ID; explicit foreground runner required |
+| `brain queue run <id> --once [--request-id ID]` | lease and run one request through the native verifier; no service, cancellation or crash recovery |
+| `brain jobs <id> --live` | read-only JSON joining ledger, hand-back, active attempt, recorded queue position/owner and next action; host activity unknown |
+| `brain jobs <id> --branch B --close [--reason "..."]` | close a manual landing with main SHA, or explicitly close parked work with a reason; retain resources |
+| `brain jobs <id> --branch B --settled --attestation-file F` | validate fresh exhaustive per-thread coordinator evidence before recording settlement; no host call |
+| `brain dispatch [--limit 50] [--node-limit 200]` | read-only bounded plan of explicit asks and their node targets; empty scan is silent |
 | `brain ready <id> --branch B` | compare the worker’s packet with branch and current local main before merge |
 | `brain jobs <id> --branch B --contract-file F` | a job's contract: outcome, what the worker may do without asking, stop conditions, consent, done; optionally a budget |
 | `brain jobs <id> --branch B --usage-file F` | a job's usage as its host reports it (JSON); it wins over what transcripts show |
@@ -555,12 +626,45 @@ You mostly talk to coordinators, and they run `brain` for you. By hand:
 | `brain link --global [runtime=folder ...]` | a pointer to this brain in runtimes' user-wide instructions |
 | `brain brains`, `brain use <name>`, `brain -b <name> …`, `brain --all` | several brains: list, default, pick, every dashboard |
 | `brain changes [node] [--seen]` | what changed in core for agents since this coordinator last read it |
+| `brain version [--ref refs/remotes/origin/main] [--json]` | installed core SHA/date and local cached-origin comparison, with cache age; never fetches |
+| `brain settings batch operations.json` | validate all set/schedule-add operations, then apply with one named-path bookkeeping commit |
 | `brain set root auto_upgrade=on` | this machine upgrades core by itself whenever no job is open |
-| `brain upgrade` | update `core/` to the latest version, then link and check |
+| `brain upgrade` | refuse while any job/worktree is open or its inventory is unreadable; once idle, update `core/`, link and check |
 | `brain hook stop` / `brain hook approve` | the stop hook both runtimes run; trust it in Codex |
 </details>
 
 ---
+
+Settings batches use a UTF-8 JSON array. For example:
+
+```json
+[
+  {"op": "set", "node": "root", "pairs": ["rotate_turns=42", "coordinator=sample-thread"]},
+  {"op": "schedule-add", "id": "daily-check", "node": "root", "when": "daily 09:00", "brief": "Inspect the fixture"}
+]
+```
+
+All operations validate before publication, including duplicate schedule IDs and machine-local
+settings. Machine-local keys remain in `.brain/local.json`; shared settings and schedule
+additions make one commit. Unrelated staged work stays staged. Targets with pre-existing
+edits are refused. A publication failure leaves a private pending/failure packet in
+`.brain/settings-batches/` with before/after contents: ask the coordinator before recovery.
+There is no automatic rollback, host schedule creation or hourly squashing.
+
+Worker, import, small-job and specialist briefs explicitly omit co-author attribution. They
+supply no trailer for any runtime or model; explicit runtime/model selection does not invent
+an attribution identity.
+
+`brief_max_kb` (default 8) charges UTF-8 task and embedded context bytes captured before
+assembly. Generated fixed instructions do not consume that allowance. Briefs warn above
+the allowance and refuse at twice it. Both chargeable and total bytes are reported; at
+256 KiB total output they refuse regardless of the allowance. Diagnostics identify the
+coordinator-controlled source sections. Mandatory safety text is retained without truncation.
+
+`brain version` compares with the locally cached origin default ref (or origin/main) and
+labels unknown or diverged ancestry explicitly. Cache age observes the last available ref
+reflog update, not a commit date or a guarantee about the remote; absent reflogs mean unknown
+age. This command makes no network request. Existing daily update notices remain separate.
 
 ## What's in this repository
 
@@ -678,6 +782,89 @@ After any change:
 4. commit here; brains pick it up with `brain upgrade`
 
 ---
+
+## Publication policy and checks
+
+`merge=local|pr` selects a workflow; it grants no push or PR permission. Before storing
+`merge=pr`, core checks the node's reviewed publication policy against every current
+inherited/node `## Limits` bullet within its ownership boundary. The nearest sealed
+ancestor's own limits are included; its parents' limits and source references are not read.
+A deny quotes its rule and source. Every PR-mode decision other than `allow` refuses
+and refers the choice to the coordinator, including a node with no limits or policy file.
+
+The coordinator prepares node-local `publication-policy.json`. `brain policy <node>
+--json` prints a template with exact rule texts/source references; fill every action
+with `allow`, `deny`, `unknown` or `not-applicable`. Preserve the full ordered rule
+snapshot. Include `version: 1`, `node`, `reviewer` (current operator or owner), and
+`reviewed_at` from `brain now`. This is supplied review evidence, not authenticated
+identity. No natural-language ACL inference occurs. Explicit consent without limits
+uses `"consent": {"node": "demo", "actions": ["push", "pr"]}` alongside the empty
+`rules` list; the reviewed node/action scope is specific, not global permission.
+
+`brain policy <node> --action push|pr` refuses deny/unknown policy; it never performs an
+outward action. Generated briefs carry these decisions. Before an authorized push,
+use `brain land-check <node> --branch <job> --run` if `land_check=<command>` is set,
+then `brain land-check <node> --branch <job> --push-step` to generate a push command
+pinned to the checked SHA. The command is only printed. Read commands never run checks.
+
+The configured shell command runs in the clean candidate worktree with the node's
+normal execution variables. Its versioned `Land check` job-ledger receipt retains
+command/config identity, exact head, inputs, time, attempt and result, including
+failures. Changed tips, commands, configuration, inputs or replacement attempts make
+old evidence unusable. The local train runs it once on its exact integration candidate
+and attributes the receipt to its accepted jobs; a failed or stale configured check
+prevents landing and push instructions. A passing check grants neither readiness nor
+permission. An absent setting adds no check and grants no outward permission.
+Core enforces the supported instruction/landing path; it cannot intercept an arbitrary
+external `git push`, or enforce host publication policy after someone leaves that path.
+
+## Rules-only activation review
+
+A nonempty, unrejected `sources/import-proposals.md` snapshot has one protected
+`rule-activation-review` due episode, stable until its byte digest changes. Importing
+never activates it. Legacy prose stays pending; the coordinator must prepare the
+explicit rules-only JSON format before bulk activation. A `status: reviewed` label
+acknowledges a historical review but does not constitute activation. A legacy explicit
+`status: rejected` acknowledgement resolves the reminder when `reviewed_by` is a current
+non-revoked operator/principal and `reviewed_at` is valid and not in the future. A rejected
+snapshot activates nothing; an invalid rejection remains pending.
+
+Example snapshot (the `.md` file contains this JSON object, without fences):
+
+```json
+{
+  "version": 1,
+  "node": "demo",
+  "scope": ["alice"],
+  "importer": "worker-1",
+  "importer_runtime": "codex",
+  "provenance": "example-repository@abc123",
+  "rules": [
+    {"id": "examples", "text": "Use fabricated examples.", "source": "example-repository@abc123:README.md:8"}
+  ]
+}
+```
+
+The source schema is exact: no roles, items, alternate destination or scope expansion.
+`scope` must exactly equal the node's current non-revoked owners. `brain proposals
+<node> --json` includes the pending `rules_snapshot` digest/count/path. An independent
+coordinator supplies a review manifest containing all seven snapshot fields unchanged,
+plus `snapshot_hash` (that digest), `reviewer`, `reviewer_runtime`, and `reviewed_at`
+(from `brain now`). Every rule must be covered in full. The reviewer must be the current
+operator or an owning principal; both actors must be non-revoked, and reviewer identity
+and runtime must differ from the importer's. Both runtimes must be configured.
+
+`brain proposals <node> --approve-all --review-manifest <file>` validates the entire
+manifest/current snapshot before changing anything. It atomically installs every rule,
+source and review acknowledgement together in the node's `AGENTS.md`. Existing unrelated
+instructions survive; later successful snapshots replace the managed imported-rules
+block. Source data stays unchanged. Missing, changed, partial, self-approved, revoked,
+unsafe or out-of-scope evidence refuses with no partial writes. The native instruction
+block explicitly says **supplied evidence**, never authenticated identity: core validates
+the supplied record, and cannot independently prove who supplied it. A principal name
+alone is insufficient. This one operation approves only that reviewed rules snapshot;
+roles, items, future imports and wider scope require separate decisions.
+
 
 ## Licence
 

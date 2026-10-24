@@ -28,8 +28,9 @@ MODULE_LANES = (
 LANE_TESTS = {name: ('test_' + name + '.py',) for name in MODULE_LANES}
 LANE_TESTS.update({
     'train': ('test_train.py', 'test_train_review.py'),
-    'jobs': ('test_jobs.py', 'test_train_ejection.py'),
+    'jobs': ('test_jobs.py', 'test_train_ejection.py', 'test_handback_queue.py'),
     'status': ('test_status.py', 'test_inbox_noise.py'),
+    'reminders': ('test_due_lifecycle.py',),
     'worktrees': ('test_worktrees.py', 'test_prune_orphans.py', 'test_prune_states.py',
                   'test_prune_thread_targets.py'),
     'rehearse': ('test_rehearse.py', 'test_rehearse_frozen.py'),
@@ -55,6 +56,7 @@ OUTSIDE_INPUTS = ('README.md', 'docs/**', 'ui/**/*.png', 'LICENSE')
 SHARED_INPUTS = (
     'lib/brain/common.py', 'lib/brain/instance.py', 'lib/brain/cli.py',
     'lib/brain/status.py', 'lib/brain/ui_status.py', 'lib/brain/ui_server.py',
+    'lib/brain/settings_batch.py', 'lib/brain/dispatcher.py',
     'lib/brain/__init__.py', 'tests/scenario.py', 'tests/core_loader.py',
     'tests/conftest.py', 'tests/lanes.py', 'tests/check_lanes.py',
     'bin/**', 'templates/**', 'skills/**', 'roles/**', 'adapters/**', 'ui/**', '!ui/**/*.png',

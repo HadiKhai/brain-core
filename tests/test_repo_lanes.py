@@ -37,6 +37,11 @@ class RepositoryLanes(unittest.TestCase):
         from brain.verify_lanes import matches
         self.assertTrue(all(matches('roles/coordinator.md', lane['inputs']) for lane in mapping.values()))
         self.assertTrue(matches('tests/live.py', mapping['ui']['inputs']))
+        self.assertTrue(all(matches('lib/brain/settings_batch.py', lane['inputs'])
+                            for lane in mapping.values()))
+        target = 'tests/test_nodes.py::R2SettingsBatch'
+        self.assertEqual([lane['name'] for lane in mapping.values()
+                          if target in lane['command'].split()], ['nodes'])
 
     def test_uncovered_repository_file_and_support_helper_fail(self):
         with tempfile.TemporaryDirectory() as folder:

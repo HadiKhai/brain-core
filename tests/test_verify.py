@@ -29,6 +29,129 @@ from scenario import Scenario, AutonomyProject, shlex_quote
 
 
 class WorkerReadyPackets(Scenario):
+    def test_port_changes_rerun_monolithic_and_lane_commands(self):
+        m = core_loader.SourceFileLoader('brain_port_reuse', str(CORE / 'bin/brain')).load_module()
+        owner = m.record_ready.__globals__
+        inst = mock.Mock(root=self.tmp, parse_time=lambda value: value)
+        inst.now_dt.return_value = datetime.datetime(2026, 1, 1, tzinfo=datetime.timezone.utc)
+        head, main = '1' * 40, '2' * 40
+        w = {'path': str(self.tmp), 'port': 4100, 'ports': 3}
+        log = self.tmp / 'verify.log'
+        calls = []
+
+        def execute(inst, n, branch, command, w, env, *args, **kwargs):
+            calls.append(command)
+            result = subprocess.run(['/bin/sh', '-c', command], env=env, capture_output=True, text=True)
+            log.write_text(result.stdout + result.stderr)
+            return result.returncode, str(log)
+
+        cases = [({}, {'PORT': '9200'}, {}, {'PORT': '9201'}, 'PORT'),
+                 ({}, {'PORTS': '3'}, {}, {'PORTS': '4'}, 'PORTS'),
+                 ({}, {'PORT_LAST': '9202'}, {}, {'PORT_LAST': '9203'}, 'PORT_LAST'),
+                 ({}, {}, {}, {'PORT': ''}, 'PORT'),
+                 ({}, {}, {'verify_export_port': 'true'}, {}, 'PORT'),
+                 ({'verify_export_port': 'true'}, {}, {}, {}, 'PORT')]
+        cases = [(*case, True) for case in cases]
+        inherited = {'PORT': '9200', 'PORTS': '3', 'PORT_LAST': '9202'}
+        cases.append(({}, inherited, {'verify_export_port': 'true'}, inherited, 'PORT', False))
+        with contextlib.ExitStack() as stack, contextlib.redirect_stdout(io.StringIO()):
+            for module, name, value in [
+                (importlib.import_module(m.verify_env.__module__.rsplit('.', 1)[0] + '.rehearse'),
+                 'read_evidence', mock.Mock(return_value=None)),
+                (owner['_m_instance'], 'unlock', mock.Mock()),
+                (owner['_m_nodes'], 'ensure_gitignore', mock.Mock()),
+                (owner['_m_common'], 'git', mock.Mock(return_value=mock.Mock(stdout='', returncode=0))),
+                (owner['_m_lanes'], 'tracked_files', mock.Mock(return_value={'fixture.txt': ['100644', 'digest']})),
+                (owner['_m_lanes'], 'changed_since', mock.Mock(return_value=[]))]:
+                stack.enter_context(mock.patch.object(module, name, value))
+            for name, value in [('ready_preflight', mock.Mock(return_value=([], head, main))),
+                                ('integration_parent', mock.Mock(return_value=main)),
+                                ('verify_input_files', mock.Mock(return_value={})),
+                                ('read_verify_input_files', mock.Mock(return_value={})),
+                                ('write_verify_input_files', mock.Mock(return_value=None)),
+                                ('verify_reservation', lambda *args: contextlib.nullcontext(None)),
+                                ('run_verify', execute), ('run_verify_stream', execute)]:
+                stack.enter_context(mock.patch.object(m, name, value))
+            for lane in (False, True):
+                for before_setting, before_values, after_setting, after_values, key, should_fail in cases:
+                    with self.subTest(lane=lane, before=before_values, after=after_values,
+                                      before_setting=before_setting, after_setting=after_setting):
+                        n = {'id': 'app', 'home_path': self.tmp, 'dir': self.tmp, 'parent': None,
+                             'external': True, 'local': {'worktrees': {'job': w}}, 'fm': dict(before_setting)}
+                        before_env = {**self.env, **before_values}
+                        for name in ('PORT', 'PORTS', 'PORT_LAST'):
+                            if name not in before_values:
+                                before_env.pop(name, None)
+                        with mock.patch.dict(os.environ, before_env, clear=True):
+                            effective = m.verify_env(n, 'job', w)
+                        command = ('[ "${' + key + '+x}" = "" ]' if key not in effective else
+                                   '[ "${' + key + '+x}" = x ] && [ "$' + key + '" = ' +
+                                   shlex.quote(effective[key]) + ' ]')
+                        n['fm']['verify'] = command
+                        if lane:
+                            n['fm']['verify_lanes'] = json.dumps([
+                                {'name': 'unit', 'command': command, 'inputs': ['fixture.txt']}])
+                        with mock.patch.dict(os.environ, before_env, clear=True):
+                            first, reasons = m.record_ready(inst, n, 'job', 1)
+                            self.assertEqual(reasons, [])
+                            self.assertEqual(first['verify_result'], 0)
+                            count = len(calls)
+                            unchanged, reasons = m.record_ready(inst, n, 'job', 1, first)
+                            self.assertEqual(reasons, [])
+                            self.assertTrue(unchanged['verify_reused'])
+                            self.assertEqual(len(calls), count)
+                            legacy = {k: v for k, v in first.items() if k != 'verify_port_context'}
+                            refreshed, reasons = m.record_ready(inst, n, 'job', 1, legacy)
+                            self.assertEqual(reasons, [])
+                            self.assertEqual(refreshed['verify_result'], 0)
+                            self.assertFalse(refreshed.get('verify_reused', False))
+                            self.assertGreater(len(calls), count)
+                            count = len(calls)
+                            if lane:
+                                recorded = first['verify_lane_env']
+                                self.assertTrue({'PORT', 'PORTS', 'PORT_LAST'} <= recorded.keys())
+                                restored = owner['_m_lanes'].recorded_lane_environment(
+                                    {'PORT': 'coordinator', 'PATH': 'coordinator'}, recorded)
+                                self.assertEqual(restored.get('PORT'), effective.get('PORT'))
+                                self.assertEqual(restored['PATH'], before_env['PATH'])
+                        n['fm'].pop('verify_export_port', None)
+                        n['fm'].update(after_setting)
+                        after_env = {k: v for k, v in before_env.items() if k not in ('PORT', 'PORTS', 'PORT_LAST')}
+                        after_env.update(after_values)
+                        with mock.patch.dict(os.environ, after_env, clear=True):
+                            changed, reasons = m.record_ready(inst, n, 'job', 1, first)
+                        self.assertEqual(reasons, [])
+                        if should_fail:
+                            self.assertNotEqual(changed['verify_result'], 0,
+                                                'a changed port environment reused a stale green command')
+                        else:
+                            self.assertEqual(changed['verify_result'], 0)
+                        self.assertFalse(changed.get('verify_reused', False))
+                        self.assertGreater(len(calls), count)
+
+    def test_reserved_port_environment_defaults_opt_in_and_operator_values(self):
+        m = core_loader.SourceFileLoader('brain_port_env', str(CORE / 'bin/brain')).load_module()
+        n = {'id': 'app', 'home_path': Path('/fixture/app'), 'fm': {}}
+        for setting in (None, 'false', 'true'):
+            n['fm'] = {} if setting is None else {'verify_export_port': setting}
+            for count in (1, 3):
+                w = {'path': '/fixture/job', 'port': 4100}
+                if count != 1:
+                    w['ports'] = count
+                reserved = {'PORT': '4100', 'PORTS': str(count), 'PORT_LAST': str(4100 + count - 1)}
+                for inherited in ({}, {'PORT': '9200'}, {'PORT': '', 'PORTS': '8', 'PORT_LAST': '9207'}):
+                    with self.subTest(setting=setting, count=count, inherited=inherited):
+                        original = {**inherited, 'UNRELATED': 'kept', 'BRAIN_PORT': 'stale'}
+                        with mock.patch.dict(os.environ, original, clear=True):
+                            env = m.verify_env(n, 'job', w)
+                            self.assertEqual(dict(os.environ), original)
+                        self.assertEqual({k: env['BRAIN_' + k] for k in reserved}, reserved)
+                        expected = {**(reserved if setting == 'true' else {}), **inherited}
+                        self.assertEqual({k: env[k] for k in reserved if k in env}, expected)
+                        self.assertEqual(env['UNRELATED'], 'kept')
+                        self.assertEqual((env['MAIN'], env['WORKTREE'], env['BRANCH'], env['NODE']),
+                                         ('/fixture/app', '/fixture/job', 'job', 'app'))
+
     def job(self):
         r = self.init("alice")
         home = self.repo(self.tmp / "app", {"calc.py": "value = 1\n",
@@ -41,8 +164,43 @@ class WorkerReadyPackets(Scenario):
         self.git("commit", "-qam", "fix", cwd=wt)
         return r, home, wt
 
+    def test_verify_refusal_names_moved_ref_and_old_new_commits(self):
+        r, home, wt = self.job()
+        loader = core_loader.SourceFileLoader("brain_ref_notice", str(CORE / "bin/brain"))
+        m = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+        loader.exec_module(m)
+        with mock.patch.dict(os.environ, self.env, clear=True):
+            inst = m.Instance(r)
+            n = inst.node("a")
+            for ref, cwd in (("refs/heads/job", wt), ("refs/heads/main", home)):
+                with self.subTest(ref=ref):
+                    old = self.git("rev-parse", ref, cwd=home).strip()
+                    def move(*args):
+                        self.git("commit", "--allow-empty", "-qm", "Move during verify", cwd=cwd)
+                        return 0, None
+                    with mock.patch.object(m, "run_verify", side_effect=move):
+                        packet, reasons = m.record_ready(inst, n, "job", 1)
+                    new = self.git("rev-parse", ref, cwd=home).strip()
+                    self.assertIsNone(packet)
+                    self.assertIn(ref + " " + old + " -> " + new, "; ".join(reasons))
+                    self.assertIn("verify changed", "; ".join(reasons))
+
+    def test_unfinished_commit_titles_refuse_ready_even_below_a_clean_tip(self):
+        r, home, wt = self.job()
+        for title in ("WIPtitle", "WIP", "WIP unfinished", "wip: unfinished", "fixup! target", "squash! target"):
+            with self.subTest(title=title):
+                self.git("commit", "--amend", "-qm", title, cwd=wt)
+                out = self.record(r, ok=False)
+                self.assertIn("unfinished commit", out)
+                self.assertIn(title, out)
+                self.git("commit", "--allow-empty", "-qm", "Finished tip", cwd=wt)
+                self.assertIn("unfinished commit", self.b(r, "ready", "a", "--branch", "job", ok=False))
+                self.git("reset", "--soft", "HEAD~1", cwd=wt)
+        self.git("commit", "--amend", "-qm", "Finish the change", cwd=wt)
+        self.assertEqual(self.record(r).strip().splitlines()[-1], "ready")
+
     def record(self, r, ok=True):
-        return self.b(r, "ready", "a", "--branch", "job", "--record", "--reviews", "2", ok=ok)
+        return self.b(r, "ready", "--summary", "Synthetic result", "a", "--branch", "job", "--record", "--reviews", "2", ok=ok)
 
     def packet(self):
         return next((self.tmp / "alice/nodes/a/job-handbacks").glob("*.json"))
@@ -94,8 +252,8 @@ class WorkerReadyPackets(Scenario):
         self.b(r, "set", "a", "verify=")
         self.assertIn("no verify command", self.record(r, ok=False))
         self.b(r, "set", "a", "verify=true")
-        self.assertIn("requires --reviews", self.b(r, "ready", "a", "--branch", "job", "--record", ok=False))
-        self.assertIn("at least one", self.b(r, "ready", "a", "--branch", "job", "--record", "--reviews", "0", ok=False))
+        self.assertIn("requires --reviews", self.b(r, "ready", "--summary", "Synthetic result", "a", "--branch", "job", "--record", ok=False))
+        self.assertIn("at least one", self.b(r, "ready", "--summary", "Synthetic result", "a", "--branch", "job", "--record", "--reviews", "0", ok=False))
 
     def test_conflict_and_mutation_during_verify_cannot_be_ready(self):
         r, home, wt = self.job()
@@ -113,9 +271,19 @@ class WorkerReadyPackets(Scenario):
         record = json.loads(path.read_text())
         original = record["ready"]
         for data in ([1], {}, {**original, "review_rounds": 0}, {**original, "verify_result": "0"},
-                     {**original, "checked_at": {}}, {**original, "node": "other"}):
+                     {**original, "checked_at": {}}, {**original, "node": "other"},
+                     {k: v for k, v in original.items() if k != 'verify_port_context'},
+                     {**original, 'verify_port_context': {'export_port': True, 'digest': '0' * 24}},
+                     {**original, 'verify_port_context': {'export_port': False, 'digest': 'invalid'}}):
             path.write_text(json.dumps({**record, "ready": data}))
-            self.assertIn("not ready", self.b(r, "ready", "a", "--branch", "job", ok=False))
+            out = self.b(r, "ready", "a", "--branch", "job", ok=False)
+            self.assertIn("not ready", out)
+            if (isinstance(data, dict) and data.get('node') == 'a' and data.get('review_rounds') == 2
+                    and data.get('verify_port_context') != original['verify_port_context']):
+                self.assertIn("run brain handback a --branch job --state done --reviews 2 --reverify --summary 'Reverified port environment'", out)
+                self.assertNotIn('Traceback', out)
+                if 'verify_port_context' not in data:
+                    self.assertIn('recorded verify port environment missing or invalid; run ', out)
         path.write_text("{")
         self.assertIn("unreadable", self.b(r, "ready", "a", "--branch", "job", ok=False))
 
@@ -366,7 +534,7 @@ class VerifyLogs(Scenario):
     def test_stdin_environment_exit_and_overall_fallback_through_handback(self):
         r, home, wt = self.job()
         code = ("import os,sys\nassert input() == 'fixture-input'\n"
-                "assert os.environ['PORT'] == '4100'\nassert os.environ['BRANCH'] == 'job'\n"
+                "assert os.environ['BRAIN_PORT'] == '4100'\nassert os.environ['BRANCH'] == 'job'\n"
                 "assert os.environ['MAIN'] == " + repr(str(home)) + "\n"
                 "assert os.environ['WORKTREE'] == " + repr(str(wt)) + "\n"
                 "assert os.environ['NODE'] == 'a'\nprint('plain failure detail')\nsys.exit(9)")
@@ -374,7 +542,7 @@ class VerifyLogs(Scenario):
         self.git('add', 'stdin-check.py', cwd=wt)
         self.git('commit', '-qm', 'stdin fixture', cwd=wt)
         self.b(r, 'set', 'a', 'verify=python3 -B stdin-check.py')
-        result = subprocess.run([sys.executable, str(r / 'core/bin/brain'), 'handback', 'a', '--branch', 'job',
+        result = subprocess.run([sys.executable, str(r / 'core/bin/brain'), 'handback', '--summary', 'Synthetic result', 'a', '--branch', 'job',
                                  '--state', 'done', '--reviews', '1'], cwd=r, env=self.env,
                                 input='fixture-input\n', capture_output=True, text=True)
         self.assertEqual(result.returncode, 1)
@@ -489,7 +657,7 @@ class VerifyLogs(Scenario):
         committed = self.git('show', 'HEAD:.gitignore', cwd=r)
         # Simulate upgrading an existing instance, with an unrelated operator edit.
         gi.write_text(committed.replace('**/job-handbacks/*-verify-*.log\n', '') + 'operator-fixture/\n')
-        self.b(r, 'ready', 'a', '--branch', 'job', '--record', '--reviews', '1')
+        self.b(r, 'ready', "--summary", "Synthetic result", 'a', '--branch', 'job', '--record', '--reviews', '1')
         self.assertEqual(self.git('show', 'HEAD:.gitignore', cwd=r), committed)
         self.assertIn('operator-fixture/', gi.read_text())
         self.assertIn('**/job-handbacks/*-verify-*.log', gi.read_text())
@@ -580,7 +748,7 @@ class VerifyInputDiagnostics(Scenario):
         return r, home, wt
 
     def finish(self, r, ok=True):
-        return self.b(r, 'handback', 'a', '--branch', 'job', '--state', 'done', '--reviews', '1', ok=ok)
+        return self.b(r, 'handback', "--summary", "Synthetic result", 'a', '--branch', 'job', '--state', 'done', '--reviews', '1', ok=ok)
 
     def private_map(self, packet):
         path = self.packet().parent / packet['input_files_ref']
@@ -783,7 +951,7 @@ class VerifyInputDiagnostics(Scenario):
         for fingerprint in files.values():
             self.assertNotIn(fingerprint, output)
 
-        self.b(r, 'handback', 'a', '--branch', 'job', '--state', 'done')
+        self.b(r, 'handback', "--summary", "Synthetic result", 'a', '--branch', 'job', '--state', 'done')
         history = self.git('log', '-p', '--', 'nodes/a/job-handbacks', cwd=r)
         self.assertNotIn('input_files', self.packet().read_text().replace('input_files_ref', 'sidecar_ref'))
         for fingerprint in files.values():

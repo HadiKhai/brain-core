@@ -19,7 +19,7 @@ import { Project, Projects, ancestors, projectState } from "./project";
 import { Graph } from "./graph";
 import { RecordPicker } from "./picker";
 import { readRoute, writeRoute, type Route } from "./routes";
-import { list, count, threads, learningRows, type RecordData } from "./model";
+import { list, needsView, count, threads, learningRows, type RecordData } from "./model";
 import "./index.css";
 declare global {
   interface Window {
@@ -45,7 +45,7 @@ const agentsCrumb = (go: (r: Partial<Route> & { view: string }) => void): Crumb[
 function heading(s: RecordData | null, route: Route, go: (r: Partial<Route> & { view: string }) => void): { title: string; subtitle?: string; crumbs?: Crumb[] } {
   const nodes = list(s?.nodes), open = s ? threads(nodes) : [];
   switch (route.view) {
-    case "inbox": return { title: "Inbox", subtitle: s ? `${count(list(s.inbox).length, "request")} · ${count(list(s.due).length, "coordinator step")}` : undefined };
+    case "inbox": return { title: "Inbox", subtitle: s ? `${count(needsView(s).inbox.length, "request")} · ${count(needsView(s).due.length, "coordinator step")}` : undefined };
     case "projects": return { title: "Projects", subtitle: s ? `${nodes.filter((n) => !n.archived).length} in this brain · ${count(open.length, "thread")} in flight` : undefined };
     case "project": {
       const n = nodes.find((x) => x.id === route.node);
@@ -55,7 +55,7 @@ function heading(s: RecordData | null, route: Route, go: (r: Partial<Route> & { 
     case "specialists": return { title: "Specialists", crumbs: agentsCrumb(go), subtitle: s ? `${count(list(s.specialists).length, "role")} · ${count(list(s.specialists).reduce((a, sp) => a + list(sp.jobs).length, 0), "hire")}` : undefined };
     case "jobs": return { title: "Jobs", crumbs: agentsCrumb(go), subtitle: s ? `${nodes.reduce((a, n) => a + list(n.jobs?.rows).length, 0)} recorded · ${nodes.reduce((a, n) => a + list(n.jobs?.open).length, 0)} open` : undefined };
     case "threads": return { title: "Threads", crumbs: agentsCrumb(go), subtitle: s ? `${open.length} open across ${count(new Set(open.map((f) => f.node.id)).size, "project")}` : undefined };
-    case "usage": return { title: "Usage", crumbs: agentsCrumb(go), subtitle: s ? `${count(list(s.usage).length, "subscription")} · stop line ${s.usage_policy?.stop_percent ?? "unknown"}%` : undefined };
+    case "usage": return { title: "Usage", crumbs: agentsCrumb(go), subtitle: s ? `${count(list(s.usage).length, "subscription")} · default stop line ${s.usage_policy?.stop_percent ?? "unknown"}%` : undefined };
     case "learnings": { const rows = s ? learningRows(s) : []; return { title: "Learnings", subtitle: s ? `${count(rows.length, "item")} · ${rows.filter((r) => r.state === "proposed").length} proposed for review` : undefined }; }
     case "graph": return { title: "Graph", subtitle: s ? `${count(nodes.filter((n) => !n.archived).length, "project")} · ${count(list(s.specialists).length, "specialist")} · ${count(list(s.items?.all).length, "learning")}` : undefined };
     default: return { title: s ? greeting(s) : "Overview", subtitle: s ? overviewSummary(s) : undefined };

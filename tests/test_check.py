@@ -61,13 +61,13 @@ target = Path(sys.argv[1])
 brain = sys.argv[2]
 sys.argv = sys.argv[2:]
 original_replace = os.replace
-def fail_replace(src, dst):
+def fail_replace(src, dst, **kwargs):
     if Path(dst) == target:
         assert Path(src).parent == target.parent
         assert Path(src).read_bytes() != target.read_bytes()
         assert Path(src).stat().st_size > 0
         raise OSError('injected replacement failure')
-    return original_replace(src, dst)
+    return original_replace(src, dst, **kwargs)
 os.replace = fail_replace
 runpy.run_path(brain, run_name='__main__')
 """
@@ -88,11 +88,11 @@ runpy.run_path(brain, run_name='__main__')
         self.b(r, 'status', 'app', '--refresh')
         self.assertIn('<!-- /brain:facts -->', status.read_text())
         self.assertEqual(status.stat().st_mode & 0o777, 0o640)
-        self.b(r, 'handback', 'app', '--branch', 'job-a', '--state', 'blocked')
+        self.b(r, 'handback', "--summary", "Synthetic result", 'app', '--branch', 'job-a', '--state', 'blocked')
         signal = next((r / 'nodes/app/job-handbacks').glob('*.json'))
-        self.failed_replace(r, signal, ['handback', 'app', '--branch', 'job-a', '--state', 'done'])
+        self.failed_replace(r, signal, ['handback', '--summary', 'Synthetic result', 'app', '--branch', 'job-a', '--state', 'done'])
         self.assertEqual(json.loads(signal.read_text())['state'], 'blocked')
-        self.b(r, 'handback', 'app', '--branch', 'job-a', '--state', 'done')
+        self.b(r, 'handback', "--summary", "Synthetic result", 'app', '--branch', 'job-a', '--state', 'done')
         self.assertEqual(json.loads(signal.read_text())['state'], 'done')
 
     def test_delivery_before_failed_persistence_repeats_instead_of_losing_item(self):
@@ -127,19 +127,19 @@ if reading:
     m.usage_reading = lambda sub: ('fixture', json.loads(reading))
 original = os.replace
 paused = False
-def replace(src, dst):
+def replace(src, dst, **kwargs):
     global paused
     if Path(dst) != Path(target) or paused:
-        return original(src, dst)
+        return original(src, dst, **kwargs)
     paused = True
     Path(candidate).write_bytes(Path(src).read_bytes())
     if phase == 'after':
-        original(src, dst)
+        original(src, dst, **kwargs)
     Path(marker).write_text('paused')
     while Path(marker).exists():
         time.sleep(0.01)
     if phase == 'before':
-        return original(src, dst)
+        return original(src, dst, **kwargs)
 os.replace = replace
 m.main()
 """
@@ -186,9 +186,9 @@ m.main()
                     if command == 'status':
                         dest, args = node / 'status.md', ['status', 'app', '--refresh']
                     elif command == 'handback':
-                        self.b(r, 'handback', 'app', '--branch', 'job-a', '--state', 'blocked')
+                        self.b(r, 'handback', "--summary", "Synthetic result", 'app', '--branch', 'job-a', '--state', 'blocked')
                         dest = next((node / 'job-handbacks').glob('*.json'))
-                        args = ['handback', 'app', '--branch', 'job-a', '--state', 'question']
+                        args = ['handback', '--summary', 'Synthetic result', '--question', 'Synthetic choice?', 'app', '--branch', 'job-a', '--state', 'question']
                     elif command == 'inbox':
                         self.b(r, 'inbox', 'app', '--new')
                         (node / 'inbox.md').write_text('- 2026-10-19 10:00 +00:00 from worker: Recover me.\n')
@@ -277,7 +277,7 @@ class RoundTwo(AutonomyProject):
 
     def test_lessons_close_to_next_brief_round_trip(self):
         r, home, wt = self.project()
-        self.b(r, "handback", "app", "--branch", "job-a", "--state", "done", "--lessons", "Validate service settings.")
+        self.b(r, "handback", "--summary", "Synthetic result", "app", "--branch", "job-a", "--state", "done", "--lessons", "Validate service settings.")
         self.learn(r, "service-settings")
         self.b(r, "jobs", "app", "--branch", "job-a", "--lessons", "service-settings")
         self.git("commit", "--allow-empty", "-qm", "first job", cwd=wt)
@@ -371,13 +371,15 @@ class RoundTwo(AutonomyProject):
         for checked in ("2020-01-01T00:00:00Z", "2026-10-19T10:00:00.1+00:00", "bad", None):
             f.write_text(json.dumps({"checked_at": checked}))
             self.assertNotIn("handback", [i["kind"] for i in self.due(r)])
-            self.b(r, "handback", "app", "--branch", "job-a", "--state", "done")
+            self.b(r, "handback", "--summary", "Synthetic result", "app", "--branch", "job-a", "--state", "done")
             record = self.m.handback_file(n, row)
             self.assertIsNone(json.loads(record.read_text())["ready"])
             record.unlink()
+            # Restore the legacy state, including absence of the synthetic attempt.
+            self.m.attempt_path(n, row).unlink()
         f.write_text(json.dumps({"checked_at": row["Started"]}))
         self.assertIn("handback", [i["kind"] for i in self.due(r)])
-        self.b(r, "handback", "app", "--branch", "job-a", "--state", "blocked")
+        self.b(r, "handback", "--summary", "Synthetic result", "app", "--branch", "job-a", "--state", "blocked")
         self.b(r, "wt", "rm", "app", "job-a", "--cause", "restart")
         self.assertFalse(f.exists())
         self.assertFalse(self.m.handback_file(n, row).exists())
@@ -390,7 +392,7 @@ class RoundTwo(AutonomyProject):
         r, home, wt = self.project()
         inst = self.m.Instance(r); n = inst.node("app")
         f = self.m.ready_path(inst, n, "job-a"); f.parent.mkdir(parents=True); f.write_text("{}")
-        self.b(r, "handback", "app", "--branch", "job-a", "--state", "done")
+        self.b(r, "handback", "--summary", "Synthetic result", "app", "--branch", "job-a", "--state", "done")
         self.b(r, "jobs", "app", "--branch", "job-a", "--lessons", "none: routine cleanup")
         self.git("commit", "--allow-empty", "-qm", "work", cwd=wt)
         self.git("merge", "-q", "job-a", cwd=home)
@@ -407,7 +409,7 @@ class RoundTwo(AutonomyProject):
                 inst = self.m.Instance(r); n = inst.node("app")
                 row = self.m.open_job(self.m.read_jobs(n), "job-a")
                 record = self.m.handback_file(n, row)
-                self.b(r, "handback", "app", "--branch", "job-a", "--state", "done",
+                self.b(r, "handback", "--summary", "Synthetic result", "app", "--branch", "job-a", "--state", "done",
                        "--lessons", "Preserve migration ordering", "--report", "reports/ordering/index.md")
                 original = record.read_bytes()
                 self.git("commit", "--allow-empty", "-qm", "work", cwd=wt)
@@ -433,7 +435,7 @@ class RoundTwo(AutonomyProject):
         inst = self.m.Instance(r); n = inst.node("app")
         branch = "import:" + "a" * 40
         self.m.job_started(inst, n, branch, "codex")
-        self.b(r, "handback", "app", "--branch", branch, "--state", "done", "--lessons", "none: no reusable lesson")
+        self.b(r, "handback", "--summary", "Synthetic result", "app", "--branch", branch, "--state", "done", "--lessons", "none: no reusable lesson")
         self.b(r, "jobs", "app", "--branch", branch, "--lessons", "none: no reusable lesson", "--close")
         row = self.m.read_jobs(n)[0]
         self.assertEqual(row["Outcome"], "studied")
@@ -444,17 +446,17 @@ class RoundTwo(AutonomyProject):
     def test_questions_and_blocked_human_needs_reach_inbox_once(self):
         r, home, wt = self.project()
         path = r / "nodes/app/inbox.md"
-        self.b(r, "handback", "app", "--branch", "job-a", "--state", "blocked", "--report", "report.md")
+        self.b(r, "handback", "--summary", "Synthetic result", "app", "--branch", "job-a", "--state", "blocked", "--report", "report.md")
         self.assertNotIn("worker job-a", path.read_text())
         for _ in range(2):
-            self.b(r, "handback", "app", "--branch", "job-a", "--state", "question", "--need-human", "Choose the port")
+            self.b(r, "handback", "--summary", "Synthetic result", "--question", "Choose the port", "app", "--branch", "job-a", "--state", "question", "--need-human", "Choose the port")
         self.assertEqual(path.read_text().count("Choose the port"), 1)
         items = json.loads(self.b(r, "inbox", "root", "--json"))
         self.assertTrue(any("Choose the port" in item["text"] for item in items))
         for _ in range(2):
-            self.b(r, "handback", "app", "--branch", "job-a", "--state", "blocked", "--need-human", "Grant access")
+            self.b(r, "handback", "--summary", "Synthetic result", "app", "--branch", "job-a", "--state", "blocked", "--need-human", "Grant access")
         self.assertEqual(path.read_text().count("Grant access"), 1)
-        self.b(r, "handback", "app", "--branch", "job-a", "--state", "question", "--report", "report.md")
+        self.b(r, "handback", "--summary", "Synthetic result", "--question", "See report report.md", "app", "--branch", "job-a", "--state", "question", "--report", "report.md")
         self.assertIn("See report report.md", path.read_text())
 
     def test_facts_header_migration_caps_times_forecasts_preview(self):
@@ -484,7 +486,7 @@ class RoundTwo(AutonomyProject):
         self.assertNotIn("reports/tour/index.md", status.read_text())
         self.assertIn("## Now\n- Keep judgement.", status.read_text())
 
-    def test_preview_bindings_stay_local_and_none_clears_reminder(self):
+    def test_preview_bindings_stay_local_and_none_retains_reminder(self):
         r, home, wt = self.project()
         inst = self.m.Instance(r); n = inst.node("app")
         self.m.write_jobs(inst, n, [self.row("job/preview-one")])
@@ -504,7 +506,8 @@ class RoundTwo(AutonomyProject):
         self.assertEqual(ui["preview_tour"], "~/local-tour/index.md")
         self.assertNotIn("local-only key", self.b(r, "check"))
         self.b(r, "set", "app", "preview=none")
-        self.assertNotIn("missing-preview", [i["kind"] for i in self.due(r)])
+        self.assertIn("missing-preview", [i["kind"] for i in self.due(r)])
+        self.assertEqual(json.loads((r / ".brain/local.json").read_text())["nodes"]["app"]["preview"], "none")
         self.b(r, "set", "app", "preview=")
         self.assertIn("missing-preview", [i["kind"] for i in self.due(r)])
         # Legacy committed values are flagged and are never used as local bindings.
@@ -521,7 +524,7 @@ class RoundTwo(AutonomyProject):
         migrated = json.loads((r / ".brain/local.json").read_text())["nodes"]["app"]
         self.assertEqual(migrated["preview"], "none")
         self.assertEqual(migrated["preview_tour"], "~/legacy-tour")
-        self.assertNotIn("missing-preview", [i["kind"] for i in self.due(r)])
+        self.assertIn("missing-preview", [i["kind"] for i in self.due(r)])
         self.b(r, "set", "app", "preview=none", "preview_tour=", "preview_url=https://demo.example.org")
         self.b(r, "status", "app", "--refresh")
         self.assertIn("Published preview: https://demo.example.org", (n["dir"] / "status.md").read_text())

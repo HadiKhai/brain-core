@@ -152,14 +152,14 @@ class VerifyLanes(Scenario):
         self.record(r)
         green = self.read_packet()
         (wt / 'temporary-red').touch()
-        self.b(r, 'ready', 'a', '--branch', 'job', '--record', '--reviews', '2', '--reverify', ok=False)
+        self.b(r, 'ready', '--summary', 'Synthetic result', 'a', '--branch', 'job', '--record', '--reviews', '2', '--reverify', ok=False)
         self.assertEqual(self.read_packet()['verify_lanes'][1]['status'], 'failed')
         (wt / 'temporary-red').unlink()
         self.record(r)
         restored = self.read_packet()
         self.assertTrue(all(x['reused'] for x in restored['verify_lanes']))
         self.assertEqual(restored['verify_lanes'][1]['log'], green['verify_lanes'][1]['log'])
-        self.b(r, 'ready', 'a', '--branch', 'job', '--record', '--reviews', '2', '--reverify')
+        self.b(r, 'ready', '--summary', 'Synthetic result', 'a', '--branch', 'job', '--record', '--reviews', '2', '--reverify')
         self.assertTrue(all(not x['reused'] for x in self.read_packet()['verify_lanes']))
 
     def test_inline_map_and_malformed_lane_evidence_fail_closed(self):

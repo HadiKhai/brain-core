@@ -30,6 +30,38 @@ import test_verify as _test_verify
 from scenario import Scenario, AutonomyProject, shlex_quote
 
 
+def settlement_export(test, root, node, branch=None, key=None, all_closed=False):
+    """Explicit synthetic coordinator observations for P2's required export."""
+    module = core_loader.SourceFileLoader('settlement_fixture', str(CORE / 'bin/brain')).load_module()
+    with mock.patch.dict(os.environ, test.env, clear=True):
+        inst = module.Instance(root)
+        n = inst.node(node)
+        rows = module.read_jobs(n) or []
+        targets = module.unsettled_jobs(rows) if all_closed else [r for r in rows if r['Job'] == branch and
+                    (key is None or module.job_key(r) == key)]
+        jobs = []
+        for row in targets:
+            identities = set()
+            workers = n['local'].get('workers', {})
+            if workers.get(module.job_key(row)):
+                identities.update(module.thread_reference_ids(workers[module.job_key(row)]))
+            for work in module.active_work(n, include_closed=True):
+                name = work[0].replace('`','').split()
+                if name and name[0] == row['Job'] and work[1] not in ('', '-', '—'):
+                    identities.update(module.thread_reference_ids(work[1]))
+            jobs.append({'job_key': module.job_key(row), 'threads': [dict(threadId=tid,
+                job_key=module.job_key(row), state='completed', settled=True, pending_requests=[]) for tid in sorted(identities)]})
+        evidence = {'version': 1, 'node': node, 'observed_at': inst.now_dt().isoformat(),
+                    'project_id': n['local'].get('home_project') or n['local'].get('host_project') or 'synthetic-project',
+                    'coverage': {'project': True, 'nested': True, 'complete': True}, 'jobs': jobs}
+        projects = sorted({n['local'][key] for key in ('home_project', 'host_project') if n['local'].get(key)})
+        if projects:
+            evidence['project_ids'] = projects
+        path = root / '.brain' / 'synthetic-settlement-export.json'
+        path.write_text(json.dumps(evidence))
+        return str(path)
+
+
 class LedgerReviewEvidence(Scenario):
     def test_next_write_repairs_only_rows_with_retained_review_evidence(self):
         r = self.init("alice")
@@ -154,7 +186,7 @@ class UnifiedHandbacks(Scenario):
     packet = _test_verify.WorkerReadyPackets.packet
 
     def finish(self, r, ok=True):
-        return self.b(r, "handback", "a", "--branch", "job", "--state", "done", "--reviews", "2",
+        return self.b(r, "handback", "--summary", "Synthetic result", "a", "--branch", "job", "--state", "done", "--reviews", "2",
                       "--report", "reports/result.md", "--lessons", "Use python -B to keep verification clean.", ok=ok)
 
     def due(self, r):
@@ -164,7 +196,7 @@ class UnifiedHandbacks(Scenario):
         r, home, wt = self.job()
         module = core_loader.SourceFileLoader("brain_handback_wake", str(CORE / "bin/brain")).load_module()
         inst = module.Instance(r)
-        args = argparse.Namespace(id="a", branch="job", state="question", lessons="none: fixture",
+        args = argparse.Namespace(summary="Synthetic result", question="Choose blue", id="a", branch="job", state="question", lessons="none: fixture",
                                   report=None, reviews=None, need_human="Choose blue")
         with mock.patch.dict(os.environ, self.env, clear=True), \
                 mock.patch.object(module, "load", return_value=inst), \
@@ -186,7 +218,7 @@ class UnifiedHandbacks(Scenario):
         calls = self.tmp / "calls"
         inst.local_of("root")["wake"] = "echo called >> " + shlex_quote(str(calls))
         inst.save_local()
-        args = argparse.Namespace(id="a", branch="job", state="question", lessons="none: fixture",
+        args = argparse.Namespace(summary="Synthetic result", question="Synthetic choice?", id="a", branch="job", state="question", lessons="none: fixture",
                                   report="report.md", reviews=None, need_human=None)
         directory = module.wake_directory(inst, inst.node("root"))
         with mock.patch.dict(os.environ, self.env, clear=True), \
@@ -207,7 +239,7 @@ class UnifiedHandbacks(Scenario):
         calls = self.tmp / "calls"
         inst.local_of("root")["wake"] = "echo called >> " + shlex_quote(str(calls))
         inst.save_local()
-        args = argparse.Namespace(id="a", branch="job", state="blocked", lessons="none: fixture",
+        args = argparse.Namespace(summary="Synthetic result", id="a", branch="job", state="blocked", lessons="none: fixture",
                                   report="report.md", reviews=None, need_human=None)
         directory = module.wake_directory(inst, inst.node("root"))
         with mock.patch.dict(os.environ, self.env, clear=True), \
@@ -230,7 +262,7 @@ class UnifiedHandbacks(Scenario):
             original(n, text, what)
             if what == "the inbox question":
                 module.inbox_append(n["dir"], "- synthetic runtime question\n")
-        args = argparse.Namespace(id="a", branch="job", state="question", lessons="none: fixture",
+        args = argparse.Namespace(summary="Synthetic result", question="Choose a colour", id="a", branch="job", state="question", lessons="none: fixture",
                                   report=None, reviews=None, need_human="Choose a colour")
         with mock.patch.dict(os.environ, self.env, clear=True), mock.patch.object(module, "load", return_value=inst), \
                 mock.patch.object(module, "no_terms_in", side_effect=concurrent_append), \
@@ -247,7 +279,8 @@ class UnifiedHandbacks(Scenario):
         main = self.git("rev-parse", "main", cwd=home)
         self.assertEqual(self.finish(r).strip().splitlines()[-1], "ready")
         data = json.loads(self.packet().read_text())
-        self.assertEqual((data["version"], data["job"], data["state"]), (2, "job", "done"))
+        self.assertEqual((data["version"], data["job"], data["state"]), (3, "job", "done"))
+        self.assertEqual(data['summary'], 'Synthetic result')
         self.assertEqual(data["lessons"], "Use python -B to keep verification clean.")
         self.assertEqual(data["report"], "reports/result.md")
         self.assertEqual(data["ready"]["review_rounds"], 2)
@@ -268,18 +301,18 @@ class UnifiedHandbacks(Scenario):
         r, home, wt = self.job()
         self.finish(r)
         path = self.packet()
-        self.b(r, "ready", "a", "--branch", "job", "--record", "--reviews", "2")
+        self.b(r, "ready", "--summary", "Synthetic result", "a", "--branch", "job", "--record", "--reviews", "2")
         self.assertEqual(json.loads(path.read_text())["lessons"], "Use python -B to keep verification clean.")
         self.assertEqual(json.loads(path.read_text())["report"], "reports/result.md")
-        self.b(r, "handback", "a", "--branch", "job", "--state", "done", "--report", "updated-report.md")
+        self.b(r, "handback", "--summary", "Synthetic result", "a", "--branch", "job", "--state", "done", "--report", "updated-report.md")
         self.assertEqual(self.b(r, "ready", "a", "--branch", "job").strip(), "ready")
         for state in ("blocked", "question"):
-            self.b(r, "handback", "a", "--branch", "job", "--state", state,
+            self.b(r, "handback", "--summary", "Synthetic result", "--question", "Synthetic choice?", "a", "--branch", "job", "--state", state,
                    "--report", "Need a choice.", "--lessons", "none: job incomplete")
             self.assertIn("hand-back is " + state, self.b(r, "ready", "a", "--branch", "job", ok=False))
             self.assertEqual(json.loads(path.read_text())["ready"], None)
             self.assertEqual(next(i for i in self.due(r) if i["kind"] == "handback")["state"], state)
-        self.b(r, "ready", "a", "--branch", "job", "--record", "--reviews", "2",
+        self.b(r, "ready", "--summary", "Synthetic result", "a", "--branch", "job", "--record", "--reviews", "2",
                "--lessons", "none: routine fix")
         self.assertEqual(list(path.parent.glob("*.json")), [path])
         self.assertEqual(json.loads(path.read_text())["lessons"], "none: routine fix")
@@ -313,6 +346,11 @@ class UnifiedHandbacks(Scenario):
         data["ready"]["checked_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
         old.write_text(json.dumps(data["ready"]))
         path.unlink()
+        # A genuine pre-attempt writer produced neither a v3 record nor its sidecar.
+        module = core_loader.SourceFileLoader('legacy_attempt_fixture', str(CORE / 'bin/brain')).load_module()
+        n = module.Instance(r).node('a')
+        row = module.open_job(module.read_jobs(n), 'job')
+        module.attempt_path(n,row).unlink()
         self.assertEqual(self.b(r, "ready", "a", "--branch", "job").strip(), "ready")
         self.assertIn("ready to merge", self.b(r, "due", "a"))
         legacy = {k: data[k] for k in ("job", "started", "state", "at", "report")}
@@ -330,7 +368,7 @@ class UnifiedHandbacks(Scenario):
         self.finish(r)
         original = self.packet().read_bytes()
         for lesson in ("", "none", "none:"):
-            self.b(r, "handback", "a", "--branch", "job", "--state", "done", "--lessons", lesson, ok=False)
+            self.b(r, "handback", "--summary", "Synthetic result", "a", "--branch", "job", "--state", "done", "--lessons", lesson, ok=False)
             self.assertEqual(self.packet().read_bytes(), original)
 
     def test_merged_required_lesson_outcomes_due_and_facts_clear_on_resolution(self):
@@ -347,7 +385,7 @@ class UnifiedHandbacks(Scenario):
         self.b(r, "status", "a", "--refresh")
         self.assertIn("none: fix specific to this job", (r / "nodes/a/status.md").read_text())
         self.assertEqual([i["kind"] for i in self.due(r)], ["missing-preview", "unsettled-threads"])
-        self.b(r, "jobs", "a", "--branch", "job", "--settled")
+        self.b(r, "jobs", "a", "--attestation-file", settlement_export(self, r, 'a', branch="job"), "--branch", "job", "--settled")
         self.b(r, "set", "a", "preview=http://localhost:4100", "preview_tour=reports/tour.md")
         self.b(r, "status", "a", "--refresh")
         self.assertEqual(self.due(r), [])
@@ -563,7 +601,7 @@ class ThreadSettlement(AutonomyProject):
         out = self.b(r, "jobs", "app")
         self.assertEqual(sum(line.startswith("  unsettled ") for line in out.splitlines()), 10)
         self.assertIn("… and 22 more", out)
-        self.assertIn("32 closed job(s) recorded settled", self.b(r, "jobs", "app", "--settled", "--all-closed"))
+        self.assertIn("32 closed job(s) recorded settled", self.b(r, "jobs", "app", "--attestation-file", settlement_export(self, r, 'app', all_closed=True), "--settled", "--all-closed"))
         self.assertNotIn("unsettled-threads", [i["kind"] for i in self.due(r)])
         def detail(branch):
             return [json.loads(line) for line in self.b(r, "jobs", "app", "--branch", branch).splitlines()
@@ -577,11 +615,11 @@ class ThreadSettlement(AutonomyProject):
                 self.assertTrue(actual["Settled"])
         self.assertEqual(detail("already")[0]["Settled"], "2020-01-01T10:00+00:00")
         before = ledger.read_bytes()
-        self.assertIn("0 closed job(s)", self.b(r, "jobs", "app", "--settled", "--all-closed"))
+        self.assertIn("0 closed job(s)", self.b(r, "jobs", "app", "--attestation-file", settlement_export(self, r, 'app', all_closed=True), "--settled", "--all-closed"))
         self.assertEqual(before, ledger.read_bytes())
         # A later job reusing a swept branch starts without an attestation.
         self.b(r, "wt", "add", "app", "legacy-0")
-        self.b(r, "jobs", "app", "--settled", "--all-closed")
+        self.b(r, "jobs", "app", "--attestation-file", settlement_export(self, r, 'app', all_closed=True), "--settled", "--all-closed")
         self.assertEqual(detail("legacy-0")[1]["Settled"], "")
         self.b(r, "wt", "rm", "app", "legacy-0", "--cause", "fixture finished")
         self.assertEqual(detail("legacy-0")[1]["Settled"], "")
@@ -593,7 +631,7 @@ class ThreadSettlement(AutonomyProject):
         newer["Started"] = "2026-02-01T10:00+00:00"
         ledger = self.ledger(r, [self.row("safe"), older, newer])
         before = ledger.read_bytes()
-        out = self.b(r, "jobs", "app", "--settled", "--all-closed", ok=False)
+        out = self.b(r, "jobs", "app", "--attestation-file", settlement_export(self, r, 'app', all_closed=True), "--settled", "--all-closed", ok=False)
         self.assertIn("a branch to stamp has an open job", out)
         self.assertEqual(before, ledger.read_bytes())
         for flags in (("--all-closed",), ("--settled", "--all-closed", "--branch", "safe"),
@@ -610,7 +648,7 @@ class ThreadSettlement(AutonomyProject):
         r, home, wt = self.project()
         for version in ("v1", "v2", "v3"):
             ledger = self.ledger(r, [self.row()], version=version)
-            self.b(r, "jobs", "app", "--branch", "job-old", "--settled")
+            self.b(r, "jobs", "app", "--attestation-file", settlement_export(self, r, 'app', branch="job-old"), "--branch", "job-old", "--settled")
             row = json.loads(next(l for l in self.b(r, "jobs", "app", "--branch", "job-old").splitlines()
                                   if l.startswith("{")))
             self.assertRegex(row["Settled"], r"^\d{4}-\d\d-\d\dT")
@@ -618,19 +656,19 @@ class ThreadSettlement(AutonomyProject):
             # Move the recorded time back, so always-stamping cannot pass in the same minute.
             ledger.write_text(ledger.read_text().replace(row["Settled"], "2020-01-01T10:00+00:00"))
             before = ledger.read_bytes()
-            self.b(r, "jobs", "app", "--branch", "job-old", "--settled")
+            self.b(r, "jobs", "app", "--attestation-file", settlement_export(self, r, 'app', branch="job-old"), "--branch", "job-old", "--settled")
             self.assertEqual(before, ledger.read_bytes())
             self.assertNotIn("unsettled-threads", [i["kind"] for i in self.due(r)])
         for rows in ([self.row(ended="")], [self.row(outcome="unknown")],
                      [self.row(ended=""), self.row()], []):
             ledger = self.ledger(r, rows)
             before = ledger.read_bytes()
-            self.b(r, "jobs", "app", "--branch", "job-old", "--settled", ok=False)
+            self.b(r, "jobs", "app", "--attestation-file", settlement_export(self, r, 'app', branch="job-old"), "--branch", "job-old", "--settled", ok=False)
             self.assertEqual(before, ledger.read_bytes())
         older, newer = self.row(), self.row()
         newer["Started"] = "2026-01-02T10:00+00:00"
         ledger = self.ledger(r, [older, newer])
-        self.b(r, "jobs", "app", "--branch", "job-old", "--settled", ok=False)
+        self.b(r, "jobs", "app", "--attestation-file", settlement_export(self, r, 'app', branch="job-old"), "--branch", "job-old", "--settled", ok=False)
         detail = self.b(r, "jobs", "app", "--branch", "job-old")
         keys = re.findall(r"--job-key ([0-9a-f]{24}) --settled", detail)
         self.assertEqual(len(keys), 2)
@@ -638,18 +676,18 @@ class ThreadSettlement(AutonomyProject):
         newer["Ended"] = ""
         ledger = self.ledger(r, [older, newer])
         before = ledger.read_bytes()
-        self.assertIn("another job on that branch is open", self.b(r, "jobs", "app", "--branch", "job-old",
+        self.assertIn("another job on that branch is open", self.b(r, "jobs", "app", "--attestation-file", settlement_export(self, r, 'app', branch="job-old", key=keys[0]), "--branch", "job-old",
                       "--job-key", keys[0], "--settled", ok=False))
         self.assertEqual(before, ledger.read_bytes())
         newer["Ended"] = "2026-01-02T12:00+00:00"
         self.ledger(r, [older, newer])
         for key in keys:
-            self.b(r, "jobs", "app", "--branch", "job-old", "--job-key", key, "--settled")
+            self.b(r, "jobs", "app", "--attestation-file", settlement_export(self, r, 'app', branch="job-old", key=key), "--branch", "job-old", "--job-key", key, "--settled")
         self.assertNotIn("unsettled-threads", [i["kind"] for i in self.due(r)])
         ledger = self.ledger(r, [self.row()])
         for flags in (("--close",), ("--start",), ("--lessons", "none: test"), ("--switch", "a -> b: test")):
             before = ledger.read_bytes()
-            self.b(r, "jobs", "app", "--branch", "job-old", "--settled", *flags, ok=False)
+            self.b(r, "jobs", "app", "--attestation-file", settlement_export(self, r, 'app', branch="job-old"), "--branch", "job-old", "--settled", *flags, ok=False)
             self.assertEqual(before, ledger.read_bytes())
         self.b(r, "jobs", "--settled", ok=False)
         for flags in ((), ("--settled",)):
@@ -686,11 +724,11 @@ class ThreadSettlement(AutonomyProject):
                 self.assert_checklist(out)
                 self.assertIn("fixture-worker", out)
                 self.assertEqual(next(i for i in self.due(r) if i["kind"] == "unsettled-threads")["count"], 1)
-                self.b(r, "jobs", "app", "--branch", "job-a", "--settled")
+                self.b(r, "jobs", "app", "--attestation-file", settlement_export(self, r, 'app', branch="job-a"), "--branch", "job-a", "--settled")
                 self.assertNotIn("unsettled-threads", [i["kind"] for i in self.due(r)])
                 # New job on the same branch must start unsettled and cannot be attested while open.
                 self.b(r, "wt", "add", "app", "job-a")
-                self.b(r, "jobs", "app", "--branch", "job-a", "--settled", ok=False)
+                self.b(r, "jobs", "app", "--attestation-file", settlement_export(self, r, 'app', branch="job-a"), "--branch", "job-a", "--settled", ok=False)
                 self.assert_checklist(self.b(r, "wt", "rm", "app", "job-a", "--cause", "fixture done"))
                 self.assertEqual(next(i for i in self.due(r) if i["kind"] == "unsettled-threads")["count"], 1)
                 # Release this fixture before the next subtest uses project().
@@ -752,7 +790,7 @@ class ThreadSettlement(AutonomyProject):
         self.b(r, "adopt", str(home))
         job = "import:" + self.git("rev-parse", "HEAD", cwd=home).strip()
         self.assert_checklist(self.b(r, "jobs", "source", "--branch", job, "--close"))
-        self.b(r, "jobs", "source", "--branch", job, "--settled")
+        self.b(r, "jobs", "source", "--attestation-file", settlement_export(self, r, 'source', branch=job), "--branch", job, "--settled")
         # Execute the actual parent of the feature-introducing commit, not a modified new writer.
         source = Path(__file__).resolve().parent.parent
         history = subprocess.run(["git", "log", "--format=%H", "-S", "def closed_job(row):",
@@ -790,7 +828,7 @@ class AutonomyHandbackPaths(AutonomyProject):
         report = self.tmp / 'code/app-work/reports/result.md'
         report.parent.mkdir(parents=True, exist_ok=True)
         report.write_text('Result.\n')
-        self.b(r, 'handback', 'app', '--branch', 'job-a', '--state', 'done', '--report', str(report))
+        self.b(r, 'handback', "--summary", "Synthetic result", 'app', '--branch', 'job-a', '--state', 'done', '--report', str(report))
         signal = next((r / 'nodes/app/job-handbacks').glob('*.json'))
         data = json.loads(signal.read_text())
         self.assertEqual(data['report'], '~/code/app-work/reports/result.md')
@@ -798,7 +836,7 @@ class AutonomyHandbackPaths(AutonomyProject):
         due = self.b(r, 'due', 'app', '--json')
         self.assertIn('~/code/app-work/reports/result.md', due)
         self.assertNotIn(str(self.tmp), due)
-        self.b(r, 'handback', 'app', '--branch', 'job-a', '--state', 'done', '--report', 'reports/relative.md')
+        self.b(r, 'handback', "--summary", "Synthetic result", 'app', '--branch', 'job-a', '--state', 'done', '--report', 'reports/relative.md')
         self.assertEqual(json.loads(signal.read_text())['report'], 'reports/relative.md')
 
 
@@ -1072,16 +1110,22 @@ class Workflow(Scenario):
         self.b(r, "set", "root", "auto_upgrade=on")
         self.assertNotIn("auto_upgrade", (r / "node.md").read_text())
         self.assertNotIn("core update available", self.b(r, "inbox", "root"))  # it will happen by itself
-        # Busy: no upgrade while a job is open anywhere.
+        # Busy: a live verification lease prevents an upgrade, including with an open job.
         home = self.repo(self.tmp / "app-home")
         self.b(r, "set", "app", f"home={home}")
         self.b(r, "wt", "add", "app", "job")
-        self.assertNotIn("core-upgrade", self.b(r, "due"))
-        self.b(r, "wt", "rm", "app", "job", "--cause", "fixture")
+        m = core_loader.SourceFileLoader("brain_auto_upgrade", str(CORE / "bin/brain")).load_module()
+        with mock.patch.dict(os.environ, self.env):
+            token = m.machine_wait("verify", m.Instance(r), "app")
+            try:
+                self.assertNotIn("core-upgrade", self.b(r, "due"))
+            finally:
+                m.machine_release(token)
         out = self.b(r, "due")
-        self.assertIn("root: core-upgrade", out)  # idle: tries (this core isn't a submodule, so it fails and says so)
+        self.assertIn("root: core-upgrade", out)  # The retained idle job allows the attempt (no core submodule here).
         self.assertIn("run brain upgrade", out)
         self.assertEqual(json.loads(self.b(r, "due", "--json"))[0]["kind"], "core-upgrade")
+        self.b(r, "wt", "rm", "app", "job", "--cause", "fixture")
 
     def test_green_verify_runs_are_reused_only_while_they_still_prove_the_commit(self):
         r, home, wt = self.job()
@@ -1090,7 +1134,7 @@ class Workflow(Scenario):
         count = lambda: len(runs.read_text().split()) if runs.exists() else 0
 
         def finish(*extra):
-            return self.b(r, "handback", "a", "--branch", "job", "--state", "done", "--reviews", "1",
+            return self.b(r, "handback", "--summary", "Synthetic result", "a", "--branch", "job", "--state", "done", "--reviews", "1",
                           "--lessons", "none: fixture", *extra)
         self.assertEqual(finish().strip().splitlines()[-1], "ready")
         self.assertEqual(count(), 1)
@@ -1124,7 +1168,7 @@ class Workflow(Scenario):
         self.assertEqual(count(), 3)
         finish("--reverify")
         self.assertEqual(count(), 4)
-        self.b(r, "ready", "a", "--branch", "job", "--record", "--reviews", "1", "--reverify")
+        self.b(r, "ready", "--summary", "Synthetic result", "a", "--branch", "job", "--record", "--reviews", "1", "--reverify")
         self.assertEqual(count(), 5)
         data = json.loads(_test_verify.WorkerReadyPackets.packet(self).read_text())
         self.assertEqual((data["verify_runs"], data["verify_reused"]), (5, 2))
@@ -1139,7 +1183,7 @@ class Workflow(Scenario):
         flag.write_text("x")
         (wt / "calc.py").write_text("value = 2  # two\n")
         self.git("commit", "-qam", "code again", cwd=wt)
-        self.b(r, "handback", "a", "--branch", "job", "--state", "done", "--reviews", "1", ok=False)
+        self.b(r, "handback", "--summary", "Synthetic result", "a", "--branch", "job", "--state", "done", "--reviews", "1", ok=False)
         flag.unlink()
         before = count()
         self.assertNotIn("reused", finish())
@@ -1194,17 +1238,18 @@ class Workflow(Scenario):
         # Verify that changes what it verifies records nothing, and the next hand-back runs it again.
         runs = self.tmp / "runs.txt"
         self.b(r, "set", "a", f"verify=echo '# touched' >> calc.py && python3 -B verify.py && echo run >> {runs}")
-        out = self.b(r, "handback", "a", "--branch", "job", "--state", "done", "--reviews", "1", ok=False)
+        out = self.b(r, "handback", "--summary", "Synthetic result", "a", "--branch", "job", "--state", "done", "--reviews", "1", ok=False)
         self.assertIn("verify changed the job's branch, local main or worktree", out)
         self.assertIsNone(json.loads(_test_verify.WorkerReadyPackets.packet(self).read_text())["ready"])
         self.git("checkout", "--", "calc.py", cwd=wt)
         self.b(r, "set", "a", f"verify=python3 -B verify.py && echo run >> {runs}")
-        self.assertNotIn("reused", self.b(r, "handback", "a", "--branch", "job", "--state", "done", "--reviews", "1"))
+        self.assertNotIn("reused", self.b(r, "handback", "--summary", "Synthetic result", "a", "--branch", "job", "--state", "done", "--reviews", "1"))
         # --reverify forces a run, so it needs one to force.
-        self.assertIn("--reverify forces a verify run", self.b(r, "handback", "a", "--branch", "job", "--state",
+        self.assertIn("--reverify forces a verify run", self.b(r, "handback", "--summary", "Synthetic result", "a", "--branch", "job", "--state",
                                                                 "done", "--reverify", ok=False))
         # A submodule change counts, whatever git's config hides.
         m = SourceFileLoader("brain_workflow_r1", str(CORE / "bin/brain")).load_module()
+        m.machine_dir = lambda: self.tmp / "machine"
         repo = self.repo(self.tmp / "with-sub", {"README.md": "x\n"})
         self.git("config", "diff.ignoreSubmodules", "all", cwd=repo)
         base = self.git("rev-parse", "HEAD", cwd=repo).strip()
@@ -1214,9 +1259,11 @@ class Workflow(Scenario):
         n = {"id": "a", "fm": {"verify_skip": "*.md"}, "home_path": repo}
         packet = {"version": 1, "node": "a", "branch": "job", "verify_command": "v", "verify_result": 0, "main": "m",
                   "head": base, "review_rounds": 1, "checked_at": "2026-01-01 10:00 +00:00", "inputs": "i"}
-        self.assertEqual(m.verify_reuse(n, "job", packet, base, "m", "v", str(repo), "i"), (base, []))  # control
-        self.assertIsNone(m.verify_reuse(n, "job", packet, head, "m", "v", str(repo), "i"))
-        # The idle check and the upgrade happen under one hold of the lock: a job started while it waited counts.
+        port_context = m.verify_port_context(n, {})
+        packet['verify_port_context'] = port_context
+        self.assertEqual(m.verify_reuse(n, "job", packet, base, "m", "v", str(repo), "i", port_context), (base, []))  # control
+        self.assertIsNone(m.verify_reuse(n, "job", packet, head, "m", "v", str(repo), "i", port_context))
+        # The idle check runs after taking the instance lock: a lease acquired while waiting counts.
         self.b(r, "set", "root", "auto_upgrade=on")
         self.b(r, "wt", "rm", "a", "job", "--cause", "fixture done")  # idle, until the late job below
         inst = m.Instance(r)
@@ -1227,8 +1274,12 @@ class Workflow(Scenario):
             def __init__(lock, i): pass
             def __enter__(lock):
                 self.b(r, "wt", "add", "a", "late")  # a job created while the tick waited for the lock
+                with mock.patch.dict(os.environ, self.env):
+                    lock.token = m.machine_wait("verify", m.Instance(r), "a")
                 started.append(True)
-            def __exit__(lock, *exc): return False
+            def __exit__(lock, *exc):
+                m.machine_release(lock.token)
+                return False
         calls, real_run = [], subprocess.run
 
         def run(args, *x, **k):  # everything runs, except an upgrade, which is recorded instead
@@ -1261,7 +1312,7 @@ class Workflow(Scenario):
         (wt / ".env").write_text("MODE=a\n")
 
         def finish(ok=True):
-            return self.b(r, "handback", "a", "--branch", "job", "--state", "done", "--reviews", "1", ok=ok)
+            return self.b(r, "handback", "--summary", "Synthetic result", "a", "--branch", "job", "--state", "done", "--reviews", "1", ok=ok)
         finish()
         self.assertIn("reused", finish())
         # Files verify reads that git ignores, and the ports it runs on, are part of the evidence.
@@ -1308,9 +1359,10 @@ class Workflow(Scenario):
         self.assertIn("verify failed", finish(ok=False))
         self.assertIn("--reverify forces a verify run", self.b(r, "ready", "a", "--branch", "job", "--reverify",
                                                                 ok=False))
-        # Job state that can't be read, or a job worktree without a ledger row, is never idle.
+        # Retained worktrees are idle; job inventory that can't be read still refuses.
         m = SourceFileLoader("brain_workflow_r2", str(CORE / "bin/brain")).load_module()
-        self.assertTrue(m.open_jobs_anywhere(m.Instance(r)))
+        m.machine_dir = lambda: self.tmp / "machine"
+        self.assertEqual(m.open_jobs_anywhere(m.Instance(r)), [])
         ledger = r / "nodes/a/job-ledger.md"
         text = ledger.read_text()
         ledger.write_text(text.replace("<!-- brain:job-ledger v3 -->", "").replace("<!-- brain:job-ledger -->", ""))

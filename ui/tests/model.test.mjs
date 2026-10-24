@@ -215,3 +215,32 @@ test("task copy hides paths and job ids while preserving usable links", () => {
   assert.equal(m.humanText("Read /opt/work/review.md"), "Read the project files");
   assert.equal(m.humanText("[Source](https://example.com/docs/review.md)"), "[Source](https://example.com/docs/review.md)");
 });
+
+test("subscription stop lines override the default in meters and routing", () => {
+  const now = Date.now() / 1000;
+  const policy = { stop_percent: 85, max_age_seconds: 120 };
+  const row = { id: "one", runtime: "codex", source: "lookup", read_at: now, stop_percent: 50,
+    windows: { seven_day: { used_percent: 50, resets_at: now + 86400 } } };
+  assert.equal(m.windowState(row.windows.seven_day, row, policy, now).state, "At stop line");
+  const other = { ...row, id: "two", stop_percent: 95 };
+  assert.equal(m.windowState(other.windows.seven_day, other, policy, now).state, "Normal");
+  const state = { usage: [row, other], usage_policy: policy, usage_routing_policy: { pacing_margin: 10 } };
+  assert.equal(m.routing(state).row.id, "two");
+  assert.equal(m.windowState({ used_percent: 85 }, { read_at: now }, policy, now).state, "At stop line");
+});
+
+test("Needs you keeps one item per id and leaves advice out", () => {
+  const request = { id: "one", kind: "inbox", node: "demo", text: "Which color?" };
+  const another = { ...request, id: "two" };
+  const state = { inbox: [request, { ...request }, another], due: [
+    { ...request }, { id: "step", node: "demo", kind: "handback", text: "Review the report" },
+    { id: "advice", node: "demo", kind: "job", informational: true, text: "Consider a smaller job" },
+  ] };
+  const view = m.needsView(state, "demo");
+  assert.deepEqual(view.items.map(i => i.id), ["one", "two", "step"]);
+  assert.deepEqual(view.inbox.map(i => i.id), ["one", "two"]);
+  assert.deepEqual(view.due.map(i => i.id), ["step"]);
+  assert.equal(m.needAsk("Choose a color; waiting on operator; clears when chosen; since: 2020-01-01; recommendation: blue; default: gray"),
+    "Choose a color; waiting on operator; clears when chosen");
+  assert.equal(state.inbox.length, 3);
+});

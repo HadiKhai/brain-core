@@ -85,3 +85,8 @@ Keep `brain` on PATH. The adapter command falls back to it outside Brain folders
 exits at once without output or changes. No project settings file is needed in a home.
 Sources checked 2026-10-21: [Claude hook locations](https://code.claude.com/docs/en/hooks#hook-locations)
 and [Codex hook locations](https://learn.chatgpt.com/docs/hooks).
+
+A read-only relay may end with the exact short reply `relay only`. When the Stop
+payload includes it in `last_assistant_message`, the hook captures unanswered
+questions, then exits before checking notes or writing reminder bookkeeping.
+Ordinary replies continue through the existing notes and upgrade reminders.

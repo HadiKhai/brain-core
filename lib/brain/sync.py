@@ -40,10 +40,18 @@ def cmd_review(a):
     if reviewer == built:
         _m_common.die("the reviewer must run on a different runtime from the builder")
     pin = a.by or (n["fm"].get("runtime") if n["fm"].get("runtime") in others else None)
-    reviewer, subscription, usage = _m_usage.class_route(inst, kind, runtime=pin, model=a.model,
+    per_class = _m_knowledge.class_routing_config(inst, n)
+    model_selection = None
+    if per_class:
+        reviewer, _ = _m_usage.class_runtime(inst, kind, runtime=pin, runtimes=others)
+        model_selection = _m_knowledge.class_model_selection(inst, n, a, reviewer, kind)
+    reviewer, subscription, usage = _m_usage.class_route(inst, kind, runtime=pin,
+        model=model_selection[0] if model_selection else a.model,
         weekly_cap=n["fm"].get("route_weekly_cap", inst.cfg.get("route_weekly_cap", 60)), runtimes=others)
     usage += " Independent review uses the other runtime from the builder."
-    _m_knowledge.launch_selection(inst, n, a, reviewer, subscription, row, kind)
+    _m_knowledge.launch_selection(inst, n, a, reviewer, subscription, row, kind, model_selection=model_selection)
+    if per_class:
+        usage += f" Routing sources: model={a.model_source}."
     where, base = None, a.base
     if n["external"]:
         if not (n["home_path"] and n["home_path"].exists()):
@@ -86,7 +94,11 @@ def cmd_review(a):
     round_line = (f"Review round {round_number} ({review_kind})." if row else
                   f"Review round not recorded ({review_kind}): no open job; round cap not applied.")
     out += [round_line, ""] + mechanical
+    inputs = [("Focus", a.focus or "")] if not check_fix else []
     if check_fix:
+        prior = json.loads(_m_review.review_read(n, a.findings))
+        inputs += [("Prior review context", finding["text"]) for finding in prior
+                   if finding["severity"] in ("blocker", "major")]
         out += fix_lines + _m_review.rehearsal_lines()
         out += ["## Report", "", "For each prior blocker/major: fixed or unresolved, with evidence. "
                 "Report regressions caused by the fix and exactly which checks you ran.", ""] + \
@@ -103,9 +115,13 @@ def cmd_review(a):
                     "Exception reason: " + (getattr(a, "reason", None) or "none") + ". "
                     "Check earlier fixes and the same kind of problem everywhere in the change.", ""]
         if getattr(a, "contract", None):
-            out += ["## The job's contract", "", _m_review.review_read(n, a.contract), ""]
+            contract_text = _m_review.review_read(n, a.contract)
+            inputs.append(("Contract", contract_text))
+            out += ["## The job's contract", "", contract_text, ""]
         else:
+            inputs += _m_briefs.contract_inputs(n, a.branch)
             out += _m_jobs.contract_lines(inst, n, a.branch, who="reviewer")
+        inputs.append(("Limits", "\n".join(_m_knowledge.limits_of(n))))
         out += _m_knowledge.knowledge_lines(inst, n, " ".join(filter(None, [a.branch, a.focus, diffstat])), "reviewer") + \
             _m_knowledge.node_knowledge_lines(n) + _m_knowledge.recall_hint(n)
         out += _m_knowledge.limits_lines(n)
@@ -121,7 +137,7 @@ def cmd_review(a):
                 "A list of findings, most severe first. Each: severity (blocker, major, minor), `file:line`, "
                 "the problem, and a concrete fix. Say which tests you ran and their results. If you find nothing "
                 "that matters, say so plainly.", ""] + _m_knowledge.handback_lines(inst, n, who="reviewer", branch=a.branch)
-    text = _m_briefs.checked_brief(n, "\n".join(out) + "\n", worker=False)
+    text = _m_briefs.checked_brief(n, "\n".join(out) + "\n", worker=False, inputs=inputs)
     _m_guard.no_terms_in(n, text, "the review brief")
     if a.out:
         _m_history.write_out(inst, n, a.out, text)

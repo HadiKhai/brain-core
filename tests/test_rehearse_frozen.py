@@ -764,7 +764,9 @@ elif sys.argv[1] == 'ui':
             with mock.patch.object(briefs._m_guard, 'no_terms_in'), \
                     contextlib.redirect_stderr(printed):
                 with self.assertRaises(SystemExit) as caught:
-                    briefs.checked_brief({'fm': {'brief_max_kb': 1}}, variable + fixed, worker=False)
+                    # P18 names source inputs, never headings parsed from rendered Markdown.
+                    briefs.checked_brief({'fm': {'brief_max_kb': 1}}, variable + fixed, worker=False,
+                                         inputs=[('Variable', variable), ('Fixed', fixed)])
             text = printed.getvalue() + str(caught.exception)
             orders.append(text.index('Variable:') < text.index('Fixed:'))
             return {'brief:0': result(rehearsal.normalize(text, [folder / 'brain']), code=1),

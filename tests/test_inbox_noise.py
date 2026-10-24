@@ -194,10 +194,16 @@ class InboxNoise(Scenario):
         self.assertFalse(any(i['kind'] == 'job' for i in read_json('inbox', 'parent', '--json')))
         self.assertFalse(any(i['kind'] == 'job' for i in read_json('inbox', sibling['id'], '--json')))
         own = read_json('inbox', owner['id'], '--json')
-        self.assertEqual([i['text'] for i in own if i['kind'] == 'job'], alerts)
+        expected_advice = [
+            'job import:current: open 36.0 h, over twice the median of 1.0 h',
+            'job import:current: 20M tokens, over twice the median of 1M',
+            'job import:current: over its 10M-token budget',
+            'job import:current: over its 3-hour budget',
+        ]
+        self.assertEqual([i['text'] for i in own if i['kind'] == 'job'], expected_advice)
         self.assertTrue(all(i.get('informational') for i in own if i['kind'] == 'job'))
         due = read_json('due', owner['id'], '--json')
-        self.assertEqual([i['text'] for i in due if i['kind'] == 'job'], alerts)
+        self.assertEqual([i['text'] for i in due if i['kind'] == 'job'], expected_advice)
         self.assertTrue(all(i['informational'] for i in due if i['kind'] == 'job'))
         root_due = read_json('due', 'root', '--json')
         self.assertFalse(any(i['kind'] == 'job' for i in root_due))

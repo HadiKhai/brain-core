@@ -15,6 +15,7 @@ from . import instance as _m_instance
 from . import jobs as _m_jobs
 from . import machine as _m_machine
 from . import nodes as _m_nodes
+from . import reminders as _m_reminders
 from . import status as _m_status
 from . import transitions as _m_transitions
 from . import usage as _m_usage
@@ -32,7 +33,7 @@ def watch_digest(value):
 def watch_read(path, default):
     if not path.exists():
         return default
-    # A damaged dedup file must never reset acknowledgement and repeat old wakes.
+    # Strict readers retain damaged evidence; delivery callers may fail open.
     data = json.loads(path.read_text())
     if not isinstance(data, type(default)):
         raise ValueError("invalid watcher state")
@@ -140,6 +141,20 @@ def watch_text_identity(item):
     return ' '.join(text.split())
 
 
+def watch_untracked(groups):
+    """Unknown episode state must not reuse a transport key and hide a new need."""
+    for group in groups.values():
+        group['episodes_known'] = False
+        for item in group['items']:
+            if (('reason' not in item or item['kind'] == 'overdue-question') and item['kind'] not in
+                    ('machine-hold', 'machine-alert', 'machine-repair', 'job-ready', 'job-landed', 'rotate')):
+                item['id'] = watch_digest([item['id'], os.urandom(24).hex()])
+                if item['kind'] == 'overdue-question':
+                    item['legacy_reason'] = item['reason']
+                    item['reason'] = 'overdue:' + item['id']
+    return groups
+
+
 def watch_due_episodes(inst, scan):
     """Persist opaque receipts while ordinary due needs remain open.
 
@@ -161,25 +176,43 @@ def watch_due_episodes(inst, scan):
         fcntl.flock(stream, fcntl.LOCK_EX)
         groups = scan()
         entries = [i for group in groups.values() for i in group['items']
-                   if 'reason' not in i and i['kind'] not in
+                   if ('reason' not in i or i['kind'] == 'overdue-question') and i['kind'] not in
                    ('machine-hold', 'machine-alert', 'machine-repair', 'job-ready', 'job-landed', 'rotate')]
         _m_common.safe_target(path)
-        data = watch_read(path, {'version': 1, 'open': {}})
-        if (data.get('version') != 1 or not isinstance(data.get('open'), dict)
-                or any(not re.fullmatch(r'[0-9a-f]{64}', k)
-                       or not isinstance(v, str) or not re.fullmatch(r'[0-9a-f]{64}', v)
-                       for k, v in data['open'].items())):
-            raise ValueError('invalid due episode state')
+        try:
+            data = watch_read(path, {'version': 1, 'open': {}})
+            if (data.get('version') != 1 or not isinstance(data.get('open'), dict)
+                    or type(data.get('overdue_episodes', False)) is not bool
+                    or any(not re.fullmatch(r'[0-9a-f]{64}', k)
+                           or not isinstance(v, str) or not re.fullmatch(r'[0-9a-f]{64}', v)
+                           for k, v in data['open'].items())):
+                raise ValueError('invalid due episode state')
+        except (OSError, ValueError):
+            return watch_untracked(groups)  # preserve evidence and fail open until repaired
         # Preserve pre-upgrade acknowledgements rather than replaying the backlog.
-        seen = set(watch_state(inst).get('seen', [])) if not path.exists() else set()
+        try:
+            legacy_seen = set(watch_state(inst).get('seen', []))
+        except (OSError, ValueError):
+            legacy_seen = set()
+        seen = legacy_seen if not path.exists() else set()
+        overdue_seen = legacy_seen if not data.get('overdue_episodes') else set()
         current = {}
         for item in entries:
             key = item['id']
-            current.setdefault(key, data['open'].get(key) or (key if key in seen else
+            acknowledged = key in seen or (item['kind'] == 'overdue-question' and
+                           item.get('legacy_id', key) in overdue_seen)
+            current.setdefault(key, data['open'].get(key) or (item.get('legacy_id', key) if acknowledged else
                                watch_digest(['due-episode'])[:16] + os.urandom(24).hex()))
             item['id'] = current[key]
-        if current != data['open'] or not path.exists():
-            _m_machine.machine_publish(inst, path, json.dumps({'version': 1, 'open': current}, sort_keys=True) + '\n')
+            if item['kind'] == 'overdue-question':
+                item['legacy_reason'] = item['reason']
+                item['reason'] = 'overdue:' + item['id']
+        if current != data['open'] or not path.exists() or not data.get('overdue_episodes'):
+            try:
+                _m_machine.machine_publish(inst, path, json.dumps(
+                    {'version': 1, 'open': current, 'overdue_episodes': True}, sort_keys=True) + '\n')
+            except OSError:
+                return watch_untracked(groups)  # unpublished identities cannot prove resolution
     return groups
 
 
@@ -195,7 +228,7 @@ def watch_items(inst, n):
                                 include_ready=False, include_advice=False) + _m_status.changes_due(inst, n)
     out = []
     for item in items:
-        if item['kind'] in ('stale-status', 'machine'):
+        if item['kind'] in ('stale-status', 'machine') or (item['kind'] == 'inbox' and item.get('informational')):
             continue
         direct_reason = None
         handback_episode = None
@@ -228,7 +261,7 @@ def watch_items(inst, n):
                             'kind': item['kind'], 'text': 'Unread core change; run brain changes'})
             continue
         # Keep identity separate from changing display (readiness, age, counts).
-        identity = (item.get('episode') if item['kind'] in ('machine-alert', 'job-stall') else
+        identity = (item.get('episode') if item.get('episode') else
                     [item.get('job'), item.get('state'), watch_text_identity(item)] if item.get('job') else
                     watch_text_identity(item))
         if item['kind'] == 'rotate':
@@ -247,7 +280,8 @@ def watch_items(inst, n):
             if handback_episode:
                 identity.append(handback_episode)
         text = _m_nodes.import_text(item['text'], _m_guard.never_terms(n))[:400]
-        entry = {'id': watch_digest([n['id'], item['kind'], identity]),
+        semantic = _m_reminders.semantic_item_key(item)
+        entry = {'id': watch_digest(semantic if semantic is not None else [n['id'], item['kind'], identity]),
                  'kind': item['kind'], 'text': text}
         if direct_reason:
             entry.update(reason=direct_reason, source=n['id'])
@@ -261,8 +295,13 @@ def watch_recorded_ready(inst, n, row, signal, strict=False):
     Cached refs fence stale evidence. This notification is not merge authority and
     does not replace the coordinator's full readiness/input/rehearsal checks.
     """
+    from . import job_attempts as _m_attempts
+    projection = _m_attempts.job_projection(inst, n, row, strict=strict)
+    signal = projection['signal']
+    if projection['attempt'] and not signal:
+        return None
     if _m_jobs.handback_file(n, row).exists():
-        if not signal or signal.get('version') != 2 or signal.get('state') != 'done' or signal.get('ready_reasons') != []:
+        if not signal or signal.get('version') not in (2, 3) or signal.get('state') != 'done' or signal.get('ready_reasons') != []:
             return None
         packet = signal.get('ready')
     else:
@@ -464,8 +503,8 @@ def watch_failures(inst, nodes, acknowledged, warnings):
             acknowledged.add(marker)
 
 
-def watch_state(inst):
-    path = inst.root / '.brain' / 'watch.json'
+def watch_state(inst, path=None):
+    path = path if path is not None else inst.root / '.brain' / 'watch.json'
     state = watch_read(path, {})
     if path.exists() and (state.get('version') != 1 or not isinstance(state.get('seen'), list)):
         raise ValueError('invalid watcher fingerprint')
@@ -485,7 +524,12 @@ def watch_state_invalid(inst):
 
 def watch_groups(inst, nodes=None):
     """The file-only wake queue, grouped by the coordinator who can act on it."""
-    return watch_due_episodes(inst, lambda: watch_scan(inst, nodes))
+    try:
+        return watch_due_episodes(inst, lambda: watch_scan(inst, nodes))
+    except (OSError, ValueError):
+        if _m_common.outward_links(inst.root):
+            raise  # fail open for receipt I/O, never for unsafe links
+        return watch_untracked(watch_scan(inst, nodes))
 
 
 def watch_scan(inst, nodes=None):
@@ -503,7 +547,9 @@ def watch_scan(inst, nodes=None):
         for line in _m_status.overdue_questions(inst, n, _m_status.inbox_lines(n)):
             root_group = groups.setdefault('root', {'node': root, 'items': [],
                                             'command': _m_hosts.wake_target(inst, root)[1]})
-            root_group['items'].append({'id': watch_digest(['overdue', n['id'], line]),
+            identity = watch_text_identity({'kind': 'inbox', 'text': line[2:]})
+            root_group['items'].append({'id': watch_digest(['overdue', n['id'], identity]),
+                                       'legacy_id': watch_digest(['overdue', n['id'], line]),
                                        'kind': 'overdue-question', 'node': n['id'],
                                        'reason': 'overdue:' + hashlib.sha256(line.encode()).hexdigest(),
                                        'text': 'Unanswered question past its threshold; inspect brain due root'})
@@ -537,25 +583,48 @@ def watch_since_wake(inst, nodes):
     return list({i['id']: i for i in out}.values())
 
 
-def watch_run(inst):
+def watch_run(inst, kinds=None, quiet=False, sources=None):
     path = inst.root / '.brain' / 'watch.json'
-    state = watch_state(inst)  # our own acknowledgement history always fails closed
+    try:
+        state = watch_state(inst)
+        state_valid = True
+    except (OSError, ValueError):
+        state, state_valid = {}, False
     seen = set(state.get('seen', []))
+    due_seen_path = inst.root / '.brain/wake/due-seen.json'
+    try:
+        seen.update(watch_state(inst, due_seen_path).get('seen', []))
+        due_seen_valid = True
+    except (OSError, ValueError):
+        due_seen_valid = False
     nodes = [n for n in inst.nodes() if not n['archived']]
     failures = set(state.get('failures', []))
     warnings = set(state.get('warnings', []))
-    watch_failures(inst, nodes, failures, warnings)
+    if kinds is None:
+        watch_failures(inst, nodes, failures, warnings)
     groups = watch_groups(inst, nodes)
     current_ids = {i['id'] for group in groups.values() for i in group['items']}
     for group in groups.values():
-        for pending in _m_hosts.wake_directory(inst, group['node']).glob('*.pending'):
-            _m_hosts.wake_retire_due_pending(pending, current_ids)
+        if group.get('episodes_known', True):
+            for pending in _m_hosts.wake_directory(inst, group['node']).glob('*.pending'):
+                _m_hosts.wake_retire_due_pending(pending, current_ids)
+    pending_ids = set()
+    for pending in (inst.root / '.brain/wake').glob('*/*.pending'):
+        try:
+            refs = json.loads(pending.read_text()).get('items', [])
+            if isinstance(refs, list):
+                pending_ids.update(i['id'] for i in refs if isinstance(i, dict) and isinstance(i.get('id'), str))
+        except (OSError, ValueError, AttributeError):
+            pass  # unidentified pending requests stay durable; they cannot own a known acknowledgement
+    seen.intersection_update(current_ids | pending_ids)
     current = []
     count = 0
     for group in groups.values():
         items = {i['id']: i for i in group['items']}
         current.extend(items.values())
-        added = sorted(set(items) - seen)
+        added = sorted(key for key in set(items) - seen
+                       if (kinds is None or items[key]['kind'] in kinds)
+                       and (sources is None or items[key]['node'] in sources))
         queued = False
         if added and group['command']:
             for key in added[:]:
@@ -595,12 +664,26 @@ def watch_run(inst):
         if not queued and group['command'] and directory.is_dir() and any(directory.glob('*.pending')):
             _m_hosts.wake_start(inst, target)  # retries queued failures without another model tick
     # Screened current excerpts are recomputed; historical acknowledgement stores only digests.
-    _m_machine.machine_publish(inst, path, json.dumps({'version': 1, 'at': inst.now(),
-                                'seen': sorted(seen), 'failures': sorted(failures), 'warnings': sorted(warnings), 'items': current}, sort_keys=True) + '\n')
-    print(f'watch: {count} new item(s) queued')
+    # Corrupt files remain byte-for-byte available for repair. Healthy stores
+    # retain only current episodes and durable pending requests, never closed history.
+    try:
+        if kinds is None and state_valid:
+            _m_machine.machine_publish(inst, path, json.dumps({'version': 1, 'at': inst.now(),
+                                        'seen': sorted(seen), 'failures': sorted(failures), 'warnings': sorted(warnings), 'items': current}, sort_keys=True) + '\n')
+        if due_seen_valid:
+            _m_machine.machine_publish(inst, due_seen_path, json.dumps({'version': 1, 'seen': sorted(seen)}) + '\n')
+    except OSError:
+        pass  # enqueue has succeeded even if acknowledgement persistence failed
+    if not quiet:
+        if not state_valid:
+            print('watch: watcher state invalid; retained for repair (brain due root)')
+        elif not due_seen_valid:
+            print('watch: due acknowledgement state invalid; retained for repair')
+        else:
+            print(f'watch: {count} new item(s) queued')
 
 
-def watch_once(inst):
+def watch_once(inst, kinds=None, quiet=False, sources=None):
     """Share the sampler's short, nonblocking instance-lock discipline."""
     import fcntl
     folder = inst.root / '.brain'
@@ -614,7 +697,8 @@ def watch_once(inst):
         try:
             fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
-            print('watch: skipped; instance busy')
+            if not quiet:
+                print('watch: skipped; instance busy')
             return
         stream.seek(0)
         stream.truncate()
@@ -623,7 +707,7 @@ def watch_once(inst):
         _m_instance._LOCK['fh'], _m_instance._LOCK['depth'] = stream, 1
         os.environ['BRAIN_LOCK_HELD'] = f'{inst.root.resolve()}|{os.getpid()}'
         try:
-            watch_run(inst)
+            watch_run(inst, kinds=kinds, quiet=quiet, sources=sources)
         finally:
             _m_instance._LOCK['depth'] = 0
             _m_instance.unlock()

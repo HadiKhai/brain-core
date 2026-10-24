@@ -46,6 +46,14 @@ def collect_problems(inst):
     nodes = inst.nodes()
     for n in nodes:
         fm, nid = n["fm"], n["id"]
+        from . import freshness as _m_freshness
+        index = _m_freshness.freshness_state(inst, n)
+        if index and index['state'] != 'fresh':
+            p(f"{nid}: upstream index {index['state']}; regenerate it explicitly, then brain index {nid} --record")
+        try:
+            _m_status.parallel_job_limit(n)
+        except ValueError as error:
+            p(f'{nid}: {error}')
         if not n["archived"]:
             status_file = n["dir"] / "status.md"
             status_text = status_file.read_text() if status_file.exists() else ""

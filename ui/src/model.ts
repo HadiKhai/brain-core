@@ -161,12 +161,16 @@ export function learningRows(s: RecordData): RecordData[] {
         (Date.parse(a.provenance?.time) || 0),
   );
 }
+export const usageStopPercent = (row: RecordData, policy: RecordData) =>
+  Number.isFinite(row.stop_percent) ? row.stop_percent : policy.stop_percent;
+
 export function windowState(
   w: RecordData | undefined,
   row: RecordData,
   policy: RecordData,
   now = Date.now() / 1000,
 ) {
+  const stop = usageStopPercent(row, policy);
   const stamp = w?.read_at || row.read_at,
     stale = !stamp || now - stamp > (policy.max_age_seconds ?? 120);
   const expired = w?.expired || !!(w?.resets_at && w.resets_at <= now);
@@ -179,11 +183,11 @@ export function windowState(
         : "Unknown"
     : stale
       ? "Stale · unverified"
-      : Number.isFinite(policy.stop_percent) &&
-          w.used_percent >= policy.stop_percent
+      : Number.isFinite(stop) &&
+          w.used_percent >= stop
         ? "At stop line"
-        : Number.isFinite(policy.stop_percent) &&
-            w.used_percent >= policy.stop_percent - 10
+        : Number.isFinite(stop) &&
+            w.used_percent >= stop - 10
           ? "Near stop line"
           : "Normal";
   return {
@@ -198,9 +202,11 @@ export function windowState(
 export function routing(s: RecordData) {
   const p = { ...s.usage_routing_policy, ...s.usage_policy },
     now = Date.now() / 1000;
-  if (p.autodetected || !Number.isFinite(p.stop_percent)) return null;
+  if (p.autodetected) return null;
   return list(s.usage)
     .map((row) => {
+      const stop = usageStopPercent(row, p);
+      if (!Number.isFinite(stop)) return null;
       const windows = Object.entries(row.windows || {}).filter(
         ([k, w]: any) =>
           ["five_hour", "seven_day"].includes(k) &&
@@ -208,7 +214,7 @@ export function routing(s: RecordData) {
           !w.expired &&
           (!w.resets_at || w.resets_at > now),
       ) as [string, RecordData][];
-      if (windows.some(([, w]) => w.used_percent >= p.stop_percent))
+      if (windows.some(([, w]) => w.used_percent >= stop))
         return null;
       const unknown =
         !windows.length ||
@@ -374,3 +380,24 @@ export function hourly(s: RecordData) {
 export function allJobs(nodes: RecordData[]): RecordData[] {
   return nodes.flatMap((n) => list(n.jobs?.rows).map((r) => ({ ...r, _node: n, _open: list(n.jobs?.open).find((o) => o.Job === r.Job && o.Started === r.Started) })));
 }
+
+// One source item can appear in status, inbox and coordinator steps.
+export function needRows(items: RecordData[]) {
+  const seen = new Set<string>();
+  return items.filter((item) => {
+    if (item.informational || ["job", "advice"].includes(item.kind)) return false;
+    if (typeof item.id !== "string" || !item.id) return true;
+    if (seen.has(item.id)) return false;
+    seen.add(item.id);
+    return true;
+  });
+}
+export function needsView(s: RecordData, node?: string) {
+  const inScope = (item: RecordData) => node === undefined || item.node === node;
+  const requests = new Set(list(s.inbox).filter(inScope));
+  const items = needRows([...requests, ...list(s.due).filter(inScope)]);
+  return { items, inbox: items.filter(i => requests.has(i)), due: items.filter(i => !requests.has(i)) };
+}
+export const needAsk = (text: unknown) => String(text || "")
+  .replace(/(?:^|;\s*)(?:since|recommendation|default):\s*[^;]*/gi, "")
+  .replace(/^;\s*/, "").trim();

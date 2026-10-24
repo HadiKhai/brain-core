@@ -28,6 +28,11 @@ stated; never run a polling loop in an agent.
    than stranding existing jobs.
 1. **Worktree.** Choose the integration mode before launching: `brain set <id> merge=pr` for
    host PR merges; `merge=local` (the default) for coordinator-owned local integration.
+   `merge=pr` refuses every policy decision other than allow, including empty policy;
+   conflicting or unmapped reviewed limits are quoted with their rule/source.
+   Have the coordinator prepare the explicit `publication-policy.json` mapping described in
+   README; core never interprets prose as an authorization engine. A mode is a workflow choice,
+   and grants no push or PR consent. Unknown policy goes to the coordinator.
    Never reuse a merged job's folder for a new branch. Create a fresh worktree for each
    new job; leave the old folder on its recorded branch until cleanup.
    `core/bin/brain wt add <id> <branch> [--base <ref>]`. It creates the worktree
@@ -148,7 +153,15 @@ stated; never run a polling loop in an agent.
    rebase the job on `origin/<default>` and hand back again, leaving the operator checkout alone.
    To update a local default branch, use a separate worktree and `git merge --ff-only origin/<default>`
    only when that branch is not checked out by the operator; otherwise leave it untouched.
-5. **Pull request.** Once pushing is allowed and the review is addressed, the worker opens it.
+5. **Pull request.** Before proposing an outward step, read the generated publication policy.
+   `brain policy <id> --action pr` must allow the PR; `brain policy <id> --action push` must
+   allow the push. A deny quotes the binding rule/source; an unknown needs the coordinator.
+   If `land_check` is configured, run `brain land-check <id> --branch <job> --run` on the
+   exact candidate, then `brain land-check <id> --branch <job> --push-step` to generate the
+   supported push command. Missing, failed or stale evidence refuses the step. Changed heads,
+   commands, configuration or replacement attempts require a fresh passing check. These checks
+   grant neither readiness nor additional outward consent. Only after those checks, permission
+   and review does the worker take the explicitly authorized push/PR step.
    Have the host watch it (host `watch`), so reviews, checks and conflicts come back to you.
    Update the Active work row.
    Before anything is merged: `core/bin/brain guard <id> <worktree>` must print `guard: clean`
@@ -179,17 +192,28 @@ stated; never run a polling loop in an agent.
    delegated/sub-agent descendants and reviewers by `brain-job: <key>`. Settle only when the
    ledger is merged or closed; never coordinators, open-job threads, running/waiting threads,
    or threads with pending requests. Unknown state or ownership means leave unsettled.
-   After all job threads are confirmed settled through the host, record
-   `brain jobs <id> --branch <branch> --settled`. Preserve the Active work thread reference.
+   After closing the job, settle each job thread through the host with one explicit thread ID
+   per call and confirm each is settled. Save a fresh version 1 JSON export following the
+   host adapter's schema, then record
+   `brain jobs <id> --branch <branch> --settled --attestation-file <export.json>`.
+   Use the printed `--job-key <key>` for a reused branch. The export must be at most five
+   minutes old, cover both bound host/home projects and nested threads, and contain exactly
+   the selected job keys with terminal settled threads and no pending requests. This is
+   coordinator-supplied evidence; core does not independently query or settle host threads.
+   Preserve the Active work thread reference.
    Legacy jobs missing markers or worker references use the host adapter's complete-project
    sweep: exhaust unsettled thread lists, protect open/active/coordinator threads and settle
    safely done closed work. After no attributable unsettled closed-work threads remain,
-   `brain jobs <id> --settled --all-closed` records all closed rows together; branches with
-   open ledger jobs cause refusal. A later job never inherits an old settlement stamp.
+   `brain jobs <id> --settled --all-closed --attestation-file <export.json>` records all closed
+   rows together using a fresh exhaustive export for every selected job and both project lists;
+   branches with open ledger jobs cause refusal. A later job never inherits an old settlement stamp.
    `brain due` counts closed-but-unsettled jobs; `brain due root` includes child settlement counts.
 
 Never merge, push to a shared branch, deploy or delete a branch without explicit consent
 (axiom 24). Several jobs can run at once; each has its own worktree and port.
+Core enforces its supported instruction/landing path; it cannot intercept an arbitrary external
+`git push`. The land-check command runs only on explicit invocation or a configured local train,
+never during due/status/watch reads. An absent setting adds no check and grants no permission.
 
 
 ## Machine care is core behaviour

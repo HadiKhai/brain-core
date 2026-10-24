@@ -52,6 +52,105 @@ class Watcher(Scenario):
                            'kind': 'verify', 'state': 'queued',
                            'scope': self.m.machine_scope(self.inst, 'root')}]
 
+    def idle_work(self):
+        return [i for i in self.m.due_items(self.inst, self.inst.node('root'), include_stale=False)
+                if i['kind'] == 'idle-with-runnable-work']
+
+    def test_idle_work_names_unstarted_tasks_in_build_order_only(self):
+        backlog = self.root / 'backlog.md'
+        backlog.write_text('- NEXT after another job: old prose\n- [ ] Outside before\n'
+                           '## Build order\n- [x] Finished\n- [X] Also finished\n'
+                           '- [ ] Deferred (parked: later)\n- [ ] Decision (waits: operator)\n'
+                           '- [ ] First runnable\n- [ ] Second runnable\n'
+                           '## Other work\n- [ ] Outside after\n')
+        items = self.idle_work()
+        self.assertEqual(len(items), 1)
+        self.assertIn('First runnable', items[0]['text'])
+        for ignored in ('Outside', 'Finished', 'finished', 'Deferred', 'Decision', 'Second runnable', 'old prose'):
+            self.assertNotIn(ignored, items[0]['text'])
+        self.assertIn('First runnable', self.b(self.root, 'due', 'root', '--json'))
+
+    def test_idle_work_each_nonrunnable_state_is_quiet(self):
+        backlog = self.root / 'backlog.md'
+        for task in ('- [x] Finished', '- [X] Finished', '- [ ] Deferred (parked: reason)',
+                     '- [ ] Decision (waits: operator)', '- NEXT legacy prose'):
+            with self.subTest(task=task):
+                backlog.write_text('## Build order\n' + task + '\n')
+                self.assertEqual(self.idle_work(), [])
+        backlog.write_text('## Build order\n```md\n- [ ] Example\n```\n'
+                           '<!-- - [ ] Hidden -->\n## Other\n- [ ] Outside\n')
+        self.assertEqual(self.idle_work(), [])
+        backlog.write_text('## Build order\n- [ ] Actually runnable\n')
+        self.assertEqual(len(self.idle_work()), 1)  # the exclusions must not disable the detector
+        with mock.patch.object(self.m, 'read_jobs', return_value=None):
+            self.assertEqual(self.idle_work(), [])  # unknown capacity never grants a start
+        self.b(self.root, 'set', 'root', 'labels=state:paused')
+        self.inst = self.m.Instance(self.root)
+        self.assertEqual(self.idle_work(), [])
+
+    def test_idle_work_invalid_parallel_cap_is_reported_and_never_launch_advice(self):
+        (self.root / 'backlog.md').write_text('## Build order\n- [ ] Runnable\n')
+        for cap in ('0', '-1', 'two', '1.5'):
+            with self.subTest(cap=cap):
+                self.assertIn('parallel_jobs', self.b(self.root, 'set', 'root', 'parallel_jobs=' + cap, ok=False))
+        path = self.root / 'node.md'
+        fm, body = self.m.read_fm(path)
+        fm['parallel_jobs'] = 'invalid'
+        self.m.write_fm(path, fm, body)
+        self.inst = self.m.Instance(self.root)
+        self.assertEqual(self.idle_work(), [])
+        self.assertIn('parallel_jobs', self.b(self.root, 'check', ok=False))
+
+    def test_idle_work_cap_and_exact_open_job_branch_matching(self):
+        backlog = self.root / 'backlog.md'
+        backlog.write_text('## Build order\n- [ ] Build `job/plan`\n- [ ] Build `job/plan-extra`\n')
+        row = dict.fromkeys(self.m.JOB_COLS, '')
+        row.update(Job='job/plan', Started=self.inst.now())
+        self.m.write_jobs(self.inst, self.inst.node('root'), [row])
+        self.assertEqual(self.idle_work(), [])  # absent parallel_jobs defaults to one
+        self.b(self.root, 'set', 'root', 'parallel_jobs=2')
+        self.inst = self.m.Instance(self.root)
+        items = self.idle_work()
+        self.assertEqual(len(items), 1)
+        self.assertIn('job/plan-extra', items[0]['text'])
+        self.assertNotIn('`job/plan`', items[0]['text'])
+        second = {**row, 'Job': 'job/other'}
+        self.m.write_jobs(self.inst, self.inst.node('root'), [row, second])
+        self.assertEqual(self.idle_work(), [])  # at the explicit cap
+        second['Ended'] = self.inst.now()
+        self.m.write_jobs(self.inst, self.inst.node('root'), [row, second])
+        self.assertEqual(len(self.idle_work()), 1)  # closed jobs free a slot
+        row['Ended'] = self.inst.now()
+        self.m.write_jobs(self.inst, self.inst.node('root'), [row, second])
+        self.assertIn('`job/plan`', self.idle_work()[0]['text'])  # only open jobs mark progress
+        row.update(Job='job/plan+extra', Ended='')
+        self.m.write_jobs(self.inst, self.inst.node('root'), [row])
+        backlog.write_text('## Build order\n- [ ] Active `job/plan+extra`\n- [ ] Next `job/plan`\n')
+        self.assertIn('Next `job/plan`', self.idle_work()[0]['text'])
+        self.assertNotIn('Active', self.idle_work()[0]['text'])
+
+    def test_idle_work_wakes_once_changes_and_rearms_without_sleeps(self):
+        backlog = self.root / 'backlog.md'
+        backlog.write_text('## Build order\n- [ ] First runnable\n')
+        with mock.patch.object(self.m, 'changes_due', return_value=[]), \
+                mock.patch.object(self.m, 'wake_start'), mock.patch.object(self.m, 'WAKE_INTERVAL', 0), \
+                mock.patch.object(self.m, 'wake_send', return_value=True) as send:
+            def tick(expected):
+                self.watch()
+                self.m.wake_drain(self.inst, self.inst.node('root'), once=True)
+                self.assertEqual(send.call_count, expected)
+            tick(1)
+            tick(1)
+            backlog.write_text('Unrelated prose changed\n## Build order\n- [ ] First runnable\n')
+            tick(1)
+            backlog.write_text('## Build order\n- [x] First runnable\n- [ ] Next runnable\n')
+            tick(2)
+            self.assertEqual([i['kind'] for i in self.since()], ['idle-with-runnable-work'])
+            backlog.write_text('## Build order\n- [x] First runnable\n- [x] Next runnable\n')
+            tick(2)
+            backlog.write_text('## Build order\n- [ ] Next runnable\n')
+            tick(3)
+
     def test_queued_hold_wakes_once_for_four_ticks_and_changing_numbers(self):
         self.queued_machine_work()
         reading = json.loads(self.env['BRAIN_MACHINE_READING'])
@@ -683,7 +782,7 @@ class Watcher(Scenario):
             inbox.write_text(inbox.read_text() + '- fabricated B\n')
             self.watch()
             observed = []
-            def host_starts(command):
+            def host_starts(command, reason=None):
                 observed.extend(self.since())
                 return True
             with mock.patch.object(self.m, 'wake_send', side_effect=host_starts):
@@ -777,7 +876,7 @@ class Watcher(Scenario):
         n = self.inst.node('root')
         row = {**dict.fromkeys(self.m.JOB_COLS, ''), 'Job': 'import:unborn', 'Started': '2026-01-01T10:00Z'}
         self.m.write_jobs(self.inst, n, [row])
-        args = argparse.Namespace(id='root', branch=row['Job'], state='blocked', lessons='none: fixture',
+        args = argparse.Namespace(summary="Synthetic result", id='root', branch=row['Job'], state='blocked', lessons='none: fixture',
                                   report='report.md', reviews=None, need_human=None)
         directory = self.m.wake_directory(self.inst, n)
         episodes, identities = [], []
@@ -835,7 +934,7 @@ class Watcher(Scenario):
         n = self.inst.node('root')
         row = {**dict.fromkeys(self.m.JOB_COLS, ''), 'Job': 'import:unborn', 'Started': '2026-01-01T10:00Z'}
         self.m.write_jobs(self.inst, n, [row])
-        args = argparse.Namespace(id='root', branch=row['Job'], state='question', lessons='none: fixture',
+        args = argparse.Namespace(summary="Synthetic result", question="Synthetic choice?", id='root', branch=row['Job'], state='question', lessons='none: fixture',
                                   report='report.md', reviews=None, need_human=None)
         directory = self.m.wake_directory(self.inst, n)
         with mock.patch.object(self.m, 'load', return_value=self.inst), \
@@ -870,7 +969,7 @@ class Watcher(Scenario):
         n = self.inst.node('root')
         row = {**dict.fromkeys(self.m.JOB_COLS, ''), 'Job': 'import:unborn', 'Started': '2026-01-01T10:00Z'}
         self.m.write_jobs(self.inst, n, [row])
-        args = argparse.Namespace(id='root', branch=row['Job'], state='blocked', lessons='none: fixture',
+        args = argparse.Namespace(summary="Synthetic result", id='root', branch=row['Job'], state='blocked', lessons='none: fixture',
                                   report='report.md', reviews=None, need_human='Choose blue')
         directory = self.m.wake_directory(self.inst, n)
         with mock.patch.object(self.m, 'load', return_value=self.inst), \
@@ -1023,17 +1122,16 @@ class Watcher(Scenario):
             sample.assert_called_once_with(self.inst)
             watch.assert_called_once_with(self.inst)
 
-    def test_corrupt_state_fails_closed_and_external_links_refused(self):
+    def test_corrupt_state_wakes_current_work_and_external_links_refused(self):
         state = self.root / '.brain/watch.json'
-        state.write_text('{broken')
-        with mock.patch.object(self.m, 'request_wake') as wake:
-            with self.assertRaises(ValueError):
+        for damaged in ('{broken', '{}'):
+            state.write_text(damaged)
+            (self.root / 'inbox.md').write_text('- new work ' + damaged + '\n')
+            with mock.patch.object(self.m, 'changes_due', return_value=[]), \
+                    mock.patch.object(self.m, 'request_wake', return_value=True) as wake:
                 self.watch()
-            wake.assert_not_called()
-        self.assertEqual(state.read_text(), '{broken')
-        state.write_text('{}')
-        with self.assertRaises(ValueError):
-            self.watch()
+                wake.assert_called()
+            self.assertEqual(state.read_text(), damaged)
         state.unlink()
         sentinel = self.tmp / 'outside'
         sentinel.write_text('sentinel')
@@ -1198,7 +1296,7 @@ class Watcher(Scenario):
             with mock.patch.object(self.m, 'load', return_value=self.inst), \
                     mock.patch.object(self.m, 'request_wake', return_value=False), \
                     contextlib.redirect_stdout(io.StringIO()):
-                self.m.cmd_handback(argparse.Namespace(id='root', branch=row['Job'], state='blocked',
+                self.m.cmd_handback(argparse.Namespace(summary="Synthetic result", id='root', branch=row['Job'], state='blocked',
                     reviews=None, lessons='none: fixture', report='fixture.md', need_human=need))
             with mock.patch.object(self.m, 'wake_start'):
                 self.watch()
@@ -1546,3 +1644,313 @@ class StallWatcher(Scenario):
             handback.write_text('{torn')
             with self.assertRaises(ValueError):
                 self.m.watch_job_stalls(self.inst, n)
+
+
+class WakeNoise(Scenario):
+    """Fabricated file/Git instances without an unused installed core or host setup."""
+    def setUp(self):
+        super().setUp()
+        patch = mock.patch.dict(os.environ, self.env)
+        patch.start()
+        self.addCleanup(patch.stop)
+        self.m = core_loader.SourceFileLoader('wake_noise_fixture', str(CORE / 'bin/brain')).load_module()
+        self.root = self.repo(self.tmp / 'oak', {
+            'instance.md': '---\nname: oak\ntimezone: UTC\nruntimes: codex\nhost: t3\n---\n',
+            '.gitignore': '.brain/\n'})
+        self.inst = self.m.Instance(self.root)
+        owner = self.m._owners['cmd_init']
+        owner._make_node(self.inst, self.root, 'root', 'Oak', 'oak', '', 'here', 'codex', None)
+        self.inst.local_of('root').update(wake='fixture-send', coordinator='fixture-root')
+        self.inst.save_local()
+
+    watch = Watcher.watch
+    queued_machine_work = Watcher.queued_machine_work
+
+    def file_evidence(self, inst, node):
+        # These receipt fixtures have no jobs or generated status facts. Avoid
+        # unrelated Git/status display work while retaining the real inbox source.
+        return ({'jobs': [], 'worktrees': {}, 'handbacks': {}, 'inbox': self.m.inbox_lines(node)}, '', '')
+
+    def test_failed_episode_publication_keeps_queued_wake_for_next_tick(self):
+        status = self.root / 'status.md'
+        status.write_text(status.read_text() + '\n## Blocked\n- Waiting on operator; '
+                          'since: 2020-01-01T00:00Z; recommendation: approve; default: wait\n')
+        root = self.inst.node('root')
+        directory = self.m.wake_directory(self.inst, root)
+        publish = self.m.machine_publish
+        def failed_episode(inst, path, text):
+            if path.name == 'due-episodes.json':
+                raise OSError('fabricated episode publication failure')
+            return publish(inst, path, text)
+        with mock.patch.object(self.m, 'machine_publish', side_effect=failed_episode), \
+                mock.patch.object(self.m, 'changes_due', return_value=[]), \
+                mock.patch.object(self.m, 'wake_start'), mock.patch.object(self.m, 'WAKE_INTERVAL', 0), \
+                mock.patch.object(self.m, 'wake_send', side_effect=[False, True]) as send:
+            self.watch()
+            pending = list(directory.glob('*.pending'))
+            self.assertEqual(len(pending), 1)
+            self.m.wake_drain(self.inst, root, once=True)
+            self.assertTrue(pending[0].exists(), 'failed delivery must retain the accepted wake')
+            self.assertEqual(send.call_count, 1)
+            self.watch()
+            self.assertTrue(pending[0].exists(), 'the next scan must not retire unknown episode work')
+            self.m.wake_drain(self.inst, root, once=True)
+            self.assertEqual(send.call_count, 2)
+            self.assertFalse(list(directory.glob('*.pending')))
+            self.assertTrue(self.m.wake_history(directory)[-1]['items'])
+
+    def test_unknown_episode_state_preserves_pending_open_blocker(self):
+        status = self.root / 'status.md'
+        status.write_text(status.read_text() + '\n## Blocked\n- Waiting on operator; '
+                          'since: 2020-01-01T00:00Z; recommendation: approve; default: wait\n')
+        root = self.inst.node('root')
+        directory = self.m.wake_directory(self.inst, root)
+        episodes = self.root / '.brain/wake/due-episodes.json'
+        with mock.patch.object(self.m, 'load', return_value=self.inst), \
+                mock.patch.object(self.m, 'due_evidence', side_effect=self.file_evidence), \
+                mock.patch.object(self.m, 'changes_due', return_value=[]), \
+                mock.patch.object(self.m, 'core_update'), mock.patch.object(self.m, 'auto_upgrade', return_value=None), \
+                mock.patch.object(self.m, 'wake_start'), mock.patch.object(self.m, 'WAKE_INTERVAL', 0), \
+                mock.patch.object(self.m, 'wake_send', return_value=True) as send:
+            for fault in ('corrupt', 'unreadable'):
+                with self.subTest(fault=fault):
+                    episodes.unlink(missing_ok=True)
+                    self.watch()
+                    pending = list(directory.glob('*.pending'))
+                    self.assertEqual(len(pending), 1)
+                    healthy = episodes.read_text()
+                    original = self.m.watch_read
+                    def read(path, default):
+                        if path == episodes and fault == 'unreadable':
+                            raise OSError('fabricated episode read failure')
+                        return original(path, default)
+                    if fault == 'corrupt':
+                        episodes.write_text('{broken')
+                    with mock.patch.object(self.m, 'watch_read', side_effect=read):
+                        with contextlib.redirect_stdout(io.StringIO()) as output:
+                            self.m.cmd_due(argparse.Namespace(id='root', quiet=False, json=True))
+                        self.assertIn('blocked-overdue', output.getvalue())
+                        self.assertTrue(pending[0].exists(), 'filtered due must retain a still-open blocker')
+                        self.m.wake_drain(self.inst, root, once=True)
+                    self.assertEqual(send.call_count, 1 if fault == 'corrupt' else 2)
+                    self.assertEqual(episodes.read_text(), '{broken' if fault == 'corrupt' else healthy)
+                    self.assertFalse(list(directory.glob('*.pending')))
+
+    def test_corrupt_wake_receipts_preserve_evidence_and_wake_new_work(self):
+        root = self.inst.node('root')
+        inbox = self.root / 'inbox.md'
+        with mock.patch.object(self.m, 'due_evidence', side_effect=self.file_evidence), \
+                mock.patch.object(self.m, 'changes_due', return_value=[]), \
+                mock.patch.object(self.m, 'core_update'), mock.patch.object(self.m, 'auto_upgrade', return_value=None), \
+                mock.patch.object(self.m, 'load', return_value=self.inst), \
+                mock.patch.object(self.m, 'wake_start'), mock.patch.object(self.m, 'WAKE_INTERVAL', 0), \
+                mock.patch.object(self.m, 'wake_send', return_value=True) as send:
+            for name in ('wake/due-seen.json', 'wake/due-episodes.json', 'watch.json'):
+                path = self.root / '.brain' / name
+                path.parent.mkdir(exist_ok=True)
+                for damaged in ('{broken', '{"version":1,"seen":"invalid","open":[]}'):
+                    with self.subTest(name=name, damaged=damaged):
+                        path.write_text(damaged)
+                        before = send.call_count
+                        inbox.write_text('- 2020-01-01 00:00 +00:00 from runtime: Host question: '
+                                         'new decision ' + str(before) + ' <!-- host-question:new -->\n')
+                        with contextlib.redirect_stdout(io.StringIO()) as output:
+                            self.m.cmd_due(argparse.Namespace(id='root', quiet=False, json=True))
+                        self.assertIn('overdue-question', output.getvalue())
+                        self.m.wake_drain(self.inst, root, once=True)
+                        self.assertEqual(send.call_count, before + 1)
+                        inbox.write_text('- another new inbox item ' + str(before) + '\n')
+                        self.watch()
+                        self.m.wake_drain(self.inst, root, once=True)
+                        self.assertEqual(send.call_count, before + 2)
+                        self.assertEqual(path.read_text(), damaged)
+            original_read = self.m.watch_read
+            def unreadable(path, default):
+                if path.name in ('watch.json', 'due-seen.json', 'due-episodes.json'):
+                    raise OSError('fabricated receipt I/O failure')
+                return original_read(path, default)
+            with mock.patch.object(self.m, 'watch_read', side_effect=unreadable):
+                before = send.call_count
+                inbox.write_text('- 2020-01-01 00:00 +00:00 from runtime: Host question: '
+                                 'new unreadable decision <!-- host-question:unreadable -->\n')
+                with contextlib.redirect_stdout(io.StringIO()):
+                    self.m.cmd_due(argparse.Namespace(id='root', quiet=False, json=True))
+                self.m.wake_drain(self.inst, root, once=True)
+                self.assertEqual(send.call_count, before + 1)
+                inbox.write_text('- new inbox work with unreadable receipts\n')
+                self.watch()
+                self.m.wake_drain(self.inst, root, once=True)
+                self.assertEqual(send.call_count, before + 2)
+
+            before = send.call_count
+            repeated = '- 2020-01-01 00:00 +00:00 from runtime: Host question: '
+            repeated += 'reopened while receipts are corrupt <!-- host-question:reopen -->\n'
+            for text, expected in ((repeated, before + 1), ('', before + 1), (repeated, before + 2)):
+                inbox.write_text(text)
+                with contextlib.redirect_stdout(io.StringIO()):
+                    self.m.cmd_due(argparse.Namespace(id='root', quiet=False, json=True))
+                self.m.wake_drain(self.inst, root, once=True)
+                self.assertEqual(send.call_count, expected)
+
+    def test_closed_episode_acknowledgements_are_pruned_and_pending_work_retained(self):
+        root = self.inst.node('root')
+        inbox = self.root / 'inbox.md'
+        line = '- 2020-01-01 00:00 +00:00 from runtime: Host question: choose blue <!-- host-question:blue -->\n'
+        with mock.patch.object(self.m, 'due_evidence', side_effect=self.file_evidence), \
+                mock.patch.object(self.m, 'changes_due', return_value=[]), \
+                mock.patch.object(self.m, 'core_update'), mock.patch.object(self.m, 'auto_upgrade', return_value=None), \
+                mock.patch.object(self.m, 'load', return_value=self.inst), \
+                mock.patch.object(self.m, 'wake_start'), mock.patch.object(self.m, 'WAKE_INTERVAL', 0), \
+                mock.patch.object(self.m, 'wake_send', return_value=True) as send:
+            for index in range(8):
+                for text in (line, ''):
+                    inbox.write_text(text)
+                    with contextlib.redirect_stdout(io.StringIO()):
+                        self.m.cmd_due(argparse.Namespace(id='root', quiet=False, json=True))
+                    self.m.wake_drain(self.inst, root, once=True)
+                self.assertEqual(send.call_count, index + 1)
+                self.assertEqual(json.loads((self.root / '.brain/wake/due-seen.json').read_text())['seen'], [])
+            self.watch()
+            self.assertEqual(json.loads((self.root / '.brain/watch.json').read_text())['seen'], [])
+            inbox.write_text('- a queued decision\n')
+            self.watch()  # durable pending inbox work remains protected after its source clears
+            pending_ids = set(json.loads((self.root / '.brain/watch.json').read_text())['seen'])
+            self.assertTrue(pending_ids)
+            inbox.write_text('')
+            self.watch()
+            self.assertEqual(set(json.loads((self.root / '.brain/watch.json').read_text())['seen']), pending_ids)
+            self.m.wake_drain(self.inst, root, once=True)
+            self.watch()
+            self.assertEqual(json.loads((self.root / '.brain/watch.json').read_text())['seen'], [])
+
+    def test_due_escalation_survives_transport_expiry_with_operator_block_and_hold(self):
+        self.queued_machine_work()
+        root = self.inst.node('root')
+        child = self.root / 'nodes/sample'
+        self.m._owners['cmd_init']._make_node(self.inst, child, 'sample', 'Sample', 'oak', '', 'here', 'codex', [])
+        status = self.root / 'status.md'
+        status.write_text(status.read_text() + '\n## Blocked\n- Waiting on the operator to approve deployment; '
+                          'since: 2020-01-01T00:00Z; recommendation: approve; default: wait\n')
+        (self.root / 'inbox.md').write_text('- 2020-01-01 00:00 +00:00 from runtime: '
+                                          'Host question: approve deployment <!-- host-question:deploy -->\n')
+        reading = {**json.loads(self.env['BRAIN_MACHINE_READING']), 'load_per_cpu': [1.5] * 3}
+        outputs = []
+        directory = self.m.wake_directory(self.inst, root)
+        with mock.patch.object(self.m, 'machine_reading', return_value=reading), \
+                mock.patch.object(self.m, 'changes_due', return_value=[]), \
+                mock.patch.object(self.m, 'core_update'), mock.patch.object(self.m, 'auto_upgrade', return_value=None), \
+                mock.patch.object(self.m, 'load', return_value=self.inst), \
+                mock.patch.object(self.m, 'wake_start'), mock.patch.object(self.m, 'WAKE_INTERVAL', 0), \
+                mock.patch.object(self.m, 'wake_send', return_value=True) as send:
+            for index in range(6):
+                for sent in directory.glob('*.sent'):
+                    old = time.time() - self.m.WAKE_DEDUP_SECONDS - 1
+                    os.utime(sent, (old, old))
+                if index:
+                    (child / 'backlog.md').write_text('Child activity fixture ' + str(index) + '\n')
+                    self.git('add', 'nodes/sample/backlog.md', cwd=self.root)
+                    self.git('commit', '-qm', 'activity fixture', cwd=self.root)
+                with contextlib.redirect_stdout(io.StringIO()) as output:
+                    self.m.cmd_due(argparse.Namespace(id='root', quiet=False, json=True, machine=True))
+                outputs.append(json.loads(output.getvalue()))
+                self.watch()
+                self.m.wake_drain(self.inst, root, once=True)
+            self.assertTrue(all(any(i['kind'] == 'blocked-overdue' for i in out) for out in outputs))
+            self.assertTrue(all(any(i['kind'] == 'machine' for i in out) for out in outputs))
+            self.assertEqual(send.call_count, 1, 'six unchanged ticks must deliver only one wake')
+
+    def test_due_escalation_changed_and_reopened_question_wakes_again(self):
+        inbox = self.root / 'inbox.md'
+        original = '- 2020-01-01 00:00 +00:00 from runtime: Host question: choose blue <!-- host-question:blue -->\n'
+        inbox.write_text(original)
+        root = self.inst.node('root')
+        with mock.patch.object(self.m, 'changes_due', return_value=[]), \
+                mock.patch.object(self.m, 'core_update'), mock.patch.object(self.m, 'auto_upgrade', return_value=None), \
+                mock.patch.object(self.m, 'load', return_value=self.inst), \
+                mock.patch.object(self.m, 'wake_start'), mock.patch.object(self.m, 'WAKE_INTERVAL', 0), \
+                mock.patch.object(self.m, 'wake_send', return_value=True) as send:
+            for text, expected in [(original, 1), (original.replace('2020-01-01', '2020-01-02'), 1),
+                                   (original, 1), ('', 1), (original, 2),
+                                   (original.replace('choose blue', 'choose green'), 3)]:
+                inbox.write_text(text)
+                with contextlib.redirect_stdout(io.StringIO()):
+                    self.m.cmd_due(argparse.Namespace(id='root', quiet=False, json=True))
+                self.m.wake_drain(self.inst, root, once=True)
+                self.assertEqual(send.call_count, expected)
+
+    def test_delivered_wake_reason_names_opaque_item_and_cause(self):
+        (self.root / 'inbox.md').write_text('- confidential fixture decision\n')
+        root = self.inst.node('root')
+        with mock.patch.object(self.m, 'changes_due', return_value=[]), \
+                mock.patch.object(self.m, 'wake_start'), mock.patch.object(self.m, 'WAKE_INTERVAL', 0), \
+                mock.patch.object(self.m, 'wake_send', return_value=True) as send:
+            self.watch()
+            self.m.wake_drain(self.inst, root, once=True)
+            reason = send.call_args.kwargs['reason']
+            item = self.m.wake_history(self.m.wake_directory(self.inst, root))[-1]['items'][0]
+            self.assertIn(item['id'], reason)
+            self.assertIn('new', reason)
+            self.assertNotIn('confidential', reason)
+
+    def test_due_escalation_receipt_is_an_exact_rehearsal_write(self):
+        (self.root / 'inbox.md').write_text('- 2020-01-01 00:00 +00:00 from runtime: Host question: choose blue '
+                                          '<!-- host-question:blue -->\n')
+        with mock.patch.object(self.m, 'load', return_value=self.inst), \
+                mock.patch.object(self.m, 'changes_due', return_value=[]), \
+                mock.patch.object(self.m, 'core_update'), mock.patch.object(self.m, 'auto_upgrade', return_value=None), \
+                mock.patch.object(self.m, 'wake_start'), contextlib.redirect_stdout(io.StringIO()):
+            self.m.cmd_due(argparse.Namespace(id='root', quiet=False, json=True))
+        self.assertTrue((self.root / '.brain/wake/due-seen.json').is_file())
+        self.assertFalse((self.root / '.brain/watch.json').exists())
+        self.assertTrue(self.m.allowed_write('brain/.brain/wake/due-seen.json', 'read'))
+        self.assertFalse(self.m.allowed_write('brain/.brain/other-watch.json', 'read'))
+
+    def test_old_escalation_acknowledgement_migrates_without_replaying_backlog(self):
+        inbox = self.root / 'inbox.md'
+        inbox.write_text('- 2020-01-01 00:00 +00:00 from runtime: Host question: choose blue '
+                         '<!-- host-question:blue -->\n')
+        with mock.patch.object(self.m, 'changes_due', return_value=[]), \
+                mock.patch.object(self.m, 'wake_start'), mock.patch.object(self.m, 'WAKE_INTERVAL', 0), \
+                mock.patch.object(self.m, 'wake_send', return_value=True) as send:
+            key = self.m.watch_digest(['overdue', 'root', inbox.read_text().strip()])
+            (self.root / '.brain/watch.json').write_text(json.dumps({'version': 1, 'seen': [key]}))
+            (self.root / '.brain/wake').mkdir(exist_ok=True)
+            (self.root / '.brain/wake/due-episodes.json').write_text(json.dumps({'version': 1, 'open': {}}))
+            self.watch()
+            root = self.inst.node('root')
+            self.m.wake_drain(self.inst, root, once=True)
+            self.assertFalse(any(i['kind'] == 'overdue-question'
+                                 for i in self.m.wake_history(self.m.wake_directory(self.inst, root))[-1]['items']))
+            first = send.call_count  # the independent inbox item may still be new
+            original = inbox.read_text()
+            inbox.write_text('')
+            self.watch()
+            inbox.write_text(original)
+            self.watch()
+            self.m.wake_drain(self.inst, root, once=True)
+            self.assertEqual(send.call_count, first + 1)
+
+    def test_question_crossing_escalation_tier_keeps_new_item_wakes(self):
+        inbox = self.root / 'inbox.md'
+        at = self.inst.now_dt()
+        inbox.write_text('- ' + at.isoformat() + ' from runtime: Host question: choose blue '
+                         '<!-- host-question:blue -->\n')
+        root = self.inst.node('root')
+        with mock.patch.object(self.m, 'changes_due', return_value=[]), \
+                mock.patch.object(self.m, 'core_update'), mock.patch.object(self.m, 'auto_upgrade', return_value=None), \
+                mock.patch.object(self.m, 'load', return_value=self.inst), \
+                mock.patch.object(self.m, 'wake_start'), mock.patch.object(self.m, 'WAKE_INTERVAL', 0), \
+                mock.patch.object(self.m, 'wake_send', return_value=True) as send:
+            self.watch()
+            self.m.wake_drain(self.inst, root, once=True)
+            self.assertEqual(send.call_count, 1)
+            with mock.patch.object(self.m.Instance, 'now_dt', return_value=at + datetime.timedelta(minutes=11)):
+                with contextlib.redirect_stdout(io.StringIO()):
+                    self.m.cmd_due(argparse.Namespace(id='root', quiet=False, json=True))
+                self.m.wake_drain(self.inst, root, once=True)
+                self.assertEqual(send.call_count, 2)
+                self.assertIn('escalation tier item ', send.call_args.kwargs['reason'])
+                inbox.write_text(inbox.read_text() + '- a genuinely new decision\n')
+                self.watch()
+                self.m.wake_drain(self.inst, root, once=True)
+                self.assertEqual(send.call_count, 3)

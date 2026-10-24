@@ -330,13 +330,13 @@ class BriefLimits(Scenario):
     def test_compaction_restart_due_and_fresh_brief_resume_without_commits(self):
         r = self.setup_job()
         self.b(r, "brief", "a", "--branch", "job", "--task", "Finish fixture work")
-        self.b(r, "handback", "a", "--branch", "job", "--state", "done", "--restart", "compactions", ok=False)
-        self.b(r, "handback", "a", "--branch", "job", "--state", "blocked", "--restart", "compactions")
+        self.b(r, "handback", "--summary", "Synthetic result", "a", "--branch", "job", "--state", "done", "--restart", "compactions", ok=False)
+        self.b(r, "handback", "--summary", "Synthetic result", "a", "--branch", "job", "--state", "blocked", "--restart", "compactions")
         due = json.loads(self.b(r, "due", "a", "--json"))
         self.assertIn("restart", str(due))
         self.assertIn("brain brief a --branch job", str(due))
         self.assertIn("## Resume existing work", self.b(r, "brief", "a", "--branch", "job"))
-        self.b(r, "handback", "a", "--branch", "job", "--state", "blocked")
+        self.b(r, "handback", "--summary", "Synthetic result", "a", "--branch", "job", "--state", "blocked")
         self.assertNotIn('"kind": "restart"', self.b(r, "due", "a", "--json"))
 
     def test_restart_replays_exact_inputs_and_acknowledges_each_signal(self):
@@ -349,7 +349,7 @@ class BriefLimits(Scenario):
                 (["--task-file", str(task_file)], task_file.read_text()),
                 (["--task", "Finish the inline fixture's remaining work."], "Finish the inline fixture's remaining work.")]:
             self.b(r, "brief", "a", "--branch", "job", *task_args, "--context-file", str(context))
-            self.b(r, "handback", "a", "--branch", "job", "--state", "blocked", "--restart", "compactions")
+            self.b(r, "handback", "--summary", "Synthetic result", "a", "--branch", "job", "--state", "blocked", "--restart", "compactions")
             due = json.loads(self.b(r, "due", "a", "--json"))
             restart = next(i for i in due if i["kind"] == "restart")
             self.assertEqual(restart["state"], "blocked")
@@ -383,7 +383,7 @@ class BriefLimits(Scenario):
         out = self.b(r, "brief", "a", "--branch", "job", "--task", "Replacement task")
         self.assertIn("Replacement task", out)
         self.assertNotIn("## Shared context", out)
-        self.b(r, "handback", "a", "--branch", "job", "--state", "blocked", "--restart", "compactions")
+        self.b(r, "handback", "--summary", "Synthetic result", "a", "--branch", "job", "--state", "blocked", "--restart", "compactions")
         restart = next(i for i in json.loads(self.b(r, "due", "a", "--json")) if i["kind"] == "restart")
         self.assertNotIn("--context-file", restart["text"])
         self.assertIn("Replacement task", restart["text"])
@@ -399,7 +399,7 @@ class BriefLimits(Scenario):
 
     def test_legacy_restart_requires_original_task_and_reviewer_has_no_worker_policy(self):
         r = self.setup_job()
-        self.b(r, "handback", "a", "--branch", "job", "--state", "blocked", "--restart", "compactions")
+        self.b(r, "handback", "--summary", "Synthetic result", "a", "--branch", "job", "--state", "blocked", "--restart", "compactions")
         out = self.b(r, "brief", "a", "--branch", "job", ok=False)
         self.assertIn("supply the original --task or --task-file", out)
         review = self.b(r, "review", "a", "--branch", "job")
@@ -413,22 +413,105 @@ class BriefLimits(Scenario):
         n = {"fm": {}, "dir": self.tmp, "parent": None}
         # Isolate only privacy lookup; retain the real formatter and byte counter.
         with mock.patch.object(briefs._m_guard, "no_terms_in"):
-            suffix = "\n" + briefs.COMPACTION_POLICY + "\n"
-            text = "## Task\n" + "x" * (8192 - len(suffix.encode()) - 8)
+            text = "## Task\n" + "x" * (8192 - 8)
             with contextlib.redirect_stderr(io.StringIO()) as err:
-                self.assertEqual(len(briefs.checked_brief(n, text).encode()), 8192)
+                output = briefs.checked_brief(n, text, inputs=[("Task", text)])
+                self.assertIn("chargeable=8192;", output)
+                total = int(re.search(r"; total=(\d+);", output).group(1))
+                self.assertEqual(len(output.encode()), total)
             self.assertEqual(err.getvalue(), "")
             with contextlib.redirect_stderr(io.StringIO()) as err:
-                briefs.checked_brief(n, text + "é")
-            self.assertIn("warning", err.getvalue())
+                briefs.checked_brief(n, text + "é", inputs=[("Task", text + "é")])
+            self.assertIn("8194 chargeable bytes", err.getvalue())
             with contextlib.redirect_stderr(io.StringIO()) as err:
-                self.assertEqual(len(briefs.checked_brief(n, text + "x" * 1024).encode()), 9216)
+                output = briefs.checked_brief(n, text + "x" * 1024, inputs=[("Task", text + "x" * 1024)])
+                self.assertIn("chargeable=9216;", output)
             self.assertIn("Task:", err.getvalue())
             for extra in (8192, 9216):
                 with self.assertRaises(SystemExit) as refused:
-                    briefs.checked_brief(n, text + "x" * extra)
+                    briefs.checked_brief(n, text + "x" * extra, inputs=[("Task", text + "x" * extra)])
                 self.assertIn("refused:", str(refused.exception))
                 self.assertIn("Task:", str(refused.exception))
+
+
+
+class R2BriefInputs(Scenario):
+    def test_b11_all_worker_briefs_explicitly_omit_attribution_for_selected_runtime(self):
+        r = self.init("sample")
+        self.b(r, "specialist", "new", "qa", "--title", "QA")
+        for runtime in ("codex", "claude"):
+            for command in (("brief", "root"), ("brief", "root", "--small"), ("hire", "qa", "root")):
+                out = self.b(r, *command, "--runtime", runtime, "--model", "sample-model", "--task", "Inspect fixture")
+                self.assertIn("Commit attribution: omitted", out)
+                self.assertNotIn("Co-Authored-By:", out)
+                self.assertIn("runtime: " + runtime, out)
+        sys.path.insert(0, str(CORE / "lib"))
+        from brain import briefs
+        self.assertIn("omitted", " ".join(briefs.attribution_lines("unknown", "unknown-model")))
+
+    def test_r1_restart_acknowledgement_follows_successful_delivery(self):
+        r = self.init("sample")
+        home = self.repo(self.tmp / "home")
+        self.b(r, "new", "app", "--title", "App", "--home", str(home))
+        self.b(r, "wt", "add", "app", "job")
+        m = core_loader.SourceFileLoader("r2_delivery", str(CORE / "bin/brain")).load_module()
+        a = argparse.Namespace(id="app", small=False, branch="job", import_study=False,
+            task="Inspect fixture", task_file=None, context_file=None, why_separate="fixture job",
+            allow_unexplained=False, peer=None, runtime="codex", model="sample-model", job_class="build",
+            effort=None, to=None, out=None)
+        with mock.patch.dict(os.environ, self.env), mock.patch.object(m, "load", return_value=m.Instance(r)), \
+             mock.patch.object(m, "acknowledge_usage_restart") as ack:
+            with contextlib.redirect_stdout(io.StringIO()):
+                m.cmd_brief(a)
+            ack.assert_called_once()
+            ack.reset_mock()
+            stream = mock.Mock(wraps=io.StringIO())
+            stream.flush.side_effect = BrokenPipeError("fixture delivery failure")
+            with mock.patch.object(sys, "stdout", stream), self.assertRaises(BrokenPipeError):
+                m.cmd_brief(a)
+            ack.assert_not_called()
+
+    def test_p18_input_bytes_ignore_fixed_text_and_forged_headings(self):
+        sys.path.insert(0, str(CORE / "lib"))
+        from brain import briefs
+        n = {"fm": {}, "dir": self.tmp, "parent": None}
+        task = "## Limits\n" + "é" * 2100
+        context = "ع" * 2100
+        with mock.patch.object(briefs._m_guard, "no_terms_in"):
+            with contextlib.redirect_stderr(io.StringIO()) as err:
+                result = briefs.checked_brief(n, "fixed safety " * 1800 + task + context,
+                                              inputs=[("Task", task), ("Shared context", context)])
+            self.assertIn("warning: brief", err.getvalue())
+            self.assertIn("chargeable", err.getvalue())
+            self.assertIn("Task:", err.getvalue())
+            self.assertIn("Shared context:", err.getvalue())
+            self.assertIn("Brief bytes: chargeable=8410", result)
+            self.assertIn("fixed safety", result)
+            with contextlib.redirect_stderr(io.StringIO()) as err:
+                briefs.checked_brief(n, "safety " * 3000, inputs=[("Task", "small")])
+            self.assertEqual(err.getvalue(), "")
+            with self.assertRaises(SystemExit):
+                briefs.checked_brief(n, "x", inputs=[("Task", "é" * 8192)])
+            with self.assertRaises(SystemExit):
+                briefs.checked_brief(n, "x" * (256 * 1024), inputs=[])
+
+    def test_p18_library_metadata_charged_in_worker_small_and_specialist(self):
+        r = self.init("sample")
+        self.b(r, "specialist", "new", "qa", "--title", "QA")
+        self.b(r, "item", "add", "guide", "--from", "root", "--title", "Inspect " + "é" * 4500,
+               "--kind", "method", "--ref", "fixture", "--body", "Inspect fixture")
+        for command in (("brief", "root"), ("brief", "root", "--small"), ("hire", "qa", "root")):
+            out = self.b(r, *command, "--task", "Inspect")
+            self.assertIn("warning: brief", out)
+            self.assertIn("Library metadata", out)
+            charge = int(re.search(r"Brief bytes: chargeable=(\d+)", out).group(1))
+            self.assertGreater(charge, 9000)
+        m = core_loader.SourceFileLoader("r2_library_provenance", str(CORE / "bin/brain")).load_module()
+        inst = m.Instance(r)
+        inputs = []
+        lines = m.knowledge_lines(inst, inst.node("root"), "Inspect", inputs=inputs)
+        self.assertEqual(inputs, [("Library metadata", "guide"), ("Library metadata", "Inspect " + "é" * 4500)])
+        self.assertGreater(len("\n".join(lines).encode()), sum(len(body.encode()) for _, body in inputs))
 
 
 if __name__ == "__main__":

@@ -599,7 +599,7 @@ class RehearsalEvidence(Scenario):
         path = rehearsal.evidence_path(n, 'job')
         path.parent.mkdir(parents=True)
         path.write_text(json.dumps(evidence))
-        self.b(r, 'ready', 'a', '--branch', 'job', '--record', '--reviews', '1')
+        self.b(r, 'ready', '--summary', 'Synthetic result', 'a', '--branch', 'job', '--record', '--reviews', '1')
         self.git('commit', '--allow-empty', '-qm', 'advance origin main', cwd=home)
         newer = self.git('rev-parse', 'HEAD', cwd=home).strip()
         self.git('update-ref', 'refs/remotes/origin/main', newer, cwd=home)
@@ -640,7 +640,7 @@ class RehearsalEvidence(Scenario):
         self.b(r, 'wt', 'add', 'a', 'job')
         wt = self.tmp / 'app-work/worktrees/job'
         self.git('commit', '--allow-empty', '-qm', 'change', cwd=wt)
-        self.assertIn('passing rehearsal missing', self.b(r, 'ready', 'a', '--branch', 'job', '--record', '--reviews', '1', ok=False))
+        self.assertIn('passing rehearsal missing', self.b(r, 'ready', '--summary', 'Synthetic result', 'a', '--branch', 'job', '--record', '--reviews', '1', ok=False))
         head = self.git('rev-parse', 'job', cwd=home).strip()
         main = self.git('rev-parse', 'main', cwd=home).strip()
         import hashlib
@@ -650,10 +650,10 @@ class RehearsalEvidence(Scenario):
                         integration_base=main, passed=True, commands=7,
                         installed_core_commit=rehearsal.installed_core_commit(r))
         path.write_text(json.dumps(evidence))
-        self.assertIn('ready', self.b(r, 'ready', 'a', '--branch', 'job', '--record', '--reviews', '1'))
+        self.assertIn('ready', self.b(r, 'ready', '--summary', 'Synthetic result', 'a', '--branch', 'job', '--record', '--reviews', '1'))
         packet = json.loads(next((r / 'nodes/a/job-handbacks').glob('*.json')).read_text())['ready']
         self.assertEqual(evidence, packet['rehearsal'])
-        reused = self.b(r, 'ready', 'a', '--branch', 'job', '--record', '--reviews', '1')
+        reused = self.b(r, 'ready', '--summary', 'Synthetic result', 'a', '--branch', 'job', '--record', '--reviews', '1')
         self.assertIn('verify: reused', reused)
         packet = json.loads(next((r / 'nodes/a/job-handbacks').glob('*.json')).read_text())['ready']
         self.assertEqual(evidence, packet['rehearsal'])
@@ -785,7 +785,9 @@ class RehearsalDelivery(unittest.TestCase):
         self.assertEqual(['wake:1: HTTP 403', 'wake:2: HTTP 302'], rehearsal.delivery_regressions(statuses))
         self.assertEqual(3, len(seen))
         self.assertTrue(all(agent and 'Python-urllib' not in agent for _, agent, _ in seen))
-        self.assertTrue(all(body == b'{"event":"brain-wake"}' for _, _, body in seen))
+        for path, _, body in seen:
+            self.assertEqual(json.loads(body), {'event': 'brain-wake',
+                             'reason': 'new request ' + hashlib.sha256((base + path).encode()).hexdigest()})
         self.assertNotIn('capability', json.dumps(statuses))
         self.assertNotIn(base, json.dumps(statuses))
 

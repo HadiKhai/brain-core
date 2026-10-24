@@ -12,11 +12,18 @@ class WorkerMessages(Scenario):
         self.b(root, "wt", "add", "a", "job/sample")
         return root, home
 
+    def test_prepared_messages_explicitly_say_they_were_not_sent(self):
+        root, _ = self.job()
+        for kind in ("start", "done", "blocked", "question"):
+            out = self.b(root, "msg", "a", kind, "Synthetic message", "--branch", "job/sample")
+            self.assertIn("NOT SENT: use the host send", out)
+            self.assertTrue(out.startswith(kind + ": Synthetic message"), out)
+
     def test_formatter_and_briefs(self):
         root, _ = self.job()
         for kind in ("start", "done", "blocked", "question"):
             out = self.b(root, "msg", "a", kind, "One\nline", "--branch", "job/sample", "--report", "~/reports/example.md")
-            self.assertEqual(out.strip(), kind + ": One line [branch: job/sample; report: ~/reports/example.md]")
+            self.assertEqual(out.strip(), kind + ": One line [branch: job/sample; report: ~/reports/example.md]\nNOT SENT: use the host send")
         out = self.b(root, "msg", "a", "question", "What next?", "--branch", "job/sample")
         self.assertIn("job-handbacks/", out)
         self.b(root, "msg", "a", "progress", "Working", "--branch", "job/sample", ok=False)
@@ -26,7 +33,7 @@ class WorkerMessages(Scenario):
             self.assertEqual(len(protocol), 1)
             self.assertIn("peer thread", protocol[0])
             self.assertNotRegex(brief, r"(?:done|blocked|question|failed)\|")
-        self.assertIn("start/done/blocked/question", self.b(root, "handback", "--help"))
+        self.assertIn("start/done/blocked/question", self.b(root, "handback", "--summary", "Synthetic result", "--help"))
 
     def test_every_brief_formatter_usage_works_from_its_run_folder(self):
         root, _ = self.job()
@@ -41,15 +48,15 @@ class WorkerMessages(Scenario):
                 if options == ("--branch", "job/sample"):
                     self.assertIn("[branch: job/sample; report:", output)
                 else:
-                    self.assertEqual(output.strip(), kind + ": Made-up result [branch: main]")
+                    self.assertEqual(output.strip(), kind + ": Made-up result [branch: main]\nNOT SENT: use the host send")
         # A generic worker may be outside Git entirely, with no ledger job or report.
         plain = self.tmp / "plain"
         plain.mkdir()
         for kind in ("start", "done", "blocked", "question"):
             output = self.run_(["msg", "a", kind, "Made-up result"], cwd=plain, brain=CORE / "bin/brain")
-            self.assertEqual(output, kind + ": Made-up result\n")
+            self.assertEqual(output, kind + ": Made-up result\nNOT SENT: use the host send\n")
         self.assertEqual(self.b(root, "msg", "a", "done", "Result", "--branch", "other").strip(),
-                         "done: Result [branch: other]")
+                         "done: Result [branch: other]\nNOT SENT: use the host send")
 
     def test_peer_threads_and_coordinator_duty(self):
         root, _ = self.job()
@@ -84,6 +91,6 @@ class WorkerMessages(Scenario):
     def test_handback_formats_failure_and_question_with_report(self):
         root, _ = self.job()
         for state, kind in (("blocked", "blocked"), ("question", "question"), ("failed", "blocked")):
-            out = self.b(root, "handback", "a", "--branch", "job/sample", "--state", state,
+            out = self.b(root, "handback", "--summary", "Synthetic result", "--question", "Synthetic choice?", "a", "--branch", "job/sample", "--state", state,
                          "--report", "~/reports/sample.md", "--lessons", "none: made-up fixture")
             self.assertIn(kind + ": coordinator can see it with brain due [branch: job/sample; report: ~/reports/sample.md]", out)

@@ -24,6 +24,396 @@ After upgrading:
 - Run `brain ui --open` again to replace an older dashboard. No setup is needed.
 - If a legacy dashboard has no identity record, stop it in its own terminal first;
   a working directory or process command cannot prove which instance it serves.
+## 2026-10-24: Stable job reminder identities and quiet Docker reports
+
+Merged-ledger and lesson-outcome needs ignore hand-back wording. Job advice latches each
+condition until a successful rebrief; live counters remain display-only and advice never
+wakes. Docker inbox reports require stopped containers, unknown ownership and age beyond
+`docker_leftover_timeout_seconds` (default/minimum 1800); reports remain informational.
+After upgrading: no action required.
+
+## 2026-10-24: M7: Upgrade around idle retained jobs and worktrees
+
+rehearsal evidence waived (coordinator instruction, 2026-10-24)
+
+For agents: Explicit and automatic core upgrades refuse live heavy/verify admission
+holders and held repository train locks, plus unreadable inventory. Parked or blocked
+jobs and retained worktrees no longer prevent upgrades; a one-line notice counts
+idle open jobs/worktrees. Dead or recycled-PID admission leases are idle and remain
+untouched.
+
+Documentation: Coordinator and home-job settlement instructions now require a fresh version 1
+`--attestation-file <export.json>` after closing the job and confirming each host thread settled.
+
+After upgrading: No migration. Retry after in-flight work stops; idle jobs and
+worktrees can stay in place. Admission and lock ownership rules are unchanged.
+
+## 2026-10-24: Namespace reserved worktree ports in child environments
+
+rehearsal evidence waived (release 1 waiver pattern; rehearse sandbox self-check refuses)
+
+For agents:
+- Verify, worktree setup and train commands receive reserved ports as `BRAIN_PORT`,
+  `BRAIN_PORTS` and `BRAIN_PORT_LAST`. Raw `PORT`, `PORTS` and `PORT_LAST` are no
+  longer added by default. Port reservations and allocation are unchanged.
+- Set `verify_export_port: true` on a node to also export the raw names. Existing
+  operator environment values, including an empty value, always pass through untouched.
+
+After upgrading:
+- A node whose scripts read `PORT`, `PORTS` or `PORT_LAST` must either set
+  `verify_export_port=true` with `brain set`, or switch to the `BRAIN_PORT` names.
+- After upgrading, verification packets from before this release must be re-verified.
+  Effective raw-port values and the export policy now bind both full and lane
+  verification reuse.
+
+## 2026-10-24: M6: Inspect installed core without fetching
+
+rehearsal evidence waived (release 1 waiver pattern; rehearse sandbox self-check refuses)
+
+For agents: brain version reports the installed SHA/date, named cached origin ref, local behind count or unknown/diverged ancestry, and cache age. Existing update notices remain intact.
+
+After upgrading: No migration. Use --ref to choose an origin cache ref. Fresh remote discovery remains outside this command.
+
+## 2026-10-24: B11: Briefs explicitly omit commit attribution
+
+rehearsal evidence waived (release 1 waiver pattern; rehearse sandbox self-check refuses)
+
+For agents: Worker, import, small-job and specialist briefs supply no co-author trailer for any selected runtime/model, including explicit overrides and unknown runtimes.
+
+After upgrading: No migration or historical rewriting. Configurable attribution identities remain future scope.
+
+## 2026-10-24: M7: Refuse explicit upgrades while jobs are open
+
+rehearsal evidence waived (release 1 waiver pattern; rehearse sandbox self-check refuses)
+
+For agents: brain upgrade checks job/worktree inventories before changing core and refuses unreadable inventory as busy. The refusal lists affected jobs and locally cached change entries, with an idle retry instruction.
+
+After upgrading: Finish jobs and release their worktrees before retrying. Idle upgrades retain their existing behavior. Deferred upgrades and cross-machine migration remain outside this change.
+
+## 2026-10-24: M9: Apply an explicit settings batch once
+
+rehearsal evidence waived (release 1 waiver pattern; rehearse sandbox self-check refuses)
+
+For agents: brain settings batch accepts set and schedule-add operations, validates the complete list before publication, keeps machine-local settings private, and commits only named shared paths once. Unrelated staged work is preserved.
+
+After upgrading: No migration; single commands remain available. Dirty target paths are refused. Interrupted publication retains a private pending/failure packet for coordinator recovery; automatic rollback and hourly squashing remain outside scope.
+
+## 2026-10-24: P18: Charge brief inputs by provenance
+
+rehearsal evidence waived (release 1 waiver pattern; rehearse sandbox self-check refuses)
+
+For agents: Brief allowances charge task and embedded context UTF-8 bytes captured before assembly. Fixed generated instructions are excluded; both input and total bytes are reported, and diagnostics name coordinator-controlled sections.
+
+After upgrading: No migration. brief_max_kb still warns above the configured allowance and refuses at twice it. A separate absolute total ceiling of 256 KiB applies. Safety text is never silently truncated; automatic context summarization remains future scope.
+
+## 2026-10-24: Release 2: Known in this release
+
+For agents:
+- upgrade in-flight check does not see native rehearsal or ownerless wrapper locks (no owner evidence)
+- brain land remains parked; use the approved manual landing path.
+- heavy-run remains parked (2 P1 + P2; redesign deferred).
+- rehearse EPERM atexit kill remains parked (P1).
+- rehearse harness linked-external-observation refusal remains parked (harness-r2).
+- P6 cancellation is deferred.
+- Native rehearsal remains blocked by the sandbox self-check refusal
+  (rehearse.py:877).
+- Clone comparison retains the harness HOME identity gap for the usage-reading
+  probe; it does not establish equivalent usage-reading observations.
+- test: cross-process limit test uses a barrier
+  Plain-branch review inventory assertions use the isolated fixture environment.
+
+After upgrading:
+- These parked jobs, deferrals and evidence gaps remain open. Release 2 follows
+  the approved rehearsal waiver and manual landing path.
+
+## 2026-10-24: B5 Reviewed publication policy at settings and instruction boundaries
+
+rehearsal evidence waived (coordinator decision A, 2026-10-24); direct admitted full verify passed
+
+For agents: `merge=pr` refuses a conflicting or unmapped current reviewed Limits snapshot,
+quoting its rule/source. Briefs and `brain policy` distinguish allow/deny/unknown; merge
+selection grants no push/PR consent. Explicit policy is supplied review evidence, not a
+natural-language authorization engine.
+Limits stop at the nearest sealed node, including that node's own rules. Empty PR policy
+also refuses; parent rules beyond an ownership boundary never appear in generated output.
+
+After upgrading: coordinators map current limits in `publication-policy.json` before PR
+mode or outward steps. Legacy ambiguous limits require their decision. Arbitrary external
+commands and a general action guard remain outside this slice.
+
+## 2026-10-24: B6 Complete supplied rules-snapshot activation
+
+rehearsal evidence waived (coordinator decision A, 2026-10-24); direct admitted full verify passed
+
+For agents: one protected due item follows each pending rules snapshot. Explicit
+`brain proposals <node> --approve-all --review-manifest <file>` atomically activates its
+complete independently reviewed rules with attribution/provenance in native instructions;
+changed/partial/revoked/self-approved evidence refuses without partial writes.
+A valid explicit legacy rejection resolves its activation reminder without activating rules;
+reviewed-but-unactivated snapshots still require the activation decision.
+
+After upgrading: legacy prose stays pending until the coordinator prepares the documented
+rules-only JSON snapshot and complete manifest. Review records are supplied evidence,
+never authenticated identity. No automatic import activation; bulk roles/items and future
+imports remain outside this rules-only slice.
+
+## 2026-10-24: P10 Exact-candidate land-check receipts
+
+rehearsal evidence waived (coordinator decision A, 2026-10-24); direct admitted full verify passed
+
+For agents: configured `land_check` runs through one reusable explicit candidate check,
+retains passing/failing job-ledger receipts, and blocks supported landing/push instructions
+when evidence is absent, failed or stale. Local trains check their exact integration tip.
+The supported push-step command only prints a SHA-pinned command; it never pushes.
+
+After upgrading: configure `land_check=<command>` where needed and use `brain land-check`
+before each supported outward step. Missing settings add no check or permission. Receipts
+do not establish readiness or consent; arbitrary external pushes and host publication
+enforcement remain outside core's supported-path boundary.
+## 2026-10-24: M8 answer inbox request episodes and report weekly age
+
+rehearsal evidence waived (release 1 waiver pattern; rehearse sandbox self-check refuses)
+
+For agents:
+- Inbox output groups stable request IDs and age by node. `brain answer <id> "<text>"`
+  records an answer to one current episode, retaining its original source and history.
+- `brain inbox --weekly` reports unanswered requests at least seven days old without
+  discarding them. `--new` remains reporting acknowledgement, separate from answers.
+
+After upgrading:
+- No migration is required. Answer receipts are bounded machine-local state under
+  `.brain/wake/`; no new host schedule or automatic age-based resolution is installed.
+
+## 2026-10-24: P4 acknowledge a specific parked handback episode
+
+rehearsal evidence waived (release 1 waiver pattern; rehearse sandbox self-check refuses)
+
+For agents:
+- `brain due --ack <id> --reason "<text>" --resume "<condition>" [--until <time>]`
+  handles one eligible blocked handback. Changed episodes and expired resume times
+  reappear; unanswered human questions, failures and restart needs stay visible.
+- `brain due --handled` and generated status retain the parked state and handling reason.
+
+After upgrading:
+- Existing handbacks remain readable; no migration or automatic resume execution.
+  Receipts are local and never replace the underlying worker signal.
+
+## 2026-10-24: P14 defer eligible reminders until absolute expiry
+
+rehearsal evidence waived (release 1 waiver pattern; rehearse sandbox self-check refuses)
+
+For agents:
+- `brain due --defer <id> <absolute-until> --reason "<text>"` defers a missing-preview
+  episode. Changed needs and expiry rearm it; protected questions and failures cannot
+  be deferred. A `preview=none` setting and the preview requirement remain intact.
+
+After upgrading:
+- No migration is required. Deferrals use bounded local receipts and never edit
+  readiness, verification or preview requirements. Other reminder kinds remain protected.
+
+## 2026-10-24: P15 opt in to explicit upstream index fingerprints
+
+rehearsal evidence waived (release 1 waiver pattern; rehearse sandbox self-check refuses)
+
+For agents:
+- Configure `upstream_inputs` and `upstream_output` as explicit files within a node's
+  allowed home. `brain check` flags missing, stale or unknown indexes; unreadable
+  inputs never count as fresh. `brain index <node> --record` records current fingerprints.
+
+After upgrading:
+- Unconfigured nodes are unchanged. No script is run; explicitly regenerate the
+  index before recording. Automatic regeneration remains outside this freshness slice.
+
+## 2026-10-24: M12 print coordinator-thread wake provisioning plans
+
+rehearsal evidence waived (release 1 waiver pattern; rehearse sandbox self-check refuses)
+
+For agents:
+- `brain machine wake-setup <node>` names the current bound coordinator, prints the
+  structured T3 webhook payload to run from that thread, and gives local bind steps.
+  Unsupported hosts and missing coordinators produce explicit setup gaps.
+
+After upgrading:
+- No bindings migrate and no host call occurs. Re-run the plan after rebinding;
+  keep returned capabilities private. Actual host provisioning remains separate.
+
+## 2026-10-24: R1 request a fresh brief at sustained context or token limits
+
+rehearsal evidence waived (release 1 waiver pattern; rehearse sandbox self-check refuses)
+
+For agents:
+- Due raises one stable `restart from brief` item at three compactions or twice
+  the job's token budget, naming both measures. It never automatically stops a job.
+- Successful rebrief delivery records a job-scoped usage baseline so pre-restart
+  counters do not immediately alert again. Only the coordinator restarts the worker.
+
+After upgrading:
+- No migration is required. Initial briefs do not reset budgets; restart baselines
+  are bounded machine-local receipts. Automatic worker termination remains outside scope.
+## 2026-10-24: M5 explicit hand-back summaries and questions
+
+rehearsal evidence waived (release 1 waiver pattern; rehearse sandbox self-check refuses)
+
+For agents: Every new hand-back needs a nonempty one-line `--summary`; `--state question` also needs `--question`. Schema v3 stores these fields without reading the report for a substitute.
+
+After upgrading: Add these flags to hand-back scripts and `ready --record`. Legacy records remain readable and explicitly show missing summary/question fields; no historical report is rewritten.
+
+## 2026-10-24: P5 durable replacement hand-back attempts
+
+rehearsal evidence waived (release 1 waiver pattern; rehearse sandbox self-check refuses)
+
+For agents: Before native verification/admission, a separate job-key/head/base/input-bound attempt records queued or verifying. Due and live records show the replacement and label earlier completion historical. Changed, closed or replaced jobs and superseded attempts cannot publish a stale result.
+
+After upgrading: No readiness/reuse rule changes. Interrupted attempts require inspection and a fresh hand-back; they never restore the previous completion as current.
+
+## 2026-10-24: P6 durable requests with an explicit foreground runner
+
+rehearsal evidence waived (release 1 waiver pattern; rehearse sandbox self-check refuses)
+
+For agents: `handback --enqueue` returns a durable request ID. `queue run <node> --once` claims one request with an exclusive lease and uses the synchronous native verifier/reservation and terminal writer. Repeated claims cannot publish again. No service is installed.
+
+After upgrading: Run the foreground command explicitly; a queued request can wait indefinitely for it. Abandoned running leases remain unknown and are never adopted by PID reuse.
+
+Known: P6 cancellation/crash recovery deferred until the heavy-run ownership redesign.
+
+## 2026-10-24: P2 fresh per-job settlement attestations
+
+rehearsal evidence waived (release 1 waiver pattern; rehearse sandbox self-check refuses)
+
+For agents: `jobs --settled` requires `--attestation-file` with fresh exhaustive project/nested-thread coverage, exact job keys, terminal settled threads and no pending requests. All entries are checked before any ledger stamp; currently bound coordinators/open jobs remain protected. Printed settle instructions use one explicit `threadId` each.
+
+After upgrading: Replace bare per-job or `--all-closed` boolean attestations with the documented version 1 export. This is coordinator-supplied evidence, not independent live host verification. Core performs no host settlement.
+
+## 2026-10-24: M4 recorded live job projection and generated Active work
+
+rehearsal evidence waived (release 1 waiver pattern; rehearse sandbox self-check refuses)
+
+For agents: `jobs --live` joins ledger, current and historical summaries, active attempt, durable request/native admission position and recorded owner, and next action. Generated Active work uses the same projection.
+
+After upgrading: Treat queued/verifying as recorded states; host and owner activity remain unknown without a host observation. No ETA or live-thread claim is inferred.
+
+## 2026-10-24: M3 bounded file-only dispatch plans
+
+rehearsal evidence waived (release 1 waiver pattern; rehearse sandbox self-check refuses)
+
+For agents: `dispatch` prints a stable plan of explicit inbox/operator asks and owning node targets, with output/node limits and a partial indicator. An empty bounded scan is silent. It uses the read-only request projection and never acknowledges delivery.
+
+After upgrading: An existing coordinator can consume the plan. No conversation is launched, no wake is retargeted, and no model/host pending query occurs. Dispatcher-thread/service rollout remains deferred.
+
+## 2026-10-24: R2 close manually landed or parked ledger jobs
+
+rehearsal evidence waived (release 1 waiver pattern; rehearse sandbox self-check refuses)
+
+For agents: `jobs <node> --branch <branch> --close` confirms the branch head is an ancestor of local main and records merged closure with the main SHA. A parked job can be closed explicitly with a one-line `--reason`, retaining its worktree and evidence.
+
+After upgrading: Record lesson outcomes and fresh settlement evidence as usual. A separate merge record is unnecessary; closure neither removes resources nor performs host settlement.
+
+## 2026-10-24: Configure worker runtime and model defaults per job class
+
+rehearsal evidence waived (root decision A, 2026-10-24); re-rehearsed natively before the release 1 tag
+
+For agents:
+- Briefs accept `route_runtime_<class>` and `route_model_<runtime>_<class>` in
+  node.md and instance.md for every supported job class. Explicit flags win, then
+  node per-class, node default, instance per-class, and instance default settings.
+- Per-class routing names the deciding sources. Unknown class suffixes fail rather
+  than silently falling back. Files without per-class keys retain legacy output.
+
+After upgrading:
+- No migration is needed. Add optional class keys to opt into per-class defaults;
+  see the settings references in instance.md and node.md.
+
+## 2026-10-24: Clear worker messages and small workflow fixes
+
+rehearsal evidence waived (root decision A, 2026-10-24); re-rehearsed natively before the release 1 tag
+
+For agents:
+- Ready rejects unfinished WIP, fixup! and squash! commit titles anywhere in the
+  job's commit range. Verify refusals name moved refs with their old and new
+  commits; every main move still invalidates verification.
+- `brain msg` prepares text and prints `NOT SENT: use the host send`. Deliver the
+  prepared message through the host explicitly.
+- `wt add` reuses cached submodule objects with independent checkout metadata
+  before setup, without fetching. `wt prune` reports submodule worktrees and
+  retains them and their shared module data.
+- Read-only stop-hook relays may finish with `relay only`, without repeating a
+  previous answer. Unanswered questions are still captured.
+- Subscriptions may override `stop_percent`; otherwise they inherit the existing
+  machine-wide default (85 when omitted). Routing and meters use each value.
+- Needs-you lists deduplicate source item IDs and keep informational advice out;
+  recommendation and default details remain available in the request reader.
+- A wake bound to a coordinator satisfies the code-node tick diagnostic.
+
+After upgrading:
+- Finish or squash unfinished commits before handing back. Send formatted worker
+  messages through the host. Cached submodules need no extra setup; uncached
+  modules remain the setup script's responsibility. Submodule worktrees reported
+  by prune are retained for explicit cleanup.
+- Existing stop lines keep their behavior. Set `stop_percent` on a subscription
+  only when it needs a different threshold. No other configuration change is needed.
+
+## 2026-10-24: Keep overdue escalation wakes quiet until the item changes
+
+rehearsal evidence waived (root decision A, 2026-10-24); re-rehearsed natively before the release 1 tag
+
+For agents:
+- Ordinary due ticks and the watcher share persistent receipts for overdue
+  questions. An unchanged escalation stays quiet after transport receipts expire;
+  a changed question or a cleared and reopened question can wake again.
+- Coordinator wake payloads include a non-empty `reason`: opaque item keys and
+  a new-or-changed or escalation-tier cause. No question text or node names leave
+  the instance. Manual requests without item metadata carry an opaque request key.
+- Due output and machine hold episode handling retain their existing behavior.
+- The replay showed no live-noise reduction: real sequence 4→4 wakes;
+  empty-source sequence 0→0 wakes.
+- Unreadable wake receipts retain their evidence and let current work wake.
+  Failed episode publication and corrupt or unreadable episode state preserve
+  accepted pending wakes; unknown identities never prove that work resolved.
+  Unknown state can repeat a wake until repaired. Healthy acknowledgements
+  retain only open needs and durable pending requests, retiring closed episodes.
+
+After upgrading:
+- Keep private wake receipts. Inspect the wake reason and `.brain/wake/` delivery
+  history when diagnosing a repeat; no new configuration is needed.
+
+## 2026-10-24: Keep agreed local build orders moving
+
+rehearsal evidence waived (root decision A, 2026-10-24); re-rehearsed natively before the release 1 tag
+
+For agents:
+- `brain due` reports `idle-with-runnable-work` when an agreed backlog task fits
+  below the node's open-job cap. Its text names the next runnable tasks, in order;
+  ordinary due receipts wake once per unchanged need.
+- In `backlog.md`, only Markdown tasks under `## Build order` participate:
+  `- [ ] text` is unstarted, `- [x] text` is done, `(parked: reason)` parks an
+  unchecked task, and `(waits: operator)` blocks it on the operator. A task naming
+  a `job/X` branch open in the ledger is already in progress. Other sections,
+  comments and fenced examples are ignored, including existing NEXT prose.
+- `parallel_jobs: N` in node frontmatter is a positive integer, default 1.
+  Every open ledger job counts toward it. Set it with `brain set <id> parallel_jobs=N`;
+  invalid values are refused and `brain check` flags invalid hand edits.
+- Coordinators need no further go for local worktrees, builds, tests, reviews or
+  local merges under the landing rules. Outward actions still need consent.
+
+After upgrading:
+- Put agreed work in your node's backlog Build order section and set its parallel
+  cap when more than one open job is allowed. Existing backlog prose is unchanged
+  and creates no reminders until you opt into the task format. Node documentation
+  in `templates/node/node.md` describes the format and capacity rules.
+
+## 2026-10-24: Known in this release
+
+For agents:
+- brain land (parked).
+- heavy-run (2 P1 + P2, redesign in backlog).
+- rehearse EPERM atexit kill (P1).
+- rehearse harness linked-external-observation refusal (harness-r2 parked).
+- native re-rehearsal unavailable: sandbox self-check refusal (rehearse.py:877), harness bytes unchanged since 3ddfd1a
+- usage-reading probe not covered by clone comparison (harness HOME identity); verified live on the operator machine; verify ×2 and clean-install check pass
+
+After upgrading:
+- These issues remain open. Release 1 uses the approved manual landing path;
+  re-rehearse natively before creating the release 1 tag.
 
 ## 2026-10-23: Rehearse JSON probes without collapsing private identities
 
@@ -881,12 +1271,15 @@ After upgrading:
 For agents:
 - Closing a job prints its worker reference, job marker and thread-settlement checklist.
   The coordinator discovers and checks threads through the host, then records
-  `brain jobs <node> --branch <branch> --settled`. Brain never calls the host API.
+  `brain jobs <node> --branch <branch> --settled --attestation-file <export.json>`
+  with a fresh version 1 export (required since the 2026-10-24 P2 update). Brain never calls
+  the host API.
 - Never settle coordinators, open jobs, running/waiting threads or threads with pending
   requests. Unknown ownership or activity leaves the job unsettled; partial cleanup does too.
 - Legacy jobs without markers or worker references can be cleared after the host adapter's
-  exhaustive project-list sweep: `brain jobs <node> --settled --all-closed` records all closed
-  rows together, refuses any target branch with open work, and leaves open rows untouched.
+  exhaustive project-list sweep: `brain jobs <node> --settled --all-closed --attestation-file <export.json>`
+  records all closed rows together with the same fresh exhaustive evidence, refuses any target
+  branch with open work, and leaves open rows untouched.
   List exhaustion proves no attributable unsettled threads remain; search only finds candidates.
 - `brain jobs` shows at most ten unsettled rows, then the remaining count.
 - `brain due`, generated facts and live state count closed jobs with unsettled threads,
