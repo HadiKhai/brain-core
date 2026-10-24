@@ -69,3 +69,12 @@ test('stream delivery carries the displayed version and disposed partial polls s
     assert.equal(env.reads(), count);
   } finally { stop?.(); env.restore(); }
 });
+
+test('a failed refresh keeps the partial reading marked and explains why details have not arrived', () => {
+  const value = { brain: { now: '2026-01-01T00:00:00Z', filling_in: true }, __ui_version: '1' };
+  const now = Date.parse('2026-01-01T00:00:12Z');
+  assert.match(live.readingMarker(value, { version: 1, failed: true }, 'Live', now), /Filling in.*Refresh failed.*12s old/);
+  for (const connection of ['Connection failed', 'Updates interrupted', 'Permission required'])
+    assert.ok(live.readingMarker(value, { version: 1 }, connection, now).includes(connection));
+  assert.match(live.readingMarker({ ...value, brain: { filling_in: true } }, null, 'Live', now), /Filling in.*age unknown/);
+});

@@ -265,7 +265,6 @@ function App() {
     <TimeZoneContext.Provider value={s?.brain?.tz}>
       <ReviewProvider enabled={!!s?.review?.enabled} catalogKey={JSON.stringify([list(s?.items?.all).filter(i => i.status === "proposed").map(i => [i.id, i.scope]), list(s?.specialists).filter(i => i.status === "proposed").map(i => [i.id, i.node, i.scope])])}><TooltipProvider>
         <SidebarProvider>
-          {marker && <div data-reading-progress role="status" style={{ position: "fixed", bottom: 12, right: 12, zIndex: 9999, padding: "8px 12px", borderRadius: 8, background: "Canvas", color: "CanvasText", border: "1px solid GrayText", font: "13px system-ui" }}>{marker}</div>}
           <Navigation s={s} route={route} go={go} onAdd={() => setAdd(true)} onNotice={setNotice} />
           <SidebarInset className="app-inset">
             <div className="topbar">
@@ -298,6 +297,13 @@ function App() {
             </div>
             <div ref={scroll} className="inset-scroll" id="workspace-content" data-fill-page={["inbox", "specialists", "learnings", "graph", "threads", "jobs"].includes(v) || undefined}>
               <PageHeader title={head.title} subtitle={head.subtitle} crumbs={head.crumbs} actions={<div id="screen-action-host" />} />
+              {marker && (
+                <Alert data-reading-progress role="status">
+                  <RefreshCw size={18} aria-hidden="true" />
+                  <AlertTitle>{marker}</AlertTitle>
+                  <AlertDescription>You can use this reading while the remaining details arrive.</AlertDescription>
+                </Alert>
+              )}
               {notice && (
                 <Alert className="notice" role="status">
                   <AlertTitle>Workspace notice</AlertTitle>

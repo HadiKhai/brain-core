@@ -7,11 +7,12 @@ export function readingMarker(value: any, progress: ReadingProgress | null, conn
   const version = value?.__ui_version;
   if (!partial && version == null) return null; // Older servers and saved snapshots have no delivery metadata.
   const confirmed = progress && String(progress.version) === version;
-  if (!partial && confirmed && !progress.refreshing && !progress.failed &&
-      !['Connection failed', 'Updates interrupted', 'Permission required'].includes(connection)) return null;
+  const failure = progress?.failed ? 'Refresh failed' :
+    ['Connection failed', 'Updates interrupted', 'Permission required'].includes(connection) ? connection : null;
+  if (!partial && confirmed && !progress.refreshing && !failure) return null;
   const at = Date.parse(value?.brain?.now);
   const age = Number.isFinite(at) ? `reading ${Math.max(0, Math.floor((now - at) / 1000))}s old` : 'reading age unknown';
-  return `${partial ? 'Filling in…' : progress?.failed ? 'Refresh failed' : 'Refreshing…'} · ${age}`;
+  return [partial ? 'Filling in…' : !failure ? 'Refreshing…' : null, failure, age].filter(Boolean).join(' · ');
 }
 
 export function watchLive(key: string, state: (value: any) => void, status: (value: string) => void, notify = false) {

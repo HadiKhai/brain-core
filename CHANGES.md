@@ -10,6 +10,9 @@ upgrading. `brain changes <node>` shows the entries this node's coordinator hasn
 For agents:
 - The dashboard first serves real node and job files with a filling-in marker,
   then publishes the complete reading. Refreshing and failed readings show their age.
+- The marker uses the dashboard's loading notice and stays visible until the
+  complete reading arrives, including when an idle tab closes its live stream.
+  Failed refreshes keep the partial reading available and explain the delay.
 - Repeated read-only Git queries share one build's results. Explicit checks and
   later builds still read Git again.
 - `brain ui --open` reuses a matching local server or replaces an identified old
