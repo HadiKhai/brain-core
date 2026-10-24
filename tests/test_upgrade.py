@@ -136,5 +136,74 @@ class ReleaseNotes(Scenario):
         self.assertNotIn("\nAfter upgrading:", preamble)
 
 
+class R2VersionAndUpgrade(Scenario):
+    def module(self):
+        return core_loader.SourceFileLoader("r2_upgrade", str(CORE / "bin/brain")).load_module()
+
+    def test_m6_cached_version_never_fetches_and_labels_unknown_diverged(self):
+        m = self.module()
+        core = self.repo(self.tmp / "core")
+        self.git("remote", "add", "origin", "https://invalid.example/core.git", cwd=core)
+        old = self.git("rev-parse", "HEAD", cwd=core).strip()
+        self.git("commit", "--allow-empty", "-qm", "next", cwd=core)
+        newer = self.git("rev-parse", "HEAD", cwd=core).strip()
+        self.env["GIT_COMMITTER_DATE"] = "2020-01-01T00:00:00+00:00"
+        self.git("update-ref", "refs/remotes/origin/main", newer, cwd=core)
+        self.git("checkout", "--detach", "-q", old, cwd=core)
+        with mock.patch.object(m.subprocess, "run", wraps=subprocess.run) as run:
+            info = m.core_version(core, now=2000000000)
+        self.assertEqual(info["sha"], old)
+        self.assertTrue(info["date"])
+        self.assertEqual(info["ref"], "refs/remotes/origin/main")
+        self.assertEqual(info["behind"], 1)
+        self.assertEqual(info["cache_age_seconds"], 2000000000 - 1577836800)
+        self.assertEqual(info["status"], "behind")
+        self.assertFalse(any(any(x in str(c) for x in ("fetch", "ls-remote", "pull")) for c in run.call_args_list))
+        self.git("commit", "--allow-empty", "-qm", "fork", cwd=core)
+        self.assertEqual(m.core_version(core)["status"], "diverged")
+        self.assertEqual(m.core_version(core, ref="refs/remotes/origin/missing")["status"], "unknown")
+        self.git("checkout", "--orphan", "unrelated", cwd=core)
+        self.git("commit", "--allow-empty", "-qm", "unrelated history", cwd=core)
+        self.assertEqual(m.core_version(core)["status"], "unknown")
+        with self.assertRaises(SystemExit):
+            m.core_version(core, ref="refs/remotes/origin/main~1")
+        self.git("remote", "remove", "origin", cwd=core)
+        self.assertEqual(m.core_version(core)["status"], "unknown")
+
+    def test_version_command_reports_installed_identity_as_json(self):
+        r = self.init("sample")
+        info = json.loads(self.b(r, "version", "--json"))
+        self.assertEqual(info["sha"], self.git("rev-parse", "HEAD", cwd=CORE).strip())
+        self.assertRegex(info["date"], r"^\d{4}-\d{2}-\d{2}T")
+        self.assertTrue(info["ref"].startswith("refs/remotes/origin/"))
+        self.assertIn("cache_age_seconds", info)
+        self.assertIn("cache age:", self.b(r, "version"))
+
+    def test_m7_busy_and_unreadable_upgrade_refuse_before_mutation(self):
+        m = self.module()
+        root = self.repo(self.tmp / "instance", {".gitmodules": "[submodule \"core\"]\npath = core\n"})
+        core = self.repo(root / "core", {"CHANGES.md": "## 2026-01-01: Base\n\nFor agents: original\n"})
+        self.git("remote", "add", "origin", "https://invalid.example/core.git", cwd=core)
+        old = self.git("rev-parse", "HEAD", cwd=core).strip()
+        (core / "CHANGES.md").write_text("## 2026-01-02: New behavior\n\nFor agents: new rules\n" + (core / "CHANGES.md").read_text())
+        self.git("commit", "-qam", "update", cwd=core)
+        self.git("update-ref", "refs/remotes/origin/main", "HEAD", cwd=core)
+        self.git("checkout", "--detach", "-q", old, cwd=core)
+        fake = mock.Mock(root=root)
+        for inventory in ([("sample", "job-one")], OSError("unreadable")):
+            with mock.patch.object(m, "find_root", return_value=root), mock.patch.object(m, "Instance", return_value=fake), \
+                 mock.patch.object(m, "open_jobs_anywhere", side_effect=inventory if isinstance(inventory, Exception) else None,
+                                   return_value=inventory), mock.patch.object(m.subprocess, "run", wraps=subprocess.run) as run:
+                with self.assertRaises(SystemExit) as err:
+                    m.cmd_upgrade(argparse.Namespace())
+            message = str(err.exception)
+            self.assertIn("idle", message)
+            self.assertIn("New behavior", message)
+            self.assertIn("job-one" if isinstance(inventory, list) else "unreadable", message)
+            self.assertFalse(any("submodule" in str(c) for c in run.call_args_list))
+            self.assertEqual(self.git("rev-parse", "HEAD", cwd=core).strip(), old)
+        fake.commit.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

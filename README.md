@@ -555,12 +555,45 @@ You mostly talk to coordinators, and they run `brain` for you. By hand:
 | `brain link --global [runtime=folder ...]` | a pointer to this brain in runtimes' user-wide instructions |
 | `brain brains`, `brain use <name>`, `brain -b <name> …`, `brain --all` | several brains: list, default, pick, every dashboard |
 | `brain changes [node] [--seen]` | what changed in core for agents since this coordinator last read it |
+| `brain version [--ref refs/remotes/origin/main] [--json]` | installed core SHA/date and local cached-origin comparison, with cache age; never fetches |
+| `brain settings batch operations.json` | validate all set/schedule-add operations, then apply with one named-path bookkeeping commit |
 | `brain set root auto_upgrade=on` | this machine upgrades core by itself whenever no job is open |
-| `brain upgrade` | update `core/` to the latest version, then link and check |
+| `brain upgrade` | refuse while any job/worktree is open or its inventory is unreadable; once idle, update `core/`, link and check |
 | `brain hook stop` / `brain hook approve` | the stop hook both runtimes run; trust it in Codex |
 </details>
 
 ---
+
+Settings batches use a UTF-8 JSON array. For example:
+
+```json
+[
+  {"op": "set", "node": "root", "pairs": ["rotate_turns=42", "coordinator=sample-thread"]},
+  {"op": "schedule-add", "id": "daily-check", "node": "root", "when": "daily 09:00", "brief": "Inspect the fixture"}
+]
+```
+
+All operations validate before publication, including duplicate schedule IDs and machine-local
+settings. Machine-local keys remain in `.brain/local.json`; shared settings and schedule
+additions make one commit. Unrelated staged work stays staged. Targets with pre-existing
+edits are refused. A publication failure leaves a private pending/failure packet in
+`.brain/settings-batches/` with before/after contents: ask the coordinator before recovery.
+There is no automatic rollback, host schedule creation or hourly squashing.
+
+Worker, import, small-job and specialist briefs explicitly omit co-author attribution. They
+supply no trailer for any runtime or model; explicit runtime/model selection does not invent
+an attribution identity.
+
+`brief_max_kb` (default 8) charges UTF-8 task and embedded context bytes captured before
+assembly. Generated fixed instructions do not consume that allowance. Briefs warn above
+the allowance and refuse at twice it. Both chargeable and total bytes are reported; at
+256 KiB total output they refuse regardless of the allowance. Diagnostics identify the
+coordinator-controlled source sections. Mandatory safety text is retained without truncation.
+
+`brain version` compares with the locally cached origin default ref (or origin/main) and
+labels unknown or diverged ancestry explicitly. Cache age observes the last available ref
+reflog update, not a commit date or a guarantee about the remote; absent reflogs mean unknown
+age. This command makes no network request. Existing daily update notices remain separate.
 
 ## What's in this repository
 

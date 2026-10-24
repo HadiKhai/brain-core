@@ -16,11 +16,94 @@ from . import nodes as _m_nodes
 from . import usage as _m_usage
 
 
+def cached_origin_ref(core):
+    ref = _m_common.git("symbolic-ref", "-q", "refs/remotes/origin/HEAD", cwd=core).stdout.strip()
+    return ref if ref.startswith("refs/remotes/origin/") else "refs/remotes/origin/main"
+
+
+def core_version(core, ref=None, now=None):
+    """Installed identity and ancestry against local origin objects only; never refresh the cache."""
+    ref = ref or cached_origin_ref(core)
+    if (not isinstance(ref, str) or not ref.startswith("refs/remotes/origin/") or
+            _m_common.git("check-ref-format", ref, cwd=core).returncode):
+        _m_common.die("--ref must name a cached refs/remotes/origin/<branch> ref")
+    identity = _m_common.git("show", "-s", "--format=%H%n%cI", "HEAD", cwd=core)
+    parts = identity.stdout.strip().splitlines() if identity.returncode == 0 else []
+    result = {"sha": parts[0] if parts else None, "date": parts[1] if len(parts) > 1 else None,
+              "ref": ref, "behind": None, "status": "unknown", "cache_age_seconds": None}
+    # A reflog timestamp observes a local ref update, rather than the commit's author date.
+    log = _m_common.git("reflog", "show", "-1", "--format=%gD", "--date=unix", ref, cwd=core)
+    stamp = re.search(r"@\{(\d+)\}", log.stdout)
+    if stamp:
+        result["cache_age_seconds"] = max(0, int((time.time() if now is None else now) - int(stamp[1])))
+    if not parts or _m_common.git("remote", "get-url", "origin", cwd=core).returncode:
+        result["reason"] = "installed identity or origin unavailable"
+        return result
+    remote = _m_common.git("rev-parse", "--verify", ref + "^{commit}", cwd=core)
+    if remote.returncode:
+        result["reason"] = "cached ref unavailable"
+        return result
+    counts = _m_common.git("rev-list", "--left-right", "--count", "HEAD..." + ref, cwd=core)
+    common = _m_common.git("merge-base", "HEAD", ref, cwd=core)
+    if counts.returncode or common.returncode:
+        result["reason"] = "ancestry unavailable"
+        return result
+    ahead, behind = map(int, counts.stdout.split())
+    result["ahead"] = ahead
+    if ahead and behind:
+        result["status"] = "diverged"
+    else:
+        result.update(behind=behind, status="behind" if behind else "ahead" if ahead else "current")
+    return result
+
+
+def cmd_version(a):
+    core = _m_common.CORE
+    root = _m_nodes.try_find_root()
+    if root and (root / "core" / ".git").exists():
+        core = root / "core"
+    info = core_version(core, ref=a.ref)
+    if a.json:
+        print(json.dumps(info, indent=2))
+        return
+    print(f"core {info['sha'] or 'unknown'}; commit date: {info['date'] or 'unknown'}")
+    age = info['cache_age_seconds']
+    age = f"{age} seconds" if age is not None else "unknown"
+    comparison = f"{info['behind']} commits behind" if info['behind'] is not None else info['status']
+    print(f"cached {info['ref']}: {comparison}; cache age: {age}; no fetch")
+    if info.get("reason"):
+        print(info["reason"])
+
+
+def upgrade_busy_message(root, busy):
+    core = root / "core"
+    ref = cached_origin_ref(core)
+    before = _m_common.git("show", "HEAD:CHANGES.md", cwd=core)
+    after = _m_common.git("show", ref + ":CHANGES.md", cwd=core)
+    available = before.returncode == after.returncode == 0
+    old_ids = {e["id"] for e in changes_entries(before.stdout)}
+    fresh = [e for e in changes_entries(after.stdout) if e["id"] not in old_ids] if available else []
+    lines = ["refused: core upgrade requires an idle brain; affected jobs/worktrees:"]
+    lines += [f"- {node}: {reason}" for node, reason in busy]
+    lines += [f"Locally cached changes from {ref} (no fetch; cache may be stale):"]
+    lines += [f"- {e['id']}\n{e['body']}" for e in fresh] if fresh else [
+        "- no new cached change entries" if available else "- change details unavailable locally"]
+    lines.append("Retry brain upgrade when idle, after jobs finish and their worktrees are released.")
+    return "\n".join(lines)
+
+
 def cmd_upgrade(a):
     root = _m_nodes.find_root()
     gm = root / ".gitmodules"
     if not gm.exists() or "path = core" not in gm.read_text():
         _m_common.die("core/ isn't a git submodule here; reinstall with install.sh, or replace core/ by hand")
+    try:
+        inst = _m_instance.Instance(root)
+        busy = open_jobs_anywhere(inst)
+    except (OSError, ValueError, TypeError, KeyError, AttributeError):
+        busy = [("inventory", "unreadable job/worktree inventory")]
+    if busy:
+        _m_common.die(upgrade_busy_message(root, busy))
     old = _m_common.git("rev-parse", "HEAD", cwd=root / "core").stdout.strip()
     r = subprocess.run(["git", "-C", str(root), "-c", "protocol.file.allow=always", "submodule", "update",
                         "--remote", "core"], capture_output=True, text=True)

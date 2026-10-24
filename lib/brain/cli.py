@@ -27,6 +27,7 @@ from . import reports as _m_reports
 from . import rehearse as _m_rehearse
 from . import rotation as _m_rotation
 from . import schedules as _m_schedules
+from . import settings_batch as _m_settings_batch
 from . import spend as _m_spend
 from . import status as _m_status
 from . import sync as _m_sync
@@ -105,7 +106,7 @@ READ_ONLY = {"cmd_show", "cmd_tree", "cmd_status", "cmd_now", "cmd_jobs", "cmd_s
              "cmd_brief", "cmd_hire", "cmd_reports", "cmd_brains", "cmd_use", "cmd_machine", "cmd_usable",
              "cmd_item_list", "cmd_item_show", "cmd_wt_list", "cmd_selftest", "cmd_init", "cmd_hook", "cmd_hook_approve", "cmd_help",
              "cmd_dashboard", "cmd_ready", "cmd_usage", "cmd_scan", "cmd_scrub", "cmd_history",
-             "cmd_connect", "cmd_recall", "cmd_proposals", "cmd_changes", "cmd_heavy", "cmd_rehearse"}
+             "cmd_version", "cmd_connect", "cmd_recall", "cmd_proposals", "cmd_changes", "cmd_heavy", "cmd_rehearse"}
 
 
 def writes(a):
@@ -279,6 +280,11 @@ def main():
     cmd("show", _m_status.cmd_show, "everything about one node, including this machine's bindings", "id")
     cmd("set", _m_nodes.cmd_set, "set fields: brain set <id> key=value ... (host IDs and home paths stay on this machine)",
         "id", opt("pairs", nargs="+"))
+    s = sub.add_parser("settings", help="apply an explicit validated settings batch")
+    settings_sub = s.add_subparsers(dest="settings_action", required=True)
+    t = settings_sub.add_parser("batch", help="JSON array of set/schedule-add operations; one bookkeeping commit")
+    t.add_argument("file", help="UTF-8 JSON batch file")
+    t.set_defaults(f=_m_settings_batch.cmd_settings_batch)
     cmd("relabel", _m_nodes.cmd_relabel, "brain relabel <id> key:value ... (key:- removes)", "id", opt("labels", nargs="+"))
     cmd("owners", _m_nodes.cmd_owners, "change owners: brain owners <id> a,b  ('' = same as parent)", "id", "owners")
     cmd("seal", _m_guard.cmd_seal, "give a node new owners and an external home (the sealing procedure's mechanics)",
@@ -436,6 +442,9 @@ def main():
     cmd("brains", _m_hosts.cmd_brains, "the brains on this machine: brain brains [forget <name>]",
         opt("action", nargs="?", choices=["list", "forget"], default="list"), opt("name", nargs="?"))
     cmd("use", _m_hosts.cmd_use, "set this machine's default brain: brain use <name>", "name")
+    cmd("version", _m_upgrade.cmd_version, "installed core SHA/date and cached origin ancestry; never fetches",
+        opt("--ref", help="cached origin ref (default origin/HEAD or refs/remotes/origin/main)"),
+        opt("--json", action="store_true"))
     cmd("upgrade", _m_upgrade.cmd_upgrade, "update core/ to the latest version, then link and check")
     cmd("changes", _m_upgrade.cmd_changes, "what changed in core for agents: unread entries (default), --all, --seen",
         opt("id", nargs="?"), opt("--seen", action="store_true", help="mark every entry read on this machine"),

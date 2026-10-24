@@ -413,22 +413,87 @@ class BriefLimits(Scenario):
         n = {"fm": {}, "dir": self.tmp, "parent": None}
         # Isolate only privacy lookup; retain the real formatter and byte counter.
         with mock.patch.object(briefs._m_guard, "no_terms_in"):
-            suffix = "\n" + briefs.COMPACTION_POLICY + "\n"
-            text = "## Task\n" + "x" * (8192 - len(suffix.encode()) - 8)
+            text = "## Task\n" + "x" * (8192 - 8)
             with contextlib.redirect_stderr(io.StringIO()) as err:
-                self.assertEqual(len(briefs.checked_brief(n, text).encode()), 8192)
+                output = briefs.checked_brief(n, text, inputs=[("Task", text)])
+                self.assertIn("chargeable=8192;", output)
+                total = int(re.search(r"; total=(\d+);", output).group(1))
+                self.assertEqual(len(output.encode()), total)
             self.assertEqual(err.getvalue(), "")
             with contextlib.redirect_stderr(io.StringIO()) as err:
-                briefs.checked_brief(n, text + "é")
-            self.assertIn("warning", err.getvalue())
+                briefs.checked_brief(n, text + "é", inputs=[("Task", text + "é")])
+            self.assertIn("8194 chargeable bytes", err.getvalue())
             with contextlib.redirect_stderr(io.StringIO()) as err:
-                self.assertEqual(len(briefs.checked_brief(n, text + "x" * 1024).encode()), 9216)
+                output = briefs.checked_brief(n, text + "x" * 1024, inputs=[("Task", text + "x" * 1024)])
+                self.assertIn("chargeable=9216;", output)
             self.assertIn("Task:", err.getvalue())
             for extra in (8192, 9216):
                 with self.assertRaises(SystemExit) as refused:
-                    briefs.checked_brief(n, text + "x" * extra)
+                    briefs.checked_brief(n, text + "x" * extra, inputs=[("Task", text + "x" * extra)])
                 self.assertIn("refused:", str(refused.exception))
                 self.assertIn("Task:", str(refused.exception))
+
+
+
+class R2BriefInputs(Scenario):
+    def test_b11_all_worker_briefs_explicitly_omit_attribution_for_selected_runtime(self):
+        r = self.init("sample")
+        self.b(r, "specialist", "new", "qa", "--title", "QA")
+        for runtime in ("codex", "claude"):
+            for command in (("brief", "root"), ("brief", "root", "--small"), ("hire", "qa", "root")):
+                out = self.b(r, *command, "--runtime", runtime, "--model", "sample-model", "--task", "Inspect fixture")
+                self.assertIn("Commit attribution: omitted", out)
+                self.assertNotIn("Co-Authored-By:", out)
+                self.assertIn("runtime: " + runtime, out)
+        sys.path.insert(0, str(CORE / "lib"))
+        from brain import briefs
+        self.assertIn("omitted", " ".join(briefs.attribution_lines("unknown", "unknown-model")))
+
+    def test_r1_restart_acknowledgement_follows_successful_delivery(self):
+        r = self.init("sample")
+        home = self.repo(self.tmp / "home")
+        self.b(r, "new", "app", "--title", "App", "--home", str(home))
+        self.b(r, "wt", "add", "app", "job")
+        m = core_loader.SourceFileLoader("r2_delivery", str(CORE / "bin/brain")).load_module()
+        a = argparse.Namespace(id="app", small=False, branch="job", import_study=False,
+            task="Inspect fixture", task_file=None, context_file=None, why_separate="fixture job",
+            allow_unexplained=False, peer=None, runtime="codex", model="sample-model", job_class="build",
+            effort=None, to=None, out=None)
+        with mock.patch.dict(os.environ, self.env), mock.patch.object(m, "load", return_value=m.Instance(r)), \
+             mock.patch.object(m, "acknowledge_usage_restart") as ack:
+            with contextlib.redirect_stdout(io.StringIO()):
+                m.cmd_brief(a)
+            ack.assert_called_once()
+            ack.reset_mock()
+            stream = mock.Mock(wraps=io.StringIO())
+            stream.flush.side_effect = BrokenPipeError("fixture delivery failure")
+            with mock.patch.object(sys, "stdout", stream), self.assertRaises(BrokenPipeError):
+                m.cmd_brief(a)
+            ack.assert_not_called()
+
+    def test_p18_input_bytes_ignore_fixed_text_and_forged_headings(self):
+        sys.path.insert(0, str(CORE / "lib"))
+        from brain import briefs
+        n = {"fm": {}, "dir": self.tmp, "parent": None}
+        task = "## Limits\n" + "é" * 2100
+        context = "ع" * 2100
+        with mock.patch.object(briefs._m_guard, "no_terms_in"):
+            with contextlib.redirect_stderr(io.StringIO()) as err:
+                result = briefs.checked_brief(n, "fixed safety " * 1800 + task + context,
+                                              inputs=[("Task", task), ("Shared context", context)])
+            self.assertIn("warning: brief", err.getvalue())
+            self.assertIn("chargeable", err.getvalue())
+            self.assertIn("Task:", err.getvalue())
+            self.assertIn("Shared context:", err.getvalue())
+            self.assertIn("Brief bytes: chargeable=8410", result)
+            self.assertIn("fixed safety", result)
+            with contextlib.redirect_stderr(io.StringIO()) as err:
+                briefs.checked_brief(n, "safety " * 3000, inputs=[("Task", "small")])
+            self.assertEqual(err.getvalue(), "")
+            with self.assertRaises(SystemExit):
+                briefs.checked_brief(n, "x", inputs=[("Task", "é" * 8192)])
+            with self.assertRaises(SystemExit):
+                briefs.checked_brief(n, "x" * (256 * 1024), inputs=[])
 
 
 if __name__ == "__main__":

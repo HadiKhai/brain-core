@@ -557,10 +557,16 @@ def cmd_hire(a):
         out += ["This work happens in a project with its own owners. Leave nothing in it that names "
                 "where this brief came from (axiom 6). Ask before pushing, publishing or anything "
                 "irreversible (axiom 24).", ""]
-    out += _m_briefs.separation_lines(a, target, a.branch)
-    out += ["## Task", "", a.task.strip(), ""] + _m_jobs.contract_lines(inst, target, a.branch) + \
+    why_lines = _m_briefs.separation_lines(a, target, a.branch)
+    out += why_lines
+    inputs = [("Task", a.task), ("Limits", "\n".join(limits_of(target))),
+              ("Why separate", a.why_separate or "")] + _m_briefs.contract_inputs(target, a.branch)
+    contract = _m_jobs.contract_lines(inst, target, a.branch)
+    out += _m_briefs.attribution_lines(runtime, a.model)
+    out += ["## Task", "", a.task.strip(), ""] + contract + \
         ["## Specialist standards", "", _m_briefs.reference_line(sp["dir"] / "role.md", sp["fm"].get("title", sp["id"])), ""] + limits_lines(target)
     if lessons:
+        inputs.append(("Lessons", "\n".join(l["text"] for l in lessons)))
         out += ["## Lessons from earlier jobs", ""] + [f"- {l['text']}" for l in lessons] + [""]
     if wanted:
         out += ["## Knowledge for this job", ""]
@@ -573,7 +579,7 @@ def cmd_hire(a):
     out += knowledge_lines(inst, target, a.task, sp["id"], exclude=wanted) + node_knowledge_lines(target) + \
         recall_hint(target)
     out += handback_lines(inst, target, branch=a.branch) + report_lines(job=bool(a.branch))
-    text = _m_briefs.checked_brief(target, "\n".join(out) + "\n")
+    text = _m_briefs.checked_brief(target, "\n".join(out) + "\n", inputs=inputs)
     _m_guard.no_terms_in(target, text, "the brief")
     _m_jobs.record_job_route(inst, target, a.branch, a.job_class, runtime, a.model, effort=a.effort)
     if a.job:

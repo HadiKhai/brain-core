@@ -544,61 +544,64 @@ def cmd_adopt(a):
                           _m_guard.never_terms(parent), metadata=True))
 
 
-def cmd_set(a):
-    inst = load()
-    n = inst.node(a.id)
-    fm, body = _m_common.read_fm(n["dir"] / "node.md")
-    old = dict(fm)
-    for kv in a.pairs:
+def prepare_settings(inst, n, pairs, messages=None):
+    """Validate a set operation without writing; only supplied Instance.local changes in memory.
+
+    Batch callers supply planned node metadata in n['fm']; subsequent operations see it.
+    """
+    _, body = _m_common.read_fm(n["dir"] / "node.md")
+    fm = dict(n["fm"])
+    messages = messages if messages is not None else []
+    for kv in pairs:
         if "=" not in kv:
             _m_common.die(f"expected key=value, got '{kv}'")
         k, v = kv.split("=", 1)
         if k in ("owners", "id"):
             _m_common.die("use 'brain owners' or 'brain seal' to change owners; ids change only with 'brain move'")
         if k == "fallback":
-            if a.id != "root":
+            if n["id"] != "root":
                 _m_common.die("fallback is per machine: brain set root fallback=<instance ids in order>")
             order = [x.strip() for x in v.split(",")] if v.strip() else []
             if any(not x for x in order) or len(order) != len(set(order)):
                 _m_common.die("fallback needs distinct, nonempty host provider instance ids")
             inst.local["fallback"] = order
             fm.pop(k, None)
-            print("  fallback: this machine (.brain/local.json)")
+            messages.append("  fallback: this machine (.brain/local.json)")
         elif k.startswith("worker:"):
             key = k[len("worker:"):]
             if not re.fullmatch(r'[0-9a-f]{24}', key):
                 _m_common.die('worker binding needs worker:<24-character brain-job key>=<thread>')
-            workers = inst.local_of(a.id).setdefault('workers', {})
+            workers = inst.local_of(n["id"]).setdefault('workers', {})
             if not isinstance(workers, dict):
                 _m_common.die('worker bindings are invalid; repair local.json before binding')
             if v:
                 workers[key] = v
             else:
                 workers.pop(key, None)
-            print('  worker binding: this machine (.brain/local.json)')
+            messages.append('  worker binding: this machine (.brain/local.json)')
         elif k == "auto_upgrade":
-            if a.id != "root" or v not in ("on", "off"):
+            if n["id"] != "root" or v not in ("on", "off"):
                 _m_common.die("auto_upgrade is per machine: brain set root auto_upgrade=on|off")
             inst.local["auto_upgrade"] = v
             fm.pop(k, None)
-            print(f"  auto_upgrade: {v} on this machine (.brain/local.json): upgrades core when no job is open")
+            messages.append(f"  auto_upgrade: {v} on this machine (.brain/local.json): upgrades core when no job is open")
         elif k in ("coordinator_sessions", "coordinator_sessions:"):
             from . import spend
             ids = [i.strip() for i in v.split(",")] if v.strip() else []
             if any(not spend.SESSION_ID.fullmatch(i) for i in ids):
                 _m_common.die("coordinator_sessions needs comma-separated runtime session ids")
-            previous = inst.local_of(a.id).get("coordinator_sessions", [])
+            previous = inst.local_of(n["id"]).get("coordinator_sessions", [])
             if k == "coordinator_sessions" and ids and isinstance(previous, list):
                 ids = [i for i in previous if isinstance(i, str) and spend.SESSION_ID.fullmatch(i)] + ids
             # The most recently selected occurrence is current, even when resuming
             # an earlier session. ':=' replaces history; an empty value clears it.
-            inst.local_of(a.id)["coordinator_sessions"] = list(reversed(dict.fromkeys(reversed(ids))))
+            inst.local_of(n["id"])["coordinator_sessions"] = list(reversed(dict.fromkeys(reversed(ids))))
             fm.pop("coordinator_sessions", None)
-            print("  coordinator_sessions: this machine (.brain/local.json)")
+            messages.append("  coordinator_sessions: this machine (.brain/local.json)")
         elif k in _m_common.LOCAL_KEYS or k in ("synced_at", "workbench", "wake", "wake_default"):
-            inst.local_of(a.id)[k] = str(Path(v).expanduser().resolve()) if k == "workbench" else v
+            inst.local_of(n["id"])[k] = str(Path(v).expanduser().resolve()) if k == "workbench" else v
             fm.pop(k, None)
-            print(f"  {k}: this machine (.brain/local.json)")
+            messages.append(f"  {k}: this machine (.brain/local.json)")
         elif k == "merge":
             if v not in ("local", "pr"):
                 _m_common.die("merge must be local or pr")
@@ -610,16 +613,26 @@ def cmd_set(a):
                 _m_common.die(str(error))
             fm[k] = v
         elif k == "home":
-            bind_home(inst, a.id, fm, v)
-            print(f"  home: {fm['home']}" + (f" -> {inst.local_of(a.id)['home']} on this machine"
+            bind_home(inst, n["id"], fm, v)
+            messages.append(f"  home: {fm['home']}" + (f" -> {inst.local_of(n['id'])['home']} on this machine"
                                              if fm["home"] == "external" else ""))
         else:
             fm[k] = v
+    return fm, body
+
+
+def cmd_set(a):
+    inst = load()
+    n = inst.node(a.id)
+    messages = []
+    fm, body = prepare_settings(inst, n, a.pairs, messages)
     inst.save_local()
-    if fm != old:
+    if fm != n["fm"]:
         _m_common.write_fm(n["dir"] / "node.md", fm, body)
         _m_status.write_registry(inst)
         inst.commit([n["dir"] / "node.md", "registry.md"], f"{a.id}: set {', '.join(kv.split('=', 1)[0] for kv in a.pairs)}")
+    for message in messages:
+        print(message)
 
 
 def cmd_relabel(a):

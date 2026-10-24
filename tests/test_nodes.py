@@ -1148,5 +1148,81 @@ class TeamHomes(Scenario):
 
 
 
+class R2SettingsBatch(Scenario):
+    def test_m9_mixed_batch_one_commit_prevalidates_and_preserves_index(self):
+        r = self.init("sample")
+        unrelated = r / "unrelated.txt"
+        unrelated.write_text("staged operator work\n")
+        self.git("add", "unrelated.txt", cwd=r)
+        before_index = self.git("diff", "--cached", "--binary", cwd=r)
+        head = self.git("rev-parse", "HEAD", cwd=r).strip()
+        batch = self.tmp / "batch.json"
+        operations = [{"op": "set", "node": "root", "pairs": ["rotate_turns=42", "coordinator=sample-thread"]},
+                      {"op": "schedule-add", "id": "daily-check", "node": "root", "when": "daily 09:00", "brief": "Inspect fixture"}]
+        tracked = {p: (r / p).read_bytes() if (r / p).exists() else None
+                   for p in ("node.md", "registry.md", ".brain/local.json")}
+        for refused, diagnostic in [
+                ({"op": "schedule-add", "id": "BAD", "when": "daily", "brief": "Bad"}, "schedule ids"),
+                ({"op": "schedule-add", "id": "daily-check", "when": "daily", "brief": "Bad"}, "exists"),
+                ({"op": "set", "pairs": ["fallback=codex,codex"]}, "distinct"),
+                ({"op": "set", "pairs": ["owners=other"]}, "brain owners")]:
+            batch.write_text(json.dumps(operations + [refused]))
+            out = self.b(r, "settings", "batch", str(batch), ok=False)
+            self.assertIn(diagnostic, out)
+            self.assertEqual(self.git("rev-parse", "HEAD", cwd=r).strip(), head)
+            self.assertFalse((r / "schedules.md").exists())
+            for p, data in tracked.items():
+                self.assertEqual((r / p).read_bytes() if (r / p).exists() else None, data)
+        batch.write_text(json.dumps(operations))
+        self.b(r, "settings", "batch", str(batch))
+        self.assertEqual(self.git("rev-list", "--count", head + "..HEAD", cwd=r).strip(), "1")
+        self.assertEqual(self.git("diff", "--cached", "--binary", cwd=r), before_index)
+        self.assertNotIn("unrelated.txt", self.git("show", "--format=", "--name-only", "HEAD", cwd=r))
+        self.assertIn("rotate_turns: 42", (r / "node.md").read_text())
+        self.assertNotIn("sample-thread", self.git("show", "HEAD:node.md", cwd=r))
+        self.assertEqual(json.loads((r / ".brain/local.json").read_text())["nodes"]["root"]["coordinator"], "sample-thread")
+        self.assertIn("daily-check", (r / "schedules.md").read_text())
+
+    def test_batch_publication_failure_retains_recovery_packet(self):
+        r = self.init("sample")
+        m = core_loader.SourceFileLoader("r2_batch_failure", str(CORE / "bin/brain")).load_module()
+        inst = m.Instance(r)
+        before = (r / "node.md").read_text()
+        planned = {r / "node.md": before + "\nNew fixture data\n", r / "schedules.md": "# Fixture\n"}
+        original_write = m.atomic_write
+        def fail_schedule(path, text):
+            if path == r / "schedules.md":
+                raise OSError("synthetic disk failure")
+            return original_write(path, text)
+        with mock.patch.object(m, "atomic_write", side_effect=fail_schedule), \
+             mock.patch.object(inst, "commit_settings_batch") as commit:
+            with self.assertRaises(SystemExit) as refused:
+                m.publish_settings_batch(inst, planned, 2)
+        self.assertIn("ask the coordinator", str(refused.exception))
+        commit.assert_not_called()
+        record = json.loads(next((r / ".brain/settings-batches").glob("*.json")).read_text())
+        self.assertEqual(record["state"], "failed")
+        self.assertEqual(record["before"]["node.md"], before)
+        self.assertEqual(record["after"]["node.md"], planned[r / "node.md"])
+        self.assertEqual((r / "node.md").read_text(), planned[r / "node.md"])
+        self.assertFalse((r / "schedules.md").exists())
+
+    def test_batch_local_only_keeps_head_and_dirty_shared_targets_refuse(self):
+        r = self.init("sample")
+        head = self.git("rev-parse", "HEAD", cwd=r).strip()
+        batch = self.tmp / "batch.json"
+        batch.write_text(json.dumps([{"op": "set", "pairs": ["coordinator=fixture-thread"]}]))
+        self.b(r, "settings", "batch", str(batch))
+        self.assertEqual(self.git("rev-parse", "HEAD", cwd=r).strip(), head)
+        node = r / "node.md"
+        node.write_text(node.read_text() + "\nOperator data\n")
+        self.git("add", "node.md", cwd=r)
+        index = self.git("diff", "--cached", "--binary", cwd=r)
+        batch.write_text(json.dumps([{"op": "set", "pairs": ["rotate_turns=4"]}]))
+        self.assertIn("existing edits", self.b(r, "settings", "batch", str(batch), ok=False))
+        self.assertEqual(self.git("diff", "--cached", "--binary", cwd=r), index)
+        self.assertIn("Operator data", node.read_text())
+
+
 if __name__ == "__main__":
     unittest.main()
