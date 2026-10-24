@@ -80,6 +80,41 @@ After upgrading:
 - These parked jobs, deferrals and evidence gaps remain open. Release 2 follows
   the approved rehearsal waiver and manual landing path.
 
+## 2026-10-24: B5 Reviewed publication policy at settings and instruction boundaries
+
+For agents: `merge=pr` refuses a conflicting or unmapped current reviewed Limits snapshot,
+quoting its rule/source. Briefs and `brain policy` distinguish allow/deny/unknown; merge
+selection grants no push/PR consent. Explicit policy is supplied review evidence, not a
+natural-language authorization engine.
+
+After upgrading: coordinators map current limits in `publication-policy.json` before PR
+mode or outward steps. Legacy ambiguous limits require their decision. Arbitrary external
+commands and a general action guard remain outside this slice.
+
+## 2026-10-24: B6 Complete supplied rules-snapshot activation
+
+For agents: one protected due item follows each pending rules snapshot. Explicit
+`brain proposals <node> --approve-all --review-manifest <file>` atomically activates its
+complete independently reviewed rules with attribution/provenance in native instructions;
+changed/partial/revoked/self-approved evidence refuses without partial writes.
+
+After upgrading: legacy prose stays pending until the coordinator prepares the documented
+rules-only JSON snapshot and complete manifest. Review records are supplied evidence,
+never authenticated identity. No automatic import activation; bulk roles/items and future
+imports remain outside this rules-only slice.
+
+## 2026-10-24: P10 Exact-candidate land-check receipts
+
+For agents: configured `land_check` runs through one reusable explicit candidate check,
+retains passing/failing job-ledger receipts, and blocks supported landing/push instructions
+when evidence is absent, failed or stale. Local trains check their exact integration tip.
+The supported push-step command only prints a SHA-pinned command; it never pushes.
+
+After upgrading: configure `land_check=<command>` where needed and use `brain land-check`
+before each supported outward step. Missing settings add no check or permission. Receipts
+do not establish readiness or consent; arbitrary external pushes and host publication
+enforcement remain outside core's supported-path boundary.
+
 ## 2026-10-24: Configure worker runtime and model defaults per job class
 
 rehearsal evidence waived (root decision A, 2026-10-24); re-rehearsed natively before the release 1 tag

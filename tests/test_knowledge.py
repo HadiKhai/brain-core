@@ -475,3 +475,98 @@ class AutonomyHire(AutonomyProject):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RuleSnapshotActivation(unittest.TestCase):
+    def setUp(self):
+        patch = mock.patch.object(sys, "path", [str(CORE / "lib"), *sys.path])
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    """Rules-only bulk activation consumes supplied independent review evidence."""
+    def test_b6_complete_snapshot_activation_and_refusals(self):
+        from brain import proposals
+        from brain.instance import Instance
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / '.brain').mkdir()
+            (root / 'instance.md').write_text('---\noperator: alice\nprincipals: alice, bob\nruntimes: codex, claude\ntimezone: UTC\n---\n')
+            (root / 'node.md').write_text('---\nid: root\nowners: alice\n---\n')
+            (root / 'sources').mkdir()
+            agents = root / 'AGENTS.md'
+            agents.write_text('# Instructions\n')
+            snapshot = {'version': 1, 'node': 'root', 'scope': ['alice'],
+                        'importer': 'worker-1', 'importer_runtime': 'codex', 'provenance': 'demo@abc',
+                        'rules': [{'id': 'one', 'text': 'Use fabricated examples.', 'source': 'demo@abc:1'},
+                                  {'id': 'two', 'text': 'Keep artifacts local.', 'source': 'demo@abc:2'}]}
+            source = root / 'sources/import-proposals.md'
+            source.write_text(json.dumps(snapshot))
+            inst = Instance(root)
+            n = inst.node('root')
+            pending = proposals.pending_rule_snapshot(inst, n)
+            self.assertEqual(pending['count'], 2)
+            self.assertEqual(pending, proposals.pending_rule_snapshot(inst, n))
+            manifest = {**snapshot, 'snapshot_hash': pending['digest'], 'reviewer': 'alice',
+                        'reviewer_runtime': 'claude', 'reviewed_at': inst.now()}
+            before = agents.read_bytes(), source.read_bytes()
+            invalid = [dict(manifest, snapshot_hash='0' * 64), dict(manifest, reviewer='worker-1'),
+                       dict(manifest, reviewer_runtime='codex'), dict(manifest, rules=snapshot['rules'][:1]),
+                       dict(manifest, scope=['alice', 'bob']), dict(manifest, provenance=''),
+                       {k: v for k, v in manifest.items() if k != 'importer'}]
+            for bad in invalid:
+                with self.subTest(bad=bad), self.assertRaises(ValueError):
+                    proposals.activate_rules(inst, n, bad, commit=False)
+                self.assertEqual(before, (agents.read_bytes(), source.read_bytes()))
+            # A self-consistent manifest still cannot widen the source snapshot's owner scope.
+            widened = {**snapshot, 'scope': ['alice', 'bob']}
+            source.write_text(json.dumps(widened))
+            widened_review = {**manifest, **widened, 'snapshot_hash': proposals.pending_rule_snapshot(inst, n)['digest']}
+            with self.assertRaises(ValueError):
+                proposals.activate_rules(inst, n, widened_review, commit=False)
+            self.assertEqual(agents.read_bytes(), before[0])
+            source.write_bytes(before[1])
+            validate = proposals._validate_review
+            def changed_during_validation(*args):
+                validate(*args)
+                source.write_bytes(before[1] + b'\n')
+            with mock.patch.object(proposals, '_validate_review', side_effect=changed_during_validation):
+                with self.assertRaisesRegex(ValueError, 'changed'):
+                    proposals.activate_rules(inst, n, manifest, commit=False)
+            self.assertEqual(agents.read_bytes(), before[0])
+            source.write_bytes(before[1])
+            config = root / 'instance.md'
+            original_config = config.read_text()
+            config.write_text(original_config.replace('principals:', 'revoked: alice\nprincipals:'))
+            with self.assertRaises(ValueError):
+                proposals.activate_rules(inst, n, manifest, commit=False)
+            config.write_text(original_config)
+            self.assertEqual(before, (agents.read_bytes(), source.read_bytes()))
+            from brain import nodes, status
+            manifest_path = root / 'review.json'
+            manifest_path.write_text(json.dumps(manifest))
+            with mock.patch.object(nodes, 'load', return_value=inst), contextlib.redirect_stdout(io.StringIO()):
+                proposals.cmd_proposal_activation(argparse.Namespace(id='root', only=None, json=False, review_manifest=str(manifest_path)))
+            self.assertEqual(status.pending_imports(inst, n)[0], 0)
+            self.assertIn('Use fabricated examples.', agents.read_text())
+            self.assertIn('supplied evidence', agents.read_text())
+            self.assertIn('demo@abc:2', agents.read_text())
+            self.assertIsNone(proposals.pending_rule_snapshot(inst, n))
+            self.assertEqual(source.read_bytes(), before[1])
+            source.write_text(json.dumps({**snapshot, 'provenance': 'demo@new'}))
+            self.assertIsNotNone(proposals.pending_rule_snapshot(inst, n))
+
+    def test_b6_legacy_and_forged_review_stay_pending(self):
+        from brain import proposals
+        from brain.instance import Instance
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / 'instance.md').write_text('---\noperator: alice\nprincipals: alice\nruntimes: codex, claude\n---\n')
+            (root / 'node.md').write_text('---\nid: root\nowners: alice\n---\n')
+            (root / 'sources').mkdir()
+            (root / 'sources/import-proposals.md').write_text('---\nstatus: reviewed\nreviewed_by: alice\nreviewed_at: 2026-01-01 10:00 +00:00\n---\nUnstructured rule summaries\n')
+            inst = Instance(root)
+            n = inst.node('root')
+            self.assertEqual(proposals.pending_rule_snapshot(inst, n)['count'], 1)
+            with self.assertRaises(ValueError):
+                proposals.activate_rules(inst, n, {}, commit=False)
+            self.assertFalse((root / 'AGENTS.md').exists())

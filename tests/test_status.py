@@ -1069,3 +1069,34 @@ class NodeHygiene(Scenario):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RuleActivationDue(unittest.TestCase):
+    def test_b6_one_stable_snapshot_due_episode(self):
+        patch = mock.patch.object(sys, 'path', [str(CORE / 'lib'), *sys.path])
+        with patch:
+            from brain import status, jobs, proposals, watch
+            from brain.instance import Instance
+            with tempfile.TemporaryDirectory() as folder:
+                root = Path(folder)
+                (root / 'instance.md').write_text('---\noperator: alice\nprincipals: alice\n---\n')
+                (root / 'node.md').write_text('---\nid: root\nowners: alice\n---\n')
+                (root / 'sources').mkdir()
+                source = root / 'sources/import-proposals.md'
+                source.write_text('Unreviewed rules.\n')
+                inst = Instance(root)
+                n = inst.node('root')
+                state = {'jobs': [], 'worktrees': {}, 'handbacks': {}, 'inbox': []}
+                evidence = (state, None, None)
+                with mock.patch.object(status._m_rotation, 'rotation_due', return_value=None), \
+                     mock.patch.object(status, 'blocked_entries', return_value=[]), \
+                     mock.patch.object(watch, 'watch_job_stalls', return_value=[]):
+                    def rule_items():
+                        return [i for i in status.due_items(inst, n, evidence=evidence) if i['kind'] == 'rule-activation-review']
+                    first = rule_items()
+                    self.assertEqual(len(first), 1)
+                    expected = jobs.digest(['root', 'rule-activation-review', proposals.pending_rule_snapshot(inst, n)['digest']])
+                    self.assertEqual(first[0]['episode'], expected)
+                    self.assertEqual(rule_items(), first)
+                    source.write_text('A different unreviewed snapshot.\n')
+                    self.assertNotEqual(rule_items()[0]['episode'], expected)

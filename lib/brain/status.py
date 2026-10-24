@@ -19,6 +19,7 @@ from . import jobs as _m_jobs
 from . import knowledge as _m_knowledge
 from . import machine as _m_machine
 from . import nodes as _m_nodes
+from . import proposals as _m_proposals
 from . import schedules as _m_schedules
 from . import rotation as _m_rotation
 from . import spend as _m_spend
@@ -474,6 +475,12 @@ def due_items(inst, n, evidence=None, include_stale=True, include_ready=True, in
     items = []
     def add(kind, text, **extra):
         items.append({"node": n["id"], "kind": kind, "text": _m_guard.redact(text, _m_guard.never_terms(n)), **extra})
+    snapshot = _m_proposals.pending_rule_snapshot(inst, n)
+    if snapshot:
+        episode = _m_jobs.digest([n['id'], 'rule-activation-review', snapshot['digest']])
+        add('rule-activation-review', f"activate the home's {snapshot['count']} imported rule(s)? "
+            f"Coordinator review of complete snapshot {snapshot['digest']} in {snapshot['path']} required: brain proposals {n['id']}",
+            episode=episode, snapshot=snapshot['digest'])
     runnable = runnable_work(n, state['jobs'])
     if runnable:
         add('idle-with-runnable-work', 'start local work from Build order: ' + '; '.join(runnable))
@@ -890,6 +897,10 @@ def proposals_of(inst, nodes):
 def cmd_proposals(a):
     """Everything waiting for review, a node at a time, with full text: read it here, then accept or reject several
     at once. Nothing here accepts anything."""
+    if getattr(a, 'approve_all', False):
+        return _m_proposals.cmd_proposal_activation(a)
+    if getattr(a, 'review_manifest', None):
+        _m_common.die('--review-manifest requires --approve-all')
     inst = _m_nodes.load()
     top = inst.node(a.id or "root")
     nodes = [n for n in inst.nodes() if top["id"] == "root" or n["id"] == top["id"] or n["id"].startswith(top["id"] + "/")]
@@ -909,6 +920,7 @@ def cmd_proposals(a):
         screens.append(group)
         rules_file = n["dir"] / "sources/import-proposals.md"
         rows.append({"node": n["id"], "owners": n["owners"],
+                     "rules_snapshot": _m_proposals.pending_rule_snapshot(inst, n),
                      "rules": str(rules_file.relative_to(inst.root)) if rules else None,
                      "rules_body": clean(_m_common.read_fm(rules_file)[1].strip()) if rules else None,
                      "specialists": [{"id": x["id"], "title": clean(x["fm"].get("title"), src_terms[x["dir"]]),
@@ -1122,6 +1134,8 @@ def pending_imports(inst, n):
                     fm.get("reviewed_by") in ({inst.cfg.get("operator")} | (set(inst.principals) - set(inst.revoked))) and
                     inst.parse_time(fm.get("reviewed_at", "")))
         rules_pending = not reviewed
+        if _m_proposals.pending_rule_snapshot(inst, n) is None:
+            rules_pending = False
     proposed = [i for i in inst.items() if i["fm"].get("status") == "proposed"]
     queue = proposal_nodes(inst, proposed)
     items = sum(1 for i in proposed if queue[i["path"]] == n["id"])

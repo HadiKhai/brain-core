@@ -76,5 +76,50 @@ class EntryPoints(Scenario):
 
 
 
+    def test_policy_and_complete_rule_snapshot_cli_boundaries(self):
+        r = self.init('alice')
+        self.b(r, 'new', 'demo', '--title', 'Demo')
+        node = r / 'nodes/demo'
+        (node / 'brief.md').write_text('## Limits\n- Never open a pull request.\n')
+        policy = json.loads(self.b(r, 'policy', 'demo', '--json'))
+        policy.update(reviewer='alice', reviewed_at=self.b(r, 'now').strip())
+        for rule in policy['rules']:
+            rule['actions'] = {'push': 'deny', 'pr': 'deny'}
+        (node / 'publication-policy.json').write_text(json.dumps(policy))
+        paths = [node / 'node.md', r / 'registry.md', r / '.brain/local.json']
+        before = [p.read_bytes() for p in paths]
+        refused = self.b(r, 'set', 'demo', 'coordinator=demo-thread', 'merge=pr', ok=False)
+        self.assertIn('Never open a pull request.', refused)
+        self.assertIn('brief.md', refused)
+        self.assertEqual(before, [p.read_bytes() for p in paths])
+        self.b(r, 'set', 'demo', 'merge=local')
+        (node / 'brief.md').write_text('## Limits\n- Ask about each outward action.\n')
+        unknown_before = [p.read_bytes() for p in paths]
+        self.assertIn('coordinator', self.b(r, 'set', 'demo', 'merge=pr', ok=False))
+        self.assertEqual(unknown_before, [p.read_bytes() for p in paths])
+        snapshot = {'version': 1, 'node': 'demo', 'scope': ['alice'], 'importer': 'worker-1',
+                    'importer_runtime': 'codex', 'provenance': 'example@abc',
+                    'rules': [{'id': 'examples', 'text': 'Use fabricated examples.', 'source': 'example@abc:1'}]}
+        source = node / 'sources/import-proposals.md'
+        source.write_text(json.dumps(snapshot))
+        sheet = json.loads(self.b(r, 'proposals', 'demo', '--json'))
+        digest = sheet[0]['rules_snapshot']['digest']
+        due = json.loads(self.b(r, 'due', 'demo', '--json'))
+        activation = [i for i in due if i['kind'] == 'rule-activation-review']
+        self.assertEqual(len(activation), 1)
+        manifest = {**snapshot, 'snapshot_hash': digest, 'reviewer': 'alice',
+                    'reviewer_runtime': 'claude', 'reviewed_at': self.b(r, 'now').strip()}
+        review = r / 'review.json'
+        review.write_text(json.dumps(manifest))
+        original = source.read_bytes()
+        out = self.b(r, 'proposals', 'demo', '--approve-all', '--review-manifest', str(review))
+        self.assertIn('supplied evidence', out)
+        self.assertIn('Use fabricated examples.', (node / 'AGENTS.md').read_text())
+        self.assertEqual(source.read_bytes(), original)
+        self.assertEqual(json.loads(self.b(r, 'proposals', 'demo', '--json')), [])
+        self.assertNotIn('rule-activation-review', [i['kind'] for i in json.loads(self.b(r, 'due', 'demo', '--json'))])
+        self.assertIn('recorded open job', self.b(r, 'land-check', 'demo', '--branch', 'absent', '--run', ok=False))
+
+
 if __name__ == "__main__":
     unittest.main()

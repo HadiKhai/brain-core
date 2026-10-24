@@ -671,9 +671,11 @@ def knowledge_lines(inst, n, task, specialist="", exclude=(), inputs=None):
                 inputs += [("Library metadata", key), ("Library metadata", title)]
             if len(lines) == 5:
                 break
+    from . import policy as _m_policy
+    publication = _m_policy.publication_instructions(inst, n)
     if not lines:
-        return []
-    return ["## Relevant library items", ""] + lines[:5] + [""]
+        return publication
+    return publication + ["## Relevant library items", ""] + lines[:5] + [""]
 
 
 def node_knowledge_lines(n):

@@ -1229,3 +1229,50 @@ class R2SettingsBatch(Scenario):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PublicationPolicy(unittest.TestCase):
+    def setUp(self):
+        patch = mock.patch.object(sys, "path", [str(CORE / "lib"), *sys.path])
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def test_b5_explicit_policy_denies_conflicts_and_unknown_limits(self):
+        from brain import policy
+        from brain.instance import Instance
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / 'instance.md').write_text('---\noperator: alice\nprincipals: alice\n---\n')
+            (root / 'node.md').write_text('---\nid: root\nowners: alice\n---\n')
+            (root / 'brief.md').write_text('## Limits\n- Never open a pull request.\n  Why: local review only.\n')
+            inst = Instance(root)
+            n = inst.node('root')
+            before = {p.name: p.read_bytes() for p in root.iterdir() if p.is_file()}
+            with self.assertRaisesRegex(ValueError, 'coordinator'):
+                policy.validate_merge(inst, n, 'pr')
+            self.assertEqual(before, {p.name: p.read_bytes() for p in root.iterdir() if p.is_file()})
+            self.assertIsNone(policy.validate_merge(inst, n, 'local'))
+            rules = policy.limit_snapshot(n)
+            record = {'version': 1, 'node': 'root', 'reviewer': 'alice', 'reviewed_at': inst.now(),
+                      'rules': [{**r, 'actions': {'pr': 'deny', 'push': 'unknown'}} for r in rules]}
+            (root / 'publication-policy.json').write_text(json.dumps(record))
+            with self.assertRaisesRegex(ValueError, 'Never open a pull request.*') as denied:
+                policy.validate_merge(inst, n, 'pr')
+            self.assertIn('brief.md', str(denied.exception))
+            from brain import nodes
+            command_before = {p.name: p.read_bytes() for p in root.iterdir() if p.is_file()}
+            errors = io.StringIO()
+            with mock.patch.object(nodes, 'load', return_value=inst), contextlib.redirect_stderr(errors):
+                with self.assertRaises(SystemExit) as refusal:
+                    nodes.cmd_set(argparse.Namespace(id='root', pairs=['coordinator=demo-thread', 'merge=pr']))
+            self.assertIn('Never open a pull request.', str(refusal.exception))
+            self.assertIn('brief.md', str(refusal.exception))
+            self.assertFalse((root / '.brain/local.json').exists())
+            self.assertEqual(command_before, {p.name: p.read_bytes() for p in root.iterdir() if p.is_file()})
+            self.assertIn('Never open a pull request.', '\n'.join(policy.publication_instructions(inst, n)))
+            record['rules'][0]['actions']['pr'] = 'allow'
+            (root / 'publication-policy.json').write_text(json.dumps(record))
+            self.assertIsNone(policy.validate_merge(inst, n, 'pr'))
+            (root / 'brief.md').write_text('## Limits\n- Ask before any outward action.\n')
+            with self.assertRaisesRegex(ValueError, 'coordinator'):
+                policy.validate_merge(inst, n, 'pr')

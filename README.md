@@ -712,6 +712,84 @@ After any change:
 
 ---
 
+## Publication policy and checks
+
+`merge=local|pr` selects a workflow; it grants no push or PR permission. Before storing
+`merge=pr`, core checks the node's reviewed publication policy against every current
+inherited/node `## Limits` bullet. A deny quotes its rule and source. An unmapped,
+changed or unsupported limit refuses and refers the choice to the coordinator.
+
+The coordinator prepares node-local `publication-policy.json`. `brain policy <node>
+--json` prints a template with exact rule texts/source references; fill every action
+with `allow`, `deny`, `unknown` or `not-applicable`. Preserve the full ordered rule
+snapshot. Include `version: 1`, `node`, `reviewer` (current operator or owner), and
+`reviewed_at` from `brain now`. This is supplied review evidence, not authenticated
+identity. No natural-language ACL inference occurs. Explicit consent without limits
+uses `"consent": {"node": "demo", "actions": ["push", "pr"]}` alongside the empty
+`rules` list; the reviewed node/action scope is specific, not global permission.
+
+`brain policy <node> --action push|pr` refuses deny/unknown policy; it never performs an
+outward action. Generated briefs carry these decisions. Before an authorized push,
+use `brain land-check <node> --branch <job> --run` if `land_check=<command>` is set,
+then `brain land-check <node> --branch <job> --push-step` to generate a push command
+pinned to the checked SHA. The command is only printed. Read commands never run checks.
+
+The configured shell command runs in the clean candidate worktree with the node's
+normal execution variables. Its versioned `Land check` job-ledger receipt retains
+command/config identity, exact head, inputs, time, attempt and result, including
+failures. Changed tips, commands, configuration, inputs or replacement attempts make
+old evidence unusable. The local train runs it once on its exact integration candidate
+and attributes the receipt to its accepted jobs; a failed or stale configured check
+prevents landing and push instructions. A passing check grants neither readiness nor
+permission. An absent setting adds no check and grants no outward permission.
+Core enforces the supported instruction/landing path; it cannot intercept an arbitrary
+external `git push`, or enforce host publication policy after someone leaves that path.
+
+## Rules-only activation review
+
+A nonempty `sources/import-proposals.md` snapshot has one protected
+`rule-activation-review` due episode, stable until its byte digest changes. Importing
+never activates it. Legacy prose stays pending; the coordinator must prepare the
+explicit rules-only JSON format before bulk activation. A `status: reviewed` label
+acknowledges a historical review but does not constitute activation.
+
+Example snapshot (the `.md` file contains this JSON object, without fences):
+
+```json
+{
+  "version": 1,
+  "node": "demo",
+  "scope": ["alice"],
+  "importer": "worker-1",
+  "importer_runtime": "codex",
+  "provenance": "example-repository@abc123",
+  "rules": [
+    {"id": "examples", "text": "Use fabricated examples.", "source": "example-repository@abc123:README.md:8"}
+  ]
+}
+```
+
+The source schema is exact: no roles, items, alternate destination or scope expansion.
+`scope` must exactly equal the node's current non-revoked owners. `brain proposals
+<node> --json` includes the pending `rules_snapshot` digest/count/path. An independent
+coordinator supplies a review manifest containing all seven snapshot fields unchanged,
+plus `snapshot_hash` (that digest), `reviewer`, `reviewer_runtime`, and `reviewed_at`
+(from `brain now`). Every rule must be covered in full. The reviewer must be the current
+operator or an owning principal; both actors must be non-revoked, and reviewer identity
+and runtime must differ from the importer's. Both runtimes must be configured.
+
+`brain proposals <node> --approve-all --review-manifest <file>` validates the entire
+manifest/current snapshot before changing anything. It atomically installs every rule,
+source and review acknowledgement together in the node's `AGENTS.md`. Existing unrelated
+instructions survive; later successful snapshots replace the managed imported-rules
+block. Source data stays unchanged. Missing, changed, partial, self-approved, revoked,
+unsafe or out-of-scope evidence refuses with no partial writes. The native instruction
+block explicitly says **supplied evidence**, never authenticated identity: core validates
+the supplied record, and cannot independently prove who supplied it. A principal name
+alone is insufficient. This one operation approves only that reviewed rules snapshot;
+roles, items, future imports and wider scope require separate decisions.
+
+
 ## Licence
 
 [MIT](LICENSE): free to use, copy, change and share, commercially or not. Keep the copyright

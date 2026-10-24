@@ -28,6 +28,10 @@ stated; never run a polling loop in an agent.
    than stranding existing jobs.
 1. **Worktree.** Choose the integration mode before launching: `brain set <id> merge=pr` for
    host PR merges; `merge=local` (the default) for coordinator-owned local integration.
+   `merge=pr` refuses conflicting or unmapped reviewed limits and quotes their rule/source.
+   Have the coordinator prepare the explicit `publication-policy.json` mapping described in
+   README; core never interprets prose as an authorization engine. A mode is a workflow choice,
+   and grants no push or PR consent. Unknown policy goes to the coordinator.
    Never reuse a merged job's folder for a new branch. Create a fresh worktree for each
    new job; leave the old folder on its recorded branch until cleanup.
    `core/bin/brain wt add <id> <branch> [--base <ref>]`. It creates the worktree
@@ -148,7 +152,15 @@ stated; never run a polling loop in an agent.
    rebase the job on `origin/<default>` and hand back again, leaving the operator checkout alone.
    To update a local default branch, use a separate worktree and `git merge --ff-only origin/<default>`
    only when that branch is not checked out by the operator; otherwise leave it untouched.
-5. **Pull request.** Once pushing is allowed and the review is addressed, the worker opens it.
+5. **Pull request.** Before proposing an outward step, read the generated publication policy.
+   `brain policy <id> --action pr` must allow the PR; `brain policy <id> --action push` must
+   allow the push. A deny quotes the binding rule/source; an unknown needs the coordinator.
+   If `land_check` is configured, run `brain land-check <id> --branch <job> --run` on the
+   exact candidate, then `brain land-check <id> --branch <job> --push-step` to generate the
+   supported push command. Missing, failed or stale evidence refuses the step. Changed heads,
+   commands, configuration or replacement attempts require a fresh passing check. These checks
+   grant neither readiness nor additional outward consent. Only after those checks, permission
+   and review does the worker take the explicitly authorized push/PR step.
    Have the host watch it (host `watch`), so reviews, checks and conflicts come back to you.
    Update the Active work row.
    Before anything is merged: `core/bin/brain guard <id> <worktree>` must print `guard: clean`
@@ -190,6 +202,9 @@ stated; never run a polling loop in an agent.
 
 Never merge, push to a shared branch, deploy or delete a branch without explicit consent
 (axiom 24). Several jobs can run at once; each has its own worktree and port.
+Core enforces its supported instruction/landing path; it cannot intercept an arbitrary external
+`git push`. The land-check command runs only on explicit invocation or a configured local train,
+never during due/status/watch reads. An absent setting adds no check and grants no permission.
 
 
 ## Machine care is core behaviour

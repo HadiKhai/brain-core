@@ -605,6 +605,11 @@ def prepare_settings(inst, n, pairs, messages=None):
         elif k == "merge":
             if v not in ("local", "pr"):
                 _m_common.die("merge must be local or pr")
+            from . import policy as _m_policy
+            try:
+                _m_policy.validate_merge(inst, {**n, 'fm': fm}, v)
+            except ValueError as error:
+                _m_common.die(str(error))
             fm[k] = v
         elif k == 'parallel_jobs':
             try:

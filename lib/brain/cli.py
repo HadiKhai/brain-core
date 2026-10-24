@@ -20,9 +20,11 @@ from . import hosts as _m_hosts
 from . import instance as _m_instance
 from . import jobs as _m_jobs
 from . import knowledge as _m_knowledge
+from . import land_checks as _m_land_checks
 from . import messages as _m_messages
 from . import machine as _m_machine
 from . import nodes as _m_nodes
+from . import policy as _m_policy
 from . import reports as _m_reports
 from . import rehearse as _m_rehearse
 from . import rotation as _m_rotation
@@ -106,12 +108,16 @@ READ_ONLY = {"cmd_show", "cmd_tree", "cmd_status", "cmd_now", "cmd_jobs", "cmd_s
              "cmd_brief", "cmd_hire", "cmd_reports", "cmd_brains", "cmd_use", "cmd_machine", "cmd_usable",
              "cmd_item_list", "cmd_item_show", "cmd_wt_list", "cmd_selftest", "cmd_init", "cmd_hook", "cmd_hook_approve", "cmd_help",
              "cmd_dashboard", "cmd_ready", "cmd_usage", "cmd_scan", "cmd_scrub", "cmd_history",
-             "cmd_version", "cmd_connect", "cmd_recall", "cmd_proposals", "cmd_changes", "cmd_heavy", "cmd_rehearse"}
+             "cmd_version", "cmd_connect", "cmd_recall", "cmd_proposals", "cmd_changes", "cmd_heavy", "cmd_rehearse", "cmd_policy"}
 
 
 def writes(a):
     """Does this command, with these options, change anything in the instance?"""
     name = a.f.__name__
+    if name == 'cmd_proposals':
+        return bool(getattr(a, 'approve_all', False))
+    if name == 'cmd_land_check':
+        return False  # the explicit runner takes short owned locks around execution
     if name == "cmd_watch":
         return False  # takes a short nonblocking instance lock itself
     if name == "cmd_wake":
@@ -230,7 +236,14 @@ def main():
         opt("--limit", type=int, default=10), opt("--json", action="store_true"))
     cmd("proposals", _m_status.cmd_proposals, "everything waiting for review, node by node, with full text and the commands "
         "to accept or reject several at once", opt("id", nargs="?"),
-        opt("--only", help="only these nodes (comma-separated)"), opt("--json", action="store_true"))
+        opt("--only", help="only these nodes (comma-separated)"), opt("--json", action="store_true"),
+        opt('--approve-all', action='store_true', help='activate one complete independently reviewed rules snapshot'),
+        opt('--review-manifest', help='complete coordinator-supplied snapshot review JSON'))
+    cmd('policy', _m_policy.cmd_policy, 'inspect explicit reviewed publication policy; never publishes', 'id',
+        opt('--action', choices=['push', 'pr']), opt('--json', action='store_true', help='print a current limits mapping template'))
+    cmd('land-check', _m_land_checks.cmd_land_check, 'record/check exact-candidate evidence; only prints supported push steps', 'id',
+        opt('--branch', required=True), opt('--run', action='store_true', help='run the configured check explicitly'),
+        opt('--push-step', action='store_true', help='print a policy-allowed SHA-pinned push step with current evidence'))
     cmd("guard", _m_guard.cmd_guard, f"check a home and its worktrees for the terms in {_m_guard.NEVER_FILE} (and, if sealed, "
         "upward traces); exits 1 if any", "id", opt("paths", nargs="*"))
     cmd("spend", _m_spend.cmd_spend, "time and tokens from this machine's transcripts: a node's past sessions (opt-in, "
