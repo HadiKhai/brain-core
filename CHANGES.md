@@ -7,6 +7,8 @@ upgrading. `brain changes <node>` shows the entries this node's coordinator hasn
 
 ## 2026-10-24: Namespace reserved worktree ports in child environments
 
+rehearsal evidence waived (release 1 waiver pattern; rehearse sandbox self-check refuses)
+
 For agents:
 - Verify, worktree setup and train commands receive reserved ports as `BRAIN_PORT`,
   `BRAIN_PORTS` and `BRAIN_PORT_LAST`. Raw `PORT`, `PORTS` and `PORT_LAST` are no
@@ -60,6 +62,23 @@ rehearsal evidence waived (release 1 waiver pattern; rehearse sandbox self-check
 For agents: Brief allowances charge task and embedded context UTF-8 bytes captured before assembly. Fixed generated instructions are excluded; both input and total bytes are reported, and diagnostics name coordinator-controlled sections.
 
 After upgrading: No migration. brief_max_kb still warns above the configured allowance and refuses at twice it. A separate absolute total ceiling of 256 KiB applies. Safety text is never silently truncated; automatic context summarization remains future scope.
+
+## 2026-10-24: Release 2: Known in this release
+
+For agents:
+- brain land remains parked; use the approved manual landing path.
+- heavy-run remains parked (2 P1 + P2; redesign deferred).
+- rehearse EPERM atexit kill remains parked (P1).
+- rehearse harness linked-external-observation refusal remains parked (harness-r2).
+- P6 cancellation is deferred.
+- Native rehearsal remains blocked by the sandbox self-check refusal
+  (rehearse.py:877).
+- Clone comparison retains the harness HOME identity gap for the usage-reading
+  probe; it does not establish equivalent usage-reading observations.
+
+After upgrading:
+- These parked jobs, deferrals and evidence gaps remain open. Release 2 follows
+  the approved rehearsal waiver and manual landing path.
 
 ## 2026-10-24: Configure worker runtime and model defaults per job class
 
