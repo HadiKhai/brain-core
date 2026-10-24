@@ -763,7 +763,7 @@ def status_facts(inst, n, state, known_merges):
     from . import job_attempts as _m_attempts
     projections = [state.get('job_projections', {}).get(_m_jobs.job_key(r)) or _m_attempts.job_projection(inst, n, r)
                    for r in state['jobs'] or [] if not r['Ended']]
-    lines += [_m_guard.redact(f"- {p['branch']}: {p['state']}; host activity unknown; " +
+    lines += [_m_guard.redact(f"- {p['branch']}: {p['state']}; host activity unknown; " + ('runtime activity unknown; ' if p['state'] == 'open' else '') +
                      (p['summary'] or ('last hand-back (historical): ' + p['historical_summary'] if p['historical_summary'] else 'summary not recorded')) +
                      f"; started {display_time(inst, p['ledger']['Started'])}; {p['ledger']['Reviews'] or '0'} reviews", _m_guard.never_terms(n))
               for p in projections] or ["- None."]
