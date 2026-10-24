@@ -630,7 +630,7 @@ class TeamHomes(Scenario):
         legacy = record.read_bytes()
         self.assertNotIn('verify_port_context', json.loads(legacy)['ready'])
         ledger = (root / "nodes/app/job-ledger.md").read_bytes()
-        command = 'brain handback app --branch job --state done --reviews 1 --reverify'
+        command = "brain handback app --branch job --state done --reviews 1 --reverify --summary 'Reverified port environment'"
         refusal = self.b(root, "ready", "app", "--branch", "job", ok=False)
         self.assertEqual(refusal.strip().splitlines()[-1],
                          'not ready: recorded verify port environment missing or invalid; run ' + command)
@@ -688,7 +688,7 @@ class TeamHomes(Scenario):
         legacy = record.read_bytes()
         self.assertNotIn('verify_port_context', json.loads(legacy)['ready'])
         self.b(root, "set", "app", "merge=local")
-        command = 'brain handback app --branch job --state done --reviews 1 --reverify'
+        command = "brain handback app --branch job --state done --reviews 1 --reverify --summary 'Reverified port environment'"
         refusal = self.b(root, "ready", "app", "--branch", "job", ok=False)
         self.assertEqual(refusal.strip().splitlines()[-1],
                          'not ready: recorded verify port environment missing or invalid; run ' + command)
@@ -709,6 +709,11 @@ class TeamHomes(Scenario):
                       self.b(root, "ready", "app", "--branch", "job", ok=False))
         self.git("remote", "remove", "origin", cwd=home)
         record.write_bytes(legacy)  # Exercise the actual old packet with no origin as well.
+        # Restore the complete old-core state after the synthetic re-verification.
+        module = core_loader.SourceFileLoader('historical_no_origin_attempt_fixture', str(CORE / 'bin/brain')).load_module()
+        node = module.Instance(root).node('app')
+        job = module.open_job(module.read_jobs(node), 'job')
+        module.attempt_path(node, job).unlink()
         refusal = self.b(root, "ready", "app", "--branch", "job", ok=False)
         self.assertEqual(refusal.strip().splitlines()[-1],
                          'not ready: recorded verify port environment missing or invalid; run ' + command)
@@ -757,7 +762,7 @@ class TeamHomes(Scenario):
         cache.write_text(json.dumps(packet))
         record.unlink()
         before = cache.read_bytes()
-        command = 'brain handback app --branch job --state done --reviews 1 --reverify'
+        command = "brain handback app --branch job --state done --reviews 1 --reverify --summary 'Reverified port environment'"
         refusal = self.b(root, "ready", "app", "--branch", "job", ok=False)
         self.assertEqual(refusal.strip().splitlines()[-1],
                          'not ready: recorded verify port environment missing or invalid; run ' + command)

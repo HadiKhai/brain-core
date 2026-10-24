@@ -141,8 +141,8 @@ def job_projection(inst, n, row, strict=False):
     admission = _m_machine.job_queue_projection(inst, n['id'], attempt.get('owner')) if attempt else None
     episode = None
     if effective:
-        episode = effective.get('wake_id') or _m_jobs.digest([effective.get(k) for k in
-                    ('state', 'summary', 'question', 'report', 'lessons', 'restart', 'restart_id')])
+        episode = effective.get('wake_id') or _m_jobs.digest([_m_jobs.job_key(row), {k: effective.get(k) for k in
+                    ('state', 'summary', 'question', 'report', 'lessons', 'restart')}])
     action = {'queued': 'run the explicit foreground queue runner' if queue else 'wait for native admission',
               'verifying': 'wait for the owned verifier', 'interrupted': 'inspect retained evidence; hand back again',
               'invalidated': 'refresh inputs and hand back again', 'unknown': 'repair unreadable attempt evidence',

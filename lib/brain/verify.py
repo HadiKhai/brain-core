@@ -270,7 +270,7 @@ def _ready_state(inst, n, branch, train=False, display=False):
         rounds = packet.get('review_rounds')
         reverify = shlex.join(['brain', 'handback', n['id'], '--branch', branch, '--state', 'done',
                               '--reviews', str(rounds if type(rounds) is int and rounds >= 1 else 0),
-                              '--reverify'])
+                              '--reverify', '--summary', 'Reverified port environment'])
         if (not isinstance(port_context, dict) or set(port_context) != {'export_port', 'digest'}
                 or type(port_context.get('export_port')) is not bool
                 or not isinstance(port_context.get('digest'), str)

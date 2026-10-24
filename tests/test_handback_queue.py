@@ -75,7 +75,9 @@ class HandbackLifecycle(Scenario):
             packet = dict(version=1, node=n['id'], branch=branch, head=head, main=main,
                           integration_base=main, verify_command='true', verify_result=0,
                           inputs=m.verify_inputs(n, n['local']['worktrees'][branch]),
-                          review_rounds=1, checked_at=inst.now_dt().isoformat())
+                          review_rounds=1, checked_at=inst.now_dt().isoformat(),
+                          verify_port_context=m.verify_port_context(n, m.verify_env(n, branch,
+                              n['local']['worktrees'][branch])))
             signal = dict(version=3, job=branch, started=row['Started'], state='done',
                           summary='Synthetic completed result', lessons='none: fixture',
                           attempt_id='a' * 32, ready=packet)
@@ -106,6 +108,33 @@ class HandbackLifecycle(Scenario):
             for train in (False, True):
                 ready = m.ready_state(inst, n, branch, train=train)
                 self.assertTrue(ready['ready'], ready['reasons'])
+
+    def test_legacy_wakeless_handback_keeps_lifecycle_acknowledgement(self):
+        m, inst, n, row = self.fixture()
+        path = m.handback_file(n, row)
+        path.parent.mkdir(exist_ok=True)
+        signal = dict(version=2, job=row['Job'], started=row['Started'], state='blocked',
+                      summary='Dependency unchanged', lessons='none: fixture')
+        path.write_text(json.dumps(signal))
+        state = dict(jobs=[row], worktrees={}, handbacks={m.job_key(row): signal}, inbox=[])
+        with mock.patch.dict(os.environ, self.env, clear=True):
+            current = next(i for i in m.due_items(inst, n, (state, '', ''),
+                           include_stale=False, include_advice=False) if i['kind'] == 'handback')
+            legacy = {k: v for k, v in current.items() if k not in ('id', 'handling')}
+            legacy['episode'] = m.digest([m.job_key(row), {k: signal.get(k) for k in
+                ('state', 'summary', 'question', 'report', 'lessons', 'restart')}])
+            legacy = m.reminder_items(inst, n, [legacy])[0]
+            m.record_reminder(inst, n, [legacy], legacy['id'], 'ack', 'Dependency handled',
+                              resume_condition='Dependency changes')
+            self.assertEqual(m.reminder_items(inst, n, [legacy]), [])
+            unchanged = m.due_items(inst, n, (state, '', ''), include_stale=False, include_advice=False)
+            self.assertFalse(any(i['kind'] == 'handback' for i in unchanged))
+            self.assertEqual(m.job_projection(inst, n, row)['episode_id'], legacy['episode'])
+            signal['summary'] = 'A different dependency'
+            path.write_text(json.dumps(signal))
+            changed = m.due_items(inst, n, (state, '', ''), include_stale=False, include_advice=False)
+            item = next(i for i in changed if i['kind'] == 'handback')
+            self.assertNotEqual(item['id'], legacy['id'])
 
     def test_p6_enqueue_claim_and_terminal_are_single_owner(self):
         m, inst, n, row = self.fixture()
