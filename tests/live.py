@@ -463,7 +463,8 @@ def freshness_across_timezones(run):
     st = root / "nodes" / "a" / "status.md"
     text = st.read_text()
     lines = text.splitlines()
-    off = "" if os.environ.get("LIVE_LEGACY_TIME") else " +03:00"  # the control: times as older cores wrote them
+    offset = wrote.strftime("%z")
+    off = "" if os.environ.get("LIVE_LEGACY_TIME") else f" {offset[:3]}:{offset[3:]}"  # legacy control omits the offset
     lines[0] = f"Updated: {wrote:%Y-%m-%d %H:%M}{off} by a coordinator (claude)"  # as `brain now` writes it
     body = "\n".join(lines) + "\n"
     body = re.sub(r"(## Recent changes[^\n]*\n)(?:\n?- [^\n]*\n)*", rf"\1\n- {wrote:%Y-%m-%d %H:%M}{off}: started\n", body)

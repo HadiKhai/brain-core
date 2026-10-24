@@ -21,6 +21,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 CORE = Path(os.environ.get("BRAIN_CORE") or Path(__file__).resolve().parent.parent)
 
@@ -1026,13 +1027,40 @@ for line in sys.stdin:
         file = root / "instance.md"; file.write_text(file.read_text().replace("timezone: UTC", "timezone: Asia/Beirut"))
         out = json.loads(self.b(root, "usage", "--json"))
         self.assertEqual(out["scope"], "account-wide")
-        self.assertIn("+03:00", out["subscriptions"][0]["windows"]["five_hour"]["reset_time"])
+        window = out["subscriptions"][0]["windows"]["five_hour"]
+        reset = datetime.datetime.fromisoformat(window["reset_time"])
+        expected = datetime.datetime.fromtimestamp(window["resets_at"], ZoneInfo("Asia/Beirut"))
+        self.assertEqual(reset.utcoffset(), expected.utcoffset())
+        self.assertEqual(reset.timestamp(), int(window["resets_at"]))
         self.assertNotIn("machine_share", out["subscriptions"][0])
         text = self.b(root, "usage")
         self.assertIn("Account-wide", text); self.assertIn("share: unavailable", text)
         self.assertIn("source", text)
         (self.cfg / "subscriptions.json").write_text("invalid")
         self.assertIn("Usage unknown", self.b(root, "brief", "root"))
+
+    def test_usage_reset_timezone_across_dst_boundary(self):
+        root = self.init("alice")
+        file = root / "instance.md"
+        file.write_text(file.read_text().replace("timezone: UTC", "timezone: Asia/Beirut"))
+        inst = self.m.Instance(root)
+        config = self.declare(self.subscription())
+        zone = ZoneInfo("Asia/Beirut")
+        # The second one-hour window crosses the rollback; reset uses winter time
+        # even though the reading and current clock still use summer time.
+        for hour, offset in ((19, 3), (20, 2)):
+            now = datetime.datetime(2026, 10, 24, hour, 30, tzinfo=datetime.timezone.utc).timestamp()
+            with self.subTest(hour=hour), mock.patch.object(self.m.time, "time", return_value=now):
+                self.cache(config, [self.reading()])
+                rows, _ = self.m.usage_rows(inst)
+                window = rows[0]["windows"]["five_hour"]
+                reset = datetime.datetime.fromisoformat(window["reset_time"])
+                expected = datetime.datetime.fromtimestamp(window["resets_at"], zone)
+                self.assertEqual(reset.isoformat(), expected.isoformat())
+                self.assertEqual(reset.timestamp(), now + 3600)
+                self.assertEqual(reset.utcoffset(), datetime.timedelta(hours=offset))
+                self.assertEqual(datetime.datetime.fromtimestamp(now, zone).utcoffset(),
+                                 datetime.timedelta(hours=3))
 
     def test_usage_corrupt_cache_is_unknown_and_ui_redacts_values_safely(self):
         root = self.init("alice")
