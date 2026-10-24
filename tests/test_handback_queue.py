@@ -136,6 +136,42 @@ class HandbackLifecycle(Scenario):
             item = next(i for i in changed if i['kind'] == 'handback')
             self.assertNotEqual(item['id'], legacy['id'])
 
+    def test_failed_native_input_check_retains_diagnostics_without_stale_readiness(self):
+        m, inst, n, row = self.fixture()
+        initial = dict(head='a', base='b', inputs='before', integration_base='b', verify_command='true')
+        args = argparse.Namespace(id='root', branch=row['Job'], state='done', summary='Synthetic result',
+                                  question=None, lessons='none: fixture', report=None, reviews=1)
+        cases = [('negative inputs', {'inputs': 'after'}, None, True),
+                 ('stale packet', {'inputs': 'after'}, {'version': 1, 'verify_result': 0}, False),
+                 ('head', {'inputs': 'after', 'head': 'changed'}, None, False),
+                 ('base', {'inputs': 'after', 'base': 'changed'}, None, False),
+                 ('integration base', {'inputs': 'after', 'integration_base': 'changed'}, None, False),
+                 ('command', {'inputs': 'after', 'verify_command': 'changed'}, None, False)]
+        path = m.handback_file(n, row)
+        with mock.patch.dict(os.environ, self.env, clear=True), \
+                mock.patch.object(m, 'load', return_value=inst), mock.patch.object(m.Instance, 'commit'), \
+                mock.patch.object(m, 'attempt_binding') as binding, mock.patch.object(m, 'record_ready') as native, \
+                mock.patch.object(m, 'ready_state', return_value={'reasons': ['native input check failed']}), \
+                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            for name, changed, packet, retained in cases:
+                with self.subTest(case=name):
+                    binding.return_value = initial
+                    before = path.read_bytes() if path.exists() else None
+                    def result(*args, **kwargs):
+                        binding.return_value = {**initial, **changed}
+                        return packet, ['native input check failed']
+                    native.side_effect = result
+                    with self.assertRaises(SystemExit):
+                        m.cmd_handback(args)
+                    if retained:
+                        signal = json.loads(path.read_text())
+                        self.assertIsNone(signal['ready'])
+                        self.assertEqual(signal['ready_reasons'], ['native input check failed'])
+                        self.assertEqual(m.current_attempt(n, row)['state'], 'terminal')
+                    else:
+                        self.assertEqual(path.read_bytes() if path.exists() else None, before)
+                        self.assertEqual(m.current_attempt(n, row)['state'], 'interrupted')
+
     def test_p6_enqueue_claim_and_terminal_are_single_owner(self):
         m, inst, n, row = self.fixture()
         args = argparse.Namespace(id='root', branch=row['Job'], state='blocked', summary='Needs a decision',

@@ -285,8 +285,17 @@ def publish_handback(a):
             _m_common.die("job changed during verification; hand back to its coordinator")
         from . import job_attempts as _m_attempts
         attempt = _m_attempts.current_attempt(n, current)
+        binding_matches = attempt and _m_attempts.attempt_matches(n, current, attempt)
+        if (not binding_matches and attempt and packet is None and reasons and not study
+                and a.state == 'done' and (a.reviews is not None or getattr(a, 'record', False))):
+            # A native failed input check carries diagnostics, never readiness.
+            # Permit only input drift; refs/config/job/attempt ownership stay fenced.
+            diagnostic_binding = {**attempt['binding'],
+                                  'inputs': _m_attempts.attempt_binding(n, current)['inputs']}
+            binding_matches = _m_attempts.attempt_matches(n, current,
+                {**attempt, 'binding': diagnostic_binding})
         if (not attempt or attempt['id'] != a._attempt_id or attempt['state'] not in _m_attempts.ATTEMPT_ACTIVE
-                or not _m_attempts.attempt_matches(n, current, attempt)):
+                or not binding_matches):
             detail = _m_guard.redact('; '.join(reasons), _m_guard.never_terms(n))
             _m_common.die('head, base, inputs or attempt changed; no stale handback published' + ('; ' + detail if detail else ''))
         request = getattr(a, '_queue_request', None)
