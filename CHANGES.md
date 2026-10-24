@@ -16,11 +16,14 @@ For agents:
 - Repeated read-only Git queries share one build's results. Explicit checks and
   later builds still read Git again.
 - `brain ui --open` reuses a matching local server or replaces an identified old
-  dashboard on the requested port. An unrelated listener is left running; the
+  dashboard through its authenticated identity on the requested port. A legacy
+  dashboard without that identity and any unrelated listener are left running; the
   command reports the busy port instead of silently choosing another one.
 
 After upgrading:
 - Run `brain ui --open` again to replace an older dashboard. No setup is needed.
+- If a legacy dashboard has no identity record, stop it in its own terminal first;
+  a working directory or process command cannot prove which instance it serves.
 
 ## 2026-10-23: Rehearse JSON probes without collapsing private identities
 

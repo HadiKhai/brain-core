@@ -54,9 +54,9 @@ def ui_work_metadata(inst, n):
     return out
 
 
-def ui_blocked_metadata(inst, n, text):
+def ui_blocked_metadata(inst, n, text, file_only=False):
     """Use explicit waiting fields; a blocked section alone does not identify its owner."""
-    data = _m_status.blocked_metadata(inst, n, 'blocked', text)
+    data = _m_status.blocked_metadata(inst, n, 'blocked', text, file_only=file_only)
     match = re.search(r'\bwaiting\s+on\s+([^;]+);\s*clears\s+when\s+([^;]+)', text, re.I)
     waiting, clears = (part.strip() for part in match.groups()) if match else ('', '')
     names = ['operator', 'you']

@@ -54,6 +54,7 @@ EXTRA_INPUTS = {'ui': ('tests/live.py', 'tests/ui-checks.js', 'tests/ui-fitness.
 OUTSIDE_INPUTS = ('README.md', 'docs/**', 'ui/**/*.png', 'LICENSE')
 SHARED_INPUTS = (
     'lib/brain/common.py', 'lib/brain/instance.py', 'lib/brain/cli.py',
+    'lib/brain/status.py', 'lib/brain/ui_status.py', 'lib/brain/ui_server.py',
     'lib/brain/__init__.py', 'tests/scenario.py', 'tests/core_loader.py',
     'tests/conftest.py', 'tests/lanes.py', 'tests/check_lanes.py',
     'bin/**', 'templates/**', 'skills/**', 'roles/**', 'adapters/**', 'ui/**', '!ui/**/*.png',

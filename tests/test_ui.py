@@ -193,7 +193,15 @@ class ExpandedUI(Scenario):
         root.mkdir()
         (root / "instance.md").write_text("---\nname: alice\nprincipals: alice\ntimezone: UTC\n---\n")
         (root / "node.md").write_text("---\nid: root\ntitle: Alice workspace\nowners: alice\nhome: here\n---\n")
-        (root / "status.md").write_text("## Now\nA synthetic first reading.\n")
+        (root / "status.md").write_text(
+            "## Now\nA synthetic first reading.\n\n## Blocked\n"
+            "- Waiting on operator; clears when choice arrives; since: 2026-01-01T00:00Z\n"
+            "- Untimestamped decision; recommendation: proceed; default: wait\n"
+            "- Invalid decision; since: not-a-date\n")
+        child = root / 'nodes' / 'meadow'
+        child.mkdir(parents=True)
+        (child / 'node.md').write_text('---\nid: meadow\ntitle: Meadow\nowners: alice\n---\n')
+        (child / 'status.md').write_text('## Blocked\n- Child decision\n- Child invalid; since: invalid\n')
         (root / '.brain').mkdir()
         (root / '.brain/local.json').write_text('{"machine":"demo","nodes":{}}')
         return root
@@ -354,24 +362,59 @@ class ExpandedUI(Scenario):
             kill.assert_not_called()
 
     def test_legacy_server_ownership_requires_python_brain_ui_and_the_same_brain(self):
+        # Cwd/argv cannot prove the selected instance: BRAIN_ROOT can override cwd,
+        # and re-exec can consume the original CLI selector before ps observes it.
         module = self.m._owners['ui_legacy_owner']
         root = self.first_paint_root()
-        command = str(os.getuid()) + ' ' + shlex.quote(sys.executable) + ' -B ' + shlex.quote(str(CORE / 'bin/brain')) + ' -b alice ui --open'
-        def result(text):
-            return subprocess.CompletedProcess([], 0, text, '')
-        with mock.patch.object(subprocess, 'run', side_effect=[result(command), result('p12345\nn' + str(root) + '\n')]):
-            self.assertTrue(module.ui_legacy_owner(12345, root))
         child = root / 'nodes/meadow'
-        child.mkdir(parents=True)
-        with mock.patch.object(subprocess, 'run', side_effect=[result(command), result('n' + str(child))]):
-            self.assertTrue(module.ui_legacy_owner(12345, root))
-        for command in ('0 /usr/bin/python3 -c "print(1)"',
-                        str(os.getuid()) + ' /usr/bin/python3 -c "brain ui"',
-                        str(os.getuid()) + ' ' + shlex.quote(sys.executable) + ' ' + shlex.quote(str(CORE / 'bin/brain')) + ' check'):
-            with mock.patch.object(subprocess, 'run', return_value=result(command)):
-                self.assertFalse(module.ui_legacy_owner(12345, root))
-        with mock.patch.object(subprocess, 'run', side_effect=[result(str(os.getuid()) + ' ' + shlex.quote(sys.executable) + ' ' + shlex.quote(str(CORE / 'bin/brain')) + ' ui'), result('n/another-brain')]):
-            self.assertFalse(module.ui_legacy_owner(12345, root))
+        variants = ['-b beta ui', 'ui -b beta', '--brain beta ui', 'ui --brain beta',
+                    '--brain=beta ui', 'ui --brain=beta', '-b alice ui', 'ui',
+                    'ui --port 4747', 'check']
+        other = self.tmp / 'beta'
+        other.mkdir()
+        (other / 'instance.md').write_text('---\nname: beta\n---\n')
+        (other / 'node.md').write_text('---\nid: root\n---\n')
+        inst = self.m.UIInstance(root)
+        for selection in variants:
+            for cwd in (root, child):
+                for env_root in ('', str(other)):
+                    with self.subTest(selection=selection, cwd=cwd, env=env_root):
+                        command = str(os.getuid()) + ' ' + shlex.quote(sys.executable) + ' ' + shlex.quote(str(CORE / 'bin/brain')) + ' ' + selection
+                        def run(args, **kwargs):
+                            output = command if args[0] == 'ps' else ('n' + str(cwd) + '\n' if '-d' in args else '12345\n')
+                            return subprocess.CompletedProcess(args, 0, output, '')
+                        with mock.patch.dict(os.environ, {'BRAIN_ROOT': env_root}), \
+                             mock.patch.object(subprocess, 'run', side_effect=run), \
+                             mock.patch.object(os, 'kill') as kill, \
+                             mock.patch.object(module, 'ui_server_request', side_effect=OSError) as request:
+                            self.assertIsNone(module.ui_reuse_server(inst, 4747, 'candidate'))
+                            self.assertFalse(module.ui_legacy_owner(12345, root))
+                            kill.assert_not_called()
+                            request.assert_not_called()
+
+    def test_partial_blocked_ages_are_unknown_without_history_and_do_not_poison_full_metadata(self):
+        inst = self.m.UIInstance(self.first_paint_root())
+        owner = self.m._owners['blocked_entries']
+        history = subprocess.CompletedProcess([], 0, '2026-01-01T00:00:00+00:00\n', '')
+        with mock.patch.object(owner._m_common, 'git', return_value=history) as git:
+            partial = self.m.ui_initial_state(inst)
+            git.assert_not_called()
+            for node in partial['nodes']:
+                unknown = [v for v in node['blocked_metadata'] if v.get('since') is None]
+                self.assertEqual(len(unknown), 2)
+                self.assertTrue(all(v['age_hours'] is None for v in unknown))
+                self.assertTrue(all(not v['escalated'] for v in unknown))
+            explicit = partial['nodes'][0]['blocked_metadata'][0]
+            self.assertEqual(explicit['since'], '2026-01-01T00:00:00+00:00')
+            self.assertTrue(explicit['waiting_on_operator'])
+            self.assertEqual(partial['nodes'][0]['blocked_metadata'][1]['recommendation'], 'proceed')
+            for node in inst.nodes():
+                full = owner.blocked_entries(inst, node)
+                self.assertTrue(all(v['since'] and v['age_hours'] is not None for v in full))
+            self.assertEqual(git.call_count, 4)
+            # A populated full cache must not turn a later file-only age into history.
+            again = self.m.ui_initial_state(inst)
+            self.assertIsNone(again['nodes'][1]['blocked_metadata'][0]['age_hours'])
 
     def test_open_does_not_fall_back_to_another_port_for_an_unrelated_listener(self):
         import http.server

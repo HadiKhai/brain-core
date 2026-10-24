@@ -33,7 +33,9 @@ test('partial data stays marked after idle and backend completion until the full
     await page.goto('/?k=demo');
     await expect(page.getByRole('button', { name: 'Field Guide', exact: true })).toBeVisible();
     await expect(page.locator('[data-reading-progress]')).toContainText('Filling in');
-    console.log(`partial reading visible: ${(performance.now() - start).toFixed(1)}ms`);
+    const firstPaintMs = performance.now() - start;
+    console.log(`partial reading visible: ${firstPaintMs.toFixed(1)}ms`);
+    expect(firstPaintMs, 'partial data and its marker must render within two seconds').toBeLessThan(2_000);
     // Check three displayed values against the same synthetic source.
     const source = await (await page.request.get('/api/state?k=demo')).json();
     for (const node of source.nodes)

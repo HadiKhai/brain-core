@@ -285,7 +285,7 @@ def ui_node(inst, n, since, cache=None, partial=False):
         "status": {k: v for k, v in secs.items() if v and k.lower() != "active work"},
         "work": work, "worktrees": wts, "inbox": [l[2:] for l in _m_status.inbox_lines(n)],
         "blocked": _m_status.status_section(n, "blocked"),
-        "blocked_metadata": [_m_ui_status.ui_blocked_metadata(inst, n, t) for t in _m_status.status_section(n, "blocked")], "decisions": ui_decisions(inst, n), "limits": _m_knowledge.limits_of(n),
+        "blocked_metadata": [_m_ui_status.ui_blocked_metadata(inst, n, t, file_only=partial) for t in _m_status.status_section(n, "blocked")], "decisions": ui_decisions(inst, n), "limits": _m_knowledge.limits_of(n),
         "never_name": len(terms), "spend": lookback,
         "jobs": {**js, "rows": [{k: hide(v) for k, v in r.items()} for r in (_m_jobs.read_jobs(n) or [])
                               if r.get("Outcome") != "external"],

@@ -2,17 +2,12 @@
 import hashlib
 import json
 import os
-import shlex
-import signal
 import stat
-import subprocess
 import tempfile
 import urllib.error
 import urllib.request
-from pathlib import Path
 
 from . import common
-from . import instance
 
 
 def ui_code_version():
@@ -57,33 +52,13 @@ def ui_server_request(port, key, stop=False):
 
 
 def ui_legacy_owner(pid, root):
-    """Old servers have no identity endpoint. Require our UID, Python CLI, and brain cwd."""
-    if pid <= 1 or pid == os.getpid():
-        return False
-    try:
-        result = subprocess.run(['ps', '-p', str(pid), '-o', 'uid=,command='], capture_output=True,
-                                text=True, timeout=0.5)
-        uid, command = result.stdout.strip().split(None, 1)
-        args = shlex.split(command)
-        if int(uid) != os.getuid() or not Path(args[0]).name.lower().startswith('python'):
-            return False
-        args = args[1:]
-        while args and args[0] in ('-B', '-u'):
-            args = args[1:]
-        script = Path(args.pop(0))
-        if (script.name != 'brain' or script.parent.name != 'bin' or not script.is_file()
-                or not (script.parent.parent / 'lib/brain/ui.py').is_file()):
-            return False
-        if args[:1] in (['-b'], ['--brain']):
-            args = args[2:]
-        if args[:1] != ['ui']:
-            return False
-        cwd = subprocess.run(['lsof', '-a', '-p', str(pid), '-d', 'cwd', '-Fn'],
-                             capture_output=True, text=True, timeout=0.5)
-        return any(instance.instance_above(Path(line[1:])) == root.resolve()
-                   for line in cwd.stdout.splitlines() if line.startswith('n'))
-    except (OSError, ValueError, IndexError, subprocess.SubprocessError):
-        return False
+    """Legacy argv/cwd cannot prove the selected instance; never authorize a signal.
+
+    Selectors can occur anywhere, and re-exec can consume them into BRAIN_ROOT.
+    An inherited environment can also select a different instance from the cwd.
+    Only the authenticated identity path below can establish safe replacement.
+    """
+    return False
 
 
 def ui_reuse_server(inst, port, version, write=False):
@@ -104,14 +79,6 @@ def ui_reuse_server(inst, port, version, write=False):
                 return None
     except (OSError, ValueError, KeyError, TypeError, urllib.error.URLError):
         pass
-    try:
-        result = subprocess.run(['lsof', '-nP', '-tiTCP:' + str(port), '-sTCP:LISTEN'],
-                                capture_output=True, text=True, timeout=0.5)
-        pids = set(int(x) for x in result.stdout.split())
-    except (OSError, ValueError, subprocess.SubprocessError):
-        pids = set()
-    if len(pids) == 1:
-        pid = next(iter(pids))
-        if ui_legacy_owner(pid, inst.root) and ui_legacy_owner(pid, inst.root):
-            os.kill(pid, signal.SIGTERM)
+    # Missing/unusable identity is ambiguous, including legacy dashboards. Leave
+    # the listener alone; cmd_ui reports the requested port busy when bind fails.
     return None
