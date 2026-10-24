@@ -550,7 +550,7 @@ def due_items(inst, n, evidence=None, include_stale=True, include_ready=True, in
                 protected=bool(signal.get('restart') or signal.get('question') or
                                any(f'from worker {branch}: blocked:' in line and '<!-- handback:' in line
                                    for line in state['inbox'])))
-        elif not signal and projection['attempt']:
+        elif not signal and projection['attempt'] and projection['attempt']['state'] != 'terminal':
             add('handback-attempt', f"{branch}: {projection['state']}; {projection['next_action']}; prior hand-back is historical",
                 job=_m_jobs.job_key(row), state=projection['state'], episode=projection['attempt']['id'],
                 informational=projection['state'] in ('queued', 'verifying'))
