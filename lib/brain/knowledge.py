@@ -819,10 +819,22 @@ def report_lines(job=False):
              "Lessons: what the next job should know, or none: <reason>; ") + "and what is still open."]
 
 
+def routing_node_configs(n):
+    """Nearest explicit node routing first; inheritance stops at owner boundaries."""
+    current = n
+    while current:
+        source = "node.md" if current is n else current["id"] + " node.md"
+        yield source, current["fm"]
+        parent = current.get("parent")
+        if current.get("sealed") or (parent and set(current.get("owners", [])) != set(parent.get("owners", []))):
+            break
+        current = parent
+
+
 def class_routing_config(inst, n):
     """Validate flat routing keys; no keys means byte-compatible legacy routing."""
     found = False
-    for source, cfg in (("node.md", n["fm"]), ("instance.md", inst.cfg)):
+    for source, cfg in [*routing_node_configs(n), ("instance.md", inst.cfg)]:
         for key in cfg:
             kind = None
             if key.startswith("route_runtime_"):
@@ -846,29 +858,30 @@ def class_routing_config(inst, n):
     return found
 
 
-def route_setting(inst, n, explicit, flag, class_key, node_key, instance_key):
-    for value, source in ((explicit, flag),
-                          (n["fm"].get(class_key), "node.md " + class_key),
-                          (n["fm"].get(node_key), "node.md " + node_key),
-                          (inst.cfg.get(class_key), "instance.md " + class_key),
-                          (inst.cfg.get(instance_key), "instance.md " + instance_key)):
-        if value:
-            return value, source
+def route_setting(inst, n, explicit, flag, class_key, node_key, instance_key, inherit=False):
+    if explicit:
+        return explicit, flag
+    configs = routing_node_configs(n) if inherit else [("node.md", n["fm"])]
+    for source, cfg in configs:
+        for key in (class_key, node_key):
+            if cfg.get(key):
+                return cfg[key], source + " " + key
+    for key in (class_key, instance_key):
+        if inst.cfg.get(key):
+            return inst.cfg[key], "instance.md " + key
     return None, "default"
 
 
 def class_model_selection(inst, n, a, runtime, kind):
     key = "route_model_" + runtime
-    model, source = route_setting(inst, n, a.model, "--model", key + "_" + kind, key, key)
+    model, source = route_setting(inst, n, a.model, "--model", key + "_" + kind, key, key, inherit=True)
     return model or "runtime default", source
 
 
 def launch_selection(inst, n, a, runtime, subscription, row, kind, model_selection=None):
     """Use configured model names, never invent a model or provider identity."""
-    if class_routing_config(inst, n):
-        a.model, a.model_source = model_selection or class_model_selection(inst, n, a, runtime, kind)
-    else:
-        a.model = a.model or n["fm"].get("route_model_" + runtime) or inst.cfg.get("route_model_" + runtime) or "runtime default"
+    class_routing_config(inst, n)  # Validate inherited keys on legacy launch paths too.
+    a.model, a.model_source = model_selection or class_model_selection(inst, n, a, runtime, kind)
     a.effort = _m_jobs.job_effort(n, row, kind, getattr(a, "effort", None))
     instance = (subscription or {}).get("host_provider_instance_id") or runtime
     if a.model == "runtime default":

@@ -220,6 +220,63 @@ for line in sys.stdin:
             self.assertEqual(route()[0], "codex")
             self.assertIn("default", route()[2])
 
+    def test_root_node_models_reach_descendants_with_overrides_and_boundary(self):
+        inst = self.routing_instance()
+        (self.tmp / "node.md").write_text("---\nid: root\nowners: alice\nroute_runtime_build: codex\nroute_model_codex_build: root-build\nroute_model_claude_build: root-other\n---\n")
+        for nid in ("child", "child/grandchild", "sealed", "sealed/inner"):
+            folder = inst.node_dir(nid)
+            folder.mkdir(parents=True, exist_ok=True)
+            (folder / "node.md").write_text("---\nid: " + nid + "\n" +
+                ("owners: team\n" if nid == "sealed" else "") + "---\n")
+        inst.cfg.update(route_model_codex_build="instance-build")
+        def route(nid, runtime=None, model=None):
+            args = argparse.Namespace(branch=None, job_class="build", runtime=runtime, model=model, effort=None)
+            chosen, why = self.m.worker_route(inst, inst.node(nid), args)
+            return chosen, args.model, why
+        def set_node(nid, **values):
+            file = inst.node_dir(nid) / "node.md"
+            fm, body = self.m.read_fm(file)
+            fm.update(values)
+            self.m.write_fm(file, fm, body)
+        with mock.patch.object(self.m, "usage_config", return_value={"autodetected": True}):
+            for nid in ("child", "child/grandchild"):
+                self.assertEqual(route(nid)[:2], ("codex", "root-build"))
+                self.assertIn("root", route(nid)[2])
+            set_node("child", route_model_codex="child-default", runtime="claude")
+            self.assertEqual(route("child")[:2], ("claude", "root-other"))
+            self.assertEqual(route("child/grandchild")[:2], ("codex", "child-default"))
+            set_node("child/grandchild", runtime="claude")
+            self.assertEqual(route("child/grandchild")[:2], ("claude", "root-other"))
+            self.assertEqual(route("child/grandchild", runtime="codex")[:2], ("codex", "child-default"))
+            set_node("child/grandchild", route_model_codex_build="leaf-build", runtime="codex")
+            self.assertEqual(route("child/grandchild")[:2], ("codex", "leaf-build"))
+            self.assertEqual(route("child/grandchild", model="flag-model")[:2], ("codex", "flag-model"))
+            for nid in ("sealed", "sealed/inner"):
+                self.assertEqual(route(nid)[:2], ("codex", "instance-build"))
+                self.assertNotIn("root-build", route(nid)[2])
+            # Runtime-wide legacy model defaults inherit through the same lookup.
+            (self.tmp / "node.md").write_text("---\nid: root\nowners: alice\nroute_model_codex: root-legacy\n---\n")
+            inst.cfg.pop("route_model_codex_build")
+            (inst.node_dir("child") / "node.md").write_text("---\nid: child\n---\n")
+            self.assertEqual(route("child")[:2], ("codex", "root-legacy"))
+
+    def test_root_node_model_inheritance_in_cli_briefs(self):
+        root = self.init("alice")
+        self.b(root, "new", "child", "--title", "Child")
+        self.b(root, "new", "child/leaf", "--title", "Leaf")
+        self.b(root, "set", "root", "route_model_codex_build=root-model")
+        children = [root / "nodes/child/node.md", root / "nodes/child/nodes/leaf/node.md"]
+        before = [file.read_bytes() for file in children]
+        for nid in ("child", "child/leaf"):
+            out = self.b(root, "brief", nid, "--runtime", "codex", "--class", "build", "--task", "Fixture work")
+            self.assertIn('"model": "root-model"', out)
+            self.assertIn("model=root node.md route_model_codex_build", out)
+        self.assertEqual([file.read_bytes() for file in children], before)
+        self.b(root, "set", "child", "route_model_codex=child-model")
+        out = self.b(root, "brief", "child/leaf", "--runtime", "codex", "--class", "build", "--task", "Fixture work")
+        self.assertIn('"model": "child-model"', out)
+        self.assertIn("model=child node.md route_model_codex", out)
+
     def test_per_class_routing_all_classes_and_unknown_keys(self):
         inst = self.routing_instance()
         node = inst.node("root")

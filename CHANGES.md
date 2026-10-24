@@ -5,6 +5,24 @@ upgrading. `brain changes <node>` shows the entries this node's coordinator hasn
 `brain due <node>` lists them until `brain changes <node> --seen`. Entry headings are
 `## <date>: <title>`; once released, a heading never changes.
 
+## 2026-10-25: Prune clean owned submodules and inherit node model routing
+
+For agents: `brain wt prune` can remove clean, merged worktrees with initialized
+or nested submodules. It retains dirty or ignored module data, unmerged module
+commits (including reflogs), and metadata with uncertain or shared checkout
+ownership. Cached submodule object stores remain intact; existing job and thread
+cleanup safeguards still apply.
+
+Model routing now reads explicit ancestor node settings, nearest first, stopping
+at owner boundaries. Local model overrides and runtime pins take precedence over
+ancestor defaults; instance defaults remain the fallback. No settings are copied
+into descendants. `brain status --refresh` already leaves writes uncommitted,
+so coordinators can include several snapshots in one explicit commit.
+
+After upgrading: No migration. Inspect `brain wt prune --dry-run` before cleanup,
+and keep retained data until its owner reconciles it. Review explicit ancestor
+routing when choosing models for descendant jobs.
+
 ## 2026-10-24: Stable job reminder identities and quiet Docker reports
 
 Merged-ledger and lesson-outcome needs ignore hand-back wording. Job advice latches each
