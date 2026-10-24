@@ -41,6 +41,27 @@ class WorkerReadyPackets(Scenario):
         self.git("commit", "-qam", "fix", cwd=wt)
         return r, home, wt
 
+    def test_verify_refusal_names_moved_ref_and_old_new_commits(self):
+        r, home, wt = self.job()
+        loader = core_loader.SourceFileLoader("brain_ref_notice", str(CORE / "bin/brain"))
+        m = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+        loader.exec_module(m)
+        with mock.patch.dict(os.environ, self.env, clear=True):
+            inst = m.Instance(r)
+            n = inst.node("a")
+            for ref, cwd in (("refs/heads/job", wt), ("refs/heads/main", home)):
+                with self.subTest(ref=ref):
+                    old = self.git("rev-parse", ref, cwd=home).strip()
+                    def move(*args):
+                        self.git("commit", "--allow-empty", "-qm", "Move during verify", cwd=cwd)
+                        return 0, None
+                    with mock.patch.object(m, "run_verify", side_effect=move):
+                        packet, reasons = m.record_ready(inst, n, "job", 1)
+                    new = self.git("rev-parse", ref, cwd=home).strip()
+                    self.assertIsNone(packet)
+                    self.assertIn(ref + " " + old + " -> " + new, "; ".join(reasons))
+                    self.assertIn("verify changed", "; ".join(reasons))
+
     def test_unfinished_commit_titles_refuse_ready_even_below_a_clean_tip(self):
         r, home, wt = self.job()
         for title in ("WIPtitle", "WIP", "WIP unfinished", "wip: unfinished", "fixup! target", "squash! target"):

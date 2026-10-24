@@ -758,10 +758,18 @@ def record_ready(inst, n, branch, reviews, previous=None, reverify=False):
                 after.append('verify lane map, toolchain or input files changed during verify')
         except (ValueError, OSError, UnicodeError, RecursionError):
             after.append('verify lane inputs became unreadable during verify')
-    if after or head_after != head or main_after != main or integration_parent(n, main_after) != integration_base:
+    integration_after = integration_parent(n, main_after)
+    if after or head_after != head or main_after != main or integration_after != integration_base:
         # What passed isn't the commit on main that was asked about: never record it as evidence.
+        ref = integration_ref(n["home_path"])
+        local_ref = ref.replace("refs/remotes/origin/", "refs/heads/", 1)
+        moved = list(dict.fromkeys(
+            "%s %s -> %s" % (name, old or "missing", new or "missing")
+            for name, old, new in (("refs/heads/" + branch, head, head_after),
+                                   (ref, main, main_after), (local_ref, integration_base, integration_after))
+            if old != new))
         return None, input_reasons + ["verify changed the job's branch, local main or worktree ("
-                      + "; ".join(after or ["refs moved"])
+                      + "; ".join(after + moved)
                       + "); commit or discard what it changed, then hand back again"]
     if input_reasons:
         return None, input_reasons
