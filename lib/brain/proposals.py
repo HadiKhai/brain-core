@@ -102,7 +102,9 @@ def _activation_block(manifest):
 def _legacy_rule_rejection(inst, raw):
     """Preserve the legacy explicit rejection acknowledgement, without activating rules."""
     try:
-        match = re.match(r'^---\n(.*?)\n---\n?', raw.decode('utf-8'), re.S)
+        # Match read_fm's universal-newline decoding while preserving raw snapshot bytes.
+        text = raw.decode('utf-8').replace('\r\n', '\n').replace('\r', '\n')
+        match = re.match(r'^---\n(.*?)\n---\n?', text, re.S)
     except UnicodeError:
         return False
     if not match:

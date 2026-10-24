@@ -1106,3 +1106,7 @@ class RuleActivationDue(unittest.TestCase):
                     self.assertEqual(rule_items(), [])
                     source.write_text(rejected.replace('status: rejected', 'status: reviewed'))
                     self.assertEqual(len(rule_items()), 1)
+                    crlf = rejected.replace('\n', '\r\n').encode('utf-8')
+                    source.write_bytes(crlf)
+                    self.assertEqual(rule_items(), [])
+                    self.assertEqual(source.read_bytes(), crlf)

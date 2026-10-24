@@ -603,3 +603,31 @@ class RuleSnapshotActivation(unittest.TestCase):
                     self.assertIsNotNone(proposals.pending_rule_snapshot(inst, node))
                 source.write_text(text.replace('reviewed_by: alice', 'reviewed_by: bob'))
                 self.assertIsNone(proposals.pending_rule_snapshot(inst, node))
+
+    def test_legacy_rejection_accepts_universal_newlines_without_changing_snapshot(self):
+        from brain import proposals, status
+        from brain.instance import Instance
+        import hashlib
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / 'instance.md').write_text('---\noperator: alice\nprincipals: alice\ntimezone: UTC\n---\n')
+            (root / 'node.md').write_text('---\nid: root\nowners: alice\n---\n')
+            (root / 'sources').mkdir()
+            source = root / 'sources/import-proposals.md'
+            inst = Instance(root)
+            node = inst.node('root')
+            text = '---\nstatus: rejected\nreviewed_by: alice\nreviewed_at: 2026-01-01 10:00 +00:00\n---\nUnstructured rules.\n'
+            with mock.patch.object(inst, 'now_dt', return_value=datetime.datetime(2026, 1, 2, tzinfo=datetime.timezone.utc)):
+                for newline in ('\r\n', '\r'):
+                    with self.subTest(newline=repr(newline)):
+                        raw = text.replace('\n', newline).encode('utf-8')
+                        source.write_bytes(raw)
+                        self.assertEqual(status.pending_imports(inst, node)[0], 0)
+                        self.assertIsNone(proposals.pending_rule_snapshot(inst, node))
+                        self.assertEqual(source.read_bytes(), raw)
+                        self.assertFalse((root / 'AGENTS.md').exists())
+                        reviewed = raw.replace(b'status: rejected', b'status: reviewed')
+                        source.write_bytes(reviewed)
+                        pending = proposals.pending_rule_snapshot(inst, node)
+                        self.assertEqual(pending['digest'], hashlib.sha256(reviewed).hexdigest())
+                        self.assertEqual(source.read_bytes(), reviewed)
