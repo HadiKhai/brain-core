@@ -167,7 +167,8 @@ def import_brief(a):
         out += [task, ""]
     out += peer_lines(a) + _m_knowledge.limits_lines(n)
     branch = import_job_id(home)
-    if not _m_jobs.open_job(_m_jobs.read_jobs(n) or [], branch):
+    row = _m_jobs.open_job(_m_jobs.read_jobs(n) or [], branch)
+    if not row:
         out += [f"Before launching, the coordinator must run `brain jobs {shlex.quote(n['id'])} "
                 f"--branch {shlex.quote(branch)} --start` to record this study.", ""]
     out += ["## Before you hand back", "",
@@ -183,6 +184,8 @@ def import_brief(a):
         _m_history.write_out(inst, n, a.out, text)
     else:
         print(text, end="")
+    sys.stdout.flush()  # A failed import-brief delivery must not acknowledge a restart.
+    _m_reminders.acknowledge_usage_restart(inst, n, row)
 
 
 # ---------- past AI conversations about a node ----------
