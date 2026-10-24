@@ -149,7 +149,7 @@ def read_ready_packet(inst, n, branch, row=None):
         signal = _m_jobs.read_handback(n, row)
         if not signal:
             return None
-        if signal.get("version") == 2:
+        if signal.get("version") in (2, 3):
             packet = signal.get("ready")
             return packet if isinstance(packet, dict) else None
     if not n["external"] or not n["home_path"]:
@@ -213,6 +213,11 @@ def _ready_state(inst, n, branch, train=False, display=False):
     reasons, head, main = ready_preflight(n, branch)
     row = _m_jobs.open_job(_m_jobs.read_jobs(n) or [], branch)
     signal = _m_jobs.read_handback(n, row) if row else None
+    if row:
+        from . import job_attempts as _m_attempts
+        attempt = _m_attempts.current_attempt(n, row, strict=False)
+        if attempt and (attempt['state'] != 'terminal' or not signal or signal.get('attempt_id') != attempt['id']):
+            reasons.append('replacement handback attempt is ' + attempt['state'] + '; prior completion is historical')
     packet = read_ready_packet(inst, n, branch, row)
     if train and packet:
         reasons, head, main = ready_preflight(n, branch, base=packet.get("integration_base", packet.get("main")))
@@ -239,7 +244,7 @@ def _ready_state(inst, n, branch, train=False, display=False):
         reasons.append("worker hand-back is " + signal["state"])
     if row and _m_jobs.handback_file(n, row).exists() and not signal:
         reasons.append("worker hand-back unreadable; return to worker")
-    if signal and signal.get("version") == 2:
+    if signal and signal.get("version") in (2, 3):
         reasons += [r for r in signal.get("ready_reasons", []) if isinstance(r, str)]
     if packet is None:
         reasons.append("ready packet missing or unreadable; worker must record it")
@@ -459,9 +464,12 @@ def verify_reservation(inst, n):
     """Reserve one command's whole run; subsequent commands join the queue afresh."""
     token = _m_machine.machine_wait("verify", inst, n["id"])
     try:
+        from . import job_attempts as _m_attempts
+        _m_attempts.attempt_phase('verifying')
         yield token
     finally:
         _m_machine.machine_release(token)
+        _m_attempts.attempt_phase('queued')
         _m_docker_leftovers.docker_leftover_nodes(inst, [n])
 
 

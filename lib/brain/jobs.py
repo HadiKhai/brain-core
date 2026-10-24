@@ -123,9 +123,11 @@ def read_handback(n, row, strict=False):
         data = json.loads(f.read_text())
         if (isinstance(data, dict) and data.get("job") == row["Job"] and
                 data.get("started") == row["Started"] and data.get("state") in ("done", "failed", "blocked", "question") and
-                data.get("version") in (None, 2) and (data.get("version") != 2 or
+                data.get("version") in (None, 2, 3) and (data.get("version") not in (2, 3) or
                 (isinstance(data.get("lessons"), str) and isinstance(data.get("ready_reasons", []), list) and
-                 (data.get("ready") is None or isinstance(data["ready"], dict))))):
+                 (data.get("ready") is None or isinstance(data["ready"], dict)))) and
+                (data.get("version") != 3 or (one_line(data.get("summary")) and
+                 (data["state"] != "question" or one_line(data.get("question")))))):
             return data
     except FileNotFoundError:
         pass
@@ -141,7 +143,11 @@ def job_signal(inst, n, row, strict=False):
     Any newer hand-back file takes precedence, including an unreadable one.
     Consumers decide whether an acknowledged compaction restart is still blocking.
     """
+    from . import job_attempts as _m_attempts
+    attempt = _m_attempts.current_attempt(n, row, strict=strict)
     signal = read_handback(n, row, strict=strict)
+    if attempt and (attempt['state'] != 'terminal' or not signal or signal.get('attempt_id') != attempt['id']):
+        return None
     if (not row['Ended'] and not handback_file(n, row).exists()
             and _m_verify.read_ready_packet(inst, n, row['Job'], row)):
         return {'state': 'done', 'report': '', 'legacy_ready': True}
@@ -180,7 +186,57 @@ def train_ejection(n, row, packet, strict=False):
     return None
 
 
+def one_line(value):
+    return isinstance(value, str) and bool(value.strip()) and not any(c in value for c in '\r\n\u2028\u2029')
+
+
+def validate_handback_text(a):
+    summary, question = getattr(a, 'summary', None), getattr(a, 'question', None)
+    if not one_line(summary):
+        _m_common.die('--summary needs a nonempty one-line summary')
+    if a.state == 'question' and not one_line(question):
+        _m_common.die('--state question requires a nonempty one-line --question')
+    if question is not None and not one_line(question):
+        _m_common.die('--question needs a nonempty one-line question')
+    return summary.strip(), question.strip() if question is not None else None
+
+
 def cmd_handback(a):
+    from . import job_attempts as _m_attempts
+    from . import handback_queue as _m_queue
+    validate_handback_text(a)
+    inst = _m_nodes.load()
+    n = inst.node(a.id)
+    row = open_job(read_jobs(n) or [], a.branch)
+    if not row:
+        _m_common.die('no open job for handback')
+    _m_guard.no_terms_in(n, a.summary, 'handback summary')
+    if getattr(a, 'question', None):
+        _m_guard.no_terms_in(n, a.question, 'handback question')
+    if getattr(a, 'enqueue', False):
+        request = _m_queue.enqueue_handback(inst, n, row, a)
+        print(request['id'])
+        return
+    identity = getattr(a, '_attempt_id', None)
+    if identity:
+        attempt = _m_attempts.current_attempt(n, row)
+        if not attempt or attempt['id'] != identity or not _m_attempts.attempt_matches(n, row, attempt):
+            _m_common.die('queued attempt changed; no handback published')
+    else:
+        attempt = _m_attempts.begin_attempt(inst, n, row)
+        identity = attempt['id']
+    a._attempt_id = identity
+    context_token = _m_attempts.ATTEMPT_CONTEXT.set((inst, n, row, identity))
+    try:
+        return publish_handback(a)
+    finally:
+        # Terminal publication retires before returning (including a not-ready exit).
+        # Exceptions retire only this attempt, never a concurrent replacement.
+        _m_attempts.finish_attempt(inst, n, row, identity, 'interrupted')
+        _m_attempts.ATTEMPT_CONTEXT.reset(context_token)
+
+
+def publish_handback(a):
     """Worker-owned completion, proposed lessons and readiness live in one job-scoped file."""
     inst = _m_nodes.load()
     n = inst.node(a.id)
@@ -217,6 +273,11 @@ def cmd_handback(a):
         current = open_job(read_jobs(n) or [], a.branch)
         if not current or job_key(current) != job_key(row):
             _m_common.die("job changed during verification; hand back to its coordinator")
+        from . import job_attempts as _m_attempts
+        attempt = _m_attempts.current_attempt(n, current)
+        if (not attempt or attempt['id'] != a._attempt_id or attempt['state'] not in _m_attempts.ATTEMPT_ACTIVE
+                or not _m_attempts.attempt_matches(n, current, attempt)):
+            _m_common.die('head, base, inputs or attempt changed; no stale handback published')
         if packet and packet.get("version") == 1 and "integration_base" not in packet:
             preflight, head, main = _m_verify.ready_preflight(n, a.branch)
             if not preflight and packet.get("head") == head and _m_verify.packet_main_matches(n, packet, main):
@@ -227,7 +288,9 @@ def cmd_handback(a):
             if isinstance(previous.get("sessions"), list) else []
         if isinstance(packet, dict):
             packet.pop("input_files", None)  # never recommit an older experimental inline fingerprint map
-        data = {"version": 2, "job": row["Job"], "started": row["Started"], "state": a.state,
+        summary, question = validate_handback_text(a)
+        data = {"version": 3, "job": row["Job"], "started": row["Started"], "state": a.state,
+                "summary": summary, "question": question, "attempt_id": a._attempt_id,
                 "sessions": list(dict.fromkeys(sessions + _m_spend.spend_session_ids()))[-20:],
                 "at": inst.now(), "report": _m_common.tilde(a.report) if a.report is not None else previous.get("report", ""),
                 "lessons": lessons, "ready": packet, "ready_reasons": reasons,
@@ -237,7 +300,7 @@ def cmd_handback(a):
         need = getattr(a, "need_human", None)
         inbox_question = a.state == "question" or (a.state == "blocked" and need)
         if inbox_question:
-            message = " ".join((need or ("See report " + data["report"] if data["report"] else
+            message = " ".join((question or need or ("See report " + data["report"] if data["report"] else
                                             "Coordinator choice needed; see worker hand-back")).split())
             marker = "<!-- handback:" + digest([job_key(row), a.state, message]) + " -->"
         if a.state in ("blocked", "question"):
@@ -273,6 +336,11 @@ def cmd_handback(a):
         f.parent.mkdir(exist_ok=True)
         _m_common.atomic_write(f, json.dumps(data, indent=2) + "\n")
         _m_common.touch(f)
+        _m_attempts.finish_attempt(inst, n, current, a._attempt_id, 'terminal')
+        request = getattr(a, '_queue_request', None)
+        if request:
+            from . import handback_queue as _m_queue
+            _m_queue.queue_terminal(inst, n, request['id'], request['lease'], 'terminal')
         question_created = False
         if inbox_question:
             wake_id = data["wake_id"]
@@ -567,7 +635,10 @@ def contract_lines(inst, n, branch, who="worker"):
 
 def handback_detail(n, row):
     signal = read_handback(n, row) or {}
-    return f"lessons: {signal.get('lessons') or 'not recorded'}; report: {signal.get('report') or 'not recorded'}"
+    missing = 'summary: ' + signal['summary'] if signal.get('summary') else 'summary missing (legacy)' if signal else 'summary not recorded'
+    if signal.get('state') == 'question':
+        missing += '; question: ' + signal['question'] if signal.get('question') else '; question missing (legacy)'
+    return missing + f"; lessons: {signal.get('lessons') or 'not recorded'}; report: {signal.get('report') or 'not recorded'}"
 
 
 def print_job_handback(n, branch):
@@ -696,8 +767,76 @@ def print_thread_checklist(n, row):
             "no thread is running or waiting, and no pending requests remain. "
             "Never settle coordinators or threads belonging to open jobs. "
             "Check every candidate through the host; unknown state means leave unsettled.\n"
-            + f"  After every job thread is safely settled: brain jobs {n['id']} --branch {row['Job']} --job-key {job_key(row)} --settled")
+            + f"  After every job thread is safely settled: brain jobs {n['id']} --branch {row['Job']} --job-key {job_key(row)} --settled --attestation-file <fresh-export.json>")
     print(_m_guard.redact(text, _m_guard.never_terms(n)))
+
+
+def read_land_check(n, row):
+    try:
+        receipt = json.loads(row.get('Land check') or 'null')
+        return receipt if isinstance(receipt, dict) and receipt.get('version') == 1 else None
+    except (ValueError, TypeError):
+        return None
+
+
+def record_land_check(inst, n, key, receipt):
+    with _m_instance.brain_lock(inst):
+        rows = ledger_rows(n)
+        matches = [r for r in rows or [] if job_key(r) == key and not r.get('Ended')]
+        if len(matches) != 1:
+            raise ValueError('land-check job changed or closed')
+        row = matches[0]
+        if (not isinstance(receipt, dict) or receipt.get('version') != 1 or receipt.get('node') != n['id']
+                or receipt.get('job_key') != key or receipt.get('branch') != row['Job']
+                or receipt.get('result') not in ('passed', 'failed') or type(receipt.get('returncode')) is not int
+                or (receipt['result'] == 'passed') != (receipt['returncode'] == 0)
+                or any(not isinstance(receipt.get(k), str) or not receipt[k] for k in
+                       ('head', 'command', 'config_digest', 'checked_at'))):
+            raise ValueError('invalid land-check receipt')
+        checked = inst.parse_time(receipt['checked_at'])
+        if not checked or not 0 <= (inst.now_dt() - checked).total_seconds() <= 300:
+            raise ValueError('stale land-check receipt')
+        row['Land check'] = json.dumps(receipt, sort_keys=True, separators=(',', ':'))
+        _m_guard.no_terms_in(n, row['Land check'], 'land-check receipt')
+        write_jobs(inst, n, rows)
+        inst.commit([], f"{n['id']}: land-check evidence")
+
+
+def manual_landing(n, row):
+    home = n.get('home_path')
+    if not home:
+        return None
+    def ref(name):
+        return _m_common.git('rev-parse', '--verify', '--quiet', name + '^{commit}', cwd=home).stdout.strip()
+    head, main = ref('refs/heads/' + row['Job']), ref('refs/heads/main')
+    start = n['local'].get('worktrees', {}).get(row['Job'], {}).get('start')
+    if (head and main and head != start
+            and _m_common.git('merge-base', '--is-ancestor', head, main, cwd=home).returncode == 0):
+        return head, main
+    return None
+
+
+def close_ledger_job(inst, n, branch, reason=None):
+    with _m_instance.brain_lock(inst):
+        rows = ledger_rows(n)
+        row = open_job(rows or [], branch)
+        if not row:
+            _m_common.die('no open ledger job to close')
+        landed = manual_landing(n, row)
+        if landed and not reason:
+            row.update({'Outcome': 'merged', 'Head commit': landed[0], 'Main commit': landed[1],
+                        'Lesson check': 'required', 'Cause': 'manual landing confirmed in local main'})
+        else:
+            if not one_line(reason):
+                _m_common.die('--close needs a merged branch or a nonempty one-line --reason for parked/closed work')
+            _m_guard.no_terms_in(n, reason, 'job closure reason')
+            row.update(Outcome='closed', Cause=reason.strip())
+        row['Ended'] = stamp(inst)
+        start, end = inst.parse_time(row['Started']), inst.parse_time(row['Ended'])
+        row['Hours'] = f'{_m_status.elapsed(start, end) / 3600:.1f}' if start and end else ''
+        write_jobs(inst, n, rows)
+        inst.commit([], f"{n['id']}: ledger job closed")
+        print_thread_checklist(n, row)
 
 
 def jobs_summary(inst, n):
@@ -831,6 +970,28 @@ def job_budget_lines(inst, n, planned=None):
 
 def cmd_jobs(a):
     inst = _m_nodes.load()
+    if getattr(a, 'attestation_file', None) and not a.settled:
+        _m_common.die('--attestation-file requires --settled')
+    if getattr(a, 'reason', None) and not a.close:
+        _m_common.die('--reason requires --close')
+    if a.close and a.id and a.branch and not _m_briefs.import_job(a.branch):
+        if any((a.start, a.settled, a.lessons is not None, a.switch is not None, a.contract_file, a.usage_file, a.job_key)):
+            _m_common.die('--close cannot combine with other job updates')
+        close_ledger_job(inst, inst.node(a.id), a.branch, getattr(a, 'reason', None))
+        return
+    if getattr(a, 'live', False):
+        if any((a.start, a.close, a.settled, a.lessons is not None, a.switch is not None, a.contract_file, a.usage_file)):
+            _m_common.die('--live is a read-only projection')
+        from . import job_attempts as _m_attempts
+        for n in inst.nodes():
+            if a.id and n['id'] != a.id:
+                continue
+            for row in read_jobs(n) or []:
+                if a.branch and row['Job'] != a.branch or a.job_key and job_key(row) != a.job_key:
+                    continue
+                projection = _m_attempts.job_projection(inst, n, row)
+                print(_m_guard.redact(json.dumps({'node': n['id'], **projection}, ensure_ascii=False), _m_guard.never_terms(n)))
+        return
     if a.job_key and not (a.id and a.branch):
         _m_common.die("--job-key needs a node and --branch")
     if a.job_key and any((a.start, a.close, a.lessons is not None, a.switch is not None, a.contract_file, a.usage_file)):
@@ -845,6 +1006,27 @@ def cmd_jobs(a):
         if any((a.start, a.close, a.lessons is not None, a.switch is not None, a.contract_file, a.usage_file)):
             _m_common.die("--settled cannot combine with other job updates")
         n = inst.node(a.id)
+        evidence_file = getattr(a, 'attestation_file', None)
+        if not evidence_file:
+            _m_common.die('--settled requires --attestation-file with fresh exhaustive per-thread evidence')
+        try:
+            evidence = json.loads(Path(evidence_file).read_text())
+        except (OSError, ValueError):
+            _m_common.die('unreadable settlement attestation; no ledger rows changed')
+        from . import settlement as _m_settlement
+        def attest(targets):
+            try:
+                identities = _m_settlement.validate_settlement_attestation(inst, n, targets, evidence)
+            except ValueError as error:
+                _m_common.die(str(error))
+            # Preserve the supplied observations separately from the coordinator ledger.
+            folder = n['dir'] / 'job-settlements'
+            _m_common.safe_target(folder / 'evidence.json')
+            folder.mkdir(exist_ok=True)
+            for target in targets:
+                _m_common.atomic_write(folder / (job_key(target) + '.json'), json.dumps(evidence, sort_keys=True) + '\n')
+            for identity in identities:
+                print('t3_thread_organize ' + json.dumps({'action': 'settle', 'threadId': identity}, sort_keys=True))
         with _m_instance.brain_lock(inst):
             rows = ledger_rows(n)
             if a.all_closed:
@@ -853,13 +1035,14 @@ def cmd_jobs(a):
                 targets = unsettled_jobs(rows)
                 if any(open_job(rows, r["Job"]) for r in targets):
                     _m_common.die("--all-closed refused: a branch to stamp has an open job; no rows changed")
+                attest(targets)
                 if targets:
                     settled_at = stamp(inst)
                     for row in targets:
                         row["Settled"] = settled_at
                     write_jobs(inst, n, rows)
                     inst.commit([], f"{n['id']}: closed job thread sweep recorded")
-                print(f"{n['id']}: {len(targets)} closed job(s) recorded settled (coordinator's complete host sweep)")
+                print(f"{n['id']}: {len(targets)} closed job(s) recorded settled (coordinator-supplied evidence; no independent live host verification)")
                 return
             matches = [r for r in rows or [] if r["Job"] == a.branch and
                        (not a.job_key or job_key(r) == a.job_key)]
@@ -872,11 +1055,12 @@ def cmd_jobs(a):
                 _m_common.die("--settled requires a merged or closed ledger job")
             if open_job(rows, a.branch):
                 _m_common.die("--settled refused: another job on that branch is open; leave unsettled until it closes")
+            attest([row])
             if not row.get("Settled"):
                 row["Settled"] = stamp(inst)
                 write_jobs(inst, n, rows)
                 inst.commit([], f"{n['id']}: job threads settled")
-        print(_m_guard.redact(f"{n['id']}: threads for {a.branch} recorded settled (coordinator's host check)", _m_guard.never_terms(n)))
+        print(_m_guard.redact(f"{n['id']}: threads for {a.branch} recorded settled (coordinator-supplied evidence; no independent live host verification)", _m_guard.never_terms(n)))
         return
     if a.branch and not a.id:
         _m_common.die("--branch needs a node: brain jobs <node> --branch <branch>")
