@@ -40,10 +40,18 @@ def cmd_review(a):
     if reviewer == built:
         _m_common.die("the reviewer must run on a different runtime from the builder")
     pin = a.by or (n["fm"].get("runtime") if n["fm"].get("runtime") in others else None)
-    reviewer, subscription, usage = _m_usage.class_route(inst, kind, runtime=pin, model=a.model,
+    per_class = _m_knowledge.class_routing_config(inst, n)
+    model_selection = None
+    if per_class:
+        reviewer, _ = _m_usage.class_runtime(inst, kind, runtime=pin, runtimes=others)
+        model_selection = _m_knowledge.class_model_selection(inst, n, a, reviewer, kind)
+    reviewer, subscription, usage = _m_usage.class_route(inst, kind, runtime=pin,
+        model=model_selection[0] if model_selection else a.model,
         weekly_cap=n["fm"].get("route_weekly_cap", inst.cfg.get("route_weekly_cap", 60)), runtimes=others)
     usage += " Independent review uses the other runtime from the builder."
-    _m_knowledge.launch_selection(inst, n, a, reviewer, subscription, row, kind)
+    _m_knowledge.launch_selection(inst, n, a, reviewer, subscription, row, kind, model_selection=model_selection)
+    if per_class:
+        usage += f" Routing sources: model={a.model_source}."
     where, base = None, a.base
     if n["external"]:
         if not (n["home_path"] and n["home_path"].exists()):

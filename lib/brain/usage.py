@@ -633,12 +633,8 @@ def class_allows_fallback(job_class):
     return False
 
 
-def class_route(inst, job_class, runtime=None, model=None, cached_only=False, weekly_cap=None, runtimes=None):
-    """Class policy, pins and weekly readings. Cached mode never contacts a provider.
-
-    Usage informs this choice; even exhausted or unknown meters leave a brief available.
-    The optional runtime is an explicit or node pin and always wins.
-    """
+def class_runtime(inst, job_class, runtime=None, runtimes=None):
+    """Resolve the engine before model-specific subscription limits are considered."""
     preferred = "claude" if job_class in ("diagnose", "review") else "codex"
     allowed_runtimes = list(inst.runtimes if runtimes is None else runtimes)
     reason = f"Routing: class {job_class or 'build'} defaults to {preferred}."
@@ -653,6 +649,17 @@ def class_route(inst, job_class, runtime=None, model=None, cached_only=False, we
         reason += f" Runtime pin: {runtime} wins."
     if job_class not in ("diagnose", "review"):
         reason += " Builder policy keeps Codex regardless of weekly usage; only an explicit runtime or node pin changes it."
+    return chosen, reason
+
+
+def class_route(inst, job_class, runtime=None, model=None, cached_only=False, weekly_cap=None, runtimes=None):
+    """Class policy, pins and weekly readings. Cached mode never contacts a provider.
+
+    Usage informs this choice; even exhausted or unknown meters leave a brief available.
+    The optional runtime is an explicit or node pin and always wins.
+    """
+    chosen, reason = class_runtime(inst, job_class, runtime, runtimes)
+    allowed_runtimes = list(inst.runtimes if runtimes is None else runtimes)
     # weekly_cap is retained for callers of the earlier interface; it never switches builders.
     try:
         if usage_config()["autodetected"]:

@@ -174,8 +174,7 @@ for line in sys.stdin:
         self.assertIn("modelSelection: unavailable", self.b(root, "brief", "a", "--class", "docs"))
 
     def test_per_class_routing_precedence_and_sources(self):
-        root = self.init("alice")
-        inst = self.m.Instance(root)
+        inst = self.routing_instance()
         node = inst.node("root")
         inst.cfg.update(default_runtime="claude", route_runtime_build="codex",
                         route_model_codex="instance-default", route_model_codex_build="instance-build")
@@ -221,8 +220,7 @@ for line in sys.stdin:
             self.assertIn("default", route()[2])
 
     def test_per_class_routing_all_classes_and_unknown_keys(self):
-        root = self.init("alice")
-        inst = self.m.Instance(root)
+        inst = self.routing_instance()
         node = inst.node("root")
         node["fm"].pop("runtime", None)
         with mock.patch.object(self.m, "usage_config", return_value={"autodetected": True}):
@@ -250,6 +248,85 @@ for line in sys.stdin:
                         self.assertIn(key, str(exc.exception))
                         self.assertIn("class", str(exc.exception))
                         cfg.pop(key)
+
+    def routing_instance(self, root=None):
+        root = root or self.tmp
+        (root / "instance.md").write_text("---\nname: alice\nruntimes: claude,codex\nhost: t3\n---\n")
+        (root / "node.md").write_text("---\nid: root\ntitle: Example\n---\n")
+        return self.m.Instance(root)
+
+    def test_class_model_quota_before_subscription_selection(self):
+        # No initialized brain or Git repository is needed for cached routing.
+        inst = self.routing_instance()
+        inst.cfg.update(name="alice", route_runtime_review="claude", route_model_claude_review="Fable")
+        inst.runtimes = ["claude", "codex"]
+        node = inst.node("root")
+        config = self.declare(self.subscription("a", runtime="claude"), self.subscription("b", runtime="claude"))
+        readings = [self.reading(5, weekly=5), self.reading(20, weekly=20)]
+        for reading, used in zip(readings, (95, 30)):
+            reading["windows"]["seven_day_model:Fable"] = {
+                "used_percent": used, "resets_at": time.time() + 86400, "models": ["Fable"]}
+        self.cache(config, readings)
+        def route(model=None):
+            a = argparse.Namespace(branch=None, job_class="review", runtime=None, model=model, effort=None)
+            _, why = self.m.worker_route(inst, node, a)
+            return json.loads(a.selection_line.split(": ", 1)[1]), why
+        selection, why = route()
+        self.assertEqual(selection["instanceId"], "host-b")
+        self.assertEqual(selection["model"], "Fable")
+        self.assertIn("model=instance.md route_model_claude_review", why)
+        self.assertNotIn("reached its stop line", why)
+        self.assertEqual(route("Fable")[0], selection)
+        readings[1]["windows"]["seven_day_model:Fable"]["used_percent"] = 95
+        self.cache(config, readings)
+        self.assertIn("reached its stop line", route()[1])
+
+    def test_review_class_model_source_label(self):
+        root = self.repo(self.tmp / "review")
+        inst = self.routing_instance(root)
+        inst.runtimes = ["claude", "codex"]
+        inst.cfg["route_model_claude_review"] = "instance-review"
+        node = inst.node("root")
+        owner = self.m._owners["cmd_review"]
+        def render(model=None):
+            a = argparse.Namespace(id="root", branch="main", built_by="codex", by=None,
+                job_class=None, model=model, effort=None, base="main", out=None, focus=None,
+                contract=None, why_separate=None, allow_unexplained=False)
+            with contextlib.redirect_stdout(io.StringIO()) as out:
+                self.m.cmd_review(a)
+            return out.getvalue()
+        with mock.patch.object(owner._m_nodes, "load", return_value=inst), \
+                mock.patch.object(inst, "node", return_value=node), \
+                mock.patch.object(self.m, "review_mechanical", return_value=[]), \
+                mock.patch.object(self.m, "job_reviewed"), \
+                mock.patch.object(self.m, "record_job_route"):
+            for cfg, model, source in ((inst.cfg, "instance-review", "instance.md"),
+                                       (node["fm"], "node-review", "node.md")):
+                cfg["route_model_claude_review"] = model
+                text = render()
+                self.assertIn('"model": "' + model + '"', text)
+                self.assertIn("model=" + source + " route_model_claude_review", text)
+            self.assertIn("model=--model", render("explicit-review"))
+            node["fm"].clear()
+            inst.cfg.clear()
+            self.assertNotIn("Routing sources:", render())
+
+    def test_compound_unknown_class_keys_rejected(self):
+        inst = self.routing_instance()
+        inst.runtimes = ["claude", "codex", "custom_engine"]
+        node = inst.node("root")
+        for cfg in (inst.cfg, node["fm"]):
+            for key in ("route_model_codex_code_review", "route_model_custom_engine_code_review"):
+                cfg[key] = "typo-model"
+                with self.subTest(key=key), self.assertRaises(SystemExit) as exc:
+                    self.m.class_routing_config(inst, node)
+                self.assertIn(key, str(exc.exception))
+                cfg.pop(key)
+            cfg["route_model_custom_engine"] = "runtime-default"
+            self.assertFalse(self.m.class_routing_config(inst, node))
+            cfg["route_model_custom_engine_review"] = "class-review"
+            self.assertTrue(self.m.class_routing_config(inst, node))
+            cfg.clear()
 
     def test_per_class_brief_cli_and_legacy_bytes(self):
         root = self.init("alice")

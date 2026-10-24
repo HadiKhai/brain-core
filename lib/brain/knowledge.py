@@ -819,8 +819,13 @@ def class_routing_config(inst, n):
                 # Existing runtime-wide model keys are still defaults.
                 if suffix in inst.runtimes:
                     continue
-                if "_" in suffix:
-                    kind = suffix.rsplit("_", 1)[1]
+                for runtime in sorted(inst.runtimes, key=len, reverse=True):
+                    if suffix.startswith(runtime + "_"):
+                        kind = suffix[len(runtime) + 1:]
+                        break
+                else:
+                    if "_" in suffix:
+                        _m_common.die(_m_guard.redact(f"{source} {key}: unknown routing runtime/class", _m_guard.never_terms(n)))
             if kind is not None:
                 if kind not in _m_jobs.JOB_CLASSES:
                     _m_common.die(_m_guard.redact(f"{source} {key}: unknown routing class", _m_guard.never_terms(n)))
@@ -839,12 +844,16 @@ def route_setting(inst, n, explicit, flag, class_key, node_key, instance_key):
     return None, "default"
 
 
-def launch_selection(inst, n, a, runtime, subscription, row, kind):
+def class_model_selection(inst, n, a, runtime, kind):
+    key = "route_model_" + runtime
+    model, source = route_setting(inst, n, a.model, "--model", key + "_" + kind, key, key)
+    return model or "runtime default", source
+
+
+def launch_selection(inst, n, a, runtime, subscription, row, kind, model_selection=None):
     """Use configured model names, never invent a model or provider identity."""
     if class_routing_config(inst, n):
-        key = "route_model_" + runtime
-        a.model, a.model_source = route_setting(inst, n, a.model, "--model", key + "_" + kind, key, key)
-        a.model = a.model or "runtime default"
+        a.model, a.model_source = model_selection or class_model_selection(inst, n, a, runtime, kind)
     else:
         a.model = a.model or n["fm"].get("route_model_" + runtime) or inst.cfg.get("route_model_" + runtime) or "runtime default"
     a.effort = _m_jobs.job_effort(n, row, kind, getattr(a, "effort", None))
@@ -867,11 +876,15 @@ def worker_route(inst, n, a):
                                             "route_runtime_" + kind, "runtime", "default_runtime")
     else:
         pin = getattr(a, "runtime", None) or n["fm"].get("runtime")
+    model_selection = None
+    if per_class:
+        runtime, _ = _m_usage.class_runtime(inst, kind, runtime=pin)
+        model_selection = class_model_selection(inst, n, a, runtime, kind)
     runtime, subscription, usage = _m_usage.class_route(
-        inst, kind, runtime=pin, model=a.model,
+        inst, kind, runtime=pin, model=model_selection[0] if model_selection else a.model,
         weekly_cap=n["fm"].get("route_weekly_cap", inst.cfg.get("route_weekly_cap", 60)))
     a.job_class = kind
-    launch_selection(inst, n, a, runtime, subscription, row, kind)
+    launch_selection(inst, n, a, runtime, subscription, row, kind, model_selection=model_selection)
     if per_class:
         usage += f" Routing sources: runtime={runtime_source}; model={a.model_source}."
     return runtime, _m_guard.redact(usage, _m_guard.never_terms(n))
