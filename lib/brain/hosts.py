@@ -184,23 +184,33 @@ def wake_due_refs(refs, current):
             or i['id'] in current]
 
 
+def wake_pending_value(path):
+    value = json.loads(path.read_text())
+    refs = value['items']
+    if (not isinstance(refs, list) or any(not isinstance(i, dict) or
+            not isinstance(i.get('kind'), str) or not isinstance(i.get('id'), str) or
+            not re.fullmatch(r'[0-9a-f]{64}', i['id']) for i in refs)):
+        raise ValueError('invalid pending wake identities')
+    return value, wake_item_refs(refs)
+
+
 def wake_retire_due_pending(path, current):
     """A completed watcher scan can retire resolved due work before another enqueue."""
     try:
-        refs = wake_item_refs(json.loads(path.read_text())['items'])
+        value, refs = wake_pending_value(path)
     except (OSError, ValueError, KeyError, TypeError):
         return  # unknown and direct legacy requests remain deliverable
     allowed = wake_due_refs(refs, current)
     if refs and not allowed:
         path.unlink(missing_ok=True)
     elif allowed != refs:
-        _m_common.atomic_write(path, json.dumps({'items': allowed}) + '\n')
+        _m_common.atomic_write(path, json.dumps({**value, 'items': allowed}) + '\n')
 
 
 def wake_actionable_pending(inst, path):
     """Retire identified old machine transitions without dropping unknown questions."""
     try:
-        refs = wake_item_refs(json.loads(path.read_text())['items'])
+        value, refs = wake_pending_value(path)
     except (OSError, ValueError, KeyError, TypeError):
         return True  # empty legacy and damaged metadata must still carry questions through
     from . import machine as _m_machine
@@ -219,7 +229,9 @@ def wake_actionable_pending(inst, path):
                              for scope in [_m_machine.machine_scope(inst, n['id'])[1]] if scope in holds}
         except (Exception, SystemExit):
             pass  # unknown state must not retire an undelivered hold or mixed question
-    allowed = [i for i in refs if i['kind'] != 'machine'
+    allowed = [i for i in refs if (value.get('explicit_kinds') is True or i['kind'] == 'inbox'
+                                   or i['kind'] in _m_watch.WATCH_DECISION_KINDS)
+               and i['kind'] != 'machine'
                and not (i['kind'] == 'machine-hold' and current_holds is not None and i['id'] not in current_holds)
                and not (i['kind'] == 'machine-alert' and (recovered or identity and i['id'] != identity))]
     if any(i['kind'] in ('job-ready', 'job-landed') for i in allowed):
@@ -248,11 +260,11 @@ def wake_actionable_pending(inst, path):
         path.unlink(missing_ok=True)
         return False
     if allowed != refs:
-        _m_common.atomic_write(path, json.dumps({'items': allowed}) + '\n')
+        _m_common.atomic_write(path, json.dumps({**value, 'items': allowed}) + '\n')
     return True
 
 
-def request_wake(inst, n, reason, items=None):
+def request_wake(inst, n, reason, items=None, explicit=False):
     """Fail open, enqueue then detach; never run a transport in the hook's process."""
     try:
         target, command = wake_target(inst, n)
@@ -287,7 +299,7 @@ def request_wake(inst, n, reason, items=None):
             if pending.exists():
                 return True
             refs = wake_item_refs(items) if items is not None else wake_reason_items(inst, n, reason)
-            _m_common.atomic_write(pending, json.dumps({'items': refs}) + '\n')
+            _m_common.atomic_write(pending, json.dumps({'items': refs, **({'explicit_kinds': True} if explicit else {})}) + '\n')
         wake_start(inst, target)
         return True
     except (Exception, SystemExit):
@@ -484,7 +496,8 @@ def wake_drain(inst, n, once=False):
                     destination.mkdir(parents=True, exist_ok=True)
                     for path in pending:
                         try:
-                            refs = wake_item_refs(json.loads(path.read_text())['items'])
+                            value = json.loads(path.read_text())
+                            refs = wake_item_refs(value['items'])
                         except (OSError, ValueError, KeyError, TypeError):
                             refs = []  # unknown/legacy requests must still carry questions through
                         allowed = [i for i in refs if i['kind'] not in _m_watch.WATCH_LOCAL_KINDS]
@@ -492,7 +505,7 @@ def wake_drain(inst, n, once=False):
                             path.unlink(missing_ok=True)
                             continue
                         if allowed != refs:
-                            _m_common.atomic_write(path, json.dumps({'items': allowed}) + '\n')
+                            _m_common.atomic_write(path, json.dumps({**value, 'items': allowed}) + '\n')
                         _m_common.safe_target(destination / path.name)
                         path.replace(destination / path.name)
                     if command:

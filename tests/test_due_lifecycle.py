@@ -79,7 +79,7 @@ class DueLifecycle(Scenario):
         self.advice_setup()
         self.inst.local_of('root').update(coordinator='fixture-root', wake='fixture-send')
         self.inst.save_local()
-        (self.root / 'inbox.md').write_text('- Choose a fabricated paint color\n')
+        (self.root / 'inbox.md').write_text('- Choose a fabricated paint color <!-- host-question:color -->\n')
         first_ids, displays = None, set()
         with mock.patch.object(self.m, 'changes_due', return_value=[]), \
                 mock.patch.object(self.m, 'wake_start'), mock.patch.object(self.m, 'WAKE_INTERVAL', 0), \

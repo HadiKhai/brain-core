@@ -1,0 +1,300 @@
+"""Decision wakes and process gate proofs using fabricated local fixtures."""
+import contextlib
+import datetime
+import io
+import json
+import os
+import select
+import shlex
+import signal
+import subprocess
+import sys
+from unittest import mock
+
+import core_loader
+from scenario import CORE, Scenario
+
+
+class DecisionGate(Scenario):
+    def setUp(self):
+        super().setUp()
+        patch = mock.patch.dict(os.environ, self.env)
+        patch.start()
+        self.addCleanup(patch.stop)
+        self.m = core_loader.SourceFileLoader('decision_fixture', str(CORE / 'bin/brain')).load_module()
+        self.root = self.init('oak')
+        self.b(self.root, 'set', 'root', 'wake=fixture-send', 'coordinator=fixture-root')
+        self.inst = self.m.Instance(self.root)
+        self.n = self.inst.node('root')
+
+    def test_default_policy_and_explicit_kinds(self):
+        items = [{'id': c * 64, 'kind': kind, 'node': 'root', 'text': text, **extra}
+                 for c, kind, text, extra in (
+                     ('a', 'unsettled-threads', 'Bookkeeping', {}),
+                     ('b', 'inbox', 'Ordinary note', {}),
+                     ('c', 'inbox', 'Choose <!-- host-question:fixture -->', {}),
+                     ('d', 'handback', 'Result', {'state': 'done'}))]
+        groups = {'root': {'node': self.n, 'command': 'fixture-send', 'items': items}}
+        with mock.patch.object(self.m, 'watch_groups', return_value=groups), \
+                mock.patch.object(self.m, 'watch_failures'), \
+                mock.patch.object(self.m, 'request_wake', return_value=True) as request, \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.m.watch_run(self.inst)
+            self.assertEqual({i['id'] for call in request.call_args_list for i in call.kwargs['items']},
+                             {'c' * 64, 'd' * 64})
+            request.reset_mock()
+            self.m.watch_run(self.inst, kinds={'unsettled-threads'})
+            self.assertEqual([i['id'] for i in request.call_args.kwargs['items']], ['a' * 64])
+
+    def test_default_kind_matrix_and_long_marked_inbox(self):
+        allowed = ('job-stall', 'blocked-overdue', 'restart', 'rotate', 'overdue-question')
+        excluded = ('job-landed', 'job-ready', 'merged-job', 'unsettled-threads', 'unrecorded-worktree',
+                    'missing-worktree', 'core-changes', 'rule-activation-review', 'overlapping-inputs',
+                    'machine-hold', 'idle-with-runnable-work')
+        for kind in allowed + excluded:
+            with self.subTest(kind=kind):
+                self.assertEqual(self.m.watch_decision_item({'kind': kind}), kind in allowed)
+        for state in ('question', 'blocked', 'done', 'failed', 'queued'):
+            self.assertEqual(self.m.watch_decision_item({'kind': 'handback', 'state': state}),
+                             state in ('question', 'blocked', 'done'))
+        (self.root / 'inbox.md').write_text('- ' + 'x' * 500 + ' <!-- host-question:long -->\n')
+        item = next(i for i in self.m.watch_items(self.inst, self.n) if i['kind'] == 'inbox')
+        self.assertNotIn('host-question', item['text'])  # excerpts can truncate the marker
+        self.assertTrue(self.m.watch_decision_item(item))
+
+    def test_queued_bookkeeping_cannot_retry_but_questions_survive(self):
+        folder = self.m.wake_directory(self.inst, self.n)
+        folder.mkdir(parents=True, exist_ok=True)
+        path = folder / ('a' * 64 + '.pending')
+        refs = [{'id': 'b' * 64, 'kind': 'unsettled-threads'},
+                {'id': 'c' * 64, 'kind': 'inbox'}]
+        path.write_text(json.dumps({'items': refs}))
+        self.assertTrue(self.m.wake_actionable_pending(self.inst, path))
+        self.assertEqual(json.loads(path.read_text())['items'], [refs[1]])
+        path.write_text(json.dumps({'items': refs[:1]}))
+        self.assertFalse(self.m.wake_actionable_pending(self.inst, path))
+        path.write_text('corrupt')
+        self.assertTrue(self.m.wake_actionable_pending(self.inst, path))
+        self.assertEqual(path.read_text(), 'corrupt')
+        for damaged in ({'items': [{'id': 123, 'kind': 'merged-job'}]},
+                        {'items': [{'id': 'bad', 'kind': 'inbox'}]}, {'items': 'bad'}):
+            path.write_text(json.dumps(damaged))
+            before = path.read_bytes()
+            self.assertTrue(self.m.wake_actionable_pending(self.inst, path))
+            self.assertEqual(path.read_bytes(), before)
+        path.write_text(json.dumps({'items': refs[:1], 'explicit_kinds': True}))
+        self.assertTrue(self.m.wake_actionable_pending(self.inst, path))
+        self.assertEqual(json.loads(path.read_text())['explicit_kinds'], True)
+
+    def start_gate(self, label, code, *args):
+        p = subprocess.Popen([sys.executable, str(CORE / 'bin/brain'), 'gate-lock', '--label', label,
+                              '--', sys.executable, '-u', '-c', code, *args], cwd=self.root,
+                             env=self.env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                             stderr=subprocess.PIPE, text=True)
+        def cleanup():
+            if p.poll() is None:
+                p.kill()
+            p.communicate()
+        self.addCleanup(cleanup)
+        return p
+
+    def line(self, stream):
+        self.assertTrue(select.select([stream], [], [], 5)[0], 'process barrier timed out')
+        return stream.readline().strip()
+
+    def test_gate_serializes_waits_preserves_argv_and_exit(self):
+        first = self.start_gate('first', "import sys; print('held', flush=True); sys.stdin.readline()")
+        self.assertEqual(self.line(first.stdout), 'held')
+        inode = (self.root / '.brain/gate.lock').stat().st_ino
+        second = self.start_gate('second', "import sys; print(repr(sys.argv[1:]), flush=True); sys.exit(7)", 'a b', '--brain=child')
+        self.assertIn('waiting for gate held by first since ', self.line(second.stderr))
+        self.assertEqual(select.select([second.stdout], [], [], 0)[0], [])
+        first.communicate('\n', timeout=5)
+        out, err = second.communicate(timeout=5)
+        self.assertEqual(second.returncode, 7, err)
+        self.assertEqual(out.strip(), "['a b', '--brain=child']")
+        self.assertEqual((self.root / '.brain/gate.lock').stat().st_ino, inode)
+
+    def test_gate_closed_nested_descriptor_refuses_without_deadlock(self):
+        outer = self.start_gate('outer',
+            "import subprocess,sys; p=subprocess.run([sys.executable,sys.argv[1], 'gate-lock', '--', "
+            "sys.executable, '-c', 'print(99)'], close_fds=True, capture_output=True, text=True, timeout=3); "
+            "print(p.returncode); print(p.stderr)", str(CORE / 'bin/brain'))
+        out, err = outer.communicate(timeout=5)
+        self.assertEqual(outer.returncode, 0, err)
+        self.assertIn('inherited descriptor closed', out)
+        self.assertNotIn('99', out)
+
+    def test_gate_nested_and_signal_lifetime(self):
+        nested = self.start_gate('outer', "import os,sys; os.execv(sys.executable, [sys.executable, sys.argv[1], 'gate-lock', '--label', 'inner', '--', sys.executable, '-c', 'print(42)'])", str(CORE / 'bin/brain'))
+        out, err = nested.communicate(timeout=5)
+        self.assertEqual(nested.returncode, 0, err)
+        self.assertEqual(out.strip(), '42')
+        first = self.start_gate('signal', "import sys; print('held', flush=True); sys.stdin.readline()")
+        self.assertEqual(self.line(first.stdout), 'held')
+        first.send_signal(signal.SIGTERM)
+        first.communicate(timeout=5)
+        self.assertEqual(first.returncode, -signal.SIGTERM)
+        second = self.start_gate('next', 'print(43)')
+        out, err = second.communicate(timeout=5)
+        self.assertEqual(second.returncode, 0, err)
+        self.assertEqual(out.strip(), '43')
+
+    def native_gate(self, command):
+        home = self.repo(self.tmp / 'source')
+        self.b(self.root, 'new', 'fixture', '--title', 'Fixture', '--home', str(home))
+        parent = ("import os,sys; sys.path.insert(0,sys.argv[2]+'/lib'); "
+                  "from brain.instance import Instance; import brain.verify as v; "
+                  "from unittest import mock; from pathlib import Path; inst=Instance(Path.cwd()); "
+                  "patch=mock.patch.object(v._m_machine,'machine_child'); patch.start(); "
+                  "result=v.run_verify_stream(inst,inst.node('fixture'),'fixture',sys.argv[1], "
+                  "{'path':os.getcwd()},dict(os.environ),None); sys.exit(result[0])")
+        return self.start_gate('native', parent, command, str(CORE))
+
+    def test_native_verify_retains_gate_fd_for_nested_wrapper_and_bootstrap(self):
+        command = shlex.join([sys.executable, str(CORE / 'bin/brain'), 'gate-lock', '--',
+                              sys.executable, '-c', 'print(42)'])
+        parent = self.native_gate(command)
+        out, err = parent.communicate(timeout=5)
+        self.assertEqual(parent.returncode, 0, out + err)
+
+    def test_native_verify_parent_death_keeps_gate_child_locked(self):
+        fifo = self.root / 'ready.fifo'
+        os.mkfifo(fifo)
+        read_fd = os.open(fifo, os.O_RDONLY | os.O_NONBLOCK)
+        self.addCleanup(os.close, read_fd)
+        child = ("import os,sys; fd=os.open(sys.argv[1],os.O_WRONLY); "
+                 "os.write(fd,str(os.getpid()).encode()); os.close(fd); sys.stdin.readline()")
+        command = 'exec ' + shlex.join([sys.executable, '-u', '-c', child, str(fifo)])
+        parent = self.native_gate(command)
+        self.assertTrue(select.select([read_fd], [], [], 5)[0], 'native child readiness barrier')
+        pid = int(os.read(read_fd, 128))
+        def kill_child():
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        self.addCleanup(kill_child)
+        parent.kill()
+        parent.wait(timeout=5)
+        os.kill(pid, 0)
+        competitor = self.start_gate('competitor', "print('competitor-entered',flush=True)")
+        self.assertIn('waiting for gate held by native since ', self.line(competitor.stderr))
+        self.assertEqual(select.select([competitor.stdout], [], [], 0)[0], [])
+        kill_child()
+        out, err = competitor.communicate(timeout=5)
+        self.assertEqual(out.strip(), 'competitor-entered', err)
+
+    def test_exec_restores_sigpipe_with_closed_output_pipe(self):
+        command = ['/usr/bin/yes', 'fixture']
+        def run(argv):
+            p = subprocess.Popen(argv, cwd=self.root, env=self.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            p.stdout.close()
+            stderr = p.stderr.read()
+            p.wait(timeout=5)
+            p.stderr.close()
+            return p.returncode, stderr
+        plain = run(command)
+        wrapped = run([sys.executable, str(CORE / 'bin/brain'), 'gate-lock', '--', *command])
+        self.assertEqual(plain[0], -signal.SIGPIPE)
+        self.assertEqual(wrapped, plain)
+
+    def test_nested_actual_work_retains_lock_after_parent_death(self):
+        fifo = self.root / 'native-ready'
+        os.mkfifo(fifo)
+        fd = os.open(fifo, os.O_RDONLY | os.O_NONBLOCK)
+        self.addCleanup(os.close, fd)
+        child = ("import os,sys; gate=int(os.environ['BRAIN_GATE_FD']); "
+                 "assert os.fstat(gate).st_ino == os.stat(os.environ['BRAIN_GATE_PATH']).st_ino; "
+                 "fd=os.open(sys.argv[1],os.O_WRONLY); os.write(fd,str(os.getpid()).encode()); "
+                 "os.close(fd); sys.stdin.readline()")
+        command = 'exec ' + shlex.join([sys.executable, str(CORE / 'bin/brain'),
+                  'gate-lock', '--label', 'nested', '--', sys.executable, '-u', '-c', child, str(fifo)])
+        parent = self.native_gate(command)
+        self.assertTrue(select.select([fd], [], [], 5)[0], 'nested native child never reached barrier')
+        pid = int(os.read(fd, 128))
+        def cleanup():
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        self.addCleanup(cleanup)
+        parent.kill()
+        parent.wait(timeout=5)
+        os.kill(pid, 0)
+        other = self.start_gate('competitor', "print('entered',flush=True)")
+        self.assertIn('waiting for gate held by native since ', self.line(other.stderr))
+        self.assertEqual(select.select([other.stdout], [], [], 0)[0], [])
+        cleanup()
+        out, err = other.communicate(timeout=5)
+        self.assertEqual(other.returncode, 0, err)
+        self.assertEqual(out.strip(), 'entered')
+        print('native -> nested wrapper -> live child: competitor blocked after parent death, released after child death')
+
+    def test_failed_native_publication_never_executes_work(self):
+        home = self.repo(self.tmp / 'source')
+        self.b(self.root, 'new', 'fixture', '--title', 'Fixture', '--home', str(home))
+        marker = self.root / 'must-not-start'
+        command = shlex.join([sys.executable, '-c', 'from pathlib import Path; Path(' + repr(str(marker)) + ').touch()'])
+        code = ("import os,sys; sys.path.insert(0,sys.argv[2]+'/lib'); "
+                "from brain.instance import Instance; import brain.verify as v; "
+                "from unittest import mock; from pathlib import Path; inst=Instance(Path.cwd()); "
+                "patch=mock.patch.object(v._m_machine,'machine_child',side_effect=RuntimeError('fixture publication rejected')); patch.start(); "
+                "v.run_verify_stream(inst,inst.node('fixture'),'fixture',sys.argv[1], {'path':os.getcwd()},dict(os.environ),None)")
+        parent = self.start_gate('native', code, command, str(CORE))
+        out, err = parent.communicate(timeout=5)
+        self.assertNotEqual(parent.returncode, 0)
+        self.assertIn('fixture publication rejected', err)
+        self.assertFalse(marker.exists())
+        other = self.start_gate('next', 'print(42)')
+        out, err = other.communicate(timeout=5)
+        self.assertEqual(other.returncode, 0, err)
+        self.assertEqual(out.strip(), '42')
+        self.assertFalse(marker.exists())
+        print('native publication failure: no command execution, no leaked gate ownership')
+
+    def test_durable_retry_and_reroute_preserve_decision_policy(self):
+        self.b(self.root, 'new', 'sample', '--title', 'Sample')
+        for mode in ('bookkeeping', 'mixed', 'explicit'):
+            with self.subTest(mode=mode):
+                inst = self.m.Instance(self.root)
+                child, root = inst.node('sample'), inst.node('root')
+                inst.local_of('sample').update(coordinator='fixture-child', wake='fixture-send')
+                inst.save_local()
+                folder = self.m.wake_directory(inst, child)
+                folder.mkdir(parents=True, exist_ok=True)
+                path = folder / (mode + '.pending')
+                bookkeeping = {'id': 'a' * 64, 'kind': 'merged-job'}
+                question = {'id': 'b' * 64, 'kind': 'inbox'}
+                refs = [bookkeeping]
+                if mode == 'mixed':
+                    refs.append(question)
+                if mode == 'explicit':
+                    refs.append({'id': 'c' * 64, 'kind': 'unsettled-threads'})
+                path.write_text(json.dumps({'items': refs, 'explicit_kinds': mode == 'explicit'}))
+                inst.local_of('sample').pop('coordinator')
+                inst.save_local()  # drain must discover the new root route
+                with mock.patch.object(self.m, 'wake_start'), mock.patch.object(self.m, 'WAKE_INTERVAL', 0), \
+                        mock.patch.object(self.m, 'wake_send', return_value=False) as send:
+                    self.m.wake_drain(inst, child, once=True)
+                    destination = self.m.wake_directory(inst, root) / path.name
+                    if mode == 'bookkeeping':
+                        self.assertFalse(path.exists())
+                        self.assertFalse(destination.exists())
+                        self.m.wake_drain(inst, root, once=True)
+                        send.assert_not_called()
+                        continue
+                    self.assertFalse(path.exists())
+                    expected = [question] if mode == 'mixed' else [bookkeeping]
+                    value = json.loads(destination.read_text())
+                    self.assertEqual(value['items'], expected)
+                    self.assertEqual(value['explicit_kinds'], mode == 'explicit')
+                    self.m.wake_drain(inst, root, once=True)
+                    self.assertEqual(send.call_count, 1)
+                    self.assertTrue(destination.exists())
+                    send.return_value = True
+                    self.m.wake_drain(inst, root, once=True)
+                    self.assertEqual(send.call_count, 2)
+                    self.assertFalse(destination.exists())
+                    history = self.m.wake_history(self.m.wake_directory(inst, root))
+                    self.assertEqual(history[-1]['items'], expected)
