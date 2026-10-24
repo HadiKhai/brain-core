@@ -7,6 +7,8 @@ upgrading. `brain changes <node>` shows the entries this node's coordinator hasn
 
 ## 2026-10-24: M7: Upgrade around idle retained jobs and worktrees
 
+rehearsal evidence waived (coordinator instruction, 2026-10-24)
+
 For agents: Explicit and automatic core upgrades refuse live heavy/verify admission
 holders and held repository train locks, plus unreadable inventory. Parked or blocked
 jobs and retained worktrees no longer prevent upgrades; a one-line notice counts
@@ -77,6 +79,7 @@ After upgrading: No migration. brief_max_kb still warns above the configured all
 ## 2026-10-24: Release 2: Known in this release
 
 For agents:
+- upgrade in-flight check does not see native rehearsal or ownerless wrapper locks (no owner evidence)
 - brain land remains parked; use the approved manual landing path.
 - heavy-run remains parked (2 P1 + P2; redesign deferred).
 - rehearse EPERM atexit kill remains parked (P1).
