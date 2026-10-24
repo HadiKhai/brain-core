@@ -7,6 +7,8 @@ upgrading. `brain changes <node>` shows the entries this node's coordinator hasn
 
 ## 2026-10-24: Configure worker runtime and model defaults per job class
 
+rehearsal evidence waived (root decision A, 2026-10-24); re-rehearsed natively before the release 1 tag
+
 For agents:
 - Briefs accept `route_runtime_<class>` and `route_model_<runtime>_<class>` in
   node.md and instance.md for every supported job class. Explicit flags win, then
@@ -19,6 +21,8 @@ After upgrading:
   see the settings references in instance.md and node.md.
 
 ## 2026-10-24: Clear worker messages and small workflow fixes
+
+rehearsal evidence waived (root decision A, 2026-10-24); re-rehearsed natively before the release 1 tag
 
 For agents:
 - Ready rejects unfinished WIP, fixup! and squash! commit titles anywhere in the
@@ -47,6 +51,8 @@ After upgrading:
 
 ## 2026-10-24: Keep overdue escalation wakes quiet until the item changes
 
+rehearsal evidence waived (root decision A, 2026-10-24); re-rehearsed natively before the release 1 tag
+
 For agents:
 - Ordinary due ticks and the watcher share persistent receipts for overdue
   questions. An unchanged escalation stays quiet after transport receipts expire;
@@ -69,6 +75,8 @@ After upgrading:
 
 ## 2026-10-24: Keep agreed local build orders moving
 
+rehearsal evidence waived (root decision A, 2026-10-24); re-rehearsed natively before the release 1 tag
+
 For agents:
 - `brain due` reports `idle-with-runnable-work` when an agreed backlog task fits
   below the node's open-job cap. Its text names the next runnable tasks, in order;
@@ -89,6 +97,18 @@ After upgrading:
   cap when more than one open job is allowed. Existing backlog prose is unchanged
   and creates no reminders until you opt into the task format. Node documentation
   in `templates/node/node.md` describes the format and capacity rules.
+
+## 2026-10-24: Known in this release
+
+For agents:
+- brain land (parked).
+- heavy-run (2 P1 + P2, redesign in backlog).
+- rehearse EPERM atexit kill (P1).
+- rehearse harness linked-external-observation refusal (harness-r2 parked).
+
+After upgrading:
+- These issues remain open. Release 1 uses the approved manual landing path;
+  re-rehearse natively before creating the release 1 tag.
 
 ## 2026-10-23: Rehearse JSON probes without collapsing private identities
 
