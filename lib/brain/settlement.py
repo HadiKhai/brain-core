@@ -10,7 +10,7 @@ SETTLEMENT_TERMINAL = ('completed', 'failed', 'interrupted', 'cancelled', 'rolle
 def validate_settlement_attestation(inst, n, targets, data):
     def refuse():
         raise ValueError('incomplete, stale or unsafe coordinator settlement attestation; no ledger rows changed')
-    if not isinstance(data, dict) or data.get('version') != 1 or data.get('node') != n['id']:
+    if not isinstance(data, dict) or type(data.get('version')) is not int or data.get('version') != 1 or data.get('node') != n['id']:
         refuse()
     observed = inst.parse_time(data.get('observed_at')) if isinstance(data.get('observed_at'), str) else None
     if not observed or not 0 <= (inst.now_dt() - observed).total_seconds() <= SETTLEMENT_MAX_AGE:

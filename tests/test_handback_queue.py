@@ -23,6 +23,7 @@ class HandbackLifecycle(Scenario):
         m = core_loader.SourceFileLoader('queue_fixture', str(CORE / 'bin/brain')).load_module()
         inst = m.Instance(root)
         inst.commit = mock.Mock()
+        inst.now_dt = lambda: datetime.datetime(2026,10,24,4,0,tzinfo=datetime.timezone.utc)
         n = inst.node('root')
         row = dict.fromkeys(m.JOB_COLS, '')
         row.update(Job='job/example', Started='2026-01-01T00:00Z')
@@ -187,6 +188,11 @@ print(enqueue_handback(i,n,r,a)['id'],flush=True)
             self.assertFalse(m.attempt_matches(n, row, attempt))
             m.write_jobs(inst, n, [closed, {**row, 'Started':'2026-01-02T00:00Z'}])
             self.assertFalse(m.attempt_matches(n, row, attempt))
+            # Minute-precision legacy job keys can collide after immediate reuse.
+            m.write_jobs(inst,n,[closed,{**row}])
+            self.assertFalse(m.attempt_matches(n,row,attempt))
+            with self.assertRaises(ValueError):
+                m.begin_attempt(inst,n,row)
             m.attempt_path(n, row).write_text('{')
             with self.assertRaises(ValueError):
                 m.active_attempt(n, row)
@@ -202,8 +208,10 @@ print(enqueue_handback(i,n,r,a)['id'],flush=True)
             self.assertIsNone(m.job_signal(inst, n, row))
             return 'native-token'
         def native(*args, **kwargs):
+            m.unlock()  # record_ready releases its outer CLI scope before native admission
             with m.verify_reservation(inst, n):
                 phases.append(m.current_attempt(n, row)['state'])
+                self.assertIsNone(m._LOCK['fh'], 'attempt phase re-held instance lock during verify')
             return {'version':1, 'integration_base':'b', 'verify_result':0}, []
         with mock.patch.dict(os.environ, self.env, clear=True), \
                 mock.patch.object(m, 'attempt_binding', return_value={'head':'a','base':'b','inputs':'c'}), \
@@ -212,7 +220,8 @@ print(enqueue_handback(i,n,r,a)['id'],flush=True)
                 mock.patch.object(m, 'docker_leftover_nodes'), mock.patch.object(m, 'record_ready', side_effect=native), \
                 mock.patch.object(m, 'ready_state', return_value={'reasons':[]}), contextlib.redirect_stdout(io.StringIO()):
             request = m.enqueue_handback(inst, n, row, args)
-            m.run_queue_once(inst, n, request['id'])
+            with m.brain_lock(inst):
+                m.run_queue_once(inst, n, request['id'])
             self.assertEqual(phases, ['queued', 'verifying'])
             release.assert_called_once_with('native-token')
             handback = m.handback_file(n, row).read_bytes()
@@ -340,6 +349,52 @@ print(enqueue_handback(i,n,r,a)['id'],flush=True)
             third = next(i for i in m.due_items(inst,n,(state,'',''),include_stale=False,include_advice=False) if i['kind']=='handback')
             self.assertEqual(second['need'], third['need'])
 
+    def test_m5_cli_refuses_missing_summary_and_question_before_an_attempt(self):
+        m, inst, n, row = self.fixture()
+        base = [sys.executable,str(CORE / 'bin/brain'),'handback','root','--branch',row['Job'],'--state','question']
+        for extra in ([],['--summary','Synthetic result'],['--summary','bad\nsummary','--question','Choose?']):
+            result = subprocess.run(base+extra,cwd=inst.root,env=self.env,capture_output=True,text=True,timeout=3)
+            self.assertNotEqual(result.returncode,0)
+            self.assertFalse(m.attempt_path(n,row).exists())
+            self.assertFalse(m.handback_file(n,row).exists())
+
+    def test_p6_cli_enqueue_foreground_terminal_and_live_join(self):
+        m, inst, n, row = self.fixture()
+        path = m.handback_file(n,row)
+        path.parent.mkdir(exist_ok=True)
+        path.write_text(json.dumps(dict(job=row['Job'],started=row['Started'],state='done',summary='Historical result')))
+        def cli(*args,ok=True):
+            result = subprocess.run([sys.executable,str(CORE / 'bin/brain'),*args],cwd=inst.root,
+                                    env=self.env,capture_output=True,text=True,timeout=3)
+            self.assertEqual(result.returncode==0,ok,result.stdout+result.stderr)
+            return result.stdout
+        identity=cli('handback','root','--branch',row['Job'],'--state','blocked','--summary','New result',
+                     '--lessons','none: fixture','--enqueue').strip()
+        self.assertRegex(identity,r'^[0-9a-f]{32}$')
+        view=json.loads(cli('jobs','root','--live'))
+        self.assertEqual(view['state'],'queued')
+        self.assertEqual(view['historical_summary'],'Historical result')
+        self.assertEqual(view['queue']['position'],1)
+        cli('queue','run','root','--once','--request-id',identity)
+        hb=path.read_bytes()
+        self.assertEqual(json.loads(hb)['summary'],'New result')
+        self.assertEqual(m.read_queue_request(n,identity)['state'],'terminal')
+        cli('queue','run','root','--once','--request-id',identity,ok=False)
+        self.assertEqual(path.read_bytes(),hb)
+
+    def test_m3_cli_empty_scan_silent_then_one_synthetic_ask(self):
+        m, inst, n, row = self.fixture()
+        def dispatch():
+            result=subprocess.run([sys.executable,str(CORE / 'bin/brain'),'dispatch','--limit','1'],
+                                  cwd=inst.root,env=self.env,capture_output=True,text=True,timeout=3)
+            self.assertEqual(result.returncode,0,result.stderr)
+            return result.stdout
+        self.assertEqual(dispatch(),'')
+        (n['dir']/'inbox.md').write_text('- 2026-01-01 00:00 +00:00 from worker: question: Choose a color?\n')
+        first=dispatch()
+        self.assertEqual(json.loads(first)['items'][0]['target_node'],'root')
+        self.assertEqual(dispatch(),first)
+
     def test_r2_manual_landing_closes_with_main_sha_and_park_needs_reason(self):
         m, inst, n, row = self.fixture()
         home = self.repo(self.tmp / 'code')
@@ -354,3 +409,15 @@ print(enqueue_handback(i,n,r,a)['id'],flush=True)
         self.assertEqual(closed['Outcome'], 'merged')
         self.assertEqual(closed['Main commit'], main)
         self.assertTrue(closed['Ended'])
+        parked = {**row, 'Job':'job/parked', 'Started':'2026-01-02T00:00Z'}
+        n['home_path'] = None
+        m.write_jobs(inst,n,[closed,parked])
+        before = (n['dir'] / m.JOBS_FILE).read_bytes()
+        with self.assertRaises(SystemExit):
+            m.close_ledger_job(inst,n,parked['Job'])
+        self.assertEqual((n['dir'] / m.JOBS_FILE).read_bytes(),before)
+        m.close_ledger_job(inst,n,parked['Job'],reason='Coordinator parked this synthetic job')
+        final = m.read_jobs(n)[1]
+        self.assertEqual(final['Outcome'],'closed')
+        self.assertEqual(final['Cause'],'Coordinator parked this synthetic job')
+        self.assertTrue(home.is_dir())

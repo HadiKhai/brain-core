@@ -46,7 +46,8 @@ def settlement_export(test, root, node, branch=None, key=None, all_closed=False)
             if workers.get(module.job_key(row)):
                 identities.update(module.thread_reference_ids(workers[module.job_key(row)]))
             for work in module.active_work(n, include_closed=True):
-                if work[0] == row['Job'] and work[1] not in ('', '-', '—'):
+                name = work[0].replace('`','').split()
+                if name and name[0] == row['Job'] and work[1] not in ('', '-', '—'):
                     identities.update(module.thread_reference_ids(work[1]))
             jobs.append({'job_key': module.job_key(row), 'threads': [dict(threadId=tid,
                 job_key=module.job_key(row), state='completed', settled=True, pending_requests=[]) for tid in sorted(identities)]})
@@ -278,7 +279,8 @@ class UnifiedHandbacks(Scenario):
         main = self.git("rev-parse", "main", cwd=home)
         self.assertEqual(self.finish(r).strip().splitlines()[-1], "ready")
         data = json.loads(self.packet().read_text())
-        self.assertEqual((data["version"], data["job"], data["state"]), (2, "job", "done"))
+        self.assertEqual((data["version"], data["job"], data["state"]), (3, "job", "done"))
+        self.assertEqual(data['summary'], 'Synthetic result')
         self.assertEqual(data["lessons"], "Use python -B to keep verification clean.")
         self.assertEqual(data["report"], "reports/result.md")
         self.assertEqual(data["ready"]["review_rounds"], 2)
@@ -344,6 +346,11 @@ class UnifiedHandbacks(Scenario):
         data["ready"]["checked_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
         old.write_text(json.dumps(data["ready"]))
         path.unlink()
+        # A genuine pre-attempt writer produced neither a v3 record nor its sidecar.
+        module = core_loader.SourceFileLoader('legacy_attempt_fixture', str(CORE / 'bin/brain')).load_module()
+        n = module.Instance(r).node('a')
+        row = module.open_job(module.read_jobs(n), 'job')
+        module.attempt_path(n,row).unlink()
         self.assertEqual(self.b(r, "ready", "a", "--branch", "job").strip(), "ready")
         self.assertIn("ready to merge", self.b(r, "due", "a"))
         legacy = {k: data[k] for k in ("job", "started", "state", "at", "report")}

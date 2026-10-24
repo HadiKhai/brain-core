@@ -20,7 +20,12 @@ def attempt_phase(state):
     context = ATTEMPT_CONTEXT.get()
     if context:
         inst, n, row, identity = context
-        return update_attempt(inst, n, row, identity, state)
+        try:
+            return update_attempt(inst, n, row, identity, state)
+        finally:
+            # Native record_ready deliberately unlocked its outer CLI scope before
+            # admission. A short phase write must not re-hold it during verify.
+            _m_instance.unlock()
 
 
 def attempt_path(n, row):
@@ -46,7 +51,9 @@ def current_attempt(n, row, strict=True):
         if path.is_symlink() or path.parent.is_symlink():
             raise ValueError('linked job attempt evidence')
         data = json.loads(path.read_text())
-        if (not isinstance(data, dict) or data.get('version') != 1 or data.get('job_key') != _m_jobs.job_key(row)
+        if sum(_m_jobs.job_key(r) == _m_jobs.job_key(row) for r in _m_jobs.read_jobs(n) or []) != 1:
+            raise ValueError('ambiguous job-attempt ownership; coordinator must reconcile the job key')
+        if (not isinstance(data, dict) or type(data.get('version')) is not int or data.get('version') != 1 or data.get('job_key') != _m_jobs.job_key(row)
                 or data.get('state') not in ATTEMPT_STATES
                 or not isinstance(data.get('id'), str) or not re.fullmatch('[0-9a-f]{32}', data['id'])
                 or not isinstance(data.get('binding'), dict)
@@ -77,9 +84,12 @@ def write_attempt(n, row, data):
 
 def begin_attempt(inst, n, row, request_id=None):
     with _m_instance.brain_lock(inst):
-        current = _m_jobs.open_job(_m_jobs.read_jobs(n) or [], row['Job'])
+        rows = _m_jobs.read_jobs(n) or []
+        current = _m_jobs.open_job(rows, row['Job'])
         if not current or _m_jobs.job_key(current) != _m_jobs.job_key(row):
             raise ValueError('job changed before handback attempt')
+        if sum(_m_jobs.job_key(r) == _m_jobs.job_key(row) for r in rows) != 1:
+            raise ValueError('ambiguous job key; coordinator must reconcile it before handback')
         data = {'version': 1, 'id': os.urandom(16).hex(), 'job_key': _m_jobs.job_key(row),
                 'state': 'queued', 'at': inst.now_dt().isoformat(), 'binding': attempt_binding(n, row),
                 'owner': [os.getpid(), _m_machine.process_stamp(os.getpid())], 'request_id': request_id}
@@ -106,8 +116,10 @@ def finish_attempt(inst, n, row, identity, state='terminal'):
 
 
 def attempt_matches(n, row, attempt):
-    current = _m_jobs.open_job(_m_jobs.read_jobs(n) or [], row['Job'])
+    rows = _m_jobs.read_jobs(n) or []
+    current = _m_jobs.open_job(rows, row['Job'])
     return (current is not None and _m_jobs.job_key(current) == _m_jobs.job_key(row)
+            and sum(_m_jobs.job_key(r) == _m_jobs.job_key(row) for r in rows) == 1
             and attempt.get('binding') == attempt_binding(n, row))
 
 

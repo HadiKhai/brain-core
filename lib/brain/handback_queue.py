@@ -34,9 +34,10 @@ def read_queue_request(n, identity):
     if path.is_symlink() or path.parent.is_symlink():
         raise ValueError('linked handback request evidence')
     data = json.loads(path.read_text())
-    if (not isinstance(data, dict) or data.get('version') != 1 or data.get('id') != identity
+    if (not isinstance(data, dict) or type(data.get('version')) is not int or data.get('version') != 1 or data.get('id') != identity
             or data.get('state') not in ('queued', 'running', 'terminal', 'interrupted', 'invalidated')
             or not isinstance(data.get('args'), dict) or not isinstance(data.get('binding'), dict)
+            or not isinstance(data.get('at'), str)
             or not re.fullmatch('[0-9a-f]{24}', str(data.get('job_key', '')))
             or not re.fullmatch('[0-9a-f]{32}', str(data.get('attempt_id', '')))):
         raise ValueError('invalid handback request; preserve for inspection')
@@ -91,6 +92,7 @@ def claim_handback(inst, n, identity):
             if data['owner'][1] in (None, 'unknown'):
                 raise ValueError('cannot identify foreground runner')
             write_queue_request(n, data)
+        _m_instance.unlock()  # the foreground lease, not brain_lock, owns the wait
         yield data
     finally:
         os.close(fd)
@@ -145,12 +147,9 @@ def run_queue_once(inst, n, identity=None):
         args = argparse.Namespace(**{key: request['args'].get(key) for key in QUEUE_ARGS})
         _m_attempts.update_attempt(inst, n, row, attempt['id'], 'queued', owner=request['owner'])
         args._attempt_id, args._queue_request, args.enqueue = attempt['id'], request, False
-        try:
-            # This is the native synchronous writer/verifier, including its own FIFO reservation.
-            _m_jobs.cmd_handback(args)
-        except BaseException:
-            # No takeover or signalling: retain the lease and owned verifier evidence.
-            raise
+        # This is the native synchronous writer/verifier, including its own FIFO
+        # reservation. Exceptions retain evidence; there is no takeover/signalling.
+        _m_jobs.cmd_handback(args)
         return identity
 
 

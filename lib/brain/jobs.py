@@ -214,17 +214,23 @@ def cmd_handback(a):
     if getattr(a, 'question', None):
         _m_guard.no_terms_in(n, a.question, 'handback question')
     if getattr(a, 'enqueue', False):
-        request = _m_queue.enqueue_handback(inst, n, row, a)
+        try:
+            request = _m_queue.enqueue_handback(inst, n, row, a)
+        except (OSError, ValueError) as error:
+            _m_common.die(_m_guard.redact(str(error), _m_guard.never_terms(n)))
         print(request['id'])
         return
-    identity = getattr(a, '_attempt_id', None)
-    if identity:
-        attempt = _m_attempts.current_attempt(n, row)
-        if not attempt or attempt['id'] != identity or not _m_attempts.attempt_matches(n, row, attempt):
-            _m_common.die('queued attempt changed; no handback published')
-    else:
-        attempt = _m_attempts.begin_attempt(inst, n, row)
-        identity = attempt['id']
+    identity = getattr(a, '_attempt_id', None) if getattr(a, '_queue_request', None) else None
+    try:
+        if identity:
+            attempt = _m_attempts.current_attempt(n, row)
+            if not attempt or attempt['id'] != identity or not _m_attempts.attempt_matches(n, row, attempt):
+                _m_common.die('queued attempt changed; no handback published')
+        else:
+            attempt = _m_attempts.begin_attempt(inst, n, row)
+            identity = attempt['id']
+    except (OSError, ValueError) as error:
+        _m_common.die(_m_guard.redact(str(error), _m_guard.never_terms(n)))
     a._attempt_id = identity
     context_token = _m_attempts.ATTEMPT_CONTEXT.set((inst, n, row, identity))
     try:
@@ -232,8 +238,12 @@ def cmd_handback(a):
     finally:
         # Terminal publication retires before returning (including a not-ready exit).
         # Exceptions retire only this attempt, never a concurrent replacement.
-        _m_attempts.finish_attempt(inst, n, row, identity, 'interrupted')
-        _m_attempts.ATTEMPT_CONTEXT.reset(context_token)
+        try:
+            _m_attempts.finish_attempt(inst, n, row, identity, 'interrupted')
+        except (OSError, ValueError):
+            pass  # unreadable/ambiguous evidence stays unknown; never overwrite it
+        finally:
+            _m_attempts.ATTEMPT_CONTEXT.reset(context_token)
 
 
 def publish_handback(a):
@@ -277,7 +287,8 @@ def publish_handback(a):
         attempt = _m_attempts.current_attempt(n, current)
         if (not attempt or attempt['id'] != a._attempt_id or attempt['state'] not in _m_attempts.ATTEMPT_ACTIVE
                 or not _m_attempts.attempt_matches(n, current, attempt)):
-            _m_common.die('head, base, inputs or attempt changed; no stale handback published')
+            detail = _m_guard.redact('; '.join(reasons), _m_guard.never_terms(n))
+            _m_common.die('head, base, inputs or attempt changed; no stale handback published' + ('; ' + detail if detail else ''))
         request = getattr(a, '_queue_request', None)
         if request:
             from . import handback_queue as _m_queue
@@ -981,12 +992,14 @@ def cmd_jobs(a):
     if getattr(a, 'reason', None) and not a.close:
         _m_common.die('--reason requires --close')
     if a.close and a.id and a.branch and not _m_briefs.import_job(a.branch):
-        if any((a.start, a.settled, a.lessons is not None, a.switch is not None, a.contract_file, a.usage_file, a.job_key)):
+        if any((a.start, a.settled, a.all_closed, getattr(a,'live',False), a.lessons is not None, a.switch is not None, a.contract_file, a.usage_file, a.job_key)):
             _m_common.die('--close cannot combine with other job updates')
         close_ledger_job(inst, inst.node(a.id), a.branch, getattr(a, 'reason', None))
         return
     if getattr(a, 'live', False):
-        if any((a.start, a.close, a.settled, a.lessons is not None, a.switch is not None, a.contract_file, a.usage_file)):
+        if a.branch and not a.id or a.job_key and not (a.id and a.branch):
+            _m_common.die('--live branch/job-key selection needs a node and --branch')
+        if any((a.start, a.close, a.settled, a.all_closed, a.lessons is not None, a.switch is not None, a.contract_file, a.usage_file)):
             _m_common.die('--live is a read-only projection')
         from . import job_attempts as _m_attempts
         for n in inst.nodes():
@@ -1013,14 +1026,14 @@ def cmd_jobs(a):
             _m_common.die("--settled cannot combine with other job updates")
         n = inst.node(a.id)
         evidence_file = getattr(a, 'attestation_file', None)
-        if not evidence_file:
-            _m_common.die('--settled requires --attestation-file with fresh exhaustive per-thread evidence')
-        try:
-            evidence = json.loads(Path(evidence_file).read_text())
-        except (OSError, ValueError):
-            _m_common.die('unreadable settlement attestation; no ledger rows changed')
         from . import settlement as _m_settlement
         def attest(targets):
+            if not evidence_file:
+                _m_common.die('--settled requires --attestation-file with fresh exhaustive per-thread evidence')
+            try:
+                evidence = json.loads(Path(evidence_file).read_text())
+            except (OSError, ValueError):
+                _m_common.die('unreadable settlement attestation; no ledger rows changed')
             try:
                 identities = _m_settlement.validate_settlement_attestation(inst, n, targets, evidence)
             except ValueError as error:
