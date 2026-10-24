@@ -293,8 +293,13 @@ def watch_recorded_ready(inst, n, row, signal, strict=False):
     Cached refs fence stale evidence. This notification is not merge authority and
     does not replace the coordinator's full readiness/input/rehearsal checks.
     """
+    from . import job_attempts as _m_attempts
+    projection = _m_attempts.job_projection(inst, n, row, strict=strict)
+    signal = projection['signal']
+    if projection['attempt'] and not signal:
+        return None
     if _m_jobs.handback_file(n, row).exists():
-        if not signal or signal.get('version') != 2 or signal.get('state') != 'done' or signal.get('ready_reasons') != []:
+        if not signal or signal.get('version') not in (2, 3) or signal.get('state') != 'done' or signal.get('ready_reasons') != []:
             return None
         packet = signal.get('ready')
     else:

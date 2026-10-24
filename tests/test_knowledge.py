@@ -371,7 +371,8 @@ class ImportAutonomy(Scenario):
         self.assertNotIn("git rebase", brief)
         self.assertNotIn("must have a Lessons section", brief)
         for state in ("blocked", "question", "done"):
-            self.b(r, "handback", "source", "--branch", job, "--state", state, "--reviews", "0",
+            self.b(r, "handback", "--summary", "Synthetic result", "source", "--branch", job, "--state", state, "--reviews", "0",
+                   *(("--question", "Synthetic choice?") if state == "question" else ()),
                    "--report", "sources/study.md", "--lessons", "bounded")
             due = json.loads(self.b(r, "due", "source", "--json"))
             signal = next(i for i in due if i["kind"] == "handback")
@@ -392,7 +393,7 @@ class ImportAutonomy(Scenario):
         self.assertNotIn("handback", [i["kind"] for i in json.loads(self.b(r, "due", "source", "--json"))])
         self.assertIn("status: proposed", (node / "library/bounded.md").read_text())
         self.assertNotIn("has no lesson outcome", self.b(r, "check"))
-        self.b(r, "handback", "source", "--branch", job, "--state", "done", ok=False)
+        self.b(r, "handback", "--summary", "Synthetic result", "source", "--branch", job, "--state", "done", ok=False)
 
     def test_existing_node_study_start_is_explicit_and_snapshot_bound(self):
         r = self.init("alice")
@@ -406,7 +407,7 @@ class ImportAutonomy(Scenario):
         self.b(r, "jobs", "source", "--branch", "job/wrong", "--start", ok=False)
         self.b(r, "jobs", "source", "--branch", "import:" + "0" * 40, "--start", ok=False)
         self.b(r, "jobs", "source", "--branch", job, "--start")
-        self.b(r, "handback", "source", "--branch", job, "--state", "done", "--lessons", "none: empty study")
+        self.b(r, "handback", "--summary", "Synthetic result", "source", "--branch", job, "--state", "done", "--lessons", "none: empty study")
         self.assertIn("no home ready evidence required", self.b(r, "due", "source"))
         self.b(r, "jobs", "source", "--branch", job, "--lessons", "none: empty study", "--close")
 
@@ -448,7 +449,7 @@ class ImportAutonomy(Scenario):
     def test_proposed_ids_are_valid_outcomes_for_merged_home_jobs(self):
         r, home, wt = _test_verify.WorkerReadyPackets.job(self)
         self.proposal(r, source="a")
-        self.b(r, "handback", "a", "--branch", "job", "--state", "done", "--reviews", "1",
+        self.b(r, "handback", "--summary", "Synthetic result", "a", "--branch", "job", "--state", "done", "--reviews", "1",
                "--report", "report.md", "--lessons", "bounded")
         self.b(r, "jobs", "a", "--branch", "job", "--lessons", "bounded")
         self.git("merge", "--no-edit", "job", cwd=home)

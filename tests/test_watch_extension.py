@@ -85,13 +85,13 @@ class WatchExtension(Scenario):
         root = self.inst.node('root')
         with mock.patch.object(self.m, 'changes_due', return_value=[]), mock.patch.object(self.m, 'wake_start'), \
                 mock.patch.object(self.m, 'WAKE_INTERVAL', 0), mock.patch.object(self.m, 'wake_send', return_value=True) as send:
-            self.b(self.root, 'handback', 'app', '--branch', row['Job'], '--state', 'done')
+            self.b(self.root, 'handback', "--summary", "Synthetic result", 'app', '--branch', row['Job'], '--state', 'done')
             first = self.m.read_handback(n, row)
             self.watch()
             self.m.wake_drain(self.inst, n, once=True)
             self.assertEqual(send.call_count, 1)
             self.tip(w['path'], 'rebased-tip')
-            self.b(self.root, 'handback', 'app', '--branch', row['Job'], '--state', 'done')
+            self.b(self.root, 'handback', "--summary", "Synthetic result", 'app', '--branch', row['Job'], '--state', 'done')
             second = self.m.read_handback(n, row)
             self.watch()
             self.m.wake_drain(self.inst, n, once=True)

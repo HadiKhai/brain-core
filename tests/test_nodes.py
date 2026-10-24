@@ -645,7 +645,7 @@ class TeamHomes(Scenario):
         self.assertEqual(record.read_bytes(), before)
         self.assertEqual((root / "nodes/app/job-ledger.md").read_bytes(), ledger)
         # A report-only worker write reuses the refreshed packet without verification.
-        self.b(root, "handback", "app", "--branch", "job", "--state", "done", "--report", "fixture report")
+        self.b(root, "handback", "--summary", "Synthetic result", "app", "--branch", "job", "--state", "done", "--report", "fixture report")
         updated = json.loads(record.read_text())["ready"]
         self.assertEqual(updated["integration_base"], base)
         self.assertNotEqual(updated["main"], base)
@@ -663,7 +663,7 @@ class TeamHomes(Scenario):
         self.b(root, *shlex.split(refusal.strip().split('; run ', 1)[1])[1:])
         self.assertTrue(self.b(root, "ready", "app", "--branch", "job").strip().endswith("ready"))
         before = record.read_bytes()
-        out = self.b(root, "handback", "app", "--branch", "job", "--state", "done", "--reviews", "2")
+        out = self.b(root, "handback", "--summary", "Synthetic result", "app", "--branch", "job", "--state", "done", "--reviews", "2")
         self.assertIn("verify: reused", out)
         packet = json.loads(record.read_text())["ready"]
         self.assertEqual(packet["integration_base"], base)
@@ -675,7 +675,7 @@ class TeamHomes(Scenario):
         self.git("commit", "--allow-empty", "-qm", "new integration base", cwd=home)
         self.git("rebase", "main", cwd=wt)
         self.assertIn("main moved", self.b(root, "ready", "app", "--branch", "job", ok=False))
-        self.b(root, "handback", "app", "--branch", "job", "--state", "done", "--reviews", "2")
+        self.b(root, "handback", "--summary", "Synthetic result", "app", "--branch", "job", "--state", "done", "--reviews", "2")
         self.assertEqual(count.read_text(), "xxxx")
 
     def test_real_old_ready_no_origin_and_pr_base_change(self):
@@ -762,7 +762,7 @@ class TeamHomes(Scenario):
         self.assertTrue(self.b(root, "ready", "app", "--branch", "job").strip().endswith("ready"))
         self.assertIn("ready to merge", self.b(root, "due", "app"))
         self.assertEqual(cache.read_bytes(), before)
-        self.assertIn("verify: reused", self.b(root, "handback", "app", "--branch", "job",
+        self.assertIn("verify: reused", self.b(root, "handback", "--summary", "Synthetic result", "app", "--branch", "job",
                       "--state", "done", "--reviews", "2"))
         self.assertEqual((wt.parent / "verify-count").read_text(), "xx")
         self.assertEqual(json.loads(record.read_text())["ready"]["integration_base"], base)
@@ -805,7 +805,7 @@ class TeamHomes(Scenario):
         self.git("branch", "main", cwd=home)  # a plausible stale local main must not hide origin's default
         self.b(root, "wt", "add", "app", "job")
         wt = self.tmp / "app-work/worktrees/job"
-        self.b(root, "handback", "app", "--branch", "job", "--state", "done", "--reviews", "1")
+        self.b(root, "handback", "--summary", "Synthetic result", "app", "--branch", "job", "--state", "done", "--reviews", "1")
         old = self.git("rev-parse", "HEAD", cwd=home)
         (home / "operator.txt").write_text("unfinished made-up work")
         merge = self.advance(seed, origin)
@@ -817,10 +817,10 @@ class TeamHomes(Scenario):
         self.assertIn("In the job worktree: git rebase origin/trunk", out)
         self.assertIn("main moved", out)
         self.assertIn("rebase on current main", out)
-        out = self.b(root, "handback", "app", "--branch", "job", "--state", "done", "--reviews", "1", ok=False)
+        out = self.b(root, "handback", "--summary", "Synthetic result", "app", "--branch", "job", "--state", "done", "--reviews", "1", ok=False)
         self.assertIn("local trunk is 2 behind", out)
         self.git("rebase", "origin/trunk", cwd=wt)
-        out = self.b(root, "handback", "app", "--branch", "job", "--state", "done", "--reviews", "1")
+        out = self.b(root, "handback", "--summary", "Synthetic result", "app", "--branch", "job", "--state", "done", "--reviews", "1")
         self.assertIn("local trunk is 2 behind", out)
         record = json.loads(next((root / "nodes/app/job-handbacks").glob("*.json")).read_text())
         self.assertEqual(record["ready"]["main"], merge)
@@ -865,7 +865,7 @@ class TeamHomes(Scenario):
         (wt / "fix").write_text("made-up change")
         self.git("add", "-A", cwd=wt)
         self.git("commit", "-qm", "fix", cwd=wt)
-        self.b(root, "handback", "app", "--branch", "job", "--state", "done", "--reviews", "1")
+        self.b(root, "handback", "--summary", "Synthetic result", "app", "--branch", "job", "--state", "done", "--reviews", "1")
         self.git("fetch", str(home), "job:job", cwd=seed)
         self.git("merge", "--no-ff", "-m", "Merge owned job", "job", cwd=seed)
         merge = self.git("rev-parse", "HEAD", cwd=seed).strip()
@@ -904,7 +904,7 @@ class TeamHomes(Scenario):
         wt=self.tmp/'app-work/worktrees/job'
         (wt/'fix').write_text('fake fix')
         self.git('add','-A',cwd=wt); self.git('commit','-qm','fix',cwd=wt)
-        self.b(root,'handback','app','--branch','job','--state','done','--reviews','1')
+        self.b(root,'handback', "--summary", "Synthetic result",'app','--branch','job','--state','done','--reviews','1')
         self.git('fetch',str(home),'job:job',cwd=seed)
         self.git('merge','--squash','job',cwd=seed);self.git('commit','-qm','fix (#5)',cwd=seed)
         self.git('push',str(origin),'trunk',cwd=seed)
@@ -921,7 +921,7 @@ class TeamHomes(Scenario):
         self.git("fetch", "origin", cwd=home)
         self.git("remote", "set-head", "origin", "-a", cwd=home)
         self.b(root, "wt", "add", "app", "job")
-        out = self.b(root, "handback", "app", "--branch", "job", "--state", "done", "--reviews", "1")
+        out = self.b(root, "handback", "--summary", "Synthetic result", "app", "--branch", "job", "--state", "done", "--reviews", "1")
         self.assertIn("origin/stable", out)
         packet = json.loads(next((root / "nodes/app/job-handbacks").glob("*.json")).read_text())["ready"]
         self.assertEqual(packet["main"], self.git("rev-parse", "stable", cwd=seed).strip())
@@ -951,7 +951,7 @@ class TeamHomes(Scenario):
         root, seed, origin, home = self.team()
         self.b(root, "wt", "add", "app", "job")
         self.git("symbolic-ref", "refs/remotes/origin/HEAD", "refs/heads/trunk", cwd=home)
-        self.assertIn("integration main is missing", self.b(root, "handback", "app", "--branch", "job",
+        self.assertIn("integration main is missing", self.b(root, "handback", "--summary", "Synthetic result", "app", "--branch", "job",
                       "--state", "done", "--reviews", "1", ok=False))
         out = self.b(root, "sync", "app", "--offline", "--mark")
         self.assertIn("not marked", out)
@@ -967,10 +967,10 @@ class TeamHomes(Scenario):
         self.git("commit", "-qm", "local integration", cwd=home)
         self.b(root, "wt", "add", "app", "job", "--base", "origin/trunk")
         wt = self.tmp / "app-work/worktrees/job"
-        self.assertIn("current local main", self.b(root, "handback", "app", "--branch", "job", "--state", "done",
+        self.assertIn("current local main", self.b(root, "handback", "--summary", "Synthetic result", "app", "--branch", "job", "--state", "done",
                       "--reviews", "1", ok=False))
         self.git("rebase", "trunk", cwd=wt)
-        self.b(root, "handback", "app", "--branch", "job", "--state", "done", "--reviews", "1")
+        self.b(root, "handback", "--summary", "Synthetic result", "app", "--branch", "job", "--state", "done", "--reviews", "1")
         (home / "second-local-work").write_text("another unpublished integration")
         self.git("add", "-A", cwd=home)
         self.git("commit", "-qm", "another local integration", cwd=home)
@@ -985,7 +985,7 @@ class TeamHomes(Scenario):
             (wt / "fix").write_text(str(i))
             self.git("add", "-A", cwd=wt)
             self.git("commit", "-qm", "made-up fix", cwd=wt)
-        self.b(root, "handback", "app", "--branch", "job", "--state", "done", "--reviews", "1")
+        self.b(root, "handback", "--summary", "Synthetic result", "app", "--branch", "job", "--state", "done", "--reviews", "1")
         self.git("fetch", str(home), "job:job", cwd=seed)
         self.git("merge", "--ff-only", "job", cwd=seed)
         self.git("push", str(origin), "trunk", cwd=seed)
@@ -1008,7 +1008,7 @@ class TeamHomes(Scenario):
             (wt / "fix").write_text(str(i))
             self.git("add", "-A", cwd=wt)
             self.git("commit", "-qm", "made-up change", cwd=wt)
-        self.b(root, "handback", "app", "--branch", "job", "--state", "done", "--reviews", "1")
+        self.b(root, "handback", "--summary", "Synthetic result", "app", "--branch", "job", "--state", "done", "--reviews", "1")
         if legacy:
             import hashlib
             record = next((root / "nodes/app/job-handbacks").glob("*.json"))
@@ -1077,7 +1077,7 @@ class TeamHomes(Scenario):
         (wt / "fix").write_text("job contribution")
         self.git("add", "-A", cwd=wt)
         self.git("commit", "-qm", "fix", cwd=wt)
-        self.b(root, "handback", "app", "--branch", "job", "--state", "done", "--reviews", "1")
+        self.b(root, "handback", "--summary", "Synthetic result", "app", "--branch", "job", "--state", "done", "--reviews", "1")
         self.git("merge", "--no-ff", "-m", "job integration", "job", cwd=home)
         self.git("push", "origin", "trunk", cwd=home)
         self.b(root, "wt", "rm", "app", "job")
@@ -1096,11 +1096,11 @@ class TeamHomes(Scenario):
         (wt / "fix").write_text("worker change")
         self.git("add", "-A", cwd=wt)
         self.git("commit", "-qm", "fix", cwd=wt)
-        self.assertIn("local default must include origin default", self.b(root, "handback", "app", "--branch", "job",
+        self.assertIn("local default must include origin default", self.b(root, "handback", "--summary", "Synthetic result", "app", "--branch", "job",
                       "--state", "done", "--reviews", "1", ok=False))
         # The fixture owns this checkout; production code never updates an operator checkout.
         self.git("merge", "--ff-only", "origin/trunk", cwd=home)
-        self.b(root, "handback", "app", "--branch", "job", "--state", "done", "--reviews", "1")
+        self.b(root, "handback", "--summary", "Synthetic result", "app", "--branch", "job", "--state", "done", "--reviews", "1")
         self.git("merge", "--no-ff", "-m", "made-up job merge", "job", cwd=home)
         self.git("push", "origin", "trunk", cwd=home)
         self.assertIn("1 recorded", self.b(root, "sync", "app"))
@@ -1126,7 +1126,7 @@ class TeamHomes(Scenario):
     def test_main_job_branch_is_still_refused_with_another_remote_default(self):
         root, seed, origin, home = self.team()
         self.b(root, "wt", "add", "app", "main")
-        self.assertIn("job branch must differ from main", self.b(root, "handback", "app", "--branch", "main",
+        self.assertIn("job branch must differ from main", self.b(root, "handback", "--summary", "Synthetic result", "app", "--branch", "main",
                       "--state", "done", "--reviews", "1", ok=False))
 
     def test_failed_ledger_import_cannot_mark_past_unrecorded_merges(self):
@@ -1148,7 +1148,7 @@ class TeamHomes(Scenario):
         self.git("branch", "main", cwd=home)
         self.b(root, "wt", "add", "app", "job")
         self.git("symbolic-ref", "--delete", "refs/remotes/origin/HEAD", cwd=home)
-        out = self.b(root, "handback", "app", "--branch", "job", "--state", "done", "--reviews", "1", ok=False)
+        out = self.b(root, "handback", "--summary", "Synthetic result", "app", "--branch", "job", "--state", "done", "--reviews", "1", ok=False)
         self.assertIn("origin default branch unavailable", out)
         self.assertIn("integration main is missing", out)
 

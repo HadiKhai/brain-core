@@ -405,7 +405,7 @@ class WorktreeGuardUnits(unittest.TestCase):
 
 class WorktreeSetupDiagnostics(Scenario):
     def finish(self, r):
-        return self.b(r, "handback", "a", "--branch", "job", "--state", "done", "--reviews", "1")
+        return self.b(r, "handback", "--summary", "Synthetic result", "a", "--branch", "job", "--state", "done", "--reviews", "1")
 
     def test_setup_completes_before_return_and_first_verify(self):
         r = self.init('alice')

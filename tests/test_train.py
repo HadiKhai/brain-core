@@ -23,7 +23,7 @@ class MergeTrain(Scenario):
             (wt / name).write_text(value)
         self.git("add", "-A", cwd=wt)
         self.git("commit", "-qm", branch, cwd=wt)
-        self.b(self.root, "handback", "a", "--branch", branch, "--state", "done", "--reviews", "1")
+        self.b(self.root, "handback", "--summary", "Synthetic result", "a", "--branch", branch, "--state", "done", "--reviews", "1")
         return wt
 
     def detach(self):
@@ -169,7 +169,7 @@ class MergeTrain(Scenario):
         self.git("add", "extra", cwd=wt)
         self.git("commit", "-qm", "new head", cwd=wt)
         self.assertIn("not ready/open", self.b(root, "train", "a", "--jobs", "one", ok=False))
-        self.b(root, "handback", "a", "--branch", "one", "--state", "done", "--reviews", "0", ok=False)
+        self.b(root, "handback", "--summary", "Synthetic result", "a", "--branch", "one", "--state", "done", "--reviews", "0", ok=False)
         self.assertIn("not ready/open", self.b(root, "train", "a", "--jobs", "one", ok=False))
 
     def test_refuses_pr_mode_and_checked_out_main(self):
@@ -257,7 +257,7 @@ class MergeTrain(Scenario):
         (wt / "bad").write_text("fails per-job verify\n")
         self.git("add", "bad", cwd=wt)
         self.git("commit", "-qm", "bad", cwd=wt)
-        self.b(root, "handback", "a", "--branch", "badjob", "--state", "done", "--reviews", "1", ok=False)
+        self.b(root, "handback", "--summary", "Synthetic result", "a", "--branch", "badjob", "--state", "done", "--reviews", "1", ok=False)
         self.detach()
         self.assertIn("not ready/open", self.b(root, "train", "a", "--jobs", "badjob", ok=False))
 

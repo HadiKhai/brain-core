@@ -330,13 +330,13 @@ class BriefLimits(Scenario):
     def test_compaction_restart_due_and_fresh_brief_resume_without_commits(self):
         r = self.setup_job()
         self.b(r, "brief", "a", "--branch", "job", "--task", "Finish fixture work")
-        self.b(r, "handback", "a", "--branch", "job", "--state", "done", "--restart", "compactions", ok=False)
-        self.b(r, "handback", "a", "--branch", "job", "--state", "blocked", "--restart", "compactions")
+        self.b(r, "handback", "--summary", "Synthetic result", "a", "--branch", "job", "--state", "done", "--restart", "compactions", ok=False)
+        self.b(r, "handback", "--summary", "Synthetic result", "a", "--branch", "job", "--state", "blocked", "--restart", "compactions")
         due = json.loads(self.b(r, "due", "a", "--json"))
         self.assertIn("restart", str(due))
         self.assertIn("brain brief a --branch job", str(due))
         self.assertIn("## Resume existing work", self.b(r, "brief", "a", "--branch", "job"))
-        self.b(r, "handback", "a", "--branch", "job", "--state", "blocked")
+        self.b(r, "handback", "--summary", "Synthetic result", "a", "--branch", "job", "--state", "blocked")
         self.assertNotIn('"kind": "restart"', self.b(r, "due", "a", "--json"))
 
     def test_restart_replays_exact_inputs_and_acknowledges_each_signal(self):
@@ -349,7 +349,7 @@ class BriefLimits(Scenario):
                 (["--task-file", str(task_file)], task_file.read_text()),
                 (["--task", "Finish the inline fixture's remaining work."], "Finish the inline fixture's remaining work.")]:
             self.b(r, "brief", "a", "--branch", "job", *task_args, "--context-file", str(context))
-            self.b(r, "handback", "a", "--branch", "job", "--state", "blocked", "--restart", "compactions")
+            self.b(r, "handback", "--summary", "Synthetic result", "a", "--branch", "job", "--state", "blocked", "--restart", "compactions")
             due = json.loads(self.b(r, "due", "a", "--json"))
             restart = next(i for i in due if i["kind"] == "restart")
             self.assertEqual(restart["state"], "blocked")
@@ -383,7 +383,7 @@ class BriefLimits(Scenario):
         out = self.b(r, "brief", "a", "--branch", "job", "--task", "Replacement task")
         self.assertIn("Replacement task", out)
         self.assertNotIn("## Shared context", out)
-        self.b(r, "handback", "a", "--branch", "job", "--state", "blocked", "--restart", "compactions")
+        self.b(r, "handback", "--summary", "Synthetic result", "a", "--branch", "job", "--state", "blocked", "--restart", "compactions")
         restart = next(i for i in json.loads(self.b(r, "due", "a", "--json")) if i["kind"] == "restart")
         self.assertNotIn("--context-file", restart["text"])
         self.assertIn("Replacement task", restart["text"])
@@ -399,7 +399,7 @@ class BriefLimits(Scenario):
 
     def test_legacy_restart_requires_original_task_and_reviewer_has_no_worker_policy(self):
         r = self.setup_job()
-        self.b(r, "handback", "a", "--branch", "job", "--state", "blocked", "--restart", "compactions")
+        self.b(r, "handback", "--summary", "Synthetic result", "a", "--branch", "job", "--state", "blocked", "--restart", "compactions")
         out = self.b(r, "brief", "a", "--branch", "job", ok=False)
         self.assertIn("supply the original --task or --task-file", out)
         review = self.b(r, "review", "a", "--branch", "job")

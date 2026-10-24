@@ -34,15 +34,18 @@ def attempt_binding(n, row):
     w = n['local'].get('worktrees', {}).get(branch)
     head = (_m_common.git('rev-parse', '--verify', '--quiet', 'refs/heads/' + branch, cwd=home).stdout.strip()
             if home else '')
-    base = (_m_common.git('rev-parse', '--verify', '--quiet', 'refs/heads/main', cwd=home).stdout.strip()
-            if home else '')
+    base = _m_verify.ready_refs(n, branch)[1] if home else ''
     return {'head': head, 'base': base, 'inputs': _m_verify.verify_inputs(n, w) if w else '',
+            'integration_base': _m_verify.integration_parent(n, base) if home else '',
             'verify_command': n['fm'].get('verify', '')}
 
 
 def current_attempt(n, row, strict=True):
     try:
-        data = json.loads(attempt_path(n, row).read_text())
+        path = attempt_path(n, row)
+        if path.is_symlink() or path.parent.is_symlink():
+            raise ValueError('linked job attempt evidence')
+        data = json.loads(path.read_text())
         if (not isinstance(data, dict) or data.get('version') != 1 or data.get('job_key') != _m_jobs.job_key(row)
                 or data.get('state') not in ATTEMPT_STATES
                 or not isinstance(data.get('id'), str) or not re.fullmatch('[0-9a-f]{32}', data['id'])
@@ -65,6 +68,8 @@ def active_attempt(n, row, strict=True):
 
 def write_attempt(n, row, data):
     path = attempt_path(n, row)
+    if path.is_symlink() or path.parent.is_symlink():
+        raise ValueError('linked job attempt evidence')
     _m_common.safe_target(path)
     path.parent.mkdir(exist_ok=True)
     _m_common.atomic_write(path, json.dumps(data, sort_keys=True) + '\n')
@@ -111,7 +116,7 @@ def job_projection(inst, n, row, strict=False):
     hb = _m_jobs.read_handback(n, row, strict=strict)
     attempt = current_attempt(n, row, strict=strict)
     # Even an interrupted replacement prevents resurrecting the previous completion.
-    effective = hb
+    effective = _m_jobs.job_signal(inst, n, row, strict=strict)
     if attempt and (attempt['state'] != 'terminal' or not hb or hb.get('attempt_id') != attempt['id']):
         effective = None
     state = ('closed' if row.get('Ended') else effective.get('state') if effective else
@@ -120,6 +125,7 @@ def job_projection(inst, n, row, strict=False):
     if attempt and attempt.get('request_id'):
         from . import handback_queue as _m_queue
         queue = _m_queue.queue_projection(n, attempt['request_id'], strict=strict)
+    admission = _m_machine.job_queue_projection(inst, n['id'], attempt.get('owner')) if attempt else None
     episode = None
     if effective:
         episode = effective.get('wake_id') or _m_jobs.digest([effective.get(k) for k in
@@ -132,5 +138,8 @@ def job_projection(inst, n, row, strict=False):
     return {'job_key': _m_jobs.job_key(row), 'branch': row['Job'], 'ledger': row,
             'state': state, 'summary': (effective.get('summary') or 'summary missing (legacy)') if effective else '',
             'question': (effective or {}).get('question'), 'handback': hb, 'signal': effective,
-            'episode_id': episode, 'attempt': attempt, 'queue': queue, 'host_activity': 'unknown',
+            'historical_summary': (hb.get('summary') or 'summary missing (legacy)') if hb and not effective else None,
+            'missing_fields': ([key for key in ('summary', 'question')
+                               if (key == 'summary' or hb.get('state') == 'question') and not hb.get(key)] if hb else []),
+            'episode_id': episode, 'attempt': attempt, 'queue': queue, 'admission': admission, 'host_activity': 'unknown',
             'next_action': action.get(state, 'inspect recorded job evidence; host activity unknown')}

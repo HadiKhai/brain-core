@@ -33,7 +33,7 @@ class WorkerMessages(Scenario):
             self.assertEqual(len(protocol), 1)
             self.assertIn("peer thread", protocol[0])
             self.assertNotRegex(brief, r"(?:done|blocked|question|failed)\|")
-        self.assertIn("start/done/blocked/question", self.b(root, "handback", "--help"))
+        self.assertIn("start/done/blocked/question", self.b(root, "handback", "--summary", "Synthetic result", "--help"))
 
     def test_every_brief_formatter_usage_works_from_its_run_folder(self):
         root, _ = self.job()
@@ -91,6 +91,6 @@ class WorkerMessages(Scenario):
     def test_handback_formats_failure_and_question_with_report(self):
         root, _ = self.job()
         for state, kind in (("blocked", "blocked"), ("question", "question"), ("failed", "blocked")):
-            out = self.b(root, "handback", "a", "--branch", "job/sample", "--state", state,
+            out = self.b(root, "handback", "--summary", "Synthetic result", "--question", "Synthetic choice?", "a", "--branch", "job/sample", "--state", state,
                          "--report", "~/reports/sample.md", "--lessons", "none: made-up fixture")
             self.assertIn(kind + ": coordinator can see it with brain due [branch: job/sample; report: ~/reports/sample.md]", out)

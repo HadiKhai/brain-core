@@ -15,9 +15,11 @@ def validate_settlement_attestation(inst, n, targets, data):
     observed = inst.parse_time(data.get('observed_at')) if isinstance(data.get('observed_at'), str) else None
     if not observed or not 0 <= (inst.now_dt() - observed).total_seconds() <= SETTLEMENT_MAX_AGE:
         refuse()
-    project = data.get('project_id')
-    expected_project = n['local'].get('home_project') or n['local'].get('host_project')
-    if not isinstance(project, str) or not project.strip() or (expected_project and project != expected_project):
+    projects = data.get('project_ids', [data.get('project_id')])
+    expected_projects = {n['local'][key] for key in ('home_project', 'host_project') if n['local'].get(key)}
+    if (not isinstance(projects, list) or not projects
+            or any(not isinstance(project, str) or not project.strip() for project in projects)
+            or len(set(projects)) != len(projects) or not expected_projects.issubset(set(projects))):
         refuse()
     coverage = data.get('coverage')
     if not isinstance(coverage, dict) or any(coverage.get(k) is not True for k in ('project', 'nested', 'complete')):
@@ -31,7 +33,10 @@ def validate_settlement_attestation(inst, n, targets, data):
     for node in inst.nodes():
         if node['local'].get('coordinator'):
             protected.update(_m_jobs.thread_reference_ids(node['local']['coordinator']))
-        for row in _m_jobs.read_jobs(node) or []:
+        ledger = _m_jobs.read_jobs(node)
+        if ledger is None:
+            refuse()
+        for row in ledger:
             if not row.get('Ended'):
                 for ref, _ in _m_jobs.bound_worker_threads(node, row['Job']):
                     protected.update(_m_jobs.thread_reference_ids(ref))

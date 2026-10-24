@@ -292,7 +292,7 @@ class Spend(Scenario):
         for part in ("job job:", "over twice the median of 22.2k", "over its 30k-token budget", "3 compactions",
                      "sub-agents spent 57%"):
             self.assertIn(part, flags[0])
-        hand = self.b(self.r, "handback", "app", "--branch", "job", "--state", "blocked", "--report", "r.md",
+        hand = self.b(self.r, "handback", "--summary", "Synthetic result", "app", "--branch", "job", "--state", "blocked", "--report", "r.md",
                       "--lessons", "none: none")
         self.assertIn("usage: 145k tokens processed", hand)
         self.assertIn("budget 30k tokens · 3 h: over (145k of 30k tokens", hand)

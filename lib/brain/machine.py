@@ -651,6 +651,27 @@ def machine_scope(inst, node):
     return [hashlib.sha256(s.encode()).hexdigest() for s in (str(inst.root.resolve()), node)]
 
 
+def job_queue_projection(inst, node, owner):
+    """Read recorded admission only. Never acquire/prune the queue or infer live ownership."""
+    path = machine_dir() / 'machine-care-queue.json'
+    try:
+        rows = json.loads(path.read_text())
+        if not isinstance(rows, list) or any(not machine_queue.valid(r) for r in rows):
+            raise ValueError('invalid recorded machine queue')
+        matches = [r for r in rows if r.get('scope') == machine_scope(inst, node) and r['owner'] == owner]
+        if len(matches) != 1:
+            return None
+        row = matches[0]
+        waiting = [r for r in rows if r['kind'] == row['kind'] and r['state'] == 'queued']
+        return {'state': row['state'], 'owner': row['owner'], 'owner_activity': 'unknown',
+                'position': waiting.index(row) + 1 if row in waiting else None,
+                'recorded_at': path.stat().st_mtime, 'source': 'recorded native admission queue'}
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError, KeyError, TypeError):
+        return {'state': 'unknown', 'position': None, 'owner': None, 'owner_activity': 'unknown'}
+
+
 def machine_wait(kind="heavy", inst=None, node=None):
     token = os.urandom(16).hex()
     owner = [os.getpid(), process_stamp(os.getpid())]

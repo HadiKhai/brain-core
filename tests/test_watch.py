@@ -876,7 +876,7 @@ class Watcher(Scenario):
         n = self.inst.node('root')
         row = {**dict.fromkeys(self.m.JOB_COLS, ''), 'Job': 'import:unborn', 'Started': '2026-01-01T10:00Z'}
         self.m.write_jobs(self.inst, n, [row])
-        args = argparse.Namespace(id='root', branch=row['Job'], state='blocked', lessons='none: fixture',
+        args = argparse.Namespace(summary="Synthetic result", id='root', branch=row['Job'], state='blocked', lessons='none: fixture',
                                   report='report.md', reviews=None, need_human=None)
         directory = self.m.wake_directory(self.inst, n)
         episodes, identities = [], []
@@ -934,7 +934,7 @@ class Watcher(Scenario):
         n = self.inst.node('root')
         row = {**dict.fromkeys(self.m.JOB_COLS, ''), 'Job': 'import:unborn', 'Started': '2026-01-01T10:00Z'}
         self.m.write_jobs(self.inst, n, [row])
-        args = argparse.Namespace(id='root', branch=row['Job'], state='question', lessons='none: fixture',
+        args = argparse.Namespace(summary="Synthetic result", question="Synthetic choice?", id='root', branch=row['Job'], state='question', lessons='none: fixture',
                                   report='report.md', reviews=None, need_human=None)
         directory = self.m.wake_directory(self.inst, n)
         with mock.patch.object(self.m, 'load', return_value=self.inst), \
@@ -969,7 +969,7 @@ class Watcher(Scenario):
         n = self.inst.node('root')
         row = {**dict.fromkeys(self.m.JOB_COLS, ''), 'Job': 'import:unborn', 'Started': '2026-01-01T10:00Z'}
         self.m.write_jobs(self.inst, n, [row])
-        args = argparse.Namespace(id='root', branch=row['Job'], state='blocked', lessons='none: fixture',
+        args = argparse.Namespace(summary="Synthetic result", id='root', branch=row['Job'], state='blocked', lessons='none: fixture',
                                   report='report.md', reviews=None, need_human='Choose blue')
         directory = self.m.wake_directory(self.inst, n)
         with mock.patch.object(self.m, 'load', return_value=self.inst), \
@@ -1296,7 +1296,7 @@ class Watcher(Scenario):
             with mock.patch.object(self.m, 'load', return_value=self.inst), \
                     mock.patch.object(self.m, 'request_wake', return_value=False), \
                     contextlib.redirect_stdout(io.StringIO()):
-                self.m.cmd_handback(argparse.Namespace(id='root', branch=row['Job'], state='blocked',
+                self.m.cmd_handback(argparse.Namespace(summary="Synthetic result", id='root', branch=row['Job'], state='blocked',
                     reviews=None, lessons='none: fixture', report='fixture.md', need_human=need))
             with mock.patch.object(self.m, 'wake_start'):
                 self.watch()

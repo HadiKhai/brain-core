@@ -187,7 +187,7 @@ def train_ejection(n, row, packet, strict=False):
 
 
 def one_line(value):
-    return isinstance(value, str) and bool(value.strip()) and not any(c in value for c in '\r\n\u2028\u2029')
+    return isinstance(value, str) and bool(value.strip()) and not any(c in value for c in '\r\n\v\f\x1c\x1d\x1e\x85\u2028\u2029')
 
 
 def validate_handback_text(a):
@@ -278,6 +278,12 @@ def publish_handback(a):
         if (not attempt or attempt['id'] != a._attempt_id or attempt['state'] not in _m_attempts.ATTEMPT_ACTIVE
                 or not _m_attempts.attempt_matches(n, current, attempt)):
             _m_common.die('head, base, inputs or attempt changed; no stale handback published')
+        request = getattr(a, '_queue_request', None)
+        if request:
+            from . import handback_queue as _m_queue
+            claim = _m_queue.read_queue_request(n, request['id'])
+            if claim.get('state') != 'running' or claim.get('lease') != request['lease']:
+                _m_common.die('handback request lease changed; no duplicate publication')
         if packet and packet.get("version") == 1 and "integration_base" not in packet:
             preflight, head, main = _m_verify.ready_preflight(n, a.branch)
             if not preflight and packet.get("head") == head and _m_verify.packet_main_matches(n, packet, main):
@@ -1021,10 +1027,14 @@ def cmd_jobs(a):
                 _m_common.die(str(error))
             # Preserve the supplied observations separately from the coordinator ledger.
             folder = n['dir'] / 'job-settlements'
+            serialized = json.dumps(evidence, sort_keys=True) + '\n'
+            _m_guard.no_terms_in(n, serialized, 'settlement attestation')
             _m_common.safe_target(folder / 'evidence.json')
             folder.mkdir(exist_ok=True)
             for target in targets:
-                _m_common.atomic_write(folder / (job_key(target) + '.json'), json.dumps(evidence, sort_keys=True) + '\n')
+                path = folder / (job_key(target) + '.json')
+                _m_common.atomic_write(path, serialized)
+                _m_common.touch(path)
             for identity in identities:
                 print('t3_thread_organize ' + json.dumps({'action': 'settle', 'threadId': identity}, sort_keys=True))
         with _m_instance.brain_lock(inst):

@@ -200,7 +200,7 @@ class WorkerReadyPackets(Scenario):
         self.assertEqual(self.record(r).strip().splitlines()[-1], "ready")
 
     def record(self, r, ok=True):
-        return self.b(r, "ready", "a", "--branch", "job", "--record", "--reviews", "2", ok=ok)
+        return self.b(r, "ready", "--summary", "Synthetic result", "a", "--branch", "job", "--record", "--reviews", "2", ok=ok)
 
     def packet(self):
         return next((self.tmp / "alice/nodes/a/job-handbacks").glob("*.json"))
@@ -252,8 +252,8 @@ class WorkerReadyPackets(Scenario):
         self.b(r, "set", "a", "verify=")
         self.assertIn("no verify command", self.record(r, ok=False))
         self.b(r, "set", "a", "verify=true")
-        self.assertIn("requires --reviews", self.b(r, "ready", "a", "--branch", "job", "--record", ok=False))
-        self.assertIn("at least one", self.b(r, "ready", "a", "--branch", "job", "--record", "--reviews", "0", ok=False))
+        self.assertIn("requires --reviews", self.b(r, "ready", "--summary", "Synthetic result", "a", "--branch", "job", "--record", ok=False))
+        self.assertIn("at least one", self.b(r, "ready", "--summary", "Synthetic result", "a", "--branch", "job", "--record", "--reviews", "0", ok=False))
 
     def test_conflict_and_mutation_during_verify_cannot_be_ready(self):
         r, home, wt = self.job()
@@ -657,7 +657,7 @@ class VerifyLogs(Scenario):
         committed = self.git('show', 'HEAD:.gitignore', cwd=r)
         # Simulate upgrading an existing instance, with an unrelated operator edit.
         gi.write_text(committed.replace('**/job-handbacks/*-verify-*.log\n', '') + 'operator-fixture/\n')
-        self.b(r, 'ready', 'a', '--branch', 'job', '--record', '--reviews', '1')
+        self.b(r, 'ready', "--summary", "Synthetic result", 'a', '--branch', 'job', '--record', '--reviews', '1')
         self.assertEqual(self.git('show', 'HEAD:.gitignore', cwd=r), committed)
         self.assertIn('operator-fixture/', gi.read_text())
         self.assertIn('**/job-handbacks/*-verify-*.log', gi.read_text())
@@ -748,7 +748,7 @@ class VerifyInputDiagnostics(Scenario):
         return r, home, wt
 
     def finish(self, r, ok=True):
-        return self.b(r, 'handback', 'a', '--branch', 'job', '--state', 'done', '--reviews', '1', ok=ok)
+        return self.b(r, 'handback', "--summary", "Synthetic result", 'a', '--branch', 'job', '--state', 'done', '--reviews', '1', ok=ok)
 
     def private_map(self, packet):
         path = self.packet().parent / packet['input_files_ref']
@@ -951,7 +951,7 @@ class VerifyInputDiagnostics(Scenario):
         for fingerprint in files.values():
             self.assertNotIn(fingerprint, output)
 
-        self.b(r, 'handback', 'a', '--branch', 'job', '--state', 'done')
+        self.b(r, 'handback', "--summary", "Synthetic result", 'a', '--branch', 'job', '--state', 'done')
         history = self.git('log', '-p', '--', 'nodes/a/job-handbacks', cwd=r)
         self.assertNotIn('input_files', self.packet().read_text().replace('input_files_ref', 'sidecar_ref'))
         for fingerprint in files.values():

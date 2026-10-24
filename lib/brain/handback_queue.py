@@ -30,7 +30,10 @@ def queue_path(n, identity):
 
 
 def read_queue_request(n, identity):
-    data = json.loads(queue_path(n, identity).read_text())
+    path = queue_path(n, identity)
+    if path.is_symlink() or path.parent.is_symlink():
+        raise ValueError('linked handback request evidence')
+    data = json.loads(path.read_text())
     if (not isinstance(data, dict) or data.get('version') != 1 or data.get('id') != identity
             or data.get('state') not in ('queued', 'running', 'terminal', 'interrupted', 'invalidated')
             or not isinstance(data.get('args'), dict) or not isinstance(data.get('binding'), dict)
@@ -42,6 +45,8 @@ def read_queue_request(n, identity):
 
 def write_queue_request(n, data):
     path = queue_path(n, data['id'])
+    if path.is_symlink() or path.parent.is_symlink():
+        raise ValueError('linked handback request evidence')
     _m_common.safe_target(path)
     path.parent.mkdir(exist_ok=True)
     _m_common.atomic_write(path, json.dumps(data, sort_keys=True) + '\n')
@@ -56,7 +61,11 @@ def enqueue_handback(inst, n, row, args):
                 'attempt_id': attempt['id'], 'binding': attempt['binding'], 'state': 'queued',
                 'at': inst.now_dt().isoformat(), 'owner': None, 'lease': None,
                 'args': {key: getattr(args, key, None) for key in QUEUE_ARGS}}
-        write_queue_request(n, data)
+        try:
+            write_queue_request(n, data)
+        except BaseException:
+            _m_attempts.finish_attempt(inst, n, row, attempt['id'], 'interrupted')
+            raise
         return data
 
 
@@ -125,7 +134,8 @@ def run_queue_once(inst, n, identity=None):
     with claim_handback(inst, n, identity) as request:
         row = _m_jobs.open_job(_m_jobs.read_jobs(n) or [], request['args'].get('branch'))
         attempt = _m_attempts.current_attempt(n, row) if row else None
-        if (not row or _m_jobs.job_key(row) != request['job_key'] or not attempt
+        if (request.get('node') != n['id'] or request['args'].get('id') != n['id']
+                or not row or _m_jobs.job_key(row) != request['job_key'] or not attempt
                 or attempt['id'] != request['attempt_id'] or attempt['state'] != 'queued'
                 or not _m_attempts.attempt_matches(n, row, attempt)):
             queue_terminal(inst, n, identity, request['lease'], 'invalidated')
@@ -133,6 +143,7 @@ def run_queue_once(inst, n, identity=None):
                 _m_attempts.finish_attempt(inst, n, row, request['attempt_id'], 'invalidated')
             return identity
         args = argparse.Namespace(**{key: request['args'].get(key) for key in QUEUE_ARGS})
+        _m_attempts.update_attempt(inst, n, row, attempt['id'], 'queued', owner=request['owner'])
         args._attempt_id, args._queue_request, args.enqueue = attempt['id'], request, False
         try:
             # This is the native synchronous writer/verifier, including its own FIFO reservation.

@@ -120,7 +120,8 @@ class PruneThreadLifecycle(AutonomyProject):
         rows = self.core.read_jobs(n)
         self.core.open_job(rows, 'job-a').update(Ended='2026-01-01T12:00+00:00', Outcome='merged')
         self.core.write_jobs(inst, n, rows)
-        self.b(root, 'jobs', 'app', '--branch', 'job-a', '--settled')
+        self.b(root, 'jobs', 'app', '--branch', 'job-a', '--settled',
+               '--attestation-file', __import__('test_jobs').settlement_export(self, root, 'app', branch='job-a'))
         out = self.b(root, 'wt', 'prune', 'app', '--offline')
         self.assertIn('fixture-bound-worker', out)
         self.assertIn('Already settled threads need no message', out)
@@ -201,7 +202,8 @@ class PruneThreadLifecycle(AutonomyProject):
         root, home, wt = self.merged()
         self.bind(root)
         self.b(root, 'wt', 'prune', 'app', '--offline')
-        self.b(root, 'jobs', 'app', '--branch', 'job-a', '--settled')
+        self.b(root, 'jobs', 'app', '--branch', 'job-a', '--settled',
+               '--attestation-file', __import__('test_jobs').settlement_export(self, root, 'app', branch='job-a'))
         self.assertNotIn('bound worker thread workspace', self.b(root, 'rotate', 'app'))
         out = self.b(root, 'brief', 'app', '--task', 'fixture', '--to', 'fixture-bound-worker')
         self.assertIn('warning: job job-a:', out)

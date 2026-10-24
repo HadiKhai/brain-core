@@ -384,13 +384,15 @@ def local_job_state(n, branch, w):
 def due_evidence(inst, n):
     rows = _m_jobs.read_jobs(n)
     wts = {b: {**w, **local_job_state(n, b, w)} for b, w in sorted(n["local"].get("worktrees", {}).items())}
-    signals = {_m_jobs.job_key(r): _m_jobs.job_signal(inst, n, r) for r in rows or []}
+    from . import job_attempts as _m_attempts
+    projections = {_m_jobs.job_key(r): _m_attempts.job_projection(inst, n, r) for r in rows or []}
+    signals = {key: value['signal'] for key, value in projections.items()}
     # Node's own commits only, excluding status (including its generated refresh commit) and children.
     names = ["brief.md", "decisions.md", "backlog.md", "node.md", "inbox.md", "sources", "AGENTS.md", _m_jobs.JOBS_FILE,
-             "job-handbacks"]
+             "job-handbacks", "job-attempts", "handback-queue"]
     paths = [str((n["dir"] / name).relative_to(inst.root)) for name in names]
     last = _m_common.git("log", "-1", "--format=%H %cI", "--", *paths, cwd=inst.root).stdout.strip()
-    state = {"jobs": rows, "worktrees": wts, "handbacks": signals, "inbox": inbox_lines(n)}
+    state = {"jobs": rows, "worktrees": wts, "handbacks": signals, "job_projections": projections, "inbox": inbox_lines(n)}
     # Hash exactly the generated display, apart from its refresh time and metadata. Retain
     # the last refresh's merge baseline so its "since previous" snapshot stays comparable.
     lines, _ = status_facts(inst, n, state, facts_meta(n).get("merged_before", []))
@@ -522,6 +524,9 @@ def due_items(inst, n, evidence=None, include_stale=True, include_ready=True, in
         branch = row["Job"]
         w = state["worktrees"].get(branch)
         signal = state["handbacks"][_m_jobs.job_key(row)]
+        from . import job_attempts as _m_attempts
+        projection = state.get('job_projections', {}).get(_m_jobs.job_key(row)) or _m_attempts.job_projection(inst, n, row)
+        signal = projection['signal']
         if w and w["merged"]:
             add("merged-job", f"{branch}: merged in local git; record brain jobs {n['id']} --branch {branch} --lessons "
                 "first, then close the ledger and prune; " + _m_jobs.handback_detail(n, row), job=_m_jobs.job_key(row))
@@ -535,16 +540,20 @@ def due_items(inst, n, evidence=None, include_stale=True, include_ready=True, in
             detail = ("ready to merge" if ready["ready"] else
                       "finished but not ready (" + "; ".join(ready["reasons"]) + ")") if ready else (signal["state"] + "; node study, no home ready evidence required"
                                            if _m_briefs.import_job(branch) else signal["state"])
-            add("handback", f"{branch}: {detail}; review report {signal.get('report', '')} and record the next step",
+            summary = signal.get('summary') or 'summary missing (legacy)'
+            add("handback", f"{branch}: {detail}; {summary}; review report {signal.get('report', '')} and record the next step",
                 job=_m_jobs.job_key(row), state=signal["state"], ready=bool(ready and ready["ready"]),
                 reasons=ready["reasons"] if ready else signal.get('ready_reasons', []),
-                episode=signal.get('wake_id') or _m_jobs.digest([_m_jobs.job_key(row), {
-                    k: signal.get(k) for k in ('state', 'summary', 'question', 'report', 'lessons', 'restart')}]),
+                episode=projection['episode_id'],
                 need=_m_jobs.digest({k: signal.get(k) for k in
                                      ('state', 'summary', 'question', 'report', 'lessons', 'restart')}),
                 protected=bool(signal.get('restart') or signal.get('question') or
                                any(f'from worker {branch}: blocked:' in line and '<!-- handback:' in line
                                    for line in state['inbox'])))
+        elif not signal and projection['attempt']:
+            add('handback-attempt', f"{branch}: {projection['state']}; {projection['next_action']}; prior hand-back is historical",
+                job=_m_jobs.job_key(row), state=projection['state'], episode=projection['attempt']['id'],
+                informational=projection['state'] in ('queued', 'verifying'))
         elif not signal and _m_jobs.handback_file(n, row).exists():
             add("invalid-handback", f"{branch}: unreadable worker signal; ask the worker to write it again", job=_m_jobs.job_key(row))
         if not _m_briefs.import_job(branch) and (not w or not w["exists"]):
@@ -751,9 +760,23 @@ def status_facts(inst, n, state, known_merges):
     lines += [_m_guard.redact(f"- {b}: {'present' if w['exists'] else 'missing'}" + ("; merged in local git" if w["merged"] else ""),
                      _m_guard.never_terms(n)) for b, w in state["worktrees"].items()] or ["- None."]
     lines += ["", "Running jobs (open in ledger; a hand-back means the worker stopped):"]
-    lines += [_m_guard.redact(f"- {r['Job']}: " + ((state['handbacks'][_m_jobs.job_key(r)] or {}).get('state') or "open; runtime activity unknown") +
-                     f"; started {display_time(inst, r['Started'])}; {r['Reviews'] or '0'} reviews", _m_guard.never_terms(n))
-              for r in state["jobs"] or [] if not r["Ended"]] or ["- None."]
+    from . import job_attempts as _m_attempts
+    projections = [state.get('job_projections', {}).get(_m_jobs.job_key(r)) or _m_attempts.job_projection(inst, n, r)
+                   for r in state['jobs'] or [] if not r['Ended']]
+    lines += [_m_guard.redact(f"- {p['branch']}: {p['state']}; host activity unknown; " +
+                     (p['summary'] or ('last hand-back (historical): ' + p['historical_summary'] if p['historical_summary'] else 'summary not recorded')) +
+                     f"; started {display_time(inst, p['ledger']['Started'])}; {p['ledger']['Reviews'] or '0'} reviews", _m_guard.never_terms(n))
+              for p in projections] or ["- None."]
+    lines += ['', 'Active work (generated from ledger and worker records; host activity unknown):', '',
+              '| Branch | State | Summary | Recorded queue | Next action |', '| --- | --- | --- | --- | --- |']
+    for p in projections[:8]:
+        queue = p['admission'] or p['queue']
+        queued = (str(queue.get('position') or 'unknown') + '; owner ' + str(queue.get('owner') or 'unknown')) if queue else 'unknown'
+        summary = p['summary'] or ('historical: ' + p['historical_summary'] if p['historical_summary'] else 'not recorded')
+        values = (p['branch'], p['state'], summary, queued, p['next_action'])
+        lines.append(_m_guard.redact('| ' + ' | '.join(_m_jobs.cell(v) for v in values) + ' |', _m_guard.never_terms(n)))
+    if len(projections) > 8:
+        lines.append(f'{len(projections) - 8} more open jobs; brain jobs --live lists all recorded rows.')
     if state["jobs"] is None:
         lines += ["- Legacy ledger: running jobs unknown."]
     lines += ["", f"Closed jobs with unsettled threads: {len(_m_jobs.unsettled_jobs(state['jobs']))}"]
