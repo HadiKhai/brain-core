@@ -16,6 +16,27 @@ where to get it. This machine's bindings (host IDs, the home's local path) are i
 For home jobs, set `verify: <command>` with `brain set`; `brain handback --state done --reviews N` runs it in
 the worker's worktree before hand-back.
 
+`parallel_jobs: N` sets the maximum number of open ledger jobs (a positive integer,
+default 1 when absent); set it with `brain set <id> parallel_jobs=N`. Record agreed
+work as Markdown tasks under `## Build order` in this node's `backlog.md`, in order:
+
+```md
+## Build order
+- [x] Finished task
+- [ ] Build search in `job/search`
+- [ ] Deferred task (parked: revisit after migration)
+- [ ] Choose a provider (waits: operator)
+```
+
+An unchecked task is unstarted unless marked `(parked: reason)` or `(waits: operator)`,
+or it names a `job/X` branch open in the ledger. Checked tasks are done. `brain due`
+reports `idle-with-runnable-work` with the first runnable tasks that fit the remaining
+slots. All open ledger jobs count toward the cap, including jobs awaiting review or
+the operator; closed jobs do not. A legacy ledger or invalid cap produces no launch
+advice; `brain check` reports an invalid cap. Lines outside this exact section,
+comments and fenced examples are ignored; old conditional NEXT prose is untouched.
+The reminder wakes once while unchanged and rearms after resolution or a change.
+
 `runtime` pins worker briefs to that engine. At its subscription stop line, the brief keeps the
 pin and names an alternative; choose `brain brief --runtime <runtime>` explicitly to use it.
 

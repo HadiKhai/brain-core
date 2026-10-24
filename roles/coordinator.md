@@ -116,6 +116,11 @@ Answer from files. Before answering about a child, run the **freshness check**:
 
 ## Routing work
 
+Local work (worktrees, builds, tests, reviews and local merges under the landing rules)
+needs no further go. Keep the agreed build order moving within the node's parallel-job cap
+and machine care. Outward actions (push to shared places, deploy, publish, delete) still
+need explicit consent.
+
 | The work is… | Do this |
 | --- | --- |
 | inside this node | do it, or start a worker |

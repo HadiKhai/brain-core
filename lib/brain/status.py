@@ -414,6 +414,58 @@ def status_lag(inst, n, evidence=None):
     return None
 
 
+def parallel_job_limit(n):
+    value = str(n['fm'].get('parallel_jobs', '1'))
+    if not re.fullmatch(r'[1-9][0-9]*', value):
+        raise ValueError('parallel_jobs must be a positive integer')
+    return int(value)
+
+
+def runnable_work(n, rows):
+    """Explicit backlog tasks only; prose and other sections grant no work authority."""
+    if rows is None or paused(n):
+        return []  # an unreadable/legacy ledger cannot establish spare capacity
+    try:
+        limit = parallel_job_limit(n)
+    except ValueError:
+        return []  # brain check reports the invalid setting; never guess capacity
+    open_rows = [r for r in rows if not r['Ended']]
+    opened = {r['Job'] for r in open_rows}
+    slots = limit - len(open_rows)
+    path = n['dir'] / 'backlog.md'
+    if slots <= 0 or not path.exists():
+        return []
+    tasks, inside, fence = [], False, None
+    text = re.sub(r'<!--.*?-->', '', path.read_text(), flags=re.S)
+    for line in text.splitlines():
+        marker = re.match(r'^ {0,3}(`{3,}|~{3,})(.*)$', line)
+        if marker:
+            run, suffix = marker.groups()
+            if fence is None:
+                fence = run
+            elif run[0] == fence[0] and len(run) >= len(fence) and not suffix.strip():
+                fence = None
+            continue
+        if fence:
+            continue
+        if re.match(r'^#{1,2}\s', line):
+            inside = line.strip().casefold() == '## build order'
+            continue
+        match = re.fullmatch(r'- \[ \]\s+(.+)', line)
+        if not inside or not match:
+            continue
+        task = match[1].strip()
+        if re.search(r'\(\s*(?:parked\s*:[^)]*|waits\s*:\s*operator\s*)\)', task, re.I):
+            continue
+        branches = re.findall(r'''(?<![\w/.-])job/[^\s`'"<>()\[\],;:]+''', task)
+        if any(branch.rstrip('.') in opened for branch in branches):
+            continue
+        tasks.append(task)
+        if len(tasks) == slots:
+            break
+    return tasks
+
+
 def due_items(inst, n, evidence=None, include_stale=True, include_ready=True, include_advice=True):
     if n["archived"]:
         return []
@@ -422,6 +474,9 @@ def due_items(inst, n, evidence=None, include_stale=True, include_ready=True, in
     items = []
     def add(kind, text, **extra):
         items.append({"node": n["id"], "kind": kind, "text": _m_guard.redact(text, _m_guard.never_terms(n)), **extra})
+    runnable = runnable_work(n, state['jobs'])
+    if runnable:
+        add('idle-with-runnable-work', 'start local work from Build order: ' + '; '.join(runnable))
     rotation = _m_rotation.rotation_due(inst, n)
     if rotation:
         add("rotate", rotation)

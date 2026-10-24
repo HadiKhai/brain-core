@@ -603,6 +603,12 @@ def cmd_set(a):
             if v not in ("local", "pr"):
                 _m_common.die("merge must be local or pr")
             fm[k] = v
+        elif k == 'parallel_jobs':
+            try:
+                _m_status.parallel_job_limit({'fm': {'parallel_jobs': v}})
+            except ValueError as error:
+                _m_common.die(str(error))
+            fm[k] = v
         elif k == "home":
             bind_home(inst, a.id, fm, v)
             print(f"  home: {fm['home']}" + (f" -> {inst.local_of(a.id)['home']} on this machine"

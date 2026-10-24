@@ -46,6 +46,10 @@ def collect_problems(inst):
     nodes = inst.nodes()
     for n in nodes:
         fm, nid = n["fm"], n["id"]
+        try:
+            _m_status.parallel_job_limit(n)
+        except ValueError as error:
+            p(f'{nid}: {error}')
         if not n["archived"]:
             status_file = n["dir"] / "status.md"
             status_text = status_file.read_text() if status_file.exists() else ""

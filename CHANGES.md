@@ -67,6 +67,29 @@ After upgrading:
 - Keep private wake receipts. Inspect the wake reason and `.brain/wake/` delivery
   history when diagnosing a repeat; no new configuration is needed.
 
+## 2026-10-24: Keep agreed local build orders moving
+
+For agents:
+- `brain due` reports `idle-with-runnable-work` when an agreed backlog task fits
+  below the node's open-job cap. Its text names the next runnable tasks, in order;
+  ordinary due receipts wake once per unchanged need.
+- In `backlog.md`, only Markdown tasks under `## Build order` participate:
+  `- [ ] text` is unstarted, `- [x] text` is done, `(parked: reason)` parks an
+  unchecked task, and `(waits: operator)` blocks it on the operator. A task naming
+  a `job/X` branch open in the ledger is already in progress. Other sections,
+  comments and fenced examples are ignored, including existing NEXT prose.
+- `parallel_jobs: N` in node frontmatter is a positive integer, default 1.
+  Every open ledger job counts toward it. Set it with `brain set <id> parallel_jobs=N`;
+  invalid values are refused and `brain check` flags invalid hand edits.
+- Coordinators need no further go for local worktrees, builds, tests, reviews or
+  local merges under the landing rules. Outward actions still need consent.
+
+After upgrading:
+- Put agreed work in your node's backlog Build order section and set its parallel
+  cap when more than one open job is allowed. Existing backlog prose is unchanged
+  and creates no reminders until you opt into the task format. Node documentation
+  in `templates/node/node.md` describes the format and capacity rules.
+
 ## 2026-10-23: Rehearse JSON probes without collapsing private identities
 
 For agents:

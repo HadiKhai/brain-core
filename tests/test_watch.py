@@ -52,6 +52,105 @@ class Watcher(Scenario):
                            'kind': 'verify', 'state': 'queued',
                            'scope': self.m.machine_scope(self.inst, 'root')}]
 
+    def idle_work(self):
+        return [i for i in self.m.due_items(self.inst, self.inst.node('root'), include_stale=False)
+                if i['kind'] == 'idle-with-runnable-work']
+
+    def test_idle_work_names_unstarted_tasks_in_build_order_only(self):
+        backlog = self.root / 'backlog.md'
+        backlog.write_text('- NEXT after another job: old prose\n- [ ] Outside before\n'
+                           '## Build order\n- [x] Finished\n- [X] Also finished\n'
+                           '- [ ] Deferred (parked: later)\n- [ ] Decision (waits: operator)\n'
+                           '- [ ] First runnable\n- [ ] Second runnable\n'
+                           '## Other work\n- [ ] Outside after\n')
+        items = self.idle_work()
+        self.assertEqual(len(items), 1)
+        self.assertIn('First runnable', items[0]['text'])
+        for ignored in ('Outside', 'Finished', 'finished', 'Deferred', 'Decision', 'Second runnable', 'old prose'):
+            self.assertNotIn(ignored, items[0]['text'])
+        self.assertIn('First runnable', self.b(self.root, 'due', 'root', '--json'))
+
+    def test_idle_work_each_nonrunnable_state_is_quiet(self):
+        backlog = self.root / 'backlog.md'
+        for task in ('- [x] Finished', '- [X] Finished', '- [ ] Deferred (parked: reason)',
+                     '- [ ] Decision (waits: operator)', '- NEXT legacy prose'):
+            with self.subTest(task=task):
+                backlog.write_text('## Build order\n' + task + '\n')
+                self.assertEqual(self.idle_work(), [])
+        backlog.write_text('## Build order\n```md\n- [ ] Example\n```\n'
+                           '<!-- - [ ] Hidden -->\n## Other\n- [ ] Outside\n')
+        self.assertEqual(self.idle_work(), [])
+        backlog.write_text('## Build order\n- [ ] Actually runnable\n')
+        self.assertEqual(len(self.idle_work()), 1)  # the exclusions must not disable the detector
+        with mock.patch.object(self.m, 'read_jobs', return_value=None):
+            self.assertEqual(self.idle_work(), [])  # unknown capacity never grants a start
+        self.b(self.root, 'set', 'root', 'labels=state:paused')
+        self.inst = self.m.Instance(self.root)
+        self.assertEqual(self.idle_work(), [])
+
+    def test_idle_work_invalid_parallel_cap_is_reported_and_never_launch_advice(self):
+        (self.root / 'backlog.md').write_text('## Build order\n- [ ] Runnable\n')
+        for cap in ('0', '-1', 'two', '1.5'):
+            with self.subTest(cap=cap):
+                self.assertIn('parallel_jobs', self.b(self.root, 'set', 'root', 'parallel_jobs=' + cap, ok=False))
+        path = self.root / 'node.md'
+        fm, body = self.m.read_fm(path)
+        fm['parallel_jobs'] = 'invalid'
+        self.m.write_fm(path, fm, body)
+        self.inst = self.m.Instance(self.root)
+        self.assertEqual(self.idle_work(), [])
+        self.assertIn('parallel_jobs', self.b(self.root, 'check', ok=False))
+
+    def test_idle_work_cap_and_exact_open_job_branch_matching(self):
+        backlog = self.root / 'backlog.md'
+        backlog.write_text('## Build order\n- [ ] Build `job/plan`\n- [ ] Build `job/plan-extra`\n')
+        row = dict.fromkeys(self.m.JOB_COLS, '')
+        row.update(Job='job/plan', Started=self.inst.now())
+        self.m.write_jobs(self.inst, self.inst.node('root'), [row])
+        self.assertEqual(self.idle_work(), [])  # absent parallel_jobs defaults to one
+        self.b(self.root, 'set', 'root', 'parallel_jobs=2')
+        self.inst = self.m.Instance(self.root)
+        items = self.idle_work()
+        self.assertEqual(len(items), 1)
+        self.assertIn('job/plan-extra', items[0]['text'])
+        self.assertNotIn('`job/plan`', items[0]['text'])
+        second = {**row, 'Job': 'job/other'}
+        self.m.write_jobs(self.inst, self.inst.node('root'), [row, second])
+        self.assertEqual(self.idle_work(), [])  # at the explicit cap
+        second['Ended'] = self.inst.now()
+        self.m.write_jobs(self.inst, self.inst.node('root'), [row, second])
+        self.assertEqual(len(self.idle_work()), 1)  # closed jobs free a slot
+        row['Ended'] = self.inst.now()
+        self.m.write_jobs(self.inst, self.inst.node('root'), [row, second])
+        self.assertIn('`job/plan`', self.idle_work()[0]['text'])  # only open jobs mark progress
+        row.update(Job='job/plan+extra', Ended='')
+        self.m.write_jobs(self.inst, self.inst.node('root'), [row])
+        backlog.write_text('## Build order\n- [ ] Active `job/plan+extra`\n- [ ] Next `job/plan`\n')
+        self.assertIn('Next `job/plan`', self.idle_work()[0]['text'])
+        self.assertNotIn('Active', self.idle_work()[0]['text'])
+
+    def test_idle_work_wakes_once_changes_and_rearms_without_sleeps(self):
+        backlog = self.root / 'backlog.md'
+        backlog.write_text('## Build order\n- [ ] First runnable\n')
+        with mock.patch.object(self.m, 'changes_due', return_value=[]), \
+                mock.patch.object(self.m, 'wake_start'), mock.patch.object(self.m, 'WAKE_INTERVAL', 0), \
+                mock.patch.object(self.m, 'wake_send', return_value=True) as send:
+            def tick(expected):
+                self.watch()
+                self.m.wake_drain(self.inst, self.inst.node('root'), once=True)
+                self.assertEqual(send.call_count, expected)
+            tick(1)
+            tick(1)
+            backlog.write_text('Unrelated prose changed\n## Build order\n- [ ] First runnable\n')
+            tick(1)
+            backlog.write_text('## Build order\n- [x] First runnable\n- [ ] Next runnable\n')
+            tick(2)
+            self.assertEqual([i['kind'] for i in self.since()], ['idle-with-runnable-work'])
+            backlog.write_text('## Build order\n- [x] First runnable\n- [x] Next runnable\n')
+            tick(2)
+            backlog.write_text('## Build order\n- [ ] Next runnable\n')
+            tick(3)
+
     def test_queued_hold_wakes_once_for_four_ticks_and_changing_numbers(self):
         self.queued_machine_work()
         reading = json.loads(self.env['BRAIN_MACHINE_READING'])
