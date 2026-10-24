@@ -82,9 +82,32 @@ def wake_recorded(inst, n, reason):
     return any((directory / (key + suffix)).exists() for suffix in ('.pending', '.sent'))
 
 
+# Only positively identified bookkeeping can be suppressed in a durable receipt.
+# Unknown discriminators remain opaque requests; fresh sampler policy is separate.
+WAKE_BOOKKEEPING_KINDS = (
+    'machine', 'machine-hold', 'machine-alert', 'machine-repair', 'job-ready',
+    'job-landed', 'merged-job', 'unsettled-threads', 'unrecorded-worktree',
+    'missing-worktree', 'core-changes', 'rule-activation-review', 'overlapping-inputs',
+    'idle-with-runnable-work', 'missing-preview', 'ledger', 'lesson-outcome',
+    'handback-attempt', 'invalid-handback', 'restart-repair', 'job', 'stale-status',
+    'wake', 'watcher',
+)
+
+
+def wake_known_kind(kind):
+    from . import watch as _m_watch
+    return kind == 'inbox' or kind in _m_watch.WATCH_DECISION_KINDS or kind in WAKE_BOOKKEEPING_KINDS
+
+
 def wake_item_refs(items):
-    """Persist identities and kinds only, never excerpts or raw source identifiers."""
-    return sorted({i['id']: {'id': i['id'], 'kind': i['kind']} for i in items}.values(), key=lambda i: i['id'])
+    """Persist identities/kinds only; contradictory pairs are corrupt, never last-wins."""
+    refs = {}
+    for item in items:
+        key, kind = item['id'], item['kind']
+        if key in refs and refs[key]['kind'] != kind:
+            raise ValueError('conflicting wake identity kinds')
+        refs[key] = {'id': key, 'kind': kind}
+    return sorted(refs.values(), key=lambda i: i['id'])
 
 
 def wake_history(directory):
@@ -116,11 +139,16 @@ def wake_delivery_items(inst, n, pending):
             items = value['items']
             if not isinstance(items, list):
                 raise ValueError('invalid wake metadata')
+            if any(not wake_known_kind(i['kind']) for i in items):
+                raise ValueError('unknown wake kind')
             refs.extend(wake_item_refs(items))
         except (OSError, ValueError, KeyError, TypeError):
             names.add(path.stem)
     if not names:
-        return wake_item_refs(refs)
+        try:
+            return wake_item_refs(refs)
+        except ValueError:
+            return []  # conflicting records still deliver an opaque request for every pending file
     try:
         items = _m_watch.watch_groups(inst).get(n['id'], {}).get('items', [])
     except (Exception, SystemExit):
@@ -130,7 +158,10 @@ def wake_delivery_items(inst, n, pending):
             key = hashlib.sha256((i.get('source', n['id']) + '\0' + i['reason']).encode()).hexdigest()
             if key in names:
                 refs.append(i)
-    return wake_item_refs(refs)
+    try:
+        return wake_item_refs(refs)
+    except ValueError:
+        return []  # preserve ambiguous queue bytes and use opaque request keys
 
 
 def wake_reason_items(inst, n, reason):
@@ -154,7 +185,10 @@ def wake_snapshot(inst, n, refs):
         items = _m_watch.watch_groups(inst).get(n['id'], {}).get('items', [])
     except (Exception, SystemExit):
         items = []  # a display snapshot must never gate delivery
-    return wake_item_refs(items + refs)
+    try:
+        return wake_item_refs(items + refs)
+    except ValueError:
+        return []  # a contradictory display snapshot cannot block an opaque wake
 
 
 def wake_previous_items(directory):
@@ -188,7 +222,8 @@ def wake_pending_value(path):
     value = json.loads(path.read_text())
     refs = value['items']
     if (not isinstance(refs, list) or any(not isinstance(i, dict) or
-            not isinstance(i.get('kind'), str) or not isinstance(i.get('id'), str) or
+            not isinstance(i.get('kind'), str) or not wake_known_kind(i['kind']) or
+            not isinstance(i.get('id'), str) or
             not re.fullmatch(r'[0-9a-f]{64}', i['id']) for i in refs)):
         raise ValueError('invalid pending wake identities')
     return value, wake_item_refs(refs)
@@ -298,7 +333,14 @@ def request_wake(inst, n, reason, items=None, explicit=False):
                 return pending.exists()  # the durable inbox lets the watcher retry otherwise
             if pending.exists():
                 return True
-            refs = wake_item_refs(items) if items is not None else wake_reason_items(inst, n, reason)
+            if items is None:
+                refs = wake_reason_items(inst, n, reason)
+            else:
+                original = [{'id': i['id'], 'kind': i['kind']} for i in items]
+                try:
+                    refs = wake_item_refs(original)
+                except ValueError:
+                    refs = original  # retain contradictory evidence for fail-open delivery
             _m_common.atomic_write(pending, json.dumps({'items': refs, **({'explicit_kinds': True} if explicit else {})}) + '\n')
         wake_start(inst, target)
         return True
@@ -496,8 +538,7 @@ def wake_drain(inst, n, once=False):
                     destination.mkdir(parents=True, exist_ok=True)
                     for path in pending:
                         try:
-                            value = json.loads(path.read_text())
-                            refs = wake_item_refs(value['items'])
+                            value, refs = wake_pending_value(path)
                         except (OSError, ValueError, KeyError, TypeError):
                             refs = []  # unknown/legacy requests must still carry questions through
                         allowed = [i for i in refs if i['kind'] not in _m_watch.WATCH_LOCAL_KINDS]

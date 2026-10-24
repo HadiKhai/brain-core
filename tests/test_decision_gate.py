@@ -50,7 +50,7 @@ class DecisionGate(Scenario):
         allowed = ('job-stall', 'blocked-overdue', 'restart', 'rotate', 'overdue-question')
         excluded = ('job-landed', 'job-ready', 'merged-job', 'unsettled-threads', 'unrecorded-worktree',
                     'missing-worktree', 'core-changes', 'rule-activation-review', 'overlapping-inputs',
-                    'machine-hold', 'idle-with-runnable-work')
+                    'machine-hold', 'idle-with-runnable-work', 'future-question')
         for kind in allowed + excluded:
             with self.subTest(kind=kind):
                 self.assertEqual(self.m.watch_decision_item({'kind': kind}), kind in allowed)
@@ -298,3 +298,88 @@ class DecisionGate(Scenario):
                     self.assertFalse(destination.exists())
                     history = self.m.wake_history(self.m.wake_directory(inst, root))
                     self.assertEqual(history[-1]['items'], expected)
+
+
+    def test_ambiguous_question_receipts_survive_retirement_retry_and_reroute(self):
+        self.b(self.root, 'new', 'sample', '--title', 'Sample')
+        cases = [(kind, reverse, enqueue) for kind, reverse, enqueue in (
+            ('unknown', False, False), ('conflict', False, False),
+            ('conflict', True, False), ('conflict', False, True), ('conflict', True, True))]
+        for route in (False, True):
+            for index, (kind, reverse, enqueue) in enumerate(cases):
+                with self.subTest(route=route, kind=kind, reverse=reverse, enqueue=enqueue):
+                    inst = self.m.Instance(self.root)
+                    n = inst.node('sample' if route else 'root')
+                    if route:
+                        inst.local_of('sample').update(coordinator='fixture-child', wake='fixture-send')
+                        inst.save_local()
+                        inst = self.m.Instance(self.root)
+                        n = inst.node('sample')
+                    marker = 'case-' + str(route) + '-' + str(index)
+                    (n['dir'] / 'inbox.md').write_text('- Choose a fabricated color <!-- host-question:' + marker + ' -->\n')
+                    question = next(i for i in self.m.watch_items(inst, n) if i['kind'] == 'inbox')
+                    # Exercise the retirement prefix even though the original question is direct.
+                    identity = self.m.watch_digest(['due-episode'])[:16] + str(index) * 48
+                    refs = [{'id': identity, 'kind': 'inbox'}]
+                    if kind == 'unknown':
+                        refs[0]['kind'] = 'future-question'
+                    else:
+                        refs.append({'id': identity, 'kind': 'merged-job'})
+                        if reverse:
+                            refs.reverse()
+                    with mock.patch.object(self.m, 'wake_start'), mock.patch.object(self.m, 'WAKE_INTERVAL', 0), \
+                            mock.patch.object(self.m, 'wake_send', return_value=False) as send:
+                        self.assertTrue(self.m.request_wake(inst, n, question['reason'],
+                                                           items=refs if enqueue else [question]))
+                        path = next(self.m.wake_directory(inst, n).glob('*.pending'))
+                        if not enqueue:
+                            path.write_text(json.dumps({'items': refs}))
+                        original = path.read_bytes()
+                        self.assertEqual(json.loads(original)['items'], refs)
+                        self.m.wake_retire_due_pending(path, set())
+                        self.assertEqual(path.read_bytes(), original)
+                        self.assertTrue(self.m.wake_actionable_pending(inst, path))
+                        self.assertEqual(path.read_bytes(), original)
+                        # Remove source evidence so transport must use the opaque fallback.
+                        (n['dir'] / 'inbox.md').write_text('')
+                        if route:
+                            inst.local_of('sample').pop('coordinator')
+                            inst.save_local()
+                            self.m.wake_drain(inst, n, once=True)
+                            self.assertFalse(path.exists())
+                            path = self.m.wake_directory(inst, inst.node('root')) / path.name
+                            self.assertEqual(path.read_bytes(), original)
+                        self.m.wake_drain(inst, inst.node('root'), once=True)
+                        self.assertEqual(send.call_count, 1)
+                        self.assertEqual(path.read_bytes(), original)
+                        self.assertNotIn('future-question', send.call_args.kwargs['reason'])
+                        send.return_value = True
+                        self.m.wake_drain(inst, inst.node('root'), once=True)
+                        self.assertEqual(send.call_count, 2)
+                        self.assertFalse(path.exists())
+                        path.with_suffix('.sent').unlink()
+
+    def test_reference_normalization_rejects_conflicting_pairs_in_both_orders(self):
+        refs = [{'id': 'a' * 64, 'kind': 'inbox'}, {'id': 'a' * 64, 'kind': 'merged-job'}]
+        for ordered in (refs, list(reversed(refs))):
+            with self.assertRaisesRegex(ValueError, 'conflicting wake identity kinds'):
+                self.m.wake_item_refs(ordered)
+        self.assertEqual(self.m.wake_item_refs([refs[0], refs[0]]), [refs[0]])
+
+
+    def test_conflicts_across_receipts_or_snapshot_cannot_block_transport(self):
+        (self.root / 'inbox.md').write_text('- Choose color <!-- host-question:collision -->\n')
+        question = next(i for i in self.m.watch_items(self.inst, self.n) if i['kind'] == 'inbox')
+        conflicting = {'id': question['id'], 'kind': 'rotate'}
+        with mock.patch.object(self.m, 'wake_start'), mock.patch.object(self.m, 'WAKE_INTERVAL', 0), \
+                mock.patch.object(self.m, 'wake_send', return_value=True) as send:
+            # One internally valid receipt conflicts with the current display snapshot.
+            self.assertTrue(self.m.request_wake(self.inst, self.n, 'snapshot conflict', items=[conflicting]))
+            self.m.wake_drain(self.inst, self.n, once=True)
+            self.assertEqual(send.call_count, 1)
+            # Two internally valid receipts conflict when normalized as a delivery batch.
+            self.assertTrue(self.m.request_wake(self.inst, self.n, 'first conflict', items=[question]))
+            self.assertTrue(self.m.request_wake(self.inst, self.n, 'second conflict', items=[conflicting]))
+            self.m.wake_drain(self.inst, self.n, once=True)
+            self.assertEqual(send.call_count, 2)
+            self.assertFalse(list(self.m.wake_directory(self.inst, self.n).glob('*.pending')))

@@ -14,6 +14,8 @@ delivery, including durable retries and rerouting. Identified old bookkeeping
 receipts no longer bypass the default filter; unknown question metadata remains
 fail-open. The additional job-restart wake feature is parked and not included;
 existing due usage advice, budgets and restart/rebrief behavior are unchanged.
+Unknown queued kinds and contradictory identity/kind pairs retain their original
+metadata for fail-open opaque delivery; new unknown sampler kinds stay excluded.
 
 `brain gate-lock [--label LABEL] -- CMD [ARGS...]` serializes commands through
 one instance lock and preserves command arguments, signals and exit status.
