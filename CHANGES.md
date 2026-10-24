@@ -55,6 +55,8 @@ For agents:
   a new-or-changed or escalation-tier cause. No question text or node names leave
   the instance. Manual requests without item metadata carry an opaque request key.
 - Due output and machine hold episode handling retain their existing behavior.
+- The replay showed no live-noise reduction: real sequence 4→4 wakes;
+  empty-source sequence 0→0 wakes.
 - Unreadable wake receipts retain their evidence and let current work wake.
   Failed episode publication and corrupt or unreadable episode state preserve
   accepted pending wakes; unknown identities never prove that work resolved.
