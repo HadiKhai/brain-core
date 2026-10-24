@@ -235,9 +235,9 @@ class ExpandedUI(Scenario):
         self.assertEqual(len(ui_node["jobs"]["rows"]), 65)
         self.assertEqual(ui_node["jobs"]["median_reviews"], 2)
         self.assertEqual(len([d for d in state["due"] if d["kind"] == "lesson-outcome"]), 65)
-        # The live view adds only each job's branch name; everything else is `brain due --json`.
+        # The live view adds branch names and stable item IDs; everything else is `brain due --json`.
         self.assertEqual([d.get("branch") for d in state["due"] if d["kind"] == "lesson-outcome"][:2], ["job-0", "job-1"])
-        self.assertEqual([{k: v for k, v in d.items() if k != "branch"} for d in state["due"]], json.loads(self.b(root, "due", "--json")))
+        self.assertEqual([{k: v for k, v in d.items() if k not in ("branch", "id")} for d in state["due"]], json.loads(self.b(root, "due", "--json")))
 
     def test_ui_search_ranks_folds_and_pages(self):
         names = ["Mariana", "Bruno Ana", "Ánalyst", "Ana Lima", "ana", "Zed"]
