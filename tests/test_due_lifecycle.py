@@ -98,6 +98,45 @@ class DueLifecycle(Scenario):
         self.m.reminder_items(self.inst, self.n, [])  # a complete empty snapshot retires it
         self.assertNotEqual(self.m.reminder_items(self.inst, self.n, raw)[0]['id'], old)
 
+    def test_fix2_identical_snapshots_share_reminder_ids_and_recurrences_rearm(self):
+        raw = [{'node': 'root', 'kind': 'stale-status', 'text': 'The same stale facts'}]
+        left, right = self.m.lifecycle_empty(), self.m.lifecycle_empty()
+        first = self.m.reminder_reconcile(self.inst, self.n, raw, left)[0]['id']
+        self.assertEqual(self.m.reminder_reconcile(self.inst, self.n, raw, right)[0]['id'], first)
+        for data in (left, right):
+            self.m.reminder_reconcile(self.inst, self.n, [], data)
+        second = self.m.reminder_reconcile(self.inst, self.n, raw, left)[0]['id']
+        self.assertNotEqual(second, first)
+        self.assertEqual(self.m.reminder_reconcile(self.inst, self.n, raw, right)[0]['id'], second)
+        self.assertEqual(self.m.reminder_reconcile(self.inst, self.n, raw, left)[0]['id'], second)
+        # Existing random IDs remain valid until their episode is actually resolved.
+        legacy = self.m.lifecycle_empty()
+        key = self.m.reminder_key(raw[0])
+        legacy['reminders']['root'] = {key: {'id': 'a' * 24, 'at': self.inst.now()}}
+        self.assertEqual(self.m.reminder_reconcile(self.inst, self.n, raw, legacy)[0]['id'], 'a' * 24)
+        self.m.reminder_reconcile(self.inst, self.n, [], legacy)
+        self.assertNotEqual(self.m.reminder_reconcile(self.inst, self.n, raw, legacy)[0]['id'], 'a' * 24)
+
+    def test_fix2_retired_reminder_bound_preserves_receipts_and_visible_need(self):
+        first = [{'node': 'root', 'kind': 'missing-preview', 'text': 'Preview needed'}]
+        second = [{'node': 'root', 'kind': 'stale-status', 'text': 'New stale facts'}]
+        with mock.patch.object(self.m, 'LIFECYCLE_LIMIT', 1):
+            self.m.reminder_items(self.inst, self.n, first)
+            self.m.reminder_items(self.inst, self.n, [])
+            self.m.reminder_items(self.inst, self.n, second)
+            receipt = self.root / '.brain/wake/lifecycle.json'
+            before = receipt.read_bytes()
+            visible = self.m.reminder_items(self.inst, self.n, first)
+            self.assertEqual(len(visible), 1)
+            self.assertEqual(visible[0]['kind'], 'missing-preview')
+            self.assertEqual(visible[0]['lifecycle_error'], 'receipt state unknown; no suppression')
+            self.assertEqual(receipt.read_bytes(), before)
+        for invalid in ([], {'bad': 'not-an-id'}):
+            data = self.m.lifecycle_empty()
+            data['reminders_retired']['root'] = invalid
+            with self.assertRaises(ValueError):
+                self.m.reminder_reconcile(self.inst, self.n, first, data)
+
     def test_fix1_import_rebrief_acknowledges_exact_row_after_delivery(self):
         home = self.repo(self.tmp / 'source')
         fm, body = self.m.read_fm(self.root / 'node.md')

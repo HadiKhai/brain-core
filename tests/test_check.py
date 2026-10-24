@@ -61,13 +61,13 @@ target = Path(sys.argv[1])
 brain = sys.argv[2]
 sys.argv = sys.argv[2:]
 original_replace = os.replace
-def fail_replace(src, dst):
+def fail_replace(src, dst, **kwargs):
     if Path(dst) == target:
         assert Path(src).parent == target.parent
         assert Path(src).read_bytes() != target.read_bytes()
         assert Path(src).stat().st_size > 0
         raise OSError('injected replacement failure')
-    return original_replace(src, dst)
+    return original_replace(src, dst, **kwargs)
 os.replace = fail_replace
 runpy.run_path(brain, run_name='__main__')
 """
@@ -127,19 +127,19 @@ if reading:
     m.usage_reading = lambda sub: ('fixture', json.loads(reading))
 original = os.replace
 paused = False
-def replace(src, dst):
+def replace(src, dst, **kwargs):
     global paused
     if Path(dst) != Path(target) or paused:
-        return original(src, dst)
+        return original(src, dst, **kwargs)
     paused = True
     Path(candidate).write_bytes(Path(src).read_bytes())
     if phase == 'after':
-        original(src, dst)
+        original(src, dst, **kwargs)
     Path(marker).write_text('paused')
     while Path(marker).exists():
         time.sleep(0.01)
     if phase == 'before':
-        return original(src, dst)
+        return original(src, dst, **kwargs)
 os.replace = replace
 m.main()
 """
@@ -484,7 +484,7 @@ class RoundTwo(AutonomyProject):
         self.assertNotIn("reports/tour/index.md", status.read_text())
         self.assertIn("## Now\n- Keep judgement.", status.read_text())
 
-    def test_preview_bindings_stay_local_and_none_clears_reminder(self):
+    def test_preview_bindings_stay_local_and_none_retains_reminder(self):
         r, home, wt = self.project()
         inst = self.m.Instance(r); n = inst.node("app")
         self.m.write_jobs(inst, n, [self.row("job/preview-one")])
@@ -504,7 +504,8 @@ class RoundTwo(AutonomyProject):
         self.assertEqual(ui["preview_tour"], "~/local-tour/index.md")
         self.assertNotIn("local-only key", self.b(r, "check"))
         self.b(r, "set", "app", "preview=none")
-        self.assertNotIn("missing-preview", [i["kind"] for i in self.due(r)])
+        self.assertIn("missing-preview", [i["kind"] for i in self.due(r)])
+        self.assertEqual(json.loads((r / ".brain/local.json").read_text())["nodes"]["app"]["preview"], "none")
         self.b(r, "set", "app", "preview=")
         self.assertIn("missing-preview", [i["kind"] for i in self.due(r)])
         # Legacy committed values are flagged and are never used as local bindings.

@@ -18,7 +18,8 @@ LIFECYCLE_BYTES = 2 * 1024 * 1024
 
 
 def lifecycle_empty():
-    return {'version': 1, 'inbox': {}, 'inbox_retired': {}, 'answers': [], 'reminders': {}, 'usage': {}}
+    return {'version': 1, 'inbox': {}, 'inbox_retired': {}, 'answers': [],
+            'reminders': {}, 'reminders_retired': {}, 'usage': {}}
 
 
 def lifecycle_read(inst):
@@ -39,7 +40,8 @@ def lifecycle_read(inst):
     data = json.loads(text)
     if (not isinstance(data, dict) or data.get('version') != 1 or
             any(not isinstance(data.get(k), dict) for k in ('inbox', 'reminders', 'usage')) or
-            not isinstance(data.get('answers'), list) or not isinstance(data.get('inbox_retired', {}), dict)):
+            not isinstance(data.get('answers'), list) or not isinstance(data.get('inbox_retired', {}), dict) or
+            not isinstance(data.get('reminders_retired', {}), dict)):
         raise ValueError('invalid lifecycle state; retain it for repair')
     return data
 
@@ -262,8 +264,12 @@ def reminder_key(item):
 
 def reminder_reconcile(inst, n, items, data, omitted_kinds=()):
     previous = data['reminders'].get(n['id'], {})
+    retired = data.get('reminders_retired', {}).get(n['id'], {})
     if not isinstance(previous, dict) or len(items) > LIFECYCLE_LIMIT:
         raise ValueError('invalid or oversized reminder lifecycle state')
+    if (not isinstance(retired, dict) or len(retired) > LIFECYCLE_LIMIT or
+            any(not re.fullmatch(r'[0-9a-f]{24}', str(value)) for value in retired.values())):
+        raise ValueError('invalid or oversized retired reminder state')
     current, out = {}, []
     if omitted_kinds:
         for key, record in previous.items():
@@ -275,7 +281,10 @@ def reminder_reconcile(inst, n, items, data, omitted_kinds=()):
                 current[key] = record
     for item in items:
         key = reminder_key(item)
-        record = previous[key] if key in previous else {'id': os.urandom(12).hex(), 'at': inst.now()}
+        # Identical frozen inputs must expose the same IDs in independent copies.
+        # Keep legacy IDs while open, then derive each successor from its retired ID.
+        identity = _m_jobs.digest([key, 'recurrence', retired[key]]) if key in retired else key
+        record = previous[key] if key in previous else {'id': identity, 'at': inst.now()}
         if not isinstance(record, dict) or not re.fullmatch(r'[0-9a-f]{24}', str(record.get('id'))):
             raise ValueError('invalid reminder episode receipt')
         record = {**record, 'kind': item['kind']}
@@ -288,6 +297,17 @@ def reminder_reconcile(inst, n, items, data, omitted_kinds=()):
         out.append({**item, 'id': record['id'], **({'handling': safe} if safe else {})})
     if len(current) > LIFECYCLE_LIMIT:
         raise ValueError('reminder lifecycle bound reached; retain receipts for review')
+    absent = set(previous) - set(current)
+    if absent:
+        if len(set(retired) | absent) > LIFECYCLE_LIMIT:
+            raise ValueError('retired reminder bound reached; retain receipts for review')
+        closed = dict(retired)
+        for key in absent:
+            record = previous[key]
+            if not isinstance(record, dict) or not re.fullmatch(r'[0-9a-f]{24}', str(record.get('id'))):
+                raise ValueError('invalid retired reminder episode')
+            closed[key] = record['id']
+        data.setdefault('reminders_retired', {})[n['id']] = closed
     if current or n['id'] in data['reminders']:
         data['reminders'][n['id']] = current
     return out

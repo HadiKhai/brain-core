@@ -787,6 +787,8 @@ class QuestionWake(Scenario):
     def test_outward_state_link_is_refused(self):
         outside = self.tmp / "outside"
         outside.mkdir()
+        # Lifecycle scans legitimately create the private state directory already.
+        (self.r / ".brain/wake").rename(self.r / ".brain/wake-original")
         (self.r / ".brain/wake").symlink_to(outside, target_is_directory=True)
         self.assertEqual(self.enqueue("question"), 0)
         self.assertEqual(list(outside.iterdir()), [])
