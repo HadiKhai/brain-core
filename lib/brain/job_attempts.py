@@ -80,6 +80,7 @@ def write_attempt(n, row, data):
     _m_common.safe_target(path)
     path.parent.mkdir(exist_ok=True)
     _m_common.atomic_write(path, json.dumps(data, sort_keys=True) + '\n')
+    _m_common.touch(path)
 
 
 def begin_attempt(inst, n, row, request_id=None):

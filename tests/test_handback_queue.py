@@ -61,6 +61,52 @@ class HandbackLifecycle(Scenario):
             self.assertEqual(m.job_projection(inst, n, row)['state'], 'interrupted')
             self.assertIsNone(m.job_signal(inst, n, row))
 
+    def test_p5_train_and_ordinary_readiness_refuse_replacement_attempts(self):
+        m, inst, n, row = self.fixture()
+        home = self.repo(self.tmp / 'home')
+        wt = self.tmp / 'worktree'
+        branch = row['Job']
+        self.git('worktree', 'add', '-qb', branch, str(wt), cwd=home)
+        n.update(external=True, home_path=home)
+        n['fm']['verify'] = 'true'
+        n['local']['worktrees'] = {branch: {'path': str(wt), 'port': 4100}}
+        with mock.patch.dict(os.environ, self.env, clear=True):
+            head, main = m.ready_refs(n, branch)
+            packet = dict(version=1, node=n['id'], branch=branch, head=head, main=main,
+                          integration_base=main, verify_command='true', verify_result=0,
+                          inputs=m.verify_inputs(n, n['local']['worktrees'][branch]),
+                          review_rounds=1, checked_at=inst.now_dt().isoformat())
+            signal = dict(version=3, job=branch, started=row['Started'], state='done',
+                          summary='Synthetic completed result', lessons='none: fixture',
+                          attempt_id='a' * 32, ready=packet)
+            path = m.handback_file(n, row)
+            path.parent.mkdir(exist_ok=True)
+            path.write_text(json.dumps(signal))
+            for train in (False, True):
+                ready = m.ready_state(inst, n, branch, train=train)
+                self.assertTrue(ready['ready'], ready['reasons'])
+            observed = []
+            for state in ('queued', 'verifying', 'interrupted', 'invalidated', 'terminal', 'unknown'):
+                attempt = m.begin_attempt(inst, n, row)
+                if state == 'unknown':
+                    m.attempt_path(n, row).write_text('{broken')
+                elif state != 'queued':
+                    m.update_attempt(inst, n, row, attempt['id'], state)
+                for train in (False, True):
+                    observed.append((state, train, m.ready_state(inst, n, branch, train=train)))
+            self.assertEqual([(state, train) for state, train, ready in observed if ready['ready']], [])
+            for state, train, ready in observed:
+                with self.subTest(state=state, train=train):
+                    self.assertIn('replacement handback attempt is ' + state,
+                                  '; '.join(ready['reasons']))
+            # Matching terminal publication restores readiness in both paths.
+            attempt = m.begin_attempt(inst, n, row)
+            m.finish_attempt(inst, n, row, attempt['id'])
+            path.write_text(json.dumps({**signal, 'attempt_id': attempt['id']}))
+            for train in (False, True):
+                ready = m.ready_state(inst, n, branch, train=train)
+                self.assertTrue(ready['ready'], ready['reasons'])
+
     def test_p6_enqueue_claim_and_terminal_are_single_owner(self):
         m, inst, n, row = self.fixture()
         args = argparse.Namespace(id='root', branch=row['Job'], state='blocked', summary='Needs a decision',

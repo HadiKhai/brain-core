@@ -90,7 +90,7 @@ runpy.run_path(brain, run_name='__main__')
         self.assertEqual(status.stat().st_mode & 0o777, 0o640)
         self.b(r, 'handback', "--summary", "Synthetic result", 'app', '--branch', 'job-a', '--state', 'blocked')
         signal = next((r / 'nodes/app/job-handbacks').glob('*.json'))
-        self.failed_replace(r, signal, ['handback', 'app', '--branch', 'job-a', '--state', 'done'])
+        self.failed_replace(r, signal, ['handback', '--summary', 'Synthetic result', 'app', '--branch', 'job-a', '--state', 'done'])
         self.assertEqual(json.loads(signal.read_text())['state'], 'blocked')
         self.b(r, 'handback', "--summary", "Synthetic result", 'app', '--branch', 'job-a', '--state', 'done')
         self.assertEqual(json.loads(signal.read_text())['state'], 'done')
@@ -188,7 +188,7 @@ m.main()
                     elif command == 'handback':
                         self.b(r, 'handback', "--summary", "Synthetic result", 'app', '--branch', 'job-a', '--state', 'blocked')
                         dest = next((node / 'job-handbacks').glob('*.json'))
-                        args = ['handback', 'app', '--branch', 'job-a', '--state', 'question']
+                        args = ['handback', '--summary', 'Synthetic result', '--question', 'Synthetic choice?', 'app', '--branch', 'job-a', '--state', 'question']
                     elif command == 'inbox':
                         self.b(r, 'inbox', 'app', '--new')
                         (node / 'inbox.md').write_text('- 2026-10-19 10:00 +00:00 from worker: Recover me.\n')
@@ -375,6 +375,8 @@ class RoundTwo(AutonomyProject):
             record = self.m.handback_file(n, row)
             self.assertIsNone(json.loads(record.read_text())["ready"])
             record.unlink()
+            # Restore the legacy state, including absence of the synthetic attempt.
+            self.m.attempt_path(n, row).unlink()
         f.write_text(json.dumps({"checked_at": row["Started"]}))
         self.assertIn("handback", [i["kind"] for i in self.due(r)])
         self.b(r, "handback", "--summary", "Synthetic result", "app", "--branch", "job-a", "--state", "blocked")
@@ -454,7 +456,7 @@ class RoundTwo(AutonomyProject):
         for _ in range(2):
             self.b(r, "handback", "--summary", "Synthetic result", "app", "--branch", "job-a", "--state", "blocked", "--need-human", "Grant access")
         self.assertEqual(path.read_text().count("Grant access"), 1)
-        self.b(r, "handback", "--summary", "Synthetic result", "--question", "Synthetic choice?", "app", "--branch", "job-a", "--state", "question", "--report", "report.md")
+        self.b(r, "handback", "--summary", "Synthetic result", "--question", "See report report.md", "app", "--branch", "job-a", "--state", "question", "--report", "report.md")
         self.assertIn("See report report.md", path.read_text())
 
     def test_facts_header_migration_caps_times_forecasts_preview(self):

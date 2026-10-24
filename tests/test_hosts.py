@@ -71,7 +71,7 @@ class LockHotfix(Scenario):
         code = "from pathlib import Path; import time; Path(" + repr(str(marker)) + ").touch(); time.sleep(10)"
         command = shlex.quote(sys.executable) + " -c " + shlex.quote(code)
         self.b(r, "set", "a", "verify=" + command)
-        p = self.start(r, "handback", "a", "--branch", "job", "--state", "done", "--reviews", "1",
+        p = self.start(r, "handback", "--summary", "Synthetic result", "a", "--branch", "job", "--state", "done", "--reviews", "1",
                        "--lessons", "none: fixture")
         try:
             self.wait_file(marker, p)
@@ -100,7 +100,7 @@ class LockHotfix(Scenario):
                                       ").touch()\nwhile not Path(" + repr(str(release)) +
                                       ").exists(): time.sleep(.02)\n")
                     case.b(r, "set", "a", "verify=" + shlex.quote(sys.executable) + " " + shlex.quote(str(script)))
-                    p = subprocess.Popen([sys.executable, str(CORE / "bin/brain"), "handback", "a", "--branch", "job",
+                    p = subprocess.Popen([sys.executable, str(CORE / "bin/brain"), "handback", "--summary", "Synthetic result", "a", "--branch", "job",
                                           "--state", "done", "--reviews", "1"], cwd=r,
                                          env={**case.env, "BRAIN_ROOT": str(r), "BRAIN_NO_UPDATE_CHECK": "1"},
                                          stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)

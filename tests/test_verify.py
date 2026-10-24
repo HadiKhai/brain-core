@@ -542,7 +542,7 @@ class VerifyLogs(Scenario):
         self.git('add', 'stdin-check.py', cwd=wt)
         self.git('commit', '-qm', 'stdin fixture', cwd=wt)
         self.b(r, 'set', 'a', 'verify=python3 -B stdin-check.py')
-        result = subprocess.run([sys.executable, str(r / 'core/bin/brain'), 'handback', 'a', '--branch', 'job',
+        result = subprocess.run([sys.executable, str(r / 'core/bin/brain'), 'handback', '--summary', 'Synthetic result', 'a', '--branch', 'job',
                                  '--state', 'done', '--reviews', '1'], cwd=r, env=self.env,
                                 input='fixture-input\n', capture_output=True, text=True)
         self.assertEqual(result.returncode, 1)

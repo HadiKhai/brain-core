@@ -743,7 +743,7 @@ def autonomy_finished_job_wake(run):
     sh("git", "commit", "-qam", "finished job", cwd=wt)
     report = a / "sources" / "finished-report.md"
     report.write_text("# Finished job\n\nChanged result.txt; local content check passed. Needs independent review.\n")
-    brain(root, "handback", "a", "--branch", "job/finished", "--state", "done", "--report", str(report))
+    brain(root, "handback", "--summary", "Synthetic result", "a", "--branch", "job/finished", "--state", "done", "--report", str(report))
     sh("git", "add", "-A", cwd=root); sh("git", "commit", "-qm", "a: ready for tick", cwd=root)
     run.agent(a, (
         "Role: coordinator of node `a`. This is your scheduled self-wake tick. Run `brain due a` and act "
@@ -969,7 +969,7 @@ def recover_coordinator_replaced(run):
     worker_head = sh('git', 'rev-parse', 'HEAD', cwd=wt).strip()
     report = Path(brain(root, 'report', 'a', 'recovered').strip()) / 'index.md'
     report.write_text('# Finished\n\nResult verified; one independent review complete, no findings.\n')
-    brain(root, 'handback', 'a', '--branch', 'job/recovered', '--state', 'done', '--reviews', '1',
+    brain(root, 'handback', '--summary', 'Synthetic result', 'a', '--branch', 'job/recovered', '--state', 'done', '--reviews', '1',
           '--report', str(report), '--lessons', 'none: fixture result has no reusable lesson')
     record = next((node / 'job-handbacks').glob('*.json'))
     packet = record.read_bytes()
