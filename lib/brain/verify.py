@@ -122,6 +122,12 @@ def ready_preflight(n, branch, base=None):
                            "in a coordinator-owned worktree, or configure merge=pr; never change the operator checkout")
         elif _m_common.git("merge-base", "--is-ancestor", base or local, head, cwd=n["home_path"]).returncode:
             reasons.append("worker must rebase on current local main as well as origin default for merge=local")
+    titles = _m_common.git("log", "--format=%s", main + ".." + head, cwd=n["home_path"])
+    if titles.returncode:
+        reasons.append("branch commit titles are unreadable")
+    else:
+        reasons.extend("unfinished commit: " + title for title in titles.stdout.splitlines()
+                       if re.match(r"(?:wip|fixup!|squash!)", title, re.IGNORECASE))
     w = n["local"].get("worktrees", {}).get(branch)
     if not w or not Path(w["path"]).exists():
         reasons.append("job worktree is missing")

@@ -41,6 +41,20 @@ class WorkerReadyPackets(Scenario):
         self.git("commit", "-qam", "fix", cwd=wt)
         return r, home, wt
 
+    def test_unfinished_commit_titles_refuse_ready_even_below_a_clean_tip(self):
+        r, home, wt = self.job()
+        for title in ("WIPtitle", "WIP", "WIP unfinished", "wip: unfinished", "fixup! target", "squash! target"):
+            with self.subTest(title=title):
+                self.git("commit", "--amend", "-qm", title, cwd=wt)
+                out = self.record(r, ok=False)
+                self.assertIn("unfinished commit", out)
+                self.assertIn(title, out)
+                self.git("commit", "--allow-empty", "-qm", "Finished tip", cwd=wt)
+                self.assertIn("unfinished commit", self.b(r, "ready", "a", "--branch", "job", ok=False))
+                self.git("reset", "--soft", "HEAD~1", cwd=wt)
+        self.git("commit", "--amend", "-qm", "Finish the change", cwd=wt)
+        self.assertEqual(self.record(r).strip().splitlines()[-1], "ready")
+
     def record(self, r, ok=True):
         return self.b(r, "ready", "a", "--branch", "job", "--record", "--reviews", "2", ok=ok)
 
