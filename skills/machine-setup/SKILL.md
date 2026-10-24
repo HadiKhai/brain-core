@@ -108,6 +108,11 @@ IDs with `orchestrator_capabilities`, never infer them from a runtime's name:
 }
 ```
 
+Each subscription may set its own `stop_percent` (greater than 0, at most 100).
+Omitting it inherits the top-level `stop_percent`, which defaults to 85. Routing,
+CLI output and dashboard meters use that subscription's effective stop line;
+changing it reuses the existing account reading.
+
 Names in `brains` are machine registry names (`brain brains`); `[]` allows none, `["*"]`
 explicitly allows every brain. Without a file, installed runtimes each have one subscription,
 using `CLAUDE_CONFIG_DIR` / `CODEX_HOME` when set, otherwise `~/.claude` / `~/.codex`, allowed

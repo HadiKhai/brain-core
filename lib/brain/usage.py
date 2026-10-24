@@ -98,6 +98,9 @@ def usage_config():
                 or not s["id"] or s["id"] in ids or not isinstance(s.get("brains", []), list) \
                 or any(not isinstance(b, str) for b in s.get("brains", [])):
             raise ValueError("invalid subscription (unique id, runtime and brains list required)")
+        sub_stop = s.get("stop_percent", stop)
+        if not usage_number(sub_stop) or not 0 < sub_stop <= 100:
+            raise ValueError("invalid subscription stop_percent (must be greater than 0 and at most 100)")
         ids.add(s["id"])
         rt = s["runtime"]
         cfg = s.get("config_dir") or os.environ.get(USAGE_RUNTIMES[rt]) or str(Path.home() / ("." + rt))
@@ -107,7 +110,7 @@ def usage_config():
             raise ValueError("invalid subscription config_dir, label or host_provider_instance_id")
         subs.append({"id": s["id"], "runtime": rt, "label": label,
                      "config_dir": str(Path(cfg).expanduser().absolute()),
-                     "host_provider_instance_id": host, "brains": s.get("brains", [])})
+                     "host_provider_instance_id": host, "brains": s.get("brains", []), "stop_percent": sub_stop})
     return {"subscriptions": subs, "stop_percent": stop, "pacing_margin": margin,
             "autodetected": not path.exists()}
 
@@ -558,7 +561,8 @@ def usage_cache_fresh(cache, config):
     checked = cache.get("checked_at")
     keys = ("id", "runtime", "label", "config_dir", "host_provider_instance_id", "brains")
     return usage_number(checked) and 0 <= time.time() - checked < usage_max_age(cache) and \
-        [{k: s.get(k) for k in keys} for s in cache.get("subscriptions", [])] == config["subscriptions"]
+        [{k: s.get(k) for k in keys} for s in cache.get("subscriptions", [])] == \
+        [{k: s.get(k) for k in keys} for s in config["subscriptions"]]
 
 
 def usage_brain_name(inst):
@@ -605,7 +609,7 @@ def usage_rows(inst=None, refresh=False, before_launch=False):
         if inst and not usage_allowed(sub, brain):
             config["other_subscriptions"] += 1
             continue
-        prior = next((s for s in cache.get("subscriptions", []) if all(s.get(k) == v for k, v in sub.items())), {})
+        prior = next((s for s in cache.get("subscriptions", []) if all(s.get(k) == v for k, v in sub.items() if k != "stop_percent")), {})
         r = cache.get("accounts", {}).get(prior.get("account_key"), {})
         stamp = r.get("read_at")
         age = max(0, time.time() - stamp) if usage_number(stamp) else None
@@ -683,13 +687,13 @@ def class_route(inst, job_class, runtime=None, model=None, cached_only=False, we
                  [m.casefold() for m in w.get("models", [])]))]
     def below_stop(row):
         active = active_windows(row)
-        return bool(active) and all(w["used_percent"] < policy.get("stop_percent", 85) for w in active)
+        return bool(active) and all(w["used_percent"] < row.get("stop_percent", policy.get("stop_percent", 85)) for w in active)
     fallback = inst.local.get("fallback", [])
     fallback = fallback if isinstance(fallback, list) else []
     def rank(row):
         host = row.get("host_provider_instance_id")
         fullest = max((w["used_percent"] for w in active_windows(row)), default=0)
-        return (fullest >= policy.get("stop_percent", 85), fullest,
+        return (fullest >= row.get("stop_percent", policy.get("stop_percent", 85)), fullest,
                 fallback.index(host) if host in fallback else len(fallback), row["id"])
     available = sorted([r for r in rows if r["runtime"] == chosen], key=rank)
     measured = [(weekly(r), r) for r in available if weekly(r) is not None]
@@ -701,7 +705,7 @@ def class_route(inst, job_class, runtime=None, model=None, cached_only=False, we
         reason += f" Weekly meter {used:g}%; keeping {chosen}."
     if selected:
         active = active_windows(selected)
-        if any(w["used_percent"] >= policy.get("stop_percent", 85) for w in active):
+        if any(w["used_percent"] >= selected.get("stop_percent", policy.get("stop_percent", 85)) for w in active):
             reason += " Usage: subscription reached its stop line. Stop starting jobs; the brief remains available."
             if runtime:
                 reason += f" Pinned runtime {runtime} reached its stop line."
@@ -729,7 +733,7 @@ def usage_route(inst, runtimes, preferred=None, model=None, cached_only=False):
         active = {n: w for n, w in r["windows"].items() if not w.get("absent") and not w["expired"] and
                   (n in USAGE_WINDOWS or (model and model.casefold() in
                    [m.casefold() for m in w.get("models", [])]))}
-        if any(w["used_percent"] >= policy["stop_percent"] for w in active.values()):
+        if any(w["used_percent"] >= r.get("stop_percent", policy["stop_percent"]) for w in active.values()):
             continue
         unknown = not active or any(w.get("source", r["source"]) == "unknown" or
             not w.get("read_at", r["read_at"]) or time.time() - w.get("read_at", r["read_at"]) > policy["max_age_seconds"]
@@ -940,11 +944,11 @@ def cmd_usage(a):
         print(json.dumps({"scope": "account-wide", "stop_percent": policy["stop_percent"],
                           "other_subscriptions": policy["other_subscriptions"], "subscriptions": rows}, indent=2))
         return
-    print(f"Account-wide subscription usage · stop line {policy['stop_percent']:g}% · this machine's share: unavailable")
-    table = [["runtime", "label", "5h used / reset", "weekly used / reset", "reading / age", "source", "brains"]]
+    print(f"Account-wide subscription usage · default stop line {policy['stop_percent']:g}% · this machine's share: unavailable")
+    table = [["runtime", "label", "stop line", "5h used / reset", "weekly used / reset", "reading / age", "source", "brains"]]
     for r in rows:
         if not r["read_at"]:
-            print(f"{r['label']}: no reading yet: run `brain usage --refresh` or install the poller (`brain usage install`)")
+            print(f"{r['label']}: no reading yet: run `brain usage --refresh` or install the poller (`brain usage install`); stop line {r['stop_percent']:g}%")
             continue
         def window(name):
             w = r["windows"].get(name)
@@ -954,7 +958,7 @@ def cmd_usage(a):
                 return "none"
             reset = usage_time(w.get("resets_at"), inst)
             return f"{w['used_percent']:g}% / {reset}" + (" (expired; unknown)" if w["expired"] else "")
-        table.append([r["runtime"], r["label"], window("five_hour"), window("seven_day"),
+        table.append([r["runtime"], r["label"], f"{r['stop_percent']:g}%", window("five_hour"), window("seven_day"),
                       f"{usage_time(r['read_at'], inst)} / {usage_age(r['age_seconds'])}", r["source"],
                       "every brain" + (" (autodetected)" if r["autodetected"] else "")
                       if r["available_to_every_brain"] else ','.join(r['brains']) or 'none'])

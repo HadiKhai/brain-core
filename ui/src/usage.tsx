@@ -17,6 +17,7 @@ import {
   list,
   machineHealth,
   windowState,
+  usageStopPercent,
   routing,
   time,
   tokens,
@@ -36,6 +37,7 @@ function WindowMeter({
   policy: RecordData;
   zone?: string;
 }) {
+  const stop = usageStopPercent(row, policy);
   const v = windowState(w, row, policy),
     remaining = w?.resets_at
       ? Math.max(0, Math.ceil((w.resets_at - Date.now() / 1000) / 60))
@@ -51,8 +53,8 @@ function WindowMeter({
       </div>
       <div className={"meter " + (v.stale ? "stale" : v.state === "At stop line" ? "danger" : v.state === "Near stop line" ? "warning" : "")}>
         <Progress value={v.percent} aria-label={name + " · " + v.state} />
-        {Number.isFinite(policy.stop_percent) && (
-          <Tip text={`Stop at ${policy.stop_percent}%`} style={{ left: Math.min(100, Math.max(0, policy.stop_percent)) + "%" }}><i className="stop-line" /></Tip>
+        {Number.isFinite(stop) && (
+          <Tip text={`Stop at ${stop}%`} style={{ left: Math.min(100, Math.max(0, stop)) + "%" }}><i className="stop-line" /></Tip>
         )}
       </div>
       <Tip text={`${w?.resets_at || w?.reset_time ? "Resets " + time(w.reset_time || w.resets_at, zone) : "Reset not recorded"} · ${v.age == null ? "reading age unknown" : `read ${v.age} min ago`} · ${w?.source || row.source || "source unknown"}`}>
@@ -101,7 +103,7 @@ export function Usage({ s, active }: { s: RecordData; active: boolean }) {
           <PagedCollection name="subscriptions">{list(s.usage).map((row, i) => (
             <article className="subscription" data-item key={row.id || i}>
               <div className="subscription-title">
-                <div className="row-line"><h3><Text>{row.label || "Subscription"}</Text></h3>{!p.autodetected && ["five_hour", "seven_day"].some((k) => { const w = row.windows?.[k]; return w && !w.absent && !w.expired && (!w.resets_at || w.resets_at > Date.now() / 1000) && w.used_percent >= p.stop_percent; }) && <Status>Skipped for new jobs</Status>}</div>
+                <div className="row-line"><h3><Text>{row.label || "Subscription"}</Text></h3>{!p.autodetected && ["five_hour", "seven_day"].some((k) => { const w = row.windows?.[k]; return w && !w.absent && !w.expired && (!w.resets_at || w.resets_at > Date.now() / 1000) && w.used_percent >= usageStopPercent(row, p); }) && <Status>Skipped for new jobs</Status>}</div>
                 {row.note ? <small className="row-note clamp-1"><Text>{row.note}</Text></small> : <small>{row.runtime || "Runtime unknown"}{(row.brains || []).length ? " · " + row.brains.join(", ") : ""}</small>}
               </div>
               <WindowMeter
@@ -133,7 +135,7 @@ export function Usage({ s, active }: { s: RecordData; active: boolean }) {
                   />
                 ))}
               <div className="row-actions">
-                <Reader title={row.label || "Subscription reading"} trigger="Inspect reading" text={[row.note || "", `Read ${time(row.read_at, s.brain?.tz)} · ${row.source || "source unknown"}`, `Brains: ${(row.brains || []).join(", ") || "Not recorded"} · ${Number.isFinite(p.stop_percent) ? `stop at ${p.stop_percent}%` : "stop line unknown"}`, ...Object.entries(row.windows || {}).map(([name, w]: any) => `${name === "five_hour" ? "5-hour" : "Weekly"}${w.models ? " · " + w.models.join(", ") : ""}: ${w.used_percent ?? "Unknown"}% · ${windowState(w, row, p).state} · resets ${time(w.resets_at, s.brain?.tz)}`)].filter(Boolean).join("\n\n")} />
+                <Reader title={row.label || "Subscription reading"} trigger="Inspect reading" text={[row.note || "", `Read ${time(row.read_at, s.brain?.tz)} · ${row.source || "source unknown"}`, `Brains: ${(row.brains || []).join(", ") || "Not recorded"} · ${Number.isFinite(usageStopPercent(row, p)) ? `stop at ${usageStopPercent(row, p)}%` : "stop line unknown"}`, ...Object.entries(row.windows || {}).map(([name, w]: any) => `${name === "five_hour" ? "5-hour" : "Weekly"}${w.models ? " · " + w.models.join(", ") : ""}: ${w.used_percent ?? "Unknown"}% · ${windowState(w, row, p).state} · resets ${time(w.resets_at, s.brain?.tz)}`)].filter(Boolean).join("\n\n")} />
               </div>
             </article>
           ))}</PagedCollection>

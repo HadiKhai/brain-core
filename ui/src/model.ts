@@ -161,12 +161,16 @@ export function learningRows(s: RecordData): RecordData[] {
         (Date.parse(a.provenance?.time) || 0),
   );
 }
+export const usageStopPercent = (row: RecordData, policy: RecordData) =>
+  Number.isFinite(row.stop_percent) ? row.stop_percent : policy.stop_percent;
+
 export function windowState(
   w: RecordData | undefined,
   row: RecordData,
   policy: RecordData,
   now = Date.now() / 1000,
 ) {
+  const stop = usageStopPercent(row, policy);
   const stamp = w?.read_at || row.read_at,
     stale = !stamp || now - stamp > (policy.max_age_seconds ?? 120);
   const expired = w?.expired || !!(w?.resets_at && w.resets_at <= now);
@@ -179,11 +183,11 @@ export function windowState(
         : "Unknown"
     : stale
       ? "Stale · unverified"
-      : Number.isFinite(policy.stop_percent) &&
-          w.used_percent >= policy.stop_percent
+      : Number.isFinite(stop) &&
+          w.used_percent >= stop
         ? "At stop line"
-        : Number.isFinite(policy.stop_percent) &&
-            w.used_percent >= policy.stop_percent - 10
+        : Number.isFinite(stop) &&
+            w.used_percent >= stop - 10
           ? "Near stop line"
           : "Normal";
   return {
@@ -198,9 +202,11 @@ export function windowState(
 export function routing(s: RecordData) {
   const p = { ...s.usage_routing_policy, ...s.usage_policy },
     now = Date.now() / 1000;
-  if (p.autodetected || !Number.isFinite(p.stop_percent)) return null;
+  if (p.autodetected) return null;
   return list(s.usage)
     .map((row) => {
+      const stop = usageStopPercent(row, p);
+      if (!Number.isFinite(stop)) return null;
       const windows = Object.entries(row.windows || {}).filter(
         ([k, w]: any) =>
           ["five_hour", "seven_day"].includes(k) &&
@@ -208,7 +214,7 @@ export function routing(s: RecordData) {
           !w.expired &&
           (!w.resets_at || w.resets_at > now),
       ) as [string, RecordData][];
-      if (windows.some(([, w]) => w.used_percent >= p.stop_percent))
+      if (windows.some(([, w]) => w.used_percent >= stop))
         return null;
       const unknown =
         !windows.length ||

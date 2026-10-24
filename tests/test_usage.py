@@ -572,6 +572,30 @@ for line in sys.stdin:
         self.assertEqual(final["Review runtime"], "claude")
         self.assertEqual(final["Review model"], "example-claude")
 
+    def test_subscription_stop_percent_defaults_validation_and_routing(self):
+        root = self.init("alice")
+        inst = self.m.Instance(root)
+        one = {**self.subscription(), "stop_percent": 50}
+        two = self.subscription("two")
+        config = self.declare(one, two, stop_percent=80)
+        self.assertEqual([s["stop_percent"] for s in config["subscriptions"]], [50, 80])
+        self.cache(config, [self.reading(50, weekly=50), self.reading(60, weekly=60)])
+        selected, _ = self.m.usage_route(inst, ["codex"], cached_only=True)
+        self.assertEqual(selected["id"], "two")
+        selected = self.m.class_route(inst, "build", cached_only=True)[1]
+        self.assertEqual(selected["id"], "two")
+        self.declare({**one, "stop_percent": 95}, two, stop_percent=80)
+        with mock.patch.object(self.m, "usage_refresh", side_effect=AssertionError("policy change refreshed readings")):
+            rows, _ = self.m.usage_rows(inst, before_launch=True)
+        self.assertEqual(rows[0]["windows"]["seven_day"]["used_percent"], 50)
+        self.assertEqual(rows[0]["stop_percent"], 95)
+        self.assertEqual(self.m.usage_route(inst, ["codex"], cached_only=True)[0]["id"], "one")
+        output = self.b(root, "usage", "--json")
+        self.assertEqual([s["stop_percent"] for s in json.loads(output)["subscriptions"]], [95, 80])
+        for value in (0, -1, 101, True, "70", None, float("nan")):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                self.declare({**one, "stop_percent": value})
+
     def test_usage_defaults_and_config_isolation(self):
         with mock.patch.object(self.m.shutil, "which", return_value="installed"):
             config = self.m.usage_config()
@@ -618,7 +642,7 @@ for line in sys.stdin:
         config = self.declare(one, missing)
         self.m.usage_refresh(config)
         text = self.b(root, "usage")
-        self.assertRegex(text, r"codex\s+one\s+none\s+24%")
+        self.assertRegex(text, r"codex\s+one\s+85%\s+none\s+24%")
         self.assertIn("missing: no reading yet: run `brain usage --refresh`", text)
         selected, reason = self.m.usage_route(self.m.Instance(root), ["codex"])
         self.assertEqual(selected["id"], "one")
