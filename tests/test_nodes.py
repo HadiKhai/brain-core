@@ -627,43 +627,68 @@ class TeamHomes(Scenario):
 
     def test_real_old_ready_survives_upgrade_and_reuses_verify_on_next_write(self):
         root, origin, home, wt, old, record, base = self.old_core_job()
-        before = record.read_bytes()
+        legacy = record.read_bytes()
+        self.assertNotIn('verify_port_context', json.loads(legacy)['ready'])
         ledger = (root / "nodes/app/job-ledger.md").read_bytes()
+        command = 'brain handback app --branch job --state done --reviews 1 --reverify'
+        refusal = self.b(root, "ready", "app", "--branch", "job", ok=False)
+        self.assertEqual(refusal.strip().splitlines()[-1],
+                         'not ready: recorded verify port environment missing or invalid; run ' + command)
+        self.assertNotIn('Traceback', refusal)
+        self.assertEqual(record.read_bytes(), legacy)
+        self.assertEqual((root / "nodes/app/job-ledger.md").read_bytes(), ledger)
+        self.b(root, *shlex.split(refusal.strip().split('; run ', 1)[1])[1:])
         self.assertTrue(self.b(root, "ready", "app", "--branch", "job").strip().endswith("ready"))
+        before = record.read_bytes()
+        self.assertIn('verify_port_context', json.loads(before)['ready'])
         self.assertIn("ready to merge", self.b(root, "due", "app"))
         self.assertEqual(record.read_bytes(), before)
         self.assertEqual((root / "nodes/app/job-ledger.md").read_bytes(), ledger)
-        # Even a report-only worker write lazily upgrades the packet without verification.
+        # A report-only worker write reuses the refreshed packet without verification.
         self.b(root, "handback", "app", "--branch", "job", "--state", "done", "--report", "fixture report")
         updated = json.loads(record.read_text())["ready"]
         self.assertEqual(updated["integration_base"], base)
         self.assertNotEqual(updated["main"], base)
-        self.assertEqual((wt.parent / "verify-count").read_text(), "x")
-        record.write_bytes(before)
-        # Refreshing origin within the unchanged integration base also preserves old evidence.
+        self.assertEqual((wt.parent / "verify-count").read_text(), "xx")
+        record.write_bytes(legacy)
+        # Refreshing origin keeps the legacy base valid, but its port proof still needs migration.
         self.git("push", "origin", "main", cwd=home)
         self.git("fetch", "origin", cwd=home)
-        self.assertTrue(self.b(root, "ready", "app", "--branch", "job").strip().endswith("ready"))
-        # Keep distinct remote/base identities for the lazy upgrade and verify reuse check.
+        refusal = self.b(root, "ready", "app", "--branch", "job", ok=False)
+        self.assertEqual(refusal.strip().splitlines()[-1],
+                         'not ready: recorded verify port environment missing or invalid; run ' + command)
+        self.assertNotIn('Traceback', refusal)
+        # Keep distinct remote/base identities before migrating and checking subsequent reuse.
         self.git("update-ref", "refs/remotes/origin/main", base + "^", cwd=home)
+        self.b(root, *shlex.split(refusal.strip().split('; run ', 1)[1])[1:])
+        self.assertTrue(self.b(root, "ready", "app", "--branch", "job").strip().endswith("ready"))
+        before = record.read_bytes()
         out = self.b(root, "handback", "app", "--branch", "job", "--state", "done", "--reviews", "2")
         self.assertIn("verify: reused", out)
         packet = json.loads(record.read_text())["ready"]
         self.assertEqual(packet["integration_base"], base)
         self.assertNotEqual(packet["main"], base)
         count = wt.parent / "verify-count"
-        self.assertEqual(count.read_text(), "x")
+        self.assertEqual(count.read_text(), "xxx")
         # Rebase keeps preflight green: the old base itself must invalidate the record.
         record.write_bytes(before)
         self.git("commit", "--allow-empty", "-qm", "new integration base", cwd=home)
         self.git("rebase", "main", cwd=wt)
         self.assertIn("main moved", self.b(root, "ready", "app", "--branch", "job", ok=False))
         self.b(root, "handback", "app", "--branch", "job", "--state", "done", "--reviews", "2")
-        self.assertEqual(count.read_text(), "xx")
+        self.assertEqual(count.read_text(), "xxxx")
 
     def test_real_old_ready_no_origin_and_pr_base_change(self):
         root, origin, home, wt, old, record, base = self.old_core_job()
+        legacy = record.read_bytes()
+        self.assertNotIn('verify_port_context', json.loads(legacy)['ready'])
         self.b(root, "set", "app", "merge=local")
+        command = 'brain handback app --branch job --state done --reviews 1 --reverify'
+        refusal = self.b(root, "ready", "app", "--branch", "job", ok=False)
+        self.assertEqual(refusal.strip().splitlines()[-1],
+                         'not ready: recorded verify port environment missing or invalid; run ' + command)
+        self.assertNotIn('Traceback', refusal)
+        self.b(root, *shlex.split(refusal.strip().split('; run ', 1)[1])[1:])
         self.assertTrue(self.b(root, "ready", "app", "--branch", "job").strip().endswith("ready"))
         self.b(root, "set", "app", "merge=pr")
         self.assertIn("main moved", self.b(root, "ready", "app", "--branch", "job", ok=False))
@@ -675,6 +700,12 @@ class TeamHomes(Scenario):
         self.assertIn("local default must include origin default",
                       self.b(root, "ready", "app", "--branch", "job", ok=False))
         self.git("remote", "remove", "origin", cwd=home)
+        record.write_bytes(legacy)  # Exercise the actual old packet with no origin as well.
+        refusal = self.b(root, "ready", "app", "--branch", "job", ok=False)
+        self.assertEqual(refusal.strip().splitlines()[-1],
+                         'not ready: recorded verify port environment missing or invalid; run ' + command)
+        self.assertNotIn('Traceback', refusal)
+        self.b(root, *shlex.split(refusal.strip().split('; run ', 1)[1])[1:])
         self.assertEqual(self.b(root, "ready", "app", "--branch", "job").strip(), "ready")
 
     def test_real_old_ledger_and_handback_survive_close_lesson_cleanup_and_sync(self):
@@ -711,18 +742,26 @@ class TeamHomes(Scenario):
         import hashlib
         root, origin, home, wt, old, record, base = self.old_core_job()
         packet = json.loads(record.read_text())["ready"]
+        self.assertNotIn('verify_port_context', packet)
         packet["checked_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
         cache = self.tmp / "app-work/scratch/ready" / (hashlib.sha256(b"job").hexdigest() + ".json")
         cache.parent.mkdir(parents=True)
         cache.write_text(json.dumps(packet))
         record.unlink()
         before = cache.read_bytes()
+        command = 'brain handback app --branch job --state done --reviews 1 --reverify'
+        refusal = self.b(root, "ready", "app", "--branch", "job", ok=False)
+        self.assertEqual(refusal.strip().splitlines()[-1],
+                         'not ready: recorded verify port environment missing or invalid; run ' + command)
+        self.assertNotIn('Traceback', refusal)
+        self.assertEqual(cache.read_bytes(), before)
+        self.b(root, *shlex.split(refusal.strip().split('; run ', 1)[1])[1:])
         self.assertTrue(self.b(root, "ready", "app", "--branch", "job").strip().endswith("ready"))
         self.assertIn("ready to merge", self.b(root, "due", "app"))
         self.assertEqual(cache.read_bytes(), before)
         self.assertIn("verify: reused", self.b(root, "handback", "app", "--branch", "job",
                       "--state", "done", "--reviews", "2"))
-        self.assertEqual((wt.parent / "verify-count").read_text(), "x")
+        self.assertEqual((wt.parent / "verify-count").read_text(), "xx")
         self.assertEqual(json.loads(record.read_text())["ready"]["integration_base"], base)
         record.unlink()  # continue with only the old standalone evidence for the cleanup probe
         self.git("merge", "--no-ff", "-m", "integrate job", "job", cwd=home)
