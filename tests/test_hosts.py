@@ -794,6 +794,23 @@ class QuestionWake(Scenario):
 
 
 class StopHook(Scenario):
+    def test_relay_only_exit_captures_questions_but_skips_note_reminders(self):
+        r = self.init("alice")
+        (r / "brief.md").write_text("Changed notes\n")
+        loader = core_loader.SourceFileLoader("brain_relay_exit", str(CORE / "bin/brain"))
+        module = loader.load_module()
+        payload = {"cwd": str(r), "last_assistant_message": "relay only"}
+        with mock.patch.object(sys, "stdin", io.StringIO(json.dumps(payload))), \
+                mock.patch.object(module, "capture_hook_questions") as capture, \
+                mock.patch.object(module, "notes_lag", side_effect=AssertionError("relay inspected notes")), \
+                contextlib.redirect_stdout(io.StringIO()) as output:
+            module.hook_stop(argparse.Namespace(event="stop"))
+        capture.assert_called_once()
+        self.assertEqual(output.getvalue(), "")
+        reason = self.hook(r, r)["reason"]
+        self.assertIn("relay only", reason)
+        self.assertNotIn("repeating your previous answer", reason)
+
     def test_hygiene_extension_old_unchanged_notes_do_not_hold_read_only_turns(self):
         r = self.init('maple')
         st = r / 'status.md'

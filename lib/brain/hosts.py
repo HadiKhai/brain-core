@@ -1051,6 +1051,9 @@ def hook_stop(a):
         capture_hook_questions(inst, n, data)
     except (Exception, SystemExit):
         pass  # question bookkeeping must not suppress existing reminders or fail a turn
+    last_message = data.get("last_assistant_message")
+    if isinstance(last_message, str) and last_message.strip().casefold() == "relay only":
+        return  # explicit read-only relay: capture questions, then skip notes and reminder bookkeeping
     if data.get("stop_hook_active") or not node_at(inst, cwd):
         return  # workers capture questions without holding their turn for coordinator notes
     try:
@@ -1138,8 +1141,8 @@ def hook_stop(a):
               f"Updated line; timestamps from `core/bin/brain now`; preserve the generated facts block and run "
               f"`core/bin/brain status {n['id']} --refresh`), then commit `{n['id']}: <what changed>`. If you are a worker, don't edit those files: append anything "
               f"the coordinator should know to inbox.md. If this conversation changed nothing here (you only read "
-              f"this node, or it isn't yours), record nothing and end by repeating your previous answer unchanged: "
-              f"your last message is what the operator reads.")
+              f"this node, or it isn't yours), record nothing and end with `relay only`; the stop hook accepts "
+              f"that short reply without another notes check.")
     print(json.dumps({"decision": "block", "reason": _m_guard.redact(reason, _m_guard.never_terms(n))}))
 
 
