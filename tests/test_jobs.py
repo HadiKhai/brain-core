@@ -1214,8 +1214,10 @@ class Workflow(Scenario):
         n = {"id": "a", "fm": {"verify_skip": "*.md"}, "home_path": repo}
         packet = {"version": 1, "node": "a", "branch": "job", "verify_command": "v", "verify_result": 0, "main": "m",
                   "head": base, "review_rounds": 1, "checked_at": "2026-01-01 10:00 +00:00", "inputs": "i"}
-        self.assertEqual(m.verify_reuse(n, "job", packet, base, "m", "v", str(repo), "i"), (base, []))  # control
-        self.assertIsNone(m.verify_reuse(n, "job", packet, head, "m", "v", str(repo), "i"))
+        port_context = m.verify_port_context(n, {})
+        packet['verify_port_context'] = port_context
+        self.assertEqual(m.verify_reuse(n, "job", packet, base, "m", "v", str(repo), "i", port_context), (base, []))  # control
+        self.assertIsNone(m.verify_reuse(n, "job", packet, head, "m", "v", str(repo), "i", port_context))
         # The idle check and the upgrade happen under one hold of the lock: a job started while it waited counts.
         self.b(r, "set", "root", "auto_upgrade=on")
         self.b(r, "wt", "rm", "a", "job", "--cause", "fixture done")  # idle, until the late job below

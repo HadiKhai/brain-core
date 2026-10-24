@@ -17,6 +17,8 @@ For agents:
 After upgrading:
 - A node whose scripts read `PORT`, `PORTS` or `PORT_LAST` must either set
   `verify_export_port=true` with `brain set`, or switch to the `BRAIN_PORT` names.
+- Hand back again to refresh older verification evidence. Effective raw-port
+  values and the export policy now bind both full and lane verification reuse.
 
 ## 2026-10-24: Configure worker runtime and model defaults per job class
 

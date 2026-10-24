@@ -260,6 +260,14 @@ def _ready_state(inst, n, branch, train=False, display=False):
         if not verify or packet.get("verify_command") != verify or type(packet.get("verify_result")) is not int \
                 or packet["verify_result"] != 0:
             reasons.append("node verify missing, changed or failed")
+        port_context = packet.get('verify_port_context')
+        if (not isinstance(port_context, dict) or set(port_context) != {'export_port', 'digest'}
+                or type(port_context.get('export_port')) is not bool
+                or not isinstance(port_context.get('digest'), str)
+                or not re.fullmatch(r'[0-9a-f]{24}', port_context['digest'])):
+            reasons.append('recorded verify port environment missing or invalid; hand back again')
+        elif port_context['export_port'] != (n['fm'].get('verify_export_port') == 'true'):
+            reasons.append('verify port export policy changed; hand back again')
         if cheap:
             try:
                 _m_lanes.recorded_lane_environment({}, packet.get('verify_lane_env'))
@@ -308,7 +316,7 @@ def verify_inputs(n, w, files=None):
     return _m_jobs.digest([sorted(files.items()), w.get("port"), w.get("ports", 1)])
 
 
-def verify_reuse(n, branch, previous, head, main, verify, cwd, inputs=None):
+def verify_reuse(n, branch, previous, head, main, verify, cwd, inputs=None, port_context=None):
     """The earlier green packet, if it still proves this commit: same node, branch, command and local main, and
     nothing changed since the commit it verified except paths the node declares can't affect verify
     (verify_skip globs, e.g. docs/*,*.md). (verified head, changed paths) or None."""
@@ -317,7 +325,8 @@ def verify_reuse(n, branch, previous, head, main, verify, cwd, inputs=None):
     if not (p.get("version") == 1 and p.get("node") == n["id"] and p.get("branch") == branch
             and p.get("verify_command") == verify and type(p.get("verify_result")) is int and p["verify_result"] == 0
             and packet_main_matches(n, p, main) and type(p.get("review_rounds")) is int and p["review_rounds"] >= 1
-            and isinstance(p.get("checked_at"), str) and sha(p.get("head")) and p.get("inputs") == inputs):
+            and isinstance(p.get("checked_at"), str) and sha(p.get("head")) and p.get("inputs") == inputs
+            and port_context is not None and p.get('verify_port_context') == port_context):
         return None  # only a complete green packet, for the same inputs, can stand for a new run
     base = p.get("verified_head") or p["head"]
     if not sha(base) or (base != p["head"] and _m_common.git("merge-base", "--is-ancestor", base, p["head"], cwd=cwd).returncode):
@@ -609,6 +618,12 @@ def verify_env(n, branch, w):
     return env
 
 
+def verify_port_context(n, env):
+    """Bind effective aliases, including unset/empty, without publishing their values."""
+    return dict(export_port=n['fm'].get('verify_export_port') == 'true',
+                digest=_m_jobs.digest([(key, env.get(key)) for key in ('PORT', 'PORTS', 'PORT_LAST')]))
+
+
 def lane_packet_valid(packet, snap):
     rows = packet.get("verify_lanes")
     expected = [l for l in snap['lanes'] if l['schedule'] != 'nightly']
@@ -639,6 +654,7 @@ def run_lanes(inst, n, branch, w, env, snap, previous, head, main, inputs, force
                 and isinstance(prior.get('checked_at'), str) and inst.parse_time(prior['checked_at'])
                 and packet_main_matches(n, prior, main)
                 and prior.get('lane_context_hash') == snap['context'] and prior.get('inputs') == inputs
+                and prior.get('verify_port_context') == verify_port_context(n, env)
                 and type(prior.get('review_rounds')) is int and prior['review_rounds'] >= 1)
     history = prior.get('lane_green', prior.get('verify_lanes', []))
     old = {r['name']: r for r in history if isinstance(r, dict) and isinstance(r.get('name'), str)} if eligible and isinstance(history, list) else {}
@@ -718,6 +734,7 @@ def record_ready(inst, n, branch, reviews, previous=None, reverify=False):
     if previous and previous.get("integration_base", previous.get("main")) != integration_base:
         reverify = True
     env = verify_env(n, branch, w)
+    port_context = verify_port_context(n, env)
     try:
         snap = _m_lanes.lane_snapshot(n, w, env, inputs)
         if snap:
@@ -727,7 +744,7 @@ def record_ready(inst, n, branch, reviews, previous=None, reverify=False):
                 print(_m_guard.redact('verify warning: ' + warning, _m_guard.never_terms(n)))
     except (ValueError, OSError, UnicodeError, RecursionError) as error:
         return None, ['verify lanes invalid: ' + _m_guard.redact(str(error), _m_guard.never_terms(n))]
-    reuse = None if reverify or snap or (previous or {}).get('verify_lanes') is not None else verify_reuse(n, branch, previous, head, main, verify, w["path"], inputs)
+    reuse = None if reverify or snap or (previous or {}).get('verify_lanes') is not None else verify_reuse(n, branch, previous, head, main, verify, w["path"], inputs, port_context)
     # The CLI holds brain_lock here. Do not sweep an operator's dirty .gitignore into
     # the worker hand-back commit just because we added the local-output exclusion.
     gi = inst.root / ".gitignore"
@@ -745,6 +762,7 @@ def record_ready(inst, n, branch, reviews, previous=None, reverify=False):
         return {"version": 1, "node": n["id"], "branch": branch, "head": head, "main": main,
                 "integration_base": integration_base, "verify_command": verify, "verify_result": 0, "verified_head": base, "verify_reused": True,
                 "inputs": inputs, "input_files_ref": input_ref, "verify_log": previous.get("verify_log"), "rehearsal": rehearsal,
+                "verify_port_context": port_context,
                 "review_rounds": reviews, "checked_at": _m_jobs.stamp(inst)}, []
     _m_instance.unlock()  # verification belongs to this worker, not the instance-wide lock
     lane_evidence = run_lanes(inst, n, branch, w, env, snap, previous, head, main, inputs, reverify) if snap else None
@@ -783,6 +801,7 @@ def record_ready(inst, n, branch, reviews, previous=None, reverify=False):
     packet = {"version": 1, "node": n["id"], "branch": branch, "head": head, "main": main,
               "integration_base": integration_base, "verify_command": verify, "verify_result": result, "verify_log": log_path, "verified_head": head,
               "inputs": inputs, "input_files_ref": input_ref, "review_rounds": reviews, "checked_at": _m_jobs.stamp(inst), "rehearsal": rehearsal}
+    packet['verify_port_context'] = port_context
     if lane_evidence:
         packet.update(lane_evidence)
         show_lanes(n, packet)
