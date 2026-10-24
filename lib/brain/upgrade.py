@@ -23,6 +23,10 @@ def cached_origin_ref(core):
 
 def core_version(core, ref=None, now=None):
     """Installed identity and ancestry against local origin objects only; never refresh the cache."""
+    top = _m_common.git("rev-parse", "--show-toplevel", cwd=core)
+    if top.returncode or Path(top.stdout.strip()).resolve() != Path(core).resolve():
+        return {"sha": None, "date": None, "ref": ref or "refs/remotes/origin/main", "behind": None,
+                "status": "unknown", "cache_age_seconds": None, "reason": "installed core Git identity unavailable"}
     ref = ref or cached_origin_ref(core)
     if (not isinstance(ref, str) or not ref.startswith("refs/remotes/origin/") or
             _m_common.git("check-ref-format", ref, cwd=core).returncode):
@@ -60,7 +64,7 @@ def core_version(core, ref=None, now=None):
 def cmd_version(a):
     core = _m_common.CORE
     root = _m_nodes.try_find_root()
-    if root and (root / "core" / ".git").exists():
+    if root and (root / "core").is_dir():
         core = root / "core"
     info = core_version(core, ref=a.ref)
     if a.json:
@@ -209,8 +213,22 @@ def open_jobs_anywhere(inst):
         if rows is None:
             out.append((n["id"], "unreadable job ledger"))
         out += [(n["id"], r["Job"]) for r in rows or [] if not r["Ended"]]
-        out += [(n["id"], f"worktree {b}") for b, w in n["local"].get("worktrees", {}).items()
-                if isinstance(w, dict) and w.get("path") and Path(w["path"]).exists()]
+        worktrees = n["local"].get("worktrees", {})
+        if not isinstance(worktrees, dict):
+            out.append((n["id"], "unreadable worktree inventory"))
+            continue
+        for branch, worktree in worktrees.items():
+            if not isinstance(worktree, dict) or not isinstance(worktree.get("path"), str) or not worktree["path"]:
+                out.append((n["id"], f"unreadable worktree {branch}"))
+                continue
+            try:
+                Path(worktree["path"]).stat()
+            except FileNotFoundError:
+                continue
+            except (OSError, ValueError):
+                out.append((n["id"], f"unreadable worktree {branch}"))
+            else:
+                out.append((n["id"], f"worktree {branch}"))
     return out
 
 

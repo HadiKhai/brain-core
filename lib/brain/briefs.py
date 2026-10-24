@@ -265,9 +265,9 @@ def cmd_brief(a):
     task_path = Path(a.task_file).expanduser().resolve() if a.task_file else None
     if task_path:
         _m_guard.no_terms_in(n, str(task_path), "task file path")
-    task = task_path.read_text() if task_path else (a.task or "<!-- the task, what done means, "
-                                                                          "where outputs go -->")
-    inputs += [("Task", task), ("Why separate", a.why_separate or ""),
+    task_input = task_path.read_text() if task_path else (a.task or "")
+    task = task_input or "<!-- the task, what done means, where outputs go -->"
+    inputs += [("Task", task_input), ("Why separate", a.why_separate or ""),
                ("Limits", "\n".join(_m_knowledge.limits_of(n)))]
     if a.small:
         from . import messages as _m_messages

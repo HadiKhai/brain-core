@@ -172,12 +172,29 @@ class R2VersionAndUpgrade(Scenario):
 
     def test_version_command_reports_installed_identity_as_json(self):
         r = self.init("sample")
+        copied = json.loads(self.b(r, "version", "--json"))
+        self.assertIsNone(copied["sha"])  # A source copy must never report its enclosing instance's SHA.
+        self.git("init", "-q", "-b", "main", cwd=r / "core")
+        self.git("commit", "--allow-empty", "-qm", "Synthetic installed core", cwd=r / "core")
         info = json.loads(self.b(r, "version", "--json"))
-        self.assertEqual(info["sha"], self.git("rev-parse", "HEAD", cwd=CORE).strip())
+        self.assertEqual(info["sha"], self.git("rev-parse", "HEAD", cwd=r / "core").strip())
         self.assertRegex(info["date"], r"^\d{4}-\d{2}-\d{2}T")
         self.assertTrue(info["ref"].startswith("refs/remotes/origin/"))
         self.assertIn("cache_age_seconds", info)
         self.assertIn("cache age:", self.b(r, "version"))
+
+    def test_m7_malformed_worktree_records_are_unknown_busy(self):
+        m = self.module()
+        inst = mock.Mock()
+        for worktrees in ({"job": None}, {"job": {}}, ["damaged"]):
+            inst.nodes.return_value = [{"id": "sample", "local": {"worktrees": worktrees}}]
+            with mock.patch.object(m, "read_jobs", return_value=[]):
+                busy = m.open_jobs_anywhere(inst)
+            self.assertTrue(busy)
+            self.assertIn("unreadable", str(busy))
+        inst.nodes.return_value = [{"id": "sample", "local": {"worktrees": {"job": {"path": str(self.tmp)}}}}]
+        with mock.patch.object(m, "read_jobs", return_value=[]), mock.patch.object(Path, "stat", side_effect=PermissionError):
+            self.assertIn("unreadable", str(m.open_jobs_anywhere(inst)))
 
     def test_m7_busy_and_unreadable_upgrade_refuse_before_mutation(self):
         m = self.module()

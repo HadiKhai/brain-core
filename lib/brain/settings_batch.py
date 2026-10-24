@@ -48,6 +48,16 @@ def plan_settings_batch(inst, operations):
                 n["fm"] = fm
                 n["external"] = fm.get("home", "here") not in ("here", "none", "")
             n["local"] = inst.local_of(nid)
+            n["info"] = {**n["fm"], **n["local"]}
+            home = n["fm"].get("home", "here")
+            if home == "here":
+                n["home_path"] = n["dir"]
+            elif home in ("none", ""):
+                n["home_path"] = None
+            elif home == "external":
+                n["home_path"] = Path(n["local"]["home"]).expanduser() if n["local"].get("home") else None
+            else:
+                n["home_path"] = Path(home).expanduser()
         else:
             if any(isinstance(operation.get(key), str) and any(c in operation[key] for c in "\r\n")
                    for key in ("id", "when", "brief")):
@@ -67,6 +77,9 @@ def plan_settings_batch(inst, operations):
 
 def publish_settings_batch(inst, planned, count):
     """Retain a private recovery packet on publication failures; never repair operator data."""
+    planned = {path: text for path, text in planned.items() if not path.exists() or path.read_text() != text}
+    if not planned:
+        return None
     shared = [path for path in planned if ".brain" not in path.relative_to(inst.root).parts]
     for path in planned:
         _m_common.safe_target(path)
