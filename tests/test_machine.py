@@ -301,6 +301,22 @@ class MachineCare(Scenario):
         for root in roots:
             self.b(root, "set", "root", "home=" + str(home))
         events = self.tmp / "events.jsonl"
+        child = self.tmp / "barrier_child.py"
+        child.write_text(r"""import json, sys, time
+from pathlib import Path
+events, barrier, i = Path(sys.argv[1]), Path(sys.argv[2]), int(sys.argv[3])
+with events.open('a') as f:
+    f.write(json.dumps(['start', i, time.monotonic()]) + '\n')
+(barrier / ('started-' + str(i))).touch()
+deadline = time.monotonic() + 30
+while not (barrier / ('release-' + str(i))).exists():
+    if time.monotonic() >= deadline:
+        raise SystemExit('barrier timeout: runner ' + str(i) + ' was not released')
+    time.sleep(.01)
+with events.open('a') as f:
+    f.write(json.dumps(['end', i, time.monotonic()]) + '\n')
+raise SystemExit(i)
+""")
         script = self.tmp / "runner.py"
         script.write_text(r"""import core_loader, json, os, shlex, sys, time
 from pathlib import Path
@@ -309,29 +325,59 @@ m.MACHINE_RETRY = .01
 m.machine_limit = lambda p: int(sys.argv[5])
 root, events, i = sys.argv[2:5]
 inst = m.Instance(Path(root))
-code = ('import json, time; f=open(' + repr(events) + ', "a"); '
-        'f.write(json.dumps(["start", ' + i + ', time.monotonic()])+"\\n"); f.flush(); '
-        'time.sleep(.3); f.write(json.dumps(["end", ' + i + ', time.monotonic()])+"\\n"); f.flush(); '
-        'raise SystemExit(' + i + ')')
-command = shlex.quote(sys.executable) + ' -c ' + shlex.quote(code)
+command = ' '.join(shlex.quote(arg) for arg in
+                   [sys.executable, sys.argv[6], events, sys.argv[7], i])
 result, log = m.run_verify(inst, inst.node('root'), 'fixture', command, {'path': root}, dict(os.environ))
 raise SystemExit(result)
 """)
         for limit in (1, 2):
             events.write_text("")
+            barrier = self.tmp / ('barrier-' + str(limit))
+            barrier.mkdir()
             processes = []
+
+            def wait_for(condition, message):
+                deadline = time.monotonic() + 10
+                while time.monotonic() < deadline:
+                    if condition():
+                        return
+                    time.sleep(.01)
+                self.fail('barrier timeout: ' + message + '; runner statuses: ' +
+                          repr([p.poll() for p in processes]))
+
+            def queue_rows():
+                with m.machine_queue() as q:
+                    return list(q.rows)
+
             try:
                 for i, root in enumerate(roots):
                     processes.append(subprocess.Popen([sys.executable, str(script), str(CORE / "bin/brain"),
-                        str(root), str(events), str(i), str(limit)], env=self.env,
+                        str(root), str(events), str(i), str(limit), str(child), str(barrier)], env=self.env,
+                        start_new_session=True,
                         stdout=subprocess.DEVNULL, stderr=subprocess.PIPE))
-                    deadline = time.monotonic() + 5
-                    while time.monotonic() < deadline:
-                        with m.machine_queue() as q:
-                            if len(q.rows) >= i + 1:
-                                break
-                        time.sleep(.002)
-                results = [p.wait(timeout=10) for p in processes]
+                    wait_for(lambda: len(queue_rows()) >= i + 1,
+                             'runner ' + str(i) + ' did not join the durable queue')
+                    if i < limit:
+                        wait_for(lambda: (barrier / ('started-' + str(i))).exists(),
+                                 'available slot ' + str(i) + ' was not admitted')
+
+                # Admitted children cannot finish until released. This observes the
+                # actual overlap and the held third runner without a timing window.
+                self.assertEqual([r['state'] for r in queue_rows()],
+                                 ['running'] * limit + ['queued'] * (3 - limit))
+                self.assertEqual(sorted(p.name for p in barrier.glob('started-*')),
+                                 ['started-' + str(i) for i in range(limit)])
+                held = [json.loads(line) for line in events.read_text().splitlines()]
+                self.assertEqual([row[:2] for row in held],
+                                 [['start', i] for i in range(limit)])
+                self.assertTrue(all(p.poll() is None for p in processes))
+
+                results = []
+                for i, p in enumerate(processes):
+                    wait_for(lambda: (barrier / ('started-' + str(i))).exists(),
+                             'queued runner ' + str(i) + ' was not admitted after release')
+                    (barrier / ('release-' + str(i))).touch()
+                    results.append(p.wait(timeout=10))
                 errors = [p.stderr.read().decode() for p in processes]
                 self.assertEqual(results, [0, 1, 2], errors)
                 rows = [json.loads(line) for line in events.read_text().splitlines()]
@@ -345,9 +391,13 @@ raise SystemExit(result)
                 self.assertEqual(peak, limit)
                 self.assertEqual(active, 0)
             finally:
+                for i in range(len(processes)):
+                    (barrier / ('release-' + str(i))).touch()
                 for p in processes:
-                    if p.poll() is None:
-                        p.kill()
+                    # Each runner owns its session, including the verify shell and
+                    # child. Failed assertions must not leave a barrier waiter alive.
+                    with contextlib.suppress(ProcessLookupError):
+                        os.killpg(p.pid, 9)
                     p.wait()
                     p.stderr.close()
 

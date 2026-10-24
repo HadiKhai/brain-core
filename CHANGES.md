@@ -89,6 +89,7 @@ For agents:
   (rehearse.py:877).
 - Clone comparison retains the harness HOME identity gap for the usage-reading
   probe; it does not establish equivalent usage-reading observations.
+- test: cross-process limit test uses a barrier
 
 After upgrading:
 - These parked jobs, deferrals and evidence gaps remain open. Release 2 follows
