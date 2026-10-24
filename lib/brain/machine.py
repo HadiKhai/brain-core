@@ -821,6 +821,12 @@ def cmd_heavy(a):
 # ---------- machine subscriptions ----------
 def cmd_machine(a):
     inst = _m_nodes.load()
+    if a.action == 'wake-setup':
+        if not getattr(a, 'id', None):
+            _m_common.die('machine wake-setup requires a target node')
+        from . import hosts as _m_hosts
+        print(json.dumps(_m_hosts.wake_setup_plan(inst, inst.node(a.id)), indent=2))
+        return
     if a.action == "sample":
         machine_sample_once(inst)
         from . import watch as _m_watch

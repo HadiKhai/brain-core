@@ -260,7 +260,7 @@ def watch_items(inst, n):
                             'kind': item['kind'], 'text': 'Unread core change; run brain changes'})
             continue
         # Keep identity separate from changing display (readiness, age, counts).
-        identity = (item.get('episode') if item['kind'] in ('machine-alert', 'job-stall') else
+        identity = (item.get('episode') if item.get('episode') else
                     [item.get('job'), item.get('state'), watch_text_identity(item)] if item.get('job') else
                     watch_text_identity(item))
         if item['kind'] == 'rotate':

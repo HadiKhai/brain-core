@@ -6,6 +6,7 @@ import os
 import re
 
 from . import common as _m_common
+from . import guard as _m_guard
 from . import history as _m_history
 from . import jobs as _m_jobs
 from . import machine as _m_machine
@@ -84,14 +85,20 @@ def usage_restart_item(inst, n, row):
     budget = (_m_spend.job_budget(n, row) or {}).get('tokens')
     with lifecycle_store(inst) as data:
         record = data['usage'].get(key, {})
+        if not isinstance(record, dict):
+            raise ValueError('invalid restart usage receipt')
         baseline = record.get('baseline', {'compactions': 0, 'processed': 0})
         if (not isinstance(baseline, dict) or any(type(baseline.get(k)) is not int or baseline[k] < 0
                                                for k in counts)):
             raise ValueError('invalid restart usage baseline')
+        if any(counts[k] < baseline[k] for k in counts):
+            raise ValueError('restart usage counters regressed; retain the baseline for review')
         delta = {k: max(0, counts[k] - baseline[k]) for k in counts}
         if delta['compactions'] < 3 and (not budget or delta['processed'] < 2 * budget):
             return None
         episode = record.get('episode')
+        if episode is not None and not re.fullmatch(r'[0-9a-f]{24}', str(episode)):
+            raise ValueError('invalid restart episode')
         if not episode:
             if len(data['usage']) >= LIFECYCLE_LIMIT and key not in data['usage']:
                 raise ValueError('restart receipt bound reached')
@@ -143,6 +150,11 @@ def reconcile_requests(inst, n, lines, data):
         if (not isinstance(record, dict) or not re.fullmatch(r'[0-9a-f]{24}', str(record.get('id'))) or
                 type(record.get('answered')) is not bool):
             raise ValueError('invalid inbox episode receipt')
+        if record['answered'] and not any(isinstance(a, dict) and a.get('id') == record['id']
+                                          and a.get('source_id') == key and a.get('node') == n['id']
+                                          and isinstance(a.get('answer'), str) and a['answer'].strip()
+                                          for a in data['answers']):
+            raise ValueError('answered receipt has no retained answer')
         current[key] = record
     if current or n['id'] in data['inbox']:
         data['inbox'][n['id']] = current
@@ -180,16 +192,17 @@ def resolve_lifecycle_id(items, item_id):
 def record_answer(inst, n, line, item_id, text):
     if not text.strip() or len(text.encode()) > 8192:
         _m_common.die('answer must contain text and be at most 8192 bytes')
+    _m_guard.no_terms_in(n, text, 'the recorded answer')
     with lifecycle_store(inst) as data:
         if len(data['answers']) >= LIFECYCLE_LIMIT:
             _m_common.die('answer history bound reached; retain it for coordinator review')
         key = inbox_source_id(n, line)
+        source = n['dir'] / 'inbox.md'
+        if not source.is_file() or line not in source.read_text().splitlines():
+            _m_common.die('request source changed; inspect the current inbox')
         current = data['inbox'].get(n['id'], {}).get(key)
         # Read-only lookups can address a first occurrence before a reporting scan.
         if current is None:
-            source = n['dir'] / 'inbox.md'
-            if not source.is_file() or line not in source.read_text().splitlines():
-                _m_common.die('request source changed; inspect the current inbox')
             current = {'id': request_episode_id(inst, n, line), 'answered': False}
             data['inbox'].setdefault(n['id'], {})[key] = current
         if current.get('id') != item_id or current.get('answered'):
@@ -211,11 +224,16 @@ def reminder_reconcile(inst, n, items, data):
     current, out = {}, []
     for item in items:
         key = reminder_key(item)
-        record = previous.get(key) or {'id': os.urandom(12).hex(), 'at': inst.now()}
+        record = previous[key] if key in previous else {'id': os.urandom(12).hex(), 'at': inst.now()}
         if not isinstance(record, dict) or not re.fullmatch(r'[0-9a-f]{24}', str(record.get('id'))):
             raise ValueError('invalid reminder episode receipt')
         current[key] = record
-        out.append({**item, 'id': record['id'], **({'handling': record['handling']} if 'handling' in record else {})})
+        handling = record.get('handling')
+        if handling is not None and not isinstance(handling, dict):
+            raise ValueError('invalid reminder handling receipt')
+        safe = {k: _m_guard.redact(v, _m_guard.never_terms(n)) if isinstance(v, str) else v
+                for k, v in handling.items()} if handling else None
+        out.append({**item, 'id': record['id'], **({'handling': safe} if safe else {})})
     if current or n['id'] in data['reminders']:
         data['reminders'][n['id']] = current
     return out
@@ -256,6 +274,7 @@ def record_reminder(inst, n, items, item_id, action, reason, until=None, resume_
     if action == 'ack' and (not isinstance(resume_condition, str) or not resume_condition.strip()
                             or len(resume_condition.encode()) > 2048):
         _m_common.die('acknowledgement requires a nonempty resume condition of at most 2048 bytes')
+    _m_guard.no_terms_in(n, reason + ' ' + (resume_condition or ''), 'the reminder handling reason')
     if action == 'defer' or until is not None:
         expiry = inst.parse_time(until)
         if not expiry or not re.search(r'(?:Z|[+-]\d\d:?\d\d)\s*$', until or '') or expiry <= inst.now_dt():

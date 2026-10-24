@@ -22,6 +22,7 @@ from . import nodes as _m_nodes
 from . import proposals as _m_proposals
 from . import schedules as _m_schedules
 from . import rotation as _m_rotation
+from . import reminders as _m_reminders
 from . import spend as _m_spend
 from . import transitions as _m_transitions
 from . import upgrade as _m_upgrade
@@ -319,7 +320,7 @@ def machine_transition_line(n, line):
                              r'\[machine episode [0-9a-f]{24} (?:open|close)\]', line) is not None)
 
 
-def inbox_lines(n):
+def inbox_lines(n, readonly=False):
     f = n["dir"] / "inbox.md"
     # Filter the historical record on read. Never rewrite or discard episode history.
     lines = [l for l in f.read_text().splitlines() if l.startswith("- ")
@@ -328,7 +329,8 @@ def inbox_lines(n):
     # source until it can be appended; reading due/inbox retries delivery without waiting.
     queue = hook_question_queue(n)
     if not queue.exists() or _m_common.outward_links(_m_instance.instance_above(n["dir"])):
-        return lines
+        root = _m_instance.instance_above(n['dir'])
+        return _m_reminders.request_lines(_m_instance.Instance(root), n, lines, readonly=readonly)
     for pending in sorted(queue.glob("*.json")):
         try:
             value = json.loads(pending.read_text())
@@ -337,12 +339,13 @@ def inbox_lines(n):
                 continue
             if not any(marker in old for old in lines):
                 lines.append(line.rstrip("\n"))
-            if not _m_common.outward_links(_m_instance.instance_above(n["dir"])):
+            if not readonly and not _m_common.outward_links(_m_instance.instance_above(n["dir"])):
                 _m_transitions.inbox_append(n["dir"], line, marker, nonblocking=True)
                 pending.unlink()
         except (OSError, ValueError, KeyError, TypeError, SystemExit):
             continue
-    return lines
+    root = _m_instance.instance_above(n['dir'])
+    return _m_reminders.request_lines(_m_instance.Instance(root), n, lines, readonly=readonly)
 
 
 # ---------- coordinator's mechanical queue and generated status ----------
@@ -467,7 +470,8 @@ def runnable_work(n, rows):
     return tasks
 
 
-def due_items(inst, n, evidence=None, include_stale=True, include_ready=True, include_advice=True):
+def due_items(inst, n, evidence=None, include_stale=True, include_ready=True, include_advice=True,
+              include_handled=False):
     if n["archived"]:
         return []
     evidence = evidence or due_evidence(inst, n)
@@ -492,7 +496,10 @@ def due_items(inst, n, evidence=None, include_stale=True, include_ready=True, in
             add("blocked-overdue", blocked["text"], **blocked_metadata(inst, n, "blocked-overdue", blocked["text"]))
     if missing_preview(n, state):
         add("missing-preview", "code node has merged jobs but no recorded preview; run a local preview and screenshot tour, "
-            "then record preview=<URL/path> and preview_tour=<path> with brain set")
+            "then record preview=<URL/path> and preview_tour=<path> with brain set",
+            episode=_m_jobs.digest([sorted(_m_jobs.job_key(r) for r in state['jobs'] or []
+                                          if r.get('Ended') and r.get('Outcome') == 'merged'),
+                                    sorted((b, w.get('tip')) for b, w in state['worktrees'].items() if w.get('merged'))]))
     if state["jobs"] is None:
         add("ledger", "job-ledger.md is a legacy file; reconcile jobs without overwriting it")
     unsettled = _m_jobs.unsettled_jobs(state["jobs"])
@@ -528,11 +535,24 @@ def due_items(inst, n, evidence=None, include_stale=True, include_ready=True, in
                                            if _m_briefs.import_job(branch) else signal["state"])
             add("handback", f"{branch}: {detail}; review report {signal.get('report', '')} and record the next step",
                 job=_m_jobs.job_key(row), state=signal["state"], ready=bool(ready and ready["ready"]),
-                reasons=ready["reasons"] if ready else [])
+                reasons=ready["reasons"] if ready else signal.get('ready_reasons', []),
+                episode=signal.get('wake_id') or _m_jobs.digest([_m_jobs.job_key(row), {
+                    k: signal.get(k) for k in ('state', 'summary', 'question', 'report', 'lessons', 'restart')}]),
+                protected=bool(signal.get('restart') or signal.get('question') or
+                               any(f'from worker {branch}: blocked:' in line and '<!-- handback:' in line
+                                   for line in state['inbox'])))
         elif not signal and _m_jobs.handback_file(n, row).exists():
             add("invalid-handback", f"{branch}: unreadable worker signal; ask the worker to write it again", job=_m_jobs.job_key(row))
         if not _m_briefs.import_job(branch) and (not w or not w["exists"]):
             add("missing-worktree", f"{branch}: open ledger job has no worktree on this machine", job=_m_jobs.job_key(row))
+        if not any(i['kind'] == 'restart' and i.get('job') == _m_jobs.job_key(row) for i in items):
+            try:
+                restart = _m_reminders.usage_restart_item(inst, n, row)
+            except (OSError, ValueError):
+                restart = {'node': n['id'], 'kind': 'restart-repair', 'job': _m_jobs.job_key(row),
+                           'text': branch + ': restart usage receipt unreadable; retain it for repair'}
+            if restart:
+                add(restart['kind'], restart['text'], **{k: v for k, v in restart.items() if k not in ('kind', 'text', 'node')})
     for branch, w in state["worktrees"].items():
         if not _m_jobs.open_job(state["jobs"] or [], branch):
             add("unrecorded-worktree", f"{branch}: worktree has no open ledger job; reconcile the records")
@@ -555,7 +575,7 @@ def due_items(inst, n, evidence=None, include_stale=True, include_ready=True, in
         add("stale-status", lag + "; update judgement sections, then brain status <node> --refresh")
     from . import watch as _m_watch
     items.extend(_m_watch.watch_job_stalls(inst, n))
-    return items
+    return _m_reminders.reminder_items(inst, n, items, include_handled=include_handled)
 
 
 def changes_due(inst, n):
@@ -590,6 +610,20 @@ def machine_due_items(inst, nodes, state, items):
 def cmd_due(a):
     inst = _m_nodes.load()
     nodes = [inst.node(a.id)] if a.id else inst.nodes()
+    defer, ack = getattr(a, 'defer', None), getattr(a, 'ack', None)
+    if defer or ack:
+        if defer and ack:
+            _m_common.die('choose one reminder operation')
+        candidates = [i for n in nodes for i in due_items(inst, n, include_handled=True)]
+        item_id = defer[0] if defer else ack
+        target = _m_reminders.resolve_lifecycle_id(candidates, item_id)
+        n = inst.node(target['node'])
+        current = [i for i in candidates if i['node'] == n['id']]
+        _m_reminders.record_reminder(inst, n, current, target['id'], 'defer' if defer else 'ack',
+                                     getattr(a, 'reason', None), until=defer[1] if defer else getattr(a, 'until', None),
+                                     resume_condition=getattr(a, 'resume', None))
+        print(f"{n['id']}: reminder {target['id']} {'deferred' if defer else 'acknowledged'}; underlying state retained")
+        return
     if getattr(a, 'since_wake', False):
         from . import watch as _m_watch
         try:
@@ -636,7 +670,7 @@ def cmd_due(a):
                 pass
     _m_docker_leftovers.docker_leftover_nodes(inst, nodes)
     state = _m_machine.machine_state(inst)
-    items = [item for n in nodes for item in due_items(inst, n) + changes_due(inst, n)]
+    items = [item for n in nodes for item in due_items(inst, n, include_handled=getattr(a, 'handled', False)) + changes_due(inst, n)]
     wake_seen = set()
     for n in nodes:
         target, _ = _m_hosts.wake_target(inst, n)
@@ -676,7 +710,9 @@ def cmd_due(a):
         print(json.dumps(items, indent=2))
     else:
         for item in items:
-            print(f"{item['node']}: {item['kind']}: {item['text']}" +
+            print(f"{item['node']}: {item['kind']}: " + (f"[{item['id'][:8]}] " if item.get('id') else '') + item['text'] +
+                  (f" (handled: {item['handling']['reason']}; resume: {item['handling'].get('resume_condition') or item['handling'].get('until')})"
+                   if item.get('handling') and _m_reminders.reminder_handled(inst, item) else '') +
                   (f" (escalated: {item['age_hours']:g}h old, over 48h)" if item.get("escalated") else ""))
 
 
@@ -684,7 +720,8 @@ def missing_preview(n, state):
     code = code_node(n)
     merged = any(r["Ended"] and r["Outcome"] == "merged" for r in state["jobs"] or []) or \
         any(w["merged"] for w in state["worktrees"].values())
-    return code and merged and not (n["local"].get("preview", "").strip() or n["fm"].get("preview_url", "").strip())
+    recorded = [n['local'].get('preview', ''), n['fm'].get('preview_url', '')]
+    return code and merged and not any(str(value).strip().casefold() not in ('', 'none') for value in recorded)
 
 
 def display_time(inst, value):
@@ -715,14 +752,17 @@ def status_facts(inst, n, state, known_merges):
     if state["jobs"] is None:
         lines += ["- Legacy ledger: running jobs unknown."]
     lines += ["", f"Closed jobs with unsettled threads: {len(_m_jobs.unsettled_jobs(state['jobs']))}"]
-    due = due_items(inst, n, (state, "", ""), include_stale=False, include_advice=False)
+    due = due_items(inst, n, (state, "", ""), include_stale=False, include_advice=False, include_handled=True)
     lessons = sorted([r for r in state["jobs"] or [] if r["Ended"] and r["Outcome"] == "merged"], key=merge_time, reverse=True)
     lines += ["", "Lesson outcomes (merged jobs):"]
     lines += [_m_guard.redact(f"- {r['Job']}: " + (r.get("Lessons") or
                      ("missing; coordinator must record outcome" if r.get("Lesson check") == "required" else
                       "legacy; outcome not required")), _m_guard.never_terms(n)) for r in lessons] or ["- None."]
     lines += ["", "Finished jobs awaiting coordinator:"]
-    lines += ["- " + i["text"] for i in due if i["kind"] in ("handback", "restart")] or ["- None."]
+    lines += ["- " + i["text"] + (" (acknowledged; reason: " + i['handling']['reason'] +
+              '; resume: ' + (i['handling'].get('resume_condition') or i['handling'].get('until') or '') + ')'
+              if _m_reminders.reminder_handled(inst, i) else '')
+              for i in due if i["kind"] in ("handback", "restart")] or ["- None."]
     forecasts = _m_jobs.forecast_lines(state["jobs"] or [])
     if forecasts:
         lines += ["", "Forecasts (merged ledger durations):"] + ["- " + _m_guard.redact(s, _m_guard.never_terms(n)) for s in forecasts]
@@ -734,7 +774,7 @@ def status_facts(inst, n, state, known_merges):
     if rules or roles or items:
         lines += ["", f"Imported, unreviewed (inactive): {rules} rule file(s), {roles} role(s), {items} proposed item(s)."]
     human = [i for i in attention_items(inst, [n]) if i[1] not in ("stale",)]
-    lines += ["", f"Due: {sum(not i.get('informational') for i in due)} · Needs the human (attention sources, excluding stale status): {len(human)}"]
+    lines += ["", f"Due: {sum(not i.get('informational') and not _m_reminders.reminder_handled(inst, i) for i in due)} · Needs the human (attention sources, excluding stale status): {len(human)}"]
     compact, count = [], 0
     for line in lines:
         if line.startswith("- "):
@@ -789,7 +829,7 @@ def refresh_status(inst, n):
     _m_common.touch(f)
 
 
-def inbox_items(inst, nodes=None, reporter="root"):
+def inbox_items(inst, nodes=None, reporter="root", readonly=False, requests_only=False):
     """The existing UI attention sources, with identities independent of line positions or other items.
     Read-only; until reported, first_seen comes from the source's git introduction (mtime if uncommitted)."""
     saved = inst.root / ".brain" / "inbox-seen.json"
@@ -804,11 +844,20 @@ def inbox_items(inst, nodes=None, reporter="root"):
     by_id = {n["id"]: n for n in (nodes if nodes is not None else inst.nodes())}
     out, ids = [], set()
     # The live attention view retains advice; delivery queues filter it separately.
-    attention = [item for item in attention_items(inst, list(by_id.values())) if item[1] != "job"]
+    if requests_only:
+        attention = []
+        for n in by_id.values():
+            if n['archived'] or paused(n):
+                continue
+            attention += [(n['id'], 'blocked-overdue' if b['escalated'] else 'blocked', b['text'])
+                          for b in blocked_entries(inst, n)]
+            attention += [(n['id'], 'inbox', 'inbox: ' + line[2:]) for line in inbox_lines(n, readonly=True)]
+    else:
+        attention = [item for item in attention_items(inst, list(by_id.values()), readonly=readonly) if item[1] != "job"]
     # Explicit node inboxes are coordinator views. Root's inbox is the human rollup;
     # root-owned job advice remains available in due, never in that human rollup.
     owner = by_id.get(reporter)
-    if reporter != "root" and owner and not owner["archived"] and not paused(owner):
+    if not requests_only and reporter != "root" and owner and not owner["archived"] and not paused(owner):
         attention += [(reporter, "job", text) for text in runaway_jobs(inst, owner)]
     for nid, kind, text in attention:
         identity = text if kind in ("blocked", "blocked-overdue", "inbox", "core-update") else \
@@ -816,12 +865,19 @@ def inbox_items(inst, nodes=None, reporter="root"):
         if kind == "machine-alert":
             identity = (_m_machine.machine_episode_due(inst) or {}).get("episode", kind)
         key = _m_jobs.digest([nid, kind, " ".join(identity.split())])
+        if kind == 'inbox':
+            key = _m_reminders.request_episode_id(inst, by_id[nid], '- ' + text.removeprefix('inbox: '))
         if key in ids:
             continue
         ids.add(key)
         n = by_id[nid]
         record = seen.get(key, {})
         first = record.get("first_seen") if isinstance(record, dict) else None
+        if kind == 'inbox':
+            match = re.match(r'inbox: (.*?) from ', text)
+            stamp = inst.parse_time(match[1]) if match else None
+            if stamp:
+                first = stamp.isoformat(timespec='seconds')
         if not first:
             source = n["dir"] / ("inbox.md" if kind == "inbox" else "status.md" if kind in ("blocked", "blocked-overdue", "stale") else "node.md")
             if kind == "import-review":
@@ -839,9 +895,11 @@ def inbox_items(inst, nodes=None, reporter="root"):
                 source.stat().st_mtime if source.exists() else inst.now_dt().timestamp(), inst.zone()).isoformat(timespec="seconds")
         out.append({"id": key, "node": nid, "kind": kind, "text": _m_guard.redact(text, _m_guard.never_terms(n)),
                     "first_seen": first, "reported": bool(record.get("reported_at")) if isinstance(record, dict) else False,
+                    'age_days': round(max(0, elapsed(inst.parse_time(first), inst.now_dt()) / 86400), 2)
+                    if inst.parse_time(first) else None,
                     **({"informational": True} if kind == "job" else {}),
                     **blocked_metadata(inst, n, kind, text)})
-    return out, reporters
+    return sorted(out, key=lambda i: i['node']), reporters
 
 
 def cmd_inbox(a):
@@ -857,7 +915,12 @@ def cmd_inbox(a):
                      if p == cwd or p in cwd.parents), None)
     reporter = inst.node(a.id)["id"] if a.id else here["id"] if here else "root"
     nodes = [n for n in inst.nodes() if reporter == "root" or n["id"] == reporter or n["id"].startswith(reporter + "/")]
-    items, reporters = inbox_items(inst, nodes, reporter)
+    weekly = getattr(a, 'weekly', False)
+    if weekly and a.new:
+        _m_common.die('--weekly is read-only and cannot combine with --new')
+    items, reporters = inbox_items(inst, nodes, reporter, readonly=weekly, requests_only=weekly)
+    if weekly:
+        items = [i for i in items if i['kind'] == 'inbox' and i['age_days'] is not None and i['age_days'] >= 7]
     prefixes = shortest_ids([i["id"] for i in items])
     seen = reporters.get(reporter, {})
     if a.new:
@@ -867,8 +930,10 @@ def cmd_inbox(a):
         state = {i["id"]: {"first_seen": i["first_seen"], "reported_at": seen.get(i["id"], {}).get("reported_at") or now}
                  for i in items}
         items = fresh
+    items.sort(key=lambda i: i['node'])
     output = json.dumps(items, indent=2) + "\n" if a.json else "".join(
         f"{item['node']}: [{prefixes[item['id']]}] {item['text']}" +
+        (f" (age {item['age_days']:g}d)" if item.get('age_days') is not None else ' (age unknown)') +
         (f" (escalated: {item['age_hours']:g}h old, over 48h)" if item.get("escalated") else "") + "\n" for item in items)
     sys.stdout.write(output)
     if a.new:
@@ -878,6 +943,29 @@ def cmd_inbox(a):
         f.parent.mkdir(exist_ok=True)
         reporters[reporter] = state
         _m_common.atomic_write(f, json.dumps({"version": 2, "reporters": reporters}, indent=2) + "\n")
+
+
+def answer_inbox(inst, item_id, text):
+    items, _ = inbox_items(inst, readonly=True, requests_only=True)
+    item = _m_reminders.resolve_lifecycle_id(items, item_id)
+    if item['kind'] != 'inbox':
+        _m_common.die('this item is not an answerable inbox request')
+    n = inst.node(item['node'])
+    _m_guard.no_terms_in(n, text, 'the recorded answer')
+    line = next((line for line in inbox_lines(n, readonly=True)
+                 if _m_reminders.request_episode_id(inst, n, line) == item['id']), None)
+    if not line:
+        _m_common.die('request episode changed; inspect the current inbox')
+    try:
+        _m_reminders.record_answer(inst, n, line, item['id'], text)
+    except (OSError, ValueError):
+        _m_common.die('answer receipt could not be recorded; retain lifecycle state for repair')
+    return item['id']
+
+
+def cmd_answer(a):
+    key = answer_inbox(_m_nodes.load(), a.item_id, a.text)
+    print(f'answer recorded for {key}; source and answer history retained')
 
 
 def proposals_of(inst, nodes):
@@ -1172,7 +1260,7 @@ def runaway_jobs(inst, n):
     return out
 
 
-def attention_items(inst, nodes):
+def attention_items(inst, nodes, readonly=False):
     """[(node id, kind, text)]: what waits on the operator, node by node."""
     out = []
     if (any(n["id"] == "root" and not n["archived"] and not paused(n) for n in nodes)
@@ -1190,7 +1278,7 @@ def attention_items(inst, nodes):
                         f"{items} item(s) proposed; confirm or reject after reviewing source citations"))
         for b in blocked_entries(inst, n):
             out.append((n["id"], "blocked-overdue" if b["escalated"] else "blocked", b["text"]))
-        out += [(n["id"], "inbox", "inbox: " + l[2:]) for l in inbox_lines(n)]
+        out += [(n["id"], "inbox", "inbox: " + l[2:]) for l in inbox_lines(n, readonly=readonly)]
         out += [(n["id"], "job", text) for text in runaway_jobs(inst, n)]
         if n["id"] == "root":
             episode = _m_machine.machine_episode_due(inst)
