@@ -117,6 +117,29 @@ class InstallAndUpgrade(Scenario):
         self.assertEqual(rc.read_text().count("# brain"), 1)
         self.assertIn("home not set on this machine", self.b(bob3, "check", ok=False))
 
+    def test_m7_native_upgrade_advances_core_with_blocked_job_and_retained_worktree(self):
+        src = self.core_repo()
+        self.install("--operator", "sample", "--title", "Sample", "--tz", "UTC", "--no-usage",
+                     "--core-url", str(src), "--bin-dir", str(self.tmp / "bin"))
+        root = self.tmp / "Brain"
+        home = self.repo(self.tmp / "project")
+        self.b(root, "new", "project", "--title", "Project", "--home", str(home))
+        self.b(root, "wt", "add", "project", "parked")
+        self.b(root, "handback", "project", "--branch", "parked", "--state", "blocked",
+               "--lessons", "none: fixture")
+        ledger = root / "nodes/project/job-ledger.md"
+        before = ledger.read_bytes()
+        worktree = json.loads((root / ".brain/local.json").read_text())["nodes"]["project"]["worktrees"]["parked"]
+        (src / "README.md").write_text((src / "README.md").read_text() + "\nUPGRADED\n")
+        self.git("commit", "-qam", "Fixture core update", cwd=src)
+        head = self.git("rev-parse", "HEAD", cwd=src).strip()
+        output = self.b(root, "upgrade")
+        self.assertIn("2 open jobs/worktrees idle; not affected", output)
+        self.assertEqual(self.git("rev-parse", "HEAD", cwd=root / "core").strip(), head)
+        self.assertIn("UPGRADED", (root / "core/README.md").read_text())
+        self.assertEqual(ledger.read_bytes(), before)
+        self.assertTrue(Path(worktree["path"]).is_dir())
+
 
 
 class ReleaseNotes(Scenario):
@@ -137,8 +160,180 @@ class ReleaseNotes(Scenario):
 
 
 class R2VersionAndUpgrade(Scenario):
+    def setUp(self):
+        super().setUp()
+        patch = mock.patch.dict(os.environ, self.env)
+        patch.start()
+        self.addCleanup(patch.stop)
+
     def module(self):
         return core_loader.SourceFileLoader("r2_upgrade", str(CORE / "bin/brain")).load_module()
+
+    def upgrade_fixture(self, m):
+        root = self.repo(self.tmp / "instance", {".gitmodules": '[submodule "core"]\npath = core\n'})
+        self.repo(root / "core", {"CHANGES.md": "## 2026-01-01: Fixture\n"})
+        home = self.repo(self.tmp / "project")
+        n = {"id": "sample", "dir": root, "local": {}, "home_path": home}
+        inst = mock.Mock(root=root, local={"machine": "fixture"})
+        inst.nodes.return_value = [n]
+        return inst, n
+
+    def upgrade_attempt(self, m, inst, refused=False):
+        mutations = []
+        real_run = subprocess.run
+
+        def run(args, **kwargs):
+            if "submodule" in args:
+                mutations.append(args)
+                return subprocess.CompletedProcess(args, 0, "", "")
+            return real_run(args, **kwargs)
+
+        output = io.StringIO()
+        with mock.patch.object(m, "find_root", return_value=inst.root), \
+                mock.patch.object(m, "Instance", return_value=inst), \
+                mock.patch.object(m.subprocess, "run", side_effect=run), contextlib.redirect_stdout(output):
+            if refused:
+                with self.assertRaises(SystemExit) as error:
+                    m.cmd_upgrade(argparse.Namespace())
+                self.assertIn("requires an idle brain", str(error.exception))
+                self.assertIn("Retry brain upgrade when idle", str(error.exception))
+                self.assertEqual(mutations, [])
+                inst.commit.assert_not_called()
+                return str(error.exception)
+            m.cmd_upgrade(argparse.Namespace())
+        self.assertEqual(len(mutations), 1)
+        self.assertIn("core is up to date", output.getvalue())
+        return output.getvalue()
+
+    def lease(self, m, **updates):
+        row = {"token": "a" * 32, "kind": "heavy", "state": "running",
+               "owner": [os.getpid(), m.process_stamp(os.getpid())]}
+        row.update(updates)
+        path = m.machine_dir() / "machine-care-queue.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps([row]))
+        return path
+
+    def test_m7_inflight_admission_and_verify_lease_refuse_without_writes(self):
+        m = self.module()
+        inst, n = self.upgrade_fixture(m)
+        for kind in ("heavy", "verify"):
+            with self.subTest(kind=kind):
+                token = m.machine_wait(kind, inst, n["id"])
+                try:
+                    path = m.machine_dir() / "machine-care-queue.json"
+                    before = path.read_bytes()
+                    message = self.upgrade_attempt(m, inst, refused=True)
+                    self.assertIn(kind, message)
+                    self.assertEqual(path.read_bytes(), before)
+                finally:
+                    m.machine_release(token)
+
+    def test_m7_live_train_lock_refuses_but_released_lock_is_idle(self):
+        import fcntl
+        m = self.module()
+        inst, n = self.upgrade_fixture(m)
+        lock = n["home_path"] / ".git/brain-train.lock"
+        with lock.open("w+") as held:
+            held.write("stale text does not decide lock ownership")
+            held.flush()
+            fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            self.assertIn("train", self.upgrade_attempt(m, inst, refused=True))
+        before = lock.read_bytes()
+        self.upgrade_attempt(m, inst)
+        self.assertEqual(lock.read_bytes(), before)
+
+    def test_m7_parked_blocked_done_jobs_and_worktrees_upgrade_with_notice(self):
+        m = self.module()
+        inst, n = self.upgrade_fixture(m)
+        rows = [{**dict.fromkeys(m.JOB_COLS, ""), "Job": state, "Started": "2026-01-01 00:00 +00:00"}
+                for state in ("parked", "blocked", "done")]
+        m.write_jobs(inst, n, rows)
+        for row in rows[1:]:
+            path = m.handback_file(n, row)
+            path.parent.mkdir(exist_ok=True)
+            path.write_text(json.dumps({"job": row["Job"], "started": row["Started"], "state": row["Job"]}))
+        worktrees = n["local"]["worktrees"] = {}
+        for row in rows:
+            path = self.tmp / row["Job"]
+            path.mkdir()
+            worktrees[row["Job"]] = {"path": str(path)}
+        before = {p: p.read_bytes() for p in n["dir"].rglob("*") if p.is_file()}
+        output = self.upgrade_attempt(m, inst)
+        self.assertIn("6 open jobs/worktrees idle; not affected", output)
+        self.assertEqual({p: p.read_bytes() for p in before}, before)
+        inst.local["auto_upgrade"] = "on"
+        calls, real_run = [], subprocess.run
+
+        def run_upgrade(args, **kwargs):
+            if "upgrade" in args:
+                calls.append(args)
+                return subprocess.CompletedProcess(args, 0, output, "")
+            return real_run(args, **kwargs)
+
+        with mock.patch.object(m, "core_update", return_value=("a" * 40, "b" * 40)), \
+                mock.patch.object(m, "Instance", return_value=inst), mock.patch.object(m, "brain_lock"), \
+                mock.patch.object(m.subprocess, "run", side_effect=run_upgrade):
+            summary = m.auto_upgrade(inst)
+            self.assertIn("core-upgraded: core is up to date", summary)
+            self.assertIn("6 open jobs/worktrees idle; not affected", summary)
+        self.assertEqual(len(calls), 1)
+        self.lease(m, state="queued")
+        self.upgrade_attempt(m, inst)  # Waiting for admission is not a running holder.
+
+    def test_m7_dead_pid_and_recycled_pid_leases_are_idle_but_live_child_is_busy(self):
+        m = self.module()
+        inst, n = self.upgrade_fixture(m)
+        dead = subprocess.Popen([sys.executable, "-c", "pass"])
+        dead.wait(timeout=10)
+        path = self.lease(m, owner=[dead.pid, "departed"])
+        before = path.read_bytes()
+        self.upgrade_attempt(m, inst)
+        self.assertEqual(path.read_bytes(), before)
+        self.lease(m, owner=[os.getpid(), "different start time"])
+        self.upgrade_attempt(m, inst)
+        self.lease(m, owner=[dead.pid, "departed"], child=[os.getpid(), m.process_stamp(os.getpid())])
+        self.assertIn("heavy", self.upgrade_attempt(m, inst, refused=True))
+
+    def test_m7_unknown_admission_inventory_and_liveness_refuse(self):
+        m = self.module()
+        inst, n = self.upgrade_fixture(m)
+        path = self.lease(m)
+        for bad in ("{", "{}", '[{"state":"running"}]'):
+            path.write_text(bad)
+            self.assertIn("unreadable", self.upgrade_attempt(m, inst, refused=True))
+            self.assertEqual(path.read_text(), bad)
+        self.lease(m)
+        with mock.patch.object(m, "process_stamp", return_value="unknown"):
+            self.upgrade_attempt(m, inst, refused=True)
+        with mock.patch.object(Path, "read_text", side_effect=PermissionError):
+            self.assertTrue(m.open_jobs_anywhere(inst))
+
+    def test_m7_dangling_ledger_link_and_invalid_node_inventory_refuse(self):
+        m = self.module()
+        inst, n = self.upgrade_fixture(m)
+        (n["dir"] / m.JOBS_FILE).symlink_to(self.tmp / "missing-ledger")
+        self.assertIn("unreadable job ledger", self.upgrade_attempt(m, inst, refused=True))
+        (n["dir"] / m.JOBS_FILE).unlink()
+        n["local"] = None
+        self.assertIn("unreadable", self.upgrade_attempt(m, inst, refused=True))
+
+    def test_m7_auto_upgrade_rechecks_live_lease_after_instance_lock(self):
+        m = self.module()
+        inst, n = self.upgrade_fixture(m)
+        inst.local["auto_upgrade"] = "on"
+        case = self
+
+        class Lock:
+            def __init__(self, unused): pass
+            def __enter__(self): case.lease(m, kind="verify")
+            def __exit__(self, *exc): pass
+
+        with mock.patch.object(m, "core_update", return_value=("a" * 40, "b" * 40)), \
+                mock.patch.object(m, "Instance", return_value=inst), mock.patch.object(m, "brain_lock", Lock), \
+                mock.patch.object(m.subprocess, "run", wraps=subprocess.run) as run:
+            self.assertIsNone(m.auto_upgrade(inst))
+        self.assertFalse(any("upgrade" in c.args[0] for c in run.call_args_list))
 
     def test_m6_cached_version_never_fetches_and_labels_unknown_diverged(self):
         m = self.module()

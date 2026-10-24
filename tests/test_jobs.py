@@ -1072,16 +1072,22 @@ class Workflow(Scenario):
         self.b(r, "set", "root", "auto_upgrade=on")
         self.assertNotIn("auto_upgrade", (r / "node.md").read_text())
         self.assertNotIn("core update available", self.b(r, "inbox", "root"))  # it will happen by itself
-        # Busy: no upgrade while a job is open anywhere.
+        # Busy: a live verification lease prevents an upgrade, including with an open job.
         home = self.repo(self.tmp / "app-home")
         self.b(r, "set", "app", f"home={home}")
         self.b(r, "wt", "add", "app", "job")
-        self.assertNotIn("core-upgrade", self.b(r, "due"))
-        self.b(r, "wt", "rm", "app", "job", "--cause", "fixture")
+        m = core_loader.SourceFileLoader("brain_auto_upgrade", str(CORE / "bin/brain")).load_module()
+        with mock.patch.dict(os.environ, self.env):
+            token = m.machine_wait("verify", m.Instance(r), "app")
+            try:
+                self.assertNotIn("core-upgrade", self.b(r, "due"))
+            finally:
+                m.machine_release(token)
         out = self.b(r, "due")
-        self.assertIn("root: core-upgrade", out)  # idle: tries (this core isn't a submodule, so it fails and says so)
+        self.assertIn("root: core-upgrade", out)  # The retained idle job allows the attempt (no core submodule here).
         self.assertIn("run brain upgrade", out)
         self.assertEqual(json.loads(self.b(r, "due", "--json"))[0]["kind"], "core-upgrade")
+        self.b(r, "wt", "rm", "app", "job", "--cause", "fixture")
 
     def test_green_verify_runs_are_reused_only_while_they_still_prove_the_commit(self):
         r, home, wt = self.job()
@@ -1205,6 +1211,7 @@ class Workflow(Scenario):
                                                                 "done", "--reverify", ok=False))
         # A submodule change counts, whatever git's config hides.
         m = SourceFileLoader("brain_workflow_r1", str(CORE / "bin/brain")).load_module()
+        m.machine_dir = lambda: self.tmp / "machine"
         repo = self.repo(self.tmp / "with-sub", {"README.md": "x\n"})
         self.git("config", "diff.ignoreSubmodules", "all", cwd=repo)
         base = self.git("rev-parse", "HEAD", cwd=repo).strip()
@@ -1218,7 +1225,7 @@ class Workflow(Scenario):
         packet['verify_port_context'] = port_context
         self.assertEqual(m.verify_reuse(n, "job", packet, base, "m", "v", str(repo), "i", port_context), (base, []))  # control
         self.assertIsNone(m.verify_reuse(n, "job", packet, head, "m", "v", str(repo), "i", port_context))
-        # The idle check and the upgrade happen under one hold of the lock: a job started while it waited counts.
+        # The idle check runs after taking the instance lock: a lease acquired while waiting counts.
         self.b(r, "set", "root", "auto_upgrade=on")
         self.b(r, "wt", "rm", "a", "job", "--cause", "fixture done")  # idle, until the late job below
         inst = m.Instance(r)
@@ -1229,8 +1236,12 @@ class Workflow(Scenario):
             def __init__(lock, i): pass
             def __enter__(lock):
                 self.b(r, "wt", "add", "a", "late")  # a job created while the tick waited for the lock
+                with mock.patch.dict(os.environ, self.env):
+                    lock.token = m.machine_wait("verify", m.Instance(r), "a")
                 started.append(True)
-            def __exit__(lock, *exc): return False
+            def __exit__(lock, *exc):
+                m.machine_release(lock.token)
+                return False
         calls, real_run = [], subprocess.run
 
         def run(args, *x, **k):  # everything runs, except an upgrade, which is recorded instead
@@ -1310,9 +1321,10 @@ class Workflow(Scenario):
         self.assertIn("verify failed", finish(ok=False))
         self.assertIn("--reverify forces a verify run", self.b(r, "ready", "a", "--branch", "job", "--reverify",
                                                                 ok=False))
-        # Job state that can't be read, or a job worktree without a ledger row, is never idle.
+        # Retained worktrees are idle; job inventory that can't be read still refuses.
         m = SourceFileLoader("brain_workflow_r2", str(CORE / "bin/brain")).load_module()
-        self.assertTrue(m.open_jobs_anywhere(m.Instance(r)))
+        m.machine_dir = lambda: self.tmp / "machine"
+        self.assertEqual(m.open_jobs_anywhere(m.Instance(r)), [])
         ledger = r / "nodes/a/job-ledger.md"
         text = ledger.read_text()
         ledger.write_text(text.replace("<!-- brain:job-ledger v3 -->", "").replace("<!-- brain:job-ledger -->", ""))

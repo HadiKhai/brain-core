@@ -5,6 +5,17 @@ upgrading. `brain changes <node>` shows the entries this node's coordinator hasn
 `brain due <node>` lists them until `brain changes <node> --seen`. Entry headings are
 `## <date>: <title>`; once released, a heading never changes.
 
+## 2026-10-24: M7: Upgrade around idle retained jobs and worktrees
+
+For agents: Explicit and automatic core upgrades refuse live heavy/verify admission
+holders and held repository train locks, plus unreadable inventory. Parked or blocked
+jobs and retained worktrees no longer prevent upgrades; a one-line notice counts
+idle open jobs/worktrees. Dead or recycled-PID admission leases are idle and remain
+untouched.
+
+After upgrading: No migration. Retry after in-flight work stops; idle jobs and
+worktrees can stay in place. Admission and lock ownership rules are unchanged.
+
 ## 2026-10-24: Namespace reserved worktree ports in child environments
 
 rehearsal evidence waived (release 1 waiver pattern; rehearse sandbox self-check refuses)

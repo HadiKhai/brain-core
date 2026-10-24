@@ -3,6 +3,7 @@ import json
 import os
 import re
 import subprocess
+import stat
 import sys
 import time
 from pathlib import Path
@@ -12,6 +13,7 @@ from . import guard as _m_guard
 from . import history as _m_history
 from . import instance as _m_instance
 from . import jobs as _m_jobs
+from . import machine as _m_machine
 from . import nodes as _m_nodes
 from . import usage as _m_usage
 
@@ -107,13 +109,16 @@ def cmd_upgrade(a):
     gm = root / ".gitmodules"
     if not gm.exists() or "path = core" not in gm.read_text():
         _m_common.die("core/ isn't a git submodule here; reinstall with install.sh, or replace core/ by hand")
+    idle = []
     try:
         inst = _m_instance.Instance(root)
-        busy = open_jobs_anywhere(inst)
+        busy = open_jobs_anywhere(inst, idle=idle)
     except (OSError, ValueError, TypeError, KeyError, AttributeError):
         busy = [("inventory", "unreadable job/worktree inventory")]
     if busy:
         _m_common.die(upgrade_busy_message(root, busy))
+    if idle:
+        print(f"{len(idle)} open jobs/worktrees idle; not affected", flush=True)
     old = _m_common.git("rev-parse", "HEAD", cwd=root / "core").stdout.strip()
     r = subprocess.run(["git", "-C", str(root), "-c", "protocol.file.allow=always", "submodule", "update",
                         "--remote", "core"], capture_output=True, text=True)
@@ -214,9 +219,12 @@ def _ledger_inventory_readable(n):
     """A format marker without a well-formed table cannot establish an idle brain."""
     path = n["dir"] / _m_jobs.JOBS_FILE
     try:
-        if not path.exists():
-            return True
+        mode = path.lstat().st_mode
+        if not stat.S_ISREG(mode):
+            return False
         lines = path.read_text().splitlines()
+    except FileNotFoundError:
+        return True
     except (OSError, UnicodeError):
         return False
     header = None
@@ -246,15 +254,88 @@ def _ledger_inventory_readable(n):
     return header is not None and separator
 
 
-def open_jobs_anywhere(inst):
-    """Why this brain isn't idle: open ledger jobs, ledgers that can't be read, and job worktrees on this machine.
-    What can't be known counts as busy."""
-    out = []
+def _upgrade_admission_busy():
+    """Observe existing admission leases without pruning or publishing the queue."""
+    path = _m_machine.machine_dir() / "machine-care-queue.json"
+    try:
+        mode = path.lstat().st_mode
+        if not stat.S_ISREG(mode):
+            raise ValueError("unsafe admission inventory")
+        rows = json.loads(path.read_text())
+        if not isinstance(rows, list) or any(not _m_machine.machine_queue.valid(r) for r in rows):
+            raise ValueError("invalid admission inventory")
+        return [("machine", f"in-flight {r['kind']} admission") for r in rows
+                if r["state"] == "running" and _m_machine.machine_queue.alive(r)]
+    except FileNotFoundError:
+        return []
+    except (OSError, ValueError, TypeError, KeyError):
+        return [("inventory", "unreadable admission inventory")]
+
+
+def _upgrade_train_busy(n):
+    """A retained flock file is idle; only a held flock (or an unknown read) refuses."""
+    import fcntl
+    home = n.get("home_path")
+    if not home:
+        return []
+    try:
+        home = Path(home)
+        # Nodes without a Git home cannot own a repository train lock.
+        try:
+            (home / ".git").lstat()
+        except FileNotFoundError:
+            return []
+        result = _version_git("rev-parse", "--git-common-dir", cwd=home)
+        if result.returncode or not result.stdout.strip():
+            raise ValueError("unreadable repository inventory")
+        common = Path(result.stdout.strip())
+        if not common.is_absolute():
+            common = home / common
+        lock = common / "brain-train.lock"
+        try:
+            fd = os.open(lock, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        except FileNotFoundError:
+            return []
+        with os.fdopen(fd) as held:
+            info = os.fstat(held.fileno())
+            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+                raise ValueError("unsafe train lock")
+            try:
+                fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return [(n["id"], "in-flight train lock")]
+        return []
+    except (OSError, ValueError, TypeError):
+        return [(n["id"], "unreadable train lock inventory")]
+
+
+def open_jobs_anywhere(inst, idle=None):
+    """In-flight work and unknown inventory refuse; retained idle jobs are only a notice.
+
+    Use the admission queue's existing PID/start-time liveness and repository flock,
+    never lease age or the mere presence of a job/worktree. Reading changes no state.
+    """
+    try:
+        return _upgrade_work_inventory(inst, idle)
+    except (OSError, ValueError, TypeError, KeyError, AttributeError):
+        return [("inventory", "unreadable job/worktree inventory")]
+
+
+def _upgrade_work_inventory(inst, idle):
+    out = _upgrade_admission_busy()
+    idle = [] if idle is None else idle
     for n in inst.nodes():
-        rows = _m_jobs.read_jobs(n)
-        if rows is None or not _ledger_inventory_readable(n):
+        try:
+            if not _ledger_inventory_readable(n):
+                raise ValueError("unreadable job ledger")
+            rows = _m_jobs.read_jobs(n)
+            if rows is None:
+                raise ValueError("unreadable job ledger")
+        except (OSError, ValueError, TypeError, KeyError):
             out.append((n["id"], "unreadable job ledger"))
-        out += [(n["id"], r["Job"]) for r in rows or [] if not r["Ended"]]
+            rows = []
+        idle += [(n["id"], r["Job"]) for r in rows if not r["Ended"]]
+        out += _upgrade_train_busy(n)
         worktrees = n["local"].get("worktrees", {})
         if not isinstance(worktrees, dict):
             out.append((n["id"], "unreadable worktree inventory"))
@@ -270,29 +351,31 @@ def open_jobs_anywhere(inst):
             except (OSError, ValueError):
                 out.append((n["id"], f"unreadable worktree {branch}"))
             else:
-                out.append((n["id"], f"worktree {branch}"))
+                idle.append((n["id"], f"worktree {branch}"))
     return out
 
 
 def auto_upgrade(inst):
-    """With auto_upgrade=on on this machine, upgrade when the core's remote moved and no job is open anywhere: a
-    worker's rules never change under it. Returns a line saying what happened, or None."""
+    """With auto_upgrade=on, upgrade when the remote moved and no work is in flight.
+    Returns a line saying what happened, or None."""
     if inst.local.get("auto_upgrade") != "on":
         return None
     update = core_update(inst)
     if not update:
         return None
-    # Idle is checked, and the upgrade runs, under one hold of the instance lock: no job can start in between.
-    # The upgrade is this process's child, so it reuses the lock (BRAIN_LOCK_HELD).
+    # Re-read inventory after taking the instance lock, then keep that lock for the
+    # child upgrade (BRAIN_LOCK_HELD). Machine admission has its own ownership rules.
     with _m_instance.brain_lock(inst):
         if open_jobs_anywhere(_m_instance.Instance(inst.root)):
-            return None  # retried on a later tick, once the jobs close
+            return None  # retried on a later tick, once in-flight work stops
         r = subprocess.run([sys.executable, str(_m_common.CORE / "bin" / "brain"), "upgrade"], capture_output=True, text=True,
                            env={**os.environ, "BRAIN_ROOT": str(inst.root), "BRAIN_NO_REEXEC": "1"})
-    first = (r.stdout.strip().splitlines() or [""])[0]
+    lines = r.stdout.strip().splitlines()
+    idle_notice = lines.pop(0) if lines and re.fullmatch(r"\d+ open jobs/worktrees idle; not affected", lines[0]) else ""
+    first = (lines or [""])[0]
     if r.returncode:
         return f"core-upgrade: automatic upgrade failed ({(r.stderr.strip().splitlines() or ['?'])[-1]}); run brain upgrade"
-    return f"core-upgraded: {first}; read what changed: brain changes root"
+    return f"core-upgraded: {first}" + (f"; {idle_notice}" if idle_notice else "") + "; read what changed: brain changes root"
 
 
 def cmd_changes(a):
