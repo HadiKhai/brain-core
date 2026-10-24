@@ -522,7 +522,7 @@ class RoundTwo(AutonomyProject):
         migrated = json.loads((r / ".brain/local.json").read_text())["nodes"]["app"]
         self.assertEqual(migrated["preview"], "none")
         self.assertEqual(migrated["preview_tour"], "~/legacy-tour")
-        self.assertNotIn("missing-preview", [i["kind"] for i in self.due(r)])
+        self.assertIn("missing-preview", [i["kind"] for i in self.due(r)])
         self.b(r, "set", "app", "preview=none", "preview_tour=", "preview_url=https://demo.example.org")
         self.b(r, "status", "app", "--refresh")
         self.assertIn("Published preview: https://demo.example.org", (n["dir"] / "status.md").read_text())
