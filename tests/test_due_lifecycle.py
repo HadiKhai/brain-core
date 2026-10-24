@@ -38,6 +38,99 @@ class DueLifecycle(Scenario):
     def requests(self):
         return [i for i in self.m.inbox_items(self.inst)[0] if i['kind'] == 'inbox']
 
+    def test_fix1_stale_answer_refuses_unscanned_recurrence(self):
+        line = self.request()
+        old = self.requests()[0]['id']
+        self.m.answer_inbox(self.inst, old, 'First answer')
+        (self.root / 'inbox.md').write_text('')
+        self.assertEqual(self.requests(), [])  # observe resolution
+        (self.root / 'inbox.md').write_text(line)
+        receipt = self.root / '.brain/wake/lifecycle.json'
+        before = receipt.read_bytes()
+        # No normal inbox scan between restoring the source and answering its old ID.
+        with self.assertRaises(SystemExit):
+            self.m.answer_inbox(self.inst, old, 'Obsolete answer')
+        self.assertEqual(receipt.read_bytes(), before)
+        with self.assertRaises(SystemExit):
+            self.m.record_answer(self.inst, self.n, line.rstrip('\n'), old, 'Obsolete direct answer')
+        self.assertEqual(receipt.read_bytes(), before)
+        self.assertEqual((self.root / 'inbox.md').read_text(), line)
+        current = self.m.inbox_items(self.inst, readonly=True, requests_only=True)[0]
+        current = next(i['id'] for i in current if i['kind'] == 'inbox')
+        self.assertNotEqual(current, old)
+        again = self.m.inbox_items(self.inst, readonly=True, requests_only=True)[0]
+        self.assertEqual(next(i['id'] for i in again if i['kind'] == 'inbox'), current)
+        (self.root / 'inbox.md').write_text('')
+        self.assertEqual(self.requests(), [])  # also retire an unanswered recurrence
+        (self.root / 'inbox.md').write_text(line)
+        with self.assertRaises(SystemExit):
+            self.m.answer_inbox(self.inst, current, 'Obsolete unanswered occurrence')
+        repeated = self.m.inbox_items(self.inst, readonly=True, requests_only=True)[0]
+        repeated = next(i['id'] for i in repeated if i['kind'] == 'inbox')
+        self.assertNotIn(repeated, (old, current))
+        current = repeated
+        self.m.answer_inbox(self.inst, current, 'Current answer from a read-only projection')
+        records = json.loads(receipt.read_text())['answers']
+        self.assertEqual([r['answer'] for r in records], ['First answer', 'Current answer from a read-only projection'])
+        self.assertEqual(self.requests(), [])
+
+    def test_fix1_partial_due_projection_preserves_unchanged_ids(self):
+        with mock.patch.object(self.m, 'status_lag', return_value='unchanged stale facts'), \
+                mock.patch.object(self.m, 'runaway_jobs', return_value=['unchanged job advice']):
+            first = self.m.due_items(self.inst, self.n)
+            second = self.m.due_items(self.inst, self.n)
+        first = {i['kind']: i['id'] for i in first}
+        second = {i['kind']: i['id'] for i in second}
+        self.assertIn('stale-status', first)
+        self.assertIn('job', first)
+        self.assertEqual(first, second)
+        receipt = self.root / '.brain/wake/lifecycle.json'
+        legacy = json.loads(receipt.read_text())
+        for record in legacy['reminders']['root'].values():
+            record.pop('kind', None)
+        receipt.write_text(json.dumps(legacy))
+        with mock.patch.object(self.m, 'status_lag', return_value='unchanged stale facts'), \
+                mock.patch.object(self.m, 'runaway_jobs', return_value=['unchanged job advice']):
+            upgraded = self.m.due_items(self.inst, self.n)
+        self.assertEqual({i['kind']: i['id'] for i in upgraded}, first)
+        raw = [{'node': 'root', 'kind': 'stale-status', 'text': 'A transient need'}]
+        old = self.m.reminder_items(self.inst, self.n, raw)[0]['id']
+        self.m.reminder_items(self.inst, self.n, [])  # a complete empty snapshot retires it
+        self.assertNotEqual(self.m.reminder_items(self.inst, self.n, raw)[0]['id'], old)
+
+    def test_fix1_import_rebrief_acknowledges_exact_row_after_delivery(self):
+        home = self.repo(self.tmp / 'source')
+        fm, body = self.m.read_fm(self.root / 'node.md')
+        self.m.write_fm(self.root / 'node.md', {**fm, 'home': 'external'}, body)
+        self.inst.local_of('root')['home'] = str(home)
+        self.inst.save_local()
+        self.inst = self.m.Instance(self.root)
+        self.n = self.inst.node('root')
+        branch = self.m.import_job_id(home)
+        row = {**dict.fromkeys(self.m.JOB_COLS, ''), 'Job': branch, 'Started': '2026-01-15T09:00Z'}
+        other = {**row, 'Job': 'import:' + 'b' * 40, 'Started': '2026-01-15T08:00Z'}
+        self.m.write_jobs(self.inst, self.n, [other, row])
+        args = argparse.Namespace(id='root', small=False, branch=None, import_study=True,
+            task=None, task_file=None, context_file=None, why_separate='fixture import',
+            allow_unexplained=False, peer=None, runtime='codex', model='fixture-model', job_class='build',
+            effort=None, to=None, out=None)
+        usage = {'compactions': 3, 'processed': 300, 'sessions': 1}
+        with mock.patch.object(self.m, 'find_root', return_value=self.root), \
+                mock.patch.object(self.m, 'live_usage', return_value=usage), \
+                mock.patch.object(self.m, 'job_budget', return_value={'tokens': 100}):
+            first = self.m.usage_restart_item(self.inst, self.n, row)
+            previous = self.m.usage_restart_item(self.inst, self.n, other)
+            stream = mock.Mock(wraps=io.StringIO())
+            stream.flush.side_effect = BrokenPipeError('fixture delivery failure')
+            with mock.patch.object(sys, 'stdout', stream), self.assertRaises(BrokenPipeError):
+                self.m.cmd_brief(args)
+            self.assertEqual(self.m.usage_restart_item(self.inst, self.n, row)['episode'], first['episode'])
+            with contextlib.redirect_stdout(io.StringIO()) as output:
+                self.m.cmd_brief(args)
+            self.assertIn('Role: import worker', output.getvalue())
+            self.assertIsNone(self.m.usage_restart_item(self.inst, self.n, row))
+            self.assertEqual(self.m.usage_restart_item(self.inst, self.n, other)['episode'], previous['episode'])
+
     def test_m8_answer_retains_source_and_recurrent_request(self):
         line = self.request()
         item = self.requests()[0]

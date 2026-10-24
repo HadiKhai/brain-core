@@ -18,7 +18,7 @@ LIFECYCLE_BYTES = 2 * 1024 * 1024
 
 
 def lifecycle_empty():
-    return {'version': 1, 'inbox': {}, 'answers': [], 'reminders': {}, 'usage': {}}
+    return {'version': 1, 'inbox': {}, 'inbox_retired': {}, 'answers': [], 'reminders': {}, 'usage': {}}
 
 
 def lifecycle_read(inst):
@@ -39,7 +39,7 @@ def lifecycle_read(inst):
     data = json.loads(text)
     if (not isinstance(data, dict) or data.get('version') != 1 or
             any(not isinstance(data.get(k), dict) for k in ('inbox', 'reminders', 'usage')) or
-            not isinstance(data.get('answers'), list)):
+            not isinstance(data.get('answers'), list) or not isinstance(data.get('inbox_retired', {}), dict)):
         raise ValueError('invalid lifecycle state; retain it for repair')
     return data
 
@@ -134,19 +134,32 @@ def inbox_source_id(n, line):
     return _m_jobs.digest([n['id'], 'inbox', ' '.join(('inbox: ' + line[2:]).split())])
 
 
+def next_request_id(n, key, data):
+    """Deterministic between read-only projection and mutation, distinct after retirement."""
+    retired = data.get('inbox_retired', {}).get(n['id'], {})
+    if not isinstance(retired, dict):
+        raise ValueError('invalid retired inbox episodes')
+    previous = retired.get(key)
+    if previous is None:
+        previous = next((a.get('id') for a in reversed(data['answers']) if isinstance(a, dict)
+                         and a.get('source_id') == key and a.get('node') == n['id']), None)
+    if previous is not None and not re.fullmatch(r'[0-9a-f]{24}', str(previous)):
+        raise ValueError('invalid previous inbox episode')
+    return _m_jobs.digest([key, 'recurrence', previous]) if previous else key
+
+
 def reconcile_requests(inst, n, lines, data):
     previous = data['inbox'].get(n['id'], {})
     if not isinstance(previous, dict):
         raise ValueError('invalid inbox lifecycle receipts')
     if len(lines) > LIFECYCLE_LIMIT:
         raise ValueError('inbox lifecycle bound reached; no requests discarded')
-    answered_sources = {a.get('source_id') for a in data['answers'] if isinstance(a, dict)}
     current = {}
     for line in lines:
         key = inbox_source_id(n, line)
         record = previous.get(key)
         if record is None:
-            record = {'id': os.urandom(12).hex() if key in answered_sources else key, 'answered': False}
+            record = {'id': next_request_id(n, key, data), 'answered': False}
         if (not isinstance(record, dict) or not re.fullmatch(r'[0-9a-f]{24}', str(record.get('id'))) or
                 type(record.get('answered')) is not bool):
             raise ValueError('invalid inbox episode receipt')
@@ -156,13 +169,37 @@ def reconcile_requests(inst, n, lines, data):
                                           for a in data['answers']):
             raise ValueError('answered receipt has no retained answer')
         current[key] = record
+    absent = set(previous) - set(current)
+    closed = data.get('inbox_retired', {}).get(n['id'], {})
+    if not isinstance(closed, dict):
+        raise ValueError('invalid retired inbox episodes')
+    absent_known = set(closed) - set(current)
+    if absent or absent_known:
+        retired = data.setdefault('inbox_retired', {}).setdefault(n['id'], {})
+        if not isinstance(retired, dict) or len(set(retired) | absent) > LIFECYCLE_LIMIT:
+            raise ValueError('retired inbox episode bound reached; retain history for review')
+        for key in absent:
+            record = previous[key]
+            if not isinstance(record, dict) or not re.fullmatch(r'[0-9a-f]{24}', str(record.get('id'))):
+                raise ValueError('invalid retired inbox episode')
+            retired[key] = record['id']
+        # A read-only projection may have exposed the next generation without
+        # persisting it. A later observed absence must invalidate that ID too.
+        # Advance only closed generations; unchanged open requests keep their IDs.
+        for key in absent_known - absent:
+            if not re.fullmatch(r'[0-9a-f]{24}', str(retired[key])):
+                raise ValueError('invalid retired inbox episode')
+            retired[key] = _m_jobs.digest([key, 'observed-absence', retired[key]])
     if current or n['id'] in data['inbox']:
         data['inbox'][n['id']] = current
     return current
 
 
-def request_lines(inst, n, lines, readonly=False):
+def request_lines(inst, n, lines, readonly=False, lifecycle_data=None):
     """Keep source history intact; an observed recurrence gets a fresh episode."""
+    if lifecycle_data is not None:
+        current = reconcile_requests(inst, n, lines, lifecycle_data)
+        return [line for line in lines if not current[inbox_source_id(n, line)]['answered']]
     try:
         with lifecycle_store(inst, readonly=readonly) as data:
             current = reconcile_requests(inst, n, lines, data)
@@ -171,11 +208,12 @@ def request_lines(inst, n, lines, readonly=False):
         return lines  # unknown receipts never hide a question
 
 
-def request_episode_id(inst, n, line):
+def request_episode_id(inst, n, line, lifecycle_data=None):
     key = inbox_source_id(n, line)
     try:
-        record = lifecycle_read(inst)['inbox'].get(n['id'], {}).get(key, {})
-        return record.get('id', key)
+        data = lifecycle_data if lifecycle_data is not None else lifecycle_read(inst)
+        record = data['inbox'].get(n['id'], {}).get(key, {})
+        return record['id'] if record else next_request_id(n, key, data)
     except (OSError, ValueError, AttributeError):
         return key
 
@@ -189,27 +227,29 @@ def resolve_lifecycle_id(items, item_id):
     return matches[0]
 
 
-def record_answer(inst, n, line, item_id, text):
+def record_answer(inst, n, line, item_id, text, lifecycle_data=None):
     if not text.strip() or len(text.encode()) > 8192:
         _m_common.die('answer must contain text and be at most 8192 bytes')
     _m_guard.no_terms_in(n, text, 'the recorded answer')
-    with lifecycle_store(inst) as data:
-        if len(data['answers']) >= LIFECYCLE_LIMIT:
-            _m_common.die('answer history bound reached; retain it for coordinator review')
-        key = inbox_source_id(n, line)
-        source = n['dir'] / 'inbox.md'
-        if not source.is_file() or line not in source.read_text().splitlines():
-            _m_common.die('request source changed; inspect the current inbox')
-        current = data['inbox'].get(n['id'], {}).get(key)
-        # Read-only lookups can address a first occurrence before a reporting scan.
-        if current is None:
-            current = {'id': request_episode_id(inst, n, line), 'answered': False}
-            data['inbox'].setdefault(n['id'], {})[key] = current
-        if current.get('id') != item_id or current.get('answered'):
-            _m_common.die('request episode changed or was already answered')
-        current['answered'] = True
-        data['answers'].append({'id': item_id, 'source_id': key, 'node': n['id'],
-                                'source': line[2:], 'answer': text, 'at': inst.now()})
+    if lifecycle_data is None:
+        with lifecycle_store(inst) as data:
+            return record_answer(inst, n, line, item_id, text, lifecycle_data=data)
+    data = lifecycle_data
+    if len(data['answers']) >= LIFECYCLE_LIMIT:
+        _m_common.die('answer history bound reached; retain it for coordinator review')
+    key = inbox_source_id(n, line)
+    source = n['dir'] / 'inbox.md'
+    if not source.is_file() or line not in source.read_text().splitlines():
+        _m_common.die('request source changed; inspect the current inbox')
+    current = data['inbox'].get(n['id'], {}).get(key)
+    if current is None:
+        current = {'id': next_request_id(n, key, data), 'answered': False}
+        data['inbox'].setdefault(n['id'], {})[key] = current
+    if current.get('id') != item_id or current.get('answered'):
+        _m_common.die('request episode changed or was already answered')
+    current['answered'] = True
+    data['answers'].append({'id': item_id, 'source_id': key, 'node': n['id'],
+                            'source': line[2:], 'answer': text, 'at': inst.now()})
 
 
 def reminder_key(item):
@@ -220,16 +260,25 @@ def reminder_key(item):
                            item.get('episode') or ' '.join(item['text'].split()), need])
 
 
-def reminder_reconcile(inst, n, items, data):
+def reminder_reconcile(inst, n, items, data, omitted_kinds=()):
     previous = data['reminders'].get(n['id'], {})
     if not isinstance(previous, dict) or len(items) > LIFECYCLE_LIMIT:
         raise ValueError('invalid or oversized reminder lifecycle state')
     current, out = {}, []
+    if omitted_kinds:
+        for key, record in previous.items():
+            if not isinstance(record, dict) or not re.fullmatch(r'[0-9a-f]{24}', str(record.get('id'))):
+                raise ValueError('invalid reminder episode receipt')
+            # Older receipts have no kind. A partial scan cannot prove them closed;
+            # the next complete scan migrates or retires them without losing identity.
+            if record.get('kind') in omitted_kinds or 'kind' not in record:
+                current[key] = record
     for item in items:
         key = reminder_key(item)
         record = previous[key] if key in previous else {'id': os.urandom(12).hex(), 'at': inst.now()}
         if not isinstance(record, dict) or not re.fullmatch(r'[0-9a-f]{24}', str(record.get('id'))):
             raise ValueError('invalid reminder episode receipt')
+        record = {**record, 'kind': item['kind']}
         current[key] = record
         handling = record.get('handling')
         if handling is not None and not isinstance(handling, dict):
@@ -237,6 +286,8 @@ def reminder_reconcile(inst, n, items, data):
         safe = {k: _m_guard.redact(v, _m_guard.never_terms(n)) if isinstance(v, str) else v
                 for k, v in handling.items()} if handling else None
         out.append({**item, 'id': record['id'], **({'handling': safe} if safe else {})})
+    if len(current) > LIFECYCLE_LIMIT:
+        raise ValueError('reminder lifecycle bound reached; retain receipts for review')
     if current or n['id'] in data['reminders']:
         data['reminders'][n['id']] = current
     return out
@@ -262,10 +313,10 @@ def reminder_handled(inst, item):
     return (expiry > inst.now_dt()) if expiry else handling['action'] == 'ack' and until is None
 
 
-def reminder_items(inst, n, items, include_handled=False):
+def reminder_items(inst, n, items, include_handled=False, omitted_kinds=()):
     try:
         with lifecycle_store(inst) as data:
-            out = reminder_reconcile(inst, n, items, data)
+            out = reminder_reconcile(inst, n, items, data, omitted_kinds=omitted_kinds)
             return out if include_handled else [i for i in out if not reminder_handled(inst, i)]
     except (OSError, ValueError):
         return [{**i, 'id': reminder_key(i), 'lifecycle_error': 'receipt state unknown; no suppression'} for i in items]

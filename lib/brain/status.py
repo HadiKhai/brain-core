@@ -320,7 +320,7 @@ def machine_transition_line(n, line):
                              r'\[machine episode [0-9a-f]{24} (?:open|close)\]', line) is not None)
 
 
-def inbox_lines(n, readonly=False):
+def inbox_lines(n, readonly=False, lifecycle_data=None):
     f = n["dir"] / "inbox.md"
     # Filter the historical record on read. Never rewrite or discard episode history.
     lines = [l for l in f.read_text().splitlines() if l.startswith("- ")
@@ -330,7 +330,8 @@ def inbox_lines(n, readonly=False):
     queue = hook_question_queue(n)
     if not queue.exists() or _m_common.outward_links(_m_instance.instance_above(n["dir"])):
         root = _m_instance.instance_above(n['dir'])
-        return _m_reminders.request_lines(_m_instance.Instance(root), n, lines, readonly=readonly)
+        return _m_reminders.request_lines(_m_instance.Instance(root), n, lines, readonly=readonly,
+                                          lifecycle_data=lifecycle_data)
     for pending in sorted(queue.glob("*.json")):
         try:
             value = json.loads(pending.read_text())
@@ -345,7 +346,8 @@ def inbox_lines(n, readonly=False):
         except (OSError, ValueError, KeyError, TypeError, SystemExit):
             continue
     root = _m_instance.instance_above(n['dir'])
-    return _m_reminders.request_lines(_m_instance.Instance(root), n, lines, readonly=readonly)
+    return _m_reminders.request_lines(_m_instance.Instance(root), n, lines, readonly=readonly,
+                                      lifecycle_data=lifecycle_data)
 
 
 # ---------- coordinator's mechanical queue and generated status ----------
@@ -577,7 +579,8 @@ def due_items(inst, n, evidence=None, include_stale=True, include_ready=True, in
         add("stale-status", lag + "; update judgement sections, then brain status <node> --refresh")
     from . import watch as _m_watch
     items.extend(_m_watch.watch_job_stalls(inst, n))
-    return _m_reminders.reminder_items(inst, n, items, include_handled=include_handled)
+    omitted = (['stale-status'] if not include_stale else []) + (['job'] if not include_advice else [])
+    return _m_reminders.reminder_items(inst, n, items, include_handled=include_handled, omitted_kinds=omitted)
 
 
 def changes_due(inst, n):
@@ -831,9 +834,14 @@ def refresh_status(inst, n):
     _m_common.touch(f)
 
 
-def inbox_items(inst, nodes=None, reporter="root", readonly=False, requests_only=False):
+def inbox_items(inst, nodes=None, reporter="root", readonly=False, requests_only=False, lifecycle_data=None):
     """The existing UI attention sources, with identities independent of line positions or other items.
     Read-only; until reported, first_seen comes from the source's git introduction (mtime if uncommitted)."""
+    if lifecycle_data is None and (readonly or requests_only):
+        try:
+            lifecycle_data = _m_reminders.lifecycle_read(inst)
+        except (OSError, ValueError):
+            pass  # Display remains fail-open; mutations require a valid locked store.
     saved = inst.root / ".brain" / "inbox-seen.json"
     try:
         data = json.loads(saved.read_text()) if saved.exists() else {}
@@ -853,9 +861,11 @@ def inbox_items(inst, nodes=None, reporter="root", readonly=False, requests_only
                 continue
             attention += [(n['id'], 'blocked-overdue' if b['escalated'] else 'blocked', b['text'])
                           for b in blocked_entries(inst, n)]
-            attention += [(n['id'], 'inbox', 'inbox: ' + line[2:]) for line in inbox_lines(n, readonly=True)]
+            attention += [(n['id'], 'inbox', 'inbox: ' + line[2:])
+                          for line in inbox_lines(n, readonly=True, lifecycle_data=lifecycle_data)]
     else:
-        attention = [item for item in attention_items(inst, list(by_id.values()), readonly=readonly) if item[1] != "job"]
+        attention = [item for item in attention_items(inst, list(by_id.values()), readonly=readonly,
+                                                     lifecycle_data=lifecycle_data) if item[1] != "job"]
     # Explicit node inboxes are coordinator views. Root's inbox is the human rollup;
     # root-owned job advice remains available in due, never in that human rollup.
     owner = by_id.get(reporter)
@@ -868,7 +878,8 @@ def inbox_items(inst, nodes=None, reporter="root", readonly=False, requests_only
             identity = (_m_machine.machine_episode_due(inst) or {}).get("episode", kind)
         key = _m_jobs.digest([nid, kind, " ".join(identity.split())])
         if kind == 'inbox':
-            key = _m_reminders.request_episode_id(inst, by_id[nid], '- ' + text.removeprefix('inbox: '))
+            key = _m_reminders.request_episode_id(inst, by_id[nid], '- ' + text.removeprefix('inbox: '),
+                                                   lifecycle_data=lifecycle_data)
         if key in ids:
             continue
         ids.add(key)
@@ -948,18 +959,19 @@ def cmd_inbox(a):
 
 
 def answer_inbox(inst, item_id, text):
-    items, _ = inbox_items(inst, readonly=True, requests_only=True)
-    item = _m_reminders.resolve_lifecycle_id(items, item_id)
-    if item['kind'] != 'inbox':
-        _m_common.die('this item is not an answerable inbox request')
-    n = inst.node(item['node'])
-    _m_guard.no_terms_in(n, text, 'the recorded answer')
-    line = next((line for line in inbox_lines(n, readonly=True)
-                 if _m_reminders.request_episode_id(inst, n, line) == item['id']), None)
-    if not line:
-        _m_common.die('request episode changed; inspect the current inbox')
     try:
-        _m_reminders.record_answer(inst, n, line, item['id'], text)
+        with _m_reminders.lifecycle_store(inst) as data:
+            items, _ = inbox_items(inst, readonly=True, requests_only=True, lifecycle_data=data)
+            item = _m_reminders.resolve_lifecycle_id(items, item_id)
+            if item['kind'] != 'inbox':
+                _m_common.die('this item is not an answerable inbox request')
+            n = inst.node(item['node'])
+            _m_guard.no_terms_in(n, text, 'the recorded answer')
+            line = next((line for line in inbox_lines(n, readonly=True, lifecycle_data=data)
+                         if _m_reminders.request_episode_id(inst, n, line, lifecycle_data=data) == item['id']), None)
+            if not line:
+                _m_common.die('request episode changed; inspect the current inbox')
+            _m_reminders.record_answer(inst, n, line, item['id'], text, lifecycle_data=data)
     except (OSError, ValueError):
         _m_common.die('answer receipt could not be recorded; retain lifecycle state for repair')
     return item['id']
@@ -1262,7 +1274,7 @@ def runaway_jobs(inst, n):
     return out
 
 
-def attention_items(inst, nodes, readonly=False):
+def attention_items(inst, nodes, readonly=False, lifecycle_data=None):
     """[(node id, kind, text)]: what waits on the operator, node by node."""
     out = []
     if (any(n["id"] == "root" and not n["archived"] and not paused(n) for n in nodes)
@@ -1280,7 +1292,8 @@ def attention_items(inst, nodes, readonly=False):
                         f"{items} item(s) proposed; confirm or reject after reviewing source citations"))
         for b in blocked_entries(inst, n):
             out.append((n["id"], "blocked-overdue" if b["escalated"] else "blocked", b["text"]))
-        out += [(n["id"], "inbox", "inbox: " + l[2:]) for l in inbox_lines(n, readonly=readonly)]
+        out += [(n["id"], "inbox", "inbox: " + l[2:])
+                for l in inbox_lines(n, readonly=readonly, lifecycle_data=lifecycle_data)]
         out += [(n["id"], "job", text) for text in runaway_jobs(inst, n)]
         if n["id"] == "root":
             episode = _m_machine.machine_episode_due(inst)
