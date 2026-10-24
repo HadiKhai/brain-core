@@ -19,6 +19,8 @@ from . import history as _m_history
 from . import hosts as _m_hosts
 from . import instance as _m_instance
 from . import jobs as _m_jobs
+from . import handback_queue as _m_handback_queue
+from . import dispatcher as _m_dispatcher
 from . import knowledge as _m_knowledge
 from . import land_checks as _m_land_checks
 from . import messages as _m_messages
@@ -119,6 +121,8 @@ def writes(a):
         return bool(getattr(a, 'approve_all', False))
     if name == 'cmd_land_check':
         return False  # the explicit runner takes short owned locks around execution
+    if name == 'cmd_dispatch':
+        return False
     if name == "cmd_watch":
         return False  # takes a short nonblocking instance lock itself
     if name == "cmd_wake":
@@ -270,9 +274,12 @@ def main():
         opt("id", nargs="?"), opt("--branch"), opt("--job-key", help="select one ledger job when a branch was reused"), opt("--lessons", help="learned item ids, or none: <reason>"),
         opt("--switch", help="record provider switch: old -> new: reason"),
         opt("--start", action="store_true", help="coordinator: start an import:<snapshot> study"),
-        opt("--close", action="store_true", help="coordinator: close a processed import study"),
+        opt("--close", action="store_true", help="coordinator: close a processed study, manually landed job, or parked job with --reason"),
+        opt("--reason", help="one-line reason to explicitly close parked work"),
+        opt("--live", action="store_true", help="read-only JSON rows joining ledger, hand-back, attempts and recorded queues; host activity unknown"),
         opt("--settled", action="store_true", help="coordinator: record all closed job threads safely settled through the host"),
         opt("--all-closed", action="store_true", help="with --settled: attest a complete host sweep for all closed ledger jobs"),
+        opt("--attestation-file", help="fresh version 1 coordinator export with exhaustive per-job/thread/project coverage"),
         opt("--contract-file", dest="contract_file", help="coordinator: the job's contract (" +
             ", ".join(f"## {f}" for f in _m_jobs.CONTRACT_FIELDS) + "; an optional ## Budget, e.g. 20M tokens, 3 h)"),
         opt("--usage-file", dest="usage_file", help="coordinator: the job's usage as the host reports it (JSON); "
@@ -300,12 +307,19 @@ def main():
         "id", opt("kind", choices=_m_messages.MESSAGE_KINDS), "message", opt("--branch"), opt("--report"))
     cmd("handback", _m_jobs.cmd_handback, "done/blocked/question hand-back; worker messages are start/done/blocked/question",
         "id", opt("--branch", required=True), opt("--state", choices=["done", "failed", "blocked", "question"], required=True),
+        opt("--summary", required=True, help="nonempty one-line worker result"),
+        opt("--question", help="one-line choice, required for question state"),
+        opt("--enqueue", action="store_true", help="durably queue this request and return its ID; explicit foreground runner required"),
         opt("--report"), opt("--lessons", help="proposed lessons, or none: <reason>"),
         opt("--restart", choices=["compactions"], help="request a fresh brief resuming this job (blocked only)"),
         opt("--need-human", help="question or blocked need to append to the node inbox"),
         opt("--reviews", type=int, help="completed review rounds; runs verify for done (or reuses a green run that "
             "still proves this commit)"),
         opt("--reverify", action="store_true", help="run verify even when an earlier green run still proves it"))
+    cmd("queue", _m_handback_queue.cmd_queue, "explicit foreground hand-back request runner; no service or recovery",
+        opt("action", choices=['run']), 'id', opt('--once', action='store_true'), opt('--request-id'))
+    cmd("dispatch", _m_dispatcher.cmd_dispatch, "bounded read-only plan of explicit root/operator asks; empty scan is silent",
+        opt('--limit', type=int, default=50), opt('--node-limit', type=int, default=200))
     cmd("show", _m_status.cmd_show, "everything about one node, including this machine's bindings", "id")
     cmd("set", _m_nodes.cmd_set, "set fields: brain set <id> key=value ... (host IDs and home paths stay on this machine)",
         "id", opt("pairs", nargs="+"))
@@ -424,6 +438,8 @@ def main():
         opt("--jobs", nargs="+", help="explicit job order (space or comma separated); all must be ready"))
     cmd("ready", _m_verify.cmd_ready, "check a worker's ready packet against the branch and cached origin default (local main without origin)", "id",
         opt("--branch", required=True), opt("--record", action="store_true", help="worker: run node verify and record"),
+        opt("--summary", help="one-line hand-back result (required for --record with schema v3)"),
+        opt("--question", help="one-line coordinator choice for a question hand-back"),
         opt("--reviews", type=int, help="completed review rounds, required with --record"),
         opt("--report"), opt("--lessons", help="proposed lessons, or none: <reason>"),
         opt("--reverify", action="store_true", help="with --record: run verify even if a green run still proves it"))

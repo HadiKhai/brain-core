@@ -218,6 +218,63 @@ For agents:
 After upgrading:
 - No migration is required. Initial briefs do not reset budgets; restart baselines
   are bounded machine-local receipts. Automatic worker termination remains outside scope.
+## 2026-10-24: M5 explicit hand-back summaries and questions
+
+rehearsal evidence waived (release 1 waiver pattern; rehearse sandbox self-check refuses)
+
+For agents: Every new hand-back needs a nonempty one-line `--summary`; `--state question` also needs `--question`. Schema v3 stores these fields without reading the report for a substitute.
+
+After upgrading: Add these flags to hand-back scripts and `ready --record`. Legacy records remain readable and explicitly show missing summary/question fields; no historical report is rewritten.
+
+## 2026-10-24: P5 durable replacement hand-back attempts
+
+rehearsal evidence waived (release 1 waiver pattern; rehearse sandbox self-check refuses)
+
+For agents: Before native verification/admission, a separate job-key/head/base/input-bound attempt records queued or verifying. Due and live records show the replacement and label earlier completion historical. Changed, closed or replaced jobs and superseded attempts cannot publish a stale result.
+
+After upgrading: No readiness/reuse rule changes. Interrupted attempts require inspection and a fresh hand-back; they never restore the previous completion as current.
+
+## 2026-10-24: P6 durable requests with an explicit foreground runner
+
+rehearsal evidence waived (release 1 waiver pattern; rehearse sandbox self-check refuses)
+
+For agents: `handback --enqueue` returns a durable request ID. `queue run <node> --once` claims one request with an exclusive lease and uses the synchronous native verifier/reservation and terminal writer. Repeated claims cannot publish again. No service is installed.
+
+After upgrading: Run the foreground command explicitly; a queued request can wait indefinitely for it. Abandoned running leases remain unknown and are never adopted by PID reuse.
+
+Known: P6 cancellation/crash recovery deferred until the heavy-run ownership redesign.
+
+## 2026-10-24: P2 fresh per-job settlement attestations
+
+rehearsal evidence waived (release 1 waiver pattern; rehearse sandbox self-check refuses)
+
+For agents: `jobs --settled` requires `--attestation-file` with fresh exhaustive project/nested-thread coverage, exact job keys, terminal settled threads and no pending requests. All entries are checked before any ledger stamp; currently bound coordinators/open jobs remain protected. Printed settle instructions use one explicit `threadId` each.
+
+After upgrading: Replace bare per-job or `--all-closed` boolean attestations with the documented version 1 export. This is coordinator-supplied evidence, not independent live host verification. Core performs no host settlement.
+
+## 2026-10-24: M4 recorded live job projection and generated Active work
+
+rehearsal evidence waived (release 1 waiver pattern; rehearse sandbox self-check refuses)
+
+For agents: `jobs --live` joins ledger, current and historical summaries, active attempt, durable request/native admission position and recorded owner, and next action. Generated Active work uses the same projection.
+
+After upgrading: Treat queued/verifying as recorded states; host and owner activity remain unknown without a host observation. No ETA or live-thread claim is inferred.
+
+## 2026-10-24: M3 bounded file-only dispatch plans
+
+rehearsal evidence waived (release 1 waiver pattern; rehearse sandbox self-check refuses)
+
+For agents: `dispatch` prints a stable plan of explicit inbox/operator asks and owning node targets, with output/node limits and a partial indicator. An empty bounded scan is silent. It uses the read-only request projection and never acknowledges delivery.
+
+After upgrading: An existing coordinator can consume the plan. No conversation is launched, no wake is retargeted, and no model/host pending query occurs. Dispatcher-thread/service rollout remains deferred.
+
+## 2026-10-24: R2 close manually landed or parked ledger jobs
+
+rehearsal evidence waived (release 1 waiver pattern; rehearse sandbox self-check refuses)
+
+For agents: `jobs <node> --branch <branch> --close` confirms the branch head is an ancestor of local main and records merged closure with the main SHA. A parked job can be closed explicitly with a one-line `--reason`, retaining its worktree and evidence.
+
+After upgrading: Record lesson outcomes and fresh settlement evidence as usual. A separate merge record is unnecessary; closure neither removes resources nor performs host settlement.
 
 ## 2026-10-24: Configure worker runtime and model defaults per job class
 

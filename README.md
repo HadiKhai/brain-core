@@ -146,14 +146,38 @@ The worker builds in its worktree, gets review on another runtime, fixes finding
 rebases on local `main`. One command finishes its part:
 
 ```sh
-brain handback website --branch job/blog-search --state done --reviews 2 \
+brain handback website --branch job/blog-search --state done --summary "Search is implemented" --reviews 2 \
   --report reports/blog-search/index.md --lessons "Use title matches before recency."
 ```
 
 It runs the node's configured verification, checks local main and stores the worker's state,
 ready packet and proposed lessons together. For a blocker or question, use `--state blocked`
-or `--state question`, omit `--reviews`, and describe it in the report. Questions reach the
+or `--state question`, keep a one-line `--summary`, omit `--reviews`, and describe it in the report.
+Question state also requires a one-line `--question`. Questions reach the
 inbox; a blocked human need adds `--need-human "<need>"`.
+
+Hand-back schema v3 stores summary and question explicitly. Older records remain readable
+and are labelled when these fields are missing; report contents never supply a guessed summary.
+An active replacement attempt makes the previous hand-back historical until an exact-bound
+terminal publication replaces it. `--enqueue` returns a durable request ID and requires an
+explicit `brain queue run website --once`; abandoned running leases stay unknown. P6
+cancellation/crash recovery is deferred until the heavy-run ownership redesign.
+
+`brain jobs website --live` and generated Active work join the same recorded projection.
+They show current state, historical summary when relevant, queue position/owner when known,
+and next action. They never establish live host activity or readiness. `brain dispatch`
+uses only explicit request sources, returns stable episode IDs and node targets, and
+acknowledges nothing. Limits bound output and nodes processed after local node enumeration;
+the plan labels partial coverage, and an empty bounded scan prints nothing.
+
+Settlement requires a version 1 JSON export with `node`, ISO `observed_at` within five
+minutes, `project_ids` covering bound host/home projects, exhaustive
+`coverage: {"project": true, "nested": true, "complete": true}`, and exactly the selected
+`jobs`. Each job has `job_key` and `threads`; every thread has singular `threadId`, matching
+`job_key`, terminal `state`, `settled: true`, and `pending_requests: []`. See the host adapter
+for terminal states and nested coverage. Pass it with `jobs --settled --attestation-file F`;
+`--all-closed` requires the same exhaustive evidence. This records coordinator-supplied
+observations rather than independent live host verification, and core never settles host threads.
 
 The coordinator runs `brain ready website --branch job/blog-search` immediately before merging.
 It compares the worker’s packet with the branch and current local main; it does not rerun tests.
@@ -553,7 +577,13 @@ You mostly talk to coordinators, and they run `brain` for you. By hand:
 | `brain wt add/list/rm/prune` | one worktree per job beside the project's repo, with setup and a block of ports |
 | `brain brief <id> [--branch B] --task-file F` | task, limits, routing, resume state and ranked usable lessons |
 | `brain brief <id> --small --task "..."` | a minutes-long, low-risk task without job ceremony |
-| `brain handback <id> --branch B --state done --reviews N --report P --lessons "..."` | one worker finishing step: verify, readiness, state and proposed lessons; also accepts blocked/question |
+| `brain handback <id> --branch B --state done --summary "..." --reviews N --report P --lessons "..."` | one worker finishing step; every publication needs a one-line summary, question state also needs `--question` |
+| `brain handback <id> ... --enqueue` | durably enqueue a hand-back and print its request ID; explicit foreground runner required |
+| `brain queue run <id> --once [--request-id ID]` | lease and run one request through the native verifier; no service, cancellation or crash recovery |
+| `brain jobs <id> --live` | read-only JSON joining ledger, hand-back, active attempt, recorded queue position/owner and next action; host activity unknown |
+| `brain jobs <id> --branch B --close [--reason "..."]` | close a manual landing with main SHA, or explicitly close parked work with a reason; retain resources |
+| `brain jobs <id> --branch B --settled --attestation-file F` | validate fresh exhaustive per-thread coordinator evidence before recording settlement; no host call |
+| `brain dispatch [--limit 50] [--node-limit 200]` | read-only bounded plan of explicit asks and their node targets; empty scan is silent |
 | `brain ready <id> --branch B` | compare the worker’s packet with branch and current local main before merge |
 | `brain jobs <id> --branch B --contract-file F` | a job's contract: outcome, what the worker may do without asking, stop conditions, consent, done; optionally a budget |
 | `brain jobs <id> --branch B --usage-file F` | a job's usage as its host reports it (JSON); it wins over what transcripts show |
