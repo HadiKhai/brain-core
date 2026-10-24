@@ -1,9 +1,11 @@
 """Review policy scenarios using only invented projects and findings."""
 import json
+import os
 import subprocess
 import sys
 import time
 import shlex
+from unittest import mock
 from scenario import Scenario
 import test_verify as _test_verify
 import core_loader
@@ -172,7 +174,8 @@ class ReviewDiscipline(Scenario):
         self.git("branch", "plain", cwd=home)
         text = self.b(r, "review", "a", "--branch", "plain", "--built-by", "claude")
         m = core_loader.SourceFileLoader("brain_plain_review", str(r / "core/bin/brain")).load_module()
-        self.assertEqual(m.open_jobs_anywhere(m.Instance(r)), [])
+        with mock.patch.dict(os.environ, self.env):
+            self.assertEqual(m.open_jobs_anywhere(m.Instance(r)), [])
         self.assertNotIn("plain", self.b(r, "jobs", "a"))
         self.assertIn("round not recorded", text)
         self.assertIn("round not recorded", self.b(r, "review", "a", "--branch", "plain", "--built-by", "claude"))

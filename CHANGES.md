@@ -90,6 +90,7 @@ For agents:
 - Clone comparison retains the harness HOME identity gap for the usage-reading
   probe; it does not establish equivalent usage-reading observations.
 - test: cross-process limit test uses a barrier
+  Plain-branch review inventory assertions use the isolated fixture environment.
 
 After upgrading:
 - These parked jobs, deferrals and evidence gaps remain open. Release 2 follows
