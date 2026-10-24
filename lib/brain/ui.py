@@ -283,7 +283,7 @@ def ui_node(inst, n, since, cache=None, partial=False):
         "coordinator": inst.thread_link(loc["coordinator"]) if loc.get("coordinator") else "",
         "updated": u.isoformat() if u else None, "updated_ago": _m_status.ago(inst, u),
         "status": {k: v for k, v in secs.items() if v and k.lower() != "active work"},
-        "work": work, "worktrees": wts, "inbox": [l[2:] for l in _m_status.inbox_lines(n)],
+        "work": work, "worktrees": wts, "inbox": [l[2:] for l in _m_status.inbox_lines(n, readonly=partial)],
         "blocked": _m_status.status_section(n, "blocked"),
         "blocked_metadata": [_m_ui_status.ui_blocked_metadata(inst, n, t, file_only=partial) for t in _m_status.status_section(n, "blocked")], "decisions": ui_decisions(inst, n), "limits": _m_knowledge.limits_of(n),
         "never_name": len(terms), "spend": lookback,
@@ -1074,10 +1074,8 @@ def cmd_ui(a):
                 box.update(partial=False, built_at=time.time(), building=False, error='')
             cond.notify_all()
 
-    def refresh(inputs, signature, spend, cache):
-        source_signature = inputs.source_signature()
+    def refresh(inputs, signature, spend, cache, source_signature, permissions):
         metadata_at = float('-inf')
-        permissions = inputs.permission_key()
         live_at, live_revision = time.monotonic(), spend.revision
         while True:
             with cond:
@@ -1292,24 +1290,47 @@ def cmd_ui(a):
     publish(st)
 
     def initialize():
-        try:
-            with _m_common.git_read_snapshot():
-                spend = UISpend(inst)
-                spend.discover()
-                spend.advance()
-                inputs = UIInputs(inst)
-                signature = inputs.signature()
-                cache = UIStateCache()
-                cache.worktree_keys = inputs.worktree_keys(inst, signature)
-                cache.usage_revision = (spend.revision, spend.permissions)
-                full = ui_state(inst, cache.problems_for(inst, signature), scan, machine_spend=spend.value,
-                                cache=cache, node_keys=inputs.node_keys(inst, signature))
-            publish(full, complete=True)
-            refresh(inputs, signature, spend, cache)
-        except (Exception, SystemExit) as error:
+        # One worker owns initialization and ongoing refresh. A failed attempt sleeps
+        # until another state request, rather than abandoning a usable partial view.
+        while True:
             with cond:
-                box.update(error=str(error), building=False)
-                cond.notify_all()
+                if box['stopped']:
+                    return
+                requested = box['request']
+                box['building'] = True
+            try:
+                with _m_common.git_read_snapshot():
+                    current = UIInstance(inst.root)
+                    spend = UISpend(current)
+                    spend.discover()
+                    spend.advance()
+                    inputs = UIInputs(current)
+                    signature = inputs.signature()
+                    cache = UIStateCache()
+                    cache.worktree_keys = inputs.worktree_keys(current, signature)
+                    cache.usage_revision = (spend.revision, spend.permissions)
+                    full = ui_state(current, cache.problems_for(current, signature), scan, machine_spend=spend.value,
+                                    cache=cache, node_keys=inputs.node_keys(current, signature))
+                    source_signature = inputs.source_signature()
+                    permissions = inputs.permission_key()
+                with cond:
+                    if box['stopped']:
+                        return
+                    publish(full, complete=True)
+                    box['checked'] = requested
+            except (Exception, SystemExit) as error:
+                with cond:
+                    box.update(error=str(error), building=False, checked=requested)
+                    cond.notify_all()
+                    retry_at = time.monotonic() + interval
+                    cond.wait_for(lambda: box['stopped'] or box['request'] > requested)
+                    # Requests during an attempt coalesce into the next attempt. A
+                    # burst cannot turn persistent failures into a hot retry loop.
+                    while not box['stopped'] and time.monotonic() < retry_at:
+                        cond.wait(timeout=retry_at - time.monotonic())
+                continue
+            refresh(inputs, signature, spend, cache, source_signature, permissions)
+            return
     port = a.port
     srv = None
     deadline = time.monotonic() + (2 if a.open else 0)

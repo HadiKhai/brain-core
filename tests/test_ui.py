@@ -202,6 +202,266 @@ class ExpandedUI(Scenario):
         self.m = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
         loader.exec_module(self.m)
 
+    @contextlib.contextmanager
+    def integration_server(self, root, spend, cleanup=lambda: None, every=0.05):
+        import http.server
+        import urllib.request
+        inst = self.m.UIInstance(root)
+        ready = threading.Event()
+        servers, workers, errors = [], [], []
+        original_server = http.server.ThreadingHTTPServer
+        original_record, original_start = self.m.ui_server_record, threading.Thread.start
+        def server(*a, **kw):
+            value = original_server(*a, **kw)
+            servers.append(value)
+            return value
+        def record(*a, **kw):
+            original_record(*a, **kw)
+            ready.set()
+        def start(thread):
+            if getattr(thread._target, '__name__', '') == 'initialize':
+                workers.append(thread)
+            return original_start(thread)
+        def run():
+            try:
+                self.m.cmd_ui(argparse.Namespace(json=False, scan=[], open=False, write=False, port=0, every=every))
+            except BaseException as error:
+                errors.append(error)
+        def get(path):
+            port = servers[0].server_address[1]
+            data = json.loads((root / '.brain/ui-servers' / (str(port) + '.json')).read_text())
+            return urllib.request.urlopen('http://127.0.0.1:' + str(port) + path + '?k=' + data['key'], timeout=2)
+        with mock.patch.object(self.m, 'load', return_value=inst), \
+             mock.patch.object(self.m, 'UISpend', side_effect=spend), \
+             mock.patch.object(http.server, 'ThreadingHTTPServer', side_effect=server), \
+             mock.patch.object(self.m, 'ui_server_record', side_effect=record), \
+             mock.patch.object(threading.Thread, 'start', start), \
+             contextlib.redirect_stdout(io.StringIO()):
+            thread = threading.Thread(target=run, daemon=True)
+            before = time.monotonic()
+            thread.start()
+            try:
+                yield ready, get, workers, before
+            finally:
+                cleanup()
+                # Release a blocked bootstrap even on the deliberately red path.
+                ready.wait(0.5)
+                if servers:
+                    servers[0].shutdown()
+                thread.join(2)
+                for worker in workers:
+                    worker.join(2)
+                self.assertFalse(thread.is_alive(), 'owned server did not stop')
+                self.assertFalse(any(worker.is_alive() for worker in workers), 'initialization worker leaked')
+                self.assertEqual(errors, [])
+
+    def test_partial_inbox_ignores_lifecycle_lock_and_preserves_queued_questions(self):
+        import fcntl
+        root = self.first_paint_root()
+        inst = self.m.UIInstance(root)
+        reminders = self.m._owners['lifecycle_store']
+        pending = '- 2026-01-01 00:00 +00:00 from worker: question: Which shape?'
+        answered = '- 2026-01-01 00:00 +00:00 from worker: question: Which color?'
+        queued = '- 2026-01-01 00:00 +00:00 from worker: question: Which size? <!-- host-question:demo -->\n'
+        for with_queue in (False, True):
+            with self.subTest(queue=with_queue):
+                inbox = root / 'inbox.md'
+                inbox.write_text(pending + '\n' + answered + '\n')
+                data = reminders.lifecycle_empty()
+                key = reminders.inbox_source_id(inst.nodes()[0], answered)
+                episode = 'a' * 24
+                data['inbox']['root'] = {key: {'id': episode, 'answered': True}}
+                data['answers'] = [{'id': episode, 'source_id': key, 'node': 'root', 'answer': 'Blue'}]
+                folder = root / '.brain/wake'
+                folder.mkdir(exist_ok=True)
+                lifecycle = folder / 'lifecycle.json'
+                lifecycle.write_text(json.dumps(data))
+                queue = root / '.brain/host-questions/root'
+                queue.mkdir(parents=True, exist_ok=True)
+                if with_queue:
+                    (queue / 'question.json').write_text(json.dumps({'line': queued, 'marker': '<!-- host-question:demo -->'}))
+                def snapshot():
+                    return (lifecycle.read_bytes(), inbox.read_bytes(),
+                            {p.name: p.read_bytes() for p in queue.iterdir()})
+                before = snapshot()
+                full_entered, release_full = threading.Event(), threading.Event()
+                spend = mock.Mock(inst=inst, value={}, revision=0, permissions=None)
+                spend.advance.return_value = False
+                spend.refresh_view.return_value = False
+                def discover():
+                    full_entered.set()
+                    if not release_full.wait(2):
+                        raise RuntimeError('full initialization barrier not released')
+                spend.discover.side_effect = discover
+                lock = (folder / 'lifecycle.lock').open('a+')
+                fcntl.flock(lock, fcntl.LOCK_EX)
+                def release():
+                    fcntl.flock(lock, fcntl.LOCK_UN)
+                    release_full.set()
+                stream = None
+                try:
+                    with self.integration_server(root, lambda _: spend, release) as (ready, get, workers, start):
+                        try:
+                            bound = ready.wait(0.5)
+                            untouched = snapshot() == before
+                            # Keep independent side-effect evidence on the old blocked path.
+                            print('held lifecycle queue=', with_queue, 'bound=', bound, 'untouched=', untouched, file=sys.stderr)
+                            self.assertTrue(untouched, 'partial bootstrap published lifecycle or drained queued questions')
+                            self.assertTrue(bound, 'partial bootstrap waited for lifecycle lock before bind')
+                            self.assertTrue(full_entered.wait(0.5))
+                            with get('/api/state') as response:
+                                partial = json.load(response)
+                            self.assertTrue(partial['brain']['filling_in'])
+                            self.assertEqual([n['title'] for n in partial['nodes']], ['Alice workspace', 'Meadow'])
+                            lines = partial['nodes'][0]['inbox']
+                            self.assertIn(pending[2:], lines)
+                            self.assertNotIn(answered[2:], lines)
+                            self.assertEqual(queued.rstrip()[2:] in lines, with_queue)
+                            stream = get('/api/events')
+                            self.assertEqual(json.loads(stream.readline()[6:]), partial)
+                            self.assertLess(time.monotonic() - start, 1)
+                            self.assertEqual(snapshot(), before)
+                            release()
+                            full = partial
+                            while full['brain'].get('filling_in'):
+                                line = stream.readline()
+                                if line.startswith(b'data: '):
+                                    full = json.loads(line[6:])
+                            self.assertNotIn(answered[2:], full['nodes'][0]['inbox'])
+                            self.assertNotEqual(lifecycle.read_bytes(), before[0])
+                            if with_queue:
+                                self.assertEqual(list(queue.iterdir()), [])
+                                self.assertEqual(inbox.read_text().count('<!-- host-question:demo -->'), 1)
+                        finally:
+                            if stream:
+                                stream.close()
+                finally:
+                    release()
+                    lock.close()
+
+    def test_initial_failure_recovers_on_same_server_refresh_without_another_worker(self):
+        root = self.first_paint_root()
+        real_state = self.m.ui_state
+        for stage in ('discover', 'state'):
+            with self.subTest(stage=stage):
+                failed, retry_entered, release_retry = threading.Event(), threading.Event(), threading.Event()
+                attempts, active = [], [0, 0]
+                sentinel = 'fabricated-private-initialization-error'
+                spend = mock.Mock(inst=self.m.UIInstance(root), value={}, revision=0, permissions=None)
+                spend.advance.return_value = False
+                spend.refresh_view.return_value = False
+                calls = [0]
+                def fault():
+                    calls[0] += 1
+                    attempts.append(threading.get_ident())
+                    active[0] += 1
+                    active[1] = max(active[1], active[0])
+                    try:
+                        if calls[0] == 1:
+                            failed.set()
+                            raise OSError(sentinel)
+                        retry_entered.set()
+                        self.assertTrue(release_retry.wait(2))
+                    finally:
+                        active[0] -= 1
+                def state(*a, **kw):
+                    if stage == 'state':
+                        fault()
+                    return real_state(*a, **kw)
+                if stage == 'discover':
+                    spend.discover.side_effect = fault
+                stream = None
+                with mock.patch.object(self.m, 'ui_state', side_effect=state):
+                    with self.integration_server(root, lambda _: spend, release_retry.set) as (ready, get, workers, start):
+                        try:
+                            self.assertTrue(ready.wait(0.5))
+                            stream = get('/api/events')
+                            partial = json.loads(stream.readline()[6:])
+                            self.assertTrue(partial['brain']['filling_in'])
+                            self.assertTrue(failed.wait(0.5))
+                            until = time.monotonic() + 0.5
+                            while True:
+                                with get('/api/loading') as response:
+                                    loading = json.load(response)
+                                if loading['failed'] or time.monotonic() >= until:
+                                    break
+                            self.assertTrue(loading['failed'])
+                            self.assertNotIn(sentinel, json.dumps((loading, partial)))
+                            with get('/') as response:
+                                self.assertNotIn(sentinel.encode(), response.read())
+                            # This real Refresh request must retain partial while the retry is held.
+                            with get('/api/state') as response:
+                                self.assertEqual(json.load(response), partial)
+                            self.assertLess(time.monotonic() - start, 1)
+                            self.assertTrue(retry_entered.wait(0.5), 'same-server Refresh did not retry initialization')
+                            release_retry.set()
+                            complete = partial
+                            while complete['brain'].get('filling_in'):
+                                line = stream.readline()
+                                if line.startswith(b'data: '):
+                                    complete = json.loads(line[6:])
+                            with get('/api/state') as response:
+                                self.assertEqual(json.load(response), complete)
+                                self.assertGreater(int(response.headers['X-Brain-UI-Version']), 1)
+                            with get('/api/loading') as response:
+                                status = json.load(response)
+                            self.assertFalse(status['filling_in'])
+                            self.assertFalse(status['failed'])
+                            self.assertFalse(status['refreshing'])
+                            self.assertNotIn(sentinel, json.dumps((complete, status)))
+                            self.assertEqual(len(workers), 1)
+                            self.assertEqual(len(set(attempts)), 1)
+                            self.assertEqual(calls[0], 2)
+                            self.assertEqual(active[1], 1)
+                        finally:
+                            if stream:
+                                stream.close()
+
+    def test_failed_initialization_waits_for_demand_coalesces_and_stops(self):
+        root = self.first_paint_root()
+        retry_entered, release_retry = threading.Event(), threading.Event()
+        waiting = threading.Event()
+        attempts, workers_seen = [], []
+        wait = threading.Condition.wait
+        def observed_wait(condition, timeout=None):
+            if threading.current_thread() in workers_seen and timeout is None:
+                waiting.set()
+            return wait(condition, timeout)
+        spend = mock.Mock(inst=self.m.UIInstance(root), value={}, revision=0, permissions=None)
+        def discover():
+            attempts.append((threading.get_ident(), time.monotonic()))
+            if len(attempts) == 2:
+                retry_entered.set()
+                self.assertTrue(release_retry.wait(2))
+            raise OSError('fabricated transient failure')
+        spend.discover.side_effect = discover
+        with mock.patch.object(threading.Condition, 'wait', observed_wait):
+            with self.integration_server(root, lambda _: spend, release_retry.set) as (ready, get, workers, start):
+                workers_seen = workers
+                self.assertTrue(ready.wait(0.5))
+                self.assertTrue(waiting.wait(0.5), 'failed initializer did not remain available for refresh')
+                self.assertEqual(len(attempts), 1)
+                for _ in range(3):
+                    with get('/api/loading') as response:
+                        self.assertTrue(json.load(response)['failed'])
+                self.assertEqual(len(attempts), 1, 'status reads retried initialization')
+                with get('/api/state') as response:
+                    self.assertTrue(json.load(response)['brain']['filling_in'])
+                self.assertTrue(retry_entered.wait(0.5))
+                for _ in range(4):
+                    with get('/api/state') as response:
+                        self.assertTrue(json.load(response)['brain']['filling_in'])
+                self.assertEqual(len(attempts), 2, 'refresh burst created duplicate workers')
+                waiting.clear()
+                release_retry.set()
+                self.assertTrue(waiting.wait(0.5), 'failed retry did not sleep after coalesced demand')
+                self.assertEqual(len(attempts), 3)
+                self.assertGreaterEqual(attempts[1][1] - attempts[0][1], 0.05)
+                self.assertGreaterEqual(attempts[2][1] - attempts[1][1], 0.05)
+                self.assertEqual(len(set(tid for tid, _ in attempts)), 1)
+                self.assertEqual(len(workers), 1)
+            self.assertEqual(len(attempts), 3, 'shutdown restarted initialization')
+
     def first_paint_root(self):
         root = self.tmp / "alice"
         root.mkdir()
