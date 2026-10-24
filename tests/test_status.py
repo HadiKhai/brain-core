@@ -1008,6 +1008,17 @@ class NodeHygiene(Scenario):
         self.assertIn('dead path ./missing.py', problems[0])
         self.assertIn('dead path lost.md', problems[1])
 
+    def test_bound_coordinator_wake_satisfies_tick_warning_without_a_schedule(self):
+        r, inst, n = self.node()
+        self.b(r, 'set', 'app', 'stack=python', 'verify=python3 -c "pass"', 'wake=exit 0')
+        self.assertIn('needs a coordinator tick', self.b(r, 'check'))
+        self.b(r, 'set', 'app', 'coordinator=fixture-coordinator')
+        self.assertNotIn('needs a coordinator tick', self.b(r, 'check'))
+        self.b(r, 'set', 'app', 'wake=')
+        self.assertIn('needs a coordinator tick', self.b(r, 'check'))
+        self.b(r, 'set', 'root', 'wake_default=exit 0')
+        self.assertNotIn('needs a coordinator tick', self.b(r, 'check'))
+
     def test_second_machine_uses_recorded_tick_without_duplicate_binding(self):
         r, inst, n = self.node()
         self.b(r, 'set', 'app', 'stack=python', 'verify=python3 -c "pass"')

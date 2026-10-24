@@ -138,7 +138,9 @@ def code_setup_warnings(inst, n):
         out.append(f"{n['id']}: code node needs verify=<command> before its first job; brain set {n['id']} 'verify=<command>'")
     bound = inst.local.get("schedules", {})
     ticks = [x for x in _m_schedules.read_schedules(inst) if x.get("node") == n["id"]]
-    if not ticks or (n["local"].get("coordinator") and not any(x["id"] in bound for x in ticks)):
+    target, wake = _m_hosts.wake_target(inst, n)
+    bound_wake = bool(n["local"].get("coordinator") and target["id"] == n["id"] and wake.strip())
+    if not bound_wake and (not ticks or (n["local"].get("coordinator") and not any(x["id"] in bound for x in ticks))):
         out.append(f"{n['id']}: code node needs a coordinator tick before its first job; schedule a host interval, "
                    "brain schedule add, then brain schedule bind (adapters/hosts/t3.md)")
     return out
