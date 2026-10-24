@@ -82,10 +82,11 @@ def validate_merge(inst, n, mode):
 def publication_instructions(inst, n):
     from . import land_checks as _m_land_checks
     lines = ['## Publication policy', '']
+    decisions = []
     for action in ('push', 'pr'):
         decision = publication_decision(inst, n, action)
-        lines.append('- ' + action + ': ' + decision['decision'] + ' — ' + decision['reason'])
-    lines += ['Selecting a merge mode grants no outward permission. Before any supported push/PR step, '
+        decisions.append(action + ': ' + decision['decision'] + ' — ' + decision['reason'])
+    lines += ['; '.join(decisions) + '. Selecting a merge mode grants no outward permission. Before any supported push/PR step, '
               'recheck policy and current land-check evidence; ask the coordinator on unknown policy.', '']
     lines += _m_land_checks.land_check_instructions(n)
     return [_m_guard.redact(line, _m_guard.never_terms(n)) for line in lines]
