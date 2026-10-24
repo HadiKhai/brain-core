@@ -530,7 +530,7 @@ def due_items(inst, n, evidence=None, include_stale=True, include_ready=True, in
         if w and w["merged"]:
             add("merged-job", f"{branch}: merged in local git; record brain jobs {n['id']} --branch {branch} --lessons "
                 "first, then close the ledger and prune; " + _m_jobs.handback_detail(n, row),
-                job=_m_jobs.job_key(row), condition='close-merged-ledger')
+                job=_m_jobs.job_key(row), condition='close-merged-ledger', episode=w.get('tip'))
         elif (signal and signal.get("restart") == "compactions" and signal["state"] == "blocked"
               and not _m_briefs.restart_acknowledged(n, row, signal)):
             command = _m_briefs.restart_command(n, row)

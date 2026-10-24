@@ -147,6 +147,160 @@ class DueLifecycle(Scenario):
             changed = self.advice()
         self.assertTrue({i['id'] for i in changed}.isdisjoint(i['id'] for i in second))
 
+    def episode_setup(self):
+        self.b(self.root, 'new', 'maple', '--title', 'Maple')
+        self.inst = self.m.Instance(self.root)
+        self.n = self.inst.node('maple')
+        self.advice_setup()
+
+    def episode_snapshot(self, state):
+        items = self.advice()
+        self.assertEqual(len(items), 6)
+        if state is not None:
+            self.assertEqual({i['state'] for i in items}, {state})
+        output = io.StringIO()
+        with mock.patch.object(self.m, 'load', return_value=self.inst), contextlib.redirect_stdout(output):
+            self.m.cmd_inbox(argparse.Namespace(id='maple', new=True, json=True, weekly=False))
+        fresh = [i for i in json.loads(output.getvalue()) if i['kind'] == 'job']
+        self.assertEqual(len(fresh), 6)
+        self.assertTrue(all(i['informational'] for i in fresh))
+        return {i['id'] for i in items}, {i['id'] for i in fresh}
+
+    def assert_episode_changed(self, before, after):
+        for old, new in zip(before, after):
+            self.assertTrue(old.isdisjoint(new))
+
+    def test_advice_episode_attempt_states(self):
+        self.episode_setup()
+        before = self.episode_snapshot('open')
+        attempt = self.m.begin_attempt(self.inst, self.n, self.row)
+        for state in ('queued', 'verifying', 'interrupted'):
+            if state != 'queued':
+                self.m.update_attempt(self.inst, self.n, self.row, attempt['id'], state)
+            after = self.episode_snapshot(state)
+            self.assert_episode_changed(before, after)
+            before = after
+        for state in ('invalidated', 'terminal'):
+            attempt = self.m.begin_attempt(self.inst, self.n, self.row)
+            self.m.finish_attempt(self.inst, self.n, self.row, attempt['id'], state)
+            after = self.episode_snapshot(state)
+            self.assert_episode_changed(before, after)
+            before = after
+        self.m.attempt_path(self.n, self.row).write_text('{broken')
+        self.assert_episode_changed(before, self.episode_snapshot('unknown'))
+
+    def test_advice_episode_new_attempt_same_state(self):
+        self.episode_setup()
+        self.m.begin_attempt(self.inst, self.n, self.row)
+        before = self.episode_snapshot(None)
+        self.m.begin_attempt(self.inst, self.n, self.row)
+        self.assert_episode_changed(before, self.episode_snapshot(None))
+
+    def write_advice_signal(self, **fields):
+        path = self.m.handback_file(self.n, self.row)
+        path.parent.mkdir(exist_ok=True)
+        signal = {'job': self.row['Job'], 'started': self.row['Started'], 'state': 'blocked',
+                  'wake_id': 'a' * 32, **fields}
+        path.write_text(json.dumps(signal))
+
+    def test_advice_episode_publication_same_state(self):
+        self.episode_setup()
+        self.write_advice_signal()
+        before = self.episode_snapshot('blocked')
+        self.write_advice_signal(wake_id='b' * 32)
+        self.assert_episode_changed(before, self.episode_snapshot('blocked'))
+
+    def test_advice_episode_restart_same_state(self):
+        self.episode_setup()
+        self.write_advice_signal(restart='compactions', restart_id='c' * 32)
+        before = self.episode_snapshot('blocked')
+        self.write_advice_signal(restart='compactions', restart_id='d' * 32)
+        self.assert_episode_changed(before, self.episode_snapshot('blocked'))
+
+    def test_advice_episode_repeated_state_without_intermediate_due(self):
+        self.episode_setup()
+        before = self.episode_snapshot('open')
+        self.write_advice_signal()
+        self.m.runaway_jobs(self.inst, self.n, structured=True)
+        self.m.handback_file(self.n, self.row).unlink()
+        self.assert_episode_changed(before, self.episode_snapshot('open'))
+
+    def test_advice_episode_remerge(self):
+        self.episode_setup()
+        self.n['local'].setdefault('worktrees', {})[self.row['Job']] = {'path': str(self.root)}
+        local = {'exists': True, 'merged': True, 'tip': 'a' * 40}
+        with mock.patch.object(self.m, 'local_job_state', side_effect=lambda *a: dict(local)):
+            before = self.episode_snapshot('open')
+            local['tip'] = 'b' * 40
+            self.assert_episode_changed(before, self.episode_snapshot('open'))
+
+    def test_advice_episode_merge_presence_same_tip(self):
+        self.episode_setup()
+        self.n['local'].setdefault('worktrees', {})[self.row['Job']] = {'path': str(self.root)}
+        local = {'exists': True, 'merged': True, 'tip': 'a' * 40}
+        with mock.patch.object(self.m, 'local_job_state', side_effect=lambda *a: dict(local)):
+            before = self.episode_snapshot('open')
+            local['merged'] = False
+            self.m.runaway_jobs(self.inst, self.n, structured=True)
+            local['merged'] = True
+            self.assert_episode_changed(before, self.episode_snapshot('open'))
+
+    def test_advice_episode_rebrief_and_subject_inputs(self):
+        self.episode_setup()
+        before = self.episode_snapshot('open')
+        self.m.acknowledge_usage_restart(self.inst, self.n, self.row)
+        after = self.episode_snapshot('open')
+        self.assert_episode_changed(before, after)
+        for field, value in (('Started', '2026-01-15T09:00Z'), ('Job', 'job/brush')):
+            self.row[field] = value
+            self.stats['open'][0][field] = value
+            self.m.write_jobs(self.inst, self.n, [self.row])
+            before, after = after, self.episode_snapshot('open')
+            self.assert_episode_changed(before, after)
+        items = self.m.runaway_jobs(self.inst, self.n, structured=True)
+        keys = {self.m.reminder_key(i) for i in items}
+        self.assertEqual(len(keys), 6)  # independent condition codes
+        for item in items:
+            self.assertNotIn(self.m.reminder_key({**item, 'node': 'birch'}), keys)
+
+    def test_advice_episode_ignores_attempt_telemetry_and_handback_display(self):
+        self.episode_setup()
+        attempt = self.m.begin_attempt(self.inst, self.n, self.row)
+        self.m.finish_attempt(self.inst, self.n, self.row, attempt['id'])
+        self.write_advice_signal(attempt_id=attempt['id'])
+        before = self.episode_snapshot('blocked')
+        lifecycle = self.root / '.brain/wake/lifecycle.json'
+        saved = lifecycle.read_bytes()
+        attempt.update(state='terminal', at='2026-01-15T13:00Z', owner=[0, 'telemetry'])
+        self.m.write_attempt(self.n, self.row, attempt)
+        self.write_advice_signal(attempt_id=attempt['id'], at='2026-01-15T14:00Z',
+                                 summary='count 987', report='reports/display.md', lessons='display')
+        projected = self.m.runaway_jobs(self.inst, self.n, structured=True, readonly=True)
+        self.assertEqual({self.m.reminder_key(i) for i in projected}, before[0])
+        self.assertEqual(lifecycle.read_bytes(), saved)
+        self.assertEqual({i['id'] for i in self.advice()}, before[0])
+        inbox, _ = self.m.inbox_items(self.inst, [self.n], reporter='maple')
+        advice = [i for i in inbox if i['kind'] == 'job']
+        self.assertEqual({i['id'] for i in advice}, before[1])
+        self.assertTrue(all(i['reported'] for i in advice))
+
+    def test_merged_need_episode_remerge_without_absent_scan(self):
+        row = self.identity_row()
+        self.detail = 'fabricated report'
+        self.m.write_jobs(self.inst, self.n, [row])
+        self.n['local']['worktrees'] = {row['Job']: {'path': str(self.root)}}
+        local = {'exists': True, 'merged': True, 'tip': 'a' * 40}
+        with mock.patch.object(self.m, 'local_job_state', side_effect=lambda *a: dict(local)):
+            def ids():
+                due = next(i for i in self.m.due_items(self.inst, self.n, include_advice=False)
+                           if i['kind'] == 'merged-job')
+                watch = next(i for i in self.m.watch_items(self.inst, self.n) if i['kind'] == 'merged-job')
+                return due['id'], watch['id']
+            before = ids()
+            local['tip'] = 'b' * 40
+            after = ids()
+            self.assertTrue(all(old != new for old, new in zip(before, after)))
+
     def test_docker_report_only_inbox_never_wakes(self):
         self.inst.local_of('root').update(coordinator='fixture-root', wake='fixture-send')
         self.inst.save_local()

@@ -9,6 +9,8 @@ from . import common as _m_common
 from . import guard as _m_guard
 from . import history as _m_history
 from . import jobs as _m_jobs
+from . import job_attempts as _m_attempts
+from . import status as _m_status
 from . import machine as _m_machine
 from . import spend as _m_spend
 
@@ -286,10 +288,28 @@ def latch_job_advice(inst, n, row, conditions, readonly=False):
         for code, text in conditions.items():
             record['conditions'].setdefault(code, text)
         advice[key] = record
-        signal = _m_jobs.job_signal(inst, n, row) or {}
-        state = signal.get('state', 'open')
+        projection = _m_attempts.job_projection(inst, n, row)
+        signal = projection['signal'] or {}
+        attempt = projection['attempt'] or {}
+        w = n['local'].get('worktrees', {}).get(row['Job'])
+        local = _m_status.local_job_state(n, row['Job'], w) if w else {}
+        # Recorded episode evidence only: never attempt timestamps, owners,
+        # queue positions, usage counters, display prose or moving thresholds.
+        context = {'state': projection['state'], 'attempt': attempt.get('id'),
+                   'publication': signal.get('wake_id'), 'restart': signal.get('restart_id'),
+                   'merged': bool(local.get('merged')),
+                   'merged_tip': local.get('tip') if local.get('merged') else None}
+        previous = record.get('context_episode')
+        if previous is not None and not re.fullmatch(r'[0-9a-f]{24}', str(previous)):
+            raise ValueError('invalid job advice context episode')
+        if record.get('context') != context:
+            # Chaining also distinguishes A -> B -> A in owning inboxes, even
+            # when no due scan reconciled the intermediate B reminder.
+            record['context_episode'] = _m_jobs.digest([record['episode'], previous, context])
+            record['context'] = context
+        state = projection['state']
         return [{'node': n['id'], 'kind': 'job', 'job': _m_jobs.job_key(row), 'condition': code,
-                 'state': state, 'episode': record['episode'], 'informational': True,
+                 'state': state, 'episode': record['context_episode'], 'informational': True,
                  'text': _m_guard.redact(f"job {row['Job']}: " + (conditions[code] if code in conditions else
                           'crossed since brief: ' + record['conditions'][code]), _m_guard.never_terms(n))}
                 for code in ADVICE_CONDITIONS if code in record['conditions']]
