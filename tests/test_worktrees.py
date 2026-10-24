@@ -83,6 +83,28 @@ class Workbench(Scenario):
         self.b(r, "wt", "rm", "app", "feat-b", ok=False)        # uncommitted work is never discarded silently
         self.assertIn("feat-c", self.b(r, "wt", "list"))
 
+    def test_prune_reports_submodules_and_retains_shared_module_data(self):
+        r = self.init("alice")
+        source = self.repo(self.tmp / "module-source")
+        home = self.repo(self.tmp / "app")
+        self.git("submodule", "add", "--name", "shared-name", str(source), "vendor/module", cwd=home)
+        self.git("commit", "-qam", "Add module", cwd=home)
+        self.b(r, "new", "app", "--title", "App", "--home", str(home))
+        self.b(r, "wt", "add", "app", "job-module")
+        wt = self.tmp / "app-work/worktrees/job-module"
+        self.git("submodule", "update", "--init", cwd=wt)
+        self.git("commit", "--allow-empty", "-qm", "Finish job", cwd=wt)
+        self.git("merge", "--ff-only", "job-module", cwd=home)
+        shared = home / ".git/modules/shared-name"
+        before = (shared / "HEAD").read_bytes()
+        for flags in (("--dry-run",), ()):
+            out = self.b(r, "wt", "prune", "app", "--offline", *flags)
+            self.assertIn("job-module (submodules retained: vendor/module)", out)
+            self.assertIn("none", out)
+            self.assertTrue((wt / "vendor/module/README.md").exists())
+            self.assertEqual((shared / "HEAD").read_bytes(), before)
+        self.assertIn("job-module", self.b(r, "wt", "list", "app"))
+
     def test_reports_have_a_predictable_place(self):
         r = self.init("alice")
         self.b(r, "new", "site", "--title", "Site")

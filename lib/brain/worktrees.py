@@ -330,6 +330,18 @@ def cmd_wt_prune(a):
             continue
         dirty, merged, ahead = worktree_state(home, w, br, n)
         if dirty is None or (merged and dirty == 0):
+            if dirty is not None:
+                entries = _m_common.git("ls-files", "--stage", "-z", cwd=w["path"])
+                if entries.returncode:
+                    kept.append(f"{br} (submodule inventory unreadable; worktree retained)")
+                    continue
+                modules = [entry.split("\t", 1)[1] for entry in entries.stdout.split("\0")
+                           if entry.startswith("160000 ") and "\t" in entry]
+                if modules:
+                    # Git refuses removing populated submodules; their gitdirs can belong
+                    # to another checkout. Report them without deinitializing or deleting.
+                    kept.append(f"{br} (submodules retained: {', '.join(modules)})")
+                    continue
             _m_jobs.print_job_handback(n, br)
             _m_jobs.print_worktree_threads(n, br, dry_run=a.dry_run)
             if not a.dry_run:
