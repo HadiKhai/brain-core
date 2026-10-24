@@ -105,6 +105,8 @@ For agents:
 - heavy-run (2 P1 + P2, redesign in backlog).
 - rehearse EPERM atexit kill (P1).
 - rehearse harness linked-external-observation refusal (harness-r2 parked).
+- native re-rehearsal unavailable: sandbox self-check refusal (rehearse.py:877), harness bytes unchanged since 3ddfd1a
+- usage-reading probe not covered by clone comparison (harness HOME identity); verified live on the operator machine; verify ×2 and clean-install check pass
 
 After upgrading:
 - These issues remain open. Release 1 uses the approved manual landing path;
