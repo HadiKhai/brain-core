@@ -651,6 +651,11 @@ class TeamHomes(Scenario):
         self.assertNotEqual(updated["main"], base)
         self.assertEqual((wt.parent / "verify-count").read_text(), "xx")
         record.write_bytes(legacy)
+        # Restore the original old-core state, which had no replacement-attempt sidecar.
+        module = core_loader.SourceFileLoader('historical_attempt_fixture', str(CORE / 'bin/brain')).load_module()
+        node = module.Instance(root).node('app')
+        job = module.open_job(module.read_jobs(node), 'job')
+        module.attempt_path(node,job).unlink()
         # Refreshing origin keeps the legacy base valid, but its port proof still needs migration.
         self.git("push", "origin", "main", cwd=home)
         self.git("fetch", "origin", cwd=home)
