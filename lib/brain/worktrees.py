@@ -237,6 +237,9 @@ def cmd_wt_add(a):
     print(f"worktree: {_m_common.tilde(path)}\n  branch {a.branch}{'' if exists else ' (new, from ' + base + ')'}  ·  "
           f"{port_text(port, count)}")
     setup = n["dir"] / SETUP_FILE
+    from . import events
+    if setup.exists() and not a.no_setup:
+        events.checkpoint_setup()
     _m_instance.unlock()  # the setup can take minutes and touches only the worktree
     try:
         for module in reuse_submodules(home, path):

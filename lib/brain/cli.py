@@ -13,6 +13,7 @@ from pathlib import Path
 from . import briefs as _m_briefs
 from . import check as _m_check
 from . import common as _m_common
+from . import events as _m_events
 from . import connect as _m_connect
 from . import guard as _m_guard
 from . import gate_lock as _m_gate_lock
@@ -115,12 +116,16 @@ READ_ONLY = {"cmd_show", "cmd_tree", "cmd_status", "cmd_now", "cmd_jobs", "cmd_s
              "cmd_brief", "cmd_hire", "cmd_reports", "cmd_brains", "cmd_use", "cmd_machine", "cmd_usable",
              "cmd_item_list", "cmd_item_show", "cmd_wt_list", "cmd_selftest", "cmd_init", "cmd_hook", "cmd_hook_approve", "cmd_help",
              "cmd_dashboard", "cmd_ready", "cmd_usage", "cmd_scan", "cmd_scrub", "cmd_history",
-             "cmd_gate_lock", "cmd_version", "cmd_connect", "cmd_recall", "cmd_proposals", "cmd_changes", "cmd_heavy", "cmd_rehearse", "cmd_policy"}
+             "cmd_events", "cmd_gate_lock", "cmd_version", "cmd_connect", "cmd_recall", "cmd_proposals", "cmd_changes", "cmd_heavy", "cmd_rehearse", "cmd_policy"}
 
 
 def writes(a):
     """Does this command, with these options, change anything in the instance?"""
     name = a.f.__name__
+    if name == "cmd_events":
+        return bool(a.explain or a.record)
+    if name == "cmd_wt_prune":
+        return not a.dry_run
     if name == 'cmd_proposals':
         return bool(getattr(a, 'approve_all', False))
     if name == 'cmd_land_check':
@@ -138,7 +143,7 @@ def writes(a):
     if name == "cmd_status":
         return a.refresh
     if name == "cmd_inbox":
-        return a.new
+        return a.new or bool(getattr(a, "add", None))
     if name == 'cmd_index':
         return a.record
     if name == 'cmd_due':
@@ -153,7 +158,7 @@ def writes(a):
     if name == "cmd_check":
         return bool(a.fix)
     if name == "cmd_jobs":
-        return a.start or a.close or a.lessons is not None or a.switch is not None or bool(a.contract_file) \
+        return a.start or a.close or bool(getattr(a, "settled", False)) or a.lessons is not None or a.switch is not None or bool(a.contract_file) \
             or bool(a.usage_file)
     if name == "cmd_ready":
         return a.record
@@ -302,6 +307,7 @@ def main():
         opt("--quiet", action="store_true", help="no output; exit 1 for node actions, including its held work, 0 otherwise"))
     cmd("inbox", _m_status.cmd_inbox, "needs in a node's subtree (default: calling node); --new remembers per reporter",
         opt("id", nargs="?"), opt("--json", action="store_true"), opt("--new", action="store_true"),
+        opt('--add', help='append a screened inbox item'),
         opt('--weekly', action='store_true', help='read-only sweep of unresolved requests aged at least seven days'))
     cmd('answer', _m_status.cmd_answer, 'record text for exactly one current inbox episode, retaining source/history',
         'item_id', 'text')
@@ -324,6 +330,8 @@ def main():
         opt("action", choices=['run']), 'id', opt('--once', action='store_true'), opt('--request-id'))
     cmd("dispatch", _m_dispatcher.cmd_dispatch, "bounded read-only plan of explicit root/operator asks; empty scan is silent",
         opt('--limit', type=int, default=50), opt('--node-limit', type=int, default=200))
+    cmd("backlog", _m_events.cmd_backlog, "append a dated backlog item", "id",
+        opt("action", choices=["add"]), "item")
     cmd("show", _m_status.cmd_show, "everything about one node, including this machine's bindings", "id")
     cmd("set", _m_nodes.cmd_set, "set fields: brain set <id> key=value ... (host IDs and home paths stay on this machine)",
         "id", opt("pairs", nargs="+"))
@@ -471,7 +479,12 @@ def main():
         opt("--iso", action="store_true"))
     cmd("tree", _m_status.cmd_tree, "show the node tree")
     cmd("status", _m_status.cmd_status, "status timestamps; --refresh regenerates only one node's facts block",
-        opt("id", nargs="?"), opt("--refresh", action="store_true"))
+        opt("id", nargs="?"), opt("--refresh", action="store_true"),
+        opt("--from-events", action="store_true"), opt("--json", action="store_true"))
+    cmd("events", _m_events.cmd_events, "private event metadata; --compare summarizes the last day", "id",
+        opt("--compare", action="store_true"), opt("--json", action="store_true"),
+        opt("--explain", metavar="DIFFERENCE_ID"), opt("--reason"),
+        opt("--record", metavar="FACT_TYPE"), opt("--job-key"), opt("--data", default="{}"))
     cmd("registry", _m_status.cmd_registry, "regenerate registry.md")
     cmd("link", _m_hosts.cmd_link, "create runtime links (axiom 22); --command puts 'brain' on your PATH; --global adds a "
         "pointer to this Brain in each runtime's user-wide instructions",
@@ -548,6 +561,7 @@ def main():
                 + ", ".join(str(p.relative_to(Path(root).resolve())) if Path(root).resolve() in p.parents else str(p)
                             for p in out[:5]) + ("…" if len(out) > 5 else "") + "; remove them (brain check lists them)")
         with _m_instance.brain_lock(root):
-            a.f(a)
+            with _m_events.Command(root, a):
+                a.f(a)
     else:
         a.f(a)

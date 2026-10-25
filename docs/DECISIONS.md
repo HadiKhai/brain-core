@@ -53,3 +53,47 @@ The regression reads the first committed ledger revision before generating a
 brief, then checks that the brief retains the expected runtime and model. Its
 cases cover class defaults, a node runtime pin, node and instance class routing,
 and inherited model configuration without activating inherited runtime policy.
+
+## D301: Private write journal, recovery and metadata projections
+
+Instance CLI writers append a durable begin before changing node state, followed
+by a commit or abort under the instance lock. A partial failure leaves a pending
+operation; a locked status refresh records the mismatch and reconciles the current
+snapshot. This is write-ahead detection and explicit reconciliation, not rollback
+across files or Git. Journals rotate monthly and remain under ignored `.brain/`.
+Stop hooks append only an invalidation to a durable outbox and never acquire the
+instance lock. The next writer folds those invalidations using current hashes.
+
+Recorded status contains generated metadata, never worker summaries, questions,
+lesson bodies or acknowledgement reasons. Display screening preserves opaque
+identities, hashes and schema keys. Damaged records are quarantined privately;
+linked journals refuse before repair or mutation. Disposable replay indexes bound
+ordinary work to newly appended bytes.
+
+## D302: Compare before selecting an event projection
+
+Files remain the default source. Event-only status replays committed generated
+projections without reading node content; it does not reconstruct typed domain
+facts. Every refresh records an independent resource-hash comparison. The explicit
+source switch requires a full comparison day and no unexplained mismatch or
+interrupted operation, including every node for an instance-wide switch.
+Existing snapshots remain available, and recovery records are labelled as snapshot
+reconciliation rather than historical events.
+
+## D303: Maintain status without a bookkeeping turn
+
+Successful instance writes refresh affected nodes' generated facts and Active work.
+The judgement timestamp is retained. Now sections retain thirty nonempty lines;
+overflow moves to a dated status archive. Generated status commits coalesce to an
+hour, or a job close, and exclude pre-existing judgement or archive edits. A failed
+optional refresh warns and invalidates the projection while preserving the primary
+write's terminal event. A dated backlog command stores prose in the node file and
+only its resource metadata in the event journal.
+
+## D304: Explicit typed facts for delivery measurements
+
+A shared `record_fact` hook appends observed metadata with an exact job key,
+absolute timestamp, phase/state and bounded evidence references. Classification
+codes are identifiers, with no free-form reason text. Reconstructed facts are
+labelled separately and never count as measured observations. No phase, preview
+usability, authorization or failure classification is inferred from transcripts.

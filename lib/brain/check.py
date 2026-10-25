@@ -119,6 +119,9 @@ def collect_problems(inst):
                 if not (l.is_symlink() and os.readlink(l) == "AGENTS.md"):
                     p(f"{nid}: {link} must be a link to AGENTS.md (axiom 22)")
                     fixable.append("links")
+        if n["id"] == "root" and not (n["dir"] / "backlog.md").exists():
+            p("root: missing backlog.md")
+            fixable.append("backlog")
         if n["id"] != "root":
             for rel in template_files:
                 if rel.name != ".gitkeep" and not (n["dir"] / rel).exists():
@@ -257,6 +260,11 @@ def apply_fixes(inst, kinds):
         inst.save_local()
     if "links" in kinds:
         done += [f"linked {l.relative_to(inst.root)}" for l in _m_hosts.link_runtimes(inst)]
+    if "backlog" in kinds:
+        path = inst.root / "backlog.md"
+        _m_common.atomic_write(path, "")
+        _m_common.touch(path)
+        done.append("root: added backlog.md")
     if "templates" in kinds:
         for n in inst.nodes():
             if n["id"] == "root":
@@ -339,7 +347,7 @@ def cmd_check(a):
         print("\n".join(f"✗ {x}" for x in problems))
         if fixable:
             print("(some can be fixed with: brain check --fix)")
-        sys.exit(1)
+        raise _m_common.VerdictExit(1)
     print(f"✓ {len(inst.nodes())} nodes, {len(inst.items())} items: all checks pass")
 
 

@@ -292,7 +292,7 @@ def active_work(n, include_closed=False):
         if line.startswith("## "):
             inside = line[3:].strip().lower().startswith("active work")
         elif inside and line.startswith("|"):
-            cells = [c.strip() for c in line.strip().strip("|").split("|")]
+            cells = [_m_jobs.uncell(c) for c in re.split(r"(?<!\\)\|", line.strip()[1:-1])]
             if cells and not set("".join(cells)) <= set("-: ") and cells[0].lower() != "branch":
                 rows.append(cells)
     return [r for r in rows if include_closed or not active_work_closed(r)]
@@ -385,18 +385,22 @@ def local_job_state(n, branch, w):
     return {"exists": exists, "tip": tip, "merged": merged}
 
 
-def due_evidence(inst, n):
+def file_state(inst, n):
     rows = _m_jobs.read_jobs(n)
     wts = {b: {**w, **local_job_state(n, b, w)} for b, w in sorted(n["local"].get("worktrees", {}).items())}
     from . import job_attempts as _m_attempts
     projections = {_m_jobs.job_key(r): _m_attempts.job_projection(inst, n, r) for r in rows or []}
     signals = {key: value['signal'] for key, value in projections.items()}
+    return {"jobs": rows, "worktrees": wts, "handbacks": signals, "job_projections": projections, "inbox": inbox_lines(n)}
+
+
+def due_evidence(inst, n):
+    state = file_state(inst, n)
     # Node's own commits only, excluding status (including its generated refresh commit) and children.
     names = ["brief.md", "decisions.md", "backlog.md", "node.md", "inbox.md", "sources", "AGENTS.md", _m_jobs.JOBS_FILE,
              "job-handbacks", "job-attempts", "handback-queue"]
     paths = [str((n["dir"] / name).relative_to(inst.root)) for name in names]
     last = _m_common.git("log", "-1", "--format=%H %cI", "--", *paths, cwd=inst.root).stdout.strip()
-    state = {"jobs": rows, "worktrees": wts, "handbacks": signals, "job_projections": projections, "inbox": inbox_lines(n)}
     # Hash exactly the generated display, apart from its refresh time and metadata. Retain
     # the last refresh's merge baseline so its "since previous" snapshot stays comparable.
     lines, _ = status_facts(inst, n, state, facts_meta(n).get("merged_before", []))
@@ -751,7 +755,7 @@ def display_time(inst, value):
     return _m_usage.usage_time(parsed.timestamp(), inst) if parsed else "unknown (legacy time)"
 
 
-def status_facts(inst, n, state, known_merges):
+def status_facts(inst, n, state, known_merges, metadata_only=False):
     """The displayed facts only: no hidden git tips, file hashes or judgement timestamp."""
     merged = {_m_jobs.job_key(r): r for r in state["jobs"] or [] if r["Ended"] and r["Outcome"] == "merged"}
     for r in state["jobs"] or []:
@@ -772,7 +776,7 @@ def status_facts(inst, n, state, known_merges):
     projections = [state.get('job_projections', {}).get(_m_jobs.job_key(r)) or _m_attempts.job_projection(inst, n, r)
                    for r in state['jobs'] or [] if not r['Ended']]
     lines += [_m_guard.redact(f"- {p['branch']}: {p['state']}; host activity unknown; " + ('runtime activity unknown; ' if p['state'] == 'open' else '') +
-                     (p['summary'] or ('last hand-back (historical): ' + p['historical_summary'] if p['historical_summary'] else 'summary not recorded')) +
+                     ('summary retained in worker record' if metadata_only else (p['summary'] or ('last hand-back (historical): ' + p['historical_summary'] if p['historical_summary'] else 'summary not recorded'))) +
                      f"; started {display_time(inst, p['ledger']['Started'])}; {p['ledger']['Reviews'] or '0'} reviews", _m_guard.never_terms(n))
               for p in projections] or ["- None."]
     lines += ['', 'Active work (generated from ledger and worker records; host activity unknown):', '',
@@ -780,7 +784,7 @@ def status_facts(inst, n, state, known_merges):
     for p in projections[:8]:
         queue = p['admission'] or p['queue']
         queued = (str(queue.get('position') or 'unknown') + '; owner ' + str(queue.get('owner') or 'unknown')) if queue else 'unknown'
-        summary = p['summary'] or ('historical: ' + p['historical_summary'] if p['historical_summary'] else 'not recorded')
+        summary = 'retained in worker record' if metadata_only else p['summary'] or ('historical: ' + p['historical_summary'] if p['historical_summary'] else 'not recorded')
         values = (p['branch'], p['state'], summary, queued, p['next_action'])
         lines.append(_m_guard.redact('| ' + ' | '.join(_m_jobs.cell(v) for v in values) + ' |', _m_guard.never_terms(n)))
     if len(projections) > 8:
@@ -791,14 +795,19 @@ def status_facts(inst, n, state, known_merges):
     due = due_items(inst, n, (state, "", ""), include_stale=False, include_advice=False, include_handled=True)
     lessons = sorted([r for r in state["jobs"] or [] if r["Ended"] and r["Outcome"] == "merged"], key=merge_time, reverse=True)
     lines += ["", "Lesson outcomes (merged jobs):"]
-    lines += [_m_guard.redact(f"- {r['Job']}: " + (r.get("Lessons") or
+    lines += [_m_guard.redact(f"- {r['Job']}: " + (("recorded; see brain jobs" if metadata_only else r.get("Lessons")) or
                      ("missing; coordinator must record outcome" if r.get("Lesson check") == "required" else
                       "legacy; outcome not required")), _m_guard.never_terms(n)) for r in lessons] or ["- None."]
     lines += ["", "Finished jobs awaiting coordinator:"]
-    lines += ["- " + i["text"] + (" (acknowledged; reason: " + i['handling']['reason'] +
-              '; resume: ' + (i['handling'].get('resume_condition') or i['handling'].get('until') or '') + ')'
-              if _m_reminders.reminder_handled(inst, i) else '')
-              for i in due if i["kind"] in ("handback", "restart")] or ["- None."]
+    if metadata_only:
+        lines += ["- " + r["Job"] + ": " + ("ready to merge" if i.get("ready") else "finished; inspect hand-back")
+                  for i in due if i["kind"] in ("handback", "restart")
+                  for r in state["jobs"] or [] if _m_jobs.job_key(r) == i.get("job")] or ["- None."]
+    else:
+        lines += ["- " + i["text"] + (" (acknowledged; reason: " + i['handling']['reason'] +
+                  '; resume: ' + (i['handling'].get('resume_condition') or i['handling'].get('until') or '') + ')'
+                  if _m_reminders.reminder_handled(inst, i) else '')
+                  for i in due if i["kind"] in ("handback", "restart")] or ["- None."]
     forecasts = _m_jobs.forecast_lines(state["jobs"] or [])
     if forecasts:
         lines += ["", "Forecasts (merged ledger durations):"] + ["- " + _m_guard.redact(s, _m_guard.never_terms(n)) for s in forecasts]
@@ -827,7 +836,7 @@ def status_facts(inst, n, state, known_merges):
     return compact, merged
 
 
-def refresh_status(inst, n):
+def refresh_status(inst, n, view=None):
     f = n["dir"] / "status.md"
     text = ""
     if f.exists():
@@ -837,16 +846,19 @@ def refresh_status(inst, n):
             (FACTS_START in text and not FACTS_RE.search(text))):
         _m_common.die("status.md has incomplete or duplicate facts markers; repair them before refreshing")
     previous = facts_meta(n)
-    evidence = due_evidence(inst, n)
-    state, fingerprint, _ = evidence
-    lines, merged = status_facts(inst, n, state, previous.get("merged", []))
+    if view is None:
+        state = file_state(inst, n)
+        lines, merged = status_facts(inst, n, state, previous.get("merged", []))
+    else:
+        lines, merged = list(view["facts"]), dict.fromkeys(view["merged"])
+    merged_before = view.get("merged_before", []) if view is not None else previous.get("merged", [])
     fingerprint = _m_jobs.digest(lines)
     # Telemetry is an informational snapshot, never part of the stale-status wake fingerprint.
     lines += ["", "Machine (snapshot at refresh; live: brain due --machine):", "- " + _m_machine.machine_summary(_m_machine.machine_state(inst))]
     lines = [FACTS_START, "## Facts (generated by brain status --refresh)", "",
              "Facts refreshed: " + inst.now(), "", *lines, "",
              "<!-- brain:facts-state " + json.dumps({"fingerprint": fingerprint, "merged": list(merged),
-                 "merged_before": previous.get("merged", [])}, sort_keys=True) + " -->", FACTS_END]
+                 "merged_before": merged_before}, sort_keys=True) + " -->", FACTS_END]
     block = "\n".join(lines)
     old = FACTS_RE.search(text)
     if old:
@@ -954,6 +966,13 @@ def inbox_items(inst, nodes=None, reporter="root", readonly=False, requests_only
 
 def cmd_inbox(a):
     inst = _m_nodes.load()
+    if getattr(a, "add", None):
+        n = inst.node(a.id or "root")
+        text = _m_nodes.import_text(" ".join(a.add.split()), _m_guard.never_terms(n))
+        _m_transitions.append_inbox(n["dir"], "brain", text, inst)
+        inst.commit([n["dir"] / "inbox.md"], n["id"] + ": inbox item")
+        print(n["id"] + ": inbox item added")
+        return
     # Default to the calling node, including external homes/workbenches. Explicit root is instance-wide.
     here = _m_hosts.node_at(inst, Path.cwd())
     if not here:
@@ -1163,11 +1182,22 @@ def cmd_tree(a):
 
 def cmd_status(a):
     inst = _m_nodes.load()
+    if getattr(a, "from_events", False):
+        from . import events
+        if not a.id or a.refresh:
+            _m_common.die("--from-events needs one node and cannot refresh snapshot files")
+        view = events.events_view(inst, inst.node(a.id))
+        print(json.dumps(view, sort_keys=True) if getattr(a, "json", False) else events.render(view), end="\n" if getattr(a, "json", False) else "")
+        return
     if a.refresh and not a.id:
         _m_common.die("--refresh needs a node id: only its coordinator writes status.md")
     for n in ([inst.node(a.id)] if a.id else inst.nodes()):
         if a.refresh:
-            refresh_status(inst, n)
+            from . import events
+            events.reconcile(inst)
+            events.comparison(inst, n)
+            view = events.events_view_without_current(inst, n) if events.source(inst, n) == "events" else None
+            refresh_status(inst, n, view)
         print(f"{n['id']:<28} {status_line(n)}")
 
 

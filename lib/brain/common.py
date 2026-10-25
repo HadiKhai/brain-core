@@ -245,6 +245,10 @@ def git(*args, cwd=None, check=False):
     return result
 
 
+class VerdictExit(SystemExit):
+    """A completed command returning a negative verdict rather than a failed mutation."""
+
+
 def die(msg):
     sys.exit(f"brain: {msg}")
 

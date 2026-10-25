@@ -171,6 +171,10 @@ def cmd_init(a):
     ensure_gitignore(root)
     _m_status.refresh_status(inst, inst.node("root"))
     inst.commit(["."], f"Initialize instance: {a.title}")
+    from . import events
+    with _m_instance.brain_lock(inst):
+        with events.Command(root, command="init"):
+            pass
     name = register(root)
     print(f"instance: {root}\nname: {name}\noperator: {a.operator}\nruntimes: {runtimes}\nhost: {a.host}")
 
@@ -558,7 +562,14 @@ def prepare_settings(inst, n, pairs, messages=None):
         k, v = kv.split("=", 1)
         if k in ("owners", "id"):
             _m_common.die("use 'brain owners' or 'brain seal' to change owners; ids change only with 'brain move'")
-        if k == "fallback":
+        if k == "status_source":
+            if v not in ("files", "events"):
+                _m_common.die("status_source must be files or events")
+            if v == "events":
+                from . import events
+                events.switch_gate(inst, n)
+            fm[k] = v
+        elif k == "fallback":
             if n["id"] != "root":
                 _m_common.die("fallback is per machine: brain set root fallback=<instance ids in order>")
             order = [x.strip() for x in v.split(",")] if v.strip() else []

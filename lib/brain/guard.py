@@ -87,7 +87,7 @@ def no_terms_in(n, text, what):
 
 
 NOTE_FILES = {"AGENTS.md", "CLAUDE.md", "brief.md", "status.md", "decisions.md", "backlog.md", "inbox.md", "node.md",
-              NEVER_FILE, "job-ledger.md", "worktree-setup.sh"}  # a node's own notes: they may discuss the rule
+              NEVER_FILE, "job-ledger.md", "backlog.md", "status-archive.md", "worktree-setup.sh"}  # a node's own notes: they may discuss the rule
 
 
 def redact(text, terms):
