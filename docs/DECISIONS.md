@@ -67,3 +67,81 @@ batch-eligibility advice after main advances. This advisory never marks it ready
 against current main: the integration result still requires verification. Ordinary
 readiness, conflict refusals and worker-owned packets remain unchanged. Display
 advice validates recorded lane evidence without executing lane-map commands.
+
+## D402: Focused execution is separate from readiness
+
+`spec-run` accepts an explicit argument vector and runs it in a registered job
+worktree using the existing node gate, machine admission and scrubbed logging.
+It preserves the command's exit status and records a private focused receipt.
+It never writes a ready packet or upgrades focused results to full proof.
+
+## D403: Train configuration excludes thread routing
+
+Train publication fingerprints semantic node configuration and local worktree
+bindings. Worker/coordinator thread identities and coordinator session bookkeeping
+are routing metadata, so rebinding them does not invalidate verified integration.
+Worktree, verify, policy and other configuration changes still refuse publication.
+
+## D404: Lane tool identity follows executable resolution
+
+Lane context fingerprints resolved executable locations and file metadata, project
+pins and the selected environment. An unused PATH suffix no longer invalidates
+proof when all resolved tools remain identical. Recorded PATH is retained for
+reproducing the original environment; a changed resolved tool still invalidates it.
+
+## D405: Native direct-full receipts and early hand-back validation
+
+`full-run` retains a native exact-candidate full packet without publishing a
+completion. Hand-back can adopt its receipt ID after checking refs, command,
+inputs, ports, lane context and retained log digests. Stale, failed or missing
+receipts refuse rather than silently starting another full gate. Arbitrary
+external JSON is not imported as native proof. Completion flags are validated
+before creating an attempt or queue request, including incompatible receipt/retry
+flags and invalid review counts, lessons or report text.
+
+## D406: Optional parallel selftests retain the canonical suite
+
+`selftest --jobs N` runs the canonical compatibility suite once through the pinned
+pytest/xdist test tools, with worker restarts disabled. The default remains the
+standard-library unittest path; runtime installation needs no test dependencies.
+Parallelism is bounded to 32 workers. Runtime estimates require a measured full
+run and are not inferred from a command-line change.
+
+## D407: Declared cheap checks precede full admission
+
+A node may declare `verify_cheap` as its format, lint, type, fitness and naming
+check command. Native full and lane gates run it first with ordinary heavy
+admission, before taking a full verify slot. Failure preserves its exit status
+and prevents the full run. Its configuration is bound into readiness and direct
+full receipts. Commands cannot be inferred reliably for arbitrary repositories;
+unconfigured nodes retain their existing verifier contract.
+
+## D408: Explicit native queue reordering is node-scoped
+
+`queue --node NODE --move TOKEN --before TOKEN` changes the stored order of two
+queued verify reservations under the existing native queue transaction. Missing,
+ambiguous, running, non-verify and foreign-node targets refuse before mutation.
+Priority bands and aging remain authoritative; manual order breaks ties within a
+band. The foreground hand-back `queue run NODE --once` interface is preserved.
+
+## D409: Moved-ref diagnostics follow the integration mode
+
+PR integration uses the cached remote default as both base identities. Its move
+is reported once under that remote ref, without inventing a local-main change.
+Local integration continues to report independently moved local and remote refs
+with their old and new commits.
+
+## D410: Per-worktree environment overrides stay machine-local
+
+`wt env` stores validated per-job additions and explicit unsets in local worktree
+metadata, without editing shared env files or printing values. Native gate and
+focused execution apply them before exporting reserved context. Control, Git
+configuration and Python import variables cannot be overridden. Override changes
+participate in readiness/attempt input identity, so old proof cannot be reused.
+
+## D411: Rehearsal launched from a core worktree retains that build
+
+An explicit core-worktree launcher keeps its selected implementation for rehearsal
+and prints the choice before running. It cannot silently re-execute the installed
+instance core. Ordinary launchers keep existing instance routing, and the explicit
+`BRAIN_NO_REEXEC` override remains supported.

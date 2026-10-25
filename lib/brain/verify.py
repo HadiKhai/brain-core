@@ -252,6 +252,8 @@ def _ready_state(inst, n, branch, train=False, display=False, advisory=False):
             reasons.append("ready packet identifies a different job or format")
         if packet.get("head") != head:
             reasons.append("branch head changed; return to worker")
+        if packet.get('verify_cheap', '') != n['fm'].get('verify_cheap', '').strip():
+            reasons.append('cheap verification configuration changed; hand back again')
         if not train and not packet_main_matches(n, packet, main):
             reasons.append("main moved; return to worker to rebase and verify again")
         w = n["local"].get("worktrees", {}).get(branch)
@@ -342,7 +344,8 @@ def verify_inputs(n, w, files=None):
     """Keep the existing digest contract: exact files plus ports decide validity and reuse.
     The optional map lets a caller compare and diagnose the same single snapshot."""
     files = verify_input_files(n, w) if files is None else files
-    return _m_jobs.digest([sorted(files.items()), w.get("port"), w.get("ports", 1)])
+    return _m_jobs.digest([sorted(files.items()), w.get("port"), w.get("ports", 1)]
+                          + ([w['env']] if w.get('env') else []))
 
 
 def verify_reuse(n, branch, previous, head, main, verify, cwd, inputs=None, port_context=None):
@@ -355,7 +358,8 @@ def verify_reuse(n, branch, previous, head, main, verify, cwd, inputs=None, port
             and p.get("verify_command") == verify and type(p.get("verify_result")) is int and p["verify_result"] == 0
             and packet_main_matches(n, p, main) and type(p.get("review_rounds")) is int and p["review_rounds"] >= 1
             and isinstance(p.get("checked_at"), str) and sha(p.get("head")) and p.get("inputs") == inputs
-            and port_context is not None and p.get('verify_port_context') == port_context):
+            and port_context is not None and p.get('verify_port_context') == port_context
+            and p.get('verify_cheap', '') == n['fm'].get('verify_cheap', '').strip()):
         return None  # only a complete green packet, for the same inputs, can stand for a new run
     base = p.get("verified_head") or p["head"]
     if not sha(base) or (base != p["head"] and _m_common.git("merge-base", "--is-ancestor", base, p["head"], cwd=cwd).returncode):
@@ -495,8 +499,23 @@ def verify_reservation(inst, n):
         _m_docker_leftovers.docker_leftover_nodes(inst, [n])
 
 
+def run_cheap_checks(inst, n, branch, w, env):
+    command = n['fm'].get('verify_cheap', '').strip()
+    if not command:
+        return None
+    token = _m_machine.machine_wait('heavy', inst, n['id'])
+    try:
+        return run_verify_stream(inst, n, branch, command, w, env, token, lane='cheap')
+    finally:
+        _m_machine.machine_release(token)
+
+
 def run_verify(inst, n, branch, verify, w, env):
     with _m_gate_lock.node_gate(inst, n, env, branch) as gate_env:
+        if verify == n.get('fm', {}).get('verify', '').strip():
+            cheap = run_cheap_checks(inst, n, branch, w, gate_env)
+            if cheap and cheap[0]:
+                return cheap
         with verify_reservation(inst, n) as token:
             return run_verify_stream(inst, n, branch, verify, w, gate_env, token)
 
@@ -648,7 +667,9 @@ def verify_env(n, branch, w):
     """Expose reserved ports without claiming generic application environment names."""
     ports = {"PORT": str(w["port"]), "PORTS": str(w.get("ports", 1)),
              "PORT_LAST": str(w["port"] + w.get("ports", 1) - 1)}
-    env = {**os.environ, "MAIN": str(n["home_path"]), "WORKTREE": w["path"], "BRANCH": branch,
+    from . import job_env as _m_job_env
+    overrides = _m_job_env.apply_job_env(os.environ, w)
+    env = {**overrides, "MAIN": str(n["home_path"]), "WORKTREE": w["path"], "BRANCH": branch,
            "NODE": n["id"], **{"BRAIN_" + key: value for key, value in ports.items()}}
     if n["fm"].get("verify_export_port") == "true":
         for key, value in ports.items():
@@ -698,6 +719,11 @@ def run_lanes(inst, n, branch, w, env, snap, previous, head, main, inputs, force
         history = prior.get('lane_green', prior.get('verify_lanes', []))
         old = {r['name']: r for r in history if isinstance(r, dict) and isinstance(r.get('name'), str)} if eligible and isinstance(history, list) else {}
         rows, results, check = [], {}, None
+        cheap = run_cheap_checks(inst, n, branch, w, env)
+        if cheap and cheap[0]:
+            return dict(verify_lanes=[], verify_result=cheap[0], verify_reused=False,
+                        verify_lanes_check=dict(command=n['fm']['verify_cheap'], result=cheap[0],
+                                                duration=0, log=cheap[1]))
         command = n['fm'].get('verify_lanes_check', '').strip()
         if command:
             with verify_reservation(inst, n) as token:
@@ -753,7 +779,18 @@ def show_lanes(n, packet):
         print(_m_guard.redact('verify lanes check: exit %s; log: %s' % (check.get('result'), check.get('log')), _m_guard.never_terms(n)))
 
 
-def record_ready(inst, n, branch, reviews, previous=None, reverify=False):
+def moved_ref_details(n, branch, head, head_after, main, main_after, integration_base, integration_after):
+    ref = integration_ref(n['home_path'])
+    local_ref = (ref.replace('refs/remotes/origin/', 'refs/heads/', 1)
+                 if n['fm'].get('merge', 'local') != 'pr' else ref)
+    return list(dict.fromkeys(
+        '%s %s -> %s' % (name, old or 'missing', new or 'missing')
+        for name, old, new in (('refs/heads/' + branch, head, head_after),
+                               (ref, main, main_after), (local_ref, integration_base, integration_after))
+        if old != new))
+
+
+def record_ready(inst, n, branch, reviews, previous=None, reverify=False, full_receipt=None):
     reasons, head, main = ready_preflight(n, branch)
     from . import rehearse as _m_rehearse
     rehearsal = _m_rehearse.read_evidence(n, branch, head)
@@ -781,6 +818,16 @@ def record_ready(inst, n, branch, reviews, previous=None, reverify=False):
                 print(_m_guard.redact('verify warning: ' + warning, _m_guard.never_terms(n)))
     except (ValueError, OSError, UnicodeError, RecursionError) as error:
         return None, ['verify lanes invalid: ' + _m_guard.redact(str(error), _m_guard.never_terms(n))]
+    if full_receipt is not None:
+        if reverify:
+            return None, ['full receipt cannot be combined with --reverify']
+        from . import full_gate as _m_full_gate
+        try:
+            packet = _m_full_gate.adopt_full_receipt(inst, n, branch, full_receipt, head, main,
+                                                   inputs, port_context, snap, reviews)
+        except (OSError, ValueError, KeyError, TypeError):
+            return None, ['full receipt missing, changed, failed or stale; run full-run on this exact candidate']
+        return packet, []
     reuse = None if reverify or snap or (previous or {}).get('verify_lanes') is not None else verify_reuse(n, branch, previous, head, main, verify, w["path"], inputs, port_context)
     # The CLI holds brain_lock here. Do not sweep an operator's dirty .gitignore into
     # the worker hand-back commit just because we added the local-output exclusion.
@@ -797,7 +844,7 @@ def record_ready(inst, n, branch, reviews, previous=None, reverify=False):
               + (f": since then only {len(changed)} file(s) under verify_skip changed" if changed else
                  ": nothing changed since") + " (--reverify runs it again)")
         return {"version": 1, "node": n["id"], "branch": branch, "head": head, "main": main,
-                "integration_base": integration_base, "verify_command": verify, "verify_result": 0, "verified_head": base, "verify_reused": True,
+                "integration_base": integration_base, "verify_command": verify, "verify_cheap": n["fm"].get("verify_cheap", "").strip(), "verify_result": 0, "verified_head": base, "verify_reused": True,
                 "inputs": inputs, "input_files_ref": input_ref, "verify_log": previous.get("verify_log"), "rehearsal": rehearsal,
                 "verify_port_context": port_context,
                 "review_rounds": reviews, "checked_at": _m_jobs.stamp(inst)}, []
@@ -822,13 +869,8 @@ def record_ready(inst, n, branch, reviews, previous=None, reverify=False):
     integration_after = integration_parent(n, main_after)
     if after or head_after != head or main_after != main or integration_after != integration_base:
         # What passed isn't the commit on main that was asked about: never record it as evidence.
-        ref = integration_ref(n["home_path"])
-        local_ref = ref.replace("refs/remotes/origin/", "refs/heads/", 1)
-        moved = list(dict.fromkeys(
-            "%s %s -> %s" % (name, old or "missing", new or "missing")
-            for name, old, new in (("refs/heads/" + branch, head, head_after),
-                                   (ref, main, main_after), (local_ref, integration_base, integration_after))
-            if old != new))
+        moved = moved_ref_details(n, branch, head, head_after, main, main_after,
+                                 integration_base, integration_after)
         return None, input_reasons + ["verify changed the job's branch, local main or worktree ("
                       + "; ".join(after + moved)
                       + "); commit or discard what it changed, then hand back again"]
@@ -836,7 +878,7 @@ def record_ready(inst, n, branch, reviews, previous=None, reverify=False):
         return None, input_reasons
     input_ref = write_verify_input_files(inst, n, branch, inputs, input_files, log_path)
     packet = {"version": 1, "node": n["id"], "branch": branch, "head": head, "main": main,
-              "integration_base": integration_base, "verify_command": verify, "verify_result": result, "verify_log": log_path, "verified_head": head,
+              "integration_base": integration_base, "verify_command": verify, "verify_cheap": n["fm"].get("verify_cheap", "").strip(), "verify_result": result, "verify_log": log_path, "verified_head": head,
               "inputs": inputs, "input_files_ref": input_ref, "review_rounds": reviews, "checked_at": _m_jobs.stamp(inst), "rehearsal": rehearsal}
     packet['verify_port_context'] = port_context
     if lane_evidence:

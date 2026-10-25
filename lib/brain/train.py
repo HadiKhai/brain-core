@@ -312,6 +312,14 @@ def cmd_land(a):
     return cmd_train(a)
 
 
+def train_configuration(n):
+    """Keep execution inputs while excluding thread routing from publication proof."""
+    routing = {'workers', 'coordinator', 'coordinator_sessions'}
+    return _m_jobs.digest([str(n['home_path']),
+                          {k: v for k, v in n['fm'].items() if k not in routing},
+                          {k: v for k, v in n['local'].items() if k not in routing}])
+
+
 def run_train(inst, n, home, verify, a):
     folder, records = journals(n)
     main = ref(home, "refs/heads/main")
@@ -390,6 +398,7 @@ def run_train(inst, n, home, verify, a):
     # Reserve ports through the existing allocator, without creating a ledger job for staging.
     inst.local_of(n["id"]).setdefault("worktrees", {})[batch] = {**w, "base": main, "start": main}
     inst.save_local()
+    expected_configuration = train_configuration(n)
     _m_instance.unlock()
     try:
         setup = n["dir"] / _m_worktrees.SETUP_FILE
@@ -508,7 +517,7 @@ def run_train(inst, n, home, verify, a):
         with _m_instance.brain_lock(inst):
             fresh = _m_instance.Instance(inst.root)
             current = fresh.node(n["id"])
-            if current["home_path"] != home or current["fm"] != n["fm"] or current["local"] != inst.node(n["id"])["local"]:
+            if train_configuration(current) != expected_configuration:
                 _m_common.die("train: configuration changed; no main update")
             for entry in accepted:
                 entry_ready(fresh, current, entry)
