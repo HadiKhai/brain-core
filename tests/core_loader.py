@@ -58,5 +58,7 @@ class SourceFileLoader(importlib.machinery.SourceFileLoader):
             for name in vars(part):
                 if not name.startswith('__') and not name.startswith('_m_'):
                     owners[name] = part
+        # The flat fixture API predates the task row hook with the same name.
+        owners['job_started'] = importlib.import_module('.jobs', package_name)
         module._owners = owners
         module.__class__ = CoreModule

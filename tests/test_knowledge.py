@@ -373,23 +373,32 @@ class ImportAutonomy(Scenario):
         self.assertNotIn("brain ready", brief)
         self.assertNotIn("git rebase", brief)
         self.assertNotIn("must have a Lessons section", brief)
-        for state in ("blocked", "question", "done"):
-            self.b(r, "handback", "--summary", "Synthetic result", "source", "--branch", job, "--state", state, "--reviews", "0",
-                   *(("--question", "Synthetic choice?") if state == "question" else ()),
-                   "--report", "sources/study.md", "--lessons", "bounded")
-            due = json.loads(self.b(r, "due", "source", "--json"))
-            signal = next(i for i in due if i["kind"] == "handback")
-            self.assertEqual(signal["state"], state)
-            self.assertEqual(signal["reasons"], [])
-            self.assertFalse(signal["ready"])
-            self.assertNotIn("missing-worktree", [i["kind"] for i in due])
-            self.assertNotIn("lesson-outcome", [i["kind"] for i in due])
+        for reviews in ((), ('--reviews', '0')):
+            for state in ("blocked", "question", "done"):
+                self.b(r, "handback", "--summary", "Synthetic result", "source", "--branch", job, "--state", state, *reviews,
+                       *(("--question", "Synthetic choice?") if state == "question" else ()),
+                       "--report", "sources/study.md", "--lessons", "bounded")
+                due = json.loads(self.b(r, "due", "source", "--json"))
+                signal = next(i for i in due if i["kind"] == "handback")
+                self.assertEqual(signal["state"], state)
+                self.assertEqual(signal["reasons"], [])
+                self.assertFalse(signal["ready"])
+                self.assertNotIn("missing-worktree", [i["kind"] for i in due])
+                self.assertNotIn("lesson-outcome", [i["kind"] for i in due])
         records = list((node / "job-handbacks").glob("*.json"))
         self.assertEqual(len(records), 1)
         data = json.loads(records[0].read_text())
         self.assertEqual(data["lessons"], "bounded")
         self.assertIs(data["ready_required"], False)
         self.assertIsNone(data["ready"])
+        saved = records[0].read_bytes()
+        for flags, message in ((('--reviews', '-1'), 'nonnegative integer'),
+                               (('--reviews', '0', '--reverify'), '--reverify requires'),
+                               (('--reviews', '1', '--full-receipt', 'missing.json'), '--full-receipt requires')):
+            out = self.b(r, 'handback', 'source', '--branch', job, '--state', 'done',
+                         '--summary', 'Synthetic result', *flags, ok=False)
+            self.assertIn(message, out)
+            self.assertEqual(records[0].read_bytes(), saved)
         self.assertEqual(owned, {name: (node / name).read_bytes() for name in owned})
         self.assertEqual(before, _test_nodes.ImportProjects.snapshot_files(self, home))
         self.b(r, "jobs", "source", "--branch", job, "--lessons", "bounded", "--close")
@@ -397,6 +406,13 @@ class ImportAutonomy(Scenario):
         self.assertIn("status: proposed", (node / "library/bounded.md").read_text())
         self.assertNotIn("has no lesson outcome", self.b(r, "check"))
         self.b(r, "handback", "--summary", "Synthetic result", "source", "--branch", job, "--state", "done", ok=False)
+        # Ordinary home jobs still require completed reviews before any attempt/queue.
+        self.b(r, 'wt', 'add', 'source', 'ordinary')
+        for queued in ((), ('--enqueue',)):
+            out = self.b(r, 'handback', 'source', '--branch', 'ordinary', '--state', 'done',
+                         '--summary', 'Synthetic result', '--reviews', '0', *queued, ok=False)
+            self.assertIn('at least one', out)
+        self.assertFalse((node / 'handback-queue').exists())
 
     def test_existing_node_study_start_is_explicit_and_snapshot_bound(self):
         r = self.init("alice")

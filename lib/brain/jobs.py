@@ -230,11 +230,15 @@ def validate_handback_text(a):
     return summary.strip(), question.strip() if question is not None else None
 
 
-def validate_handback_options(a):
+def validate_handback_options(a, row=None):
     """Reject invalid completion flags before attempts, queueing or heavy work."""
     validate_handback_text(a)
     reviews = getattr(a, 'reviews', None)
-    checking = a.state == 'done' and (reviews is not None or getattr(a, 'record', False))
+    study = bool(row and not row.get('Ended') and row.get('Job') == getattr(a, 'branch', None)
+                 and _m_briefs.import_job(row['Job']))
+    if study and reviews is not None and (type(reviews) is not int or reviews < 0):
+        _m_common.die('study review rounds must be a nonnegative integer')
+    checking = a.state == 'done' and not study and (reviews is not None or getattr(a, 'record', False))
     if checking and (type(reviews) is not int or reviews < 1):
         _m_common.die('--record requires --reviews N completed review rounds (at least one)')
     if getattr(a, 'restart', None) and a.state != 'blocked':
@@ -253,12 +257,12 @@ def validate_handback_options(a):
 def cmd_handback(a):
     from . import job_attempts as _m_attempts
     from . import handback_queue as _m_queue
-    validate_handback_options(a)
     inst = _m_nodes.load()
     n = inst.node(a.id)
     row = open_job(read_jobs(n) or [], a.branch)
     if not row:
         _m_common.die('no open job for handback')
+    validate_handback_options(a, row=row)
     _m_guard.no_terms_in(n, a.summary, 'handback summary')
     if getattr(a, 'question', None):
         _m_guard.no_terms_in(n, a.question, 'handback question')

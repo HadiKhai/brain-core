@@ -193,6 +193,8 @@ class LessonRecurrence(Scenario):
 
     def test_node_own_terms_and_same_named_specialists_stay_local(self):
         r, folder = self.fixture()
+        # Independent ownership keeps the root view local to its own specialist.
+        self.b(r, "set", "app", "coordinator=fixture-app-thread")
         self.b(r, "specialist", "new", "editor", "--at", "app", "--title", "Local editor")
         local = r / "nodes/app/specialists/editor"
         (local / "direction.md").write_bytes((folder / "direction.md").read_bytes())
