@@ -52,3 +52,10 @@ as hand-backs and generated status.
 SIGKILL may leave an unused same-folder temporary file. These tests establish per-file process
 crash safety and lock release, not a transaction across files/git commits or power-loss durability.
 Review completion is fixture evidence; these rehearsals do not test independent reviewer quality.
+
+The atomic writer syncs the replacement file before rename and its containing
+directory afterward. A failure before rename preserves the old file; a failure
+syncing the directory is reported after the complete new file becomes visible.
+The ordering tests in `tests/test_atomic_durability.py` cover both cases. They do
+not simulate power loss or establish a cross-file/Git transaction, and persistence
+of newly created ancestor directories is outside this one-file guarantee.

@@ -176,7 +176,12 @@ def outward_links(root):
 
 
 def atomic_write(path, text):
-    """Replace a whole file from a same-folder temporary; failures leave the old file intact."""
+    """Sync file data, replace atomically, then sync its parent directory.
+
+    Pre-publication failures preserve the old file. A parent-sync error is reported
+    after the complete new file is visible; callers must not assume rollback.
+    This is one-file persistence ordering, not a transaction across records.
+    """
     path = Path(path)
     safe_target(path)
     tmp = None
@@ -190,6 +195,11 @@ def atomic_write(path, text):
             stream.flush()
             os.fsync(stream.fileno())
         os.replace(tmp, path)
+        directory = os.open(path.parent, os.O_RDONLY | getattr(os, 'O_DIRECTORY', 0) | os.O_NOFOLLOW)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
     finally:
         if tmp and tmp.exists():
             tmp.unlink()

@@ -131,3 +131,12 @@ creation, and only a response confirming the bound thread may publish a local
 wake URL. Missing remote access retains the task id and reports the setup gap.
 PR watch setup also requires the coordinator context and positive host confirmation.
 Pinning is not claimed to change host auto-settlement policy.
+
+## D1208: Sync the parent directory after atomic file replacement
+
+Atomic publication syncs the new file data, renames the complete same-folder
+temporary, then syncs the containing directory. A pre-publication failure leaves
+the old file intact. A directory-sync failure is reported after the new complete
+file is visible, so an error does not imply rollback. Tests prove ordering and
+failure behavior; physical power loss and cross-file/Git transactions require
+separate evidence. Durability still depends on filesystem and storage guarantees.
