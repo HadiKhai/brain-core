@@ -95,6 +95,38 @@ class HostActions(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'binding changed'):
                 self.m.provision_coordinator(self.inst, 'root', {'instanceId':'codex','model':'sample-model'})
         self.assertEqual(self.inst._load_local()['nodes']['root']['coordinator'], 'replacement')
+        self.assertEqual(self.inst._load_local()['nodes']['root']['host_setup_pending']['returned_bindings']['coordinator'], 'launched-thread')
+
+    def test_rotation_during_pin_does_not_report_old_coordinator_success(self):
+        self.inst.local_of('root')['host_project'] = 'project-1'
+        self.inst.save_local()
+        def call(inst, tool, args):
+            if tool == 't3_thread_organize':
+                other = self.m.Instance(self.root)
+                other.local_of('root')['coordinator'] = 'replacement'
+                other.save_local()
+            return {'threadId':'launched-thread'}
+        with mock.patch.object(self.m, 'host_call', side_effect=call):
+            with self.assertRaisesRegex(ValueError, 'changed during pinning'):
+                self.m.provision_coordinator(self.inst, 'root', {'instanceId':'codex','model':'sample-model'})
+        self.assertEqual(self.inst._load_local()['nodes']['root']['coordinator'], 'replacement')
+
+    def test_rotation_during_wake_keeps_returned_task_without_binding_stale_url(self):
+        self.inst.local_of('root').update(coordinator='thread-1', host_project='project-1')
+        self.inst.save_local()
+        def call(inst, tool, args):
+            if tool == 't3_thread_configuration':
+                return {'threadId':'thread-1'}
+            other = self.m.Instance(self.root)
+            other.local_of('root')['coordinator'] = 'replacement'
+            other.save_local()
+            return {'boundThreadId':'thread-1','scheduledTaskId':'task-1','webhookUrl':'https://host.example/private'}
+        with mock.patch.object(self.m, 'host_call', side_effect=call):
+            with self.assertRaisesRegex(ValueError, 'changed during host setup'):
+                self.m.provision_wake(self.inst, 'root')
+        saved = self.inst._load_local()
+        self.assertNotIn('wake', saved['nodes']['root'])
+        self.assertEqual(next(iter(saved['host_unbound_tasks'].values()))['task'], 'task-1')
 
     def test_host_watch_requires_exact_context_and_positive_confirmation(self):
         self.inst.local_of('root').update(coordinator='thread-1', host_project='project-1')
@@ -157,6 +189,22 @@ class HostActions(unittest.TestCase):
         route.assert_not_called()
         provision.assert_not_called()
         self.assertFalse(self.inst.local_path.exists())
+
+    def test_rotation_during_watch_retains_owner_without_claiming_current_success(self):
+        self.inst.local_of('root').update(coordinator='thread-1')
+        self.inst.save_local()
+        def call(inst, tool, args):
+            if tool == 't3_thread_configuration':
+                return {'threadId':'thread-1'}
+            other = self.m.Instance(self.root)
+            other.local_of('root')['coordinator'] = 'replacement'
+            other.save_local()
+            return {'watching':True}
+        with mock.patch.object(self.m, 'host_call', side_effect=call):
+            with self.assertRaisesRegex(ValueError, 'changed during watch setup'):
+                self.m.watch_change(self.inst, 'root', 'https://example.com/org/repo/pull/1')
+        saved = self.inst._load_local()
+        self.assertEqual(next(iter(saved['host_unbound_watches'].values()))['coordinator'], 'thread-1')
 
     def test_transport_uses_native_acp_without_a_shell(self):
         envelope = {'structuredContent': {'threadId':'thread-1'}}

@@ -57,7 +57,10 @@ def _bind(inst, nid, **values):
         inst.node(nid)
         local = inst.local_of(nid)
         if any(local.get(key) not in (None, '', value) for key, value in values.items()):
-            raise ValueError('host binding changed during provisioning; retain the host result for reconciliation')
+            pending = local.setdefault('host_setup_pending', {'operation':'coordinator', 'started':inst.now()})
+            pending.setdefault('returned_bindings', {}).update(values)
+            inst.save_local()
+            raise ValueError('host binding changed during provisioning; host result retained for reconciliation')
         local.update(values)
         inst.save_local()
 
@@ -104,6 +107,8 @@ def provision_coordinator(inst, nid, selection):
     host_call(inst, 't3_thread_organize', {'threadId':coordinator, 'action':'pin'})
     with _m_instance.brain_lock(inst):
         inst.local = inst._load_local()
+        if inst.local_of(nid).get('coordinator') != coordinator:
+            raise ValueError('coordinator changed during pinning; reconcile the completed host action')
         inst.local_of(nid).pop('host_setup_pending', None)
         inst.save_local()
     return coordinator
@@ -145,7 +150,9 @@ def provision_wake(inst, nid):
         inst.local = inst._load_local()
         # A binding rotation while the host request ran must not publish a stale URL.
         if inst.local_of(nid).get('coordinator') != coordinator:
-            raise ValueError('coordinator changed during host setup; retain the host task for reconciliation')
+            inst.local.setdefault('host_unbound_tasks', {})[identity] = {'task':sid, 'coordinator':coordinator}
+            inst.save_local()
+            raise ValueError('coordinator changed during host setup; host task retained for reconciliation')
         inst.local.setdefault('schedules', {})[key] = sid
         inst.local.setdefault('host_wake_tasks', {})[coordinator] = sid
         inst.save_local()
@@ -163,6 +170,13 @@ def watch_change(inst, nid, url):
     result = host_call(inst, 'watch_pull_request', {'url':url, 'threadId':coordinator})
     if result.get('watching') is not True:
         raise ValueError('host did not confirm pull-request watch')
+    with _m_instance.brain_lock(inst):
+        inst.local = inst._load_local()
+        if inst.local_of(nid).get('coordinator') != coordinator:
+            key = hashlib.sha256((coordinator + '\0' + url).encode()).hexdigest()
+            inst.local.setdefault('host_unbound_watches', {})[key] = {'coordinator':coordinator, 'url':url}
+            inst.save_local()
+            raise ValueError('coordinator changed during watch setup; watch retained for reconciliation')
     return result
 
 
@@ -214,7 +228,9 @@ def provision_schedule(inst, nid, sid, provider=None):
         current = next((row for row in _m_schedules.read_schedules(inst) if row['id'] == sid), None)
         if (current != record or inst.local_of(nid).get('coordinator') != coordinator or
                 inst.local.get('schedules', {}).get(sid) not in (None, '', task)):
-            raise ValueError('schedule changed during host setup; reconcile the returned host task')
+            inst.local.setdefault('host_unbound_tasks', {})[key] = {'task':task, 'coordinator':coordinator}
+            inst.save_local()
+            raise ValueError('schedule changed during host setup; returned host task retained for reconciliation')
         inst.local.setdefault('schedules', {})[sid] = task
         inst.local.setdefault('host_schedule_receipts', {})[sid] = {
             'definition':definition, 'coordinator':coordinator, 'task':task, 'provider':provider}

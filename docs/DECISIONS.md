@@ -177,3 +177,11 @@ routing or writing any pending lifecycle marker. A known unavailable transport
 uses the documented adapter workflow; it does not leave an ambiguous launch to
 reconcile. Once a host launch actually starts, its existing interruption marker
 and no-blind-retry behavior still apply.
+
+## D1213: Preserve returned host identities across binding rotations
+
+If a coordinator binding changes during a completed host request, preserve the
+new binding and retain the returned thread/task/watch identity locally for
+reconciliation. Do not claim that the old coordinator is current, publish its
+wake URL, discard the known result, or blindly repeat the host operation. Pinning
+also rechecks the binding before clearing its pending operation marker.
