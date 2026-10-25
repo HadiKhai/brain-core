@@ -154,3 +154,48 @@ class Tasks(Scenario):
         self.assertEqual(row['status'], 'merged')
         self.assertEqual(row['merge_sha'], head)
         self.assertEqual(row['code_path'], 'engine.py')
+
+    def test_backfill_is_additive_idempotent_and_preserves_exact_source(self):
+        from brain import tasks_backfill
+        path = self.root / 'backlog.md'
+        text = '# Backlog\n- Add export support repo:D1301\n- [x] Already shipped\n- [ ] Keep source links\n'
+        path.write_text(text)
+        dry = tasks_backfill.backfill(self.inst, self.n)
+        self.assertEqual(len(dry), 2)
+        self.assertFalse((self.root / 'tasks').exists())
+        created = tasks_backfill.backfill(self.inst, self.n, apply=True)
+        self.assertEqual(len(created), 2)
+        self.assertEqual(path.read_text(), text)
+        requirement = tasks.read_records(self.n, 'requirements')[created[0]['requirement']]
+        self.assertEqual(requirement['quote'], '- Add export support repo:D1301')
+        self.assertEqual(requirement['date_basis'], 'file-observed')
+        self.assertEqual(tasks_backfill.backfill(self.inst, self.n, apply=True), [])
+        path.write_text('# Backlog\n\n' + text.split('\n', 1)[1])
+        self.assertEqual(tasks_backfill.backfill(self.inst, self.n, apply=True), [])
+
+    def test_backfill_selects_build_order_and_attaches_open_job(self):
+        from brain import tasks_backfill, jobs
+        (self.root / 'status.md').write_text('# Status\n## Done\n- Finished\n## Build order\n1. Add preview\n2. Add export\n')
+        jobs.job_started(self.inst, self.n, 'job/example', 'codex')
+        created = tasks_backfill.backfill(self.inst, self.n, apply=True)
+        self.assertEqual(len(created), 3)
+        self.assertNotIn('Finished', [r['title'] for r in created])
+        job = jobs.read_jobs(self.n)[0]
+        task = tasks.read_records(self.n)[job['Task']]
+        self.assertEqual(task['job'], jobs.job_key(job))
+        self.assertEqual(task['status'], 'in-progress')
+        tasks.validate(self.n, tasks.read_records(self.n))
+
+    def test_backfill_rejects_linked_source_and_does_not_invent_linear_issues(self):
+        from brain import tasks_backfill
+        foreign = self.tmp / 'foreign.md'
+        foreign.write_text('- Private external promise\n')
+        (self.root / 'backlog.md').symlink_to(foreign)
+        with self.assertRaises(ValueError):
+            tasks_backfill.backfill(self.inst, self.n, apply=True)
+        (self.root / 'backlog.md').unlink()
+        (self.root / 'backlog.md').write_text('- DEMO-42 Add export\n- Repair local scripts\n')
+        self.n['fm']['tasks.source'] = 'linear'
+        created = tasks_backfill.backfill(self.inst, self.n, apply=True)
+        self.assertEqual(len(created), 1)
+        self.assertTrue(created[0]['id'].startswith('TASK-'))

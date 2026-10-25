@@ -256,6 +256,10 @@ def cmd_task(a):
 def register(sub):
     parser = sub.add_parser('task', help='node-local tasks, dependencies and completion evidence')
     actions = parser.add_subparsers(dest='action', required=True)
+    fill = actions.add_parser('backfill', help='import node-local promises without changing source files')
+    fill.add_argument('node')
+    fill.add_argument('--apply', action='store_true')
+    fill.set_defaults(f=cmd_task_backfill)
     failure = actions.add_parser('event', help='record one identified failed round')
     failure.add_argument('node')
     failure.add_argument('task_id')
@@ -401,5 +405,14 @@ def cmd_task_event(a):
     n = inst.node(a.node)
     try:
         print(json.dumps(event(inst, n, a.task_id, a.event_id, a.reason)))
+    except (OSError, ValueError) as error:
+        _m_common.die(str(error))
+
+
+def cmd_task_backfill(a):
+    from . import tasks_backfill as _m_backfill
+    inst = _m_nodes.load()
+    try:
+        print(json.dumps(_m_backfill.backfill(inst, inst.node(a.node), a.apply), ensure_ascii=False))
     except (OSError, ValueError) as error:
         _m_common.die(str(error))

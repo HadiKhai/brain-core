@@ -82,3 +82,15 @@ Closing a job updates its task only from a successful native verification packet
 whose head is already on main, retaining the changed code paths. Other closures
 park the task rather than claiming completion. File-only due items surface ready,
 unblocked, parked and inactive tasks without changing their state.
+
+## D1303: Task backfill is additive and source-addressed
+
+The backfill importer reads explicit list entries from node-local backlogs,
+build orders, inboxes and relevant status sections, plus open ledger jobs.
+Stable source fingerprints make replays and source line shifts idempotent.
+Every imported task links an exact source quote and location. A missing original
+request date is recorded as file observation time with an explicit date basis.
+Existing task records and source prose are preserved. Imported prose stays in
+backlog until its runnable state and dependencies are explicit; open jobs retain
+their exact job identity. External issue references on provider-backed nodes wait
+for a provider pull rather than becoming duplicate local product issues.
