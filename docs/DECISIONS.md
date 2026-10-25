@@ -1,5 +1,22 @@
 # Code decisions
 
+## D18401: Exercise native persistence contracts in focused fixtures
+
+Atomic replacement and crash fixtures change a recorded input before writing
+status, so the candidate bytes must differ from the complete old file. They
+retain old-or-new byte checks, file modes and commit identity checks. The durable
+event comparison index is validated as JSON separately from temporary debris.
+
+The real-core integration fixture includes its generated evidence in a failing
+assertion; unexpected writes remain failures.
+
+Import fixtures distinguish automatically refreshed facts from a manual input
+change that still needs refresh, without activating imported content. Schedule
+fixtures preserve the automated-turn prefix and multiline body while parsing
+the provider separately and keeping reads byte-preserving. Lane coverage's
+negative fixture removes all incoming edges to the nonselective module and
+checks the transitive closure before asserting that coverage fails closed.
+
 ## D001: Node-local full gates and native machine capacity
 
 Full-gate exclusion is keyed by the resolved node id within an instance. The
