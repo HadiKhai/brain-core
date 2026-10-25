@@ -1905,3 +1905,54 @@ fitness coexistence and verify requeue ordering, with every owned attempt finali
 Code-home admission fixtures declare a harmless verify command and a recorded
 coordinator tick before testing thermal holds. These prerequisites do not weaken
 the admission refusal, quiet output or absent-worktree assertions.
+## D1501: Complete dashboard usage before clearing fill state
+
+The dashboard drains existing usage caches in bounded bootstrap slices and keeps
+advancing incomplete aggregates between metadata polls. Partial values remain
+visible, and the filling state clears only when usage aggregation is complete.
+No transcript content is published and viewing does not persist usage caches.
+
+## D1502: External rehearsal capture is declared and machine-local
+
+An optional `rehearse_external` declaration in local bindings selects exact home,
+worktree or workbench roots for one private capture before comparison. Both lanes
+read the same detached capture, including dirty and ignored bytes. Unknown
+bindings retain drift detection. Capture is fixed after preparation; it does not
+claim an atomic historical snapshot against concurrent writers during copying.
+No declaration preserves the existing observation mode.
+
+## D1503: Facts projection has its own explicit ownership phase
+
+A node configured with `status_projection=owned-facts` can run `status --project`
+as a separate phase. The phase updates only the delimited generated facts block,
+preserves all source bytes outside it and all archive bytes, refuses active or
+interrupted writers, and leaves unchanged facts untouched. Cleanup still never
+rewrites status. Ordinary explicit refresh and journal replay remain available.
+No scheduler, background service or implicit cleanup invocation is added.
+
+## D1504: Parallel selftests redistribute the remaining queue
+
+Parallel selftests use the pinned runner's work-stealing scheduler with worker
+restarts disabled and unchanged canonical suite selection. Focused dispatch
+proof cannot establish the duration or readiness of a complete suite.
+
+## D18501: Compare recovery snapshots at one instance time
+
+The dashboard recovery scenario fixes the existing instance clock while comparing
+completed SSE contents with a later state request. Derived ages and forecast
+measurement timestamps then describe the same observation. Server scheduling,
+retry barriers and demand still use the real monotonic clock. The scenario keeps
+its complete payload equality, private-error screening, partial-to-complete
+transition and single initialization worker assertions. Runtime publication and
+refresh semantics are unchanged.
+
+## D18502: Dashboard due uses the coordinator read projection
+
+The dashboard reads `coordinator_due_items` once for its selected nodes, matching
+the CLI's routing of ordinary needs, unread changes and completion notices. It
+copies items before adding display fields and retains their existing IDs. A read
+does not reconcile events or deliver completions. The ledger scenario preserves
+all landing notices, verifies repeated reads retain their identities, and checks
+that viewing preserves ledger, completion journal and watch delivery state and
+does not invoke provider polling or host delivery. Existing reminder lifecycle
+reconciliation is unchanged.

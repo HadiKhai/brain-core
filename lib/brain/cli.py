@@ -79,7 +79,7 @@ def cmd_selftest(a):
         args = [sys.executable, "-m", "unittest", "discover", "-s", str(tests), "-t", str(tests)]
     else:
         args = [sys.executable, '-m', 'pytest', '-p', 'no:cacheprovider', '-n', str(jobs),
-                '--max-worker-restart=0', str(tests / 'test_brain.py')]
+                '--max-worker-restart=0', '--dist=worksteal', str(tests / 'test_brain.py')]
     if a.verbose:
         args.append("-v")
     elif jobs > 1:
@@ -196,7 +196,7 @@ def writes(a):
     if name == "cmd_machine":
         return a.action == "sample" or a.yes
     if name == "cmd_status":
-        return a.refresh
+        return a.refresh or getattr(a, "project", False)
     if name == "cmd_inbox":
         return a.new or bool(getattr(a, "add", None))
     if name == 'cmd_index':
@@ -619,6 +619,7 @@ def main():
     cmd("tree", _m_status.cmd_tree, "show the node tree")
     cmd("status", _m_status.cmd_status, "status timestamps; --refresh regenerates only one node's facts block",
         opt("id", nargs="?"), opt("--refresh", action="store_true"),
+        opt("--project", action="store_true", help="explicit phase for configured generated-facts ownership"),
         opt("--from-events", action="store_true"), opt("--json", action="store_true"))
     cmd("events", _m_events.cmd_events, "private event metadata; --compare summarizes the last day", "id",
         opt("--compare", action="store_true"), opt("--json", action="store_true"),

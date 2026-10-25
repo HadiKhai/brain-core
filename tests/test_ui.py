@@ -202,6 +202,42 @@ class ExpandedUI(Scenario):
         self.m = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
         loader.exec_module(self.m)
 
+    def test_usage_completion_controls_full_dashboard_without_discarding_partial_values(self):
+        import urllib.request
+        root = self.init('demo')
+        allowed = threading.Event()
+        spend = mock.Mock(inst=self.m.UIInstance(root), value={'complete': False, 'files': 2, 'read': 1},
+                          revision=0, permissions=None)
+        spend.refresh_view.return_value = False
+        def advance():
+            if allowed.is_set() and not spend.value['complete']:
+                spend.value = {'complete': True, 'files': 2, 'read': 2}
+                return True
+            return False
+        spend.advance.side_effect = advance
+        with self.integration_server(root, lambda inst: spend, cleanup=allowed.set) as (ready, get, workers, before):
+            self.assertTrue(ready.wait(2))
+            deadline = time.monotonic() + 5
+            while True:
+                with get('/api/state') as response:
+                    state = json.load(response)
+                if (state.get('spend') or {}).get('read') == 1:
+                    break
+                self.assertLess(time.monotonic(), deadline)
+                time.sleep(0.02)
+            self.assertTrue(state['brain']['filling_in'])
+            self.assertEqual(state['spend']['files'], 2)
+            with get('/api/loading') as response:
+                self.assertTrue(json.load(response)['filling_in'])
+            allowed.set()
+            while state['brain'].get('filling_in'):
+                self.assertLess(time.monotonic(), deadline)
+                with get('/api/state') as response:
+                    state = json.load(response)
+            self.assertEqual(state['spend']['read'], 2)
+            with get('/api/loading') as response:
+                self.assertFalse(json.load(response)['filling_in'])
+
     @contextlib.contextmanager
     def integration_server(self, root, spend, cleanup=lambda: None, every=0.05):
         import http.server
@@ -341,6 +377,7 @@ class ExpandedUI(Scenario):
 
     def test_initial_failure_recovers_on_same_server_refresh_without_another_worker(self):
         root = self.first_paint_root()
+        fixed = self.m.UIInstance(root).now_dt()
         real_state = self.m.ui_state
         for stage in ('discover', 'state'):
             with self.subTest(stage=stage):
@@ -371,7 +408,10 @@ class ExpandedUI(Scenario):
                 if stage == 'discover':
                     spend.discover.side_effect = fault
                 stream = None
-                with mock.patch.object(self.m, 'ui_state', side_effect=state):
+                # Compare publication contents at one instance time; request/retry
+                # scheduling still uses the real monotonic clock.
+                with mock.patch.object(self.m.UIInstance, 'now_dt', return_value=fixed), \
+                     mock.patch.object(self.m, 'ui_state', side_effect=state):
                     with self.integration_server(root, lambda _: spend, release_retry.set) as (ready, get, workers, start):
                         try:
                             self.assertTrue(ready.wait(0.5))
@@ -978,15 +1018,36 @@ class ExpandedUI(Scenario):
         rows = [{"Job":f"job-{i}", "Started":"2026-01-01T00:00:00+00:00", "Ended":"2026-01-01T01:00:00+00:00",
                  "Hours":"1", "Reviews":"2", "Outcome":"merged", "Lesson check":"required"} for i in range(65)]
         self.m.write_jobs(inst, node, rows)
-        with mock.patch.object(self.m, "usage_refresh", side_effect=AssertionError("UI must never poll")):
+        def files():
+            # Reminder lifecycle receipts reconcile on reads. Completion facts
+            # and their delivery state must remain untouched by the dashboard.
+            paths = [node['dir'] / 'job-ledger.md']
+            for pattern in ('events*', 'watch*'):
+                for path in (root / '.brain').glob(pattern):
+                    paths.extend(path.rglob('*') if path.is_dir() else [path])
+            return {str(p.relative_to(root)): p.read_bytes() for p in paths
+                    if p.is_file() and not p.is_symlink()}
+        before = files()
+        with mock.patch.object(self.m, "usage_refresh", side_effect=AssertionError("UI must never poll")), \
+             mock.patch.object(self.m, "wake_send", side_effect=AssertionError("UI must never call a host")):
             state = self.m.ui_state(inst)
+        self.assertEqual(files(), before)
         ui_node = next(n for n in state["nodes"] if n["id"] == "project")
         self.assertEqual(len(ui_node["jobs"]["rows"]), 65)
         self.assertEqual(ui_node["jobs"]["median_reviews"], 2)
         self.assertEqual(len([d for d in state["due"] if d["kind"] == "lesson-outcome"]), 65)
+        landed = [d['id'] for d in state['due'] if d['kind'] == 'job-landed']
+        self.assertEqual(len(landed), 65)
+        self.assertEqual(len(set(landed)), 65)
         # The live view adds branch names; stable item IDs also appear in `brain due --json`.
         self.assertEqual([d.get("branch") for d in state["due"] if d["kind"] == "lesson-outcome"][:2], ["job-0", "job-1"])
         self.assertEqual([{k: v for k, v in d.items() if k != "branch"} for d in state["due"]], json.loads(self.b(root, "due", "--json")))
+        after_cli = files()
+        with mock.patch.object(self.m, "usage_refresh", side_effect=AssertionError("UI must never poll")), \
+             mock.patch.object(self.m, "wake_send", side_effect=AssertionError("UI must never call a host")):
+            again = self.m.ui_state(self.m.Instance(root))
+        self.assertEqual([d['id'] for d in again['due'] if d['kind'] == 'job-landed'], landed)
+        self.assertEqual(files(), after_cli)
 
     def test_ui_search_ranks_folds_and_pages(self):
         names = ["Mariana", "Bruno Ana", "Ánalyst", "Ana Lima", "ana", "Zed"]

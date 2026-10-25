@@ -590,6 +590,8 @@ class Command:
         self.node = next((target for target in candidates if isinstance(target, str) and target in ids), "root")
         self.close_job = bool(getattr(args, "close", False)) or (args is not None and args.f.__name__ in ("cmd_wt_prune", "cmd_wt_rm"))
         self.command = command or args.f.__name__.removeprefix("cmd_")
+        if getattr(args, "project", False) and self.command == "status":
+            self.command = "project_status"
         self.lease = None
         self.record_paths = set()
         self.study_handback = (self.command == 'handback' and
@@ -1172,6 +1174,8 @@ def affected_nodes(inst, changed, preferred):
 
 
 def maintain(op, changed):
+    if op.command == "project_status":
+        return getattr(op, "projected_views", {})
     from . import status, freshness
     dispatch_landings(op.inst)
     freshness.maintain_indexes(op.inst, op.inst.nodes())
