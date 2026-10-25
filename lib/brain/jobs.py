@@ -85,7 +85,8 @@ def write_jobs(inst, n, rows):
     cols = JOB_COLS + list(dict.fromkeys(k for r in rows for k in r if k not in JOB_COLS))
     out = [head + "| " + " | ".join(cell(c) for c in cols) + " |", "| " + " | ".join("---" for _ in cols) + " |"]
     out += ["| " + " | ".join(cell(r.get(c, "")) for c in cols) + " |" for r in rows]
-    _m_common.atomic_write(f, "\n".join(out) + "\n")
+    from . import events
+    events.write_record(inst, n, "jobs", "ledger", "\n".join(out) + "\n")
     _m_common.touch(f)
 
 
@@ -360,7 +361,8 @@ def publish_handback(a):
         if study:
             data.update(ready_required=False, review_rounds=a.reviews)
         f.parent.mkdir(exist_ok=True)
-        _m_common.atomic_write(f, json.dumps(data, indent=2) + "\n")
+        from . import events
+        events.write_record(inst, n, "handback", job_key(row), json.dumps(data, indent=2) + "\n")
         _m_common.touch(f)
         _m_attempts.finish_attempt(inst, n, current, a._attempt_id, 'terminal')
         request = getattr(a, '_queue_request', None)

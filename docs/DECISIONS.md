@@ -97,3 +97,24 @@ absolute timestamp, phase/state and bounded evidence references. Classification
 codes are identifiers, with no free-form reason text. Reconstructed facts are
 labelled separately and never count as measured observations. No phase, preview
 usability, authorization or failure classification is inferred from transcripts.
+
+## D305: Event-backed ledger and hand-back materialization
+
+Ledger and worker hand-back writers persist immutable private source objects, then
+append a record event with the object's digest before materializing the conventional
+file. Prose and raw receipts remain in the private object store, while the journal
+contains identities, provenance and fingerprints. An applied acknowledgement closes
+the per-file publication window. Pending records retry under the writer lock; a
+changed target refuses recovery rather than overwriting independent work.
+
+`events --rebuild-records` restores missing ledger/hand-back files from those event
+sources. Existing snapshots are imported once as reconstructed records, retaining
+raw bytes and distinguishing that import from observed historical events. This
+provides event-derived paperwork without a coordinator transcription turn. Status
+still replays committed generated metadata views as described in D302.
+
+Landing facts (`landed`, `job_landed`, `task_landed`) trigger the optional tasks
+module's dependency reconciliation with the exact event id and changed node.
+Acknowledgements are durable facts. A failed application remains pending for the
+next writer, and reconciliation must respect task holds and visibility. This hook
+emits no host wake and performs no transcript classification.

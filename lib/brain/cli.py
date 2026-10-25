@@ -123,7 +123,7 @@ def writes(a):
     """Does this command, with these options, change anything in the instance?"""
     name = a.f.__name__
     if name == "cmd_events":
-        return bool(a.explain or a.record)
+        return bool(a.explain or a.record or a.rebuild_records)
     if name == "cmd_wt_prune":
         return not a.dry_run
     if name == 'cmd_proposals':
@@ -484,6 +484,7 @@ def main():
     cmd("events", _m_events.cmd_events, "private event metadata; --compare summarizes the last day", "id",
         opt("--compare", action="store_true"), opt("--json", action="store_true"),
         opt("--explain", metavar="DIFFERENCE_ID"), opt("--reason"),
+        opt("--rebuild-records", action="store_true"),
         opt("--record", metavar="FACT_TYPE"), opt("--job-key"), opt("--data", default="{}"))
     cmd("registry", _m_status.cmd_registry, "regenerate registry.md")
     cmd("link", _m_hosts.cmd_link, "create runtime links (axiom 22); --command puts 'brain' on your PATH; --global adds a "
