@@ -2050,3 +2050,19 @@ journal indexes, repair markers, leases, comparison and status metadata, and
 immutable event objects share this boundary. Final-file link and hard-link
 refusals, no-follow opens, descriptor identity checks and persistence ordering
 remain in force. Standalone paths retain their physical-parent behavior.
+
+## D19101: Flush test identities and enforce per-test timeouts
+
+Development pytest runs require the pinned pytest-timeout plugin and apply a
+120-second signal timeout by default, including setup and teardown. End-user
+execution remains Python 3.9 and standard-library-only. A controller-side hook
+streams each phase's nodeid, outcome and duration, then a completion with combined
+phase duration and failure precedence. Failure phases retain their traceback.
+Every event flushes immediately to terminal output and, when requested with
+`--completed-results=/private/new-file.jsonl`, an exclusively created JSONL file.
+Under xdist only the controller writes that file. A parent interruption can
+therefore retain completed identities even when final JUnit and duration tables
+have not been written. Existing native verification logs capture the terminal
+stream without command changes; private structured evidence is opt-in. The
+configuration is a shared lane input. Collection and business assertions remain
+unchanged; synthetic proofs cover interruption, xdist timeout and fixture errors.

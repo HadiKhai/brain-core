@@ -79,7 +79,7 @@ SHARED_INPUTS = (
     'lib/brain/__init__.py', 'tests/scenario.py', 'tests/core_loader.py',
     'tests/conftest.py', 'tests/lanes.py', 'tests/check_lanes.py',
     'bin/**', 'templates/**', 'skills/**', 'roles/**', 'adapters/**', 'ui/**', '!ui/**/*.png',
-    'install.sh', 'MODEL.md', 'CHANGES.md', '.gitignore', 'requirements-test.txt',
+    'install.sh', 'MODEL.md', 'CHANGES.md', '.gitignore', 'requirements-test.txt', 'pytest.ini',
 )
 
 
