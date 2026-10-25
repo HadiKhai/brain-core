@@ -27,6 +27,7 @@ from . import status as _m_status
 from . import usage as _m_usage
 from . import ui_review as _m_ui_review
 from . import ui_status as _m_ui_status
+from . import ui_server as _m_ui_server
 from . import verify as _m_verify
 from . import worktrees as _m_worktrees
 
@@ -217,11 +218,11 @@ class UIInstance(_m_instance.Instance):
 def ui_state(inst, problems=None, scan=None, spend_budget=2.0, machine_spend=None, cache=None, node_keys=None):
     readiness = _m_verify.display_cache(cache.ready, cache.worktree_keys) if cache is not None else contextlib.nullcontext()
     usage = _m_spend.live_usage_snapshot(cache.usage, cache.usage_revision) if cache is not None else contextlib.nullcontext()
-    with _m_spend.spend_read_only(), readiness, usage:
+    with _m_common.git_read_snapshot(), _m_spend.spend_read_only(), readiness, usage:
         return _ui_state(inst, problems, scan, spend_budget, machine_spend, cache, node_keys)
 
 
-def ui_node(inst, n, since, cache=None):
+def ui_node(inst, n, since, cache=None, partial=False):
     """The expensive repository/readiness part, reusable independently for each node."""
     home_commits = []
     fm, loc = n["fm"], n["local"]
@@ -239,7 +240,7 @@ def ui_node(inst, n, since, cache=None):
     wts = []
     terms = _m_guard.never_terms(n)
     hide = lambda t: _m_guard.redact(t, terms) if terms and isinstance(t, str) else t  # noqa: E731
-    if n["external"] and n["home_path"] and n["home_path"].exists():
+    if not partial and n["external"] and n["home_path"] and n["home_path"].exists():
         home = n["home_path"]
         wts = [{k: hide(v) for k, v in cached_worktree(inst, home, b, w, n, cache).items()}
                for b, w in sorted(loc.get("worktrees", {}).items())]
@@ -254,7 +255,7 @@ def ui_node(inst, n, since, cache=None):
     js = _m_jobs.jobs_summary(inst, n)
     for r in js["open"]:
         r.update(work_metadata.get(r["Job"], {}))
-        used = _m_spend.live_usage(inst, n, r)
+        used = None if partial else _m_spend.live_usage(inst, n, r)
         r["usage"] = _m_spend.spend_summary(used, terms) if used and used["sessions"] else None
         r["budget"] = _m_spend.job_budget(n, r)
     try:
@@ -282,9 +283,9 @@ def ui_node(inst, n, since, cache=None):
         "coordinator": inst.thread_link(loc["coordinator"]) if loc.get("coordinator") else "",
         "updated": u.isoformat() if u else None, "updated_ago": _m_status.ago(inst, u),
         "status": {k: v for k, v in secs.items() if v and k.lower() != "active work"},
-        "work": work, "worktrees": wts, "inbox": [l[2:] for l in _m_status.inbox_lines(n)],
+        "work": work, "worktrees": wts, "inbox": [l[2:] for l in _m_status.inbox_lines(n, readonly=partial)],
         "blocked": _m_status.status_section(n, "blocked"),
-        "blocked_metadata": [_m_ui_status.ui_blocked_metadata(inst, n, t) for t in _m_status.status_section(n, "blocked")], "decisions": ui_decisions(inst, n), "limits": _m_knowledge.limits_of(n),
+        "blocked_metadata": [_m_ui_status.ui_blocked_metadata(inst, n, t, file_only=partial) for t in _m_status.status_section(n, "blocked")], "decisions": ui_decisions(inst, n), "limits": _m_knowledge.limits_of(n),
         "never_name": len(terms), "spend": lookback,
         "jobs": {**js, "rows": [{k: hide(v) for k, v in r.items()} for r in (_m_jobs.read_jobs(n) or [])
                               if r.get("Outcome") != "external"],
@@ -294,6 +295,32 @@ def ui_node(inst, n, since, cache=None):
                                                           if l.startswith("# ")), d.parent.name),
                      "path": _m_common.tilde(d)} for d in reps]}
     return row, home_commits
+
+
+def ui_initial_state(inst, scan=None):
+    """A file-only first reading; repository, readiness and usage fill in afterwards."""
+    nodes = inst.nodes()
+    return {
+        'review': {'enabled': False}, 'due': [], 'scan': scan or [],
+        'usage_policy': {'stop_percent': None, 'max_age_seconds': 120}, 'usage_routing_policy': {},
+        'brain': {'name': _m_nodes.brain_name(inst.root), 'title': nodes[0]['fm'].get('title', 'Brain'),
+                  'root': _m_common.tilde(inst.root), 'machine': inst.local.get('machine', ''),
+                  'tz': str(inst.zone() or ''), 'fallback': inst.local.get('fallback', []),
+                  'now': inst.now_dt().isoformat(timespec='seconds'), 'others': [], 'filling_in': True},
+        'nodes': [ui_node(inst, n, '', partial=True)[0] for n in nodes],
+        'attention': [], 'inbox': [], 'commits': [], 'hours': UI_HOURS,
+        'activity': {'start': (int(time.time()) // 3600 - UI_HOURS + 1) * 3600, 'counts': {}},
+        'commits_24h': 0, 'commits_total': 0, 'specialists': [],
+        'items': {'count': 0, 'all': [], 'recent': []}, 'schedules': [],
+        'machine': {}, 'spend': None, 'usage': [], 'usage_other_subscriptions': 0, 'problems': None,
+    }
+
+
+def ui_loading(box, now=None):
+    return {'filling_in': box['partial'],
+            'age_seconds': max(0, int((time.time() if now is None else now) - box['built_at'])),
+            'refreshing': box['building'] or box.get('request', 0) > box.get('checked', 0),
+            'failed': bool(box.get('error')), 'version': box.get('version', 0)}
 
 
 class UIStateCache:
@@ -1002,8 +1029,18 @@ def cmd_ui(a):
     reviews = _m_ui_review.Reviews(inst.root, enabled=getattr(a, "write", False))
     key = secrets.token_urlsafe(18)  # other accounts on this machine can reach 127.0.0.1 too; they don't get this
     if a.json:
-        print(json.dumps(ui_state(inst, len(_m_check.collect_problems(inst)[0]), scan, spend_budget=None), indent=1))
+        with _m_common.git_read_snapshot():
+            print(json.dumps(ui_state(inst, len(_m_check.collect_problems(inst)[0]), scan, spend_budget=None), indent=1))
         return
+    version = _m_ui_server.ui_code_version()
+    if a.open:
+        existing = _m_ui_server.ui_reuse_server(inst, a.port, version, reviews.enabled)
+        if existing:
+            import webbrowser
+            print(f'brain ui core: {_m_common.tilde(_m_common.CORE)} @ source {version[:12]}', flush=True)
+            print(f'brain ui: {existing}  (reusing this version on port {a.port})', flush=True)
+            webbrowser.open(existing)
+            return
     assets = _m_common.CORE / "ui" / "dist"
     started = (assets / "index.html").read_bytes()
 
@@ -1016,34 +1053,38 @@ def cmd_ui(a):
     cond = threading.Condition()
     interval = max(0.05, a.every)
     box = {'json': b'', 'version': 0, 'clients': 0, 'last_poll': float('-inf'),
-           'telemetry': time.monotonic(), 'request': 0, 'checked': 0}
+           'telemetry': time.monotonic(), 'request': 0, 'checked': 0,
+           'partial': True, 'built_at': time.time(), 'building': True, 'error': '', 'stopped': False}
 
-    def touch():
+    def touch(wait=False):
         with cond:
             box['last_poll'] = time.monotonic()
             box['request'] += 1
             requested = box['request']
             cond.notify_all()
             # An idle poll must receive the newly checked snapshot, not the previous poll's data.
-            cond.wait_for(lambda: box['checked'] >= requested, timeout=30)
+            if wait or not box['partial']:
+                cond.wait_for(lambda: not box['partial'] and box['checked'] >= requested, timeout=4)
 
-    def publish(st):
+    def publish(st, complete=False):
         st = {**st, "review": {"enabled": reviews.enabled}}
         with cond:
             box.update(state=st, json=json.dumps(st, sort_keys=True).encode(), version=box['version'] + 1)
+            if complete:
+                box.update(partial=False, built_at=time.time(), building=False, error='')
             cond.notify_all()
 
-    def refresh(inputs, signature, spend, cache):
-        source_signature = inputs.source_signature()
+    def refresh(inputs, signature, spend, cache, source_signature, permissions):
         metadata_at = float('-inf')
-        permissions = inputs.permission_key()
         live_at, live_revision = time.monotonic(), spend.revision
         while True:
             with cond:
                 # Idle/background clients poll each minute. Keep their small aggregation slices
                 # moving between polls; a closed/no-client server sleeps after the lease expires.
-                while not box['clients'] and time.monotonic() - box['last_poll'] > 75:
+                while not box['stopped'] and not box['clients'] and time.monotonic() - box['last_poll'] > 75:
                     cond.wait()
+                if box['stopped']:
+                    return
                 requested = box['request']
                 spend.background = not box['clients']
             try:
@@ -1051,6 +1092,8 @@ def cmd_ui(a):
                 if requested > box['checked'] or time.monotonic() - metadata_at >= cadence:
                     changed = inputs.signature()
                     if changed != signature:
+                        with cond:
+                            box['building'] = True
                         i = UIInstance(inst.root)
                         if inputs.topology != inputs.topology_key(i):
                             inputs = UIInputs(i)
@@ -1072,7 +1115,7 @@ def cmd_ui(a):
                         st = ui_state(i, problems, scan, machine_spend=spend.value, cache=cache,
                                       node_keys=inputs.node_keys(i, changed))
                         signature = changed
-                        publish(st)
+                        publish(st, complete=True)
                     sources = inputs.source_signature()
                     if sources != source_signature:
                         spend.discover()
@@ -1107,7 +1150,8 @@ def cmd_ui(a):
                     publish(ui_meters(spend.inst, box['state'], cache))
                     box['telemetry'] = time.monotonic()
             except Exception as e:
-                box['error'] = str(e)
+                with cond:
+                    box.update(error=str(e), building=False)
             finally:
                 with cond:
                     box['checked'] = requested
@@ -1120,11 +1164,13 @@ def cmd_ui(a):
         def log_message(self, *args):
             pass
 
-        def send(self, code, body, ctype):
+        def send(self, code, body, ctype, headers=None):
             self.send_response(code)
             self.send_header("Content-Type", ctype)
             self.send_header("Cache-Control", "no-store")
             self.send_header("Content-Length", str(len(body)))
+            for name, value in (headers or {}).items():
+                self.send_header(name, value)
             self.end_headers()
             self.wfile.write(body)
 
@@ -1133,6 +1179,10 @@ def cmd_ui(a):
                                                  self.server.server_address[1], key):
                 return self.send(403, b"Local same-origin review key required", "text/plain")
             url = urllib.parse.urlsplit(self.path)
+            if url.path == '/api/server/stop':
+                self.send(200, b'{}', 'application/json')
+                threading.Thread(target=self.server.shutdown, daemon=True).start()
+                return
             if url.path not in ("/api/review/prepare", "/api/review/apply"):
                 return self.send(404, b"not found", "text/plain")
             try:
@@ -1149,7 +1199,7 @@ def cmd_ui(a):
                 message = str(error) if isinstance(error, _m_ui_review.ReviewError) else "Review failed validation; no confirmation is retained. Refresh and review again."
                 return self.send(409, json.dumps({"error": message}).encode(), "application/json")
             if url.path.endswith("/apply"):
-                touch()
+                touch(wait=True)
             return self.send(200, json.dumps(result).encode(), "application/json")
 
         def do_GET(self):
@@ -1174,6 +1224,12 @@ def cmd_ui(a):
                 return self.send(200, body, mimetypes.guess_type(str(path))[0] or "application/octet-stream")
             if url.path.startswith("/api/") and not hmac.compare_digest(given, key):
                 return self.send(403, b"this run's key is missing: open the address brain ui printed", "text/plain")
+            if url.path == '/api/server':
+                return self.send(200, json.dumps(identity).encode(), 'application/json')
+            if url.path == '/api/loading':
+                with cond:
+                    body = json.dumps(ui_loading(box)).encode()
+                return self.send(200, body, 'application/json')
             if url.path == "/api/review":
                 try:
                     result = reviews.catalog()
@@ -1182,7 +1238,9 @@ def cmd_ui(a):
                 return self.send(200, json.dumps(result).encode(), "application/json")
             if url.path == "/api/state":
                 touch()
-                return self.send(200, box["json"], "application/json")
+                with cond:
+                    body, version = box["json"], str(box["version"])
+                return self.send(200, body, "application/json", {"X-Brain-UI-Version": version})
             if url.path == "/api/search":
                 q = urllib.parse.parse_qs(url.query)
                 one = lambda k, d: (q.get(k) or [d])[0]  # noqa: E731
@@ -1214,7 +1272,7 @@ def cmd_ui(a):
                         if v == seen and time.monotonic() - pinged < 15:
                             continue
                         if v != seen:
-                            self.wfile.write(b"data: " + body + b"\n\n")
+                            self.wfile.write(b"data: " + body + b"\nid: " + str(v).encode() + b"\n\n")
                             seen = v
                         else:
                             self.wfile.write(b": ping\n\n")
@@ -1228,32 +1286,71 @@ def cmd_ui(a):
                         cond.notify_all()
             self.send(404, b"not found", "text/plain")
 
-    spend = UISpend(inst)
-    spend.discover()
-    spend.advance()
-    inputs = UIInputs(inst)
-    signature = inputs.signature()
-    cache = UIStateCache()
-    cache.worktree_keys = inputs.worktree_keys(inst, signature)
-    cache.usage_revision = (spend.revision, spend.permissions)
-    st = ui_state(inst, cache.problems_for(inst, signature), scan, machine_spend=spend.value,
-                  cache=cache, node_keys=inputs.node_keys(inst, signature))
-    st = {**st, "review": {"enabled": reviews.enabled}}
-    box.update(json=json.dumps(st, sort_keys=True).encode(), version=1, state=st)
-    threading.Thread(target=refresh, args=(inputs, signature, spend, cache), daemon=True).start()
+    st = ui_initial_state(inst, scan)
+    publish(st)
+
+    def initialize():
+        # One worker owns initialization and ongoing refresh. A failed attempt sleeps
+        # until another state request, rather than abandoning a usable partial view.
+        while True:
+            with cond:
+                if box['stopped']:
+                    return
+                requested = box['request']
+                box['building'] = True
+            try:
+                with _m_common.git_read_snapshot():
+                    current = UIInstance(inst.root)
+                    spend = UISpend(current)
+                    spend.discover()
+                    spend.advance()
+                    inputs = UIInputs(current)
+                    signature = inputs.signature()
+                    cache = UIStateCache()
+                    cache.worktree_keys = inputs.worktree_keys(current, signature)
+                    cache.usage_revision = (spend.revision, spend.permissions)
+                    full = ui_state(current, cache.problems_for(current, signature), scan, machine_spend=spend.value,
+                                    cache=cache, node_keys=inputs.node_keys(current, signature))
+                    source_signature = inputs.source_signature()
+                    permissions = inputs.permission_key()
+                with cond:
+                    if box['stopped']:
+                        return
+                    publish(full, complete=True)
+                    box['checked'] = requested
+            except (Exception, SystemExit) as error:
+                with cond:
+                    box.update(error=str(error), building=False, checked=requested)
+                    cond.notify_all()
+                    retry_at = time.monotonic() + interval
+                    cond.wait_for(lambda: box['stopped'] or box['request'] > requested)
+                    # Requests during an attempt coalesce into the next attempt. A
+                    # burst cannot turn persistent failures into a hot retry loop.
+                    while not box['stopped'] and time.monotonic() < retry_at:
+                        cond.wait(timeout=retry_at - time.monotonic())
+                continue
+            refresh(inputs, signature, spend, cache, source_signature, permissions)
+            return
     port = a.port
     srv = None
-    for p_ in range(port, port + 20):
+    deadline = time.monotonic() + (2 if a.open else 0)
+    while True:
         try:
-            srv = http.server.ThreadingHTTPServer(("127.0.0.1", p_), H)
+            srv = http.server.ThreadingHTTPServer(("127.0.0.1", port), H)
             break
         except OSError:
-            continue
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(0.05)
     if not srv:
-        _m_common.die(f"no free port from {port}")
+        _m_common.die(f"port {port} is busy; no other port was opened (leave unrelated services running)")
     srv.daemon_threads = True
+    port = srv.server_address[1]
+    identity = {'pid': os.getpid(), 'version': version, 'root': str(inst.root.resolve()), 'write': reviews.enabled}
+    _m_ui_server.ui_server_record(inst, port, {**identity, 'key': key})
+    threading.Thread(target=initialize, daemon=True).start()
     url = f"http://127.0.0.1:{srv.server_address[1]}/?k={key}"
-    print(f"brain ui core: {core_revision()}", flush=True)
+    print(f"brain ui core: {_m_common.tilde(_m_common.CORE)} @ source {version[:12]}", flush=True)
     mode = "local proposal reviews enabled" if reviews.enabled else "read-only"
     print(f"{st['brain']['title']} ({st['brain']['name']}): {url}  ({mode}, this machine only; Ctrl-C stops it)",
           flush=True)
@@ -1264,6 +1361,11 @@ def cmd_ui(a):
         srv.serve_forever()
     except KeyboardInterrupt:
         pass
+    finally:
+        with cond:
+            box['stopped'] = True
+            cond.notify_all()
+        srv.server_close()
 
 
 # ---------- check ----------

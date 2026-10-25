@@ -26,6 +26,18 @@ from . import verify as _m_verify
 WATCH_LOCAL_KINDS = ('unsettled-threads',)
 
 
+WATCH_DECISION_KINDS = ('handback', 'job-stall', 'blocked-overdue', 'restart', 'rotate',
+                        'overdue-question')
+
+
+def watch_decision_item(item):
+    if item['kind'] == 'inbox':
+        return bool(item.get('reason') or re.search(r'<!-- (?:host-question|handback):[^>]+ -->', item.get('text', '')))
+    if item['kind'] == 'handback':
+        return item.get('state') in ('question', 'blocked', 'done')
+    return item['kind'] in WATCH_DECISION_KINDS
+
+
 def watch_digest(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
 
@@ -283,6 +295,8 @@ def watch_items(inst, n):
         semantic = _m_reminders.semantic_item_key(item)
         entry = {'id': watch_digest(semantic if semantic is not None else [n['id'], item['kind'], identity]),
                  'kind': item['kind'], 'text': text}
+        if item['kind'] == 'handback':
+            entry['state'] = item.get('state')
         if direct_reason:
             entry.update(reason=direct_reason, source=n['id'])
         out.append(entry)
@@ -623,7 +637,7 @@ def watch_run(inst, kinds=None, quiet=False, sources=None):
         items = {i['id']: i for i in group['items']}
         current.extend(items.values())
         added = sorted(key for key in set(items) - seen
-                       if (kinds is None or items[key]['kind'] in kinds)
+                       if (watch_decision_item(items[key]) if kinds is None else items[key]['kind'] in kinds)
                        and (sources is None or items[key]['node'] in sources))
         queued = False
         if added and group['command']:
@@ -637,7 +651,7 @@ def watch_run(inst, kinds=None, quiet=False, sources=None):
                     accepted = _m_machine.machine_hold_claim(
                         inst, item['episode'], item['scope'],
                         deliver=lambda: _m_hosts.request_wake(inst, group['node'], 'machine-hold:' + item['episode'],
-                                                             items=[items[k] for k in bundle]))
+                                                             items=[items[k] for k in bundle], explicit=kinds is not None))
                     if accepted:
                         seen.update(bundle)
                         count += len(bundle)
@@ -648,14 +662,14 @@ def watch_run(inst, kinds=None, quiet=False, sources=None):
                 elif 'reason' in items[key]:
                     origin = inst.node(items[key].get('source', group['node']['id']))
                     if (_m_hosts.wake_recorded(inst, origin, items[key]['reason'])
-                            or _m_hosts.request_wake(inst, origin, items[key]['reason'], items=[items[key]])):
+                            or _m_hosts.request_wake(inst, origin, items[key]['reason'], items=[items[key]], explicit=kinds is not None)):
                         seen.add(key)
                         count += 1
                         queued = True
                     added.remove(key)
             # Include item identity in the opaque wake reason; equal counts aren't equal sets.
             reason = f'{len(added)} new items: ' + watch_digest(added)
-            if added and _m_hosts.request_wake(inst, group['node'], reason, items=[items[k] for k in added]):
+            if added and _m_hosts.request_wake(inst, group['node'], reason, items=[items[k] for k in added], explicit=kinds is not None):
                 seen.update(added)  # acknowledgement means durable queue, not transport success
                 count += len(added)
                 queued = True

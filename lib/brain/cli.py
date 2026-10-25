@@ -15,6 +15,7 @@ from . import check as _m_check
 from . import common as _m_common
 from . import connect as _m_connect
 from . import guard as _m_guard
+from . import gate_lock as _m_gate_lock
 from . import history as _m_history
 from . import hosts as _m_hosts
 from . import instance as _m_instance
@@ -65,6 +66,9 @@ def take_brain_flag():
     args, out, name, i = sys.argv[1:], [], None, 0
     while i < len(args):
         x = args[i]
+        if x == "--":
+            out.extend(args[i:])
+            break
         if x in ("-b", "--brain") and i + 1 < len(args):
             name, i = args[i + 1], i + 2
             continue
@@ -111,7 +115,7 @@ READ_ONLY = {"cmd_show", "cmd_tree", "cmd_status", "cmd_now", "cmd_jobs", "cmd_s
              "cmd_brief", "cmd_hire", "cmd_reports", "cmd_brains", "cmd_use", "cmd_machine", "cmd_usable",
              "cmd_item_list", "cmd_item_show", "cmd_wt_list", "cmd_selftest", "cmd_init", "cmd_hook", "cmd_hook_approve", "cmd_help",
              "cmd_dashboard", "cmd_ready", "cmd_usage", "cmd_scan", "cmd_scrub", "cmd_history",
-             "cmd_version", "cmd_connect", "cmd_recall", "cmd_proposals", "cmd_changes", "cmd_heavy", "cmd_rehearse", "cmd_policy"}
+             "cmd_gate_lock", "cmd_version", "cmd_connect", "cmd_recall", "cmd_proposals", "cmd_changes", "cmd_heavy", "cmd_rehearse", "cmd_policy"}
 
 
 def writes(a):
@@ -478,6 +482,8 @@ def main():
     cmd("check", _m_check.cmd_check, "verify what can be checked mechanically; --fix repairs the safe things",
         opt("--fix", action="store_true"),
         opt("--live", action="store_true", help="send real webhook probes; default check only reads cached results"))
+    cmd("gate-lock", _m_gate_lock.cmd_gate_lock, "serialize a command across this instance",
+        opt("--label"), opt("command", nargs=argparse.REMAINDER))
     cmd("heavy", _m_machine.cmd_heavy, "wait until the machine admits new heavy work",
         opt("--node", help="coordinator whose work is waiting (default root)"))
     cmd("machine", _m_machine.cmd_machine, "machine state, sampler and bindings",

@@ -152,7 +152,7 @@ def empty_blocked(text):
     return bool(re.fullmatch(r"\(?\s*(?:none|nothing)(?:\s+(?:right now|blocked|currently|yet|at present))?[.!]?\s*\)?", text, re.I))
 
 
-def blocked_entries(inst, n):
+def blocked_entries(inst, n, file_only=False):
     """Stable source text, with age kept separate so a ticking clock cannot re-notify."""
     if n["archived"]:
         return []
@@ -164,11 +164,13 @@ def blocked_entries(inst, n):
     cache = getattr(inst, "_blocked_entries", {})
     key = (n["id"], stamp.st_mtime_ns if stamp else None, stamp.st_size if stamp else None, now.isoformat())
     # Cache source parsing/history separately from the clock-derived age.
-    source_key = key[:3]
+    source_key = (*key[:3], file_only)
     parsed = cache.get(source_key)
     if parsed is not None:
-        return [{**b, "age_hours": round(max(0, elapsed(inst.parse_time(b["since"]), now) / 3600), 2),
-                 "escalated": elapsed(inst.parse_time(b["since"]), now) > BLOCKED_HOURS * 3600} for b in parsed]
+        return [{**b,
+                 "age_hours": round(max(0, elapsed(inst.parse_time(b["since"]), now) / 3600), 2) if b["since"] else None,
+                 "escalated": bool(b["since"] and elapsed(inst.parse_time(b["since"]), now) > BLOCKED_HOURS * 3600)}
+                for b in parsed]
     out = []
     first_lines = status_section(n, "blocked", physical=True)
     for index, text in enumerate(status_section(n, "blocked")):
@@ -178,15 +180,17 @@ def blocked_entries(inst, n):
             r"(?:^|;\s*)(since|recommendation|default):\s*([^;]*)", text, re.I))
         since = inst.parse_time(fields.get("since", ""))
         # Legacy entries still age: use this bullet's introduction, never the status Updated line.
-        if not since:
+        if not since and not file_only:
             needle = first_lines[index]
             history = _m_common.git("log", "--reverse", "--format=%cI", "-S", needle, "--",
                           str(source.relative_to(inst.root)), cwd=inst.root).stdout.splitlines()
             since = inst.parse_time(history[0]) if history else datetime.datetime.fromtimestamp(
                 source.stat().st_mtime, inst.zone())
-        hours = max(0, elapsed(since, inst.now_dt()) / 3600)
-        out.append({"text": text, "since": since.isoformat(timespec="seconds"),
-                    "age_hours": round(hours, 2), "escalated": hours > BLOCKED_HOURS,
+        # File-only bootstrap cannot infer when a legacy bullet appeared.
+        hours = max(0, elapsed(since, inst.now_dt()) / 3600) if since else None
+        out.append({"text": text, "since": since.isoformat(timespec="seconds") if since else None,
+                    "age_hours": round(hours, 2) if hours is not None else None,
+                    "escalated": hours is not None and hours > BLOCKED_HOURS,
                     "recommendation": fields.get("recommendation", ""), "default": fields.get("default", ""),
                     "missing": [k for k in ("since", "recommendation", "default")
                                 if not fields.get(k) or (k == "since" and not inst.parse_time(fields[k]))]})
@@ -195,12 +199,12 @@ def blocked_entries(inst, n):
     return out
 
 
-def blocked_metadata(inst, n, kind, text):
+def blocked_metadata(inst, n, kind, text, file_only=False):
     if kind not in ("blocked", "blocked-overdue"):
         return {}
     return next(({k: _m_nodes.import_text(v, _m_guard.never_terms(n)) if isinstance(v, str) else v
                   for k, v in b.items() if k not in ("text", "missing")}
-                 for b in blocked_entries(inst, n) if b["text"] == text), {})
+                 for b in blocked_entries(inst, n, file_only=file_only) if b["text"] == text), {})
 
 
 def dead_note_paths(inst, n):

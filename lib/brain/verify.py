@@ -16,6 +16,7 @@ from pathlib import Path
 from . import common as _m_common
 from . import docker_leftovers as _m_docker_leftovers
 from . import guard as _m_guard
+from . import gate_lock as _m_gate_lock
 from . import history as _m_history
 from . import instance as _m_instance
 from . import jobs as _m_jobs
@@ -551,8 +552,9 @@ def run_verify_stream(inst, n, branch, verify, w, env, token, lane=None):
             started = time.monotonic()
             deadline = started + VERIFY_PROGRESS_SECONDS
             # The bootstrap cannot exec the verify until its PID/start stamp is durable.
-            # EOF before publication means no verify starts. No extra FD reaches the shell,
-            # so a background daemon cannot keep a completed verify's reservation alive.
+            # EOF before publication means no verify starts. The bootstrap FD closes
+            # before exec; only the validated instance gate FD survives into the real gate.
+            instance_gate_fd = _m_gate_lock.gate_inherited_fd(inst.root, env)
             gate_read, gate_write = os.pipe()
             bootstrap = ("import json,os,sys,signal; fd=int(sys.argv[1]); data=bytearray()\n"
                          "while True:\n"
@@ -568,7 +570,8 @@ def run_verify_stream(inst, n, branch, verify, w, env, token, lane=None):
             try:
                 proc = subprocess.Popen([sys.executable, "-I", "-S", "-c", bootstrap, str(gate_read)],
                                         cwd=w["path"], env=env, stdout=subprocess.PIPE,
-                                        stderr=subprocess.STDOUT, pass_fds=(gate_read,))
+                                        stderr=subprocess.STDOUT, pass_fds=(gate_read,) +
+                                        ((instance_gate_fd,) if instance_gate_fd is not None else ()))
                 os.close(gate_read)
                 gate_read = None
                 _m_machine.machine_child(token, proc.pid)

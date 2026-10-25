@@ -1,5 +1,5 @@
 import { ReviewProvider } from "./review";
-import { watchLive } from "./live";
+import { watchLive, readingMarker, type ReadingProgress } from "./live";
 import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { Bell, Moon, RefreshCw, Sun } from "lucide-react";
@@ -80,6 +80,41 @@ function App() {
   const scroll = useRef<HTMLDivElement>(null),
     positions = useRef<Record<string, number>>({}),
     activeView = useRef(route.view + ":" + (route.node || ""));
+  const [progress, setProgress] = useState<ReadingProgress | null>(null);
+  const [, readingTick] = useState(0);
+  const marker = readingMarker(s, progress, connection);
+  const hasReading = s?.__ui_version != null;
+  useEffect(() => {
+    if (!hasReading || window.__STATE__) return;
+    const key = new URLSearchParams(location.search).get("k");
+    if (!key) return;
+    const controller = new AbortController();
+    let timer: ReturnType<typeof setTimeout>;
+    const poll = async () => {
+      try {
+        if (!document.hidden) {
+          const response = await fetch('/api/loading?k=' + encodeURIComponent(key), { signal: controller.signal });
+          if (!response.ok) throw Error('Reading status unavailable');
+          const next: ReadingProgress = await response.json();
+          if (typeof next.version !== 'number') throw Error('Reading status unavailable');
+          if (!controller.signal.aborted) setProgress(prev => prev?.version === next.version &&
+            !!prev.refreshing === !!next.refreshing && !!prev.failed === !!next.failed ? prev : next);
+        }
+      } catch {
+        if (!controller.signal.aborted) setProgress(null);
+      } finally {
+        if (!controller.signal.aborted) timer = setTimeout(poll, 1000);
+      }
+    };
+    void poll();
+    return () => { controller.abort(); clearTimeout(timer); };
+  }, [hasReading, retry]);
+  const showMarker = !!marker;
+  useEffect(() => {
+    if (!showMarker) return;
+    const timer = setInterval(() => { if (!document.hidden) readingTick(value => value + 1); }, 1000);
+    return () => clearInterval(timer);
+  }, [showMarker]);
   useLayoutEffect(() => {
     // Overlay scrollbars need no reserved space. CSS stable alone can still
     // allocate a classic-width strip on systems whose scrollbars overlay content.
@@ -262,6 +297,13 @@ function App() {
             </div>
             <div ref={scroll} className="inset-scroll" id="workspace-content" data-fill-page={["inbox", "specialists", "learnings", "graph", "threads", "jobs"].includes(v) || undefined}>
               <PageHeader title={head.title} subtitle={head.subtitle} crumbs={head.crumbs} actions={<div id="screen-action-host" />} />
+              {marker && (
+                <Alert data-reading-progress role="status">
+                  <RefreshCw size={18} aria-hidden="true" />
+                  <AlertTitle>{marker}</AlertTitle>
+                  <AlertDescription>You can use this reading while the remaining details arrive.</AlertDescription>
+                </Alert>
+              )}
               {notice && (
                 <Alert className="notice" role="status">
                   <AlertTitle>Workspace notice</AlertTitle>

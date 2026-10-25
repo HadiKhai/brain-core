@@ -17,6 +17,50 @@ node files. Worker and review briefs use the same model lookup.
 After upgrading: No migration. Review explicit ancestor model routing when
 choosing models for descendant jobs. Worktree cleanup behavior is unchanged.
 
+## 2026-10-25: Decision wakes and shared gate lock
+
+For agents: Default sampler wakes carry only marked questions and worker results,
+stalled jobs, overdue blockers/questions and existing restart/rotation decisions.
+Bookkeeping remains visible in `brain due`; explicit watcher kinds retain opt-in
+delivery, including durable retries and rerouting. Identified old bookkeeping
+receipts no longer bypass the default filter; unknown question metadata remains
+fail-open. The additional job-restart wake feature is parked and not included;
+existing due usage advice, budgets and restart/rebrief behavior are unchanged.
+Unknown queued kinds and contradictory identity/kind pairs retain their original
+metadata for fail-open opaque delivery; new unknown sampler kinds stay excluded.
+
+`brain gate-lock [--label LABEL] -- CMD [ARGS...]` serializes commands through
+one instance lock and preserves command arguments, signals and exit status.
+The native verify launcher forwards the validated gate descriptor alongside its
+bootstrap descriptor. Exec restores Python-ignored child signals, including SIGPIPE.
+
+After upgrading: Wrap each complete full gate in `brain gate-lock --label
+"component verify" -- ...`, retaining machine admission. Forward its validated FD
+at other Python subprocess boundaries; native verify does this automatically.
+Keep existing turn protection until every route is installed and confirmed. Do
+not remove the lock file. Coordinators drain absorbed host queue messages at each
+turn's start.
+
+
+## 2026-10-24: Open the dashboard before slow repository checks finish
+
+For agents:
+- The dashboard first serves real node and job files with a filling-in marker,
+  then publishes the complete reading. Refreshing and failed readings show their age.
+- The marker uses the dashboard's loading notice and stays visible until the
+  complete reading arrives, including when an idle tab closes its live stream.
+  Failed refreshes keep the partial reading available and explain the delay.
+- Repeated read-only Git queries share one build's results. Explicit checks and
+  later builds still read Git again.
+- `brain ui --open` reuses a matching local server or replaces an identified old
+  dashboard through its authenticated identity on the requested port. A legacy
+  dashboard without that identity and any unrelated listener are left running; the
+  command reports the busy port instead of silently choosing another one.
+
+After upgrading:
+- Run `brain ui --open` again to replace an older dashboard. No setup is needed.
+- If a legacy dashboard has no identity record, stop it in its own terminal first;
+  a working directory or process command cannot prove which instance it serves.
 ## 2026-10-24: Stable job reminder identities and quiet Docker reports
 
 Merged-ledger and lesson-outcome needs ignore hand-back wording. Job advice latches each
