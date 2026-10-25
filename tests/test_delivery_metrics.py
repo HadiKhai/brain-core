@@ -88,3 +88,41 @@ class DeliveryMetrics(Scenario):
         self.assertEqual(result['phase_seconds']['execution']['working'], 10)
         self.assertEqual(result['phase_seconds']['acknowledgement']['waiting'], 10)
         self.assertIsNone(result['unattributed_seconds'])
+
+    def test_rework_separates_findings_requirements_and_unclassified_episodes(self):
+        _, inst, n = self.prepare()
+        self.fact(inst, n, 'rework_started', 0, reason_code='review_finding')
+        self.fact(inst, n, 'rework_finished', 10)
+        self.fact(inst, n, 'rework_started', 15, reason_code='requirement_change')
+        self.fact(inst, n, 'rework_started', 20)
+        self.fact(inst, n, 'delivery_completed', 24)
+        rework = delivery_metrics.delivery_measurements(inst, n)['jobs'][0]['rework']
+        self.assertEqual(rework, {'review_finding': {'episodes': 1, 'seconds': 10},
+                                 'requirement_change': {'episodes': 1, 'seconds': 5},
+                                 'unclassified': {'episodes': 1, 'seconds': 4}})
+
+    def test_dependency_wait_ranking_and_completion_are_evidence_based(self):
+        _, inst, n = self.prepare()
+        b, c = 'b' * 24, 'c' * 24
+        self.fact(inst, n, 'dependency_declared', 0, depends_on=[b, c])
+        self.fact(inst, n, 'dependency_blocked', 5, depends_on=[b])
+        self.fact(inst, n, 'dependency_unblocked', 15)
+        self.fact(inst, n, 'dependency_blocked', 20, depends_on=[b, c])
+        self.fact(inst, n, 'delivery_completed', 40)
+        self.fact(inst, n, 'job_landed', 30, key=b, evidence={'head': 'abc1234'})
+        result = delivery_metrics.delivery_measurements(inst, n)['jobs'][0]
+        self.assertEqual(result['dependency_wait_seconds'], {b: 30, c: 20})
+        self.assertEqual(result['critical_dependency'], b)
+        self.assertEqual(result['critical_dependency_basis'], 'largest_observed_wait')
+        self.assertEqual(result['unresolved_dependencies'], [c])
+        self.assertEqual(result['blocking_dependencies'], [])
+        self.assertIsNone(result['forecast_critical_path'])
+
+    def test_declared_dependencies_do_not_invent_wait_or_forecast(self):
+        _, inst, n = self.prepare()
+        self.fact(inst, n, 'dependency_declared', 0, depends_on=['b' * 24])
+        result = delivery_metrics.delivery_measurements(inst, n)['jobs'][0]
+        self.assertEqual(result['blocking_dependencies'], ['b' * 24])
+        self.assertEqual(result['dependency_wait_seconds'], {})
+        self.assertIsNone(result['critical_dependency'])
+        self.assertEqual(result['rework']['unclassified']['episodes'], 0)

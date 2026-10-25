@@ -26,6 +26,11 @@ def delivery_measurements(inst, n, now=None):
     for key, rows in sorted(groups.items()):
         rows.sort(key=lambda row: (row[0], row[1]))
         jobs.append(_delivery_job_metrics(key, rows, now))
+    completed = {key for key, rows in groups.items() if any(d['fact_type'] in _TERMINAL for _, _, d in rows)}
+    for job in jobs:
+        unresolved = [key for key in job['depends_on'] if key not in completed]
+        job['unresolved_dependencies'] = unresolved
+        job['blocking_dependencies'] = unresolved if job['job_key'] not in completed else []
     return {'node': n['id'], 'jobs': jobs, 'reconstructed_facts_excluded': reconstructed,
             'basis': 'explicit observed events; missing observations remain unknown'}
 
@@ -51,6 +56,8 @@ def _delivery_job_metrics(key, rows, now):
     result.update(phase_seconds=phases, phase_observed_seconds=observed,
                   unattributed_seconds=max(0.0, elapsed - observed) if elapsed is not None else None,
                   phase_coverage='observed' if intervals else 'no_phase_observations')
+    result.update(_delivery_rework_metrics(rows, end, request))
+    result.update(_delivery_dependency_metrics(rows, end, request))
     return result
 
 
@@ -67,3 +74,65 @@ def _delivery_phase_intervals(rows, now, request=None):
         if stop > start and data['state'] in ('working', 'waiting'):
             intervals.append((start, stop, data))
     return intervals, end
+
+
+_REWORK_REASONS = ('review_finding', 'requirement_change')
+
+
+def _delivery_rework_metrics(rows, end, request):
+    result = {key: {'episodes': 0, 'seconds': 0.0} for key in (*_REWORK_REASONS, 'unclassified')}
+    active = None
+    for at, _, data in rows:
+        if at > end:
+            break
+        kind = data['fact_type']
+        if kind not in ('rework_started', 'rework_finished', *_TERMINAL):
+            continue
+        if active:
+            start, reason = active
+            start = max(start, request) if request else start
+            result[reason]['seconds'] += max(0.0, (at - start).total_seconds())
+            active = None
+        if kind == 'rework_started':
+            reason = data.get('reason_code')
+            reason = reason if reason in _REWORK_REASONS else 'unclassified'
+            result[reason]['episodes'] += 1
+            active = (at, reason)
+    if active:
+        start, reason = active
+        start = max(start, request) if request else start
+        result[reason]['seconds'] += max(0.0, (end - start).total_seconds())
+    return {'rework': result}
+
+
+def _delivery_dependency_metrics(rows, end, request):
+    declared, active, waits = [], None, {}
+    for at, _, data in rows:
+        if at > end:
+            break
+        kind = data['fact_type']
+        if kind not in ('dependency_declared', 'dependencies_changed', 'dependency_blocked',
+                        'dependency_unblocked', *_TERMINAL):
+            continue
+        if active:
+            start, dependencies = active
+            start = max(start, request) if request else start
+            seconds = max(0.0, (at - start).total_seconds())
+            for key in dependencies:
+                waits[key] = waits.get(key, 0.0) + seconds
+            active = None
+        if 'depends_on' in data:
+            declared = sorted(data['depends_on'])
+        if kind == 'dependency_blocked':
+            active = (at, declared)
+    if active:
+        start, dependencies = active
+        start = max(start, request) if request else start
+        for key in dependencies:
+            waits[key] = waits.get(key, 0.0) + max(0.0, (end - start).total_seconds())
+    ranked = sorted(waits, key=lambda key: (-waits[key], key))
+    critical = ranked[0] if ranked and waits[ranked[0]] > 0 else None
+    return {'depends_on': declared, 'dependency_wait_seconds': waits,
+            'critical_dependency': critical,
+            'critical_dependency_basis': 'largest_observed_wait' if critical else 'no_observed_dependency_wait',
+            'forecast_critical_path': None}

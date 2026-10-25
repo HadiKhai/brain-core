@@ -146,3 +146,14 @@ metrics integrate successive observed transitions until an explicit terminal eve
 or the query time. Done phases contribute no work or wait duration. Gaps before
 the first observed phase remain unattributed; no transcript gap, process lifetime
 or Git timestamp becomes invented working time. Reconstructed events stay excluded.
+
+## D309: Rework reasons and dependency delays require explicit facts
+
+`rework_started`/`rework_finished` measure episodes classified by the controlled
+reason codes `review_finding` or `requirement_change`; missing classifications stay
+unclassified. `dependency_declared`/`dependencies_changed` name exact dependency
+identities, while `dependency_blocked`/`dependency_unblocked` measure observed waits.
+The dependency with the largest recorded wait is reported with that explicit basis.
+Declared dependencies without wait events do not invent delays. An observed landing
+removes its identity from current blockers. These measurements do not predict a
+future critical path; overlapping dependency waits must not be added as wall time.
