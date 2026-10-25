@@ -138,6 +138,13 @@ class RehearsalRedaction(Scenario):
             rehearsal.cmd_rehearse(args)
             saved = path.read_text()
             self.assertEqual(evidence, json.loads(saved))
+            evidence.update(passed=False, regressions=['check: raw failure'])
+            with self.assertRaises(SystemExit) as failed:
+                rehearsal.cmd_rehearse(args)
+            self.assertEqual(1, failed.exception.code)
+            self.assertEqual(evidence, json.loads(path.read_text()))
+            self.assertIn('rehearse: failed; commands=1; regressions=1', printed.getvalue())
+            self.assertIn('check: raw failure', printed.getvalue())
             run.side_effect = rehearsal.RehearsalError('invented-canary raw probe output')
             with self.assertRaises(SystemExit) as caught:
                 rehearsal.cmd_rehearse(args)
@@ -609,8 +616,63 @@ class RehearsalEvidence(Scenario):
             self.assertFalse(ready_state(inst, n, 'job')['ready'])
             path.write_text(json.dumps({**evidence, 'integration_base': newer}))
             mismatched = ready_state(inst, n, 'job', train=True)
-            self.assertFalse(mismatched['ready'])
-            self.assertIn('passing rehearsal missing', '; '.join(mismatched['reasons']))
+            self.assertTrue(mismatched['ready'], mismatched['reasons'])
+            self.assertIsNone(rehearsal.read_evidence(n, 'job', head, main=main, integration_base=main))
+
+    def test_failed_stale_and_unreadable_reports_do_not_block_or_get_rewritten(self):
+        from brain.instance import Instance
+        r = self.init('sample')
+        home = self.repo(self.tmp / 'app')
+        self.b(r, 'new', 'a', '--title', 'A', '--home', str(home))
+        self.b(r, 'set', 'a', 'verify=true', 'rehearse=required')
+        self.b(r, 'wt', 'add', 'a', 'job')
+        wt = self.tmp / 'app-work/worktrees/job'
+        self.git('commit', '--allow-empty', '-qm', 'change', cwd=wt)
+        n = Instance(r).node('a')
+        path = rehearsal.evidence_path(n, 'job')
+        path.parent.mkdir(parents=True)
+        head = self.git('rev-parse', 'job', cwd=home).strip()
+        main = self.git('rev-parse', 'main', cwd=home).strip()
+        evidence = dict(version=1, node='a', branch='job', head=head, main=main,
+                        integration_base=main, passed=True,
+                        installed_core_commit=rehearsal.installed_core_commit(r))
+        for report in ({**evidence, 'passed': False, 'regressions': ['raw failure']},
+                       {**evidence, 'head': main}, {**evidence, 'main': head},
+                       {**evidence, 'installed_core_commit': 'old'}, 'unreadable'):
+            with self.subTest(report=report):
+                raw = json.dumps(report) if isinstance(report, dict) else report
+                path.write_text(raw)
+                self.assertIn('ready', self.b(r, 'handback', '--summary', 'Synthetic result',
+                                            'a', '--branch', 'job', '--state', 'done', '--reviews', '1'))
+                self.assertEqual('ready', self.b(r, 'ready', 'a', '--branch', 'job').strip())
+                self.assertEqual(raw, path.read_text())
+                self.assertIsNone(rehearsal.read_evidence(n, 'job', head))
+        (wt / '.env').write_text('CHANGED=1')
+        self.assertIn('verify_inputs changed', self.b(r, 'ready', 'a', '--branch', 'job', ok=False))
+
+    def test_legacy_rehearsal_reason_is_ignored_without_ignoring_other_reasons(self):
+        r = self.init('sample')
+        home = self.repo(self.tmp / 'app')
+        self.b(r, 'new', 'a', '--title', 'A', '--home', str(home))
+        self.b(r, 'set', 'a', 'verify=true', 'rehearse=required')
+        self.b(r, 'wt', 'add', 'a', 'job')
+        self.git('commit', '--allow-empty', '-qm', 'change', cwd=self.tmp / 'app-work/worktrees/job')
+        self.b(r, 'handback', '--summary', 'Synthetic result', 'a', '--branch', 'job',
+               '--state', 'done', '--reviews', '1')
+        path = next((r / 'nodes/a/job-handbacks').glob('*.json'))
+        packet = json.loads(path.read_text())
+        legacy = 'passing rehearsal missing for this head and main; run brain rehearse'
+        for reasons, ready in (([legacy], True), ([legacy, 'node verify missing, changed or failed'], False)):
+            packet['ready_reasons'] = reasons
+            path.write_text(json.dumps(packet))
+            out = self.b(r, 'ready', 'a', '--branch', 'job', ok=ready)
+            self.assertNotIn(legacy, out)
+            if not ready:
+                self.assertIn('node verify missing, changed or failed', out)
+        packet['ready_reasons'] = [legacy]
+        path.write_text(json.dumps(packet))
+        self.b(r, 'handback', '--summary', 'Same evidence', 'a', '--branch', 'job', '--state', 'done')
+        self.assertEqual([], json.loads(path.read_text())['ready_reasons'])
 
     def test_installed_core_commit_change_invalidates_evidence(self):
         from brain.instance import Instance
@@ -632,7 +694,7 @@ class RehearsalEvidence(Scenario):
         self.git('commit', '--allow-empty', '-qm', 'upgraded baseline', cwd=r / 'core')
         self.assertIsNone(rehearsal.read_evidence(n, 'job', head))
 
-    def test_required_ready_gate_and_head_main_invalidation(self):
+    def test_legacy_required_is_advisory_but_head_and_main_still_bind(self):
         r = self.init('sample')
         home = self.repo(self.tmp / 'app')
         self.b(r, 'new', 'a', '--title', 'A', '--home', str(home))
@@ -640,7 +702,8 @@ class RehearsalEvidence(Scenario):
         self.b(r, 'wt', 'add', 'a', 'job')
         wt = self.tmp / 'app-work/worktrees/job'
         self.git('commit', '--allow-empty', '-qm', 'change', cwd=wt)
-        self.assertIn('passing rehearsal missing', self.b(r, 'ready', '--summary', 'Synthetic result', 'a', '--branch', 'job', '--record', '--reviews', '1', ok=False))
+        self.assertIn('ready', self.b(r, 'ready', '--summary', 'Synthetic result', 'a', '--branch', 'job', '--record', '--reviews', '1'))
+        self.assertFalse((self.tmp / 'app-work/scratch/rehearse').exists())
         head = self.git('rev-parse', 'job', cwd=home).strip()
         main = self.git('rev-parse', 'main', cwd=home).strip()
         import hashlib
@@ -662,12 +725,12 @@ class RehearsalEvidence(Scenario):
         baseline = r / 'core/CHANGES.md'
         old = baseline.read_text()
         baseline.write_text(old + '\nBaseline changed\n')
-        self.assertIn('passing rehearsal missing', self.b(r, 'ready', 'a', '--branch', 'job', ok=False))
+        self.assertEqual('ready', self.b(r, 'ready', 'a', '--branch', 'job').strip())
         baseline.write_text(old)
         self.git('commit', '--allow-empty', '-qm', 'new head', cwd=wt)
-        self.assertIn('passing rehearsal missing', self.b(r, 'ready', 'a', '--branch', 'job', ok=False))
+        self.assertIn('branch head changed', self.b(r, 'ready', 'a', '--branch', 'job', ok=False))
         self.git('commit', '--allow-empty', '-qm', 'new main', cwd=home)
-        self.assertIn('passing rehearsal missing', self.b(r, 'ready', 'a', '--branch', 'job', ok=False))
+        self.assertIn('main moved', self.b(r, 'ready', 'a', '--branch', 'job', ok=False))
 
 @unittest.skipUnless(sys.platform == 'darwin', 'requires macOS OS sandbox')
 class RehearsalPipeline(Scenario):

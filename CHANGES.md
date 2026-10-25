@@ -5,6 +5,21 @@ upgrading. `brain changes <node>` shows the entries this node's coordinator hasn
 `brain due <node>` lists them until `brain changes <node> --seen`. Entry headings are
 `## <date>: <title>`; once released, a heading never changes.
 
+## 2026-10-25: Rehearsal is an optional diagnostic
+
+For agents: Ready, hand-back and local train landing no longer require passing
+rehearsal evidence, including for legacy nodes with `rehearse=required`. Old
+hand-back reasons for that specific gate are ignored; all other refusals remain.
+Review briefs and skills no longer instruct agents to start rehearsal automatically.
+`brain rehearse` remains an explicit diagnostic with its sandbox, raw failure
+reports and exact candidate/main/installed-core evidence checks intact. Current
+passing evidence can still accompany a ready packet.
+
+After upgrading: No migration or waiver is needed for legacy rehearsal settings.
+Use ordinary review, verify, readiness and landing checks; rehearsal never
+substitutes for them. Run it only when explicitly requested, with native admission,
+and preserve its actual report even when it fails or becomes stale.
+
 ## 2026-10-25: Release 3
 
 For agents:

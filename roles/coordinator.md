@@ -199,7 +199,8 @@ Effort defaults: build/ui/migration/review high, diagnose xhigh, docs/mechanical
 `--effort` overrides contract `## Effort`, which overrides the class default. Follow the printed
 `modelSelection` at launch: provider instance, configured model and reasoningEffort.
 Without a configured/explicit model, it says unavailable; set the model before launching.
-Independent review must still use the builder's other runtime.
+Independent review uses a fresh context that did not build the change; an authorized
+reviewer may use the same runtime and model. Record the actual reviewer thread ID, runtime and model.
 
 Before any host launch or delegation, run `brain usage` (any agent may run it). `brain brief`,
 `brain hire` and `brain review` use the poller's cache and name the subscription and host
@@ -384,12 +385,13 @@ settling their threads without their ownership checks.
 
 ## Before the operator looks at work
 
-A change the operator will be asked to approve has been reviewed by an agent on another runtime
-first (the `review` skill), and you say what that review found. Use one full round followed by
+A change the operator will be asked to approve has been reviewed in a fresh context by
+an agent that did not build it first (the `review` skill), and you say what that review found. Use one full round followed by
 `brain review --check-fix` for prior blockers/majors and fix regressions. A second full round
 or any third brief needs `--reason security|schema|privacy`; supply that reason when those
 changes need further review. Include prior findings as JSON (`severity` and `text`). Read the
-mechanical checks in each brief and require the reviewer to report its real-shaped rehearsal.
+mechanical checks in each brief. Rehearsal is optional: do not start one automatically
+or require it for readiness or landing. If explicitly requested, report its actual result.
 
 Before a code node’s first job, bind its coordinator interval tick (`brain schedule add`
 and `brain schedule bind`) and set its verification command. Missing setup warns in

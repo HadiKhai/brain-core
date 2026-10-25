@@ -244,6 +244,7 @@ class WorkerReadyPackets(Scenario):
 
     def test_failed_verify_dirty_tree_missing_config_and_reviews(self):
         r, home, wt = self.job()
+        self.b(r, "set", "a", "rehearse=required")
         (wt / "calc.py").write_text("value = 3\n")
         self.assertIn("dirty", self.record(r, ok=False))
         self.git("commit", "-qam", "wrong", cwd=wt)

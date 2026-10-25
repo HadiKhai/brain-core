@@ -177,8 +177,8 @@ def review_mechanical(inst, n, a, row, where, base, head):
 
 
 def rehearsal_lines():
-    return ["## Rehearsal", "", "Run the change against real-shaped data: use `brain rehearse` when available. "
-            "Otherwise copy a brain (never use the original), and run installed versus candidate core with "
-            "`BRAIN_ROOT=<copy> BRAIN_NO_REEXEC=1 BRAIN_NO_UPDATE_CHECK=1 python3 <worktree>/bin/brain due`, "
-            "`check`, and `ready <node> --branch <job>` for open jobs. Report exactly what ran, new errors, "
-            "ready flips and due noise. Keep private data out of the report.", ""]
+    return ["## Rehearsal", "", "Rehearsal is an optional diagnostic, never a readiness or landing gate. "
+            "Do not start one automatically. When explicitly requested, run `brain rehearse` on the "
+            "committed candidate with machine admission and its sandbox protections. Inspect the report "
+            "and preserve raw failures; report exactly what ran or state that it was not run. "
+            "Keep private data out of the report.", ""]

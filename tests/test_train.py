@@ -35,6 +35,49 @@ class MergeTrain(Scenario):
     def ledger(self):
         return (self.root / "nodes/a/job-ledger.md").read_text()
 
+    def test_legacy_required_allows_local_landing_with_absent_failed_and_stale_rehearsals(self):
+        import hashlib
+        root, home = self.project(settings=('rehearse=required',))
+        reports = {}
+        for branch in ('absent', 'failed', 'stale'):
+            self.b(root, 'wt', 'add', 'a', branch)
+            wt = self.tmp / 'app-work/worktrees' / branch
+            (wt / branch).write_text(branch)
+            self.git('add', branch, cwd=wt)
+            self.git('commit', '-qm', branch, cwd=wt)
+            if branch != 'absent':
+                path = self.tmp / 'app-work/scratch/rehearse' / (hashlib.sha256(branch.encode()).hexdigest() + '.json')
+                path.parent.mkdir(parents=True, exist_ok=True)
+                report = dict(version=1, node='a', branch=branch, passed=branch == 'stale',
+                              head='0' * 40, regressions=['raw diagnostic failure'])
+                path.write_text(json.dumps(report))
+                reports[path] = path.read_bytes()
+            self.b(root, 'handback', '--summary', 'Synthetic result', 'a', '--branch', branch,
+                   '--state', 'done', '--reviews', '1')
+            self.assertEqual('ready', self.b(root, 'ready', 'a', '--branch', branch).strip())
+        self.detach()
+        out = self.b(root, 'train', 'a', '--jobs', 'absent', 'failed', 'stale')
+        self.assertIn('merged 3 job(s); 1 full verify run(s)', out)
+        self.assertEqual(self.ledger().count('| merged |'), 3)
+        for branch in ('absent', 'failed', 'stale'):
+            self.assertEqual(self.git('rev-parse', branch, cwd=home),
+                             self.git('merge-base', branch, 'main', cwd=home))
+        self.assertEqual(set(reports), set((self.tmp / 'app-work/scratch/rehearse').glob('*.json')))
+        for path, raw in reports.items():
+            self.assertEqual(raw, path.read_bytes())
+
+    def test_legacy_required_allows_manual_fast_forward_and_registered_close(self):
+        root, home = self.project(settings=('rehearse=required',))
+        self.job('one')
+        head = self.git('rev-parse', 'one', cwd=home).strip()
+        self.assertEqual('ready', self.b(root, 'ready', 'a', '--branch', 'one').strip())
+        self.git('merge', '--ff-only', 'one', cwd=home)
+        self.b(root, 'jobs', 'a', '--branch', 'one', '--close')
+        self.assertEqual(head, self.git('rev-parse', 'main', cwd=home).strip())
+        self.assertEqual(self.ledger().count('| merged |'), 1)
+        self.assertIn('manual landing confirmed in local main', self.ledger())
+        self.assertFalse((self.tmp / 'app-work/scratch/rehearse').exists())
+
     def test_three_jobs_one_full_run_and_no_push(self):
         root, home = self.project()
         for key in ('PORT', 'PORTS', 'PORT_LAST'):
@@ -66,7 +109,7 @@ class MergeTrain(Scenario):
         self.assertEqual(self.ledger().count("| merged |"), 3)
 
     def test_configured_land_check_blocks_then_records_exact_integration_tip(self):
-        root, home = self.project(settings=('land_check=false',))
+        root, home = self.project(settings=('land_check=false', 'rehearse=required'))
         node = root / 'nodes/a'
         (node / 'publication-policy.json').write_text(json.dumps({
             'version': 1, 'node': 'a', 'reviewer': 'alice', 'reviewed_at': '2026-01-01 00:00 +00:00',

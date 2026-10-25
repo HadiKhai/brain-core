@@ -307,7 +307,7 @@ def watch_recorded_ready(inst, n, row, signal, strict=False):
     """Validate a stored success for notification, never run a readiness/verify path.
 
     Cached refs fence stale evidence. This notification is not merge authority and
-    does not replace the coordinator's full readiness/input/rehearsal checks.
+    does not replace the coordinator's full readiness/input checks.
     """
     from . import job_attempts as _m_attempts
     projection = _m_attempts.job_projection(inst, n, row, strict=strict)

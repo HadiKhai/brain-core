@@ -1,6 +1,6 @@
 ---
 name: home-job
-description: Run one job (a fix, a feature, tests, an audit) in a node's external git home without touching the operator's own checkout - a worktree per job, a worker per worktree, a second-runtime review, a pull request, then cleanup. Use when work must change code or files in a node's home, especially several jobs at once.
+description: Run one job (a fix, a feature, tests, an audit) in a node's external git home without touching the operator's own checkout - a worktree per job, a worker per worktree, a fresh-context non-builder review, a pull request, then cleanup. Use when work must change code or files in a node's home, especially several jobs at once.
 ---
 
 # A job in an external home
@@ -72,7 +72,8 @@ stated; never run a polling loop in an agent.
    Effort: build/ui/migration/review high, diagnose xhigh, docs/mechanical medium.
    Override with contract `## Effort` or `--effort` (the flag wins). The brief prints
    `modelSelection` with the host instance, configured model and reasoningEffort;
-   use that selection when launching. Independent reviews still use the other runtime.
+   use that selection when launching. Independent reviews use a fresh context that did not build the change; the same runtime
+   and model are allowed when authorized. Record the actual reviewer thread ID, runtime and model.
    Wrap it with `core/bin/brain brief <id> --branch <branch> --task-file <file>
    --why-separate "<independent concern>" --context-file <shared findings>`: that adds the
    worktree, port, limits, guard step and hand-back. Use `core/bin/brain hire` when a
@@ -82,7 +83,7 @@ stated; never run a polling loop in an agent.
    Pass `--why-separate "<distinct expertise>"` to hire and include the shared findings in its task text.
    Keep a host interval tick on the coordinator: `brain due <id>` plus host pending requests;
    empty means stop silently. The worker's file is durable; a host notification is optional.
-4. **Review and hand back.** Review by the other runtime before the operator sees it (the
+4. **Review and hand back.** Review in a fresh non-builder context before the operator sees it (the
    `review` skill). Set `brain set <id> 'verify=<command>'` beforehand. The worker finishes
    reviews, commits, rebases on the integration main (`origin/<default>` when origin exists, otherwise `main`) and runs one command:
    `brain handback <id> --branch <branch> --state done --reviews <completed rounds>
@@ -326,16 +327,20 @@ Never delete the live folder or switch its branch merely to satisfy the old reco
 
 ## Core release rehearsal
 
-For jobs changing Brain core, set `rehearse=required` on the node. After committing
-and rebasing, run `brain rehearse <id> --branch <branch>` before review and
-hand-back. Run machine admission and the node's heavy-work lock first. It compares
-installed and candidate commands on temporary copies, including due on every node,
-check and an independent check --fix, ready on every open job, status refresh,
-brief warnings, UI JSON and the unrelated-folder Stop hook. Live external homes
-are read-only observations under the OS sandbox; network access is denied.
-Only summary counts and hashes leave the copies. Evidence lives in the workbench
-and is included in the ready packet. A changed job head, integration main or installed core needs
-another rehearsal. Unsupported sandbox platforms refuse; never bypass isolation.
+`brain rehearse <id> --branch <branch>` is an optional diagnostic report for a
+committed core candidate. Never start it automatically as part of review,
+hand-back, readiness or landing. Legacy `rehearse=required` settings do not add
+a readiness or landing requirement. Missing, failed or stale rehearsal evidence
+does not block otherwise valid proof; preserve raw failures and report what ran.
+
+When explicitly requested, run machine admission and the node's heavy-work lock
+first. Rehearsal compares installed and candidate commands on temporary copies,
+including due, check, ready, status, brief warnings, UI JSON and the Stop hook.
+Live external homes are read-only observations under the OS sandbox; network
+access is denied. Evidence lives in the workbench; current passing evidence may
+be included in the ready packet. Changed candidate, main or installed-core inputs
+make that report stale without changing readiness. Unsupported sandbox platforms
+refuse the diagnostic; never bypass isolation.
 
 Rehearsal also sends one real constant-event POST per distinct bound coordinator webhook.
 It uses an explicit User-Agent, never prints the URL, and fails on any non-2xx

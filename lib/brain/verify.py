@@ -209,6 +209,12 @@ def ready_state(inst, n, branch, train=False, display=False):
     return values[job][1]
 
 
+def current_ready_reasons(reasons):
+    """Retire only the former rehearsal gate in already-published hand-backs."""
+    legacy = "passing rehearsal missing for this head and main; run brain rehearse"
+    return [reason for reason in reasons if isinstance(reason, str) and reason != legacy]
+
+
 def _ready_state(inst, n, branch, train=False, display=False):
     display = display and not train
     reasons, head, main = ready_preflight(n, branch)
@@ -233,20 +239,12 @@ def _ready_state(inst, n, branch, train=False, display=False):
                 reasons.append('train ejected this ready evidence; worker must hand back again')
         except (OSError, ValueError):
             reasons.append('train ejection evidence unreadable; refusing readiness')
-    from . import rehearse as _m_rehearse
-    if train and packet:
-        rehearsal = _m_rehearse.read_evidence(n, branch, head, main=packet.get("main"),
-                                             integration_base=packet.get("integration_base"))
-    else:
-        rehearsal = _m_rehearse.read_evidence(n, branch, head)
-    if _m_rehearse.required(n) and rehearsal is None:
-        reasons.append("passing rehearsal missing for this head and main; run brain rehearse")
     if signal and signal["state"] != "done":
         reasons.append("worker hand-back is " + signal["state"])
     if row and _m_jobs.handback_file(n, row).exists() and not signal:
         reasons.append("worker hand-back unreadable; return to worker")
     if signal and signal.get("version") in (2, 3):
-        reasons += [r for r in signal.get("ready_reasons", []) if isinstance(r, str)]
+        reasons += current_ready_reasons(signal.get("ready_reasons", []))
     if packet is None:
         reasons.append("ready packet missing or unreadable; worker must record it")
     else:
@@ -737,8 +735,6 @@ def record_ready(inst, n, branch, reviews, previous=None, reverify=False):
     reasons, head, main = ready_preflight(n, branch)
     from . import rehearse as _m_rehearse
     rehearsal = _m_rehearse.read_evidence(n, branch, head)
-    if _m_rehearse.required(n) and rehearsal is None:
-        reasons.append("passing rehearsal missing for this head and main; run brain rehearse")
     verify = n["fm"].get("verify", "").strip()
     if not verify:
         reasons.append("node has no verify command; coordinator must set verify=<command>")

@@ -265,7 +265,7 @@ def publish_handback(a):
     study = _m_briefs.import_job(row["Job"])
     if a.state == "done" and not study and previous.get("state", "done") == "done":
         packet = _m_verify.read_ready_packet(inst, n, a.branch, row)
-        reasons = previous.get("ready_reasons", [])
+        reasons = _m_verify.current_ready_reasons(previous.get("ready_reasons", []))
     if getattr(a, "reverify", False) and not (a.state == "done" and not study and
                                               (a.reviews is not None or getattr(a, "record", False))):
         _m_common.die("--reverify forces a verify run: it goes with --state done --reviews N")

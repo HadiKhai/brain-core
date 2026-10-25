@@ -1,12 +1,13 @@
 ---
 name: review
-description: Have a change reviewed by an agent on a different runtime than the one that built it, and get the findings addressed, before the operator is asked to look. Use after a worker finishes a change, before opening or marking a pull request ready.
+description: Have a change reviewed in a fresh context by an agent that did not build it, and get the findings addressed, before the operator is asked to look. Use after a worker finishes a change, before opening or marking a pull request ready.
 ---
 
-# Second-runtime review
+# Independent review
 
-Run by the coordinator that started the builder. A reviewer on another runtime catches what the
-builder's runtime tends to miss.
+Run by the coordinator that started the builder. Use a fresh reviewer context that
+did not build the change. The runtime and model may match the builder when authorized;
+record the reviewer's actual thread ID, runtime and model.
 
 Before launching, run `brain usage`. Use only a subscription allowed for this brain and below
 the stop line; follow the subscription and host instance in the brief. Unknown usage must be
@@ -14,11 +15,14 @@ stated; never run a polling loop in an agent.
 
 1. **The node's own reviewers first** (axiom 7). If the home has its own review agents or
    checklist, the builder runs them; this review adds to them.
-2. **Brief.** `brain review` supplies a separation reason from its independent
-   second-runtime review role; `--why-separate` can state a more specific reason.
+2. **Brief.** State the independent non-builder review role; `--why-separate` can
+   state a more specific reason.
    `core/bin/brain review <id> --branch <branch> --built-by <builder runtime>
    [--focus "<what worries you>"]`. It picks a reviewer runtime the builder didn't use and says
-   where to run. Add `--model <id or display name>` for model-scoped weekly limits.
+   where to run. That is the current CLI selection behavior, not an independence
+   requirement. If it cannot represent the authorized reviewer, the coordinator
+   supplies a separate explicit brief and reports the actual external review; never
+   invent native review records. Add `--model <id or display name>` for model-scoped weekly limits.
    When reviewing verify failures, inspect the printed private log, each failing lane's own tail,
    and the overall fallback. `[lane NAME]` prefixes identify interleaved test groups or named steps;
    `FAIL`, `FAILED`, `FAILURE`, `ERROR`, or `exit N` (nonzero) identifies a failing lane. Missing
@@ -46,12 +50,11 @@ stated; never run a polling loop in an agent.
    never-name evidence refuses the brief without quoting it. Inspect all gaps and failures.
 
 3. **Run it.** Use one reviewer for the concern, not one per file or test step. State why this
-   separate agent is needed (independent second-runtime review), and include shared findings
+   separate agent is needed (fresh-context non-builder review), and include shared findings
    and earlier rounds in the supplied brief so it need not gather them again. Host `delegate` on the reviewer runtime, in the job's worktree (or `launch` a
    worker there if the host's delegate can't pick a folder). The reviewer changes nothing.
-   Run `brain rehearse` when available, otherwise compare installed and candidate cores on
-   copies of real-shaped data with `BRAIN_ROOT=<copy>`: due, check and ready per open job.
-   Report exactly what ran and any new errors, ready flips or due noise; never use the original.
+   Rehearsal is an optional diagnostic; do not start it automatically. If explicitly requested,
+   inspect its report and preserve raw failures. Report exactly what ran, or state that it was not run.
 4. **Address.** Send the findings to the builder (host `send`). Blockers and majors get fixed or
    answered with a reason. When a round finds a kind of problem an earlier round already found,
    the builder audits that whole class before the fix check, not only the new sites. Use one full
@@ -67,11 +70,11 @@ stated; never run a polling loop in an agent.
    what was found, what was fixed, and anything the builder and reviewer still disagree on. Give
    the operator both sides of a disagreement; don't settle it silently.
 
-For core changes, reviewers run `brain rehearse <id> --branch <branch>` from
-that job's committed worktree and inspect its regression summary as well as the
-diff. Rehearsal executes the committed branch, never uncommitted edits. It uses
-throwaway copies and requires an OS write/network sandbox (currently macOS).
-A failed or unavailable rehearsal is not passing release evidence.
+For core changes, `brain rehearse <id> --branch <branch>` remains available when
+explicitly requested. It executes the committed branch using throwaway copies
+and requires machine admission and an OS write/network sandbox (currently macOS).
+Missing, failed or stale rehearsal reports never block readiness or landing,
+including on legacy nodes with `rehearse=required`. Other proof requirements still apply.
 
 Rehearsal also sends one real constant-event POST per distinct bound coordinator webhook.
 It uses an explicit User-Agent, never prints the URL, and fails on any non-2xx

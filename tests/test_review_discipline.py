@@ -301,6 +301,8 @@ class ReviewDiscipline(Scenario):
         r, home, wt = self.job()
         text = self.review(r)
         self.assertLess(text.index("## Rehearsal"), text.index("## Report"))
+        self.assertIn("optional diagnostic", text)
+        self.assertIn("Do not start one automatically", text)
 
     def test_fitness_skips_dirty_or_mismatched_registered_worktrees(self):
         r, home, wt = self.job()
