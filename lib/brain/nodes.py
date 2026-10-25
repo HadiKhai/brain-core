@@ -604,7 +604,7 @@ def prepare_settings(inst, n, pairs, messages=None):
             inst.local_of(n['id'])[k] = v
             fm.pop(k, None)
             messages.append('  wake_enabled: this machine (.brain/local.json)')
-        elif k in _m_common.LOCAL_KEYS or k in ("synced_at", "workbench", "wake", "wake_default", "wake_coalesce", "wake_policy", "host_export"):
+        elif k in _m_common.LOCAL_KEYS or k in ("synced_at", "workbench", "wake", "wake_default", "wake_coalesce", "wake_policy", "host_export", "dispatcher"):
             inst.local_of(n["id"])[k] = str(Path(v).expanduser().resolve()) if k == "workbench" else v
             fm.pop(k, None)
             messages.append(f"  {k}: this machine (.brain/local.json)")

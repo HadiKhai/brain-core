@@ -219,3 +219,19 @@ A pause label or a cached error alone never implies this disabled state. The fla
 must describe an explicit operational decision. This separates intentional disabled
 delivery from actual refusal while retaining the original evidence. It does not
 change host tasks, install anything, probe, or enable a route.
+
+
+## D512: Dispatch current questions through the native outbox
+
+`dispatch --run` performs bounded file-only routing of typed questions, positively
+marked legacy host questions and validated host-question exports. It selects the
+nearest coordinator, reuses current watcher identities and writes binding-scoped
+acceptance receipts only after the outbox accepts the request. Failed enqueue is
+retryable; repeated dispatch neither re-relays results nor creates another ask.
+Landings, parks, FYIs and unclassified blocked prose never become new questions.
+
+`dispatcher=on` runs this native dispatcher on the existing sampler. Plain dispatch
+remains a read-only plan. No model thread is launched and no host activity is
+inferred. Native execution is the implemented mechanism; a separate persistent
+model dispatcher thread remains outside this capability. Activation is explicit,
+with disabled routes left disabled.

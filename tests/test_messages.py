@@ -182,3 +182,51 @@ class TypedCommunication(Scenario):
                 with self.assertRaises(ValueError):
                     self.m.communication_record(self.inst, self.inst.node('root'), 'question', 'Choose?', 'bad', spec)
             send.assert_not_called()
+
+
+class NativeDispatcher(Scenario):
+    def setUp(self):
+        super().setUp()
+        import core_loader
+        import os
+        from unittest import mock
+        patch = mock.patch.dict(os.environ, self.env)
+        patch.start()
+        self.addCleanup(patch.stop)
+        self.m = core_loader.SourceFileLoader('dispatcher_fixture', str(CORE / 'bin/brain')).load_module()
+        self.root = self.init('alice')
+        self.b(self.root, 'set', 'root', 'coordinator=fixture-root', 'wake=fixture-send', 'wake_coalesce=on', 'wake_policy=questions')
+        self.inst = self.m.Instance(self.root)
+
+    def question(self):
+        from unittest import mock
+        import datetime
+        spec = {'options': [{'id': 'continue', 'label': 'Continue', 'action': 'routine'},
+                            {'id': 'wait', 'label': 'Wait', 'action': 'routine'}],
+                'recommendation': 'continue', 'default': 'continue',
+                'deadline': (self.inst.now_dt() + datetime.timedelta(hours=1)).isoformat()}
+        with mock.patch.object(self.m, 'request_wake'):
+            return self.m.communication_record(self.inst, self.inst.node('root'), 'question',
+                                               'Choose a fixture path', 'fixture-question', spec)
+
+    def test_native_dispatch_routes_question_once_without_result_relays(self):
+        from unittest import mock
+        self.question()
+        for kind in ('fyi', 'landing', 'park'):
+            self.m.communication_record(self.inst, self.inst.node('root'), kind, 'Sample update', kind)
+        with mock.patch.object(self.m, 'wake_start'), mock.patch.object(self.m, 'WAKE_INTERVAL', 0), \
+                mock.patch.object(self.m, 'wake_send', return_value=True) as send:
+            result = self.m.dispatch_run(self.inst)
+            self.assertEqual(result['accepted'], 1)
+            self.assertEqual(self.m.dispatch_run(self.inst)['accepted'], 0)
+            self.m.wake_drain(self.inst, self.inst.node('root'), once=True)
+            self.assertEqual(send.call_count, 1)
+
+    def test_failed_enqueue_is_not_a_dispatch_receipt(self):
+        from unittest import mock
+        self.question()
+        with mock.patch.object(self.m, 'request_wake', side_effect=[False, True]) as enqueue:
+            self.assertEqual(self.m.dispatch_run(self.inst)['accepted'], 0)
+            self.assertEqual(self.m.dispatch_run(self.inst)['accepted'], 1)
+            self.assertEqual(self.m.dispatch_run(self.inst)['accepted'], 0)
+            self.assertEqual(enqueue.call_count, 2)

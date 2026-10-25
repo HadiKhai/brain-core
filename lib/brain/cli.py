@@ -333,7 +333,8 @@ def main():
     cmd("queue", _m_handback_queue.cmd_queue, "explicit foreground hand-back request runner; no service or recovery",
         opt("action", choices=['run']), 'id', opt('--once', action='store_true'), opt('--request-id'))
     cmd("dispatch", _m_dispatcher.cmd_dispatch, "bounded read-only plan of explicit root/operator asks; empty scan is silent",
-        opt('--limit', type=int, default=50), opt('--node-limit', type=int, default=200))
+        opt('--limit', type=int, default=50), opt('--node-limit', type=int, default=200),
+        opt('--run', action='store_true', help='enqueue only current questions through the durable coalesced wake path'))
     cmd("show", _m_status.cmd_show, "everything about one node, including this machine's bindings", "id")
     cmd("set", _m_nodes.cmd_set, "set fields: brain set <id> key=value ... (host IDs and home paths stay on this machine)",
         "id", opt("pairs", nargs="+"))
