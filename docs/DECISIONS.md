@@ -158,3 +158,10 @@ actual branch tip and its latest supplied usable/unusable/exempt preview receipt
 A saved URL or old-head receipt cannot establish usability. Unknown branch tips
 remain unknown. Receipt collectors own actual rendering and data checks; this
 projection never substitutes a browser claim or launches an environment.
+
+## D113: Product-test delay timers anchor to an observed request episode
+
+Measure 60 minutes from the first observed request for each named product outcome.
+Duplicate request exports cannot reset the clock. An observed product-test start
+or matching outcome delivery clears it. Absence of a start is reported as missing
+recorded evidence, never proof that an unexported external test did not run.

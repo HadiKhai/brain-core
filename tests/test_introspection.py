@@ -249,3 +249,28 @@ class PreviewTestingAdvisories(unittest.TestCase):
         self.assertEqual(self.m.preview_testing_advisories(self.runs,KEY,self.now,None),[])
         exempt=fact('preview_exempt',4,head=HEAD,evidence={'ref':'exemption-a'})
         self.assertEqual(self.m.preview_testing_advisories([*self.runs,exempt],KEY,self.now,HEAD),[])
+
+
+class ProductTestStartAdvisories(unittest.TestCase):
+    def setUp(self):
+        self.m=core_loader.SourceFileLoader('first_test_advisory_fixture',str(CORE/'bin/brain')).load_module()
+        self.now=datetime.datetime(2026,1,1,11,tzinfo=datetime.timezone.utc)
+        self.request=fact('product_work_requested',0,product=True,evidence={'ref':'outcome-a'})
+
+    def test_hour_without_recorded_product_start_advises_and_duplicates_do_not_reset_clock(self):
+        self.assertEqual(self.m.product_test_start_advisories([self.request],KEY,self.now-datetime.timedelta(seconds=1)),[])
+        result=self.m.product_test_start_advisories([self.request],KEY,self.now)
+        self.assertEqual(len(result),1)
+        self.assertEqual(result[0]['minutes_without_recorded_product_test'],60)
+        duplicate=fact('product_work_requested',59,product=True,evidence={'ref':'outcome-a'})
+        self.assertEqual(len(self.m.product_test_start_advisories([self.request,duplicate],KEY,self.now)),1)
+
+    def test_only_observed_product_start_for_current_job_clears_timer(self):
+        start=fact('product_test_started',5,product=True,evidence={'ref':'test-a'})
+        self.assertEqual(self.m.product_test_start_advisories([self.request,start],KEY,self.now),[])
+        start['data']['product']=False
+        self.assertEqual(len(self.m.product_test_start_advisories([self.request,start],KEY,self.now)),1)
+        start['data']['product']=True
+        start['data']['origin']='reconstructed'
+        self.assertEqual(len(self.m.product_test_start_advisories([self.request,start],KEY,self.now)),1)
+        self.assertEqual(self.m.product_test_start_advisories([],KEY,self.now),[])

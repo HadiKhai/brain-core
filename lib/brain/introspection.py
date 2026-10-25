@@ -228,7 +228,10 @@ def introspection_product_request(events, job_key, now):
                 and e['data'].get('product') is True and e['data'].get('evidence', {}).get('ref')]
     if not requests:
         return None, []
-    request = requests[-1]
+    distinct = {}
+    for event in requests:
+        distinct.setdefault(event['data']['evidence']['ref'], event)
+    request = list(distinct.values())[-1]
     at = introspection_time(request['data']['at'])
     following = [e for e in observed if introspection_time(e['data']['at']) >= at]
     ref = request['data']['evidence']['ref']
@@ -294,6 +297,23 @@ def introspection_head(n, branch):
     head = result.stdout.strip() if result.returncode == 0 else ''
     return head if re.fullmatch('[0-9a-f]{40}|[0-9a-f]{64}', head) else None
 
+
+def product_test_start_advisories(events, job_key, now):
+    request, following = introspection_product_request(events, job_key, now)
+    if not request:
+        return []
+    if any(e['data']['fact_type'] == 'product_test_started' and e['data'].get('product') is True
+           and e['data'].get('evidence', {}).get('ref') for e in following):
+        return []
+    seconds = (now - introspection_time(request['data']['at'])).total_seconds()
+    if seconds < 3600:
+        return []
+    return [{'kind': 'no-product-test-start', 'informational': True,
+             'minutes_without_recorded_product_test': int(seconds / 60),
+             'text': 'At least 60 minutes since the observed product request with no product-test start recorded.',
+             'evidence': [request['id']], 'outcome_ref': request['data']['evidence']['ref'],
+             'scope': 'absence of a recorded observed start; unexported external execution remains unknown'}]
+
 def introspection_queue(inst, n):
     now = inst.now_dt().timestamp()
     record = _m_coordinators.coordinator_host_runs(inst, now).get(n['id'])
@@ -328,6 +348,7 @@ def introspection_snapshot(inst, n, branch=None, hours=24, limit=50):
         view['advisories'] += unchanged_verification_advisories(facts, view['job_key'], now)
         if not row['Ended']:
             view['advisories'] += infrastructure_displacement_advisories(facts, view['job_key'], now)
+            view['advisories'] += product_test_start_advisories(facts, view['job_key'], now)
             view['head'] = introspection_head(n, row['Job'])
             if str(n['local'].get('preview', '')).strip().casefold() != 'none':
                 view['advisories'] += preview_testing_advisories(facts, view['job_key'], now, view['head'])

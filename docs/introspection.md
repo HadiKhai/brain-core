@@ -85,3 +85,10 @@ An explicit `preview_exempt` receipt or existing `preview=none` binding exempts 
 work. Unknown current heads stay unknown. Producers must retain rendering/data
 check evidence behind the receipt reference; this reader never claims a live
 browser check or starts a backend for a missing feature.
+
+The first-product-test timer starts at the first observed
+`product_work_requested` for an outcome reference. Duplicate observations of that
+reference do not reset it. After 60 minutes without a recorded observed
+`product_test_started` (`product=true`, with a run ref), it advises on the missing
+record. A matching outcome delivery also ends the timer. Reconstructed starts
+cannot establish measured execution; unexported external tests remain unknown.

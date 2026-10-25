@@ -1660,3 +1660,10 @@ For agents: introspection links repeated completed runs to current-head preview
 receipts. Old proofs and saved URLs alone cannot establish usability; explicit
 exemptions remain supported.
 After upgrading: record usable/unusable preview evidence; no environment is started.
+
+## Product-test start delay advice
+
+For agents: introspection advises after 60 minutes from an observed product
+request without a recorded product-test start. Duplicate requests do not reset it;
+observed starts or delivery clear it.
+After upgrading: record request/start facts with stable outcome and run references.
