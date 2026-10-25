@@ -1619,3 +1619,10 @@ condition/next gate and dependency states. It also reports queue depth, question
 waits, recorded merges/hour and observed decision-turn share, retaining unknowns.
 After upgrading: typed event producers supply observed phase and communication
 facts; no host query or transcript classifier is installed. See docs/introspection.md.
+
+## Repeated review-class advisories
+
+For agents: introspection compares explicit major/blocker classes across distinct
+independent receipt rounds and links recurring classes to their observed reviews.
+After upgrading: the review receipt hook supplies classifications. Without it,
+review evidence is unavailable; no transcript classification is attempted.

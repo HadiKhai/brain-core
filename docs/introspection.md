@@ -36,3 +36,12 @@ Communication metrics cover the selected interval:
 Facts contain controlled metadata only. Free-form bodies, permission prose and
 transcripts are never interpreted as classifications. Keep the event journal and
 source receipts private to the instance.
+
+Repeated review-class advice consumes the review receipt reader when available.
+It compares explicit major/blocker classes for the same exact job generation
+across independent receipt rounds. Case, spaces and hyphens normalize taxonomy
+spelling; no finding prose is classified. A round is its reviewer thread plus
+reviewed head, so duplicate exports do not manufacture recurrence. Minor findings,
+other jobs and receipts declaring reused/builder context do not establish it.
+The historical recurrence is informational even if a later finding was closed;
+the receipt subsystem owns current finding state and input-bound reopening.

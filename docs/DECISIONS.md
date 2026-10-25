@@ -111,3 +111,12 @@ unknown. Communication metrics measure native queue pressure, recorded merges,
 joined question episodes and explicitly classified turns. Stable references
 deduplicate turns and questions. Reconstructed or future records cannot establish
 measured phases or elapsed times. Counts retain their recorded-evidence scope.
+
+## D107: Recurring review classes come from independent structured receipts
+
+The recurrence detector consumes explicit review receipt classifications, scoped
+to the exact job generation. Only major/blocker classes repeated across distinct
+reviewer-thread/head rounds qualify. Duplicate receipts and reused contexts do
+not create rounds; spelling normalization never interprets finding prose. Advice
+is historical and informational, with receipt evidence. It does not reopen or
+close findings, validate host independence or replace the review gate.

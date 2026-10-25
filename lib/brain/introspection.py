@@ -1,6 +1,7 @@
 """Causal progress and communication metrics from explicit file-backed evidence."""
 import datetime
 import json
+import re
 from pathlib import Path
 
 from . import common as _m_common
@@ -9,6 +10,7 @@ from . import events as _m_events
 from . import guard as _m_guard
 from . import jobs as _m_jobs
 from . import nodes as _m_nodes
+from . import review as _m_review
 from . import ui as _m_ui
 
 
@@ -118,6 +120,36 @@ def communication_metrics(rows, events, start, end, queue):
             'scope': 'recorded ledger merges and explicit observed question/turn events; no transcript inference'}
 
 
+
+def review_class_advisories(receipts, job_key):
+    """Compare explicit major/blocker classes across attributable review rounds."""
+    classes = {}
+    for rec in receipts:
+        if (not isinstance(rec, dict) or type(rec.get('version')) is not int or rec['version'] != 1
+                or rec.get('job_key') != job_key
+                or rec.get('verdict') not in ('pass', 'blocked') or not isinstance(rec.get('findings'), list)
+                or not re.fullmatch('[0-9a-f]{40}|[0-9a-f]{64}', str(rec.get('head', '')))):
+            continue
+        reviewer = rec.get('reviewer', {})
+        if (not isinstance(reviewer, dict) or not isinstance(reviewer.get('threadId'), str) or not reviewer['threadId']
+                or reviewer.get('fresh_context') is not True or reviewer.get('context_reused') is not False
+                or reviewer.get('built_change') is not False or not introspection_time(rec.get('observed_at'))):
+            continue
+        round_id = (reviewer['threadId'], rec['head'])
+        for finding in rec['findings']:
+            if (not isinstance(finding, dict) or finding.get('severity') not in ('blocker', 'major')
+                    or not isinstance(finding.get('class'), str)):
+                continue
+            label = re.sub(r'[\s-]+', '_', finding['class'].strip().casefold())
+            if not re.fullmatch('[a-z][a-z0-9_]{0,63}', label):
+                continue
+            classes.setdefault(label, {})[round_id] = {'head': rec['head'],
+                'reviewer_thread': reviewer['threadId'], 'observed_at': rec['observed_at']}
+    return [{'kind': 'repeated-review-class', 'failure_class': label, 'review_count': len(rounds),
+             'text': 'Repeated major/blocker class; audit the whole class before another repair round.',
+             'evidence': list(rounds.values()), 'informational': True}
+            for label, rounds in sorted(classes.items()) if len(rounds) >= 2]
+
 def introspection_queue(inst, n):
     now = inst.now_dt().timestamp()
     record = _m_coordinators.coordinator_host_runs(inst, now).get(n['id'])
@@ -143,7 +175,12 @@ def introspection_snapshot(inst, n, branch=None, hours=24, limit=50):
         outcome = None
         if contract.is_file():
             outcome = _m_ui.md_sections(contract.read_text()).get('Outcome')
-        views.append(causal_job_view(row, _m_jobs.job_key(row), facts, by_key, now, outcome))
+        view = causal_job_view(row, _m_jobs.job_key(row), facts, by_key, now, outcome)
+        reader = getattr(_m_review, 'review_evidence', None)
+        receipts = list(reader(inst, n, branch=row['Job'])) if reader else []
+        view['advisories'] = review_class_advisories(receipts, view['job_key'])
+        view['review_evidence'] = 'receipt_hook' if reader else 'unavailable'
+        views.append(view)
     result = {'version': 1, 'node': n['id'], 'jobs': views, 'partial': len(selected) > limit,
               'metrics': communication_metrics(rows, facts, now - datetime.timedelta(hours=hours), now,
                                                introspection_queue(inst, n))}

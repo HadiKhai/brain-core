@@ -89,3 +89,32 @@ class IntrospectionCommand(Scenario):
         self.assertEqual(result['jobs'][0]['blocker'],'review_pending')
         self.assertIsNone(result['metrics']['decision_turn_share'])
         self.assertIn('recorded',result['metrics']['scope'])
+
+
+class ReviewClassRecurrence(unittest.TestCase):
+    def setUp(self):
+        self.m=core_loader.SourceFileLoader('review_class_fixture',str(CORE/'bin/brain')).load_module()
+
+    def receipt(self,thread,head=HEAD,kind='unsafe_path',key=KEY):
+        return {'version':1,'job_key':key,'head':head,'observed_at':'2026-01-01T10:00:00Z',
+                'reviewer':{'threadId':thread,'runtime':'codex','model':'example-model','fresh_context':True,'context_reused':False,'built_change':False},
+                'verdict':'blocked','findings':[{'id':'f-a','class':kind,'severity':'major','state':'open'}]}
+
+    def test_repeated_explicit_class_across_independent_receipts_has_evidence(self):
+        first=self.receipt('review-a')
+        second=self.receipt('review-b','c'*40,'Unsafe Path')
+        result=self.m.review_class_advisories([first,second],KEY)
+        self.assertEqual(len(result),1)
+        self.assertEqual(result[0]['failure_class'],'unsafe_path')
+        self.assertEqual(result[0]['review_count'],2)
+        self.assertEqual(len(result[0]['evidence']),2)
+        self.assertEqual(self.m.review_class_advisories([first,first],KEY),[])
+
+    def test_other_jobs_minor_findings_and_reused_context_do_not_establish_recurrence(self):
+        first=self.receipt('review-a')
+        wrong=self.receipt('review-b',key='d'*24)
+        minor=self.receipt('review-c')
+        minor['findings'][0]['severity']='minor'
+        reused=self.receipt('review-d')
+        reused['reviewer']['context_reused']=True
+        self.assertEqual(self.m.review_class_advisories([first,wrong,minor,reused],KEY),[])
