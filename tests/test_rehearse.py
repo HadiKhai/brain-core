@@ -251,12 +251,13 @@ class RehearsalFixture(Scenario):
         self.head = self.git('rev-parse', 'HEAD', cwd=self.home).strip()
 
     def run_rehearsal(self, mutation=lambda: None, during_run=False, damage_copy=None,
-                      outputs=None, inspect_lane=None, now=None, lane_runner=None):
+                      outputs=None, inspect_lane=None, now=None, lane_runner=None, diagnostic_dir=None):
         from types import SimpleNamespace
         inst = SimpleNamespace(root=self.root, nodes=lambda: [],
                                now=lambda: '2035-01-03 00:00 +00:00',
                                now_dt=lambda: now or datetime.datetime(2035, 1, 3, tzinfo=datetime.timezone.utc))
-        node = dict(external=True, home_path=self.home, id='engine', dir=self.root)
+        node = dict(external=True, home_path=self.home, id='engine',
+                    dir=diagnostic_dir if diagnostic_dir is not None else self.root)
         copy = rehearsal.copy_tree
         def copying(source, dest):
             copy(source, dest)
@@ -279,7 +280,7 @@ class RehearsalFixture(Scenario):
                 mock.patch.object(rehearsal, 'sandbox_prefix', return_value=[]), \
                 mock.patch.object(rehearsal._m_verify, 'ready_refs', return_value=(self.head, self.head)), \
                 mock.patch.object(rehearsal._m_verify, 'integration_parent', return_value=self.head), \
-                mock.patch.object(rehearsal._m_instance, 'Instance', return_value=inst), \
+                mock.patch.object(rehearsal, '_m_instance', SimpleNamespace(Instance=lambda directory: inst)), \
                 mock.patch.object(rehearsal, 'isolated_probe_instance', return_value=inst), \
                 mock.patch.object(rehearsal, 'probe_delivery', return_value=[]), \
                 mock.patch.object(rehearsal, 'copy_tree', side_effect=copying), \
@@ -294,6 +295,21 @@ class RehearsalFixture(Scenario):
 
 
 class RehearsalEperm(RehearsalFixture):
+    def run_rehearsal(self, **kwargs):
+        from brain import events, instance
+        real_instance = instance.Instance
+        diagnostic = self.init('diagnostic')
+        evidence = super().run_rehearsal(diagnostic_dir=diagnostic, **kwargs)
+        self.assertIs(instance.Instance, real_instance)
+        native = instance.Instance(diagnostic)
+        self.assertIsInstance(native, real_instance)
+        inbox = (native.node('root')['dir'] / 'inbox.md').read_text()
+        self.assertIn('pgid=43210; PIDs=43211,43212; EPERM; no further signals sent', inbox)
+        self.assertIn('operator stop: kill -TERM -43210', inbox)
+        self.assertTrue(any(row['kind'] == 'begin' and row['data'].get('command') == 'inbox'
+                            for row in events.read(native)))
+        return evidence
+
     def denied_lane(self, source, core, folder, nodes, commands, **kwargs):
         folder.mkdir()
         (folder / 'brain').mkdir()

@@ -17,6 +17,14 @@ the provider separately and keeping reads byte-preserving. Lane coverage's
 negative fixture removes all incoming edges to the nonselective module and
 checks the transitive closure before asserting that coverage fails closed.
 
+## D18401.1: Localize rehearsal constructor stubs
+
+Rehearsal fixtures replace the constructor binding in the rehearsal module,
+leaving the shared instance module and its real Instance type intact. Denied
+process cleanup publishes to an independent initialized diagnostic instance;
+tests retain inbox content and native journal evidence alongside every denied
+group, member, signal and manual stop assertion.
+
 ## D001: Node-local full gates and native machine capacity
 
 Full-gate exclusion is keyed by the resolved node id within an instance. The
