@@ -345,7 +345,7 @@ def publish_handback(a):
                 else:
                     target, _ = _m_hosts.wake_target(inst, n)
                     directory = _m_hosts.wake_directory(inst, target)
-                    key = hashlib.sha256((n["id"] + "\0wake:" + old_id).encode()).hexdigest()
+                    key = _m_hosts.wake_request_key(inst, n, "wake:" + old_id)
                     if (directory / (key + ".pending")).exists() and not (directory / (key + ".sent")).exists():
                         wake_id = old_id
             data["wake_id"] = wake_id or os.urandom(16).hex()
