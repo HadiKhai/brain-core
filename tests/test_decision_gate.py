@@ -47,7 +47,7 @@ class DecisionGate(Scenario):
             self.assertEqual([i['id'] for i in request.call_args.kwargs['items']], ['a' * 64])
 
     def test_default_kind_matrix_and_long_marked_inbox(self):
-        allowed = ('job-stall', 'blocked-overdue', 'restart', 'rotate', 'overdue-question')
+        allowed = ('job-stall', 'blocked-overdue', 'restart', 'job-restart', 'rotate', 'overdue-question')
         excluded = ('job-landed', 'job-ready', 'merged-job', 'unsettled-threads', 'unrecorded-worktree',
                     'missing-worktree', 'core-changes', 'rule-activation-review', 'overlapping-inputs',
                     'machine-hold', 'idle-with-runnable-work', 'future-question')

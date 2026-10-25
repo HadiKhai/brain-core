@@ -476,7 +476,7 @@ in order; repeating an ID moves it last. The last id is the current coordinator.
 runtime id from its shell (`CODEX_THREAD_ID` or `CLAUDE_CODE_SESSION_ID`), never substitute a T3 host thread id. Spend counts all recorded
 sessions, even from scratch folders, through the normal subscription/privacy gates.
 
-`brain due <node>` raises `rotate` at 150,000 input-context tokens or 50 conversation
+`brain due <node>` raises `rotate` at 300,000 input-context tokens or 50 conversation
 turns. `rotate_tokens=` and `rotate_turns=` configure these thresholds. Claude input includes
 fresh, cache-read and cache-write tokens; Codex's input already includes its cached tokens.
 These are the latest response's accounting counts, never a sum of the conversation's text.
