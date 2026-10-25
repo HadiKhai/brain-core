@@ -38,7 +38,7 @@ def introspection_time(value):
 def introspection_observed(events, now, job_key=None):
     """Unknown, reconstructed, wrong-job and future inputs cannot establish observations."""
     out, seen = [], set()
-    for event in events:
+    for sequence, event in enumerate(events):
         if not isinstance(event, dict) or event.get('kind') != 'fact' or not isinstance(event.get('data'), dict):
             continue
         data = event['data']
@@ -52,8 +52,8 @@ def introspection_observed(events, now, job_key=None):
                 or data.get('origin') != 'observed' or (job_key is not None and data.get('job_key') != job_key)):
             continue
         seen.add(identity)
-        out.append((at, {**event, 'id': identity}))
-    return [event for at, event in sorted(out, key=lambda pair: (pair[0], pair[1]['id']))]
+        out.append((at, sequence, {**event, 'id': identity}))
+    return [event for at, sequence, event in sorted(out, key=lambda item: (item[0], item[1]))]
 
 
 def causal_job_view(row, job_key, events, rows_by_key, now, outcome):
@@ -221,6 +221,44 @@ def unchanged_verification_advisories(events, job_key, now):
         previous = (signature, event['id'])
     return out
 
+
+def introspection_product_request(events, job_key, now):
+    observed = introspection_observed(events, now, job_key)
+    requests = [e for e in observed if e['data']['fact_type'] == 'product_work_requested'
+                and e['data'].get('product') is True and e['data'].get('evidence', {}).get('ref')]
+    if not requests:
+        return None, []
+    request = requests[-1]
+    at = introspection_time(request['data']['at'])
+    following = [e for e in observed if introspection_time(e['data']['at']) >= at]
+    ref = request['data']['evidence']['ref']
+    if any(e['data']['fact_type'] == 'product_outcome_delivered' and e['data'].get('state') == 'done'
+           and e['data'].get('evidence', {}).get('ref') == ref for e in following):
+        return None, []
+    return request, following
+
+
+def infrastructure_displacement_advisories(events, job_key, now):
+    request, following = introspection_product_request(events, job_key, now)
+    if not request:
+        return []
+    phases = [e for e in following if e['data']['fact_type'] == 'phase_changed']
+    durations = {True: 0.0, False: 0.0}
+    evidence = [request['id']]
+    for index, event in enumerate(phases):
+        data = event['data']
+        if data.get('phase') != 'execution' or data.get('state') != 'working' or type(data.get('product')) is not bool:
+            continue
+        end = introspection_time(phases[index + 1]['data']['at']) if index + 1 < len(phases) else now
+        durations[data['product']] += max(0, (end - introspection_time(data['at'])).total_seconds())
+        evidence.append(event['id'])
+    if durations[False] <= durations[True] or not durations[False]:
+        return []
+    return [{'kind': 'infrastructure-overtaking-product', 'informational': True,
+             'text': 'Explicitly classified infrastructure phase time exceeds product phase time before recorded outcome delivery; inspect the requested outcome.',
+             'infrastructure_phase_seconds': durations[False], 'product_phase_seconds': durations[True],
+             'evidence': evidence, 'scope': 'observed classified phase elapsed time, not CPU or inferred activity'}]
+
 def introspection_queue(inst, n):
     now = inst.now_dt().timestamp()
     record = _m_coordinators.coordinator_host_runs(inst, now).get(n['id'])
@@ -253,6 +291,8 @@ def introspection_snapshot(inst, n, branch=None, hours=24, limit=50):
         view['advisories'] += permission_request_advisories(facts, view['job_key'], now)
         view['advisories'] += acknowledgement_wait_advisories(facts, view['job_key'], now)
         view['advisories'] += unchanged_verification_advisories(facts, view['job_key'], now)
+        if not row['Ended']:
+            view['advisories'] += infrastructure_displacement_advisories(facts, view['job_key'], now)
         view['review_evidence'] = 'receipt_hook' if reader else 'unavailable'
         views.append(view)
     result = {'version': 1, 'node': n['id'], 'jobs': views, 'partial': len(selected) > limit,

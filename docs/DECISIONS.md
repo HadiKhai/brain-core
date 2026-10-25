@@ -141,3 +141,12 @@ Compare observed successful full runs only when head, integration base and input
 fingerprint match, with distinct stable run references. Failed, explicitly forced
 or incompletely fingerprinted runs reset the comparison. This informational exact-
 head detector never skips verification or expands the native proof reuse policy.
+
+## D111: Infrastructure displacement compares observed phase intervals
+
+Compare only explicitly classified execution/working phase intervals following a
+named product request. Unknown classification is excluded; no task prose is
+classified. Report infrastructure time exceeding product time before recorded
+outcome delivery, retaining interval receipts and the elapsed-phase scope. A
+matching delivery fact closes the comparison. This is informational, not a gate
+or a claim about CPU use or the necessity of setup.

@@ -197,3 +197,31 @@ class UnchangedVerificationAdvisories(unittest.TestCase):
                         {'reason_code':'forced_reverify'},{'reason_code':'full_failed'},{'inputs':None}):
             second=self.completed(2,'verify-b',**changes)
             self.assertEqual(self.m.unchanged_verification_advisories([first,second],KEY,self.now),[])
+
+
+class InfrastructureAdvisories(unittest.TestCase):
+    def setUp(self):
+        self.m=core_loader.SourceFileLoader('infra_advisory_fixture',str(CORE/'bin/brain')).load_module()
+        self.now=datetime.datetime(2026,1,1,11,tzinfo=datetime.timezone.utc)
+
+    def test_explicit_infrastructure_phase_time_exceeding_product_is_reported(self):
+        events=[fact('product_work_requested',0,product=True,evidence={'ref':'outcome-a'}),
+                fact('phase_changed',5,phase='execution',state='working',product=False),
+                fact('phase_changed',25,phase='execution',state='working',product=True),
+                fact('phase_changed',35,phase='coordination',state='working')]
+        result=self.m.infrastructure_displacement_advisories(events,KEY,self.now)
+        self.assertEqual(len(result),1)
+        self.assertEqual(result[0]['infrastructure_phase_seconds'],1200)
+        self.assertEqual(result[0]['product_phase_seconds'],600)
+        self.assertTrue(result[0]['informational'])
+        delivered=fact('product_outcome_delivered',40,state='done',evidence={'ref':'outcome-a'})
+        self.assertEqual(self.m.infrastructure_displacement_advisories([*events,delivered],KEY,self.now),[])
+
+    def test_unknown_classification_nonproduct_requests_and_more_product_time_are_quiet(self):
+        request=fact('product_work_requested',0,product=True,evidence={'ref':'outcome-a'})
+        unknown=fact('phase_changed',5,phase='execution',state='working')
+        self.assertEqual(self.m.infrastructure_displacement_advisories([request,unknown],KEY,self.now),[])
+        product=fact('phase_changed',5,phase='execution',state='working',product=True)
+        infra=fact('phase_changed',55,phase='execution',state='working',product=False)
+        self.assertEqual(self.m.infrastructure_displacement_advisories([request,product,infra],KEY,self.now),[])
+        self.assertEqual(self.m.infrastructure_displacement_advisories([infra],KEY,self.now),[])

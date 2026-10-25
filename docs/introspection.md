@@ -67,3 +67,12 @@ establish a repeated successful full run. Changed evidence, `full_failed` or
 `forced_reverify` reset the comparison. Duplicate exports of one run do not count.
 This deliberately detects the exact-head case; it does not guess whether an
 unrelated commit could have reused proof or override verifier reuse checks.
+
+Infrastructure-displacement advice starts from an observed
+`product_work_requested` with `product=true` and an outcome reference. It compares
+elapsed `phase_changed` execution/working intervals explicitly marked
+`product=true` or `product=false`. Unknown classifications and other phases are
+not counted. Infrastructure exceeding product phase time produces informational
+advice until matching `product_outcome_delivered` proof is recorded. These are
+classified phase durations, not measured CPU time or transcript-derived activity;
+the advice does not claim that necessary setup was unauthorized.

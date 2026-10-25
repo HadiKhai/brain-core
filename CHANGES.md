@@ -1646,3 +1646,10 @@ For agents: introspection links successive successful full runs with unchanged
 head/base/input evidence. Forced reruns, failures and missing evidence stay quiet.
 After upgrading: producers record full-run facts with unique run refs and complete
 fingerprints. This advice does not change any gate or proof reuse rule.
+
+## Infrastructure displacement advice
+
+For agents: introspection compares observed classified execution-phase durations
+after a product request and flags infrastructure exceeding product time before
+recorded outcome delivery. Unknown classifications are excluded.
+After upgrading: producers mark product/infrastructure phase transitions explicitly.
