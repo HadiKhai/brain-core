@@ -142,3 +142,14 @@ concurrent edits are retained. Private machine receipts bind source and native
 hashes to executed proof without putting source provenance into the native copy.
 The copy remains uncommitted for the target's normal change process; teaching
 neither propagates future updates nor publishes or accepts knowledge proposals.
+
+## D907: Semantic documents retain verified source ownership through embedding
+
+Document discovery rejects linked bindings, notes and report ancestors before
+reading content. The opened regular file must have one link and its physical
+node/home owner must match the caller; registered workbenches cannot override a
+more specific node owner. Source bytes are bounded and read from the verified
+descriptor. The same screened bytes enter embedding directly, with no second path
+read that could substitute a different source. Caller provenance is assigned only
+after these checks. Rejected sources never enter model inputs or vector caches;
+ordinary same-node documents and lexical fallback remain available.
