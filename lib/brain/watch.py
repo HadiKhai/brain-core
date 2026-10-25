@@ -26,7 +26,7 @@ from . import verify as _m_verify
 WATCH_LOCAL_KINDS = ('unsettled-threads',)
 
 
-WATCH_DECISION_KINDS = ('delegated-completion', 'question', 'handback', 'job-stall', 'blocked-overdue', 'restart', 'job-restart', 'rotate',
+WATCH_DECISION_KINDS = ('coordinator-queue', 'coordinator-busy', 'delegated-completion', 'question', 'handback', 'job-stall', 'blocked-overdue', 'restart', 'job-restart', 'rotate',
                         'overdue-question')
 
 

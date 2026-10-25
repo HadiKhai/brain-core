@@ -1658,3 +1658,113 @@ For agents: machine-local `wake_coalesce=on` enables one outstanding coordinator
 wake until visible due consumes it, with one reminder attempt after thirty minutes.
 After upgrading: existing transports keep their delivery behavior; enable this only
 for a coordinator that runs due on every wake. No host queue behavior is inferred.
+
+For agents: idle-work detection accepts nested and numbered Markdown tasks and
+exact branch names in code spans. Parent completion, parking, operator waits and
+open jobs suppress descendants. Heading depth scopes the Build order section.
+After upgrading: no migration; use code spans around punctuation-bearing branches.
+
+## Coordinator backlog and busy-run advisories
+
+For agents: root due/watch reports bound coordinator queues above three items or
+ten minutes. Busy-run alerts require a fresh exact-thread host observation with
+an actual start and queued wakes; native pending files alone cannot prove busy.
+After upgrading: no host changes. Optional exporter schema and evidence limits
+are in docs/coordinator-observations.md; the core does not install an exporter.
+
+## Evidence-linked observation scorecards
+
+For agents: `brain scorecard <node> --file <manifest>` scores supplied source
+receipts, timing targets and required runtime cases. Missing, changed, unsafe or
+incomplete evidence stays unknown. Synthetic test success proves no real night.
+After upgrading: no migration or collector is installed; see docs/scorecard.md.
+
+## Source-first diagnostic permits
+
+For agents: `brain diagnose` records canonical source findings before admitting
+one tracked probe attempt. Source answers do not admit probes; two setup failures
+refuse a third within the same job/HEAD/question. Probe execution is external.
+After upgrading: no migration; see docs/diagnostics.md for receipt and CLI format.
+
+## Causal progress and communication metrics
+
+For agents: `brain introspect` shows recorded outcome/phase/blocker/owner/clearing
+condition/next gate and dependency states. It also reports queue depth, question
+waits, recorded merges/hour and observed decision-turn share, retaining unknowns.
+After upgrading: typed event producers supply observed phase and communication
+facts; no host query or transcript classifier is installed. See docs/introspection.md.
+
+## Repeated review-class advisories
+
+For agents: introspection compares explicit major/blocker classes across distinct
+independent receipt rounds and links recurring classes to their observed reviews.
+After upgrading: the review receipt hook supplies classifications. Without it,
+review evidence is unavailable; no transcript classification is attempted.
+
+## Repeated permission-request advice
+
+For agents: introspection flags an observed permission request inside an exact
+recorded authorization scope; revocations, phase exits and changed heads prevent
+false matches. The advisory grants no authority.
+After upgrading: supply typed authorization/request facts with stable receipt refs.
+
+## Needless acknowledgement-wait advice
+
+For agents: introspection joins current acknowledgement waits to explicit
+no-ack-required delivery receipts. Required or unknown acknowledgements stay quiet.
+After upgrading: producers record actual delivery facts; printing is insufficient.
+
+## Unchanged-input verification rerun advice
+
+For agents: introspection links successive successful full runs with unchanged
+head/base/input evidence. Forced reruns, failures and missing evidence stay quiet.
+After upgrading: producers record full-run facts with unique run refs and complete
+fingerprints. This advice does not change any gate or proof reuse rule.
+
+## Infrastructure displacement advice
+
+For agents: introspection compares observed classified execution-phase durations
+after a product request and flags infrastructure exceeding product time before
+recorded outcome delivery. Unknown classifications are excluded.
+After upgrading: producers mark product/infrastructure phase transitions explicitly.
+
+## Testing without usable-preview advice
+
+For agents: introspection links repeated completed runs to current-head preview
+receipts. Old proofs and saved URLs alone cannot establish usability; explicit
+exemptions remain supported.
+After upgrading: record usable/unusable preview evidence; no environment is started.
+
+## Product-test start delay advice
+
+For agents: introspection advises after 60 minutes from an observed product
+request without a recorded product-test start. Duplicate requests do not reset it;
+observed starts or delivery clear it.
+After upgrading: record request/start facts with stable outcome and run references.
+
+## Introspection proof-boundary corrections
+
+For agents: ended attempts without merged outcome display closed_without_delivery;
+scorecard sources reject hard-linked receipts as well as symbolic links.
+After upgrading: no migration; linked receipt evidence remains unknown until copied.
+
+## Temporal bounds for introspection evidence
+
+For agents: current job projections exclude pre-generation observations and
+future review receipts. Equal-time observations retain journal order.
+After upgrading: no migration; historical records remain stored without becoming
+current measured evidence.
+
+## Coalesced coordinator queue projection
+
+For agents: queue advisories and metrics consume the transport's wake_turn_queue
+hook when available, retaining delivered-but-unconsumed turns and first enqueue
+time. Missing hooks retain the labelled pending-only fallback; corrupt or unknown
+projections remain unknown.
+After upgrading: no host busy inference or transport state mutation is added.
+
+## Introspection test lane ownership
+
+For agents: introspection, diagnostic and scorecard tests have declared lane
+owners; their nonselective runtime imports participate in shared fingerprints.
+After upgrading: no migration. Repository lane coverage remains mandatory.

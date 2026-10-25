@@ -610,6 +610,9 @@ def due_items(inst, n, evidence=None, include_stale=True, include_ready=True, in
     items = []
     def add(kind, text, **extra):
         items.append({"node": n["id"], "kind": kind, "text": _m_guard.redact(text, _m_guard.never_terms(n)), **extra})
+    if n['id'] == 'root':
+        from . import coordinator_advisories as _m_coordinator_advisories
+        items.extend(_m_coordinator_advisories.coordinator_advisories(inst))
     snapshot = _m_proposals.pending_rule_snapshot(inst, n)
     if snapshot:
         episode = _m_jobs.digest([n['id'], 'rule-activation-review', snapshot['digest']])

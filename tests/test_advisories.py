@@ -105,3 +105,128 @@ class NestedBuildOrder(unittest.TestCase):
         self.assertEqual(self.tasks(text), ['First', 'Second'])
         self.n['fm']['parallel_jobs'] = '1'
         self.assertEqual(self.tasks(text), ['First'])
+
+
+class CoordinatorAdvisories(unittest.TestCase):
+    def setUp(self):
+        import datetime
+        import tempfile
+        from types import SimpleNamespace
+        self.folder = tempfile.TemporaryDirectory(prefix='coordinator-advisory-')
+        self.addCleanup(self.folder.cleanup)
+        self.root = Path(self.folder.name).resolve()
+        self.now = datetime.datetime(2026, 1, 1, 12, tzinfo=datetime.timezone.utc)
+        self.m = core_loader.SourceFileLoader('coordinator_advisory', str(CORE / 'bin/brain')).load_module()
+        self.n = {'id': 'app', 'dir': self.root / 'nodes/app', 'local': {'coordinator': 'fixture-thread'}, 'fm': {}, 'archived': False}
+        self.inst = SimpleNamespace(root=self.root, now_dt=lambda:self.now, nodes=lambda:[self.n])
+        (self.root / '.brain').mkdir()
+
+    def pending(self, count=1, age=0):
+        import json
+        import os
+        directory = self.m.wake_directory(self.inst, self.n)
+        directory.mkdir(parents=True, exist_ok=True)
+        path = directory / ('a'*64+'.pending')
+        path.write_text(json.dumps({'items':[{'kind':'handback','id':format(i,'064x')} for i in range(count)]}))
+        stamp = self.now.timestamp() - age
+        os.utime(path, (stamp,stamp))
+        return path
+
+    def host(self, **changes):
+        import json
+        record = {'node':'app','thread':'fixture-thread','run':'fixture-run','status':'active',
+                  'started_at':'2026-01-01T11:35:00+00:00','queued_wakes':[{'id':'wake-a','queued_at':'2026-01-01T11:59:00+00:00'}]}
+        record.update(changes)
+        (self.root / '.brain/coordinator-runs.json').write_text(json.dumps({'version':1,'observed_at':self.now.isoformat(),'runs':[record]}))
+
+    def test_queue_thresholds_and_stable_episode(self):
+        path = self.pending(count=3, age=600)
+        self.assertEqual(self.m.coordinator_advisories(self.inst), [])
+        self.pending(count=4, age=600)
+        items = self.m.coordinator_advisories(self.inst)
+        self.assertEqual([i['kind'] for i in items], ['coordinator-queue'])
+        episode = items[0]['episode']
+        import datetime
+        self.now += datetime.timedelta(minutes=1)
+        self.assertEqual(self.m.coordinator_advisories(self.inst)[0]['episode'], episode)
+        path.unlink()
+        self.assertEqual(self.m.coordinator_advisories(self.inst), [])
+        self.pending(count=1, age=601)
+        self.assertEqual(len(self.m.coordinator_advisories(self.inst)),1)
+
+    def test_busy_requires_fresh_matching_active_run_and_queued_wakes(self):
+        self.host()
+        self.assertEqual([i['kind'] for i in self.m.coordinator_advisories(self.inst)], ['coordinator-busy'])
+        self.host(thread='old-thread')
+        self.assertEqual(self.m.coordinator_advisories(self.inst),[])
+        self.host(status='completed')
+        self.assertEqual(self.m.coordinator_advisories(self.inst),[])
+        self.host(queued_wakes=[])
+        self.assertEqual(self.m.coordinator_advisories(self.inst),[])
+        self.host()
+        import datetime
+        self.now += datetime.timedelta(minutes=4)
+        self.assertEqual(self.m.coordinator_advisories(self.inst),[])
+
+    def test_coalesced_queue_hook_survives_pending_file_removal_without_claiming_busy(self):
+        hosts=self.m.coordinator_advisories.__globals__['_m_hosts']
+        snapshot={'known':True,'item_count':4,'oldest_at':self.now.timestamp()-660,'unconsumed_wake':True}
+        with mock.patch.object(hosts,'wake_turn_queue',return_value=snapshot,create=True):
+            items=self.m.coordinator_advisories(self.inst)
+            self.assertEqual([i['kind'] for i in items],['coordinator-queue'])
+            view=self.m.coordinator_queue_view(self.inst,self.n,self.now.timestamp())
+            self.assertEqual(view['count'],4)
+            self.assertEqual(view['source'],'coalesced_native_queue')
+        with mock.patch.object(hosts,'wake_turn_queue',return_value={'known':False},create=True):
+            self.assertEqual(self.m.coordinator_advisories(self.inst),[])
+            self.assertIsNone(self.m.coordinator_queue_view(self.inst,self.n,self.now.timestamp())['count'])
+
+    def test_missing_malformed_future_and_linked_observations_do_not_invent_activity(self):
+        self.assertEqual(self.m.coordinator_advisories(self.inst),[])
+        self.host(started_at='2026-01-01T12:01:00+00:00')
+        self.assertEqual(self.m.coordinator_advisories(self.inst),[])
+        self.host(queued_wakes=[{'id':'wake-a','queued_at':'2026-01-01T12:01:00+00:00'}])
+        self.assertEqual(self.m.coordinator_advisories(self.inst),[])
+        self.host()
+        path=self.root / '.brain/coordinator-runs.json'
+        path.unlink()
+        path.symlink_to(self.root / 'elsewhere')
+        self.assertEqual(self.m.coordinator_advisories(self.inst),[])
+
+
+from scenario import Scenario
+
+
+class CoordinatorWakeDelivery(Scenario):
+    def test_root_wakes_once_per_busy_run_then_rearms_for_new_run(self):
+        import datetime
+        import json
+        import os
+        root = self.init('oak')
+        self.b(root, 'new', 'app', '--title', 'Application')
+        self.b(root, 'set', 'root', 'coordinator=fixture-root', 'wake=fixture-send')
+        self.b(root, 'set', 'app', 'coordinator=fixture-app')
+        m = core_loader.SourceFileLoader('coordinator_delivery', str(CORE / 'bin/brain')).load_module()
+        now = datetime.datetime(2026,1,1,12,tzinfo=datetime.timezone.utc)
+        data = {'version':1,'observed_at':now.isoformat(),'runs':[{'node':'app','thread':'fixture-app',
+                'run':'fixture-run','status':'active','started_at':'2026-01-01T11:35:00Z',
+                'queued_wakes':[{'id':'w','queued_at':'2026-01-01T11:59:00Z'}]}]}
+        snapshot = root / '.brain/coordinator-runs.json'
+        snapshot.write_text(json.dumps(data))
+        with mock.patch.dict(os.environ,self.env,clear=True), mock.patch.object(m.Instance,'now_dt',return_value=now), \
+             mock.patch.object(m,'wake_start'), mock.patch.object(m,'wake_send',return_value=True) as send, \
+             contextlib.redirect_stdout(io.StringIO()):
+            inst = m.Instance(root)
+            m.watch_once(inst)
+            m.wake_drain(inst,inst.node('root'),once=True)
+            self.assertEqual(send.call_count,1)
+            m.watch_once(inst)
+            m.wake_drain(inst,inst.node('root'),once=True)
+            self.assertEqual(send.call_count,1)
+            data['runs'][0]['run']='fixture-new-run'
+            snapshot.write_text(json.dumps(data))
+            m.watch_once(inst)
+            directory=m.wake_directory(inst,inst.node('root'))
+            (directory / 'last').write_text('0')
+            m.wake_drain(inst,inst.node('root'),once=True)
+            self.assertEqual(send.call_count,2)

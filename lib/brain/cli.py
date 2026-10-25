@@ -26,9 +26,11 @@ from . import host_tasks as _m_host_tasks
 from . import host_lifecycle as _m_host_lifecycle
 from . import instance as _m_instance
 from . import job_env as _m_job_env
+from . import introspection as _m_introspection
 from . import jobs as _m_jobs
 from . import handback_queue as _m_handback_queue
 from . import dispatcher as _m_dispatcher
+from . import diagnostics as _m_diagnostics
 from . import knowledge as _m_knowledge
 from . import launch_receipts as _m_launch_receipts
 from . import learning as _m_learning
@@ -50,6 +52,7 @@ from . import rehearse as _m_rehearse
 from . import rotation as _m_rotation
 from . import host_actions as _m_host_actions
 from . import digest as _m_digest
+from . import scorecard as _m_scorecard
 from . import schedules as _m_schedules
 from . import settings_batch as _m_settings_batch
 from . import spec_run as _m_spec_run
@@ -142,7 +145,7 @@ def reexec_into_instance_core():
 
 # Commands that change nothing in the instance: they never wait for the lock.
 READ_ONLY = {"cmd_show", "cmd_tree", "cmd_status", "cmd_now", "cmd_jobs", "cmd_stale", "cmd_ui", "cmd_guard",
-             "cmd_due", "cmd_inbox", "cmd_index",
+             "cmd_due", "cmd_inbox", "cmd_index", "cmd_scorecard", "cmd_introspect",
              "cmd_brief", "cmd_hire", "cmd_reports", "cmd_brains", "cmd_use", "cmd_machine", "cmd_usable",
              "cmd_item_list", "cmd_item_show", "cmd_wt_list", "cmd_selftest", "cmd_init", "cmd_hook", "cmd_hook_pretool", "cmd_hook_approve", "cmd_help",
              "cmd_dashboard", "cmd_ready", "cmd_usage", "cmd_scan", "cmd_scrub", "cmd_history",
@@ -421,6 +424,15 @@ def main():
         opt('--run', action='store_true', help='enqueue only current questions through the durable coalesced wake path'))
     cmd("backlog", _m_events.cmd_backlog, "append a dated backlog item", "id",
         opt("action", choices=["add"]), "item")
+    cmd("introspect", _m_introspection.cmd_introspect, "recorded causal job progress and communication metrics",
+        "id", opt("--branch"), opt("--hours", type=float, default=24), opt("--limit", type=int, default=50))
+    cmd("diagnose", _m_diagnostics.cmd_diagnose, "source-first diagnosis and bounded recorded probe setup permits",
+        "id", opt("action", choices=["plan", "outcome"]), opt("--branch", required=True),
+        opt("--question", required=True), opt("--source", action="append"),
+        opt("--finding", choices=["source", "ambiguous", "runtime"]), opt("--reason"),
+        opt("--attempt"), opt("--state", choices=["setup-failed", "observed"]))
+    cmd("scorecard", _m_scorecard.cmd_scorecard, "score a supplied evidence window; missing evidence stays unknown",
+        "id", opt("--file", required=True, help="version 1 measurement manifest"))
     cmd("show", _m_status.cmd_show, "everything about one node, including this machine's bindings", "id")
     cmd("set", _m_nodes.cmd_set, "set fields: brain set <id> key=value ... (host IDs and home paths stay on this machine)",
         "id", opt("pairs", nargs="+"))
