@@ -348,6 +348,30 @@ class VerifyLanes(Scenario):
                 self.assertIn('recorded verify lane environment',
                               self.b(r, 'ready', 'a', '--branch', 'job', ok=False))
 
+    def test_legacy_or_missing_evidence_context_refuses_ready_and_reruns(self):
+        r, home, wt, lanes = self.setup_lanes()
+        self.record(r)
+        m = core_loader.SourceFileLoader('lane_evidence_version', str(CORE / 'bin/brain')).load_module()
+        n = m.Instance(r).node('a')
+        w = n['local']['worktrees']['job']
+        with mock.patch.dict('os.environ', self.env):
+            snap = m.lane_snapshot(n, w, m.verify_env(n, 'job', w), m.verify_inputs(n, w))
+        self.assertEqual(self.read_packet()['lane_context_hash'], snap['evidence_context'])
+        self.assertNotEqual(snap['context'], snap['evidence_context'])
+        for context in (None, snap['context']):
+            with self.subTest(context=context):
+                record = json.loads(self.packet().read_text())
+                if context is None:
+                    record['ready'].pop('lane_context_hash')
+                else:
+                    record['ready']['lane_context_hash'] = context
+                self.packet().write_text(json.dumps(record))
+                self.assertIn('lane configuration', self.b(r, 'ready', 'a', '--branch', 'job', ok=False))
+                self.record(r)
+                packet = self.read_packet()
+                self.assertEqual(packet['lane_context_hash'], snap['evidence_context'])
+                self.assertTrue(all(not row['reused'] for row in packet['verify_lanes']))
+
     def test_dynamic_map_cannot_mutate_unselected_files_during_readiness(self):
         r, home, wt, lanes = self.setup_lanes()
         self.commit(wt, 'lanes.json', json.dumps(lanes))

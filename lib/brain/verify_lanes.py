@@ -236,9 +236,11 @@ def lane_snapshot(n, w, env, inputs):
     context = _m_jobs.digest([map_hash, sorted((k, v) for k, v in n['fm'].items() if k.startswith('verify')),
                            sorted((k, v) for k, v in files.items() if Path(k).name in LOCK_NAMES or Path(k).name.endswith('.lock')),
                            platform.platform(), sys.version, str(n['home_path']), str(w['path']), tools,
-                           lane_environment(env)])
+                           [(key, env.get(key)) for key in sorted(LANE_ENV_KEYS)]])
+    evidence_context = _m_jobs.digest(['lane-evidence-v2', context, lane_environment(env)])
     hashes = {l['name']: _m_jobs.digest([inputs, sorted((p, v) for p, v in files.items() if matches(p, l['inputs']))]) for l in lanes}
-    return dict(lanes=lanes, map_hash=map_hash, config_hash=lane_config_hash(n), context=context, hashes=hashes, files=files, warnings=warnings)
+    return dict(lanes=lanes, map_hash=map_hash, config_hash=lane_config_hash(n), context=context,
+                evidence_context=evidence_context, hashes=hashes, files=files, warnings=warnings)
 
 
 def changed_since(cwd, head, current):

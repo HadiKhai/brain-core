@@ -104,9 +104,11 @@ Worktree, verify, policy and other configuration changes still refuse publicatio
 ## D404: Lane tool identity follows executable resolution
 
 Lane context fingerprints resolved executable locations and file metadata, project
-pins and the selected environment. An unused PATH suffix no longer invalidates
-proof when all resolved tools remain identical. Recorded PATH is retained for
-reproducing the original environment; a changed resolved tool still invalidates it.
+pins and the selected non-PATH environment. An unused PATH suffix leaves this
+semantic identity unchanged when all resolved tools remain identical. Readiness
+uses the recorded PATH to reproduce the original environment. Execution evidence
+separately binds that exact selected environment (D20001); a fresh handback with a
+different PATH reruns lanes even when semantic identity remains equal.
 
 ## D405: Native direct-full receipts and early hand-back validation
 
@@ -2067,14 +2069,23 @@ stream without command changes; private structured evidence is opt-in. The
 configuration is a shared lane input. Collection and business assertions remain
 unchanged; synthetic proofs cover interruption, xdist timeout and fixture errors.
 
-## D20001: Bind lane evidence to the complete recorded PATH
+## D20001: Separate semantic lane identity from execution evidence
 
-Lane context hashes include the same environment snapshot stored in the ready
-packet, including the complete PATH and the distinction between unset and empty
-values. Resolving command tokens alone cannot identify interpreters selected by
-an env shebang or helpers launched from a module. Reading readiness restores the
-recorded environment; a subsequent handback fingerprints its current environment
-and reruns lanes when that context changes. Existing executable identity checks
+Snapshots retain a semantic context for configuration, inputs and resolved tools,
+with selected non-PATH environment values distinguishing unset from empty. An
+irrelevant PATH suffix preserves this identity (D404). A separate versioned
+evidence context digests the semantic context and the complete selected recorded
+environment, including PATH. Ready packets store this evidence context in
+`lane_context_hash`; validation, reuse and emission all use it. Missing or legacy
+identity-only evidence refuses readiness and requires fresh execution.
+
+Resolving command tokens alone cannot identify interpreters selected by an env
+shebang or helpers launched from a module. Reading readiness strictly restores
+the packet's recorded environment before computing evidence; an unrelated caller
+PATH therefore preserves readiness. A subsequent handback uses its current
+environment and reruns lanes if that evidence context changes. Recorded PATH
+tampering refuses readiness even when semantic identity remains unchanged.
+Existing executable identity, ownership, input, port and full-receipt guards
 remain in place.
 
 The private input-sidecar regression permits its fixture's generated status

@@ -813,7 +813,7 @@ def verify_port_context(n, env):
 def lane_packet_valid(packet, snap):
     rows = packet.get("verify_lanes")
     expected = [l for l in snap['lanes'] if l['schedule'] != 'nightly']
-    if (packet.get('lane_context_hash') != snap['context'] or packet.get('lane_map_hash') != snap['map_hash']
+    if (packet.get('lane_context_hash') != snap['evidence_context'] or packet.get('lane_map_hash') != snap['map_hash']
             or not isinstance(rows, list) or len(rows) != len(expected)):
         return False
     for row, lane in zip(rows, expected):
@@ -840,7 +840,7 @@ def run_lanes(inst, n, branch, w, env, snap, previous, head, main, inputs, force
                     and prior.get('branch') == branch and prior.get('verify_command') == n['fm'].get('verify', '').strip()
                     and isinstance(prior.get('checked_at'), str) and inst.parse_time(prior['checked_at'])
                     and packet_main_matches(n, prior, main)
-                    and prior.get('lane_context_hash') == snap['context'] and prior.get('inputs') == inputs
+                    and prior.get('lane_context_hash') == snap['evidence_context'] and prior.get('inputs') == inputs
                     and prior.get('verify_port_context') == verify_port_context(n, env)
                     and type(prior.get('review_rounds')) is int and prior['review_rounds'] >= 1)
         history = prior.get('lane_green', prior.get('verify_lanes', []))
@@ -890,7 +890,7 @@ def run_lanes(inst, n, branch, w, env, snap, previous, head, main, inputs, force
         if check and check['result']:
             result = check['result']
         resources['failed'] = bool(result)
-        return dict(verify_lanes=rows, lane_green=list(old.values()), lane_map_hash=snap['map_hash'], lane_config_hash=snap['config_hash'], lane_context_hash=snap['context'],
+        return dict(verify_lanes=rows, lane_green=list(old.values()), lane_map_hash=snap['map_hash'], lane_config_hash=snap['config_hash'], lane_context_hash=snap['evidence_context'],
                     verify_lane_env=_m_lanes.lane_environment(env),
                     verify_lanes_check=check, verify_result=result,
                     verify_reused=bool(rows) and all(r['reused'] for r in rows) and not check)
