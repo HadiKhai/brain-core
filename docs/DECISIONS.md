@@ -145,3 +145,12 @@ An explicit core-worktree launcher keeps its selected implementation for rehears
 and prints the choice before running. It cannot silently re-execute the installed
 instance core. Ordinary launchers keep existing instance routing, and the explicit
 `BRAIN_NO_REEXEC` override remains supported.
+
+## D412: Required review and preview receipts gate execution and readiness
+
+The verifier calls the independent review and preview receipt validators before
+recording execution and in ordinary, display and train readiness readers. Policy
+refusals cannot be bypassed by importing a direct-full receipt. Missing validator
+APIs refuse when their policy is required; installations with no corresponding
+policy retain existing behavior. Receipt schemas and writers remain owned by the
+review and preview modules.

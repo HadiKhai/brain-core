@@ -37,7 +37,7 @@ LANE_TESTS.update({
     'rehearse': ('test_rehearse.py', 'test_rehearse_frozen.py'),
     'ui': ('test_ui.py', 'test_ui_idle.py', 'test_ui_review.py', 'test_ui_status.py'),
     'watch': ('test_watch.py', 'test_watch_extension.py', 'test_decision_gate.py'),
-    'verify': ('test_verify.py', 'test_verify_train_hooks.py', 'test_spec_run.py', 'test_gate_context.py', 'test_full_gate.py', 'test_cheap_checks.py'),
+    'verify': ('test_verify.py', 'test_verify_train_hooks.py', 'test_spec_run.py', 'test_gate_context.py', 'test_full_gate.py', 'test_cheap_checks.py', 'test_ready_policies.py'),
     'review': ('test_review_discipline.py',),
     'catch-all': ('test_repo_lanes.py',),
 })

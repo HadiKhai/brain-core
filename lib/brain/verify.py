@@ -3,6 +3,7 @@ import contextlib
 import contextvars
 import fnmatch
 import hashlib
+import importlib
 import json
 import math
 import os
@@ -209,6 +210,33 @@ def ready_state(inst, n, branch, train=False, display=False):
     return values[job][1]
 
 
+def ready_policy_reasons(inst, n, branch, head, packet=None):
+    """Use independently owned receipt validators; absent required APIs fail closed."""
+    reasons = []
+    cfg = getattr(inst, 'cfg', {})
+    cfg = cfg if isinstance(cfg, dict) else {}
+    for module_name, function in (('.review', 'validate_ready_reviews'),
+                                  ('.preview_evidence', 'validate_ready_preview')):
+        try:
+            validator = getattr(importlib.import_module(module_name, __package__), function, None)
+        except ImportError:
+            validator = None
+        if validator is not None:
+            reasons.extend(validator(inst, n, branch, head, packet=packet))
+            continue
+        if module_name == '.review':
+            row = _m_jobs.open_job(_m_jobs.read_jobs(n) or [], branch)
+            required = (n['fm'].get('review_independence', cfg.get('review_independence')) == 'fresh-thread'
+                        or (row or {}).get('Review identity required') == 'true')
+        else:
+            required = (bool(n['local'].get('preview') or n['local'].get('review_urls'))
+                        or str(n['fm'].get('requires_preview_evidence', cfg.get('requires_preview_evidence', ''))).lower()
+                        in ('true', 'yes', '1', 'on'))
+        if required:
+            reasons.append(function + ' unavailable; required receipt policy cannot be validated')
+    return reasons
+
+
 def current_ready_reasons(reasons):
     """Retire only the former rehearsal gate in already-published hand-backs."""
     legacy = "passing rehearsal missing for this head and main; run brain rehearse"
@@ -228,6 +256,7 @@ def _ready_state(inst, n, branch, train=False, display=False, advisory=False):
         if (not isinstance(old_remote, str) or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", old_remote)
                 or _m_common.git("merge-base", "--is-ancestor", old_remote, remote, cwd=n["home_path"]).returncode):
             reasons.append("recorded remote base is not an ancestor of current integration main")
+    reasons.extend(ready_policy_reasons(inst, n, branch, head, packet))
     if row:
         from . import job_attempts as _m_attempts
         attempt = _m_attempts.current_attempt(n, row, strict=False)
@@ -792,6 +821,7 @@ def moved_ref_details(n, branch, head, head_after, main, main_after, integration
 
 def record_ready(inst, n, branch, reviews, previous=None, reverify=False, full_receipt=None):
     reasons, head, main = ready_preflight(n, branch)
+    reasons.extend(ready_policy_reasons(inst, n, branch, head, previous))
     from . import rehearse as _m_rehearse
     rehearsal = _m_rehearse.read_evidence(n, branch, head)
     verify = n["fm"].get("verify", "").strip()
