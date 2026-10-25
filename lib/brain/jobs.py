@@ -1,6 +1,7 @@
 """Jobs mechanics for Brain."""
 import hashlib
 import json
+import math
 import os
 import re
 import shlex
@@ -30,6 +31,7 @@ JOBS_MARK = "<!-- brain:job-ledger v3 -->"  # older cores refuse this format ins
 JOBS_LEGACY_MARKS = ("<!-- brain:job-ledger v2 -->", "<!-- brain:job-ledger v1 -->")
 JOB_COLS = ["Job", "Started", "Ended", "Hours", "Outcome", "Commits", "Reviews", "Runtime", "Cause"]
 JOB_COLS += ["Class", "Model", "Effort"]
+JOB_COLS += ["Files", "Lines", "Forecast", "Actual", "Meter %"]
 JOB_COLS += ["Lessons", "Lesson check", "Switches", "Settled"]
 JOB_COLS += ["Land check"]
 JOB_COLS += ["Active h", "Agent h", "Fresh in", "Cache read", "Cache write", "Output", "Reasoning", "Tool calls",
@@ -77,6 +79,18 @@ def write_jobs(inst, n, rows):
             # A coordinator can start another review after this hand-back. Retained
             # evidence repairs undercounts, but cannot undo an open job's new rounds.
             row["Reviews"] = str(rounds if row.get("Ended") else max(current, rounds))
+        actual = clean_actual(hb.get("actual"))
+        if hb.get("state") == "done" and actual:
+            row["Actual"] = json.dumps(actual, sort_keys=True)
+            size = actual.get("size") if isinstance(actual.get("size"), dict) else {}
+            for key in ("files", "lines"):
+                if type(size.get(key)) is int and size[key] >= 0:
+                    row[key.title()] = str(size[key])
+            # Closing supplies final accounting; hand-back is the earlier snapshot.
+            if row.get("Ended"):
+                refreshed = clean_actual(actual_cost(inst, n, row, _m_spend.row_usage(row)))
+                actual = {**actual, **{k: v for k, v in refreshed.items() if v is not None}}
+                row["Actual"] = json.dumps(actual, sort_keys=True)
     f = n["dir"] / JOBS_FILE
     head = (f"# Jobs: {n['id']}\n\n{JOBS_MARK}\nOne row per job, kept by `brain wt add`, `brain review`, "
             "`brain wt rm` and `brain wt prune`; times carry their UTC offset; tokens are exact counts from this "
@@ -275,6 +289,10 @@ def publish_handback(a):
                                        getattr(a, "reverify", False))
         if packet:
             reused, fresh = (1, 0) if packet.get("verify_reused") else (0, 1)
+    actual = None
+    if a.state == "done" and not study:
+        actual = actual_cost(inst, n, row, _m_spend.live_usage(inst, n, row))
+        actual["size"] = job_size(n, row, packet)
     # Verification released the global lock. Re-read under it before publishing so a
     # concurrently closed/restarted job never receives this worker's old result.
     with _m_instance.brain_lock(inst):
@@ -321,6 +339,8 @@ def publish_handback(a):
                 "at": inst.now(), "report": _m_common.tilde(a.report) if a.report is not None else previous.get("report", ""),
                 "lessons": lessons, "ready": packet, "ready_reasons": reasons,
                 "verify_runs": count("verify_runs") + fresh, "verify_reused": count("verify_reused") + reused}
+        if actual is not None:
+            data.update(estimate=saved_forecast(row.get("Forecast")), actual=clean_actual(actual))
         if a.state == "done":
             data["wake_id"] = os.urandom(16).hex()  # each publication is a fresh completion, even after a rebase
         need = getattr(a, "need_human", None)
@@ -896,6 +916,9 @@ def jobs_summary(inst, n):
 
 
 def job_kind(branch, rows=()):
+    declared = next((r.get("Class") for r in reversed(rows) if r["Job"] == branch and r.get("Class")), None)
+    if declared:
+        return declared
     # Generic job/ says nothing about the task. Repeated slug families do.
     if branch.startswith("import:"):
         return "import"
@@ -906,6 +929,282 @@ def job_kind(branch, rows=()):
     repeats = sum(r["Job"].lower().startswith("job/" + token + "-") or
                   r["Job"].lower() == "job/" + token for r in rows)
     return token if token and not token.isdigit() and repeats >= 2 else "unclassified"
+
+
+def forecast_number(value):
+    try:
+        number = float(value)
+        return number if not isinstance(value, bool) and math.isfinite(number) and number >= 0 else None
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def forecast_record(value):
+    try:
+        data = json.loads(value or "null")
+        return data if isinstance(data, dict) and data.get("version") == 1 else None
+    except (TypeError, ValueError):
+        return None
+
+
+def saved_forecast(value):
+    data = forecast_record(value)
+    if not data or not isinstance(data.get("class"), str) or not isinstance(data.get("runtime"), str):
+        return None
+    if (type(data.get("samples")) is not int or data["samples"] < 0 or
+            type(data.get("measured")) is not int or data["measured"] < 0 or
+            type(data.get("enough_data")) is not bool or data.get("selection") not in ("nearest 5 sizes", "all class sizes") or
+            not isinstance(data.get("conversion"), dict)):
+        return None
+    for key in ("wall_h", "active_h", "tokens", "weekly_percent"):
+        if key in data and (not isinstance(data[key], dict) or
+                            any(not _m_usage.usage_number(data[key].get(k)) or data[key][k] < 0
+                                for k in ("median", "min", "max"))):
+            return None
+    if data["enough_data"] and "wall_h" not in data:
+        return None
+    if "tokens" in data and ("active_h" not in data or
+                             not all(k in data["conversion"] for k in ("processed_per_percent", "fresh_per_percent", "source"))):
+        return None
+    for key in ("processed_per_percent", "fresh_per_percent"):
+        value = data["conversion"].get(key)
+        if value is not None and (not _m_usage.usage_number(value) or value <= 0):
+            return None
+    return data
+
+
+def job_size(n, row, packet=None):
+    """Committed net change from the job's Git base; NUL records never expose paths."""
+    w = n.get("local", {}).get("worktrees", {}).get(row["Job"], {})
+    path = w.get("path")
+    if not path or not Path(path).is_dir():
+        return None
+    head = _m_common.git("rev-parse", "--verify", "HEAD", cwd=path)
+    branch = _m_common.git("symbolic-ref", "--short", "HEAD", cwd=path)
+    if head.returncode or branch.returncode or branch.stdout.strip() != row["Job"]:
+        return None
+    base_ref = None
+    if isinstance(packet, dict) and packet.get("head") == head.stdout.strip():
+        base_ref = packet.get("integration_base", packet.get("main"))
+    if not base_ref:
+        remote = _m_verify.integration_ref(path)
+        if remote:
+            base_ref = _m_verify.integration_parent(n, remote) if n.get("home_path") else remote
+    base = _m_common.git("merge-base", base_ref or w.get("start") or "refs/heads/main", head.stdout.strip(), cwd=path)
+    if base.returncode:
+        return None
+    diff = _m_common.git("diff", "--no-ext-diff", "--no-textconv", "--no-renames", "--numstat", "-z",
+                         base.stdout.strip(), head.stdout.strip(), "--", cwd=path)
+    if diff.returncode:
+        return None
+    files = lines = binary = 0
+    for record in diff.stdout.split("\0"):
+        if not record:
+            continue
+        added, deleted, _ = record.split("\t", 2)
+        files += 1
+        if added == "-" or deleted == "-":
+            binary += 1
+        else:
+            lines += int(added) + int(deleted)
+    return {"files": files, "lines": lines, "binary_files": binary,
+            "base": base.stdout.strip(), "head": head.stdout.strip()}
+
+
+def planned_size(n, row):
+    """Optional contract ## Size: N files, M lines. Never infer scope from prose."""
+    if not row:
+        return None
+    path = contract_file(n, row)
+    sections = _m_ui.md_sections(path.read_text()) if path.is_file() else {}
+    body = next((v for k, v in sections.items() if k.lower() == "size"), "")
+    files, lines = re.search(r"\b(\d+)\s+files?\b", body), re.search(r"\b(\d+)\s+lines?\b", body)
+    if files and lines:
+        return {"files": int(files[1]), "lines": int(lines[1])}
+    return None
+
+
+def meter_conversion(inst, n, runtime, rows):
+    """Approximation per runtime. Only explicit paired ledger observations calibrate it.
+
+    Meter % is an operator/host-attributed job delta, not an account-wide before/after
+    subtraction: overlapping jobs make such subtraction unsuitable for calibration.
+    """
+    import statistics
+    defaults = {"claude": 68000000, "codex": 51000000}
+    def setting(name, default):
+        value = forecast_number(n["fm"].get(name, inst.cfg.get(name, default)))
+        return value if value and value > 0 else default
+    processed = setting("forecast_processed_per_percent_" + runtime, defaults.get(runtime))
+    fresh = setting("forecast_fresh_per_percent_" + runtime, 1100000)
+    fresh_source = "configured/default"
+    pairs = []
+    for row in rows:
+        share, u = forecast_number(row.get("Meter %")), _m_spend.row_usage(row)
+        if (row.get("Ended") and row.get("Outcome") == "merged" and row.get("Runtime") == runtime and
+                share and share <= 100 and u and u["processed"] > 0):
+            try:
+                pair = (u["processed"] / share, u["fresh"] / share)
+                if all(forecast_number(v) is not None for v in pair) and pair[0] > 0:
+                    pairs.append(pair)
+            except OverflowError:
+                pass
+    if len(pairs) >= 3:
+        processed = statistics.median(p[0] for p in pairs)
+        fresh_samples = [p[1] for p in pairs if p[1] > 0]
+        if len(fresh_samples) >= 3:
+            fresh = statistics.median(fresh_samples)
+            fresh_source = "ledger"
+    return {"processed_per_percent": processed, "fresh_per_percent": fresh,
+            "source": "ledger" if len(pairs) >= 3 else "configured/default", "fresh_source": fresh_source,
+            "samples": len(pairs)}
+
+
+def estimate_job(inst, n, rows, kind, runtime, size=None):
+    """Same explicit class (legacy branch inference as fallback), nearest five sizes.
+
+    Rank by the sum of log size ratios so files and lines have equal influence.
+    Unknown sizes never pretend to be zero. Without a planned size use all class samples.
+    """
+    import statistics
+    samples = []
+    for row in rows:
+        hours = forecast_number(row.get("Hours"))
+        if (not row.get("Ended") or row.get("Outcome") != "merged" or hours is None or
+                (row.get("Class") or job_kind(row["Job"], rows)) != kind):
+            continue
+        distance = 0
+        if size is not None:
+            values = [forecast_number(row.get(k.title())) for k in ("files", "lines")]
+            if any(v is None for v in values):
+                continue
+            distance = sum(abs(math.log1p(v) - math.log1p(size[k])) for k, v in zip(("files", "lines"), values))
+        samples.append((distance, row, hours))
+    def nearest(values):
+        return sorted(values, key=lambda x: (x[0], x[1].get("Started", "")))[:5] if size is not None else values
+    measured_samples = nearest([s for s in samples if s[1].get("Runtime") == runtime])
+    samples = nearest(samples)
+    def spread(values):
+        return {"median": statistics.median(values), "min": min(values), "max": max(values)}
+    out = {"version": 1, "class": kind, "runtime": runtime, "size": size, "samples": len(samples),
+           "enough_data": len(samples) >= 3, "selection": "nearest 5 sizes" if size else "all class sizes",
+           "conversion": meter_conversion(inst, n, runtime, rows)}
+    if out["enough_data"]:
+        out["wall_h"] = spread([h for _, _, h in samples])
+    measured = []
+    for _, row, _ in measured_samples:
+        u = _m_spend.row_usage(row)
+        active = forecast_number(row.get("Active h"))
+        if u and u["processed"] > 0 and active is not None:
+            measured.append((active, u["processed"]))
+    out["measured"] = len(measured)
+    if len(measured) >= 3:
+        out["active_h"], out["tokens"] = spread([a for a, _ in measured]), spread([t for _, t in measured])
+        factor = out["conversion"]["processed_per_percent"]
+        if factor:
+            out["weekly_percent"] = {k: v / factor for k, v in out["tokens"].items()}
+    return out
+
+
+def estimate_line(estimate):
+    if not estimate:
+        return "Forecast: unavailable; no saved launch estimate."
+    out = f"Forecast {estimate['class']}: {estimate['samples']} similar merged jobs ({estimate['selection']}); "
+    if not estimate["enough_data"]:
+        return out + "too little data (need 3 merged jobs). Advisory, never a limit or gate."
+    def show(key, label, render):
+        s = estimate[key]
+        return f"{label} {render(s['median'])} (min–max {render(s['min'])}–{render(s['max'])})"
+    out += show("wall_h", "wall", lambda x: f"{round(x, 2):g} h")
+    if "tokens" in estimate:
+        out += "; " + show("active_h", "active", lambda x: f"{round(x, 2):g} h")
+        out += "; " + show("tokens", "processed tokens", _m_spend.tokens_text)
+        if "weekly_percent" in estimate:
+            out += "; " + show("weekly_percent", f"approx. {estimate['runtime']} weekly share", lambda x: f"{x:.3g}%")
+        c = estimate["conversion"]
+        if c["processed_per_percent"]:
+            out += (f"; 1% ≈ {_m_spend.tokens_text(c['processed_per_percent'])} processed / "
+                    f"{_m_spend.tokens_text(c['fresh_per_percent'])} fresh ({c['source']} processed, "
+                    f"{c.get('fresh_source', 'configured/default')} fresh)")
+    else:
+        out += f"; active hours/tokens/weekly share: too little data ({estimate['measured']} measured for {estimate['runtime']}; need 3)"
+    return out + ". Advisory, never a limit or gate."
+
+
+def record_job_forecast(inst, n, row, estimate):
+    if not row:
+        return
+    with _m_instance.brain_lock(inst):
+        rows = ledger_rows(n)
+        current = open_job(rows or [], row["Job"])
+        saved = saved_forecast((current or {}).get("Forecast"))
+        if current and job_key(current) == job_key(row) and (not saved or
+                (saved["class"], saved["runtime"]) != (estimate["class"], estimate["runtime"])):
+            current["Forecast"] = json.dumps(estimate, sort_keys=True)
+            write_jobs(inst, n, rows)
+            inst.commit([], f"{n['id']}: launch forecast")
+
+
+def actual_cost(inst, n, row, usage):
+    start = inst.parse_time(row.get("Started", ""))
+    end = inst.parse_time(row.get("Ended", "")) or inst.now_dt()
+    out = {"version": 1, "at": end.isoformat(),
+           "wall_h": max(0, _m_status.elapsed(start, end) / 3600) if start else None,
+           "active_h": None, "tokens": None, "weekly_percent": None}
+    source = str((usage or {}).get("source") or "")
+    if usage and (source == "host" or source.startswith(("host:", "transcripts:"))):
+        out.update(active_h=usage.get("active_h", usage.get("active_minutes", 0) / 60),
+                   tokens=usage["processed"], usage_source=usage["source"], usage_at=end.isoformat())
+        saved = saved_forecast(row.get("Forecast")) or {}
+        conversion = saved.get("conversion") or meter_conversion(inst, n, row.get("Runtime", ""), [])
+        factor = conversion.get("processed_per_percent")
+        if factor:
+            out["weekly_percent"] = usage["processed"] / factor
+    return out
+
+
+def actual_line(actual):
+    actual = clean_actual(actual) or {}
+    out = "Actual at hand-back/close: "
+    out += "; ".join(label + " " + ((_m_spend.tokens_text(v) if key == "tokens" else f"{round(v, 2):g}") + unit
+                                      if (v := forecast_number(actual.get(key))) is not None else "unknown")
+                     for key, label, unit in (("wall_h", "wall", " h"), ("active_h", "active", " h"),
+                                               ("tokens", "processed tokens", ""),
+                                               ("weekly_percent", "approx. weekly share", "%")))
+    size = actual.get("size")
+    if isinstance(size, dict):
+        out += f"; Git size {size.get('files', '?')} files, {size.get('lines', '?')} added/deleted lines"
+    return out
+
+
+def clean_actual(data):
+    """Persist/display only known numeric facts and Git identities from worker evidence."""
+    if not isinstance(data, dict) or type(data.get("version")) is not int or data["version"] != 1:
+        return None
+    out = {"version": 1}
+    for key in ("wall_h", "active_h", "tokens", "weekly_percent"):
+        out[key] = forecast_number(data.get(key))
+    tokens = data.get("tokens")
+    out["tokens"] = tokens if type(tokens) is int and tokens >= 0 else None
+    for key in ("at", "usage_at"):
+        if isinstance(data.get(key), str) and _m_usage.usage_stamp(data[key]):
+            out[key] = data[key]
+    source = str(data.get("usage_source") or "")
+    if source == "host" or source.startswith("host:"):
+        out["usage_source"] = "host"
+    elif source.startswith("transcripts:"):
+        out["usage_source"] = "transcripts: measured"
+    size = data.get("size")
+    out["size"] = None
+    if isinstance(size, dict):
+        size_out = {key: size[key] for key in ("files", "lines", "binary_files")
+                    if type(size.get(key)) is int and size[key] >= 0}
+        for key in ("base", "head"):
+            if isinstance(size.get(key), str) and re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", size[key]):
+                size_out[key] = size[key]
+        if all(key in size_out for key in ("files", "lines")):
+            out["size"] = size_out
+    return out
 
 
 def job_forecasts(rows):
@@ -923,7 +1222,7 @@ def job_forecasts(rows):
             u = _m_spend.row_usage(row)
             sample = (hours, u if u and u["processed"] else None)
             groups.setdefault("unclassified", []).append(sample)  # the explicit all-jobs fallback
-            kind = job_kind(row["Job"], rows)
+            kind = row.get("Class") or job_kind(row["Job"], rows)
             if kind != "unclassified":
                 groups.setdefault(kind, []).append(sample)
     out = []
@@ -989,8 +1288,7 @@ def job_budget_lines(inst, n, planned=None):
         remaining = min((w["resets_at"] - time.time()) / 3600 for w in windows)
         out.append(f"current route {selected['label']}: {len(these)} open/planned job(s), typical serial full-job time {estimate:g} h "
                    f"{'fits' if estimate <= remaining else 'exceeds'} {remaining:.1f} h until the next recorded reset; "
-                   "elapsed time not subtracted; allowance fit unknown (the subscription says how full it is, not "
-                   "how many tokens a percent is).")
+                   "elapsed time not subtracted; weekly token share is an approximate forecast, never a limit.")
     return out
 
 
@@ -1209,12 +1507,22 @@ def cmd_jobs(a):
             for line in job_advice(inst, n, r) + [_m_spend.usage_line(u, _m_spend.job_budget(n, r), r["age_h"])] + \
                     _m_spend.usage_advice(u, j["median_tokens"]):
                 print(_m_guard.redact("        " + line, _m_guard.never_terms(n)))
+            if r.get("Forecast"):
+                print(_m_guard.redact("        " + estimate_line(saved_forecast(r["Forecast"])), _m_guard.never_terms(n)))
+                hb = read_handback(n, r) or {}
+                if isinstance(hb.get("actual"), dict):
+                    print(_m_guard.redact("        " + actual_line(hb["actual"]), _m_guard.never_terms(n)))
         for c in j["causes"]:
             print(f"  cause {c}")
         for line in forecast_lines(read_jobs(n) or [], a.branch) + job_budget_lines(inst, n, a.branch):
             print(_m_guard.redact("  " + line, _m_guard.never_terms(n)))
         for r in read_jobs(n) or []:
             if a.branch and r["Job"] == a.branch and (not a.job_key or job_key(r) == a.job_key):
+                if r.get("Ended") and r.get("Forecast"):
+                    print(_m_guard.redact(estimate_line(saved_forecast(r["Forecast"])), _m_guard.never_terms(n)))
+                    actual = forecast_record(r.get("Actual"))
+                    if actual:
+                        print(_m_guard.redact(actual_line(actual), _m_guard.never_terms(n)))
                 print(_m_guard.redact(json.dumps(r, ensure_ascii=False), _m_guard.never_terms(n)))
                 if closed_job(r) and not r.get("Settled"):
                     print_thread_checklist(n, r)

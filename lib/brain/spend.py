@@ -907,10 +907,13 @@ def host_usage_cells(path, n):
     except (OSError, ValueError) as e:
         _m_common.die(f"can't read {path}: {e}")
     known = {"fresh", "cache_read", "cache_write", "output", "reasoning", "tools", "compactions", "subagents",
-             "sub_share", "active_minutes", "agent_minutes", "models", "host"}
+             "sub_share", "active_minutes", "agent_minutes", "models", "host", "meter_percent"}
     if not isinstance(data, dict) or set(data) - known or not isinstance(data.get("host", ""), str):
         _m_common.die("host usage is a JSON object with: " + ", ".join(sorted(known)))
-    nums = {k: data.get(k, 0) for k in known - {"models", "host", "sub_share"}}
+    meter = _m_jobs.forecast_number(data.get("meter_percent"))
+    if "meter_percent" in data and (meter is None or meter > 100):
+        _m_common.die("meter_percent is an attributed job share from 0 to 100, never an account-wide delta")
+    nums = {k: data.get(k, 0) for k in known - {"models", "host", "sub_share", "meter_percent"}}
     if any(type(v) is not int or v < 0 for v in nums.values()) or \
             not (isinstance(data.get("sub_share", 0), (int, float)) and 0 <= data.get("sub_share", 0) <= 1) or \
             not isinstance(data.get("models", {}), dict) or \
@@ -924,7 +927,8 @@ def host_usage_cells(path, n):
         _m_common.die("unsafe host label")
     if _m_guard.find_terms(" ".join([label, *u["models"]]), _m_guard.never_terms(n)):
         _m_common.die("the host's label or a model name holds a never-name word of this node; leave it out")
-    return {**usage_cells({**u, "source": ""}), "Usage": "host" + (f": {label}" if label else "")}
+    return {**usage_cells({**u, "source": ""}), "Usage": "host" + (f": {label}" if label else ""),
+            "Meter %": str(meter) if meter is not None else ""}
 
 
 def usage_advice(u, median_tokens=None):

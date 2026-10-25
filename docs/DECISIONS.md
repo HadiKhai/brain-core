@@ -53,3 +53,25 @@ The regression reads the first committed ledger revision before generating a
 brief, then checks that the brief retains the expected runtime and model. Its
 cases cover class defaults, a node runtime pin, node and instance class routing,
 and inherited model configuration without activating inherited runtime policy.
+
+## D201: Preserve advisory launch estimates alongside measured job actuals
+
+Launch estimates use merged work with the same declared class (legacy branch
+family inference remains a fallback). An optional contract Size section supplies
+files and added/deleted lines. The five nearest known sizes use log distances;
+without planned size, the estimate uses all same-class samples. Wall time is
+class-wide; active time and tokens require the selected runtime. Each metric
+requires three observations and shows median plus observed minimum and maximum.
+
+Ordinary resumes retain the original launch estimate. A changed class or runtime
+recomputes it. Hand-back captures measured usage and committed Git contribution
+size, excluding uncommitted and unrelated rebased changes. Close-time accounting
+refreshes known values without replacing missing measurements with zero. Ledger
+consumption sanitizes worker actuals to numeric facts and Git identities.
+
+Weekly share is approximate and advisory. Configurable per-runtime conversions
+start at 51 million processed tokens per percent for Codex and 68 million for
+Claude; fresh-token conversion starts at 1.1 million. Three explicitly attributed
+merged-job meter observations refine conversion. Account-wide deltas are never
+assumed attributable to one concurrent job. These estimates never affect routing,
+admission, readiness or limits.
