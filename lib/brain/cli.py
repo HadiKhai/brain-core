@@ -32,6 +32,7 @@ from . import freshness as _m_freshness
 from . import nodes as _m_nodes
 from . import queue_priority as _m_queue_priority
 from . import policy as _m_policy
+from . import release as _m_release
 from . import reports as _m_reports
 from . import rehearse as _m_rehearse
 from . import rotation as _m_rotation
@@ -461,6 +462,8 @@ def main():
         opt("--findings", help="prior findings JSON: list of objects with severity and text"),
         opt("--fix-base", help="reviewed commit before the fixes; defaults to previous review head"),
         opt("--contract", help="contract file; defaults to the job's recorded contract"))
+    cmd('release', _m_release.cmd_release, 'inspect or execute an opted-in reviewed full-green release', 'id',
+        opt('--run', action='store_true'))
     cmd("train", _m_train.cmd_train, "batch ready jobs onto local main, verify once, and print the release command", "id",
         opt("--jobs", nargs="+", help="explicit job order (space or comma separated); all must be ready"))
     cmd("land", _m_train.cmd_land, "batch land ready jobs; host settlement requires fresh separate evidence", "id",

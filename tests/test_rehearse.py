@@ -1,11 +1,14 @@
 """Fabricated rehearsal comparisons and real sandbox mutation checks."""
+import ast
 import contextlib
 import datetime
+import errno
 import hashlib
 import importlib
 import io
 import json
 import logging
+import signal
 import os
 from pathlib import Path
 import subprocess
@@ -24,6 +27,40 @@ def result(text='', code=0, seconds=0.01, unexpected=0):
 
 
 class RehearsalComparison(unittest.TestCase):
+    def test_ui_crash_after_partial_output_is_baseline_incomplete(self):
+        complete = '{"nodes":[{"id":"engine","worktrees":[]}]}'
+        candidate = result(complete)
+        for code, timeout, text in [(-9, False, '{"nodes":['),
+                                    (1, False, complete), (-9, False, complete),
+                                    (0, True, complete), (0, False, '{"nodes":['),
+                                    (0, False, 'not JSON'), (0, False, '[]'),
+                                    (0, False, '{"nodes":"invalid"}')]:
+            with self.subTest(code=code, timeout=timeout, text=text):
+                baseline = dict(result(text, code=code), timeout=timeout)
+                self.assertEqual(['ui: baseline incomplete'],
+                                 rehearsal.compare({'ui': baseline}, {'ui': candidate}))
+
+    def test_json_errors_compare_individual_lines_and_require_complete_baseline(self):
+        old = result(json.dumps({'inbox': ['old report\n✗ historical failure'], 'count': 1}, ensure_ascii=False))
+        new = result(json.dumps({'inbox': ['longer old report\n✗ historical failure'], 'count': 2}, ensure_ascii=False))
+        self.assertEqual([], rehearsal.added_check_errors(old, new))
+        new['text'] = json.dumps({'inbox': ['✗ historical failure\n✗ actual new failure'], 'count': 2}, ensure_ascii=False)
+        self.assertEqual(['✗ actual new failure'], rehearsal.added_check_errors(old, new))
+        duplicate = result(json.dumps({'inbox': ['✗ historical failure', '✗ historical failure']}, ensure_ascii=False))
+        self.assertEqual(['✗ historical failure'], rehearsal.added_check_errors(old, duplicate))
+        for field, value in [('timeout', True), ('text', '')]:
+            baseline = dict(old, **{field: value})
+            flags = rehearsal.compare({'ui': baseline}, {'ui': new})
+            self.assertEqual(['ui: baseline incomplete'], flags)
+
+    def test_stderr_only_check_failure_is_a_completed_operand_and_safety_still_fails(self):
+        old = dict(result('✗ old failure', code=1), semantic_stdout='', semantic_stderr='✗ old failure')
+        new = dict(result('✗ new failure', code=1), semantic_stdout='', semantic_stderr='✗ new failure')
+        self.assertIn('check: new check errors', rehearsal.compare({'check': old}, {'check': new}))
+        old['timeout'], new['unexpected'] = True, 1
+        self.assertEqual(['check: unexpected writes', 'check: baseline incomplete'],
+                         rehearsal.compare({'check': old}, {'check': new}))
+
     def test_clean_candidate_and_normalization(self):
         self.assertEqual([], rehearsal.compare({'check': result('✓ all good')}, {'check': result('✓ all good')}))
         self.assertEqual(rehearsal.normalize('{"b":2,"a":1}'), rehearsal.normalize('{"a":1,"b":2}'))
@@ -63,6 +100,45 @@ class RehearsalComparison(unittest.TestCase):
 
 
 class RehearsalRedaction(Scenario):
+    def test_public_refusal_identifies_reason_and_phase_without_source_content(self):
+        from types import SimpleNamespace
+        node = dict(id='engine', external=True, home_path=self.tmp / 'candidate')
+        inst = SimpleNamespace(root=self.tmp / 'source', node=lambda _: node, nodes=lambda: [])
+        error = PermissionError(1, 'invented-canary private path')
+        with mock.patch.object(rehearsal._m_nodes, 'find_root', return_value=inst.root), \
+                mock.patch.object(rehearsal._m_instance, 'Instance', return_value=inst), \
+                mock.patch.object(rehearsal, 'evidence_path', return_value=self.tmp / 'evidence.json'), \
+                mock.patch.object(rehearsal, 'rehearse', side_effect=error):
+            with self.assertRaises(SystemExit) as caught:
+                rehearsal.cmd_rehearse(SimpleNamespace(id='engine', branch='job'))
+        self.assertIn('phase=rehearsal', str(caught.exception))
+        self.assertIn('reason=PermissionError:EPERM', str(caught.exception))
+        self.assertNotIn('invented-canary', str(caught.exception))
+        with mock.patch.object(rehearsal._m_nodes, 'find_root', side_effect=error):
+            with self.assertRaises(SystemExit) as caught:
+                rehearsal.cmd_rehearse(SimpleNamespace(id='engine', branch='job'))
+        self.assertIn('phase=instance', str(caught.exception))
+        self.assertIn('reason=PermissionError:EPERM', str(caught.exception))
+        self.assertNotIn('invented-canary', str(caught.exception))
+
+    def test_ui_deadline_is_configurable_and_invalid_values_refuse_before_launch(self):
+        with mock.patch.dict(os.environ, {'BRAIN_REHEARSE_UI_TIMEOUT': '123.5'}), \
+                mock.patch.object(rehearsal.subprocess, 'Popen') as popen:
+            process = popen.return_value
+            process.returncode, process.pid = 0, 123
+            process.communicate.return_value = ('{"nodes": []}', '')
+            lane = self.tmp / 'deadline'
+            (lane / 'brain').mkdir(parents=True)
+            with mock.patch.object(rehearsal, 'sandbox_prefix', return_value=[]), \
+                    mock.patch.object(rehearsal.os, 'killpg'):
+                rehearsal.run_command(lane / 'brain/core', lane, ['ui', '--json'], 'read', [])
+            self.assertEqual(123.5, process.communicate.call_args.kwargs['timeout'])
+            for value in ('0', '-1', 'nan', 'inf', 'private-path'):
+                with mock.patch.dict(os.environ, {'BRAIN_REHEARSE_UI_TIMEOUT': value}):
+                    with self.assertRaisesRegex(rehearsal.RehearsalError, 'UI probe deadline'):
+                        rehearsal.run_command(lane / 'brain/core', lane, ['ui', '--json'], 'read', [])
+            self.assertEqual(1, popen.call_count)
+
     def probe(self, out, err='', code=0):
         lane = self.tmp / 'lane'
         (lane / 'brain').mkdir(parents=True, exist_ok=True)
@@ -89,7 +165,7 @@ class RehearsalRedaction(Scenario):
         self.assertEqual(digest(old), digest(same))
         self.assertNotEqual(digest(old), digest(changed))
         self.assertIn('due:0: new due items', rehearsal.compare({'due:0': old}, {'due:0': changed}))
-        self.assertIn('check: new check errors', rehearsal.compare({'check': result()}, {'check': error}))
+        self.assertIn('check: new check errors', rehearsal.compare({'check': result('✓ good')}, {'check': error}))
         self.assertEqual('', printed.getvalue())
         for r in (old, same, changed, error):
             self.assertNotIn('invented-canary', json.dumps(r).casefold())
@@ -175,11 +251,12 @@ class RehearsalFixture(Scenario):
         self.head = self.git('rev-parse', 'HEAD', cwd=self.home).strip()
 
     def run_rehearsal(self, mutation=lambda: None, during_run=False, damage_copy=None,
-                      outputs=None, inspect_lane=None, now=None):
+                      outputs=None, inspect_lane=None, now=None, lane_runner=None):
         from types import SimpleNamespace
         inst = SimpleNamespace(root=self.root, nodes=lambda: [],
+                               now=lambda: '2035-01-03 00:00 +00:00',
                                now_dt=lambda: now or datetime.datetime(2035, 1, 3, tzinfo=datetime.timezone.utc))
-        node = dict(external=True, home_path=self.home, id='engine')
+        node = dict(external=True, home_path=self.home, id='engine', dir=self.root)
         copy = rehearsal.copy_tree
         def copying(source, dest):
             copy(source, dest)
@@ -188,7 +265,9 @@ class RehearsalFixture(Scenario):
                     damage_copy(dest)
                 if not during_run:
                     mutation()
-        def lane(*args):
+        def lane(*args, **kwargs):
+            if lane_runner:
+                return lane_runner(*args, **kwargs)
             observed = inspect_lane(*args) if inspect_lane else None
             if during_run:
                 mutation()
@@ -214,7 +293,214 @@ class RehearsalFixture(Scenario):
         p.write_text(text)
 
 
+class RehearsalEperm(RehearsalFixture):
+    def denied_lane(self, source, core, folder, nodes, commands, **kwargs):
+        folder.mkdir()
+        (folder / 'brain').mkdir()
+        process = mock.Mock(pid=43210, returncode=0)
+        process.communicate.return_value = ('quiet', '')
+        with mock.patch.object(rehearsal, 'sandbox_prefix', return_value=[]), \
+                mock.patch.object(rehearsal.subprocess, 'Popen', return_value=process), \
+                mock.patch.object(rehearsal, 'group_members', return_value=([43211, 43212], True)), \
+                mock.patch.object(rehearsal.os, 'killpg', side_effect=PermissionError(errno.EPERM, 'denied')) as group, \
+                mock.patch.object(rehearsal.os, 'kill', side_effect=AssertionError('no PID signals')):
+            probes = {}
+            for key in ('check', 'hook'):
+                probes[key] = rehearsal.run_command(core, folder, [], 'read', [], **kwargs)
+            self.assertEqual(2, group.call_count)
+            self.assertEqual(2, process.communicate.call_count)
+            return probes
+
+    def test_killpg_eperm_continues_and_result_retains_group(self):
+        if sys.platform == 'darwin':
+            members, complete = rehearsal.group_members(os.getpgrp())
+            self.assertTrue(complete)
+            self.assertIn(os.getpid(), members)
+        evidence = self.run_rehearsal(lane_runner=self.denied_lane)
+        self.assertFalse(evidence['passed'])
+        self.assertEqual(4, len(evidence['leftovers']))
+        for row in evidence['leftovers']:
+            self.assertEqual(43210, row['pgid'])
+            self.assertEqual([43211, 43212], row['pids'])
+            self.assertEqual('kill -TERM -43210', row['stop_command'])
+        self.assertIn('rehearsal process cleanup incomplete', evidence['regressions'])
+
+    def test_killpg_eperm_leftover_stays_due_after_later_refusal(self):
+        from brain.instance import Instance
+        r = self.init('sample')
+        inst = Instance(r)
+        node = inst.node('root')
+        lane = self.tmp / 'denied'
+        lane.mkdir()
+        (lane / 'brain').mkdir()
+        process = mock.Mock(pid=43210, returncode=None)
+        def timeout(*args, **kwargs):
+            (lane / 'home/rehearsal-startup-failed').write_text('failed')
+            raise subprocess.TimeoutExpired('fixture', 60, output=b'partial')
+        process.communicate.side_effect = timeout
+        with mock.patch.object(rehearsal, 'sandbox_prefix', return_value=[]), \
+                mock.patch.object(rehearsal.subprocess, 'Popen', return_value=process), \
+                mock.patch.object(rehearsal, 'group_members', return_value=([43211], True)), \
+                mock.patch.object(rehearsal.os, 'killpg', side_effect=PermissionError(errno.EPERM, 'denied')) as group, \
+                mock.patch.object(rehearsal.os, 'kill', side_effect=AssertionError('no PID signals')):
+            # Persist before subsequent clock/output validation can refuse a probe.
+            with self.assertRaises(rehearsal.RehearsalError):
+                rehearsal.run_command(lane / 'brain/core', lane, [], 'read', [],
+                    on_leftover=lambda row: rehearsal.report_leftover(inst, node, row))
+            group.assert_called_once()
+            process.communicate.assert_called_once()
+        for _ in range(2):
+            due = self.b(r, 'due', 'root', '--json')
+            self.assertIn('pgid=43210', due)
+            self.assertIn('PIDs=43211', due)
+            self.assertIn('kill -TERM -43210', due)
+
+    def test_supervisor_atexit_never_signals_running_children(self):
+        folder = self.tmp / 'supervisor'
+        self.denied_lane(self.root, self.root / 'core', folder, [], [])
+        script = next(folder.rglob('sitecustomize.py')).read_text()
+        tree = ast.parse(script)
+        reap = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == 'reap')
+        child = mock.Mock()
+        child.poll.return_value = None
+        child.kill.side_effect = AssertionError('child-side atexit signal after denied group cleanup')
+        namespace = {'children': [child], 'ProcessLookupError': ProcessLookupError}
+        exec(compile(ast.Module(body=[reap], type_ignores=[]), '<supervisor>', 'exec'), namespace)
+        namespace['reap']()
+        child.kill.assert_not_called()
+        child.wait.assert_not_called()
+
+    def test_signal_audit_records_every_denied_group_attempt(self):
+        outcome = self.run_rehearsal(lane_runner=self.denied_lane)
+        audit = outcome['signal_audit']
+        self.assertEqual(len(audit), 4)
+        for entry in audit:
+            self.assertEqual(entry['pgid'], 43210)
+            self.assertEqual(entry['pid'], 43210)
+            self.assertEqual(entry['signal'], int(signal.SIGKILL))
+            self.assertEqual(entry['result'], 'denied')
+            self.assertEqual(entry['errno'], errno.EPERM)
+            self.assertIsNotNone(datetime.datetime.fromisoformat(entry['at']).utcoffset())
+
+
 class RehearsalStability(RehearsalFixture):
+    def test_report_observations_ignore_assets_but_track_index_operands(self):
+        from types import SimpleNamespace
+        workbench = self.tmp / 'external-work'
+        report = workbench / 'reports/run'
+        (report / 'baseline').mkdir(parents=True)
+        dependency = self.tmp / 'dependencies'
+        dependency.mkdir()
+        (dependency / 'package.json').write_text('{}')
+        (report / 'baseline/node_modules').symlink_to(dependency, target_is_directory=True)
+        index = report / 'index.md'
+        index.write_text('# original')
+        node = dict(id='engine', external=True, home_path=self.home, fm={}, dir=self.root,
+                    local={'home': str(self.home), 'workbench': str(workbench)})
+        inst = SimpleNamespace(root=self.root, nodes=lambda: [node], local={'nodes': {'engine': node['local']}})
+        before = rehearsal.external_inputs(inst)
+        (dependency / 'package.json').write_text('{"ignored":true}')
+        self.assertEqual(before, rehearsal.external_inputs(inst))
+        for mutate in (lambda: index.write_text('# changed'), lambda: index.unlink(),
+                       lambda: index.write_text('# restored'),
+                       lambda: (workbench / 'reports/another').mkdir(),
+                       lambda: (workbench / 'reports/another/index.md').write_text('# added'),
+                       lambda: (workbench / 'reports/another/index.md').unlink(),
+                       lambda: (workbench / 'reports/another').rmdir()):
+            mutate()
+            after = rehearsal.external_inputs(inst)
+            self.assertNotEqual(before, after)
+            before = after
+        linked_index = self.tmp / 'linked-index.md'
+        linked_index.write_text('# linked')
+        index.unlink()
+        index.symlink_to(linked_index)
+        before = rehearsal.external_inputs(inst)
+        linked_index.write_text('# changed target')
+        self.assertNotEqual(before, rehearsal.external_inputs(inst))
+        linked_workbench = self.tmp / 'linked-work'
+        linked_workbench.mkdir()
+        (linked_workbench / 'reports').symlink_to(workbench / 'reports', target_is_directory=True)
+        node['local']['workbench'] = str(linked_workbench)
+        with self.assertRaisesRegex(rehearsal.RehearsalError, 'linked external observation'):
+            rehearsal.external_inputs(inst)
+
+    def test_external_report_directory_links_refuse_instead_of_omitting_reads(self):
+        from types import SimpleNamespace
+        workbench = self.tmp / 'external-work'
+        (workbench / 'reports').mkdir(parents=True)
+        target = self.tmp / 'report-target'
+        target.mkdir()
+        (target / 'index.md').write_text('# report')
+        (workbench / 'reports/run').symlink_to(target, target_is_directory=True)
+        node = dict(id='engine', external=True, home_path=self.home, fm={}, dir=self.root,
+                    local={'home': str(self.home), 'workbench': str(workbench)})
+        inst = SimpleNamespace(root=self.root, nodes=lambda: [node], local={'nodes': {'engine': node['local']}})
+        with self.assertRaisesRegex(rehearsal.RehearsalError, 'linked external observation'):
+            rehearsal.external_inputs(inst)
+
+    def test_external_inputs_detect_dirty_bytes_refs_reports_and_ignored_inputs(self):
+        from types import SimpleNamespace
+        workbench = self.tmp / 'external-work'
+        report = workbench / 'reports/run/index.md'
+        report.parent.mkdir(parents=True)
+        report.write_text('# old report')
+        node = dict(id='engine', external=True, home_path=self.home, fm={}, dir=self.root,
+                    local={'home': str(self.home), 'workbench': str(workbench),
+                           'worktrees': {'main': {'path': str(self.home)}}})
+        inst = SimpleNamespace(root=self.root, nodes=lambda: [node], local={'nodes': {'engine': node['local']}})
+        before = rehearsal.external_inputs(inst)
+        self.assertEqual(before, rehearsal.external_inputs(inst))
+        for mutate in (lambda: (self.home / 'README.md').write_text('dirty one'),
+                       lambda: (self.home / 'README.md').write_text('dirty two'),
+                       lambda: (self.home / '.env').write_text('MODE=second'),
+                       lambda: report.write_text('# new report'),
+                       lambda: self.git('update-ref', 'refs/remotes/origin/main', self.head, cwd=self.home)):
+            mutate()
+            after = rehearsal.external_inputs(inst)
+            self.assertNotEqual(before, after)
+            before = after
+
+    def test_external_drift_withholds_pass_without_claiming_candidate_regression(self):
+        old = {'ready:0:0': result('not ready: old reason', 1), 'hook': result()}
+        new = {'ready:0:0': result('not ready: changed reason', 1), 'hook': result()}
+        with mock.patch.object(rehearsal, 'external_inputs', side_effect=['one', 'two', 'two']):
+            outcome = self.run_rehearsal(outputs=[old, new])
+        self.assertFalse(outcome['passed'])
+        self.assertEqual(['DRIFT: external inputs changed; comparison inconclusive'], outcome['regressions'])
+        self.assertIn('ready:0:0: ready reason changed', outcome['drift_comparisons'])
+        from types import SimpleNamespace
+        node = dict(external=True, home_path=self.home)
+        inst = SimpleNamespace(root=self.root, node=lambda _: node, nodes=lambda: [])
+        printed = io.StringIO()
+        with mock.patch.object(rehearsal._m_nodes, 'find_root', return_value=self.root), \
+                mock.patch.object(rehearsal._m_instance, 'Instance', return_value=inst), \
+                mock.patch.object(rehearsal, 'evidence_path', return_value=self.tmp / 'evidence.json'), \
+                mock.patch.object(rehearsal, 'rehearse', return_value=outcome), \
+                contextlib.redirect_stdout(printed), self.assertRaises(SystemExit):
+            rehearsal.cmd_rehearse(SimpleNamespace(id='engine', branch='job'))
+        self.assertIn('inconclusive: ready:0:0: ready reason changed', printed.getvalue())
+
+    def test_machine_snapshot_is_shared_and_preserves_sample_history(self):
+        from types import SimpleNamespace
+        instant = datetime.datetime(2035, 1, 3, tzinfo=datetime.timezone.utc)
+        inst = SimpleNamespace(root=self.root, now_dt=lambda: instant)
+        reading = {'cpus': 8, 'thermal': 'pressure', 'load': [12, 12, 12],
+                   'load_per_cpu': [1.5, 1.5, 1.5]}
+        from brain import ui
+        with mock.patch.object(ui, 'machine_load', return_value=reading):
+            rehearsal.freeze_machine_inputs(inst, instant.isoformat())
+        data = json.loads((self.root / '.brain/machine.json').read_text())
+        self.assertEqual(reading, data['samples'][-1]['reading'])
+        self.assertEqual(instant.timestamp(), data['samples'][-1]['at'])
+        # Fresh sustained samples keep their continuity and episode information.
+        data.update(episode=True, heat_reasons=['sustained thermal pressure'])
+        data['samples'].insert(0, dict(at=instant.timestamp() - 60, reading=reading))
+        (self.root / '.brain/machine.json').write_text(json.dumps(data))
+        with mock.patch.object(ui, 'machine_load', side_effect=AssertionError('must use snapshot')):
+            rehearsal.freeze_machine_inputs(inst, instant.isoformat())
+        self.assertEqual(data, json.loads((self.root / '.brain/machine.json').read_text()))
+
     def test_volatile_churn_during_copy_and_run_does_not_refuse(self):
         paths = ['.git/refs/t3/checkpoint', '.git/logs/HEAD', '.git/COMMIT_EDITMSG',
                  '.git/hook-once', '.git/index.lock', '.git/config.lock',

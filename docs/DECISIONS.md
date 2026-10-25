@@ -154,3 +154,65 @@ refusals cannot be bypassed by importing a direct-full receipt. Missing validato
 APIs refuse when their policy is required; installations with no corresponding
 policy retain existing behavior. Receipt schemas and writers remain owned by the
 review and preview modules.
+
+## D413: Rehearsal drift is inconclusive and denied cleanup stops signaling
+
+Rehearsal observes external input identity around both private lanes. A changed
+external operand withholds a pass and reports comparison drift rather than
+attributing it to candidate code. Independent safety or incomplete-baseline
+failures remain failures. Report observations inspect indexes and directory/link
+metadata without recursively scanning report assets.
+
+Cleanup records each group signal attempt with PID, process group, signal, UTC
+instant and outcome. EPERM is terminal for that probe's signaling: it retains a
+leftover with observed members and a plain stop command, persists it immediately
+to the node inbox, and prevents passing evidence. The generated child supervisor
+never signals from atexit, so it cannot send a later child kill after outer cleanup
+was denied. Only the outer supervisor owns group cleanup.
+
+## D414: Landing reconciles observed integration and delegates exact settlement
+
+`land` reconciles completed exact-head jobs already integrated by an external Git
+fast-forward, using native readiness and closure checks without rerunning a gate.
+It then uses the native batch train. After successful publication, outside the
+instance lock, it delegates only the accepted closed job keys to the lifecycle
+settlement adapter. Missing adapters, active threads and incomplete confirmations
+remain pending independently of the landed SHA. Repeated calls can resume pending
+settlement without rebuilding an already-published batch.
+
+Train execution journals retain the exact full command, duration and log digest
+for later release validation. No generic product preview lifecycle is inferred.
+
+## D415: Opt-in scheduled green releases use atomic non-forced Git pushes
+
+Explicit `release_auto=on` authorizes the native sampler's two configured daily
+release windows (default 09:00 and 21:00). A repository-scoped stable lock and
+durable private Git-metadata ledger cap attempts at two per calendar day, across
+instances. Prepared and uncertain attempts count toward the cap and fence retries.
+
+The executor requires a published exact-main train, a successful full run with
+unchanged command/log digest and measured duration, native independent-review
+receipts for every accepted job, and the next numbered CHANGES release section.
+It checks origin against the train's recorded cached origin base and verifies
+ancestry before an atomic ordinary Git push of the exact SHA and release-N tag.
+A temporary pre-push guard checks the remote IDs advertised to Git and then runs
+the original executable pre-push hook unchanged. Receive-pack rejects subsequent
+ref races. There are no forced refspecs or force options;
+an unconfirmed result remains unknown and requires reconciliation. Confirmed
+release metadata includes SHA, tag and full-gate time.
+
+## D416: Native verifier ownership includes cleanup and optional typed facts
+
+When the native managed-admission API is available, each command keeps one producer
+context across admission, execution and all cleanup actions. Actual subprocess
+status reaches the token. Cleanup attempts queue release, phase publication,
+owned Docker cleanup and diagnostics while preserving a primary failure.
+Configured shared resources use the native lease around execution and cleanup;
+a failed command retains its resource claim until cleanup is established.
+Unconfigured resource leases perform no registry IO.
+
+Successful actual monolithic full executions can emit typed `verify_completed`
+facts bound to job, exact head, base and execution fingerprint. Focused runs and
+imported/reused proof emit none; explicit reverify is classified separately.
+Telemetry uses the event module's controlled schema and is absent on installations
+without that module.

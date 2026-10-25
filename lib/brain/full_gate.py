@@ -60,7 +60,7 @@ def cmd_full_run(a):
     if not row:
         _m_common.die('full-run requires an open job')
     key = _m_jobs.job_key(row)
-    packet, reasons = _m_verify.record_ready(inst, n, a.branch, a.reviews, reverify=True)
+    packet, reasons = _m_verify.record_ready(inst, n, a.branch, a.reviews, reverify=False)
     if not packet or reasons or type(packet.get('verify_result')) is not int or packet['verify_result'] != 0:
         _m_common.die('full-run failed: ' + '; '.join(reasons))
     current = _m_jobs.open_job(_m_jobs.read_jobs(n) or [], a.branch)

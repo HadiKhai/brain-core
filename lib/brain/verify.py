@@ -511,42 +511,116 @@ def verify_log_dir(inst, n, branch):
     return parent / "job-handbacks", dfd, key, check
 
 
+class _ResourceCommandFailure(Exception):
+    pass
+
+
 @contextlib.contextmanager
-def verify_reservation(inst, n):
-    """Reserve one command's whole run; subsequent commands join the queue afresh."""
-    token = _m_machine.machine_wait("verify", inst, n["id"])
+def verification_resources(inst, n):
+    state = {'failed': False}
+    if not n.get('fm', {}).get('verify_resources'):
+        yield state
+        return
     try:
-        from . import job_attempts as _m_attempts
-        _m_attempts.attempt_phase('verifying')
-        yield token
-    finally:
-        _m_machine.machine_release(token)
+        module = importlib.import_module('.resource_leases', __package__)
+    except ImportError:
+        _m_common.die('configured verification resources require the native lease module')
+    try:
+        with module.configured_resource_lease(inst, n):
+            yield state
+            if state['failed']:
+                raise _ResourceCommandFailure('command failed; resource cleanup remains unconfirmed')
+    except _ResourceCommandFailure:
+        pass  # preserve the command result while the native lease retains its claim
+
+
+def verify_cleanup(inst, n):
+    try:
+        module = importlib.import_module('.docker_cleanup', __package__)
+    except ModuleNotFoundError as error:
+        if error.name != __package__ + '.docker_cleanup':
+            raise
+        return
+    report = module.docker_cleanup_nodes(inst, [n])
+    if report.get('errors'):
+        raise ValueError('verification resource cleanup incomplete')
+
+
+def queued_attempt_phase():
+    from . import job_attempts as _m_attempts
+    try:
+        _m_attempts.attempt_phase('queued')
+    except (OSError, ValueError):
+        pass  # unreadable phase evidence remains unknown; publication rechecks it
+
+
+@contextlib.contextmanager
+def command_reservation(inst, n, branch=None, kind='verify'):
+    """One producer context spans native admission, execution and every cleanup."""
+    managed = getattr(_m_machine, 'machine_run', None)
+    with managed(kind, inst, n['id'], branch, release=False) if managed else contextlib.nullcontext(None) as run:
+        primary = None
+        token = run
         try:
-            _m_attempts.attempt_phase('queued')
-        except (OSError, ValueError):
-            pass  # Preserve unknown evidence; publication rechecks job/attempt ownership.
-        _m_docker_leftovers.docker_leftover_nodes(inst, [n])
+            token = (_m_machine.machine_wait(kind, inst, n['id'], job=branch, token=run)
+                     if managed else _m_machine.machine_wait(kind, inst, n['id']))
+            if kind == 'verify':
+                from . import job_attempts as _m_attempts
+                _m_attempts.attempt_phase('verifying')
+            yield token
+        except BaseException as error:
+            primary = error
+            raise
+        finally:
+            actions = []
+            if token is not None:
+                actions.append(lambda: _m_machine.machine_release(token))
+            if kind == 'verify':
+                actions.append(queued_attempt_phase)
+            actions.extend([lambda: verify_cleanup(inst, n),
+                            lambda: _m_docker_leftovers.docker_leftover_nodes(inst, [n])])
+            if managed:
+                finish = getattr(_m_machine, 'machine_finish_intent', None)
+                if finish is not None:
+                    actions.insert(0, lambda: finish(inst, run, primary))
+                failure = primary or (_ResourceCommandFailure('nonzero command result') if run.result else None)
+                _m_machine.machine_cleanup(run, actions, primary=failure)
+            else:
+                errors = []
+                for action in actions:
+                    try:
+                        action()
+                    except BaseException as error:
+                        errors.append(error)
+                if errors and primary is None:
+                    raise errors[0]
+
+
+@contextlib.contextmanager
+def verify_reservation(inst, n, branch=None):
+    with command_reservation(inst, n, branch) as token:
+        yield token
 
 
 def run_cheap_checks(inst, n, branch, w, env):
     command = n['fm'].get('verify_cheap', '').strip()
     if not command:
         return None
-    token = _m_machine.machine_wait('heavy', inst, n['id'])
-    try:
+    with command_reservation(inst, n, branch, kind='heavy') as token:
         return run_verify_stream(inst, n, branch, command, w, env, token, lane='cheap')
-    finally:
-        _m_machine.machine_release(token)
 
 
 def run_verify(inst, n, branch, verify, w, env):
-    with _m_gate_lock.node_gate(inst, n, env, branch) as gate_env:
+    with _m_gate_lock.node_gate(inst, n, env, branch) as gate_env, verification_resources(inst, n) as resources:
         if verify == n.get('fm', {}).get('verify', '').strip():
             cheap = run_cheap_checks(inst, n, branch, w, gate_env)
             if cheap and cheap[0]:
+                resources['failed'] = True
                 return cheap
-        with verify_reservation(inst, n) as token:
-            return run_verify_stream(inst, n, branch, verify, w, gate_env, token)
+        with verify_reservation(inst, n, branch) as token:
+            result = run_verify_stream(inst, n, branch, verify, w, gate_env, token)
+            resources['failed'] = bool(result[0])
+            return result
 
 
 def run_verify_stream(inst, n, branch, verify, w, env, token, lane=None):
@@ -682,6 +756,8 @@ def run_verify_stream(inst, n, branch, verify, w, env, token, lane=None):
                 # Always retain context for failures outside the named convention as well.
                 say("verify overall tail:")
                 say("\n".join(overall))
+            if hasattr(token, 'result'):
+                token.result = proc.returncode
             return proc.returncode, str(folder / name)
     finally:
         if proc is not None:
@@ -736,7 +812,7 @@ def lane_evidence_valid(row):
 
 
 def run_lanes(inst, n, branch, w, env, snap, previous, head, main, inputs, force=False):
-    with _m_gate_lock.node_gate(inst, n, env, branch) as env:
+    with _m_gate_lock.node_gate(inst, n, env, branch) as env, verification_resources(inst, n) as resources:
         prior = previous if isinstance(previous, dict) else {}
         eligible = (prior.get('version') == 1 and prior.get('node') == n['id']
                     and prior.get('branch') == branch and prior.get('verify_command') == n['fm'].get('verify', '').strip()
@@ -750,12 +826,13 @@ def run_lanes(inst, n, branch, w, env, snap, previous, head, main, inputs, force
         rows, results, check = [], {}, None
         cheap = run_cheap_checks(inst, n, branch, w, env)
         if cheap and cheap[0]:
+            resources['failed'] = True
             return dict(verify_lanes=[], verify_result=cheap[0], verify_reused=False,
                         verify_lanes_check=dict(command=n['fm']['verify_cheap'], result=cheap[0],
                                                 duration=0, log=cheap[1]))
         command = n['fm'].get('verify_lanes_check', '').strip()
         if command:
-            with verify_reservation(inst, n) as token:
+            with command_reservation(inst, n, branch, kind='heavy') as token:
                 start = time.monotonic()
                 result, log = run_verify_stream(inst, n, branch, command, w, env, token, lane='fitness')
                 check = dict(command=command, result=result, duration=time.monotonic()-start, log=log)
@@ -777,7 +854,7 @@ def run_lanes(inst, n, branch, w, env, snap, previous, head, main, inputs, force
             elif reuse:
                 row.update(previous_lane, reused=True)
             else:
-                with verify_reservation(inst, n) as token:
+                with verify_reservation(inst, n, branch) as token:
                     print('verify lane: ' + name, flush=True)
                     start = time.monotonic()
                     result, log = run_verify_stream(inst, n, branch, lane['command'], w, env, token, lane=name)
@@ -790,6 +867,7 @@ def run_lanes(inst, n, branch, w, env, snap, previous, head, main, inputs, force
         result = next((r['result'] or 1 for r in rows if r['result'] != 0), 0)
         if check and check['result']:
             result = check['result']
+        resources['failed'] = bool(result)
         return dict(verify_lanes=rows, lane_green=list(old.values()), lane_map_hash=snap['map_hash'], lane_config_hash=snap['config_hash'], lane_context_hash=snap['context'],
                     verify_lane_env=_m_lanes.lane_environment(env),
                     verify_lanes_check=check, verify_result=result,
@@ -806,6 +884,23 @@ def show_lanes(n, packet):
     check = (packet or {}).get('verify_lanes_check')
     if isinstance(check, dict):
         print(_m_guard.redact('verify lanes check: exit %s; log: %s' % (check.get('result'), check.get('log')), _m_guard.never_terms(n)))
+
+
+def record_full_fact(inst, n, branch, head, base, inputs, forced=False):
+    """Only actual successful full execution emits this optional typed observation."""
+    try:
+        events = importlib.import_module('.events', __package__)
+    except ModuleNotFoundError as error:
+        if error.name == __package__ + '.events':
+            return False
+        raise
+    row = _m_jobs.open_job(_m_jobs.read_jobs(n) or [], branch)
+    if not row:
+        return False
+    events.record_fact(inst, n, 'verify_completed', job_key=_m_jobs.job_key(row),
+                       state='done', phase='execution', head=head, base=base, inputs=inputs,
+                       reason_code='forced_reverify' if forced else 'full_pass')
+    return True
 
 
 def moved_ref_details(n, branch, head, head_after, main, main_after, integration_base, integration_after):
@@ -914,6 +1009,9 @@ def record_ready(inst, n, branch, reviews, previous=None, reverify=False, full_r
     if lane_evidence:
         packet.update(lane_evidence)
         show_lanes(n, packet)
+    elif result == 0:
+        record_full_fact(inst, n, branch, head, main,
+                         _m_jobs.digest([verify, inputs, port_context]), forced=reverify)
     return packet, []
 
 

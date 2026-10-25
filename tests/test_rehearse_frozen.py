@@ -1069,7 +1069,7 @@ class FrozenClock(Scenario):
         original = rehearsal.snapshot(self.root)
         lane = rehearsal.run_lane
         seen = []
-        def inspect(source, core, folder, nodes, commands):
+        def inspect(source, core, folder, nodes, commands, **kwargs):
             seen.append((source, folder))
             self.assertNotEqual(self.root, source)
             self.assertEqual(source.parent, folder.parent)
@@ -1078,7 +1078,7 @@ class FrozenClock(Scenario):
                 (self.root / 'live-only').write_text('concurrent writer')
                 self.git('add', 'live-only', cwd=self.root)
                 self.git('commit', '-qm', 'live-only drift', cwd=self.root)
-            return lane(source, core, folder, nodes, commands)
+            return lane(source, core, folder, nodes, commands, **kwargs)
         with mock.patch.object(rehearsal, 'run_lane', side_effect=inspect):
             printed = self.publish_private_diff()
         self.assertIn('rehearse: passed', printed)
