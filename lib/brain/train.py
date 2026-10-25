@@ -15,6 +15,7 @@ from . import land_checks as _m_land_checks
 from . import nodes as _m_nodes
 from . import spend as _m_spend
 from . import status as _m_status
+from . import tasks as _m_tasks
 from . import verify as _m_verify
 from . import worktrees as _m_worktrees
 
@@ -81,6 +82,7 @@ def finish(inst, n, path, data):
                     "Base commit": entry["base"], "Head commit": entry["head"],
                     "Hours": f"{_m_status.elapsed(started, ended) / 3600:.1f}" if started and ended else ""})
     _m_jobs.write_jobs(inst, n, rows)  # one atomic ledger replacement, all jobs or none
+    _m_tasks.train_finished(inst, n, rows, data)
     data["state"] = "reconciled" if reconciled else "complete"
     save(path, data)
     inst.commit([], f"{n['id']}: train merged")

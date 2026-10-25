@@ -154,7 +154,7 @@ def validate(n, records):
                 raise ValueError(ident + ': active status requires a live ledger job and branch')
         if row['status'] in ('merged', 'done'):
             from . import task_flow as _m_flow
-            _m_flow.completion(n, row)
+            _m_flow.completion(n, row, records=records)
         if row['status'] == 'parked' and (not row.get('park_reason') or not row.get('resume') or
                 not row.get('next_action') or not (row.get('owner') or row.get('execution_owner')) or not _m_instance.Instance(instance_root(n)).parse_time(row.get('review_at'))):
             raise ValueError(ident + ': parked tasks require a reason and resume condition')
@@ -462,6 +462,89 @@ def job_closed(inst, n, row):
     except ValueError:
         mutate(inst, n, ident, {'status': 'parked', 'park_reason': 'Landing evidence is incomplete',
                               'resume': 'Provide the exact verified commit already on main', **_m_flow.park_fields(inst)}, provider=True)
+
+
+def train_finished(inst, n, rows, data):
+    """Publish one validated task graph; a verified train journal retries torn writes.
+
+    The caller holds the instance lock and has published the entire ledger. No
+    provider requests occur here: external completion intent uses the sync outbox.
+    """
+    import copy
+    from . import jobs as _m_jobs
+    from . import task_flow as _m_flow
+    linked = []
+    for entry in data['accepted']:
+        job = next((r for r in rows if _m_jobs.job_key(r) == entry['key']), None)
+        if not job or job.get('Job') != entry['branch'] or job.get('Head commit') != entry['head'] or not job.get('Ended'):
+            raise ValueError('train task reconciliation requires the accepted ended ledger jobs')
+        if job.get('Task'):
+            linked.append((entry, job))
+    if not linked:
+        return
+    records = copy.deepcopy(read_records(n))
+    changed = set()
+    tip = data.get('tip', '')
+    verified = (SHA.fullmatch(tip) and n.get('home_path') and
+                _m_common.git('merge-base', '--is-ancestor', tip, 'refs/heads/main', cwd=n['home_path']).returncode == 0 and
+                any(type(run.get('result')) is int and run['result'] == 0 and run.get('head') == tip and
+                    run.get('jobs') == [e['branch'] for e in data['accepted']] for run in data.get('runs', [])))
+    for entry, job in linked:
+        ident = job['Task']
+        if ident in changed or ident not in records:
+            raise ValueError('train task binding is missing or ambiguous')
+        row = records[ident]
+        receipt = {k: entry[k] for k in ('key', 'head', 'base')}
+        receipt.update(batch=data['batch'], tip=tip)
+        if row.get('train_completion') == receipt:
+            continue
+        if row.get('job') != entry['key'] or row.get('branch') != entry['branch']:
+            raise ValueError('train task binding changed; retain journal for reconciliation')
+        for attempt in row.get('attempts', []):
+            if attempt.get('job') == entry['key']:
+                attempt.update(state='closed', ended=data['ended'])
+        row.update(status='parked', park_reason='Train landing evidence is incomplete',
+                   resume='Provide exact verified main landing evidence and resume the task',
+                   **_m_flow.park_fields(inst))
+        if (verified and SHA.fullmatch(entry['head']) and SHA.fullmatch(entry['base']) and
+                _m_common.git('merge-base', '--is-ancestor', entry['head'], tip, cwd=n['home_path']).returncode == 0 and
+                _m_common.git('merge-base', '--is-ancestor', entry['base'], entry['head'], cwd=n['home_path']).returncode == 0):
+            diff = _m_common.git('diff', '--name-only', entry['base'], entry['head'], cwd=n['home_path'])
+            if diff.returncode == 0 and diff.stdout.strip():
+                evidence = 'Verified train ' + data['batch'] + ' at ' + tip
+                row.update(status='merged', merge_sha=entry['head'], code_path=', '.join(diff.stdout.splitlines()),
+                           evidence=list(dict.fromkeys(row['evidence'] + [evidence])), park_reason='', resume='')
+        row.update(train_completion=receipt, updated=data['ended'], last_progress_at=data['ended'])
+        changed.add(ident)
+    # Completion can depend on another accepted task. Park failed proofs to a
+    # fixed point before validating anything, so iteration order cannot hide debt.
+    while True:
+        failed = []
+        for ident in changed:
+            if records[ident]['status'] == 'merged':
+                try:
+                    _m_flow.completion(n, records[ident], records=records)
+                except (ValueError, OSError):
+                    failed.append(ident)
+        if not failed:
+            break
+        for ident in failed:
+            records[ident].update(status='parked', park_reason='Train landing evidence is incomplete',
+                                 resume='Provide exact verified main landing evidence and resume the task')
+    validate(n, records)  # no task writes until the full prospective graph passes
+    for ident in sorted(changed):
+        row = records[ident]
+        if row['status'] == 'merged':
+            row['event_pending'] = 'task_landed'
+            if row.get('source') == 'linear':
+                row['provider_pending'] = 'completed'
+        save_record(n, row)
+    # Also flush pending facts from a prior interrupted invocation, after every
+    # task outcome is durable. The producer deduplicates by task/evidence identity.
+    for _, job in linked:
+        row = read_records(n)[job['Task']]
+        if row.get('event_pending'):
+            emit_task_landed(inst, n, row)
 
 
 def due_tasks(inst, n):

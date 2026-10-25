@@ -175,3 +175,18 @@ capacity, explicit decision authority, contract completeness and code-scope
 checks. It never treats a detected Markdown entry as execution authority.
 Actual host launch and rebinding stay with the configured lifecycle adapter;
 plan generation creates neither a thread nor a worktree.
+
+## D1311: Train task completion validates the whole final graph
+
+Train finalization publishes linked task outcomes after the atomic ledger update
+and before marking its write-ahead journal complete. The accepted job identities,
+successful check on the exact integration tip, main ancestry and scoped delivery
+proof determine completion. Missing proof parks the obligation with a resume
+condition; changed task bindings retain the journal for reconciliation.
+
+All prospective task outcomes and dependencies validate together before any task
+file is replaced. Per-task receipt identities make interrupted publication
+replayable without resetting later progress or duplicating evidence. Pending
+landing facts publish only after every outcome is durable. External completion
+intent enters the existing provider sync outbox; finalization performs no network
+request.

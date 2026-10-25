@@ -181,6 +181,150 @@ class Tasks(Scenario):
         path.write_text('# Backlog\n\n' + text.split('\n', 1)[1])
         self.assertEqual(tasks_backfill.backfill(self.inst, self.n, apply=True), [])
 
+    def train_fixture(self, count=1, unlinked=False):
+        """A published journal and real Git endpoints, without running a gate."""
+        from brain import jobs, train
+        self.repo(self.root)
+        base = self.git('rev-parse', 'HEAD', cwd=self.root).strip()
+        entries = []
+        for index in range(count):
+            ident, branch, filename = 'APP-' + str(index + 1), 'job/example-' + str(index), 'engine' + str(index) + '.py'
+            self.add(ident, status='ready', baseline_sha=base, scope=[filename])
+            jobs.job_started(self.inst, self.n, branch, 'codex', task_id=ident)
+            (self.root / filename).write_text('VERSION = 1\n')
+            self.git('add', filename, cwd=self.root)
+            self.git('commit', '-qm', 'Implement ' + ident, cwd=self.root)
+            row = jobs.read_jobs(self.n)[-1]
+            entries.append(dict(branch=branch, key=jobs.job_key(row), base=base,
+                                head=self.git('rev-parse', 'HEAD', cwd=self.root).strip(), commits=1))
+            tasks.handback_event(self.inst, self.n, row, dict(state='done', at=self.inst.now(), ready={'verify_result': 0}))
+        if unlinked:
+            # A legacy job may share the batch without a task binding.
+            rows = jobs.read_jobs(self.n)
+            row = {**rows[-1], 'Job': 'job/legacy', 'Task': ''}
+            rows.append(row)
+            jobs.write_jobs(self.inst, self.n, rows)
+            entries.append({**entries[-1], 'branch': row['Job'], 'key': jobs.job_key(row)})
+        tip = self.git('rev-parse', 'main', cwd=self.root).strip()
+        data = dict(version=1, batch='train/fixture', state='verified', base=base, tip=tip,
+                    accepted=entries, ended=self.inst.now(),
+                    runs=[dict(jobs=[e['branch'] for e in entries], head=tip, result=0, log='fixture.log')])
+        path = self.root / 'job-trains' / 'fixture.json'
+        path.parent.mkdir()
+        train.save(path, data)
+        return train, jobs, path, data
+
+    def test_train_finish_completes_one_linked_task_and_preserves_legacy_job(self):
+        train, jobs, path, data = self.train_fixture(unlinked=True)
+        train.finish(self.inst, self.n, path, data)
+        row = tasks.read_records(self.n)['APP-1']
+        self.assertEqual(row['status'], 'merged')
+        self.assertEqual(row['merge_sha'], data['accepted'][0]['head'])
+        self.assertEqual(row['code_path'], 'engine0.py')
+        self.assertEqual(row['attempts'][0]['state'], 'closed')
+        self.assertTrue(all(r['Ended'] for r in jobs.read_jobs(self.n)))
+        self.assertEqual(data['state'], 'complete')
+        tasks.validate(self.n, tasks.read_records(self.n))
+
+    def test_train_finish_validates_multiple_tasks_against_final_dependency_graph(self):
+        train, jobs, path, data = self.train_fixture(count=2)
+        # Include both spellings of a dependency within this node.
+        tasks.mutate(self.inst, self.n, 'APP-2', {'depends_on': ['APP-1', 'root:APP-1']})
+        train.finish(self.inst, self.n, path, data)
+        rows = tasks.read_records(self.n)
+        self.assertEqual([r['status'] for r in rows.values()], ['merged', 'merged'])
+        self.assertEqual([r['attempts'][0]['state'] for r in rows.values()], ['closed', 'closed'])
+        tasks.validate(self.n, rows)
+        tasks.mutate(self.inst, self.n, 'APP-2', {'priority': 'P1'})
+        before = {p: p.read_bytes() for p in (self.root / 'tasks').glob('*.md')}
+        train.finish(self.inst, self.n, path, data)
+        self.assertEqual(before, {p: p.read_bytes() for p in before})
+
+    def test_train_finish_missing_exact_verification_parks_all_linked_tasks(self):
+        train, jobs, path, data = self.train_fixture(count=2)
+        data['runs'][0]['head'] = data['base']
+        train.finish(self.inst, self.n, path, data)
+        rows = tasks.read_records(self.n)
+        self.assertEqual([r['status'] for r in rows.values()], ['parked', 'parked'])
+        self.assertTrue(all(r['resume'] and r['review_at'] and r['next_action'] for r in rows.values()))
+        tasks.validate(self.n, rows)
+
+    def test_train_finish_incomplete_scope_parks_dependents_without_partial_validation(self):
+        train, jobs, path, data = self.train_fixture(count=2)
+        tasks.mutate(self.inst, self.n, 'APP-1', {'scope': ['missing.py']})
+        tasks.mutate(self.inst, self.n, 'APP-2', {'depends_on': ['APP-1']})
+        train.finish(self.inst, self.n, path, data)
+        self.assertEqual([r['status'] for r in tasks.read_records(self.n).values()], ['parked', 'parked'])
+        tasks.validate(self.n, tasks.read_records(self.n))
+
+    def test_train_finish_recovery_replays_partial_task_publication(self):
+        train, jobs, path, data = self.train_fixture(count=2)
+        save = tasks.save_record
+        calls = []
+        def interrupted(node, row, folder='tasks'):
+            calls.append(row['id'])
+            if len(calls) == 2:
+                raise OSError('Fixture interrupted task publication')
+            save(node, row, folder)
+        with mock.patch.object(tasks, 'save_record', side_effect=interrupted):
+            with self.assertRaisesRegex(OSError, 'Fixture interrupted'):
+                train.finish(self.inst, self.n, path, data)
+        self.assertEqual(json.loads(path.read_text())['state'], 'verified')
+        self.assertTrue(all(r['Ended'] for r in jobs.read_jobs(self.n)))
+        delivered = (self.root / 'tasks/APP-1.md').read_bytes()
+        train.run_train(self.inst, self.n, self.root, 'false', argparse.Namespace(jobs=None))
+        self.assertEqual([r['status'] for r in tasks.read_records(self.n).values()], ['merged', 'merged'])
+        self.assertEqual((self.root / 'tasks/APP-1.md').read_bytes(), delivered)
+        self.assertEqual(json.loads(path.read_text())['state'], 'reconciled')
+        tasks.validate(self.n, tasks.read_records(self.n))
+
+    def test_train_finish_retains_verified_journal_when_task_binding_changed(self):
+        train, jobs, path, data = self.train_fixture(count=2)
+        tasks.mutate(self.inst, self.n, 'APP-2', {'job': 'different-attempt'})
+        before = {p: p.read_bytes() for p in (self.root / 'tasks').glob('*.md')}
+        with self.assertRaisesRegex(ValueError, 'binding changed'):
+            train.finish(self.inst, self.n, path, data)
+        self.assertEqual(before, {p: p.read_bytes() for p in before})
+        self.assertEqual(json.loads(path.read_text())['state'], 'verified')
+
+    def test_train_finish_without_task_links_keeps_legacy_completion(self):
+        train, jobs, path, data = self.train_fixture()
+        rows = jobs.read_jobs(self.n)
+        rows[0]['Task'] = ''
+        jobs.write_jobs(self.inst, self.n, rows)
+        before = (self.root / 'tasks/APP-1.md').read_bytes()
+        train.finish(self.inst, self.n, path, data)
+        self.assertEqual(data['state'], 'complete')
+        self.assertEqual((self.root / 'tasks/APP-1.md').read_bytes(), before)
+
+    def test_train_finish_defers_provider_write_and_emits_only_after_batch_is_durable(self):
+        from brain import task_linear
+        train, jobs, path, data = self.train_fixture(count=2)
+        self.linear_config()
+        row = tasks.read_records(self.n)['APP-1']
+        row.update(source='linear', provider={'id': self.linear_issue()['id'],
+                                             'team': self.n['fm']['tasks.linear.team_id'], 'state_type': 'started'})
+        tasks.save_record(self.n, row)
+        observed = []
+        def emit(inst, node, row):
+            observed.append([r['status'] for r in tasks.read_records(node).values()])
+        with mock.patch.object(task_linear, 'request') as request, mock.patch.object(tasks, 'emit_task_landed', side_effect=emit):
+            train.finish(self.inst, self.n, path, data)
+        request.assert_not_called()
+        self.assertEqual(observed, [['merged', 'merged'], ['merged', 'merged']])
+        self.assertEqual(tasks.read_records(self.n)['APP-1']['provider_pending'], 'completed')
+
+    def test_train_finish_validates_entire_batch_before_any_task_write(self):
+        train, jobs, path, data = self.train_fixture(count=2)
+        rows = tasks.read_records(self.n)
+        rows['APP-2']['title'] = ''
+        tasks.save_record(self.n, rows['APP-2'])
+        before = {p: p.read_bytes() for p in (self.root / 'tasks').glob('*.md')}
+        with self.assertRaisesRegex(ValueError, 'title required'):
+            train.finish(self.inst, self.n, path, data)
+        self.assertEqual(before, {p: p.read_bytes() for p in before})
+        self.assertEqual(json.loads(path.read_text())['state'], 'verified')
+
     def test_backfill_selects_build_order_and_attaches_open_job(self):
         from brain import tasks_backfill, jobs
         (self.root / 'status.md').write_text('# Status\n## Done\n- Finished\n## Build order\n1. Add preview\n2. Add export\n')

@@ -36,7 +36,9 @@ def resolve(n, ref, local=None, cache=None):
     if target is None or boundary(n) != boundary(target) or set(n['owners']) != set(target['owners']):
         raise ValueError('cross-node dependency is unavailable within this ownership boundary')
     _m_tasks.record_path(target, ident)
-    if cache is None:
+    if node_id == n['id'] and local is not None:
+        rows = local
+    elif cache is None:
         rows = _m_tasks.read_records(target)
     else:
         if node_id not in cache:
@@ -79,13 +81,13 @@ def blockers(n, row, rows=None, seen=None):
             result.append(ref)
         elif dep.get('source') != 'linear':
             try:
-                completion(target, dep, seen)
+                completion(target, dep, seen, rows if target['id'] == n['id'] else None)
             except (ValueError, OSError):
                 result.append(ref)
     return result
 
 
-def completion(n, row, seen=None):
+def completion(n, row, seen=None, records=None):
     """A code SHA, operational receipt and report artifact prove different work."""
     seen = set(seen or ())
     identity = (n['id'], row['id'])
@@ -131,7 +133,7 @@ def completion(n, row, seen=None):
                 raise ValueError('report completion requires the exact artifact digest and version')
     else:
         raise ValueError('unknown completion kind')
-    if row.get('unresolved_dependencies') or blockers(n, row, seen=seen):
+    if row.get('unresolved_dependencies') or blockers(n, row, records, seen):
         raise ValueError('unfinished dependencies or successors prevent completion')
 
 
