@@ -13,10 +13,12 @@ const groups = [
   { title: "Backlog", states: ["backlog"] },
   { title: "Ready", states: ["ready"] },
   { title: "In progress", states: ["in-progress", "in-review", "testing"] },
-  { title: "Waiting", states: ["blocked", "parked"] },
+  { title: "Waiting", states: ["blocked", "parked", "unproven"] },
   { title: "Completed", states: ["merged", "done"] },
   { title: "Dropped", states: ["dropped"] },
 ];
+
+const groupStatus = (t: RecordData) => t.delivery_state === "unproven" ? "unproven" : t.status;
 
 export function taskRows(s: RecordData, node?: string): RecordData[] {
   return list(s.nodes).filter(n => !node || n.id === node).flatMap(n => list(n.tasks?.rows).map((task): RecordData => ({ ...task, node: n.id, project: n.title })))
@@ -36,7 +38,7 @@ function TaskCard({ task: t, rows, s, go }: { task: RecordData; rows: RecordData
         Requirement: t.requirement, Decisions: t.decisions?.join(", "), Source: t.request?.ref }} />}>
       <div className="task-card-copy"><strong><Text>{t.title}</Text></strong><small><Text>{t.project}</Text></small></div>
     </ReaderRow>
-    <div className="task-meta"><Status>{label(t.status)}</Status><span>{t.priority}</span><span dir="auto">{t.owner || "Unassigned"}</span></div>
+    <div className="task-meta"><Status>{t.delivery_state === "unproven" ? "Evidence unproven" : label(t.status)}</Status><span>{t.priority}</span><span dir="auto">{t.owner || "Unassigned"}</span></div>
     {!!t.blocked_by?.length && <p className="task-blocker">Blocked by <Text>{titles(t.blocked_by)}</Text></p>}
     {t.status === "parked" && <p className="task-blocker">Resume when: <Text>{t.resume || "A resume condition is recorded"}</Text></p>}
     {t.provider_pending && <p className="task-blocker">Tracker update pending</p>}
@@ -54,22 +56,22 @@ export function Tasks({ s, go, node }: { s: RecordData; go: Go; node?: string })
   const filtered = rows.filter(t => (!query || [t.title, t.project, t.id].join(" ").toLocaleLowerCase().includes(query.toLocaleLowerCase())) && (!owner || t.owner === owner));
   const owners = [...new Set(rows.map(t => String(t.owner || "")).filter(Boolean))].sort();
   const errors = list(s.nodes).filter(n => (!node || n.id === node) && n.tasks?.error);
-  return <section className="surface tasks-surface" aria-label="Tasks">
+  return <section className="surface tasks-surface" data-project={node ? "true" : undefined} aria-label="Tasks">
     {errors.map(n => <p role="alert" className="task-blocker" key={n.id}>{n.title}: {n.tasks.error}</p>)}
     <div className="task-filters">
       <Input aria-label="Search tasks" placeholder="Search tasks" value={query} onChange={e => setQuery(e.target.value)} />
       <Choice name="Filter tasks by owner" value={owner} onChange={setOwner} options={[{ value: "", label: "All owners" }, ...owners.map(o => ({ value: o, label: o }))]} />
-      <small>{filtered.length} of {rows.length} tasks</small>
+      <small>{filtered.length} of {rows.length} tasks · {rows.reduce((sum, t) => sum + (t.attempt_count || 0), 0)} attempts</small>
     </div>
     <SectionTabs value={view} onValue={setView} tabs={[
       { id: "board", label: "Board", body: filtered.length ? <div className="task-board">
-        {groups.filter(g => filtered.some(t => g.states.includes(t.status))).map(g => <section className="task-column" key={g.title} aria-label={g.title + " tasks"}>
-          <h2>{g.title} <span>{filtered.filter(t => g.states.includes(t.status)).length}</span></h2>
-          {filtered.filter(t => g.states.includes(t.status)).map(t => <TaskCard key={t.node + ":" + t.id} task={t} rows={rows} s={s} go={go} />)}
+        {groups.filter(g => filtered.some(t => g.states.includes(groupStatus(t)))).map(g => <section className="task-column" key={g.title} aria-label={g.title + " tasks"}>
+          <h2>{g.title} <span>{filtered.filter(t => g.states.includes(groupStatus(t))).length}</span></h2>
+          {filtered.filter(t => g.states.includes(groupStatus(t))).map(t => <TaskCard key={t.node + ":" + t.id} task={t} rows={rows} s={s} go={go} />)}
         </section>)}
       </div> : <Empty text={rows.length ? "No matching tasks." : "No tasks recorded yet."} action={rows.length ? "Try another search or owner." : "Your coordinator can import existing commitments with the task migration command."} /> },
       { id: "dependencies", label: "Dependencies", body: filtered.length ? <ul className="task-dependencies" aria-label="Task dependency map">
-        {filtered.map(t => <li key={t.node + ":" + t.id}><strong><Text>{t.title}</Text></strong><Status>{label(t.status)}</Status>
+        {filtered.map(t => <li key={t.node + ":" + t.id}><strong><Text>{t.title}</Text></strong><Status>{t.delivery_state === "unproven" ? "Evidence unproven" : label(t.status)}</Status>
           <span>{t.depends_on?.length ? "Depends on " + t.depends_on.map((id: string) => rows.find(r => r.node === t.node && r.id === id)?.title || id).join(", ") : "No dependencies"}</span>
           {!!t.blocked_by?.length && <small className="task-blocker">{t.blocked_by.length} unfinished</small>}
           {!!t.blocks?.length && <small>Blocks {t.blocks.length}</small>}

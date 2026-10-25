@@ -88,6 +88,8 @@ def cmd_rotate(a):
     lines = [f"# Coordinator handover: {n['id']}", "", f"Prepared: {inst.now()}", "",
              "Start from these files. Read node.md, brief.md and the coordinator role before acting.",
              "The old thread must stay available until host tasks and pending requests have been reconciled.", ""]
+    from . import tasks as _m_tasks
+    lines += _m_tasks.brief_index(inst, n)
     for name in ("status.md", "decisions.md", "backlog.md", "inbox.md"):
         path = n["dir"] / name
         try:

@@ -20,3 +20,5 @@
 .task-dependencies strong { flex:1 1 200px; font-size:13px; overflow-wrap:anywhere; }
 .task-dependencies li > span:not([data-slot]) { font-size:12px; color:var(--muted-foreground); }
 .task-dependencies small { font-size:11px; }
+.task-reader .row-actions { width:auto; max-width:100%; }
+.tasks-surface[data-project="true"] { border:0; border-radius:0; }

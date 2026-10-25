@@ -14,7 +14,7 @@ from . import instance as _m_instance
 from . import tasks as _m_tasks
 
 ENDPOINT = 'https://api.linear.app/graphql'
-ISSUE_FIELDS = '''id identifier title description priority url team { id }
+ISSUE_FIELDS = '''id identifier title description priority url updatedAt team { id }
  assignee { id name } state { id type name }
  inverseRelations(first: 100) { nodes { type issue { identifier } } pageInfo { hasNextPage } }'''
 PULL = '''query TaskIssues($team: ID!, $after: String) {
@@ -97,24 +97,30 @@ def pull(inst, n):
             dependencies = [r['issue']['identifier'] for r in relations['nodes'] if r.get('type') == 'blocks']
             assignee = issue.get('assignee') or {}
             row = {'version': _m_tasks.VERSION, 'id': ident, 'kind': 'feature', 'order': 0, 'decisions': [],
-                   'evidence': [], 'provenance': [], 'strikes': 0, 'created': inst.now(), **previous,
+                   'evidence': [], 'provenance': [], 'superseded_by': [], 'scope': [], 'aliases': [], 'unresolved_dependencies': [], 'completion_kind': 'merge', 'last_progress_at': inst.now(), 'strikes': 0, 'created': inst.now(), **previous,
                    'source': 'linear', 'title': issue['title'], 'description': issue.get('description') or '',
                    'status': status, 'priority': {0: 'P2', 1: 'P0', 2: 'P1', 3: 'P2', 4: 'P3'}.get(issue.get('priority'), 'P2'),
                    'owner': assignee.get('name') or '', 'depends_on': dependencies,
                    'external_url': issue.get('url') or '',
                    'provider': {'id': uid(issue.get('id')), 'team': team, 'state_id': uid(state.get('id')),
-                                'state_type': state['type'], 'synced_at': inst.now()}}
+                                'state_type': state['type'], 'synced_at': inst.now(), 'updated_at': issue.get('updatedAt')}}
             if previous.get('status') == 'parked':
                 row['status'] = 'parked'
             if status == 'dropped':
                 row['drop_reason'] = 'Provider state: canceled'
             # Source updates do not pretend to be local work activity.
             row['updated'] = previous.get('updated') or inst.now()
+            if previous and any(previous.get(key) != row.get(key) for key in ('title', 'description', 'status', 'depends_on')):
+                row['last_progress_at'] = inst.now()
+            if status == 'done' and previous.get('status') != 'done':
+                row['event_pending'] = 'task_landed'
             rows[ident] = row
         _m_tasks.validate(n, rows)
         for ident, row in rows.items():
             if row != old.get(ident):
                 _m_tasks.save_record(n, row)
+                if row.get('event_pending'):
+                    _m_tasks.emit_task_landed(inst, n, row)
         inst.commit([], n['id'] + ': pull external tasks')
     return list(rows.values())
 

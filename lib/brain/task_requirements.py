@@ -32,6 +32,8 @@ def add_rule(inst, n, ident, text, at, ref, supersedes=None):
     rules = _m_tasks.read_records(n, 'rules')
     if ident in rules or supersedes and supersedes not in rules:
         raise ValueError('rule already exists or superseded rule not found')
+    if supersedes and rules[supersedes].get('status') != 'active':
+        raise ValueError('only an active rule can be superseded')
     row = {'version': _m_tasks.VERSION, 'id': ident, 'text': text, 'at': at, 'ref': ref,
            'status': 'active', 'created': inst.now()}
     if supersedes:

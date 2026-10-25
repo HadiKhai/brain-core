@@ -12,8 +12,11 @@ test("global task board preserves parked and dropped debt and opens the exact jo
   await page.setViewportSize({ width: 1440, height: 1000 });
   await page.goto('/snapshot?scenario=tasks#view=tasks');
   const tasks = page.locator('[data-page=tasks]');
-  await expect(tasks.locator('.task-card')).toHaveCount(6);
+  await expect(tasks.locator('.task-card')).toHaveCount(7);
   await expect(tasks.getByRole('region', { name: 'Waiting tasks' })).toContainText('Narrow the parser contract');
+  await expect(tasks.getByRole('region', { name: 'Waiting tasks' })).toContainText('Reconcile an old delivery claim');
+  await expect(tasks).toContainText('7 of 7 tasks · 2 attempts');
+  await expect(tasks.getByRole('region', { name: 'Completed tasks' })).not.toContainText('old delivery claim');
   await expect(tasks.getByRole('region', { name: 'Dropped tasks' })).toContainText('Retain the obsolete preview');
   await expect(tasks.getByRole('region', { name: 'Completed tasks' })).not.toContainText('obsolete');
   await shot(page, 'tasks-board');
@@ -45,9 +48,11 @@ test("project task tab is scoped and mobile layout has no page overflow", async 
   await page.goto('/snapshot?scenario=tasks#view=project&node=field-guide&tab=tasks');
   const project = page.locator('[data-page=project]');
   const tasks = project.getByRole('region', { name: 'Tasks', exact: true });
-  await expect(tasks.locator('.task-card')).toHaveCount(5);
+  await expect(tasks.locator('.task-card')).toHaveCount(6);
   await expect(tasks).not.toContainText('Translate the public report');
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  const titleBox = await tasks.locator('.task-card-copy').first().boundingBox();
+  expect(titleBox?.width).toBeGreaterThan(120);
   await shot(page, 'tasks-mobile-project');
   await tasks.getByRole('button', { name: 'Read task', exact: true }).first().click();
   await expect(page.getByRole('dialog')).toContainText('Keep the source request');

@@ -19,7 +19,9 @@ SHA = re.compile(r'(?:[0-9a-f]{40}|[0-9a-f]{64})\Z')
 FIELDS = {'title', 'kind', 'status', 'priority', 'order', 'parent', 'depends_on', 'requirement', 'decisions',
           'owner', 'job', 'branch', 'pr', 'merge_sha', 'code_path', 'evidence', 'estimate', 'spent', 'strikes',
           'park_reason', 'resume', 'drop_reason', 'description', 'source', 'provenance', 'external_url'}
-LISTS = {'depends_on', 'decisions', 'evidence', 'provenance'}
+FIELDS |= {'superseded_by', 'completion_kind', 'completion_receipt', 'baseline_sha', 'scope', 'aliases',
+           'last_progress_at', 'review_at', 'next_action', 'drop_decision', 'hold', 'execution_owner', 'unresolved_dependencies', 'contract', 'authority'}
+LISTS = {'depends_on', 'decisions', 'evidence', 'provenance', 'superseded_by', 'scope', 'aliases', 'unresolved_dependencies'}
 
 
 def record_path(n, ident, folder='tasks'):
@@ -49,6 +51,11 @@ def read_records(n, folder='tasks'):
         if row.get('version') != VERSION or row.get('id') != path.stem:
             raise ValueError('unsupported or mismatched record: ' + path.name)
         row['description'] = body.strip()
+        if folder == 'tasks':
+            for key in ('superseded_by', 'scope', 'aliases', 'unresolved_dependencies'):
+                row.setdefault(key, [])
+            row.setdefault('completion_kind', 'merge')
+            row.setdefault('last_progress_at', row.get('created', row.get('updated', '')))
         records[row['id']] = row
     return records
 
@@ -75,6 +82,11 @@ def normalize(changes):
     if unknown:
         raise ValueError('unknown task fields: ' + ', '.join(sorted(unknown)))
     out = dict(changes)
+    if 'completion_receipt' in out and isinstance(out['completion_receipt'], str):
+        try:
+            out['completion_receipt'] = json.loads(out['completion_receipt'])
+        except ValueError:
+            raise ValueError('completion_receipt must be JSON')
     for key in LISTS & out.keys():
         if isinstance(out[key], str):
             out[key] = [s.strip() for s in out[key].split(',') if s.strip()]
@@ -101,6 +113,15 @@ def validate(n, records):
             raise ValueError(ident + ': title required')
         if row.get('status') not in STATUSES or row.get('kind') not in KINDS:
             raise ValueError(ident + ': unknown status or kind')
+        for key in ('title', 'status', 'kind', 'owner', 'source', 'job', 'branch', 'code_path', 'merge_sha',
+                    'baseline_sha', 'park_reason', 'resume', 'review_at', 'next_action', 'requirement', 'parent', 'drop_decision', 'hold'):
+            if key in row and not isinstance(row[key], str):
+                raise ValueError(ident + ': invalid scalar field ' + key)
+        if row.get('source') == 'linear':
+            from . import task_linear as _m_linear
+            if not isinstance(row.get('provider'), dict) or row['provider'].get('team') != _m_linear.config(n):
+                raise ValueError('external task lacks provider identity')
+            _m_linear.uid(row['provider'].get('id'))
         if row.get('source') not in ('local', 'linear'):
             raise ValueError(ident + ': invalid task source')
         if not isinstance(row.get('owner'), str) or not row['owner'].strip():
@@ -114,7 +135,7 @@ def validate(n, records):
         for key in LISTS:
             if not isinstance(row.get(key), list) or any(not isinstance(x, str) or not x.strip() for x in row[key]):
                 raise ValueError(ident + ': invalid ' + key)
-        deps = row['depends_on'] + ([row['parent']] if row.get('parent') else [])
+        deps = [d for d in row['depends_on'] if ':' not in d] + ([row['parent']] if row.get('parent') else [])
         external = row.get('source') == 'linear' and isinstance(row.get('provider'), dict)
         if any(d not in records for d in deps) and not external:
             raise ValueError(ident + ': missing dependency or parent')
@@ -127,34 +148,20 @@ def validate(n, records):
             if jobs is None:
                 from . import jobs as _m_jobs
                 jobs = _m_jobs.read_jobs(n) or []
-            if not any(r.get('Job') == row.get('branch') and not r.get('Ended') and
+            has_attempt = any(a.get('state') == 'open' and a.get('id') for a in row.get('attempts', []) if isinstance(a, dict))
+            if not has_attempt and not any(r.get('Job') == row.get('branch') and not r.get('Ended') and
                        _m_jobs.job_key(r) == row.get('job') for r in jobs):
                 raise ValueError(ident + ': active status requires a live ledger job and branch')
-        if row['status'] in ('merged', 'done') and not (external and row['provider'].get('state_type') == 'completed'):
-            if not SHA.fullmatch(row.get('merge_sha', '')) or not row.get('code_path') or not row['evidence']:
-                raise ValueError(ident + ': completion requires merge_sha, code_path and evidence')
-            home = n.get('home_path')
-            if not home or _m_common.git('merge-base', '--is-ancestor', row['merge_sha'], 'refs/heads/main', cwd=home).returncode:
-                raise ValueError(ident + ': merge_sha must be on local main')
-        if row['status'] == 'parked' and (not row.get('park_reason') or not row.get('resume')):
+        if row['status'] in ('merged', 'done'):
+            from . import task_flow as _m_flow
+            _m_flow.completion(n, row)
+        if row['status'] == 'parked' and (not row.get('park_reason') or not row.get('resume') or
+                not row.get('next_action') or not (row.get('owner') or row.get('execution_owner')) or not _m_instance.Instance(instance_root(n)).parse_time(row.get('review_at'))):
             raise ValueError(ident + ': parked tasks require a reason and resume condition')
-        if row['status'] == 'dropped' and not row.get('drop_reason'):
+        if row['status'] == 'dropped' and not (external and row['provider'].get('state_type') == 'canceled') and (not row.get('drop_reason') or not re.fullmatch(r'(?:repo:D[0-9]+|private:D-[A-Za-z0-9-]+)', row.get('drop_decision', ''))):
             raise ValueError(ident + ': dropped tasks require an explicit reason')
-    visited, visiting = set(), set()
-    def visit(ident):
-        if ident in visiting:
-            raise ValueError('task dependency or parent cycle')
-        if ident in visited:
-            return
-        visiting.add(ident)
-        row = records[ident]
-        for dep in row['depends_on'] + ([row['parent']] if row.get('parent') else []):
-            if dep in records:
-                visit(dep)
-        visiting.remove(ident)
-        visited.add(ident)
-    for ident in records:
-        visit(ident)
+    from . import task_flow as _m_flow
+    _m_flow.validate_graph(n, records)
 
 
 def mutate(inst, n, ident, changes, create=False, provider=False):
@@ -172,14 +179,23 @@ def mutate(inst, n, ident, changes, create=False, provider=False):
         if create:
             row = {'version': VERSION, 'id': ident, 'title': '', 'kind': 'feature', 'status': 'backlog',
                    'priority': 'P2', 'order': 0, 'owner': ','.join(n.get('owners', [])), 'depends_on': [], 'decisions': [],
-                   'evidence': [], 'provenance': [], 'strikes': 0, 'source': 'local', 'created': inst.now()}
+                   'evidence': [], 'provenance': [], 'superseded_by': [], 'scope': [], 'aliases': [], 'unresolved_dependencies': [],
+                   'strikes': 0, 'source': 'local', 'completion_kind': 'merge', 'created': inst.now(),
+                   'last_progress_at': inst.now()}
         else:
             row = dict(rows[ident])
         row.update(changes, updated=inst.now())
+        if set(changes) & {'status', 'job', 'evidence', 'merge_sha', 'completion_receipt'}:
+            row['last_progress_at'] = changes.get('last_progress_at') or inst.now()
         rows[ident] = row
         validate(n, rows)
+        closed_transition = row['status'] in ('merged', 'done') and (create or read_records(n).get(ident, {}).get('status') != row['status'])
+        if closed_transition:
+            row['event_pending'] = 'task_landed'
         save_record(n, row)
         inst.commit([], n['id'] + ': task ' + ident)
+        if closed_transition:
+            emit_task_landed(inst, n, row)
         return row
 
 
@@ -187,7 +203,8 @@ def projection(n):
     rows = read_records(n)
     result = []
     for row in sorted(rows.values(), key=lambda r: (r.get('order', 0), r.get('priority', 'P2'), r['id'])):
-        blockers = [d for d in row.get('depends_on', []) if d not in rows or rows[d].get('status') not in ('done', 'merged')]
+        from . import task_flow as _m_flow
+        blockers = _m_flow.blockers(n, row, rows) + row.get('unresolved_dependencies', [])
         result.append({**row, 'blocked_by': blockers,
                        'blocks': [r['id'] for r in rows.values() if row['id'] in r.get('depends_on', [])]})
     return result
@@ -244,13 +261,24 @@ def cmd_task(a):
             if a.owner:
                 rows = [r for r in rows if r.get('owner') == a.owner]
             if a.action == 'next':
-                rows = [r for r in rows if r['status'] == 'ready' and not r['blocked_by']][:1]
+                from . import task_flow as _m_flow
+                rows = [r for r in rows if r['status'] == 'ready' and not r['blocked_by'] and not _m_flow.holds(inst, n, r)][:1]
             if a.action == 'check':
                 validate(n, read_records(n))
                 print('tasks: valid')
                 return
         if a.json:
-            print(json.dumps(rows, ensure_ascii=False))
+            if a.action == 'next':
+                from . import task_flow as _m_flow
+                all_rows = projection(n)
+                value = {'next': rows[0] if rows else None,
+                         'counts': {'tasks': len(all_rows), 'parked': sum(r['status'] == 'parked' for r in all_rows),
+                                    'held': sum(bool(_m_flow.holds(inst, n, r)) for r in all_rows),
+                                    'active_attempts': sum(sum(not a.get('ended') for a in r.get('attempts', [])) for r in all_rows)},
+                         'holds': _m_flow.holds(inst, n)}
+            else:
+                value = rows
+            print(json.dumps(value, ensure_ascii=False))
         else:
             for row in rows:
                 if a.action == 'graph':
@@ -272,6 +300,8 @@ def register(sub):
             external.add_argument('--title', required=True)
             external.add_argument('--description', default='')
         external.set_defaults(f=cmd_task_provider)
+    from . import task_flow as _m_flow
+    _m_flow.register(actions)
     from . import task_requirements as _m_requirements
     from . import tasks_backfill as _m_backfill
     _m_requirements.register(actions)
@@ -282,6 +312,7 @@ def register(sub):
     fill = actions.add_parser('backfill', help='import node-local promises without changing source files')
     fill.add_argument('node')
     fill.add_argument('--apply', action='store_true')
+    fill.add_argument('--register', help='versioned stopped-work register; imported as open reconciliation')
     fill.set_defaults(f=cmd_task_backfill)
     failure = actions.add_parser('event', help='record one identified failed round')
     failure.add_argument('node')
@@ -322,7 +353,10 @@ def prepare_start(n, task_id=None, branch=''):
     row = rows.get(task_id)
     if not row or row['status'] != 'ready':
         raise ValueError('starting a job requires a ready task')
-    if any(rows.get(d, {}).get('status') not in ('merged', 'done') for d in row['depends_on']):
+    from . import task_flow as _m_flow
+    if _m_flow.holds(_m_flow.instance_for(n), n, row):
+        raise ValueError('task dispatch is held; explicit resume required')
+    if row.get('unresolved_dependencies') or _m_flow.blockers(n, row, rows):
         raise ValueError('task dependencies are unfinished')
     validate(n, rows)
 
@@ -331,7 +365,22 @@ def job_started(inst, n, row):
     ident = row.get('Task')
     if ident:
         from . import jobs as _m_jobs
-        mutate(inst, n, ident, {'status': 'in-progress', 'job': _m_jobs.job_key(row), 'branch': row['Job']}, provider=True)
+        from . import task_flow as _m_flow
+        current = read_records(n)[ident]
+        baseline = inst.local_of(n['id']).get('worktrees', {}).get(row['Job'], {}).get('start')
+        if not baseline and n.get('home_path'):
+            baseline = _m_common.git('rev-parse', '--verify', 'HEAD', cwd=n['home_path']).stdout.strip()
+        changes = {'status': 'in-progress', 'job': _m_jobs.job_key(row), 'branch': row['Job'],
+                   'aliases': list(dict.fromkeys(current.get('aliases', []) + [row['Job']])),
+                   'execution_owner': ','.join(n.get('owners', []))}
+        if baseline and not current.get('baseline_sha'):
+            changes['baseline_sha'] = baseline
+        updated = mutate(inst, n, ident, changes, provider=True)
+        attempts = updated.get('attempts', [])
+        key = _m_jobs.job_key(row)
+        if not any(a.get('job') == key for a in attempts):
+            updated['attempts'] = attempts + [{'id': key, 'job': key, 'branch': row['Job'], 'head': baseline or '', 'started': row['Started'], 'state': 'open'}]
+            save_record(n, updated)
         provider_job_state(inst, n, ident, 'started')
 
 
@@ -353,6 +402,8 @@ def event(inst, n, ident, event_id, reason):
         row['strikes'] += 1
         if row['strikes'] >= 2:
             row.update(status='parked', park_reason=reason, resume='Repair the failing step and explicitly set ready')
+            from . import task_flow as _m_flow
+            row.update(_m_flow.park_fields(inst))
         else:
             row.update(status='blocked', park_reason=reason)
         row['updated'] = inst.now()
@@ -384,6 +435,12 @@ def job_closed(inst, n, row):
     if not ident:
         return
     from . import sync as _m_sync
+    from . import jobs as _m_jobs
+    current = read_records(n)[ident]
+    for attempt in current.get('attempts', []):
+        if attempt.get('job') == _m_jobs.job_key(row):
+            attempt.update(state='closed', ended=row.get('Ended') or inst.now())
+    save_record(n, current)
     packet = _m_sync.integration_packet(inst, n, row) or {}
     changes = {'status': 'parked', 'park_reason': row.get('Cause') or 'Job closed without proven task completion',
                'resume': 'Start a new task job or supply verified main landing evidence'}
@@ -394,6 +451,9 @@ def job_closed(inst, n, row):
         if paths:
             changes = {'status': 'merged', 'merge_sha': head, 'code_path': ', '.join(paths),
                        'evidence': ['Verified job ' + row['Job'] + ' at ' + inst.now()], 'park_reason': '', 'resume': ''}
+    from . import task_flow as _m_flow
+    if changes['status'] == 'parked':
+        changes.update(_m_flow.park_fields(inst))
     # Existing task proof remains unchanged if the job endpoint is not on main.
     try:
         mutate(inst, n, ident, changes, provider=True)
@@ -401,7 +461,7 @@ def job_closed(inst, n, row):
             provider_job_state(inst, n, ident, 'completed')
     except ValueError:
         mutate(inst, n, ident, {'status': 'parked', 'park_reason': 'Landing evidence is incomplete',
-                              'resume': 'Provide the exact verified commit already on main'}, provider=True)
+                              'resume': 'Provide the exact verified commit already on main', **_m_flow.park_fields(inst)}, provider=True)
 
 
 def due_tasks(inst, n):
@@ -418,9 +478,14 @@ def due_tasks(inst, n):
         elif row['status'] == 'parked':
             kind = 'task-parked'
         elif row['status'] in ('in-progress', 'in-review', 'testing'):
-            at = inst.parse_time(row.get('updated'))
+            at = inst.parse_time(row.get('last_progress_at') or row.get('updated'))
             if at and (inst.now_dt() - at).total_seconds() >= 900:
                 kind = 'task-stalled'
+        progress = inst.parse_time(row.get('last_progress_at') or row.get('created'))
+        if row['status'] not in ('merged', 'done', 'dropped') and progress and (inst.now_dt() - progress).total_seconds() >= 86400:
+            items.append({'node': n['id'], 'kind': 'task-aging', 'task': row['id'],
+                          'episode': row['id'] + ':aging:' + (row.get('last_progress_at') or row['created']),
+                          'text': row['id'] + ': reconsider the task after 24h without substantive progress'})
         if kind:
             items.append({'node': n['id'], 'kind': kind, 'task': row['id'],
                           'episode': row['id'] + ':' + row['updated'],
@@ -441,7 +506,8 @@ def cmd_task_backfill(a):
     from . import tasks_backfill as _m_backfill
     inst = _m_nodes.load()
     try:
-        print(json.dumps(_m_backfill.backfill(inst, inst.node(a.node), a.apply), ensure_ascii=False))
+        value = _m_backfill.import_register(inst, inst.node(a.node), a.register, a.apply) if a.register else _m_backfill.backfill(inst, inst.node(a.node), a.apply)
+        print(json.dumps(value, ensure_ascii=False))
     except (OSError, ValueError) as error:
         _m_common.die(str(error))
 
@@ -451,7 +517,12 @@ def cmd_task_provider(a):
     inst = _m_nodes.load()
     n = inst.node(a.node)
     try:
-        result = _m_linear.create(inst, n, a.title, a.description) if a.action == 'create' else _m_linear.sync(inst, n)
+        if a.action == 'create':
+            result = _m_linear.create(inst, n, a.title, a.description)
+        else:
+            if not provider_pull_on_wake(inst, n):
+                raise ValueError('provider sync unknown')
+            result = projection(n)
         print(json.dumps(result, ensure_ascii=False))
     except (OSError, ValueError, KeyError, TypeError):
         _m_common.die('External task operation failed; inspect provider configuration and retained mirror')
@@ -459,12 +530,19 @@ def cmd_task_provider(a):
 
 def provider_pull_on_wake(inst, n):
     if source(n) != 'linear':
-        return
+        return True
     from . import task_linear as _m_linear
+    state = 'synced'
     try:
         _m_linear.sync(inst, n)
     except (OSError, ValueError, KeyError, TypeError):
+        state = 'unknown'
         print('! External task sync failed; retained mirror and pending state need repair')
+    path = n['dir'] / 'task-sync.json'
+    _m_common.atomic_write(path, json.dumps({'version': 1, 'state': state, 'at': inst.now()}) + '\n')
+    _m_common.touch(path)
+    inst.commit([], n['id'] + ': task provider reading')
+    return state == 'synced'
 
 
 def provider_job_state(inst, n, ident, state_type):
@@ -509,6 +587,15 @@ def ui_tasks(inst, n):
         rows = []
         for row in projection(n):
             req = requirements.get(row.get('requirement'), {})
+            delivery = 'open'
+            if row['status'] in ('merged', 'done'):
+                from . import task_flow as _m_flow
+                try:
+                    _m_flow.completion(n, row)
+                    delivery = 'provider' if row.get('source') == 'linear' else 'verified'
+                except (OSError, ValueError):
+                    delivery = 'unproven'
+            row = {**row, 'delivery_state': delivery, 'attempt_count': len(row.get('attempts', []))}
             rows.append({**row, 'request': {'quote': req.get('quote', ''), 'at': req.get('at', ''),
                                           'ref': req.get('ref', ''), 'date_basis': req.get('date_basis', 'source-timestamp')}})
         terms = _m_guard.never_terms(n)
@@ -523,3 +610,49 @@ def ui_tasks(inst, n):
         return {'source': source(n), 'rows': screen(rows), 'error': ''}
     except (OSError, ValueError, TypeError, KeyError):
         return {'source': 'unknown', 'rows': [], 'error': 'Task records need repair before they can be displayed'}
+
+
+def instance_root(n):
+    from . import task_flow as _m_flow
+    return _m_flow.instance_for(n).root
+
+
+def brief_index(inst, n):
+    from . import task_flow as _m_flow
+    return _m_flow.brief_index(inst, n)
+
+
+def reconcile_dependencies(inst, changed_node=None, event_id=None):
+    from . import task_flow as _m_flow
+    return _m_flow.reconcile_dependencies(inst, changed_node, event_id)
+
+
+def emit_task_landed(inst, n, row):
+    """Metadata-only event integration; an unavailable journal keeps retry intent."""
+    import hashlib
+    try:
+        from . import events as _m_events
+    except ImportError:
+        return False
+    identity = hashlib.sha256(json.dumps([row['id'], row.get('merge_sha'), row.get('completion_receipt'), row.get('provider', {}).get('updated_at')], sort_keys=True).encode()).hexdigest()
+    try:
+        prior = next((e for e in _m_events.facts(inst, n, row.get('job')) if
+                      e.get('data', {}).get('fact_type') == 'task_landed' and e['data'].get('inputs') == identity), None)
+        evidence = {'ref': row['id']}
+        if row.get('merge_sha'):
+            evidence['head'] = row['merge_sha']
+        receipt = prior or _m_events.record_fact(inst, n, 'task_landed', job_key=row.get('job'),
+                        phase='finished', state='done', inputs=identity, evidence=evidence)
+        current = read_records(n)[row['id']]
+        current.pop('event_pending', None)
+        current['landing_event'] = receipt['ref']
+        save_record(n, current)
+        inst.commit([], n['id'] + ': task landing event recorded')
+        return True
+    except (OSError, ValueError, KeyError, TypeError):
+        return False
+
+
+def launch_plan(inst, n, task_id=None, branch=None):
+    from . import task_flow as _m_flow
+    return _m_flow.launch_plan(inst, n, task_id, branch)

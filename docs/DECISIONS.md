@@ -139,3 +139,39 @@ provider completion is labelled as external evidence. Search and ownership
 filters work locally. Task snapshots screen nested strings with the node guard,
 retain the existing keyed state endpoint and never mutate records or pull a
 provider while rendering. Malformed storage produces a repair message.
+
+## D1308: Cross-node dependencies and scoped completion retain obligations
+
+Task references may use `node:id` within the same owner set and sealing boundary.
+Dependency, parent and successor cycles refuse before writes. A landing event
+reevaluates dependent blocked tasks idempotently; holds and explicit pauses remain
+in force until explicitly removed. Reconsideration dates never authorize unpause.
+
+Code completion requires a changed task baseline, delivering commit on intended
+main and changed paths covering every declared scope. An open successor cannot
+close transferred work. Operations require scoped, dated passed receipts; reports
+add an exact node-local artifact digest/version. Provider completion remains an
+external fact. Drops require their decision reference.
+
+Task IDs survive attempts and branch aliases. Plain-Git and operational attempts
+can be registered without running host actions. Parked obligations retain owner,
+reason, resume condition, review date and next action in cold briefs. Aging uses
+last substantive progress and a stable episode, never a bookkeeping refresh.
+
+## D1309: Stopped-work imports retain evidence without inventing delivery
+
+A versioned source register groups aliases under stable obligations and retains
+raw heads, scope and receipt references. Importing it creates open reconciliation
+tasks, including for uncertain or retired implementations. Replays preserve task
+progress. Dashboard delivery labels are derived from current scoped evidence;
+stale or unknown completion is visible as unproven rather than silently counted.
+Task landing facts carry bounded references and fingerprints, with retry intent
+retained until the metadata-only event journal confirms publication.
+
+## D1310: Dispatch plans require task-specific authority and contract
+
+The task engine exposes native launch commands only after dependency, hold,
+capacity, explicit decision authority, contract completeness and code-scope
+checks. It never treats a detected Markdown entry as execution authority.
+Actual host launch and rebinding stay with the configured lifecycle adapter;
+plan generation creates neither a thread nor a worktree.

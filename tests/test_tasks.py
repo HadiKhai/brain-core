@@ -24,6 +24,10 @@ class Tasks(Scenario):
         self.addCleanup(self.commit.stop)
 
     def add(self, ident='APP-1', **changes):
+        if changes.get('status') == 'parked':
+            changes = {'review_at': self.inst.now(), 'next_action': 'Repair the source', **changes}
+        if changes.get('status') == 'dropped':
+            changes = {'drop_decision': 'private:D-3', **changes}
         return tasks.mutate(self.inst, self.n, ident, {'title': 'Example', **changes}, create=True)
 
     def test_round_trip_multiline_and_links(self):
@@ -47,7 +51,7 @@ class Tasks(Scenario):
         self.add(status='parked', park_reason='Two failures', resume='Repair parser')
         self.add('APP-2', status='ready', depends_on=['APP-1'])
         self.assertEqual(tasks.projection(self.n)[1]['blocked_by'], ['APP-1'])
-        tasks.mutate(self.inst, self.n, 'APP-1', {'status': 'dropped', 'drop_reason': 'Scope removed'})
+        tasks.mutate(self.inst, self.n, 'APP-1', {'status': 'dropped', 'drop_reason': 'Scope removed', 'drop_decision': 'private:D-3'})
         self.assertEqual(tasks.projection(self.n)[1]['blocked_by'], ['APP-1'])
         with self.assertRaises(ValueError):
             tasks.mutate(self.inst, self.n, 'APP-2', {'status': 'parked'})
@@ -58,8 +62,12 @@ class Tasks(Scenario):
                 self.add(status=status, job='wrong', branch='job/sample', merge_sha='a' * 40,
                          code_path='README.md', evidence=['tests passed'])
         self.repo(self.root)
+        base = self.git('rev-parse', 'HEAD', cwd=self.root).strip()
+        (self.root / 'README.md').write_text('Changed implementation\n')
+        self.git('add', 'README.md', cwd=self.root)
+        self.git('commit', '-qm', 'Deliver report', cwd=self.root)
         sha = self.git('rev-parse', 'HEAD', cwd=self.root).strip()
-        self.add(status='merged', merge_sha=sha, code_path='README.md', evidence=['focused tests passed'])
+        self.add(status='merged', baseline_sha=base, scope=['README.md'], merge_sha=sha, code_path='README.md', evidence=['focused tests passed'])
         tasks.mutate(self.inst, self.n, 'APP-1', {'status': 'done'})
         self.assertEqual(tasks.read_records(self.n)['APP-1']['status'], 'done')
 
@@ -96,7 +104,7 @@ class Tasks(Scenario):
         self.b(root, 'task', 'add', 'root', 'APP-2', 'status=ready', 'order=1', 'depends_on=APP-1', '--title', 'Blocked')
         self.b(root, 'task', 'add', 'root', 'APP-3', 'status=ready', 'order=2', '--title', 'Available')
         out = json.loads(self.b(root, 'task', 'next', 'root', '--json'))
-        self.assertEqual([r['id'] for r in out], ['APP-3'])
+        self.assertEqual(out['next']['id'], 'APP-3')
         self.assertIn('tasks: valid', self.b(root, 'task', 'check', 'root'))
 
     def test_job_start_requires_ready_task_and_records_exact_job(self):
@@ -140,12 +148,12 @@ class Tasks(Scenario):
         from brain import jobs, sync
         self.repo(self.root)
         base = self.git('rev-parse', 'HEAD', cwd=self.root).strip()
+        self.add(status='ready', scope=['engine.py'])
+        jobs.job_started(self.inst, self.n, 'job/example', 'codex', task_id='APP-1')
         (self.root / 'engine.py').write_text('VERSION = 1\n')
         self.git('add', 'engine.py', cwd=self.root)
         self.git('commit', '-qm', 'Implement example', cwd=self.root)
         head = self.git('rev-parse', 'HEAD', cwd=self.root).strip()
-        self.add(status='ready')
-        jobs.job_started(self.inst, self.n, 'job/example', 'codex', task_id='APP-1')
         row = jobs.read_jobs(self.n)[0]
         row.update(Outcome='merged', **{'Head commit': head})
         with mock.patch.object(sync, 'integration_packet', return_value={'verify_result': 0, 'head': head, 'main': base}):
@@ -336,7 +344,7 @@ class Tasks(Scenario):
     def test_source_task_upsert_is_idempotent_and_preserves_parked_progress(self):
         row = tasks.upsert_source_task(self.inst, self.n, 'enforcement:sample', 'Repair recurring failure', kind='fix')
         ident = row['id']
-        tasks.mutate(self.inst, self.n, ident, {'status': 'parked', 'park_reason': 'Two rounds', 'resume': 'Narrow parser'})
+        tasks.mutate(self.inst, self.n, ident, {'status': 'parked', 'park_reason': 'Two rounds', 'resume': 'Narrow parser', 'review_at': self.inst.now(), 'next_action': 'Repair source'})
         same = tasks.upsert_source_task(self.inst, self.n, 'enforcement:sample', 'New observation')
         self.assertEqual(same['id'], ident)
         self.assertEqual(same['title'], 'Repair recurring failure')
@@ -354,3 +362,266 @@ class Tasks(Scenario):
         state = tasks.ui_tasks(self.inst, self.n)
         self.assertEqual(state['rows'], [])
         self.assertTrue(state['error'])
+
+    def peer_node(self, ident, owners='sample'):
+        path = self.root / 'nodes' / ident
+        path.mkdir(parents=True)
+        (path / 'node.md').write_text('---\nid: ' + ident + '\nowners: ' + owners + '\nhome: here\n---\n')
+        return self.inst.node(ident)
+
+    def ops_done(self, n, ident='OPS-1'):
+        return tasks.mutate(self.inst, n, ident, {'title': 'Restore service', 'source': 'local', 'completion_kind': 'ops',
+            'status': 'done', 'evidence': ['Exact operation passed'],
+            'completion_receipt': {'result': 'passed', 'ref': 'run:fixture-1', 'scope': 'Restore service', 'at': self.inst.now()}}, create=True)
+
+    def test_cross_node_landing_unblocks_once_and_preserves_boundary(self):
+        peer = self.peer_node('producer')
+        tasks.mutate(self.inst, peer, 'OPS-1', {'title': 'Restore service', 'completion_kind': 'ops'}, create=True)
+        self.add(status='blocked', depends_on=['producer:OPS-1'])
+        self.assertEqual(tasks.projection(self.n)[0]['blocked_by'], ['producer:OPS-1'])
+        tasks.mutate(self.inst, peer, 'OPS-1', {'status': 'done', 'evidence': ['Operation passed'],
+            'completion_receipt': {'result': 'passed', 'ref': 'run:fixture', 'scope': 'Restore service', 'at': self.inst.now()}})
+        changed = tasks.reconcile_dependencies(self.inst, 'producer', 'event:one')
+        self.assertEqual(changed, [{'node': 'root', 'task': 'APP-1'}])
+        self.assertEqual(tasks.reconcile_dependencies(self.inst, 'producer', 'event:one'), [])
+        sealed = self.peer_node('sealed', owners='other')
+        with self.assertRaises(ValueError):
+            tasks.mutate(self.inst, self.n, 'APP-1', {'depends_on': ['sealed:OPS-1']})
+
+    def test_cross_node_cycles_are_rejected_before_mutation(self):
+        peer = self.peer_node('producer')
+        self.add()
+        tasks.mutate(self.inst, peer, 'APP-2', {'title': 'Peer work', 'depends_on': ['root:APP-1']}, create=True)
+        with self.assertRaises(ValueError):
+            tasks.mutate(self.inst, self.n, 'APP-1', {'depends_on': ['producer:APP-2']})
+        self.assertEqual(tasks.read_records(self.n)['APP-1']['depends_on'], [])
+
+    def test_pause_hold_and_reconsideration_date_never_dispatch_or_unpause(self):
+        from brain import task_flow
+        peer = self.peer_node('producer')
+        self.ops_done(peer)
+        self.add(status='blocked', depends_on=['producer:OPS-1'], hold='private:D-1 until explicit resume')
+        self.assertEqual(tasks.reconcile_dependencies(self.inst, 'producer', 'event:one'), [])
+        tasks.mutate(self.inst, self.n, 'APP-1', {'hold': ''})
+        self.n['fm']['labels'] = 'state:paused'
+        self.assertTrue(task_flow.holds(self.inst, self.n))
+        with self.assertRaises(ValueError):
+            tasks.prepare_start(self.n, 'APP-1', 'job/example')
+        self.n['fm']['labels'] = ''
+        self.assertEqual(tasks.reconcile_dependencies(self.inst, 'producer', 'event:two'), [{'node': 'root', 'task': 'APP-1'}])
+
+    def test_park_handover_and_aging_preserve_exact_open_set(self):
+        from brain import task_flow
+        self.add(status='parked', park_reason='Two failures', resume='Narrow parser')
+        old = (self.inst.now_dt() - __import__('datetime').timedelta(days=2)).isoformat()
+        tasks.mutate(self.inst, self.n, 'APP-1', {'last_progress_at': old})
+        first = [r for r in tasks.due_tasks(self.inst, self.n) if r['kind'] == 'task-aging'][0]
+        before = task_flow.brief_index(self.inst, self.n)
+        tasks.mutate(self.inst, self.n, 'APP-1', {'estimate': '1h'})
+        after = task_flow.brief_index(self.inst, self.n)
+        second = [r for r in tasks.due_tasks(self.inst, self.n) if r['kind'] == 'task-aging'][0]
+        self.assertEqual(first['episode'], second['episode'])
+        self.assertEqual(before, after)
+        self.assertIn('APP-1 [parked]', '\n'.join(after))
+
+    def test_operations_and_exact_report_receipts_do_not_borrow_code_proof(self):
+        import hashlib
+        row = self.ops_done(self.n)
+        self.assertEqual(row['status'], 'done')
+        artifact = self.root / 'report.md'
+        artifact.write_text('Measured result\n')
+        receipt = {'result': 'passed', 'ref': 'report:fixture', 'scope': 'Measured result', 'at': self.inst.now(),
+                   'artifact': 'report.md', 'sha256': hashlib.sha256(artifact.read_bytes()).hexdigest(), 'version': '1'}
+        self.add('REPORT-1', completion_kind='report', status='done', evidence=['Artifact measured'], completion_receipt=receipt)
+        artifact.write_text('Changed later\n')
+        with self.assertRaises(ValueError):
+            tasks.validate(self.n, tasks.read_records(self.n))
+
+    def test_plain_git_attempt_and_rename_keep_one_obligation(self):
+        from brain import task_flow
+        self.repo(self.root)
+        head = self.git('rev-parse', 'HEAD', cwd=self.root).strip()
+        self.git('branch', 'job/first', cwd=self.root)
+        self.add(status='ready', scope=['engine.py'])
+        task_flow.attempt(self.inst, self.n, 'APP-1', 'attempt:one', branch='job/first', head=head, source_ref='run:first')
+        task_flow.alias(self.inst, self.n, 'APP-1', 'job/first', 'job/renamed')
+        row = tasks.read_records(self.n)['APP-1']
+        self.assertEqual(len(tasks.read_records(self.n)), 1)
+        self.assertEqual(row['aliases'], ['job/first', 'job/renamed'])
+        self.assertEqual(row['baseline_sha'], head)
+        self.assertEqual(len(row['attempts']), 1)
+        with self.assertRaises(ValueError):
+            tasks.mutate(self.inst, self.n, 'APP-1', {'status': 'merged', 'merge_sha': head,
+                'code_path': 'README.md', 'evidence': ['Base is unchanged']})
+
+    def test_open_successor_and_uncovered_scope_prevent_completion(self):
+        self.repo(self.root)
+        base = self.git('rev-parse', 'HEAD', cwd=self.root).strip()
+        (self.root / 'engine.py').write_text('VERSION = 1\n')
+        self.git('add', 'engine.py', cwd=self.root)
+        self.git('commit', '-qm', 'Deliver narrow code', cwd=self.root)
+        head = self.git('rev-parse', 'HEAD', cwd=self.root).strip()
+        self.add('APP-2')
+        self.add(scope=['other.py'], baseline_sha=base)
+        for changes in ({'scope': ['other.py']}, {'scope': ['engine.py'], 'superseded_by': ['APP-2']}):
+            with self.assertRaises(ValueError):
+                tasks.mutate(self.inst, self.n, 'APP-1', {'status': 'done', 'merge_sha': head,
+                    'code_path': 'engine.py', 'evidence': ['Narrow code passed'], **changes})
+
+    def test_stopped_register_keeps_raw_receipts_open_and_replays_without_duplicates(self):
+        from brain import tasks_backfill
+        receipt = {'ref': 'source-report.md:9', 'scope': 'Old teardown behavior was not proven', 'head': 'b' * 40,
+                   'outcome': 'retired implementation', 'raw': 'Original scope and failure receipt'}
+        register = {'version': 1, 'obligations': [{'node': 'root', 'source_id': 'stopped:one-obligation',
+            'title': 'Reconcile teardown guarantees', 'source_ref': 'source-report.md:8',
+            'aliases': ['job/old', 'job/new'], 'receipts': [receipt]}]}
+        path = self.tmp / 'register.json'
+        path.write_text(json.dumps(register))
+        first = tasks_backfill.import_register(self.inst, self.n, path, apply=True)
+        self.assertEqual(len(first), 1)
+        row = tasks.read_records(self.n)[first[0]['task']]
+        self.assertEqual(row['status'], 'backlog')
+        self.assertTrue(row['reconciliation'])
+        self.assertEqual(row['raw_receipts'], [receipt])
+        self.assertEqual(row['aliases'], ['job/old', 'job/new'])
+        self.assertEqual(tasks_backfill.import_register(self.inst, self.n, path, apply=True), [])
+        self.assertEqual(len(tasks.read_records(self.n)), 1)
+
+    def test_code_completion_cannot_use_unchanged_or_unrelated_scope(self):
+        self.repo(self.root)
+        base = self.git('rev-parse', 'HEAD', cwd=self.root).strip()
+        self.add(scope=['engine.py'], baseline_sha=base)
+        for head, paths in ((base, 'README.md'), ('b' * 40, 'engine.py')):
+            with self.assertRaises(ValueError):
+                tasks.mutate(self.inst, self.n, 'APP-1', {'status': 'done', 'merge_sha': head,
+                    'code_path': paths, 'evidence': ['Unproven claim']})
+
+    def test_snapshot_marks_stale_completion_as_unproven_instead_of_verified(self):
+        row = self.ops_done(self.n)
+        row['completion_receipt']['result'] = 'unknown'
+        tasks.save_record(self.n, row)
+        snapshot = tasks.ui_tasks(self.inst, self.n)
+        self.assertEqual(snapshot['rows'][0]['delivery_state'], 'unproven')
+
+    def test_failed_provider_sync_retains_unknown_hold_without_leaking_error(self):
+        from brain import task_linear, task_flow
+        self.linear_config()
+        with mock.patch.object(task_linear, 'collect', return_value=[self.linear_issue()]):
+            task_linear.pull(self.inst, self.n)
+        with mock.patch.object(task_linear, 'sync', side_effect=ValueError('sensitive provider error')):
+            self.assertFalse(tasks.provider_pull_on_wake(self.inst, self.n))
+        state = json.loads((self.root / 'task-sync.json').read_text())
+        self.assertEqual(state['state'], 'unknown')
+        self.assertNotIn('sensitive', json.dumps(state))
+        self.assertTrue(task_flow.holds(self.inst, self.n))
+        with self.assertRaises(ValueError):
+            tasks.prepare_start(self.n, 'DEMO-1', 'job/example')
+
+    def test_backfill_retains_closed_job_claims_as_reconciliation_and_explicit_dependencies(self):
+        from brain import tasks_backfill, jobs
+        jobs.job_started(self.inst, self.n, 'job/old-attempt', 'codex')
+        rows = jobs.read_jobs(self.n)
+        rows[0].update(Ended=self.inst.now(), Outcome='closed', Cause='Retired implementation, scope unresolved')
+        jobs.write_jobs(self.inst, self.n, rows)
+        (self.root / 'backlog.md').write_text('- APP-1 Import the source\n- APP-2 Share depends_on=APP-1,MISSING-1\n')
+        created = tasks_backfill.backfill(self.inst, self.n, apply=True)
+        self.assertEqual(len(created), 3)
+        current = tasks.read_records(self.n)
+        self.assertEqual(current['APP-2']['depends_on'], ['APP-1'])
+        self.assertEqual(current['APP-2']['unresolved_dependencies'], ['MISSING-1'])
+        task = next(r for r in current.values() if r.get('branch') == 'job/old-attempt')
+        self.assertEqual(task['status'], 'backlog')
+        self.assertTrue(task['reconciliation'])
+        self.assertEqual(task['raw_receipts'][0]['raw']['Cause'], 'Retired implementation, scope unresolved')
+        self.assertEqual(tasks_backfill.backfill(self.inst, self.n, apply=True), [])
+
+    def test_backfill_patch_equivalence_maps_rebased_sha_without_closing_scope(self):
+        from brain import tasks_backfill
+        self.repo(self.root)
+        base = self.git('rev-parse', 'HEAD', cwd=self.root).strip()
+        self.git('checkout', '-qb', 'job/source', cwd=self.root)
+        (self.root / 'engine.py').write_text('VERSION = 1\n')
+        self.git('add', 'engine.py', cwd=self.root)
+        self.git('commit', '-qm', 'Implement source behavior', cwd=self.root)
+        head = self.git('rev-parse', 'HEAD', cwd=self.root).strip()
+        self.git('checkout', '-q', 'main', cwd=self.root)
+        (self.root / 'other.txt').write_text('Independent change\n')
+        self.git('add', 'other.txt', cwd=self.root)
+        self.git('commit', '-qm', 'Independent main change', cwd=self.root)
+        self.git('cherry-pick', head, cwd=self.root)
+        main = self.git('rev-parse', 'HEAD', cwd=self.root).strip()
+        self.assertNotEqual(main, head)
+        mapping = tasks_backfill.delivery_mapping(self.n, base, head)
+        self.assertEqual(mapping['kind'], 'patch-equivalent')
+        self.assertEqual(mapping['main_sha'], main)
+        self.assertEqual(mapping['code_paths'], ['engine.py'])
+        self.assertEqual(tasks_backfill.delivery_mapping(self.n, base, base)['kind'], 'unchanged')
+
+    def test_park_requires_all_resume_fields_and_drop_requires_decision(self):
+        self.add(status='ready')
+        fields = {'status': 'parked', 'park_reason': 'Two failed rounds', 'resume': 'Repair parser',
+                  'review_at': self.inst.now(), 'next_action': 'Narrow parser'}
+        for key in ('park_reason', 'resume', 'review_at', 'next_action'):
+            with self.assertRaises(ValueError):
+                tasks.mutate(self.inst, self.n, 'APP-1', {k: v for k, v in fields.items() if k != key})
+        with self.assertRaises(ValueError):
+            tasks.mutate(self.inst, self.n, 'APP-1', {'status': 'dropped', 'drop_reason': 'Scope removed'})
+
+    def test_paused_ready_task_is_never_selected_or_started_by_elapsed_time(self):
+        from brain import task_flow
+        self.add(status='ready')
+        self.n['fm']['labels'] = 'state:paused'
+        with self.assertRaisesRegex(ValueError, 'held'):
+            tasks.prepare_start(self.n, 'APP-1', 'job/example')
+        self.assertTrue(task_flow.holds(self.inst, self.n))
+        self.n['fm']['labels'] = ''
+        self.n['fm']['tasks.hold'] = 'private:D-7 explicit resumption required'
+        with self.assertRaisesRegex(ValueError, 'held'):
+            tasks.prepare_start(self.n, 'APP-1', 'job/example')
+
+    def test_capacity_counts_active_attempts_and_frees_closed_attempts(self):
+        from brain import task_flow
+        self.n['fm']['tasks.capacity'] = '1'
+        self.add('OPS-1', status='ready', completion_kind='ops')
+        task_flow.attempt(self.inst, self.n, 'OPS-1', 'run:one', source_ref='receipt:one')
+        self.add('OPS-2', status='ready', completion_kind='ops')
+        self.assertTrue(task_flow.holds(self.inst, self.n, tasks.read_records(self.n)['OPS-2']))
+        task_flow.attempt(self.inst, self.n, 'OPS-1', 'run:one', source_ref='receipt:one', close=True)
+        self.assertFalse(task_flow.holds(self.inst, self.n, tasks.read_records(self.n)['OPS-2']))
+
+    def test_task_landing_event_retries_use_metadata_and_do_not_duplicate(self):
+        import types
+        package = sys.modules[tasks.__package__]
+        stub = types.ModuleType(tasks.__package__ + '.events')
+        observed = []
+        stub.facts = lambda *args: observed
+        def record(inst, n, fact_type, job_key=None, **fields):
+            self.assertEqual(fact_type, 'task_landed')
+            self.assertEqual(set(fields), {'phase', 'state', 'inputs', 'evidence'})
+            self.assertEqual(fields['evidence'], {'ref': 'OPS-1'})
+            receipt = {'ref': 'fixture-event', 'data': {'fact_type': fact_type, **fields}}
+            observed.append(receipt)
+            return receipt
+        stub.record_fact = record
+        with mock.patch.dict(sys.modules, {stub.__name__: stub}), mock.patch.object(package, 'events', stub, create=True):
+            self.ops_done(self.n)
+            row = tasks.read_records(self.n)['OPS-1']
+            self.assertNotIn('event_pending', row)
+            self.assertTrue(tasks.emit_task_landed(self.inst, self.n, row))
+            self.assertEqual(len(observed), 1)
+
+    def test_launch_plan_requires_per_task_contract_authority_and_never_creates_worktree(self):
+        self.add(status='ready', scope=['engine.py'])
+        with self.assertRaises(ValueError):
+            tasks.launch_plan(self.inst, self.n)
+        contract = self.root / 'task-contract.md'
+        contract.write_text('\n'.join('## ' + heading + '\nExplicit scoped behavior\n' for heading in
+            ('Outcome', 'Authorized', 'Discretion', 'Stop when', 'Needs consent', 'Done means')))
+        tasks.mutate(self.inst, self.n, 'APP-1', {'contract': 'task-contract.md', 'authority': 'private:D-1'})
+        plan = tasks.launch_plan(self.inst, self.n)
+        self.assertEqual(plan['task'], 'APP-1')
+        self.assertEqual(plan['commands'][0], ['brain', 'wt', 'add', 'root', 'job/task-app-1', '--task-id', 'APP-1'])
+        self.assertFalse((self.root / 'worktrees').exists())
+        self.assertFalse((self.root / 'job-ledger.md').exists())
+        self.n['fm']['labels'] = 'state:paused'
+        self.assertIsNone(tasks.launch_plan(self.inst, self.n))
