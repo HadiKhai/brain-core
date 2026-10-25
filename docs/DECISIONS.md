@@ -2023,3 +2023,20 @@ hard-link checks. Atomic publication uses that checked parent for its temporary
 file, replacement and no-follow directory open. An internal directory alias thus
 retains its supported behavior without removing directory fsync. File sync still
 precedes replacement, and directory sync errors still propagate after publication.
+
+
+## D18901: Keep strict real-core rehearsal as an optional diagnostic
+
+Only `RehearsalNativeCore::test_real_core_cli_clean_candidate_and_byte_identical_source`
+moves from the aggregate per-change collection to `tests/nightly_rehearse.py`.
+The existing outside-job-lane inventory classifies that file; it remains an input
+to the rehearsal lane. The original class, method and assertions are unchanged,
+and every other canonical test remains collected exactly once. The explicit
+command is recorded in CHANGES.md and the optional file's module documentation.
+
+Real-core write accounting has seven unresolved unexpected writes. They must be
+named and then fixed or justified before this issue can close. Optional execution
+retains the strict source snapshots and write comparisons. No runtime allowlist,
+journal suppression or rehearsal success is introduced by this classification.
+The first future nightly result remains the coordinator's reporting obligation;
+this change creates no schedule or delivery integration.

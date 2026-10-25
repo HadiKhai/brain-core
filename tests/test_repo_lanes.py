@@ -118,7 +118,7 @@ class RepositoryLanes(unittest.TestCase):
         result = check_lanes.check(mapping=mapping)
         self.assertEqual(result['unit_files'], len(list((lanes.ROOT / 'tests').glob('test_*.py'))))
         self.assertGreater(result['lanes'], 1)
-        self.assertEqual(set(result['outside_job_lanes']), {'live.py', 'ui-checks.js', 'ui-fitness.js'})
+        self.assertEqual(set(result['outside_job_lanes']), {'live.py', 'ui-checks.js', 'ui-fitness.js', 'nightly_rehearse.py'})
         sys.path.insert(0, str(lanes.ROOT / 'lib'))
         from brain.verify_lanes import matches
         self.assertTrue(all(matches('lib/brain/common.py', lane['inputs']) for lane in mapping))

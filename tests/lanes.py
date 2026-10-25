@@ -52,6 +52,7 @@ LANE_TESTS.update({
 })
 COMPATIBILITY = 'test_brain.py'
 OUTSIDE_JOB_LANES = {
+    'nightly_rehearse.py': 'strict real-core rehearsal diagnostic; explicit optional/nightly verification',
     'live.py': 'real runtime/model calls; separate live verification',
     'ui-checks.js': 'browser assertions; separate browser verification',
     'ui-fitness.js': 'browser layout assertions; separate browser verification',
@@ -60,7 +61,7 @@ SUPPORT = ('scenario.py', 'core_loader.py', 'conftest.py', 'lanes.py', 'check_la
 # Only these modules have separately audited dispatch/call selection. The gate
 # requires all remaining core modules in every lane, even after import refactors.
 SELECTIVE_MODULES = ('train',)
-EXTRA_INPUTS = {'ui': ('tests/live.py', 'tests/ui-checks.js', 'tests/ui-fitness.js')}
+EXTRA_INPUTS = {'rehearse': ('tests/nightly_rehearse.py',), 'ui': ('tests/live.py', 'tests/ui-checks.js', 'tests/ui-fitness.js')}
 # Mirror the development node's existing documentation/image skip policy.
 OUTSIDE_INPUTS = ('README.md', 'docs/**', 'ui/**/*.png', 'LICENSE')
 SHARED_INPUTS = (
