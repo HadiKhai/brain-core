@@ -27,7 +27,7 @@ def verified_completions(n, tasks, checker):
     return proven
 
 
-def commitment_digest(tasks, requirements, completed):
+def commitment_digest(tasks, requirements, completed, runnable=None):
     """Project completion already checked by the task domain's scoped verifier."""
     tasks = sorted(tasks, key=lambda r: (r.get('order', 0), r['id']))
     done = completed
@@ -37,6 +37,8 @@ def commitment_digest(tasks, requirements, completed):
         req = requirements.get(row.get('requirement'), {})
         item['source'] = (' '.join(str(req.get(k, '')) for k in ('at', 'ref')).strip()
                           or 'promise source unavailable')
+        if req.get('date_basis') in ('file-observed', 'job-start'):
+            item['source'] = req['date_basis'] + ' context; ' + item['source']
         report['promised'].append(item)
         if row['id'] in done:
             item['completion_basis'] = ('external provider completion; local implementation unproven'
@@ -52,7 +54,9 @@ def commitment_digest(tasks, requirements, completed):
         report['not_done'].append(item)
         if row.get('needs_human'):
             report['needs_you'].append(item)
-        if status == 'ready' and all(dep in done for dep in row.get('depends_on', [])):
+        ready = (row['id'] in runnable if runnable is not None else
+                 all(dep in done for dep in row.get('depends_on', [])))
+        if status == 'ready' and ready:
             report['next'].append(item)
     return report
 
@@ -157,7 +161,15 @@ def cmd_digest(a):
             requirements = _m_tasks.read_records(n, 'requirements')
             from . import task_flow as _m_task_flow
             completed = verified_completions(n, tasks.values(), _m_task_flow.completion)
-            report = commitment_digest(list(tasks.values()), requirements, completed)
+            runnable = set()
+            for row in tasks.values():
+                if row.get('status') == 'ready':
+                    try:
+                        if not _m_task_flow.holds(inst, n, row) and not _m_task_flow.blockers(n, row, tasks):
+                            runnable.add(row['id'])
+                    except (ValueError, OSError, TypeError, KeyError):
+                        pass  # unresolved scope/dependencies stay unfinished
+            report = commitment_digest(list(tasks.values()), requirements, completed, runnable)
             text = json.dumps(report, indent=2) if a.json else digest_text(n['fm'].get('title', n['id']), report)
         print(_m_guard.redact(text, _m_guard.never_terms(n)))
     except ImportError:

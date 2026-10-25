@@ -160,3 +160,12 @@ inputs, so the barrier itself cannot trigger a rebuild. The fixture's wall clock
 is controlled independently from real scheduling time; a dedicated regression
 advances the five-minute age boundary and still requires state invalidation.
 Production UI code, timeouts and exact cache assertions remain unchanged.
+
+## D1211: Preserve task-domain dispatch and source-date semantics in digests
+
+Next-work reporting uses the task domain's ownership-aware dependency and hold
+checks, including qualified cross-node references. Backfilled file-observation
+and job-start dates are labelled context instead of being presented as exact
+promise dates. Focused integration exercises the real scoped completion checker
+against changed code, no-op code, operational receipts, versioned and changed
+report artifacts, and provider-completed mirrors.

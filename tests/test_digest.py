@@ -40,6 +40,14 @@ class CommitmentDigest(unittest.TestCase):
         result = self.m.commitment_digest(rows, {}, {'TASK2'})
         self.assertEqual([r['id'] for r in result['next']], ['TASK5'])
 
+    def test_domain_runnable_set_and_backfill_date_basis_are_preserved(self):
+        rows = [dict(id='TASK1', title='Cross-node', status='ready', depends_on=['other:TASK2'], requirement='REQ1'),
+                dict(id='TASK2', title='Held', status='ready')]
+        result = self.m.commitment_digest(rows, {'REQ1': {'at':'2026-01-01', 'ref':'file:1',
+                                                       'date_basis':'file-observed'}}, set(), {'TASK1'})
+        self.assertEqual([r['id'] for r in result['next']], ['TASK1'])
+        self.assertIn('file-observed context', result['promised'][0]['source'])
+
     def test_parked_and_dropped_stay_visible(self):
         rows = self.rows() + [dict(id='TASK5', title='Removed', status='dropped', drop_reason='scope decision')]
         result = self.m.commitment_digest(rows, {}, {'TASK2'})
