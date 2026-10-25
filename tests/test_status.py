@@ -1110,3 +1110,212 @@ class RuleActivationDue(unittest.TestCase):
                     source.write_bytes(crlf)
                     self.assertEqual(rule_items(), [])
                     self.assertEqual(source.read_bytes(), crlf)
+
+
+class RenderedFingerprint(Scenario):
+    """Native fabricated readiness, plus focused render-boundary telemetry probes."""
+
+    def setUp(self):
+        super().setUp()
+        self.env['BRAIN_NO_UPDATE_CHECK'] = '1'
+        env = mock.patch.dict(os.environ, self.env)
+        env.start()
+        self.addCleanup(env.stop)
+        self.m = core_loader.SourceFileLoader('rendered_facts', str(CORE / 'bin/brain')).load_module()
+        self.root = self.init('oak')
+        self.home = self.repo(self.tmp / 'home')
+        self.b(self.root, 'new', 'sample', '--title', 'Sample', '--home', str(self.home))
+        self.inst = self.m.Instance(self.root)
+        self.n = self.inst.node('sample')
+        self.branch = 'job/example'
+        self.wt = self.tmp / 'worker'
+        self.git('worktree', 'add', '-qb', self.branch, str(self.wt), cwd=self.home)
+        self.n['fm']['verify'] = 'true'
+        self.n['local']['workbench'] = str(self.tmp / 'workbench')
+        self.w = {'path': str(self.wt), 'port': 4100}
+        self.n['local']['worktrees'] = {self.branch: self.w}
+        head, main = self.m.ready_refs(self.n, self.branch)
+        self.w['start'] = head
+        self.row = dict.fromkeys(self.m.JOB_COLS, '')
+        self.row.update(Job=self.branch, Started=(self.inst.now_dt() - datetime.timedelta(hours=1)).isoformat(),
+                        Runtime='codex', Reviews='1')
+        self.m.write_jobs(self.inst, self.n, [self.row])
+        self.packet = dict(version=1, node=self.n['id'], branch=self.branch, head=head,
+                           main=main, integration_base=main, verify_command='true', verify_result=0,
+                           inputs=self.m.verify_inputs(self.n, self.w), review_rounds=1,
+                           checked_at=self.inst.now_dt().isoformat(),
+                           verify_port_context=self.m.verify_port_context(
+                               self.n, self.m.verify_env(self.n, self.branch, self.w)))
+        self.signal = dict(version=3, job=self.branch, started=self.row['Started'], state='done',
+                           summary='Synthetic completed result', lessons='none: fixture',
+                           ready=self.packet, wake_id='a' * 32)
+        self.hb = self.m.handback_file(self.n, self.row)
+        self.hb.parent.mkdir(exist_ok=True)
+        self.save_signal()
+        self.assertTrue(self.m.ready_state(self.inst, self.n, self.branch)['ready'])
+
+    def save_signal(self):
+        self.hb.write_text(json.dumps(self.signal))
+
+    def facts(self):
+        state, _, _ = self.m.due_evidence(self.inst, self.n)
+        return self.m.status_facts(self.inst, self.n, state,
+                                   self.m.facts_meta(self.n).get('merged_before', []))[0]
+
+    def assert_change(self, change, rejected=False):
+        self.m.refresh_status(self.inst, self.n)
+        before = self.m.due_evidence(self.inst, self.n)[1]
+        old_facts = self.facts()
+        self.assertIsNone(self.m.status_lag(self.inst, self.n))
+        change()
+        if rejected:
+            self.assertFalse(self.m.ready_state(self.inst, self.n, self.branch, display=True)['ready'])
+        self.assertNotEqual(old_facts, self.facts(), 'semantic mutation must be visible')
+        self.assertNotEqual(before, self.m.due_evidence(self.inst, self.n)[1])
+        self.assertIsNotNone(self.m.status_lag(self.inst, self.n))
+        self.assertIn('stale-status', [i['kind'] for i in self.m.due_items(self.inst, self.n)])
+        self.m.refresh_status(self.inst, self.n)
+        self.assertIsNone(self.m.status_lag(self.inst, self.n))
+        self.assertNotIn('stale-status', [i['kind'] for i in self.m.due_items(self.inst, self.n)])
+
+    # (a) The twelve independently reproduced misses from the previous design.
+    # The first also provides (b), the current-node verify regression proof.
+    def test_a01_b_current_verify(self):
+        self.assert_change(lambda: self.n['fm'].__setitem__('verify', 'false'), rejected=True)
+
+    def test_a02_current_verify_export_port(self):
+        self.assert_change(lambda: self.n['fm'].__setitem__('verify_export_port', 'true'), rejected=True)
+
+    def test_a03_current_rehearse(self):
+        self.assert_change(lambda: self.n['fm'].__setitem__('rehearse', 'required'), rejected=True)
+
+    def test_a04_current_verify_lanes(self):
+        self.assert_change(lambda: self.n['fm'].__setitem__('verify_lanes', json.dumps([
+            dict(name='unit', command='true', inputs=['README.md'])])), rejected=True)
+
+    def test_a05_worktree_checkout_branch(self):
+        self.assert_change(lambda: self.git('checkout', '--detach', '-q', cwd=self.wt), rejected=True)
+
+    def test_a06_worktree_clean(self):
+        self.assert_change(lambda: (self.wt / 'README.md').write_text('synthetic dirty change'), rejected=True)
+
+    def test_a07_current_verify_inputs(self):
+        (self.home / '.git/info/exclude').write_text('.env\n')
+        self.assert_change(lambda: (self.wt / '.env').write_text('SYNTHETIC=1\n'), rejected=True)
+
+    def test_a08_train_ejected(self):
+        path = self.n['dir'] / 'job-trains' / 'sample.json'
+        path.parent.mkdir()
+        self.assert_change(lambda: path.write_text(json.dumps(dict(version=1, ejected=[dict(
+            key=self.m.job_key(self.row), packet=self.m.ready_fingerprint(self.n, self.row, self.packet))]))),
+            rejected=True)
+
+    def test_a09_exact_restart_acknowledgement(self):
+        self.signal.update(state='blocked', restart='compactions', restart_id='b' * 32)
+        self.save_signal()
+        self.assert_change(lambda: self.w.update(restart_ack=self.m.digest([
+            self.m.job_key(self.row), self.signal])))
+        self.assertTrue(self.m.restart_acknowledged(self.n, self.row, self.signal))
+
+    def test_a10_versionless_handback_legacy_head(self):
+        self.signal = dict(job=self.branch, started=self.row['Started'], state='done',
+                           summary='Synthetic legacy completion')
+        self.save_signal()
+        path = self.m.ready_path(self.inst, self.n, self.branch)
+        path.parent.mkdir(parents=True)
+        path.write_text(json.dumps(self.packet))
+        self.assertTrue(self.m.ready_state(self.inst, self.n, self.branch)['ready'])
+        def change():
+            self.packet['head'] = 'f' * 40
+            path.write_text(json.dumps(self.packet))
+        self.assert_change(change, rejected=True)
+
+    def test_a11_switch_semantic_payload(self):
+        self.row['Switches'] = '2026-01-15T09:05:00+00:00 codex -> claude: provider limit'
+        self.m.write_jobs(self.inst, self.n, [self.row])
+        def change():
+            self.row['Switches'] = '2026-01-15T09:05:00+00:00 codex -> local-model: provider failure'
+            self.m.write_jobs(self.inst, self.n, [self.row])
+        self.assert_change(change)
+
+    def test_a12_rehearsal_delivery_status(self):
+        self.packet['rehearsal'] = dict(version=1, passed=True, regressions=[],
+                                        delivery=[dict(coordinator=0, status=200)])
+        self.save_signal()
+        def change():
+            self.packet['rehearsal']['delivery'][0]['status'] = 503
+            self.save_signal()
+        self.assert_change(change)
+
+    def test_c_native_restart_counters(self):
+        usage = {'compactions': 4, 'processed': 1000, 'subagents': 0, 'sub_share': 0}
+        with mock.patch.object(self.m, 'live_usage', return_value=usage):
+            self.m.refresh_status(self.inst, self.n)
+            before = self.m.due_evidence(self.inst, self.n)[1]
+            old_facts = self.facts()
+            usage.update(compactions=8, processed=2000)
+            self.assertNotEqual(old_facts, self.facts())
+            self.assertEqual(before, self.m.due_evidence(self.inst, self.n)[1])
+            self.assertIsNone(self.m.status_lag(self.inst, self.n))
+            self.m.refresh_status(self.inst, self.n)
+            self.assertEqual(before, self.m.facts_meta(self.n)['fingerprint'])
+            self.assertIsNone(self.m.status_lag(self.inst, self.n))
+
+    def test_c_rendered_telemetry_patterns(self):
+        # Probe the shared render boundary with exact production-shaped telemetry.
+        # Every pair independently exercises comparison AND refresh, with no new API
+        # dependency, so the same tests run unchanged against the requested old core.
+        pairs = [
+            ('4 tokens', '5 tokens'), ('999 tokens', '1.01k tokens'),
+            ('1M tokens', '2B tokens'), ('1,000 processed tokens', '2,000 processed tokens'),
+            ('1M tokens, over twice the median of 2M', '2M tokens, over twice the median of 3M'),
+            ('token budget 1000', 'token budget 2000'), ('over its 2M-token budget', 'over its 3M-token budget'),
+            ('sub-agents spent 51% of its tokens', 'sub-agents spent 72% of its tokens'),
+            ('token meter: 51%', 'token meter: 62%'),
+            ('1M tokens processed (spread 1M–2M), of them 2M fresh input and output',
+             '2M tokens processed (spread 2M–3M), of them 3M fresh input and output'),
+            ('open 12.3 h, over twice the median of 6.1 h', 'open 13.4 h, over twice the median of 6.2 h'),
+            ('age 1.2d', 'age 1.3d'), ('duration 12 seconds', 'duration 13 seconds'),
+            ('elapsed 59 s', 'elapsed 1 min'), ('duration 2 minutes', 'duration 3 minutes'),
+            ('median 6.1 h, spread 1–9 h; of which 2 h active',
+             'median 7.2 h, spread 2–10 h; of which 3 h active'),
+            ('Facts refreshed: 2026-01-15 09:00 +00:00', 'Facts refreshed: 2026-01-16 10:01 +00:00'),
+            ('Facts refreshed: 2026-01-15', 'Facts refreshed: 2026-01-16'),
+            ('4 compactions; 1 restarts', '5 compactions; 2 restarts'),
+            ('- machine: load/CPU 1/5/15m 0.12/0.13/0.14; free memory 32 GB; thermal normal',
+             '- machine: load/CPU 1/5/15m 0.32/0.33/0.34; free memory 30 GB; thermal warm'),
+        ]
+        original = self.m.status_facts
+        for old, new in pairs:
+            with self.subTest(old=old):
+                value = [old]
+                def render(*args):
+                    lines, merged = original(*args)
+                    return lines + ['', value[0]], merged
+                with mock.patch.object(self.m, 'status_facts', side_effect=render):
+                    self.m.refresh_status(self.inst, self.n)
+                    before = self.m.due_evidence(self.inst, self.n)[1]
+                    value[0] = new
+                    self.assertEqual(before, self.m.due_evidence(self.inst, self.n)[1])
+                    self.assertIsNone(self.m.status_lag(self.inst, self.n))
+                    self.m.refresh_status(self.inst, self.n)
+                    self.assertEqual(before, self.m.facts_meta(self.n)['fingerprint'])
+                    self.assertIsNone(self.m.status_lag(self.inst, self.n))
+
+    def test_semantic_numbers_and_recorded_dates_stay_verbatim(self):
+        samples = [
+            '- job/123: merged (4 commits); PR #812; head 123456789abcdef',
+            'Closed jobs with unsettled threads: 12', 'Due: 4 · Needs the human: 2',
+            '- 2026-01-15 09:05 +00:00: job/123 (2 commits)',
+            'started 2026-01-15 09:05 +00:00; 3 reviews',
+            'verify command: sleep 12; timeout 34s; port 4100',
+            '| job/123 | queued | 1234567 | 2; owner 123 | wait |',
+            'delivery: [{"coordinator": 0, "status": 503}]',
+        ]
+        self.assertEqual(self.m.normalise_status_facts(samples), samples)
+        before = self.m.status_fingerprint(samples)
+        for index, text in enumerate(samples):
+            with self.subTest(text=text):
+                changed = list(samples)
+                changed[index] = re.sub(r'\d', lambda match: str((int(match[0]) + 1) % 10), text)
+                self.assertNotEqual(before, self.m.status_fingerprint(changed))

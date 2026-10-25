@@ -108,3 +108,13 @@ this path. Core never executes an option or grants action authorization.
 Question state retains explicit and default answers. Answered typed question inbox
 lines are hidden by projection, preserving their original receipt bytes. Arbitrary
 external host sends remain outside the native notification API's interception.
+
+
+## D505: Normalize rendered status telemetry for stale detection
+
+Port the retained rendered-fingerprint implementation. Comparison and publication
+share one normalizer with named patterns for token meters, elapsed durations,
+restart counters and live snapshot fields. Recorded identities, decision-relevant
+numbers, dates, queue ownership, HTTP results and readiness facts remain visible
+and fingerprinted. Runtime-switch details and retained delivery results are part
+of the render, without running their commands or probes.
