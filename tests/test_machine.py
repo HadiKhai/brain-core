@@ -1740,6 +1740,25 @@ else: sys.exit(91)
         self.assertEqual(len(json.loads(self.state_path.read_text())['volumes']), 1)
 
 
+    def test_out_of_range_owner_pid_never_escapes_cleanup_hook(self):
+        self.container['Config']['Labels']['brain.owner-pid'] = '2147483648'
+        self.save_state()
+        with mock.patch.object(self.m, 'process_stamp', side_effect=OverflowError('out of range')):
+            self.assertEqual(self.sweep()['stopped'], [])
+        self.assertEqual(self.mutations(), [])
+
+    def test_unused_external_resource_name_is_retained_despite_test_labels(self):
+        self.removable_resources()
+        self.state['volumes'][0]['Name'] = 'shared-data'
+        self.state['networks'][0]['Name'] = 'shared-network'
+        self.save_state()
+        result = self.sweep()
+        self.assertEqual(result['removed'], [self.identity])
+        state = json.loads(self.state_path.read_text())
+        self.assertEqual(len(state['volumes']), 1)
+        self.assertEqual(len(state['networks']), 1)
+
+
 class ReservationBootIdentity(unittest.TestCase):
     def setUp(self):
         self.m = core_loader.SourceFileLoader('boot_fixture', str(CORE / 'bin/brain')).load_module()
@@ -2082,3 +2101,20 @@ class ResourceLeases(unittest.TestCase):
                 raise OSError('partial service start')
         with self.assertRaisesRegex(ValueError, 'resource busy'):
             self.m.resource_claim(self.inst, 'review', 'preview:durable')
+
+
+    def test_missing_configuration_performs_no_registry_io(self):
+        with mock.patch.object(self.m, 'machine_dir', side_effect=AssertionError('no registry for absent setting')):
+            with self.m.configured_resource_lease(self.inst, {'id': 'app', 'fm': {}}) as receipts:
+                self.assertEqual(receipts, [])
+
+    def test_unknown_service_child_retains_process_lease_for_inspection(self):
+        receipt = self.m.resource_claim(self.inst, 'app', 'service:unknown', lifetime='process')
+        with mock.patch.object(self.m, 'process_stamp', side_effect=lambda pid: None if pid == 12345 else 'birth-' + str(pid)):
+            with self.assertRaisesRegex(ValueError, 'child identity unknown'):
+                self.m.resource_child(receipt, 12345)
+        self.assertFalse(self.m.resource_release(receipt))
+        with mock.patch.object(self.m.os, 'getpid', return_value=54321), \
+                mock.patch.object(self.m, 'process_stamp', side_effect=lambda pid: 'birth-54321' if pid == 54321 else None):
+            with self.assertRaisesRegex(ValueError, 'resource busy'):
+                self.m.resource_claim(self.inst, 'review', 'service:unknown')

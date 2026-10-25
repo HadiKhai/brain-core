@@ -26,7 +26,7 @@ def resource_digest(resource):
 
 def resource_valid(row, digest):
     def identity(who):
-        return (isinstance(who, list) and len(who) == 2 and type(who[0]) is int and who[0] > 0
+        return (isinstance(who, list) and len(who) == 2 and type(who[0]) is int and 0 < who[0] <= 2147483647
                 and isinstance(who[1], str) and who[1] not in ('', 'unknown'))
     return (isinstance(row, dict) and row.get('version') == 1 and row.get('resource') == digest
             and isinstance(row.get('token'), str) and _RESOURCE_TOKEN.fullmatch(row['token'])
@@ -134,7 +134,7 @@ def resource_child(receipt, pid):
     Unknown child publication retains the lease for inspection, even after the
     parent exits. It never becomes evidence that a service was stopped.
     """
-    if type(pid) is not int or pid <= 0:
+    if type(pid) is not int or not 0 < pid <= 2147483647:
         raise ValueError('invalid resource child')
     stamp = _m_machine.process_stamp(pid)
     unknown = stamp in (None, 'unknown')

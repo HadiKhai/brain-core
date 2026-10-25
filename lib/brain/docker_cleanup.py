@@ -18,7 +18,7 @@ CLEANUP_SECONDS = 5
 CLEANUP_GRACE = 1800
 _CLEANUP_ID = re.compile(r'[0-9a-f]{64}')
 _CLEANUP_PROJECT = 'com.docker.compose.project'
-_CLEANUP_ERRORS = (OSError, ValueError, TypeError, KeyError, IndexError, AttributeError, subprocess.SubprocessError)
+_CLEANUP_ERRORS = (OSError, ValueError, TypeError, KeyError, IndexError, AttributeError, OverflowError, subprocess.SubprocessError)
 
 
 def cleanup_settings(n):
@@ -101,7 +101,8 @@ def cleanup_test_member(inst, n, row, patterns, deadline):
             any(m.get('Type') != 'volume' for m in row['Mounts'])):
         return False
     pid, stamp = labels.get('brain.owner-pid', ''), labels.get('brain.owner-stamp', '')
-    if not re.fullmatch(r'[1-9][0-9]{0,9}', pid) or not stamp or stamp == 'unknown':
+    if (not re.fullmatch(r'[1-9][0-9]{0,9}', pid) or int(pid) > 2147483647
+            or not stamp or stamp == 'unknown'):
         return False
     if time.time() - _m_leftovers.leftover_timestamp(row['Created']) < CLEANUP_GRACE:
         return False
@@ -205,6 +206,11 @@ def cleanup_resource_owned(inst, n, row, kind, patterns, deadline):
                  'Created': row.get('Created' if kind == 'network' else 'CreatedAt'),
                  'HostConfig': {'AutoRemove': False}, 'Mounts': []}
     if not isinstance(row.get('Labels'), dict):
+        return False
+    project = row['Labels'].get(_CLEANUP_PROJECT, '')
+    name = row.get('Name', '')
+    if (not isinstance(project, str) or not project or not isinstance(name, str) or
+            not (name == project or name.startswith(project + '_') or name.startswith(project + '-'))):
         return False
     if kind == 'network' and row.get('Containers') != {}:
         return False

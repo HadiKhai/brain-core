@@ -84,6 +84,9 @@ the same scope, owner and age proof as containers. Every container, including
 stopped and foreign containers, participates in the attachment veto. Network
 inspection must show no endpoints. Reinspection must match the captured resource
 metadata before deletion; Docker's own in-use refusal remains authoritative.
+Named resources must stay inside their owning project namespace; project labels
+alone cannot authorize deletion of an externally named shared resource. Owner PIDs
+are bounded to the OS process-id range before probing.
 Errors keep resources for a later run. No images, bind contents, compose files,
 global prune, forced disconnect or host lifecycle APIs are touched.
 
