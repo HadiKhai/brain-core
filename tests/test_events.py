@@ -112,6 +112,44 @@ class EventAppend(Scenario):
         self.assertEqual((r / 'nodes/app/node.md').read_bytes(), before)
         self.assertEqual((r / 'backlog.md').read_bytes(), target_before)
 
+    def test_failed_setup_aborts_after_hook_without_masking_primary_exception(self):
+        r = self.init('demo')
+        self.b(r, 'new', 'app', '--title', 'App')
+        for error in (SystemExit(7), KeyboardInterrupt('fixture cancellation'), RuntimeError('fixture primary')):
+            with self.subTest(error=type(error).__name__):
+                with self.assertRaises(type(error)) as caught:
+                    with instance.brain_lock(r):
+                        with events.Command(r, command='wt_setup', node='app') as operation:
+                            transitions.inbox_append(r / 'nodes/app', '- runtime: PRIVATE-EXIT\n', nonblocking=True)
+                            raise error
+                self.assertIs(caught.exception, error)
+                records = self.records(r)
+                terminal = [e for e in records if e['ref'] == operation.ref][-1]
+                self.assertEqual(terminal['kind'], 'abort')
+                self.assertEqual(terminal['data']['command'], 'wt_setup')
+                self.assertEqual(events.pending(records), {})
+                hook = [e for e in records if e['kind'] == 'hook'][-1]
+                self.assertEqual(hook['data']['resources'][0]['hash'],
+                                 events.digest((r / 'nodes/app/inbox.md').read_bytes()))
+                self.assertNotIn('PRIVATE-EXIT', (r / '.brain/events.jsonl').read_text())
+
+    def test_failed_setup_with_hook_and_partial_write_stays_pending(self):
+        r = self.init('demo')
+        self.b(r, 'new', 'app', '--title', 'App')
+        error = RuntimeError('fixture primary')
+        with self.assertRaises(RuntimeError) as caught:
+            with instance.brain_lock(r):
+                with events.Command(r, command='wt_setup', node='app') as operation:
+                    transitions.inbox_append(r / 'nodes/app', '- runtime: fixture exit\n', nonblocking=True)
+                    (r / 'nodes/app/backlog.md').write_text('- retained partial write\n')
+                    raise error
+        self.assertIs(caught.exception, error)
+        records = self.records(r)
+        self.assertEqual(set(events.pending(records)), {operation.ref})
+        self.assertFalse(any(e['ref'] == operation.ref and e['kind'] in ('abort', 'commit') for e in records))
+        self.assertTrue(any(e['kind'] == 'hook' for e in records))
+        self.assertEqual((r / 'nodes/app/backlog.md').read_text(), '- retained partial write\n')
+
     def test_scripted_day_records_each_brain_write_and_omits_external_git(self):
         r = self.init('demo')
         home = self.repo(self.tmp / 'code')

@@ -1822,3 +1822,8 @@ An explicit job-close transition updates one unambiguous source row. Explicit
 terminal source labels continue to permit cleanup subject to the existing Git,
 dirty-worktree and competing-owner guards. Generated facts and ledger timestamps
 never establish host liveness or safe thread settlement.
+
+Failed and cancelled setup operations attribute durable inbox hooks before
+checking for partial writes. A hook-only failure records its abort and retains
+the hook; actual unfinished source writes remain pending for reconciliation.
+The original setup result or exception remains authoritative.

@@ -637,9 +637,11 @@ class Command:
 
     def finish(self, success, exit_code=0):
         self.inst = instance.Instance(self.inst.root)
+        # Hooks own their durable writes even when this command failed. Attribute
+        # them before deciding whether the command left partial writes behind.
+        fold_hooks(self.inst)
         after = resources(self.inst)
         changed = self.changes(after)
-        fold_hooks(self.inst)
         if success:
             maintenance_ok, views = True, {}
             try:
