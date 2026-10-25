@@ -59,3 +59,11 @@ observed `handoff_delivered` with `state=done`, `reason_code=ack_not_required` a
 the same delivery reference. Missing delivery or an explicit
 `acknowledgement_required` fact prevents advice. A later phase transition clears
 the current wait. Printing a message is not delivery evidence.
+
+Unchanged-input rerun advice compares consecutive `verify_completed` observations
+with `state=done`, `reason_code=full_pass`, full `head`/`base` identities, an `inputs`
+fingerprint and a distinct run reference in `evidence.ref`. Same head/base/inputs
+establish a repeated successful full run. Changed evidence, `full_failed` or
+`forced_reverify` reset the comparison. Duplicate exports of one run do not count.
+This deliberately detects the exact-head case; it does not guess whether an
+unrelated commit could have reused proof or override verifier reuse checks.

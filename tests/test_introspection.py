@@ -168,3 +168,32 @@ class AcknowledgementAdvisories(unittest.TestCase):
         delivered['data']['evidence']['ref']='delivery-a'
         required=fact('acknowledgement_required',2,evidence={'ref':'delivery-a'})
         self.assertEqual(self.m.acknowledgement_wait_advisories([delivered,required,wait],KEY,self.now),[])
+
+
+class UnchangedVerificationAdvisories(unittest.TestCase):
+    def setUp(self):
+        self.m=core_loader.SourceFileLoader('rerun_advisory_fixture',str(CORE/'bin/brain')).load_module()
+        self.now=datetime.datetime(2026,1,1,11,tzinfo=datetime.timezone.utc)
+
+    def completed(self,minute,ref,**changes):
+        fields={'state':'done','head':HEAD,'base':'c'*40,'inputs':'d'*64,
+                'reason_code':'full_pass','evidence':{'ref':ref}}
+        fields.update(changes)
+        return fact('verify_completed',minute,**fields)
+
+    def test_same_successful_full_inputs_advise_with_both_run_receipts(self):
+        first=self.completed(1,'verify-a')
+        second=self.completed(2,'verify-b')
+        result=self.m.unchanged_verification_advisories([first,second],KEY,self.now)
+        self.assertEqual(len(result),1)
+        self.assertEqual(result[0]['kind'],'unchanged-input-rerun')
+        self.assertEqual(len(result[0]['evidence']),2)
+        duplicate=self.completed(2,'verify-a')
+        self.assertEqual(self.m.unchanged_verification_advisories([first,duplicate],KEY,self.now),[])
+
+    def test_changes_forced_reruns_failures_and_missing_inputs_do_not_match(self):
+        first=self.completed(1,'verify-a')
+        for changes in ({'head':'e'*40},{'base':'e'*40},{'inputs':'e'*64},
+                        {'reason_code':'forced_reverify'},{'reason_code':'full_failed'},{'inputs':None}):
+            second=self.completed(2,'verify-b',**changes)
+            self.assertEqual(self.m.unchanged_verification_advisories([first,second],KEY,self.now),[])

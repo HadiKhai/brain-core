@@ -134,3 +134,10 @@ Advise only when the current observed phase is waiting for a named delivery
 receipt whose delivered handoff explicitly required no acknowledgement. A later
 acknowledgement requirement or progress clears the comparison. Never infer
 receipt obligations from silence or treat a formatted message as delivered.
+
+## D110: Rerun advice compares complete successful-run identities
+
+Compare observed successful full runs only when head, integration base and input
+fingerprint match, with distinct stable run references. Failed, explicitly forced
+or incompletely fingerprinted runs reset the comparison. This informational exact-
+head detector never skips verification or expands the native proof reuse policy.

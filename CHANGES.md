@@ -1639,3 +1639,10 @@ After upgrading: supply typed authorization/request facts with stable receipt re
 For agents: introspection joins current acknowledgement waits to explicit
 no-ack-required delivery receipts. Required or unknown acknowledgements stay quiet.
 After upgrading: producers record actual delivery facts; printing is insufficient.
+
+## Unchanged-input verification rerun advice
+
+For agents: introspection links successive successful full runs with unchanged
+head/base/input evidence. Forced reruns, failures and missing evidence stay quiet.
+After upgrading: producers record full-run facts with unique run refs and complete
+fingerprints. This advice does not change any gate or proof reuse rule.

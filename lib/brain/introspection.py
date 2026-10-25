@@ -197,6 +197,30 @@ def acknowledgement_wait_advisories(events, job_key, now):
              'text': 'A delivered handoff explicitly requires no acknowledgement; continue within the existing contract.',
              'evidence': [receipts[ref], latest['id']]}]
 
+
+def unchanged_verification_advisories(events, job_key, now):
+    previous, seen_runs, out = None, set(), []
+    for event in introspection_observed(events, now, job_key):
+        data = event['data']
+        if data['fact_type'] != 'verify_completed':
+            continue
+        ref = data.get('evidence', {}).get('ref')
+        if not ref or ref in seen_runs:
+            continue
+        seen_runs.add(ref)
+        if (data.get('state') != 'done' or data.get('reason_code') != 'full_pass'
+                or any(not re.fullmatch('[0-9a-f]{40}|[0-9a-f]{64}', str(data.get(k, '')))
+                       for k in ('head', 'base')) or not data.get('inputs')):
+            previous = None
+            continue
+        signature = (data['head'], data['base'], data['inputs'])
+        if previous and previous[0] == signature:
+            out.append({'kind': 'unchanged-input-rerun', 'informational': True,
+                        'text': 'A successful full verify repeated with the same head, base and input fingerprint; inspect proof reuse.',
+                        'evidence': [previous[1], event['id']], 'head': data['head'], 'inputs': data['inputs']})
+        previous = (signature, event['id'])
+    return out
+
 def introspection_queue(inst, n):
     now = inst.now_dt().timestamp()
     record = _m_coordinators.coordinator_host_runs(inst, now).get(n['id'])
@@ -228,6 +252,7 @@ def introspection_snapshot(inst, n, branch=None, hours=24, limit=50):
         view['advisories'] = review_class_advisories(receipts, view['job_key'])
         view['advisories'] += permission_request_advisories(facts, view['job_key'], now)
         view['advisories'] += acknowledgement_wait_advisories(facts, view['job_key'], now)
+        view['advisories'] += unchanged_verification_advisories(facts, view['job_key'], now)
         view['review_evidence'] = 'receipt_hook' if reader else 'unavailable'
         views.append(view)
     result = {'version': 1, 'node': n['id'], 'jobs': views, 'partial': len(selected) > limit,
