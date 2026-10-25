@@ -119,3 +119,61 @@ class ThreadTargetCommands(AutonomyProject):
         self.assertIn('fresh thread in a fresh worktree', old)
         current = self.b(root, 'brief', 'app', '--task', 'fixture task', '--to', 'new-worker')
         self.assertNotIn('bound worker thread workspace', current)
+
+
+class CleanupThreadInterface(unittest.TestCase):
+    # Reuse fixture setup only; canonical ownership tests remain in their class.
+    setUp = ThreadTargetOwnership.setUp
+    def test_cleanup_result_keeps_incarnations_and_never_claims_host_settlement(self):
+        self.node['home_path'] = CORE
+        self.node['local']['worktrees']['job-a'] = {'path': self.temp.name}
+        self.node['local']['workers'] = {self.core.job_key(self.old): 'old-worker'}
+        with mock.patch.object(self.core, 'read_jobs', return_value=[self.old, self.current]), \
+                mock.patch.object(self.core, 'active_work', return_value=[['job-a', 'new-worker', '-', 'working']]):
+            result = self.core.worktree_cleanup_result(self.node, 'job-a')
+        self.assertEqual(result['version'], 1)
+        self.assertEqual(result['phase'], 'before-remove')
+        self.assertTrue(result['workspace_exists'])
+        self.assertEqual(len(result['jobs']), 2)
+        self.assertEqual(result['jobs'][0]['key'], self.core.job_key(self.old))
+        self.assertFalse(result['jobs'][1]['closed'])
+        self.assertEqual({ref['id'] for ref in result['threads']}, {'old-worker', 'new-worker'})
+        self.assertTrue(result['requires_host_validation'])
+        self.assertNotIn('settled', result)
+        json.dumps(result)  # Native hooks receive a portable data result.
+
+    def test_finished_cleanup_result_has_no_message_permission_after_path_loss(self):
+        self.node['local']['worktrees']['job-a'] = {'path': str(Path(self.temp.name) / 'gone')}
+        with mock.patch.object(self.core, 'read_jobs', return_value=[self.old]), \
+                mock.patch.object(self.core, 'active_work', return_value=[]):
+            result = self.core.worktree_cleanup_result(self.node, 'job-a', removed=True)
+        self.assertFalse(result['workspace_exists'])
+        self.assertEqual(result['phase'], 'removed')
+        self.assertEqual(result['host_actions'], ['inspect', 'settle-if-safe'])
+
+
+class CleanupThreadHook(AutonomyProject):
+    def test_callback_refusal_never_removes_workspace(self):
+        root, home, wt = self.project()
+        core = load_target_core()
+        inst = core.Instance(root)
+        seen = []
+        def deny(plan):
+            seen.append(plan)
+            return False
+        with self.assertRaises(SystemExit):
+            core.remove_worktree(inst, inst.node('app'), 'job-a', thread_hook=deny)
+        self.assertTrue(wt.is_dir())
+        self.assertEqual(seen[0]['phase'], 'before-remove')
+
+    def test_callback_branch_change_is_rechecked_before_removal(self):
+        root, home, wt = self.project()
+        core = load_target_core()
+        inst = core.Instance(root)
+        def change(plan):
+            self.git('switch', '-qc', 'new-live-work', cwd=wt)
+            return True
+        with self.assertRaisesRegex(SystemExit, 'checked-out branch differs'):
+            core.remove_worktree(inst, inst.node('app'), 'job-a', thread_hook=change)
+        self.assertTrue(wt.is_dir())
+        self.assertIn('new-live-work', self.git('branch', '--show-current', cwd=wt))
