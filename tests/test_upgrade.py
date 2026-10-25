@@ -140,6 +140,35 @@ class InstallAndUpgrade(Scenario):
         self.assertEqual(ledger.read_bytes(), before)
         self.assertTrue(Path(worktree["path"]).is_dir())
 
+    def test_automatic_task_migration_preserves_jobs_and_explicit_backfill_links(self):
+        m = core_loader.SourceFileLoader('brain_upgrade_migration', str(CORE / 'bin/brain')).load_module()
+        root = self.init('demo')
+        inst = m.Instance(root)
+        node = inst.node('root')
+        with mock.patch.dict(os.environ, self.env, clear=True):
+            m.job_started(inst, node, 'job/example', 'codex')
+            ledger = root / 'job-ledger.md'
+            before = ledger.read_bytes()
+            row = m.read_jobs(node)[0]
+            key = m.job_key(row)
+            backfill = m._owners['cmd_task_migrate']
+            self.assertEqual(backfill.migrate(inst, [node])[0]['created'], 1)
+            self.assertEqual(ledger.read_bytes(), before)
+            tasks = backfill._m_tasks
+            records = tasks.read_records(node)
+            task = next(iter(records.values()))
+            self.assertEqual(task['job'], key)
+            self.assertIn('job:' + key, task['provenance'])
+            self.assertEqual(task['raw_receipts'][0]['raw'], row)
+            self.assertEqual(backfill.migrate(inst, [node])[0]['created'], 0)
+            self.assertEqual(ledger.read_bytes(), before)
+            self.assertEqual(backfill.backfill(inst, node, apply=True), [])
+            self.assertEqual(m.read_jobs(node)[0]['Task'], task['id'])
+            linked = ledger.read_bytes()
+            self.assertEqual(backfill.backfill(inst, node, apply=True), [])
+            self.assertEqual(ledger.read_bytes(), linked)
+            self.assertEqual(tasks.read_records(node), records)
+
 
 
 class ReleaseNotes(Scenario):

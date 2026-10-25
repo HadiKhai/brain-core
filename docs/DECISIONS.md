@@ -1,5 +1,18 @@
 # Code decisions
 
+## D20003: Preserve automatic adoption sources and deterministic runtime proofs
+
+Install and upgrade task migration retain ledger bytes. Imported task records keep
+job keys and source provenance; explicit task backfill may attach ledger Task cells,
+including after an earlier automatic import, without creating duplicate records.
+
+Partial spend coverage publishes a genuine bounded parsing slice behind a fixture
+release barrier before exercising background completion. It retains incomplete,
+file count, rebuild count and read-only assertions without relying on startup speed.
+The legacy brief oracle accepts the resolver's extra-path argument and verifies it
+is empty in the byte-comparison scenario. Release notices live under dated headings
+following the changes document's title and introduction.
+
 ## D18401: Exercise native persistence contracts in focused fixtures
 
 Atomic replacement and crash fixtures change a recorded input before writing

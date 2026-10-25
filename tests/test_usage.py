@@ -487,7 +487,8 @@ for line in sys.stdin:
         args = argparse.Namespace(id="a", job_class="build", task="x", branch=None, runtime=None, model=None,
             effort=None, import_study=False, small=False, task_file=None, context_file=None, why_separate=None,
             allow_unexplained=False, to=None, peer=None, out=None)
-        def legacy_route(inst, node, a):
+        def legacy_route(inst, node, a, extra=()):
+            self.assertEqual(list(extra), [])
             row = self.m.open_job(self.m.read_jobs(node) or [], a.branch)
             kind = self.m.job_class(node, row, a.job_class)
             runtime, sub, usage = self.m.class_route(inst, kind, runtime=a.runtime or node["fm"].get("runtime"),
