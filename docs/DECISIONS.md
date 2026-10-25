@@ -53,3 +53,17 @@ The regression reads the first committed ledger revision before generating a
 brief, then checks that the brief retains the expected runtime and model. Its
 cases cover class defaults, a node runtime pin, node and instance class routing,
 and inherited model configuration without activating inherited runtime policy.
+
+## D401: Git-owned landing and compatible batch advice
+
+A clean main checkout is fast-forwarded by Git with autostash and ignored-file
+replacement disabled. An unoccupied main uses one compare-and-swap ref update.
+Publication never rolls back a checkout or ref. Closure requires an explicit
+successful publication receipt; ambiguous results retain the journal for repair.
+Host settlement remains pending until separately supplied, validated evidence.
+
+A completed job with valid recorded-base evidence and a clean merge may receive
+batch-eligibility advice after main advances. This advisory never marks it ready
+against current main: the integration result still requires verification. Ordinary
+readiness, conflict refusals and worker-owned packets remain unchanged. Display
+advice validates recorded lane evidence without executing lane-map commands.

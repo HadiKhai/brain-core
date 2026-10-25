@@ -215,8 +215,8 @@ def current_ready_reasons(reasons):
     return [reason for reason in reasons if isinstance(reason, str) and reason != legacy]
 
 
-def _ready_state(inst, n, branch, train=False, display=False):
-    display = display and not train
+def _ready_state(inst, n, branch, train=False, display=False, advisory=False):
+    display = display and (not train or advisory)
     reasons, head, main = ready_preflight(n, branch)
     row = _m_jobs.open_job(_m_jobs.read_jobs(n) or [], branch)
     signal = _m_jobs.read_handback(n, row) if row else None
@@ -314,6 +314,26 @@ def _ready_state(inst, n, branch, train=False, display=False):
     reasons = [scrubber.feed(reason, final=True) for reason in reasons]
     return {"ready": not reasons, "reasons": reasons, "packet": packet,
             "validation": "recorded" if display else "full"}
+
+
+def due_ready_state(inst, n, branch):
+    """Offer batch advice without promoting old-base proof to current readiness."""
+    ordinary = ready_state(inst, n, branch, display=True)
+    moved = {"worker must rebase on current main",
+             "worker must rebase on current local main as well as origin default for merge=local",
+             "main moved; return to worker to rebase and verify again"}
+    if (ordinary['ready'] or n['fm'].get('merge', 'local') == 'pr'
+            or not ordinary['reasons'] or any(r not in moved for r in ordinary['reasons'])):
+        return ordinary
+    recorded = _ready_state(inst, n, branch, train=True, display=True, advisory=True)
+    if not recorded['ready']:
+        return ordinary
+    result = _m_common.git('merge-tree', '--write-tree', 'refs/heads/main',
+                           'refs/heads/' + branch, cwd=n['home_path'])
+    if result.returncode:
+        return ordinary  # conflict or unreadable classification keeps every refusal
+    return {**ordinary, 'ready': False, 'reasons': [],
+            'batch_advice': 'eligible for batch; exact-result verification required'}
 
 
 VERIFY_INPUTS = ".env,.env.*"  # files git doesn't track that verify reads, unless the node names its own

@@ -494,8 +494,27 @@ def job_reviewed(inst, n, branch, *, full=True, head="", reason=""):
         inst.commit([], f"{n['id']}: job reviewed")
 
 
+def publication_refusal(n, row):
+    """An ambiguous train must not become success through closure or cleanup."""
+    for path in (n['dir'] / 'job-trains').glob('*.json'):
+        try:
+            data = json.loads(path.read_text())
+            if not isinstance(data, dict):
+                raise ValueError()
+        except (OSError, ValueError):
+            return 'train journal unreadable; coordinator must reconcile before closure or cleanup'
+        if any(entry.get('key') == job_key(row) for entry in data.get('accepted', [])):
+            if (data.get('state') in ('publishing', 'publication_failed') or
+                    (data.get('state') == 'verified' and data.get('publication_succeeded') is not True)):
+                return 'train publication unresolved; reconcile retained journal before closure or cleanup'
+    return ''
+
+
 def published_train(n, row):
-    """Publication intent is integration evidence only when its tip actually reached main."""
+    """An explicit success receipt and integrated tip authorize train recovery."""
+    refusal = publication_refusal(n, row)
+    if refusal:
+        _m_common.die(refusal)
     home = n.get("home_path")
     if not home:
         return None
@@ -504,7 +523,8 @@ def published_train(n, row):
             data = json.loads(path.read_text())
         except (OSError, ValueError):
             _m_common.die("train journal unreadable; coordinator must repair it before closing a job")
-        if data.get("version") != 1 or data.get("state") != "verified":
+        if (data.get("version") != 1 or data.get("state") != "verified"
+                or data.get('publication_succeeded') is not True):
             continue
         tip = data.get("tip")
         if not isinstance(tip, str) or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", tip):
@@ -512,7 +532,7 @@ def published_train(n, row):
         if _m_common.git("merge-base", "--is-ancestor", tip, "refs/heads/main", cwd=home).returncode:
             continue
         for entry in data.get("accepted", []):
-            if entry.get("key") == job_key(row):
+            if entry.get("key") == job_key(row) and entry.get('branch') == row['Job']:
                 return data["batch"], entry
     return None
 
@@ -848,6 +868,9 @@ def close_ledger_job(inst, n, branch, reason=None):
         row = open_job(rows or [], branch)
         if not row:
             _m_common.die('no open ledger job to close')
+        refusal = publication_refusal(n, row)
+        if refusal:
+            _m_common.die(refusal)
         landed = manual_landing(n, row)
         if landed and not reason:
             row.update({'Outcome': 'merged', 'Head commit': landed[0], 'Main commit': landed[1],

@@ -27,7 +27,7 @@ MODULE_LANES = (
 )
 LANE_TESTS = {name: ('test_' + name + '.py',) for name in MODULE_LANES}
 LANE_TESTS.update({
-    'train': ('test_train.py', 'test_train_review.py'),
+    'train': ('test_train.py', 'test_train_review.py', 'test_train_landing.py', 'test_land.py'),
     'jobs': ('test_jobs.py', 'test_train_ejection.py', 'test_handback_queue.py'),
     'status': ('test_status.py', 'test_inbox_noise.py'),
     'reminders': ('test_due_lifecycle.py',),
@@ -161,7 +161,7 @@ def source_inputs(tree, train_symbols):
                 and not (isinstance(node.value, ast.Name) and node.value.id == 'self')):
             uses_train = True
         if isinstance(node, ast.Constant) and isinstance(node.value, str):
-            if node.value in {'train', '.train', '_m_train', 'cmd_train'}:
+            if node.value in {'train', 'land', '.train', '_m_train', 'cmd_train', 'cmd_land'}:
                 uses_train = True
         if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
                 and node.func.id == 'getattr' and len(node.args) >= 2

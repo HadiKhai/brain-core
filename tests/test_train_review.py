@@ -125,14 +125,15 @@ class TrainReviewFixes(Scenario):
         self.assertEqual([e['branch'] for e in data['ejected']], ['j2', 'j4'])
         self.assertEqual(sum(not run['jobs'] for run in data['runs']), 1)
 
-    def test_prepublication_main_checkout_refuses(self):
+    def test_prepublication_clean_main_checkout_fast_forwards(self):
         root, home = self.project('if test "${BRANCH#train/}" != "$BRANCH"; then git -C "$MAIN" checkout -q main; fi')
         self.job('one')
         self.detach()
         before = self.git('rev-parse', 'main', cwd=home)
-        self.assertIn('main is checked out', self.b(root, 'train', 'a', ok=False))
-        self.assertEqual(self.git('rev-parse', 'main', cwd=home), before)
-        self.assertNotIn('| merged |', self.ledger())
+        self.assertIn('merged 1 job(s)', self.b(root, 'train', 'a'))
+        self.assertNotEqual(self.git('rev-parse', 'main', cwd=home), before)
+        self.assertIn('| merged |', self.ledger())
+        self.assertEqual((home / 'one').read_text(), 'one\n')
         self.assertFalse(self.git('status', '--porcelain', '--', 'nodes/a/job-trains', cwd=root).strip())
 
     def test_update_ref_cas_rejects_race_after_explicit_main_check(self):
@@ -161,6 +162,55 @@ class TrainReviewFixes(Scenario):
         self.assertEqual(self.batches()[0]['state'], 'empty')
         self.assertFalse(self.git('status', '--porcelain', '--', 'nodes/a/job-trains', cwd=root).strip())
         self.assertTrue(self.git('ls-files', '--', 'nodes/a/job-trains/*.json', cwd=root).strip())
+
+    def test_failed_same_tip_cas_never_closes_ledger_on_retry(self):
+        root, home = self.project()
+        self.job('one')
+        self.detach()
+        m = core_loader.SourceFileLoader('failed_cas_retry', str(CORE / 'bin/brain')).load_module()
+        git = m.git
+        writes = []
+        def racing_git(*args, **kwargs):
+            if args[:2] == ('update-ref', '-m'):
+                writes.append(args)
+                self.git('update-ref', 'refs/heads/main', args[-2], args[-1], cwd=home)
+            return git(*args, **kwargs)
+        with mock.patch.dict(os.environ, {**self.env, 'BRAIN_ROOT': str(root)}), mock.patch.object(m, 'git', side_effect=racing_git), contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaisesRegex(SystemExit, 'main changed during publication'):
+                m.cmd_train(argparse.Namespace(id='a', jobs=None))
+        self.assertEqual(len(writes), 1)
+        data = self.batches()[0]
+        self.assertEqual(data['state'], 'publication_failed')
+        self.assertEqual(self.git('rev-parse', 'main', cwd=home).strip(), data['tip'])
+        self.assertNotIn('| merged |', self.ledger())
+        self.assertIn('unresolved publication', self.b(root, 'train', 'a', ok=False))
+        self.assertNotIn('| merged |', self.ledger())
+
+    def test_partial_git_failure_and_interrupted_retry_never_record_success(self):
+        root, home = self.project()
+        self.job('one')
+        m = core_loader.SourceFileLoader('partial_merge_retry', str(CORE / 'bin/brain')).load_module()
+        git = m.git
+        def failing_git(*args, **kwargs):
+            if args[:2] == ('merge', '--ff-only'):
+                self.git('checkout', args[-1], '--', 'one', cwd=home)
+                return subprocess.CompletedProcess(args, 128, '', 'injected Git I/O failure')
+            return git(*args, **kwargs)
+        with mock.patch.dict(os.environ, {**self.env, 'BRAIN_ROOT': str(root)}), mock.patch.object(m, 'git', side_effect=failing_git), contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaisesRegex(SystemExit, 'Git fast-forward failed') as error:
+                m.cmd_train(argparse.Namespace(id='a', jobs=None))
+        self.assertIn('git status (porcelain):\nA  one', str(error.exception))
+        self.assertEqual((home / 'one').read_text(), 'one\n')
+        self.assertEqual(self.batches()[0]['state'], 'publication_failed')
+        self.assertNotIn('| merged |', self.ledger())
+        # Simulate process death before failure observation with main at the tip.
+        path = next((root / 'nodes/a/job-trains').glob('*.json'))
+        data = json.loads(path.read_text())
+        data['state'] = 'publishing'
+        path.write_text(json.dumps(data))
+        self.git('update-ref', 'refs/heads/main', data['tip'], data['base'], cwd=home)
+        self.assertIn('unresolved publication', self.b(root, 'train', 'a', ok=False))
+        self.assertNotIn('| merged |', self.ledger())
 
     def test_linked_worktree_apply_rebase_also_occupies_main(self):
         root, home = self.project()

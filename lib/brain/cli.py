@@ -440,6 +440,8 @@ def main():
         opt("--contract", help="contract file; defaults to the job's recorded contract"))
     cmd("train", _m_train.cmd_train, "batch ready jobs onto local main, verify once, and print the release command", "id",
         opt("--jobs", nargs="+", help="explicit job order (space or comma separated); all must be ready"))
+    cmd("land", _m_train.cmd_land, "batch land ready jobs; host settlement requires fresh separate evidence", "id",
+        opt("--jobs", nargs="+", help="explicit job order (space or comma separated); all must be ready"))
     cmd("ready", _m_verify.cmd_ready, "check a worker's ready packet against the branch and cached origin default (local main without origin)", "id",
         opt("--branch", required=True), opt("--record", action="store_true", help="worker: run node verify and record"),
         opt("--summary", help="one-line hand-back result (required for --record with schema v3)"),
