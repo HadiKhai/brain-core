@@ -64,7 +64,7 @@ def rotation_due(inst, n):
 
 
 def cmd_rotate(a):
-    inst = _m_nodes.load()
+    inst = getattr(a, '_instance', None) or _m_nodes.load()
     n = inst.node(a.id)
     if _m_common.outward_links(inst.root):
         _m_common.die("rotation refused: unsafe instance links; repair before preparing a handover")

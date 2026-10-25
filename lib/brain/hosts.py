@@ -18,6 +18,7 @@ from pathlib import Path
 
 from . import briefs as _m_briefs
 from . import common as _m_common
+from . import conversation_answers as _m_conversation_answers
 from . import guard as _m_guard
 from . import instance as _m_instance
 from . import jobs as _m_jobs
@@ -1300,7 +1301,7 @@ def hook_questions(path):
                                              if not isinstance(q, dict) or q.get("id") not in answered]
                 except ValueError:
                     pass
-    return [q for args in pending.values() if isinstance(args, dict)
+    return [dict(q, _source_call=identity) for identity, args in pending.items() if isinstance(args, dict)
             for q in args.get("questions", []) if isinstance(q, dict) and isinstance(q.get("question"), str)]
 
 
@@ -1308,22 +1309,17 @@ def capture_hook_questions(inst, n, data):
     path = data.get("transcript_path")
     if not isinstance(path, str) or not path:
         return
+    _m_conversation_answers.queue_conversation_answers(inst, n, data)
     questions = hook_questions(path)
     if not questions:
         return
     # Same boundary checks as CLI writes, but no instance lock: a parent brain command may hold it.
     if _m_common.outward_links(inst.root):
         return
-    terms = _m_guard.never_terms(n)
     for q in questions:
-        parts = [q["question"]]
-        for option in q.get("options", []):
-            if isinstance(option, dict):
-                parts += [v for k in ("label", "description") if isinstance((v := option.get(k)), str)]
-        text = " ".join(_m_nodes.import_text("\n".join(parts), terms).split())
-        text = _m_nodes.import_text(text, terms)  # whitespace folding can form a protected phrase or secret assignment
+        text = _m_conversation_answers.question_text(n, q)
         # Hash only screened content; raw tool ids, paths, answers and session ids never persist.
-        marker = "<!-- host-question:" + hashlib.sha256(text.encode()).hexdigest() + " -->"
+        marker = _m_conversation_answers.question_marker(n, q, data)
         wake_id = os.urandom(16).hex()
         line = f"- {inst.now()} from runtime: Host question: {text} <!-- wake:{wake_id} --> {marker}\n"
         try:
@@ -1332,7 +1328,7 @@ def capture_hook_questions(inst, n, data):
             import fcntl
             queue = _m_status.hook_question_queue(n)
             queue.mkdir(parents=True, exist_ok=True)
-            pending = queue / (hashlib.sha256(text.encode()).hexdigest() + ".json")
+            pending = queue / (marker[len('<!-- host-question:'):-len(' -->')] + ".json")
             # Serialize only this marker's queue publication; hooks never wait on the lock.
             lock = pending.with_suffix(".lock")
             _m_common.safe_target(lock)

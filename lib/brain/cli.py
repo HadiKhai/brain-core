@@ -23,6 +23,7 @@ from . import history as _m_history
 from . import hosts as _m_hosts
 from . import host_observations as _m_host_observations
 from . import host_tasks as _m_host_tasks
+from . import host_lifecycle as _m_host_lifecycle
 from . import instance as _m_instance
 from . import job_env as _m_job_env
 from . import jobs as _m_jobs
@@ -328,7 +329,8 @@ def main():
     cmd("jobs", _m_jobs.cmd_jobs, "jobs per node: open ones and their age, median hours and review rounds, causes",
         opt("id", nargs="?"), opt("--branch"), opt("--job-key", help="select one ledger job when a branch was reused"), opt("--lessons", help="learned item ids, or none: <reason>"),
         opt("--switch", help="record provider switch: old -> new: reason"),
-        opt("--start", action="store_true", help="coordinator: start an import:<snapshot> study"),
+        opt("--start", action="store_true", help="coordinator: start an import study or adopt an existing --thread"),
+        opt("--thread", help="with --start/--branch: adopt an existing worker and its linked Git checkout"),
         opt("--close", action="store_true", help="coordinator: close a processed study, manually landed job, or parked job with --reason"),
         opt("--reason", help="one-line reason to explicitly close parked work"),
         opt("--live", action="store_true", help="read-only JSON rows joining ledger, hand-back, attempts and recorded queues; host activity unknown"),
@@ -339,6 +341,11 @@ def main():
             ", ".join(f"## {f}" for f in _m_jobs.CONTRACT_FIELDS) + "; an optional ## Budget, e.g. 20M tokens, 3 h)"),
         opt("--usage-file", dest="usage_file", help="coordinator: the job's usage as the host reports it (JSON); "
             "wins over what transcripts show"))
+    cmd("lifecycle", _m_host_lifecycle.cmd_lifecycle, "execute a native host lifecycle action with fresh ownership checks",
+        opt("action", choices=("settle", "launch", "restart", "maintain", "rotate", "accept-rotation")), "id",
+        opt("--job-key", help="restart only this exact open ledger job"),
+        opt("--ticket", help="accept only this exact confirmed rotation launch"),
+        opt("--session-id", help="replacement runtime actual session identity; never a host thread ID substitute"))
     cmd("rotate", _m_rotation.cmd_rotate, "prepare a file-based coordinator handover; prints host steps", "id")
     cmd("due", _m_status.cmd_due, "coordinator actions and machine holds; empty means no output",
         opt("--since-wake", action="store_true", help="new file-only wake items compared with the wake before the latest delivery"),

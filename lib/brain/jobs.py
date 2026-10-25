@@ -816,6 +816,9 @@ def bound_worker_threads(n, branch):
             key = job_key(row)
             if row["Job"] == branch and workers.get(key):
                 refs.append((workers[key], "worker:" + key))
+            retired = n["local"].get("retired_workers", {}).get(key, [])
+            if row["Job"] == branch and isinstance(retired, list):
+                refs.extend((thread, "retired-worker:" + key) for thread in retired if isinstance(thread, str) and thread)
     for row in _m_status.active_work(n, include_closed=True):
         name = row[0].replace("`", "").split()
         if name and name[0] == branch and len(row) > 1:
@@ -1512,6 +1515,14 @@ def job_budget_lines(inst, n, planned=None):
 
 
 def cmd_jobs(a):
+    if getattr(a, 'thread', None) is not None:
+        if (not (a.id and a.branch and a.start) or any((a.close, a.settled, a.all_closed,
+                getattr(a, 'live', False), a.lessons is not None, a.switch is not None,
+                a.contract_file, a.usage_file, a.job_key, getattr(a, 'reason', None),
+                getattr(a, 'attestation_file', None)))):
+            _m_common.die('adoption refused: --thread requires --start, a node and --branch, without other updates')
+        from . import job_adoption as _m_adoption
+        return _m_adoption.cmd_adopt_job(a)
     inst = _m_nodes.load()
     if getattr(a, 'attestation_file', None) and not a.settled:
         _m_common.die('--attestation-file requires --settled')
