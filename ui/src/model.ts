@@ -1,5 +1,10 @@
 // The Python API owns this read-only snapshot. Optional fields stay optional across upgrades.
 export type RecordData = Record<string, any>;
+export function budgetUsage(open?: RecordData) {
+  const round = open?.round_usage;
+  return round ? { processed: round.processed ?? null, compactions: round.compactions ?? null, hours: round.hours ?? null }
+    : { processed: open?.usage?.processed ?? null, compactions: open?.usage?.compactions ?? null, hours: open?.age_h ?? null };
+}
 export const list = (v: any): RecordData[] => (Array.isArray(v) ? v : []);
 export const label = (v: any) => {
   const text = String(v ?? "");

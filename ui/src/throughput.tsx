@@ -1,5 +1,6 @@
 import { DataTable, Empty } from "./shared";
 import { list, tokens, type RecordData } from "./model";
+import "./throughput.css";
 
 export type ThroughputDay = {
   date: string;
@@ -18,12 +19,12 @@ export type ThroughputDay = {
 
 const decimal = (value: unknown) => typeof value === "number" && Number.isFinite(value) ? value.toFixed(2) : "Unmeasured";
 
-export function Throughput({ nodes }: { nodes: RecordData[] }) {
+export function Throughput({ nodes, embedded = false }: { nodes: RecordData[]; embedded?: boolean }) {
   const rows = nodes.flatMap(node => list(node.jobs?.throughput).map((day): RecordData => ({
     ...day, project: node.title || node.id || "Project", _key: `${node.id}:${day.date}`,
   }))).sort((a, b) => String(b.date).localeCompare(String(a.date)) || String(a.project).localeCompare(String(b.project)));
-  return <section className="surface" aria-label="Daily throughput">
-    <div className="surface-head"><h2>Daily throughput</h2><small>Last 14 days · measured merges</small></div>
+  return <section className={`daily-throughput ${embedded ? "pb-4" : "surface"}`} aria-label="Daily throughput">
+    {embedded ? <small>Last 14 days · measured merges</small> : <div className="surface-head"><h2>Daily throughput</h2><small>Last 14 days · measured merges</small></div>}
     <p>Calendar-day rates; today uses elapsed hours. Tokens and admission waits show their measurement coverage. Other waiting causes are unmeasured.</p>
     {rows.length ? <DataTable name="throughput-days" rows={rows} details={false} columns={[
       { key: "date", label: "Day" },

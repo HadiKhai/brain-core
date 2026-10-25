@@ -13,6 +13,15 @@ const emitted = ts.transpile(source, {
 const m = await import(
   "data:text/javascript;base64," + Buffer.from(emitted).toString("base64")
 );
+test("budget badges use replacement-round counters while lifetime usage stays available", () => {
+  const lifetime = { processed: 900000, compactions: 8, active_h: 9 };
+  const open = { usage: lifetime, age_h: 12, round_usage: { processed: 2000, compactions: 0, hours: 0.25 } };
+  assert.deepEqual(m.budgetUsage(open), { processed: 2000, compactions: 0, hours: 0.25 });
+  assert.equal(open.usage, lifetime);
+  assert.deepEqual(m.budgetUsage({ ...open, round_usage: null }), { processed: 900000, compactions: 8, hours: 12 });
+  assert.deepEqual(m.budgetUsage({ ...open, round_usage: { processed: null, compactions: null, hours: null } }),
+    { processed: null, compactions: null, hours: null });
+});
 test("closed ledger rows and stale worktrees never masquerade as in-flight jobs", () => {
   const n = {
     id: "demo",

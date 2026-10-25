@@ -842,7 +842,12 @@ class ExpandedUI(Scenario):
             module.cmd_preview(argparse.Namespace(id='root', record=str(input_path), json=False))
         self.assertEqual(module.preview_evidence(inst, node)['state'], 'verified')
         self.assertNotIn('preview-evidence', preview_due())
+        ui = self.m._owners['UIInputs']
+        inputs = ui.UIInputs(inst)
+        before_key = inputs.node_keys(inst, inputs.signature())['root']
         image.write_bytes(image.read_bytes() + b'changed')
+        self.assertNotEqual(inputs.node_keys(inst, inputs.signature())['root'], before_key,
+                            'external screenshot metadata did not invalidate cached preview evidence')
         self.assertEqual(module.preview_evidence(inst, node)['state'], 'stale')
         self.assertIn('preview-evidence', preview_due())
         image.write_bytes(image.read_bytes()[:-7])
@@ -864,6 +869,47 @@ class ExpandedUI(Scenario):
         node['local']['preview_tour'] = str(folder / 'another.md')
         with self.assertRaises(ValueError):
             module.validate_preview_evidence(inst, node, receipt)
+
+    def test_round_usage_payload_keeps_lifetime_and_reports_unknown_receipts(self):
+        module = self.m._owners['ui_node']
+        root = self.first_paint_root()
+        inst = self.m.UIInstance(root)
+        node = inst.nodes()[0]
+        row = {'Job': 'job/live', 'Started': '2026-01-01T00:00:00Z', 'Ended': ''}
+        total = {'sessions': 1, 'processed': 900000, 'compactions': 8}
+        round_usage = {'processed': 2000, 'compactions': 0, 'hours': 0.25}
+        with mock.patch.object(module._m_jobs, 'jobs_summary', side_effect=lambda *_: {'open': [dict(row)], 'forecasts': []}), \
+             mock.patch.object(module._m_spend, 'live_usage', return_value=total), \
+             mock.patch.object(module._m_spend, 'spend_summary', side_effect=lambda value, _: value), \
+             mock.patch.object(module._m_spend, 'job_round_usage', create=True, return_value=round_usage) as rounds:
+            output = module.ui_node(inst, node, '')[0]['jobs']['open'][0]
+            self.assertEqual(output['usage'], total)
+            self.assertEqual(output['round_usage'], round_usage)
+            rounds.assert_called_once()
+            rounds.side_effect = ValueError('private invalid receipt detail')
+            output = module.ui_node(inst, node, '')[0]['jobs']['open'][0]
+            self.assertEqual(output['usage'], total)
+            self.assertEqual(output['round_usage'], {'state': 'unavailable', 'processed': None, 'compactions': None, 'hours': None})
+            self.assertNotIn('private invalid receipt detail', json.dumps(output))
+
+    def test_round_receipt_metadata_invalidates_only_its_job_node_cache(self):
+        module = self.m._owners['UIInputs']
+        root = self.first_paint_root()
+        other = root / 'nodes/amber'
+        other.mkdir()
+        (other / 'node.md').write_text('---\nid: amber\ntitle: Amber\n---\n')
+        inst = self.m.UIInstance(root)
+        row = {'Job': 'job/live', 'Started': '2026-01-01T00:00:00Z', 'Ended': ''}
+        with mock.patch.object(module._m_jobs, 'read_jobs', side_effect=lambda n: [row] if n['id'] == 'meadow' else []):
+            inputs = module.UIInputs(inst)
+            before = inputs.node_keys(inst, inputs.signature())
+            path = root / '.brain/wake/lifecycle.json'
+            path.parent.mkdir(exist_ok=True)
+            key = module._m_jobs.digest(['meadow', module._m_jobs.job_key(row)])
+            path.write_text(json.dumps({'usage': {key: {'job': module._m_jobs.job_key(row), 'round_at': '2026-01-02T00:00:00Z'}}}))
+            after = inputs.node_keys(inst, inputs.signature())
+            self.assertNotEqual(before['meadow'], after['meadow'])
+            self.assertEqual(before['amber'], after['amber'])
 
     def test_partial_blocked_ages_are_unknown_without_history_and_do_not_poison_full_metadata(self):
         inst = self.m.UIInstance(self.first_paint_root())
