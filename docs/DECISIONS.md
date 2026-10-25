@@ -174,3 +174,11 @@ ledger observation. Scorecard receipt sources reject hard links as well as
 symbolic links, so a locally named receipt cannot silently refer to another
 shared file identity. Neither rule upgrades source assertions into independent
 live or delivery proof.
+
+## D115: Observed job evidence stays inside its temporal episode
+
+Current causal views and fact advisories exclude observations before the exact
+ledger generation's recorded start. Review recurrence also excludes future and
+pre-generation receipts using the snapshot clock. Unknown or reconstructed
+history cannot establish measured current progress. Equal-time facts retain
+journal order rather than being reordered by opaque identities.

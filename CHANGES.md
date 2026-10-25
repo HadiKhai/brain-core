@@ -1673,3 +1673,10 @@ After upgrading: record request/start facts with stable outcome and run referenc
 For agents: ended attempts without merged outcome display closed_without_delivery;
 scorecard sources reject hard-linked receipts as well as symbolic links.
 After upgrading: no migration; linked receipt evidence remains unknown until copied.
+
+## Temporal bounds for introspection evidence
+
+For agents: current job projections exclude pre-generation observations and
+future review receipts. Equal-time observations retain journal order.
+After upgrading: no migration; historical records remain stored without becoming
+current measured evidence.

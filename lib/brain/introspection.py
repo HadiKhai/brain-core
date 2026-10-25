@@ -56,8 +56,15 @@ def introspection_observed(events, now, job_key=None):
     return [event for at, sequence, event in sorted(out, key=lambda item: (item[0], item[1]))]
 
 
-def causal_job_view(row, job_key, events, rows_by_key, now, outcome):
+
+def introspection_job_events(events, row, job_key, now):
     observed = introspection_observed(events, now, job_key)
+    started = introspection_time(row.get('Started'))
+    return [e for e in observed if not started or introspection_time(e['data']['at']) >= started]
+
+
+def causal_job_view(row, job_key, events, rows_by_key, now, outcome):
+    observed = introspection_job_events(events, row, job_key, now)
     phases = [e for e in observed if e['data']['fact_type'] == 'phase_changed']
     latest = phases[-1] if phases else None
     data = latest['data'] if latest else {}
@@ -121,8 +128,9 @@ def communication_metrics(rows, events, start, end, queue):
 
 
 
-def review_class_advisories(receipts, job_key):
+def review_class_advisories(receipts, job_key, now=None, since=None):
     """Compare explicit major/blocker classes across attributable review rounds."""
+    now = now or datetime.datetime.now(datetime.timezone.utc)
     classes = {}
     for rec in receipts:
         if (not isinstance(rec, dict) or type(rec.get('version')) is not int or rec['version'] != 1
@@ -134,6 +142,9 @@ def review_class_advisories(receipts, job_key):
         if (not isinstance(reviewer, dict) or not isinstance(reviewer.get('threadId'), str) or not reviewer['threadId']
                 or reviewer.get('fresh_context') is not True or reviewer.get('context_reused') is not False
                 or reviewer.get('built_change') is not False or not introspection_time(rec.get('observed_at'))):
+            continue
+        at = introspection_time(rec['observed_at'])
+        if at > now or (since and at < since):
             continue
         round_id = (reviewer['threadId'], rec['head'])
         for finding in rec['findings']:
@@ -339,19 +350,20 @@ def introspection_snapshot(inst, n, branch=None, hours=24, limit=50):
         outcome = None
         if contract.is_file():
             outcome = _m_ui.md_sections(contract.read_text()).get('Outcome')
-        view = causal_job_view(row, _m_jobs.job_key(row), facts, by_key, now, outcome)
+        job_facts = introspection_job_events(facts, row, _m_jobs.job_key(row), now)
+        view = causal_job_view(row, _m_jobs.job_key(row), job_facts, by_key, now, outcome)
         reader = getattr(_m_review, 'review_evidence', None)
         receipts = list(reader(inst, n, branch=row['Job'])) if reader else []
-        view['advisories'] = review_class_advisories(receipts, view['job_key'])
-        view['advisories'] += permission_request_advisories(facts, view['job_key'], now)
-        view['advisories'] += acknowledgement_wait_advisories(facts, view['job_key'], now)
-        view['advisories'] += unchanged_verification_advisories(facts, view['job_key'], now)
+        view['advisories'] = review_class_advisories(receipts, view['job_key'], now, introspection_time(row.get('Started')))
+        view['advisories'] += permission_request_advisories(job_facts, view['job_key'], now)
+        view['advisories'] += acknowledgement_wait_advisories(job_facts, view['job_key'], now)
+        view['advisories'] += unchanged_verification_advisories(job_facts, view['job_key'], now)
         if not row['Ended']:
-            view['advisories'] += infrastructure_displacement_advisories(facts, view['job_key'], now)
-            view['advisories'] += product_test_start_advisories(facts, view['job_key'], now)
+            view['advisories'] += infrastructure_displacement_advisories(job_facts, view['job_key'], now)
+            view['advisories'] += product_test_start_advisories(job_facts, view['job_key'], now)
             view['head'] = introspection_head(n, row['Job'])
             if str(n['local'].get('preview', '')).strip().casefold() != 'none':
-                view['advisories'] += preview_testing_advisories(facts, view['job_key'], now, view['head'])
+                view['advisories'] += preview_testing_advisories(job_facts, view['job_key'], now, view['head'])
             view['preview_evidence'] = 'head_bound_receipts' if view['head'] else 'head_unknown'
         view['review_evidence'] = 'receipt_hook' if reader else 'unavailable'
         views.append(view)

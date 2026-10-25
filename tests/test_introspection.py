@@ -49,6 +49,9 @@ class CausalIntrospection(unittest.TestCase):
         view=self.m.causal_job_view(self.row,KEY,[wrong,future],{},self.now,None)
         self.assertIsNone(view['phase'])
         self.assertEqual(view['evidence'],[])
+        old=fact('phase_changed',5,phase='review',state='waiting',reason_code='review_pending')
+        old['data']['at']='2025-12-31T10:05:00+00:00'
+        self.assertIsNone(self.m.causal_job_view(self.row,KEY,[old],{},self.now,None)['phase'])
 
     def test_communication_metrics_count_recorded_merges_waits_and_decision_turn_share(self):
         start=datetime.datetime(2026,1,1,10,tzinfo=datetime.timezone.utc)
@@ -123,6 +126,9 @@ class ReviewClassRecurrence(unittest.TestCase):
         reused=self.receipt('review-d')
         reused['reviewer']['context_reused']=True
         self.assertEqual(self.m.review_class_advisories([first,wrong,minor,reused],KEY),[])
+        future=self.receipt('review-future')
+        future['observed_at']='2099-01-01T00:00:00Z'
+        self.assertEqual(self.m.review_class_advisories([first,future],KEY),[])
 
 
 class PermissionAdvisories(unittest.TestCase):
