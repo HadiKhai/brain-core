@@ -182,3 +182,11 @@ ledger generation's recorded start. Review recurrence also excludes future and
 pre-generation receipts using the snapshot clock. Unknown or reconstructed
 history cannot establish measured current progress. Equal-time facts retain
 journal order rather than being reordered by opaque identities.
+
+## D116: Queue metrics consume the transport owner's coalesced-turn projection
+
+When installed, the transport's same-binding wake_turn_queue hook supplies the
+union of pending items and an unconsumed coalesced turn, preserving its first
+enqueue time. The consumer never reads or mutates transport state itself. An
+unknown projection stays unknown; the legacy pending-only fallback is labelled
+as such while the hook is absent. Queue timestamps never establish host run start.

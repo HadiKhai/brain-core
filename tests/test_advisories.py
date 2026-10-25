@@ -168,6 +168,19 @@ class CoordinatorAdvisories(unittest.TestCase):
         self.now += datetime.timedelta(minutes=4)
         self.assertEqual(self.m.coordinator_advisories(self.inst),[])
 
+    def test_coalesced_queue_hook_survives_pending_file_removal_without_claiming_busy(self):
+        hosts=self.m.coordinator_advisories.__globals__['_m_hosts']
+        snapshot={'known':True,'item_count':4,'oldest_at':self.now.timestamp()-660,'unconsumed_wake':True}
+        with mock.patch.object(hosts,'wake_turn_queue',return_value=snapshot,create=True):
+            items=self.m.coordinator_advisories(self.inst)
+            self.assertEqual([i['kind'] for i in items],['coordinator-queue'])
+            view=self.m.coordinator_queue_view(self.inst,self.n,self.now.timestamp())
+            self.assertEqual(view['count'],4)
+            self.assertEqual(view['source'],'coalesced_native_queue')
+        with mock.patch.object(hosts,'wake_turn_queue',return_value={'known':False},create=True):
+            self.assertEqual(self.m.coordinator_advisories(self.inst),[])
+            self.assertIsNone(self.m.coordinator_queue_view(self.inst,self.n,self.now.timestamp())['count'])
+
     def test_missing_malformed_future_and_linked_observations_do_not_invent_activity(self):
         self.assertEqual(self.m.coordinator_advisories(self.inst),[])
         self.host(started_at='2026-01-01T12:01:00+00:00')

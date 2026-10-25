@@ -83,6 +83,34 @@ def coordinator_native_queue(inst, n, now):
     return queued
 
 
+
+def coordinator_queue_view(inst, n, now, host_record=None):
+    """Use the transport owner's bound turn projection when that hook is installed."""
+    if host_record and host_record['thread'] == n['local'].get('coordinator'):
+        queued = host_record['queued']
+        source = 'fresh_host_snapshot'
+    else:
+        reader = getattr(_m_hosts, 'wake_turn_queue', None)
+        if reader:
+            unknown = {'count': None, 'oldest_at': None, 'episode': None, 'source': 'coalesced_queue_unknown'}
+            try:
+                value = reader(inst, n)
+                count, at = value.get('item_count'), value.get('oldest_at')
+                if value.get('known') is not True or type(count) is not int or count < 0:
+                    return unknown
+                if count and (type(at) not in (int, float) or not math.isfinite(at) or at > now):
+                    return unknown
+                if not count and at is not None:
+                    return unknown
+                return {'count': count, 'oldest_at': at, 'episode': [at], 'source': 'coalesced_native_queue'}
+            except (OSError, ValueError, TypeError, AttributeError):
+                return unknown
+        queued = coordinator_native_queue(inst, n, now)
+        source = 'native_pending_only'
+    oldest = min(queued, key=lambda key: (queued[key], key)) if queued else None
+    at = queued[oldest] if oldest is not None else None
+    return {'count': len(queued), 'oldest_at': at, 'episode': [oldest, at], 'source': source}
+
 def coordinator_advisories(inst):
     now = inst.now_dt().timestamp()
     host = coordinator_host_runs(inst, now)
@@ -93,25 +121,25 @@ def coordinator_advisories(inst):
         thread = n['local']['coordinator']
         rec = host.get(n['id'])
         rec = rec if rec and rec['thread'] == thread else None
-        queued = rec['queued'] if rec else coordinator_native_queue(inst, n, now)
-        if not queued:
+        queue = coordinator_queue_view(inst, n, now, rec)
+        if not queue['count']:
             continue
-        oldest = min(queued, key=lambda key: (queued[key], key))
+        oldest_at = queue['oldest_at']
         def add(kind, identity, text):
             episode = hashlib.sha256(json.dumps([n['id'], thread, kind, identity], sort_keys=True).encode()).hexdigest()
             items.append({'node': 'root', 'kind': kind, 'subject_node': n['id'],
                           'episode': episode, 'text': text})
-        if len(queued) > 3 or now - queued[oldest] > 600:
-            add('coordinator-queue', [oldest, queued[oldest]],
-                f"{n['id']}: coordinator has {len(queued)} queued item(s); oldest waiting "
-                f"{int((now - queued[oldest]) / 60)} min. Drain all queued work in one turn.")
+        if queue['count'] > 3 or now - oldest_at > 600:
+            add('coordinator-queue', queue['episode'],
+                f"{n['id']}: coordinator has {queue['count']} queued item(s); oldest waiting "
+                f"{int((now - oldest_at) / 60)} min. Drain all queued work in one turn.")
         try:
             busy_minutes = float(n['fm'].get('coordinator_stall_minutes', 20))
             if not math.isfinite(busy_minutes) or busy_minutes < 1:
                 busy_minutes = 20
         except (ValueError, TypeError):
             busy_minutes = 20
-        if rec and rec['status'] == 'active' and now - rec['started'] >= busy_minutes * 60:
+        if rec and rec['queued'] and rec['status'] == 'active' and now - rec['started'] >= busy_minutes * 60:
             add('coordinator-busy', [rec['run'], rec['started']],
                 f"{n['id']}: coordinator active for {int((now - rec['started']) / 60)} min "
                 'with wakes queued behind this run; inspect its current work.')

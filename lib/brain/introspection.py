@@ -329,9 +329,9 @@ def introspection_queue(inst, n):
     now = inst.now_dt().timestamp()
     record = _m_coordinators.coordinator_host_runs(inst, now).get(n['id'])
     record = record if record and record['thread'] == n['local'].get('coordinator') else None
-    queued = record['queued'] if record else _m_coordinators.coordinator_native_queue(inst, n, now)
-    return {'count': len(queued), 'oldest_wait_seconds': max(now - at for at in queued.values()) if queued else None,
-            'source': 'fresh_host_snapshot' if record else 'native_pending_only'}
+    queue = _m_coordinators.coordinator_queue_view(inst, n, now, record)
+    return {'count': queue['count'], 'oldest_wait_seconds': now - queue['oldest_at'] if queue['oldest_at'] is not None else None,
+            'source': queue['source']}
 
 
 def introspection_snapshot(inst, n, branch=None, hours=24, limit=50):

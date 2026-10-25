@@ -1680,3 +1680,11 @@ For agents: current job projections exclude pre-generation observations and
 future review receipts. Equal-time observations retain journal order.
 After upgrading: no migration; historical records remain stored without becoming
 current measured evidence.
+
+## Coalesced coordinator queue projection
+
+For agents: queue advisories and metrics consume the transport's wake_turn_queue
+hook when available, retaining delivered-but-unconsumed turns and first enqueue
+time. Missing hooks retain the labelled pending-only fallback; corrupt or unknown
+projections remain unknown.
+After upgrading: no host busy inference or transport state mutation is added.
