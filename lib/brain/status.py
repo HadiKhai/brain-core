@@ -672,6 +672,26 @@ def machine_due_items(inst, nodes, state, items):
               'scope': scope, 'text': _m_machine.machine_summary(state)}] if hold else [])
 
 
+def coordinator_due_items(inst, nodes, include_handled=False):
+    """Source work belongs to its nearest live coordinator, retaining source ids."""
+    from . import watch as _m_watch
+    selected = {n['id'] for n in nodes}
+    items = []
+    for source in inst.nodes():
+        if source['archived']:
+            continue
+        own = source['id'] in selected
+        if not own and _m_hosts.wake_target(inst, source)[0]['id'] not in selected:
+            continue
+        items += [i for i in due_items(inst, source, include_stale=own, include_advice=own,
+                                      include_handled=include_handled) + changes_due(inst, source)
+                  if own or i['kind'] not in (*_m_watch.WATCH_LOCAL_KINDS, 'overdue-question')]
+    items += [{**i, 'node': i.get('source', i['node'])}
+              for i in _m_watch.watch_completion_items(inst)
+              if _m_watch.watch_completion_target(inst, i)['id'] in selected]
+    return items
+
+
 def cmd_due(a):
     inst = _m_nodes.load()
     nodes = [inst.node(a.id)] if a.id else inst.nodes()
@@ -744,7 +764,7 @@ def cmd_due(a):
                                  'text': _m_hosts.wake_reason_summary(value['items'])})
     _m_docker_leftovers.docker_leftover_nodes(inst, nodes)
     state = _m_machine.machine_state(inst)
-    items = [item for n in nodes for item in due_items(inst, n, include_handled=getattr(a, 'handled', False)) + changes_due(inst, n)]
+    items = coordinator_due_items(inst, nodes, include_handled=getattr(a, 'handled', False))
     from . import communication as _m_communication
     items += _m_communication.communication_items(inst, nodes)
     items += consumed

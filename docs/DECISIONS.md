@@ -124,3 +124,20 @@ The retained fingerprint test for `rehearse=required` predates removal of rehear
 as a readiness gate. Its current regression asserts that the retired option does
 not restore a gate or change status semantics; the fingerprint feature does not
 reintroduce that obsolete behavior.
+
+
+## D506: Visible wake ownership and question-only root bindings
+
+Port the retained due/inbox union to consumption-aware bindings via machine-local
+`wake_policy=visible`. Unbound descendants route to their nearest bound ancestor;
+its due view includes that source work. Its watcher also includes fresh inbox
+rollups and its own stale judgement/advice. Recorded completion ownership follows
+the source coordinator in visible mode. Existing bindings retain legacy selection
+until configured. New wake setup instructions enable visible/coalescing mode for
+coordinators and `wake_policy=questions` for root.
+
+Question-only native root bindings retire positively identified non-question
+notifications while retaining opaque/damaged pending requests for recovery. Typed
+question flags survive queue serialization; arbitrary host sends remain outside
+this boundary. Root can retain landings and parks in inbox/event state without a
+transport wake. These settings are machine-local, never automatically installed.
