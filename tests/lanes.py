@@ -32,7 +32,7 @@ LANE_TESTS.update({
     'train': ('test_train.py', 'test_train_review.py'),
     'jobs': ('test_jobs.py', 'test_train_ejection.py', 'test_handback_queue.py', 'test_job_adoption.py', 'test_host_lifecycle.py'),
     'status': ('test_status.py', 'test_inbox_noise.py'),
-    'reminders': ('test_due_lifecycle.py',),
+    'reminders': ('test_due_lifecycle.py', 'test_conversation_answers.py'),
     'worktrees': ('test_worktrees.py', 'test_prune_orphans.py', 'test_prune_states.py',
                   'test_prune_thread_targets.py'),
     'rehearse': ('test_rehearse.py', 'test_rehearse_frozen.py'),

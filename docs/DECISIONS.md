@@ -101,3 +101,23 @@ nested workers, live/pending children, changed ownership, incomplete inventory,
 unattributed threads, repeated execution and exact accepted-job scoping using a
 fake native host. These tests do not establish live host integration or atomic
 host-side compare-and-set behavior between the last query and settlement.
+
+## D605: Reconcile exact conversation answers without guessing stale requests
+
+Runtime question markers incorporate a hash of the actual session, tool call
+and question identity. A successful matching tool-answer result, or a single
+adjacent operator reply selecting an offered option, supplies positive answer
+evidence. Free-text guesses, ambiguous multi-question replies, cancellations,
+foreign sessions and old call episodes do not close another request.
+
+The stop hook reads a bounded transcript snapshot and queues screened evidence
+without waiting for the lifecycle lock. Ordinary inbox/due reads apply it to the
+exact current request episode through the existing answer receipt. Evidence is
+retained until that transaction is durably visible; a failed write keeps the
+question open and the answer available for retry. Historical source questions
+and answer provenance remain recorded. Legacy questions without origin evidence
+still require an explicit answer receipt.
+
+Tests use both native runtime record shapes and cover chat selections, exact
+free-text tool answers, ambiguous or cancelled replies, foreign/old identities,
+recurrence and failed publication. No host request is cancelled by reconciliation.

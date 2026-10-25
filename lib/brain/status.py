@@ -10,6 +10,7 @@ from pathlib import Path
 from . import briefs as _m_briefs
 from . import check as _m_check
 from . import common as _m_common
+from . import conversation_answers as _m_conversation_answers
 from . import docker_leftovers as _m_docker_leftovers
 from . import guard as _m_guard
 from . import history as _m_history
@@ -334,7 +335,7 @@ def inbox_lines(n, readonly=False, lifecycle_data=None):
     queue = hook_question_queue(n)
     if not queue.exists() or _m_common.outward_links(_m_instance.instance_above(n["dir"])):
         root = _m_instance.instance_above(n['dir'])
-        return _m_reminders.request_lines(_m_instance.Instance(root), n, lines, readonly=readonly,
+        return _m_conversation_answers.answer_lines(_m_instance.Instance(root), n, lines, readonly=readonly,
                                           lifecycle_data=lifecycle_data)
     for pending in sorted(queue.glob("*.json")):
         try:
@@ -350,7 +351,7 @@ def inbox_lines(n, readonly=False, lifecycle_data=None):
         except (OSError, ValueError, KeyError, TypeError, SystemExit):
             continue
     root = _m_instance.instance_above(n['dir'])
-    return _m_reminders.request_lines(_m_instance.Instance(root), n, lines, readonly=readonly,
+    return _m_conversation_answers.answer_lines(_m_instance.Instance(root), n, lines, readonly=readonly,
                                       lifecycle_data=lifecycle_data)
 
 
