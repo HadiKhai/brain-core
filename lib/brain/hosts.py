@@ -377,7 +377,7 @@ def wake_previous_items(directory):
                 # Only trust an in-flight comparison while a drain owns delivery.
                 value = json.loads((directory / 'inflight.json').read_text())
                 refs = value['before']
-                if isinstance(refs, list) and wake_item_refs(refs) == refs:
+                if isinstance(refs, list) and wake_log_refs(wake_item_refs(refs)) == wake_log_refs(refs):
                     return refs
     except (OSError, ValueError, KeyError, TypeError):
         pass

@@ -183,6 +183,24 @@ class TypedCommunication(Scenario):
                     self.m.communication_record(self.inst, self.inst.node('root'), 'question', 'Choose?', 'bad', spec)
             send.assert_not_called()
 
+    def test_typed_question_inflight_baseline_excludes_previously_shown_question(self):
+        from unittest import mock
+        m, n = self.m, self.inst.node('root')
+        with mock.patch.object(m, 'wake_start'), mock.patch.object(m, 'WAKE_INTERVAL', 0):
+            m.communication_record(self.inst, n, 'question', 'First fixture question', 'first', self.spec('outward'))
+            with mock.patch.object(m, 'wake_send', return_value=True):
+                m.wake_drain(self.inst, n, once=True)
+            m.communication_record(self.inst, n, 'question', 'Second fixture question', 'second', self.spec('outward'))
+            observed = []
+            def send(*args, **kwargs):
+                observed.extend(m.watch_since_wake(self.inst, [n]))
+                return True
+            with mock.patch.object(m, 'wake_send', side_effect=send):
+                m.wake_drain(self.inst, n, once=True)
+            questions = [i for i in observed if i['kind'] == 'question']
+            self.assertEqual(len(questions), 1)
+            self.assertTrue(questions[0]['text'].startswith('Second fixture question'))
+
 
 class NativeDispatcher(Scenario):
     def setUp(self):

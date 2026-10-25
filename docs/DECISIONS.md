@@ -235,3 +235,12 @@ remains a read-only plan. No model thread is launched and no host activity is
 inferred. Native execution is the implemented mechanism; a separate persistent
 model dispatcher thread remains outside this capability. Activation is explicit,
 with disabled routes left disabled.
+
+
+## D513: Compare display baselines by their retained identity/kind schema
+
+In-flight snapshot validation uses the same identity/kind projection as retained
+history. A question's internal queue-classification flag does not invalidate a
+previous display baseline. This preserves the established history schema while
+keeping already-shown questions out of the next `due --since-wake` view, including
+when the host starts before transport returns.
