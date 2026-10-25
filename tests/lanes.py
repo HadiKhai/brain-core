@@ -27,7 +27,7 @@ MODULE_LANES = (
 )
 LANE_TESTS = {name: ('test_' + name + '.py',) for name in MODULE_LANES}
 LANE_TESTS.update({
-    'knowledge': ('test_knowledge.py', 'test_semantic_recall.py', 'test_recurrence.py', 'test_learning_loop.py'),
+    'knowledge': ('test_knowledge.py', 'test_semantic_recall.py', 'test_recurrence.py', 'test_learning_loop.py', 'test_feedback.py'),
     'train': ('test_train.py', 'test_train_review.py'),
     'jobs': ('test_jobs.py', 'test_train_ejection.py', 'test_handback_queue.py'),
     'status': ('test_status.py', 'test_inbox_noise.py'),

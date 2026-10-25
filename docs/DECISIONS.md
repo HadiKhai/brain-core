@@ -109,3 +109,18 @@ Read-only due, facts and dashboard calls never create tasks. Source identities
 are stable per target/principle so observations preserve parked/dropped progress.
 Inactive, foreign-scope and malformed evidence cannot create work. Free-form
 legacy prose is not guessed into new rule ids or silently activated.
+
+## D905: Feedback closes through executed mapped proof
+
+Node-local feedback records have stable ids and link a correction to its
+principle, job, check and before/after evidence. Read-only list/due/facts/UI paths
+never change the ledger. Add and map retain open state; a mapping change clears
+old proof. Close executes the mapped relative check inside its registered job
+worktree (or the ledger job's home), with a 30-second budget. Python and shell
+checks use explicit interpreters; no shell command string is evaluated.
+
+Only exit zero with unchanged check bytes and Git HEAD records closure. Proof
+contains check SHA256, HEAD, job, check and timestamp. Missing evidence, a failed
+check, timeout or concurrent source change leaves feedback open. Corrupt stores
+are retained with a repair notice. This proof records the executed check result,
+not the semantic adequacy of the check or an authenticated reviewer identity.

@@ -21,6 +21,7 @@ from . import machine as _m_machine
 from . import nodes as _m_nodes
 from . import recurrence as _m_recurrence
 from . import learning as _m_learning
+from . import feedback as _m_feedback
 from . import proposals as _m_proposals
 from . import schedules as _m_schedules
 from . import rotation as _m_rotation
@@ -600,6 +601,7 @@ def due_items(inst, n, evidence=None, include_stale=True, include_ready=True, in
     items.extend(_m_watch.watch_job_stalls(inst, n))
     items.extend(_m_recurrence.synthesis_due(inst, n))
     items.extend(_m_learning.enforcement_due(inst, n))
+    items.extend(_m_feedback.feedback_due(inst, n))
     omitted = (['stale-status'] if not include_stale else []) + (['job'] if not include_advice else [])
     return _m_reminders.reminder_items(inst, n, items, include_handled=include_handled, omitted_kinds=omitted)
 
@@ -818,6 +820,8 @@ def status_facts(inst, n, state, known_merges):
     rules, roles, items = pending_imports(inst, n)
     if rules or roles or items:
         lines += ["", f"Imported, unreviewed (inactive): {rules} rule file(s), {roles} role(s), {items} proposed item(s)."]
+    feedback = _m_feedback.feedback_projection(inst, n)
+    lines += ["", f"Open feedback: {sum(row['status'] == 'open' for row in feedback)}"]
     for metric in _m_learning.enforcement_metrics(inst, n):
         lines += [f"{metric['type']} {metric['target']}: {metric['wishes']}/{metric['total']} wishes ({metric['wish_percent']}%)."]
     human = [i for i in attention_items(inst, [n]) if i[1] not in ("stale",)]
