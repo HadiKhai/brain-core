@@ -74,7 +74,7 @@ def causal_job_view(row, job_key, events, rows_by_key, now, outcome):
     finished = bool(row.get('Ended'))
     return {'job_key': job_key, 'branch': row['Job'], 'outcome': outcome,
             'phase': 'finished' if finished else data.get('phase'),
-            'state': 'done' if finished else data.get('state'),
+            'state': ('recorded_merged' if row.get('Outcome') == 'merged' else 'closed_without_delivery') if finished else data.get('state'),
             'blocker': reason if not finished and data.get('state') == 'waiting' else None,
             'owner': owner if not finished else None, 'clears_when': clears if not finished else None,
             'next_gate': gate if not finished else None, 'dependencies': dependencies,

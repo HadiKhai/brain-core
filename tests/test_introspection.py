@@ -36,6 +36,11 @@ class CausalIntrospection(unittest.TestCase):
         self.assertIsNone(empty['phase'])
         self.assertIsNone(empty['owner'])
 
+    def test_closed_attempt_without_delivery_is_not_reported_done(self):
+        parked={**self.row,'Ended':'2026-01-01T10:30:00Z','Outcome':'parked'}
+        result=self.m.causal_job_view(parked,KEY,[],{},self.now,None)
+        self.assertEqual(result['state'],'closed_without_delivery')
+
     def test_future_and_wrong_job_facts_cannot_change_current_phase(self):
         wrong=fact('phase_changed',5,phase='finished',state='done')
         wrong['data']['job_key']='d'*24

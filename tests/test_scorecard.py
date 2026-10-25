@@ -62,6 +62,10 @@ class NightScorecard(unittest.TestCase):
         rec['evidence']=[self.ref]
         rec['value']=True
         self.assertEqual(self.m.night_scorecard(self.root,self.data,[])['metrics']['checkout_edits']['status'],'unknown')
+        import os
+        rec['value']=0
+        os.link(self.artifact,self.root/'linked.json')
+        self.assertEqual(self.m.night_scorecard(self.root,self.data,[])['metrics']['checkout_edits']['status'],'unknown')
 
 
 from scenario import Scenario

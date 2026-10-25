@@ -1667,3 +1667,9 @@ For agents: introspection advises after 60 minutes from an observed product
 request without a recorded product-test start. Duplicate requests do not reset it;
 observed starts or delivery clear it.
 After upgrading: record request/start facts with stable outcome and run references.
+
+## Introspection proof-boundary corrections
+
+For agents: ended attempts without merged outcome display closed_without_delivery;
+scorecard sources reject hard-linked receipts as well as symbolic links.
+After upgrading: no migration; linked receipt evidence remains unknown until copied.

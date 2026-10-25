@@ -53,7 +53,8 @@ def scorecard_refs(root, refs):
                 or not re.fullmatch('[0-9a-f]{64}', str(ref.get('sha256', '')))):
             raise ValueError('invalid source reference')
         path = root / relative
-        if any(p.is_symlink() for p in [path, *path.parents]) or not path.is_file():
+        if (any(p.is_symlink() for p in [path, *path.parents]) or not path.is_file()
+                or path.stat().st_nlink != 1):
             raise ValueError('unsafe source reference')
         if not path.resolve().is_relative_to(root):
             raise ValueError('source reference outside node')

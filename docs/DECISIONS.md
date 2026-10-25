@@ -165,3 +165,12 @@ Measure 60 minutes from the first observed request for each named product outcom
 Duplicate request exports cannot reset the clock. An observed product-test start
 or matching outcome delivery clears it. Absence of a start is reported as missing
 recorded evidence, never proof that an unexported external test did not run.
+
+## D114: Closure state and source containment retain proof boundaries
+
+A ledger attempt ending without a recorded merge is displayed as
+`closed_without_delivery`, never as done. A recorded merge remains explicitly a
+ledger observation. Scorecard receipt sources reject hard links as well as
+symbolic links, so a locally named receipt cannot silently refer to another
+shared file identity. Neither rule upgrades source assertions into independent
+live or delivery proof.
