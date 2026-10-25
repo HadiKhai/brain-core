@@ -2107,6 +2107,12 @@ coalescing otherwise leaves an unrelated generated status edit. The original
 clean-tree, private-hash, missing-evidence and reuse assertions remain intact;
 an explicit ignore-rule assertion also checks the sidecar is ignored by Git.
 
+Fabricated lane snapshots used by gate-ownership and machine-admission tests
+also supply distinct semantic and evidence contexts, including exception-release
+fixtures. Their shape follows the production snapshot contract so result emission
+can complete before the existing ownership, queue-order and cleanup assertions.
+Production validation still refuses missing or legacy evidence identities.
+
 ## D20002: Isolate completion reader cases by delivery owner
 
 Completion read-failure fixtures bind a fresh fabricated recipient for each

@@ -348,7 +348,8 @@ print('fixture proof isolated; enclosing proof restored and still held')
         lanes = [dict(name=name, command='true', schedule='job', requires=[], always=False)
                  for name in ('first', 'second')]
         snap = dict(lanes=lanes, hashes={l['name']: 'fixture' for l in lanes},
-                    context='fixture', map_hash='fixture', config_hash='fixture')
+                    context='fixture', evidence_context='fixture-evidence',
+                    map_hash='fixture', config_hash='fixture')
         stream, fds, competitors = self.m.run_verify_stream, [], []
         def observe(inst, n, branch, command, w, env, token, lane=None):
             fd = int(env['BRAIN_GATE_FD'])

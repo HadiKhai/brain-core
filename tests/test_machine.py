@@ -437,7 +437,8 @@ raise SystemExit(result)
         lanes = [dict(name=name, command='true', schedule='job', requires=[], always=False)
                  for name in (["second"] if fitness else ["first", "second"])]
         snap = dict(lanes=lanes, hashes={l['name']: 'fixture' for l in lanes},
-                    context='fixture', map_hash='fixture', config_hash='fixture')
+                    context='fixture', evidence_context='fixture-evidence',
+                    map_hash='fixture', config_hash='fixture')
 
         def waiting():
             try:
@@ -552,7 +553,8 @@ raise SystemExit(result)
         n = inst.node('a')
         lane = dict(name='fixture', command='true', schedule='job', requires=[], always=False)
         snap = dict(lanes=[lane], hashes={'fixture': 'fixture'},
-                    context='fixture', map_hash='fixture', config_hash='fixture')
+                    context='fixture', evidence_context='fixture-evidence',
+                    map_hash='fixture', config_hash='fixture')
         for fitness in (False, True):
             with self.subTest(fitness=fitness):
                 n['fm']['verify_lanes_check'] = 'true' if fitness else ''
