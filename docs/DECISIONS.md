@@ -115,3 +115,19 @@ versioned report-artifact checks instead of maintaining a weaker duplicate
 predicate. Provider-completed mirrored tasks are labelled external provider truth
 with local implementation unproven. Technical blockers remain unfinished work;
 they are not inferred human approval requests.
+
+## D1207: Provision host bindings through the native transport
+
+Explicit host actions use the supported T3 ACP MCP transport with argument arrays,
+without a shell or custom host build. New-node provisioning registers its node
+workspace, launches its coordinator with an explicit model selection, saves each
+returned binding locally and pins the exact thread. An interrupted launch leaves
+a pending marker; retries cannot blindly create another conversation. Conflicting
+concurrent bindings are preserved for reconciliation.
+
+Webhook setup must run in the bound coordinator's context. Its portable record
+contains no capability URL. A stable per-binding request id deduplicates host
+creation, and only a response confirming the bound thread may publish a local
+wake URL. Missing remote access retains the task id and reports the setup gap.
+PR watch setup also requires the coordinator context and positive host confirmation.
+Pinning is not claimed to change host auto-settlement policy.
