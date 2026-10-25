@@ -66,3 +66,16 @@ argument names before transport. This protects calls made by this client; it
 does not change the external host parser or other callers. Tests mock the bridge
 and cover argument construction, decoding, missing transport, malformed data,
 rejected calls and timeout behavior without contacting a live host.
+
+## D603: Guard messages only for positively bound workers and coordinators
+
+The worker-message guard allows start, done, blocked and question messages to
+coordinators. It rejects other message kinds only when the host supplied an
+explicit caller identity, that identity has exactly one recognized ledger-job
+binding, and the target is a recorded coordinator. Coordinator, peer, unmapped
+and ambiguous callers are not reclassified as workers.
+
+The helper supplies the native PreToolUse adapter with a denial reason; it does
+not install hooks or intercept tools outside that adapter. Runtime session IDs
+must be bound truthfully by the host to receive enforcement. Tests cover all
+four kinds, progress chatter, linked references and unknown/protected callers.
