@@ -22,7 +22,7 @@ class WatchExtension(Scenario):
 
     def watch(self):
         with contextlib.redirect_stdout(io.StringIO()):
-            self.m.watch_once(self.inst)
+            self.m.watch_once(self.inst, kinds={'job-ready', 'job-landed', 'handback', 'rotate', 'inbox'})
 
     def root_events(self):
         group = self.m.watch_groups(self.inst).get('root', {})
@@ -261,7 +261,7 @@ class WatchExtension(Scenario):
         question = {'id': 'd' * 64, 'kind': 'inbox'}
         with mock.patch.object(self.m, 'wake_start'), mock.patch.object(self.m, 'WAKE_INTERVAL', 0), \
                 mock.patch.object(self.m, 'wake_send', return_value=True) as send:
-            self.m.request_wake(self.inst, root, 'ready mixed question', items=events + [question])
+            self.m.request_wake(self.inst, root, 'ready mixed question', items=events + [question], explicit=True)
             signal['state'] = 'blocked'
             self.save_signal(n, row, signal)
             self.m.wake_drain(self.inst, root, once=True)
@@ -278,7 +278,7 @@ class WatchExtension(Scenario):
         question = {'id': 'd' * 64, 'kind': 'inbox'}
         with mock.patch.object(self.m, 'wake_start'), mock.patch.object(self.m, 'WAKE_INTERVAL', 0), \
                 mock.patch.object(self.m, 'wake_send', return_value=True) as send:
-            self.m.request_wake(self.inst, root, 'ready and protected question', items=events + [question])
+            self.m.request_wake(self.inst, root, 'ready and protected question', items=events + [question], explicit=True)
             with mock.patch.object(self.m, 'watch_completion_items', side_effect=OSError('fixture unreadable evidence')), \
                     contextlib.suppress(OSError):
                 self.m.wake_drain(self.inst, root, once=True)
@@ -298,7 +298,7 @@ class WatchExtension(Scenario):
             return True
         with mock.patch.object(self.m, 'changes_due', return_value=[]), mock.patch.object(self.m, 'wake_start'), \
                 mock.patch.object(self.m, 'WAKE_INTERVAL', 0), mock.patch.object(self.m, 'wake_send', side_effect=send):
-            self.m.request_wake(old_inst, root, 'first unrelated request', items=[{'id': 'f' * 64, 'kind': 'inbox'}])
+            self.m.request_wake(old_inst, root, 'first unrelated request', items=[{'id': 'f' * 64, 'kind': 'inbox'}], explicit=True)
             self.m.wake_drain(old_inst, root)
             self.assertEqual(len(calls), 2)
             history = self.m.wake_history(self.m.wake_directory(self.inst, root))
@@ -323,7 +323,7 @@ class WatchExtension(Scenario):
                 self.signal(n, row, episode=('a' if mode == 'handback' else 'b') * 32)
                 self.watch()  # acknowledge a valid notice before the transient read failure
                 if mixed:
-                    self.m.request_wake(self.inst, root, 'protected mixed ' + mode, items=self.root_events() + [question])
+                    self.m.request_wake(self.inst, root, 'protected mixed ' + mode, items=self.root_events() + [question], explicit=True)
                 failure = (mock.patch.object(Path, 'read_text', denied) if mode == 'handback' else
                            mock.patch.object(self.m, 'watch_recorded_ready', side_effect=OSError('fixture read failure')))
                 with failure:
@@ -408,7 +408,7 @@ class WatchExtension(Scenario):
                         mock.patch.object(self.m, 'watch_recorded_ready', side_effect=unavailable(SystemExit)),
                         mock.patch.object(self.m, 'watch_recorded_ready', side_effect=unavailable(RuntimeError))]
             for index, failure in enumerate(failures):
-                self.m.request_wake(self.inst, root, 'two jobs and a question ' + str(index), items=[stale, unknown, question])
+                self.m.request_wake(self.inst, root, 'two jobs and a question ' + str(index), items=[stale, unknown, question], explicit=True)
                 with failure:
                     self.m.wake_drain(self.inst, root, once=True)
                 self.assertEqual(send.call_count, index + 1)
@@ -440,7 +440,7 @@ class WatchExtension(Scenario):
         with mock.patch.object(self.m, 'wake_start'), mock.patch.object(self.m, 'WAKE_INTERVAL', 0), \
                 mock.patch.object(self.m, 'wake_send', return_value=True) as send:
             for index, error in enumerate((None, SystemExit, RuntimeError)):
-                self.m.request_wake(self.inst, root, 'stale job and a question ' + str(index), items=[stale, unknown, question])
+                self.m.request_wake(self.inst, root, 'stale job and a question ' + str(index), items=[stale, unknown, question], explicit=True)
                 failure = (mock.patch.object(self.m, 'read_jobs', side_effect=unavailable(error))
                            if error else contextlib.nullcontext())
                 with failure:

@@ -35,7 +35,7 @@ LANE_TESTS.update({
                   'test_prune_thread_targets.py'),
     'rehearse': ('test_rehearse.py', 'test_rehearse_frozen.py'),
     'ui': ('test_ui.py', 'test_ui_idle.py', 'test_ui_review.py', 'test_ui_status.py'),
-    'watch': ('test_watch.py', 'test_watch_extension.py'),
+    'watch': ('test_watch.py', 'test_watch_extension.py', 'test_decision_gate.py'),
     'verify': ('test_verify.py', 'test_verify_train_hooks.py'),
     'review': ('test_review_discipline.py',),
     'catch-all': ('test_repo_lanes.py',),
@@ -56,6 +56,7 @@ OUTSIDE_INPUTS = ('README.md', 'docs/**', 'ui/**/*.png', 'LICENSE')
 SHARED_INPUTS = (
     'lib/brain/common.py', 'lib/brain/instance.py', 'lib/brain/cli.py',
     'lib/brain/status.py', 'lib/brain/ui_status.py', 'lib/brain/ui_server.py',
+    'lib/brain/gate_lock.py',
     'lib/brain/settings_batch.py', 'lib/brain/dispatcher.py',
     'lib/brain/__init__.py', 'tests/scenario.py', 'tests/core_loader.py',
     'tests/conftest.py', 'tests/lanes.py', 'tests/check_lanes.py',

@@ -19,11 +19,35 @@ not in `node.md`: read them with `core/bin/brain show <id>` (axiom 23).
 
 ## Start of every session
 
+At the start of every turn, run t3_queue_list on your own thread, read anything new, then t3_queue_cancel what you've absorbed.
+
 Read `node.md`, `brief.md`, `status.md`, `backlog.md` and `inbox.md`. `core/bin/brain due <id>` lists core
 changes you haven't read: read them with `core/bin/brain changes <id>` (they can change these
 rules and add commands), then mark them read with `--seen`. If the node's home is external, other
 owners may have worked there since: run `core/bin/brain sync <id>` and fold what matters into
 `status.md` (the node-sync skill).
+
+## Decision wakes and shared gates
+
+The sampler wakes only for marked inbox questions/results, question/blocked/done
+hand-backs, stalled jobs, overdue blockers/questions and existing restart/rotation
+needs. Bookkeeping remains in `brain due`; explicit watcher kinds can request it.
+The additional job-restart wake feature is parked and is not included here.
+Existing usage advice and restart/rebrief behavior remain available.
+
+Serialize full gates sharing an instance with
+`brain gate-lock --label "component verify" -- CMD [ARGS...]`.
+The wrapper does not replace machine admission. Keep the wrapper outside the
+complete queue, standalone gate or forced hand-back command. Native
+`run_verify_stream` validates and forwards the gate descriptor alongside its
+bootstrap pipe, so a wrapped full verify may nest under a wrapped hand-back and
+keeps the gate locked if the parent dies while verification continues. Exec
+nesting also shares it. Every other Python subprocess boundary in a queue/direct
+runner must pass `BRAIN_GATE_FD` with `pass_fds`, while retaining its existing FDs.
+A subprocess that closes it refuses promptly; do not work around that refusal by
+removing an inner wrapper. Keep any existing turn-file protection until the CLI
+and all queue/direct/forced-handback routes are installed and confirmed.
+The lock stays at `.brain/gate.lock`; never unlink or replace it.
 
 ## Write as you go (axioms 16 and 17)
 

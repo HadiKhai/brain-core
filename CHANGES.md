@@ -5,6 +5,31 @@ upgrading. `brain changes <node>` shows the entries this node's coordinator hasn
 `brain due <node>` lists them until `brain changes <node> --seen`. Entry headings are
 `## <date>: <title>`; once released, a heading never changes.
 
+## 2026-10-25: Decision wakes and shared gate lock
+
+For agents: Default sampler wakes carry only marked questions and worker results,
+stalled jobs, overdue blockers/questions and existing restart/rotation decisions.
+Bookkeeping remains visible in `brain due`; explicit watcher kinds retain opt-in
+delivery, including durable retries and rerouting. Identified old bookkeeping
+receipts no longer bypass the default filter; unknown question metadata remains
+fail-open. The additional job-restart wake feature is parked and not included;
+existing due usage advice, budgets and restart/rebrief behavior are unchanged.
+Unknown queued kinds and contradictory identity/kind pairs retain their original
+metadata for fail-open opaque delivery; new unknown sampler kinds stay excluded.
+
+`brain gate-lock [--label LABEL] -- CMD [ARGS...]` serializes commands through
+one instance lock and preserves command arguments, signals and exit status.
+The native verify launcher forwards the validated gate descriptor alongside its
+bootstrap descriptor. Exec restores Python-ignored child signals, including SIGPIPE.
+
+After upgrading: Wrap each complete full gate in `brain gate-lock --label
+"component verify" -- ...`, retaining machine admission. Forward its validated FD
+at other Python subprocess boundaries; native verify does this automatically.
+Keep existing turn protection until every route is installed and confirmed. Do
+not remove the lock file. Coordinators drain absorbed host queue messages at each
+turn's start.
+
+
 ## 2026-10-24: Open the dashboard before slow repository checks finish
 
 For agents:
