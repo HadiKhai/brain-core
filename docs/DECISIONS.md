@@ -39,3 +39,17 @@ context with a default threshold of 300000 tokens. Explicit token and turn
 settings retain precedence, and unavailable session evidence creates no invented
 usage or rotation event. Tests cover exact boundaries, independent and unknown
 counters, terminal jobs, episode renewal and the quiet-due control path.
+
+## D601: Adopt an existing linked checkout without changing its work
+
+`jobs --start --branch --thread` registers an existing linked Git checkout and
+an explicit worker reference. The home checkout, absent or ambiguous branches,
+coordinator identities and conflicting historical/active bindings are refused.
+An exact repeated adoption preserves the original ledger identity. The initial
+planned runtime uses the same route resolver as worktree creation.
+
+Adoption preserves HEAD and dirty files, assigns bookkeeping ports and never
+runs setup or launches a thread. Host activity remains unknown. It creates no
+terminal handback; the adopted worker uses the normal contract, brief and
+handback commands as work continues. Tests use an existing dirty checkout and
+cover registration, idempotence, conflicting workers and protected checkouts.
