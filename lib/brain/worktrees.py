@@ -353,19 +353,51 @@ def removal_refusal(n, branch, w):
     return ""
 
 
-def remove_worktree(inst, n, branch, force=False):
+def worktree_cleanup_result(n, branch, removed=False, record=None):
+    """Portable facts for a host-owned tell/settle hook, never host authorization.
+
+    Keep every recorded incarnation and reference visible. The host must verify
+    liveness, coordinator protection, pending requests and current ownership.
+    A missing workspace forbids messaging its old thread.
+    """
+    record = record or n['local'].get('worktrees', {}).get(branch) or {}
+    exists = bool(record.get('path') and Path(record['path']).is_dir())
+    rows = [r for r in (_m_jobs.read_jobs(n) or []) if r['Job'] == branch]
+    threads = [{'id': identity, 'reference': reference, 'source': source}
+               for reference, source in _m_jobs.bound_worker_threads(n, branch)
+               for identity in sorted(_m_jobs.thread_reference_ids(reference))]
+    return {'version': 1, 'node': n['id'], 'branch': branch,
+            'phase': 'removed' if removed else 'before-remove',
+            'workspace': record.get('path'), 'workspace_exists': exists,
+            'jobs': [{'key': _m_jobs.job_key(row), 'closed': _m_jobs.closed_job(row),
+                      'started': row.get('Started'), 'ended': row.get('Ended')} for row in rows],
+            'threads': threads, 'requires_host_validation': True,
+            'host_actions': ['inspect', 'tell-if-safe', 'settle-if-safe'] if exists and not removed
+                            else ['inspect', 'settle-if-safe']}
+
+
+def remove_worktree(inst, n, branch, force=False, thread_hook=None):
     w = n["local"].get("worktrees", {}).get(branch)
     if not w:
         _m_common.die(f"{n['id']}: no worktree for '{branch}' made by brain on this machine")
     reason = removal_refusal(n, branch, w)
     if reason:
         _m_common.die(f"{branch}: {reason}; worktree retained")
+    if thread_hook is not None:
+        if thread_hook(worktree_cleanup_result(n, branch, record=w)) is not True:
+            _m_common.die(f"{branch}: thread cleanup not confirmed; worktree retained")
+        # Host work can take time. Recheck current branch and live job ownership
+        # after the callback; the original preflight grants no lasting permission.
+        reason = removal_refusal(n, branch, w)
+        if reason:
+            _m_common.die(f"{branch}: {reason}; worktree retained")
     if Path(w["path"]).exists():
         r = _m_common.git("worktree", "remove", *(["--force"] if force else []), w["path"], cwd=n["home_path"])
         if r.returncode:
             _m_common.die(f"{branch}: {r.stderr.strip()} (uncommitted work? --force discards it)")
     inst.local_of(n["id"])["worktrees"].pop(branch)
     inst.save_local()
+    return worktree_cleanup_result(n, branch, removed=True, record=w)
 
 
 def cmd_wt_rm(a):

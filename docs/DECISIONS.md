@@ -131,3 +131,18 @@ the command result. `machine_cleanup(token, actions, primary=error)` runs cleanu
 The admission-only command uses that context without changing its public behavior.
 Other command runners integrate the same context around admission, launch and
 cleanup rather than creating a second terminal path.
+
+## D806: Keep worktree cleanup facts separate from host settlement
+
+`worktree_cleanup_result(node, branch)` returns versioned facts: workspace
+presence, every recorded job incarnation, thread references and the required
+host inspection sequence. It never attests host settlement or thread ownership.
+Missing workspaces forbid messaging stale threads. The host owns liveness,
+pending-request, coordinator and open-job protection checks.
+
+`remove_worktree(..., thread_hook=callback)` optionally runs that host integration
+before deletion. Only an explicit `True` result permits removal; refusal or an
+exception retains the checkout. Branch and live ownership checks run again after
+the callback. The returned post-removal result contains the original workspace
+reference for host inspection without authorizing a stale-thread message.
+Default callers preserve their existing checklist and removal behavior.
