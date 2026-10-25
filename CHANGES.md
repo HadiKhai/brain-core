@@ -5,6 +5,45 @@ upgrading. `brain changes <node>` shows the entries this node's coordinator hasn
 `brain due <node>` lists them until `brain changes <node> --seen`. Entry headings are
 `## <date>: <title>`; once released, a heading never changes.
 
+## 2026-10-25: Release 3
+
+For agents:
+- The dashboard opens with real file-backed data and a filling-in notice before
+  slow repository checks finish. The notice stays until complete data arrives;
+  failed readings retain useful data and can recover on refresh. Passive startup
+  avoids lifecycle writes and blocking history reads.
+- Dashboard reuse checks authenticated server identity. Legacy and unrelated
+  listeners are retained rather than stopped from a guessed working directory.
+- Default watcher wakes focus on questions, worker results and decisions.
+  Bookkeeping stays in `brain due`. Unknown or conflicting queued question
+  metadata is preserved for delivery instead of being discarded.
+- Job reminder identities follow durable job and attempt episodes, so changing
+  hand-back wording does not repeat merged-job reminders. Usage reset offsets
+  are evaluated at the reset instant. Docker reports remain informational and
+  wait for the configured leftover age.
+- Explicit ancestor model settings inherit to descendants without changing
+  runtime-selection policy. Nearest model settings and local or CLI overrides
+  retain precedence, and inheritance stops at ownership boundaries.
+- `brain gate-lock` preserves command arguments, exit status and signals, with
+  validated descriptor forwarding through native verification. In this release
+  its lock is still instance-wide; node-local locking is a later fix.
+- Coordinators drain absorbed host-queue messages at turn start. Closed-thread
+  settlement requires a fresh host attestation export.
+
+After upgrading:
+- No data migration is needed. Run `brain ui --open` to reuse or replace a server
+  whose identity is verified; stop a legacy server in its own terminal first.
+- Review ancestor model settings and drain coordinator queues normally. Existing
+  worktree cleanup retains unsafe or uncertain cases; automatic submodule
+  worktree removal is not included.
+- This release contains the fourteen local commits through `4ad1978`, plus this
+  changelog only. It reuses that code's full verification: 1,116 passed, one
+  skipped, 298.865 seconds through owned cleanup.
+- Fixes 1–12 belong to release-4. In particular, optional rehearsal, node-local
+  gate locks and the new restart/review enforcement are not included here.
+  Existing rehearsal requirements and other readiness checks remain unchanged.
+
+
 ## 2026-10-25: Inherit node model routing without changing runtime selection
 
 For agents: Model routing reads explicit ancestor node settings, nearest first,
