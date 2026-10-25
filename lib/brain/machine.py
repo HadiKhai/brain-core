@@ -1267,6 +1267,16 @@ def cmd_machine(a):
             _m_watch.watch_once(inst)  # same minute timer; sampler has released its instance lock
         except (OSError, ValueError):
             print('watch: watcher state invalid; retained for repair (brain due root)')
+        # The release extension owns opt-in policy and attempt fencing. Older
+        # installations without it keep the same native sampler behavior.
+        from importlib import import_module
+        try:
+            _m_release = import_module(__package__ + '.release')
+        except ModuleNotFoundError as error:
+            if error.name != __package__ + '.release':
+                raise
+        else:
+            _m_release.tick_releases(inst)
         return
     if a.action in ("install", "uninstall"):
         machine_service(inst, a.action, a.yes)

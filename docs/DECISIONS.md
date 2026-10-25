@@ -205,3 +205,12 @@ existing resource-admission policy and runs inside the managed terminal context,
 so setup failure and admission refusal have durable causes. Setup duration counts
 execution separately from admission wait. This does not add arbitrary process-tree
 supervision or change heavy-command slot semantics.
+
+## D810: Reuse the native sampler for an optional release tick
+
+After its watcher hook, the native minute sampler lazily invokes
+`release.tick_releases(instance)` when the release extension is installed. Only
+absence of that extension is ignored; dependency/import failures inside it remain
+visible. The extension owns explicit opt-in policy, eligible windows and durable
+attempt fencing. The hook adds no timer, daemon, configuration activation or
+separate publication mechanism.
