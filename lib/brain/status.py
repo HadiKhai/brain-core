@@ -563,7 +563,8 @@ def due_items(inst, n, evidence=None, include_stale=True, include_ready=True, in
             add("invalid-handback", f"{branch}: unreadable worker signal; ask the worker to write it again", job=_m_jobs.job_key(row))
         if not _m_briefs.import_job(branch) and (not w or not w["exists"]):
             add("missing-worktree", f"{branch}: open ledger job has no worktree on this machine", job=_m_jobs.job_key(row))
-        if not any(i['kind'] == 'restart' and i.get('job') == _m_jobs.job_key(row) for i in items):
+        if (not (w and w['merged']) and (not signal or _m_briefs.restart_acknowledged(n, row, signal))
+                and not any(i['kind'] == 'restart' and i.get('job') == _m_jobs.job_key(row) for i in items)):
             try:
                 restart = _m_reminders.usage_restart_item(inst, n, row)
             except (OSError, ValueError):
@@ -798,7 +799,7 @@ def status_facts(inst, n, state, known_merges):
     lines += ["- " + i["text"] + (" (acknowledged; reason: " + i['handling']['reason'] +
               '; resume: ' + (i['handling'].get('resume_condition') or i['handling'].get('until') or '') + ')'
               if _m_reminders.reminder_handled(inst, i) else '')
-              for i in due if i["kind"] in ("handback", "restart")] or ["- None."]
+              for i in due if i["kind"] in ("handback", "restart", "job-restart")] or ["- None."]
     forecasts = _m_jobs.forecast_lines(state["jobs"] or [])
     if forecasts:
         lines += ["", "Forecasts (merged ledger durations):"] + ["- " + _m_guard.redact(s, _m_guard.never_terms(n)) for s in forecasts]

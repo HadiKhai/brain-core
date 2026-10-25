@@ -32,8 +32,11 @@ owners may have worked there since: run `core/bin/brain sync <id>` and fold what
 The sampler wakes only for marked inbox questions/results, question/blocked/done
 hand-backs, stalled jobs, overdue blockers/questions and existing restart/rotation
 needs. Bookkeeping remains in `brain due`; explicit watcher kinds can request it.
-The additional job-restart wake feature is parked and is not included here.
-Existing usage advice and restart/rebrief behavior remain available.
+A protected `job-restart` item blocks `brain due --quiet` when a running job
+reaches three compactions or twice its known positive token limit. Restart the
+worker with the exact brief command before continuing that job. Successful
+rebrief delivery establishes the next usage baseline. Automatic host stop and
+relaunch delivery remains separate from this due obligation.
 
 Serialize a node's full gates with
 `brain gate-lock --node <node> --label "component verify" -- CMD [ARGS...]`.
@@ -483,7 +486,7 @@ in order; repeating an ID moves it last. The last id is the current coordinator.
 runtime id from its shell (`CODEX_THREAD_ID` or `CLAUDE_CODE_SESSION_ID`), never substitute a T3 host thread id. Spend counts all recorded
 sessions, even from scratch folders, through the normal subscription/privacy gates.
 
-`brain due <node>` raises `rotate` at 150,000 input-context tokens or 50 conversation
+`brain due <node>` raises `rotate` at 300,000 input-context tokens or 50 conversation
 turns. `rotate_tokens=` and `rotate_turns=` configure these thresholds. Claude input includes
 fresh, cache-read and cache-write tokens; Codex's input already includes its cached tokens.
 These are the latest response's accounting counts, never a sum of the conversation's text.

@@ -6,6 +6,7 @@ import os
 import re
 
 from . import common as _m_common
+from . import briefs as _m_briefs
 from . import guard as _m_guard
 from . import history as _m_history
 from . import jobs as _m_jobs
@@ -82,13 +83,11 @@ def usage_restart_item(inst, n, row):
     if row.get('Ended'):
         return None
     usage = _m_spend.live_usage(inst, n, row)
-    if not usage:
-        return None
-    counts = {k: usage.get(k) for k in ('compactions', 'processed')}
-    if any(type(v) is not int or v < 0 for v in counts.values()):
-        return None
+    counts = {k: (usage or {}).get(k) for k in ('compactions', 'processed')}
+    counts = {k: v if type(v) is int and v >= 0 else None for k, v in counts.items()}
     key = _m_jobs.digest([n['id'], _m_jobs.job_key(row)])
     budget = (_m_spend.job_budget(n, row) or {}).get('tokens')
+    budget = budget if type(budget) in (int, float) and budget > 0 else None
     with lifecycle_store(inst) as data:
         record = data['usage'].get(key, {})
         if not isinstance(record, dict):
@@ -97,14 +96,19 @@ def usage_restart_item(inst, n, row):
         if (not isinstance(baseline, dict) or any(type(baseline.get(k)) is not int or baseline[k] < 0
                                                for k in counts)):
             raise ValueError('invalid restart usage baseline')
-        if any(counts[k] < baseline[k] for k in counts):
+        if any(value is not None and value < baseline[k] for k, value in counts.items()):
             raise ValueError('restart usage counters regressed; retain the baseline for review')
-        delta = {k: max(0, counts[k] - baseline[k]) for k in counts}
-        if delta['compactions'] < 3 and (not budget or delta['processed'] < 2 * budget):
-            return None
+        delta = {k: value - baseline[k] if value is not None else None for k, value in counts.items()}
         episode = record.get('episode')
         if episode is not None and not re.fullmatch(r'[0-9a-f]{24}', str(episode)):
             raise ValueError('invalid restart episode')
+        # Independent positive evidence opens a need. Once open, only a
+        # delivered rebrief or terminal job evidence resolves it, never a
+        # missing counter or a subsequently increased budget.
+        crossed = ((delta['compactions'] is not None and delta['compactions'] >= 3) or
+                   (budget is not None and delta['processed'] is not None and delta['processed'] >= 2 * budget))
+        if not episode and not crossed:
+            return None
         if not episode:
             if len(data['usage']) >= LIFECYCLE_LIMIT and key not in data['usage']:
                 raise ValueError('restart receipt bound reached')
@@ -112,11 +116,14 @@ def usage_restart_item(inst, n, row):
             data['usage'][key] = {'job': _m_jobs.job_key(row), 'baseline': baseline,
                                   'episode': episode, 'at': inst.now()}
         budget_text = str(budget) if budget else 'not configured'
-        return {'node': n['id'], 'kind': 'restart', 'job': _m_jobs.job_key(row), 'episode': episode,
-                'text': (f"{row['Job']}: restart from brief: {delta['compactions']} compactions since brief "
-                         f"(threshold 3); {delta['processed']} processed tokens since brief "
+        shown = {k: value if value is not None else 'unknown' for k, value in delta.items()}
+        command = _m_briefs.restart_command(n, row)
+        return {'node': n['id'], 'kind': 'job-restart', 'job': _m_jobs.job_key(row), 'episode': episode,
+                'blocking': True, 'protected': True,
+                'text': (f"{row['Job']}: BLOCKING job restart from brief: {shown['compactions']} compactions since brief "
+                         f"(threshold 3); {shown['processed']} processed tokens since brief "
                          f"(token budget {budget_text}; threshold twice the budget). "
-                         'Coordinator: regenerate the job brief and restart its worker; no automatic stop.')}
+                         f"Owning coordinator must restart its worker with `{command}` before continuing the job.")}
 
 
 def acknowledge_usage_restart(inst, n, row):
@@ -129,7 +136,10 @@ def acknowledge_usage_restart(inst, n, row):
         if key in advice:
             advice[key] = {'episode': os.urandom(12).hex(), 'conditions': {}}
         record = data['usage'].get(key)
-        if not isinstance(record, dict) or not record.get('episode'):
+        signal = _m_jobs.job_signal(inst, n, row)
+        manual_restart = bool(signal and signal.get('restart') == 'compactions' and
+                              not _m_briefs.restart_acknowledged(n, row, signal))
+        if not (isinstance(record, dict) and record.get('episode')) and not manual_restart:
             return
         usage = _m_spend.live_usage(inst, n, row)
         if not usage or any(type(usage.get(k)) is not int or usage[k] < 0
