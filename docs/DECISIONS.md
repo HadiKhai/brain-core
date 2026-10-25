@@ -172,3 +172,19 @@ atomic cross-system transaction. Tests use a fake host, cover replacement-side
 binding, child/unknown-transport refusal, uncertain launch outcomes, resumable
 retirement and writer-lock boundaries. Live host integration and scheduler
 installation remain separate validation.
+
+## D608: Require current thread settlement before releasing a closed workspace
+
+The workspace cleanup callback accepts only exact closed ledger identities,
+start/end receipts, workspace and recorded thread references. It forces a fresh
+exhaustive host settlement sweep even when the ledger already has a historical
+settlement stamp. Live children, questions, changed ownership and unknown host
+state refuse cleanup. Worker bindings are removed only after confirmation and
+remain retained as retired references; a second ownership check prevents
+unbinding a concurrently replaced worker.
+
+The callback returns a boolean to the workspace owner. It never removes files,
+cancels requests or treats a prior stamp as current host evidence. The workspace
+owner remains responsible for its final branch/live-owner check and removal.
+Tests cover current settlement, retained live descendants, unknown/open jobs,
+unbinding with retained references and ownership changes after a host action.

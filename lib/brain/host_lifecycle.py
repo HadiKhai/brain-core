@@ -104,7 +104,7 @@ def terminal_host_thread(rpc, identity):
     return thread if pending.get('requestIds') == [] else None
 
 
-def settle_closed_jobs(inst, n, rpc=None, job_keys=None):
+def settle_closed_jobs(inst, n, rpc=None, job_keys=None, revalidate=False):
     rpc = rpc or _m_rpc.call
     if _m_common.outward_links(inst.root):
         raise ValueError('lifecycle refused: unsafe instance links')
@@ -112,6 +112,8 @@ def settle_closed_jobs(inst, n, rpc=None, job_keys=None):
     if rows is None:
         raise ValueError('lifecycle refused: unreadable job ledger')
     targets = _m_jobs.unsettled_jobs(rows)
+    if revalidate and job_keys is None:
+        raise ValueError('settlement revalidation requires exact closed job keys')
     if job_keys is not None:
         requested = set(job_keys)
         if any(not isinstance(key, str) or not re.fullmatch('[0-9a-f]{24}', key) for key in requested):
@@ -120,12 +122,15 @@ def settle_closed_jobs(inst, n, rpc=None, job_keys=None):
         if not requested.issubset(closed):
             raise ValueError('settlement refused: requested job is open or unknown')
         targets = [row for row in targets if _m_jobs.job_key(row) in requested]
+        if revalidate:
+            targets = [row for row in rows if _m_jobs.job_key(row) in requested and _m_jobs.closed_job(row)]
     result = {'node': n['id'], 'settled_threads': [], 'settled_jobs': [], 'retained': [], 'unknown_threads': []}
     if not targets:
         return result
     projects, inventory, callers = lifecycle_inventory(n, rpc)
     protected = lifecycle_protected(inst) | callers
     known = {_m_jobs.job_key(row): row for row in rows}
+    ownership = {key: _m_jobs.bound_worker_threads(n, row['Job']) for key, row in known.items()}
     owner, missing = {}, set()
     for row in rows:
         key = _m_jobs.job_key(row)
@@ -193,6 +198,10 @@ def settle_closed_jobs(inst, n, rpc=None, job_keys=None):
             result['retained'].append({'job': key, 'reason': 'unattributed project threads prevent exhaustive job attestation'})
             continue
         with _m_instance.brain_lock(inst):
+            fresh_owner = _m_instance.Instance(inst.root)
+            fresh_node = fresh_owner.node(n['id'])
+            if _m_jobs.bound_worker_threads(fresh_node, row['Job']) != ownership[key]:
+                raise ValueError('worker ownership changed before settlement publication; no job stamped')
             current_rows = _m_jobs.ledger_rows(n)
             current = next((r for r in current_rows or [] if _m_jobs.job_key(r) == key), None)
             if not current or not _m_jobs.closed_job(current):
@@ -218,6 +227,71 @@ def settle_closed_jobs(inst, n, rpc=None, job_keys=None):
             inst.commit([path], f"{n['id']}: native host settlement confirmed")
             result['settled_jobs'].append(key)
     return result
+
+
+def worktree_thread_hook(inst, n, cleanup, rpc=None):
+    """C06 callback: True only after exact closed jobs are freshly host-settled.
+
+    The caller still owns path removal and its final branch/live-owner recheck.
+    This function never removes a workspace or cancels a host request.
+    """
+    try:
+        fresh = _m_instance.Instance(inst.root)
+        current = fresh.node(n['id'])
+        if (not isinstance(cleanup, dict) or cleanup.get('version') != 1 or cleanup.get('node') != n['id']
+                or not isinstance(cleanup.get('branch'), str) or not isinstance(cleanup.get('jobs'), list)
+                or not cleanup['jobs'] or not isinstance(cleanup.get('threads'), list)):
+            return False
+        branch = cleanup['branch']
+        workspace = current['local'].get('worktrees', {}).get(branch, {}).get('path')
+        if not workspace or cleanup.get('workspace') != workspace:
+            return False
+        rows = _m_jobs.read_jobs(current)
+        if rows is None:
+            return False
+        expected = {_m_jobs.job_key(row): row for row in rows if row['Job'] == branch}
+        if {item.get('key') for item in cleanup['jobs'] if isinstance(item, dict)} != set(expected):
+            return False
+        for item in cleanup['jobs']:
+            row = expected.get(item.get('key'))
+            if (not row or not _m_jobs.closed_job(row) or item.get('closed') is not True
+                    or item.get('started') != row.get('Started') or item.get('ended') != row.get('Ended')):
+                return False
+        references = set()
+        worker_bindings = {key: current['local'].get('workers', {}).get(key) for key in expected}
+        retired_bindings = {key: list(current['local'].get('retired_workers', {}).get(key, [])) for key in expected}
+        for reference, _ in _m_jobs.bound_worker_threads(current, branch):
+            references.update(_m_jobs.thread_reference_ids(reference))
+        supplied = {item.get('id') for item in cleanup['threads'] if isinstance(item, dict)}
+        if not supplied or supplied != references:
+            return False
+        observation = settle_closed_jobs(fresh, current, rpc=rpc, job_keys=list(expected), revalidate=True)
+        if set(observation['settled_jobs']) != set(expected) or observation['retained']:
+            return False
+        with _m_instance.brain_lock(inst):
+            latest = _m_instance.Instance(inst.root)
+            bound = latest.node(n['id'])
+            rows = _m_jobs.read_jobs(bound) or []
+            if bound['local'].get('worktrees', {}).get(branch, {}).get('path') != workspace:
+                return False
+            if any(bound['local'].get('workers', {}).get(key) != worker_bindings[key] or
+                   bound['local'].get('retired_workers', {}).get(key, []) != retired_bindings[key] for key in expected):
+                return False
+            for key in expected:
+                row = next((row for row in rows if _m_jobs.job_key(row) == key), None)
+                if not row or not _m_jobs.closed_job(row) or not row.get('Settled'):
+                    return False
+            for key in expected:
+                reference = bound['local'].get('workers', {}).pop(key, None)
+                if reference:
+                    retired = bound['local'].setdefault('retired_workers', {}).setdefault(key, [])
+                    if reference not in retired:
+                        retired.append(reference)
+            latest.save_local()
+            inst.local = latest.local
+        return True
+    except (OSError, ValueError, TypeError, AttributeError, _m_rpc.HostRPCError):
+        return False
 
 
 def settle_landed_jobs(inst, n, job_keys):

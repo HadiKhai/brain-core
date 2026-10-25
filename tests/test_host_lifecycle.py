@@ -123,3 +123,35 @@ class HostLifecycle(Scenario):
         self.assertTrue(result['pending'])
         self.assertTrue(result['errors'])
         self.assertEqual(self.calls, [])
+
+    def test_cleanup_callback_revalidates_exact_closed_jobs_and_retains_live_threads(self):
+        branch = self.closed['Job']
+        self.n['local']['worktrees'] = {branch: {'path': str(self.tmp / 'checkout')}}
+        self.inst.save_local()
+        cleanup = {'version': 1, 'node': 'root', 'branch': branch, 'workspace': str(self.tmp / 'checkout'),
+                   'jobs': [{'key': self.m.job_key(self.closed), 'closed': True,
+                             'started': self.closed['Started'], 'ended': self.closed['Ended']}],
+                   'threads': [{'id': 'fixture-worker'}]}
+        self.assertTrue(self.m.worktree_thread_hook(self.inst, self.n, cleanup, rpc=self.rpc))
+        self.assertNotIn(self.m.job_key(self.closed), self.m.Instance(self.root).local_of('root')['workers'])
+        self.assertIn('fixture-worker', self.m.Instance(self.root).local_of('root')['retired_workers'][self.m.job_key(self.closed)])
+        # A prior stamp cannot substitute for current host observations.
+        self.threads['fixture-child'].update(status='running', activeRunId='child-run')
+        self.assertFalse(self.m.worktree_thread_hook(self.inst, self.n, cleanup, rpc=self.rpc))
+        cleanup['jobs'][0]['key'] = self.m.job_key(self.opened)
+        self.calls.clear()
+        self.assertFalse(self.m.worktree_thread_hook(self.inst, self.n, cleanup, rpc=self.rpc))
+        self.assertEqual(self.calls, [])
+
+    def test_binding_change_after_host_action_never_publishes_settled_job(self):
+        original = self.rpc
+        def rebound(name, args):
+            result = original(name, args)
+            if name == 't3_thread_organize' and args['threadId'] == 'fixture-worker':
+                fresh = self.m.Instance(self.root)
+                fresh.local_of('root')['workers'][self.m.job_key(self.closed)] = 'foreign-worker'
+                fresh.save_local()
+            return result
+        with self.assertRaisesRegex(ValueError, 'ownership changed'):
+            self.m.settle_closed_jobs(self.inst, self.n, rpc=rebound)
+        self.assertFalse(self.m.read_jobs(self.n)[0].get('Settled'))
