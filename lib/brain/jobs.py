@@ -993,6 +993,8 @@ def close_ledger_job(inst, n, branch, reason=None):
         row['Hours'] = f'{_m_status.elapsed(start, end) / 3600:.1f}' if start and end else ''
         _m_tasks.job_closed(inst, n, row)
         write_jobs(inst, n, rows)
+        from . import events
+        events.close_active_work(inst, n, row)
         inst.commit([], f"{n['id']}: ledger job closed")
         print_thread_checklist(n, row)
 

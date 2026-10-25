@@ -350,6 +350,20 @@ class PruneSafety(AutonomyProject):
         self.assertIn('open ledger job job-a', self.b(r, 'wt', 'prune', 'app', '--offline'))
         self.assertTrue(wt.exists())
 
+    def test_unknown_ownership_survives_repeated_refresh_and_removal(self):
+        r, home, wt = self.merged()
+        self.close_job(r)
+        status = r / 'nodes/app/status.md'
+        for state in ('unknown', '', 'review — merged into preview'):
+            with self.subTest(state=state):
+                status.write_text('## Active work\n| Branch | Thread | PR | State |\n'
+                                  '| `job-a` (fixture annotation) | fixture-thread | - | ' + state + ' |\n')
+                for _ in range(2):
+                    self.b(r, 'status', 'app', '--refresh')
+                self.assertIn('live bound thread', self.b(r, 'wt', 'prune', 'app', '--offline'))
+                self.assertIn('live bound thread', self.b(r, 'wt', 'rm', 'app', 'job-a', '--force', ok=False))
+                self.assertTrue(wt.exists())
+
     def test_local_mode_follows_origin_default_named_master(self):
         r, home, wt = self.project()
         self.git('branch', '-m', 'main', 'master', cwd=home)

@@ -718,9 +718,10 @@ def snapshot_view(inst, n, known_merges=None):
     known = status.facts_meta(n).get('merged_before', []) if known_merges is None else known_merges
     lines, merged = status.status_facts(inst, n, state, known, metadata_only=True)
     active, keys = [], []
-    hints = {}
+    hints, retained = {}, set()
     for cells in status.active_work(n, include_closed=True):
-        if len(cells) >= 4:
+        if len(cells) >= 2:
+            cells = (cells + ['-'] * max(0, 3 - len(cells)) + ['unknown'])[:4]
             # Match the cleanup reader's supported backtick/annotation syntax.
             branch = cells[0].replace('`', '').split()
             if branch:
@@ -737,8 +738,20 @@ def snapshot_view(inst, n, known_merges=None):
         job_state = row['Outcome'] if row['Ended'] else signal.get('state') or 'open'
         if job_state not in ('open', 'done', 'failed', 'blocked', 'question', 'merged', 'abandoned', 'closed', 'studied', 'external'):
             job_state = 'unknown'
+        if unambiguous and candidates[0][1].strip() not in ('', '-', '—'):
+            # Ledger completion is not a terminal transition of the source owner.
+            # Keep its state verbatim, including unknown and annotated labels.
+            job_state = candidates[0][3]
+            retained.add(id(candidates[0]))
         active.append([row['Job'], *refs, job_state])
         keys.append(jobs.job_key(row))
+    for candidates in hints.values():
+        for cells in candidates:
+            if (id(cells) not in retained and cells[1].strip() not in ('', '-', '—')
+                    and not status.active_work_closed(cells)):
+                # Ambiguous, missing or settled ledger rows cannot erase ownership.
+                active.append(cells)
+                keys.append('')
     return screen(inst, {'facts': lines, 'active': active, 'active_keys': keys, 'merged': list(merged), 'merged_before': known,
                          'comparison': {'facts': brain_facts(lines), 'active': active}})
 
@@ -1024,6 +1037,18 @@ def active_table(inst, n, view):
         return
     common.atomic_write(path, text)
     common.touch(path)
+
+
+def close_active_work(inst, n, row):
+    """An explicit job-close transition may close one unambiguous source row."""
+    from . import jobs, status
+    rows = status.active_work(n, include_closed=True)
+    matches = [cells for cells in rows
+               if cells and cells[0].replace('`', '').split()[:1] == [row['Job']]]
+    if (len(matches) == 1 and len(matches[0]) >= 4
+            and sum(r['Job'] == row['Job'] for r in jobs.read_jobs(n) or []) == 1):
+        matches[0][3] = row['Outcome']
+        active_table(inst, n, {'active': rows})
 
 
 def judgement(text):

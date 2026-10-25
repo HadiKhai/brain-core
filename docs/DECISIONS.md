@@ -1808,3 +1808,17 @@ zero-merge days and measurement coverage. The existing project picker scopes tho
 rows. The summary opens the table in the existing reader, keeping one main list
 on the Jobs page, and cannot shrink below its contents. The duration chart and
 lifetime totals remain visible in their existing locations.
+
+## D1104: Retain source ownership across generated completion displays
+
+Event status projections preserve a bound Active work row's source state,
+including unknown states and terminal annotations. Ledger completion alone cannot
+turn live ownership into terminal cleanup authorization. Ambiguous, unmatched,
+incomplete and still-live rows beside settled ledger entries remain visible across
+repeated projections. Branch backticks and annotations use the cleanup reader's
+matching rules.
+
+An explicit job-close transition updates one unambiguous source row. Explicit
+terminal source labels continue to permit cleanup subject to the existing Git,
+dirty-worktree and competing-owner guards. Generated facts and ledger timestamps
+never establish host liveness or safe thread settlement.

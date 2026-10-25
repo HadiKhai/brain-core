@@ -312,6 +312,74 @@ class EventViews(Scenario):
         self.b(r, 'jobs', 'app', '--branch', 'job-one', '--settled', '--attestation-file', settlement_export(self, r, 'app', branch='job-one'))
         self.assertNotIn('| job-one |', st.read_text())
 
+    def test_projection_preserves_bound_source_states_over_completed_ledger(self):
+        from brain import jobs, status
+        r = self.init('demo')
+        home = self.repo(self.tmp / 'code')
+        self.b(r, 'new', 'app', '--title', 'App', '--home', str(home))
+        self.b(r, 'wt', 'add', 'app', 'job-one', '--no-setup')
+        inst = instance.Instance(r)
+        n = inst.node('app')
+        rows = jobs.read_jobs(n)
+        rows[0].update(Ended='2026-01-01T00:00:00+00:00', Outcome='merged')
+        jobs.write_jobs(inst, n, rows)  # ledger data alone is not an owner transition
+        path = n['dir'] / 'status.md'
+        for state in ('working', 'unknown', '', 'review — merged into preview',
+                      'merged — fixture complete', 'done: fixture complete'):
+            for branch in ('`job-one`', '`job-one` (fixture annotation)'):
+                with self.subTest(state=state, branch=branch):
+                    path.write_text('## Active work\n| Branch | Thread | PR | State |\n'
+                                    + '| ' + branch + ' | fixture-thread | #12 | ' + state + ' |\n')
+                    expected = [['job-one', 'fixture-thread', '#12', state]]
+                    self.b(r, 'backlog', 'app', 'add', 'fixture refresh')
+                    self.assertEqual(self.view(r)['active'], expected)
+                    table = path.read_text().split('## Active work', 1)[1]
+                    self.b(r, 'status', 'app', '--refresh')
+                    self.assertEqual(self.view(r)['active'], expected)
+                    self.assertEqual(path.read_text().split('## Active work', 1)[1], table)
+                    self.assertEqual(status.active_work_closed(expected[0]),
+                                     status.active_work_closed(status.active_work(n, include_closed=True)[0]))
+
+    def test_projection_retains_ambiguous_unmatched_and_incomplete_owners(self):
+        from brain import jobs, status
+        r = self.init('demo')
+        home = self.repo(self.tmp / 'code')
+        self.b(r, 'new', 'app', '--title', 'App', '--home', str(home))
+        self.b(r, 'wt', 'add', 'app', 'job-one', '--no-setup')
+        inst = instance.Instance(r)
+        n = inst.node('app')
+        rows = jobs.read_jobs(n)
+        rows[0].update(Ended='2026-01-01T00:00:00+00:00', Outcome='merged')
+        path = n['dir'] / 'status.md'
+        source = ('## Active work\n| Branch | Thread | PR | State |\n'
+                  '| `job-one` | fixture-first | - | working |\n'
+                  '| job-one (fixture annotation) | fixture-second | - | unknown |\n'
+                  '| orphan | fixture-orphan | - | working |\n'
+                  '| incomplete | fixture-incomplete |\n')
+        for mode in ('duplicate-source', 'duplicate-ledger', 'settled-ledger', 'missing-ledger'):
+            with self.subTest(mode=mode):
+                ledger = [dict(rows[0])]
+                if mode == 'duplicate-ledger':
+                    ledger.append({**rows[0], 'Started': '2025-01-01T00:00:00+00:00'})
+                elif mode == 'settled-ledger':
+                    ledger[0]['Settled'] = '2026-01-01T00:01:00+00:00'
+                elif mode == 'missing-ledger':
+                    ledger = []
+                jobs.write_jobs(inst, n, ledger)
+                path.write_text(source)
+                first = None
+                for _ in range(2):
+                    view = events.snapshot_view(inst, n)
+                    bound = {cells[1]: cells[3] for cells in view['active'] if cells[1] != '-'}
+                    self.assertEqual(bound, {'fixture-first': 'working', 'fixture-second': 'unknown',
+                                             'fixture-orphan': 'working', 'fixture-incomplete': 'unknown'})
+                    if first is not None:
+                        self.assertEqual(view['active'], first)
+                    first = view['active']
+                    events.active_table(inst, n, view)
+                events.close_active_work(inst, n, rows[0])
+                self.assertEqual(status.active_work(n, include_closed=True), first)
+
     def test_status_commit_is_hourly_and_skips_someone_elses_judgement(self):
         r = self.init('demo')
         self.b(r, 'new', 'app', '--title', 'App')
