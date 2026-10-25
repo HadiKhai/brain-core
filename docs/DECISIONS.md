@@ -85,6 +85,7 @@ reproducing the original environment; a changed resolved tool still invalidates 
 
 ## D405: Native direct-full receipts and early hand-back validation
 
+<<<<<<< HEAD
 `full-run` retains a native exact-candidate full packet without publishing a
 completion. Hand-back can adopt its receipt ID after checking refs, command,
 inputs, ports, lane context and retained log digests. Stale, failed or missing
@@ -448,3 +449,37 @@ absence of that extension is ignored; dependency/import failures inside it remai
 visible. The extension owns explicit opt-in policy, eligible windows and durable
 attempt fencing. The hook adds no timer, daemon, configuration activation or
 separate publication mechanism.
+=======
+Each gate captures its expected duration at enqueue: verify_estimate_seconds,
+or the median of at least three measured completed non-reused readiness runs
+on that node. Queue and running projections simulate free slots with recorded
+start times and gate durations. Missing, overrun or unsafe evidence yields unknown.
+The projection reads recorded evidence without process probes or queue writes.
+Reported estimates describe capacity only; environmental holds are not predicted.
+
+## D205: Compare whole-job wave forecasts with fresh weekly headroom
+
+The jobs/usage budget view sums complete per-job weekly-share forecasts against
+the selected subscription's fresh seven-day reading and recorded stop line. It
+shows the median sum, observed-maximum sum, and whether each fits current headroom.
+Missing job samples or stale, unknown, expired or future readings keep fit unknown.
+The estimate is account-wide and approximate; work already spent is not subtracted.
+Five-hour and model-specific capacity fit remain unknown. This read-only advisory
+uses cached usage only and cannot change routing or admission.
+
+## D206: Refresh daily throughput from durable measured facts
+
+Every jobs/dashboard snapshot computes the last fourteen calendar days from the
+ledger, using elapsed hours for today and a full day for earlier dates. Only
+merged jobs with valid non-future end times count. Rates are merges/hour and
+calendar minutes/merge; token means use measured merges only, with coverage
+counts. Recorded run/reuse counts expose reruns without inferring absent history.
+
+Native admission records monotonic delay in a context-local collector during
+readiness. The hand-back accumulates known admission delay across attempts and
+ledger consumption retains numeric counts and seconds. Older incomplete delay
+history stays unknown. Admission time includes native capacity/environment holds;
+other wait causes are unmeasured. The dashboard component displays measured
+coverage and does not infer causes from wall time. Rollups refresh on snapshot
+reads without a scheduler, host lifecycle action or generated-file writes.
+>>>>>>> d246b32260099a1bcbcb64aa5f67dcde71001a14

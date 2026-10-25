@@ -121,6 +121,8 @@ class JobForecasts(Scenario):
         hb = self.m.read_handback(n, row)
         self.assertGreaterEqual(hb["verify_duration"]["elapsed_seconds"], 0)
         self.assertFalse(hb["verify_duration"]["reused"])
+        self.assertGreaterEqual(hb["verify_duration"]["queue_seconds"], 0)
+        self.assertGreaterEqual(hb["admission_wait_seconds_total"], 0)
         self.assertEqual(hb["estimate"], json.loads(saved))
         self.assertEqual(hb["actual"]["tokens"], 10200000)
         self.assertEqual(hb["actual"]["active_h"], 1)
@@ -318,3 +320,37 @@ class JobForecasts(Scenario):
         path.write_text(json.dumps({**hb, 'verify_duration': {'elapsed_seconds': 'private', 'reused': False}}))
         self.m.write_jobs(self.inst, self.n, [row])
         self.assertNotIn('private', self.m.read_jobs(self.n)[0]['Verify s'])
+
+    def test_wave_fit_uses_fresh_weekly_headroom_and_retains_unknown_samples(self):
+        rows = self.rows()
+        planned = [{**rows[0], 'Job': 'job/new', 'Ended': '', 'Outcome': '', 'Hours': ''}]
+        sub = {'runtime': 'codex', 'label': 'Fixture', 'stop_percent': 85, 'read_at': 1000,
+               'source': 'lookup', 'windows': {'seven_day': {'used_percent': 84, 'resets_at': 2000,
+                                                           'expired': False}}}
+        fit = self.m.wave_allowance(self.inst, self.n, rows, planned, sub, now=1000)
+        self.assertAlmostEqual(fit['forecast_percent'], .3)
+        self.assertEqual(fit['headroom_percent'], 1)
+        self.assertTrue(fit['fits'])
+        overloaded = self.m.wave_allowance(self.inst, self.n, rows, planned * 4, sub, now=1000)
+        self.assertFalse(overloaded['fits'])
+        for reading in ({**sub, 'read_at': 0}, {**sub, 'source': 'unknown'},
+                        {**sub, 'read_at': 1100}, {**sub, 'read_at': 800}):
+            self.assertIsNone(self.m.wave_allowance(self.inst, self.n, rows, planned, reading, now=1000))
+        sparse = self.m.wave_allowance(self.inst, self.n, rows[:2], planned, sub, now=1000)
+        self.assertIsNone(sparse['forecast_percent'])
+        self.assertIsNone(sparse['fits'])
+        self.assertEqual(sparse['missing_jobs'], 1)
+        self.m.write_jobs(self.inst, self.n, rows + planned)
+        with mock.patch.object(self.m, 'usage_route', return_value=(sub, 'fixture')), \
+                mock.patch.object(self.m, 'usage_rows', return_value=([], {'max_age_seconds': 120})), \
+                mock.patch.object(self.m.time, 'time', return_value=1000):
+            lines = '\n'.join(self.m.job_budget_lines(self.inst, self.n))
+        self.assertIn('0.3% weekly share', lines)
+        self.assertIn('median fits headroom', lines)
+
+    def test_unknown_accounting_sources_cannot_calibrate_or_supply_token_forecasts(self):
+        for source in ('none found', 'not counted', 'not counted: OSError'):
+            rows = [{**row, 'Usage': source, 'Meter %': '1'} for row in self.rows()]
+            estimate = self.estimate(rows)
+            self.assertNotIn('tokens', estimate)
+            self.assertEqual(estimate['conversion']['source'], 'configured/default')

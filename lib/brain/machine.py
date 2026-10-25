@@ -1,5 +1,6 @@
 """Machine mechanics for Brain."""
 import contextlib
+import contextvars
 import datetime
 import hashlib
 import json
@@ -27,6 +28,7 @@ MACHINE_DEFAULTS = {"load5_per_cpu": 0.8, "memory_free_gb": 8, "disk_free_gb": 4
                     "verify_day": 2, "verify_night": 1, "night_start": 22, "night_end": 8, "cpu_idle_min_pct": 15,
                     "memory_pressure_max_pct": 80, "max_hold_minutes": 20}
 MACHINE_RETRY = 5
+ADMISSION_TIMING = contextvars.ContextVar("brain_admission_timing", default=None)
 
 
 def machine_valid_sample(sample):

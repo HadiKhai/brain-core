@@ -83,7 +83,14 @@ class GateForecasts(Scenario):
                 mock.patch.object(self.m, 'machine_reasons', return_value=[]), \
                 mock.patch.object(self.m, 'machine_limit', return_value=1), \
                 contextlib.redirect_stdout(io.StringIO()):
-            token = self.m.machine_wait('verify', self.inst, 'root')
+            timings = []
+            timing_token = self.m.ADMISSION_TIMING.set(timings)
+            try:
+                token = self.m.machine_wait('verify', self.inst, 'root')
+            finally:
+                self.m.ADMISSION_TIMING.reset(timing_token)
+            self.assertEqual(len(timings), 1)
+            self.assertGreaterEqual(timings[0], 0)
             try:
                 with self.m.machine_queue() as q:
                     self.assertEqual(q.rows[0]['priority'], 'landing')

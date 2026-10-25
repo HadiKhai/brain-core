@@ -15,6 +15,7 @@ from . import docker_leftovers as _m_docker_leftovers
 from . import guard as _m_guard
 from . import hosts as _m_hosts
 from . import instance as _m_instance
+from . import machine as _m_machine
 from . import nodes as _m_nodes
 from . import review as _m_review
 from . import spend as _m_spend
@@ -32,7 +33,7 @@ JOBS_MARK = "<!-- brain:job-ledger v3 -->"  # older cores refuse this format ins
 JOBS_LEGACY_MARKS = ("<!-- brain:job-ledger v2 -->", "<!-- brain:job-ledger v1 -->")
 JOB_COLS = ["Job", "Started", "Ended", "Hours", "Outcome", "Commits", "Reviews", "Runtime", "Cause"]
 JOB_COLS += ["Class", "Model", "Effort"]
-JOB_COLS += ["Files", "Lines", "Forecast", "Actual", "Meter %", "Verify s", "Verify reused"]
+JOB_COLS += ["Files", "Lines", "Forecast", "Actual", "Meter %", "Verify s", "Verify reused", "Verify runs", "Verify reuses", "Queue s"]
 JOB_COLS += ["Lessons", "Lesson check", "Switches", "Settled"]
 JOB_COLS += ["Land check"]
 JOB_COLS += ["Active h", "Agent h", "Fresh in", "Cache read", "Cache write", "Output", "Reasoning", "Tool calls",
@@ -80,6 +81,12 @@ def write_jobs(inst, n, rows):
             # A coordinator can start another review after this hand-back. Retained
             # evidence repairs undercounts, but cannot undo an open job's new rounds.
             row["Reviews"] = str(rounds if row.get("Ended") else max(current, rounds))
+        for field, key in (("Verify runs", "verify_runs"), ("Verify reuses", "verify_reused")):
+            if type(hb.get(key)) is int and hb[key] >= 0:
+                row[field] = str(hb[key])
+        queued = forecast_number(hb.get("admission_wait_seconds_total"))
+        if queued is not None:
+            row["Queue s"] = str(queued)
         duration = hb.get("verify_duration")
         if isinstance(duration, dict) and type(duration.get("reused")) is bool:
             seconds = forecast_number(duration.get("elapsed_seconds"))
@@ -314,9 +321,15 @@ def publish_handback(a):
     duration = None
     if a.state == "done" and not study and (a.reviews is not None or getattr(a, "record", False)):
         verify_started = time.monotonic()
-        packet, reasons = _m_verify.record_ready(inst, n, a.branch, a.reviews, packet,
-                                       getattr(a, "reverify", False), full_receipt=getattr(a, "full_receipt", None))
+        waits = []
+        timing_token = _m_machine.ADMISSION_TIMING.set(waits)
+        try:
+            packet, reasons = _m_verify.record_ready(inst, n, a.branch, a.reviews, packet,
+                                           getattr(a, "reverify", False), full_receipt=getattr(a, "full_receipt", None))
+        finally:
+            _m_machine.ADMISSION_TIMING.reset(timing_token)
         duration = record_verify_duration(inst, n, row, packet, time.monotonic() - verify_started)
+        duration["queue_seconds"] = 0.0 if duration["reused"] else sum(waits)
         if packet:
             reused, fresh = (1, 0) if packet.get("verify_reused") else (0, 1)
     actual = None
@@ -371,8 +384,13 @@ def publish_handback(a):
                 "verify_runs": count("verify_runs") + fresh, "verify_reused": count("verify_reused") + reused}
         if duration is not None:
             data["verify_duration"] = duration
+            prior_wait = forecast_number(previous.get("admission_wait_seconds_total"))
+            if prior_wait is not None or not previous.get("verify_runs"):
+                data["admission_wait_seconds_total"] = (prior_wait or 0) + duration["queue_seconds"]
         elif previous.get("verify_duration") is not None:
             data["verify_duration"] = previous["verify_duration"]
+            if previous.get("admission_wait_seconds_total") is not None:
+                data["admission_wait_seconds_total"] = previous["admission_wait_seconds_total"]
         if actual is not None:
             data.update(estimate=saved_forecast(row.get("Forecast")), actual=clean_actual(actual))
         if a.state == "done":
@@ -1001,7 +1019,53 @@ def jobs_summary(inst, n):
             "median_active_h": med([u["active_h"] for u in measured]),
             "measured": len(measured),
             "causes": [r["Cause"] for r in done if r["Cause"]][-10:],
-            "forecasts": job_forecasts(rows)}
+            "forecasts": job_forecasts(rows), "throughput": daily_throughput(inst, n, rows)}
+
+
+def daily_throughput(inst, n, rows, days=14):
+    """Read-only calendar-day rollup, refreshed with every jobs/dashboard snapshot."""
+    import datetime
+    now = inst.now_dt()
+    buckets = {}
+    for offset in range(days):
+        date = now.date() - datetime.timedelta(days=offset)
+        start = datetime.datetime.combine(date, datetime.time.min, tzinfo=now.tzinfo)
+        seconds = (min(start + datetime.timedelta(days=1), now) - start).total_seconds()
+        buckets[date.isoformat()] = dict(date=date.isoformat(), window_seconds=seconds, merged=0,
+            measured_merges=0, processed_tokens=0, verify_runs=0, verify_reused=0, reruns=0,
+            verify_measured_jobs=0, queue_seconds=0, queue_measured_jobs=0)
+    for row in rows:
+        end = inst.parse_time(row.get("Ended", ""))
+        if not end or end > now or row.get("Outcome") != "merged":
+            continue
+        bucket = buckets.get(end.astimezone(now.tzinfo).date().isoformat())
+        if bucket is None:
+            continue
+        bucket["merged"] += 1
+        usage = _m_spend.row_usage(row)
+        source = str((usage or {}).get("source") or "")
+        if usage and (source == "host" or source.startswith(("host:", "transcripts:"))):
+            bucket["processed_tokens"] += usage["processed"]
+            bucket["measured_merges"] += 1
+        runs, reused = row.get("Verify runs", ""), row.get("Verify reuses", "")
+        if str(runs).isdigit() and str(reused).isdigit():
+            bucket["verify_runs"] += int(runs)
+            bucket["verify_reused"] += int(reused)
+            bucket["reruns"] += max(0, int(runs) - 1)
+            bucket["verify_measured_jobs"] += 1
+        queued = forecast_number(row.get("Queue s"))
+        if queued is not None:
+            bucket["queue_seconds"] += queued
+            bucket["queue_measured_jobs"] += 1
+    for bucket in buckets.values():
+        seconds, merged = bucket["window_seconds"], bucket["merged"]
+        bucket["merges_per_hour"] = merged * 3600 / seconds if seconds > 0 else None
+        bucket["minutes_per_merge"] = seconds / 60 / merged if merged else None
+        measured = bucket["measured_merges"]
+        bucket["tokens_per_merge"] = bucket["processed_tokens"] / measured if measured else None
+        if not bucket["queue_measured_jobs"]:
+            bucket["queue_seconds"] = None
+    return list(buckets.values())
 
 
 def job_kind(branch, rows=()):
@@ -1113,6 +1177,12 @@ def planned_size(n, row):
     return None
 
 
+def measured_job_usage(row):
+    usage = _m_spend.row_usage(row)
+    source = str((usage or {}).get("source") or "")
+    return usage if source == "host" or source.startswith(("host:", "transcripts:")) else None
+
+
 def meter_conversion(inst, n, runtime, rows):
     """Approximation per runtime. Only explicit paired ledger observations calibrate it.
 
@@ -1129,7 +1199,7 @@ def meter_conversion(inst, n, runtime, rows):
     fresh_source = "configured/default"
     pairs = []
     for row in rows:
-        share, u = forecast_number(row.get("Meter %")), _m_spend.row_usage(row)
+        share, u = forecast_number(row.get("Meter %")), measured_job_usage(row)
         if (row.get("Ended") and row.get("Outcome") == "merged" and row.get("Runtime") == runtime and
                 share and share <= 100 and u and u["processed"] > 0):
             try:
@@ -1183,7 +1253,7 @@ def estimate_job(inst, n, rows, kind, runtime, size=None, model=None):
         out["wall_h"] = spread([h for _, _, h in samples])
     measured = []
     for _, row, _ in measured_samples:
-        u = _m_spend.row_usage(row)
+        u = measured_job_usage(row)
         active = forecast_number(row.get("Active h"))
         if u and u["processed"] > 0 and active is not None:
             measured.append((active, u["processed"]))
@@ -1223,13 +1293,13 @@ def estimate_line(estimate):
     return out + ". Advisory, never a limit or gate."
 
 
-def launch_forecast(inst, n, row, kind, runtime, model=None):
+def launch_forecast(inst, n, row, kind, runtime, model=None, rows=None):
     """Both launch paths retain one estimate until the selected route changes."""
     model = model if model and model != "runtime default" else None
     saved = saved_forecast((row or {}).get("Forecast"))
     if saved and (saved["class"], saved["runtime"], saved.get("model")) == (kind, runtime, model):
         return saved
-    return estimate_job(inst, n, read_jobs(n) or [], kind, runtime, planned_size(n, row), model=model)
+    return estimate_job(inst, n, (read_jobs(n) or []) if rows is None else rows, kind, runtime, planned_size(n, row), model=model)
 
 
 def record_job_forecast(inst, n, row, estimate):
@@ -1321,7 +1391,7 @@ def job_forecasts(rows):
                 continue
             if not 0 <= hours < float("inf"):
                 continue
-            u = _m_spend.row_usage(row)
+            u = measured_job_usage(row)
             sample = (hours, u if u and u["processed"] else None)
             groups.setdefault("unclassified", []).append(sample)  # the explicit all-jobs fallback
             kind = row.get("Class") or job_kind(row["Job"], rows)
@@ -1360,6 +1430,41 @@ def forecast_lines(rows, planned=None):
     return out
 
 
+def wave_allowance(inst, n, rows, planned, subscription, now=None, max_age_seconds=120):
+    """Compare a complete wave forecast with fresh account-weekly headroom; never an admission gate."""
+    now = time.time() if now is None else now
+    window = subscription.get("windows", {}).get("seven_day", {})
+    read_at = window.get("read_at", subscription.get("read_at"))
+    used = forecast_number(window.get("used_percent"))
+    reset = forecast_number(window.get("resets_at"))
+    if (not _m_usage.usage_number(read_at) or not 0 <= now - read_at <= max_age_seconds or
+            not read_at or window.get("source", subscription.get("source")) == "unknown" or
+            window.get("absent") or window.get("expired") or reset is None or reset <= now or
+            used is None or used > 100):
+        return None
+    stop = forecast_number(subscription.get("stop_percent", 85))
+    if stop is None or not 0 < stop <= 100:
+        return None
+    values, missing = [], 0
+    for row in planned:
+        kind = row.get("Class") or job_kind(row["Job"], rows)
+        runtime = row.get("Runtime") or subscription.get("runtime")
+        estimate = launch_forecast(inst, n, row, kind, runtime, row.get("Model"), rows=rows)
+        share = estimate.get("weekly_percent")
+        if not isinstance(share, dict):
+            missing += 1
+        else:
+            values.append(share)
+    total = sum(value["median"] for value in values) if values and not missing else None
+    upper = sum(value["max"] for value in values) if values and not missing else None
+    headroom = max(0, stop - used)
+    return {"jobs": len(planned), "missing_jobs": missing, "forecast_percent": total,
+            "upper_percent": upper, "headroom_percent": headroom,
+            "fits": total <= headroom if total is not None else None,
+            "range_fits": upper <= headroom if upper is not None else None,
+            "basis": "whole-job approximate account-weekly share; elapsed work not subtracted"}
+
+
 def job_budget_lines(inst, n, planned=None):
     """Compare ledger wall time with fresh routed reset windows, never infer token allowance."""
     rows = read_jobs(n) or []
@@ -1390,7 +1495,17 @@ def job_budget_lines(inst, n, planned=None):
         remaining = min((w["resets_at"] - time.time()) / 3600 for w in windows)
         out.append(f"current route {selected['label']}: {len(these)} open/planned job(s), typical serial full-job time {estimate:g} h "
                    f"{'fits' if estimate <= remaining else 'exceeds'} {remaining:.1f} h until the next recorded reset; "
-                   "elapsed time not subtracted; weekly token share is an approximate forecast, never a limit.")
+                   "elapsed time not subtracted.")
+        wave = wave_allowance(inst, n, rows, these, selected, max_age_seconds=policy["max_age_seconds"])
+        if not wave or wave["forecast_percent"] is None:
+            out.append(f"current route {selected['label']}: weekly allowance fit unknown (fresh weekly reading and three measured samples per job required).")
+        else:
+            out.append(f"current route {selected['label']}: {wave['jobs']} open/planned whole-job forecast "
+                       f"{wave['forecast_percent']:.3g}% weekly share (observed-max sum {wave['upper_percent']:.3g}%), "
+                       f"{wave['headroom_percent']:.3g}% headroom to the recorded stop line; median "
+                       f"{'fits' if wave['fits'] else 'exceeds'} headroom"
+                       + ("; observed range may exceed it" if not wave["range_fits"] else "")
+                       + ". Approximate, account-wide; elapsed work not subtracted; five-hour/model-specific fit unknown; advisory only.")
     return out
 
 
