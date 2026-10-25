@@ -2,6 +2,7 @@
 import argparse
 import contextlib
 import json
+import math
 import os
 import re
 import shutil
@@ -162,6 +163,53 @@ def ui_commits(cwd, since, all_refs=False):
     return out
 
 
+
+CPU_READING_CACHE = {}
+
+def machine_utilization():
+    """Bounded stdlib-only probes; iowait is not CPU busy time on Linux."""
+    cached = CPU_READING_CACHE.get(sys.platform)
+    if cached and 0 <= time.monotonic() - cached[0] < 5:
+        return dict(cached[1])
+    result = {}
+    try:
+        if sys.platform == 'darwin':
+            top = subprocess.run(['top', '-l', '2', '-s', '1', '-n', '0'], capture_output=True,
+                                 text=True, timeout=3, env={**os.environ, 'LC_ALL': 'C'})
+            matches = re.findall(r'CPU usage:.*?([\d.]+)% idle', top.stdout)
+            if top.returncode == 0 and len(matches) >= 2:
+                result['cpu_idle_pct'] = float(matches[-1])
+            pressure = subprocess.run(['memory_pressure', '-Q'], capture_output=True,
+                                      text=True, timeout=1, env={**os.environ, 'LC_ALL': 'C'})
+            match = re.search(r'System-wide memory free percentage:\s*(\d+)%', pressure.stdout)
+            if pressure.returncode == 0 and match:
+                result['memory_pressure_pct'] = 100 - float(match[1])
+        elif sys.platform.startswith('linux'):
+            def counters():
+                values = list(map(int, Path('/proc/stat').read_text().splitlines()[0].split()[1:]))
+                # guest time is already included in user/nice; iowait leaves CPUs idle.
+                return sum(values[:8]), values[3] + (values[4] if len(values) > 4 else 0)
+            first = counters()
+            time.sleep(0.05)
+            second = counters()
+            total, idle = second[0] - first[0], second[1] - first[1]
+            if total > 0 and 0 <= idle <= total:
+                result['cpu_idle_pct'] = round(100 * idle / total, 1)
+            try:
+                psi = Path('/proc/pressure/memory').read_text()
+                match = re.search(r'^some avg10=([\d.]+)', psi, re.M)
+                if match:
+                    result['memory_pressure_pct'] = float(match[1])
+            except OSError:
+                pass
+    except (OSError, ValueError, IndexError, subprocess.SubprocessError):
+        pass
+    # Bad or unavailable probes stay unknown, rather than becoming admission evidence.
+    result = {k: v for k, v in result.items() if math.isfinite(v) and 0 <= v <= 100}
+    CPU_READING_CACHE[sys.platform] = (time.monotonic(), dict(result))
+    return result
+
+
 def machine_load():
     d = {"cpus": os.cpu_count() or 1, "thermal": "unknown"}
     try:
@@ -187,7 +235,7 @@ def machine_load():
             d["mem_free_gb"], d["mem_total_gb"] = round(sum(pages.values()) * page / 1e9, 1), round(total / 1e9)
         elif Path("/proc/meminfo").exists():
             mi = dict(re.findall(r"(\w+):\s+(\d+)", Path("/proc/meminfo").read_text()))
-            d["mem_free_gb"], d["mem_total_gb"] = round((int(mi["MemFree"]) + int(mi["Inactive"])) * 1024 / 1e9, 1), round(int(mi["MemTotal"]) * 1024 / 1e9)
+            d["mem_free_gb"], d["mem_total_gb"] = round(int(mi.get("MemAvailable", int(mi["MemFree"]) + int(mi["Inactive"]))) * 1024 / 1e9, 1), round(int(mi["MemTotal"]) * 1024 / 1e9)
     except (OSError, AttributeError, ValueError, KeyError, subprocess.SubprocessError):
         pass
     try:
@@ -209,6 +257,7 @@ def machine_load():
         pass
     if "mem_free_gb" in d:
         d["memory_pressure"] = "low-free-memory" if d["mem_free_gb"] < 8 else "normal"
+    d.update(machine_utilization())
     return d
 
 

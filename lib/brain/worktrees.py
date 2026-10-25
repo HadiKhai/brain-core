@@ -14,6 +14,7 @@ from . import instance as _m_instance
 from . import jobs as _m_jobs
 from . import tasks as _m_tasks
 from . import knowledge as _m_knowledge
+from . import machine as _m_machine
 from . import nodes as _m_nodes
 from . import status as _m_status
 from . import verify as _m_verify
