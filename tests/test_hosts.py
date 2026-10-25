@@ -1056,11 +1056,13 @@ class StopHook(Scenario):
         self.assertIn("Blue A blue option", content)
         self.assertIn("Host question:", self.b(r, "inbox", "a"))
         self.assertIn("Host question:", self.b(r, "due", "a"))
-        # A fresh tool id asking the same question still yields exactly one inbox entry.
+        # A fresh call is a separate episode: an answer to q1 must not retire q2.
         rows = [self.question_call("q2", text="Use ForbiddenColour?\npassword=made-up",
                                   options=[{"label": "Blue", "description": "A blue option"}])]
         self.hook(r, d, transcript=self.question_log(rows))
-        self.assertEqual((d / "inbox.md").read_text().count("host-question:"), 1)
+        self.assertEqual((d / "inbox.md").read_text().count("host-question:"), 2)
+        self.hook(r, d, transcript=self.question_log(rows))
+        self.assertEqual((d / "inbox.md").read_text().count("host-question:"), 2)
 
     def test_answered_question_can_be_asked_again_and_slow_wake_succeeds(self):
         r = self.init("alice")
