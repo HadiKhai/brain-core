@@ -56,22 +56,58 @@ and inherited model configuration without activating inherited runtime policy.
 
 
 
-## D101: Configurable required separation reasons
+## D201: Preserve advisory launch estimates alongside measured job actuals
 
-The shared brief reason resolver accepts a node-local `separation_policy` of
-`warn` (the compatible default) or `required`. Required mode refuses a missing
-reason before brief output or route recording. Explicit reasons, contract reasons
-and independent review defaults satisfy it; an explicit urgent waiver remains
-available. Invalid policy values fail closed. This controls brief generation;
-it does not infer a safe agent cap or cancel overlapping work.
+Launch estimates use merged work with the same declared class (legacy branch
+family inference remains a fallback). An optional contract Size section supplies
+files and added/deleted lines. The five nearest known sizes use log distances;
+without planned size, the estimate uses all same-class samples. Wall time is
+class-wide; active time and tokens require the selected runtime. Each metric
+requires three observations and shows median plus observed minimum and maximum.
 
-## D102: Nested build-order authority stays explicit
+Ordinary resumes retain the original launch estimate. A changed class or runtime
+recomputes it. Hand-back captures measured usage and committed Git contribution
+size, excluding uncommitted and unrelated rebased changes. Close-time accounting
+refreshes known values without replacing missing measurements with zero. Ledger
+consumption sanitizes worker actuals to numeric facts and Git identities.
 
-Only unchecked Markdown list tasks inside a Build order section are suggested.
-Bullets and ordered list markers may nest; completed, parked, operator-waiting or
-already-open parent entries suppress their descendants. Section heading depth
-defines its boundary. Comments and fenced examples remain excluded. Backtick code
-spans preserve exact branch names including legal commas and semicolons; plain
-mentions end at whitespace or Markdown brackets, with a terminal period ignored.
-Use code spans for branch names next to ambiguous prose punctuation. Existing
-capacity arithmetic and unreadable-ledger behavior remain unchanged.
+Weekly share is approximate and advisory. Configurable per-runtime conversions
+start at 51 million processed tokens per percent for Codex and 68 million for
+Claude; fresh-token conversion starts at 1.1 million. Three explicitly attributed
+merged-job meter observations refine conversion. Account-wide deltas are never
+assumed attributable to one concurrent job. These estimates never affect routing,
+admission, readiness or limits.
+
+## D202: Share specialist and ordinary launch forecasting
+
+Specialist hires and worker briefs resolve their route first, then use the same
+saved estimate helper and persist the same record. A selected model conditions
+samples on that exact model and runtime; changing the model refreshes the
+estimate. An unspecified runtime-default model retains class/runtime forecasting
+and does not invent a model identity. Sparse model history stays sparse.
+
+## D203: Record readiness wall duration and report slow verification
+
+Each readiness attempt records monotonic wall duration, including preflight and
+admission, in its worker record. Ledger consumption retains numeric seconds and
+whether the result reused proof. Reused proof records zero new execution time;
+it never recharges the historical lane durations. Existing records with no
+duration remain unknown. CLI job advice shows the measurement basis and flags
+runs above verify_warn_seconds (node or instance; default 600 seconds). This
+advice does not change readiness or introduce a timeout.
+
+## D204: Share queue ordering between admission and capacity forecasts
+
+Queued verification uses a stable priority view. A node can opt into landing
+priority with verify_priority=landing; other work retains normal priority. After
+ten minutes normal work ages ahead of landing requests, and legacy records with
+no enqueue timestamp retain precedence. List order breaks ties, preserving
+explicit coordinator reordering within a priority band. Running reservations
+are never preempted or reordered. Node locks and machine slot limits are unchanged.
+
+Each gate captures its expected duration at enqueue: verify_estimate_seconds,
+or the median of at least three measured completed non-reused readiness runs
+on that node. Queue and running projections simulate free slots with recorded
+start times and gate durations. Missing, overrun or unsafe evidence yields unknown.
+The projection reads recorded evidence without process probes or queue writes.
+Reported estimates describe capacity only; environmental holds are not predicted.

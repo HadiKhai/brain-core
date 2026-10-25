@@ -616,6 +616,9 @@ class machine_queue:
                 and row.get("kind") in ("heavy", "verify") and row.get("state") in ("queued", "running")
                 and ("scope" not in row or (isinstance(row["scope"], list) and len(row["scope"]) == 2
                      and all(isinstance(s, str) and re.fullmatch(r"[0-9a-f]{64}", s) for s in row["scope"])))
+                and row.get("priority", "normal") in ("normal", "landing")
+                and all(key not in row or queue_number(row[key]) for key in ("queued_at", "started_at"))
+                and (row.get("expected_seconds") is None or queue_number(row["expected_seconds"]))
                 and ("child" not in row or identity(row["child"])))
 
     @staticmethod
@@ -651,6 +654,86 @@ def machine_scope(inst, node):
     return [hashlib.sha256(s.encode()).hexdigest() for s in (str(inst.root.resolve()), node)]
 
 
+def queue_number(value):
+    return type(value) in (int, float) and math.isfinite(value) and value >= 0
+
+
+def queue_order(rows, now=None):
+    """Stable priority view of queued records; caller list order resolves every tie.
+
+    Old records without timestamps retain precedence. Normal work ages ahead of
+    landing work after ten minutes, so a stream of landing requests cannot starve it.
+    This returns a copy and never reorders running reservations in the native store.
+    """
+    now = time.time() if now is None else now
+    def rank(row):
+        queued = row.get('queued_at')
+        if queued is None or queue_number(queued) and now - queued >= 600:
+            return 0
+        return 1 if row.get('priority') == 'landing' else 2
+    return sorted(rows, key=rank)
+
+
+def queue_wait_estimate(rows, target, slots, now=None, held=False):
+    """Capacity-only simulation; environmental holds and unknown/overrun durations stay unknown."""
+    import heapq
+    now = time.time() if now is None else now
+    waiting = queue_order([r for r in rows if r['kind'] == target['kind'] and r['state'] == 'queued'], now)
+    out = dict(position=waiting.index(target) + 1 if target in waiting else None,
+               wait_seconds=None, completion_seconds=None,
+               basis='recorded capacity and per-gate duration; environmental holds not predicted')
+    if target.get('state') == 'running':
+        expected, start = target.get('expected_seconds'), target.get('started_at')
+        if queue_number(expected) and queue_number(start) and 0 <= now - start < expected:
+            out.update(wait_seconds=0, completion_seconds=expected - (now - start))
+        return out
+    if held or target not in waiting or type(slots) is not int or slots < 1:
+        return out
+    running = [r for r in rows if r['kind'] == target['kind'] and r['state'] == 'running']
+    if not running and waiting[0] == target:
+        out['wait_seconds'] = 0
+        if queue_number(target.get('expected_seconds')):
+            out['completion_seconds'] = target['expected_seconds']
+        return out
+    if len(running) > slots:
+        return out
+    available = [0.0] * (slots - len(running))
+    for row in running:
+        expected, start = row.get('expected_seconds'), row.get('started_at')
+        if not queue_number(expected) or not queue_number(start) or not 0 <= now - start < expected:
+            return out
+        available.append(expected - (now - start))
+    heapq.heapify(available)
+    for row in waiting:
+        wait = heapq.heappop(available)
+        duration = row.get('expected_seconds')
+        if row == target:
+            out['wait_seconds'] = wait
+            if queue_number(duration):
+                out['completion_seconds'] = wait + duration
+            return out
+        if not queue_number(duration):
+            return out
+        heapq.heappush(available, wait + duration)
+    return out
+
+
+def gate_expected_seconds(inst, node):
+    """Explicit per-gate estimate, or three measured completed readiness runs on this node."""
+    from . import jobs as _m_jobs
+    import statistics
+    if inst is None or node is None:
+        return None
+    n = inst.node(node)
+    configured = _m_jobs.forecast_number(n['fm'].get('verify_estimate_seconds'))
+    if configured is not None and configured > 0:
+        return configured
+    values = [_m_jobs.forecast_number(r.get('Verify s')) for r in _m_jobs.read_jobs(n) or []
+              if r.get('Ended') and r.get('Outcome') == 'merged' and r.get('Verify reused') == 'false']
+    values = [v for v in values if v is not None and v > 0]
+    return statistics.median(values) if len(values) >= 3 else None
+
+
 def job_queue_projection(inst, node, owner):
     """Read recorded admission only. Never acquire/prune the queue or infer live ownership."""
     path = machine_dir() / 'machine-care-queue.json'
@@ -662,9 +745,11 @@ def job_queue_projection(inst, node, owner):
         if len(matches) != 1:
             return None
         row = matches[0]
-        waiting = [r for r in rows if r['kind'] == row['kind'] and r['state'] == 'queued']
+        waiting = queue_order([r for r in rows if r['kind'] == row['kind'] and r['state'] == 'queued'])
+        estimate = queue_wait_estimate(rows, row, machine_limit(machine_policy(strict=False)))
         return {'state': row['state'], 'owner': row['owner'], 'owner_activity': 'unknown',
                 'position': waiting.index(row) + 1 if row in waiting else None,
+                'priority': row.get('priority', 'normal'), 'estimate': estimate,
                 'recorded_at': path.stat().st_mtime, 'source': 'recorded native admission queue'}
     except FileNotFoundError:
         return None
@@ -678,6 +763,11 @@ def machine_wait(kind="heavy", inst=None, node=None):
     if owner[1] in (None, "unknown"):
         _m_common.die("machine care: cannot establish this process's start time; no heavy work started")
     previous, last_report, started = None, 0, time.monotonic()
+    expected = gate_expected_seconds(inst, node) if kind == 'verify' else None
+    priority = (inst.node(node)['fm'].get('verify_priority', 'normal')
+                if kind == 'verify' and inst is not None and node is not None else 'normal')
+    if priority not in ('normal', 'landing'):
+        _m_common.die('verify_priority must be normal or landing; no work started')
     try:
         while True:
             policy = machine_policy(strict=False)
@@ -688,22 +778,27 @@ def machine_wait(kind="heavy", inst=None, node=None):
             with machine_queue() as queue:
                 row = next((r for r in queue.rows if r["token"] == token), None)
                 if row is None:
-                    row = {"token": token, "owner": owner, "kind": kind, "state": "queued"}
+                    row = {"token": token, "owner": owner, "kind": kind, "state": "queued",
+                           "priority": priority, "expected_seconds": expected, "queued_at": time.time()}
                     if inst is not None and node is not None:
                         row["scope"] = machine_scope(inst, node)
                     queue.rows.append(row)
-                waiting = [r for r in queue.rows if r["kind"] == kind and r["state"] == "queued"]
+                waiting = queue_order([r for r in queue.rows if r["kind"] == kind and r["state"] == "queued"])
                 running = sum(r["kind"] == "verify" and r["state"] == "running" for r in queue.rows)
                 position = waiting.index(row) + 1
                 if not reasons and (kind != "verify" or (position == 1 and running < machine_limit(policy))):
                     row["state"] = "running"
+                    row['started_at'] = time.time()
                     return token
+                estimate = queue_wait_estimate(queue.rows, row, machine_limit(policy), held=bool(reasons))
             detail = ("; ".join(reasons) if reasons else
                       f"queued #{position}, {running}/{machine_limit(policy)} verify slots busy")
             status = (re.sub(r"\d+(?:\.\d+)?", "#", detail), position, running, machine_limit(policy))
             now = time.monotonic()
             if status != previous or now - last_report >= 60:
-                print(f"machine care: {kind} held {now - started:.0f}s; {detail}; retry in {MACHINE_RETRY}s",
+                wait = estimate['wait_seconds']
+                wait_text = f'approx. capacity wait {wait:.0f}s' if wait is not None else 'wait estimate unknown'
+                print(f"machine care: {kind} held {now - started:.0f}s; {detail}; {wait_text}; retry in {MACHINE_RETRY}s",
                       flush=True)
                 previous, last_report = status, now
             time.sleep(MACHINE_RETRY)

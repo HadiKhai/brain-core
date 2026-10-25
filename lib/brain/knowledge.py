@@ -547,12 +547,15 @@ def cmd_hire(a):
         _m_common.die(f"{target['id']}'s home isn't on this machine (brain set {target['id']} home=<path>)")
     where, w = _m_worktrees.job_where(target, a.branch)
     runtime, usage = worker_route(inst, target, a)
+    row = _m_jobs.open_job(_m_jobs.read_jobs(target) or [], a.branch)
+    forecast = _m_jobs.launch_forecast(inst, target, row, a.job_class, runtime, a.model)
     head = _m_worktrees.job_run_line(where, w, a.branch, runtime, a.model, tilde_home=False)
     head = head.replace(f"  ·  runtime: {runtime}", f"  ·  runtime: {runtime}  ·  class: {a.job_class}", 1)
     out = [f"Role: worker, hired as specialist `{sp['id']}` ({sp['fm'].get('title', '')}).",
            head,
            "The rules, agents and skills where you run come first (axiom 7); this brief adds to them.",
-           "", a.selection_line, "", _m_guard.redact(usage, _m_guard.never_terms(target)), ""]
+           "", a.selection_line, "", _m_guard.redact(usage, _m_guard.never_terms(target)), "",
+           _m_jobs.estimate_line(forecast), ""]
     if target["sealed"]:
         out += ["This work happens in a project with its own owners. Leave nothing in it that names "
                 "where this brief came from (axiom 6). Ask before pushing, publishing or anything "
@@ -582,6 +585,7 @@ def cmd_hire(a):
     text = _m_briefs.checked_brief(target, "\n".join(out) + "\n", inputs=inputs)
     _m_guard.no_terms_in(target, text, "the brief")
     _m_jobs.record_job_route(inst, target, a.branch, a.job_class, runtime, a.model, effort=a.effort)
+    _m_jobs.record_job_forecast(inst, target, row, forecast)
     if a.job:
         rows = inst.local.setdefault("hires", [])
         record = {"specialist": sp["id"], "at": sp["node"]["id"], "node": target["id"],
