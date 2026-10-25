@@ -22,6 +22,7 @@ from . import status as _m_status
 from . import sync as _m_sync
 from . import transitions as _m_transitions
 from . import ui as _m_ui
+from . import tasks as _m_tasks
 from . import usage as _m_usage
 from . import verify as _m_verify
 
@@ -408,6 +409,7 @@ def publish_handback(a):
             _m_guard.no_terms_in(n, bullet, "the inbox question")
             question_created = _m_transitions.inbox_append(n["dir"], bullet, marker)
             _m_common.touch(inbox)
+        _m_tasks.handback_event(inst, n, row, data)
         inst.commit([], f"{n['id']}: worker hand-back")
     if question_created:
         _m_hosts.request_wake(inst, n, 'wake:' + wake_id)
@@ -501,12 +503,19 @@ def record_job_route(inst, n, branch, kind, runtime, model, review=False, effort
             inst.commit([], f"{n['id']}: job route")
 
 
-def job_started(inst, n, branch, runtime):
+def job_started(inst, n, branch, runtime, task_id=None):
     with _m_instance.brain_lock(inst):
         rows = ledger_rows(n)
         if rows is not None and not open_job(rows, branch):
+            try:
+                _m_tasks.prepare_start(n, task_id, branch)
+            except ValueError as error:
+                _m_common.die(str(error))
             rows.append({"Job": branch, "Started": inst.now_dt().isoformat(), "Reviews": "0", "Runtime": runtime})
+            if task_id:
+                rows[-1]["Task"] = task_id
             write_jobs(inst, n, rows)
+            _m_tasks.job_started(inst, n, rows[-1])
             inst.commit([], f"{n['id']}: job started")
 
 
@@ -625,6 +634,7 @@ def job_ended(inst, n, branch, outcome, commits="", cause="", worktree=None, pre
         write_jobs(inst, n, rows)
         if not n["external"] or n["local"].get("workbench") or n["home_path"]:
             _m_verify.ready_path(inst, n, branch).unlink(missing_ok=True)
+        _m_tasks.job_closed(inst, n, r)
         cleanup_handback(inst, n, r, rows)
         inst.commit([], f"{n['id']}: job {outcome}")
         print_thread_checklist(n, r)
@@ -938,6 +948,7 @@ def close_ledger_job(inst, n, branch, reason=None):
         row['Ended'] = stamp(inst)
         start, end = inst.parse_time(row['Started']), inst.parse_time(row['Ended'])
         row['Hours'] = f'{_m_status.elapsed(start, end) / 3600:.1f}' if start and end else ''
+        _m_tasks.job_closed(inst, n, row)
         write_jobs(inst, n, rows)
         inst.commit([], f"{n['id']}: ledger job closed")
         print_thread_checklist(n, row)
@@ -1535,6 +1546,7 @@ def cmd_jobs(a):
                 _m_common.die("--switch needs old -> new: reason")
             r["Switches"] = "; ".join(filter(None, [r.get("Switches"), f"{stamp(inst)} {switch}"]))
         write_jobs(inst, n, rows)
+        _m_tasks.job_closed(inst, n, r)
         cleanup_handback(inst, n, r, rows)
         inst.commit([], f"{n['id']}: job outcome")
         if a.close:

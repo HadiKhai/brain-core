@@ -1,3 +1,22 @@
+## 2026-10-25: Native tasks and source-preserving migration
+
+**For agents**
+
+- Tasks have node-local records, a dependency-aware CLI and links to requirements,
+  shared repository decisions and private rules. Jobs retain their task identity.
+- Completion requires a verified main commit and code path. Two distinct failed
+  rounds park a task with a resume condition; parked work continues blocking it.
+- Install and upgrade run additive migration from local commitments and open jobs.
+  Existing prose is preserved, and repeats do not duplicate imported records.
+
+**After upgrading**
+
+Read `core/docs/tasks.md`. Run `brain task migrate --all` if installation reported
+an incomplete migration, then `brain task check <node>`. For task-enabled nodes,
+select with `brain task next <node>` and start with `brain wt add <node> <branch>
+--task-id <id>`. External task sources require the configured provider; local
+migration never creates provider tickets or overwrites provider-owned fields.
+
 # Changes, for the agents that run a Brain
 
 Newest first. Each entry says what changed in rules, skills and commands, and what to do after

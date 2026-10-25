@@ -56,37 +56,51 @@ and inherited model configuration without activating inherited runtime policy.
 
 
 
-## D1201: Observe node gate ownership before core replacement
+## D1301: Node-local tasks with explicit dependencies and completion evidence
 
-An upgrade inventory observes each node's native gate lock as well as machine
-admission and repository train ownership. Admission may be disabled while a gate
-still runs. An exclusively held gate refuses upgrade; a retained unlocked gate
-file is idle. The observer never reads holder metadata as proof or removes locks.
-Linked, nonregular or unreadable gate inventory refuses before core mutation.
-This check covers native wrappers; unregistered external processes cannot be
-inferred from job labels or elapsed time.
+Store one Markdown file per task under a node's `tasks/`, using versioned,
+JSON-valued frontmatter and a free-text description. Requirements have separate
+`requirements/REQ-*.md` records preserving their exact quote, date and source.
+Task decision references distinguish shared repository entries (`repo:D123`)
+from private entries (`private:D-123`); neither reference copies decision text.
 
-## D1202: Release existing state ownership for slow observations
+Task mutations validate the complete node dependency graph before writing.
+Cycles, missing dependencies, unsupported schemas and linked storage refuse.
+Active work requires an exact live ledger job; completion requires evidence,
+a code path and a commit already on local main. Parked tasks require a reason
+and resume condition and continue blocking dependents; dropping a task does not
+silently satisfy dependencies. Provider-owned tasks retain external ownership
+of their product fields; internal work can still use local records.
 
-Slow network lookups, transcript scans and provider refreshes release an already
-held state lock, then revalidate their explicit policy, binding and output inputs
-before publication. Read-only callers do not acquire a state lock. The observer
-reloads local bindings on retake so unrelated concurrent writes survive. Job
-accounting fences the original job identity and preserves newer host usage.
-Destructive worktree callers prepare accounting before removal and retain the
-existing ownership and lifecycle refusal checks.
+## D1302: Task-aware jobs preserve explicit opt-in and landing proof
 
-Machine service operations use an independent bounded reservation after releasing
-state. Commit and core-upgrade transactions retain their existing serialization;
-this protocol does not provide cross-file crash recovery or Git/core exchange.
-Contention tests use explicit ready/release barriers. Positive controls execute
-sibling commands while the slow boundary remains paused; negative controls
-observe the actual held flock without waiting for a timing threshold.
+Nodes with task records require a ready, unblocked task before creating a job
+worktree. Nodes without records keep their existing job interface, and import
+studies remain compatible. The ledger retains the task ID, while the task stores
+the stable job key and branch. Identified failed rounds count once; two failures
+park the task with an explicit resume condition.
 
-## D1203: Record schedule providers explicitly
+Closing a job updates its task only from a successful native verification packet
+whose head is already on main, retaining the changed code paths. Other closures
+park the task rather than claiming completion. File-only due items surface ready,
+unblocked, parked and inactive tasks without changing their state.
 
-A schedule may declare a shared runtime provider; its machine-local host binding
-may override it in a separate provider map. Keep host id strings compatible with
-existing readers. Rebinding without a provider or unbinding removes stale local
-metadata. Check warns on a mismatch with the resolved node's explicit runtime pin
-and applies that node's redaction policy. No provider is inferred from a host id.
+## D1303: Task backfill is additive and source-addressed
+
+The backfill importer reads explicit list entries from node-local backlogs,
+build orders, inboxes and relevant status sections, plus open ledger jobs.
+Stable source fingerprints make replays and source line shifts idempotent.
+Every imported task links an exact source quote and location. A missing original
+request date is recorded as file observation time with an explicit date basis.
+Existing task records and source prose are preserved. Imported prose stays in
+backlog until its runnable state and dependencies are explicit; open jobs retain
+their exact job identity. External issue references on provider-backed nodes wait
+for a provider pull rather than becoming duplicate local product issues.
+
+## D1304: Requirements retain sources and rules activate explicitly
+
+Requirements are immutable source records. Explicit rule creation builds a
+current `rules.md` index and preserves superseded rule records. Imported prose
+never activates itself, and a manually maintained rules index refuses overwrite.
+Install/upgrade runs additive task migration and documents repairs on failure;
+read-only commands never silently migrate storage or contact providers.

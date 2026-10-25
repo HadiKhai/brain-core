@@ -12,6 +12,7 @@ from . import common as _m_common
 from . import guard as _m_guard
 from . import instance as _m_instance
 from . import jobs as _m_jobs
+from . import tasks as _m_tasks
 from . import knowledge as _m_knowledge
 from . import nodes as _m_nodes
 from . import status as _m_status
@@ -208,6 +209,10 @@ def cmd_wt_add(a):
         _m_common.die(f"that branch name contains {', '.join(_m_guard.find_terms(a.branch, _m_guard.never_terms(n)))}: pick another")
     for warning in _m_status.code_setup_warnings(inst, n):
         print("! " + warning)
+    try:
+        _m_tasks.prepare_start(n, getattr(a, "task_id", None), a.branch)
+    except ValueError as error:
+        _m_common.die(str(error))
     wb = workbench(inst, n, create=True)
     path = wb / "worktrees" / a.branch.replace("/", "-")
     for owner, record in n["local"].get("worktrees", {}).items():
@@ -233,7 +238,7 @@ def cmd_wt_add(a):
         "created": inst.now()}
     inst.local_of(n["id"]).setdefault("workbench", str(wb))
     inst.save_local()
-    _m_jobs.job_started(inst, n, a.branch, runtime)
+    _m_jobs.job_started(inst, n, a.branch, runtime, task_id=getattr(a, "task_id", None))
     print(f"worktree: {_m_common.tilde(path)}\n  branch {a.branch}{'' if exists else ' (new, from ' + base + ')'}  ·  "
           f"{port_text(port, count)}")
     setup = n["dir"] / SETUP_FILE
