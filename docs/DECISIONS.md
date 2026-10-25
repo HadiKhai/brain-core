@@ -80,3 +80,11 @@ this protocol does not provide cross-file crash recovery or Git/core exchange.
 Contention tests use explicit ready/release barriers. Positive controls execute
 sibling commands while the slow boundary remains paused; negative controls
 observe the actual held flock without waiting for a timing threshold.
+
+## D1203: Record schedule providers explicitly
+
+A schedule may declare a shared runtime provider; its machine-local host binding
+may override it in a separate provider map. Keep host id strings compatible with
+existing readers. Rebinding without a provider or unbinding removes stale local
+metadata. Check warns on a mismatch with the resolved node's explicit runtime pin
+and applies that node's redaction policy. No provider is inferred from a host id.

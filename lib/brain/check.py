@@ -204,14 +204,22 @@ def collect_problems(inst):
                 warnings.append(f"{folder.relative_to(inst.root)}/lessons.md: malformed lesson tags; repair before reuse")
             if not _m_instance.resolve_ref(nodes, l["from"]):
                 warnings.append(f"{folder.relative_to(inst.root)}/lessons.md: lesson from unknown node '{l['from']}'")
-    for x in _m_schedules.read_schedules(inst):
+    schedules = _m_schedules.read_schedules(inst)
+    for x in schedules:
         for f in _m_schedules.SCHEDULE_FIELDS:
             if not x.get(f):
                 p(f"schedules.md: '{x['id']}' is missing '{f}'")
-        if x.get("node") and not _m_instance.resolve_ref(nodes, x["node"]):
+        target = _m_instance.resolve_ref(nodes, x.get("node"))
+        if x.get("node") and not target:
             p(f"schedules.md: '{x['id']}' names unknown node '{x['node']}'")
+        provider = _m_schedules.schedule_provider(inst, x)
+        pin = target["fm"].get("runtime") if target else None
+        if provider and pin and provider != pin:
+            warnings.append(_m_guard.redact(
+                f"schedule '{x['id']}' provider '{provider}' differs from node '{target['id']}' runtime pin '{pin}'",
+                _m_guard.never_terms(target)))
     for sid in inst.local.get("schedules", {}):
-        if not any(x["id"] == sid for x in _m_schedules.read_schedules(inst)):
+        if not any(x["id"] == sid for x in schedules):
             warnings.append(f"this machine runs schedule '{sid}', which schedules.md no longer lists: remove it "
                             f"in the host, then brain schedule unbind {sid}")
     if registry_stale(inst):
