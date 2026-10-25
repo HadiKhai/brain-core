@@ -14,11 +14,23 @@ from . import nodes as _m_nodes
 SHA = re.compile(r'(?:[0-9a-f]{40}|[0-9a-f]{64})\Z')
 
 
-def commitment_digest(tasks, requirements, main_shas):
-    """External completion and a candidate SHA are insufficient landing evidence."""
+def verified_completions(n, tasks, checker):
+    proven = set()
+    for row in tasks:
+        if row.get('status') not in ('done', 'merged'):
+            continue
+        try:
+            checker(n, row)
+        except (ValueError, OSError, TypeError, KeyError):
+            continue
+        proven.add(row['id'])
+    return proven
+
+
+def commitment_digest(tasks, requirements, completed):
+    """Project completion already checked by the task domain's scoped verifier."""
     tasks = sorted(tasks, key=lambda r: (r.get('order', 0), r['id']))
-    done = {r['id'] for r in tasks if r.get('status') in ('done', 'merged') and
-            r.get('merge_sha') in main_shas and r.get('code_path') and r.get('evidence')}
+    done = completed
     report = {key: [] for key in ('promised', 'done', 'not_done', 'needs_you', 'next')}
     for row in tasks:
         item = dict(row)
@@ -27,12 +39,14 @@ def commitment_digest(tasks, requirements, main_shas):
                           or 'promise source unavailable')
         report['promised'].append(item)
         if row['id'] in done:
+            item['completion_basis'] = ('external provider completion; local implementation unproven'
+                if row.get('source') == 'linear' else row.get('completion_kind', 'merge'))
             report['done'].append(item)
             continue
         status = row.get('status', 'unknown')
         reason = row.get('park_reason') or row.get('drop_reason') or status
         if status in ('done', 'merged'):
-            reason = 'completion lacks proven local-main landing evidence'
+            reason = 'completion lacks valid scoped evidence'
         item['reason'] = reason
         item['estimate'] = row.get('estimate') or 'estimate unavailable'
         report['not_done'].append(item)
@@ -49,8 +63,11 @@ def digest_text(title, report):
     lines = [title + ' — ' + state, '', 'Promised:']
     lines += [f"- {r['id']} {r['title']} — {r['source']}" for r in report['promised']] or ['- none recorded']
     lines += ['', f"Done ✓: {len(report['done'])}/{total}"]
-    lines += [f"- {r['id']} {r['title']} — {r['merge_sha']} {r['code_path']}; " +
-              '; '.join(map(str, r['evidence'])) for r in report['done']]
+    for row in report['done']:
+        basis = row['completion_basis']
+        proof = (row.get('merge_sha', '') + ' ' + row.get('code_path', '') if basis == 'merge' else
+                 str(row.get('completion_receipt', {}).get('ref', '')))
+        lines.append(f"- {row['id']} {row['title']} — {basis}; {proof}; " + '; '.join(map(str, row.get('evidence', []))))
     lines += ['', 'Not done ✗:']
     lines += [f"- {r['id']} {r['title']} — {r['reason']}; {r['estimate']}" +
               ('; resumes when ' + r['resume'] if r.get('resume') else '') for r in report['not_done']] or ['- none']
@@ -138,14 +155,9 @@ def cmd_digest(a):
             from . import tasks as _m_tasks
             tasks = _m_tasks.read_records(n)
             requirements = _m_tasks.read_records(n, 'requirements')
-            home = n.get('home_path')
-            proven = set()
-            for row in tasks.values():
-                sha = row.get('merge_sha', '')
-                if home and isinstance(sha, str) and SHA.fullmatch(sha) and not _m_common.git(
-                        'merge-base', '--is-ancestor', sha, 'refs/heads/main', cwd=home).returncode:
-                    proven.add(sha)
-            report = commitment_digest(list(tasks.values()), requirements, proven)
+            from . import task_flow as _m_task_flow
+            completed = verified_completions(n, tasks.values(), _m_task_flow.completion)
+            report = commitment_digest(list(tasks.values()), requirements, completed)
             text = json.dumps(report, indent=2) if a.json else digest_text(n['fm'].get('title', n['id']), report)
         print(_m_guard.redact(text, _m_guard.never_terms(n)))
     except ImportError:

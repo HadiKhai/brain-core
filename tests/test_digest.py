@@ -22,7 +22,7 @@ class CommitmentDigest(unittest.TestCase):
                 dict(id='TASK4', title='Later', status='parked', park_reason='dependency', resume='adapter exists')]
 
     def test_only_landed_evidence_enters_done(self):
-        result = self.m.commitment_digest(self.rows(), {'REQ1': {'at': '2026-01-01', 'ref': 'request:1', 'quote': 'Ship first'}}, {'a' * 40})
+        result = self.m.commitment_digest(self.rows(), {'REQ1': {'at': '2026-01-01', 'ref': 'request:1', 'quote': 'Ship first'}}, {'TASK2'})
         self.assertEqual([r['id'] for r in result['done']], ['TASK2'])
         self.assertEqual(len(result['promised']), 4)
         self.assertEqual([r['id'] for r in result['not_done']], ['TASK1', 'TASK3', 'TASK4'])
@@ -37,12 +37,12 @@ class CommitmentDigest(unittest.TestCase):
     def test_ready_depends_on_proven_completion(self):
         rows = self.rows() + [dict(id='TASK5', title='Ready', status='ready', depends_on=['TASK2']),
                               dict(id='TASK6', title='Blocked', status='ready', depends_on=['TASK3'])]
-        result = self.m.commitment_digest(rows, {}, {'a' * 40})
+        result = self.m.commitment_digest(rows, {}, {'TASK2'})
         self.assertEqual([r['id'] for r in result['next']], ['TASK5'])
 
     def test_parked_and_dropped_stay_visible(self):
         rows = self.rows() + [dict(id='TASK5', title='Removed', status='dropped', drop_reason='scope decision')]
-        result = self.m.commitment_digest(rows, {}, {'a' * 40})
+        result = self.m.commitment_digest(rows, {}, {'TASK2'})
         text = self.m.digest_text('sample', result)
         for block in ('Promised:', 'Done ✓:', 'Not done ✗:', 'Needs you:', 'Next:'):
             self.assertIn(block, text)
@@ -59,6 +59,20 @@ class CommitmentDigest(unittest.TestCase):
         self.assertEqual(result['review_rounds'], 4)
         self.assertEqual(result['elapsed_hours'], 1.7)
         self.assertEqual([f['job'] for f in result['findings']], ['job/a'])
+
+    def test_domain_checker_controls_scoped_completion_and_external_labels(self):
+        rows = self.rows()
+        rows[2]['provider'] = {'state_type':'completed'}
+        calls = []
+        def checker(node, row):
+            calls.append(row['id'])
+            if row['id'] == 'TASK2':
+                raise ValueError('unchanged baseline')
+        done = self.m.verified_completions({}, rows, checker)
+        self.assertEqual(done, {'TASK3'})
+        self.assertEqual(calls, ['TASK2', 'TASK3'])
+        text = self.m.digest_text('sample', self.m.commitment_digest(rows, {}, done))
+        self.assertIn('external provider completion; local implementation unproven', text)
 
     def test_unknown_metrics_remain_unknown(self):
         result = self.m.efficiency_retro([dict(Job='job/a', Hours='?', Reviews='', Outcome='blocked')])

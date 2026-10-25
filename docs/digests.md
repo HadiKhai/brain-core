@@ -5,11 +5,12 @@ Promised, Done, Not done, Needs you, and Next. `--json` returns the same project
 The task-store capability must be installed. A requirement's `at` and `ref` name
 the promise source; missing dates and estimates remain unknown.
 
-Done requires a completed task, a commit reachable from local main, a code path,
-and evidence. A provider's external completion state alone does not prove local
-implementation. Parked and dropped commitments remain in Not done with their
-reasons. A ready task appears in Next only after its dependencies have proven
-completion. A technical blocker does not become a request for human approval.
+Done uses the task domain's `task_flow.completion` checker: changed code scope
+on local main, a scoped operational receipt, or a versioned report artifact.
+A provider-completed mirror is labelled external provider truth with local
+implementation unproven. Parked and dropped commitments remain in Not done with
+their reasons. A ready task appears in Next only after its dependencies have
+proven completion. A technical blocker does not become a request for approval.
 
 `brain digest app --retro --day 2026-01-01` summarizes the jobs that ended on that
 local calendar date. Omit `--day` for yesterday. It reports recorded failures,

@@ -106,3 +106,12 @@ rounds, elapsed time, failures and repeated compaction signals. Missing readings
 remain unknown. The generated output stays under `.brain/daily-retro`; it does
 not send messages or activate lessons, rules or decisions. `brain digest --retro`
 can regenerate a selected day on stdout without changing the stored snapshot.
+
+## D1206: Delegate digest completion to the task domain
+
+Commitment reporting calls `task_flow.completion` for each completed record.
+This preserves the domain's changed-baseline code scope, operational receipt and
+versioned report-artifact checks instead of maintaining a weaker duplicate
+predicate. Provider-completed mirrored tasks are labelled external provider truth
+with local implementation unproven. Technical blockers remain unfinished work;
+they are not inferred human approval requests.
