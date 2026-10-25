@@ -27,17 +27,23 @@ MODULE_LANES = (
 )
 LANE_TESTS = {name: ('test_' + name + '.py',) for name in MODULE_LANES}
 LANE_TESTS.update({
+    'events': ('test_events.py', 'test_event_facts.py', 'test_event_review.py'),
+    'introspection': ('test_advisories.py',),
+    'tasks': ('test_tasks.py',),
+    'hosts': ('test_hosts.py', 'test_launch_receipts.py'),
+    'usage': ('test_usage.py', 'test_usage_cache.py', 'test_usage_rounds.py'),
+    'cli': ('test_cli.py', 'test_selftest_parallel.py'),
+    'train': ('test_train.py', 'test_train_review.py', 'test_train_landing.py', 'test_land.py', 'test_train_automation.py', 'test_release.py'),
+    'jobs': ('test_jobs.py', 'test_train_ejection.py', 'test_handback_queue.py', 'test_queue_priority.py', 'test_forecasts.py', 'test_gate_forecasts.py'),
     'knowledge': ('test_knowledge.py', 'test_semantic_recall.py'),
-    'train': ('test_train.py', 'test_train_review.py', 'test_train_landing.py', 'test_land.py'),
-    'jobs': ('test_jobs.py', 'test_train_ejection.py', 'test_handback_queue.py', 'test_forecasts.py', 'test_gate_forecasts.py'),
     'status': ('test_status.py', 'test_inbox_noise.py'),
     'reminders': ('test_due_lifecycle.py',),
     'worktrees': ('test_worktrees.py', 'test_prune_orphans.py', 'test_prune_states.py',
-                  'test_prune_thread_targets.py'),
+                  'test_prune_thread_targets.py', 'test_job_env.py', 'test_lock_sites.py'),
     'rehearse': ('test_rehearse.py', 'test_rehearse_frozen.py'),
     'ui': ('test_ui.py', 'test_ui_idle.py', 'test_ui_review.py', 'test_ui_status.py'),
     'watch': ('test_watch.py', 'test_watch_extension.py', 'test_decision_gate.py'),
-    'verify': ('test_verify.py', 'test_verify_train_hooks.py'),
+    'verify': ('test_verify.py', 'test_verify_train_hooks.py', 'test_spec_run.py', 'test_gate_context.py', 'test_full_gate.py', 'test_cheap_checks.py', 'test_ready_policies.py', 'test_verify_ownership.py'),
     'review': ('test_review_discipline.py',),
     'catch-all': ('test_repo_lanes.py',),
 })
@@ -55,9 +61,12 @@ EXTRA_INPUTS = {'ui': ('tests/live.py', 'tests/ui-checks.js', 'tests/ui-fitness.
 # Mirror the development node's existing documentation/image skip policy.
 OUTSIDE_INPUTS = ('README.md', 'docs/**', 'ui/**/*.png', 'LICENSE')
 SHARED_INPUTS = (
+    'lib/brain/launch_receipts.py',
+    'lib/brain/events.py',
     'lib/brain/common.py', 'lib/brain/instance.py', 'lib/brain/cli.py',
     'lib/brain/status.py', 'lib/brain/ui_status.py', 'lib/brain/ui_server.py',
-    'lib/brain/gate_lock.py', 'lib/brain/docker_cleanup.py',
+    'lib/brain/gate_lock.py', 'lib/brain/spec_run.py', 'lib/brain/full_gate.py', 'lib/brain/queue_priority.py', 'lib/brain/job_env.py', 'lib/brain/release.py',
+    'lib/brain/docker_cleanup.py', 'lib/brain/resource_leases.py',
     'lib/brain/action_guard.py', 'lib/brain/preview_evidence.py', 'lib/brain/review_findings.py',
     'lib/brain/settings_batch.py', 'lib/brain/dispatcher.py',
     'lib/brain/__init__.py', 'tests/scenario.py', 'tests/core_loader.py',

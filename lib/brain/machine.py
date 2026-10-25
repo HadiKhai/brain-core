@@ -24,7 +24,8 @@ from . import ui as _m_ui
 
 
 MACHINE_DEFAULTS = {"load5_per_cpu": 0.8, "memory_free_gb": 8, "disk_free_gb": 40,
-                    "verify_day": 2, "verify_night": 1, "night_start": 22, "night_end": 8}
+                    "verify_day": 2, "verify_night": 1, "night_start": 22, "night_end": 8, "cpu_idle_min_pct": 15,
+                    "memory_pressure_max_pct": 80, "max_hold_minutes": 20}
 MACHINE_RETRY = 5
 
 
@@ -41,9 +42,12 @@ def machine_valid_sample(sample):
         if key in reading and (not isinstance(reading[key], list) or len(reading[key]) != 3 or
                                not all(number(v) for v in reading[key])):
             return False
-    for key in ("cpus", "mem_free_gb", "mem_total_gb", "disk_free_gb", "disk_total_gb"):
+    for key in ("cpus", "mem_free_gb", "mem_total_gb", "disk_free_gb", "disk_total_gb",
+                "cpu_idle_pct", "memory_pressure_pct"):
         if key in reading and not number(reading[key]):
             return False
+    if any(key in reading and reading[key] > 100 for key in ("cpu_idle_pct", "memory_pressure_pct")):
+        return False
     return reading.get("thermal", "unknown") in ("unknown", "normal", "pressure")
 
 
@@ -59,7 +63,7 @@ def machine_samples(inst, fresh=True):
         if fresh and not 0 <= age <= 180:
             return None
         prior = data.get("heat_reasons", [])
-        if (type(data.get("episode", False)) is not bool or not isinstance(prior, list) or any(r not in ("sustained 5-minute load", "sustained thermal pressure") for r in prior)
+        if (type(data.get("episode", False)) is not bool or not isinstance(prior, list) or any(not machine_heat_reason(r) for r in prior)
                 or (data.get("episode") and not prior)):
             return None
         return data
@@ -77,6 +81,13 @@ def machine_reading(inst=None):
     data = machine_samples(inst) if inst else None
     if data:
         reading = dict(data["samples"][-1]["reading"])
+        # CPU admission is instantaneous: a good observation clears a held step.
+        if "cpu_idle_pct" in reading:
+            policy = machine_policy(strict=False)
+            if ('sustained thermal pressure' in data.get('heat_reasons', [])
+                    and not machine_thermal_recovered(data['samples'])):
+                reading['sample_reasons'] = machine_reasons(reading, policy) + ['thermal warning unresolved']
+            return reading
         policy = machine_policy(strict=False)
         reasons = machine_sustained(data["samples"], policy)
         end, previous, covered = data["samples"][-1]["at"], data["samples"][-1]["at"], False
@@ -126,7 +137,10 @@ def machine_sustained(samples, policy):
             previous = at
         return False
     reasons = []
-    if sustained(lambda r: bool(r.get("load_per_cpu")) and
+    if "cpu_idle_pct" in latest["reading"]:
+        reasons += [r for r in machine_reasons(latest["reading"], policy)
+                    if r.startswith(("CPU idle", "memory pressure"))]
+    if sustained(lambda r: "cpu_idle_pct" not in r and bool(r.get("load_per_cpu")) and
                  r["load_per_cpu"][1] > policy["load5_per_cpu"], 5):
         reasons.append("sustained 5-minute load")
     warning_at, previous = None, None
@@ -149,6 +163,11 @@ def machine_sustained(samples, policy):
 
 
 def machine_recovered(samples, policy, prior_heat):
+    latest = samples[-1]["reading"]
+    if "sustained thermal pressure" in prior_heat:
+        return machine_thermal_recovered(samples)
+    if "cpu_idle_pct" in latest:
+        return not machine_reasons(latest, policy)
     end, previous = samples[-1]["at"], samples[-1]["at"]
     for sample in reversed(samples):
         at, r = sample["at"], sample["reading"]
@@ -342,12 +361,12 @@ def machine_sample(inst):
         data = {}
     prior = data.get("heat_reasons", [])
     metadata_ok = (type(data.get("episode", False)) is bool and isinstance(prior, list)
-                   and all(r in ("sustained 5-minute load", "sustained thermal pressure") for r in prior)
+                   and all(machine_heat_reason(r) for r in prior)
                    and (not data.get("episode") or bool(prior)))
     pending = data.get("pending_notice")
     if pending is not None:
         metadata_ok = (metadata_ok and isinstance(pending, str) and
-                       (pending == "heavy work hold cleared" or pending.startswith("hold heavy work: sustained"))
+                       (pending == "heavy work hold cleared" or pending.startswith("hold heavy work: "))
                        and bool(re.fullmatch(r"[0-9a-f]{24}", str(data.get("episode_id", "")))))
     if not metadata_ok:
         data = {**data, "episode": False, "heat_reasons": [], "pending_notice": None, "episode_id": "",
@@ -368,8 +387,13 @@ def machine_sample(inst):
     reasons = machine_sustained(samples, policy)
     heat = [r for r in reasons if r.startswith("sustained")]
     prior = data.get("heat_reasons", [])
-    prior = [r for r in prior if r in ("sustained 5-minute load", "sustained thermal pressure")] if isinstance(prior, list) else []
-    active = bool(heat) or (bool(data.get("episode")) and not machine_recovered(samples, policy, prior))
+    prior = [r for r in prior if machine_heat_reason(r)] if isinstance(prior, list) else []
+    if "cpu_idle_pct" in samples[-1]["reading"]:
+        heat += [r for r in reasons if r.startswith("CPU idle")]
+        # Legacy load episodes close as soon as the CPU-based policy admits.
+        active = bool(heat) or ('sustained thermal pressure' in prior and not machine_thermal_recovered(samples))
+    else:
+        active = bool(heat) or (bool(data.get("episode")) and not machine_recovered(samples, policy, prior))
     heat = list(dict.fromkeys(heat + prior)) if active else []
     changed = active != bool(data.get("episode"))
     # Persist the episode and pending notice atomically; retry a pending delivery after a crash.
@@ -478,6 +502,8 @@ def machine_policy(strict=True):
             v = policy[k]
             if type(v) not in (int, float) or not math.isfinite(v) or v < 0:
                 raise ValueError("invalid " + k)
+            if k.endswith("_pct") and v > 100:
+                raise ValueError("percentage exceeds 100")
             if k.startswith("verify_") and (type(v) is not int or v < 1):
                 raise ValueError("verify limits must be positive integers")
             if k.startswith("night_") and (type(v) is not int or v > 23):
@@ -496,8 +522,15 @@ def machine_reasons(reading, policy):
         return reading["sample_reasons"]
     reasons = []
     loads = reading.get("load_per_cpu")
-    if loads and loads[1] > policy["load5_per_cpu"]:
+    idle = reading.get("cpu_idle_pct")
+    if idle is not None and idle < policy["cpu_idle_min_pct"]:
+        reasons.append(f"CPU idle {idle:g}% < {policy['cpu_idle_min_pct']:g}% (5-minute load/CPU "
+                       + (f"{loads[1]:.2f}" if loads else "unknown") + ")")
+    if idle is None and loads and loads[1] > policy["load5_per_cpu"]:
         reasons.append(f"5-minute load/CPU {loads[1]:.2f} > {policy['load5_per_cpu']:g}")
+    pressure = reading.get("memory_pressure_pct")
+    if pressure is not None and pressure > policy["memory_pressure_max_pct"]:
+        reasons.append(f"memory pressure {pressure:g}% > {policy['memory_pressure_max_pct']:g}%")
     if reading.get("thermal") == "pressure":
         reasons.append("thermal pressure")
     for field, limit, title in (("mem_free_gb", "memory_free_gb", "free memory"),
@@ -762,7 +795,13 @@ def machine_wait_notices(inst, now=None):
                     continue
                 identity = hashlib.sha256((token + ':' + event).encode()).hexdigest()
                 # Durable report and stable identity; terminal wakes also explain the exit.
-                n = inst.node(target)
+                try:
+                    n = inst.node(target)
+                    source_node = inst.node(row['node'])
+                except SystemExit:
+                    # Renamed/removed routing retains its undelivered receipt;
+                    # it cannot prevent another owned command from starting.
+                    continue
                 marker = '<!-- machine-wait:' + token + ':' + event + ' -->'
                 text = ('command completed: ' + row['reason'] if event == 'completed' else
                         'held step exited: ' + row['reason'] if event == 'exited' else machine_wait_text(row))
@@ -771,7 +810,7 @@ def machine_wait_notices(inst, now=None):
                     if row.get('reduced'):
                         text += '; reduced parallelism 1'
                 at = datetime.datetime.fromtimestamp(now, datetime.timezone.utc).isoformat()
-                text = _m_guard.redact(text, _m_guard.never_terms(n) + _m_guard.never_terms(inst.node(row['node'])))
+                text = _m_guard.redact(text, _m_guard.never_terms(n) + _m_guard.never_terms(source_node))
                 line = '- ' + at + ' from machine: ' + text + ' ' + marker + '\n'
                 try:
                     created = _m_transitions.inbox_append(n['dir'], line, marker, nonblocking=True)
@@ -1018,6 +1057,27 @@ def machine_scope(inst, node):
     return [hashlib.sha256(s.encode()).hexdigest() for s in (str(inst.root.resolve()), node)]
 
 
+def job_queue_projection(inst, node, owner):
+    """Read recorded admission only. Never acquire/prune the queue or infer live ownership."""
+    path = machine_dir() / 'machine-care-queue.json'
+    try:
+        rows = json.loads(path.read_text())
+        if not isinstance(rows, list) or any(not machine_queue.valid(r) for r in rows):
+            raise ValueError('invalid recorded machine queue')
+        matches = [r for r in rows if r.get('scope') == machine_scope(inst, node) and r['owner'] == owner]
+        if len(matches) != 1:
+            return None
+        row = matches[0]
+        waiting = [r for r in rows if r['kind'] == row['kind'] and r['state'] == 'queued']
+        return {'state': row['state'], 'owner': row['owner'], 'owner_activity': 'unknown',
+                'position': waiting.index(row) + 1 if row in waiting else None,
+                'recorded_at': path.stat().st_mtime, 'source': 'recorded native admission queue'}
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError, KeyError, TypeError):
+        return {'state': 'unknown', 'position': None, 'owner': None, 'owner_activity': 'unknown'}
+
+
 def queue_number(value):
     return type(value) in (int, float) and math.isfinite(value) and value >= 0
 
@@ -1121,57 +1181,13 @@ def job_queue_projection(inst, node, owner):
         return {'state': 'unknown', 'position': None, 'owner': None, 'owner_activity': 'unknown'}
 
 
-def machine_wait(kind="heavy", inst=None, node=None, token=None):
-    token = token if token is not None else os.urandom(16).hex()
-    owner = [os.getpid(), process_stamp(os.getpid())]
-    if owner[1] in (None, "unknown"):
-        _m_common.die("machine care: cannot establish this process's start time; no heavy work started")
-    boot = machine_boot_id()
-    previous, last_report, started = None, 0, time.monotonic()
-    expected = gate_expected_seconds(inst, node) if kind == 'verify' else None
-    priority = (inst.node(node)['fm'].get('verify_priority', 'normal')
-                if kind == 'verify' and inst is not None and node is not None else 'normal')
-    if priority not in ('normal', 'landing'):
-        _m_common.die('verify_priority must be normal or landing; no work started')
-    try:
-        while True:
-            policy = machine_policy(strict=False)
-            reading = machine_reading()
-            reasons = machine_reasons(reading, policy)
-            if policy.get("_error"):
-                reasons.append(policy["_error"])
-            with machine_queue() as queue:
-                row = next((r for r in queue.rows if r["token"] == token), None)
-                if row is None:
-                    row = {"token": token, "owner": owner, "kind": kind, "state": "queued",
-                           "priority": priority, "expected_seconds": expected, "queued_at": time.time()}
-                    if boot is not None:
-                        row["boot"] = boot
-                    if inst is not None and node is not None:
-                        row["scope"] = machine_scope(inst, node)
-                    queue.rows.append(row)
-                waiting = queue_order([r for r in queue.rows if r["kind"] == kind and r["state"] == "queued"])
-                running = sum(r["kind"] == "verify" and r["state"] == "running" for r in queue.rows)
-                position = waiting.index(row) + 1
-                if not reasons and (kind != "verify" or (position == 1 and running < machine_limit(policy))):
-                    row["state"] = "running"
-                    row['started_at'] = time.time()
-                    return token
-                estimate = queue_wait_estimate(queue.rows, row, machine_limit(policy), held=bool(reasons))
-            detail = ("; ".join(reasons) if reasons else
-                      f"queued #{position}, {running}/{machine_limit(policy)} verify slots busy")
-            status = (re.sub(r"\d+(?:\.\d+)?", "#", detail), position, running, machine_limit(policy))
-            now = time.monotonic()
-            if status != previous or now - last_report >= 60:
-                wait = estimate['wait_seconds']
-                wait_text = f'approx. capacity wait {wait:.0f}s' if wait is not None else 'wait estimate unknown'
-                print(f"machine care: {kind} held {now - started:.0f}s; {detail}; {wait_text}; retry in {MACHINE_RETRY}s",
-                      flush=True)
-                previous, last_report = status, now
-            time.sleep(MACHINE_RETRY)
-    except BaseException:
-        machine_release(token)
-        raise
+def machine_wait(kind="heavy", inst=None, node=None, job=None, clock=None, read=None, pause=None,
+                 reduction_ready=False, token=None):
+    clock = clock or (token.clock if token is not None else time)
+    if token is not None:
+        return machine_admit(token, kind, inst, node, job, clock, read, pause, reduction_ready)
+    with machine_run(kind, inst, node, job, clock, close_success=False) as token:
+        return machine_admit(token, kind, inst, node, job, clock, read, pause, reduction_ready)
 
 
 def machine_release(token):
@@ -1233,6 +1249,9 @@ def machine_state(inst=None):
         if not isinstance(rows, list) or any(not machine_queue.valid(r) for r in rows):
             raise ValueError("invalid queue")
         rows = [r for r in rows if machine_queue.alive(r)]
+        reading["waits"] = [r for r in rows if 'since' in r]
+        reading["legacy_waiting_scopes"] = [r['scope'] for r in rows
+            if r['state'] == 'queued' and 'scope' in r and 'since' not in r]
         reading["queued"] = sum(r["state"] == "queued" for r in rows)
         reading["waiting_scopes"] = [r["scope"] for r in rows if r["state"] == "queued" and "scope" in r]
         reading["verifying"] = sum(r["kind"] == "verify" and r["state"] == "running" for r in rows)
@@ -1360,14 +1379,19 @@ def cmd_machine(a):
             _m_watch.watch_once(inst)  # same minute timer; sampler has released its instance lock
         except (OSError, ValueError):
             print('watch: watcher state invalid; retained for repair (brain due root)')
+        # The release extension owns opt-in policy and attempt fencing. Older
+        # installations without it keep the same native sampler behavior.
+        from importlib import import_module
+        try:
+            _m_release = import_module(__package__ + '.release')
+        except ModuleNotFoundError as error:
+            if error.name != __package__ + '.release':
+                raise
+        else:
+            _m_release.tick_releases(inst)
         return
     if a.action in ("install", "uninstall"):
-        if not a.yes:
-            machine_service(inst, a.action, False)
-            return
-        _m_instance.unlock()
-        with _m_instance.reservation(inst, "machine-service"):
-            machine_service(_m_instance.Instance(inst.root), a.action, a.yes)
+        machine_service(inst, a.action, a.yes)
         return
     nodes = inst.nodes()
     if a.missing_homes:
@@ -1400,3 +1424,116 @@ def cmd_machine(a):
         for x in scheds:
             print(f"  {x['id']:<28} {'on this machine' if bound.get(x['id']) else 'not here'}")
     print("\nTo bind what's missing: tell the root coordinator \"set up this machine\" (skill machine-setup).")
+
+
+def machine_heat_reason(reason):
+    return isinstance(reason, str) and (reason in ("sustained 5-minute load", "sustained thermal pressure")
+                                       or reason.startswith("CPU idle"))
+
+
+
+def machine_thermal_recovered(samples):
+    end, previous = samples[-1]['at'], samples[-1]['at']
+    for sample in reversed(samples):
+        at, reading = sample['at'], sample['reading']
+        if not 0 <= previous - at <= 90 or reading.get('thermal') != 'normal':
+            return False
+        if end - at >= 120:
+            return True
+        previous = at
+    return False
+
+
+
+def machine_admit(token, kind, inst, node, job, clock, read, pause, reduction_ready):
+    """A live queued process owns its continuation; no replay of arbitrary commands."""
+    clock = clock or time
+    token.clock = clock
+    read = read or (lambda: machine_reading(inst))
+    pause = pause or clock.sleep
+    owner = [os.getpid(), process_stamp(os.getpid())]
+    if owner[1] in (None, "unknown"):
+        _m_common.die("machine care: cannot establish this process's start time; no heavy work started")
+    boot = machine_boot_id()
+    previous, last_report, started = None, 0, clock.monotonic()
+    snapshot = None
+    expected = gate_expected_seconds(inst, node) if kind == 'verify' else None
+    priority = (inst.node(node)['fm'].get('verify_priority', 'normal')
+                if kind == 'verify' and inst is not None and node is not None else 'normal')
+    if priority not in ('normal', 'landing'):
+        _m_common.die('verify_priority must be normal or landing; no work started')
+    while True:
+        policy = machine_policy(strict=False)
+        reading = read()
+        reasons = list(machine_reasons(reading, policy))
+        if policy.get("_error"):
+            reasons.append(policy["_error"])
+        elapsed = max(0, clock.monotonic() - started)
+        reduced = bool(reasons) and elapsed >= policy['max_hold_minutes'] * 60
+        hard = [r for r in reasons if not (r.startswith('CPU idle') or '5-minute load' in r)]
+        if reduced and hard:
+            _m_common.die('machine care: maximum hold reached; unsafe resource pressure; no command started')
+        if reduced and not policy.get('_error') and not reduction_ready:
+            _m_common.die('machine care: maximum hold reached; cannot enforce reduced parallelism '
+                          'for this verify command; no command started. Use a literal make or pytest command.')
+        # Degrade resource admission, never bypass a broken policy or FIFO ownership.
+        resource_hold = bool(reasons) and (not reduced or bool(policy.get('_error')))
+        with machine_queue() as queue:
+            row = next((r for r in queue.rows if r["token"] == token), None)
+            if row is None:
+                row = {"token": token, "owner": owner, "kind": kind, "state": "queued",
+                       "priority": priority, "expected_seconds": expected, "queued_at": clock.time()}
+                if boot is not None:
+                    row["boot"] = boot
+                if inst is not None and node is not None:
+                    row["scope"] = machine_scope(inst, node)
+                queue.rows.append(row)
+            waiting = queue_order([r for r in queue.rows if r["kind"] == kind and r["state"] == "queued"], clock.time())
+            running = sum(r["kind"] == "verify" and r["state"] == "running" for r in queue.rows)
+            position = waiting.index(row) + 1
+            limit = 1 if reduced else machine_limit(policy)
+            admitted = not resource_hold and (kind != "verify" or (position == 1 and running < limit))
+            detail = ("; ".join(reasons) if resource_hold else
+                      f"queued #{position}, {running}/{limit} verify slots busy")
+            if admitted:
+                row['state'] = 'running'
+                row['started_at'] = clock.time()
+                row['reduced'] = reduced
+                if 'since' in row:
+                    row['resumed_at'] = clock.time()
+            else:
+                row.setdefault('since', clock.time())
+                row.update(reason=detail, reading=reading, position=position,
+                           clears_when='resource thresholds clear once, or maximum hold expires; FIFO verify slot available')
+            if job is not None:
+                row["job"] = hashlib.sha256(job.encode()).hexdigest()
+            estimate = queue_wait_estimate(queue.rows, row, limit, now=clock.time(), held=resource_hold)
+            snapshot = dict(row)
+        # No machine lock is held across instance state publication or transport enqueue.
+        if inst is not None and node is not None:
+            machine_record_wait(inst, node, job, snapshot, clock.time())
+        if admitted:
+            if 'since' in snapshot:
+                print(f"machine care: {kind} resumed after {elapsed:.0f}s" +
+                      ('; reduced parallelism (1)' if reduced else ''), flush=True)
+            return token
+        status = (re.sub(r"\d+(?:\.\d+)?", "#", detail), position, running, limit)
+        now = clock.monotonic()
+        if status != previous or now - last_report >= 60:
+            wait = estimate['wait_seconds']
+            wait_text = f'approx. capacity wait {wait:.0f}s' if wait is not None else 'wait estimate unknown'
+            print(f"machine care: {kind} held {elapsed:.0f}s; {detail}; {wait_text}; retry in {MACHINE_RETRY}s", flush=True)
+            previous, last_report = status, now
+        pause(MACHINE_RETRY)
+
+
+
+def machine_environment(token, env):
+    """Propagate degraded admission to the command, without rewriting its shell text."""
+    with machine_queue() as queue:
+        reduced = any(r['token'] == token and r.get('reduced') for r in queue.rows)
+    if not reduced:
+        return env
+    return {**env, 'BRAIN_REDUCED_PARALLELISM': '1', 'BRAIN_PARALLELISM': '1',
+            'CMAKE_BUILD_PARALLEL_LEVEL': '1', 'MAKEFLAGS': '-j1', 'OMP_NUM_THREADS': '1',
+            'OPENBLAS_NUM_THREADS': '1', 'MKL_NUM_THREADS': '1', 'CARGO_BUILD_JOBS': '1'}

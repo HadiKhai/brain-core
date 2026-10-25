@@ -1,10 +1,14 @@
 """Local merge trains. Git owns fast-forwards; Brain never rolls publication back."""
 import fcntl
 import json
+import importlib
+import hashlib
+import time
 import os
 import shlex
 import shutil
 import subprocess
+import sys
 import uuid
 from pathlib import Path
 
@@ -297,19 +301,93 @@ def cmd_train(a):
             fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             _m_common.die("train: another train owns this repository")
+        primary = None
         try:
             run_train(inst, n, home, verify, a)
+        except BaseException as error:
+            primary = error
+            raise
         finally:
-            # Persist ejections/interrupted execution evidence even when publication stops.
-            try:
-                inst.commit([], f"{n['id']}: train state")
-            finally:
-                _m_docker_leftovers.docker_leftover_nodes(inst, [n])
+            # Attempt all finalizers, preserving any publication/execution failure.
+            errors = []
+            for action in (lambda: inst.commit([], f"{n['id']}: train state"),
+                           lambda: _m_verify.verify_cleanup(inst, n),
+                           lambda: _m_docker_leftovers.docker_leftover_nodes(inst, [n])):
+                try:
+                    action()
+                except BaseException as error:
+                    errors.append(error)
+            if errors:
+                if primary is None:
+                    raise errors[0]
+                primary.cleanup_errors = [type(error).__name__ + ': ' + str(error) for error in errors]
+                print('train: cleanup incomplete; primary failure retained', file=sys.stderr)
+
+
+def reconcile_manual_landings(inst, n):
+    """Close only completed exact-head jobs whose commits are already in local main."""
+    closed = []
+    with _m_instance.brain_lock(inst):
+        current = _m_instance.Instance(inst.root).node(n['id'])
+        for row in _m_jobs.read_jobs(current) or []:
+            if row.get('Ended') or _m_briefs.import_job(row['Job']):
+                continue
+            if _m_jobs.publication_refusal(current, row) or not _m_jobs.manual_landing(current, row):
+                continue
+            state = _m_verify.ready_state(inst, current, row['Job'], train=True)
+            if not state['ready']:
+                continue
+            _m_jobs.close_ledger_job(inst, current, row['Job'])
+            closed.append(_m_jobs.job_key(row))
+            print('train: reconciled manual landing ' + row['Job'])
+    return closed
+
+
+def post_publication(inst, n, path, data):
+    """Host settlement runs outside the instance lock; failure cannot undo landing."""
+    if not data.get('settle_requested') or data.get('publication_succeeded') is not True:
+        return None
+    keys = [entry['key'] for entry in data['accepted']]
+    if not keys:
+        return None
+    if set((data.get('settlement') or {}).get('settled', [])) == set(keys):
+        return data['settlement']
+    _m_instance.unlock()
+    try:
+        module = importlib.import_module('.host_lifecycle', __package__)
+        result = module.settle_landed_jobs(inst, n, keys)
+        if (not isinstance(result, dict) or not all(isinstance(result.get(k), list) for k in ('settled', 'pending', 'errors'))
+                or any(key not in keys for key in result['settled'])):
+            raise ValueError('invalid settlement result')
+    except (Exception, SystemExit) as error:
+        result = dict(settled=[], pending=[dict(job=key, reason='settlement unconfirmed') for key in keys],
+                      errors=[type(error).__name__])
+    with _m_instance.brain_lock(inst):
+        current = json.loads(path.read_text())
+        if current.get('tip') != data.get('tip') or current.get('accepted') != data.get('accepted'):
+            raise ValueError('train journal changed; settlement result retained by native lifecycle')
+        current['settlement'] = result
+        save(path, current)
+    print('train: landed ' + data['tip'] + '; settlement ' +
+          ('complete' if not result['pending'] and not result['errors'] else 'pending'))
+    return result
 
 
 def cmd_land(a):
-    """The coordinator's batch landing entry point shares the native train gate."""
+    """One coordinator command reconciles, gates, publishes and safely settles."""
+    inst = _m_nodes.load()
+    n, _ = _m_worktrees.git_home(inst, a.id)
+    reconcile_manual_landings(inst, n)
+    a.settle = True
     return cmd_train(a)
+
+
+def train_configuration(n):
+    """Keep execution inputs while excluding thread routing from publication proof."""
+    routing = {'workers', 'coordinator', 'coordinator_sessions'}
+    return _m_jobs.digest([str(n['home_path']),
+                          {k: v for k, v in n['fm'].items() if k not in routing},
+                          {k: v for k, v in n['local'].items() if k not in routing}])
 
 
 def run_train(inst, n, home, verify, a):
@@ -366,6 +444,11 @@ def run_train(inst, n, home, verify, a):
         for branch, why in refused:
             print(_m_guard.redact("train: not queued " + branch + ": " + why, _m_guard.never_terms(n)))
     if not queue:
+        for old_path, old_data in records:
+            if old_data.get('state') in ('complete', 'reconciled'):
+                if getattr(a, 'settle', False):
+                    old_data['settle_requested'] = True
+                post_publication(inst, n, old_path, old_data)
         print("train: no ready jobs")
         return
     date = inst.now_dt().strftime("%Y-%m-%d")
@@ -375,7 +458,10 @@ def run_train(inst, n, home, verify, a):
     batch = f"train/{date}-{number}"
     path = folder / f"{date}-{number}.json"
     data = {"version": 1, "batch": batch, "state": "building", "base": main,
-            "queued": queue, "accepted": [], "ejected": [], "runs": []}
+            "queued": queue, "accepted": [], "ejected": [], "runs": [],
+            "settle_requested": getattr(a, 'settle', False),
+            "origin_base": _m_common.git('rev-parse', '--verify', '--quiet',
+                                          'refs/remotes/origin/main^{commit}', cwd=home).stdout.strip()}
     save(path, data)
     wb = _m_worktrees.workbench(inst, n, create=True)
     stage = wb / "scratch" / batch.replace("/", "-")
@@ -390,6 +476,7 @@ def run_train(inst, n, home, verify, a):
     # Reserve ports through the existing allocator, without creating a ledger job for staging.
     inst.local_of(n["id"]).setdefault("worktrees", {})[batch] = {**w, "base": main, "start": main}
     inst.save_local()
+    expected_configuration = train_configuration(n)
     _m_instance.unlock()
     try:
         setup = n["dir"] / _m_worktrees.SETUP_FILE
@@ -429,7 +516,9 @@ def run_train(inst, n, home, verify, a):
         def check(entries):
             head = ref(stage, "HEAD")
             inputs = _m_verify.verify_inputs(n, w)
+            started = time.monotonic()
             result, log = _m_verify.run_verify(inst, n, batch, verify, w, env)
+            duration = time.monotonic() - started
             if dirty(stage) or ref(stage, "HEAD") != head or _m_verify.verify_inputs(n, w) != inputs:
                 _m_common.die("train: verify changed staging state; no main update")
             if result:
@@ -442,8 +531,14 @@ def run_train(inst, n, home, verify, a):
                     with os.fdopen(fd, "wb") as pinned:
                         shutil.copyfileobj(source, pinned)
                 log = str(target)
-            data["runs"].append({"jobs": [e["branch"] for e in entries], "head": head, "result": result, "log": log})
+            data["runs"].append({"jobs": [e["branch"] for e in entries], "head": head, "result": result,
+                                 "log": log, "seconds": duration, "command": verify,
+                                 "log_digest": hashlib.sha256(Path(log).read_bytes()).hexdigest()})
             save(path, data)
+            if result == 0:
+                for entry in entries:
+                    _m_verify.record_full_fact(inst, n, entry['branch'], head, main,
+                                              _m_jobs.digest([verify, inputs]))
             return result, log
 
         verified_inputs = None
@@ -508,7 +603,7 @@ def run_train(inst, n, home, verify, a):
         with _m_instance.brain_lock(inst):
             fresh = _m_instance.Instance(inst.root)
             current = fresh.node(n["id"])
-            if current["home_path"] != home or current["fm"] != n["fm"] or current["local"] != inst.node(n["id"])["local"]:
+            if train_configuration(current) != expected_configuration:
                 _m_common.die("train: configuration changed; no main update")
             for entry in accepted:
                 entry_ready(fresh, current, entry)
@@ -553,6 +648,7 @@ def run_train(inst, n, home, verify, a):
             finish(fresh, current, path, data)
             for entry in conflicts:
                 print(_m_guard.redact("train: rebase required (conflicts with landed main): " + entry["branch"], _m_guard.never_terms(current)))
+        post_publication(fresh, current, path, data)
         print(f"train: {batch} merged {len(accepted)} job(s); {len(data['runs'])} full verify run(s)")
         print('Release when ready: ' + release_step if release_step else 'No push step: ' + release_note)
     finally:

@@ -12,6 +12,7 @@ from pathlib import Path
 from . import briefs as _m_briefs
 from . import check as _m_check
 from . import common as _m_common
+from . import docker_cleanup as _m_docker_cleanup
 from . import docker_leftovers as _m_docker_leftovers
 from . import guard as _m_guard
 from . import history as _m_history
@@ -785,6 +786,7 @@ def cmd_due(a):
                 wake_views.append((n, value))
                 consumed.append({'node': n['id'], 'kind': 'wake-reasons',
                                  'text': _m_hosts.wake_reason_summary(value['items'])})
+    _m_docker_cleanup.docker_cleanup_nodes(inst, nodes)
     _m_docker_leftovers.docker_leftover_nodes(inst, nodes)
     state = _m_machine.machine_state(inst)
     items = [item for n in nodes for item in due_items(inst, n, include_handled=getattr(a, 'handled', False)) + changes_due(inst, n)]

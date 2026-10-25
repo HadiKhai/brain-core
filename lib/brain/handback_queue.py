@@ -20,7 +20,7 @@ from . import nodes as _m_nodes
 
 
 QUEUE_ARGS = ('id', 'branch', 'state', 'summary', 'question', 'lessons', 'report', 'reviews',
-              'need_human', 'restart', 'reverify')
+              'need_human', 'restart', 'reverify', 'full_receipt')
 
 
 def queue_path(n, identity):
@@ -54,7 +54,7 @@ def write_queue_request(n, data):
 
 
 def enqueue_handback(inst, n, row, args):
-    _m_jobs.validate_handback_text(args)
+    _m_jobs.validate_handback_options(args)
     with _m_instance.brain_lock(inst):
         identity = os.urandom(16).hex()
         attempt = _m_attempts.begin_attempt(inst, n, row, request_id=identity)

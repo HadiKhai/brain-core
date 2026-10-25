@@ -186,7 +186,8 @@ def rehearsal_lines():
 
 # Review identities are observed host data supplied by a coordinator, not a live host query.
 def independence_policy(inst, n):
-    value = n['fm'].get('review_independence', inst.cfg.get('review_independence', 'cross-runtime'))
+    cfg = inst.cfg if isinstance(inst.cfg, dict) else {}
+    value = n['fm'].get('review_independence', cfg.get('review_independence', 'cross-runtime'))
     if value not in ('cross-runtime', 'fresh-thread'):
         raise ValueError('review_independence must be cross-runtime or fresh-thread')
     return value
@@ -322,6 +323,13 @@ def validate_ready_reviews(inst, n, branch, head, packet=None):
             raise ValueError('review is blocked')
     except (OSError, ValueError, TypeError, KeyError):
         return ['missing, stale, blocked or non-independent exact-head review receipt']
+    try:
+        from . import review_findings as _m_review_findings
+        findings = _m_review_findings.review_finding_state(inst, n, branch, head)
+        if any(f['severity'] in ('major', 'blocker') and f['state'] != 'closed' for f in findings):
+            return ['open or reopened major/blocker review findings remain at this head']
+    except (OSError, ValueError, TypeError, KeyError):
+        return ['missing or invalid durable review finding state']
     return []
 
 

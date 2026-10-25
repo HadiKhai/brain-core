@@ -1463,7 +1463,10 @@ class DockerLeftoverHooks(unittest.TestCase):
     def test_verify_and_gate_reservation_close_on_success_and_failure(self):
         for failure in (False, True):
             order = []
-            with mock.patch.object(self.m, 'machine_wait', return_value='token'), \
+            token = argparse.Namespace(result=0)
+            with mock.patch.object(self.m, 'machine_run', side_effect=lambda *a, **kw: contextlib.nullcontext(token)), \
+                    mock.patch.object(self.m, 'machine_finish_intent'), \
+                    mock.patch.object(self.m, 'machine_wait', return_value=token), \
                     mock.patch.object(self.m, 'machine_release', side_effect=lambda _: order.append('release')), \
                     mock.patch.object(self.m, 'docker_leftover_nodes', side_effect=lambda *a: order.append('report')) as report:
                 try:
@@ -1499,15 +1502,17 @@ class DockerLeftoverHooks(unittest.TestCase):
             with mock.patch.object(self.m, 'load', return_value=self.inst), \
                     mock.patch.object(self.m, 'git_home', return_value=(self.node, self.folder)), \
                     mock.patch.object(self.m, 'integration_ref', return_value='refs/heads/main'), \
-                    mock.patch.object(self.m, 'main_unoccupied'), \
+                    mock.patch.object(self.m, 'landing_preflight'), \
                     mock.patch.object(self.m, 'git', return_value=subprocess.CompletedProcess([], 0, str(self.folder), '')), \
-                    mock.patch.object(self.m, 'run_train', side_effect=RuntimeError if failure else None), \
+                    mock.patch.object(self.m, 'run_train', side_effect=RuntimeError('primary train failure') if failure else None), \
+                    mock.patch.object(self.m, 'verify_cleanup', side_effect=ValueError('secondary cleanup') if failure else None) as cleanup, \
                     mock.patch.object(self.m, 'docker_leftover_nodes') as report:
                 if failure:
-                    with self.assertRaises(RuntimeError):
+                    with self.assertRaisesRegex(RuntimeError, 'primary train failure'):
                         self.m.cmd_train(argparse.Namespace(id='maple'))
                 else:
                     self.m.cmd_train(argparse.Namespace(id='maple'))
+                cleanup.assert_called_once_with(self.inst, self.node)
                 report.assert_called_once_with(self.inst, [self.node])
 
     def test_due_tick_calls_one_shared_node_check_before_due_evidence(self):
@@ -1523,11 +1528,13 @@ class DockerLeftoverHooks(unittest.TestCase):
                 mock.patch.object(self.m, 'machine_due_items', return_value=[]), \
                 mock.patch.object(self.m, 'due_items', side_effect=lambda *a, **k: order.append('due') or []), \
                 mock.patch.object(self.m, 'changes_due', return_value=[]), \
+                mock.patch.object(self.m, 'docker_cleanup_nodes', side_effect=lambda *a: order.append('cleanup')) as cleanup, \
                 mock.patch.object(self.m, 'docker_leftover_nodes', side_effect=lambda *a: order.append('report')) as report, \
                 contextlib.redirect_stdout(io.StringIO()):
             self.m.cmd_due(args)
             report.assert_called_once_with(self.inst, [self.node])
-            self.assertEqual(order, ['report', 'due'])
+            cleanup.assert_called_once_with(self.inst, [self.node])
+            self.assertEqual(order, ['cleanup', 'report', 'due'])
 
 
 if __name__ == "__main__":
@@ -1740,6 +1747,25 @@ else: sys.exit(91)
         self.assertEqual(len(json.loads(self.state_path.read_text())['volumes']), 1)
 
 
+    def test_out_of_range_owner_pid_never_escapes_cleanup_hook(self):
+        self.container['Config']['Labels']['brain.owner-pid'] = '2147483648'
+        self.save_state()
+        with mock.patch.object(self.m, 'process_stamp', side_effect=OverflowError('out of range')):
+            self.assertEqual(self.sweep()['stopped'], [])
+        self.assertEqual(self.mutations(), [])
+
+    def test_unused_external_resource_name_is_retained_despite_test_labels(self):
+        self.removable_resources()
+        self.state['volumes'][0]['Name'] = 'shared-data'
+        self.state['networks'][0]['Name'] = 'shared-network'
+        self.save_state()
+        result = self.sweep()
+        self.assertEqual(result['removed'], [self.identity])
+        state = json.loads(self.state_path.read_text())
+        self.assertEqual(len(state['volumes']), 1)
+        self.assertEqual(len(state['networks']), 1)
+
+
 class ReservationBootIdentity(unittest.TestCase):
     def setUp(self):
         self.m = core_loader.SourceFileLoader('boot_fixture', str(CORE / 'bin/brain')).load_module()
@@ -1832,7 +1858,8 @@ class TerminalProducer(Scenario):
         self.patch = mock.patch.dict(os.environ, self.env)
         self.patch.start()
         self.addCleanup(self.patch.stop)
-        self.clock = argparse.Namespace(time=lambda: 100000.0)
+        self.clock = argparse.Namespace(time=lambda: 100000.0, monotonic=lambda: 100000.0,
+                                        sleep=lambda _: self.fail('unexpected admission sleep'))
 
     def waits(self):
         return json.loads((self.root / '.brain/wake/machine-holds.json').read_text())['waits']
@@ -1905,3 +1932,216 @@ class TerminalProducer(Scenario):
         row = self.waits()[token]
         self.assertEqual(row['outcome'], 'error')
         self.assertIn('cannot establish', row['reason'])
+
+
+class RecordedAdmission(Scenario):
+    def setUp(self):
+        super().setUp()
+        self.m = core_loader.SourceFileLoader('recorded_admission_fixture', str(CORE / 'bin/brain')).load_module()
+        self.root = self.init('alice')
+        self.inst = self.m.Instance(self.root)
+        self.patch = mock.patch.dict(os.environ, self.env)
+        self.patch.start()
+        self.addCleanup(self.patch.stop)
+        self.clock = argparse.Namespace(at=100000.0)
+        self.clock.time = self.clock.monotonic = lambda: self.clock.at
+        self.good = {'cpu_idle_pct': 75, 'load_per_cpu': [2, 2, 2], 'mem_free_gb': 32, 'disk_free_gb': 200}
+        self.hot = dict(self.good, cpu_idle_pct=2)
+
+    def test_recorded_hold_resumes_on_first_clear_reading(self):
+        readings = iter([self.hot, self.good])
+        def pause(seconds):
+            self.clock.at += 900
+        with mock.patch.object(self.m, 'request_wake', return_value=True) as wake:
+            with self.m.machine_run('verify', self.inst, 'root', clock=self.clock) as token:
+                self.m.machine_wait('verify', self.inst, 'root', token=token, clock=self.clock,
+                                    read=lambda: next(readings), pause=pause)
+        waits = json.loads((self.root / '.brain/wake/machine-holds.json').read_text())['waits']
+        self.assertEqual(waits[token]['resumed_at'], 100900.0)
+        self.assertEqual(waits[token]['outcome'], 'success')
+        self.assertEqual([c.kwargs['items'][0]['kind'] for c in wake.call_args_list],
+                         ['machine-resumed', 'machine-completed'])
+
+    def test_fifteen_and_fortyfive_minute_reports_are_once_per_wait(self):
+        def pause(seconds):
+            self.clock.at += 900
+            self.m.machine_wait_notices(self.inst, self.clock.at)
+            self.m.machine_wait_notices(self.inst, self.clock.at)
+            if self.clock.at >= 102700:
+                raise KeyboardInterrupt()
+        # Queue capacity, rather than resource pressure, can legitimately wait
+        # past the resource deadline. It must remain visible and report once.
+        self.good['cpu_idle_pct'] = 75
+        with mock.patch.object(self.m, 'request_wake', return_value=True) as wake, \
+                mock.patch.object(self.m, 'machine_limit', return_value=0):
+            with self.assertRaises(KeyboardInterrupt):
+                with self.m.machine_run('verify', self.inst, 'root', clock=self.clock) as token:
+                    self.m.machine_wait('verify', self.inst, 'root', token=token, clock=self.clock,
+                                        read=lambda: self.good, pause=pause)
+        kinds = [c.kwargs['items'][0]['kind'] for c in wake.call_args_list]
+        self.assertEqual(kinds.count('machine-coordinator'), 1)
+        self.assertEqual(kinds.count('machine-root'), 1)
+        self.assertEqual(kinds.count('machine-exited'), 1)
+
+    def test_maximum_hold_rejects_unknown_reduction_with_terminal_reason(self):
+        def pause(seconds):
+            self.clock.at += 1200
+        with mock.patch.object(self.m, 'request_wake', return_value=True):
+            with self.assertRaisesRegex(SystemExit, 'cannot enforce reduced parallelism'):
+                with self.m.machine_run('verify', self.inst, 'root', clock=self.clock) as token:
+                    self.m.machine_wait('verify', self.inst, 'root', token=token, clock=self.clock,
+                                        read=lambda: self.hot, pause=pause, reduction_ready=False)
+        row = json.loads((self.root / '.brain/wake/machine-holds.json').read_text())['waits'][token]
+        self.assertEqual(row['state'], 'exited')
+        self.assertIn('cannot enforce', row['reason'])
+
+    def test_supported_reduction_keeps_hard_resource_limits(self):
+        def pause(seconds):
+            self.clock.at += 1200
+        unsafe = dict(self.hot, mem_free_gb=1)
+        with mock.patch.object(self.m, 'request_wake', return_value=True):
+            with self.assertRaisesRegex(SystemExit, 'unsafe resource pressure'):
+                with self.m.machine_run('verify', self.inst, 'root', clock=self.clock) as token:
+                    self.m.machine_wait('verify', self.inst, 'root', token=token, clock=self.clock,
+                                        read=lambda: unsafe, pause=pause, reduction_ready=True)
+
+    def test_supported_cpu_reduction_is_recorded_and_exported(self):
+        def pause(seconds):
+            self.clock.at += 1200
+        with mock.patch.object(self.m, 'request_wake', return_value=True):
+            with self.m.machine_run('verify', self.inst, 'root', clock=self.clock) as token:
+                self.m.machine_wait('verify', self.inst, 'root', token=token, clock=self.clock,
+                                    read=lambda: self.hot, pause=pause, reduction_ready=True)
+                self.assertEqual(self.m.machine_environment(token, {})['BRAIN_PARALLELISM'], '1')
+        row = json.loads((self.root / '.brain/wake/machine-holds.json').read_text())['waits'][token]
+        self.assertTrue(row['reduced'])
+
+    def test_known_idle_cpu_overrides_io_load_but_unknown_cpu_keeps_load_fallback(self):
+        self.assertEqual(self.m.machine_reasons(self.good, self.m.machine_policy()), [])
+        unknown = {k: v for k, v in self.good.items() if k != 'cpu_idle_pct'}
+        self.assertTrue(self.m.machine_reasons(unknown, self.m.machine_policy()))
+
+class ResourceLeases(unittest.TestCase):
+    def setUp(self):
+        self.m = core_loader.SourceFileLoader('lease_fixture', str(CORE / 'bin/brain')).load_module()
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.folder = Path(self.tmp.name)
+        self.inst = argparse.Namespace(root=self.folder / 'instance')
+        self.patches = [mock.patch.object(self.m, 'machine_dir', return_value=self.folder / 'machine'),
+                        mock.patch.object(self.m, 'machine_boot_id', return_value='linux:fixture-boot'),
+                        mock.patch.object(self.m, 'process_stamp', side_effect=lambda pid: 'birth-' + str(pid))]
+        for patch in self.patches:
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def test_competing_nodes_and_instances_cannot_claim_same_service(self):
+        with self.m.resource_lease(self.inst, 'app', ['database:fixture-db']) as first:
+            other = argparse.Namespace(root=self.folder / 'other-instance')
+            with self.assertRaisesRegex(ValueError, 'resource busy'):
+                with self.m.resource_lease(other, 'review', ['database:fixture-db']):
+                    self.fail('foreign lease admitted')
+            self.assertEqual(len(first), 1)
+        with self.m.resource_lease(self.inst, 'review', ['database:fixture-db']):
+            pass
+
+    def test_prior_boot_reclaims_but_unknown_identity_keeps_lease(self):
+        receipt = self.m.resource_claim(self.inst, 'app', 'service:fixture', lifetime='process')
+        with mock.patch.object(self.m.os, 'getpid', return_value=54321), \
+                mock.patch.object(self.m, 'process_stamp', side_effect=lambda pid: 'birth-54321' if pid == 54321 else 'unknown'):
+            with self.assertRaisesRegex(ValueError, 'resource busy'):
+                self.m.resource_claim(self.inst, 'other', 'service:fixture')
+        with mock.patch.object(self.m, 'machine_boot_id', return_value='linux:new-boot'):
+            replacement = self.m.resource_claim(self.inst, 'other', 'service:fixture')
+        self.assertNotEqual(receipt['token'], replacement['token'])
+        self.assertFalse(self.m.resource_release(receipt))
+
+    def test_live_child_keeps_service_after_parent_death(self):
+        receipt = self.m.resource_claim(self.inst, 'app', 'preview:fixture', lifetime='process')
+        self.m.resource_child(receipt, 12345)
+        parent = receipt['owner'][0]
+        with mock.patch.object(self.m.os, 'getpid', return_value=54321), \
+                mock.patch.object(self.m, 'process_stamp', side_effect=lambda pid: 'birth-' + str(pid) if pid in (12345, 54321) else None):
+            with self.assertRaisesRegex(ValueError, 'resource busy'):
+                self.m.resource_claim(self.inst, 'review', 'preview:fixture')
+        with mock.patch.object(self.m, 'process_stamp', side_effect=lambda pid: None if pid == 12345 else 'birth-' + str(pid)):
+            self.assertTrue(self.m.resource_release(receipt))
+
+    def test_partial_multi_claim_rolls_back_and_redacts_resource_names_in_registry(self):
+        with self.m.resource_lease(self.inst, 'app', ['service:second']):
+            with self.assertRaisesRegex(ValueError, 'resource busy'):
+                with self.m.resource_lease(self.inst, 'review', ['service:first', 'service:second']):
+                    self.fail('partial claim admitted')
+            with self.m.resource_lease(self.inst, 'review', ['service:first']):
+                pass
+        for path in (self.folder / 'machine/resource-leases').glob('*.json'):
+            text = path.read_text()
+            self.assertNotIn('service:', text)
+            self.assertNotIn('review', text)
+            self.assertNotIn(str(self.inst.root), text)
+
+    def test_linked_registry_metadata_refuses_without_touching_target(self):
+        receipt = self.m.resource_claim(self.inst, 'app', 'database:fixture')
+        path = self.folder / 'machine/resource-leases' / (receipt['resource'] + '.json')
+        target = self.folder / 'foreign.json'
+        target.write_text('private fixture')
+        path.unlink()
+        path.symlink_to(target)
+        with self.assertRaises((OSError, ValueError)):
+            self.m.resource_claim(self.inst, 'review', 'database:fixture')
+        self.assertEqual(target.read_text(), 'private fixture')
+
+
+    def test_persistent_service_survives_owner_death_and_reboot_until_explicit_cleanup(self):
+        receipt = self.m.resource_claim(self.inst, 'app', 'database:durable')
+        with mock.patch.object(self.m, 'process_stamp', return_value=None), \
+                mock.patch.object(self.m, 'machine_boot_id', return_value='linux:new-boot'):
+            # The prospective new owner must itself have a birth identity.
+            with mock.patch.object(self.m, 'process_stamp', side_effect=lambda pid: 'new-birth'):
+                with self.assertRaisesRegex(ValueError, 'resource busy'):
+                    self.m.resource_claim(self.inst, 'review', 'database:durable')
+        self.assertTrue(self.m.resource_release(receipt))
+
+    def test_failed_service_body_retains_unverified_cleanup_ownership(self):
+        with self.assertRaisesRegex(OSError, 'partial service start'):
+            with self.m.resource_lease(self.inst, 'app', ['preview:durable']):
+                raise OSError('partial service start')
+        with self.assertRaisesRegex(ValueError, 'resource busy'):
+            self.m.resource_claim(self.inst, 'review', 'preview:durable')
+
+
+    def test_missing_configuration_performs_no_registry_io(self):
+        with mock.patch.object(self.m, 'machine_dir', side_effect=AssertionError('no registry for absent setting')):
+            with self.m.configured_resource_lease(self.inst, {'id': 'app', 'fm': {}}) as receipts:
+                self.assertEqual(receipts, [])
+
+    def test_unknown_service_child_retains_process_lease_for_inspection(self):
+        receipt = self.m.resource_claim(self.inst, 'app', 'service:unknown', lifetime='process')
+        with mock.patch.object(self.m, 'process_stamp', side_effect=lambda pid: None if pid == 12345 else 'birth-' + str(pid)):
+            with self.assertRaisesRegex(ValueError, 'child identity unknown'):
+                self.m.resource_child(receipt, 12345)
+        self.assertFalse(self.m.resource_release(receipt))
+        with mock.patch.object(self.m.os, 'getpid', return_value=54321), \
+                mock.patch.object(self.m, 'process_stamp', side_effect=lambda pid: 'birth-54321' if pid == 54321 else None):
+            with self.assertRaisesRegex(ValueError, 'resource busy'):
+                self.m.resource_claim(self.inst, 'review', 'service:unknown')
+
+    def test_concurrent_claims_publish_only_one_active_owner(self):
+        barrier = threading.Barrier(3)
+        outcomes = []
+        def claim(node):
+            barrier.wait(timeout=3)
+            try:
+                outcomes.append(('owned', self.m.resource_claim(self.inst, node, 'database:concurrent')))
+            except ValueError as error:
+                outcomes.append(('busy', str(error)))
+        workers = [threading.Thread(target=claim, args=(node,), daemon=True) for node in ('build', 'review')]
+        for worker in workers:
+            worker.start()
+        barrier.wait(timeout=3)
+        for worker in workers:
+            worker.join(timeout=3)
+            self.assertFalse(worker.is_alive())
+        self.assertEqual(sorted(kind for kind, value in outcomes), ['busy', 'owned'])
+        receipt = next(value for kind, value in outcomes if kind == 'owned')
+        self.assertTrue(self.m.resource_release(receipt))

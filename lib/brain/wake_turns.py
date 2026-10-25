@@ -128,6 +128,10 @@ def wake_turn_consume(inst, n, consume=True, shown=None):
                 return value
             value['consumed'] = True
             wake_turn_write(path, value)  # fence transport completion before acknowledging its queue
+            for ref in value['items']:
+                if ref['kind'] in _m_hosts.WAKE_TERMINAL_KINDS:
+                    _m_hosts.wake_accept_write(_m_hosts.wake_terminal_receipt(inst, ref['id']), 'delivered\n')
+            _m_hosts.wake_ack_shown(inst, n, value['items'])
             for name in value['paths']:
                 pending = directory / name
                 _m_common.safe_target(pending)

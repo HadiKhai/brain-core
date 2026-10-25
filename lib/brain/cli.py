@@ -21,6 +21,7 @@ from . import gate_lock as _m_gate_lock
 from . import history as _m_history
 from . import hosts as _m_hosts
 from . import instance as _m_instance
+from . import job_env as _m_job_env
 from . import jobs as _m_jobs
 from . import handback_queue as _m_handback_queue
 from . import dispatcher as _m_dispatcher
@@ -29,15 +30,19 @@ from . import launch_receipts as _m_launch_receipts
 from . import land_checks as _m_land_checks
 from . import messages as _m_messages
 from . import machine as _m_machine
+from . import full_gate as _m_full_gate
 from . import freshness as _m_freshness
 from . import nodes as _m_nodes
+from . import queue_priority as _m_queue_priority
 from . import policy as _m_policy
+from . import release as _m_release
 from . import preview_evidence as _m_preview_evidence
 from . import reports as _m_reports
 from . import rehearse as _m_rehearse
 from . import rotation as _m_rotation
 from . import schedules as _m_schedules
 from . import settings_batch as _m_settings_batch
+from . import spec_run as _m_spec_run
 from . import spend as _m_spend
 from . import status as _m_status
 from . import sync as _m_sync
@@ -54,9 +59,18 @@ from . import watch as _m_watch
 
 def cmd_selftest(a):
     tests = _m_common.CORE / "tests"
-    args = [sys.executable, "-m", "unittest", "discover", "-s", str(tests), "-t", str(tests)]
+    jobs = getattr(a, 'jobs', 1)
+    if type(jobs) is not int or not 1 <= jobs <= 32:
+        _m_common.die('selftest --jobs must be between 1 and 32')
+    if jobs == 1:
+        args = [sys.executable, "-m", "unittest", "discover", "-s", str(tests), "-t", str(tests)]
+    else:
+        args = [sys.executable, '-m', 'pytest', '-p', 'no:cacheprovider', '-n', str(jobs),
+                '--max-worker-restart=0', str(tests / 'test_brain.py')]
     if a.verbose:
         args.append("-v")
+    elif jobs > 1:
+        args.append('-q')
     if a.k:
         args += ["-k", a.k]
     env = {**os.environ, "BRAIN_CORE": str(_m_common.CORE), "BRAIN_NO_REEXEC": "1"}
@@ -103,8 +117,10 @@ def reexec_into_instance_core():
     """`brain` on PATH points at one core; for another instance, use that instance's own core."""
     if os.environ.get("BRAIN_NO_REEXEC") or (len(sys.argv) > 1 and sys.argv[1] in ("init", "selftest")):
         return
-    if len(sys.argv) > 1 and sys.argv[1] == "ui" and (_m_common.CORE / ".git").is_file():
-        return  # a core worktree (a dashboard in development) serves its own build
+    if len(sys.argv) > 1 and sys.argv[1] in ('ui', 'rehearse') and (_m_common.CORE / '.git').is_file():
+        if sys.argv[1] == 'rehearse':
+            print('rehearse: using the current worktree core; instance-core re-execution disabled', file=sys.stderr)
+        return  # an explicitly selected development worktree executes its own build
     root = _m_nodes.try_find_root()
     if not root:
         return
@@ -144,6 +160,8 @@ def writes(a):
         return a.action in ("add", "set", "backfill", "sync", "event", "requirement-add")
     if name == 'cmd_proposals':
         return bool(getattr(a, 'approve_all', False))
+    if name in ('cmd_full_run', 'cmd_spec_run'):
+        return False  # native execution owns short locks and machine admission
     if name == 'cmd_land_check':
         return False  # the explicit runner takes short owned locks around execution
     if name == 'cmd_dispatch':
@@ -348,9 +366,11 @@ def main():
         opt("--need-human", help="question or blocked need to append to the node inbox"),
         opt("--reviews", type=int, help="completed review rounds; runs verify for done (or reuses a green run that "
             "still proves this commit)"),
+        opt("--full-receipt", help="adopt a native exact-candidate full-run receipt without rerunning"),
         opt("--reverify", action="store_true", help="run verify even when an earlier green run still proves it"))
-    cmd("queue", _m_handback_queue.cmd_queue, "explicit foreground hand-back request runner; no service or recovery",
-        opt("action", choices=['run']), 'id', opt('--once', action='store_true'), opt('--request-id'))
+    cmd("queue", _m_queue_priority.cmd_gate_queue, "run one hand-back or explicitly reorder queued native verify tokens",
+        opt("action", choices=['run'], nargs='?'), opt('id', nargs='?'), opt('--once', action='store_true'),
+        opt('--request-id'), opt('--node'), opt('--move'), opt('--before'))
     cmd("dispatch", _m_dispatcher.cmd_dispatch, "bounded read-only plan of explicit root/operator asks; empty scan is silent",
         opt('--limit', type=int, default=50), opt('--node-limit', type=int, default=200))
     cmd("backlog", _m_events.cmd_backlog, "append a dated backlog item", "id",
@@ -444,6 +464,10 @@ def main():
     t.add_argument("--no-setup", action="store_true", dest="no_setup")
     t.add_argument("--task-id", help="ready task to link to this job")
     t.set_defaults(f=_m_worktrees.cmd_wt_add)
+    t = wsub.add_parser('env', help='set machine-local per-worktree environment overrides; values are never printed')
+    t.add_argument('id'); t.add_argument('branch'); t.add_argument('pairs', nargs='*')
+    t.add_argument('--unset', action='append', default=[])
+    t.set_defaults(f=_m_job_env.cmd_job_env)
     t = wsub.add_parser("list", help="brain wt list [node]")
     t.add_argument("id", nargs="?")
     t.set_defaults(f=_m_worktrees.cmd_wt_list)
@@ -474,16 +498,23 @@ def main():
         opt("--same-runtime-reason", help="reason for a configured expiring same-runtime exception"))
     cmd("preview-receipt", _m_preview_evidence.cmd_preview_receipt, "record rendered preview source samples", "id",
         opt("--branch", required=True), opt("--file", required=True))
+    cmd('release', _m_release.cmd_release, 'inspect or execute an opted-in reviewed full-green release', 'id',
+        opt('--run', action='store_true'))
     cmd("train", _m_train.cmd_train, "batch ready jobs onto local main, verify once, and print the release command", "id",
         opt("--jobs", nargs="+", help="explicit job order (space or comma separated); all must be ready"))
     cmd("land", _m_train.cmd_land, "batch land ready jobs; host settlement requires fresh separate evidence", "id",
         opt("--jobs", nargs="+", help="explicit job order (space or comma separated); all must be ready"))
+    cmd("full-run", _m_full_gate.cmd_full_run, "run the native full gate and retain exact-candidate evidence without publishing completion", "id",
+        opt("--branch", required=True), opt("--reviews", required=True, type=int))
+    cmd("spec-run", _m_spec_run.cmd_spec_run, "run one focused command with native admission; never records full readiness", "id",
+        opt("--branch", required=True), opt("--command", nargs=argparse.REMAINDER, required=True))
     cmd("ready", _m_verify.cmd_ready, "check a worker's ready packet against the branch and cached origin default (local main without origin)", "id",
         opt("--branch", required=True), opt("--record", action="store_true", help="worker: run node verify and record"),
         opt("--summary", help="one-line hand-back result (required for --record with schema v3)"),
         opt("--question", help="one-line coordinator choice for a question hand-back"),
         opt("--reviews", type=int, help="completed review rounds, required with --record"),
         opt("--report"), opt("--lessons", help="proposed lessons, or none: <reason>"),
+        opt("--full-receipt", help="with --record: adopt a native full-run receipt"),
         opt("--reverify", action="store_true", help="with --record: run verify even if a green run still proves it"))
     cmd("schedule", _m_schedules.cmd_schedule, "recurring work: brain schedule list | add <id> --when W --node N --brief B | "
         "bind <id> <host id> | unbind <id>", opt("action", choices=["list", "add", "bind", "unbind"], nargs="?",
@@ -550,7 +581,8 @@ def main():
         opt("id", nargs="?"), opt("--seen", action="store_true", help="mark every entry read on this machine"),
         opt("--all", action="store_true"), opt("--json", action="store_true"))
     cmd("selftest", cmd_selftest, "run the core's scenario tests in throwaway folders",
-        opt("-v", "--verbose", action="store_true"), opt("-k"))
+        opt("-v", "--verbose", action="store_true"), opt("-k"),
+        opt("--jobs", type=int, default=1, help="parallel pytest workers (requires requirements-test.txt); 1 uses stdlib unittest"))
     def cmd_help(a):
         ap.print_help()
     sub.add_parser("help", help="show this help").set_defaults(f=cmd_help)
@@ -580,11 +612,6 @@ def main():
             with open(os.devnull, "w") as sink:
                 os.dup2(sink.fileno(), sys.stdout.fileno())
         return
-    if a.f == _m_worktrees.cmd_wt_add:
-        inst = _m_nodes.load()
-        node = inst.node(a.id)
-        token = _m_machine.machine_wait(inst=inst, node=node["id"])
-        _m_machine.machine_release(token)
     if a.f == _m_machine.cmd_machine and a.action == "sample":
         a.f(a)  # sampler and watcher each take a short nonblocking instance lock
         return

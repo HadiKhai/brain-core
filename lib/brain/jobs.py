@@ -222,10 +222,30 @@ def validate_handback_text(a):
     return summary.strip(), question.strip() if question is not None else None
 
 
+def validate_handback_options(a):
+    """Reject invalid completion flags before attempts, queueing or heavy work."""
+    validate_handback_text(a)
+    reviews = getattr(a, 'reviews', None)
+    checking = a.state == 'done' and (reviews is not None or getattr(a, 'record', False))
+    if checking and (type(reviews) is not int or reviews < 1):
+        _m_common.die('--record requires --reviews N completed review rounds (at least one)')
+    if getattr(a, 'restart', None) and a.state != 'blocked':
+        _m_common.die('--restart requires --state blocked')
+    if getattr(a, 'reverify', False) and not checking:
+        _m_common.die('--reverify requires --state done --reviews N')
+    if getattr(a, 'full_receipt', None) and (not checking or getattr(a, 'reverify', False)):
+        _m_common.die('--full-receipt requires --state done --reviews N and excludes --reverify')
+    lessons = getattr(a, 'lessons', None)
+    if lessons is not None and (not lessons.strip() or lessons.strip().lower() in ('none', 'none:')):
+        _m_common.die('--lessons needs proposed lessons, or none: <reason>')
+    if getattr(a, 'report', None) is not None and not one_line(a.report):
+        _m_common.die('--report requires a nonempty one-line path')
+
+
 def cmd_handback(a):
     from . import job_attempts as _m_attempts
     from . import handback_queue as _m_queue
-    validate_handback_text(a)
+    validate_handback_options(a)
     inst = _m_nodes.load()
     n = inst.node(a.id)
     row = open_job(read_jobs(n) or [], a.branch)
@@ -295,7 +315,7 @@ def publish_handback(a):
     if a.state == "done" and not study and (a.reviews is not None or getattr(a, "record", False)):
         verify_started = time.monotonic()
         packet, reasons = _m_verify.record_ready(inst, n, a.branch, a.reviews, packet,
-                                       getattr(a, "reverify", False))
+                                       getattr(a, "reverify", False), full_receipt=getattr(a, "full_receipt", None))
         duration = record_verify_duration(inst, n, row, packet, time.monotonic() - verify_started)
         if packet:
             reused, fresh = (1, 0) if packet.get("verify_reused") else (0, 1)
