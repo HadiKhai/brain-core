@@ -100,3 +100,22 @@ wrapper, bounds file reads and rejects duplicate JSON keys.
 The command is read-only, invokes no host, and prints no supplied identifiers or
 option values. A match attests only that returned metadata matches the declared
 route. It neither enforces provider execution nor proves which model actually ran.
+
+## D704: Model-fit learning fills only opted-in, unpinned defaults
+
+The learner groups recorded jobs by exact class, runtime and effort. It accepts
+reviewed merges and explicitly failed outcomes only when usage is measured and
+attributed entirely to the recorded model. Open, parked, switched, mixed-model,
+unknown and conflicting duplicate observations are excluded. Each model needs at
+least three reviewed merges by default. Success rate and median review rounds
+rank before median processed tokens and active hours. These recorded outcomes
+are quality proxies; the learner does not infer causal model quality or prices.
+
+`brain model-fit` reports the current evidence and recommendation without changing
+configuration. With `model_fit=on`, brief routing may use that recommendation only
+when no explicit, node, ancestor or instance model setting chose a model. Candidate
+models must be declared in `model_fit_models_<runtime>`; no undeclared model or
+runtime is introduced. `model_fit_min_samples` controls the minimum observations.
+The feature defaults off. New ledger evidence updates recommendations automatically,
+while runtime pins, effort selection and subscription/model quota checks retain
+precedence. Receipt validation remains a separate adapter boundary.

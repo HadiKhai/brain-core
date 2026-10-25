@@ -5,6 +5,23 @@ upgrading. `brain changes <node>` shows the entries this node's coordinator hasn
 `brain due <node>` lists them until `brain changes <node> --seen`. Entry headings are
 `## <date>: <title>`; once released, a heading never changes.
 
+## 2026-10-25: Independent restart rounds and measured usage learning
+
+For agents: Restart budget and compaction checks now use counters since the last
+delivered restart brief while preserving cumulative accounting. Private usage
+caches retain exact-window append offsets and job totals; transcript and permission
+metadata invalidate them. Read-only dashboards do not publish caches.
+`brain launch-check` compares returned provider/model/options metadata with a
+routed selection and rejects mismatches or unknown data; it does not prove host
+execution. `brain model-fit` reports recommendations from comparable attributed
+outcomes. Optional `model_fit=on` fills only unpinned defaults from declared
+`model_fit_models_<runtime>` candidates; all existing pins and quota checks remain.
+
+After upgrading: No migration is required. Older usage caches rebuild automatically.
+Older restart receipts without active minutes use elapsed time since acknowledgement.
+Model-fit routing defaults off and requires sufficient measured samples. Host
+adapters should validate returned receipts before accepting a route as checked.
+
 ## 2026-10-25: Rehearsal is an optional diagnostic
 
 For agents: Ready, hand-back and local train landing no longer require passing

@@ -877,6 +877,13 @@ def route_setting(inst, n, explicit, flag, class_key, node_key, instance_key, in
 def class_model_selection(inst, n, a, runtime, kind):
     key = "route_model_" + runtime
     model, source = route_setting(inst, n, a.model, "--model", key + "_" + kind, key, key, inherit=True)
+    if not model and n['fm'].get('model_fit', inst.cfg.get('model_fit', 'off')) != 'off':
+        from . import model_fit as _m_model_fit
+        row = _m_jobs.open_job(_m_jobs.read_jobs(n) or [], getattr(a, 'branch', None))
+        effort = _m_jobs.job_effort(n, row, kind, getattr(a, 'effort', None))
+        learned = _m_model_fit.learned_model_selection(inst, n, kind, runtime, effort)
+        if learned:
+            return learned
     return model or "runtime default", source
 
 
@@ -912,6 +919,6 @@ def worker_route(inst, n, a):
         weekly_cap=n["fm"].get("route_weekly_cap", inst.cfg.get("route_weekly_cap", 60)))
     a.job_class = kind
     launch_selection(inst, n, a, runtime, subscription, row, kind, model_selection=model_selection)
-    if per_class or " node.md " in a.model_source:
+    if per_class or " node.md " in a.model_source or a.model_source.startswith("model fit "):
         usage += f" Routing sources: runtime={runtime_source}; model={a.model_source}."
     return runtime, _m_guard.redact(usage, _m_guard.never_terms(n))

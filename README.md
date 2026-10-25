@@ -660,6 +660,20 @@ checks use processed tokens, compactions and available active minutes since that
 restart. Older restart receipts without active minutes use elapsed time since
 acknowledgement. Ordinary brief regeneration does not reset the allowance.
 
+`brain model-fit <node> --class build --runtime codex --effort high` reports
+recommendations learned from comparable, measured job outcomes. Declare candidates
+with `model_fit_models_codex=sample-fast,sample-steady` (or the corresponding runtime
+key). At least three reviewed merges per model are required by default; change
+`model_fit_min_samples` to set another positive sample count. Recorded success and
+review rounds rank ahead of token and active-time costs. These are quality proxies,
+not prices or causal performance claims. Unknown, mixed and incomparable data is
+excluded.
+
+Set `model_fit=on` in node.md or instance.md to use learned choices for otherwise
+unpinned model defaults. It defaults off. Explicit and inherited model settings,
+runtime pins, effort and quota checks keep precedence. Without enough attributed
+samples or a declared candidate list, the existing runtime default remains.
+
 `brain launch-check <node> --selection-file selection.json --receipt-file receipt.json`
 checks the returned host provider, model and options against the declared selection.
 It rejects mismatches and unknown fields without calling the host or claiming
