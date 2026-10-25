@@ -525,9 +525,14 @@ class Tasks(Scenario):
         self.assertEqual(tasks.projection(self.n)[0]['blocked_by'], ['producer:OPS-1'])
         tasks.mutate(self.inst, peer, 'OPS-1', {'status': 'done', 'evidence': ['Operation passed'],
             'completion_receipt': {'result': 'passed', 'ref': 'run:fixture', 'scope': 'Restore service', 'at': self.inst.now()}})
-        changed = tasks.reconcile_dependencies(self.inst, 'producer', 'event:one')
-        self.assertEqual(changed, [{'node': 'root', 'task': 'APP-1'}])
+        # The integrated event producer already reconciles the real landing.
+        current = tasks.read_records(self.n)['APP-1']
+        self.assertEqual(current['status'], 'ready')
+        self.assertRegex(current['dependency_event'], r'^[0-9a-f]{32}$')
+        before = (self.n['dir'] / 'tasks' / 'APP-1.md').read_bytes()
         self.assertEqual(tasks.reconcile_dependencies(self.inst, 'producer', 'event:one'), [])
+        self.assertEqual(tasks.reconcile_dependencies(self.inst, 'producer', 'event:one'), [])
+        self.assertEqual((self.n['dir'] / 'tasks' / 'APP-1.md').read_bytes(), before)
         sealed = self.peer_node('sealed', owners='other')
         with self.assertRaises(ValueError):
             tasks.mutate(self.inst, self.n, 'APP-1', {'depends_on': ['sealed:OPS-1']})
