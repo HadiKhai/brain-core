@@ -22,6 +22,16 @@ from . import worktrees as _m_worktrees
 
 
 def restart_brief(inst, n, row):
+    # Native brief generation records replay inputs and routing. Reload while
+    # owning its short publication lock so it cannot restore stale local state.
+    with _m_instance.brain_lock(inst):
+        fresh, current, live = restart_source(inst, n['id'], _m_jobs.job_key(row))
+        if live is None:
+            raise ValueError('job changed before native restart brief preparation')
+        return _restart_brief(fresh, current, live)
+
+
+def _restart_brief(inst, n, row):
     saved = _m_briefs.saved_brief_inputs(n, row)
     if not (saved.get('task') or saved.get('task_file')):
         raise ValueError('restart needs the recorded original task; no task invented')

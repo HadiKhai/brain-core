@@ -1,5 +1,6 @@
 """Native restart fences and recovery, using a fake host and a real ledger."""
 import json
+import os
 from unittest import mock
 
 import core_loader
@@ -19,7 +20,7 @@ class WorkerLifecycle(Scenario):
         self.m.write_jobs(self.inst, self.n, [self.row])
         self.key = self.m.job_key(self.row)
         self.n['local'].update(coordinator='parent', host_project='project', workers={self.key: 'old'},
-            worktrees={'job/palette': {'path': str(self.root), 'start': self.git('rev-parse', 'HEAD', cwd=self.root).strip(),
+            worktrees={'job/palette': {'path': str(self.root), 'port': 4100, 'start': self.git('rev-parse', 'HEAD', cwd=self.root).strip(),
                        'brief_inputs': {'job': self.key, 'task': 'Draw'}}})
         self.inst.save_local()
         self.usage = {'processed': 800, 'compactions': 3, 'active_minutes': 4, 'sessions': 1, 'source': 'host'}
@@ -171,4 +172,52 @@ class WorkerLifecycle(Scenario):
             result = self.m.maintain_lifecycle(self.inst, self.n, rpc=self.rpc)
         self.assertEqual(result['restarts'][0]['state'], 'stopping')
         self.assertEqual(result['settlement']['settled_jobs'], [])
+
+    def test_lost_launch_response_recovers_exact_first_prompt_once(self):
+        self.tick()
+        original = self.rpc
+        prompts = {}
+        def lost(name, args):
+            result = original(name, args)
+            if name == 't3_thread_launch':
+                prompts['new'] = args['message']
+                raise self.m.HostRPCError('fixture launch response lost after success')
+            if name == 't3_thread_read' and args.get('afterPosition') == 0 and args['threadId'] in prompts:
+                result['items'] = [{'createdBy': 'user', 'text': prompts[args['threadId']], 'textTruncated': False}]
+            return result
+        self.rpc = lost
+        self.assertEqual(self.tick()['state'], 'pending')
+        self.assertEqual(self.tick()['state'], 'done')
+        self.assertEqual(len(self.actions('t3_thread_launch')), 1)
+
+    def test_replacement_question_is_not_acknowledged_or_launched_twice(self):
+        self.tick()
+        original = self.rpc
+        def question(name, args):
+            result = original(name, args)
+            if name == 't3_thread_launch':
+                self.threads['new']['pendingRequestCount'] = 1
+            return result
+        self.rpc = question
+        self.assertEqual(self.tick()['state'], 'pending')
+        self.assertEqual(self.m.Instance(self.root).local_of('root')['workers'][self.key], 'old')
+        self.threads['new']['pendingRequestCount'] = 0
+        self.assertEqual(self.tick()['state'], 'done')
+        self.assertEqual(len(self.actions('t3_thread_launch')), 1)
+
+    def test_native_resume_brief_defers_baseline_until_replacement_binding(self):
+        owner = self.m._owners['restart_worker']
+        def route(inst, n, args):
+            args.model, args.job_class, args.effort = 'fixture-model', 'build', 'high'
+            args.selection_line = 'modelSelection: ' + json.dumps({'instanceId': 'codex', 'model': 'fixture-model'})
+            return 'codex', 'Fixture account snapshot'
+        with mock.patch.dict(os.environ, self.env, clear=True), \
+                mock.patch.object(owner._m_spend, 'live_usage', return_value=self.usage), \
+                mock.patch.object(owner._m_briefs._m_knowledge, 'worker_route', side_effect=route), \
+                mock.patch.object(owner._m_reminders, 'acknowledge_usage_restart', side_effect=AssertionError('early acknowledgement')):
+            self.m.usage_restart_item(self.inst, self.n, self.row)
+            text, selection = self.m.restart_brief(self.inst, self.n, self.row)
+        self.assertIn('Draw', text)
+        self.assertEqual(selection['model'], 'fixture-model')
+        self.assertTrue(self.m.lifecycle_read(self.inst)['usage'][self.m.digest(['root', self.key])]['episode'])
 

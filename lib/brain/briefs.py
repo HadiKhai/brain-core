@@ -185,8 +185,7 @@ def import_brief(a):
     else:
         print(text, end="")
     sys.stdout.flush()  # A failed import-brief delivery must not acknowledge a restart.
-    if not getattr(a, "_defer_restart_ack", False):
-        _m_reminders.acknowledge_usage_restart(inst, n, row)
+    _m_reminders.acknowledge_usage_restart(inst, n, row)
 
 
 # ---------- past AI conversations about a node ----------
@@ -343,7 +342,8 @@ def cmd_brief(a):
     else:
         print(text, end="")
     sys.stdout.flush()  # Do not acknowledge a failed delivery through a closed pipe.
-    _m_reminders.acknowledge_usage_restart(inst, n, row)
+    if not getattr(a, "_defer_restart_ack", False):
+        _m_reminders.acknowledge_usage_restart(inst, n, row)
     if w is not None and row:
         w["brief_inputs"] = {"job": _m_jobs.job_key(row), "task_file": str(task_path) if task_path else None,
                              "task": a.task if not task_path else None, "context_files": context_inputs}

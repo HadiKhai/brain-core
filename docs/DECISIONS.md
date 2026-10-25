@@ -140,6 +140,10 @@ is acknowledged only after replacement binding; startup usage remains charged.
 Brief preparation can defer acknowledgement for this path, while ordinary brief
 delivery preserves its existing behavior.
 
+The defer guard belongs to the ordinary branch resume brief, including its
+manual-compaction acknowledgement, and is exercised through the native brief
+generator. Import studies retain their separate delivery behavior.
+
 Tests exercise exact-run interruption, pending/live-child refusal, missing usage,
 changed ownership/workspaces, unknown launch outcomes, post-binding publication
 failure and replacement startup accounting. Maintenance is an explicit scheduler
