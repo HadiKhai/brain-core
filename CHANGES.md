@@ -1688,3 +1688,9 @@ hook when available, retaining delivered-but-unconsumed turns and first enqueue
 time. Missing hooks retain the labelled pending-only fallback; corrupt or unknown
 projections remain unknown.
 After upgrading: no host busy inference or transport state mutation is added.
+
+## Introspection test lane ownership
+
+For agents: introspection, diagnostic and scorecard tests have declared lane
+owners; their nonselective runtime imports participate in shared fingerprints.
+After upgrading: no migration. Repository lane coverage remains mandatory.

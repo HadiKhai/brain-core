@@ -190,3 +190,11 @@ union of pending items and an unconsumed coalesced turn, preserving its first
 enqueue time. The consumer never reads or mutates transport state itself. An
 unknown projection stays unknown; the legacy pending-only fallback is labelled
 as such while the hook is absent. Queue timestamps never establish host run start.
+
+## D117: New introspection tests have explicit lane ownership
+
+The introspection, diagnostic and scorecard suites each belong to declared test
+lanes. Their nonselective runtime modules, including the shared typed-event
+import, are explicit shared inputs because command dispatch and fixture loading
+can import them in any lane. Coverage validation remains fail-closed; no runner,
+selection assertion or canonical test class is removed or weakened.

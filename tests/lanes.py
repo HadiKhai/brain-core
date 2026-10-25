@@ -27,6 +27,9 @@ MODULE_LANES = (
 )
 LANE_TESTS = {name: ('test_' + name + '.py',) for name in MODULE_LANES}
 LANE_TESTS.update({
+    'introspection': ('test_introspection.py', 'test_advisories.py'),
+    'diagnostics': ('test_diagnostics.py',),
+    'scorecard': ('test_scorecard.py',),
     'train': ('test_train.py', 'test_train_review.py'),
     'jobs': ('test_jobs.py', 'test_train_ejection.py', 'test_handback_queue.py'),
     'status': ('test_status.py', 'test_inbox_noise.py'),
@@ -58,6 +61,8 @@ SHARED_INPUTS = (
     'lib/brain/status.py', 'lib/brain/ui_status.py', 'lib/brain/ui_server.py',
     'lib/brain/gate_lock.py',
     'lib/brain/settings_batch.py', 'lib/brain/dispatcher.py',
+    'lib/brain/diagnostics.py', 'lib/brain/events.py',
+    'lib/brain/introspection.py', 'lib/brain/scorecard.py',
     'lib/brain/__init__.py', 'tests/scenario.py', 'tests/core_loader.py',
     'tests/conftest.py', 'tests/lanes.py', 'tests/check_lanes.py',
     'bin/**', 'templates/**', 'skills/**', 'roles/**', 'adapters/**', 'ui/**', '!ui/**/*.png',
