@@ -2118,3 +2118,23 @@ class ResourceLeases(unittest.TestCase):
                 mock.patch.object(self.m, 'process_stamp', side_effect=lambda pid: 'birth-54321' if pid == 54321 else None):
             with self.assertRaisesRegex(ValueError, 'resource busy'):
                 self.m.resource_claim(self.inst, 'review', 'service:unknown')
+
+    def test_concurrent_claims_publish_only_one_active_owner(self):
+        barrier = threading.Barrier(3)
+        outcomes = []
+        def claim(node):
+            barrier.wait(timeout=3)
+            try:
+                outcomes.append(('owned', self.m.resource_claim(self.inst, node, 'database:concurrent')))
+            except ValueError as error:
+                outcomes.append(('busy', str(error)))
+        workers = [threading.Thread(target=claim, args=(node,), daemon=True) for node in ('build', 'review')]
+        for worker in workers:
+            worker.start()
+        barrier.wait(timeout=3)
+        for worker in workers:
+            worker.join(timeout=3)
+            self.assertFalse(worker.is_alive())
+        self.assertEqual(sorted(kind for kind, value in outcomes), ['busy', 'owned'])
+        receipt = next(value for kind, value in outcomes if kind == 'owned')
+        self.assertTrue(self.m.resource_release(receipt))

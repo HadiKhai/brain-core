@@ -176,7 +176,9 @@ runner-owned command lifetime, separate from admission-only permission.
 
 Canonical resource keys identify shared databases, previews and services across
 nodes and instances. A stable per-resource transaction lock protects one durable
-claim; stale tokens cannot release a replacement claim. Records contain opaque
+claim; stale tokens cannot release a replacement claim. Concurrent creators use
+exclusive creation and reopen the stable lock inode without replacing it.
+Records contain opaque
 resource/scope hashes, process birth identities and boot identity, without raw
 resource names, commands or instance paths. Acquisition of several keys rolls back
 partial claims if any resource is busy.

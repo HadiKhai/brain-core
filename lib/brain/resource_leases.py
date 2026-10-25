@@ -50,7 +50,13 @@ def resource_store(digest):
     lock = None
     temporary = None
     try:
-        lock = os.open(digest + '.lock', os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600, dir_fd=fd)
+        try:
+            lock = os.open(digest + '.lock', os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                           0o600, dir_fd=fd)
+        except FileExistsError:
+            # Concurrent creators reopen the stable inode. Never unlink or
+            # replace it, and never follow a link supplied by another caller.
+            lock = os.open(digest + '.lock', os.O_RDWR | os.O_NOFOLLOW, dir_fd=fd)
         info = os.fstat(lock)
         if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
             raise ValueError('unsafe resource lease lock')
