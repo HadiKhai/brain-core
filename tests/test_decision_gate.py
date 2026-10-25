@@ -107,6 +107,79 @@ class DecisionGate(Scenario):
     def gate_path(self, node='root'):
         return self.root / '.brain/gates' / (hashlib.sha256(node.encode()).hexdigest() + '.lock')
 
+    def test_scenario_isolates_and_restores_enclosing_native_gate_proof(self):
+        code = r"""import os,sys,unittest
+sys.path.insert(0,sys.argv[1]+'/tests')
+sys.path.insert(0,sys.argv[1]+'/lib')
+from pathlib import Path
+from brain.gate_lock import GATE_ENV, gate_inherited_fd
+from test_decision_gate import DecisionGate
+before={key:os.environ[key] for key in GATE_ENV}
+fd=gate_inherited_fd(Path.cwd(),os.environ,'root')
+identity=os.fstat(fd)
+suite=unittest.TestSuite(DecisionGate(name) for name in (
+    'test_different_nodes_overlap_without_label_identity',
+    'test_native_lane_gate_stays_held_between_commands_and_closes_own_fd'))
+result=unittest.TextTestRunner(stream=sys.stderr).run(suite)
+if not result.wasSuccessful(): sys.exit(1)
+assert {key:os.environ.get(key) for key in GATE_ENV} == before
+assert gate_inherited_fd(Path.cwd(),os.environ,'root') == fd
+assert os.fstat(fd).st_ino == identity.st_ino
+print('fixture proof isolated; enclosing proof restored and still held')
+"""
+        outer = self.start_gate('enclosing native gate', code, str(CORE))
+        out, err = outer.communicate(timeout=30)
+        self.assertEqual(outer.returncode, 0, out + err)
+        self.assertIn('enclosing proof restored and still held', out)
+
+    def test_most_specific_contained_context_and_conflicting_registrations(self):
+        home = self.repo(self.root / 'projects/maple')
+        bench = self.root / 'projects/workbench'
+        worktree = bench / 'worktrees/job'
+        worktree.mkdir(parents=True)
+        self.b(self.root, 'new', 'maple', '--title', 'Maple', '--home', str(home))
+        self.b(self.root, 'new', 'elm', '--title', 'Elm')
+        inst = self.m.Instance(self.root)
+        # The same node may register the same anchor in several roles.
+        inst.local_of('maple').update(workbench=str(bench),
+            worktrees={'home-alias': {'path': str(home)}, 'job': {'path': str(worktree)}})
+        inst.save_local()
+        for cwd in (home, bench, worktree):
+            with self.subTest(cwd=cwd):
+                p = self.start_gate('contained context', "import os; print(os.environ['BRAIN_GATE_NODE'])", cwd=cwd)
+                out, err = p.communicate(timeout=3)
+                self.assertEqual(p.returncode, 0, err)
+                self.assertEqual(out.strip(), 'maple')
+        # A deeper node folder wins over the enclosing node's registered home.
+        inst.local_of('maple')['workbench'] = str(self.root / 'nodes')
+        inst.save_local()
+        p = self.start_gate('node folder', "import os; print(os.environ['BRAIN_GATE_NODE'])", cwd=self.root / 'nodes/elm')
+        out, err = p.communicate(timeout=3)
+        self.assertEqual(p.returncode, 0, err)
+        self.assertEqual(out.strip(), 'elm')
+        # Equal-depth node-folder/registration conflicts refuse, not root fallback.
+        inst.local_of('maple')['workbench'] = str(self.root / 'nodes/elm')
+        inst.save_local()
+        bad = self.start_gate('tie', 'print(99)', cwd=self.root / 'nodes/elm')
+        out, err = bad.communicate(timeout=3)
+        self.assertNotEqual(bad.returncode, 0, out + err)
+        self.assertIn('--node', err)
+        explicit = self.start_gate('explicit wins', "import os; print(os.environ['BRAIN_GATE_NODE'])",
+                                   node='maple', cwd=self.root / 'nodes/elm')
+        out, err = explicit.communicate(timeout=3)
+        self.assertEqual(explicit.returncode, 0, err)
+        self.assertEqual(out.strip(), 'maple')
+
+    def test_equal_contained_home_registrations_refuse(self):
+        home = self.repo(self.root / 'projects/shared')
+        for node in ('maple', 'elm'):
+            self.b(self.root, 'new', node, '--title', node.title(), '--home', str(home))
+        bad = self.start_gate('contained tie', 'print(99)', cwd=home)
+        out, err = bad.communicate(timeout=3)
+        self.assertNotEqual(bad.returncode, 0, out + err)
+        self.assertIn('--node', err)
+        self.assertNotIn('99', out)
+
     def test_different_nodes_overlap_without_label_identity(self):
         for node in ('maple', 'elm'):
             self.b(self.root, 'new', node, '--title', node.title())

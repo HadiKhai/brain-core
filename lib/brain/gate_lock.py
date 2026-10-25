@@ -11,7 +11,6 @@ import signal
 import sys
 
 from . import common as _m_common
-from . import hosts as _m_hosts
 from . import nodes as _m_nodes
 
 
@@ -27,13 +26,10 @@ def gate_node(inst, ref=None):
     if ref is not None:
         return inst.node(ref)
     cwd = Path.cwd().resolve()
-    here = _m_hosts.node_at(inst, cwd)
-    if here:
-        return here
     matches = []
     for n in inst.nodes():
         local = n['local']
-        places = [n['home_path'], local.get('workbench'),
+        places = [n['dir'], n['home_path'], local.get('workbench'),
                   *[w.get('path') for w in local.get('worktrees', {}).values()]]
         depths = [len(p.parts) for p in (Path(x).expanduser().resolve() for x in places if x)
                   if p == cwd or p in cwd.parents]
@@ -41,9 +37,9 @@ def gate_node(inst, ref=None):
             matches.append((max(depths), n))
     if matches:
         depth = max(d for d, _ in matches)
-        nearest = [n for d, n in matches if d == depth]
+        nearest = {n['id']: n for d, n in matches if d == depth}
         if len(nearest) == 1:
-            return nearest[0]
+            return next(iter(nearest.values()))
     _m_common.die('gate-lock: cannot identify one node from this folder; use --node NODE')
 
 

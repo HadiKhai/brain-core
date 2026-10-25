@@ -27,6 +27,17 @@ CORE = Path(os.environ.get("BRAIN_CORE") or Path(__file__).resolve().parent.pare
 
 class Scenario(unittest.TestCase):
     def setUp(self):
+        # A real verify may enclose the test runner. Its descriptor stays open and
+        # locked; its environment proof must not identify our temporary instances.
+        gate_keys = ('BRAIN_GATE_FD', 'BRAIN_GATE_PATH', 'BRAIN_GATE_NODE')
+        enclosing_gate = {key: os.environ[key] for key in gate_keys if key in os.environ}
+        def restore_gate_environment():
+            for key in gate_keys:
+                os.environ.pop(key, None)
+            os.environ.update(enclosing_gate)
+        self.addCleanup(restore_gate_environment)
+        for key in gate_keys:
+            os.environ.pop(key, None)
         self.tmp = Path(tempfile.mkdtemp(prefix="brain-test-")).resolve()
         self.env = {**os.environ, "HOME": str(self.tmp), "BRAIN_NO_REEXEC": "1",
                     "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t",
