@@ -852,6 +852,8 @@ def cmd_machine(a):
         machine_sample_once(inst)
         from . import host_observations as _m_host_observations
         _m_host_observations.host_export_if_enabled(inst)
+        from . import host_tasks as _m_host_tasks
+        _m_host_tasks.host_task_refresh_if_enabled(inst)
         from . import watch as _m_watch
         try:
             _m_watch.watch_once(inst)  # same minute timer; sampler has released its instance lock

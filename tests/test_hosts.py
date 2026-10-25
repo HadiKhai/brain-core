@@ -1423,6 +1423,19 @@ class WakeConsumption(Scenario):
         self.enqueue(2)
         self.assertEqual(self.send.call_count, 2)
 
+    def test_readonly_projection_counts_unconsumed_items_without_pending_files(self):
+        refs = [{'id': format(i, '064x'), 'kind': 'inbox'} for i in range(1, 5)]
+        self.m.request_wake(self.inst, self.n, 'fixture-batch', items=refs, explicit=True)
+        self.m.wake_drain(self.inst, self.n, once=True)
+        self.assertFalse(list(self.m.wake_directory(self.inst, self.n).glob('*.pending')))
+        directory = self.m.wake_directory(self.inst, self.n)
+        before = {p.name: p.read_bytes() for p in directory.iterdir() if p.is_file()}
+        view = self.m.wake_turn_queue(self.inst, self.n)
+        self.assertEqual(view, {'known': True, 'item_count': 4, 'oldest_at': self.now, 'unconsumed_wake': True})
+        self.assertEqual(before, {p.name: p.read_bytes() for p in directory.iterdir() if p.is_file()})
+        self.m.wake_turn_consume(self.inst, self.n)
+        self.assertEqual(self.m.wake_turn_queue(self.inst, self.n)['item_count'], 0)
+
 
 class AckAllShown(Scenario):
     def setUp(self):
@@ -1682,3 +1695,58 @@ class WakeIdentityTypes(Scenario):
                     self.assertEqual(send.call_count, 1)
                     self.assertFalse(pending.exists())
                     self.assertNotIn('untrusted-identity', send.call_args.kwargs['reason'])
+
+
+class RegisteredDelegatedWake(Scenario):
+    def setUp(self):
+        super().setUp()
+        patch = mock.patch.dict(os.environ, self.env)
+        patch.start()
+        self.addCleanup(patch.stop)
+        self.m = core_loader.SourceFileLoader('delegated_fixture', str(CORE / 'bin/brain')).load_module()
+        self.root = self.init('alice')
+        self.b(self.root, 'new', 'app', '--title', 'App')
+        self.b(self.root, 'set', 'app', 'coordinator=fixture-parent', 'wake=fixture-send')
+        self.inst = self.m.Instance(self.root)
+        self.parent = 'fixture-parent'
+        self.pending_children = True
+        self.calls = []
+
+    def rpc(self, name, args):
+        self.calls.append((name, args))
+        if name == 't3_thread_list':
+            return {'currentThreadId': self.parent}
+        if name == 'delegate_task':
+            self.assertTrue(args['task'].startswith('Automated turn: no operator present; cancellations are host events.'))
+            return {'taskId': 'fixture-task', 'childThreadId': 'fixture-child'}
+        self.assertEqual(name, 'task_status')
+        return {'taskId': args['taskId'], 'status': 'completed', 'childRunId': 'fixture-run',
+                'hasPendingChildRuns': self.pending_children,
+                'workState': 'waiting_for_children' if self.pending_children else 'result_available'}
+
+    def register(self):
+        return self.m.host_delegate(self.inst, self.inst.node('app'), 'Inspect a sample',
+                                    {'providerInstanceId': 'fixture', 'model': 'fixture-model'}, 'one-task', rpc=self.rpc)
+
+    def test_registered_task_is_idempotent_and_nested_work_does_not_complete_early(self):
+        self.register()
+        self.register()
+        self.assertEqual(sum(name == 'delegate_task' for name, _ in self.calls), 1)
+        with mock.patch.object(self.m, 'wake_start'):
+            self.assertEqual(self.m.host_task_refresh(self.inst, rpc=self.rpc)['items'], [])
+            self.pending_children = False
+            self.assertEqual(len(self.m.host_task_refresh(self.inst, rpc=self.rpc)['items']), 1)
+            self.m.host_task_refresh(self.inst, rpc=self.rpc)
+        with mock.patch.object(self.m, 'WAKE_INTERVAL', 0), mock.patch.object(self.m, 'wake_send', return_value=True) as send:
+            self.m.wake_drain(self.inst, self.inst.node('app'), once=True)
+            self.m.wake_drain(self.inst, self.inst.node('app'), once=True)
+            self.assertEqual(send.call_count, 1)
+        self.assertEqual(len(self.m.host_task_items(self.inst)), 1)
+        self.assertEqual(sum(name == 'task_status' for name, _ in self.calls), 2,
+                         'immutable completion is not polled again after its receipt')
+
+    def test_wrong_parent_context_cannot_launch_or_claim_completion(self):
+        self.parent = 'different-parent'
+        with self.assertRaises(ValueError):
+            self.register()
+        self.assertFalse(any(name == 'delegate_task' for name, _ in self.calls))

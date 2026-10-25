@@ -26,7 +26,7 @@ from . import verify as _m_verify
 WATCH_LOCAL_KINDS = ('unsettled-threads',)
 
 
-WATCH_DECISION_KINDS = ('question', 'handback', 'job-stall', 'blocked-overdue', 'restart', 'rotate',
+WATCH_DECISION_KINDS = ('delegated-completion', 'question', 'handback', 'job-stall', 'blocked-overdue', 'restart', 'rotate',
                         'overdue-question')
 
 
@@ -609,12 +609,16 @@ def watch_scan(inst, nodes=None):
     from . import communication as _m_communication
     from . import host_observations as _m_host_observations
     try:
-        host_items = _m_host_observations.host_observation_items(inst, nodes)
+        from . import host_tasks as _m_host_tasks
+        host_items = (_m_host_observations.host_observation_items(inst, nodes) +
+                      _m_host_tasks.host_task_items(inst, nodes))
     except (OSError, ValueError, TypeError):
         host_items = []
     for item in _m_communication.communication_items(inst, nodes) + host_items:
         n = inst.node(item['node'])
         target, command = _m_hosts.wake_target(inst, n)
+        if target['id'] == 'root' and item['kind'] == 'delegated-completion':
+            continue  # root result notifications remain in files/inbox
         group = groups.setdefault(target['id'], {'node': target, 'items': [], 'command': command})
         group['items'].append(item)
     completions = watch_completion_items(inst, nodes)

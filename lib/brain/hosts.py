@@ -75,6 +75,10 @@ def wake_directory(inst, n):
     return inst.root / ".brain" / "wake" / urllib.parse.quote(n["id"], safe="")
 
 
+def wake_turn_queue(inst, n):
+    return _m_wake_turns.wake_turn_queue(inst, n)
+
+
 def wake_start(inst, n):
     env = {**os.environ, "BRAIN_ROOT": str(inst.root), "BRAIN_NO_REEXEC": "1"}
     env.pop("BRAIN_LOCK_HELD", None)  # a detached worker never inherits its requester's lock bypass

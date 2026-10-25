@@ -770,6 +770,8 @@ def cmd_due(a):
     from . import host_observations as _m_host_observations
     try:
         items += _m_host_observations.host_observation_items(inst, nodes)
+        from . import host_tasks as _m_host_tasks
+        items += _m_host_tasks.host_task_items(inst, nodes)
         host_known = _m_host_observations.host_snapshot(inst) is not None
     except (OSError, ValueError, TypeError):
         host_known = False

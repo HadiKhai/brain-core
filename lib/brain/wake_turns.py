@@ -55,6 +55,19 @@ def wake_turn_write(path, value):
     _m_common.atomic_write(path, json.dumps(value, sort_keys=True) + '\n')
 
 
+def wake_turn_pending_summary(pending):
+    opaque, known = [], True
+    for path in pending:
+        try:
+            _, refs = _m_hosts.wake_pending_value(path)
+            if not refs:
+                opaque.append(path.name)
+        except (OSError, ValueError, KeyError, TypeError):
+            known = False
+            opaque.append(path.name)
+    return opaque, known
+
+
 def wake_turn_prepare(inst, n, pending, refs):
     """Return (action, token). A damaged/unwritable receipt never suppresses work."""
     if not wake_turn_enabled(n):
@@ -64,9 +77,12 @@ def wake_turn_prepare(inst, n, pending, refs):
         with wake_turn_lock(directory) as path:
             binding = wake_turn_binding(inst, n)
             value = wake_turn_read(path, binding)
+            opaque, known = wake_turn_pending_summary(pending)
             if value and value['sent'] and not value['consumed']:
                 value['items'] = _m_hosts.wake_item_refs(value['items'] + refs)
                 value['paths'] = sorted(set(value['paths']) | {p.name for p in pending})
+                value['opaque_paths'] = sorted(set(value.get('opaque_paths', [])) | set(opaque))
+                value['queue_known'] = value.get('queue_known', False) and known
                 reminder = not value['reminded'] and _m_hosts.WAKE_CLOCK.time() - value['at'] >= 1800
                 if reminder:
                     value['reminded'] = True  # at most one reminder attempt per consumption episode
@@ -77,7 +93,7 @@ def wake_turn_prepare(inst, n, pending, refs):
             token = os.urandom(16).hex()
             value = {'version': 1, 'binding': binding, 'token': token, 'sent': False,
                      'consumed': False, 'reminded': False, 'at': _m_hosts.WAKE_CLOCK.time(),
-                     'items': refs, 'paths': [p.name for p in pending]}
+                     'items': refs, 'paths': [p.name for p in pending], 'opaque_paths': opaque, 'queue_known': known}
             wake_turn_write(path, value)
             return 'send', token
     except (OSError, ValueError, KeyError, TypeError):
@@ -152,3 +168,42 @@ def wake_turn_stuck(inst, n):
     except (OSError, ValueError, KeyError, TypeError):
         pass
     return None
+
+
+def wake_turn_queue(inst, n):
+    """Read-only native reason count. Never infer host activity from delivery state."""
+    unknown = {'known': False, 'item_count': None, 'oldest_at': None, 'unconsumed_wake': False}
+    target, _ = _m_hosts.wake_target(inst, n)
+    directory = _m_hosts.wake_directory(inst, target)
+    try:
+        path = directory / 'turn.json'
+        _m_common.safe_target(path)
+        before = path.read_bytes() if path.exists() else None
+        turn = wake_turn_read(path, wake_turn_binding(inst, target)) if wake_turn_enabled(target) else None
+        identities, times = set(), []
+        unconsumed = bool(turn and not turn['consumed'])
+        if unconsumed:
+            if turn.get('queue_known') is not True or not isinstance(turn.get('opaque_paths'), list):
+                return unknown
+            identities.update('item:' + i['id'] for i in turn['items'])
+            identities.update('opaque:' + name for name in turn['opaque_paths'])
+            times.append(turn['at'])
+        pending = sorted(directory.glob('*.pending'))
+        manifest = [(p.name, p.stat().st_mtime_ns, p.stat().st_size) for p in pending]
+        for p in pending:
+            metadata, refs = _m_hosts.wake_pending_value(p)
+            if metadata.get('binding') not in (None, wake_turn_binding(inst, target)):
+                continue
+            identities.update('item:' + i['id'] for i in refs)
+            if not refs:
+                identities.add('opaque:' + p.name)
+            times.append(p.stat().st_mtime)
+        after = path.read_bytes() if path.exists() else None
+        if before != after or manifest != [(p.name, p.stat().st_mtime_ns, p.stat().st_size)
+                                           for p in sorted(directory.glob('*.pending'))]:
+            return unknown
+        return {'known': True, 'item_count': len(identities),
+                'oldest_at': min(times) if identities else None,
+                'unconsumed_wake': bool(unconsumed and turn['sent'])}
+    except (OSError, ValueError, KeyError, TypeError):
+        return unknown

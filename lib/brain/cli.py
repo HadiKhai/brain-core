@@ -20,6 +20,7 @@ from . import gate_lock as _m_gate_lock
 from . import history as _m_history
 from . import hosts as _m_hosts
 from . import host_observations as _m_host_observations
+from . import host_tasks as _m_host_tasks
 from . import instance as _m_instance
 from . import jobs as _m_jobs
 from . import handback_queue as _m_handback_queue
@@ -127,7 +128,7 @@ def writes(a):
         return bool(getattr(a, 'approve_all', False))
     if name == 'cmd_land_check':
         return False  # the explicit runner takes short owned locks around execution
-    if name in ('cmd_dispatch', 'cmd_host_export'):
+    if name in ('cmd_dispatch', 'cmd_host_export', 'cmd_delegate'):
         return False
     if name == "cmd_watch":
         return False  # takes a short nonblocking instance lock itself
@@ -309,6 +310,8 @@ def main():
         'item_id', 'text')
     cmd('index', _m_freshness.cmd_index, 'configured upstream index freshness; never runs a generator', 'id',
         opt('--record', action='store_true', help='explicitly record current input/output fingerprints after regeneration'))
+    cmd("delegate", _m_host_tasks.cmd_delegate, "explicit registered native delegation with completion fallback",
+        "id", opt("--task-file", required=True), opt("--target-file", required=True), opt("--key", required=True))
     cmd("host-export", _m_host_observations.cmd_host_export, "one bounded native export; preserves previous snapshot on failure")
     cmd("notify", _m_communication.cmd_notify, "record typed notification; root wakes only for questions",
         "id", opt("kind", choices=_m_communication.COMMUNICATION_KINDS), "text",

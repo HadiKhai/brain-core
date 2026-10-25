@@ -174,3 +174,19 @@ ids and nonempty string kinds. Numeric, boolean, null, collection and malformed
 string ids become unknown metadata; they never reach string-only transport code.
 The existing opaque-request fallback carries that pending file through transport.
 Failed transport preserves original bytes. Successful transport alone retires it.
+
+
+## D509: Register delegation before relying on host completion delivery
+
+Explicit native `delegate` verifies the calling host context against the bound
+parent, persists a stable idempotency key, then calls the shared RPC bridge. Unknown
+outcomes keep the intent for explicit same-key retry. Observers query only tasks
+owned by their current bound host context. Waiting nested children or pending
+child turns never count as completed tasks.
+
+A terminal task/run identity is recorded durably before publishing its completion
+inbox/doorbell. Immutable terminal observations are not polled again. File watchers
+can recover a doorbell after interrupted publication; root results remain inbox-
+only. Registration and observation do not replace host-owned automatic completion
+behavior. Without a configured native parent context/observer or reachable host,
+universal instantaneous delivery cannot be guaranteed by this layer.
