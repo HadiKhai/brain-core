@@ -1037,6 +1037,8 @@ def cmd_proposals(a):
     """Everything waiting for review, a node at a time, with full text: read it here, then accept or reject several
     at once. Nothing here accepts anything."""
     if getattr(a, 'approve_all', False):
+        if getattr(a, "brief", False):
+            _m_common.die("--brief cannot activate proposals")
         return _m_proposals.cmd_proposal_activation(a)
     if getattr(a, 'review_manifest', None):
         _m_common.die('--review-manifest requires --approve-all')
@@ -1081,6 +1083,9 @@ def cmd_proposals(a):
                                                     src_terms[i["path"]]),
                                 "path": str(i["path"].relative_to(inst.root)),
                                 "body": clean(_m_common.read_fm(i["path"])[1].strip(), src_terms[i["path"]])} for i in it]})
+    if getattr(a, "brief", False):
+        from . import proposal_briefs as _m_proposal_briefs
+        return _m_proposal_briefs.reviewer_brief(rows, screens, a.json)
     if a.json:
         print(json.dumps([_m_history.history_screen(row, group) for row, group in zip(rows, screens)], indent=1,
                          ensure_ascii=False))

@@ -632,3 +632,33 @@ class RuleSnapshotActivation(unittest.TestCase):
                         pending = proposals.pending_rule_snapshot(inst, node)
                         self.assertEqual(pending['digest'], hashlib.sha256(reviewed).hexdigest())
                         self.assertEqual(source.read_bytes(), reviewed)
+
+
+class ProposalReviewerBrief(Scenario):
+    propose = ImportReview.propose
+
+    def test_compact_brief_has_claim_citation_and_individual_commands_without_writes(self):
+        r = self.init('alice')
+        self.propose(r, 'bounded')
+        path = r / 'library/bounded.md'
+        path.write_text(path.read_text().replace('Bound memory.', 'Bound memory.\n\n' + 'Additional evidence. ' * 100))
+        before = path.read_bytes()
+        out = self.b(r, 'proposals', '--brief')
+        self.assertIn('Claim: Bound memory.', out)
+        self.assertIn('Citation: README.md@', out)
+        self.assertIn('brain item accept bounded --reviewed-by', out)
+        self.assertIn('brain item reject bounded', out)
+        self.assertLess(len(out), 1400)
+        self.assertEqual(path.read_bytes(), before)
+        self.assertIn('status: proposed', path.read_text())
+        rows = json.loads(self.b(r, 'proposals', '--brief', '--json'))
+        self.assertEqual(rows[0]['id'], 'bounded')
+        self.assertEqual(rows[0]['claim'], 'Bound memory.')
+        self.assertIn('reject', rows[0])
+
+    def test_brief_preserves_source_and_holder_screening(self):
+        r = self.init('alice')
+        self.propose(r)
+        (r / 'never-name.txt').write_text('Bound\n')
+        out = self.b(r, 'proposals', '--brief')
+        self.assertNotIn('Bound', out)

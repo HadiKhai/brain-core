@@ -251,6 +251,7 @@ def main():
     cmd("proposals", _m_status.cmd_proposals, "everything waiting for review, node by node, with full text and the commands "
         "to accept or reject several at once", opt("id", nargs="?"),
         opt("--only", help="only these nodes (comma-separated)"), opt("--json", action="store_true"),
+        opt("--brief", action="store_true", help="compact independent reviewer sheet with claim, citation and decision commands"),
         opt('--approve-all', action='store_true', help='activate one complete independently reviewed rules snapshot'),
         opt('--review-manifest', help='complete coordinator-supplied snapshot review JSON'))
     cmd('policy', _m_policy.cmd_policy, 'inspect explicit reviewed publication policy; never publishes', 'id',

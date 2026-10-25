@@ -73,3 +73,12 @@ Eligibility (scope, state, source content) is checked before embedding and every
 cache read, including deletion/revocation. Proposals remain inactive. There is
 no online provider enabled. The index covers usable library items and the target node's own knowledge,
 decision notes and report indexes. External transcript archives are not indexed.
+
+## D902: Proposal briefs summarize evidence without activating it
+
+`proposals --brief` presents each pending claim, citation, source, scope and
+individual supported decision commands. `--json` exposes the same bounded sheets.
+The existing full view remains the source for complete evidence. Holder and
+source screening applies to every sheet, including commands and paths. Brief
+rendering is read-only and refuses combination with activation. Specialist/rule
+rejections remain inactive source decisions where no rejection CLI exists.
