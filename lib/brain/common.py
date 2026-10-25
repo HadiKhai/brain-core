@@ -221,7 +221,7 @@ def git_read_snapshot():
         _GIT_READS.reset(token)
 
 
-def git(*args, cwd=None, check=False):
+def git(*args, cwd=None, check=False, env=None):
     reads = _GIT_READS.get()
     key = (str(Path(cwd or Path.cwd()).absolute()), args)
     query = args
@@ -232,12 +232,12 @@ def git(*args, cwd=None, check=False):
                  or query == ('remote',)
                  or (query[0] == 'symbolic-ref' and len([x for x in query[1:] if not x.startswith('-')]) == 1
                      and all(not x.startswith('-') or x in ('--short', '--quiet', '-q') for x in query[1:]))))
-    cacheable = (reads is not None and read_only
+    cacheable = (reads is not None and read_only and env is None
                  and not any(str(a).startswith('--output') for a in args))
     result = reads.get(key) if cacheable else None
     if result is None:
         result = subprocess.run(["git", *(["-C", str(cwd)] if cwd else []), *args],
-                                capture_output=True, text=True, errors="replace", check=False)
+                                capture_output=True, text=True, errors="replace", check=False, env=env)
         if cacheable:
             reads[key] = result
     if check:

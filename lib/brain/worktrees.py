@@ -339,6 +339,10 @@ def removal_refusal(n, branch, w):
         return "job ledger cannot be read safely"
     # Cleanup closes its own current row; every other claimant is live work.
     own = _m_jobs.open_job(rows, branch)
+    if own:
+        refusal = _m_jobs.publication_refusal(n, own)
+        if refusal:
+            return refusal
     for row in rows:
         if row is own or row.get("Ended"):
             continue
