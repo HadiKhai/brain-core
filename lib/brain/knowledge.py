@@ -395,8 +395,8 @@ def cmd_specialist_accept(a):
         print(f"{sid}: accepted")
 
 
-def direction_principles(path):
-    """Read explicit ids only from the Principles section; never infer or activate rules.
+def direction_principles(path, sections=("## Principles",)):
+    """Read explicit ids from declared sections (Principles by default); never infer or activate rules.
 
     Each ### id: title block may name one enforced_by value. Keep that value as
     evidence at capture time, even if the direction later changes.
@@ -412,7 +412,7 @@ def direction_principles(path):
         if fenced:
             continue
         if re.match(r"^#{1,2} ", line):
-            active = line.strip() == "## Principles"
+            active = line.strip() in sections
             current = None
         elif active and line.startswith("### "):
             m = re.fullmatch(r"### ([a-z][a-z0-9-]*): .+", line)
@@ -497,11 +497,12 @@ def cmd_lesson(a):
     text = a.text.strip()
     if not text or len(text.splitlines()) != 1:
         _m_common.die("a lesson must be one nonempty line")
+    from . import learning as _m_learning
     principle, check = a.principle, "wish"
     if principle != "unclassified":
-        rules = direction_principles(folder / "direction.md")
+        rules = _m_learning.enforcement_rules(folder)
         if principle not in rules:
-            _m_common.die("principle id is absent from the target's direction.md; use unclassified if none fits")
+            _m_common.die("principle id is absent from the target's declared rules; use unclassified if none fits")
         check = rules[principle]["enforced_by"]
     tags = json.dumps({"principle": principle, "enforced_by": check}, ensure_ascii=False)
     path = folder / "lessons.md"
@@ -521,6 +522,7 @@ def cmd_lesson(a):
     _m_common.safe_target(path)
     path.write_text("\n".join(lines) + "\n")
     inst.commit([path], f"lesson: {a.specialist} from {src['id']}")
+    _m_learning.materialize_enforcement_tasks(inst, target)
     print(line)
 
 

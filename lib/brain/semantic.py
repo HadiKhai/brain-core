@@ -5,11 +5,13 @@ import json
 import math
 import os
 import subprocess
+import stat
 import sys
 import tempfile
 from pathlib import Path
 
 from . import common as _m_common
+from . import history as _m_history
 from . import semantic_runtime as _m_semantic_runtime
 
 MODEL_REVISION = '761b726dd34fb83930e26aab4e9ac3899aa1fa78'
@@ -24,7 +26,10 @@ def semantic_capability(inst):
     """Cheap install/upgrade/check preflight: never imports a model or downloads."""
     if os.environ.get('BRAIN_SEMANTIC_OFFLINE') == '1' or os.environ.get('BRAIN_USAGE_TESTING') == '1':
         return False, 'offline or test mode'
-    if inst.local.get('semantic', {}).get('enabled', True) is False:
+    config = inst.local.get('semantic', {})
+    if not isinstance(config, dict):
+        return False, 'invalid optional recall configuration'
+    if config.get('enabled', True) is False:
         return False, 'disabled on this machine'
     try:
         if any(importlib.util.find_spec(name) is None for name in ('onnxruntime', 'tokenizers', 'numpy')):
@@ -78,8 +83,31 @@ def normalized(vector):
     return [v / norm for v in vector]
 
 
+def semantic_path_linked(path):
+    """A source binding/report path cannot delegate ownership through a link."""
+    path = Path(path).absolute()
+    return any(part.is_symlink() for part in (path, *path.parents))
+
+
+def semantic_source_owner(inst, source):
+    """Resolve the most specific physical node/home before consuming source bytes."""
+    matches = []
+    for other in inst.nodes():
+        anchors = [other['dir']]
+        if other.get('external') and other.get('home_path'):
+            anchors.append(other['home_path'])
+        for anchor in anchors:
+            anchor = anchor.resolve()
+            if source == anchor or anchor in source.parents:
+                matches.append((len(anchor.parts), other['id']))
+    if not matches:
+        return None  # a separately registered external workbench
+    deepest = max(depth for depth, _ in matches)
+    return {owner for depth, owner in matches if depth == deepest}
+
+
 def semantic_documents(inst, node):
-    """Only this node's notes and its own report indexes, never another owner set."""
+    """Read only regular node-local sources through a verified descriptor, once."""
     from . import guard as _m_guard
     from . import worktrees as _m_worktrees
     roots = [node['dir']]
@@ -87,30 +115,60 @@ def semantic_documents(inst, node):
         roots.append(_m_worktrees.workbench(inst, node))
     except (OSError, ValueError, SystemExit):
         pass
-    paths = [node['dir'] / name for name in ('knowledge.md', 'decisions.md')]
-    for root in roots:
-        paths.extend(sorted((root / 'reports').glob('*/index.md')))
     seen = set()
-    for path in paths:
+    for root in dict.fromkeys(roots):
         try:
-            resolved = path.resolve()
-            if resolved in seen or not path.is_file() or path.stat().st_size > 1024 * 1024:
+            if semantic_path_linked(root):
                 continue
-            if not any(root.resolve() in resolved.parents for root in roots):
-                continue
-            seen.add(resolved)
-            text = path.read_text()
-            if path.name == 'decisions.md' and not any(line.startswith('## ') for line in text.splitlines() if not line.startswith('## YYYY')):
-                continue
-            if not text.strip() or _m_guard.find_terms(text, _m_guard.never_terms(node)):
-                continue
-            title = next((line.lstrip('# ').strip() for line in text.splitlines() if line.startswith('# ')), path.stem)
-            reference = _m_common.tilde(path)
-            yield {'path': path, 'fm': {'id': 'document-' + hashlib.sha256(reference.encode()).hexdigest()[:16],
-                   'title': title, 'kind': 'document', 'status': 'active', 'scope': ', '.join(node['owners']),
-                   'source_node': node['id'], 'source_ref': reference}}
+            paths = [root / name for name in ('knowledge.md', 'decisions.md')] if root == node['dir'] else []
+            reports = root / 'reports'
+            # Do not enumerate a linked report root or descend linked directories.
+            if reports.is_dir() and not semantic_path_linked(reports):
+                paths.extend(entry / 'index.md' for entry in sorted(reports.iterdir())
+                             if not entry.is_symlink() and entry.is_dir())
         except (OSError, ValueError):
             continue
+        for path in paths:
+            stream = None
+            try:
+                if semantic_path_linked(path) or not path.is_file():
+                    continue
+                stream, _ = _m_history.history_open(path, [root.resolve()], [])
+                if stream is None:
+                    continue
+                opened = stream.fileno()
+                metadata = os.fstat(opened)
+                where = _m_history.history_fd_path(opened)
+                if (not where or not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1
+                        or metadata.st_size > 1024 * 1024):
+                    continue
+                source = Path(where).resolve()
+                owners = semantic_source_owner(inst, source)
+                if owners is not None and owners != {node['id']}:
+                    continue
+                identity = (metadata.st_dev, metadata.st_ino)
+                if identity in seen:
+                    continue
+                raw = stream.read(1024 * 1024 + 1)
+                if len(raw) > 1024 * 1024:
+                    continue
+                text = raw.decode('utf-8')
+                if path.name == 'decisions.md' and not any(line.startswith('## ') for line in text.splitlines() if not line.startswith('## YYYY')):
+                    continue
+                if not text.strip() or _m_guard.find_terms(text, _m_guard.never_terms(node)):
+                    continue
+                seen.add(identity)
+                title = next((line.lstrip('# ').strip() for line in text.splitlines() if line.startswith('# ')), path.stem)
+                reference = _m_common.tilde(path)
+                yield {'path': path, '_semantic_text': text,
+                       'fm': {'id': 'document-' + hashlib.sha256(reference.encode()).hexdigest()[:16],
+                              'title': title, 'kind': 'document', 'status': 'active', 'scope': ', '.join(node['owners']),
+                              'source_node': node['id'], 'source_ref': reference}}
+            except (OSError, ValueError):
+                continue
+            finally:
+                if stream is not None:
+                    stream.close()
 
 
 def semantic_ranked(inst, node, problem, embedder=None):
@@ -129,7 +187,10 @@ def semantic_ranked(inst, node, problem, embedder=None):
         items.extend(semantic_documents(inst, node))
         documents = []
         for item in items:
-            fm, body = _m_common.read_fm(item['path'])
+            if '_semantic_text' in item:
+                fm, body = item['fm'], item['_semantic_text']
+            else:
+                fm, body = _m_common.read_fm(item['path'])
             text = ' '.join(str(fm.get(k, '')) for k in ('title', 'keywords')) + '\n' + body
             documents.append('passage: ' + text)
         key = hashlib.sha256(node['id'].encode()).hexdigest()

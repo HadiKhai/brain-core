@@ -61,6 +61,9 @@ class LessonTags(Scenario):
         self.b(r, "new", "app", "--title", "App")
         self.b(r, "specialist", "new", "editor", "--title", "Editor")
         folder = r / "specialists/editor"
+        # Tag/provenance tests declare this check; existence is validated separately.
+        (r / "checks").mkdir()
+        (r / "checks/bounds.py").write_text("pass\n")
         (folder / "direction.md").write_text(
             "# Editor: direction\n\n## Principles\n"
             "### one-place: One thing, one place\nenforced_by: wish\n"
@@ -941,3 +944,32 @@ class GovernanceLinkedDirectory(Scenario):
         file.write_text('---\nscope: alice\n---\nContent\n')
         library.symlink_to(outside, target_is_directory=True)
         self.assertFalse(m.governance_file(m.Instance(r).node('root'), library / 'item.md'))
+
+class ProposalReviewerBrief(Scenario):
+    propose = ImportReview.propose
+
+    def test_compact_brief_has_claim_citation_and_individual_commands_without_writes(self):
+        r = self.init('alice')
+        self.propose(r, 'bounded')
+        path = r / 'library/bounded.md'
+        path.write_text(path.read_text().replace('Bound memory.', 'Bound memory.\n\n' + 'Additional evidence. ' * 100))
+        before = path.read_bytes()
+        out = self.b(r, 'proposals', '--brief')
+        self.assertIn('Claim: Bound memory.', out)
+        self.assertIn('Citation: README.md@', out)
+        self.assertIn('brain item accept bounded --reviewed-by', out)
+        self.assertIn('brain item reject bounded', out)
+        self.assertLess(len(out), 1400)
+        self.assertEqual(path.read_bytes(), before)
+        self.assertIn('status: proposed', path.read_text())
+        rows = json.loads(self.b(r, 'proposals', '--brief', '--json'))
+        self.assertEqual(rows[0]['id'], 'bounded')
+        self.assertEqual(rows[0]['claim'], 'Bound memory.')
+        self.assertIn('reject', rows[0])
+
+    def test_brief_preserves_source_and_holder_screening(self):
+        r = self.init('alice')
+        self.propose(r)
+        (r / 'never-name.txt').write_text('Bound\n')
+        out = self.b(r, 'proposals', '--brief')
+        self.assertNotIn('Bound', out)

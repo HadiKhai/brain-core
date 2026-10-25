@@ -19,6 +19,9 @@ from . import guard as _m_guard
 from . import instance as _m_instance
 from . import jobs as _m_jobs
 from . import knowledge as _m_knowledge
+from . import learning as _m_learning
+from . import feedback as _m_feedback
+from . import teaching as _m_teaching
 from . import machine as _m_machine
 from . import nodes as _m_nodes
 from . import rehearse as _m_rehearse
@@ -356,6 +359,9 @@ def ui_node(inst, n, since, cache=None, partial=False):
         "blocked": _m_status.status_section(n, "blocked"),
         "blocked_metadata": [_m_ui_status.ui_blocked_metadata(inst, n, t, file_only=partial) for t in _m_status.status_section(n, "blocked")], "decisions": ui_decisions(inst, n), "limits": _m_knowledge.limits_of(n),
         "never_name": len(terms), "spend": lookback,
+        "enforcement": _m_learning.enforcement_metrics(inst, n),
+        "feedback": _m_feedback.feedback_projection(inst, n),
+        "native_teaching": _m_teaching.teaching_summary(inst, n),
         "jobs": {**js, "rows": [{k: hide(v) for k, v in r.items()} for r in (_m_jobs.read_jobs(n) or [])
                               if r.get("Outcome") != "external"],
                                            "open": [{k: hide(v) for k, v in r.items()} for r in js["open"]],
@@ -468,6 +474,8 @@ def _ui_state(inst, problems=None, scan=None, spend_budget=2.0, machine_spend=No
                                             "time": fm.get("learned_at"), "owners": _m_common.lst(fm.get("source_owners"))},
                              "accepted_at": fm.get("accepted_at"), "accepted_by": fm.get("accepted_by")}))
     specialists = []
+    enforcement = {(row["id"], metric["type"], metric["target"]): metric
+                   for row in out_nodes for metric in row.get("enforcement", [])}
     for sp in _m_knowledge.find_specialists(inst):
         lesson_path = sp["dir"] / "lessons.md"
         role_body = _m_common.read_fm(sp["dir"] / "role.md")[1]
@@ -480,6 +488,7 @@ def _ui_state(inst, problems=None, scan=None, spend_budget=2.0, machine_spend=No
                                  "hire_command": "brain hire " + shlex.quote(sp["id"]) + " " + shlex.quote(sp["node"]["id"]) + " --task 'Describe the task'",
                                  "scope": _m_common.lst(sp["fm"].get("scope")), "status": sp["fm"].get("status", "active"),
                                  "imported": sp["fm"].get("imported") == "true",
+                                 "enforcement": enforcement.get((sp["node"]["id"], "specialist", sp["id"])),
                                  "lessons": _m_knowledge.parse_lessons(lesson_path) if lesson_path.exists() else [],
                                  "jobs": [r for r in inst.local.get("hires", [])
                                           if r.get("specialist") == sp["id"] and r.get("at") == sp["node"]["id"]]}))

@@ -1367,3 +1367,103 @@ replayable without resetting later progress or duplicating evidence. Pending
 landing facts publish only after every outcome is durable. External completion
 intent enters the existing provider sync outbox; finalization performs no network
 request.
+
+## D901: Local semantic recall is optional and fails back to lexical recall
+
+An optional, short-lived ONNX worker uses the pinned multilingual-e5-small int8
+model ([pinned artifacts](https://huggingface.co/Xenova/multilingual-e5-small/tree/761b726dd34fb83930e26aab4e9ac3899aa1fa78))
+with query/passage prefixes, masked mean pooling and normalized cosine
+ranking. No daemon, API key, remote inference or torch dependency is required.
+The core remains Python 3.9 standard library only. Optional runtime packages
+are detected without importing the model. Unknown or less than 2 GB available
+RAM, missing packages, malformed optional configuration, offline operation and any inference/index failure retain
+lexical retrieval. `brain check` reports the current mode; install and upgrade
+already run that check. `brain recall --setup` prepares the model explicitly.
+
+Artifacts download lazily with pinned revision, lengths and SHA256 integrity;
+tests prohibit downloads. Ordinary recall bounds optional work to 12 seconds;
+explicit setup allows 180 seconds. Model setup has no outward publication.
+The private `.brain/semantic/` cache binds vectors to model and content hashes.
+Linked document sources are excluded. Eligibility (scope, state, source content) is checked before embedding and every
+cache read, including deletion/revocation. Proposals remain inactive. There is
+no online provider enabled. The index covers usable library items and the target node's own knowledge,
+decision notes and report indexes. External transcript archives are not indexed.
+
+## D902: Proposal briefs summarize evidence without activating it
+
+`proposals --brief` presents each pending claim, citation, source, scope and
+individual supported decision commands. `--json` exposes the same bounded sheets.
+The existing full view remains the source for complete evidence. Holder and
+source screening applies to every sheet, including commands and paths. Brief
+rendering is read-only and refuses combination with activation. Specialist/rule
+rejections remain inactive source decisions where no rejection CLI exists.
+
+## D903: Recurrence receipts consume evidence, not direction authority
+
+Synthesis is due after three fresh corrections to one principle or five fresh
+unclassified corrections. Exact occurrence hashes preserve duplicate records
+and stable identities across reordering. An explicit `due --synthesis-seen` receipt
+consumes only the current set, refusing stale/wrong-node sets, without rewriting
+lessons, provenance, scope or direction. Reads remain repeatable until handled.
+Distillation proposes an evidence-backed diff and requires an explicit decision
+before applying it. Corrupt receipts, lessons and source policy fail closed with
+repair notices. Inactive or out-of-scope specialist lessons never participate.
+
+## D904: Enforcement uses declared rules and scoped correction evidence
+
+Stable rule ids in direction Principles and role/standard Standards, Checklist
+or Never sections carry `enforced_by` paths or `wish`. Lesson capture resolves
+that same declaration set; duplicate ids across sources refuse. Paths are relative to the
+node's bound home and cannot escape it. Check reports missing declared files;
+facts and dashboard JSON expose wish counts and percentages. Two scoped wish
+corrections emit a stable check-work notice. Rule declarations and correction
+snapshots are preserved separately; installing a declared check clears that wish.
+
+Task records are produced only during lesson capture or explicit
+`enforcement --sync-tasks`, using the task domain's idempotent source API.
+Read-only due, facts and dashboard calls never create tasks. Source references name the declaring standards/direction file. Source identities
+are stable per target/principle so observations preserve parked/dropped progress.
+Inactive, foreign-scope and malformed evidence cannot create work. Free-form
+legacy prose is not guessed into new rule ids or silently activated.
+
+## D905: Feedback closes through executed mapped proof
+
+Node-local feedback records have stable ids and link a correction to its
+principle, job, check and before/after evidence. Read-only list/due/facts/UI paths
+never change the ledger. Add and map retain open state; a mapping change clears
+old proof. Close executes the mapped relative check inside its registered job
+worktree (or the ledger job's home), with a 30-second budget. Python and shell
+checks use explicit interpreters; no shell command string is evaluated.
+
+Only exit zero with unchanged check bytes and Git HEAD records closure. Proof
+contains check SHA256, HEAD, job, check and timestamp. Missing evidence, a failed
+check, timeout or concurrent source change leaves feedback open. Corrupt stores
+are retained with a repair notice. This proof records the executed check result,
+not the semantic adequacy of the check or an authenticated reviewer identity.
+
+## D906: Native teaching applies an adaptation through the target harness
+
+`teach` prepares a scope-checked brief, or applies an explicitly supplied native
+adaptation with `--file --to --check`. External homes require an existing
+registered worktree and matching branch. The target file stays inside that home;
+linked files, repository metadata and generated outputs refuse. Existing files
+require an exact expected content hash. Boundary crossings require every target
+owner's explicit consent even when the item scope permits use.
+
+The target's own check must pass without changing the adaptation or source
+snapshot. Failure restores only this operation's unchanged copy; unexpected
+concurrent edits are retained. Private machine receipts bind source and native
+hashes to executed proof without putting source provenance into the native copy.
+The copy remains uncommitted for the target's normal change process; teaching
+neither propagates future updates nor publishes or accepts knowledge proposals.
+
+## D907: Semantic documents retain verified source ownership through embedding
+
+Document discovery rejects linked bindings, notes and report ancestors before
+reading content. The opened regular file must have one link and its physical
+node/home owner must match the caller; registered workbenches cannot override a
+more specific node owner. Source bytes are bounded and read from the verified
+descriptor. The same screened bytes enter embedding directly, with no second path
+read that could substitute a different source. Caller provenance is assigned only
+after these checks. Rejected sources never enter model inputs or vector caches;
+ordinary same-node documents and lexical fallback remain available.

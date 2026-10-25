@@ -14,6 +14,8 @@ def prepare_model(folder, download, staging):
     from brain.semantic import MODEL_FILES, MODEL_ID, MODEL_REVISION
     folder.mkdir(parents=True, exist_ok=True)
     manifest = folder / 'manifest.json'
+    if folder.is_symlink() or manifest.is_symlink():
+        raise ValueError('unsafe model path')
     try:
         saved = json.loads(manifest.read_text())
     except (OSError, ValueError):

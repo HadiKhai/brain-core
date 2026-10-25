@@ -35,7 +35,7 @@ LANE_TESTS.update({
     'cli': ('test_cli.py', 'test_selftest_parallel.py'),
     'train': ('test_train.py', 'test_train_review.py', 'test_train_landing.py', 'test_land.py', 'test_train_automation.py', 'test_release.py'),
     'jobs': ('test_jobs.py', 'test_train_ejection.py', 'test_handback_queue.py', 'test_queue_priority.py', 'test_forecasts.py', 'test_gate_forecasts.py', 'test_throughput.py', 'test_job_adoption.py', 'test_host_lifecycle.py', 'test_worker_lifecycle.py'),
-    'knowledge': ('test_knowledge.py', 'test_semantic_recall.py'),
+    'knowledge': ('test_knowledge.py', 'test_semantic_recall.py', 'test_recurrence.py', 'test_learning_loop.py', 'test_feedback.py', 'test_teach.py'),
     'status': ('test_status.py', 'test_inbox_noise.py'),
     'reminders': ('test_due_lifecycle.py', 'test_conversation_answers.py'),
     'worktrees': ('test_worktrees.py', 'test_prune_orphans.py', 'test_prune_states.py', 'test_prune_thread_targets.py', 'test_job_env.py', 'test_lock_sites.py'),

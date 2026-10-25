@@ -23,6 +23,10 @@ from . import jobs as _m_jobs
 from . import knowledge as _m_knowledge
 from . import machine as _m_machine
 from . import nodes as _m_nodes
+from . import recurrence as _m_recurrence
+from . import learning as _m_learning
+from . import feedback as _m_feedback
+from . import teaching as _m_teaching
 from . import proposals as _m_proposals
 from . import reports as _m_reports
 from . import schedules as _m_schedules
@@ -727,6 +731,10 @@ def due_items(inst, n, evidence=None, include_stale=True, include_ready=True, in
     for task_item in _m_tasks.due_tasks(inst, n):
         task_item["text"] = _m_guard.redact(task_item["text"], _m_guard.never_terms(n))
         items.append(task_item)
+
+    items.extend(_m_recurrence.synthesis_due(inst, n))
+    items.extend(_m_learning.enforcement_due(inst, n))
+    items.extend(_m_feedback.feedback_due(inst, n))
     omitted = (['stale-status'] if not include_stale else []) + (['job'] if not include_advice else [])
     return _m_reminders.reminder_items(inst, n, items, include_handled=include_handled, omitted_kinds=omitted)
 
@@ -782,6 +790,11 @@ def coordinator_due_items(inst, nodes, include_handled=False):
 
 def cmd_due(a):
     inst = _m_nodes.load()
+    if getattr(a, "synthesis_seen", None):
+        if not a.id or a.quiet or a.json or a.machine or getattr(a, 'defer', None) or getattr(a, 'ack', None):
+            _m_common.die("--synthesis-seen needs one node id and no display/reminder options")
+        _m_recurrence.synthesis_seen(inst, inst.node(a.id), a.synthesis_seen)
+        return
     nodes = [inst.node(a.id)] if a.id else inst.nodes()
     defer, ack = getattr(a, 'defer', None), getattr(a, 'ack', None)
     if defer or ack:
@@ -1013,6 +1026,13 @@ def status_facts(inst, n, state, known_merges, metadata_only=False):
     rules, roles, items = pending_imports(inst, n)
     if rules or roles or items:
         lines += ["", f"Imported, unreviewed (inactive): {rules} rule file(s), {roles} role(s), {items} proposed item(s)."]
+    teaching = _m_teaching.teaching_summary(inst, n)
+    if teaching["copies"]:
+        lines += ["", f"Checked native copies tracked: {teaching['copies']}"]
+    feedback = _m_feedback.feedback_projection(inst, n)
+    lines += ["", f"Open feedback: {sum(row['status'] == 'open' for row in feedback)}"]
+    for metric in _m_learning.enforcement_metrics(inst, n):
+        lines += [f"{metric['type']} {metric['target']}: {metric['wishes']}/{metric['total']} wishes ({metric['wish_percent']}%)."]
     human = [i for i in attention_items(inst, [n]) if i[1] not in ("stale",)]
     lines += ["", f"Due: {sum(not i.get('informational') and not _m_reminders.reminder_handled(inst, i) for i in due)} · Needs the human (attention sources, excluding stale status): {len(human)}"]
     compact, count = [], 0
@@ -1251,6 +1271,8 @@ def cmd_proposals(a):
     """Everything waiting for review, a node at a time, with full text: read it here, then accept or reject several
     at once. Nothing here accepts anything."""
     if getattr(a, 'approve_all', False):
+        if getattr(a, "brief", False):
+            _m_common.die("--brief cannot activate proposals")
         return _m_proposals.cmd_proposal_activation(a)
     if getattr(a, 'review_manifest', None):
         _m_common.die('--review-manifest requires --approve-all')
@@ -1295,6 +1317,9 @@ def cmd_proposals(a):
                                                     src_terms[i["path"]]),
                                 "path": str(i["path"].relative_to(inst.root)),
                                 "body": clean(_m_common.read_fm(i["path"])[1].strip(), src_terms[i["path"]])} for i in it]})
+    if getattr(a, "brief", False):
+        from . import proposal_briefs as _m_proposal_briefs
+        return _m_proposal_briefs.reviewer_brief(rows, screens, a.json)
     if a.json:
         print(json.dumps([_m_history.history_screen(row, group) for row, group in zip(rows, screens)], indent=1,
                          ensure_ascii=False))

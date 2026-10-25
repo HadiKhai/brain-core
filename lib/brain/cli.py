@@ -31,6 +31,9 @@ from . import handback_queue as _m_handback_queue
 from . import dispatcher as _m_dispatcher
 from . import knowledge as _m_knowledge
 from . import launch_receipts as _m_launch_receipts
+from . import learning as _m_learning
+from . import feedback as _m_feedback
+from . import teaching as _m_teaching
 from . import land_checks as _m_land_checks
 from . import messages as _m_messages
 from . import machine as _m_machine
@@ -191,8 +194,14 @@ def writes(a):
         return a.new or bool(getattr(a, "add", None))
     if name == 'cmd_index':
         return a.record or bool(getattr(a, "refresh", False))
+    if name == "cmd_teach":
+        return bool(a.file)
+    if name == "cmd_feedback":
+        return a.action != "list"
+    if name == "cmd_enforcement":
+        return a.sync_tasks
     if name == 'cmd_due':
-        return bool(getattr(a, 'defer', None) or getattr(a, 'ack', None))
+        return bool(getattr(a, 'synthesis_seen', None) or getattr(a, 'defer', None) or getattr(a, 'ack', None))
     if name == "cmd_changes":
         return a.seen
     if name == "cmd_connect":
@@ -308,6 +317,7 @@ def main():
     cmd("proposals", _m_status.cmd_proposals, "everything waiting for review, node by node, with full text and the commands "
         "to accept or reject several at once", opt("id", nargs="?"),
         opt("--only", help="only these nodes (comma-separated)"), opt("--json", action="store_true"),
+        opt("--brief", action="store_true", help="compact independent reviewer sheet with claim, citation and decision commands"),
         opt('--approve-all', action='store_true', help='activate one complete independently reviewed rules snapshot'),
         opt('--review-manifest', help='complete coordinator-supplied snapshot review JSON'))
     cmd('policy', _m_policy.cmd_policy, 'inspect explicit reviewed publication policy; never publishes', 'id',
@@ -357,6 +367,7 @@ def main():
     cmd("rotate", _m_rotation.cmd_rotate, "prepare a file-based coordinator handover; prints host steps", "id")
     cmd("due", _m_status.cmd_due, "coordinator actions and machine holds; empty means no output",
         opt("--since-wake", action="store_true", help="new file-only wake items compared with the wake before the latest delivery"),
+        opt("--synthesis-seen", metavar="SET", help="record an exact synthesis set after its proposal has been reviewed"),
         opt("--machine", action="store_true", help="also show informational machine readings, even without node actions"),
         opt('--defer', nargs=2, metavar=('ITEM_ID', 'UNTIL'), help='defer an eligible reminder until an absolute timestamp'),
         opt('--ack', metavar='ITEM_ID', help='acknowledge a current parked/blocked handback episode'),
@@ -471,6 +482,15 @@ def main():
     t.add_argument("id", nargs="+"); t.add_argument("--at")
     t.add_argument("--reviewed-by", required=True, dest="reviewed_by")
     t.set_defaults(f=_m_knowledge.cmd_specialist_accept)
+    cmd("teach", _m_teaching.cmd_teach, "prepare or apply a checked native adaptation of a usable item", "item", "node",
+        opt("--branch"), opt("--file"), opt("--to"), opt("--check"), opt("--expected-sha256"),
+        opt("--consented-by", default=""))
+    cmd("feedback", _m_feedback.cmd_feedback, "record corrections and close only with an executed green check", "id",
+        opt("action", nargs="?", default="list", choices=["list", "add", "map", "close"]),
+        opt("value", nargs="?"), opt("--principle"), opt("--job"), opt("--check"),
+        opt("--before"), opt("--after"), opt("--json", action="store_true"))
+    cmd("enforcement", _m_learning.cmd_enforcement, "inspect enforcement and synchronize check tasks", "id",
+        opt("--sync-tasks", action="store_true"), opt("--json", action="store_true"))
     cmd("lesson", _m_knowledge.cmd_lesson, "brain lesson <specialist|node> --from <node> \"text\"", "specialist",
         opt("--from", dest="source", required=True), opt("--at"),
         opt("--node", action="store_true", help="record a correction to a node instead of a specialist"),
