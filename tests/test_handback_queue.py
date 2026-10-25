@@ -234,6 +234,26 @@ class HandbackLifecycle(Scenario):
                 m.queue_terminal(inst, n, request['id'], claimed['lease'], 'terminal')
                 self.assertFalse(m.queue_terminal(inst, n, request['id'], claimed['lease'], 'terminal'))
             self.assertEqual(m.read_queue_request(n, request['id'])['state'], 'terminal')
+            # Queue validation uses the same bound import-study row as direct handback.
+            study = {**row, 'Job': 'import:fixture'}
+            m.write_jobs(inst, n, [row, study])
+            study_args = argparse.Namespace(**{**vars(args), 'branch': study['Job'],
+                                              'state': 'done', 'reviews': 0})
+            queued = m.enqueue_handback(inst, n, study, study_args)
+            self.assertEqual(queued['job_key'], m.job_key(study))
+            self.assertEqual(queued['args']['reviews'], 0)
+            self.assertEqual(queued['state'], 'queued')
+            with m.claim_handback(inst, n, queued['id']) as claimed:
+                self.assertTrue(m.queue_terminal(inst, n, queued['id'], claimed['lease'], 'terminal'))
+            before = {p.name: p.read_bytes() for p in (n['dir'] / 'handback-queue').glob('*.json')}
+            for invalid in (argparse.Namespace(**{**vars(args), 'state': 'done', 'reviews': 0}),
+                            argparse.Namespace(**{**vars(study_args), 'reviews': -1}),
+                            argparse.Namespace(**{**vars(study_args), 'reverify': True}),
+                            argparse.Namespace(**{**vars(study_args), 'full_receipt': 'missing.json'})):
+                with self.assertRaises(SystemExit):
+                    m.enqueue_handback(inst, n, study if invalid.branch == study['Job'] else row, invalid)
+                self.assertEqual(before, {p.name: p.read_bytes()
+                                          for p in (n['dir'] / 'handback-queue').glob('*.json')})
 
     def test_p2_attestation_refuses_unsafe_entries_without_ledger_mutation(self):
         m, inst, n, row = self.fixture()

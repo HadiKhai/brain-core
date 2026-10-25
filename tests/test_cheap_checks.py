@@ -46,7 +46,9 @@ class CheapChecks(Scenario):
             self.assertEqual(len(waits), 1)
             row = next(iter(waits.values()))
             self.assertIsNotNone(row['ended_at'])
-            self.assertEqual(row['outcome'], 'error' if cheap_result else 'success')
+            self.assertEqual(row['outcome'], 'failed' if cheap_result else 'success')
+            if cheap_result:
+                self.assertEqual(row['reason'], 'command exited with status ' + str(cheap_result))
         return result, events
 
     def test_cheap_runs_before_full_admission(self):

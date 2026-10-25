@@ -56,7 +56,7 @@ def write_queue_request(n, data):
 
 
 def enqueue_handback(inst, n, row, args):
-    _m_jobs.validate_handback_options(args)
+    _m_jobs.validate_handback_options(args, row=row)
     with _m_instance.brain_lock(inst):
         identity = os.urandom(16).hex()
         attempt = _m_attempts.begin_attempt(inst, n, row, request_id=identity)

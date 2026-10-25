@@ -1956,3 +1956,27 @@ all landing notices, verifies repeated reads retain their identities, and checks
 that viewing preserves ledger, completion journal and watch delivery state and
 does not invoke provider polling or host delivery. Existing reminder lifecycle
 reconciliation is unchanged.
+
+
+## D18601: Preserve native completion and pre-creation admission contracts
+
+Focused cheap-check fixtures distinguish a nonzero result (`failed`) from an
+exception (`error`), retaining exit 7, queue release and the prohibition on full
+admission after a failed cheap check. Queue preflight receives the actual bound
+job row, so open import studies retain their documented zero-review completion
+while ordinary jobs and invalid study flags still refuse before publication.
+
+Worktree creation checks the canonical machine policy and reading before creating
+the workbench, branch, worktree, local binding or ledger row, including with
+`--no-setup`. A held start uses managed native admission and preserves its terminal
+record; healthy light creation does not acquire a heavy reservation. Setup retains
+its own resource reservation. Invalid machine policy has no fallback.
+
+Completion display fixtures retain real landed notices with stable source-owned
+identities. A quiet tick remains actionable when such a notice exists, even when
+other advice is informational. Lesson outcomes are checked independently of the
+preview evidence lifecycle: setting a URL and tour path still leaves the exact
+source-bound screenshot-tour need until a real receipt is recorded.
+
+Integrated fixture files have explicit, unique status, rehearsal and dashboard
+lane ownership. Existing command selection and worker policy are unchanged.

@@ -228,7 +228,13 @@ class InboxNoise(Scenario):
                          self.m.runaway_jobs(self.inst, root))
         with mock.patch.object(self.m, 'changes_due', return_value=[]):
             self.assertNotIn('job', [i['kind'] for i in self.m.watch_items(self.inst, root)])
-        # Advice alone is informational and does not make a quiet tick actionable.
+        # The real merged history row also produces an independently owned
+        # completion. Informational advice stays quiet; that completion does not.
+        landed, = [i for i in due if i['kind'] == 'job-landed']
+        self.assertEqual((landed['node'], landed['source']), ('root', 'root'))
+        self.assertTrue(landed['id'])
+        self.assertFalse(landed.get('informational', False))
+        ledger = (self.root / 'job-ledger.md').read_bytes()
         with mock.patch.object(self.m, 'load', return_value=self.inst), \
                 mock.patch.object(self.m, 'changes_due', return_value=[]), \
                 mock.patch.object(self.m, 'due_evidence', return_value=(
@@ -236,4 +242,7 @@ class InboxNoise(Scenario):
                 mock.patch.object(self.m, 'status_lag', return_value=None), \
                 self.assertRaises(SystemExit) as quiet:
             self.m.cmd_due(argparse.Namespace(id='root', quiet=True, json=False))
-        self.assertEqual(quiet.exception.code, 0)
+        self.assertEqual(quiet.exception.code, 1)
+        self.assertEqual((self.root / 'job-ledger.md').read_bytes(), ledger)
+        after = json.loads(self.b(self.root, 'due', 'root', '--json'))
+        self.assertEqual([i['id'] for i in after if i['kind'] == 'job-landed'], [landed['id']])

@@ -216,6 +216,15 @@ def cmd_wt_add(a):
         _m_tasks.prepare_start(n, getattr(a, "task_id", None), a.branch)
     except ValueError as error:
         _m_common.die(str(error))
+    # Even a setup-free start must not publish a job under native resource pressure.
+    # Healthy light creation needs no reservation; held starts use the managed
+    # admission lifecycle, including its real terminal outcome and owned release.
+    policy = _m_machine.machine_policy()
+    if _m_machine.machine_reasons(_m_machine.machine_reading(inst), policy):
+        with _m_instance.released(inst, n), \
+                _m_machine.machine_run('heavy', inst, n['id'], a.branch) as token:
+            _m_machine.machine_wait('heavy', inst, n['id'], job=a.branch, token=token)
+        n = inst.node(a.id)  # released admission reloads validated local bindings
     wb = workbench(inst, n, create=True)
     path = wb / "worktrees" / a.branch.replace("/", "-")
     for owner, record in n["local"].get("worktrees", {}).items():

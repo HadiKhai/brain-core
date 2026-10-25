@@ -765,6 +765,8 @@ raise SystemExit(result)
                '--node', 'root', '--brief', 'Inspect fixture work')
         readings = self.tmp / "readings.json"
         readings.write_text(json.dumps({**self.good, "thermal": "pressure"}))
+        ledger = (root / 'job-ledger.md').read_bytes() if (root / 'job-ledger.md').exists() else None
+        local = (root / '.brain/local.json').read_bytes()
         code = ("import core_loader,json; from pathlib import Path; "
                 "m=core_loader.SourceFileLoader('fixture'," + repr(str(CORE / "bin/brain")) + ").load_module(); "
                 "m.MACHINE_RETRY=.01; m.machine_reading=lambda inst=None:json.loads(Path(" + repr(str(readings)) + ").read_text()); m.main()")
@@ -776,6 +778,9 @@ raise SystemExit(result)
             self.assertIn("thermal pressure", first)
             self.assertNotEqual(subprocess.run(["git", "show-ref", "--verify", "refs/heads/job/fixture"],
                                 cwd=home, env=self.env, capture_output=True).returncode, 0)
+            self.assertFalse((self.tmp / 'fixture-home-work/worktrees/job-fixture').exists())
+            self.assertEqual((root / 'job-ledger.md').read_bytes() if (root / 'job-ledger.md').exists() else None, ledger)
+            self.assertEqual((root / '.brain/local.json').read_bytes(), local)
             inst = m.Instance(root)
             with mock.patch.object(m, "load", return_value=inst), mock.patch.object(m, "due_items", return_value=[]), \
                     mock.patch.object(m, "machine_reading", return_value=json.loads(readings.read_text())), \

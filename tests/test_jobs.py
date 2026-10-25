@@ -402,7 +402,13 @@ class UnifiedHandbacks(Scenario):
         self.b(r, "jobs", "a", "--attestation-file", settlement_export(self, r, 'a', branch="job"), "--branch", "job", "--settled")
         self.b(r, "set", "a", "preview=http://localhost:4100", "preview_tour=reports/tour.md")
         self.b(r, "status", "a", "--refresh")
-        self.assertEqual(self.due(r), [])
+        pending = self.due(r)
+        self.assertNotIn('lesson-outcome', [i['kind'] for i in pending])
+        preview, = pending
+        self.assertEqual((preview['node'], preview['kind'], preview['condition']),
+                         ('a', 'preview-evidence', 'source-bound-preview-tour'))
+        self.assertEqual(json.loads(self.b(r, 'preview', 'a', '--json')),
+                         {'state': 'missing', 'reason': 'no source-bound screenshot tour recorded'})
 
     def test_unbound_home_does_not_break_read_only_due_or_ready(self):
         r, home, wt = self.job()
