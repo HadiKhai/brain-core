@@ -122,6 +122,8 @@ READ_ONLY = {"cmd_show", "cmd_tree", "cmd_status", "cmd_now", "cmd_jobs", "cmd_s
 def writes(a):
     """Does this command, with these options, change anything in the instance?"""
     name = a.f.__name__
+    if name == "cmd_task_provider":
+        return True
     if name == "cmd_task_sources":
         return a.action == "rule-add"
     if name == "cmd_task_migrate":

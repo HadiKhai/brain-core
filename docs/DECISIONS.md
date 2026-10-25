@@ -102,3 +102,30 @@ current `rules.md` index and preserves superseded rule records. Imported prose
 never activates itself, and a manually maintained rules index refuses overwrite.
 Install/upgrade runs additive task migration and documents repairs on failure;
 read-only commands never silently migrate storage or contact providers.
+
+## D1305: External task ownership and durable state writeback
+
+`tasks.source=linear` selects an opt-in stdlib GraphQL adapter; local remains the
+default. Linear owns issue identifiers, product text, workflow, priority, assignee
+and blocker relations. Pulls preserve internal job, requirement and decision data,
+validate complete pagination before writing, and retain mirrors on errors.
+Provider completion is displayed as provider evidence, separately from a local
+verified code landing. Parked internal work retains its resume condition.
+
+Job state writes persist retry intent before the API request. Requests contain
+only issue/state UUIDs, never internal task metadata. Product issue creation
+searches the configured team for a matching title before creating an issue.
+Credentials come only from the process environment and are never persisted.
+Read-only dashboard/due paths perform no provider requests. Wakes and job starts
+pull explicitly; failed writes remain pending for the next sync.
+
+API contract: [Linear GraphQL](https://linear.app/developers/graphql), with field
+and relation definitions from the [official schema](https://github.com/linear/linear/blob/master/packages/sdk/src/schema.graphql).
+
+## D1306: Stable source tasks preserve progress across producer retries
+
+`upsert_source_task` derives a local task and requirement identity from a stable
+producer source ID. Repeated observations return the existing record unchanged,
+including parked and dropped states. New observations begin in backlog with
+source provenance and an explicitly observed date. Read-only consumers never
+invoke the producer mutation API.

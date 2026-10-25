@@ -209,6 +209,7 @@ def cmd_wt_add(a):
         _m_common.die(f"that branch name contains {', '.join(_m_guard.find_terms(a.branch, _m_guard.never_terms(n)))}: pick another")
     for warning in _m_status.code_setup_warnings(inst, n):
         print("! " + warning)
+    _m_tasks.provider_pull_on_wake(inst, n)
     try:
         _m_tasks.prepare_start(n, getattr(a, "task_id", None), a.branch)
     except ValueError as error:

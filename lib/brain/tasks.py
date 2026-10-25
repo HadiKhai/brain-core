@@ -101,6 +101,11 @@ def validate(n, records):
             raise ValueError(ident + ': title required')
         if row.get('status') not in STATUSES or row.get('kind') not in KINDS:
             raise ValueError(ident + ': unknown status or kind')
+        if row.get('source') not in ('local', 'linear'):
+            raise ValueError(ident + ': invalid task source')
+        if not isinstance(row.get('owner'), str) or not row['owner'].strip():
+            if row.get('source') != 'linear':
+                raise ValueError(ident + ': owner required')
         if row.get('priority') not in ('P0', 'P1', 'P2', 'P3'):
             raise ValueError(ident + ': priority must be P0-P3')
         for key in ('order', 'strikes'):
@@ -110,21 +115,22 @@ def validate(n, records):
             if not isinstance(row.get(key), list) or any(not isinstance(x, str) or not x.strip() for x in row[key]):
                 raise ValueError(ident + ': invalid ' + key)
         deps = row['depends_on'] + ([row['parent']] if row.get('parent') else [])
-        if any(d not in records for d in deps):
+        external = row.get('source') == 'linear' and isinstance(row.get('provider'), dict)
+        if any(d not in records for d in deps) and not external:
             raise ValueError(ident + ': missing dependency or parent')
         for link in row['decisions']:
             if not re.fullmatch(r'(?:repo:D[0-9]+|private:D-[A-Za-z0-9-]+)', link):
                 raise ValueError('decision links use repo:D123 or private:D-123')
         if row.get('requirement') and row['requirement'] not in read_records(n, 'requirements'):
             raise ValueError(ident + ': requirement not found')
-        if row['status'] in ('in-progress', 'in-review', 'testing'):
+        if row['status'] in ('in-progress', 'in-review', 'testing') and not external:
             if jobs is None:
                 from . import jobs as _m_jobs
                 jobs = _m_jobs.read_jobs(n) or []
             if not any(r.get('Job') == row.get('branch') and not r.get('Ended') and
                        _m_jobs.job_key(r) == row.get('job') for r in jobs):
                 raise ValueError(ident + ': active status requires a live ledger job and branch')
-        if row['status'] in ('merged', 'done'):
+        if row['status'] in ('merged', 'done') and not (external and row['provider'].get('state_type') == 'completed'):
             if not SHA.fullmatch(row.get('merge_sha', '')) or not row.get('code_path') or not row['evidence']:
                 raise ValueError(ident + ': completion requires merge_sha, code_path and evidence')
             home = n.get('home_path')
@@ -143,7 +149,8 @@ def validate(n, records):
         visiting.add(ident)
         row = records[ident]
         for dep in row['depends_on'] + ([row['parent']] if row.get('parent') else []):
-            visit(dep)
+            if dep in records:
+                visit(dep)
         visiting.remove(ident)
         visited.add(ident)
     for ident in records:
@@ -156,6 +163,8 @@ def mutate(inst, n, ident, changes, create=False, provider=False):
         if create == (ident in rows):
             raise ValueError('task already exists' if create else 'task not found')
         changes = normalize(changes)
+        if not create and 'source' in changes and changes['source'] != rows[ident].get('source'):
+            raise ValueError('task source cannot be changed; preserve provider ownership')
         if source(n) == 'linear' and not provider and (create and changes.get('source') != 'local' or
                 not create and rows[ident].get('source') == 'linear' and
                 set(changes) & {'title', 'description', 'status', 'priority', 'owner', 'depends_on'}):
@@ -256,6 +265,13 @@ def cmd_task(a):
 def register(sub):
     parser = sub.add_parser('task', help='node-local tasks, dependencies and completion evidence')
     actions = parser.add_subparsers(dest='action', required=True)
+    for action in ('sync', 'create'):
+        external = actions.add_parser(action, help='explicit Linear task adapter operation')
+        external.add_argument('node')
+        if action == 'create':
+            external.add_argument('--title', required=True)
+            external.add_argument('--description', default='')
+        external.set_defaults(f=cmd_task_provider)
     from . import task_requirements as _m_requirements
     from . import tasks_backfill as _m_backfill
     _m_requirements.register(actions)
@@ -316,6 +332,7 @@ def job_started(inst, n, row):
     if ident:
         from . import jobs as _m_jobs
         mutate(inst, n, ident, {'status': 'in-progress', 'job': _m_jobs.job_key(row), 'branch': row['Job']}, provider=True)
+        provider_job_state(inst, n, ident, 'started')
 
 
 def event(inst, n, ident, event_id, reason):
@@ -380,6 +397,8 @@ def job_closed(inst, n, row):
     # Existing task proof remains unchanged if the job endpoint is not on main.
     try:
         mutate(inst, n, ident, changes, provider=True)
+        if changes['status'] == 'merged':
+            provider_job_state(inst, n, ident, 'completed')
     except ValueError:
         mutate(inst, n, ident, {'status': 'parked', 'park_reason': 'Landing evidence is incomplete',
                               'resume': 'Provide the exact verified commit already on main'}, provider=True)
@@ -390,7 +409,9 @@ def due_tasks(inst, n):
     items = []
     for row in projection(n):
         kind = None
-        if row['status'] == 'ready' and not row['blocked_by']:
+        if row.get('provider_pending'):
+            kind = 'task-provider-pending'
+        elif row['status'] == 'ready' and not row['blocked_by']:
             kind = 'task-ready'
         elif row['status'] == 'blocked' and row['depends_on'] and not row['blocked_by']:
             kind = 'task-unblocked'
@@ -423,3 +444,58 @@ def cmd_task_backfill(a):
         print(json.dumps(_m_backfill.backfill(inst, inst.node(a.node), a.apply), ensure_ascii=False))
     except (OSError, ValueError) as error:
         _m_common.die(str(error))
+
+
+def cmd_task_provider(a):
+    from . import task_linear as _m_linear
+    inst = _m_nodes.load()
+    n = inst.node(a.node)
+    try:
+        result = _m_linear.create(inst, n, a.title, a.description) if a.action == 'create' else _m_linear.sync(inst, n)
+        print(json.dumps(result, ensure_ascii=False))
+    except (OSError, ValueError, KeyError, TypeError):
+        _m_common.die('External task operation failed; inspect provider configuration and retained mirror')
+
+
+def provider_pull_on_wake(inst, n):
+    if source(n) != 'linear':
+        return
+    from . import task_linear as _m_linear
+    try:
+        _m_linear.sync(inst, n)
+    except (OSError, ValueError, KeyError, TypeError):
+        print('! External task sync failed; retained mirror and pending state need repair')
+
+
+def provider_job_state(inst, n, ident, state_type):
+    if read_records(n)[ident].get('source') != 'linear':
+        return
+    from . import task_linear as _m_linear
+    try:
+        _m_linear.write_state(inst, n, ident, state_type)
+        _m_linear.pull(inst, n)
+    except (OSError, ValueError, KeyError, TypeError):
+        print('! External task state is pending; retained for retry on the next sync')
+
+
+def upsert_source_task(inst, n, source_id, title, *, kind='chore', description='', source_ref='', decisions=None, requirement=None):
+    """Idempotent producer API: observations never reset existing task progress."""
+    import hashlib
+    if not isinstance(source_id, str) or not source_id.strip():
+        raise ValueError('source task needs a stable source id')
+    suffix = hashlib.sha256(source_id.encode()).hexdigest()[:16].upper()
+    ident = 'TASK-' + suffix
+    with _m_instance.brain_lock(inst):
+        existing = read_records(n)
+        if ident in existing:
+            if source_id not in existing[ident].get('provenance', []):
+                raise ValueError('source task identity collision')
+            return existing[ident]
+        req_id = requirement or 'REQ-' + suffix
+        if not requirement and req_id not in read_records(n, 'requirements'):
+            save_record(n, {'version': VERSION, 'id': req_id, 'quote': title, 'at': inst.now(),
+                            'date_basis': 'event-observed', 'ref': source_ref or source_id,
+                            'created': inst.now()}, 'requirements')
+        return mutate(inst, n, ident, {'title': title, 'kind': kind, 'description': description,
+                                      'source': 'local', 'provenance': [source_id, source_ref or source_id],
+                                      'requirement': req_id, 'decisions': decisions or []}, create=True)

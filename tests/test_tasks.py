@@ -235,3 +235,110 @@ class Tasks(Scenario):
         with self.assertRaises(ValueError):
             tasks_backfill.migrate(self.inst, [self.n])
         self.assertEqual(len(tasks.read_records(self.n)), 1)
+
+    def linear_config(self):
+        self.n['fm'].update({'tasks.source': 'linear', 'tasks.linear.team_id': '11111111-1111-4111-8111-111111111111',
+                             'tasks.linear.started_state_id': '22222222-2222-4222-8222-222222222222',
+                             'tasks.linear.done_state_id': '33333333-3333-4333-8333-333333333333'})
+
+    def linear_issue(self, ident='DEMO-1', state='unstarted'):
+        return {'id': '44444444-4444-4444-8444-444444444444', 'identifier': ident, 'title': 'Export report',
+                'description': 'Product description', 'priority': 2, 'url': 'https://linear.app/example/issue/' + ident,
+                'team': {'id': self.n['fm']['tasks.linear.team_id']}, 'state': {'id': '55555555-5555-4555-8555-555555555555', 'type': state},
+                'assignee': {'name': 'Developer'}, 'inverseRelations': {'nodes': [], 'pageInfo': {'hasNextPage': False}}}
+
+    def test_linear_pull_preserves_internal_metadata_and_provider_state_owns_fields(self):
+        from brain import task_linear
+        self.linear_config()
+        with mock.patch.object(task_linear, 'collect', return_value=[self.linear_issue()]):
+            task_linear.pull(self.inst, self.n)
+        tasks.mutate(self.inst, self.n, 'DEMO-1', {'decisions': ['repo:D1305'], 'estimate': '2h'})
+        issue = self.linear_issue(state='completed')
+        issue['title'] = 'Changed in provider'
+        with mock.patch.object(task_linear, 'collect', return_value=[issue]):
+            task_linear.pull(self.inst, self.n)
+        row = tasks.read_records(self.n)['DEMO-1']
+        self.assertEqual(row['status'], 'done')
+        self.assertEqual(row['title'], 'Changed in provider')
+        self.assertEqual(row['decisions'], ['repo:D1305'])
+        with self.assertRaises(ValueError):
+            tasks.mutate(self.inst, self.n, 'DEMO-1', {'title': 'Local overwrite'})
+
+    def test_linear_failure_retains_mirror_and_state_intent_without_private_variables(self):
+        from brain import task_linear
+        self.linear_config()
+        with mock.patch.object(task_linear, 'collect', return_value=[self.linear_issue()]):
+            task_linear.pull(self.inst, self.n)
+        tasks.mutate(self.inst, self.n, 'DEMO-1', {'decisions': ['private:D-123'], 'evidence': ['Internal-only evidence']})
+        before = (self.root / 'tasks' / 'DEMO-1.md').read_text()
+        with mock.patch.object(task_linear, 'collect', side_effect=ValueError('offline')):
+            with self.assertRaises(ValueError):
+                task_linear.pull(self.inst, self.n)
+        self.assertEqual((self.root / 'tasks' / 'DEMO-1.md').read_text(), before)
+        with mock.patch.object(task_linear, 'request', side_effect=ValueError('offline')) as request:
+            with self.assertRaises(ValueError):
+                task_linear.write_state(self.inst, self.n, 'DEMO-1', 'started')
+        self.assertEqual(tasks.read_records(self.n)['DEMO-1']['provider_pending'], 'started')
+        self.assertEqual(set(request.call_args.args[1]), {'id', 'state'})
+        self.assertNotIn('private', json.dumps(request.call_args.args[1]))
+        with mock.patch.object(task_linear, 'request', return_value={'issueUpdate': {'success': True, 'issue': {'id': self.linear_issue()['id']}}}):
+            task_linear.write_state(self.inst, self.n, 'DEMO-1', 'started')
+        self.assertNotIn('provider_pending', tasks.read_records(self.n)['DEMO-1'])
+
+    def test_linear_pagination_and_duplicate_create_do_not_drop_or_duplicate_issues(self):
+        from brain import task_linear
+        self.linear_config()
+        pages = [{'issues': {'nodes': [self.linear_issue()], 'pageInfo': {'hasNextPage': True, 'endCursor': 'next'}}},
+                 {'issues': {'nodes': [self.linear_issue('DEMO-2')], 'pageInfo': {'hasNextPage': False}}}]
+        with mock.patch.object(task_linear, 'request', side_effect=pages) as request:
+            self.assertEqual(len(task_linear.collect(self.n)), 2)
+            self.assertEqual(request.call_args.args[1]['after'], 'next')
+        with mock.patch.object(task_linear, 'collect', return_value=[self.linear_issue()]), mock.patch.object(task_linear, 'request') as request:
+            row = task_linear.create(self.inst, self.n, ' export REPORT ')
+        self.assertEqual(row['id'], 'DEMO-1')
+        request.assert_not_called()
+
+    def test_linear_incomplete_dependency_page_refuses_entire_pull(self):
+        from brain import task_linear
+        self.linear_config()
+        issue = self.linear_issue()
+        issue['inverseRelations']['pageInfo']['hasNextPage'] = True
+        with mock.patch.object(task_linear, 'collect', return_value=[issue]):
+            with self.assertRaises(ValueError):
+                task_linear.pull(self.inst, self.n)
+        self.assertFalse((self.root / 'tasks').exists())
+
+    def test_linear_transport_scrubs_provider_errors_and_source_is_immutable(self):
+        import os
+        from brain import task_linear
+        self.linear_config()
+        with mock.patch.object(task_linear, 'collect', return_value=[self.linear_issue()]):
+            task_linear.pull(self.inst, self.n)
+        with self.assertRaises(ValueError):
+            tasks.mutate(self.inst, self.n, 'DEMO-1', {'source': 'local'})
+        with mock.patch.dict(os.environ, {'BRAIN_LINEAR_TOKEN': 'lin_api_fixture-secret'}), \
+                mock.patch.object(task_linear.urllib.request, 'urlopen', side_effect=OSError('fixture-secret in provider response')):
+            with self.assertRaises(ValueError) as error:
+                task_linear.request('query { viewer { id } }', {})
+        self.assertNotIn('fixture-secret', str(error.exception))
+
+    def test_linear_unknown_blocker_is_preserved_and_blocks_job_start(self):
+        from brain import task_linear
+        self.linear_config()
+        issue = self.linear_issue()
+        issue['inverseRelations']['nodes'] = [{'type': 'blocks', 'issue': {'identifier': 'OTHER-42'}}]
+        with mock.patch.object(task_linear, 'collect', return_value=[issue]):
+            task_linear.pull(self.inst, self.n)
+        self.assertEqual(tasks.projection(self.n)[0]['blocked_by'], ['OTHER-42'])
+        with self.assertRaises(ValueError):
+            tasks.prepare_start(self.n, 'DEMO-1', 'job/example')
+
+    def test_source_task_upsert_is_idempotent_and_preserves_parked_progress(self):
+        row = tasks.upsert_source_task(self.inst, self.n, 'enforcement:sample', 'Repair recurring failure', kind='fix')
+        ident = row['id']
+        tasks.mutate(self.inst, self.n, ident, {'status': 'parked', 'park_reason': 'Two rounds', 'resume': 'Narrow parser'})
+        same = tasks.upsert_source_task(self.inst, self.n, 'enforcement:sample', 'New observation')
+        self.assertEqual(same['id'], ident)
+        self.assertEqual(same['title'], 'Repair recurring failure')
+        self.assertEqual(same['status'], 'parked')
+        self.assertEqual(len(tasks.read_records(self.n)), 1)

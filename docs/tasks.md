@@ -56,3 +56,20 @@ in the same code commit. Private context stays in the node's private decision
 log. Tasks reference these with `repo:D123` or `private:D-12`; references do not
 copy their text. Repository decision backfills must use that repository's normal
 reviewed change process and exclude personal, private and operational context.
+
+## Optional external source
+
+Local tasks need no credentials or network. For a node already using Linear, set
+`tasks.source=linear`, `tasks.linear.team_id`, `tasks.linear.started_state_id`
+and `tasks.linear.done_state_id` to that team's UUIDs. Provide its API key or
+OAuth token as `BRAIN_LINEAR_TOKEN` in the process environment, never in node
+files. `brain task sync <node>` pulls and retries pending job state changes.
+Wake delivery and job start also pull; read-only task/due/dashboard views do not.
+
+Linear owns product text, assignee, priority, state and blocker relations. Internal
+job/requirement/decision fields remain local. Provider completion is a provider
+fact, not proof of a local native gate. `brain task create <node> --title '<product
+title>' --description '<product description>'` searches for duplicates first.
+Only that explicit product text goes to creation; lifecycle writes send only
+provider issue and workflow UUIDs. Local administrative tasks can still be added
+with `source=local`. Network errors retain the mirror and pending write intent.
