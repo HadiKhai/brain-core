@@ -660,6 +660,12 @@ checks use processed tokens, compactions and available active minutes since that
 restart. Older restart receipts without active minutes use elapsed time since
 acknowledgement. Ordinary brief regeneration does not reset the allowance.
 
+`brain launch-check <node> --selection-file selection.json --receipt-file receipt.json`
+checks the returned host provider, model and options against the declared selection.
+It rejects mismatches and unknown fields without calling the host or claiming
+execution enforcement. Keep receipt files private; the result prints only status
+and field names.
+
 `brief_max_kb` (default 8) charges UTF-8 task and embedded context bytes captured before
 assembly. Generated fixed instructions do not consume that allowance. Briefs warn above
 the allowance and refuse at twice it. Both chargeable and total bytes are reported; at

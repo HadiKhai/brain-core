@@ -86,3 +86,17 @@ existing caches and keep progress in memory, but never publish spend files. A la
 explicit accounting request may publish that progress. Cache schema version 6
 rebuilds older aggregates automatically. Full dashboard latency also depends on
 its worktree, readiness and due callers.
+
+## D703: Routed selections are checked against returned adapter receipts
+
+`brain launch-check` compares an explicit declared provider instance, model and
+options with actual returned host receipt fields. Provider aliases in declarations
+must agree. Options may be objects or unique id/value descriptor arrays; string
+and boolean values retain their types. Empty options must be explicit. Missing,
+ambiguous or malformed fields return unknown; unequal fields return mismatch.
+Both statuses exit nonzero. The checker accepts the host's structured-content
+wrapper, bounds file reads and rejects duplicate JSON keys.
+
+The command is read-only, invokes no host, and prints no supplied identifiers or
+option values. A match attests only that returned metadata matches the declared
+route. It neither enforces provider execution nor proves which model actually ran.
