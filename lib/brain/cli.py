@@ -10,6 +10,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+from . import action_guard as _m_action_guard
 from . import briefs as _m_briefs
 from . import check as _m_check
 from . import common as _m_common
@@ -113,7 +114,7 @@ def reexec_into_instance_core():
 READ_ONLY = {"cmd_show", "cmd_tree", "cmd_status", "cmd_now", "cmd_jobs", "cmd_stale", "cmd_ui", "cmd_guard",
              "cmd_due", "cmd_inbox", "cmd_index",
              "cmd_brief", "cmd_hire", "cmd_reports", "cmd_brains", "cmd_use", "cmd_machine", "cmd_usable",
-             "cmd_item_list", "cmd_item_show", "cmd_wt_list", "cmd_selftest", "cmd_init", "cmd_hook", "cmd_hook_approve", "cmd_help",
+             "cmd_item_list", "cmd_item_show", "cmd_wt_list", "cmd_selftest", "cmd_init", "cmd_hook", "cmd_hook_pretool", "cmd_hook_approve", "cmd_help",
              "cmd_dashboard", "cmd_ready", "cmd_usage", "cmd_scan", "cmd_scrub", "cmd_history",
              "cmd_gate_lock", "cmd_version", "cmd_connect", "cmd_recall", "cmd_proposals", "cmd_changes", "cmd_heavy", "cmd_rehearse", "cmd_policy"}
 
@@ -463,6 +464,10 @@ def main():
     t.set_defaults(f=_m_hosts.cmd_hook, event="stop")
     t = hsub.add_parser("approve", help="trust this instance and its project hooks in Codex (writes its config)")
     t.set_defaults(f=_m_hosts.cmd_hook_approve)
+    t = hsub.add_parser("pretool", help="check declared forbidden tool actions; reads runtime JSON on stdin")
+    t.set_defaults(f=_m_action_guard.cmd_hook_pretool)
+    cmd("allow", _m_action_guard.cmd_allow, "allow one exact forbidden shell command once", "id", "action",
+        opt("--once", action="store_true", required=True), opt("--cwd"), opt("--tool", default="Bash"))
     cmd("wake", _m_hosts.cmd_wake, "wake a node coordinator (or root); inbox remains the record", "id",
         opt("reason", nargs="?"), opt("--drain", action="store_true", help=argparse.SUPPRESS))
     cmd("watch", _m_watch.cmd_watch, "queue wakes only for new actionable file items",

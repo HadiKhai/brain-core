@@ -78,3 +78,20 @@ never executes a probe or claims that a cited source proves the statement.
 
 `decision_scope_since` on a node or instance can exempt earlier dated entries.
 Without a cutoff, all dated entries are checked. Template examples are ignored.
+
+## D1003: Enforce declared tool patterns with exact single-use allowances
+
+`hook pretool` matches explicit `Forbidden actions` bullets in node instructions,
+inheriting only to the nearest ownership boundary. Shell bullets are conservative
+textual glob searches over a whole command, including compound commands; `tool:`
+patterns match tool identities. This declared subset is not a shell sandbox.
+
+`allow --once` records an exact shell command, resolved working directory and node.
+It does not run the command. A locked atomic state update consumes the allowance
+before returning permission, with opaque issued/consumed audit events. Policy
+changes invalidate allowances. Hook errors fail open, matching existing runtime
+hook behavior. Runtime adapter templates register the hook; updating an adapter
+file does not install or activate it on a machine.
+
+An optional worker-message validator receives only explicit host session identity
+and raw tool arguments; the action engine never guesses a caller's role.
