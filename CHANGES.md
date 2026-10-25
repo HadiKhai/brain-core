@@ -1,3 +1,13 @@
+## Local recall and learning tools
+
+For agents: recall optionally uses local multilingual ONNX embeddings with automatic
+lexical fallback. `proposals --brief` provides compact evidence sheets. Recurring
+corrections produce synthesis notices; `distill` proposes a direction diff.
+
+After upgrading: `brain check` reports recall capability. Optional ONNX dependencies
+and model setup are not required for ordinary recall. Review synthesis proposals
+before recording their exact-set receipts; receipts never activate direction.
+
 # Changes, for the agents that run a Brain
 
 Newest first. Each entry says what changed in rules, skills and commands, and what to do after

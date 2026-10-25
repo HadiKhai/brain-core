@@ -82,3 +82,14 @@ The existing full view remains the source for complete evidence. Holder and
 source screening applies to every sheet, including commands and paths. Brief
 rendering is read-only and refuses combination with activation. Specialist/rule
 rejections remain inactive source decisions where no rejection CLI exists.
+
+## D903: Recurrence receipts consume evidence, not direction authority
+
+Synthesis is due after three fresh corrections to one principle or five fresh
+unclassified corrections. Exact occurrence hashes preserve duplicate records
+and stable identities across reordering. An explicit `due --synthesis-seen` receipt
+consumes only the current set, refusing stale/wrong-node sets, without rewriting
+lessons, provenance, scope or direction. Reads remain repeatable until handled.
+Distillation proposes an evidence-backed diff and requires an explicit decision
+before applying it. Corrupt receipts, lessons and source policy fail closed with
+repair notices. Inactive or out-of-scope specialist lessons never participate.

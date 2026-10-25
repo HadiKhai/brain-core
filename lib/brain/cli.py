@@ -142,7 +142,7 @@ def writes(a):
     if name == 'cmd_index':
         return a.record
     if name == 'cmd_due':
-        return bool(getattr(a, 'defer', None) or getattr(a, 'ack', None))
+        return bool(getattr(a, 'synthesis_seen', None) or getattr(a, 'defer', None) or getattr(a, 'ack', None))
     if name == "cmd_changes":
         return a.seen
     if name == "cmd_connect":
@@ -293,6 +293,7 @@ def main():
     cmd("rotate", _m_rotation.cmd_rotate, "prepare a file-based coordinator handover; prints host steps", "id")
     cmd("due", _m_status.cmd_due, "coordinator actions and machine holds; empty means no output",
         opt("--since-wake", action="store_true", help="new file-only wake items compared with the wake before the latest delivery"),
+        opt("--synthesis-seen", metavar="SET", help="record an exact synthesis set after its proposal has been reviewed"),
         opt("--machine", action="store_true", help="also show informational machine readings, even without node actions"),
         opt('--defer', nargs=2, metavar=('ITEM_ID', 'UNTIL'), help='defer an eligible reminder until an absolute timestamp'),
         opt('--ack', metavar='ITEM_ID', help='acknowledge a current parked/blocked handback episode'),

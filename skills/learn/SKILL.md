@@ -55,4 +55,7 @@ description: Capture reusable knowledge (a method, style, asset, script, lesson 
    accept or reject several at once: `brain item accept a b c --reviewed-by <principal>`,
    `brain item reject d e`, `brain specialist accept x y --at <node> --reviewed-by <principal>`.
    Edit a proposal's text before accepting it if it needs it. Only the operator or a principal accepts.
-10. Run `core/bin/brain check`.
+10. Recurring corrections appear in `brain due`: three fresh lessons for a principle or
+    five unclassified lessons. Use `distill` to propose an evidence-backed direction diff;
+    never activate it without the operator's explicit decision.
+11. Run `core/bin/brain check`.

@@ -19,6 +19,7 @@ from . import jobs as _m_jobs
 from . import knowledge as _m_knowledge
 from . import machine as _m_machine
 from . import nodes as _m_nodes
+from . import recurrence as _m_recurrence
 from . import proposals as _m_proposals
 from . import schedules as _m_schedules
 from . import rotation as _m_rotation
@@ -596,6 +597,7 @@ def due_items(inst, n, evidence=None, include_stale=True, include_ready=True, in
         add("stale-status", lag + "; update judgement sections, then brain status <node> --refresh")
     from . import watch as _m_watch
     items.extend(_m_watch.watch_job_stalls(inst, n))
+    items.extend(_m_recurrence.synthesis_due(inst, n))
     omitted = (['stale-status'] if not include_stale else []) + (['job'] if not include_advice else [])
     return _m_reminders.reminder_items(inst, n, items, include_handled=include_handled, omitted_kinds=omitted)
 
@@ -631,6 +633,11 @@ def machine_due_items(inst, nodes, state, items):
 
 def cmd_due(a):
     inst = _m_nodes.load()
+    if getattr(a, "synthesis_seen", None):
+        if not a.id or a.quiet or a.json or a.machine or getattr(a, 'defer', None) or getattr(a, 'ack', None):
+            _m_common.die("--synthesis-seen needs one node id and no display/reminder options")
+        _m_recurrence.synthesis_seen(inst, inst.node(a.id), a.synthesis_seen)
+        return
     nodes = [inst.node(a.id)] if a.id else inst.nodes()
     defer, ack = getattr(a, 'defer', None), getattr(a, 'ack', None)
     if defer or ack:
