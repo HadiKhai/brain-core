@@ -225,3 +225,27 @@ class InfrastructureAdvisories(unittest.TestCase):
         infra=fact('phase_changed',55,phase='execution',state='working',product=False)
         self.assertEqual(self.m.infrastructure_displacement_advisories([request,product,infra],KEY,self.now),[])
         self.assertEqual(self.m.infrastructure_displacement_advisories([infra],KEY,self.now),[])
+
+
+class PreviewTestingAdvisories(unittest.TestCase):
+    def setUp(self):
+        self.m=core_loader.SourceFileLoader('preview_advisory_fixture',str(CORE/'bin/brain')).load_module()
+        self.now=datetime.datetime(2026,1,1,11,tzinfo=datetime.timezone.utc)
+        self.runs=[fact('verify_completed',i,state='done',head=HEAD,evidence={'ref':f'run-{i}'}) for i in (1,2,3)]
+
+    def test_three_distinct_runs_need_current_usable_preview_receipt(self):
+        result=self.m.preview_testing_advisories(self.runs,KEY,self.now,HEAD)
+        self.assertEqual(len(result),1)
+        self.assertEqual(result[0]['test_runs'],3)
+        usable=fact('preview_usable',4,state='done',head=HEAD,evidence={'ref':'preview-a'})
+        self.assertEqual(self.m.preview_testing_advisories([*self.runs,usable],KEY,self.now,HEAD),[])
+        unusable=fact('preview_unusable',5,head=HEAD,evidence={'ref':'preview-b'})
+        self.assertEqual(len(self.m.preview_testing_advisories([*self.runs,usable,unusable],KEY,self.now,HEAD)),1)
+
+    def test_stale_preview_duplicate_runs_missing_head_and_exemptions_do_not_claim_proof(self):
+        stale=fact('preview_usable',4,state='done',head='c'*40,evidence={'ref':'preview-a'})
+        self.assertEqual(len(self.m.preview_testing_advisories([*self.runs,stale],KEY,self.now,HEAD)),1)
+        self.assertEqual(self.m.preview_testing_advisories([self.runs[0]]*3,KEY,self.now,HEAD),[])
+        self.assertEqual(self.m.preview_testing_advisories(self.runs,KEY,self.now,None),[])
+        exempt=fact('preview_exempt',4,head=HEAD,evidence={'ref':'exemption-a'})
+        self.assertEqual(self.m.preview_testing_advisories([*self.runs,exempt],KEY,self.now,HEAD),[])

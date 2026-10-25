@@ -76,3 +76,12 @@ not counted. Infrastructure exceeding product phase time produces informational
 advice until matching `product_outcome_delivered` proof is recorded. These are
 classified phase durations, not measured CPU time or transcript-derived activity;
 the advice does not claim that necessary setup was unauthorized.
+
+Testing-without-usable-preview advice counts more than two distinct completed
+`verify_completed`/`test_completed` run refs at the actual current branch head.
+A saved URL alone is not usability proof. A current-head `preview_usable` receipt
+with `state=done` suppresses advice; a later `preview_unusable` invalidates it.
+An explicit `preview_exempt` receipt or existing `preview=none` binding exempts the
+work. Unknown current heads stay unknown. Producers must retain rendering/data
+check evidence behind the receipt reference; this reader never claims a live
+browser check or starts a backend for a missing feature.

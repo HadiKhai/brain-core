@@ -150,3 +150,11 @@ classified. Report infrastructure time exceeding product time before recorded
 outcome delivery, retaining interval receipts and the elapsed-phase scope. A
 matching delivery fact closes the comparison. This is informational, not a gate
 or a claim about CPU use or the necessity of setup.
+
+## D112: Preview usability receipts bind to the actual branch head
+
+After more than two distinct completed check runs, compare their head to the
+actual branch tip and its latest supplied usable/unusable/exempt preview receipt.
+A saved URL or old-head receipt cannot establish usability. Unknown branch tips
+remain unknown. Receipt collectors own actual rendering and data checks; this
+projection never substitutes a browser claim or launches an environment.

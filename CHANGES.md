@@ -1653,3 +1653,10 @@ For agents: introspection compares observed classified execution-phase durations
 after a product request and flags infrastructure exceeding product time before
 recorded outcome delivery. Unknown classifications are excluded.
 After upgrading: producers mark product/infrastructure phase transitions explicitly.
+
+## Testing without usable-preview advice
+
+For agents: introspection links repeated completed runs to current-head preview
+receipts. Old proofs and saved URLs alone cannot establish usability; explicit
+exemptions remain supported.
+After upgrading: record usable/unusable preview evidence; no environment is started.

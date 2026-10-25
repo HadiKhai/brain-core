@@ -259,6 +259,41 @@ def infrastructure_displacement_advisories(events, job_key, now):
              'infrastructure_phase_seconds': durations[False], 'product_phase_seconds': durations[True],
              'evidence': evidence, 'scope': 'observed classified phase elapsed time, not CPU or inferred activity'}]
 
+
+def preview_testing_advisories(events, job_key, now, head):
+    if not head:
+        return []  # an old event head cannot establish the current checkout identity
+    runs, preview = {}, None
+    for event in introspection_observed(events, now, job_key):
+        data = event['data']
+        if data.get('head') != head:
+            continue
+        ref = data.get('evidence', {}).get('ref')
+        if not ref:
+            continue
+        if data['fact_type'] in ('verify_completed', 'test_completed') and data.get('state') == 'done':
+            runs[ref] = event['id']
+        if data['fact_type'] in ('preview_usable', 'preview_unusable', 'preview_exempt'):
+            preview = event
+    usable = preview and ((preview['data']['fact_type'] == 'preview_usable' and
+                           preview['data'].get('state') == 'done') or preview['data']['fact_type'] == 'preview_exempt')
+    if len(runs) <= 2 or usable:
+        return []
+    return [{'kind': 'testing-without-usable-preview', 'informational': True, 'test_runs': len(runs),
+             'text': 'More than two completed check runs have no current usable-preview receipt; provide something usable to try.',
+             'head': head, 'evidence': list(runs.values()) + ([preview['id']] if preview else []),
+             'scope': 'recorded completed runs and supplied usability receipts; no live browser verification'}]
+
+
+def introspection_head(n, branch):
+    saved = n['local'].get('worktrees', {}).get(branch, {})
+    where = Path(saved['path']) if isinstance(saved, dict) and saved.get('path') else n.get('home_path')
+    if not where or not where.is_dir():
+        return None
+    result = _m_common.git('rev-parse', '--verify', '--quiet', 'refs/heads/' + branch + '^{commit}', cwd=where)
+    head = result.stdout.strip() if result.returncode == 0 else ''
+    return head if re.fullmatch('[0-9a-f]{40}|[0-9a-f]{64}', head) else None
+
 def introspection_queue(inst, n):
     now = inst.now_dt().timestamp()
     record = _m_coordinators.coordinator_host_runs(inst, now).get(n['id'])
@@ -293,6 +328,10 @@ def introspection_snapshot(inst, n, branch=None, hours=24, limit=50):
         view['advisories'] += unchanged_verification_advisories(facts, view['job_key'], now)
         if not row['Ended']:
             view['advisories'] += infrastructure_displacement_advisories(facts, view['job_key'], now)
+            view['head'] = introspection_head(n, row['Job'])
+            if str(n['local'].get('preview', '')).strip().casefold() != 'none':
+                view['advisories'] += preview_testing_advisories(facts, view['job_key'], now, view['head'])
+            view['preview_evidence'] = 'head_bound_receipts' if view['head'] else 'head_unknown'
         view['review_evidence'] = 'receipt_hook' if reader else 'unavailable'
         views.append(view)
     result = {'version': 1, 'node': n['id'], 'jobs': views, 'partial': len(selected) > limit,
