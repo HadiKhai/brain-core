@@ -252,4 +252,3 @@ class WorkerLifecycle(Scenario):
         self.assertEqual(self.initial_tick()['state'], 'pending')
         self.assertEqual(self.initial_tick()['state'], 'pending')
         self.assertEqual(len(self.actions('t3_thread_launch')), 1)
-

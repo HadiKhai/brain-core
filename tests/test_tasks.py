@@ -272,6 +272,8 @@ class Tasks(Scenario):
         self.assertEqual(json.loads(path.read_text())['state'], 'verified')
         self.assertTrue(all(r['Ended'] for r in jobs.read_jobs(self.n)))
         delivered = (self.root / 'tasks/APP-1.md').read_bytes()
+        # Reconciliation runs with main unoccupied; instance records stay intact.
+        self.git('checkout', '--detach', '-q', cwd=self.root)
         train.run_train(self.inst, self.n, self.root, 'false', argparse.Namespace(jobs=None))
         self.assertEqual([r['status'] for r in tasks.read_records(self.n).values()], ['merged', 'merged'])
         self.assertEqual((self.root / 'tasks/APP-1.md').read_bytes(), delivered)

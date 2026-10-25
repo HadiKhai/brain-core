@@ -399,4 +399,3 @@ def launch_worker(inst, n, key, rpc=None):
             return {'job': key, 'state': 'done', 'thread': receipt['new']}
     except (OSError, ValueError, _m_rpc.HostRPCError, SystemExit) as error:
         return {'job': key, 'state': 'pending', 'reason': str(error)}
-

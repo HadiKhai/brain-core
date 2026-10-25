@@ -1816,7 +1816,3 @@ def job_advice(inst, n, row):
         out.append("no contract: brain jobs <node> --branch <branch> --contract-file <file> says what the worker may do "
                    "without asking")
     return out
-
-
-
-

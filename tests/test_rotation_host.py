@@ -150,4 +150,3 @@ class RotationHost(Scenario):
             self.threads['child']['latestRunId'] = 'child-run'
             self.assertEqual(self.rotate()['state'], 'launched')
             self.assertEqual(registry['tasks']['registration']['parent_thread'], 'old')
-
