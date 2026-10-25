@@ -119,3 +119,18 @@ runtime is introduced. `model_fit_min_samples` controls the minimum observations
 The feature defaults off. New ledger evidence updates recommendations automatically,
 while runtime pins, effort selection and subscription/model quota checks retain
 precedence. Receipt validation remains a separate adapter boundary.
+
+## D705: Native restarts acknowledge their captured pre-launch usage
+
+`acknowledge_usage_restart(..., observed_usage=<live_usage dict>)` accepts an
+explicit captured snapshot after a replacement has launched and been bound. The
+helper never re-reads lifetime counters in this mode, so replacement startup and
+work remain charged to its new round. Processed tokens, compactions and active
+minutes must all be known nonnegative integers, with positive measured sessions
+and host/transcript provenance. Missing, unknown, boolean or regressed counters refuse without changing the existing receipt. The supplied
+snapshot is copied and lifetime totals are never mutated.
+
+Omitting the keyword retains the existing post-delivery live-read behavior.
+Explicitly passing `None` is an unavailable snapshot and never selects that fallback.
+Episode and successful-delivery requirements remain unchanged. The native caller
+owns matching the captured snapshot to its exact job/restart operation.

@@ -111,3 +111,41 @@ class UsageRounds(Scenario):
             self.usage['processed'] += 20
             self.m.acknowledge_usage_restart(self.inst, self.n, self.row)
             self.assertEqual(self.m.job_round_usage(self.inst, self.n, self.row, self.usage)['processed'], 20)
+
+    def test_captured_prelaunch_usage_does_not_erase_new_worker_usage(self):
+        self.assertIsNotNone(self.m.usage_restart_item(self.inst, self.n, self.row))
+        captured = dict(self.usage)
+        self.usage.update(processed=260, fresh=260, compactions=5, active_minutes=135)
+        with mock.patch.object(self.m, 'live_usage', side_effect=AssertionError('read after launch')):
+            self.m.acknowledge_usage_restart(self.inst, self.n, self.row, observed_usage=captured)
+        round_usage = self.m.job_round_usage(self.inst, self.n, self.row, self.usage)
+        self.assertEqual((round_usage['processed'], round_usage['compactions'], round_usage['active_minutes']),
+                         (50, 1, 15))
+        self.assertEqual(captured['processed'], 210)
+        self.assertEqual(captured['active_minutes'], 120)
+
+    def test_unknown_or_incomplete_captured_usage_refuses_without_changing_receipt(self):
+        self.assertIsNotNone(self.m.usage_restart_item(self.inst, self.n, self.row))
+        before = self.m.lifecycle_read(self.inst)
+        good = dict(self.usage)
+        invalid = [None, {}, [], {k: v for k, v in good.items() if k != 'active_minutes'},
+                   {**good, 'sessions': 0, 'source': 'none found'}, {**good, 'sessions': None},
+                   {**good, 'source': 'not counted'}, {k: v for k, v in good.items() if k != 'source'},
+                   {**good, 'active_minutes': None}, {**good, 'active_minutes': True},
+                   {**good, 'processed': -1}, {**good, 'processed': 1.5},
+                   {**good, 'compactions': None}]
+        with mock.patch.object(self.m, 'live_usage', side_effect=AssertionError('fallback from unknown snapshot')):
+            for usage in invalid:
+                with self.subTest(usage=usage), self.assertRaisesRegex(ValueError, 'usage unavailable'):
+                    self.m.acknowledge_usage_restart(self.inst, self.n, self.row, observed_usage=usage)
+                self.assertEqual(self.m.lifecycle_read(self.inst), before)
+
+    def test_captured_usage_cannot_regress_an_existing_round_baseline(self):
+        self.restart()
+        self.usage.update(processed=420)
+        self.assertIsNotNone(self.m.usage_restart_item(self.inst, self.n, self.row))
+        before = self.m.lifecycle_read(self.inst)
+        with self.assertRaisesRegex(ValueError, 'regressed'):
+            self.m.acknowledge_usage_restart(self.inst, self.n, self.row,
+                                            observed_usage={**self.usage, 'processed': 200})
+        self.assertEqual(self.m.lifecycle_read(self.inst), before)
