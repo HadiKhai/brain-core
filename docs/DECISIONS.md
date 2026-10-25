@@ -62,3 +62,14 @@ reason before brief output or route recording. Explicit reasons, contract reason
 and independent review defaults satisfy it; an explicit urgent waiver remains
 available. Invalid policy values fail closed. This controls brief generation;
 it does not infer a safe agent cap or cancel overlapping work.
+
+## D102: Nested build-order authority stays explicit
+
+Only unchecked Markdown list tasks inside a Build order section are suggested.
+Bullets and ordered list markers may nest; completed, parked, operator-waiting or
+already-open parent entries suppress their descendants. Section heading depth
+defines its boundary. Comments and fenced examples remain excluded. Backtick code
+spans preserve exact branch names including legal commas and semicolons; plain
+mentions end at whitespace or Markdown brackets, with a terminal period ignored.
+Use code spans for branch names next to ambiguous prose punctuation. Existing
+capacity arithmetic and unreadable-ledger behavior remain unchanged.

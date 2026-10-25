@@ -447,10 +447,10 @@ def runnable_work(n, rows):
     path = n['dir'] / 'backlog.md'
     if slots <= 0 or not path.exists():
         return []
-    tasks, inside, fence = [], False, None
+    tasks, section_depth, fence, parents = [], None, None, []
     text = re.sub(r'<!--.*?-->', '', path.read_text(), flags=re.S)
-    for line in text.splitlines():
-        marker = re.match(r'^ {0,3}(`{3,}|~{3,})(.*)$', line)
+    for line in text.expandtabs(4).splitlines():
+        marker = re.match(r'^ *(`{3,}|~{3,})(.*)$', line)
         if marker:
             run, suffix = marker.groups()
             if fence is None:
@@ -460,17 +460,36 @@ def runnable_work(n, rows):
             continue
         if fence:
             continue
-        if re.match(r'^#{1,2}\s', line):
-            inside = line.strip().casefold() == '## build order'
+        heading = re.fullmatch(r' {0,3}(#{1,6}) +(.+?) *#* *', line)
+        if heading:
+            depth, title = len(heading[1]), heading[2].strip().casefold()
+            if title == 'build order':
+                section_depth = depth
+                parents = []
+            elif section_depth is not None and depth <= section_depth:
+                section_depth, parents = None, []
             continue
-        match = re.fullmatch(r'- \[ \]\s+(.+)', line)
-        if not inside or not match:
+        match = re.fullmatch(r'( *)(?:[-+*]|[0-9]{1,9}[.)]) +(.+)', line)
+        if section_depth is None or not match:
             continue
-        task = match[1].strip()
-        if re.search(r'\(\s*(?:parked\s*:[^)]*|waits\s*:\s*operator\s*)\)', task, re.I):
-            continue
-        branches = re.findall(r'''(?<![\w/.-])job/[^\s`'"<>()\[\],;:]+''', task)
-        if any(branch.rstrip('.') in opened for branch in branches):
+        indent, body = len(match[1]), match[2].strip()
+        while parents and parents[-1][0] >= indent:
+            parents.pop()
+        checkbox = re.fullmatch(r'\[([ xX])\] +(.+)', body)
+        task = checkbox[2].strip() if checkbox else body
+        # Code spans delimit full branch identities, including legal punctuation.
+        # In plain text whitespace/brackets delimit them; a final sentence period
+        # is ignored. Use code spans when punctuation would otherwise be ambiguous.
+        spans = re.findall(r'`+([^`]+)`+', task)
+        plain = re.sub(r'`+[^`]+`+', '', task)
+        branches = [span.strip() for span in spans if span.strip().startswith('job/')]
+        branches += [b.rstrip('.') for b in re.findall(r"(?<![\w/.-])job/[^\s<>()\[\]`]+", plain)]
+        blocked = bool((parents and parents[-1][1]) or
+                       (checkbox and checkbox[1] != ' ') or
+                       re.search(r'\(\s*(?:parked\s*:[^)]*|waits\s*:\s*operator\s*)\)', task, re.I) or
+                       any(branch in opened for branch in branches))
+        parents.append((indent, blocked))
+        if not checkbox or blocked:
             continue
         tasks.append(task)
         if len(tasks) == slots:

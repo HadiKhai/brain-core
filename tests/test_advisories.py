@@ -46,3 +46,62 @@ class SeparationPolicy(unittest.TestCase):
         self.n['fm']['separation_policy'] = 'silently-ignore'
         with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
             self.m.separation_lines(self.a, self.n, None)
+
+
+class NestedBuildOrder(unittest.TestCase):
+    def setUp(self):
+        import tempfile
+        self.folder = tempfile.TemporaryDirectory(prefix='advisory-test-')
+        self.addCleanup(self.folder.cleanup)
+        self.m = core_loader.SourceFileLoader('nested_order', str(CORE / 'bin/brain')).load_module()
+        self.n = {'dir': Path(self.folder.name), 'fm': {'parallel_jobs': '8'}, 'archived': False}
+
+    def tasks(self, text, rows=()):
+        (self.n['dir'] / 'backlog.md').write_text(text)
+        return self.m.runnable_work(self.n, list(rows))
+
+    def test_nested_and_numbered_tasks_inherit_parent_blocks(self):
+        text = '''## Build order
+- Milestone
+  * [ ] First
+  + [ ] Second
+- [x] Completed group
+  - [ ] Not authorized
+- Deferred group (parked: dependency)
+  - [ ] Also not authorized
+- Choice group (waits: operator)
+  - [ ] Still not authorized
+1. [ ] Third
+## Other
+- [ ] Outside
+'''
+        self.assertEqual(self.tasks(text), ['First', 'Second', 'Third'])
+
+    def test_exact_code_span_branch_punctuation_and_plain_boundaries(self):
+        rows = [{'Job': 'job/plan,extra', 'Ended': ''}, {'Job': 'job/a;b', 'Ended': ''}]
+        text = '''## Build order
+- [ ] Active `job/plan,extra`
+  - [ ] Child of active work
+- [ ] Active job/a;b
+- [ ] Different `job/plan`
+- [ ] Next
+'''
+        self.assertEqual(self.tasks(text, rows), ['Different `job/plan`', 'Next'])
+        self.assertEqual(self.tasks('## Build order\n- [ ] Other `job/plan,extra`\n',
+                                    [{'Job':'job/plan','Ended':''}]), ['Other `job/plan,extra`'])
+
+    def test_build_section_depth_comments_fences_and_capacity(self):
+        text = '''### Build order
+  - [ ] First
+  ```md
+  - [ ] Example
+  ```
+<!-- - [ ] Hidden -->
+#### Stage
+2) [ ] Second
+### Other
+- [ ] Outside
+'''
+        self.assertEqual(self.tasks(text), ['First', 'Second'])
+        self.n['fm']['parallel_jobs'] = '1'
+        self.assertEqual(self.tasks(text), ['First'])

@@ -61,3 +61,9 @@ a separation reason. Supply `--why-separate` or the contract's `## Why separate`
 independent reviews retain their default reason. `--allow-unexplained` records an
 explicit urgent waiver. The default `warn` preserves existing brief automation.
 This setting does not launch, cancel or consolidate agents.
+
+Build order headings may use any Markdown heading depth. Bullet (`-`, `*`, `+`)
+and numbered (`1.` or `1)`) tasks may nest. Completed, parked, operator-waiting or
+open-job parents suppress all nested tasks. Name branches in backtick code spans
+to preserve their full identity, including punctuation. Other headings at the
+same or shallower depth end the section; comments and fenced examples are ignored.

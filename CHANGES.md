@@ -1582,3 +1582,10 @@ For agents: `brain set <node> separation_policy=required` makes a missing
 separation reason refuse brief generation across workers, hires and reviews.
 Use `--why-separate`, a contract reason, or the explicit urgent waiver.
 After upgrading: existing nodes keep warning behavior unless they opt in.
+
+## Nested build-order detection
+
+For agents: idle-work detection accepts nested and numbered Markdown tasks and
+exact branch names in code spans. Parent completion, parking, operator waits and
+open jobs suppress descendants. Heading depth scopes the Build order section.
+After upgrading: no migration; use code spans around punctuation-bearing branches.
