@@ -240,6 +240,10 @@ def wake_item_refs(items):
     """Persist identities/kinds only; contradictory pairs are corrupt, never last-wins."""
     refs = {}
     for item in items:
+        if (not isinstance(item, dict) or not isinstance(item.get('id'), str) or
+                not re.fullmatch(r'[0-9a-f]{64}', item['id']) or
+                not isinstance(item.get('kind'), str) or not item['kind']):
+            raise ValueError('invalid typed wake identity')
         key, kind = item['id'], item['kind']
         if key in refs and refs[key]['kind'] != kind:
             raise ValueError('conflicting wake identity kinds')

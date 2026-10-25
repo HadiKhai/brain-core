@@ -1652,3 +1652,33 @@ class NativeHostExport(Scenario):
         with mock.patch.object(self.m, 'host_native_call') as call:
             self.m.host_export_if_enabled(self.inst)
             call.assert_not_called()
+
+
+class WakeIdentityTypes(Scenario):
+    def test_malformed_pending_ids_deliver_opaque_requests_without_type_errors(self):
+        patch = mock.patch.dict(os.environ, self.env)
+        patch.start()
+        self.addCleanup(patch.stop)
+        m = core_loader.SourceFileLoader('identity_fixture', str(CORE / 'bin/brain')).load_module()
+        root = self.init('alice')
+        self.b(root, 'set', 'root', 'coordinator=fixture-root', 'wake=fixture-send')
+        inst, node = m.Instance(root), None
+        node = inst.node('root')
+        directory = m.wake_directory(inst, node)
+        directory.mkdir(parents=True, exist_ok=True)
+        for index, identity in enumerate((7, True, None, [], {}, 'untrusted-identity')):
+            with self.subTest(identity=identity):
+                pending = directory / (format(index + 1, '064x') + '.pending')
+                raw = json.dumps({'items': [{'id': identity, 'kind': 'inbox'}]})
+                pending.write_text(raw)
+                with mock.patch.object(m, 'WAKE_INTERVAL', 0), mock.patch.object(m, 'wake_start'), \
+                        mock.patch.object(m, 'watch_groups', return_value={}), \
+                        mock.patch.object(m, 'wake_snapshot', return_value=[]):
+                    with mock.patch.object(m, 'wake_send', return_value=False):
+                        m.wake_drain(inst, node, once=True)
+                    self.assertEqual(pending.read_text(), raw)
+                    with mock.patch.object(m, 'wake_send', return_value=True) as send:
+                        m.wake_drain(inst, node, once=True)
+                    self.assertEqual(send.call_count, 1)
+                    self.assertFalse(pending.exists())
+                    self.assertNotIn('untrusted-identity', send.call_args.kwargs['reason'])

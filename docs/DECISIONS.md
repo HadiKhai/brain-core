@@ -165,3 +165,12 @@ shorter job keys. Question classification flags stay in queue metadata; display
 history preserves its identity/kind-only schema. Export RPC waits never hold the
 instance writer lock; a separate nonblocking export lock prevents stale concurrent
 publications.
+
+
+## D508: Reject malformed wake identities at the typed boundary
+
+Identity projection accepts only dictionaries with 64-character hexadecimal string
+ids and nonempty string kinds. Numeric, boolean, null, collection and malformed
+string ids become unknown metadata; they never reach string-only transport code.
+The existing opaque-request fallback carries that pending file through transport.
+Failed transport preserves original bytes. Successful transport alone retires it.
