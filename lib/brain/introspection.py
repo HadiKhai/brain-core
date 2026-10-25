@@ -45,12 +45,12 @@ def introspection_observed(events, now, job_key=None):
         except (ValueError, TypeError, KeyError):
             continue
         at = introspection_time(data.get('at'))
-        identity = event.get('id')
+        identity = event.get('id') or event.get('ref')
         if (not isinstance(identity, str) or not identity or identity in seen or not at or at > now
                 or data.get('origin') != 'observed' or (job_key is not None and data.get('job_key') != job_key)):
             continue
         seen.add(identity)
-        out.append((at, event))
+        out.append((at, {**event, 'id': identity}))
     return [event for at, event in sorted(out, key=lambda pair: (pair[0], pair[1]['id']))]
 
 
