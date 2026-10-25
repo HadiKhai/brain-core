@@ -138,3 +138,11 @@ microsecond precision. A saved URL, publication event or Git commit is not evide
 of usability. Missing request or usability evidence produces an unknown duration.
 Reconstructed history is labelled and excluded from measured observations. The
 projection is read-only and uses exact job identities.
+
+## D308: Phase time is observed working and waiting time
+
+`phase_changed` explicitly names a phase and working/waiting/done state. Delivery
+metrics integrate successive observed transitions until an explicit terminal event
+or the query time. Done phases contribute no work or wait duration. Gaps before
+the first observed phase remain unattributed; no transcript gap, process lifetime
+or Git timestamp becomes invented working time. Reconstructed events stay excluded.
