@@ -9,6 +9,7 @@ import time
 from pathlib import Path
 
 from . import common as _m_common
+from . import gate_lock as _m_gate_lock
 from . import guard as _m_guard
 from . import history as _m_history
 from . import instance as _m_instance
@@ -143,6 +144,9 @@ def cmd_upgrade(a):
     # the new core's own link and check --fix commit whatever they change
     subprocess.run([sys.executable, newbin, "link"], env=env)
     subprocess.run([sys.executable, newbin, "check", "--fix"], env=env)
+    migration = subprocess.run([sys.executable, newbin, "task", "migrate", "--all"], env=env)
+    if migration.returncode:
+        print("! task migration needs repair; see core/docs/tasks.md before starting jobs")
     _m_usage.usage_restart(root)
 
 
@@ -309,6 +313,33 @@ def _upgrade_train_busy(n):
         return [(n["id"], "unreadable train lock inventory")]
 
 
+def _upgrade_node_gate_busy(inst, n):
+    """Admission can be disabled; a node gate remains authoritative ownership."""
+    import fcntl
+    path = _m_gate_lock.gate_path(inst.root, n["id"])
+    try:
+        if path.parent.is_symlink():
+            raise ValueError("unsafe gate directory")
+        try:
+            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        except FileNotFoundError:
+            return []
+        with os.fdopen(fd) as held:
+            info = os.fstat(held.fileno())
+            target = path.lstat()
+            if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or
+                    not stat.S_ISREG(target.st_mode) or
+                    (info.st_dev, info.st_ino) != (target.st_dev, target.st_ino)):
+                raise ValueError("unsafe node gate")
+            try:
+                fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return [(n["id"], "in-flight node gate")]
+        return []
+    except (OSError, ValueError, TypeError):
+        return [(n["id"], "unreadable node gate inventory")]
+
+
 def open_jobs_anywhere(inst, idle=None):
     """In-flight work and unknown inventory refuse; retained idle jobs are only a notice.
 
@@ -336,6 +367,7 @@ def _upgrade_work_inventory(inst, idle):
             rows = []
         idle += [(n["id"], r["Job"]) for r in rows if not r["Ended"]]
         out += _upgrade_train_busy(n)
+        out += _upgrade_node_gate_busy(inst, n)
         worktrees = n["local"].get("worktrees", {})
         if not isinstance(worktrees, dict):
             out.append((n["id"], "unreadable worktree inventory"))

@@ -730,3 +730,112 @@ class SmallFixes(Scenario):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ForbiddenActions(Scenario):
+    def setUp(self):
+        super().setUp()
+        self.m = core_loader.SourceFileLoader('action_guard_fixture', str(CORE / 'bin/brain')).load_module()
+
+    def test_forbidden_command_blocks_and_exact_allowance_is_consumed_once(self):
+        r = self.init('alice')
+        self.b(r, 'new', 'app', '--title', 'App')
+        node = r / 'nodes/app'
+        (node / 'AGENTS.md').write_text('## Forbidden actions\n- git push*\n- rm -rf*\n')
+        inst = self.m.Instance(r)
+        n = inst.node('app')
+        payload = {'cwd': str(node), 'tool_name': 'Bash', 'tool_input': {'command': 'git push origin main'}}
+        self.assertIn('forbidden', self.m.pretool_decision(inst, n, payload).lower())
+        self.assertIsNone(self.m.pretool_decision(inst, n, dict(payload, tool_input={'command': 'git status'})))
+        self.b(r, 'allow', 'app', 'git push origin main', '--once', '--cwd', str(node))
+        self.assertIsNotNone(self.m.pretool_decision(inst, n, dict(payload, tool_input={'command': 'git push origin other'})))
+        self.assertIsNone(self.m.pretool_decision(inst, n, payload))
+        self.assertIsNotNone(self.m.pretool_decision(inst, n, payload))
+        state = json.loads(self.m.allowance_path(inst, n).read_text())
+        self.assertEqual([e['event'] for e in state['events']], ['issued', 'consumed'])
+        self.assertNotIn('git push', json.dumps(state))
+
+    def test_boundary_inheritance_cwd_and_compound_commands_are_scoped(self):
+        r = self.init('alice')
+        self.b(r, 'principal', 'add', 'team')
+        self.b(r, 'new', 'app', '--title', 'App')
+        self.b(r, 'new', 'private', '--title', 'Private', '--owners', 'team')
+        (r / 'AGENTS.md').write_text('## Forbidden actions\n- git push*\n')
+        inst = self.m.Instance(r)
+        app = inst.node('app')
+        data = {'cwd': str(app['dir']), 'tool_name': 'Bash', 'tool_input': {'command': 'echo ready && git push origin main'}}
+        self.assertIsNotNone(self.m.pretool_decision(inst, app, data))
+        self.assertIsNone(self.m.pretool_decision(inst, inst.node('private'), data))
+        self.b(r, 'allow', 'app', data['tool_input']['command'], '--once', '--cwd', str(app['dir']))
+        different = dict(data, cwd=str(r))
+        self.assertIsNotNone(self.m.pretool_decision(inst, app, different))
+        self.assertIsNone(self.m.pretool_decision(inst, app, data))
+
+    def test_pretool_output_denies_but_malformed_hook_fails_open(self):
+        r = self.init('alice')
+        (r / 'AGENTS.md').write_text('## Forbidden actions\n- git push*\n')
+        p = subprocess.run([sys.executable, str(CORE / 'bin/brain'), 'hook', 'pretool'], cwd=r, env=self.env,
+                           input=json.dumps({'cwd': str(r), 'tool_name': 'Bash', 'tool_input': {'command': 'git push'}}),
+                           text=True, capture_output=True)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertEqual(json.loads(p.stdout)['hookSpecificOutput']['permissionDecision'], 'deny')
+        p = subprocess.run([sys.executable, str(CORE / 'bin/brain'), 'hook', 'pretool'], cwd=r, env=self.env,
+                           input='{bad', text=True, capture_output=True)
+        self.assertEqual((p.returncode, p.stdout), (0, ''))
+
+    def test_policy_changes_invalidate_allowance_and_concurrent_hooks_consume_once(self):
+        r = self.init('alice')
+        rules = r / 'AGENTS.md'
+        rules.write_text('## Forbidden actions\n- git push*\n')
+        self.b(r, 'allow', 'root', 'git push', '--once', '--cwd', str(r))
+        data = json.dumps({'cwd': str(r), 'tool_name': 'Bash', 'tool_input': {'command': 'git push'}})
+        processes = [subprocess.Popen([sys.executable, str(CORE / 'bin/brain'), 'hook', 'pretool'],
+                     cwd=r, env=self.env, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                     text=True) for _ in range(2)]
+        outputs = [p.communicate(data, timeout=10) for p in processes]
+        self.assertEqual(sum(not stdout for stdout, stderr in outputs), 1)
+        self.assertTrue(all(p.returncode == 0 for p in processes))
+        self.b(r, 'allow', 'root', 'git push', '--once', '--cwd', str(r))
+        rules.write_text(rules.read_text() + '- rm -rf*\n')
+        m = self.m
+        inst = m.Instance(r)
+        self.assertIsNotNone(m.pretool_decision(inst, inst.node('root'), json.loads(data)))
+
+
+class PreviewSampleReceipts(Scenario):
+    def context(self):
+        r = self.init('alice')
+        home = self.repo(self.tmp / 'web')
+        self.b(r, 'new', 'web', '--title', 'Web', '--home', str(home))
+        self.b(r, 'wt', 'add', 'web', 'job')
+        self.b(r, 'set', 'web', 'preview=https://preview.example/app')
+        m = core_loader.SourceFileLoader('preview_sample_fixture', str(CORE / 'bin/brain')).load_module()
+        inst = m.Instance(r)
+        n = inst.node('web')
+        row = m.read_jobs(n)[-1]
+        head = self.git('rev-parse', 'job', cwd=home).strip()
+        data = {'version': 1, 'node': 'web', 'job_key': m.job_key(row), 'branch': 'job', 'head': head,
+                'checked_at': inst.now_dt().isoformat(), 'renderer_threadId': 'browser-thread',
+                'urls': [{'url': n['local']['preview'], 'rendered': True, 'render_evidence': 'screenshot.png',
+                          'items': [{'page_item': 'person-' + str(i), 'source_ref': 'source.json#' + str(i),
+                                     'source_item': 'person-' + str(i)} for i in range(3)]}]}
+        return m, inst, n, data
+
+    def test_missing_samples_mismatch_wrong_url_and_stale_head_fail_closed(self):
+        m, inst, n, data = self.context()
+        self.assertTrue(m.validate_ready_preview(inst, n, 'job', data['head']))
+        for mutate in ('few', 'duplicate', 'mismatch', 'url', 'head', 'render'):
+            bad = json.loads(json.dumps(data))
+            route = bad['urls'][0]
+            if mutate == 'few': route['items'].pop()
+            if mutate == 'duplicate': route['items'][1] = route['items'][0]
+            if mutate == 'mismatch': route['items'][1]['source_item'] = 'wrong'
+            if mutate == 'url': route['url'] += '/wrong'
+            if mutate == 'head': bad['head'] = '0' * 40
+            if mutate == 'render': route['rendered'] = False
+            with self.subTest(mutate=mutate), self.assertRaises(ValueError):
+                m.record_preview_receipt(inst, n, 'job', bad)
+        m.record_preview_receipt(inst, n, 'job', data)
+        self.assertEqual(m.validate_ready_preview(inst, n, 'job', data['head']), [])
+        n['local']['preview'] += '/new'
+        self.assertTrue(m.validate_ready_preview(inst, n, 'job', data['head']))

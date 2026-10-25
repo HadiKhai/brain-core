@@ -86,6 +86,16 @@ def specialist_text(sp):
     return "\n".join((sp["dir"] / f).read_text() for f in ("role.md", "lessons.md") if (sp["dir"] / f).is_file())
 
 
+def specialist_holds_terms(sp, terms, principals):
+    """Keep role frontmatter and written lesson scope distinct; all other text stays strict."""
+    for name in ("role.md", "lessons.md"):
+        path = sp["dir"] / name
+        if path.is_file() and _m_guard.find_terms(path.read_text(), terms, principals=principals,
+                                                 lessons=name == "lessons.md"):
+            return True
+    return False
+
+
 def specialist_terms(inst, sp, extra=(), nodes=None):
     """A specialist carries the words of every node it was learned from: its sources, and each lesson's node."""
     f = sp["dir"] / "lessons.md"
@@ -140,7 +150,7 @@ def cmd_item_add(a):
         text = text.split("\n---\n", 1)[0] + "\n---\n\n" + body.strip() + "\n"
     if a.proposed:
         for n in sources:  # each source's never-name words, its ancestors' included
-            _m_guard.no_terms_in(n, text, "the library item")
+            _m_guard.no_terms_in(n, text, "the library item", principals=inst.principals)
         body = text.split("\n---\n", 1)[-1]
         if _m_nodes.SECRET_META.search(text) or _m_nodes.SECRET_KEY.search(body):
             _m_common.die("unsafe proposed item content")
@@ -174,8 +184,11 @@ def cmd_item_show(a):
     if not ok:
         _m_common.die("item is not usable here: " + why)
     text = item["path"].read_text()
-    if _m_guard.find_terms(text, learning_terms(inst, item["fm"], [n])):
+    terms = learning_terms(inst, item["fm"], [n])
+    if _m_guard.find_terms(text, terms, principals=inst.principals):
         _m_common.die("the item holds a never-name word of this node or of where it was learned; it can't be shown here")
+    if _m_guard.find_terms(text, terms):
+        text = _m_guard.governance_text(text, drop=True)
     print(text, end="")
 
 
@@ -281,7 +294,9 @@ def review_proposals(inst, records, action, reviewer=None, via=None):
         _m_common.safe_target(path)
         if fm.get("status") != "proposed":
             _m_common.die(f"{ident}: only a proposed {kind} can be {action}ed")
-        if action == "accept" and _m_guard.find_terms(text + "\n" + reviewer, terms):
+        unsafe = (specialist_holds_terms(sp, terms, inst.principals) if kind == "specialist" else
+                  bool(_m_guard.find_terms(text, terms, principals=inst.principals)))
+        if action == "accept" and unsafe:
             _m_common.die(f"{ident}: holds a never-name word of where it was learned; edit it before accepting")
         if reviewer and _m_guard.find_terms(reviewer, terms):
             _m_common.die("the review attribution holds a never-name word")
@@ -528,8 +543,9 @@ def cmd_hire(a):
         missing = [o for o in target["owners"] if o not in scope]
         if missing:
             _m_common.die(f"specialist '{sp['id']}' isn't scoped for {', '.join(missing)} (axiom 10)")
-    if _m_guard.find_terms(str(sp["dir"] / "role.md") + "\n" + (sp["dir"] / "role.md").read_text(), learning_terms(
-            inst, {"source_nodes": sp["fm"].get("source_nodes")}, [sp["node"], target])):
+    terms = learning_terms(inst, {"source_nodes": sp["fm"].get("source_nodes")}, [sp["node"], target])
+    if (_m_guard.find_terms(str(sp["dir"] / "role.md"), terms) or
+            _m_guard.find_terms((sp["dir"] / "role.md").read_text(), terms, principals=inst.principals)):
         _m_common.die(f"specialist '{sp['id']}' holds a never-name word of where it was learned or of {target['id']}")
     nodes = inst.nodes()
     lessons = [l for l in parse_lessons(sp["dir"] / "lessons.md")
@@ -538,7 +554,7 @@ def cmd_hire(a):
                                                                 "source_nodes": sp["fm"].get("source_nodes")},
                                                           [sp["node"], target], nodes))]
     items = [i for i in inst.items() if usable(i["fm"], target["owners"])[0] and
-             not _m_guard.find_terms(i["path"].read_text(), learning_terms(inst, i["fm"], [target], nodes))]
+             not _m_guard.find_terms(i["path"].read_text(), learning_terms(inst, i["fm"], [target], nodes), principals=inst.principals)]
     wanted = _m_common.lst(a.items)
     for w in wanted:
         if not any(i["fm"].get("id") == w for i in items):
@@ -546,13 +562,19 @@ def cmd_hire(a):
     if target["external"] and not (target["home_path"] and target["home_path"].exists()):
         _m_common.die(f"{target['id']}'s home isn't on this machine (brain set {target['id']} home=<path>)")
     where, w = _m_worktrees.job_where(target, a.branch)
-    runtime, usage = worker_route(inst, target, a)
+    runtime, usage = worker_route(inst, target, a,
+        extra=[sp["dir"] / "role.md", sp["dir"] / "lessons.md", *(i["path"] for i in items),
+               *(inst.node(nid)["dir"] / "specialists" / a.specialist / "role.md" for nid in chain),
+               *([Path(a.out).expanduser()] if a.out else [])])
+    row = _m_jobs.open_job(_m_jobs.read_jobs(target) or [], a.branch)
+    forecast = _m_jobs.launch_forecast(inst, target, row, a.job_class, runtime, a.model)
     head = _m_worktrees.job_run_line(where, w, a.branch, runtime, a.model, tilde_home=False)
     head = head.replace(f"  ·  runtime: {runtime}", f"  ·  runtime: {runtime}  ·  class: {a.job_class}", 1)
     out = [f"Role: worker, hired as specialist `{sp['id']}` ({sp['fm'].get('title', '')}).",
            head,
            "The rules, agents and skills where you run come first (axiom 7); this brief adds to them.",
-           "", a.selection_line, "", _m_guard.redact(usage, _m_guard.never_terms(target)), ""]
+           "", a.selection_line, "", _m_guard.redact(usage, _m_guard.never_terms(target)), "",
+           _m_jobs.estimate_line(forecast), ""]
     if target["sealed"]:
         out += ["This work happens in a project with its own owners. Leave nothing in it that names "
                 "where this brief came from (axiom 6). Ask before pushing, publishing or anything "
@@ -582,6 +604,7 @@ def cmd_hire(a):
     text = _m_briefs.checked_brief(target, "\n".join(out) + "\n", inputs=inputs)
     _m_guard.no_terms_in(target, text, "the brief")
     _m_jobs.record_job_route(inst, target, a.branch, a.job_class, runtime, a.model, effort=a.effort)
+    _m_jobs.record_job_forecast(inst, target, row, forecast)
     if a.job:
         rows = inst.local.setdefault("hires", [])
         record = {"specialist": sp["id"], "at": sp["node"]["id"], "node": target["id"],
@@ -622,11 +645,8 @@ def knowledge_tokens(text):
     return out
 
 
-def knowledge_ranked(inst, n, contexts, exclude=(), states=("active",), required=None):
-    """Explainable lexical ranking of items whose scope covers n's owners; only `states` count (usable items
-    are exactly `brain usable`: active and in scope). With `required`, that context must match.
-    [(score, id, title, why, item)], best first."""
-    ranked = []
+def knowledge_candidates(inst, n, exclude=(), states=("active",)):
+    """Apply the same scope, state and source-content policy before any retrieval."""
     nodes = inst.nodes()
     for item in inst.items():
         fm = item["fm"]
@@ -634,8 +654,18 @@ def knowledge_ranked(inst, n, contexts, exclude=(), states=("active",), required
             continue
         if not usable({**fm, "status": "active"}, n["owners"])[0]:
             continue
-        if _m_guard.find_terms(item["path"].read_text(), learning_terms(inst, fm, [n], nodes)):
+        if _m_guard.find_terms(item["path"].read_text(), learning_terms(inst, fm, [n], nodes), principals=inst.principals):
             continue
+        yield item
+
+
+def knowledge_ranked(inst, n, contexts, exclude=(), states=("active",), required=None):
+    """Explainable lexical ranking of items whose scope covers n's owners; only `states` count (usable items
+    are exactly `brain usable`: active and in scope). With `required`, that context must match.
+    [(score, id, title, why, item)], best first."""
+    ranked = []
+    for item in knowledge_candidates(inst, n, exclude, states):
+        fm = item["fm"]
         body = _m_common.read_fm(item["path"])[1]
         words = knowledge_tokens(" ".join(str(fm.get(k, "")) for k in ("id", "title", "kind", "keywords")) + " " + body)
         score, why, hit = 0, [], set()
@@ -699,26 +729,42 @@ def cmd_recall(a):
     n = inst.node(a.id)
     problem = " ".join(a.words)
     terms = knowledge_tokens(problem)
-    if not terms:
+    if not terms and not getattr(a, "setup", False):
         _m_common.die("describe the problem in a few words: brain recall <node> \"what goes wrong\"")
     contexts = [("problem", terms, 4),
                 ("labels/stack", knowledge_tokens(n["fm"].get("labels", "") + " " + n["fm"].get("stack", "")), 1)]
     forbidden = _m_guard.never_terms(n)
-    found = knowledge_ranked(inst, n, contexts, required="problem")[:a.limit]
-    waiting = knowledge_ranked(inst, n, contexts, states=("proposed",), required="problem")
+    from . import semantic as _m_semantic
+    if getattr(a, 'setup', False):
+        try:
+            _m_semantic.local_embed(inst, [], setup=True)
+            print('local semantic model prepared')
+        except (Exception, SystemExit):
+            print('local semantic setup unavailable; lexical recall remains available')
+        return
+    semantic = _m_semantic.semantic_ranked(inst, n, problem)
+    model_name = _m_semantic.MODEL_ID if semantic is not None else None
+    if semantic is not None:
+        found, waiting = semantic
+        found = found[:max(0, a.limit)]
+    else:
+        found = knowledge_ranked(inst, n, contexts, required="problem")[:max(0, a.limit)]
+        waiting = knowledge_ranked(inst, n, contexts, states=("proposed",), required="problem")
     if a.json:
         rows = [{"id": key, "title": _m_guard.redact(title, forbidden), "kind": item["fm"].get("kind", ""),
-                 "from": item["fm"].get("source_node", ""), "score": -score, "why": why}
+                 "from": item["fm"].get("source_node", ""), "score": -score, "why": why,
+                 **({"ref": item["fm"]["source_ref"]} if item["fm"].get("kind") == "document" else {})}
                 for score, key, title, why, item in found]
-        print(json.dumps(_m_history.history_screen({"node": n["id"], "items": rows, "proposed": [r[1] for r in waiting]},
+        print(json.dumps(_m_history.history_screen({"node": n["id"], "items": rows, "proposed": [r[1] for r in waiting], **({"model": model_name} if model_name else {})},
                                         forbidden), indent=1, ensure_ascii=False))
         return
     if not found:
         print(f"{n['id']}: nothing learned yet matches that")
     for score, key, title, why, item in found:
         src = item["fm"].get("source_node", "")
+        read = item["fm"].get("source_ref", "") if item["fm"].get("kind") == "document" else f"brain item show {key} --node {n['id']}"
         print(_m_guard.redact(f"- `{key}` ({item['fm'].get('kind', '')}, from {src}): {title} — {'; '.join(why)}. "
-                     f"Read: brain item show {key} --node {n['id']}", forbidden))
+                     f"Read: {read}", forbidden))
     if waiting:
         print(f"{len(waiting)} unreviewed proposal(s) also match: {', '.join(r[1] for r in waiting[:10])}"
               f"{' …' if len(waiting) > 10 else ''}. They help only once accepted: brain proposals")
@@ -741,8 +787,26 @@ def limits_of(n):
     return out
 
 
+
+def limit_records(inst, n):
+    """Explicit absolute expiries affect operational briefs, never publication consent."""
+    records = []
+    for text in limits_of(n):
+        expiry = re.findall(r"(?:^|[;\n])\s*Expires:[ \t]*([^;\n]+)", text, re.I)
+        when = (inst.parse_time(expiry[0].strip()) if len(expiry) == 1 and
+                re.search(r'(?:Z|[+-]\d{2}:?\d{2})$', expiry[0].strip()) else None)
+        state = 'active'
+        if expiry:
+            state = 'invalid-expiry' if not when else ('expired' if when <= inst.now_dt() else 'active')
+        records.append({'text': text, 'state': state, 'expires_at': when.isoformat() if when else None})
+    return records
+
 def limits_lines(n):
-    lims = limits_of(n)
+    root = n
+    while root.get('parent'):
+        root = root['parent']
+    inst = _m_instance.Instance(root['dir'])
+    lims = [row['text'] for row in limit_records(inst, n) if row['state'] != 'expired']
     return (["## Limits", ""] + [f"- {l}" for l in lims] + [""]) if lims else []
 
 
@@ -894,7 +958,7 @@ def launch_selection(inst, n, a, runtime, subscription, row, kind, model_selecti
         a.selection_line = "modelSelection: " + json.dumps(selection)
 
 
-def worker_route(inst, n, a):
+def worker_route(inst, n, a, extra=()):
     """Route all worker briefs with the same runtime pin and model usage limits."""
     row = _m_jobs.open_job(_m_jobs.read_jobs(n) or [], getattr(a, "branch", None))
     kind = _m_jobs.job_class(n, row, getattr(a, "job_class", None))
@@ -909,7 +973,7 @@ def worker_route(inst, n, a):
     model_selection = class_model_selection(inst, n, a, runtime, kind)
     runtime, subscription, usage = _m_usage.class_route(
         inst, kind, runtime=pin, model=model_selection[0] if model_selection else a.model,
-        weekly_cap=n["fm"].get("route_weekly_cap", inst.cfg.get("route_weekly_cap", 60)))
+        weekly_cap=n["fm"].get("route_weekly_cap", inst.cfg.get("route_weekly_cap", 60)), node=n, extra=extra)
     a.job_class = kind
     launch_selection(inst, n, a, runtime, subscription, row, kind, model_selection=model_selection)
     if per_class or " node.md " in a.model_source:

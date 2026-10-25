@@ -1,6 +1,7 @@
 """Jobs mechanics for Brain."""
 import hashlib
 import json
+import math
 import os
 import re
 import shlex
@@ -21,6 +22,7 @@ from . import status as _m_status
 from . import sync as _m_sync
 from . import transitions as _m_transitions
 from . import ui as _m_ui
+from . import tasks as _m_tasks
 from . import usage as _m_usage
 from . import verify as _m_verify
 
@@ -30,6 +32,7 @@ JOBS_MARK = "<!-- brain:job-ledger v3 -->"  # older cores refuse this format ins
 JOBS_LEGACY_MARKS = ("<!-- brain:job-ledger v2 -->", "<!-- brain:job-ledger v1 -->")
 JOB_COLS = ["Job", "Started", "Ended", "Hours", "Outcome", "Commits", "Reviews", "Runtime", "Cause"]
 JOB_COLS += ["Class", "Model", "Effort"]
+JOB_COLS += ["Files", "Lines", "Forecast", "Actual", "Meter %", "Verify s", "Verify reused"]
 JOB_COLS += ["Lessons", "Lesson check", "Switches", "Settled"]
 JOB_COLS += ["Land check"]
 JOB_COLS += ["Active h", "Agent h", "Fresh in", "Cache read", "Cache write", "Output", "Reasoning", "Tool calls",
@@ -77,6 +80,24 @@ def write_jobs(inst, n, rows):
             # A coordinator can start another review after this hand-back. Retained
             # evidence repairs undercounts, but cannot undo an open job's new rounds.
             row["Reviews"] = str(rounds if row.get("Ended") else max(current, rounds))
+        duration = hb.get("verify_duration")
+        if isinstance(duration, dict) and type(duration.get("reused")) is bool:
+            seconds = forecast_number(duration.get("elapsed_seconds"))
+            if seconds is not None:
+                row["Verify s"] = str(seconds)
+                row["Verify reused"] = str(duration["reused"]).lower()
+        actual = clean_actual(hb.get("actual"))
+        if hb.get("state") == "done" and actual:
+            row["Actual"] = json.dumps(actual, sort_keys=True)
+            size = actual.get("size") if isinstance(actual.get("size"), dict) else {}
+            for key in ("files", "lines"):
+                if type(size.get(key)) is int and size[key] >= 0:
+                    row[key.title()] = str(size[key])
+            # Closing supplies final accounting; hand-back is the earlier snapshot.
+            if row.get("Ended"):
+                refreshed = clean_actual(actual_cost(inst, n, row, _m_spend.row_usage(row)))
+                actual = {**actual, **{k: v for k, v in refreshed.items() if v is not None}}
+                row["Actual"] = json.dumps(actual, sort_keys=True)
     f = n["dir"] / JOBS_FILE
     head = (f"# Jobs: {n['id']}\n\n{JOBS_MARK}\nOne row per job, kept by `brain wt add`, `brain review`, "
             "`brain wt rm` and `brain wt prune`; times carry their UTC offset; tokens are exact counts from this "
@@ -290,11 +311,18 @@ def publish_handback(a):
                                               (a.reviews is not None or getattr(a, "record", False))):
         _m_common.die("--reverify forces a verify run: it goes with --state done --reviews N")
     fresh = reused = 0
+    duration = None
     if a.state == "done" and not study and (a.reviews is not None or getattr(a, "record", False)):
+        verify_started = time.monotonic()
         packet, reasons = _m_verify.record_ready(inst, n, a.branch, a.reviews, packet,
                                        getattr(a, "reverify", False), full_receipt=getattr(a, "full_receipt", None))
+        duration = record_verify_duration(inst, n, row, packet, time.monotonic() - verify_started)
         if packet:
             reused, fresh = (1, 0) if packet.get("verify_reused") else (0, 1)
+    actual = None
+    if a.state == "done" and not study:
+        actual = actual_cost(inst, n, row, _m_spend.live_usage(inst, n, row))
+        actual["size"] = job_size(n, row, packet)
     # Verification released the global lock. Re-read under it before publishing so a
     # concurrently closed/restarted job never receives this worker's old result.
     with _m_instance.brain_lock(inst):
@@ -341,6 +369,12 @@ def publish_handback(a):
                 "at": inst.now(), "report": _m_common.tilde(a.report) if a.report is not None else previous.get("report", ""),
                 "lessons": lessons, "ready": packet, "ready_reasons": reasons,
                 "verify_runs": count("verify_runs") + fresh, "verify_reused": count("verify_reused") + reused}
+        if duration is not None:
+            data["verify_duration"] = duration
+        elif previous.get("verify_duration") is not None:
+            data["verify_duration"] = previous["verify_duration"]
+        if actual is not None:
+            data.update(estimate=saved_forecast(row.get("Forecast")), actual=clean_actual(actual))
         if a.state == "done":
             data["wake_id"] = os.urandom(16).hex()  # each publication is a fresh completion, even after a rebase
         need = getattr(a, "need_human", None)
@@ -395,17 +429,20 @@ def publish_handback(a):
             _m_guard.no_terms_in(n, bullet, "the inbox question")
             question_created = _m_transitions.inbox_append(n["dir"], bullet, marker)
             _m_common.touch(inbox)
+        _m_tasks.handback_event(inst, n, row, data)
         inst.commit([], f"{n['id']}: worker hand-back")
     if question_created:
         _m_hosts.request_wake(inst, n, 'wake:' + wake_id)
     elif a.state == "blocked" and not need:
         _m_hosts.request_wake(inst, n, "wake:" + data["wake_id"])
+    _m_instance.unlock()  # accounting follows durable publication and does not mutate shared state
     try:
         current = open_job(read_jobs(n) or [], a.branch)
         if current:
             started, used, budget = inst.parse_time(current["Started"]), _m_spend.live_usage(inst, n, current), _m_spend.job_budget(n, current)
             if (used and used["sessions"]) or budget:  # the worker sees its spend against its budget
-                print(_m_guard.redact(_m_spend.usage_line(used, budget, _m_status.elapsed(started, inst.now_dt()) / 3600 if started else None),
+                print(_m_guard.redact(_m_spend.usage_line(used, budget, _m_status.elapsed(started, inst.now_dt()) / 3600 if started else None,
+                                      round_usage=_m_spend.job_round_usage(inst, n, current, used)),
                              _m_guard.never_terms(n)))
     except (OSError, ValueError, RuntimeError):
         pass  # accounting never blocks a hand-back
@@ -416,7 +453,7 @@ def publish_handback(a):
         print(_m_verify.VerifyScrubber(_m_guard.never_terms(n)).feed(
             "ready" if not why else "not ready: " + "; ".join(dict.fromkeys(why)), final=True))
         if why:
-            sys.exit(1)
+            raise _m_common.VerdictExit(1)
     else:
         from . import messages as _m_messages
         kind = "blocked" if a.state == "failed" else a.state
@@ -486,16 +523,23 @@ def record_job_route(inst, n, branch, kind, runtime, model, review=False, effort
             inst.commit([], f"{n['id']}: job route")
 
 
-def job_started(inst, n, branch, runtime):
+def job_started(inst, n, branch, runtime, task_id=None):
     with _m_instance.brain_lock(inst):
         rows = ledger_rows(n)
         if rows is not None and not open_job(rows, branch):
+            try:
+                _m_tasks.prepare_start(n, task_id, branch)
+            except ValueError as error:
+                _m_common.die(str(error))
             rows.append({"Job": branch, "Started": inst.now_dt().isoformat(), "Reviews": "0", "Runtime": runtime})
+            if task_id:
+                rows[-1]["Task"] = task_id
             write_jobs(inst, n, rows)
+            _m_tasks.job_started(inst, n, rows[-1])
             inst.commit([], f"{n['id']}: job started")
 
 
-def job_reviewed(inst, n, branch, *, full=True, head="", reason=""):
+def job_reviewed(inst, n, branch, *, full=True, head="", reason="", identity_required=False, exception=None):
     with _m_instance.brain_lock(inst):
         rows = ledger_rows(n)
         r = open_job(rows or [], branch)
@@ -509,7 +553,13 @@ def job_reviewed(inst, n, branch, *, full=True, head="", reason=""):
         r["Full reviews"] = str(full_prior + int(full))
         r["Review head"] = head
         r["Review kind"] = "full" if full else "check-fix"
-        r["Review reason"] = reason
+        r["Review reason"] = " ".join(reason.splitlines())
+        if identity_required:
+            r['Review identity required'] = 'true'
+        if exception:
+            history = json.loads(r.get('Review exceptions') or '[]')
+            history.append({**exception, 'round': prior + 1, 'head': head})
+            r['Review exceptions'] = json.dumps(history)
         write_jobs(inst, n, rows)
         inst.commit([], f"{n['id']}: job reviewed")
 
@@ -557,20 +607,34 @@ def published_train(n, row):
     return None
 
 
-def job_ended(inst, n, branch, outcome, commits="", cause="", worktree=None):
-    # Transcripts are read before the lock is taken: a long first read never holds up other commands.
+def prepare_job_usage(inst, n, branch, worktree=None):
     early = open_job(read_jobs(n) or [], branch)
     usage = None
     if early and not str(early.get("Usage", "")).startswith("host"):  # what the host reported wins
-        try:
-            usage = _m_spend.usage_cells(_m_spend.job_usage(inst, n, early, worktree), _m_guard.never_terms(n))
-        except (OSError, ValueError, RuntimeError) as e:
-            usage = {"Usage": f"not counted: {type(e).__name__}"}  # a close never fails for its accounting
+        with _m_instance.released(inst, n, extra=[_m_usage.usage_file("subscriptions.json"), handback_file(n, early)]):
+            try:
+                usage = _m_spend.usage_cells(_m_spend.job_usage(inst, n, early, worktree), _m_guard.never_terms(n))
+            except (OSError, ValueError, RuntimeError) as e:
+                usage = {"Usage": f"not counted: {type(e).__name__}"}  # a close never fails for its accounting
+    # Check before returning to a caller that may now delete the worktree.
+    current = open_job(read_jobs(n) or [], branch)
+    if early and (not current or job_key(early) != job_key(current)):
+        _m_common.die("job changed during accounting; retry from fresh state")
+    return early, usage
+
+
+def job_ended(inst, n, branch, outcome, commits="", cause="", worktree=None, prepared=None):
+    # Destructive callers prepare accounting before removal. Revalidate job identity
+    # and preserve host-reported usage after the slow scan has released state.
     with _m_instance.brain_lock(inst):
+        early, usage = prepared if prepared is not None else prepare_job_usage(inst, n, branch, worktree)
+        n = inst.node(n["id"])
         rows = ledger_rows(n)
         r = open_job(rows or [], branch)
         if not r:
             return
+        if not early or job_key(early) != job_key(r):
+            _m_common.die("job changed during accounting; retry from fresh state")
         _m_sync.retain_integration(inst, n, r)
         published = published_train(n, r)
         if published:
@@ -585,11 +649,12 @@ def job_ended(inst, n, branch, outcome, commits="", cause="", worktree=None):
         budget = _m_spend.job_budget(n, r)
         if budget:
             r["Budget"] = _m_spend.budget_text(budget)
-        if usage and early and job_key(early) == job_key(r) and not str(r.get("Usage", "")).startswith("host"):
+        if usage and r.get("Usage") == early.get("Usage") and not str(r.get("Usage", "")).startswith("host"):
             r.update(usage)
         write_jobs(inst, n, rows)
         if not n["external"] or n["local"].get("workbench") or n["home_path"]:
             _m_verify.ready_path(inst, n, branch).unlink(missing_ok=True)
+        _m_tasks.job_closed(inst, n, r)
         cleanup_handback(inst, n, r, rows)
         inst.commit([], f"{n['id']}: job {outcome}")
         print_thread_checklist(n, r)
@@ -903,6 +968,7 @@ def close_ledger_job(inst, n, branch, reason=None):
         row['Ended'] = stamp(inst)
         start, end = inst.parse_time(row['Started']), inst.parse_time(row['Ended'])
         row['Hours'] = f'{_m_status.elapsed(start, end) / 3600:.1f}' if start and end else ''
+        _m_tasks.job_closed(inst, n, row)
         write_jobs(inst, n, rows)
         inst.commit([], f"{n['id']}: ledger job closed")
         print_thread_checklist(n, row)
@@ -939,6 +1005,9 @@ def jobs_summary(inst, n):
 
 
 def job_kind(branch, rows=()):
+    declared = next((r.get("Class") for r in reversed(rows) if r["Job"] == branch and r.get("Class")), None)
+    if declared:
+        return declared
     # Generic job/ says nothing about the task. Repeated slug families do.
     if branch.startswith("import:"):
         return "import"
@@ -949,6 +1018,295 @@ def job_kind(branch, rows=()):
     repeats = sum(r["Job"].lower().startswith("job/" + token + "-") or
                   r["Job"].lower() == "job/" + token for r in rows)
     return token if token and not token.isdigit() and repeats >= 2 else "unclassified"
+
+
+def forecast_number(value):
+    try:
+        number = float(value)
+        return number if not isinstance(value, bool) and math.isfinite(number) and number >= 0 else None
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def forecast_record(value):
+    try:
+        data = json.loads(value or "null")
+        return data if isinstance(data, dict) and data.get("version") == 1 else None
+    except (TypeError, ValueError):
+        return None
+
+
+def saved_forecast(value):
+    data = forecast_record(value)
+    if not data or not isinstance(data.get("class"), str) or not isinstance(data.get("runtime"), str):
+        return None
+    if (type(data.get("samples")) is not int or data["samples"] < 0 or
+            type(data.get("measured")) is not int or data["measured"] < 0 or
+            type(data.get("enough_data")) is not bool or data.get("selection") not in ("nearest 5 sizes", "all class sizes") or
+            not isinstance(data.get("conversion"), dict)):
+        return None
+    for key in ("wall_h", "active_h", "tokens", "weekly_percent"):
+        if key in data and (not isinstance(data[key], dict) or
+                            any(not _m_usage.usage_number(data[key].get(k)) or data[key][k] < 0
+                                for k in ("median", "min", "max"))):
+            return None
+    if data["enough_data"] and "wall_h" not in data:
+        return None
+    if "tokens" in data and ("active_h" not in data or
+                             not all(k in data["conversion"] for k in ("processed_per_percent", "fresh_per_percent", "source"))):
+        return None
+    for key in ("processed_per_percent", "fresh_per_percent"):
+        value = data["conversion"].get(key)
+        if value is not None and (not _m_usage.usage_number(value) or value <= 0):
+            return None
+    return data
+
+
+def job_size(n, row, packet=None):
+    """Committed net change from the job's Git base; NUL records never expose paths."""
+    w = n.get("local", {}).get("worktrees", {}).get(row["Job"], {})
+    path = w.get("path")
+    if not path or not Path(path).is_dir():
+        return None
+    head = _m_common.git("rev-parse", "--verify", "HEAD", cwd=path)
+    branch = _m_common.git("symbolic-ref", "--short", "HEAD", cwd=path)
+    if head.returncode or branch.returncode or branch.stdout.strip() != row["Job"]:
+        return None
+    base_ref = None
+    if isinstance(packet, dict) and packet.get("head") == head.stdout.strip():
+        base_ref = packet.get("integration_base", packet.get("main"))
+    if not base_ref:
+        remote = _m_verify.integration_ref(path)
+        if remote:
+            base_ref = _m_verify.integration_parent(n, remote) if n.get("home_path") else remote
+    base = _m_common.git("merge-base", base_ref or w.get("start") or "refs/heads/main", head.stdout.strip(), cwd=path)
+    if base.returncode:
+        return None
+    diff = _m_common.git("diff", "--no-ext-diff", "--no-textconv", "--no-renames", "--numstat", "-z",
+                         base.stdout.strip(), head.stdout.strip(), "--", cwd=path)
+    if diff.returncode:
+        return None
+    files = lines = binary = 0
+    for record in diff.stdout.split("\0"):
+        if not record:
+            continue
+        added, deleted, _ = record.split("\t", 2)
+        files += 1
+        if added == "-" or deleted == "-":
+            binary += 1
+        else:
+            lines += int(added) + int(deleted)
+    return {"files": files, "lines": lines, "binary_files": binary,
+            "base": base.stdout.strip(), "head": head.stdout.strip()}
+
+
+def planned_size(n, row):
+    """Optional contract ## Size: N files, M lines. Never infer scope from prose."""
+    if not row:
+        return None
+    path = contract_file(n, row)
+    sections = _m_ui.md_sections(path.read_text()) if path.is_file() else {}
+    body = next((v for k, v in sections.items() if k.lower() == "size"), "")
+    files, lines = re.search(r"\b(\d+)\s+files?\b", body), re.search(r"\b(\d+)\s+lines?\b", body)
+    if files and lines:
+        return {"files": int(files[1]), "lines": int(lines[1])}
+    return None
+
+
+def meter_conversion(inst, n, runtime, rows):
+    """Approximation per runtime. Only explicit paired ledger observations calibrate it.
+
+    Meter % is an operator/host-attributed job delta, not an account-wide before/after
+    subtraction: overlapping jobs make such subtraction unsuitable for calibration.
+    """
+    import statistics
+    defaults = {"claude": 68000000, "codex": 51000000}
+    def setting(name, default):
+        value = forecast_number(n["fm"].get(name, inst.cfg.get(name, default)))
+        return value if value and value > 0 else default
+    processed = setting("forecast_processed_per_percent_" + runtime, defaults.get(runtime))
+    fresh = setting("forecast_fresh_per_percent_" + runtime, 1100000)
+    fresh_source = "configured/default"
+    pairs = []
+    for row in rows:
+        share, u = forecast_number(row.get("Meter %")), _m_spend.row_usage(row)
+        if (row.get("Ended") and row.get("Outcome") == "merged" and row.get("Runtime") == runtime and
+                share and share <= 100 and u and u["processed"] > 0):
+            try:
+                pair = (u["processed"] / share, u["fresh"] / share)
+                if all(forecast_number(v) is not None for v in pair) and pair[0] > 0:
+                    pairs.append(pair)
+            except OverflowError:
+                pass
+    if len(pairs) >= 3:
+        processed = statistics.median(p[0] for p in pairs)
+        fresh_samples = [p[1] for p in pairs if p[1] > 0]
+        if len(fresh_samples) >= 3:
+            fresh = statistics.median(fresh_samples)
+            fresh_source = "ledger"
+    return {"processed_per_percent": processed, "fresh_per_percent": fresh,
+            "source": "ledger" if len(pairs) >= 3 else "configured/default", "fresh_source": fresh_source,
+            "samples": len(pairs)}
+
+
+def estimate_job(inst, n, rows, kind, runtime, size=None, model=None):
+    """Same explicit class (legacy branch inference as fallback), nearest five sizes.
+
+    Rank by the sum of log size ratios so files and lines have equal influence.
+    Unknown sizes never pretend to be zero. Without a planned size use all class samples.
+    """
+    import statistics
+    samples = []
+    for row in rows:
+        hours = forecast_number(row.get("Hours"))
+        if (not row.get("Ended") or row.get("Outcome") != "merged" or hours is None or
+                (row.get("Class") or job_kind(row["Job"], rows)) != kind or
+                (model and (row.get("Model") != model or row.get("Runtime") != runtime))):
+            continue
+        distance = 0
+        if size is not None:
+            values = [forecast_number(row.get(k.title())) for k in ("files", "lines")]
+            if any(v is None for v in values):
+                continue
+            distance = sum(abs(math.log1p(v) - math.log1p(size[k])) for k, v in zip(("files", "lines"), values))
+        samples.append((distance, row, hours))
+    def nearest(values):
+        return sorted(values, key=lambda x: (x[0], x[1].get("Started", "")))[:5] if size is not None else values
+    measured_samples = nearest([s for s in samples if s[1].get("Runtime") == runtime])
+    samples = nearest(samples)
+    def spread(values):
+        return {"median": statistics.median(values), "min": min(values), "max": max(values)}
+    out = {"version": 1, "class": kind, "runtime": runtime, "model": model, "size": size, "samples": len(samples),
+           "enough_data": len(samples) >= 3, "selection": "nearest 5 sizes" if size else "all class sizes",
+           "conversion": meter_conversion(inst, n, runtime, rows)}
+    if out["enough_data"]:
+        out["wall_h"] = spread([h for _, _, h in samples])
+    measured = []
+    for _, row, _ in measured_samples:
+        u = _m_spend.row_usage(row)
+        active = forecast_number(row.get("Active h"))
+        if u and u["processed"] > 0 and active is not None:
+            measured.append((active, u["processed"]))
+    out["measured"] = len(measured)
+    if len(measured) >= 3:
+        out["active_h"], out["tokens"] = spread([a for a, _ in measured]), spread([t for _, t in measured])
+        factor = out["conversion"]["processed_per_percent"]
+        if factor:
+            out["weekly_percent"] = {k: v / factor for k, v in out["tokens"].items()}
+    return out
+
+
+def estimate_line(estimate):
+    if not estimate:
+        return "Forecast: unavailable; no saved launch estimate."
+    out = f"Forecast {estimate['class']}: {estimate['samples']} similar merged jobs ({estimate['selection']}); "
+    if estimate.get("model"):
+        out += f"model {estimate['model']}; "
+    if not estimate["enough_data"]:
+        return out + "too little data (need 3 merged jobs). Advisory, never a limit or gate."
+    def show(key, label, render):
+        s = estimate[key]
+        return f"{label} {render(s['median'])} (min–max {render(s['min'])}–{render(s['max'])})"
+    out += show("wall_h", "wall", lambda x: f"{round(x, 2):g} h")
+    if "tokens" in estimate:
+        out += "; " + show("active_h", "active", lambda x: f"{round(x, 2):g} h")
+        out += "; " + show("tokens", "processed tokens", _m_spend.tokens_text)
+        if "weekly_percent" in estimate:
+            out += "; " + show("weekly_percent", f"approx. {estimate['runtime']} weekly share", lambda x: f"{x:.3g}%")
+        c = estimate["conversion"]
+        if c["processed_per_percent"]:
+            out += (f"; 1% ≈ {_m_spend.tokens_text(c['processed_per_percent'])} processed / "
+                    f"{_m_spend.tokens_text(c['fresh_per_percent'])} fresh ({c['source']} processed, "
+                    f"{c.get('fresh_source', 'configured/default')} fresh)")
+    else:
+        out += f"; active hours/tokens/weekly share: too little data ({estimate['measured']} measured for {estimate['runtime']}; need 3)"
+    return out + ". Advisory, never a limit or gate."
+
+
+def launch_forecast(inst, n, row, kind, runtime, model=None):
+    """Both launch paths retain one estimate until the selected route changes."""
+    model = model if model and model != "runtime default" else None
+    saved = saved_forecast((row or {}).get("Forecast"))
+    if saved and (saved["class"], saved["runtime"], saved.get("model")) == (kind, runtime, model):
+        return saved
+    return estimate_job(inst, n, read_jobs(n) or [], kind, runtime, planned_size(n, row), model=model)
+
+
+def record_job_forecast(inst, n, row, estimate):
+    if not row:
+        return
+    with _m_instance.brain_lock(inst):
+        rows = ledger_rows(n)
+        current = open_job(rows or [], row["Job"])
+        saved = saved_forecast((current or {}).get("Forecast"))
+        if current and job_key(current) == job_key(row) and (not saved or
+                (saved["class"], saved["runtime"], saved.get("model")) !=
+                (estimate["class"], estimate["runtime"], estimate.get("model"))):
+            current["Forecast"] = json.dumps(estimate, sort_keys=True)
+            write_jobs(inst, n, rows)
+            inst.commit([], f"{n['id']}: launch forecast")
+
+
+def actual_cost(inst, n, row, usage):
+    start = inst.parse_time(row.get("Started", ""))
+    end = inst.parse_time(row.get("Ended", "")) or inst.now_dt()
+    out = {"version": 1, "at": end.isoformat(),
+           "wall_h": max(0, _m_status.elapsed(start, end) / 3600) if start else None,
+           "active_h": None, "tokens": None, "weekly_percent": None}
+    source = str((usage or {}).get("source") or "")
+    if usage and (source == "host" or source.startswith(("host:", "transcripts:"))):
+        out.update(active_h=usage.get("active_h", usage.get("active_minutes", 0) / 60),
+                   tokens=usage["processed"], usage_source=usage["source"], usage_at=end.isoformat())
+        saved = saved_forecast(row.get("Forecast")) or {}
+        conversion = saved.get("conversion") or meter_conversion(inst, n, row.get("Runtime", ""), [])
+        factor = conversion.get("processed_per_percent")
+        if factor:
+            out["weekly_percent"] = usage["processed"] / factor
+    return out
+
+
+def actual_line(actual):
+    actual = clean_actual(actual) or {}
+    out = "Actual at hand-back/close: "
+    out += "; ".join(label + " " + ((_m_spend.tokens_text(v) if key == "tokens" else f"{round(v, 2):g}") + unit
+                                      if (v := forecast_number(actual.get(key))) is not None else "unknown")
+                     for key, label, unit in (("wall_h", "wall", " h"), ("active_h", "active", " h"),
+                                               ("tokens", "processed tokens", ""),
+                                               ("weekly_percent", "approx. weekly share", "%")))
+    size = actual.get("size")
+    if isinstance(size, dict):
+        out += f"; Git size {size.get('files', '?')} files, {size.get('lines', '?')} added/deleted lines"
+    return out
+
+
+def clean_actual(data):
+    """Persist/display only known numeric facts and Git identities from worker evidence."""
+    if not isinstance(data, dict) or type(data.get("version")) is not int or data["version"] != 1:
+        return None
+    out = {"version": 1}
+    for key in ("wall_h", "active_h", "tokens", "weekly_percent"):
+        out[key] = forecast_number(data.get(key))
+    tokens = data.get("tokens")
+    out["tokens"] = tokens if type(tokens) is int and tokens >= 0 else None
+    for key in ("at", "usage_at"):
+        if isinstance(data.get(key), str) and _m_usage.usage_stamp(data[key]):
+            out[key] = data[key]
+    source = str(data.get("usage_source") or "")
+    if source == "host" or source.startswith("host:"):
+        out["usage_source"] = "host"
+    elif source.startswith("transcripts:"):
+        out["usage_source"] = "transcripts: measured"
+    size = data.get("size")
+    out["size"] = None
+    if isinstance(size, dict):
+        size_out = {key: size[key] for key in ("files", "lines", "binary_files")
+                    if type(size.get(key)) is int and size[key] >= 0}
+        for key in ("base", "head"):
+            if isinstance(size.get(key), str) and re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", size[key]):
+                size_out[key] = size[key]
+        if all(key in size_out for key in ("files", "lines")):
+            out["size"] = size_out
+    return out
 
 
 def job_forecasts(rows):
@@ -966,7 +1324,7 @@ def job_forecasts(rows):
             u = _m_spend.row_usage(row)
             sample = (hours, u if u and u["processed"] else None)
             groups.setdefault("unclassified", []).append(sample)  # the explicit all-jobs fallback
-            kind = job_kind(row["Job"], rows)
+            kind = row.get("Class") or job_kind(row["Job"], rows)
             if kind != "unclassified":
                 groups.setdefault(kind, []).append(sample)
     out = []
@@ -1032,8 +1390,7 @@ def job_budget_lines(inst, n, planned=None):
         remaining = min((w["resets_at"] - time.time()) / 3600 for w in windows)
         out.append(f"current route {selected['label']}: {len(these)} open/planned job(s), typical serial full-job time {estimate:g} h "
                    f"{'fits' if estimate <= remaining else 'exceeds'} {remaining:.1f} h until the next recorded reset; "
-                   "elapsed time not subtracted; allowance fit unknown (the subscription says how full it is, not "
-                   "how many tokens a percent is).")
+                   "elapsed time not subtracted; weekly token share is an approximate forecast, never a limit.")
     return out
 
 
@@ -1209,6 +1566,7 @@ def cmd_jobs(a):
                 _m_common.die("--switch needs old -> new: reason")
             r["Switches"] = "; ".join(filter(None, [r.get("Switches"), f"{stamp(inst)} {switch}"]))
         write_jobs(inst, n, rows)
+        _m_tasks.job_closed(inst, n, r)
         cleanup_handback(inst, n, r, rows)
         inst.commit([], f"{n['id']}: job outcome")
         if a.close:
@@ -1249,15 +1607,31 @@ def cmd_jobs(a):
                             "   (over twice the median in tokens)" if heavy else ""), _m_guard.never_terms(n)))
             if job_key(r) in overlaps:
                 print(_m_guard.redact("        " + r["Job"] + ": " + overlaps[job_key(r)], _m_guard.never_terms(n)))
-            for line in job_advice(inst, n, r) + [_m_spend.usage_line(u, _m_spend.job_budget(n, r), r["age_h"])] + \
-                    _m_spend.usage_advice(u, j["median_tokens"]):
+            round_usage = _m_spend.job_round_usage(inst, n, r, u)
+            for line in job_advice(inst, n, r) + [_m_spend.usage_line(u, _m_spend.job_budget(n, r), r["age_h"], round_usage=round_usage)] + \
+                    _m_spend.usage_advice(u, j["median_tokens"], round_usage=round_usage):
                 print(_m_guard.redact("        " + line, _m_guard.never_terms(n)))
+            if r.get("Forecast"):
+                print(_m_guard.redact("        " + estimate_line(saved_forecast(r["Forecast"])), _m_guard.never_terms(n)))
+                hb = read_handback(n, r) or {}
+                if isinstance(hb.get("actual"), dict):
+                    print(_m_guard.redact("        " + actual_line(hb["actual"]), _m_guard.never_terms(n)))
         for c in j["causes"]:
             print(f"  cause {c}")
         for line in forecast_lines(read_jobs(n) or [], a.branch) + job_budget_lines(inst, n, a.branch):
             print(_m_guard.redact("  " + line, _m_guard.never_terms(n)))
         for r in read_jobs(n) or []:
             if a.branch and r["Job"] == a.branch and (not a.job_key or job_key(r) == a.job_key):
+                if r.get("Ended"):
+                    hb = read_handback(n, r) or {}
+                    line = verify_duration_line(inst, n, hb.get("verify_duration"))
+                    if line:
+                        print(_m_guard.redact(line, _m_guard.never_terms(n)))
+                if r.get("Ended") and r.get("Forecast"):
+                    print(_m_guard.redact(estimate_line(saved_forecast(r["Forecast"])), _m_guard.never_terms(n)))
+                    actual = forecast_record(r.get("Actual"))
+                    if actual:
+                        print(_m_guard.redact(actual_line(actual), _m_guard.never_terms(n)))
                 print(_m_guard.redact(json.dumps(r, ensure_ascii=False), _m_guard.never_terms(n)))
                 if closed_job(r) and not r.get("Settled"):
                     print_thread_checklist(n, r)
@@ -1266,9 +1640,39 @@ def cmd_jobs(a):
 REVIEW_CAP = 2  # one full review and one blocker-only fix check; exceptions require a reason
 
 
+def record_verify_duration(inst, n, row, packet, elapsed_seconds):
+    """Measure readiness wall time, including preflight/admission; reused proof costs no new execution."""
+    seconds = forecast_number(elapsed_seconds)
+    if seconds is None:
+        return None
+    reused = isinstance(packet, dict) and packet.get("verify_reused") is True
+    threshold = forecast_number(n["fm"].get("verify_warn_seconds", inst.cfg.get("verify_warn_seconds", 600)))
+    threshold = threshold if threshold is not None and threshold > 0 else 600
+    seconds = 0.0 if reused else seconds
+    return {"elapsed_seconds": seconds, "reused": reused, "slow": seconds > threshold,
+            "warning_seconds": threshold, "at": inst.now_dt().isoformat(),
+            "basis": "readiness wall time including admission and preflight"}
+
+
+def verify_duration_line(inst, n, duration):
+    if not isinstance(duration, dict):
+        return None
+    seconds = forecast_number(duration.get("elapsed_seconds"))
+    if seconds is None or type(duration.get("reused")) is not bool:
+        return None
+    threshold = forecast_number(n["fm"].get("verify_warn_seconds", inst.cfg.get("verify_warn_seconds", 600)))
+    threshold = threshold if threshold is not None and threshold > 0 else 600
+    return (f"verify duration: {seconds:.3f}s (readiness wall time incl. admission/preflight)"
+            + ("; reused proof, no new execution" if duration["reused"] else "")
+            + (f"; slow verify: exceeds {threshold:g}s" if seconds > threshold else ""))
+
+
 def job_advice(inst, n, row):
     """What the records say about an open job's process: advice from observed events, never a gate."""
     out, hb = [], read_handback(n, row) or {}
+    duration_line = verify_duration_line(inst, n, hb.get("verify_duration"))
+    if duration_line:
+        out.append(duration_line)
     reviews = int(row.get("Reviews") or 0) if str(row.get("Reviews") or "0").isdigit() else 0
     if reviews > REVIEW_CAP:
         out.append(f"advice: {reviews} review rounds, over the cap of {REVIEW_CAP}: audit each finding's whole class "

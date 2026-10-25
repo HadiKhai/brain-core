@@ -12,6 +12,7 @@ from . import common as _m_common
 from . import guard as _m_guard
 from . import instance as _m_instance
 from . import jobs as _m_jobs
+from . import tasks as _m_tasks
 from . import knowledge as _m_knowledge
 from . import nodes as _m_nodes
 from . import status as _m_status
@@ -208,6 +209,10 @@ def cmd_wt_add(a):
         _m_common.die(f"that branch name contains {', '.join(_m_guard.find_terms(a.branch, _m_guard.never_terms(n)))}: pick another")
     for warning in _m_status.code_setup_warnings(inst, n):
         print("! " + warning)
+    try:
+        _m_tasks.prepare_start(n, getattr(a, "task_id", None), a.branch)
+    except ValueError as error:
+        _m_common.die(str(error))
     wb = workbench(inst, n, create=True)
     path = wb / "worktrees" / a.branch.replace("/", "-")
     for owner, record in n["local"].get("worktrees", {}).items():
@@ -233,10 +238,13 @@ def cmd_wt_add(a):
         "created": inst.now()}
     inst.local_of(n["id"]).setdefault("workbench", str(wb))
     inst.save_local()
-    _m_jobs.job_started(inst, n, a.branch, runtime)
+    _m_jobs.job_started(inst, n, a.branch, runtime, task_id=getattr(a, "task_id", None))
     print(f"worktree: {_m_common.tilde(path)}\n  branch {a.branch}{'' if exists else ' (new, from ' + base + ')'}  ·  "
           f"{port_text(port, count)}")
     setup = n["dir"] / SETUP_FILE
+    from . import events
+    if setup.exists() and not a.no_setup:
+        events.checkpoint_setup()
     _m_instance.unlock()  # the setup can take minutes and touches only the worktree
     try:
         for module in reuse_submodules(home, path):
@@ -357,19 +365,51 @@ def removal_refusal(n, branch, w):
     return ""
 
 
-def remove_worktree(inst, n, branch, force=False):
+def worktree_cleanup_result(n, branch, removed=False, record=None):
+    """Portable facts for a host-owned tell/settle hook, never host authorization.
+
+    Keep every recorded incarnation and reference visible. The host must verify
+    liveness, coordinator protection, pending requests and current ownership.
+    A missing workspace forbids messaging its old thread.
+    """
+    record = record or n['local'].get('worktrees', {}).get(branch) or {}
+    exists = bool(record.get('path') and Path(record['path']).is_dir())
+    rows = [r for r in (_m_jobs.read_jobs(n) or []) if r['Job'] == branch]
+    threads = [{'id': identity, 'reference': reference, 'source': source}
+               for reference, source in _m_jobs.bound_worker_threads(n, branch)
+               for identity in sorted(_m_jobs.thread_reference_ids(reference))]
+    return {'version': 1, 'node': n['id'], 'branch': branch,
+            'phase': 'removed' if removed else 'before-remove',
+            'workspace': record.get('path'), 'workspace_exists': exists,
+            'jobs': [{'key': _m_jobs.job_key(row), 'closed': _m_jobs.closed_job(row),
+                      'started': row.get('Started'), 'ended': row.get('Ended')} for row in rows],
+            'threads': threads, 'requires_host_validation': True,
+            'host_actions': ['inspect', 'tell-if-safe', 'settle-if-safe'] if exists and not removed
+                            else ['inspect', 'settle-if-safe']}
+
+
+def remove_worktree(inst, n, branch, force=False, thread_hook=None):
     w = n["local"].get("worktrees", {}).get(branch)
     if not w:
         _m_common.die(f"{n['id']}: no worktree for '{branch}' made by brain on this machine")
     reason = removal_refusal(n, branch, w)
     if reason:
         _m_common.die(f"{branch}: {reason}; worktree retained")
+    if thread_hook is not None:
+        if thread_hook(worktree_cleanup_result(n, branch, record=w)) is not True:
+            _m_common.die(f"{branch}: thread cleanup not confirmed; worktree retained")
+        # Host work can take time. Recheck current branch and live job ownership
+        # after the callback; the original preflight grants no lasting permission.
+        reason = removal_refusal(n, branch, w)
+        if reason:
+            _m_common.die(f"{branch}: {reason}; worktree retained")
     if Path(w["path"]).exists():
         r = _m_common.git("worktree", "remove", *(["--force"] if force else []), w["path"], cwd=n["home_path"])
         if r.returncode:
             _m_common.die(f"{branch}: {r.stderr.strip()} (uncommitted work? --force discards it)")
     inst.local_of(n["id"])["worktrees"].pop(branch)
     inst.save_local()
+    return worktree_cleanup_result(n, branch, removed=True, record=w)
 
 
 def cmd_wt_rm(a):
@@ -379,12 +419,14 @@ def cmd_wt_rm(a):
     reason = removal_refusal(n, a.branch, w) if w else ""
     if reason:
         _m_common.die(f"{a.branch}: {reason}; worktree retained")
-    state = worktree_state(home, w, a.branch, n) if w else (None, False, "")
+    with _m_instance.released(inst, n):
+        state = worktree_state(home, w, a.branch, n) if w else (None, False, "")
+    prepared = _m_jobs.prepare_job_usage(inst, n, a.branch, (w or {}).get("path"))
     _m_jobs.print_job_handback(n, a.branch)
     _m_jobs.print_worktree_threads(n, a.branch)
     remove_worktree(inst, n, a.branch, a.force)
     _m_jobs.job_ended(inst, n, a.branch, "merged" if state[1] else "abandoned", job_commits(home, w, a.branch), a.cause or "",
-              worktree=(w or {}).get("path"))
+              worktree=(w or {}).get("path"), prepared=prepared)
     print(f"removed the worktree for {a.branch} (the branch itself stays)")
 
 
@@ -393,7 +435,8 @@ def cmd_wt_prune(a):
     inst = _m_nodes.load()
     n, home = git_home(inst, a.id)
     if not a.dry_run and _m_common.git("remote", cwd=home).stdout.strip() and not a.offline:
-        _m_common.git("fetch", "--all", "--prune", "--quiet", cwd=home)
+        with _m_instance.released(inst, n):
+            _m_common.git("fetch", "--all", "--prune", "--quiet", cwd=home)
     removed, kept = [], []
     for br, w in sorted(n["local"].get("worktrees", {}).items()):
         reason = removal_refusal(n, br, w)
@@ -403,7 +446,8 @@ def cmd_wt_prune(a):
         if not integration_target(n):
             kept.append(f"{br} (origin default unavailable; run git remote set-head origin -a)")
             continue
-        dirty, merged, ahead = worktree_state(home, w, br, n)
+        with _m_instance.released(inst, n):
+            dirty, merged, ahead = worktree_state(home, w, br, n)
         if dirty is None or (merged and dirty == 0):
             if dirty is not None:
                 entries = _m_common.git("ls-files", "--stage", "-z", cwd=w["path"])
@@ -420,9 +464,10 @@ def cmd_wt_prune(a):
             _m_jobs.print_job_handback(n, br)
             _m_jobs.print_worktree_threads(n, br, dry_run=a.dry_run)
             if not a.dry_run:
+                prepared = _m_jobs.prepare_job_usage(inst, inst.node(n["id"]), br, w.get("path"))
                 remove_worktree(inst, inst.node(n["id"]), br)
                 _m_jobs.job_ended(inst, n, br, "merged" if merged else "abandoned", job_commits(home, w, br),
-                          "" if merged else "worktree was gone", worktree=w.get("path"))
+                          "" if merged else "worktree was gone", worktree=w.get("path"), prepared=prepared)
             removed.append(br)
         else:
             kept.append(f"{br} ({'uncommitted work' if dirty else 'not merged'})")

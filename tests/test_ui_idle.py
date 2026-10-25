@@ -404,6 +404,7 @@ cli.main()
         def scope(revision):
             return spend.live_usage_snapshot(values, revision) if hasattr(spend, 'live_usage_snapshot') else contextlib.nullcontext()
         with mock.patch.object(spend, 'job_usage', return_value={'sessions': 1}) as count, \
+             mock.patch.object(spend, 'spend_input_signature', return_value=('fixture',)), \
              mock.patch.object(spend.time, 'monotonic', return_value=0) as clock:
             with scope(1):
                 spend.live_usage(inst, node, row)

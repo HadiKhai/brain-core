@@ -1,9 +1,43 @@
+## 2026-10-25: Native tasks and source-preserving migration
+
+**For agents**
+
+- Tasks have node-local records, a dependency-aware CLI and links to requirements,
+  shared repository decisions and private rules. Jobs retain their task identity.
+- Completion requires a verified main commit and code path. Two distinct failed
+  rounds park a task with a resume condition; parked work continues blocking it.
+- Install and upgrade run additive migration from local commitments and open jobs.
+  Existing prose is preserved, and repeats do not duplicate imported records.
+
+**After upgrading**
+
+Read `core/docs/tasks.md`. Run `brain task migrate --all` if installation reported
+an incomplete migration, then `brain task check <node>`. For task-enabled nodes,
+select with `brain task next <node>` and start with `brain wt add <node> <branch>
+--task-id <id>`. External task sources require the configured provider; local
+migration never creates provider tickets or overwrites provider-owned fields.
+
 # Changes, for the agents that run a Brain
 
 Newest first. Each entry says what changed in rules, skills and commands, and what to do after
 upgrading. `brain changes <node>` shows the entries this node's coordinator hasn't read yet, and
 `brain due <node>` lists them until `brain changes <node> --seen`. Entry headings are
 `## <date>: <title>`; once released, a heading never changes.
+
+## 2026-10-25: Private event journal and automatic status maintenance
+
+For agents: Instance writers now record durable metadata operations, refresh affected
+status facts and archive Now overflow. `brain events <node> --compare` audits gaps;
+`brain status <node> --from-events` reads committed generated projections. These
+projections are not typed domain-fact reconstruction. `status_source=events` stays
+an explicit switch after a clean comparison day. `brain backlog <node> add <item>`
+records dated deferred work. Typed observed facts use `brain events <node> --record`
+with controlled metadata; no transcript-based classification is performed.
+
+After upgrading: Run `brain check --fix` for missing standard backlog files. Move
+handwritten Active work state prose to Now or decisions before a write regenerates
+the table. Keep snapshots during comparison. An interrupted journal requires a
+locked `brain status <node> --refresh`; see `docs/recovery.md`.
 
 ## 2026-10-25: Rehearsal is an optional diagnostic
 
@@ -1575,3 +1609,13 @@ For agents:
 
 After upgrading:
 - Nothing required. Offer the study to the operator for nodes whose import study is done.
+
+
+
+
+## Consumption-aware wakes
+
+For agents: machine-local `wake_coalesce=on` enables one outstanding coordinator
+wake until visible due consumes it, with one reminder attempt after thirty minutes.
+After upgrading: existing transports keep their delivery behavior; enable this only
+for a coordinator that runs due on every wake. No host queue behavior is inferred.

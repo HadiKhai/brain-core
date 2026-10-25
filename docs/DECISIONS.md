@@ -54,13 +54,7 @@ brief, then checks that the brief retains the expected runtime and model. Its
 cases cover class defaults, a node runtime pin, node and instance class routing,
 and inherited model configuration without activating inherited runtime policy.
 
-## D401: Git-owned landing and compatible batch advice
 
-A clean main checkout is fast-forwarded by Git with autostash and ignored-file
-replacement disabled. An unoccupied main uses one compare-and-swap ref update.
-Publication never rolls back a checkout or ref. Closure requires an explicit
-successful publication receipt; ambiguous results retain the journal for repair.
-Host settlement remains pending until separately supplied, validated evidence.
 
 A completed job with valid recorded-base evidence and a clean merge may receive
 batch-eligibility advice after main advances. This advisory never marks it ready
@@ -216,3 +210,51 @@ facts bound to job, exact head, base and execution fingerprint. Focused runs and
 imported/reused proof emit none; explicit reverify is classified separately.
 Telemetry uses the event module's controlled schema and is absent on installations
 without that module.
+## D1301: Node-local tasks with explicit dependencies and completion evidence
+
+Store one Markdown file per task under a node's `tasks/`, using versioned,
+JSON-valued frontmatter and a free-text description. Requirements have separate
+`requirements/REQ-*.md` records preserving their exact quote, date and source.
+Task decision references distinguish shared repository entries (`repo:D123`)
+from private entries (`private:D-123`); neither reference copies decision text.
+
+Task mutations validate the complete node dependency graph before writing.
+Cycles, missing dependencies, unsupported schemas and linked storage refuse.
+Active work requires an exact live ledger job; completion requires evidence,
+a code path and a commit already on local main. Parked tasks require a reason
+and resume condition and continue blocking dependents; dropping a task does not
+silently satisfy dependencies. Provider-owned tasks retain external ownership
+of their product fields; internal work can still use local records.
+
+## D1302: Task-aware jobs preserve explicit opt-in and landing proof
+
+Nodes with task records require a ready, unblocked task before creating a job
+worktree. Nodes without records keep their existing job interface, and import
+studies remain compatible. The ledger retains the task ID, while the task stores
+the stable job key and branch. Identified failed rounds count once; two failures
+park the task with an explicit resume condition.
+
+Closing a job updates its task only from a successful native verification packet
+whose head is already on main, retaining the changed code paths. Other closures
+park the task rather than claiming completion. File-only due items surface ready,
+unblocked, parked and inactive tasks without changing their state.
+
+## D1303: Task backfill is additive and source-addressed
+
+The backfill importer reads explicit list entries from node-local backlogs,
+build orders, inboxes and relevant status sections, plus open ledger jobs.
+Stable source fingerprints make replays and source line shifts idempotent.
+Every imported task links an exact source quote and location. A missing original
+request date is recorded as file observation time with an explicit date basis.
+Existing task records and source prose are preserved. Imported prose stays in
+backlog until its runnable state and dependencies are explicit; open jobs retain
+their exact job identity. External issue references on provider-backed nodes wait
+for a provider pull rather than becoming duplicate local product issues.
+
+## D1304: Requirements retain sources and rules activate explicitly
+
+Requirements are immutable source records. Explicit rule creation builds a
+current `rules.md` index and preserves superseded rule records. Imported prose
+never activates itself, and a manually maintained rules index refuses overwrite.
+Install/upgrade runs additive task migration and documents repairs on failure;
+read-only commands never silently migrate storage or contact providers.

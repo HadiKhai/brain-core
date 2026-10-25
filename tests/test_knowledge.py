@@ -474,6 +474,258 @@ class AutonomyHire(AutonomyProject):
 
 
 
+class GovernanceScopeGuard(Scenario):
+    def project(self):
+        r = self.init("alice")
+        self.b(r, "principal", "add", "quietcrew")
+        home = self.repo(self.tmp / "app")
+        self.b(r, "new", "app", "--title", "App", "--home", str(home))
+        self.b(r, "specialist", "new", "qa", "--title", "Review checks", "--at", "app",
+               "--scope", "alice,quietcrew")
+        self.b(r, "item", "add", "checks", "--from", "app", "--title", "Review checks",
+               "--kind", "method", "--ref", "notes", "--at", "app", "--scope", "alice,quietcrew",
+               "--consented-by", "alice", "--body", "Review checks safely.")
+        nd = r / "nodes/app"
+        role = nd / "specialists/qa/role.md"
+        item = nd / "library/checks.md"
+        item.write_text(item.read_text().replace("source_owners: alice", "source_owners: alice, quietcrew"))
+        (nd / "never-name.txt").write_text("quietcrew\n")
+        return r, nd, role, item
+
+    def test_principal_scope_is_usable_without_exporting_governance(self):
+        r, nd, role, item = self.project()
+        before = {p: p.read_text() for p in (role, item)}
+        outputs = [self.b(r, "hire", "qa", "app", "--task", "Review checks", "--items", "checks"),
+                   self.b(r, "brief", "app", "--task", "Review checks"),
+                   self.b(r, "review", "app", "--branch", "main", "--built-by", "codex",
+                          "--focus", "Review checks"),
+                   self.b(r, "item", "show", "checks", "--node", "app")]
+        for out in outputs:
+            self.assertNotIn("quietcrew", out)
+            self.assertNotIn("scope:", out)
+            self.assertNotIn("source_owners:", out)
+            self.assertIn("Review checks", out)
+        self.assertIn("`checks`", outputs[1])
+        for p, text in before.items():
+            self.assertEqual(p.read_text(), text)
+        self.assertIn("guard: clean", self.b(r, "guard", "app", str(nd)))
+        self.git("add", "nodes/app/library", "nodes/app/specialists", cwd=r)
+        self.assertIn("guard: clean", self.b(r, "guard", "app", str(nd)))
+
+    def test_exemption_is_exact_and_confined_to_governance_frontmatter(self):
+        r, nd, role, item = self.project()
+        original = role.read_text()
+        variants = [original + "\nquietcrew\n",
+                    original.replace("title: Review checks", "title: quietcrew"),
+                    original.replace("scope: alice, quietcrew", "scope: alice,quietcrew-extra"),
+                    original.replace("scope: alice, quietcrew", "scope: alice,QuietCrew"),
+                    original + "\nscope: quietcrew\n"]
+        for text in variants:
+            with self.subTest(text=text):
+                self.assertNotEqual(text, original)
+                role.write_text(text)
+                out = self.b(r, "hire", "qa", "app", "--task", "Review", ok=False)
+                self.assertNotIn("quietcrew", out.casefold())
+                out = self.b(r, "guard", "app", str(nd), ok=False)
+                self.assertNotIn("quietcrew", out.casefold())
+        role.write_text(original)
+        self.b(r, "brief", "app", "--task", "---\nscope: quietcrew\n---\nReview", ok=False)
+        other = nd / "ordinary.md"
+        other.write_text("---\nscope: quietcrew\n---\nReview\n")
+        self.b(r, "guard", "app", str(nd), ok=False)
+        other.unlink()
+        role.write_text("---\nscope: quietcrew\n")
+        self.b(r, "hire", "qa", "app", "--task", "Review", ok=False)
+
+    def test_index_keeps_screening_non_governance_text(self):
+        r, nd, role, item = self.project()
+        original = role.read_text()
+        role.write_text(original + "\nquietcrew\n")
+        self.git("add", "nodes/app/specialists/qa/role.md", cwd=r)
+        role.write_text(original)
+        out = self.b(r, "guard", "app", str(nd), ok=False)
+        self.assertIn("index stage 0:", out)
+        self.assertNotIn("quietcrew", out.casefold())
+
+    def test_governance_stream_is_chunk_safe_and_keeps_raw_index_results(self):
+        m = core_loader.SourceFileLoader("brain_scope_stream", str(CORE / "bin/brain")).load_module()
+        variants = [
+            ("---\nscope: quietcrew\nsource_owners: quietcrew\n---\nSafe\n", False),
+            ("---\r\nscope: quietcrew\r\n---\r\nSafe\r\n", True),
+            ("---\nscope: quietcrew\n---", False),
+            ("---\nscope: quietcrew-extra\n---\nSafe\n", True),
+            ("---\nscope: quietcrew\n---\nBody quietcrew\n", True),
+            ("---\nscope: quietcrew\n", True),
+            ("scope: quietcrew\n", True),
+            ("---\nscope: quietcrew\n---suffix\n", False),
+            ("---\nscope: quietcrew\n---\nStraße\n", False),
+        ]
+        for text, forbidden in variants:
+            for chunk in (1, 2, 3, 5, 7, 32):
+                for bounded in (False, True):
+                    with self.subTest(text=text, chunk=chunk, bounded=bounded):
+                        encoded = text.encode()
+                        stream = io.BytesIO(encoded + (b"NEXT BLOB" if bounded else b""))
+                        raw = set()
+                        result = m.stream_mentions(stream, ["quietcrew", "strasse"],
+                                                   size=len(encoded) if bounded else None,
+                                                   chunk=chunk, principals=["quietcrew"], raw=raw)
+                        self.assertEqual("quietcrew" in result, forbidden)
+                        self.assertIn("quietcrew", raw)
+                        self.assertEqual("strasse" in result, "Straße" in text)
+                        if bounded:
+                            self.assertEqual(stream.read(), b"NEXT BLOB")
+
+    def test_only_known_principal_values_pass_typed_no_terms_checks(self):
+        r, nd, role, item = self.project()
+        args = ("item", "add", "proposed-checks", "--from", "app", "--at", "app",
+                "--title", "Review plan", "--kind", "method", "--ref", "notes",
+                "--scope", "alice,quietcrew", "--consented-by", "alice", "--body", "Safe plan",
+                "--proposed", "--repo", "example.test/team/project", "--commit", "b" * 40)
+        self.b(r, *args)
+        self.assertIn("guard: clean", self.b(r, "guard", "app", str(nd)))
+        self.b(r, "brief", "app", "--task", "---\nscope: quietcrew\n---\nSafe plan", ok=False)
+
+    def test_same_blob_in_an_ordinary_file_keeps_its_index_guard(self):
+        r, nd, role, item = self.project()
+        ordinary = nd / "ordinary.md"
+        ordinary.write_text(role.read_text())
+        self.git("add", "nodes/app/ordinary.md", "nodes/app/specialists/qa/role.md", cwd=r)
+        ordinary.unlink()
+        out = self.b(r, "guard", "app", str(nd), ok=False)
+        self.assertIn("index stage 0:", out)
+        self.assertIn("ordinary.md", out)
+        self.assertNotIn("specialists/qa/role.md:", out)
+        self.assertNotIn("quietcrew", out.casefold())
+
+    def test_item_fields_and_body_keep_their_never_name_checks(self):
+        r, nd, role, item = self.project()
+        original = item.read_text()
+        variants = [original + "\nquietcrew\n",
+                    original.replace("title: Review checks", "title: quietcrew"),
+                    original.replace("source_ref: notes", "source_ref: quietcrew"),
+                    original.replace("scope: alice, quietcrew", "scope: alice, quietcrew-extra"),
+                    original.replace("source_owners: alice, quietcrew", "source_owners: quietcrew-extra")]
+        for text in variants:
+            with self.subTest(text=text):
+                self.assertNotEqual(text, original)
+                item.write_text(text)
+                self.b(r, "hire", "qa", "app", "--task", "Review", "--items", "checks", ok=False)
+                self.b(r, "item", "show", "checks", "--node", "app", ok=False)
+                self.b(r, "guard", "app", str(nd), ok=False)
+        item.write_text(original)
+
+    def test_governance_copied_to_the_external_home_is_still_forbidden(self):
+        r, nd, role, item = self.project()
+        home = self.tmp / "app"
+        (home / "library").mkdir()
+        (home / "library/checks.md").write_text(item.read_text())
+        (home / "node.md").write_text("---\nid: fake\n---\n")
+        out = self.b(r, "guard", "app", ok=False)
+        self.assertIn("library/checks.md", out)
+        self.assertNotIn("quietcrew", out.casefold())
+
+    def test_staged_symlink_data_cannot_claim_governance_metadata(self):
+        r, nd, role, item = self.project()
+        oid = self.git("hash-object", "-w", str(role), cwd=r).strip()
+        self.git("update-index", "--add", "--cacheinfo", "120000," + oid + ",nodes/app/specialists/qa/role.md", cwd=r)
+        out = self.b(r, "guard", "app", str(nd), ok=False)
+        self.assertIn("index stage 0:", out)
+        self.assertNotIn("quietcrew", out.casefold())
+
+    def test_accept_allows_metadata_but_keeps_body_and_reviewer_strict(self):
+        r, nd, role, item = self.project()
+        for p in (role, item):
+            p.write_text(p.read_text().replace("status: active", "status: proposed"))
+        commands = [(item, ("item", "accept", "checks")),
+                    (role, ("specialist", "accept", "qa", "--at", "app"))]
+        for path, command in commands:
+            original = path.read_text()
+            path.write_text(original + "\nquietcrew\n")
+            self.b(r, *command, "--reviewed-by", "alice", ok=False)
+            path.write_text(original)
+            self.b(r, *command, "--reviewed-by", "quietcrew", ok=False)
+            self.b(r, *command, "--reviewed-by", "alice")
+            self.assertIn("status: active", path.read_text())
+            self.assertIn("scope: alice, quietcrew", path.read_text())
+
+    def test_lessons_exempt_only_their_written_scope_segment(self):
+        r, nd, role, item = self.project()
+        source_home = self.tmp / "team-home"
+        source_home.mkdir()
+        self.b(r, "new", "team", "--title", "Team", "--owners", "alice,quietcrew", "--home", str(source_home))
+        self.b(r, "lesson", "qa", "--at", "app", "--from", "team", "Review shared checks safely.")
+        lessons = role.parent / "lessons.md"
+        original = lessons.read_text()
+        self.assertIn("guard: clean", self.b(r, "guard", "app", str(nd)))
+        self.git("add", "nodes/app/specialists/qa/lessons.md", cwd=r)
+        self.assertIn("guard: clean", self.b(r, "guard", "app", str(nd)))
+        self.assertIn("Review shared checks safely.", self.b(r, "hire", "qa", "app", "--task", "Review"))
+        role.write_text(role.read_text().replace("status: active", "status: proposed"))
+        self.b(r, "specialist", "accept", "qa", "--at", "app", "--reviewed-by", "alice")
+        for bad in (original + "\nquietcrew\n",
+                    original.replace("scope alice, quietcrew:", "scope alice, quietcrew-extra:"),
+                    original.replace("from team", "from quietcrew"),
+                    original.replace("Review shared checks safely.", "quietcrew"),
+                    "---\nscope: quietcrew\n---\nSafe\n"):
+            self.assertNotEqual(bad, original)
+            lessons.write_text(bad)
+            self.b(r, "guard", "app", str(nd), ok=False)
+        lessons.write_text(original)
+
+    def test_connect_screens_each_typed_source_separately(self):
+        r, nd, role, item = self.project()
+        lessons = role.parent / "lessons.md"
+        lessons.write_text("# Lessons\n\n- 2026-01-01 10:00 +00:00 · from app · scope alice, quietcrew: Review safely.\n")
+        m = core_loader.SourceFileLoader("brain_scope_connect", str(CORE / "bin/brain")).load_module()
+        inst = m.Instance(r)
+        skipped = []
+        refs = {f["ref"] for f in m.connect_sources(inst, inst.node("app"), skipped)}
+        self.assertIn("app:specialists/qa/role.md", refs)
+        self.assertIn("app:specialists/qa/lessons.md", refs)
+        self.assertIn("item:checks", refs)
+        self.assertNotIn("qa", skipped)
+        self.assertNotIn("checks", skipped)
+        lessons.write_text(lessons.read_text() + "\nquietcrew\n")
+        item.write_text(item.read_text() + "\nquietcrew\n")
+        refs = {f["ref"] for f in m.connect_sources(inst, inst.node("app"))}
+        self.assertNotIn("app:specialists/qa/role.md", refs)
+        self.assertNotIn("item:checks", refs)
+
+    def test_duplicate_governance_keys_are_screened_whole(self):
+        m = core_loader.SourceFileLoader("brain_scope_duplicates", str(CORE / "bin/brain")).load_module()
+        for key in ("scope", "source_owners"):
+            text = f"---\n{key}: quietcrew\n  {key} : alice\n---\nSafe\n"
+            self.assertIn("quietcrew", m.governance_text(text, ["quietcrew"]))
+            for chunk in (1, 4, 64):
+                self.assertIn("quietcrew", m.stream_mentions(io.BytesIO(text.encode()), ["quietcrew"],
+                                                             principals=["quietcrew"], chunk=chunk))
+
+    def test_governance_parser_uses_read_fm_grammar(self):
+        m = core_loader.SourceFileLoader("brain_scope_grammar", str(CORE / "bin/brain")).load_module()
+        cases = [("---\r\nscope: quietcrew\r\n---\r\nSafe\r\n", True),
+                 ("---\n---\nscope: quietcrew\n---\nSafe\n", False),
+                 ("---\nscope: quietcrew\n---suffix", False)]
+        for text, forbidden in cases:
+            self.assertEqual("quietcrew" in m.governance_text(text, ["quietcrew"]), forbidden)
+            for chunk in (1, 4, 64):
+                self.assertEqual("quietcrew" in m.stream_mentions(io.BytesIO(text.encode()), ["quietcrew"],
+                                                                  principals=["quietcrew"], chunk=chunk), forbidden)
+
+        text = "---\nscope: quietcrew\n---suffix"
+        self.assertIn("---suffix", m.governance_text(text, ["quietcrew"]))
+        for chunk in (1, 4, 64):
+            self.assertIn("---suffix", m.stream_mentions(io.BytesIO(text.encode()), ["---suffix"],
+                                                         principals=["quietcrew"], chunk=chunk))
+
+    def test_direct_script_collects_the_governance_class(self):
+        run = subprocess.run([sys.executable, str(Path(__file__)),
+                              "GovernanceScopeGuard.test_governance_parser_uses_read_fm_grammar"],
+                             env=self.env, text=True, capture_output=True)
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertIn("Ran 1 test", run.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()
 
@@ -632,3 +884,28 @@ class RuleSnapshotActivation(unittest.TestCase):
                         pending = proposals.pending_rule_snapshot(inst, node)
                         self.assertEqual(pending['digest'], hashlib.sha256(reviewed).hexdigest())
                         self.assertEqual(source.read_bytes(), reviewed)
+
+
+class OperationalLimitExpiry(Scenario):
+    def test_explicit_expiry_lifts_operational_limit_but_preserves_policy_snapshot(self):
+        r = self.init('alice')
+        (r / 'brief.md').write_text('# Brief\n\n## Limits\n- Temporary cap. Why: maintenance; Lift when: expiry; Expires: 2020-01-01T00:00:00+00:00\n- Permanent cap. Why: safety; Lift when: explicit choice\n- Unclear cap. Why: safety; Lift when: review; Expires: tomorrow\n')
+        m = core_loader.SourceFileLoader('limit_expiry_fixture', str(CORE / 'bin/brain')).load_module()
+        inst = m.Instance(r)
+        n = inst.node('root')
+        records = m.limit_records(inst, n)
+        self.assertEqual([row['state'] for row in records], ['expired', 'active', 'invalid-expiry'])
+        text = '\n'.join(m.limits_lines(n))
+        self.assertNotIn('Temporary cap', text)
+        self.assertIn('Permanent cap', text)
+        self.assertIn('Unclear cap', text)
+        self.assertEqual(len(m.limit_snapshot(n)), 3)
+        self.assertEqual(m.publication_decision(inst, n, 'push')['decision'], 'unknown')
+        self.assertIn('invalid Expires:', self.b(r, 'check'))
+
+    def test_expiry_is_absolute_and_narrative_clearing_conditions_do_not_grant_permission(self):
+        r = self.init('alice')
+        (r / 'brief.md').write_text('# Brief\n\n## Limits\n- Wait for green. Why: verification; Lift when: the tests pass\n- Future limit. Why: maintenance; Lift when: expiry; Expires: 2099-01-01T00:00:00+00:00\n')
+        m = core_loader.SourceFileLoader('limit_future_fixture', str(CORE / 'bin/brain')).load_module()
+        inst = m.Instance(r)
+        self.assertEqual([row['state'] for row in m.limit_records(inst, inst.node('root'))], ['active', 'active'])

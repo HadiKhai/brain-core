@@ -316,3 +316,113 @@ class ReviewDiscipline(Scenario):
         text = self.review(r, "--reason", "schema")
         self.assertIn("Fitness gate: skipped: worktree differs", text)
         self.assertFalse((wt / "gate-ran").exists())
+
+
+class IndependentReviewReceipts(Scenario):
+    job = _test_verify.WorkerReadyPackets.job
+
+    def context(self):
+        r, home, wt = self.job()
+        self.b(r, 'set', 'a', 'review_independence=fresh-thread')
+        m = core_loader.SourceFileLoader('independent_review_fixture', str(_test_verify.CORE / 'bin/brain')).load_module()
+        inst = m.Instance(r)
+        n = inst.node('a')
+        rows = m.read_jobs(n)
+        rows[-1].update(Runtime='codex', Model='example-model')
+        m.write_jobs(inst, n, rows)
+        key = m.job_key(rows[-1])
+        inst.local['nodes']['a'].setdefault('workers', {})[key] = 'builder-thread'
+        inst.save_local()
+        n = inst.node('a')
+        head = self.git('rev-parse', 'HEAD', cwd=wt).strip()
+        receipt = {'version': 1, 'node': 'a', 'job_key': key, 'branch': 'job', 'head': head,
+                   'observed_at': inst.now_dt().isoformat(), 'builder': {'threadId': 'builder-thread', 'runtime': 'codex', 'model': 'example-model'},
+                   'reviewer': {'threadId': 'reviewer-thread', 'runtime': 'codex', 'model': 'example-model',
+                                'fresh_context': True, 'context_reused': False, 'built_change': False},
+                   'verdict': 'pass', 'findings': []}
+        return r, wt, m, inst, n, receipt
+
+    def test_same_model_distinct_fresh_thread_receipt_is_required_and_recorded(self):
+        r, wt, m, inst, n, receipt = self.context()
+        self.assertTrue(m.validate_ready_reviews(inst, n, 'job', receipt['head']))
+        m.record_review_receipt(inst, n, 'job', receipt)
+        self.assertEqual(m.validate_ready_reviews(inst, n, 'job', receipt['head']), [])
+        evidence = m.review_evidence(inst, n, 'job')
+        self.assertEqual(evidence[0]['reviewer']['threadId'], 'reviewer-thread')
+        self.assertEqual(evidence[0]['reviewer']['runtime'], 'codex')
+        self.assertEqual(evidence[0]['reviewer']['model'], 'example-model')
+        self.assertNotIn('reviewer-thread', (n['dir'] / 'job-ledger.md').read_text())
+        self.git('commit', '--allow-empty', '-qm', 'next change', cwd=wt)
+        head = self.git('rev-parse', 'HEAD', cwd=wt).strip()
+        self.assertTrue(m.validate_ready_reviews(inst, n, 'job', head))
+
+    def test_self_unknown_reused_builder_and_failed_receipts_are_rejected(self):
+        r, wt, m, inst, n, original = self.context()
+        for fields in ({'threadId': 'builder-thread'}, {'threadId': ''}, {'model': ''},
+                       {'fresh_context': False}, {'context_reused': True}, {'built_change': True}):
+            receipt = json.loads(json.dumps(original))
+            receipt['reviewer'].update(fields)
+            with self.subTest(fields=fields), self.assertRaises(ValueError):
+                m.record_review_receipt(inst, n, 'job', receipt)
+        legacy = dict(n, fm={**n['fm'], 'review_independence': 'cross-runtime'})
+        with self.assertRaises(ValueError):
+            m.record_review_receipt(inst, legacy, 'job', original)
+        receipt = dict(original, verdict='blocked')
+        m.record_review_receipt(inst, n, 'job', receipt)
+        self.assertTrue(m.validate_ready_reviews(inst, n, 'job', receipt['head']))
+
+    def test_review_route_allows_same_runtime_only_with_explicit_fresh_policy(self):
+        r, wt, m, inst, n, receipt = self.context()
+        text = self.b(r, 'review', 'a', '--branch', 'job', '--built-by', 'codex', '--by', 'codex', '--model', 'example-model')
+        self.assertIn('fresh non-builder thread', text)
+        self.assertIn('Reviewer runtime: codex', text)
+        self.assertIn('receipt', text)
+        file = self.tmp / 'receipt.json'
+        file.write_text(json.dumps(receipt))
+        self.assertIn('review receipt recorded', self.b(r, 'review', 'a', '--branch', 'job', '--receipt-file', str(file)))
+        self.b(r, 'set', 'a', 'review_independence=cross-runtime')
+        self.b(r, 'review', 'a', '--branch', 'job', '--built-by', 'codex', '--by', 'codex', '--reason', 'security', ok=False)
+
+    def test_legacy_exception_expires_and_still_requires_thread_evidence(self):
+        r, wt, m, inst, n, receipt = self.context()
+        self.b(r, 'set', 'a', 'review_independence=cross-runtime',
+               'same_runtime_review_until=2099-01-01T00:00:00+00:00')
+        args = ('review', 'a', '--branch', 'job', '--built-by', 'codex', '--by', 'codex', '--model', 'example-model')
+        self.assertIn('--same-runtime-reason', self.b(r, *args, ok=False))
+        text = self.b(r, *args, '--same-runtime-reason', 'Provider unavailable')
+        self.assertIn('Same-runtime exception expires:', text)
+        inst = m.Instance(r)
+        n = inst.node('a')
+        self.assertTrue(m.validate_ready_reviews(inst, n, 'job', receipt['head']))
+        ledger = (n['dir'] / 'job-ledger.md').read_text()
+        self.assertIn('Provider unavailable', ledger)
+        self.b(r, 'set', 'a', 'same_runtime_review_until=2020-01-01T00:00:00+00:00')
+        text = self.b(r, *args, '--same-runtime-reason', 'Provider unavailable', '--reason', 'security', ok=False)
+        self.assertIn('exception expired', text)
+
+
+
+class ClosedFindingInputs(Scenario):
+    job = _test_verify.WorkerReadyPackets.job
+    context = IndependentReviewReceipts.context
+    def test_closed_findings_survive_unchanged_and_unrelated_commits(self):
+        r, wt, m, inst, n, receipt = self.context()
+        finding = {'id': 'bounds', 'class': 'boundary', 'severity': 'blocker', 'text': 'Guard the range',
+                   'paths': ['calc.py'], 'state': 'closed', 'evidence': 'test_range passes'}
+        m.record_review_findings(inst, n, 'job', receipt['head'], [finding])
+        incoming = dict(finding, state='open', evidence='')
+        m.record_review_findings(inst, n, 'job', receipt['head'], [incoming])
+        self.assertEqual(m.review_finding_state(inst, n, 'job', receipt['head'])[0]['state'], 'closed')
+        (wt / 'notes.txt').write_text('unrelated\n')
+        self.git('add', 'notes.txt', cwd=wt)
+        self.git('commit', '-qm', 'unrelated note', cwd=wt)
+        head = self.git('rev-parse', 'HEAD', cwd=wt).strip()
+        self.assertEqual(m.review_finding_state(inst, n, 'job', head)[0]['state'], 'closed')
+        (wt / 'calc.py').write_text('value = 3\n')
+        self.git('commit', '-qam', 'relevant input changed', cwd=wt)
+        head = self.git('rev-parse', 'HEAD', cwd=wt).strip()
+        self.assertEqual(m.review_finding_state(inst, n, 'job', head)[0]['state'], 'reopened')
+        with self.assertRaises(ValueError):
+            m.record_review_findings(inst, n, 'job', head, [dict(finding, evidence='')])
+        m.record_review_findings(inst, n, 'job', head, [finding])
+        self.assertEqual(m.review_finding_state(inst, n, 'job', head)[0]['state'], 'closed')

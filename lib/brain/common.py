@@ -44,9 +44,12 @@ def touch(*paths):
 
 # ---------- files ----------
 
+FRONTMATTER_RE = re.compile(r"^---\n(.*?)\n---\n?(.*)$", re.S)
+
+
 def read_fm(path):
     text = Path(path).read_text()
-    m = re.match(r"^---\n(.*?)\n---\n?(.*)$", text, re.S)
+    m = FRONTMATTER_RE.match(text)
     if not m:
         return {}, text
     fm = {}
@@ -243,6 +246,10 @@ def git(*args, cwd=None, check=False, env=None):
     if check:
         result.check_returncode()
     return result
+
+
+class VerdictExit(SystemExit):
+    """A completed command returning a negative verdict rather than a failed mutation."""
 
 
 def die(msg):

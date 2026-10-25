@@ -10,9 +10,11 @@ import subprocess
 import sys
 from pathlib import Path
 
+from . import action_guard as _m_action_guard
 from . import briefs as _m_briefs
 from . import check as _m_check
 from . import common as _m_common
+from . import events as _m_events
 from . import connect as _m_connect
 from . import guard as _m_guard
 from . import gate_lock as _m_gate_lock
@@ -24,6 +26,7 @@ from . import jobs as _m_jobs
 from . import handback_queue as _m_handback_queue
 from . import dispatcher as _m_dispatcher
 from . import knowledge as _m_knowledge
+from . import launch_receipts as _m_launch_receipts
 from . import land_checks as _m_land_checks
 from . import messages as _m_messages
 from . import machine as _m_machine
@@ -33,6 +36,7 @@ from . import nodes as _m_nodes
 from . import queue_priority as _m_queue_priority
 from . import policy as _m_policy
 from . import release as _m_release
+from . import preview_evidence as _m_preview_evidence
 from . import reports as _m_reports
 from . import rehearse as _m_rehearse
 from . import rotation as _m_rotation
@@ -42,6 +46,7 @@ from . import spec_run as _m_spec_run
 from . import spend as _m_spend
 from . import status as _m_status
 from . import sync as _m_sync
+from . import tasks as _m_tasks
 from . import train as _m_train
 from . import transitions as _m_transitions
 from . import ui as _m_ui
@@ -129,14 +134,30 @@ def reexec_into_instance_core():
 READ_ONLY = {"cmd_show", "cmd_tree", "cmd_status", "cmd_now", "cmd_jobs", "cmd_stale", "cmd_ui", "cmd_guard",
              "cmd_due", "cmd_inbox", "cmd_index",
              "cmd_brief", "cmd_hire", "cmd_reports", "cmd_brains", "cmd_use", "cmd_machine", "cmd_usable",
-             "cmd_item_list", "cmd_item_show", "cmd_wt_list", "cmd_selftest", "cmd_init", "cmd_hook", "cmd_hook_approve", "cmd_help",
+             "cmd_item_list", "cmd_item_show", "cmd_wt_list", "cmd_selftest", "cmd_init", "cmd_hook", "cmd_hook_pretool", "cmd_hook_approve", "cmd_help",
              "cmd_dashboard", "cmd_ready", "cmd_usage", "cmd_scan", "cmd_scrub", "cmd_history",
-             "cmd_gate_lock", "cmd_version", "cmd_connect", "cmd_recall", "cmd_proposals", "cmd_changes", "cmd_heavy", "cmd_rehearse", "cmd_policy"}
+             "cmd_launch_check", "cmd_events", "cmd_gate_lock", "cmd_version", "cmd_connect", "cmd_recall", "cmd_proposals", "cmd_changes", "cmd_heavy", "cmd_rehearse", "cmd_policy", "cmd_preview"}
 
 
 def writes(a):
     """Does this command, with these options, change anything in the instance?"""
     name = a.f.__name__
+    if name == "cmd_events":
+        return bool(a.explain or a.record)
+    if name == "cmd_wt_prune":
+        return not a.dry_run
+    if name == 'cmd_preview':
+        return bool(a.record)
+    if name == "cmd_task_sources":
+        return a.action == "rule-add"
+    if name == "cmd_task_migrate":
+        return True
+    if name == "cmd_task_backfill":
+        return a.apply
+    if name == "cmd_requirement":
+        return True
+    if name == "cmd_task":
+        return a.action in ("add", "set", "backfill", "sync", "event", "requirement-add")
     if name == 'cmd_proposals':
         return bool(getattr(a, 'approve_all', False))
     if name in ('cmd_full_run', 'cmd_spec_run'):
@@ -156,7 +177,7 @@ def writes(a):
     if name == "cmd_status":
         return a.refresh
     if name == "cmd_inbox":
-        return a.new
+        return a.new or bool(getattr(a, "add", None))
     if name == 'cmd_index':
         return a.record
     if name == 'cmd_due':
@@ -171,7 +192,7 @@ def writes(a):
     if name == "cmd_check":
         return bool(a.fix)
     if name == "cmd_jobs":
-        return a.start or a.close or a.lessons is not None or a.switch is not None or bool(a.contract_file) \
+        return a.start or a.close or bool(getattr(a, "settled", False)) or a.lessons is not None or a.switch is not None or bool(a.contract_file) \
             or bool(a.usage_file)
     if name == "cmd_ready":
         return a.record
@@ -188,6 +209,8 @@ def main():
                     "default: the one whose folders you are in, else `brain use`)")
     ap.add_argument("-a", "--all", action="store_true", help="with no command: every brain's dashboard")
     sub = ap.add_subparsers(dest="cmd", metavar="<command>")
+
+    _m_tasks.register(sub)
 
     def cmd(name, fn, h, *args):
         s = sub.add_parser(name, help=h, description=h)
@@ -206,6 +229,8 @@ def main():
         opt("--operator", required=True), opt("--title", required=True), opt("--runtimes", default="claude,codex"),
         opt("--host", default="t3"), opt("--tz", default="UTC"),
         opt("--name", help="short name for `brain -b <name>` (default: the folder's name)"))
+    cmd("launch-check", _m_launch_receipts.cmd_launch_check, "compare routed selection with returned host receipt metadata", "id",
+        opt("--selection-file", required=True), opt("--receipt-file", required=True))
     cmd("usage", _m_usage.cmd_usage, "account-wide subscription usage (agents read the machine cache)",
         opt("action", choices=["install", "uninstall"], nargs="?"), opt("--json", action="store_true"),
         opt("--refresh", action="store_true"), opt("--watch", action="store_true"),
@@ -263,8 +288,9 @@ def main():
         opt("--save", action="store_true", help="brief: save it in .brain/connect/<node>/briefs/ and print its path"),
         opt("--json", action="store_true"))
     cmd("recall", _m_knowledge.cmd_recall, "what every project learned that may help with a problem here: "
-        "brain recall <node> \"what goes wrong\"", "id", opt("words", nargs="+"),
-        opt("--limit", type=int, default=10), opt("--json", action="store_true"))
+        "brain recall <node> \"what goes wrong\"", opt("id", nargs="?", default="root"), opt("words", nargs="*"),
+        opt("--limit", type=int, default=10), opt("--setup", action="store_true", help="prepare the optional local multilingual ONNX model"),
+        opt("--json", action="store_true"))
     cmd("proposals", _m_status.cmd_proposals, "everything waiting for review, node by node, with full text and the commands "
         "to accept or reject several at once", opt("id", nargs="?"),
         opt("--only", help="only these nodes (comma-separated)"), opt("--json", action="store_true"),
@@ -283,6 +309,8 @@ def main():
                                                                help="every session on this machine, per runtime"),
         opt("--also", action="append", metavar="FOLDER", help="also sessions run in this folder (repeatable)"),
         opt("--json", action="store_true"))
+    cmd('preview', _m_reports.cmd_preview, 'record/check source-bound local screenshot-tour evidence', 'id',
+        opt('--record', metavar='RECEIPT_JSON'), opt('--json', action='store_true'))
     cmd("ui", _m_ui.cmd_ui, "a live view of this brain in your browser: projects, work in flight, worktrees, activity "
         "(read-only by default, this machine only)", opt("--port", type=int, default=_m_ui.UI_PORT),
         opt("--every", type=float, default=3.0, help="seconds between refreshes"),
@@ -320,6 +348,7 @@ def main():
         opt("--quiet", action="store_true", help="no output; exit 1 for node actions, including its held work, 0 otherwise"))
     cmd("inbox", _m_status.cmd_inbox, "needs in a node's subtree (default: calling node); --new remembers per reporter",
         opt("id", nargs="?"), opt("--json", action="store_true"), opt("--new", action="store_true"),
+        opt('--add', help='append a screened inbox item'),
         opt('--weekly', action='store_true', help='read-only sweep of unresolved requests aged at least seven days'))
     cmd('answer', _m_status.cmd_answer, 'record text for exactly one current inbox episode, retaining source/history',
         'item_id', 'text')
@@ -344,6 +373,8 @@ def main():
         opt('--request-id'), opt('--node'), opt('--move'), opt('--before'))
     cmd("dispatch", _m_dispatcher.cmd_dispatch, "bounded read-only plan of explicit root/operator asks; empty scan is silent",
         opt('--limit', type=int, default=50), opt('--node-limit', type=int, default=200))
+    cmd("backlog", _m_events.cmd_backlog, "append a dated backlog item", "id",
+        opt("action", choices=["add"]), "item")
     cmd("show", _m_status.cmd_show, "everything about one node, including this machine's bindings", "id")
     cmd("set", _m_nodes.cmd_set, "set fields: brain set <id> key=value ... (host IDs and home paths stay on this machine)",
         "id", opt("pairs", nargs="+"))
@@ -431,6 +462,7 @@ def main():
     t = wsub.add_parser("add", help="brain wt add <node> <branch> [--base REF]: new worktree + setup + port")
     t.add_argument("id"); t.add_argument("branch"); t.add_argument("--base")
     t.add_argument("--no-setup", action="store_true", dest="no_setup")
+    t.add_argument("--task-id", help="ready task to link to this job")
     t.set_defaults(f=_m_worktrees.cmd_wt_add)
     t = wsub.add_parser('env', help='set machine-local per-worktree environment overrides; values are never printed')
     t.add_argument('id'); t.add_argument('branch'); t.add_argument('pairs', nargs='*')
@@ -449,19 +481,23 @@ def main():
     t.set_defaults(f=_m_worktrees.cmd_wt_prune)
     cmd("report", _m_reports.cmd_report, "start a report: brain report <node> \"topic\" (prints its folder)", "id", "topic")
     cmd("reports", _m_reports.cmd_reports, "every report, newest first: brain reports [node]", opt("id", nargs="?"))
-    cmd("review", _m_sync.cmd_review, "brief for a review by another runtime: brain review <node> --branch B",
+    cmd("review", _m_sync.cmd_review, "brief for an independent review: brain review <node> --branch B",
         "id", opt("--branch", required=True), opt("--base"), opt("--built-by", dest="built_by"),
-        opt("--by", "--runtime", help="reviewer runtime (default: one the builder didn't use)"), opt("--focus"),
+        opt("--by", "--runtime", help="reviewer runtime (default: configured independence policy)"), opt("--focus"),
         opt("--class", dest="job_class", choices=_m_jobs.JOB_CLASSES),
         opt("--effort", choices=_m_jobs.JOB_EFFORTS),
-        opt("--why-separate", help="reason for a separate reviewer; defaults to independent second-runtime review"),
+        opt("--why-separate", help="reason for a separate reviewer; defaults to the independence policy"),
         opt("--allow-unexplained", action="store_true", help="allow an urgent launch without a reason"),
         opt("--model", help="job model for scoped usage limits"), opt("--out"),
         opt("--reason", choices=("security", "schema", "privacy"), help="exception for another full round or round 3+"),
         opt("--check-fix", action="store_true", help="only check prior blockers/majors and fix regressions"),
         opt("--findings", help="prior findings JSON: list of objects with severity and text"),
         opt("--fix-base", help="reviewed commit before the fixes; defaults to previous review head"),
-        opt("--contract", help="contract file; defaults to the job's recorded contract"))
+        opt("--contract", help="contract file; defaults to the job's recorded contract"),
+        opt("--receipt-file", help="completed review host-observation JSON; does not start another round"),
+        opt("--same-runtime-reason", help="reason for a configured expiring same-runtime exception"))
+    cmd("preview-receipt", _m_preview_evidence.cmd_preview_receipt, "record rendered preview source samples", "id",
+        opt("--branch", required=True), opt("--file", required=True))
     cmd('release', _m_release.cmd_release, 'inspect or execute an opted-in reviewed full-green release', 'id',
         opt('--run', action='store_true'))
     cmd("train", _m_train.cmd_train, "batch ready jobs onto local main, verify once, and print the release command", "id",
@@ -484,6 +520,7 @@ def main():
         "bind <id> <host id> | unbind <id>", opt("action", choices=["list", "add", "bind", "unbind"], nargs="?",
                                                   default="list"),
         opt("id", nargs="?"), opt("host_id", nargs="?"), opt("--when"), opt("--node", default="root"), opt("--brief"),
+        opt("--provider", help="runtime explicitly selected in the host schedule (add/bind only)"),
         opt("-v", "--verbose", action="store_true"))
     cmd("sync", _m_sync.cmd_sync, "what changed in a node (and its home) since the last sync; --all: every external home",
         opt("id", nargs="?"), opt("--all", action="store_true"),
@@ -496,6 +533,10 @@ def main():
     t.set_defaults(f=_m_hosts.cmd_hook, event="stop")
     t = hsub.add_parser("approve", help="trust this instance and its project hooks in Codex (writes its config)")
     t.set_defaults(f=_m_hosts.cmd_hook_approve)
+    t = hsub.add_parser("pretool", help="check declared forbidden tool actions; reads runtime JSON on stdin")
+    t.set_defaults(f=_m_action_guard.cmd_hook_pretool)
+    cmd("allow", _m_action_guard.cmd_allow, "allow one exact forbidden shell command once", "id", "action",
+        opt("--once", action="store_true", required=True), opt("--cwd"), opt("--tool", default="Bash"))
     cmd("wake", _m_hosts.cmd_wake, "wake a node coordinator (or root); inbox remains the record", "id",
         opt("reason", nargs="?"), opt("--drain", action="store_true", help=argparse.SUPPRESS))
     cmd("watch", _m_watch.cmd_watch, "queue wakes only for new actionable file items",
@@ -504,7 +545,12 @@ def main():
         opt("--iso", action="store_true"))
     cmd("tree", _m_status.cmd_tree, "show the node tree")
     cmd("status", _m_status.cmd_status, "status timestamps; --refresh regenerates only one node's facts block",
-        opt("id", nargs="?"), opt("--refresh", action="store_true"))
+        opt("id", nargs="?"), opt("--refresh", action="store_true"),
+        opt("--from-events", action="store_true"), opt("--json", action="store_true"))
+    cmd("events", _m_events.cmd_events, "private event metadata; --compare summarizes the last day", "id",
+        opt("--compare", action="store_true"), opt("--json", action="store_true"),
+        opt("--explain", metavar="DIFFERENCE_ID"), opt("--reason"),
+        opt("--record", metavar="FACT_TYPE"), opt("--job-key"), opt("--data", default="{}"))
     cmd("registry", _m_status.cmd_registry, "regenerate registry.md")
     cmd("link", _m_hosts.cmd_link, "create runtime links (axiom 22); --command puts 'brain' on your PATH; --global adds a "
         "pointer to this Brain in each runtime's user-wide instructions",
@@ -582,6 +628,7 @@ def main():
                 + ", ".join(str(p.relative_to(Path(root).resolve())) if Path(root).resolve() in p.parents else str(p)
                             for p in out[:5]) + ("…" if len(out) > 5 else "") + "; remove them (brain check lists them)")
         with _m_instance.brain_lock(root):
-            a.f(a)
+            with _m_events.Command(root, a):
+                a.f(a)
     else:
         a.f(a)

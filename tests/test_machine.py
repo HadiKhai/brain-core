@@ -1532,3 +1532,376 @@ class DockerLeftoverHooks(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DockerCleanup(Scenario):
+    """All Docker operations target a disposable stateful CLI fixture."""
+    def setUp(self):
+        super().setUp()
+        self.m = core_loader.SourceFileLoader('cleanup_fixture', str(CORE / 'bin/brain')).load_module()
+        self.root = self.init('alice')
+        self.inst = self.m.Instance(self.root)
+        self.node = self.inst.node('root')
+        self.node['fm'].update(docker_cleanup_prefixes='demo-verify-*',
+                               docker_cleanup_host='unix:///var/run/docker.sock',
+                               docker_cleanup_daemon='fixture-daemon', docker_cleanup_mode='stop')
+        self.scope = ':'.join(self.m.machine_scope(self.inst, 'root'))
+        self.identity = 'a' * 64
+        self.container = {'Id': self.identity, 'Name': '/demo-verify-one-db',
+            'Created': '2020-01-01T00:00:00Z', 'State': {'Running': True, 'Status': 'running'},
+            'Config': {'Labels': {'com.docker.compose.project': 'demo-verify-one',
+                                  'brain.docker-scope': self.scope, 'brain.owner-pid': '12345',
+                                  'brain.owner-stamp': 'fixture-birth'}},
+            'HostConfig': {'AutoRemove': False}, 'Mounts': [],
+            'NetworkSettings': {'Networks': {}}}
+        self.state_path = self.tmp / 'docker-state.json'
+        self.log_path = self.tmp / 'docker-calls.jsonl'
+        self.state = {'containers': [self.container], 'volumes': [], 'networks': [], 'daemon': 'fixture-daemon'}
+        self.save_state()
+        fake = self.tmp / 'fake-bin'
+        fake.mkdir()
+        docker = fake / 'docker'
+        docker.write_text('#!' + sys.executable + '\n' + '''import json, os, sys
+from pathlib import Path
+p = Path(os.environ['CLEANUP_STATE'])
+s = json.loads(p.read_text())
+a = sys.argv[1:]
+with open(os.environ['CLEANUP_LOG'], 'a') as f: f.write(json.dumps(a) + '\\n')
+if a[:2] == ['context','inspect']:
+ print(json.dumps([{'Endpoints':{'docker':{'Host':s.get('host','unix:///var/run/docker.sock')}}}]))
+ sys.exit(0)
+a = a[2:]
+if a[:1] == ['info']: print(json.dumps(s['daemon']))
+elif a[:1] == ['ps']: print('\\n'.join(r['Id'] for r in s['containers']))
+elif a[:1] == ['inspect']: print(json.dumps([r for r in s['containers'] if r['Id'] in a[1:]]))
+elif a[:1] == ['stop']:
+ if s.get('stop_failure'): sys.exit(1)
+ for r in s['containers']:
+  if r['Id'] in a[1:]: r['State'] = {'Running':False,'Status':'exited'}
+ p.write_text(json.dumps(s))
+elif a[:1] == ['rm']:
+ if any(r['State']['Running'] for r in s['containers'] if r['Id'] in a[1:]): sys.exit(1)
+ s['containers'] = [r for r in s['containers'] if r['Id'] not in a[1:]]
+ p.write_text(json.dumps(s))
+elif a[:1] in (['volume'], ['network']):
+ kind = a[0] + 's'
+ key = 'Name' if kind == 'volumes' else 'Id'
+ if a[1] == 'ls': print('\\n'.join(r[key] for r in s[kind]))
+ elif a[1] == 'inspect': print(json.dumps([r for r in s[kind] if r[key] in a[2:]]))
+ elif a[1] == 'rm':
+  if s.get('resource_busy'): sys.exit(1)
+  s[kind] = [r for r in s[kind] if r[key] not in a[2:]]
+  p.write_text(json.dumps(s))
+ else: sys.exit(92)
+else: sys.exit(91)
+''')
+        docker.chmod(0o700)
+        self.patch = mock.patch.dict(os.environ, {**self.env, 'PATH': str(fake) + os.pathsep + os.environ['PATH'],
+            'CLEANUP_STATE': str(self.state_path), 'CLEANUP_LOG': str(self.log_path),
+            'DOCKER_HOST': '', 'DOCKER_CONTEXT': ''})
+        self.patch.start()
+        self.addCleanup(self.patch.stop)
+        self.owner = mock.patch.object(self.m, 'process_stamp', return_value=None)
+        self.owner.start()
+        self.addCleanup(self.owner.stop)
+
+    def save_state(self):
+        self.state_path.write_text(json.dumps(self.state))
+
+    def sweep(self):
+        return self.m.docker_cleanup_nodes(self.inst, [self.node])
+
+    def mutations(self):
+        rows = [json.loads(line) for line in self.log_path.read_text().splitlines()] if self.log_path.exists() else []
+        return [r for r in rows if len(r) > 2 and r[2] in ('stop', 'rm', 'volume', 'network')]
+
+    def test_stops_only_proven_owned_abandoned_test_container(self):
+        result = self.sweep()
+        self.assertEqual(result['stopped'], [self.identity])
+        self.assertEqual(self.mutations(), [['--host', 'unix:///var/run/docker.sock', 'stop', self.identity]])
+        self.assertFalse(json.loads(self.state_path.read_text())['containers'][0]['State']['Running'])
+
+    def test_live_unknown_or_recycled_identity_is_retained(self):
+        for stamp in ('fixture-birth', 'unknown', 'different-birth'):
+            with self.subTest(stamp=stamp), mock.patch.object(self.m, 'process_stamp', return_value=stamp):
+                self.assertEqual(self.sweep()['stopped'], [])
+        self.assertEqual(self.mutations(), [])
+
+    def test_scope_prefix_preview_dev_and_automatically_removed_are_retained(self):
+        original = json.loads(json.dumps(self.container))
+        variants = [({'brain.docker-scope': 'foreign'}, {}),
+                    ({'com.docker.compose.project': 'demo-development'}, {}),
+                    ({'com.docker.compose.project': 'demo-verify-preview'}, {}),
+                    ({'brain.preview': 'true'}, {}), ({}, {'AutoRemove': True})]
+        for labels, config in variants:
+            self.container.update(json.loads(json.dumps(original)))
+            self.container['Config']['Labels'].update(labels)
+            self.container['HostConfig'].update(config)
+            self.save_state()
+            self.assertEqual(self.sweep()['stopped'], [])
+        self.assertEqual(self.mutations(), [])
+
+    def test_missing_owner_young_or_bind_mounted_resources_are_retained(self):
+        self.container['Config']['Labels'].pop('brain.owner-stamp')
+        self.save_state()
+        self.assertEqual(self.sweep()['stopped'], [])
+        self.container['Config']['Labels']['brain.owner-stamp'] = 'fixture-birth'
+        self.container['Created'] = '2999-01-01T00:00:00Z'
+        self.save_state()
+        self.assertEqual(self.sweep()['stopped'], [])
+        self.container['Created'] = '2020-01-01T00:00:00Z'
+        self.container['Mounts'] = [{'Type': 'bind', 'Source': '/fictional/real-data'}]
+        self.save_state()
+        self.assertEqual(self.sweep()['stopped'], [])
+        self.assertEqual(self.mutations(), [])
+
+    def test_incomplete_inventory_or_foreign_project_peer_vetoes_stop(self):
+        foreign = json.loads(json.dumps(self.container))
+        foreign['Id'] = 'b' * 64
+        foreign['Config']['Labels']['brain.docker-scope'] = 'foreign'
+        self.state['containers'].append(foreign)
+        self.save_state()
+        self.assertEqual(self.sweep()['stopped'], [])
+        self.assertEqual(self.mutations(), [])
+
+    def test_conflicting_selectors_unpinned_endpoint_or_daemon_retains(self):
+        with mock.patch.dict(os.environ, {'DOCKER_HOST': 'unix:///var/run/docker.sock', 'DOCKER_CONTEXT': 'other'}):
+            self.assertEqual(self.sweep()['stopped'], [])
+        self.state['daemon'] = 'other-daemon'
+        self.save_state()
+        self.assertEqual(self.sweep()['stopped'], [])
+        self.state['daemon'] = 'fixture-daemon'
+        self.state['host'] = 'unix:///arbitrary/forwarded.sock'
+        self.save_state()
+        self.assertEqual(self.sweep()['stopped'], [])
+        self.assertEqual(self.mutations(), [])
+
+    def test_discovery_failure_is_quiet_and_stop_failure_is_reported(self):
+        with mock.patch.object(self.m.shutil, 'which', return_value=None):
+            self.assertEqual(self.sweep()['stopped'], [])
+        self.state['stop_failure'] = True
+        self.save_state()
+        result = self.sweep()
+        self.assertEqual(result['stopped'], [])
+        self.assertTrue(result['errors'])
+
+
+    def removable_resources(self):
+        self.node['fm']['docker_cleanup_mode'] = 'remove'
+        labels = dict(self.container['Config']['Labels'])
+        self.state['volumes'] = [{'Name': 'demo-verify-one-data', 'Labels': labels,
+                                  'CreatedAt': '2020-01-01T00:00:00Z'}]
+        self.state['networks'] = [{'Id': 'c' * 64, 'Name': 'demo-verify-one-net', 'Labels': labels,
+                                   'Created': '2020-01-01T00:00:00Z', 'Containers': {}}]
+        self.save_state()
+
+    def test_removes_stopped_owned_container_and_unused_owned_volume_network(self):
+        self.removable_resources()
+        result = self.sweep()
+        self.assertEqual(result['stopped'], [self.identity])
+        self.assertEqual(result['removed'], [self.identity, 'volume:demo-verify-one-data', 'network:' + 'c' * 64])
+        state = json.loads(self.state_path.read_text())
+        self.assertEqual([state[k] for k in ('containers', 'volumes', 'networks')], [[], [], []])
+        for command in self.mutations():
+            self.assertNotIn('--force', command)
+            self.assertNotIn('-v', command)
+            self.assertNotIn('prune', command)
+
+    def test_unused_foreign_shared_young_or_attached_resources_are_retained(self):
+        self.removable_resources()
+        self.state['volumes'][0]['Labels'] = {'brain.docker-scope': 'foreign'}
+        self.state['networks'][0]['Containers'] = {'foreign-container': {}}
+        self.save_state()
+        result = self.sweep()
+        self.assertEqual(result['removed'], [self.identity])
+        state = json.loads(self.state_path.read_text())
+        self.assertEqual(len(state['volumes']), 1)
+        self.assertEqual(len(state['networks']), 1)
+
+    def test_live_foreign_container_volume_reference_prevents_removal(self):
+        self.removable_resources()
+        foreign = json.loads(json.dumps(self.container))
+        foreign['Id'] = 'b' * 64
+        foreign['Config']['Labels'] = {'com.docker.compose.project': 'other-development'}
+        foreign['Mounts'] = [{'Type': 'volume', 'Name': 'demo-verify-one-data'}]
+        self.state['containers'].append(foreign)
+        self.save_state()
+        result = self.sweep()
+        self.assertNotIn('volume:demo-verify-one-data', result['removed'])
+        self.assertEqual(len(json.loads(self.state_path.read_text())['volumes']), 1)
+
+    def test_docker_busy_refusal_retains_resources_and_reports_error(self):
+        self.removable_resources()
+        self.state['resource_busy'] = True
+        self.save_state()
+        result = self.sweep()
+        self.assertEqual(result['removed'], [self.identity])
+        self.assertTrue(result['errors'])
+        self.assertEqual(len(json.loads(self.state_path.read_text())['volumes']), 1)
+
+
+class ReservationBootIdentity(unittest.TestCase):
+    def setUp(self):
+        self.m = core_loader.SourceFileLoader('boot_fixture', str(CORE / 'bin/brain')).load_module()
+        self.row = {'token': 'a' * 32, 'owner': [12345, 'fixture-birth'],
+                    'kind': 'verify', 'state': 'running', 'boot': 'linux:old-boot'}
+
+    def test_different_known_boot_reclaims_without_pid_probe(self):
+        with mock.patch.object(self.m, 'machine_boot_id', return_value='linux:new-boot'), \
+                mock.patch.object(self.m, 'process_stamp', side_effect=AssertionError('do not probe prior-boot PIDs')):
+            self.assertFalse(self.m.machine_queue.alive(self.row))
+
+    def test_same_missing_or_unknown_boot_preserves_identity_rules(self):
+        for boot in ('linux:old-boot', None):
+            with mock.patch.object(self.m, 'machine_boot_id', return_value=boot), \
+                    mock.patch.object(self.m, 'process_stamp', return_value='unknown'):
+                self.assertTrue(self.m.machine_queue.alive(self.row))
+        legacy = {k: v for k, v in self.row.items() if k != 'boot'}
+        with mock.patch.object(self.m, 'machine_boot_id', return_value='linux:new-boot'), \
+                mock.patch.object(self.m, 'process_stamp', return_value='fixture-birth'):
+            self.assertTrue(self.m.machine_queue.alive(legacy))
+        self.assertTrue(self.m.machine_queue.valid(legacy))
+        for invalid in ('', 12, [], 'unknown'):
+            self.assertFalse(self.m.machine_queue.valid(dict(self.row, boot=invalid)))
+
+    def test_linux_and_darwin_boot_reading_is_stable_and_failure_is_unknown(self):
+        with mock.patch.object(self.m.sys, 'platform', 'linux'), \
+                mock.patch.object(self.m.Path, 'read_text', return_value='12345678-1234-1234-1234-123456789abc\n'):
+            self.assertEqual(self.m.machine_boot_id(), 'linux:12345678-1234-1234-1234-123456789abc')
+        with mock.patch.object(self.m.sys, 'platform', 'darwin'), \
+                mock.patch.object(self.m.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, '{ sec = 12345, usec = 67 } fixture date')):
+            self.assertEqual(self.m.machine_boot_id(), 'darwin:12345:67')
+        with mock.patch.object(self.m.sys, 'platform', 'darwin'), \
+                mock.patch.object(self.m.subprocess, 'run', side_effect=OSError('unavailable')):
+            self.assertIsNone(self.m.machine_boot_id())
+
+    def test_native_admission_publishes_boot_identity(self):
+        with tempfile.TemporaryDirectory() as folder, \
+                mock.patch.object(self.m, 'machine_dir', return_value=Path(folder)), \
+                mock.patch.object(self.m, 'machine_boot_id', return_value='linux:current-boot'), \
+                mock.patch.object(self.m, 'process_stamp', return_value='fixture-birth'), \
+                mock.patch.object(self.m, 'machine_reading', return_value={}), \
+                mock.patch.object(self.m, 'machine_limit', return_value=2):
+            token = self.m.machine_wait('verify')
+            rows = json.loads((Path(folder) / 'machine-care-queue.json').read_text())
+            self.assertEqual(rows[0]['boot'], 'linux:current-boot')
+            self.m.machine_release(token)
+            self.assertEqual(json.loads((Path(folder) / 'machine-care-queue.json').read_text()), [])
+
+
+class HoldCpuDiagnostics(unittest.TestCase):
+    def setUp(self):
+        self.m = core_loader.SourceFileLoader('cpu_fixture', str(CORE / 'bin/brain')).load_module()
+
+    def test_top_cpu_reports_pid_percent_and_basename_without_arguments(self):
+        output = ' 42 180.5 /System/Library/Fixture Indexer\n 43 20.2 /usr/bin/python3\n 44 2.0 helper\n'
+        with mock.patch.object(self.m.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, output)) as run:
+            self.assertEqual(self.m.machine_top_cpu(), [
+                {'pid': 42, 'cpu_percent': 180.5, 'command': 'Fixture Indexer'},
+                {'pid': 43, 'cpu_percent': 20.2, 'command': 'python3'},
+                {'pid': 44, 'cpu_percent': 2.0, 'command': 'helper'}])
+            self.assertEqual(run.call_args[0][0], ['ps', '-A', '-o', 'pid=', '-o', 'pcpu=', '-o', 'comm='])
+            self.assertEqual(run.call_args[1]['timeout'], 1)
+
+    def test_bad_rows_and_command_failure_do_not_invent_a_culprit(self):
+        for output in ('bad data', '1 nan secret\n2 inf private\n-1 99 wrong\n3 -5 invalid\n', ''):
+            with mock.patch.object(self.m.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, output)):
+                self.assertEqual(self.m.machine_top_cpu(), [])
+        with mock.patch.object(self.m.subprocess, 'run', side_effect=subprocess.TimeoutExpired('ps', 1)):
+            self.assertEqual(self.m.machine_top_cpu(), [])
+
+    def test_only_hold_state_collects_and_displays_cpu_observation(self):
+        with tempfile.TemporaryDirectory() as folder, \
+                mock.patch.object(self.m, 'machine_dir', return_value=Path(folder)), \
+                mock.patch.object(self.m, 'machine_reading', return_value={'mem_free_gb': 1}), \
+                mock.patch.object(self.m, 'machine_top_cpu', return_value=[{'pid': 42, 'cpu_percent': 80, 'command': 'fixture'}]) as top:
+            state = self.m.machine_state()
+            self.assertEqual(top.call_count, 1)
+            self.assertIn('top CPU: fixture pid=42 80%', self.m.machine_summary(state))
+            with mock.patch.object(self.m, 'machine_reading', return_value={}):
+                self.assertNotIn('top CPU:', self.m.machine_summary(self.m.machine_state()))
+                self.assertEqual(top.call_count, 1)
+
+
+class TerminalProducer(Scenario):
+    def setUp(self):
+        super().setUp()
+        self.m = core_loader.SourceFileLoader('terminal_producer_fixture', str(CORE / 'bin/brain')).load_module()
+        self.root = self.init('alice')
+        self.inst = self.m.Instance(self.root)
+        self.patch = mock.patch.dict(os.environ, self.env)
+        self.patch.start()
+        self.addCleanup(self.patch.stop)
+        self.clock = argparse.Namespace(time=lambda: 100000.0)
+
+    def waits(self):
+        return json.loads((self.root / '.brain/wake/machine-holds.json').read_text())['waits']
+
+    def test_launch_failure_keeps_original_cause_once_and_retries_wake(self):
+        with mock.patch.object(self.m, 'request_wake', side_effect=[False, True]) as wake:
+            with self.assertRaisesRegex(OSError, 'fixture launch failed'):
+                with self.m.machine_run('verify', self.inst, 'root', 'job/leaf', clock=self.clock):
+                    raise OSError('fixture launch failed')
+            self.m.machine_wait_notices(self.inst, 100001.0)
+            self.m.machine_wait_notices(self.inst, 100002.0)
+        row = next(iter(self.waits().values()))
+        self.assertEqual(row['outcome'], 'error')
+        self.assertIn('fixture launch failed', row['reason'])
+        self.assertEqual(row['ended_at'], 100000.0)
+        self.assertEqual(wake.call_count, 2)
+        self.assertEqual(wake.call_args_list[0].kwargs['items'], wake.call_args_list[1].kwargs['items'])
+        self.assertEqual(wake.call_args.kwargs['items'][0]['kind'], 'machine-exited')
+
+    def test_cleanup_runs_all_and_handled_outer_exception_cannot_hide_failure(self):
+        seen = []
+        def fail():
+            seen.append('first')
+            raise OSError('cleanup failed')
+        with mock.patch.object(self.m, 'request_wake', return_value=True):
+            try:
+                raise ValueError('unrelated handled exception')
+            except ValueError:
+                with self.assertRaisesRegex(OSError, 'cleanup failed'):
+                    with self.m.machine_run('heavy', self.inst, 'root', clock=self.clock) as token:
+                        self.m.machine_cleanup(token, [fail, lambda: seen.append('second')], primary=None)
+        self.assertEqual(seen, ['first', 'second'])
+        row = next(iter(self.waits().values()))
+        self.assertEqual(row['outcome'], 'error')
+        self.assertIn('cleanup failed', row['reason'])
+        self.assertEqual(row['cleanup_errors'], ['OSError: cleanup failed'])
+
+    def test_cleanup_preserves_explicit_primary_and_records_secondary(self):
+        def fail():
+            raise OSError('secondary cleanup')
+        primary = ValueError('primary launcher')
+        with mock.patch.object(self.m, 'request_wake', return_value=True):
+            with self.assertRaisesRegex(ValueError, 'primary launcher'):
+                with self.m.machine_run('verify', self.inst, 'root', clock=self.clock) as token:
+                    try:
+                        raise primary
+                    finally:
+                        self.m.machine_cleanup(token, [fail], primary=primary)
+        row = next(iter(self.waits().values()))
+        self.assertIn('primary launcher', row['reason'])
+        self.assertEqual(row['cleanup_errors'], ['OSError: secondary cleanup'])
+
+    def test_success_and_nonzero_exit_have_one_immutable_terminal_transition(self):
+        with mock.patch.object(self.m, 'request_wake', return_value=True) as wake:
+            with self.m.machine_run('heavy', self.inst, 'root', clock=self.clock) as token:
+                token.result = 7
+            self.m.machine_terminal(self.inst, token, result=0)
+            self.m.machine_wait_notices(self.inst, 100010.0)
+        row = self.waits()[token]
+        self.assertEqual(row['outcome'], 'failed')
+        self.assertIn('status 7', row['reason'])
+        self.assertEqual(wake.call_count, 1)
+
+    def test_failure_before_queue_publication_still_has_a_terminal_reason(self):
+        with mock.patch.object(self.m, 'request_wake', return_value=True), \
+                mock.patch.object(self.m, 'process_stamp', return_value='unknown'):
+            with self.assertRaises(SystemExit):
+                with self.m.machine_run('verify', self.inst, 'root', clock=self.clock) as token:
+                    self.m.machine_wait('verify', self.inst, 'root', token=token)
+        row = self.waits()[token]
+        self.assertEqual(row['outcome'], 'error')
+        self.assertIn('cannot establish', row['reason'])

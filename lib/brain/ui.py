@@ -80,7 +80,7 @@ def ui_meters(inst, state, cache):
     nodes = []
     now = inst.now_dt()
     for n in state['nodes']:
-        worktrees = [{**w, 'listening': ui_listening(w)} for w in n['worktrees']]
+        worktrees = [{**w, 'listening': ui_listening(w) if w.get('live', True) else []} for w in n['worktrees']]
         jobs = {**n['jobs'], 'open': [{**r, 'age_h': round(_m_status.elapsed(inst.parse_time(r['Started']), now) / 3600, 1)}
                                     for r in n['jobs']['open']]}
         def age(row):
@@ -125,14 +125,28 @@ def ui_worktree(inst, home, branch, w, n=None):
     return d
 
 
-def cached_worktree(inst, home, branch, w, n, cache):
+def ui_live_worktrees(n):
+    """Repository inspection belongs to current work, including ledger repair rows."""
+    rows = _m_jobs.read_jobs(n) or []
+    branches = {row['Job'] for row in rows if not row.get('Ended')}
+    closed = {row['Job'] for row in rows if row.get('Ended')} - branches
+    branches.update(row[0].strip().strip('`') for row in _m_status.active_work(n)
+                    if row and row[0].strip().strip('`') not in closed)
+    return {branch: w for branch, w in n['local'].get('worktrees', {}).items() if branch in branches}
+
+
+def cached_worktree(inst, home, branch, w, n, cache, live=None):
+    if not (branch in ui_live_worktrees(n) if live is None else live):
+        return {'branch': branch, 'path': _m_common.tilde(Path(w['path'])), 'port': w.get('port'),
+                'ports': w.get('ports', 1), 'exists': Path(w['path']).exists(), 'live': False,
+                'listening': [], 'dirty': None, 'ahead': None, 'last': None, 'wrote': None}
     if cache is None:
-        return ui_worktree(inst, home, branch, w, n)
+        return {**ui_worktree(inst, home, branch, w, n), 'live': True}
     job = (n['id'], branch)
     key = cache.worktree_keys.get(job)
     old = cache.worktrees.get(job)
     if old is None or old[0] != key:
-        cache.worktrees[job] = (key, ui_worktree(inst, home, branch, w, n))
+        cache.worktrees[job] = (key, {**ui_worktree(inst, home, branch, w, n), 'live': True})
     return cache.worktrees[job][1]
 
 
@@ -218,7 +232,8 @@ class UIInstance(_m_instance.Instance):
 def ui_state(inst, problems=None, scan=None, spend_budget=2.0, machine_spend=None, cache=None, node_keys=None):
     readiness = _m_verify.display_cache(cache.ready, cache.worktree_keys) if cache is not None else contextlib.nullcontext()
     usage = _m_spend.live_usage_snapshot(cache.usage, cache.usage_revision) if cache is not None else contextlib.nullcontext()
-    with _m_common.git_read_snapshot(), _m_spend.spend_read_only(), readiness, usage:
+    jobs = _m_status.local_job_snapshot(cache.local_jobs, cache.worktree_keys) if cache is not None else _m_status.local_job_snapshot()
+    with _m_common.git_read_snapshot(), _m_spend.spend_read_only(), readiness, usage, jobs:
         return _ui_state(inst, problems, scan, spend_budget, machine_spend, cache, node_keys)
 
 
@@ -242,9 +257,12 @@ def ui_node(inst, n, since, cache=None, partial=False):
     hide = lambda t: _m_guard.redact(t, terms) if terms and isinstance(t, str) else t  # noqa: E731
     if not partial and n["external"] and n["home_path"] and n["home_path"].exists():
         home = n["home_path"]
-        wts = [{k: hide(v) for k, v in cached_worktree(inst, home, b, w, n, cache).items()}
+        live = ui_live_worktrees(n)
+        wts = [{k: hide(v) for k, v in cached_worktree(inst, home, b, w, n, cache, live=b in live).items()}
                for b, w in sorted(loc.get("worktrees", {}).items())]
         for wt, branch in zip(wts, sorted(loc.get("worktrees", {}))):
+            if not wt.get('live', True):
+                continue
             state = _m_verify.ready_state(inst, n, branch, display=True)
             wt["ready"] = {"ready": state["ready"], "reasons": [hide(x) for x in state["reasons"]],
                            "packet": {k: hide(v) for k, v in state["packet"].items() if k not in ("input_files", "input_files_ref")}
@@ -328,6 +346,7 @@ class UIStateCache:
     def __init__(self):
         self.nodes, self.due = {}, {}
         self.ready, self.worktrees, self.worktree_keys = {}, {}, {}
+        self.local_jobs = {}
         self.usage, self.usage_revision = {}, None
         self.problems, self.problem_key, self.problem_at = None, None, float('-inf')
 
@@ -704,10 +723,11 @@ class UIInputs:
         self.core_revision, self.core_at = None, None
         for n in inst.nodes():
             loc = n['local']
-            homes = [n['home_path']] if n['home_path'] else []
-            homes += [Path(w['path']) for w in loc.get('worktrees', {}).values() if w.get('path')]
+            live = ui_live_worktrees(n)
+            homes = [n['home_path']] if n['external'] and n['home_path'] else []
+            homes += [Path(w['path']) for w in live.values() if w.get('path')]
             watched = self.node_paths.setdefault(n['id'], set())
-            for w in loc.get('worktrees', {}).values():
+            for w in live.values():
                 if w.get('path'):
                     self.verify_globs.append((n['id'], Path(w['path']),
                                               _m_common.lst(n['fm'].get('verify_inputs')) or
@@ -798,12 +818,12 @@ class UIInputs:
     @staticmethod
     def topology_key(inst):
         # Coordinator/preview/status edits do not change the watched repositories.
-        return (tuple((n['id'], str(n['home_path']), str(n['local'].get('workbench')), n['fm'].get('verify_inputs'), n['fm'].get('rehearse'), tuple(sorted(
+        return (tuple((n['id'], str(n['home_path']), str(n['local'].get('workbench')), n['fm'].get('verify_inputs'), n['fm'].get('rehearse'), tuple(sorted(ui_live_worktrees(n))), tuple(sorted(
                     (b, str(w.get('path'))) for b, w in n['local'].get('worktrees', {}).items())))
                       for n in inst.nodes()),
                 tuple(UIInputs.stamp(_m_usage.usage_file(name)) for name in ('subscriptions.json', 'brains.json')),
                 tuple(UIInputs.stamp(Path(w['path']) / '.git') for n in inst.nodes()
-                      for w in n['local'].get('worktrees', {}).values()
+                      for w in ui_live_worktrees(n).values()
                       if w.get('path') and (Path(w['path']) / '.git').is_file()))
 
     def node_keys(self, inst, signature):
@@ -865,7 +885,7 @@ class UIInputs:
                 records = [self.stamp(_m_jobs.handback_file(n, row)) for row in job_rows]
                 home = Path(w['path'])
                 git_rows = []
-                for directory in self.home_git.get(home, set()):
+                for directory in self.home_git.get(home, set()) | self.home_git.get(n['home_path'], set()):
                     git_rows.extend(self.stamp(directory / name) for name in ('HEAD', 'index', 'packed-refs', 'config'))
                     # Read only the job and integration refs, not unrelated workers' branch tips.
                     refs = ['refs/heads/' + branch, 'refs/heads/main', 'refs/remotes/origin/HEAD']
@@ -878,7 +898,7 @@ class UIInputs:
                         pass
                     git_rows.extend(self.stamp(directory / ref) for ref in refs)
                 extras = tuple(self.stamp(path) for path in sorted(self.verify_paths.get(home, set())))
-                result[(n['id'], branch)] = (tuple(semantic), tuple(records), self.home_keys.get(home),
+                result[(n['id'], branch)] = (tuple(semantic), tuple(records), self.stamp(home), self.home_keys.get(home),
                                              tuple(git_rows), extras)
         return result
 

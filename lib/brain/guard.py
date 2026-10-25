@@ -74,20 +74,89 @@ def never_terms(n):
     return [(t, redact(label, out)) for t, label in out]  # even a node's own id may hold one of its words
 
 
-def find_terms(text, terms):
-    low = text.casefold()  # casefold, not lower: context-free (Greek Σ) and full (ß -> ss)
+def governance_text(text, principals=(), drop=False):
+    """Screen known learning frontmatter; never exempt body text or non-principal values.
+
+    `drop` is for worker output, after screening: governance stays on disk, not in the brief.
+    Callers must establish that this is a library item or specialist role, not arbitrary task text.
+    """
+    m = _m_common.FRONTMATTER_RE.match(text)
+    if not m:
+        return text
+    keys = [line.split(":", 1)[0].strip() for line in m.group(1).splitlines() if ":" in line]
+    if any(keys.count(key) > 1 for key in ("scope", "source_owners")):
+        return text  # read_fm keeps the last value; ineffective duplicates are ordinary data.
+    ids = set(principals)
+
+    def line(match):
+        if drop:
+            return ""
+        values = match.group(2).split(",")
+        values = ["" if value.strip() in ids else value for value in values]
+        return match.group(1) + ",".join(values) + match.group(3)
+
+    header = re.sub(r"^([ \t]*(?:scope|source_owners)[ \t]*:)([^\r\n]*)(\r?\n|\r?$)", line,
+                    m.group(1), flags=re.M)
+    return text[:m.start(1)] + header + text[m.end(1):]
+
+
+def governance_lessons(text, principals):
+    """Mask only exact IDs in the scope segment that parse_lessons recognizes."""
+    ids = set(principals)
+
+    def line(match):
+        values = ["" if value.strip() in ids else value for value in match.group(3).split(",")]
+        return f"- {match.group(1)} · from {match.group(2)} · scope {','.join(values)}: {match.group(4)}"
+
+    return re.sub(r"^- (.+?) · from (.+?) · scope (.+?): (.+)$", line, text, flags=re.M)
+
+
+def governance_principals(n):
+    while n["parent"]:
+        n = n["parent"]
+    return _m_common.lst(_m_common.read_fm(n["dir"] / "instance.md")[0].get("principals"))
+
+
+def governance_file(n, path):
+    """Only real instance library items and specialist role files get metadata treatment."""
+    while n["parent"]:
+        n = n["parent"]
+    path = Path(os.path.abspath(path))
+    if path.is_symlink():
+        return False
+    if path.parent.name == "library" and path.suffix == ".md":
+        owner = path.parent.parent
+    elif path.name in ("role.md", "lessons.md") and path.parent.parent.name == "specialists":
+        owner = path.parent.parent.parent
+    else:
+        return False
+    try:
+        parts = owner.relative_to(n["dir"].absolute()).parts
+    except ValueError:
+        return False
+    if (len(parts) % 2 or any(parts[i] != "nodes" for i in range(0, len(parts), 2))
+            or not (owner / "node.md").is_file()):
+        return False
+    return "lessons" if path.name == "lessons.md" and path.parent.parent.name == "specialists" else "frontmatter"
+
+
+def find_terms(text, terms, principals=(), lessons=False):
+    # Casefold, not lower: context-free (Greek Σ) and full (ß -> ss).
+    if principals:
+        text = governance_lessons(text, principals) if lessons else governance_text(text, principals)
+    low = text.casefold()
     return [label for t, label in terms if t.casefold() in low]
 
 
-def no_terms_in(n, text, what):
+def no_terms_in(n, text, what, principals=()):
     """Briefs and reports go to agents who must not see the words they must never write."""
-    hits = find_terms(text, never_terms(n))
+    hits = find_terms(text, never_terms(n), principals)
     if hits:
         _m_common.die(f"{what} contains {', '.join(hits)}: reword it (the term itself stays out of every brief)")
 
 
 NOTE_FILES = {"AGENTS.md", "CLAUDE.md", "brief.md", "status.md", "decisions.md", "backlog.md", "inbox.md", "node.md",
-              NEVER_FILE, "job-ledger.md", "worktree-setup.sh"}  # a node's own notes: they may discuss the rule
+              NEVER_FILE, "job-ledger.md", "backlog.md", "status-archive.md", "worktree-setup.sh"}  # a node's own notes: they may discuss the rule
 
 
 def redact(text, terms):
@@ -114,11 +183,15 @@ def guard_paths(n, paths=()):
     return out
 
 
-def stream_mentions(fh, needles, size=None, chunk=1 << 20):
+def stream_mentions(fh, needles, size=None, chunk=1 << 20, principals=(), raw=None, lessons=False):
     """Read a whole byte stream (or exactly one Git blob), preserving UTF-8 and folded chunk edges."""
     import codecs
     found, keep = set(), max((len(x) for x in needles), default=1) - 1
     dec, tail = codecs.getincrementaldecoder("utf-8")(errors="ignore"), ""
+    # Buffer only the opening frontmatter until its closing delimiter is established.
+    # Malformed/unclosed frontmatter falls back to screening every original byte.
+    prefix, opening, edge, raw_tail = ([] if principals and not lessons else None), "", "", ""
+    lesson_tail = ""
     while True:
         block = fh.read(chunk if size is None else min(chunk, size))
         if size is not None:
@@ -126,14 +199,36 @@ def stream_mentions(fh, needles, size=None, chunk=1 << 20):
             if not block and size:
                 raise OSError("unexpected end of Git blob")
         final = not block or size == 0
-        text = tail + dec.decode(block, final=final).casefold()
+        decoded = dec.decode(block, final=final)
+        if raw is not None:
+            raw_text = raw_tail + decoded.casefold()
+            raw.update(x for x in needles if x in raw_text)
+            raw_tail = raw_text[-keep:] if keep else ""
+        if prefix is not None:
+            prefix.append(decoded)
+            opening = (opening + decoded)[:5]
+            started = opening.startswith("---\n")
+            possible = "---\n".startswith(opening)
+            probe = edge + decoded
+            candidate = "".join(prefix) if final or re.search(r"\n---", probe) else None
+            complete = candidate is not None and _m_common.FRONTMATTER_RE.match(candidate)
+            if not final and ((possible and not started) or (started and not complete)):
+                edge = probe[-3:]
+                continue
+            decoded = governance_text(candidate if candidate is not None else "".join(prefix), principals)
+            prefix = None
+        if principals and lessons:
+            lines = (lesson_tail + decoded).split("\n")
+            lesson_tail = "" if final else lines.pop()
+            decoded = governance_lessons("\n".join(lines) + ("\n" if not final and lines else ""), principals)
+        text = tail + decoded.casefold()
         found |= {x for x in needles if x in text}
         if final:
             return found
         tail = text[-keep:] if keep else ""
 
 
-def file_mentions(fp, needles, errors=None, chunk=1 << 20):
+def file_mentions(fp, needles, errors=None, chunk=1 << 20, principals=(), lessons=False):
     """Which of `needles` (case-folded) appear in a regular file, read whole in chunks that overlap by the longest
     needle, so nothing is missed at a boundary or past any size. Not a regular file: nothing (a FIFO would block
     a read forever). A regular file that can't be read: nothing, and the reason goes to `errors`."""
@@ -142,7 +237,7 @@ def file_mentions(fp, needles, errors=None, chunk=1 << 20):
         if not stat.S_ISREG(os.stat(fp).st_mode):
             return found
         with open(fp, "rb") as fh:
-            found = stream_mentions(fh, needles, chunk=chunk)
+            found = stream_mentions(fh, needles, chunk=chunk, principals=principals, lessons=lessons)
     except OSError as e:
         if errors is not None:
             errors.append((fp, e.strerror or str(e)))
@@ -182,6 +277,7 @@ def scan_terms(n, paths=(), terms=None):
     hits, errors, repos, unread = [], [], {}, []
     needles = [t.casefold() for t, _ in terms]
     visited = set()
+    principals = governance_principals(n)
 
     def failed(what, root, r):
         errors.append(f"{what} in {redact(_m_common.tilde(root), terms)}: {redact((r.stderr or '').strip(), terms)}")
@@ -223,24 +319,28 @@ def scan_terms(n, paths=(), terms=None):
                 # An unstaged deletion is valid; the index blob below still guards what a commit would keep.
                 if f in tracked and not os.path.lexists(root / f):
                     continue
-                seen = file_mentions(root / f, needles, errors=unread)
+                kind = governance_file(n, root / f)
+                seen = file_mentions(root / f, needles, errors=unread,
+                                     principals=principals if kind else (), lessons=kind == "lessons")
                 hits += [(label, f"{_m_common.tilde(root)}/{f}") for t, label in terms if t.casefold() in seen]
             blobs = {}
             included = set(files)
             for mode, oid, stage, f in entries:
                 if f in included and mode != "160000" and set(oid) != {"0"}:
-                    blobs.setdefault(oid, []).append((f, stage))
+                    kind = governance_file(n, root / f) if mode in ("100644", "100755") else False
+                    blobs.setdefault((oid, kind), []).append((f, stage))
             if blobs:
                 # One streaming process per repository: no size cap, and no process per file.
                 with subprocess.Popen(["git", "cat-file", "--batch"], cwd=root, stdin=subprocess.PIPE,
                                       stdout=subprocess.PIPE, stderr=subprocess.DEVNULL) as proc:
                     try:
-                        for oid, names in blobs.items():
+                        for (oid, kind), names in blobs.items():
                             proc.stdin.write((oid + "\n").encode()); proc.stdin.flush()
                             header = proc.stdout.readline().split()
                             if len(header) != 3 or header[1] != b"blob":
                                 raise OSError("Git index blob unavailable")
-                            seen = stream_mentions(proc.stdout, needles, size=int(header[2]))
+                            seen = stream_mentions(proc.stdout, needles, size=int(header[2]),
+                                                   principals=principals if kind else (), lessons=kind == "lessons")
                             if proc.stdout.read(1) != b"\n":
                                 raise OSError("incomplete Git blob response")
                             hits += [(label, f"index stage {stage}: {_m_common.tilde(root)}/{f}")
@@ -263,7 +363,9 @@ def scan_terms(n, paths=(), terms=None):
                 dn[:] = [x for x in dn if x not in (".git", "node_modules")]
                 for f in fn:
                     fp = Path(dp) / f
-                    seen = file_mentions(fp, [t.casefold() for t, _ in terms], errors=unread)
+                    kind = governance_file(n, fp)
+                    seen = file_mentions(fp, needles, errors=unread,
+                                         principals=principals if kind else (), lessons=kind == "lessons")
                     hits += [(label, _m_common.tilde(fp)) for t, label in terms
                              if t.casefold() in seen or t.casefold() in str(fp.relative_to(root)).casefold()]
     for root in repos.values():

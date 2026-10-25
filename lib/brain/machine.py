@@ -7,6 +7,8 @@ import math
 import os
 import re
 import shlex
+import signal
+import threading
 import stat
 import subprocess
 import sys
@@ -523,6 +525,362 @@ def machine_limit(policy, hour=None):
     return policy["verify_night" if night else "verify_day"]
 
 
+
+class MachineRun(str):
+    """Opaque queue token with process-local result and injected clock."""
+    def __new__(cls, clock):
+        token = super().__new__(cls, os.urandom(16).hex())
+        token.clock, token.result = clock, 0
+        return token
+
+
+class MachineSignal(BaseException):
+    def __init__(self, number):
+        self.number = number
+        super().__init__('received ' + signal.Signals(number).name)
+
+
+@contextlib.contextmanager
+def machine_signals():
+    """Unwind catchable termination; restore embedding applications' handlers."""
+    previous = {}
+    def stop(number, frame):
+        raise MachineSignal(number)
+    try:
+        if threading.current_thread() is threading.main_thread():
+            for number in (signal.SIGTERM, signal.SIGHUP):
+                previous[number] = signal.signal(number, stop)
+        yield
+    finally:
+        for number, handler in previous.items():
+            signal.signal(number, handler)
+
+
+def machine_exit_fields(error=None, result=0):
+    if isinstance(error, MachineSignal):
+        return 'cancelled', str(error)
+    if isinstance(error, KeyboardInterrupt):
+        return 'cancelled', 'interrupted (KeyboardInterrupt)'
+    if error is not None:
+        return 'error', type(error).__name__ + ': ' + (str(error) or 'command stopped before completion')
+    if result:
+        return 'failed', 'command exited with status ' + str(result)
+    return 'success', 'command completed successfully'
+
+
+def machine_terminal_row(row, now, outcome, reason):
+    """The only terminal transition, shared by unwind and dead-owner recovery."""
+    if row.get('ended_at') is not None:
+        return False
+    row.update(state='completed' if outcome == 'success' else 'exited', outcome=outcome,
+               reason=reason, ended_at=now, closed_at=now, updated_at=now)
+    row.pop('finalizing', None)
+    return True
+
+
+def machine_finish_intent(inst, token, error=None):
+    """Publish owner intent before cleanup exposes queue removal to recovery."""
+    if inst is None:
+        return
+    outcome, reason = machine_exit_fields(error, token.result)
+    for attempt in range(2):
+        try:
+            with machine_hold_store(inst) as data:
+                row = data.get('waits', {}).get(token)
+                if row is not None and row.get('ended_at') is None:
+                    row['finalizing'] = True
+                    # Success is provisional until every cleanup action finishes.
+                    row['terminal_intent'] = ({'outcome': outcome, 'reason': reason}
+                                              if outcome != 'success' else None)
+            return
+        except (OSError, ValueError):
+            if attempt:
+                print('machine care: terminal intent unavailable; private state needs repair', file=sys.stderr)
+
+
+def machine_cleanup(token, actions, primary=None):
+    """Attempt every cleanup; preserve the primary exception and secondary evidence."""
+    errors = []
+    for action in actions:
+        try:
+            action()
+        except BaseException as error:
+            errors.append(error)
+    if errors:
+        token.cleanup_errors = getattr(token, 'cleanup_errors', []) + [
+            type(error).__name__ + ': ' + str(error) for error in errors]
+        if primary is None:
+            raise errors[0]
+
+
+def machine_terminal(inst, token, error=None, result=0):
+    if inst is None:
+        return
+    outcome, reason = machine_exit_fields(error, result)
+    with machine_hold_store(inst) as data:
+        row = data.get('waits', {}).get(token)
+        if row is not None:
+            if machine_terminal_row(row, token.clock.time(), outcome, reason):
+                if getattr(token, 'cleanup_errors', None):
+                    row['cleanup_errors'] = list(token.cleanup_errors)
+    try:
+        machine_wait_notices(inst, token.clock.time())
+    except (Exception, SystemExit):
+        print('machine care: terminal wake pending; notice scan will retry', file=sys.stderr)
+
+
+@contextlib.contextmanager
+def machine_run(kind, inst, node, job=None, clock=None, close_success=True, release=True):
+    """Own admission through cleanup; all unsuccessful exits share one finalizer."""
+    clock = clock or time
+    token = MachineRun(clock)
+    row = dict(token=str(token), owner=[os.getpid(), 'unknown'], kind=kind, state='admitting',
+               since=clock.time(), reason='checking machine admission', reading={},
+               clears_when='admission checks complete', managed=True)
+    if inst is not None and node is not None:
+        row['scope'] = machine_scope(inst, node)
+    with machine_signals():
+        try:
+            row['owner'][1] = process_stamp(os.getpid()) or 'unknown'
+            if inst is not None and node is not None:
+                machine_record_wait(inst, node, job, row, clock.time())
+            yield token
+            if close_success:
+                machine_finish_intent(inst, token)
+                if release:
+                    machine_release(token)
+                machine_terminal(inst, token, result=token.result)
+        except BaseException as error:
+            # Retry a transient private publication failure once. Never mask the
+            # original error with a queue-release failure or invent a successful run.
+            machine_finish_intent(inst, token, error)
+            machine_cleanup(token, [lambda: machine_release(token)], primary=error)
+            if inst is not None and node is not None:
+                for attempt in range(2):
+                    try:
+                        with machine_hold_store(inst) as data:
+                            data.setdefault('waits', {}).setdefault(str(token),
+                                dict(row, node=node, job=job, updated_at=clock.time()))
+                        machine_terminal(inst, token, error)
+                        break
+                    except (OSError, ValueError):
+                        if attempt:
+                            print('machine care: terminal record unavailable; private state needs repair', file=sys.stderr)
+            raise
+
+
+def machine_record_wait(inst, node, job, row, now):
+    # Per-instance details remain private; the shared machine queue uses opaque owners.
+    from . import hosts as _m_hosts
+    with machine_hold_store(inst) as data:
+        waits = data.setdefault('waits', {})
+        previous = waits.get(row['token'], {})
+        if previous.get('ended_at') is not None:
+            return
+        waits[row['token']] = {**previous, **row, 'node': node, 'job': job,
+                               'updated_at': now}
+        # Pending delivery is authority, not disposable history. Retired tokens must
+        # outlive the historical inbox markers they suppress (which have no expiry).
+        closed = sorted((k for k, v in waits.items() if
+                         ((v.get('notified_completed' if v.get('outcome') == 'success' else 'notified_exited')
+                           and getattr(_m_hosts, 'wake_terminal_delivered', lambda *_: False)(inst, hashlib.sha256(
+                               (k + (':completed' if v.get('outcome') == 'success' else ':exited')).encode()).hexdigest())) or
+                          (not v.get('managed') and v['state'] == 'running' and
+                           (v.get('resumed_at') is None or v.get('notified_resumed'))))),
+                        key=lambda k: waits[k]['updated_at'])
+        retired = set(data.get('retired_waits', []))
+        for key in closed[:-100]:
+            retired.add(key)
+            del waits[key]
+        data['retired_waits'] = sorted(retired)
+    machine_wait_notices(inst, now)
+
+
+def machine_wait_text(row):
+    since = datetime.datetime.fromtimestamp(row['since'], datetime.timezone.utc).isoformat()
+    return (f"{row['kind']} {row.get('job') or row['token'][:8]} held since {since}: {row['reason']}; "
+            f"clears when {row['clears_when']}")
+
+
+def machine_wait_notices(inst, now=None):
+    from . import hosts as _m_hosts
+    from . import transitions as _m_transitions
+    from . import guard as _m_guard
+    now = time.time() if now is None else now
+    with machine_hold_store(inst) as data:
+        # Prune dead continuations from reporting, without deleting their evidence.
+        try:
+            live = json.loads((machine_dir() / 'machine-care-queue.json').read_text())
+            if not isinstance(live, list) or any(not machine_queue.valid(r) for r in live):
+                raise ValueError('invalid machine queue')
+            live = {r['token'] for r in live if machine_queue.alive(r)}
+        except FileNotFoundError:
+            live = set()
+        except (OSError, ValueError):
+            live = None  # unknown cannot establish cancellation
+        for token, row in data.get('waits', {}).items():
+            if row.get('ended_at') is None:
+                stamp = process_stamp(row['owner'][0])
+                dead = stamp is None or (stamp != 'unknown' and row['owner'][1] != 'unknown'
+                                         and stamp != row['owner'][1])
+                unknown = stamp == 'unknown' or row['owner'][1] == 'unknown'
+                if dead:
+                    intent = row.get('terminal_intent') if row.get('finalizing') else None
+                    if (isinstance(intent, dict) and intent.get('outcome') in ('error', 'failed', 'cancelled')
+                            and isinstance(intent.get('reason'), str) and intent['reason']):
+                        machine_terminal_row(row, now, intent['outcome'], intent['reason'])
+                    else:
+                        machine_terminal_row(row, now, 'abandoned', 'owner stopped before the command completed')
+                elif (not row.get('finalizing') and unknown and row['state'] in ('queued', 'running')
+                      and (live is None or token not in live)):
+                    machine_terminal_row(row, now, 'unknown',
+                        'owner identity is unknown; command completion cannot be established')
+                elif (row['state'] == 'queued' and live is not None and token not in live
+                      and not row.get('managed')):
+                    machine_terminal_row(row, now, 'error',
+                        'command reservation is missing; owner has not been shown to have stopped')
+                # A known-live managed owner owns its outcome through cleanup.
+                # Queue removal precedes that finalizer; recovery must not turn
+                # this ordinary release window into an immutable invented cause.
+            elapsed = now - row['since']
+            events = []
+            if row['state'] == 'exited':
+                events.append(('exited', row['node']))
+            elif row['state'] == 'completed':
+                events.append(('completed', row['node']))
+            elif row.get('closed_at') is not None:
+                continue
+            elif row['state'] == 'queued':
+                if elapsed >= 900:
+                    events.append(('coordinator', row['node']))
+                if elapsed >= 2700:
+                    events.append(('root', 'root'))
+            elif row.get('resumed_at') is not None:
+                events.append(('resumed', row['node']))
+            for event, target in events:
+                if row.get('notified_' + event):
+                    continue
+                identity = hashlib.sha256((token + ':' + event).encode()).hexdigest()
+                # Durable report and stable identity; terminal wakes also explain the exit.
+                n = inst.node(target)
+                marker = '<!-- machine-wait:' + token + ':' + event + ' -->'
+                text = ('command completed: ' + row['reason'] if event == 'completed' else
+                        'held step exited: ' + row['reason'] if event == 'exited' else machine_wait_text(row))
+                if event == 'resumed':
+                    text = 'held step resumed automatically: ' + text
+                    if row.get('reduced'):
+                        text += '; reduced parallelism 1'
+                at = datetime.datetime.fromtimestamp(now, datetime.timezone.utc).isoformat()
+                text = _m_guard.redact(text, _m_guard.never_terms(n) + _m_guard.never_terms(inst.node(row['node'])))
+                line = '- ' + at + ' from machine: ' + text + ' ' + marker + '\n'
+                try:
+                    created = _m_transitions.inbox_append(n['dir'], line, marker, nonblocking=True)
+                    if created and event in ('exited', 'completed'):
+                        _m_common.touch(n['dir'] / 'inbox.md')
+                except BlockingIOError:
+                    continue
+                # Enqueue is idempotent across an interrupted receipt publication.
+                reason = 'machine-wait:' + identity + (': ' + text if event in ('exited', 'completed') else '')
+                if _m_hosts.request_wake(inst, inst.node(target), reason,
+                                        items=[{'id': identity, 'kind': 'machine-' + event}]):
+                    row['notified_' + event] = True
+
+
+def machine_exit_notice(inst, identity):
+    """Resolve a terminal wake's plain reason privately at delivery time."""
+    from . import guard as _m_guard
+    with machine_hold_store(inst) as data:
+        for token, row in data.get('waits', {}).items():
+            if (row['state'] in ('exited', 'completed') and
+                    hashlib.sha256((token + (':completed' if row['state'] == 'completed' else ':exited')).encode()).hexdigest() == identity):
+                return _m_guard.redact(row['reason'], _m_guard.never_terms(inst.node(row['node'])))
+    return 'command exited; read its recorded reason'
+
+
+def machine_wait_pending_ids(inst):
+    """Only live queued episodes may deliver a hold escalation; unknown retains it."""
+    with machine_hold_store(inst) as data:
+        try:
+            rows = json.loads((machine_dir() / 'machine-care-queue.json').read_text())
+        except FileNotFoundError:
+            rows = []
+        if not isinstance(rows, list) or any(not machine_queue.valid(row) for row in rows):
+            raise ValueError('invalid machine queue')
+        live = {row['token'] for row in rows if row['state'] == 'queued' and machine_queue.alive(row)}
+        return {hashlib.sha256((token + ':' + event).encode()).hexdigest()
+                for token, row in data.get('waits', {}).items()
+                if token in live and row['state'] == 'queued' and row.get('closed_at') is None
+                for event in ('coordinator', 'root')}
+
+
+def machine_wait_notice_line(line):
+    """Only autonomous producer lines own delivery, never copied signal markers."""
+    if re.search(r'<!-- (?:host-question|handback|worker-failure):', line):
+        return False
+    return re.fullmatch(
+        r'(?:- |inbox: )\d{4}-\d{2}-\d{2}T\S+ from machine: '
+        r'(?:held step (?:exited: |resumed automatically: ).+|command completed: .+|'
+        r'(?:heavy|verify) .+ held since .+: .+; clears when .+) '
+        r'<!-- machine-wait:[0-9a-f]{32}:(?:coordinator|root|resumed|exited|completed) -->',
+        line.rstrip('\r\n')) is not None
+
+
+def machine_wait_line_retired(inst, line):
+    if not machine_wait_notice_line(line):
+        return False
+    match = re.search(r'<!-- machine-wait:([0-9a-f]{32}):(coordinator|root) -->', line)
+    if not match:
+        return False
+    try:
+        data = json.loads((inst.root / '.brain/wake/machine-holds.json').read_text())
+        row = data.get('waits', {}).get(match[1])
+        return (match[1] in data.get('retired_waits', []) or
+                bool(row and (row.get('state') == 'running' or row.get('closed_at') is not None)))
+    except (OSError, ValueError, TypeError, AttributeError):
+        return False
+
+
+def machine_wait_items(inst, nodes, state, now=None):
+    now = time.time() if now is None else now
+    rows = state.get('waits', [])
+    own = machine_scope(inst, 'root')[0]
+    targets = {n['id'] for n in nodes if not n['archived']}
+    items = []
+    for row in rows:
+        if row.get('scope', [None])[0] != own or row.get('state') != 'queued' or 'since' not in row:
+            continue
+        for node in targets:
+            if row['scope'][1] != machine_scope(inst, node)[1] and not (node == 'root' and now-row['since'] >= 2700):
+                continue
+            if now - row['since'] >= 900:
+                items.append({'node': node, 'kind': 'machine-stall', 'episode': row['token'],
+                              'text': machine_wait_text(row)})
+    return items
+
+
+
+def machine_boot_id():
+    """Stable OS boot identity; never estimate it from uptime or wall time.
+
+    Unknown readings preserve the existing PID/start-time checks. A known boot
+    change invalidates the whole reservation before any old numeric PID probe.
+    """
+    try:
+        if sys.platform.startswith('linux'):
+            identity = Path('/proc/sys/kernel/random/boot_id').read_text().strip().lower()
+            if re.fullmatch(r'[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}', identity):
+                return 'linux:' + identity
+        elif sys.platform == 'darwin':
+            result = subprocess.run(['sysctl', '-n', 'kern.boottime'], capture_output=True,
+                                    text=True, timeout=2, env={**os.environ, 'LC_ALL': 'C'})
+            match = re.search(r'\{\s*sec\s*=\s*([0-9]+),\s*usec\s*=\s*([0-9]+)\s*\}', result.stdout)
+            if result.returncode == 0 and match and int(match[2]) < 1000000:
+                return 'darwin:' + str(int(match[1])) + ':' + str(int(match[2]))
+    except (OSError, ValueError, subprocess.SubprocessError):
+        pass
+    return None
+
+
 def process_stamp(pid, deadline=None):
     """PID plus OS start time prevents reclaiming a recycled PID as our worker."""
     def remaining():
@@ -616,10 +974,19 @@ class machine_queue:
                 and row.get("kind") in ("heavy", "verify") and row.get("state") in ("queued", "running")
                 and ("scope" not in row or (isinstance(row["scope"], list) and len(row["scope"]) == 2
                      and all(isinstance(s, str) and re.fullmatch(r"[0-9a-f]{64}", s) for s in row["scope"])))
-                and ("child" not in row or identity(row["child"])))
+                and row.get("priority", "normal") in ("normal", "landing")
+                and all(key not in row or queue_number(row[key]) for key in ("queued_at", "started_at"))
+                and (row.get("expected_seconds") is None or queue_number(row["expected_seconds"]))
+                and ("child" not in row or identity(row["child"]))
+                and ("boot" not in row or (isinstance(row["boot"], str)
+                     and re.fullmatch(r"(?:linux|darwin):[a-zA-Z0-9:-]+", row["boot"]) is not None)))
 
     @staticmethod
     def alive(row):
+        if row.get("boot"):
+            current_boot = machine_boot_id()
+            if current_boot is not None and current_boot != row["boot"]:
+                return False
         for key in ("owner", "child"):
             who = row.get(key)
             if who:
@@ -651,6 +1018,86 @@ def machine_scope(inst, node):
     return [hashlib.sha256(s.encode()).hexdigest() for s in (str(inst.root.resolve()), node)]
 
 
+def queue_number(value):
+    return type(value) in (int, float) and math.isfinite(value) and value >= 0
+
+
+def queue_order(rows, now=None):
+    """Stable priority view of queued records; caller list order resolves every tie.
+
+    Old records without timestamps retain precedence. Normal work ages ahead of
+    landing work after ten minutes, so a stream of landing requests cannot starve it.
+    This returns a copy and never reorders running reservations in the native store.
+    """
+    now = time.time() if now is None else now
+    def rank(row):
+        queued = row.get('queued_at')
+        if queued is None or queue_number(queued) and now - queued >= 600:
+            return 0
+        return 1 if row.get('priority') == 'landing' else 2
+    return sorted(rows, key=rank)
+
+
+def queue_wait_estimate(rows, target, slots, now=None, held=False):
+    """Capacity-only simulation; environmental holds and unknown/overrun durations stay unknown."""
+    import heapq
+    now = time.time() if now is None else now
+    waiting = queue_order([r for r in rows if r['kind'] == target['kind'] and r['state'] == 'queued'], now)
+    out = dict(position=waiting.index(target) + 1 if target in waiting else None,
+               wait_seconds=None, completion_seconds=None,
+               basis='recorded capacity and per-gate duration; environmental holds not predicted')
+    if target.get('state') == 'running':
+        expected, start = target.get('expected_seconds'), target.get('started_at')
+        if queue_number(expected) and queue_number(start) and 0 <= now - start < expected:
+            out.update(wait_seconds=0, completion_seconds=expected - (now - start))
+        return out
+    if held or target not in waiting or type(slots) is not int or slots < 1:
+        return out
+    running = [r for r in rows if r['kind'] == target['kind'] and r['state'] == 'running']
+    if not running and waiting[0] == target:
+        out['wait_seconds'] = 0
+        if queue_number(target.get('expected_seconds')):
+            out['completion_seconds'] = target['expected_seconds']
+        return out
+    if len(running) > slots:
+        return out
+    available = [0.0] * (slots - len(running))
+    for row in running:
+        expected, start = row.get('expected_seconds'), row.get('started_at')
+        if not queue_number(expected) or not queue_number(start) or not 0 <= now - start < expected:
+            return out
+        available.append(expected - (now - start))
+    heapq.heapify(available)
+    for row in waiting:
+        wait = heapq.heappop(available)
+        duration = row.get('expected_seconds')
+        if row == target:
+            out['wait_seconds'] = wait
+            if queue_number(duration):
+                out['completion_seconds'] = wait + duration
+            return out
+        if not queue_number(duration):
+            return out
+        heapq.heappush(available, wait + duration)
+    return out
+
+
+def gate_expected_seconds(inst, node):
+    """Explicit per-gate estimate, or three measured completed readiness runs on this node."""
+    from . import jobs as _m_jobs
+    import statistics
+    if inst is None or node is None:
+        return None
+    n = inst.node(node)
+    configured = _m_jobs.forecast_number(n['fm'].get('verify_estimate_seconds'))
+    if configured is not None and configured > 0:
+        return configured
+    values = [_m_jobs.forecast_number(r.get('Verify s')) for r in _m_jobs.read_jobs(n) or []
+              if r.get('Ended') and r.get('Outcome') == 'merged' and r.get('Verify reused') == 'false']
+    values = [v for v in values if v is not None and v > 0]
+    return statistics.median(values) if len(values) >= 3 else None
+
+
 def job_queue_projection(inst, node, owner):
     """Read recorded admission only. Never acquire/prune the queue or infer live ownership."""
     path = machine_dir() / 'machine-care-queue.json'
@@ -662,9 +1109,11 @@ def job_queue_projection(inst, node, owner):
         if len(matches) != 1:
             return None
         row = matches[0]
-        waiting = [r for r in rows if r['kind'] == row['kind'] and r['state'] == 'queued']
+        waiting = queue_order([r for r in rows if r['kind'] == row['kind'] and r['state'] == 'queued'])
+        estimate = queue_wait_estimate(rows, row, machine_limit(machine_policy(strict=False)))
         return {'state': row['state'], 'owner': row['owner'], 'owner_activity': 'unknown',
                 'position': waiting.index(row) + 1 if row in waiting else None,
+                'priority': row.get('priority', 'normal'), 'estimate': estimate,
                 'recorded_at': path.stat().st_mtime, 'source': 'recorded native admission queue'}
     except FileNotFoundError:
         return None
@@ -672,12 +1121,18 @@ def job_queue_projection(inst, node, owner):
         return {'state': 'unknown', 'position': None, 'owner': None, 'owner_activity': 'unknown'}
 
 
-def machine_wait(kind="heavy", inst=None, node=None):
-    token = os.urandom(16).hex()
+def machine_wait(kind="heavy", inst=None, node=None, token=None):
+    token = token if token is not None else os.urandom(16).hex()
     owner = [os.getpid(), process_stamp(os.getpid())]
     if owner[1] in (None, "unknown"):
         _m_common.die("machine care: cannot establish this process's start time; no heavy work started")
+    boot = machine_boot_id()
     previous, last_report, started = None, 0, time.monotonic()
+    expected = gate_expected_seconds(inst, node) if kind == 'verify' else None
+    priority = (inst.node(node)['fm'].get('verify_priority', 'normal')
+                if kind == 'verify' and inst is not None and node is not None else 'normal')
+    if priority not in ('normal', 'landing'):
+        _m_common.die('verify_priority must be normal or landing; no work started')
     try:
         while True:
             policy = machine_policy(strict=False)
@@ -688,22 +1143,29 @@ def machine_wait(kind="heavy", inst=None, node=None):
             with machine_queue() as queue:
                 row = next((r for r in queue.rows if r["token"] == token), None)
                 if row is None:
-                    row = {"token": token, "owner": owner, "kind": kind, "state": "queued"}
+                    row = {"token": token, "owner": owner, "kind": kind, "state": "queued",
+                           "priority": priority, "expected_seconds": expected, "queued_at": time.time()}
+                    if boot is not None:
+                        row["boot"] = boot
                     if inst is not None and node is not None:
                         row["scope"] = machine_scope(inst, node)
                     queue.rows.append(row)
-                waiting = [r for r in queue.rows if r["kind"] == kind and r["state"] == "queued"]
+                waiting = queue_order([r for r in queue.rows if r["kind"] == kind and r["state"] == "queued"])
                 running = sum(r["kind"] == "verify" and r["state"] == "running" for r in queue.rows)
                 position = waiting.index(row) + 1
                 if not reasons and (kind != "verify" or (position == 1 and running < machine_limit(policy))):
                     row["state"] = "running"
+                    row['started_at'] = time.time()
                     return token
+                estimate = queue_wait_estimate(queue.rows, row, machine_limit(policy), held=bool(reasons))
             detail = ("; ".join(reasons) if reasons else
                       f"queued #{position}, {running}/{machine_limit(policy)} verify slots busy")
             status = (re.sub(r"\d+(?:\.\d+)?", "#", detail), position, running, machine_limit(policy))
             now = time.monotonic()
             if status != previous or now - last_report >= 60:
-                print(f"machine care: {kind} held {now - started:.0f}s; {detail}; retry in {MACHINE_RETRY}s",
+                wait = estimate['wait_seconds']
+                wait_text = f'approx. capacity wait {wait:.0f}s' if wait is not None else 'wait estimate unknown'
+                print(f"machine care: {kind} held {now - started:.0f}s; {detail}; {wait_text}; retry in {MACHINE_RETRY}s",
                       flush=True)
                 previous, last_report = status, now
             time.sleep(MACHINE_RETRY)
@@ -729,6 +1191,33 @@ def machine_child(token, pid):
         _m_common.die("machine care: reservation disappeared; verify not started")
 
 
+def machine_top_cpu():
+    """A bounded diagnostic sample; executable names only, never argv or identity proof."""
+    try:
+        result = subprocess.run(['ps', '-A', '-o', 'pid=', '-o', 'pcpu=', '-o', 'comm='],
+                                capture_output=True, text=True, timeout=1,
+                                env={**os.environ, 'LC_ALL': 'C'})
+        if result.returncode:
+            return []
+        rows = []
+        for line in result.stdout.splitlines()[:4096]:
+            fields = line.split(None, 2)
+            if len(fields) != 3:
+                continue
+            try:
+                pid, percent = int(fields[0]), float(fields[1])
+            except ValueError:
+                continue
+            if pid <= 0 or not math.isfinite(percent) or percent < 0:
+                continue
+            command = ''.join(c for c in Path(fields[2]).name if c.isprintable())[:120]
+            if command:
+                rows.append({'pid': pid, 'cpu_percent': percent, 'command': command})
+        return sorted(rows, key=lambda r: (-r['cpu_percent'], r['pid']))[:3]
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return []
+
+
 def machine_state(inst=None):
     reading = machine_reading(inst)
     policy = machine_policy(strict=False)
@@ -736,6 +1225,8 @@ def machine_state(inst=None):
     if policy.get("_error"):
         reading["held"].append(policy["_error"])
     reading["verify_limit"] = machine_limit(policy)
+    if reading["held"]:
+        reading["top_cpu"] = machine_top_cpu()
     # Reading the live view never creates state or a lock file.
     try:
         rows = json.loads((machine_dir() / "machine-care-queue.json").read_text())
@@ -758,8 +1249,10 @@ def machine_hold_store(inst):
     import fcntl
     path = inst.root / '.brain/wake/machine-holds.json'
     lock = path.with_suffix('.lock')
-    if _m_common.outward_links(inst.root):
-        raise ValueError('unsafe machine hold state')
+    # Guard this store's destination. An unrelated unsafe log link must not
+    # prevent recording why launch refused; safe_target still rejects escapes
+    # and hard links on the record and lock themselves.
+    _m_common.safe_target(path)
     path.parent.mkdir(exist_ok=True)
     _m_common.safe_target(lock)
     fd = os.open(lock, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
@@ -775,6 +1268,16 @@ def machine_hold_store(inst):
                        or not re.fullmatch(r'[0-9a-f]{32}', str(row.get('episode', '')))
                        or type(row.get('reported')) is not bool for key, row in data['holds'].items())):
             raise ValueError('invalid machine hold state')
+        waits = data.get('waits', {})
+        if (not isinstance(waits, dict) or any(not machine_queue.valid({**row, 'state': 'running'})
+                or row.get('state') not in ('admitting', 'queued', 'running', 'exited', 'completed')
+                or token != row['token'] or not isinstance(row.get('node'), str)
+                or not machine_timestamp(row.get('updated_at')) for token, row in waits.items())):
+            raise ValueError('invalid recorded machine waits')
+        retired = data.get('retired_waits', [])
+        if (not isinstance(retired, list) or any(not isinstance(token, str) or
+                not re.fullmatch(r'[0-9a-f]{32}', token) for token in retired)):
+            raise ValueError('invalid retired machine waits')
         before = json.dumps(data, sort_keys=True)
         yield data
         if json.dumps(data, sort_keys=True) != before:
@@ -824,18 +1327,20 @@ def machine_hold_claim(inst, episode, scope, deliver=None):
 
 def machine_summary(reading):
     loads = reading.get("load_per_cpu")
+    top = reading.get("top_cpu", []) if reading["held"] else []
+    detail = ("; top CPU: " + ", ".join(f"{r['command']} pid={r['pid']} {r['cpu_percent']:g}%" for r in top)) if top else ""
     return ("machine: load/CPU 1/5/15m " + ("/".join(f"{v:.2f}" for v in loads) if loads else "unknown") +
             f"; free memory {reading.get('mem_free_gb', 'unknown')} GB; free disk " +
             f"{reading.get('disk_free_gb', 'unknown')} GB; thermal {reading.get('thermal', 'unknown')}; " +
             f"verifies {reading['verifying']}/{reading['verify_limit']}; queued {reading['queued']}; " +
-            ("held: " + "; ".join(reading["held"]) if reading["held"] else "heavy work allowed"))
+            ("held: " + "; ".join(reading["held"]) if reading["held"] else "heavy work allowed") + detail)
 
 
 def cmd_heavy(a):
     inst = _m_nodes.load()
     node = inst.node(getattr(a, "node", None) or "root")
-    token = machine_wait(inst=inst, node=node["id"])
-    machine_release(token)
+    with machine_run('heavy', inst, node['id']) as token:
+        machine_wait(inst=inst, node=node['id'], token=token)
     print("machine care: heavy work allowed (admission only)")
 
 
@@ -857,7 +1362,12 @@ def cmd_machine(a):
             print('watch: watcher state invalid; retained for repair (brain due root)')
         return
     if a.action in ("install", "uninstall"):
-        machine_service(inst, a.action, a.yes)
+        if not a.yes:
+            machine_service(inst, a.action, False)
+            return
+        _m_instance.unlock()
+        with _m_instance.reservation(inst, "machine-service"):
+            machine_service(_m_instance.Instance(inst.root), a.action, a.yes)
         return
     nodes = inst.nodes()
     if a.missing_homes:

@@ -57,7 +57,7 @@ def rotation_due(inst, n):
         except (ValueError, TypeError):
             return default
     context, turns = measured["context"], measured["turns"]
-    if (context is not None and context >= limit("rotate_tokens", 150000)) or turns >= limit("rotate_turns", 50):
+    if (context is not None and context >= limit("rotate_tokens", 300000)) or turns >= limit("rotate_turns", 50):
         return (f"coordinator context {context if context is not None else 'unknown'} tokens, {turns} turns; "
                 f"run brain rotate {n['id']} and follow the host handover steps")
     return None

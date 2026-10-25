@@ -22,31 +22,48 @@ from . import worktrees as _m_worktrees
 
 
 def cmd_review(a):
-    """Brief for a reviewer on a different runtime than the one that built the change."""
+    """Brief an independent reviewer, or record the completed host identity receipt."""
     inst = _m_nodes.load()
     n = inst.node(a.id)
     rows = _m_jobs.read_jobs(n)
     if rows is None:
         _m_common.die("cannot record review: unrecognized job ledger")
     row = _m_jobs.open_job(rows, a.branch)
+    if getattr(a, 'receipt_file', None):
+        try:
+            data = json.loads(Path(a.receipt_file).expanduser().read_text())
+            _m_review.record_review_receipt(inst, n, a.branch, data)
+        except (OSError, ValueError, TypeError) as error:
+            _m_common.die(str(error))
+        print('review receipt recorded (coordinator-supplied host observation; no independent live host query)')
+        return
     round_number = _m_review.review_policy(a, row)
     check_fix = getattr(a, "check_fix", False)
     built = a.built_by or (row or {}).get("Runtime") or n["fm"].get("runtime") or inst.cfg.get("default_runtime", "")
-    others = [rt for rt in inst.runtimes if rt != built]
+    try:
+        fresh = _m_review.independence_policy(inst, n) == 'fresh-thread'
+        exception = _m_review.runtime_exception(inst, n, a, built)
+    except ValueError as error:
+        _m_common.die(str(error))
+    others = list(inst.runtimes) if fresh or exception else [rt for rt in inst.runtimes if rt != built]
     kind = _m_jobs.job_class(n, explicit=a.job_class, default="review")
-    reviewer = a.by or ("claude" if "claude" in others else (others[0] if others else None))
+    reviewer = a.by or n["fm"].get("review_runtime", inst.cfg.get("review_runtime")) or (built if fresh else ("claude" if "claude" in others else (others[0] if others else None)))
     if not reviewer:
         _m_common.die(f"only one runtime ({built}) in instance.md: nothing to cross-review with")
-    if reviewer == built:
+    if reviewer == built and not (fresh or exception):
         _m_common.die("the reviewer must run on a different runtime from the builder")
-    pin = a.by or (n["fm"].get("runtime") if n["fm"].get("runtime") in others else None)
+    pin = reviewer if (a.by or fresh or exception or n["fm"].get("review_runtime") or inst.cfg.get("review_runtime")) else (n["fm"].get("runtime") if n["fm"].get("runtime") in others else None)
     per_class = _m_knowledge.class_routing_config(inst, n)
     reviewer, _ = _m_usage.class_runtime(inst, kind, runtime=pin, runtimes=others)
+    if not a.model:
+        a.model = n['fm'].get('review_model', inst.cfg.get('review_model'))
     model_selection = _m_knowledge.class_model_selection(inst, n, a, reviewer, kind)
     reviewer, subscription, usage = _m_usage.class_route(inst, kind, runtime=pin,
         model=model_selection[0] if model_selection else a.model,
-        weekly_cap=n["fm"].get("route_weekly_cap", inst.cfg.get("route_weekly_cap", 60)), runtimes=others)
-    usage += " Independent review uses the other runtime from the builder."
+        weekly_cap=n["fm"].get("route_weekly_cap", inst.cfg.get("route_weekly_cap", 60)), runtimes=others,
+        node=n, extra=[Path(a.out).expanduser()] if a.out else [])
+    usage += (" Independent review requires a fresh non-builder thread; same runtime and model are allowed."
+              if fresh or exception else " Independent review uses the other runtime from the builder.")
     _m_knowledge.launch_selection(inst, n, a, reviewer, subscription, row, kind, model_selection=model_selection)
     if per_class or " node.md " in a.model_source:
         usage += f" Routing sources: model={a.model_source}."
@@ -84,10 +101,17 @@ def cmd_review(a):
            "Role: worker, reviewing a change you didn't write. Don't modify any file, commit or push.",
            "The rules, agents and skills where you run come first (axiom 7): if this project has its own "
            "review checklist or reviewer agents, apply them too.", ""]
+    if fresh or exception:
+        out += ["Review identity receipt required: after completion, record the actual builder and reviewer "
+                "thread IDs, runtimes and models using `brain review " + n['id'] + " --branch " + a.branch +
+                " --receipt-file <host-observation.json>`. Unknown, self or reused context cannot establish independence.", ""]
+    if exception:
+        out += ["Same-runtime exception expires: " + exception['until'],
+                "Exception reason: " + json.dumps(exception['reason']), ""]
     if n["sealed"]:
         out += ["This project has its own owners. Write nothing into it, and keep your report free of any "
                 "reference to where this brief came from (axiom 6).", ""]
-    out += _m_briefs.separation_lines(a, n, a.branch, default="Independent second-runtime review.")
+    out += _m_briefs.separation_lines(a, n, a.branch, default="Independent fresh non-builder context." if fresh or exception else "Independent second-runtime review.")
     review_kind = "check-fix" if check_fix else "full"
     round_line = (f"Review round {round_number} ({review_kind})." if row else
                   f"Review round not recorded ({review_kind}): no open job; round cap not applied.")
@@ -140,7 +164,7 @@ def cmd_review(a):
     if a.out:
         _m_history.write_out(inst, n, a.out, text)
     _m_jobs.job_reviewed(inst, n, a.branch, full=not check_fix, head=head,
-                         reason=getattr(a, "reason", None) or "")
+                         reason=getattr(a, "reason", None) or "", identity_required=fresh or bool(exception), exception=exception)
     _m_jobs.record_job_route(inst, n, a.branch, kind, reviewer, a.model, review=True, effort=a.effort)
     if not a.out:
         print(text, end="")
@@ -357,7 +381,8 @@ def sync_one(inst, n, a):
         if (home / ".git").exists():
             has_remote = bool(_m_common.git("remote", cwd=home).stdout.strip())
             if has_remote and not a.offline:
-                r = _m_common.git("fetch", "--all", "--prune", "--quiet", cwd=home)
+                with _m_instance.released(inst, n):
+                    r = _m_common.git("fetch", "--all", "--prune", "--quiet", cwd=home)
                 print("fetched" if r.returncode == 0 else f"fetch failed: {r.stderr.strip()[:200]}")
             _m_verify.main_notice(n)
             can_mark = sync_external_merges(inst, n, since, getattr(a, "reset_main", False))
@@ -380,9 +405,10 @@ def sync_one(inst, n, a):
             url = _m_nodes.remote_url(home)
             if has_remote and not a.offline and "github.com" in url and shutil.which("gh"):
                 try:
-                    r = subprocess.run(["gh", "pr", "list", "--state", "open", "-L", "30", "--json",
-                                        "number,title,author,headRefName,updatedAt,isDraft,reviewDecision"],
-                                       cwd=home, capture_output=True, text=True, timeout=30)
+                    with _m_instance.released(inst, n):
+                        r = subprocess.run(["gh", "pr", "list", "--state", "open", "-L", "30", "--json",
+                                            "number,title,author,headRefName,updatedAt,isDraft,reviewDecision"],
+                                           cwd=home, capture_output=True, text=True, timeout=30)
                     prs = json.loads(r.stdout) if r.returncode == 0 else None
                 except (subprocess.TimeoutExpired, ValueError):
                     prs = None

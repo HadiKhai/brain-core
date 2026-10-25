@@ -19,6 +19,13 @@ Every agent working anywhere under it reads this file first.
 Any agent may run `brain usage`: read the machine cache before launching work, respect the
 subscription's allowed brains and stop line, and follow the host instance chosen by the brief.
 
+## Tasks on install or upgrade
+
+Read `core/docs/tasks.md`. Run `brain task migrate --all` once after setup; it is
+additive and repeatable. For a node with task records, use `brain task next <id>`
+and pass its ID to `brain wt add <id> <branch> --task-id <task>`. Keep parked tasks
+visible until resumed, and use exact requirements and decision references.
+
 ## About the operator
 
 <!-- TODO(operator): 5-10 lines. Who you are, how you like answers, what agents must never do.

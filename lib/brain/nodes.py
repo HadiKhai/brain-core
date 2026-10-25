@@ -171,6 +171,10 @@ def cmd_init(a):
     ensure_gitignore(root)
     _m_status.refresh_status(inst, inst.node("root"))
     inst.commit(["."], f"Initialize instance: {a.title}")
+    from . import events
+    with _m_instance.brain_lock(inst):
+        with events.Command(root, command="init"):
+            pass
     name = register(root)
     print(f"instance: {root}\nname: {name}\noperator: {a.operator}\nruntimes: {runtimes}\nhost: {a.host}")
 
@@ -558,7 +562,14 @@ def prepare_settings(inst, n, pairs, messages=None):
         k, v = kv.split("=", 1)
         if k in ("owners", "id"):
             _m_common.die("use 'brain owners' or 'brain seal' to change owners; ids change only with 'brain move'")
-        if k == "fallback":
+        if k == "status_source":
+            if v not in ("files", "events"):
+                _m_common.die("status_source must be files or events")
+            if v == "events":
+                from . import events
+                events.switch_gate(inst, n)
+            fm[k] = v
+        elif k == "fallback":
             if n["id"] != "root":
                 _m_common.die("fallback is per machine: brain set root fallback=<instance ids in order>")
             order = [x.strip() for x in v.split(",")] if v.strip() else []
@@ -598,7 +609,7 @@ def prepare_settings(inst, n, pairs, messages=None):
             inst.local_of(n["id"])["coordinator_sessions"] = list(reversed(dict.fromkeys(reversed(ids))))
             fm.pop("coordinator_sessions", None)
             messages.append("  coordinator_sessions: this machine (.brain/local.json)")
-        elif k in _m_common.LOCAL_KEYS or k in ("synced_at", "workbench", "wake", "wake_default"):
+        elif k in _m_common.LOCAL_KEYS or k in ("synced_at", "workbench", "wake", "wake_default", "wake_coalesce"):
             inst.local_of(n["id"])[k] = str(Path(v).expanduser().resolve()) if k == "workbench" else v
             fm.pop(k, None)
             messages.append(f"  {k}: this machine (.brain/local.json)")
@@ -610,6 +621,10 @@ def prepare_settings(inst, n, pairs, messages=None):
                 _m_policy.validate_merge(inst, {**n, 'fm': fm}, v)
             except ValueError as error:
                 _m_common.die(str(error))
+            fm[k] = v
+        elif k == 'separation_policy':
+            if v not in ('warn', 'required'):
+                _m_common.die('separation_policy must be warn or required')
             fm[k] = v
         elif k == 'parallel_jobs':
             try:

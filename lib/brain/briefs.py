@@ -132,7 +132,7 @@ def import_brief(a):
         _m_common.die("--import needs an external git home on this machine")
     home = n["home_path"]
     head = _m_common.git("rev-parse", "--verify", "-q", "HEAD", cwd=home).stdout.strip() or "unborn"
-    runtime, usage = _m_knowledge.worker_route(inst, n, a)
+    runtime, usage = _m_knowledge.worker_route(inst, n, a, extra=[Path(a.out).expanduser()] if a.out else [])
     out = [f"Role: import worker for node `{n['id']}` ({n['fm'].get('title', '')}).",
            f"Run in: {n['dir']}  ·  runtime: {runtime}  ·  class: {a.job_class}" + (f"  ·  model: {a.model}" if a.model else ""),
            "The rules, agents and skills where you run come first (axiom 7); this brief adds to them.",
@@ -203,12 +203,15 @@ def peer_lines(a):
 
 def separation_lines(a, n, branch, default=""):
     """One launch-reason policy for workers, specialists and independent reviewers."""
+    policy = n['fm'].get('separation_policy', 'warn')
+    if policy not in ('warn', 'required'):
+        _m_common.die('separation_policy must be warn or required')
     row = _m_jobs.open_job(_m_jobs.read_jobs(n) or [], branch) if branch else None
     contract = _m_jobs.contract_file(n, row).read_text() if row and _m_jobs.contract_file(n, row).is_file() else ""
     sections = {k.lower(): v for k, v in _m_ui.md_sections(contract).items()}
     why = a.why_separate if a.why_separate is not None else (default or sections.get("why separate") or "")
     if not why.strip():
-        if a.why_separate is not None and not a.allow_unexplained:
+        if (a.why_separate is not None or policy == 'required') and not a.allow_unexplained:
             _m_common.die("--why-separate needs a reason; use --allow-unexplained for an urgent job")
         why = ("Urgent launch: separation reason explicitly waived." if a.allow_unexplained else
                "not stated by the coordinator")
@@ -243,8 +246,6 @@ def cmd_brief(a):
         a.context_file = saved.get("context_files", [])
     if signal and signal.get("restart") and not (a.task_file or a.task):
         _m_common.die("restart brief has no recorded task; supply the original --task or --task-file")
-    why_lines = separation_lines(a, n, a.branch)
-    shared = why_lines + peer_lines(a)
     context, context_inputs, inputs = [], [], []
     for name in a.context_file or []:
         try:
@@ -263,9 +264,13 @@ def cmd_brief(a):
         inputs.append(("Shared context", body))
         context_inputs.append(str(path))
         context += [f"### Context from {_m_common.tilde(path)}", "", body, ""]
+    runtime, usage = _m_knowledge.worker_route(inst, n, a,
+        extra=[*context_inputs, *([Path(a.out).expanduser()] if a.out else [])])
+    why_lines = separation_lines(a, n, a.branch)
+    shared = why_lines + peer_lines(a)
     if context:
         shared += ["## Shared context", "", "Gathered once by the coordinator; use these findings before rereading sources.", "", *context]
-    runtime, usage = _m_knowledge.worker_route(inst, n, a)
+    forecast = _m_jobs.launch_forecast(inst, n, row, a.job_class, runtime, a.model)
     head = _m_worktrees.job_run_line(where, w, a.branch, runtime, a.model)
     head = head.replace(f"  ·  runtime: {runtime}", f"  ·  runtime: {runtime}  ·  class: {a.job_class}", 1)
     task_path = Path(a.task_file).expanduser().resolve() if a.task_file else None
@@ -278,7 +283,7 @@ def cmd_brief(a):
     if a.small:
         from . import messages as _m_messages
         out = [f"Role: worker in node `{n['id']}`; small job.", head, a.selection_line, _m_guard.redact(usage, _m_guard.never_terms(n)),
-               *shared, _m_messages.MESSAGE_PROTOCOL, "Follow this node's rules. Task: " + task.strip(),
+               *shared, _m_jobs.estimate_line(forecast), _m_messages.MESSAGE_PROTOCOL, "Follow this node's rules. Task: " + task.strip(),
                "Clear, low risk, minutes, no shared-state changes. If that stops being true, hand back for a full job. "
                + " ".join(attribution_lines(runtime, a.model)).strip(),
                *_m_knowledge.limits_lines(n), *_m_knowledge.knowledge_lines(inst, n, task, inputs=inputs),
@@ -298,7 +303,8 @@ def cmd_brief(a):
         return
     out = [f"Role: worker in node `{n['id']}` ({n['fm'].get('title', '')}), started by its coordinator.", head,
            "The rules, agents and skills where you run come first (axiom 7); this brief adds to them.", "",
-           a.selection_line, "", _m_guard.redact(usage, _m_guard.never_terms(n)), ""]
+           a.selection_line, "", _m_guard.redact(usage, _m_guard.never_terms(n)), "",
+           _m_jobs.estimate_line(forecast), ""]
     if n["sealed"]:
         out += ["This work happens in a project with its own owners. Leave nothing in it that names where this "
                 "brief came from (axiom 6). Ask before pushing, publishing or anything irreversible (axiom 24).",
@@ -337,6 +343,7 @@ def cmd_brief(a):
     text = checked_brief(n, "\n".join(out) + "\n", inputs=inputs)
     _m_guard.no_terms_in(n, text, "the brief")
     _m_jobs.record_job_route(inst, n, a.branch, a.job_class, runtime, a.model, effort=a.effort)
+    _m_jobs.record_job_forecast(inst, n, row, forecast)
     if a.out:
         _m_history.write_out(inst, n, a.out, text)
     else:

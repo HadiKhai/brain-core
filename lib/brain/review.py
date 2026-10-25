@@ -182,3 +182,163 @@ def rehearsal_lines():
             "committed candidate with machine admission and its sandbox protections. Inspect the report "
             "and preserve raw failures; report exactly what ran or state that it was not run. "
             "Keep private data out of the report.", ""]
+
+
+# Review identities are observed host data supplied by a coordinator, not a live host query.
+def independence_policy(inst, n):
+    value = n['fm'].get('review_independence', inst.cfg.get('review_independence', 'cross-runtime'))
+    if value not in ('cross-runtime', 'fresh-thread'):
+        raise ValueError('review_independence must be cross-runtime or fresh-thread')
+    return value
+
+
+def runtime_exception(inst, n, a, built):
+    """Retain explicit expiring legacy exceptions without weakening thread independence."""
+    if a.by != built or independence_policy(inst, n) == 'fresh-thread':
+        return None
+    reason = (getattr(a, 'same_runtime_reason', None) or '').strip()
+    until = n['fm'].get('same_runtime_review_until', inst.cfg.get('same_runtime_review_until', ''))
+    expiry = inst.parse_time(until) if re.search(r'(?:Z|[+-]\d{2}:?\d{2})$', until) else None
+    if not reason or not expiry:
+        _m_common.die('same-runtime review needs fresh-thread policy or an expiring exception and --same-runtime-reason')
+    if expiry <= inst.now_dt():
+        _m_common.die('same-runtime review exception expired')
+    return {'runtime': built, 'reason': reason, 'until': until}
+
+
+def review_receipt_path(n, row, head):
+    import hashlib
+    if not re.fullmatch(r'[0-9a-f]{40,64}', head or ''):
+        raise ValueError('invalid review head')
+    root = n
+    while root.get('parent'):
+        root = root['parent']
+    return root['dir'] / '.brain/review-receipts' / hashlib.sha256(n['id'].encode()).hexdigest() / _m_jobs.job_key(row) / (head + '.json')
+
+
+def validate_review_receipt(inst, n, row, head, data, fresh=False):
+    def refuse():
+        raise ValueError('review receipt needs exact code, known builder and distinct fresh non-builder thread identities')
+    if (not isinstance(data, dict) or type(data.get('version')) is not int or data['version'] != 1 or
+            data.get('node') != n['id'] or data.get('job_key') != _m_jobs.job_key(row) or
+            data.get('branch') != row['Job'] or data.get('head') != head):
+        refuse()
+    observed = inst.parse_time(data.get('observed_at')) if isinstance(data.get('observed_at'), str) else None
+    started = inst.parse_time(row.get('Started'))
+    if not observed or observed > inst.now_dt() or (started and observed < started):
+        refuse()
+    if fresh and (inst.now_dt() - observed).total_seconds() > 300:
+        refuse()
+    builder, reviewer = data.get('builder'), data.get('reviewer')
+    for identity in (builder, reviewer):
+        if not isinstance(identity, dict) or any(not isinstance(identity.get(k), str) or not identity[k].strip()
+                or any(c.isspace() for c in identity[k]) for k in ('threadId', 'runtime', 'model')):
+            refuse()
+        if identity['runtime'] not in inst.runtimes:
+            refuse()
+    known = set()
+    for ref, _ in _m_jobs.bound_worker_threads(n, row['Job']):
+        known.update(_m_jobs.thread_reference_ids(ref))
+    if (builder['threadId'] not in known or reviewer['threadId'] in known or
+            reviewer['threadId'] == builder['threadId'] or builder['runtime'] != row.get('Runtime') or
+            builder['model'] != row.get('Model') or reviewer.get('fresh_context') is not True or
+            reviewer.get('context_reused') is not False or reviewer.get('built_change') is not False):
+        refuse()
+    if builder['runtime'] == reviewer['runtime'] and independence_policy(inst, n) != 'fresh-thread':
+        try:
+            history = json.loads(row.get('Review exceptions') or '[]')
+            permitted = any(isinstance(entry, dict) and entry.get('head') == head and
+                            entry.get('runtime') == reviewer['runtime'] and entry.get('reason') and
+                            isinstance(entry.get('until'), str) and inst.parse_time(entry['until']) and
+                            observed < inst.parse_time(entry['until']) for entry in history)
+        except (ValueError, TypeError):
+            permitted = False
+        if not permitted:
+            refuse()
+    for key in ('runtime', 'model'):
+        expected = row.get('Review ' + key) or n['fm'].get('review_' + key, inst.cfg.get('review_' + key))
+        if expected and expected != reviewer[key]:
+            refuse()
+    if data.get('verdict') not in ('pass', 'blocked') or not isinstance(data.get('findings'), list):
+        refuse()
+    for finding in data['findings']:
+        if (not isinstance(finding, dict) or finding.get('severity') not in ('blocker', 'major', 'minor') or
+                any(not isinstance(finding.get(k), str) or not finding[k].strip() for k in ('id', 'class', 'text')) or
+                finding.get('state') not in ('open', 'closed') or not isinstance(finding.get('paths'), list) or
+                not finding['paths']):
+            refuse()
+    if data['verdict'] == 'pass' and any(f['state'] == 'open' and f['severity'] in ('blocker', 'major') for f in data['findings']):
+        refuse()
+    return data
+
+
+def record_review_receipt(inst, n, branch, data):
+    from . import instance as _m_instance
+    with _m_instance.brain_lock(inst):
+        row = _m_jobs.open_job(_m_jobs.read_jobs(n) or [], branch)
+        if not row:
+            raise ValueError('review receipt needs an open job')
+        repo = n.get('home_path') if n.get('external') else inst.root
+        head = _m_common.git('rev-parse', '--verify', 'refs/heads/' + branch + '^{commit}', cwd=repo).stdout.strip()
+        validate_review_receipt(inst, n, row, head, data, fresh=True)
+        serialized = json.dumps(data, sort_keys=True) + '\n'
+        _m_guard.no_terms_in(n, serialized, 'review identity receipt')
+        path = review_receipt_path(n, row, head)
+        _m_common.safe_target(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        import hashlib
+        history = path.parent / (head + '-' + hashlib.sha256(data['reviewer']['threadId'].encode()).hexdigest() + '.json')
+        _m_common.safe_target(history)
+        if history.exists() and history.read_text() != serialized:
+            raise ValueError('reviewer thread already supplied a different receipt; use a fresh review context')
+        from . import review_findings as _m_review_findings
+        _m_review_findings.record_review_findings(inst, n, branch, head, data['findings'])
+        _m_common.atomic_write(history, serialized)
+        _m_common.atomic_write(path, serialized)
+        rows = _m_jobs.read_jobs(n)
+        current = _m_jobs.open_job(rows or [], branch)
+        current['Review identity required'] = 'true'
+        current['Review identity receipt'] = str(path.relative_to(inst.root))
+        _m_jobs.write_jobs(inst, n, rows)
+        inst.commit([], f"{n['id']}: review identity receipt")
+    return path
+
+
+def validate_ready_reviews(inst, n, branch, head, packet=None):
+    row = _m_jobs.open_job(_m_jobs.read_jobs(n) or [], branch)
+    try:
+        required = independence_policy(inst, n) == 'fresh-thread' or (row or {}).get('Review identity required') == 'true'
+    except ValueError as error:
+        return [str(error)]
+    if not required:
+        return []
+    if not row:
+        return ['independent review receipt requires an open job']
+    try:
+        path = review_receipt_path(n, row, head)
+        data = json.loads(path.read_text())
+        validate_review_receipt(inst, n, row, head, data)
+        if data['verdict'] != 'pass':
+            raise ValueError('review is blocked')
+    except (OSError, ValueError, TypeError, KeyError):
+        return ['missing, stale, blocked or non-independent exact-head review receipt']
+    return []
+
+
+def review_evidence(inst, n, branch=None):
+    """Read-only receipts, including failed review classes, for advisory consumers."""
+    out = []
+    for row in _m_jobs.read_jobs(n) or []:
+        if branch and row['Job'] != branch:
+            continue
+        folder = review_receipt_path(n, row, '0' * 40).parent
+        for path in sorted(folder.glob('*-*.json')):
+            try:
+                data = json.loads(path.read_text())
+                if not isinstance(data, dict):
+                    continue
+                validate_review_receipt(inst, n, row, data.get('head'), data)
+                out.append(data)
+            except (OSError, ValueError, TypeError, KeyError):
+                continue
+    return out
