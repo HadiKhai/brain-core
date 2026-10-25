@@ -32,8 +32,11 @@ owners may have worked there since: run `core/bin/brain sync <id>` and fold what
 The sampler wakes only for marked inbox questions/results, question/blocked/done
 hand-backs, stalled jobs, overdue blockers/questions and existing restart/rotation
 needs. Bookkeeping remains in `brain due`; explicit watcher kinds can request it.
-The additional job-restart wake feature is parked and is not included here.
-Existing usage advice and restart/rebrief behavior remain available.
+A protected `job-restart` item blocks `brain due --quiet` when a running job
+reaches three compactions or twice its known positive token limit. Restart the
+worker with the exact brief command before continuing that job. Successful
+rebrief delivery establishes the next usage baseline. Automatic host stop and
+relaunch delivery remains separate from this due obligation.
 
 Serialize full gates sharing an instance with
 `brain gate-lock --label "component verify" -- CMD [ARGS...]`.
