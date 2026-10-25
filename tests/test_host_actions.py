@@ -1,4 +1,5 @@
 """Host lifecycle is faked; no test launches a real conversation or schedule."""
+import argparse
 import hashlib
 import json
 import os
@@ -145,6 +146,17 @@ class HostActions(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'this node'):
                 self.m.provision_schedule(self.inst, 'root', 'other')
             self.assertEqual(call.call_count, 1)
+
+    def test_missing_native_transport_refuses_before_routing_or_pending_state(self):
+        with mock.patch.dict(os.environ, {'T3_ACP_MCP_NODE':''}), \
+                mock.patch.object(self.m, 'load', return_value=self.inst), \
+                mock.patch.object(self.m, 'worker_route') as route, \
+                mock.patch.object(self.m, 'provision_coordinator') as provision:
+            with self.assertRaisesRegex(SystemExit, 'native host MCP transport unavailable'):
+                self.m.cmd_host(argparse.Namespace(action='provision', id='root', model='sample', url=None))
+        route.assert_not_called()
+        provision.assert_not_called()
+        self.assertFalse(self.inst.local_path.exists())
 
     def test_transport_uses_native_acp_without_a_shell(self):
         envelope = {'structuredContent': {'threadId':'thread-1'}}

@@ -169,3 +169,11 @@ and job-start dates are labelled context instead of being presented as exact
 promise dates. Focused integration exercises the real scoped completion checker
 against changed code, no-op code, operational receipts, versioned and changed
 report artifacts, and provider-completed mirrors.
+
+## D1212: Refuse unavailable native host transport before provisioning state
+
+The host CLI checks its supported adapter and native MCP transport before model
+routing or writing any pending lifecycle marker. A known unavailable transport
+uses the documented adapter workflow; it does not leave an ambiguous launch to
+reconcile. Once a host launch actually starts, its existing interruption marker
+and no-blind-retry behavior still apply.

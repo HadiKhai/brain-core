@@ -229,6 +229,8 @@ def provision_schedule(inst, nid, sid, provider=None):
 def cmd_host(a):
     inst = _m_nodes.load()
     try:
+        if inst.cfg.get('host') != 't3' or not os.environ.get('T3_ACP_MCP_NODE'):
+            raise ValueError('native host MCP transport unavailable; use the host adapter workflow')
         if a.action == 'wake-setup':
             provision_wake(inst, a.id)
             print('host wake task bound to this coordinator; capability saved privately')
