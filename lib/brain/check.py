@@ -16,6 +16,45 @@ from . import schedules as _m_schedules
 from . import status as _m_status
 
 
+def decision_warnings(inst, n):
+    """Validate decision metadata; a citation is not independent verification of a fact."""
+    path = n['dir'] / 'decisions.md'
+    if not path.is_file():
+        return []
+    cutoff_text = n['fm'].get('decision_scope_since', inst.cfg.get('decision_scope_since'))
+    cutoff = inst.parse_time(cutoff_text) if cutoff_text else None
+    if cutoff_text and not cutoff:
+        return [f"{n['id']}: invalid decision_scope_since timestamp"]
+    text = re.sub(r'(?ms)^```.*?^```[^\n]*', '', path.read_text())
+    headings = list(re.finditer(r'^## (\d{4}-\d{2}-\d{2})[^\n]*', text, re.M))
+    out = []
+    for index, heading in enumerate(headings):
+        date = inst.parse_time(heading.group(1) + 'T00:00:00+00:00')
+        if cutoff and date and date.date() < cutoff.date():
+            continue
+        body = text[heading.end():headings[index + 1].start() if index + 1 < len(headings) else len(text)]
+        label = f"{n['id']}: decisions.md:{text.count(chr(10), 0, heading.start()) + 1}"
+        if not re.search(r'^Applies to:[ \t]*(\S[^\n]*)', body, re.M | re.I):
+            out.append(label + ': decision has no Applies to: scope')
+        external = (re.search(r'^(?:External|Vendor|Provider|Policy) fact:', body, re.M | re.I) or
+                    re.search(r'\b(?:vendor|provider|upstream)\b[^.\n]{0,120}\b(?:requires?|allows?|limits?|supports?|expires?|retains?|policy)\b',
+                              heading.group() + body, re.I))
+        source = re.search(r'^Source:[ \t]*(\S[^\n]*)', body, re.M | re.I)
+        valid = False
+        if source:
+            import urllib.parse
+            value = source.group(1).strip()
+            url = re.search(r'https?://[^\s<>)]+', value)
+            try:
+                valid = bool(url and urllib.parse.urlsplit(url.group()).netloc)
+            except ValueError:
+                valid = False
+            valid = valid or bool(re.fullmatch(r'probe:[ \t]+\S.+', value, re.I))
+        if external and not valid:
+            out.append(label + ': external fact has no valid Source: URL or probe: command')
+    return out
+
+
 def collect_problems(inst):
     """Returns (problems, warnings, fixable) for the axioms that can be checked mechanically."""
     problems, warnings, fixable = [], [], []
@@ -73,6 +112,7 @@ def collect_problems(inst):
                                 "add '; since: <brain now timestamp>; recommendation: <action>; default: <fallback>'")
             warnings.extend(_m_status.code_setup_warnings(inst, n))
             warnings.extend(_m_guard.redact(w, _m_guard.never_terms(n)) for w in _m_status.dead_note_paths(inst, n))
+        warnings.extend(decision_warnings(inst, n))
         future, dated = _m_status.future_entries(inst, n)
         problems.extend(future)
         warnings.extend(dated)
@@ -155,6 +195,9 @@ def collect_problems(inst):
                 p(f"{nid}: {where} contains {label} (see: brain guard {nid})")
             for e in errs:
                 p(f"{nid}: couldn't check for never-name words: {e}")
+            for record in _m_knowledge.limit_records(inst, n):
+                if record['state'] == 'invalid-expiry':
+                    warnings.append(f"{nid}: a limit has invalid Expires: metadata; it remains active")
             for lim in _m_knowledge.limits_of(n):
                 missing = [k for k in ("Why:", "Lift when:") if k.lower() not in lim.lower()]
                 if missing:

@@ -10,6 +10,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+from . import action_guard as _m_action_guard
 from . import briefs as _m_briefs
 from . import check as _m_check
 from . import common as _m_common
@@ -31,6 +32,7 @@ from . import machine as _m_machine
 from . import freshness as _m_freshness
 from . import nodes as _m_nodes
 from . import policy as _m_policy
+from . import preview_evidence as _m_preview_evidence
 from . import reports as _m_reports
 from . import rehearse as _m_rehearse
 from . import rotation as _m_rotation
@@ -115,7 +117,7 @@ def reexec_into_instance_core():
 READ_ONLY = {"cmd_show", "cmd_tree", "cmd_status", "cmd_now", "cmd_jobs", "cmd_stale", "cmd_ui", "cmd_guard",
              "cmd_due", "cmd_inbox", "cmd_index",
              "cmd_brief", "cmd_hire", "cmd_reports", "cmd_brains", "cmd_use", "cmd_machine", "cmd_usable",
-             "cmd_item_list", "cmd_item_show", "cmd_wt_list", "cmd_selftest", "cmd_init", "cmd_hook", "cmd_hook_approve", "cmd_help",
+             "cmd_item_list", "cmd_item_show", "cmd_wt_list", "cmd_selftest", "cmd_init", "cmd_hook", "cmd_hook_pretool", "cmd_hook_approve", "cmd_help",
              "cmd_dashboard", "cmd_ready", "cmd_usage", "cmd_scan", "cmd_scrub", "cmd_history",
              "cmd_launch_check", "cmd_events", "cmd_gate_lock", "cmd_version", "cmd_connect", "cmd_recall", "cmd_proposals", "cmd_changes", "cmd_heavy", "cmd_rehearse", "cmd_policy"}
 
@@ -437,19 +439,23 @@ def main():
     t.set_defaults(f=_m_worktrees.cmd_wt_prune)
     cmd("report", _m_reports.cmd_report, "start a report: brain report <node> \"topic\" (prints its folder)", "id", "topic")
     cmd("reports", _m_reports.cmd_reports, "every report, newest first: brain reports [node]", opt("id", nargs="?"))
-    cmd("review", _m_sync.cmd_review, "brief for a review by another runtime: brain review <node> --branch B",
+    cmd("review", _m_sync.cmd_review, "brief for an independent review: brain review <node> --branch B",
         "id", opt("--branch", required=True), opt("--base"), opt("--built-by", dest="built_by"),
-        opt("--by", "--runtime", help="reviewer runtime (default: one the builder didn't use)"), opt("--focus"),
+        opt("--by", "--runtime", help="reviewer runtime (default: configured independence policy)"), opt("--focus"),
         opt("--class", dest="job_class", choices=_m_jobs.JOB_CLASSES),
         opt("--effort", choices=_m_jobs.JOB_EFFORTS),
-        opt("--why-separate", help="reason for a separate reviewer; defaults to independent second-runtime review"),
+        opt("--why-separate", help="reason for a separate reviewer; defaults to the independence policy"),
         opt("--allow-unexplained", action="store_true", help="allow an urgent launch without a reason"),
         opt("--model", help="job model for scoped usage limits"), opt("--out"),
         opt("--reason", choices=("security", "schema", "privacy"), help="exception for another full round or round 3+"),
         opt("--check-fix", action="store_true", help="only check prior blockers/majors and fix regressions"),
         opt("--findings", help="prior findings JSON: list of objects with severity and text"),
         opt("--fix-base", help="reviewed commit before the fixes; defaults to previous review head"),
-        opt("--contract", help="contract file; defaults to the job's recorded contract"))
+        opt("--contract", help="contract file; defaults to the job's recorded contract"),
+        opt("--receipt-file", help="completed review host-observation JSON; does not start another round"),
+        opt("--same-runtime-reason", help="reason for a configured expiring same-runtime exception"))
+    cmd("preview-receipt", _m_preview_evidence.cmd_preview_receipt, "record rendered preview source samples", "id",
+        opt("--branch", required=True), opt("--file", required=True))
     cmd("train", _m_train.cmd_train, "batch ready jobs onto local main, verify once, and print the release command", "id",
         opt("--jobs", nargs="+", help="explicit job order (space or comma separated); all must be ready"))
     cmd("land", _m_train.cmd_land, "batch land ready jobs; host settlement requires fresh separate evidence", "id",
@@ -477,6 +483,10 @@ def main():
     t.set_defaults(f=_m_hosts.cmd_hook, event="stop")
     t = hsub.add_parser("approve", help="trust this instance and its project hooks in Codex (writes its config)")
     t.set_defaults(f=_m_hosts.cmd_hook_approve)
+    t = hsub.add_parser("pretool", help="check declared forbidden tool actions; reads runtime JSON on stdin")
+    t.set_defaults(f=_m_action_guard.cmd_hook_pretool)
+    cmd("allow", _m_action_guard.cmd_allow, "allow one exact forbidden shell command once", "id", "action",
+        opt("--once", action="store_true", required=True), opt("--cwd"), opt("--tool", default="Bash"))
     cmd("wake", _m_hosts.cmd_wake, "wake a node coordinator (or root); inbox remains the record", "id",
         opt("reason", nargs="?"), opt("--drain", action="store_true", help=argparse.SUPPRESS))
     cmd("watch", _m_watch.cmd_watch, "queue wakes only for new actionable file items",

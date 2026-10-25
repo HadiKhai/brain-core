@@ -86,6 +86,16 @@ def specialist_text(sp):
     return "\n".join((sp["dir"] / f).read_text() for f in ("role.md", "lessons.md") if (sp["dir"] / f).is_file())
 
 
+def specialist_holds_terms(sp, terms, principals):
+    """Keep role frontmatter and written lesson scope distinct; all other text stays strict."""
+    for name in ("role.md", "lessons.md"):
+        path = sp["dir"] / name
+        if path.is_file() and _m_guard.find_terms(path.read_text(), terms, principals=principals,
+                                                 lessons=name == "lessons.md"):
+            return True
+    return False
+
+
 def specialist_terms(inst, sp, extra=(), nodes=None):
     """A specialist carries the words of every node it was learned from: its sources, and each lesson's node."""
     f = sp["dir"] / "lessons.md"
@@ -140,7 +150,7 @@ def cmd_item_add(a):
         text = text.split("\n---\n", 1)[0] + "\n---\n\n" + body.strip() + "\n"
     if a.proposed:
         for n in sources:  # each source's never-name words, its ancestors' included
-            _m_guard.no_terms_in(n, text, "the library item")
+            _m_guard.no_terms_in(n, text, "the library item", principals=inst.principals)
         body = text.split("\n---\n", 1)[-1]
         if _m_nodes.SECRET_META.search(text) or _m_nodes.SECRET_KEY.search(body):
             _m_common.die("unsafe proposed item content")
@@ -174,8 +184,11 @@ def cmd_item_show(a):
     if not ok:
         _m_common.die("item is not usable here: " + why)
     text = item["path"].read_text()
-    if _m_guard.find_terms(text, learning_terms(inst, item["fm"], [n])):
+    terms = learning_terms(inst, item["fm"], [n])
+    if _m_guard.find_terms(text, terms, principals=inst.principals):
         _m_common.die("the item holds a never-name word of this node or of where it was learned; it can't be shown here")
+    if _m_guard.find_terms(text, terms):
+        text = _m_guard.governance_text(text, drop=True)
     print(text, end="")
 
 
@@ -281,7 +294,9 @@ def review_proposals(inst, records, action, reviewer=None, via=None):
         _m_common.safe_target(path)
         if fm.get("status") != "proposed":
             _m_common.die(f"{ident}: only a proposed {kind} can be {action}ed")
-        if action == "accept" and _m_guard.find_terms(text + "\n" + reviewer, terms):
+        unsafe = (specialist_holds_terms(sp, terms, inst.principals) if kind == "specialist" else
+                  bool(_m_guard.find_terms(text, terms, principals=inst.principals)))
+        if action == "accept" and unsafe:
             _m_common.die(f"{ident}: holds a never-name word of where it was learned; edit it before accepting")
         if reviewer and _m_guard.find_terms(reviewer, terms):
             _m_common.die("the review attribution holds a never-name word")
@@ -528,8 +543,9 @@ def cmd_hire(a):
         missing = [o for o in target["owners"] if o not in scope]
         if missing:
             _m_common.die(f"specialist '{sp['id']}' isn't scoped for {', '.join(missing)} (axiom 10)")
-    if _m_guard.find_terms(str(sp["dir"] / "role.md") + "\n" + (sp["dir"] / "role.md").read_text(), learning_terms(
-            inst, {"source_nodes": sp["fm"].get("source_nodes")}, [sp["node"], target])):
+    terms = learning_terms(inst, {"source_nodes": sp["fm"].get("source_nodes")}, [sp["node"], target])
+    if (_m_guard.find_terms(str(sp["dir"] / "role.md"), terms) or
+            _m_guard.find_terms((sp["dir"] / "role.md").read_text(), terms, principals=inst.principals)):
         _m_common.die(f"specialist '{sp['id']}' holds a never-name word of where it was learned or of {target['id']}")
     nodes = inst.nodes()
     lessons = [l for l in parse_lessons(sp["dir"] / "lessons.md")
@@ -538,7 +554,7 @@ def cmd_hire(a):
                                                                 "source_nodes": sp["fm"].get("source_nodes")},
                                                           [sp["node"], target], nodes))]
     items = [i for i in inst.items() if usable(i["fm"], target["owners"])[0] and
-             not _m_guard.find_terms(i["path"].read_text(), learning_terms(inst, i["fm"], [target], nodes))]
+             not _m_guard.find_terms(i["path"].read_text(), learning_terms(inst, i["fm"], [target], nodes), principals=inst.principals)]
     wanted = _m_common.lst(a.items)
     for w in wanted:
         if not any(i["fm"].get("id") == w for i in items):
@@ -635,7 +651,7 @@ def knowledge_candidates(inst, n, exclude=(), states=("active",)):
             continue
         if not usable({**fm, "status": "active"}, n["owners"])[0]:
             continue
-        if _m_guard.find_terms(item["path"].read_text(), learning_terms(inst, fm, [n], nodes)):
+        if _m_guard.find_terms(item["path"].read_text(), learning_terms(inst, fm, [n], nodes), principals=inst.principals):
             continue
         yield item
 
@@ -768,8 +784,26 @@ def limits_of(n):
     return out
 
 
+
+def limit_records(inst, n):
+    """Explicit absolute expiries affect operational briefs, never publication consent."""
+    records = []
+    for text in limits_of(n):
+        expiry = re.findall(r"(?:^|[;\n])\s*Expires:[ \t]*([^;\n]+)", text, re.I)
+        when = (inst.parse_time(expiry[0].strip()) if len(expiry) == 1 and
+                re.search(r'(?:Z|[+-]\d{2}:?\d{2})$', expiry[0].strip()) else None)
+        state = 'active'
+        if expiry:
+            state = 'invalid-expiry' if not when else ('expired' if when <= inst.now_dt() else 'active')
+        records.append({'text': text, 'state': state, 'expires_at': when.isoformat() if when else None})
+    return records
+
 def limits_lines(n):
-    lims = limits_of(n)
+    root = n
+    while root.get('parent'):
+        root = root['parent']
+    inst = _m_instance.Instance(root['dir'])
+    lims = [row['text'] for row in limit_records(inst, n) if row['state'] != 'expired']
     return (["## Limits", ""] + [f"- {l}" for l in lims] + [""]) if lims else []
 
 

@@ -509,7 +509,7 @@ def job_started(inst, n, branch, runtime):
             inst.commit([], f"{n['id']}: job started")
 
 
-def job_reviewed(inst, n, branch, *, full=True, head="", reason=""):
+def job_reviewed(inst, n, branch, *, full=True, head="", reason="", identity_required=False, exception=None):
     with _m_instance.brain_lock(inst):
         rows = ledger_rows(n)
         r = open_job(rows or [], branch)
@@ -523,7 +523,13 @@ def job_reviewed(inst, n, branch, *, full=True, head="", reason=""):
         r["Full reviews"] = str(full_prior + int(full))
         r["Review head"] = head
         r["Review kind"] = "full" if full else "check-fix"
-        r["Review reason"] = reason
+        r["Review reason"] = " ".join(reason.splitlines())
+        if identity_required:
+            r['Review identity required'] = 'true'
+        if exception:
+            history = json.loads(r.get('Review exceptions') or '[]')
+            history.append({**exception, 'round': prior + 1, 'head': head})
+            r['Review exceptions'] = json.dumps(history)
         write_jobs(inst, n, rows)
         inst.commit([], f"{n['id']}: job reviewed")
 

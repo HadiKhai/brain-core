@@ -56,22 +56,97 @@ and inherited model configuration without activating inherited runtime policy.
 
 
 
-## D901: Local semantic recall is optional and fails back to lexical recall
+## D1001: Keep governance identifiers out of content screening and worker output
 
-An optional, short-lived ONNX worker uses the pinned multilingual-e5-small int8
-model with query/passage prefixes, masked mean pooling and normalized cosine
-ranking. No daemon, API key, remote inference or torch dependency is required.
-The core remains Python 3.9 standard library only. Optional runtime packages
-are detected without importing the model. Unknown or less than 2 GB available
-RAM, missing packages, offline operation and any inference/index failure retain
-lexical retrieval. `brain check` reports the current mode; install and upgrade
-already run that check. `brain recall --setup` prepares the model explicitly.
+Exact configured principal identifiers in library and specialist scope metadata
+are governance values. Screen all other metadata and content, including duplicate
+governance keys, with the existing never-name checks. Use the same frontmatter
+grammar for parsing and streaming scans. Limit on-disk exemptions to recognized
+instance library, role and lesson paths; external copies and ordinary files stay
+strict, including Git index blobs and symlinks.
 
-Artifacts download lazily with pinned revision, lengths and SHA256 integrity;
-tests prohibit downloads. Ordinary recall bounds optional work to 12 seconds;
-explicit setup allows 180 seconds. Model setup has no outward publication.
-The private `.brain/semantic/` cache binds vectors to model and content hashes.
-Eligibility (scope, state, source content) is checked before embedding and every
-cache read, including deletion/revocation. Proposals remain inactive. There is
-no online provider enabled. The index covers usable library items and the target node's own knowledge,
-decision notes and report indexes. External transcript archives are not indexed.
+Proposal acceptance, hiring, recall and connection discovery apply this distinction
+without changing stored scopes. Worker-facing item output removes governance
+lines when those lines contain a forbidden principal. Final briefs remain subject
+to strict content checks.
+
+## D1002: Validate decision scope and external fact citations
+
+Dated entries in node decision logs carry an explicit `Applies to:` scope.
+`check` warns on missing scope and on external fact claims without a `Source:`
+URL or `probe:` command. Explicit fact labels and common vendor/provider policy
+phrasing trigger the citation check. This validates evidence metadata only; it
+never executes a probe or claims that a cited source proves the statement.
+
+`decision_scope_since` on a node or instance can exempt earlier dated entries.
+Without a cutoff, all dated entries are checked. Template examples are ignored.
+
+## D1003: Enforce declared tool patterns with exact single-use allowances
+
+`hook pretool` matches explicit `Forbidden actions` bullets in node instructions,
+inheriting only to the nearest ownership boundary. Shell bullets are conservative
+textual glob searches over a whole command, including compound commands; `tool:`
+patterns match tool identities. This declared subset is not a shell sandbox.
+
+`allow --once` records an exact shell command, resolved working directory and node.
+It does not run the command. A locked atomic state update consumes the allowance
+before returning permission, with opaque issued/consumed audit events. Policy
+changes invalidate allowances. Hook errors fail open, matching existing runtime
+hook behavior. Runtime adapter templates register the hook; updating an adapter
+file does not install or activate it on a machine.
+
+An optional worker-message validator receives only explicit host session identity
+and raw tool arguments; the action engine never guesses a caller's role.
+
+## D1004: Expire explicit operational limits without granting outward consent
+
+A limit may declare one absolute `Expires:` timestamp. Brief generation omits the
+limit after that time, without changing its source record. Invalid or duplicate
+expiry metadata keeps the limit active and produces a check warning. Narrative
+`Lift when:` conditions remain explanatory; core does not guess that they hold.
+
+Publication policy continues to snapshot every original limit, including expired
+ones. An operational expiry never grants push, publication or deletion consent.
+
+## D1005: Review independence is a fresh non-builder thread identity
+
+Instances and nodes may select `review_independence=fresh-thread`, with optional
+`review_runtime` and `review_model`. Same-runtime and same-model reviewers then
+qualify when their actual host identity belongs to a distinct, fresh context that
+did not build the change. Missing identities or unknown/reused context refuse.
+Cross-runtime routing remains the compatibility default. A legacy same-runtime
+exception needs an absolute expiry and an explicit reason; it still requires the
+fresh-thread identity receipt before readiness.
+
+`review --receipt-file` records a completed review separately from briefing a new
+round. A receipt names the exact job generation and code head, observed builder
+and reviewer runtime/model/thread, context independence and verdict. Builder
+identity must match recorded worker bindings and the builder route. Recording
+requires an observation from the last five minutes; the immutable observation
+remains valid for the same code. Later code or a blocked verdict needs new proof.
+These are coordinator-supplied host observations, not independent live-host queries.
+
+Thread identities and receipt histories live under machine-local `.brain/`.
+The shared ledger stores only the local receipt reference and required-proof flag.
+Readiness consumes a pure validator so the gate owner can enforce it before work.
+
+## D1006: Bind preview rendering and source comparisons to code and URLs
+
+A configured preview or explicit `requires_preview_evidence=true` requires an
+exact-head receipt. Each presented preview/review URL needs a successful rendering
+observation and evidence reference, plus three distinct displayed items compared
+with their source values and references. Wrong URLs, absent rendering evidence,
+fewer than three distinct matches, future observations and stale heads refuse.
+
+The recording command stores supplied browser observations locally; it does not
+pretend to open a browser itself. Readiness uses the pure validator. A screenshot
+tour receipt and these source comparisons prove different properties.
+
+## D1007: Preserve finding closure until its code inputs change
+
+Findings have stable IDs, failure classes, severity, explicit tracked input paths
+and closure evidence. Machine-local state retains closed findings across later
+reviews and unrelated commits. A change to a bound Git object reopens the finding;
+closing it again requires evidence against the new inputs. Existing IDs cannot
+silently rebind their input scope. Review observations retain their original
+verdict while the finding-state projection provides durable closure history.
