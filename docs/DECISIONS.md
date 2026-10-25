@@ -68,3 +68,21 @@ time since acknowledgement. Unknown counters remain unknown and counter regressi
 refuses rather than creating spare allowance. Opening a subsequent restart episode
 retains the current round's start. The dashboard consumes a separate `round_usage`
 projection while lifetime usage remains available.
+
+## D702: Usage caches track append offsets and permission metadata
+
+Per-transcript aggregates, including exact job time windows, persist their parsed
+byte offsets in the private spend cache. File identity, size, nanosecond timestamps,
+mode and link count invalidate reused data; replacements, truncations and same-size
+rewrites rebuild it. Growing append-only transcripts resume at the saved whole-line
+offset. Per-job total caches contain aggregate counts and a hashed input signature,
+never transcript text or workspace paths.
+
+Live snapshots share one metadata revision across jobs. That revision includes
+allowed and forbidden source roots, transcript metadata, hand-back changes and
+job bindings; an unchanged caller revision cannot retain newly appended or forbidden
+data. Cached host figures retain precedence. Read-only dashboard requests may use
+existing caches and keep progress in memory, but never publish spend files. A later
+explicit accounting request may publish that progress. Cache schema version 6
+rebuilds older aggregates automatically. Full dashboard latency also depends on
+its worktree, readiness and due callers.
