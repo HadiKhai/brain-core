@@ -51,6 +51,8 @@ a same-runtime receipt cannot bypass the configured policy or expiry.
 
 A bound `preview` URL, machine-local `review_urls` list or
 `requires_preview_evidence=true` requires rendering and source-comparison evidence.
+Set additional presented URLs with `brain set app 'review_urls=["https://preview.example/review"]'`;
+this JSON array remains machine-local.
 Record it with `brain preview-receipt app --branch fix/range --file preview.json`.
 The receipt includes `version`, `node`, `job_key`, `branch`, `head`, `checked_at`,
 `renderer_threadId` and `urls`. Each URL entry has:
@@ -76,3 +78,9 @@ does not establish data correctness.
 Readiness integrations call `review.validate_ready_reviews` and
 `preview_evidence.validate_ready_preview` before verification and when reading an
 existing packet. Both return refusal reasons without running a host or browser.
+
+Readiness reconciles a pass receipt with the durable finding union at the same
+candidate commit. Omitting an earlier major or blocker keeps it unresolved;
+changed or deleted bound inputs reopen a closure. Unchanged closures survive
+unrelated commits. Malformed or missing durable state refuses readiness and is
+preserved for repair, rather than replaced by an empty pass receipt.

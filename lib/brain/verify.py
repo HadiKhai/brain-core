@@ -3,6 +3,7 @@ import contextlib
 import contextvars
 import fnmatch
 import hashlib
+import importlib
 import json
 import math
 import os
@@ -180,6 +181,14 @@ def packet_main_matches(n, packet, main):
             packet.get("integration_base", packet.get("main")) == base)
 
 
+class ReadyStateResult(dict):
+    """Dictionary-compatible result with cache-private policy provenance."""
+    def __init__(self, data, policy_reasons=(), head=''):
+        super().__init__(data)
+        self.policy_reasons = tuple(policy_reasons)
+        self.policy_head = head
+
+
 _DISPLAY_CACHE = contextvars.ContextVar('brain_ui_ready_cache', default=None)
 
 
@@ -206,7 +215,46 @@ def ready_state(inst, n, branch, train=False, display=False):
     if previous is None or previous[0] != key:
         result = _ready_state(inst, n, branch, train, display)
         values[job] = (key, result)
+    else:
+        result = previous[1]
+        if isinstance(result, ReadyStateResult):
+            policy = ready_policy_reasons(inst, n, branch, result.policy_head, result.get('packet'))
+            if tuple(policy) != result.policy_reasons:
+                # Preserve cached Git/input facts. Only replace reasons contributed
+                # by policy validators, including recovery from a former refusal.
+                reasons = [reason for reason in result.get('reasons', []) if reason not in result.policy_reasons]
+                reasons.extend(policy)
+                result = ReadyStateResult({**result, 'ready': not reasons, 'reasons': reasons}, policy, result.policy_head)
+                values[job] = (key, result)
     return values[job][1]
+
+
+def ready_policy_reasons(inst, n, branch, head, packet=None):
+    """Use independently owned receipt validators; absent required APIs fail closed."""
+    reasons = []
+    cfg = getattr(inst, 'cfg', {})
+    cfg = cfg if isinstance(cfg, dict) else {}
+    for module_name, function in (('.review', 'validate_ready_reviews'),
+                                  ('.preview_evidence', 'validate_ready_preview')):
+        try:
+            validator = getattr(importlib.import_module(module_name, __package__), function, None)
+        except ImportError:
+            validator = None
+        if validator is not None:
+            reasons.extend(validator(inst, n, branch, head, packet=packet))
+            continue
+        if module_name == '.review':
+            row = _m_jobs.open_job(_m_jobs.read_jobs(n) or [], branch)
+            required = (n['fm'].get('review_independence', cfg.get('review_independence')) == 'fresh-thread'
+                        or (row or {}).get('Review identity required') == 'true')
+        else:
+            required = (bool(n['local'].get('preview') or n['local'].get('review_urls'))
+                        or str(n['fm'].get('requires_preview_evidence', cfg.get('requires_preview_evidence', ''))).lower()
+                        in ('true', 'yes', '1', 'on'))
+        if required:
+            reasons.append(function + ' unavailable; required receipt policy cannot be validated')
+    scrubber = VerifyScrubber(_m_guard.never_terms(n))
+    return [scrubber.feed(reason, final=True) for reason in reasons]
 
 
 def current_ready_reasons(reasons):
@@ -228,6 +276,8 @@ def _ready_state(inst, n, branch, train=False, display=False):
         if (not isinstance(old_remote, str) or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", old_remote)
                 or _m_common.git("merge-base", "--is-ancestor", old_remote, remote, cwd=n["home_path"]).returncode):
             reasons.append("recorded remote base is not an ancestor of current integration main")
+    policy_reasons = ready_policy_reasons(inst, n, branch, head, packet)
+    reasons.extend(policy_reasons)
     if row:
         from . import job_attempts as _m_attempts
         attempt = _m_attempts.current_attempt(n, row, strict=False)
@@ -312,8 +362,8 @@ def _ready_state(inst, n, branch, train=False, display=False):
             reasons.append("packet has no valid check time")
     scrubber = VerifyScrubber(_m_guard.never_terms(n))
     reasons = [scrubber.feed(reason, final=True) for reason in reasons]
-    return {"ready": not reasons, "reasons": reasons, "packet": packet,
-            "validation": "recorded" if display else "full"}
+    return ReadyStateResult({"ready": not reasons, "reasons": reasons, "packet": packet,
+                             "validation": "recorded" if display else "full"}, policy_reasons, head)
 
 
 VERIFY_INPUTS = ".env,.env.*"  # files git doesn't track that verify reads, unless the node names its own
@@ -735,6 +785,7 @@ def show_lanes(n, packet):
 
 def record_ready(inst, n, branch, reviews, previous=None, reverify=False):
     reasons, head, main = ready_preflight(n, branch)
+    reasons.extend(ready_policy_reasons(inst, n, branch, head, previous))
     from . import rehearse as _m_rehearse
     rehearsal = _m_rehearse.read_evidence(n, branch, head)
     verify = n["fm"].get("verify", "").strip()

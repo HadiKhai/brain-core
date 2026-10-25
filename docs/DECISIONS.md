@@ -159,3 +159,46 @@ still cannot be duplicated.
 Governance exemptions require real instance paths below the instance root.
 Linked intermediate library or specialist directories never grant an exemption
 to foreign file contents, even when the final file itself is regular.
+
+## D1009: Apply receipt policies before verification and on packet reads
+
+Readiness calls the independently owned review and preview validators before any
+lane mapping or verifier starts, and again when reading normal, display or train
+packets. Required policies refuse if their validator API is unavailable. Default
+unconfigured nodes keep their existing behavior. A typed configuration reader
+treats only a real instance settings dictionary as configuration.
+
+Presented `review_urls` are machine-local, like `preview`; the settings command
+accepts a JSON array string and the receipt validator checks every configured URL.
+The schema integration uses actual receipt writers and a fabricated v3 hand-back,
+with a fake verifier, so it proves admission and read enforcement without running
+a real gate or claiming browser observations.
+
+## D1010: Revalidate receipt policy inside the display cache
+
+A display-cache hit rechecks required receipt policy against the cached code head.
+Policy-only changes replace only the prior policy reasons and readiness flag;
+Git and input facts keep their existing cache identity. Restoring valid evidence
+clears a cached policy refusal without rerunning unrelated validation. Cache-private
+provenance is held as dictionary attributes, outside serialized result fields.
+Policy reasons are privacy-screened before entering cache provenance or output.
+Full and train validations continue to bypass the display cache.
+
+## D1011: Screen shared retrieval candidates with typed governance metadata
+
+Lexical ranking and optional local semantic retrieval share the same candidate
+iterator. It applies state, scope and source-content checks once, masking only
+exact known principal values in governance fields. Body text and unknown values
+remain screened. Query ranking does not bypass candidate eligibility.
+
+## D1012: Reconcile readiness with the durable finding union
+
+A passing exact-head identity receipt also requires a readable durable finding
+union. Omission preserves earlier findings; open or input-reopened majors and
+blockers refuse readiness. Closed findings survive unrelated commits. Relevant
+changes, including deletion, require an explicit evidence-backed closure at the
+new commit. Finding scope, severity and class cannot be rebound under the same ID.
+Persisted records validate their schema and input hashes against their recorded
+commit before either readiness reads or receipt writes can trust them. Missing
+state after a recorded identity review refuses replacement rather than resetting
+its history.

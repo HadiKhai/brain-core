@@ -855,3 +855,21 @@ class GuardAllowanceRenewal(Scenario):
             {'cwd': str(r), 'tool_name': 'Bash', 'tool_input': {'command': 'git push'}}))
         state = json.loads(m.allowance_path(inst, inst.node('root')).read_text())
         self.assertEqual([e['event'] for e in state['events']], ['issued', 'invalidated', 'issued', 'consumed'])
+
+
+class PreviewUrlConfiguration(Scenario):
+    context = PreviewSampleReceipts.context
+
+    def test_presented_review_urls_are_machine_local_and_all_need_source_samples(self):
+        m, inst, n, data = self.context()
+        extra = 'https://preview.example/review'
+        self.b(inst.root, 'set', 'web', 'review_urls=' + json.dumps([extra]))
+        inst = m.Instance(inst.root)
+        n = inst.node('web')
+        self.assertNotIn('review_urls', n['fm'])
+        self.assertIn(extra, m.preview_urls(n))
+        with self.assertRaises(ValueError):
+            m.record_preview_receipt(inst, n, 'job', data)
+        data['urls'].append(dict(data['urls'][0], url=extra))
+        m.record_preview_receipt(inst, n, 'job', data)
+        self.assertEqual(m.validate_ready_preview(inst, n, 'job', data['head']), [])

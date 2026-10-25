@@ -30,7 +30,7 @@ from pathlib import Path
 CORE = Path(__file__).resolve().parents[2]
 ENTRY_POINT = CORE / "bin" / "brain"
 NODE_FIELDS = ["id", "title", "owners", "labels", "home", "runtime", "created"]
-LOCAL_KEYS = ["coordinator", "host_project", "home_project", "preview", "preview_tour"]  # per machine (axiom 23)
+LOCAL_KEYS = ["coordinator", "host_project", "home_project", "preview", "preview_tour", "review_urls"]  # per machine (axiom 23)
 ITEM_FIELDS = ["id", "title", "kind", "source_node", "source_ref", "learned_at",
                "source_owners", "scope", "status"]
 STALE_DAYS = 7

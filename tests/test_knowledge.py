@@ -492,6 +492,24 @@ class GovernanceScopeGuard(Scenario):
         (nd / "never-name.txt").write_text("quietcrew\n")
         return r, nd, role, item
 
+    def test_all_retrieval_candidates_apply_typed_governance_screening(self):
+        r, nd, role, item = self.project()
+        m = core_loader.SourceFileLoader('typed_candidates_fixture', str(CORE / 'bin/brain')).load_module()
+        inst = m.Instance(r)
+        n = inst.node('app')
+        before = item.read_text()
+        self.assertEqual([row['fm']['id'] for row in m.knowledge_candidates(inst, n)], ['checks'])
+        contexts = [('problem', m.knowledge_tokens('Review checks'), 1)]
+        self.assertEqual([row[1] for row in m.knowledge_ranked(inst, n, contexts)], ['checks'])
+        self.assertEqual(list(m.knowledge_candidates(inst, n, exclude=('checks',))), [])
+        self.assertEqual(list(m.knowledge_candidates(inst, n, states=('proposed',))), [])
+        for text in (before + '\nquietcrew\n', before.replace('scope: alice, quietcrew', 'scope: alice, quietcrew-extra')):
+            item.write_text(text)
+            self.assertEqual(list(m.knowledge_candidates(inst, n)), [])
+            self.assertEqual(m.knowledge_ranked(inst, n, contexts), [])
+        item.write_text(before)
+        self.assertEqual([row['fm']['id'] for row in m.knowledge_candidates(inst, n)], ['checks'])
+
     def test_principal_scope_is_usable_without_exporting_governance(self):
         r, nd, role, item = self.project()
         before = {p: p.read_text() for p in (role, item)}

@@ -638,11 +638,8 @@ def knowledge_tokens(text):
     return out
 
 
-def knowledge_ranked(inst, n, contexts, exclude=(), states=("active",), required=None):
-    """Explainable lexical ranking of items whose scope covers n's owners; only `states` count (usable items
-    are exactly `brain usable`: active and in scope). With `required`, that context must match.
-    [(score, id, title, why, item)], best first."""
-    ranked = []
+def knowledge_candidates(inst, n, exclude=(), states=("active",)):
+    """Apply the same scope, state and source-content policy before any retrieval."""
     nodes = inst.nodes()
     for item in inst.items():
         fm = item["fm"]
@@ -652,6 +649,16 @@ def knowledge_ranked(inst, n, contexts, exclude=(), states=("active",), required
             continue
         if _m_guard.find_terms(item["path"].read_text(), learning_terms(inst, fm, [n], nodes), principals=inst.principals):
             continue
+        yield item
+
+
+def knowledge_ranked(inst, n, contexts, exclude=(), states=("active",), required=None):
+    """Explainable lexical ranking of items whose scope covers n's owners; only `states` count (usable items
+    are exactly `brain usable`: active and in scope). With `required`, that context must match.
+    [(score, id, title, why, item)], best first."""
+    ranked = []
+    for item in knowledge_candidates(inst, n, exclude, states):
+        fm = item["fm"]
         body = _m_common.read_fm(item["path"])[1]
         words = knowledge_tokens(" ".join(str(fm.get(k, "")) for k in ("id", "title", "kind", "keywords")) + " " + body)
         score, why, hit = 0, [], set()
