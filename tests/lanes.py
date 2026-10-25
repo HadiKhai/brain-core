@@ -34,7 +34,7 @@ LANE_TESTS.update({
     'usage': ('test_usage.py', 'test_usage_cache.py', 'test_usage_rounds.py'),
     'cli': ('test_cli.py', 'test_selftest_parallel.py'),
     'train': ('test_train.py', 'test_train_review.py', 'test_train_landing.py', 'test_land.py', 'test_train_automation.py', 'test_release.py'),
-    'jobs': ('test_jobs.py', 'test_train_ejection.py', 'test_handback_queue.py', 'test_queue_priority.py', 'test_forecasts.py', 'test_gate_forecasts.py'),
+    'jobs': ('test_jobs.py', 'test_train_ejection.py', 'test_handback_queue.py', 'test_queue_priority.py', 'test_forecasts.py', 'test_gate_forecasts.py', 'test_throughput.py'),
     'knowledge': ('test_knowledge.py', 'test_semantic_recall.py'),
     'status': ('test_status.py', 'test_inbox_noise.py'),
     'reminders': ('test_due_lifecycle.py',),

@@ -85,7 +85,6 @@ reproducing the original environment; a changed resolved tool still invalidates 
 
 ## D405: Native direct-full receipts and early hand-back validation
 
-<<<<<<< HEAD
 `full-run` retains a native exact-candidate full packet without publishing a
 completion. Hand-back can adopt its receipt ID after checking refs, command,
 inputs, ports, lane context and retained log digests. Stale, failed or missing
@@ -449,7 +448,56 @@ absence of that extension is ignored; dependency/import failures inside it remai
 visible. The extension owns explicit opt-in policy, eligible windows and durable
 attempt fencing. The hook adds no timer, daemon, configuration activation or
 separate publication mechanism.
-=======
+
+## D201: Preserve advisory launch estimates alongside measured job actuals
+
+Launch estimates use merged work with the same declared class (legacy branch
+family inference remains a fallback). An optional contract Size section supplies
+files and added/deleted lines. The five nearest known sizes use log distances;
+without planned size, the estimate uses all same-class samples. Wall time is
+class-wide; active time and tokens require the selected runtime. Each metric
+requires three observations and shows median plus observed minimum and maximum.
+
+Ordinary resumes retain the original launch estimate. A changed class or runtime
+recomputes it. Hand-back captures measured usage and committed Git contribution
+size, excluding uncommitted and unrelated rebased changes. Close-time accounting
+refreshes known values without replacing missing measurements with zero. Ledger
+consumption sanitizes worker actuals to numeric facts and Git identities.
+
+Weekly share is approximate and advisory. Configurable per-runtime conversions
+start at 51 million processed tokens per percent for Codex and 68 million for
+Claude; fresh-token conversion starts at 1.1 million. Three explicitly attributed
+merged-job meter observations refine conversion. Account-wide deltas are never
+assumed attributable to one concurrent job. These estimates never affect routing,
+admission, readiness or limits.
+
+## D202: Share specialist and ordinary launch forecasting
+
+Specialist hires and worker briefs resolve their route first, then use the same
+saved estimate helper and persist the same record. A selected model conditions
+samples on that exact model and runtime; changing the model refreshes the
+estimate. An unspecified runtime-default model retains class/runtime forecasting
+and does not invent a model identity. Sparse model history stays sparse.
+
+## D203: Record readiness wall duration and report slow verification
+
+Each readiness attempt records monotonic wall duration, including preflight and
+admission, in its worker record. Ledger consumption retains numeric seconds and
+whether the result reused proof. Reused proof records zero new execution time;
+it never recharges the historical lane durations. Existing records with no
+duration remain unknown. CLI job advice shows the measurement basis and flags
+runs above verify_warn_seconds (node or instance; default 600 seconds). This
+advice does not change readiness or introduce a timeout.
+
+## D204: Share queue ordering between admission and capacity forecasts
+
+Queued verification uses a stable priority view. A node can opt into landing
+priority with verify_priority=landing; other work retains normal priority. After
+ten minutes normal work ages ahead of landing requests, and legacy records with
+no enqueue timestamp retain precedence. List order breaks ties, preserving
+explicit coordinator reordering within a priority band. Running reservations
+are never preempted or reordered. Node locks and machine slot limits are unchanged.
+
 Each gate captures its expected duration at enqueue: verify_estimate_seconds,
 or the median of at least three measured completed non-reused readiness runs
 on that node. Queue and running projections simulate free slots with recorded
@@ -482,4 +530,152 @@ history stays unknown. Admission time includes native capacity/environment holds
 other wait causes are unmeasured. The dashboard component displays measured
 coverage and does not infer causes from wall time. Rollups refresh on snapshot
 reads without a scheduler, host lifecycle action or generated-file writes.
->>>>>>> d246b32260099a1bcbcb64aa5f67dcde71001a14
+
+## D1001: Keep governance identifiers out of content screening and worker output
+
+Exact configured principal identifiers in library and specialist scope metadata
+are governance values. Screen all other metadata and content, including duplicate
+governance keys, with the existing never-name checks. Use the same frontmatter
+grammar for parsing and streaming scans. Limit on-disk exemptions to recognized
+instance library, role and lesson paths; external copies and ordinary files stay
+strict, including Git index blobs and symlinks.
+
+Proposal acceptance, hiring, recall and connection discovery apply this distinction
+without changing stored scopes. Worker-facing item output removes governance
+lines when those lines contain a forbidden principal. Final briefs remain subject
+to strict content checks.
+
+## D1002: Validate decision scope and external fact citations
+
+Dated entries in node decision logs carry an explicit `Applies to:` scope.
+`check` warns on missing scope and on external fact claims without a `Source:`
+URL or `probe:` command. Explicit fact labels and common vendor/provider policy
+phrasing trigger the citation check. This validates evidence metadata only; it
+never executes a probe or claims that a cited source proves the statement.
+
+`decision_scope_since` on a node or instance can exempt earlier dated entries.
+Without a cutoff, all dated entries are checked. Template examples are ignored.
+
+## D1003: Enforce declared tool patterns with exact single-use allowances
+
+`hook pretool` matches explicit `Forbidden actions` bullets in node instructions,
+inheriting only to the nearest ownership boundary. Shell bullets are conservative
+textual glob searches over a whole command, including compound commands; `tool:`
+patterns match tool identities. This declared subset is not a shell sandbox.
+
+`allow --once` records an exact shell command, resolved working directory and node.
+It does not run the command. A locked atomic state update consumes the allowance
+before returning permission, with opaque issued/consumed audit events. Policy
+changes invalidate allowances. Hook errors fail open, matching existing runtime
+hook behavior. Runtime adapter templates register the hook; updating an adapter
+file does not install or activate it on a machine.
+
+An optional worker-message validator receives only explicit host session identity
+and raw tool arguments; the action engine never guesses a caller's role.
+
+## D1004: Expire explicit operational limits without granting outward consent
+
+A limit may declare one absolute `Expires:` timestamp. Brief generation omits the
+limit after that time, without changing its source record. Invalid or duplicate
+expiry metadata keeps the limit active and produces a check warning. Narrative
+`Lift when:` conditions remain explanatory; core does not guess that they hold.
+
+Publication policy continues to snapshot every original limit, including expired
+ones. An operational expiry never grants push, publication or deletion consent.
+
+## D1005: Review independence is a fresh non-builder thread identity
+
+Instances and nodes may select `review_independence=fresh-thread`, with optional
+`review_runtime` and `review_model`. Same-runtime and same-model reviewers then
+qualify when their actual host identity belongs to a distinct, fresh context that
+did not build the change. Missing identities or unknown/reused context refuse.
+Cross-runtime routing remains the compatibility default. A legacy same-runtime
+exception needs an absolute expiry and an explicit reason; it still requires the
+fresh-thread identity receipt before readiness.
+
+`review --receipt-file` records a completed review separately from briefing a new
+round. A receipt names the exact job generation and code head, observed builder
+and reviewer runtime/model/thread, context independence and verdict. Builder
+identity must match recorded worker bindings and the builder route. Recording
+requires an observation from the last five minutes; the immutable observation
+remains valid for the same code. Later code or a blocked verdict needs new proof.
+These are coordinator-supplied host observations, not independent live-host queries.
+
+Thread identities and receipt histories live under machine-local `.brain/`.
+The shared ledger stores only the local receipt reference and required-proof flag.
+Readiness consumes a pure validator so the gate owner can enforce it before work.
+
+## D1006: Bind preview rendering and source comparisons to code and URLs
+
+A configured preview or explicit `requires_preview_evidence=true` requires an
+exact-head receipt. Each presented preview/review URL needs a successful rendering
+observation and evidence reference, plus three distinct displayed items compared
+with their source values and references. Wrong URLs, absent rendering evidence,
+fewer than three distinct matches, future observations and stale heads refuse.
+
+The recording command stores supplied browser observations locally; it does not
+pretend to open a browser itself. Readiness uses the pure validator. A screenshot
+tour receipt and these source comparisons prove different properties.
+
+## D1007: Preserve finding closure until its code inputs change
+
+Findings have stable IDs, failure classes, severity, explicit tracked input paths
+and closure evidence. Machine-local state retains closed findings across later
+reviews and unrelated commits. A change to a bound Git object reopens the finding;
+closing it again requires evidence against the new inputs. Existing IDs cannot
+silently rebind their input scope. Review observations retain their original
+verdict while the finding-state projection provides durable closure history.
+
+## D1008: Preserve guard scope through policy changes and linked directories
+
+A fresh explicit allowance can replace an obsolete allowance for the same exact
+action after the declared rule set changes. The old authorization is recorded as
+invalidated before the new one is issued; an unconsumed current-policy allowance
+still cannot be duplicated.
+
+Governance exemptions require real instance paths below the instance root.
+Linked intermediate library or specialist directories never grant an exemption
+to foreign file contents, even when the final file itself is regular.
+
+## D1009: Apply receipt policies before verification and on packet reads
+
+Readiness calls the independently owned review and preview validators before any
+lane mapping or verifier starts, and again when reading normal, display or train
+packets. Required policies refuse if their validator API is unavailable. Default
+unconfigured nodes keep their existing behavior. A typed configuration reader
+treats only a real instance settings dictionary as configuration.
+
+Presented `review_urls` are machine-local, like `preview`; the settings command
+accepts a JSON array string and the receipt validator checks every configured URL.
+The schema integration uses actual receipt writers and a fabricated v3 hand-back,
+with a fake verifier, so it proves admission and read enforcement without running
+a real gate or claiming browser observations.
+
+## D1010: Revalidate receipt policy inside the display cache
+
+A display-cache hit rechecks required receipt policy against the cached code head.
+Policy-only changes replace only the prior policy reasons and readiness flag;
+Git and input facts keep their existing cache identity. Restoring valid evidence
+clears a cached policy refusal without rerunning unrelated validation. Cache-private
+provenance is held as dictionary attributes, outside serialized result fields.
+Policy reasons are privacy-screened before entering cache provenance or output.
+Full and train validations continue to bypass the display cache.
+
+## D1011: Screen shared retrieval candidates with typed governance metadata
+
+Lexical ranking and optional local semantic retrieval share the same candidate
+iterator. It applies state, scope and source-content checks once, masking only
+exact known principal values in governance fields. Body text and unknown values
+remain screened. Query ranking does not bypass candidate eligibility.
+
+## D1012: Reconcile readiness with the durable finding union
+
+A passing exact-head identity receipt also requires a readable durable finding
+union. Omission preserves earlier findings; open or input-reopened majors and
+blockers refuse readiness. Closed findings survive unrelated commits. Relevant
+changes, including deletion, require an explicit evidence-backed closure at the
+new commit. Finding scope, severity and class cannot be rebound under the same ID.
+Persisted records validate their schema and input hashes against their recorded
+commit before either readiness reads or receipt writes can trust them. Missing
+state after a recorded identity review refuses replacement rather than resetting
+its history.

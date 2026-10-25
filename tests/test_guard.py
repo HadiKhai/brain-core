@@ -839,3 +839,37 @@ class PreviewSampleReceipts(Scenario):
         self.assertEqual(m.validate_ready_preview(inst, n, 'job', data['head']), [])
         n['local']['preview'] += '/new'
         self.assertTrue(m.validate_ready_preview(inst, n, 'job', data['head']))
+
+
+class GuardAllowanceRenewal(Scenario):
+    def test_changed_policy_can_receive_a_new_exact_allowance(self):
+        r = self.init('alice')
+        rules = r / 'AGENTS.md'
+        rules.write_text('## Forbidden actions\n- git push*\n')
+        self.b(r, 'allow', 'root', 'git push', '--once', '--cwd', str(r))
+        rules.write_text(rules.read_text() + '- rm -rf*\n')
+        self.b(r, 'allow', 'root', 'git push', '--once', '--cwd', str(r))
+        m = core_loader.SourceFileLoader('allowance_renewal_fixture', str(CORE / 'bin/brain')).load_module()
+        inst = m.Instance(r)
+        self.assertIsNone(m.pretool_decision(inst, inst.node('root'),
+            {'cwd': str(r), 'tool_name': 'Bash', 'tool_input': {'command': 'git push'}}))
+        state = json.loads(m.allowance_path(inst, inst.node('root')).read_text())
+        self.assertEqual([e['event'] for e in state['events']], ['issued', 'invalidated', 'issued', 'consumed'])
+
+
+class PreviewUrlConfiguration(Scenario):
+    context = PreviewSampleReceipts.context
+
+    def test_presented_review_urls_are_machine_local_and_all_need_source_samples(self):
+        m, inst, n, data = self.context()
+        extra = 'https://preview.example/review'
+        self.b(inst.root, 'set', 'web', 'review_urls=' + json.dumps([extra]))
+        inst = m.Instance(inst.root)
+        n = inst.node('web')
+        self.assertNotIn('review_urls', n['fm'])
+        self.assertIn(extra, m.preview_urls(n))
+        with self.assertRaises(ValueError):
+            m.record_preview_receipt(inst, n, 'job', data)
+        data['urls'].append(dict(data['urls'][0], url=extra))
+        m.record_preview_receipt(inst, n, 'job', data)
+        self.assertEqual(m.validate_ready_preview(inst, n, 'job', data['head']), [])
