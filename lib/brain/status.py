@@ -22,6 +22,7 @@ from . import knowledge as _m_knowledge
 from . import machine as _m_machine
 from . import nodes as _m_nodes
 from . import proposals as _m_proposals
+from . import reports as _m_reports
 from . import schedules as _m_schedules
 from . import rotation as _m_rotation
 from . import reminders as _m_reminders
@@ -558,6 +559,13 @@ def due_items(inst, n, evidence=None, include_stale=True, include_ready=True, in
             episode=_m_jobs.digest([sorted(_m_jobs.job_key(r) for r in state['jobs'] or []
                                           if r.get('Ended') and r.get('Outcome') == 'merged'),
                                     sorted((b, w.get('tip')) for b, w in state['worktrees'].items() if w.get('merged'))]))
+    elif code_node(n) and any(str(value or '').strip().casefold() not in ('', 'none') for value in
+                              (n['local'].get('preview'), n['fm'].get('preview_url'))):
+        preview = _m_reports.preview_evidence(inst, n)
+        if preview['state'] != 'verified':
+            add('preview-evidence', 'preview screenshot tour is missing or stale; inspect the local preview, '
+                'capture its screens, then record source-bound evidence with brain preview <node> --record <receipt.json>',
+                condition='source-bound-preview-tour')
     if state["jobs"] is None:
         add("ledger", "job-ledger.md is a legacy file; reconcile jobs without overwriting it")
     unsettled = _m_jobs.unsettled_jobs(state["jobs"])

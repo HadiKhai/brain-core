@@ -115,12 +115,14 @@ READ_ONLY = {"cmd_show", "cmd_tree", "cmd_status", "cmd_now", "cmd_jobs", "cmd_s
              "cmd_brief", "cmd_hire", "cmd_reports", "cmd_brains", "cmd_use", "cmd_machine", "cmd_usable",
              "cmd_item_list", "cmd_item_show", "cmd_wt_list", "cmd_selftest", "cmd_init", "cmd_hook", "cmd_hook_approve", "cmd_help",
              "cmd_dashboard", "cmd_ready", "cmd_usage", "cmd_scan", "cmd_scrub", "cmd_history",
-             "cmd_gate_lock", "cmd_version", "cmd_connect", "cmd_recall", "cmd_proposals", "cmd_changes", "cmd_heavy", "cmd_rehearse", "cmd_policy"}
+             "cmd_gate_lock", "cmd_version", "cmd_connect", "cmd_recall", "cmd_proposals", "cmd_changes", "cmd_heavy", "cmd_rehearse", "cmd_policy", "cmd_preview"}
 
 
 def writes(a):
     """Does this command, with these options, change anything in the instance?"""
     name = a.f.__name__
+    if name == 'cmd_preview':
+        return bool(a.record)
     if name == 'cmd_proposals':
         return bool(getattr(a, 'approve_all', False))
     if name == 'cmd_land_check':
@@ -265,6 +267,8 @@ def main():
                                                                help="every session on this machine, per runtime"),
         opt("--also", action="append", metavar="FOLDER", help="also sessions run in this folder (repeatable)"),
         opt("--json", action="store_true"))
+    cmd('preview', _m_reports.cmd_preview, 'record/check source-bound local screenshot-tour evidence', 'id',
+        opt('--record', metavar='RECEIPT_JSON'), opt('--json', action='store_true'))
     cmd("ui", _m_ui.cmd_ui, "a live view of this brain in your browser: projects, work in flight, worktrees, activity "
         "(read-only by default, this machine only)", opt("--port", type=int, default=_m_ui.UI_PORT),
         opt("--every", type=float, default=3.0, help="seconds between refreshes"),

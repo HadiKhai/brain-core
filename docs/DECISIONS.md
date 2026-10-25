@@ -71,3 +71,18 @@ explicit lifecycle and readiness actions read current evidence outside it.
 
 Tests cover a large closed-worktree inventory, active-row recovery, reopened
 jobs, batched ref reads, invalidation and an explicit action after cached display.
+
+## D1102: Bind preview tours to source and artifact evidence
+
+`preview <node> --record <receipt.json>` validates an externally captured preview
+tour before replacing its machine-local receipt. Evidence names the configured
+preview address and tour, a bound source worktree or home at a clean HEAD, an
+explicit capture time, and SHA-256 digests for the tour and its linked PNG
+screenshots. Early worktree milestones can be recorded before a main landing.
+
+The read-only check and due queue reject missing, stale or malformed evidence.
+A bare URL does not discharge the screenshot-tour need. Failed recording retains
+the prior receipt; changing source, address, tour binding or artifact bytes makes
+it stale. The receipt validates supplied capture evidence, not visual quality or
+the accuracy of application data. Those remain the browser review's responsibility.
+No network request, browser launch or source change occurs during validation.

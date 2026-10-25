@@ -808,6 +808,63 @@ class ExpandedUI(Scenario):
         with socket.socket() as probe:
             self.assertNotEqual(probe.connect_ex(('127.0.0.1', port)), 0, 'owned listener leaked')
 
+    def test_preview_tour_receipt_binds_source_and_artifacts_and_never_clears_on_a_bare_url(self):
+        import hashlib
+        root = self.first_paint_root()
+        home = self.repo(self.tmp / 'preview-source')
+        inst = self.m.UIInstance(root)
+        node = inst.nodes()[0]
+        node['home_path'], node['external'] = home, True
+        node['local']['preview'] = 'http://127.0.0.1:4999/'
+        folder = self.tmp / 'preview-evidence'
+        folder.mkdir()
+        image = folder / 'overview.png'
+        # A synthetic PNG header; the receipt checks format and bytes, not visual quality.
+        image.write_bytes(b'\x89PNG\r\n\x1a\n' + b'\0' * 4 + b'IHDR' + (1280).to_bytes(4, 'big') + (720).to_bytes(4, 'big'))
+        tour = folder / 'index.md'
+        tour.write_text('# Preview tour\n\n![Overview](overview.png)\n')
+        node['local']['preview_tour'] = str(tour)
+        module = self.m._owners['cmd_report']
+        self.assertEqual(module.preview_evidence(inst, node)['state'], 'missing')
+        def preview_due():
+            state = {'jobs': [], 'worktrees': {}, 'handbacks': {}, 'inbox': []}
+            with mock.patch.object(self.m, 'due_evidence', return_value=(state, '', '')):
+                return [row['kind'] for row in self.m.due_items(inst, node, include_stale=False, include_advice=False)]
+        self.assertIn('preview-evidence', preview_due())
+        def artifact(path):
+            return {'path': str(path), 'sha256': hashlib.sha256(path.read_bytes()).hexdigest()}
+        receipt = {'version': 1, 'url': node['local']['preview'], 'branch': '',
+                   'head': self.git('rev-parse', 'HEAD', cwd=home).strip(),
+                   'checked_at': inst.now_dt().isoformat(), 'tour': artifact(tour), 'screenshots': [artifact(image)]}
+        input_path = folder / 'receipt.json'
+        input_path.write_text(json.dumps(receipt))
+        with mock.patch.object(module._m_nodes, 'load', return_value=inst), contextlib.redirect_stdout(io.StringIO()):
+            module.cmd_preview(argparse.Namespace(id='root', record=str(input_path), json=False))
+        self.assertEqual(module.preview_evidence(inst, node)['state'], 'verified')
+        self.assertNotIn('preview-evidence', preview_due())
+        image.write_bytes(image.read_bytes() + b'changed')
+        self.assertEqual(module.preview_evidence(inst, node)['state'], 'stale')
+        self.assertIn('preview-evidence', preview_due())
+        image.write_bytes(image.read_bytes()[:-7])
+        self.git('commit', '--allow-empty', '-qm', 'next preview revision', cwd=home)
+        self.assertEqual(module.preview_evidence(inst, node)['state'], 'stale')
+        before = module.preview_receipt_file(inst, node).read_bytes()
+        receipt['head'] = self.git('rev-parse', 'HEAD', cwd=home).strip()
+        receipt['screenshots'] = []
+        input_path.write_text(json.dumps(receipt))
+        with mock.patch.object(module._m_nodes, 'load', return_value=inst), self.assertRaises(SystemExit):
+            module.cmd_preview(argparse.Namespace(id='root', record=str(input_path), json=False))
+        self.assertEqual(module.preview_receipt_file(inst, node).read_bytes(), before)
+        receipt['screenshots'] = [artifact(image)]
+        for changed in ({'url': 'https://example.invalid/other'}, {'branch': 'unbound'},
+                        {'head': '0' * 40}, {'checked_at': 'not-a-date'}, {'version': True},
+                        {'screenshots': [artifact(image), artifact(image)]}):
+            with self.subTest(changed=list(changed)), self.assertRaises(ValueError):
+                module.validate_preview_evidence(inst, node, {**receipt, **changed})
+        node['local']['preview_tour'] = str(folder / 'another.md')
+        with self.assertRaises(ValueError):
+            module.validate_preview_evidence(inst, node, receipt)
+
     def test_partial_blocked_ages_are_unknown_without_history_and_do_not_poison_full_metadata(self):
         inst = self.m.UIInstance(self.first_paint_root())
         owner = self.m._owners['blocked_entries']
