@@ -294,12 +294,24 @@ class MachineCare(Scenario):
             self.assertEqual(active[1], limit)
 
     def test_full_runner_cross_process_limits(self):
-        m = self.m
-        roots = [self.init(name) for name in ("oak", "elm", "ash")]
-        home = self.tmp / "fixture-home"
-        self.repo(home, {"fixture.txt": "fixture"})
+        roots = [self.init(name) for name in ('oak', 'elm', 'ash')]
+        home = self.repo(self.tmp / 'fixture-home')
         for root in roots:
-            self.b(root, "set", "root", "home=" + str(home))
+            self.b(root, 'set', 'root', 'home=' + str(home))
+        self.native_runner_capacity(roots, ['root'] * 3, (1, 2))
+
+    def test_node_gates_and_configured_capacity_across_native_runners(self):
+        root = self.init('oak')
+        for node in ('elm', 'ash'):
+            self.b(root, 'new', node, '--title', node.title())
+        home = self.repo(self.tmp / 'fixture-home')
+        nodes = ['root', 'elm', 'ash']
+        for node in nodes:
+            self.b(root, 'set', node, 'home=' + str(home))
+        self.native_runner_capacity([root] * 3, nodes, (1, 2, 3))
+
+    def native_runner_capacity(self, roots, nodes, limits):
+        m = self.m
         events = self.tmp / "events.jsonl"
         child = self.tmp / "barrier_child.py"
         child.write_text(r"""import json, sys, time
@@ -322,15 +334,18 @@ raise SystemExit(i)
 from pathlib import Path
 m = core_loader.SourceFileLoader('fixture_runner', sys.argv[1]).load_module()
 m.MACHINE_RETRY = .01
-m.machine_limit = lambda p: int(sys.argv[5])
+# Capacity comes from machine-care.json, not a patched limiter.
 root, events, i = sys.argv[2:5]
 inst = m.Instance(Path(root))
 command = ' '.join(shlex.quote(arg) for arg in
                    [sys.executable, sys.argv[6], events, sys.argv[7], i])
-result, log = m.run_verify(inst, inst.node('root'), 'fixture', command, {'path': root}, dict(os.environ))
+result, log = m.run_verify(inst, inst.node(sys.argv[8]), 'fixture', command, {'path': root}, dict(os.environ))
 raise SystemExit(result)
 """)
-        for limit in (1, 2):
+        for limit in limits:
+            m.machine_dir().mkdir(parents=True, exist_ok=True)
+            (m.machine_dir() / "machine-care.json").write_text(json.dumps(
+                {"verify_day": limit, "verify_night": 1, "night_start": 0, "night_end": 0}))
             events.write_text("")
             barrier = self.tmp / ('barrier-' + str(limit))
             barrier.mkdir()
@@ -352,7 +367,7 @@ raise SystemExit(result)
             try:
                 for i, root in enumerate(roots):
                     processes.append(subprocess.Popen([sys.executable, str(script), str(CORE / "bin/brain"),
-                        str(root), str(events), str(i), str(limit), str(child), str(barrier)], env=self.env,
+                        str(root), str(events), str(i), str(limit), str(child), str(barrier), nodes[i]], env=self.env,
                         start_new_session=True,
                         stdout=subprocess.DEVNULL, stderr=subprocess.PIPE))
                     wait_for(lambda: len(queue_rows()) >= i + 1,
@@ -404,6 +419,7 @@ raise SystemExit(result)
     def test_lane_owner_requeues_behind_waiting_verify(self):
         m = self.m
         root, home, wt = _test_verify.WorkerReadyPackets.job(self)
+        self.b(root, 'new', 'other', '--title', 'Other', '--home', str(home))
         inst = m.Instance(root)
         n = inst.node('a')
         w, env = {'path': str(wt)}, dict(os.environ)
@@ -420,7 +436,7 @@ raise SystemExit(result)
 
                 def waiting():
                     try:
-                        m.run_verify(inst, n, 'waiting', 'true', w, env)
+                        m.run_verify(inst, inst.node('other'), 'waiting', 'true', w, env)
                     except BaseException as e:
                         errors.append(e)
 
@@ -577,7 +593,8 @@ raise SystemExit(result)
                 "for fd in range(3,128):\n"
                 " try: os.fstat(fd); extra.append(fd)\n"
                 " except OSError: pass\n"
-                "Path(" + repr(str(fds_file)) + ").write_text(json.dumps(extra))\n"
+                "Path(" + repr(str(fds_file)) + ").write_text(json.dumps({'fds':extra, "
+                "'gate':os.environ['BRAIN_GATE_FD'], 'node':os.environ['BRAIN_GATE_NODE']}))\n"
                 "pid=os.fork()\n"
                 "if pid == 0:\n os.close(0); os.close(1); os.close(2); time.sleep(30); os._exit(0)\n"
                 "Path(" + repr(str(daemon_file)) + ").write_text(str(pid))\n"
@@ -595,7 +612,9 @@ raise SystemExit(result)
             daemon = int(daemon_file.read_text())
             stamp = m.process_stamp(daemon)
             self.assertIsNotNone(stamp)
-            self.assertEqual(json.loads(fds_file.read_text()), [])
+            descriptors = json.loads(fds_file.read_text())
+            self.assertEqual(descriptors['fds'], [int(descriptors['gate'])])
+            self.assertEqual(descriptors['node'], 'a')
             with m.machine_queue() as q:
                 self.assertEqual(len(q.rows), 1)
                 child = q.rows[0]["child"]

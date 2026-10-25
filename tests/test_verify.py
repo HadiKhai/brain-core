@@ -34,6 +34,7 @@ class WorkerReadyPackets(Scenario):
         owner = m.record_ready.__globals__
         inst = mock.Mock(root=self.tmp, parse_time=lambda value: value)
         inst.now_dt.return_value = datetime.datetime(2026, 1, 1, tzinfo=datetime.timezone.utc)
+        inst.now.return_value = '2026-01-01 00:00 +00:00'
         head, main = '1' * 40, '2' * 40
         w = {'path': str(self.tmp), 'port': 4100, 'ports': 3}
         log = self.tmp / 'verify.log'

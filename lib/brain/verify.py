@@ -476,8 +476,9 @@ def verify_reservation(inst, n):
 
 
 def run_verify(inst, n, branch, verify, w, env):
-    with verify_reservation(inst, n) as token:
-        return run_verify_stream(inst, n, branch, verify, w, env, token)
+    with _m_gate_lock.node_gate(inst, n, env, branch) as gate_env:
+        with verify_reservation(inst, n) as token:
+            return run_verify_stream(inst, n, branch, verify, w, gate_env, token)
 
 
 def run_verify_stream(inst, n, branch, verify, w, env, token, lane=None):
@@ -551,8 +552,8 @@ def run_verify_stream(inst, n, branch, verify, w, env, token, lane=None):
             deadline = started + VERIFY_PROGRESS_SECONDS
             # The bootstrap cannot exec the verify until its PID/start stamp is durable.
             # EOF before publication means no verify starts. The bootstrap FD closes
-            # before exec; only the validated instance gate FD survives into the real gate.
-            instance_gate_fd = _m_gate_lock.gate_inherited_fd(inst.root, env)
+            # before exec; only the validated node gate FD survives into the real gate.
+            node_gate_fd = _m_gate_lock.gate_inherited_fd(inst.root, env, n['id'])
             gate_read, gate_write = os.pipe()
             bootstrap = ("import json,os,sys,signal; fd=int(sys.argv[1]); data=bytearray()\n"
                          "while True:\n"
@@ -569,7 +570,7 @@ def run_verify_stream(inst, n, branch, verify, w, env, token, lane=None):
                 proc = subprocess.Popen([sys.executable, "-I", "-S", "-c", bootstrap, str(gate_read)],
                                         cwd=w["path"], env=env, stdout=subprocess.PIPE,
                                         stderr=subprocess.STDOUT, pass_fds=(gate_read,) +
-                                        ((instance_gate_fd,) if instance_gate_fd is not None else ()))
+                                        ((node_gate_fd,) if node_gate_fd is not None else ()))
                 os.close(gate_read)
                 gate_read = None
                 _m_machine.machine_child(token, proc.pid)
@@ -665,58 +666,59 @@ def lane_evidence_valid(row):
 
 
 def run_lanes(inst, n, branch, w, env, snap, previous, head, main, inputs, force=False):
-    prior = previous if isinstance(previous, dict) else {}
-    eligible = (prior.get('version') == 1 and prior.get('node') == n['id']
-                and prior.get('branch') == branch and prior.get('verify_command') == n['fm'].get('verify', '').strip()
-                and isinstance(prior.get('checked_at'), str) and inst.parse_time(prior['checked_at'])
-                and packet_main_matches(n, prior, main)
-                and prior.get('lane_context_hash') == snap['context'] and prior.get('inputs') == inputs
-                and prior.get('verify_port_context') == verify_port_context(n, env)
-                and type(prior.get('review_rounds')) is int and prior['review_rounds'] >= 1)
-    history = prior.get('lane_green', prior.get('verify_lanes', []))
-    old = {r['name']: r for r in history if isinstance(r, dict) and isinstance(r.get('name'), str)} if eligible and isinstance(history, list) else {}
-    rows, results, check = [], {}, None
-    command = n['fm'].get('verify_lanes_check', '').strip()
-    if command:
-        with verify_reservation(inst, n) as token:
-            start = time.monotonic()
-            result, log = run_verify_stream(inst, n, branch, command, w, env, token, lane='fitness')
-            check = dict(command=command, result=result, duration=time.monotonic()-start, log=log)
-    for lane in snap['lanes']:
-        if lane['schedule'] == 'nightly':
-            continue
-        name = lane['name']
-        previous_lane = old.get(name, {})
-        changed = _m_lanes.changed_since(w['path'], previous_lane.get('verified_head'), head) if previous_lane else None
-        reuse = (not force and eligible and type(previous_lane.get('result')) is int and previous_lane['result'] == 0
-                 and previous_lane.get('status') == 'passed' and lane_evidence_valid(previous_lane)
-                 and Path(previous_lane['log']).is_file() and previous_lane.get('command') == lane['command']
-                 and previous_lane.get('input_hash') == snap['hashes'][name] and changed is not None
-                 and not lane['always'] and not any(_m_lanes.matches(p, lane['strict_inputs']) for p in changed))
-        row = dict(name=name, command=lane['command'], input_hash=snap['hashes'][name],
-                   result=None, duration=0, log=None, reused=False, verified_head=head, status='skipped')
-        if check and check['result'] or any(results.get(req) != 0 for req in lane['requires']):
-            pass
-        elif reuse:
-            row.update(previous_lane, reused=True)
-        else:
+    with _m_gate_lock.node_gate(inst, n, env, branch) as env:
+        prior = previous if isinstance(previous, dict) else {}
+        eligible = (prior.get('version') == 1 and prior.get('node') == n['id']
+                    and prior.get('branch') == branch and prior.get('verify_command') == n['fm'].get('verify', '').strip()
+                    and isinstance(prior.get('checked_at'), str) and inst.parse_time(prior['checked_at'])
+                    and packet_main_matches(n, prior, main)
+                    and prior.get('lane_context_hash') == snap['context'] and prior.get('inputs') == inputs
+                    and prior.get('verify_port_context') == verify_port_context(n, env)
+                    and type(prior.get('review_rounds')) is int and prior['review_rounds'] >= 1)
+        history = prior.get('lane_green', prior.get('verify_lanes', []))
+        old = {r['name']: r for r in history if isinstance(r, dict) and isinstance(r.get('name'), str)} if eligible and isinstance(history, list) else {}
+        rows, results, check = [], {}, None
+        command = n['fm'].get('verify_lanes_check', '').strip()
+        if command:
             with verify_reservation(inst, n) as token:
-                print('verify lane: ' + name, flush=True)
                 start = time.monotonic()
-                result, log = run_verify_stream(inst, n, branch, lane['command'], w, env, token, lane=name)
-                row.update(result=result, log=log, duration=time.monotonic()-start,
-                           status='passed' if result == 0 else 'failed')
-        if row['result'] == 0:
-            old[name] = dict(row)
-        rows.append(row)
-        results[name] = row['result']
-    result = next((r['result'] or 1 for r in rows if r['result'] != 0), 0)
-    if check and check['result']:
-        result = check['result']
-    return dict(verify_lanes=rows, lane_green=list(old.values()), lane_map_hash=snap['map_hash'], lane_config_hash=snap['config_hash'], lane_context_hash=snap['context'],
-                verify_lane_env=_m_lanes.lane_environment(env),
-                verify_lanes_check=check, verify_result=result,
-                verify_reused=bool(rows) and all(r['reused'] for r in rows) and not check)
+                result, log = run_verify_stream(inst, n, branch, command, w, env, token, lane='fitness')
+                check = dict(command=command, result=result, duration=time.monotonic()-start, log=log)
+        for lane in snap['lanes']:
+            if lane['schedule'] == 'nightly':
+                continue
+            name = lane['name']
+            previous_lane = old.get(name, {})
+            changed = _m_lanes.changed_since(w['path'], previous_lane.get('verified_head'), head) if previous_lane else None
+            reuse = (not force and eligible and type(previous_lane.get('result')) is int and previous_lane['result'] == 0
+                     and previous_lane.get('status') == 'passed' and lane_evidence_valid(previous_lane)
+                     and Path(previous_lane['log']).is_file() and previous_lane.get('command') == lane['command']
+                     and previous_lane.get('input_hash') == snap['hashes'][name] and changed is not None
+                     and not lane['always'] and not any(_m_lanes.matches(p, lane['strict_inputs']) for p in changed))
+            row = dict(name=name, command=lane['command'], input_hash=snap['hashes'][name],
+                       result=None, duration=0, log=None, reused=False, verified_head=head, status='skipped')
+            if check and check['result'] or any(results.get(req) != 0 for req in lane['requires']):
+                pass
+            elif reuse:
+                row.update(previous_lane, reused=True)
+            else:
+                with verify_reservation(inst, n) as token:
+                    print('verify lane: ' + name, flush=True)
+                    start = time.monotonic()
+                    result, log = run_verify_stream(inst, n, branch, lane['command'], w, env, token, lane=name)
+                    row.update(result=result, log=log, duration=time.monotonic()-start,
+                               status='passed' if result == 0 else 'failed')
+            if row['result'] == 0:
+                old[name] = dict(row)
+            rows.append(row)
+            results[name] = row['result']
+        result = next((r['result'] or 1 for r in rows if r['result'] != 0), 0)
+        if check and check['result']:
+            result = check['result']
+        return dict(verify_lanes=rows, lane_green=list(old.values()), lane_map_hash=snap['map_hash'], lane_config_hash=snap['config_hash'], lane_context_hash=snap['context'],
+                    verify_lane_env=_m_lanes.lane_environment(env),
+                    verify_lanes_check=check, verify_result=result,
+                    verify_reused=bool(rows) and all(r['reused'] for r in rows) and not check)
 
 
 def show_lanes(n, packet):

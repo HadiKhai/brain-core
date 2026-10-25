@@ -2,6 +2,7 @@
 import contextlib
 import datetime
 import io
+import hashlib
 import json
 import os
 import select
@@ -86,10 +87,11 @@ class DecisionGate(Scenario):
         self.assertTrue(self.m.wake_actionable_pending(self.inst, path))
         self.assertEqual(json.loads(path.read_text())['explicit_kinds'], True)
 
-    def start_gate(self, label, code, *args):
-        p = subprocess.Popen([sys.executable, str(CORE / 'bin/brain'), 'gate-lock', '--label', label,
-                              '--', sys.executable, '-u', '-c', code, *args], cwd=self.root,
-                             env=self.env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+    def start_gate(self, label, code, *args, node=None, cwd=None, env=None):
+        p = subprocess.Popen([sys.executable, str(CORE / 'bin/brain'), 'gate-lock',
+                              *(['--node', node] if node else []), '--label', label,
+                              '--', sys.executable, '-u', '-c', code, *args], cwd=cwd or self.root,
+                             env=env or self.env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                              stderr=subprocess.PIPE, text=True)
         def cleanup():
             if p.poll() is None:
@@ -102,10 +104,207 @@ class DecisionGate(Scenario):
         self.assertTrue(select.select([stream], [], [], 5)[0], 'process barrier timed out')
         return stream.readline().strip()
 
+    def gate_path(self, node='root'):
+        return self.root / '.brain/gates' / (hashlib.sha256(node.encode()).hexdigest() + '.lock')
+
+    def test_different_nodes_overlap_without_label_identity(self):
+        for node in ('maple', 'elm'):
+            self.b(self.root, 'new', node, '--title', node.title())
+        first = self.start_gate('identical label', "import sys; print('held'); sys.stdin.readline()",
+                                cwd=self.root / 'nodes/maple')
+        self.assertEqual(self.line(first.stdout), 'held')
+        second = self.start_gate('identical label', "print('independent')", cwd=self.root / 'nodes/elm')
+        out, err = second.communicate(timeout=3)
+        self.assertEqual(second.returncode, 0, err)
+        self.assertEqual(out.strip(), 'independent')
+        self.assertIsNone(first.poll())
+        self.assertFalse((self.root / '.brain/gate.lock').exists())
+
+    def test_explicit_node_and_context_share_stable_lock(self):
+        self.b(self.root, 'new', 'maple', '--title', 'Maple')
+        first = self.start_gate('../../display only', "import sys; print('held'); sys.stdin.readline()",
+                                node='maple')
+        self.assertEqual(self.line(first.stdout), 'held')
+        inode = self.gate_path('maple').stat().st_ino
+        second = self.start_gate('another label', "print('released')", cwd=self.root / 'nodes/maple')
+        self.assertIn('waiting for gate held by ../../display only', self.line(second.stderr))
+        first.communicate('\n', timeout=3)
+        out, err = second.communicate(timeout=3)
+        self.assertEqual(second.returncode, 0, err)
+        self.assertEqual(out.strip(), 'released')
+        self.assertEqual(self.gate_path('maple').stat().st_ino, inode)
+
+    def test_inherited_wrong_node_path_and_unlocked_proof_refuse(self):
+        self.b(self.root, 'new', 'maple', '--title', 'Maple')
+        for mutation in ("args=['--node','maple']", "os.environ['BRAIN_GATE_PATH'] += '.stale'; args=[]",
+                         "import fcntl; fcntl.flock(int(os.environ['BRAIN_GATE_FD']),fcntl.LOCK_UN); args=[]",
+                         "os.environ.pop('BRAIN_GATE_FD'); args=[]"):
+            with self.subTest(mutation=mutation):
+                code = ("import os,sys; " + mutation + "; os.execv(sys.executable, "
+                        "[sys.executable,sys.argv[1],'gate-lock',*args,'--',sys.executable,'-c','print(99)'])")
+                outer = self.start_gate('outer', code, str(CORE / 'bin/brain'))
+                out, err = outer.communicate(timeout=3)
+                self.assertNotEqual(outer.returncode, 0, out + err)
+                self.assertIn('inherited', err)
+                self.assertNotIn('99', out)
+        next_gate = self.start_gate('after refusals', 'print(42)')
+        out, err = next_gate.communicate(timeout=3)
+        self.assertEqual(next_gate.returncode, 0, err)
+        self.assertEqual(out.strip(), '42')
+
+    def test_external_context_requires_unique_registered_node(self):
+        home = self.repo(self.tmp / 'home')
+        for node in ('maple', 'elm'):
+            self.b(self.root, 'new', node, '--title', node.title(), '--home', str(home))
+        bad = self.start_gate('ambiguous', 'print(99)', cwd=home)
+        out, err = bad.communicate(timeout=3)
+        self.assertNotEqual(bad.returncode, 0, out + err)
+        self.assertIn('--node', err)
+        good = self.start_gate('explicit', 'print(42)', node='elm', cwd=home)
+        out, err = good.communicate(timeout=3)
+        self.assertEqual(good.returncode, 0, err)
+        self.assertEqual(out.strip(), '42')
+
+    def test_native_direct_excludes_own_node_before_machine_admission(self):
+        home = self.repo(self.tmp / 'native-home')
+        self.b(self.root, 'set', 'root', 'home=' + str(home))
+        self.b(self.root, 'new', 'maple', '--title', 'Maple')
+        fifo = self.tmp / 'direct-ready'
+        os.mkfifo(fifo)
+        read_fd = os.open(fifo, os.O_RDWR | os.O_NONBLOCK)
+        self.addCleanup(os.close, read_fd)
+        child = ("import os,sys; f=os.open(" + repr(str(fifo)) +
+                 ",os.O_WRONLY); os.write(f,b'1'); os.close(f); sys.stdin.readline()")
+        command = 'exec ' + shlex.join([sys.executable, '-u', '-c', child])
+        code = ("import os,sys; sys.path.insert(0,sys.argv[1]+'/lib'); "
+                "from brain.instance import Instance; from pathlib import Path; "
+                "import brain.verify as v; inst=Instance(Path.cwd()); "
+                "result=v.run_verify(inst,inst.node('root'),'fixture'," + repr(command) +
+                ",{'path':os.getcwd()},dict(os.environ)); sys.exit(result[0])")
+        def native():
+            p = subprocess.Popen([sys.executable, '-u', '-c', code, str(CORE)], cwd=self.root,
+                                 env=self.env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                 stderr=subprocess.PIPE, text=True, start_new_session=True)
+            def cleanup():
+                try:
+                    p.communicate(None if p.stdin.closed else '\n', timeout=5)
+                except subprocess.TimeoutExpired:
+                    os.killpg(p.pid, signal.SIGKILL)
+                    p.communicate()
+            self.addCleanup(cleanup)
+            return p
+        first = native()
+        self.assertTrue(self.line(first.stdout).startswith('verify log:'))
+        self.assertTrue(select.select([read_fd], [], [], 5)[0], 'direct child not started')
+        self.assertEqual(os.read(read_fd, 1), b'1')
+        second = native()
+        # Wait for an explicit lock-wait barrier, not an absence sampled during startup.
+        self.assertIn('waiting for gate held by', self.line(second.stderr))
+        self.assertEqual(select.select([second.stdout], [], [], 0)[0], [])
+        queue = self.tmp / '.local/state/brain/machine-care-queue.json'
+        self.assertEqual(len(json.loads(queue.read_text())), 1)
+        independent = self.start_gate('independent', 'print(42)', node='maple')
+        out, err = independent.communicate(timeout=3)
+        self.assertEqual(independent.returncode, 0, err)
+        first.communicate('\n', timeout=5)
+        self.assertTrue(self.line(second.stdout).startswith('verify log:'))
+        self.assertTrue(select.select([read_fd], [], [], 5)[0], 'second child not started')
+        self.assertEqual(os.read(read_fd, 1), b'1')
+        second.communicate('\n', timeout=5)
+        self.assertEqual((first.returncode, second.returncode), (0, 0))
+        self.assertEqual(json.loads(queue.read_text()), [])
+
+    def test_registered_home_workbench_and_worktree_infer_the_same_node(self):
+        home = self.repo(self.tmp / 'registered-home')
+        bench = self.tmp / 'registered-workbench'
+        worktree = bench / 'worktrees/job'
+        worktree.mkdir(parents=True)
+        self.b(self.root, 'new', 'maple', '--title', 'Maple', '--home', str(home))
+        inst = self.m.Instance(self.root)
+        inst.local_of('maple').update(workbench=str(bench), worktrees={'job': {'path': str(worktree)}})
+        inst.save_local()
+        for cwd in (home, bench, worktree):
+            with self.subTest(cwd=cwd):
+                first = self.start_gate('explicit', "import sys; print('held'); sys.stdin.readline()", node='maple')
+                self.assertEqual(self.line(first.stdout), 'held')
+                second = self.start_gate('context', "import os; print(os.environ['BRAIN_GATE_NODE'])", cwd=cwd)
+                self.assertIn('waiting for gate held by explicit', self.line(second.stderr))
+                first.communicate('\n', timeout=3)
+                out, err = second.communicate(timeout=3)
+                self.assertEqual(second.returncode, 0, err)
+                self.assertEqual(out.strip(), 'maple')
+        env = {**self.env, 'BRAIN_ROOT': str(self.root)}
+        outside = self.start_gate('unbound', 'print(99)', cwd=self.tmp, env=env)
+        out, err = outside.communicate(timeout=3)
+        self.assertNotEqual(outside.returncode, 0, out + err)
+        self.assertIn('--node', err)
+
+    def test_lock_targets_refuse_links_and_nonregular_files(self):
+        path = self.gate_path()
+        path.parent.mkdir(parents=True)
+        outside = self.tmp / 'outside-lock'
+        outside.write_text('untouched')
+        for kind in ('symlink', 'hardlink', 'fifo', 'directory-symlink'):
+            with self.subTest(kind=kind):
+                if kind == 'symlink':
+                    path.symlink_to(outside)
+                elif kind == 'hardlink':
+                    os.link(outside, path)
+                elif kind == 'fifo':
+                    os.mkfifo(path)
+                else:
+                    path.parent.rmdir()
+                    path.parent.symlink_to(self.tmp, target_is_directory=True)
+                p = self.start_gate('unsafe', 'print(99)')
+                out, err = p.communicate(timeout=3)
+                self.assertNotEqual(p.returncode, 0, out + err)
+                self.assertNotIn('99', out)
+                self.assertEqual(outside.read_text(), 'untouched')
+                if kind == 'directory-symlink':
+                    path.parent.unlink()
+                    path.parent.mkdir()
+                    self.assertFalse((self.tmp / path.name).exists())
+                else:
+                    path.unlink()
+
+    def test_native_lane_gate_stays_held_between_commands_and_closes_own_fd(self):
+        home = self.repo(self.tmp / 'lane-home')
+        self.b(self.root, 'set', 'root', 'home=' + str(home))
+        inst = self.m.Instance(self.root)
+        n = inst.node('root')
+        lanes = [dict(name=name, command='true', schedule='job', requires=[], always=False)
+                 for name in ('first', 'second')]
+        snap = dict(lanes=lanes, hashes={l['name']: 'fixture' for l in lanes},
+                    context='fixture', map_hash='fixture', config_hash='fixture')
+        stream, fds, competitors = self.m.run_verify_stream, [], []
+        def observe(inst, n, branch, command, w, env, token, lane=None):
+            fd = int(env['BRAIN_GATE_FD'])
+            fds.append(fd)
+            self.assertEqual(env['BRAIN_GATE_NODE'], 'root')
+            if lane == 'first':
+                competitor = self.start_gate('same node', 'print(42)')
+                competitors.append(competitor)
+                self.assertIn('waiting for gate held by lanes', self.line(competitor.stderr))
+            self.assertEqual(select.select([competitors[0].stdout], [], [], 0)[0], [])
+            return stream(inst, n, branch, command, w, env, token, lane=lane)
+        with mock.patch.object(self.m, 'run_verify_stream', side_effect=observe):
+            result = self.m.run_lanes(inst, n, 'lanes', {'path': str(home)}, self.env,
+                                      snap, None, 'head', 'main', {})
+        self.assertEqual(result['verify_result'], 0)
+        self.assertEqual(len(fds), 2)
+        self.assertEqual(fds[0], fds[1])
+        with self.assertRaises(OSError):
+            os.fstat(fds[0])
+        out, err = competitors[0].communicate(timeout=3)
+        self.assertEqual(competitors[0].returncode, 0, err)
+        self.assertEqual(out.strip(), '42')
+        with self.m.machine_queue() as queue:
+            self.assertEqual(queue.rows, [])
+
     def test_gate_serializes_waits_preserves_argv_and_exit(self):
         first = self.start_gate('first', "import sys; print('held', flush=True); sys.stdin.readline()")
         self.assertEqual(self.line(first.stdout), 'held')
-        inode = (self.root / '.brain/gate.lock').stat().st_ino
+        inode = self.gate_path().stat().st_ino
         second = self.start_gate('second', "import sys; print(repr(sys.argv[1:]), flush=True); sys.exit(7)", 'a b', '--brain=child')
         self.assertIn('waiting for gate held by first since ', self.line(second.stderr))
         self.assertEqual(select.select([second.stdout], [], [], 0)[0], [])
@@ -113,7 +312,7 @@ class DecisionGate(Scenario):
         out, err = second.communicate(timeout=5)
         self.assertEqual(second.returncode, 7, err)
         self.assertEqual(out.strip(), "['a b', '--brain=child']")
-        self.assertEqual((self.root / '.brain/gate.lock').stat().st_ino, inode)
+        self.assertEqual(self.gate_path().stat().st_ino, inode)
 
     def test_gate_closed_nested_descriptor_refuses_without_deadlock(self):
         outer = self.start_gate('outer',
@@ -149,10 +348,10 @@ class DecisionGate(Scenario):
                   "patch=mock.patch.object(v._m_machine,'machine_child'); patch.start(); "
                   "result=v.run_verify_stream(inst,inst.node('fixture'),'fixture',sys.argv[1], "
                   "{'path':os.getcwd()},dict(os.environ),None); sys.exit(result[0])")
-        return self.start_gate('native', parent, command, str(CORE))
+        return self.start_gate('native', parent, command, str(CORE), node='fixture')
 
     def test_native_verify_retains_gate_fd_for_nested_wrapper_and_bootstrap(self):
-        command = shlex.join([sys.executable, str(CORE / 'bin/brain'), 'gate-lock', '--',
+        command = shlex.join([sys.executable, str(CORE / 'bin/brain'), 'gate-lock', '--node', 'fixture', '--',
                               sys.executable, '-c', 'print(42)'])
         parent = self.native_gate(command)
         out, err = parent.communicate(timeout=5)
@@ -178,7 +377,7 @@ class DecisionGate(Scenario):
         parent.kill()
         parent.wait(timeout=5)
         os.kill(pid, 0)
-        competitor = self.start_gate('competitor', "print('competitor-entered',flush=True)")
+        competitor = self.start_gate('competitor', "print('competitor-entered',flush=True)", node='fixture')
         self.assertIn('waiting for gate held by native since ', self.line(competitor.stderr))
         self.assertEqual(select.select([competitor.stdout], [], [], 0)[0], [])
         kill_child()
@@ -209,7 +408,7 @@ class DecisionGate(Scenario):
                  "fd=os.open(sys.argv[1],os.O_WRONLY); os.write(fd,str(os.getpid()).encode()); "
                  "os.close(fd); sys.stdin.readline()")
         command = 'exec ' + shlex.join([sys.executable, str(CORE / 'bin/brain'),
-                  'gate-lock', '--label', 'nested', '--', sys.executable, '-u', '-c', child, str(fifo)])
+                  'gate-lock', '--node', 'fixture', '--label', 'nested', '--', sys.executable, '-u', '-c', child, str(fifo)])
         parent = self.native_gate(command)
         self.assertTrue(select.select([fd], [], [], 5)[0], 'nested native child never reached barrier')
         pid = int(os.read(fd, 128))
@@ -222,7 +421,7 @@ class DecisionGate(Scenario):
         parent.kill()
         parent.wait(timeout=5)
         os.kill(pid, 0)
-        other = self.start_gate('competitor', "print('entered',flush=True)")
+        other = self.start_gate('competitor', "print('entered',flush=True)", node='fixture')
         self.assertIn('waiting for gate held by native since ', self.line(other.stderr))
         self.assertEqual(select.select([other.stdout], [], [], 0)[0], [])
         cleanup()
@@ -241,7 +440,7 @@ class DecisionGate(Scenario):
                 "from unittest import mock; from pathlib import Path; inst=Instance(Path.cwd()); "
                 "patch=mock.patch.object(v._m_machine,'machine_child',side_effect=RuntimeError('fixture publication rejected')); patch.start(); "
                 "v.run_verify_stream(inst,inst.node('fixture'),'fixture',sys.argv[1], {'path':os.getcwd()},dict(os.environ),None)")
-        parent = self.start_gate('native', code, command, str(CORE))
+        parent = self.start_gate('native', code, command, str(CORE), node='fixture')
         out, err = parent.communicate(timeout=5)
         self.assertNotEqual(parent.returncode, 0)
         self.assertIn('fixture publication rejected', err)

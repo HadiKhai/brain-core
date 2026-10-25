@@ -482,7 +482,8 @@ def main():
     cmd("check", _m_check.cmd_check, "verify what can be checked mechanically; --fix repairs the safe things",
         opt("--fix", action="store_true"),
         opt("--live", action="store_true", help="send real webhook probes; default check only reads cached results"))
-    cmd("gate-lock", _m_gate_lock.cmd_gate_lock, "serialize a command across this instance",
+    cmd("gate-lock", _m_gate_lock.cmd_gate_lock, "serialize a command for one node",
+        opt("--node", help="node id (default: unambiguous current folder)"),
         opt("--label"), opt("command", nargs=argparse.REMAINDER))
     cmd("heavy", _m_machine.cmd_heavy, "wait until the machine admits new heavy work",
         opt("--node", help="coordinator whose work is waiting (default root)"))

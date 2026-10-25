@@ -35,19 +35,26 @@ needs. Bookkeeping remains in `brain due`; explicit watcher kinds can request it
 The additional job-restart wake feature is parked and is not included here.
 Existing usage advice and restart/rebrief behavior remain available.
 
-Serialize full gates sharing an instance with
-`brain gate-lock --label "component verify" -- CMD [ARGS...]`.
-The wrapper does not replace machine admission. Keep the wrapper outside the
-complete queue, standalone gate or forced hand-back command. Native
-`run_verify_stream` validates and forwards the gate descriptor alongside its
-bootstrap pipe, so a wrapped full verify may nest under a wrapped hand-back and
-keeps the gate locked if the parent dies while verification continues. Exec
-nesting also shares it. Every other Python subprocess boundary in a queue/direct
-runner must pass `BRAIN_GATE_FD` with `pass_fds`, while retaining its existing FDs.
-A subprocess that closes it refuses promptly; do not work around that refusal by
-removing an inner wrapper. Keep any existing turn-file protection until the CLI
-and all queue/direct/forced-handback routes are installed and confirmed.
-The lock stays at `.brain/gate.lock`; never unlink or replace it.
+Serialize a node's full gates with
+`brain gate-lock --node <node> --label "component verify" -- CMD [ARGS...]`.
+Different nodes may gate concurrently; existing native machine admission alone
+limits their capacity (two slots by day by default, configurable below). Labels
+are descriptive only. Omitting `--node` requires an unambiguous node folder,
+registered home, workbench or worktree; an ambiguous/unbound folder refuses.
+Keep the wrapper outside the complete queue, standalone gate or forced hand-back
+command. Native `run_verify` and `run_lanes` acquire this same node lock before
+machine admission; a lane run holds it across all its lanes while each command
+joins the machine queue afresh. This prevents own-node waiters occupying slots.
+`run_verify_stream` validates and forwards the node descriptor alongside its
+bootstrap pipe. A child keeps ownership if its parent dies. Exec nesting shares
+ownership only for the same node. Every other Python subprocess boundary in an
+external queue/direct runner must pass `BRAIN_GATE_FD` with `pass_fds`, retaining
+its existing FDs and the `BRAIN_GATE_PATH`/`BRAIN_GATE_NODE` environment. Closed,
+stale, unlocked or mismatched inherited proof refuses promptly.
+The stable locks live at `.brain/gates/<sha256-node-id>.lock`; never unlink or
+replace them. Instance-wide gate locks and cross-node turn files must not surround
+these routes: they defeat node independence. The wrapper provides exclusion;
+it does not replace native machine admission or reserve an additional slot.
 
 ## Write as you go (axioms 16 and 17)
 

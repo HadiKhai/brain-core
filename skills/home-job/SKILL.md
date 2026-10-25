@@ -219,6 +219,19 @@ never during due/status/watch reads. An absent setting adds no check and grants 
 
 ## Machine care is core behaviour
 
+Full-gate exclusion is per node: use
+`brain gate-lock --node <node> --label "component verify" -- CMD [ARGS...]`
+around a complete queue, standalone gate or forced hand-back. Native verification
+also takes the same node lock before admission and retains it across all lanes.
+Different nodes can run concurrently within the configured machine capacity;
+never wrap them in an instance-wide gate lock or a cross-node turn file. Labels
+do not define identity. Nested wrappers must target the same node and preserve
+`BRAIN_GATE_FD`, `BRAIN_GATE_PATH` and `BRAIN_GATE_NODE`; Python subprocesses must
+forward the validated descriptor using `pass_fds`, alongside existing FDs.
+Closed, stale, unlocked or mismatched inherited proof refuses. Stable lock files
+in `.brain/gates/` are never unlinked or replaced. The wrapper does not consume
+an extra machine slot.
+
 Before starting heavy work outside `brain wt add` or a fresh job verify, run `brain heavy --node <node>`.
 Those two commands already wait for machine admission. Never start a replacement to bypass
 held work. Running work is left alone. A one-minute load spike does not hold work. With fresh
