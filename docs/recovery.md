@@ -160,3 +160,10 @@ day, removal of a commit or entire operation as mutation controls, recovery,
 lock-free/idempotent hook folding, privacy screening, rotation, explicit switching,
 thread-reference retention, Now overflow and status commit throttling. Full-suite
 and train-rehearsal proof must be reported separately from those focused scenarios.
+
+The atomic writer syncs the replacement file before rename and its containing
+directory afterward. A failure before rename preserves the old file; a failure
+syncing the directory is reported after the complete new file becomes visible.
+The ordering tests in `tests/test_atomic_durability.py` cover both cases. They do
+not simulate power loss or establish a cross-file/Git transaction, and persistence
+of newly created ancestor directories is outside this one-file guarantee.

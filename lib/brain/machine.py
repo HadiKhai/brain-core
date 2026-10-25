@@ -1363,6 +1363,12 @@ def cmd_machine(a):
         _m_host_tasks.host_task_refresh_if_enabled(inst)
         from . import dispatcher as _m_dispatcher
         _m_dispatcher.dispatch_if_enabled(inst)
+
+        from . import digest as _m_digest
+        try:
+            _m_digest.daily_retro(inst)
+        except (OSError, ValueError, TypeError):
+            print('daily retro unavailable; retained job records are unchanged')
         from . import watch as _m_watch
         try:
             _m_watch.watch_once(inst)  # same minute timer; sampler has released its instance lock

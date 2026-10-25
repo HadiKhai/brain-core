@@ -1,4 +1,5 @@
 """Nodes mechanics for Brain."""
+import argparse
 import json
 import os
 import re
@@ -273,11 +274,20 @@ def cmd_new(a):
     _m_status.write_registry(inst)
     inst.commit([d, "registry.md"], f"Add node {a.id}")
     n = inst.node(a.id.strip("/"))
+    if getattr(a, 'brief', None):
+        brief = d / 'brief.md'
+        _m_common.safe_target(brief)
+        _m_common.atomic_write(brief, brief.read_text() + '\n## Requested outcome\n\n' + a.brief.strip() + '\n')
+        inst.commit([brief], 'Record requested node outcome')
     print(f"created: {d}\nparent: {parent_id}\nowners: {', '.join(eff)}{'  (sealed)' if sealed else ''}\n"
           f"home: {n['fm'].get('home')}{' -> ' + _m_common.tilde(n['home_path']) if n['external'] and n['home_path'] else ''}\n"
           f"runtime: {n['fm'].get('runtime')}")
     if sealed and not n["external"]:
         print("  sealed without an external home: run 'brain seal' to give it one (axiom 8)")
+    if getattr(a, 'coordinator', False):
+        from . import host_actions as _m_host_actions
+        _m_instance.unlock()
+        _m_host_actions.cmd_host(argparse.Namespace(action='provision', id=n['id'], model=a.model, url=None))
 
 
 # ---------- importing existing projects ----------

@@ -48,6 +48,8 @@ from . import preview_evidence as _m_preview_evidence
 from . import reports as _m_reports
 from . import rehearse as _m_rehearse
 from . import rotation as _m_rotation
+from . import host_actions as _m_host_actions
+from . import digest as _m_digest
 from . import schedules as _m_schedules
 from . import settings_batch as _m_settings_batch
 from . import spec_run as _m_spec_run
@@ -144,7 +146,7 @@ READ_ONLY = {"cmd_show", "cmd_tree", "cmd_status", "cmd_now", "cmd_jobs", "cmd_s
              "cmd_brief", "cmd_hire", "cmd_reports", "cmd_brains", "cmd_use", "cmd_machine", "cmd_usable",
              "cmd_item_list", "cmd_item_show", "cmd_wt_list", "cmd_selftest", "cmd_init", "cmd_hook", "cmd_hook_pretool", "cmd_hook_approve", "cmd_help",
              "cmd_dashboard", "cmd_ready", "cmd_usage", "cmd_scan", "cmd_scrub", "cmd_history",
-             "cmd_model_fit", "cmd_launch_check", "cmd_events", "cmd_gate_lock", "cmd_version", "cmd_connect", "cmd_recall", "cmd_proposals", "cmd_changes", "cmd_heavy", "cmd_rehearse", "cmd_policy", "cmd_preview"}
+             "cmd_digest", "cmd_model_fit", "cmd_launch_check", "cmd_events", "cmd_gate_lock", "cmd_version", "cmd_connect", "cmd_recall", "cmd_proposals", "cmd_changes", "cmd_heavy", "cmd_rehearse", "cmd_policy", "cmd_preview"}
 
 
 def writes(a):
@@ -176,6 +178,8 @@ def writes(a):
         return False  # native execution owns short locks and machine admission
     if name == 'cmd_land_check':
         return False  # the explicit runner takes short owned locks around execution
+    if name == 'cmd_host':
+        return False  # host calls use short local binding transactions
     if name == 'cmd_lifecycle':
         return False  # native RPC stays outside the instance lock; publication takes its own short locks
     if name in ('cmd_dispatch', 'cmd_host_export', 'cmd_delegate'):
@@ -262,7 +266,9 @@ def main():
         opt("--no-load", action="store_true", help="install: write the LaunchAgent without loading it"))
     cmd("new", _m_nodes.cmd_new, "create a node", "id", opt("--title", required=True), opt("--owners", default=""),
         opt("--labels", default=""), opt("--runtime"), opt("--home", help="a path outside the instance"),
-        opt("--home-url", dest="home_url"))
+        opt("--home-url", dest="home_url"), opt("--brief", help="initial node outcome"),
+        opt("--coordinator", action="store_true", help="also provision the host project and coordinator"),
+        opt("--model", help="coordinator model; otherwise use configured routing"))
     cmd("scan", _m_nodes.cmd_scan, "discover git repos without writing (given folders are depth 0)",
         opt("dirs", nargs="+"), opt("--json", action="store_true"), opt("--depth", type=int, default=4))
     cmd("adopt", _m_nodes.cmd_adopt, "make existing git repositories node homes, then print study commands",
@@ -565,6 +571,12 @@ def main():
         opt("--report"), opt("--lessons", help="proposed lessons, or none: <reason>"),
         opt("--full-receipt", help="with --record: adopt a native full-run receipt"),
         opt("--reverify", action="store_true", help="with --record: run verify even if a green run still proves it"))
+    cmd("host", _m_host_actions.cmd_host, "explicit coordinator provisioning and host wake/watch actions",
+        opt("action", choices=['provision', 'wake-setup', 'watch', 'schedule']), "id", opt("--model"), opt("--url"),
+        opt("--schedule-id"), opt("--provider", help="explicit host runtime for schedule binding"))
+    cmd("digest", _m_digest.cmd_digest, "commitments with landing evidence; --retro summarizes recorded job measurements", "id",
+        opt("--json", action="store_true"), opt("--retro", action="store_true"),
+        opt("--day", help="retro calendar date (YYYY-MM-DD); defaults to the previous local day"))
     cmd("schedule", _m_schedules.cmd_schedule, "recurring work: brain schedule list | add <id> --when W --node N --brief B | "
         "bind <id> <host id> | unbind <id>", opt("action", choices=["list", "add", "bind", "unbind"], nargs="?",
                                                   default="list"),

@@ -332,6 +332,54 @@ def job_commits(home, w, branch):
     return c if c.isdigit() else ""
 
 
+def cleanup_generation(home, w, branch, n):
+    """Fresh local cleanup evidence, deliberately outside the display Git cache.
+
+    This detects changes across released scans; it is not a lease against Git
+    writers after the final observation. Git's removal and live-work checks stay
+    authoritative. No network lookup belongs in the final locked observation.
+    """
+    def query(*args, cwd=home, accepted=(0,)):
+        result = subprocess.run(["git", "-C", str(cwd), *args], capture_output=True,
+                                env={**os.environ, "GIT_OPTIONAL_LOCKS": "0"})
+        if result.returncode not in accepted:
+            raise ValueError("cleanup Git evidence unavailable")
+        return result
+
+    remote = query("remote").stdout.split()
+    base = (query("symbolic-ref", "refs/remotes/origin/HEAD").stdout.strip().decode()
+            if b"origin" in remote else "refs/heads/main")
+    if n["fm"].get("merge", "local") != "pr":
+        base = base.replace("refs/remotes/origin/", "refs/heads/", 1)
+    tip = query("rev-parse", "--verify", "refs/heads/" + branch).stdout.strip()
+    target = query("rev-parse", "--verify", base).stdout.strip()
+    ancestor = query("merge-base", "--is-ancestor", tip.decode(), target.decode(), accepted=(0, 1)).returncode == 0
+    path = Path(w["path"])
+    identity, checkout, head, status = None, None, None, None
+    if path.exists():
+        stat = path.stat()
+        identity = (stat.st_dev, stat.st_ino)
+        checkout = query("symbolic-ref", "--quiet", "HEAD", cwd=path).stdout.strip()
+        head = query("rev-parse", "--verify", "HEAD", cwd=path).stdout.strip()
+        status = query("status", "--porcelain=v1", "-z", "--untracked-files=all", cwd=path).stdout
+    return {"base": base, "target": target, "tip": tip, "ancestor": ancestor,
+            "identity": identity, "checkout": checkout, "head": head, "status": status}
+
+
+def cleanup_recheck(home, w, branch, n, generation, state):
+    """Retain on a changed generation; preserve squash evidence only for its exact refs."""
+    try:
+        current = cleanup_generation(home, w, branch, n)
+    except (OSError, ValueError):
+        current = None
+    if current != generation:
+        _m_common.die(f"{branch}: cleanup inputs changed or unreadable; worktree retained; retry from fresh state")
+    # A positive remote squash lookup remains evidence only for unchanged inputs.
+    merged = current["tip"].decode() != w.get("start") and (current["ancestor"] or state[1])
+    return (None if current["status"] is None else len(current["status"].split(b"\0")) - 1,
+            merged, state[2])
+
+
 def removal_refusal(n, branch, w):
     """File-derived live-work checks; force never overrides ownership or liveness."""
     path = Path(w["path"]).resolve()
@@ -426,11 +474,19 @@ def cmd_wt_rm(a):
     reason = removal_refusal(n, a.branch, w) if w else ""
     if reason:
         _m_common.die(f"{a.branch}: {reason}; worktree retained")
+    if not w:
+        _m_common.die(f"{n['id']}: no worktree for '{a.branch}' made by brain on this machine")
     with _m_instance.released(inst, n):
-        state = worktree_state(home, w, a.branch, n) if w else (None, False, "")
+        try:
+            generation = cleanup_generation(home, w, a.branch, n)
+        except (OSError, ValueError):
+            _m_common.die(f"{a.branch}: cleanup inputs unreadable; worktree retained")
+        state = worktree_state(home, w, a.branch, n)
+        cleanup_recheck(home, w, a.branch, n, generation, state)
     prepared = _m_jobs.prepare_job_usage(inst, n, a.branch, (w or {}).get("path"))
     _m_jobs.print_job_handback(n, a.branch)
     _m_jobs.print_worktree_threads(n, a.branch)
+    state = cleanup_recheck(home, w, a.branch, n, generation, state)
     remove_worktree(inst, n, a.branch, a.force)
     _m_jobs.job_ended(inst, n, a.branch, "merged" if state[1] else "abandoned", job_commits(home, w, a.branch), a.cause or "",
               worktree=(w or {}).get("path"), prepared=prepared)
@@ -454,7 +510,13 @@ def cmd_wt_prune(a):
             kept.append(f"{br} (origin default unavailable; run git remote set-head origin -a)")
             continue
         with _m_instance.released(inst, n):
+            try:
+                generation = cleanup_generation(home, w, br, n)
+            except (OSError, ValueError):
+                kept.append(f"{br} (cleanup inputs unreadable; worktree retained)")
+                continue
             dirty, merged, ahead = worktree_state(home, w, br, n)
+            cleanup_recheck(home, w, br, n, generation, (dirty, merged, ahead))
         if dirty is None or (merged and dirty == 0):
             if dirty is not None:
                 entries = _m_common.git("ls-files", "--stage", "-z", cwd=w["path"])
@@ -472,6 +534,7 @@ def cmd_wt_prune(a):
             _m_jobs.print_worktree_threads(n, br, dry_run=a.dry_run)
             if not a.dry_run:
                 prepared = _m_jobs.prepare_job_usage(inst, inst.node(n["id"]), br, w.get("path"))
+                dirty, merged, ahead = cleanup_recheck(home, w, br, n, generation, (dirty, merged, ahead))
                 remove_worktree(inst, inst.node(n["id"]), br)
                 _m_jobs.job_ended(inst, n, br, "merged" if merged else "abandoned", job_commits(home, w, br),
                           "" if merged else "worktree was gone", worktree=w.get("path"), prepared=prepared)
