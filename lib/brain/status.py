@@ -1054,15 +1054,7 @@ def status_facts(inst, n, state, known_merges, metadata_only=False):
     return compact, merged
 
 
-def refresh_status(inst, n, view=None):
-    f = n["dir"] / "status.md"
-    text = ""
-    if f.exists():
-        with f.open(newline="") as stream:
-            text = stream.read()
-    if (text.count(FACTS_START) != text.count(FACTS_END) or text.count(FACTS_START) > 1 or
-            (FACTS_START in text and not FACTS_RE.search(text))):
-        _m_common.die("status.md has incomplete or duplicate facts markers; repair them before refreshing")
+def facts_block(inst, n, view=None):
     previous = facts_meta(n)
     if view is None:
         state = file_state(inst, n)
@@ -1077,7 +1069,19 @@ def refresh_status(inst, n, view=None):
              "Facts refreshed: " + inst.now(), "", *lines, "",
              "<!-- brain:facts-state " + json.dumps({"fingerprint": fingerprint, "merged": list(merged),
                  "merged_before": merged_before}, sort_keys=True) + " -->", FACTS_END]
-    block = "\n".join(lines)
+    return "\n".join(lines)
+
+
+def refresh_status(inst, n, view=None):
+    f = n["dir"] / "status.md"
+    text = ""
+    if f.exists():
+        with f.open(newline="") as stream:
+            text = stream.read()
+    if (text.count(FACTS_START) != text.count(FACTS_END) or text.count(FACTS_START) > 1 or
+            (FACTS_START in text and not FACTS_RE.search(text))):
+        _m_common.die("status.md has incomplete or duplicate facts markers; repair them before refreshing")
+    block = facts_block(inst, n, view)
     old = FACTS_RE.search(text)
     if old:
         suffix = text[old.end():]
@@ -1404,6 +1408,14 @@ def cmd_tree(a):
 
 
 def cmd_status(a):
+    if getattr(a, 'project', False):
+        from . import status_projection
+        inst = _m_nodes.load()
+        if not a.id or a.refresh or a.from_events:
+            _m_common.die('status --project requires one node and no other status mode')
+        changed = status_projection.project_owned(inst, inst.node(a.id))
+        print('status projection: ' + ('updated' if changed else 'unchanged'))
+        return
     inst = _m_nodes.load()
     if getattr(a, "from_events", False):
         from . import events

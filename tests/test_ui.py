@@ -202,6 +202,42 @@ class ExpandedUI(Scenario):
         self.m = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
         loader.exec_module(self.m)
 
+    def test_usage_completion_controls_full_dashboard_without_discarding_partial_values(self):
+        import urllib.request
+        root = self.init('demo')
+        allowed = threading.Event()
+        spend = mock.Mock(inst=self.m.UIInstance(root), value={'complete': False, 'files': 2, 'read': 1},
+                          revision=0, permissions=None)
+        spend.refresh_view.return_value = False
+        def advance():
+            if allowed.is_set() and not spend.value['complete']:
+                spend.value = {'complete': True, 'files': 2, 'read': 2}
+                return True
+            return False
+        spend.advance.side_effect = advance
+        with self.integration_server(root, lambda inst: spend, cleanup=allowed.set) as (ready, get, workers, before):
+            self.assertTrue(ready.wait(2))
+            deadline = time.monotonic() + 5
+            while True:
+                with get('/api/state') as response:
+                    state = json.load(response)
+                if (state.get('spend') or {}).get('read') == 1:
+                    break
+                self.assertLess(time.monotonic(), deadline)
+                time.sleep(0.02)
+            self.assertTrue(state['brain']['filling_in'])
+            self.assertEqual(state['spend']['files'], 2)
+            with get('/api/loading') as response:
+                self.assertTrue(json.load(response)['filling_in'])
+            allowed.set()
+            while state['brain'].get('filling_in'):
+                self.assertLess(time.monotonic(), deadline)
+                with get('/api/state') as response:
+                    state = json.load(response)
+            self.assertEqual(state['spend']['read'], 2)
+            with get('/api/loading') as response:
+                self.assertFalse(json.load(response)['filling_in'])
+
     @contextlib.contextmanager
     def integration_server(self, root, spend, cleanup=lambda: None, every=0.05):
         import http.server

@@ -46,3 +46,13 @@ class ParallelSelftest(Scenario):
             m.reexec_into_instance_core()
         execute.assert_not_called()
         self.assertIn('current worktree', output.getvalue())
+
+    def test_parallel_dispatch_steals_remaining_work_without_retries(self):
+        m = core_loader.SourceFileLoader('stealing_selftest_fixture', str(CORE / 'bin/brain')).load_module()
+        with mock.patch.object(m.subprocess, 'run', return_value=mock.Mock(returncode=0)) as execute:
+            with self.assertRaises(SystemExit):
+                m.cmd_selftest(argparse.Namespace(verbose=False, k='FocusedFixture', jobs=2))
+        argv = execute.call_args.args[0]
+        self.assertIn('--dist=worksteal', argv)
+        self.assertIn('--max-worker-restart=0', argv)
+        self.assertEqual(argv[-2:], ['-k', 'FocusedFixture'])

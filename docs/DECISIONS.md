@@ -1832,3 +1832,34 @@ Worktree cleanup records current journal metadata for replay without automatical
 rewriting the status document, Active work table or status archive. Explicit
 status refresh still materializes the view and caps the Now section. Other event
 projection paths remain available.
+
+## D1501: Complete dashboard usage before clearing fill state
+
+The dashboard drains existing usage caches in bounded bootstrap slices and keeps
+advancing incomplete aggregates between metadata polls. Partial values remain
+visible, and the filling state clears only when usage aggregation is complete.
+No transcript content is published and viewing does not persist usage caches.
+
+## D1502: External rehearsal capture is declared and machine-local
+
+An optional `rehearse_external` declaration in local bindings selects exact home,
+worktree or workbench roots for one private capture before comparison. Both lanes
+read the same detached capture, including dirty and ignored bytes. Unknown
+bindings retain drift detection. Capture is fixed after preparation; it does not
+claim an atomic historical snapshot against concurrent writers during copying.
+No declaration preserves the existing observation mode.
+
+## D1503: Facts projection has its own explicit ownership phase
+
+A node configured with `status_projection=owned-facts` can run `status --project`
+as a separate phase. The phase updates only the delimited generated facts block,
+preserves all source bytes outside it and all archive bytes, refuses active or
+interrupted writers, and leaves unchanged facts untouched. Cleanup still never
+rewrites status. Ordinary explicit refresh and journal replay remain available.
+No scheduler, background service or implicit cleanup invocation is added.
+
+## D1504: Parallel selftests redistribute the remaining queue
+
+Parallel selftests use the pinned runner's work-stealing scheduler with worker
+restarts disabled and unchanged canonical suite selection. Focused dispatch
+proof cannot establish the duration or readiness of a complete suite.

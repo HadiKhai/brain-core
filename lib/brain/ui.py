@@ -33,6 +33,7 @@ from . import usage as _m_usage
 from . import ui_review as _m_ui_review
 from . import ui_status as _m_ui_status
 from . import ui_server as _m_ui_server
+from . import ui_fill as _m_ui_fill
 from . import verify as _m_verify
 from . import worktrees as _m_worktrees
 
@@ -1191,7 +1192,7 @@ def cmd_ui(a):
     interval = max(0.05, a.every)
     box = {'json': b'', 'version': 0, 'clients': 0, 'last_poll': float('-inf'),
            'telemetry': time.monotonic(), 'request': 0, 'checked': 0,
-           'partial': True, 'built_at': time.time(), 'building': True, 'error': '', 'stopped': False}
+           'partial': True, 'metadata_ready': False, 'built_at': time.time(), 'building': True, 'error': '', 'stopped': False}
 
     def touch(wait=False):
         with cond:
@@ -1206,9 +1207,20 @@ def cmd_ui(a):
     def publish(st, complete=False):
         st = {**st, "review": {"enabled": reviews.enabled}}
         with cond:
-            box.update(state=st, json=json.dumps(st, sort_keys=True).encode(), version=box['version'] + 1)
             if complete:
-                box.update(partial=False, built_at=time.time(), building=False, error='')
+                box['metadata_ready'] = True
+            if box['metadata_ready']:
+                brain = dict(st['brain'])
+                if _m_ui_fill.complete(st):
+                    brain.pop('filling_in', None)
+                else:
+                    brain['filling_in'] = True
+                st = {**st, 'brain': brain}
+            box.update(state=st, json=json.dumps(st, sort_keys=True).encode(), version=box['version'] + 1)
+            if box['metadata_ready']:
+                box['partial'] = not _m_ui_fill.complete(st)
+            if complete:
+                box.update(built_at=time.time(), building=False, error='')
             cond.notify_all()
 
     def refresh(inputs, signature, spend, cache, source_signature, permissions):
@@ -1258,8 +1270,10 @@ def cmd_ui(a):
                         spend.discover()
                         source_signature = sources
                     metadata_at = time.monotonic()
-                if spend.advance():
-                    publish({**box['state'], 'spend': spend.value})
+                if box['partial']:
+                    _m_ui_fill.advance_warm(spend, seconds=0.25)
+                if spend.advance() or (box['partial'] and _m_ui_fill.complete({'spend': spend.value})):
+                    publish({**box['state'], 'spend': spend.value}, complete=box['partial'])
                 if spend.revision != live_revision and time.monotonic() - live_at >= 60:
                     i = UIInstance(inst.root)
                     nodes = {n['id']: n for n in i.nodes()}
@@ -1296,7 +1310,7 @@ def cmd_ui(a):
                     cond.notify_all()
             with cond:
                 if box['request'] == box['checked']:
-                    cond.wait(timeout=interval)
+                    cond.wait(timeout=min(interval, 0.05) if box['partial'] else interval)
 
     class H(http.server.BaseHTTPRequestHandler):
         def log_message(self, *args):
@@ -1441,7 +1455,7 @@ def cmd_ui(a):
                     current = UIInstance(inst.root)
                     spend = UISpend(current)
                     spend.discover()
-                    spend.advance()
+                    _m_ui_fill.advance_warm(spend)
                     inputs = UIInputs(current)
                     signature = inputs.signature()
                     cache = UIStateCache()
