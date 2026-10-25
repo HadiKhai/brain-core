@@ -245,8 +245,9 @@ def main():
         opt("--save", action="store_true", help="brief: save it in .brain/connect/<node>/briefs/ and print its path"),
         opt("--json", action="store_true"))
     cmd("recall", _m_knowledge.cmd_recall, "what every project learned that may help with a problem here: "
-        "brain recall <node> \"what goes wrong\"", "id", opt("words", nargs="+"),
-        opt("--limit", type=int, default=10), opt("--json", action="store_true"))
+        "brain recall <node> \"what goes wrong\"", opt("id", nargs="?", default="root"), opt("words", nargs="*"),
+        opt("--limit", type=int, default=10), opt("--setup", action="store_true", help="prepare the optional local multilingual ONNX model"),
+        opt("--json", action="store_true"))
     cmd("proposals", _m_status.cmd_proposals, "everything waiting for review, node by node, with full text and the commands "
         "to accept or reject several at once", opt("id", nargs="?"),
         opt("--only", help="only these nodes (comma-separated)"), opt("--json", action="store_true"),

@@ -291,6 +291,8 @@ def apply_fixes(inst, kinds):
 
 def cmd_check(a):
     inst = _m_nodes.load()
+    from . import semantic as _m_semantic
+    print(_m_semantic.semantic_mode(inst))
     problems, warnings, fixable = collect_problems(inst)
     if a.fix and fixable:
         for d in apply_fixes(inst, fixable):

@@ -53,3 +53,23 @@ The regression reads the first committed ledger revision before generating a
 brief, then checks that the brief retains the expected runtime and model. Its
 cases cover class defaults, a node runtime pin, node and instance class routing,
 and inherited model configuration without activating inherited runtime policy.
+
+## D901: Local semantic recall is optional and fails back to lexical recall
+
+An optional, short-lived ONNX worker uses the pinned multilingual-e5-small int8
+model with query/passage prefixes, masked mean pooling and normalized cosine
+ranking. No daemon, API key, remote inference or torch dependency is required.
+The core remains Python 3.9 standard library only. Optional runtime packages
+are detected without importing the model. Unknown or less than 2 GB available
+RAM, missing packages, offline operation and any inference/index failure retain
+lexical retrieval. `brain check` reports the current mode; install and upgrade
+already run that check. `brain recall --setup` prepares the model explicitly.
+
+Artifacts download lazily with pinned revision, lengths and SHA256 integrity;
+tests prohibit downloads. Ordinary recall bounds optional work to 12 seconds;
+explicit setup allows 180 seconds. Model setup has no outward publication.
+The private `.brain/semantic/` cache binds vectors to model and content hashes.
+Eligibility (scope, state, source content) is checked before embedding and every
+cache read, including deletion/revocation. Proposals remain inactive. There is
+no online provider enabled. The index covers usable library items and the target node's own knowledge,
+decision notes and report indexes. External transcript archives are not indexed.
