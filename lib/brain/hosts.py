@@ -1203,6 +1203,14 @@ def notes_lag(inst, n, events=None, previous=None):
     paths = [str(rel / name) for name in COORDINATOR_FILES]
     dirty = _m_common.git("status", "--porcelain", "--", *paths, cwd=inst.root).stdout.split("\n")
     dirty = [l[3:] for l in dirty if l.strip()]
+    # Generated facts and recorded Now/archive transformations are not missing
+    # coordinator judgement. Unowned prose changes still require a commit.
+    from . import events as _m_events
+    if not _m_events.status_judgement_dirty(inst, n):
+        dirty = [p for p in dirty if p != (rel / 'status.md').as_posix()]
+        blobs = _m_events._status_bytes(inst, n)
+        if blobs[3] == blobs[4] or _m_events._owned_judgement(inst, n, blobs):
+            dirty = [p for p in dirty if p != (rel / 'status-archive.md').as_posix()]
     if dirty:
         out.append("not committed: " + ", ".join(dirty[:5]))
     return out

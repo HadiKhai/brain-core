@@ -17,6 +17,30 @@ from brain import events, instance, transitions
 
 
 class EventAppend(Scenario):
+    def test_physical_parent_keeps_file_link_and_descriptor_guards(self):
+        from brain import history
+        r = self.init('demo')
+        storage = r / 'private-state'
+        storage.mkdir()
+        alias = r / 'alias'
+        alias.symlink_to(storage)
+        target = alias / 'sample.jsonl'
+        events.append_line(target, {'fixture': True})
+        before = target.read_bytes()
+        with mock.patch.object(history, 'history_fd_path', return_value=str(r / 'moved')):
+            with self.assertRaisesRegex(OSError, 'directory moved'):
+                events.append_line(target, {'fixture': False})
+        self.assertEqual(target.read_bytes(), before)
+        linked = storage / 'linked.jsonl'
+        os.link(target, linked)
+        with self.assertRaises(SystemExit):
+            events.append_line(target, {'fixture': False})
+        linked.unlink()
+        linked.symlink_to(target)
+        with self.assertRaises(SystemExit):
+            events.append_line(linked, {'fixture': False})
+        self.assertEqual(target.read_bytes(), before)
+
     def records(self, root):
         return events.read(instance.Instance(root))
 
@@ -186,6 +210,27 @@ class EventAppend(Scenario):
 
 
 class EventViews(Scenario):
+    def test_node_refresh_does_not_adopt_a_foreign_live_subtree(self):
+        r = self.init('demo')
+        for nid in ('app', 'app/child', 'other'):
+            self.b(r, 'new', nid, '--title', nid)
+        inst = instance.Instance(r)
+        with instance.brain_lock(r):
+            with events.Command(r, command='fixture', node='app') as op:
+                (r / 'nodes/app/nodes/child/backlog.md').write_text('- pending\n')
+                count = len(events.read(inst))
+                with mock.patch.object(events, '_CURRENT', []):
+                    events.reconcile(inst, node=inst.node('other'))
+                    self.assertEqual(len(events.read(inst)), count)
+                    self.assertTrue(events.lease_live(inst, op.ref))
+                    for node in (None, inst.node('app/child')):
+                        with self.assertRaises(SystemExit):
+                            events.reconcile(inst, node=node)
+                    local = r / '.brain/local.json'
+                    local.write_text(local.read_text() + ' ')
+                    with self.assertRaises(SystemExit):
+                        events.reconcile(inst, node=inst.node('other'))
+
     records = EventAppend.records
     commits = EventAppend.commits
     def view(self, root, node='app'):
