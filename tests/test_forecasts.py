@@ -119,6 +119,8 @@ class JobForecasts(Scenario):
         self.b(self.root, "handback", "app", "--branch", "job/sample", "--state", "done", "--summary", "Fixture result", "--reviews", "1",
                "--lessons", "none: fixture", "--report", "reports/fixture.md")
         hb = self.m.read_handback(n, row)
+        self.assertGreaterEqual(hb["verify_duration"]["elapsed_seconds"], 0)
+        self.assertFalse(hb["verify_duration"]["reused"])
         self.assertEqual(hb["estimate"], json.loads(saved))
         self.assertEqual(hb["actual"]["tokens"], 10200000)
         self.assertEqual(hb["actual"]["active_h"], 1)
@@ -289,3 +291,30 @@ class JobForecasts(Scenario):
         self.assertEqual(json.loads(self.m.open_job(self.m.read_jobs(n), 'job/sample')['Forecast'])['model'], 'other-model')
         no_branch = self.b(self.root, 'hire', 'tester', 'app', '--class', 'docs', '--task', 'Read fixture')
         self.assertIn('Forecast docs:', no_branch)
+
+    def test_verify_duration_records_new_time_reuse_and_configured_slow_advice(self):
+        row = self.rows(1)[0]
+        fresh = self.m.record_verify_duration(self.inst, self.n, row, {'verify_reused': False}, 601.25)
+        self.assertEqual(fresh['elapsed_seconds'], 601.25)
+        self.assertTrue(fresh['slow'])
+        reused = self.m.record_verify_duration(self.inst, self.n, row, {'verify_reused': True}, 900)
+        self.assertEqual(reused['elapsed_seconds'], 0)
+        self.assertFalse(reused['slow'])
+        self.n['fm']['verify_warn_seconds'] = '900'
+        self.assertFalse(self.m.record_verify_duration(self.inst, self.n, row, {}, 601.25)['slow'])
+        for bad in (-1, float('nan'), True):
+            self.assertIsNone(self.m.record_verify_duration(self.inst, self.n, row, {}, bad))
+        hb = {'version': 2, 'job': row['Job'], 'started': row['Started'], 'state': 'done',
+              'lessons': 'none: fixture', 'verify_duration': fresh}
+        path = self.m.handback_file(self.n, row)
+        path.parent.mkdir(exist_ok=True)
+        path.write_text(json.dumps(hb))
+        self.m.write_jobs(self.inst, self.n, [row])
+        saved = self.m.read_jobs(self.n)[0]
+        self.assertEqual(saved['Verify s'], '601.25')
+        self.assertEqual(saved['Verify reused'], 'false')
+        self.n['fm']['verify_warn_seconds'] = '600'
+        self.assertIn('slow verify', '\n'.join(self.m.job_advice(self.inst, self.n, row)))
+        path.write_text(json.dumps({**hb, 'verify_duration': {'elapsed_seconds': 'private', 'reused': False}}))
+        self.m.write_jobs(self.inst, self.n, [row])
+        self.assertNotIn('private', self.m.read_jobs(self.n)[0]['Verify s'])

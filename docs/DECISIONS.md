@@ -83,3 +83,13 @@ saved estimate helper and persist the same record. A selected model conditions
 samples on that exact model and runtime; changing the model refreshes the
 estimate. An unspecified runtime-default model retains class/runtime forecasting
 and does not invent a model identity. Sparse model history stays sparse.
+
+## D203: Record readiness wall duration and report slow verification
+
+Each readiness attempt records monotonic wall duration, including preflight and
+admission, in its worker record. Ledger consumption retains numeric seconds and
+whether the result reused proof. Reused proof records zero new execution time;
+it never recharges the historical lane durations. Existing records with no
+duration remain unknown. CLI job advice shows the measurement basis and flags
+runs above verify_warn_seconds (node or instance; default 600 seconds). This
+advice does not change readiness or introduce a timeout.

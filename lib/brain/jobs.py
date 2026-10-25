@@ -31,7 +31,7 @@ JOBS_MARK = "<!-- brain:job-ledger v3 -->"  # older cores refuse this format ins
 JOBS_LEGACY_MARKS = ("<!-- brain:job-ledger v2 -->", "<!-- brain:job-ledger v1 -->")
 JOB_COLS = ["Job", "Started", "Ended", "Hours", "Outcome", "Commits", "Reviews", "Runtime", "Cause"]
 JOB_COLS += ["Class", "Model", "Effort"]
-JOB_COLS += ["Files", "Lines", "Forecast", "Actual", "Meter %"]
+JOB_COLS += ["Files", "Lines", "Forecast", "Actual", "Meter %", "Verify s", "Verify reused"]
 JOB_COLS += ["Lessons", "Lesson check", "Switches", "Settled"]
 JOB_COLS += ["Land check"]
 JOB_COLS += ["Active h", "Agent h", "Fresh in", "Cache read", "Cache write", "Output", "Reasoning", "Tool calls",
@@ -79,6 +79,12 @@ def write_jobs(inst, n, rows):
             # A coordinator can start another review after this hand-back. Retained
             # evidence repairs undercounts, but cannot undo an open job's new rounds.
             row["Reviews"] = str(rounds if row.get("Ended") else max(current, rounds))
+        duration = hb.get("verify_duration")
+        if isinstance(duration, dict) and type(duration.get("reused")) is bool:
+            seconds = forecast_number(duration.get("elapsed_seconds"))
+            if seconds is not None:
+                row["Verify s"] = str(seconds)
+                row["Verify reused"] = str(duration["reused"]).lower()
         actual = clean_actual(hb.get("actual"))
         if hb.get("state") == "done" and actual:
             row["Actual"] = json.dumps(actual, sort_keys=True)
@@ -284,9 +290,12 @@ def publish_handback(a):
                                               (a.reviews is not None or getattr(a, "record", False))):
         _m_common.die("--reverify forces a verify run: it goes with --state done --reviews N")
     fresh = reused = 0
+    duration = None
     if a.state == "done" and not study and (a.reviews is not None or getattr(a, "record", False)):
+        verify_started = time.monotonic()
         packet, reasons = _m_verify.record_ready(inst, n, a.branch, a.reviews, packet,
                                        getattr(a, "reverify", False))
+        duration = record_verify_duration(inst, n, row, packet, time.monotonic() - verify_started)
         if packet:
             reused, fresh = (1, 0) if packet.get("verify_reused") else (0, 1)
     actual = None
@@ -339,6 +348,10 @@ def publish_handback(a):
                 "at": inst.now(), "report": _m_common.tilde(a.report) if a.report is not None else previous.get("report", ""),
                 "lessons": lessons, "ready": packet, "ready_reasons": reasons,
                 "verify_runs": count("verify_runs") + fresh, "verify_reused": count("verify_reused") + reused}
+        if duration is not None:
+            data["verify_duration"] = duration
+        elif previous.get("verify_duration") is not None:
+            data["verify_duration"] = previous["verify_duration"]
         if actual is not None:
             data.update(estimate=saved_forecast(row.get("Forecast")), actual=clean_actual(actual))
         if a.state == "done":
@@ -1531,6 +1544,11 @@ def cmd_jobs(a):
             print(_m_guard.redact("  " + line, _m_guard.never_terms(n)))
         for r in read_jobs(n) or []:
             if a.branch and r["Job"] == a.branch and (not a.job_key or job_key(r) == a.job_key):
+                if r.get("Ended"):
+                    hb = read_handback(n, r) or {}
+                    line = verify_duration_line(inst, n, hb.get("verify_duration"))
+                    if line:
+                        print(_m_guard.redact(line, _m_guard.never_terms(n)))
                 if r.get("Ended") and r.get("Forecast"):
                     print(_m_guard.redact(estimate_line(saved_forecast(r["Forecast"])), _m_guard.never_terms(n)))
                     actual = forecast_record(r.get("Actual"))
@@ -1544,9 +1562,39 @@ def cmd_jobs(a):
 REVIEW_CAP = 2  # one full review and one blocker-only fix check; exceptions require a reason
 
 
+def record_verify_duration(inst, n, row, packet, elapsed_seconds):
+    """Measure readiness wall time, including preflight/admission; reused proof costs no new execution."""
+    seconds = forecast_number(elapsed_seconds)
+    if seconds is None:
+        return None
+    reused = isinstance(packet, dict) and packet.get("verify_reused") is True
+    threshold = forecast_number(n["fm"].get("verify_warn_seconds", inst.cfg.get("verify_warn_seconds", 600)))
+    threshold = threshold if threshold is not None and threshold > 0 else 600
+    seconds = 0.0 if reused else seconds
+    return {"elapsed_seconds": seconds, "reused": reused, "slow": seconds > threshold,
+            "warning_seconds": threshold, "at": inst.now_dt().isoformat(),
+            "basis": "readiness wall time including admission and preflight"}
+
+
+def verify_duration_line(inst, n, duration):
+    if not isinstance(duration, dict):
+        return None
+    seconds = forecast_number(duration.get("elapsed_seconds"))
+    if seconds is None or type(duration.get("reused")) is not bool:
+        return None
+    threshold = forecast_number(n["fm"].get("verify_warn_seconds", inst.cfg.get("verify_warn_seconds", 600)))
+    threshold = threshold if threshold is not None and threshold > 0 else 600
+    return (f"verify duration: {seconds:.3f}s (readiness wall time incl. admission/preflight)"
+            + ("; reused proof, no new execution" if duration["reused"] else "")
+            + (f"; slow verify: exceeds {threshold:g}s" if seconds > threshold else ""))
+
+
 def job_advice(inst, n, row):
     """What the records say about an open job's process: advice from observed events, never a gate."""
     out, hb = [], read_handback(n, row) or {}
+    duration_line = verify_duration_line(inst, n, hb.get("verify_duration"))
+    if duration_line:
+        out.append(duration_line)
     reviews = int(row.get("Reviews") or 0) if str(row.get("Reviews") or "0").isdigit() else 0
     if reviews > REVIEW_CAP:
         out.append(f"advice: {reviews} review rounds, over the cap of {REVIEW_CAP}: audit each finding's whole class "
