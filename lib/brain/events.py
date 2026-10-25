@@ -1158,13 +1158,17 @@ def maintain(op, changed):
     freshness.maintain_indexes(op.inst, op.inst.nodes())
     changed = {**{path: None for path in op.record_paths}, **changed}
     views = {}
+    # Cleanup records current metadata for replay, but never rewrites the status
+    # document or its archive. An explicit refresh still materializes the view.
+    materialize = op.command not in ('wt_prune', 'wt_rm')
     _, recorded_views, _ = replay(op.inst)
     selected = {n['id']: n for n in affected_nodes(op.inst, changed, op.node)}
     for n in op.inst.nodes():
         if not n['archived'] and node_ref(n['id']) in journal(op.inst).state['invalid']:
             selected[n['id']] = n
     for n in selected.values():
-        cap_now(op.inst, n)
+        if materialize:
+            cap_now(op.inst, n)
         if op.command == 'status' or (op.command == 'check' and status.facts_meta(n)):
             # A requested refresh already consumed its merge baseline; retain that display.
             known = status.facts_meta(n).get('merged_before', [])
@@ -1175,11 +1179,12 @@ def maintain(op, changed):
         # own new metadata projection; a refresh alone must use the committed event view.
         if source(op.inst, n) == 'events' and op.command == 'status':
             view = events_view_without_current(op.inst, n)
-        status.refresh_status(op.inst, n, view)
-        active_table(op.inst, n, view)
         views[n['id']] = view
-        ledger = (n["dir"] / "job-ledger.md").relative_to(op.inst.root).as_posix()
-        status_commit(op.inst, n, op.close_job and ledger in changed)
+        if materialize:
+            status.refresh_status(op.inst, n, view)
+            active_table(op.inst, n, view)
+            ledger = (n["dir"] / "job-ledger.md").relative_to(op.inst.root).as_posix()
+            status_commit(op.inst, n, op.close_job and ledger in changed)
     return views
 
 

@@ -1827,3 +1827,8 @@ Failed and cancelled setup operations attribute durable inbox hooks before
 checking for partial writes. A hook-only failure records its abort and retains
 the hook; actual unfinished source writes remain pending for reconciliation.
 The original setup result or exception remains authoritative.
+
+Worktree cleanup records current journal metadata for replay without automatically
+rewriting the status document, Active work table or status archive. Explicit
+status refresh still materializes the view and caps the Now section. Other event
+projection paths remain available.

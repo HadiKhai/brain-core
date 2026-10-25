@@ -378,6 +378,45 @@ class EventViews(Scenario):
                     self.assertEqual(status.active_work_closed(expected[0]),
                                      status.active_work_closed(status.active_work(n, include_closed=True)[0]))
 
+    def test_cleanup_records_replay_view_without_materializing_status_until_refresh(self):
+        for action in ('prune', 'rm'):
+            with self.subTest(action=action):
+                r = self.init('demo-' + action)
+                home = self.repo(self.tmp / ('code-' + action))
+                self.b(r, 'new', 'app', '--title', 'App', '--home', str(home))
+                self.b(r, 'wt', 'add', 'app', 'job-one', '--no-setup')
+                local = json.loads((r / '.brain/local.json').read_text())
+                wt = Path(local['nodes']['app']['worktrees']['job-one']['path'])
+                self.git('commit', '--allow-empty', '-qm', 'fixture complete', cwd=wt)
+                self.git('merge', '-q', 'job-one', cwd=home)
+                path = r / 'nodes/app/status.md'
+                archive = path.with_name('status-archive.md')
+                path.write_text('## Now\n\n' + ''.join('- fixture note %d\n' % i for i in range(35))
+                                + '\n## Active work\n| Branch | Thread | PR | State |\n'
+                                  '| `job-one` (fixture annotation) | fixture-thread | - | merged — fixture complete |\n')
+                before = path.read_bytes()
+                self.assertFalse(archive.exists())
+                count = len(self.commits(r))
+                args = ('--offline',) if action == 'prune' else ('job-one',)
+                self.b(r, 'wt', action, 'app', *args)
+                self.assertFalse(wt.exists())
+                self.assertEqual(path.read_bytes(), before)
+                self.assertFalse(archive.exists())
+                commits = self.commits(r)
+                self.assertEqual(len(commits), count + 1)
+                self.assertEqual(commits[-1]['data']['command'], 'wt_' + action)
+                self.assertTrue(commits[-1]['data']['maintenance_ok'])
+                self.assertEqual(events.pending(self.records(r)), {})
+                view = self.view(r)
+                self.assertEqual(commits[-1]['data']['views'][events.node_ref('app')], view)
+                self.assertEqual(view['active'], [['job-one', 'fixture-thread', '-', 'merged — fixture complete']])
+                self.b(r, 'status', 'app', '--refresh')
+                self.assertNotEqual(path.read_bytes(), before)
+                self.assertIn('## Facts (generated', path.read_text())
+                self.assertTrue(archive.exists())
+                self.assertIn('- fixture note 34', archive.read_text())
+                self.assertEqual(self.view(r)['active'], view['active'])
+
     def test_projection_retains_ambiguous_unmatched_and_incomplete_owners(self):
         from brain import jobs, status
         r = self.init('demo')
