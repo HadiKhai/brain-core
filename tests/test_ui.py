@@ -635,6 +635,82 @@ class ExpandedUI(Scenario):
             self.assertIsNone(module.ui_reuse_server(inst, 4747, 'new'))
             kill.assert_not_called()
 
+    def test_closed_worktrees_keep_metadata_without_git_or_socket_checks(self):
+        module = self.m._owners['cached_worktree']
+        root = self.first_paint_root()
+        inst = self.m.UIInstance(root)
+        node = inst.nodes()[0]
+        record = {'path': str(root), 'port': 4747}
+        node['local']['worktrees'] = {'job/closed': record, 'job/live': record}
+        rows = [{'Job': 'job/closed', 'Ended': '2026-01-01'}, {'Job': 'job/live', 'Ended': ''}]
+        cache = module.UIStateCache()
+        with mock.patch.object(module._m_jobs, 'read_jobs', return_value=rows), \
+             mock.patch.object(module._m_status, 'active_work', return_value=[]), \
+             mock.patch.object(module, 'ui_worktree', return_value={'branch': 'job/live'}) as inspect:
+            closed = module.cached_worktree(inst, root, 'job/closed', record, node, cache)
+            inspect.assert_not_called()
+            self.assertEqual(closed['branch'], 'job/closed')
+            self.assertTrue(closed['exists'])
+            self.assertIsNone(closed['dirty'])
+            self.assertFalse(closed['live'])
+            module.cached_worktree(inst, root, 'job/live', record, node, cache)
+            inspect.assert_called_once()
+            with mock.patch.object(module._m_status, 'active_work', return_value=[['job/closed', 'old thread', '-', 'Review']]):
+                self.assertEqual(set(module.ui_live_worktrees(node)), {'job/live'})
+
+    def test_due_repository_snapshot_batches_refs_and_display_cache_never_leaks_to_actions(self):
+        module = self.m._owners['local_job_state']
+        root = self.first_paint_root()
+        home = self.repo(self.tmp / 'repository')
+        inst = self.m.UIInstance(root)
+        node = inst.nodes()[0]
+        node['home_path'] = home
+        tip = self.git('rev-parse', 'HEAD', cwd=home).strip()
+        self.git('branch', 'job/merged', cwd=home)
+        record = {'path': str(home), 'start': '0' * 40}
+        values, keys = {}, {('root', 'job/merged'): 'first'}
+        real_git = module._m_common.git
+        with mock.patch.object(module._m_common, 'git', wraps=real_git) as git:
+            with module.local_job_snapshot(values, keys):
+                first = module.local_job_state(node, 'job/merged', record)
+                for i in range(160):
+                    module.local_job_state(node, 'job/missing-' + str(i), record)
+            self.assertEqual(first, {'exists': True, 'tip': tip, 'merged': True})
+            self.assertLess(git.call_count, 8, 'one ref scan per node, not commands per worktree')
+            git.reset_mock()
+            with module.local_job_snapshot(values, keys):
+                self.assertEqual(module.local_job_state(node, 'job/merged', record), first)
+            git.assert_not_called()
+            self.git('branch', '-D', 'job/merged', cwd=home)
+            self.assertEqual(module.local_job_state(node, 'job/merged', record)['tip'], '')
+            self.assertGreater(git.call_count, 0, 'an explicit action must read current refs')
+            keys[('root', 'job/merged')] = 'second'
+            with module.local_job_snapshot(values, keys):
+                self.assertEqual(module.local_job_state(node, 'job/merged', record)['tip'], '')
+
+    def test_input_discovery_scans_only_live_worktrees_and_reopens_on_ledger_change(self):
+        module = self.m._owners['UIInputs']
+        root = self.first_paint_root()
+        inst = self.m.UIInstance(root)
+        node = inst.nodes()[0]
+        node['home_path'], node['external'] = root, True
+        records = {f'job/closed-{i}': {'path': str(root / f'closed-{i}')} for i in range(160)}
+        records['job/live'] = {'path': str(root / 'live')}
+        node['local']['worktrees'] = records
+        rows = [{'Job': 'job/live', 'Ended': ''}]
+        with mock.patch.object(module._m_jobs, 'read_jobs', side_effect=lambda _: list(rows)), \
+             mock.patch.object(module._m_status, 'active_work', return_value=[]), \
+             mock.patch.object(module._m_common, 'git', return_value=subprocess.CompletedProcess([], 0, '', '')) as git:
+            inputs = module.UIInputs(inst)
+            inspected = {call.kwargs.get('cwd') for call in git.call_args_list}
+            self.assertEqual(inspected, {root, root / 'live'})
+            before = inputs.topology
+            rows.append({'Job': 'job/closed-1', 'Ended': ''})
+            self.assertNotEqual(module.UIInputs.topology_key(inst), before)
+            rows[:] = []
+            with mock.patch.object(module._m_status, 'active_work', return_value=[['`job/closed-2`', 'thread', '-', 'working']]):
+                self.assertEqual(set(module.ui_live_worktrees(node)), {'job/closed-2'})
+
     def test_legacy_server_ownership_requires_python_brain_ui_and_the_same_brain(self):
         # Cwd/argv cannot prove the selected instance: BRAIN_ROOT can override cwd,
         # and re-exec can consume the original CLI selector before ps observes it.
