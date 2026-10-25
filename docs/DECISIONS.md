@@ -118,3 +118,14 @@ module's dependency reconciliation with the exact event id and changed node.
 Acknowledgements are durable facts. A failed application remains pending for the
 next writer, and reconciliation must respect task holds and visibility. This hook
 emits no host wake and performs no transcript classification.
+
+## D306: Opt-in native maintenance for upstream source indexes
+
+`upstream_generator=links` selects a standard-library generator over the node's
+explicit `upstream_inputs` and `upstream_output`. It writes source links and content
+fingerprints, then records freshness only if those inputs remained unchanged.
+Successful instance writes maintain opted-in indexes, and `index --refresh` runs
+that same generator explicitly. No external script, shell command or host action
+is executed. Existing output must carry the native ownership marker; unmarked,
+linked, shared or out-of-boundary files are preserved. Other index formats retain
+the existing freshness warning and explicit recording workflow.

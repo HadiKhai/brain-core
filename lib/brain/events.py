@@ -1110,8 +1110,9 @@ def affected_nodes(inst, changed, preferred):
 
 
 def maintain(op, changed):
-    from . import status
+    from . import status, freshness
     dispatch_landings(op.inst)
+    freshness.maintain_indexes(op.inst, op.inst.nodes())
     views = {}
     _, recorded_views, _ = replay(op.inst)
     selected = {n['id']: n for n in affected_nodes(op.inst, changed, op.node)}
