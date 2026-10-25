@@ -2040,3 +2040,13 @@ retains the strict source snapshots and write comparisons. No runtime allowlist,
 journal suppression or rehearsal success is introduced by this classification.
 The first future nightly result remains the coordinator's reporting obligation;
 this change creates no schedule or delivery integration.
+
+## D19001: Retain the checked event publication target
+
+Event storage retains the canonical target returned by its containment check
+before creating directories or opening files. A contained directory alias that
+changes afterward cannot redirect publication to its new destination. Appends,
+journal indexes, repair markers, leases, comparison and status metadata, and
+immutable event objects share this boundary. Final-file link and hard-link
+refusals, no-follow opens, descriptor identity checks and persistence ordering
+remain in force. Standalone paths retain their physical-parent behavior.

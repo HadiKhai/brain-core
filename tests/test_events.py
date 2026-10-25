@@ -17,6 +17,56 @@ from brain import events, instance, transitions
 
 
 class EventAppend(Scenario):
+    def test_alias_retarget_after_validation_keeps_checked_publication_target(self):
+        r = self.init('demo')
+        safe_target = events.common.safe_target
+        for operation in ('append', 'append-new-parent', 'index', 'lease'):
+            with self.subTest(operation=operation):
+                storage = r / ('state-' + operation)
+                storage.mkdir()
+                outside = self.tmp / ('outside-' + operation)
+                outside.mkdir()
+                (outside / 'sentinel').write_bytes(b'keep external fixture bytes\n')
+                alias = r / ('alias-' + operation)
+                alias.symlink_to(storage)
+                relative = Path('missing/record') if operation in ('append-new-parent', 'lease') else Path('record')
+                target = alias / relative
+                if operation in ('append', 'index'):
+                    (outside / relative).write_bytes(b'external original\n')
+                before = {p.relative_to(outside): p.read_bytes() if p.is_file() else None
+                          for p in outside.rglob('*')}
+                checked = []
+
+                def retarget(path):
+                    result = safe_target(path)
+                    if path == target:
+                        self.assertEqual(result, storage / relative)
+                        checked.append(result)
+                        alias.unlink()
+                        alias.symlink_to(outside)
+                    return result
+
+                try:
+                    with mock.patch.object(events.common, 'safe_target', side_effect=retarget):
+                        if operation.startswith('append'):
+                            events.append_line(target, {'fixture': True})
+                        elif operation == 'index':
+                            journal = events.Journal(instance.Instance(r))
+                            journal.path = target
+                            journal.save()
+                        else:
+                            self.assertEqual(events.private_path(target), storage / relative)
+                finally:
+                    self.assertEqual({p.relative_to(outside): p.read_bytes() if p.is_file() else None
+                                      for p in outside.rglob('*')}, before)
+                self.assertEqual(checked, [storage / relative])
+                if operation == 'lease':
+                    self.assertTrue((storage / relative).parent.is_dir())
+                elif operation == 'index':
+                    self.assertEqual(json.loads((storage / relative).read_bytes())['version'], 2)
+                else:
+                    self.assertEqual((storage / relative).read_bytes(), b'{"fixture":true}\n')
+
     def test_physical_parent_keeps_file_link_and_descriptor_guards(self):
         from brain import history
         r = self.init('demo')

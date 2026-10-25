@@ -46,13 +46,12 @@ def screen(inst, value):
 
 
 def private_path(path):
-    common.safe_target(path)
+    # Keep the checked parent before mkdir or any open can follow a changed alias.
+    path = common.safe_target(path) or path.parent.resolve() / path.name
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.is_symlink():
         common.die("event storage must not be linked")
-    # Contained directory links are supported by the instance guard. Use their
-    # physical parent for no-follow opens and descriptor identity comparisons.
-    return path.parent.resolve() / path.name
+    return path
 
 
 def append_line(path, value):
