@@ -1298,13 +1298,16 @@ def runaway_jobs(inst, n, structured=False, readonly=False):
             why['median-age'] = f"open {r['age_h']} h, over twice the median of {j['median_hours']} h"
         if u and j["median_tokens"] and u["processed"] > 2 * j["median_tokens"]:
             why['median-tokens'] = f"{_m_spend.tokens_text(u['processed'])} tokens, over twice the median of {_m_spend.tokens_text(j['median_tokens'])}"
+        round_usage = _m_spend.job_round_usage(inst, n, r, u)
+        meter = round_usage if round_usage is not None else u
+        hours = round_usage['hours'] if round_usage is not None else r['age_h']
         b = _m_spend.job_budget(n, r)
-        if b and u and b.get("tokens") and u["processed"] > b["tokens"]:
+        if b and meter and b.get("tokens") and meter.get("processed") is not None and meter["processed"] > b["tokens"]:
             why['budget-tokens'] = f"over its {_m_spend.tokens_text(b['tokens'])}-token budget"
-        if b and b.get("hours") and r["age_h"] > b["hours"]:
+        if b and b.get("hours") and hours > b["hours"]:
             why['budget-hours'] = f"over its {b['hours']:g}-hour budget"
-        if u and u["compactions"] >= 3:
-            why['compaction-limit'] = f"{u['compactions']} compactions"
+        if meter and meter.get("compactions") is not None and meter["compactions"] >= 3:
+            why['compaction-limit'] = f"{meter['compactions']} compactions"
         if u and u["subagents"] and u["sub_share"] > 0.5:
             why['subagent-share'] = f"sub-agents spent {round(100 * u['sub_share'])}% of its tokens"
         if structured:

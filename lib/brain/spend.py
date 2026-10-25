@@ -24,7 +24,7 @@ from . import ui as _m_ui
 # then incrementally: transcripts only grow, so the next read starts where the last one stopped.
 
 SPEND_IDLE_MIN = 5  # a gap between two events of more than this many minutes is idle time
-SPEND_VERSION = 5
+SPEND_VERSION = 6
 SPEND_FIELDS = ("events", "fresh", "cache_read", "cache_write", "output", "reasoning", "tools")
 SPEND_TOKENS = ("fresh", "cache_read", "cache_write", "output", "reasoning")  # reasoning is part of output
 JOB_MARK = "brain-job: {}"  # in every job brief: the sessions a brief starts are found again by it
@@ -310,7 +310,7 @@ def claude_session_id(path):
 def spend_file(inst, path, runtime, allowed, forbidden, budget=None, window=None):
     """One transcript's aggregate, brought up to date; None when unreadable or outside the folders this brain may
     read (checked on the open file, as `brain history` does). A file that shrank or was replaced is read again.
-    With a window ([lo, hi] seconds), only what happened inside it, to the second; kept in this run only."""
+    With a window ([lo, hi] seconds), only what happened inside it, to the second; cached by exact window."""
     try:
         real = Path(path).resolve()
     except (OSError, RuntimeError):
@@ -320,27 +320,34 @@ def spend_file(inst, path, runtime, allowed, forbidden, budget=None, window=None
         return None
     with fh:
         try:
-            size = os.fstat(fh.fileno()).st_size
+            st = os.fstat(fh.fileno())
+            size = st.st_size
+            stamp = [size, st.st_mtime_ns, st.st_ctime_ns, st.st_mode, st.st_nlink]
         except OSError:
             return None
         packed = isinstance(fh, _m_history.Decompressed)
-        mem = str(real) if window is None else (str(real), tuple(window))
+        mem = (str(inst.root.resolve()), str(real), runtime, tuple(window) if window else None)
         known = _SPEND_MEM.get(mem)
         terms = spend_terms(inst)
-        if known and known[0] == (size, list(ident)) and known[1].get("complete", True) and \
-                not any(_m_guard.find_terms(m, terms) for m in known[1]["models"]):
+        if known and known[0] == (stamp, list(ident)) and known[1].get("complete", True) and \
+                not any(_m_guard.find_terms(m, terms) for m in known[1]["models"]) and \
+                (_SPEND_READ_ONLY.get() or known[1].get("published")):
             return known[1]  # unchanged, and its names still pass today's never-name words
-        key = hashlib.sha256(str(real).encode()).hexdigest()[:32]
+        identity = str(real) if window is None else str(real) + ':' + repr(tuple(window))
+        key = hashlib.sha256(identity.encode()).hexdigest()[:32]
         cf = spend_cache_dir(inst) / "files" / f"{key}.json"
         # Read-only viewers retain partial progress in memory; a disk cache is optional.
         agg = known[1] if known and known[0][1] == list(ident) else None
         if agg is None:
             try:
-                agg = json.loads(cf.read_text()) if window is None else None
+                agg = json.loads(cf.read_text())
             except (OSError, ValueError):
                 pass
         if not (isinstance(agg, dict) and agg.get("v") == SPEND_VERSION and agg.get("key") == key
-                and agg.get("ino") == list(ident) and agg["state"]["offset"] <= size
+                and agg.get("ino") == list(ident) and agg.get('runtime') == runtime
+                and agg["state"]["offset"] <= size
+                and (agg.get('stamp') == stamp or (isinstance(agg.get('stamp'), list)
+                     and agg['stamp'][0] < size))
                 and (not packed or agg["state"]["offset"] in (0, size))):
             agg = {**spend_new(runtime, real), "key": key, "ino": list(ident)}
             if window is not None:
@@ -359,7 +366,10 @@ def spend_file(inst, path, runtime, allowed, forbidden, budget=None, window=None
             meta = codex_meta(real, allowed, forbidden)
             if meta:
                 agg.update(id=meta[0], parent=meta[2])
-        if agg["state"]["offset"] < size or stale:
+        dirty = agg.get("stamp") != stamp or not agg.get("published")
+        if agg["state"]["offset"] < size or stale or dirty:
+            if dirty or stale:
+                agg["published"] = False
             try:
                 if agg["state"]["offset"] < size:
                     agg["complete"] = spend_read(agg, fh, budget)
@@ -368,19 +378,21 @@ def spend_file(inst, path, runtime, allowed, forbidden, budget=None, window=None
             if packed:
                 agg["state"]["offset"] = size  # read whole: what it holds is counted
             agg["models"] = [m if not _m_guard.find_terms(m, terms) else "other" for m in agg["models"]]
+            agg["stamp"] = stamp
             try:
-                if window is None and not _SPEND_READ_ONLY.get():  # explicit spend commands may persist aggregates
+                if not _SPEND_READ_ONLY.get():  # explicit accounting may persist windowed aggregates too
+                    agg["published"] = True
                     cf.parent.mkdir(parents=True, exist_ok=True)
                     _m_common.atomic_write(cf, json.dumps({k: v for k, v in agg.items() if k not in SPEND_UNKEPT},
                                                 separators=(",", ":")))
             except OSError:
-                pass  # still right for this run; read again next time
+                agg["published"] = False  # still right for this run; publish on the next explicit read
         # A time slice can end exactly after the final whole line. There is no next
         # read to mark EOF in that case; the saved cursor already proves completion.
         if agg['state']['offset'] == size:
             agg['complete'] = True
         agg["path"] = str(real)  # this run's own, never written
-        _SPEND_MEM[mem] = ((size, list(ident)), agg)
+        _SPEND_MEM[mem] = ((stamp, list(ident)), agg)
     return agg
 
 
@@ -720,6 +732,22 @@ def job_sessions(inst, n, row, worktree=None):
 def job_usage(inst, n, row, worktree=None):
     """What a job cost, counted only while it was open: tokens by kind, active time, compactions, sub-agents,
     tool calls and the models that ran it."""
+    signature = hashlib.sha256(json.dumps(job_usage_signature(inst, n, row),
+                                          sort_keys=True).encode()).hexdigest()
+    key = _m_jobs.digest([n['id'], _m_jobs.job_key(row), str(worktree or '')])
+    cache = spend_cache_dir(inst) / 'jobs' / (key + '.json')
+    try:
+        saved = json.loads(cache.read_text())
+        used = saved.get('usage')
+        if (saved.get('version') == SPEND_VERSION and saved.get('signature') == signature
+                and isinstance(used, dict) and isinstance(used.get('models'), dict)
+                and all(type(used.get(k)) is int and used[k] >= 0
+                        for k in (*SPEND_TOKENS, 'processed', 'compactions', 'sessions',
+                                  'tools', 'subagents', 'active_minutes', 'agent_minutes'))):
+            used['models'] = spend_models(used['models'], spend_terms(inst))
+            return used
+    except (OSError, ValueError, AttributeError):
+        pass
     start, end = job_window(inst, row)
     if start is None:
         return None
@@ -735,6 +763,13 @@ def job_usage(inst, n, row, worktree=None):
         exact.append(a)
     u = spend_sum(exact, start, end)
     u["source"] = f"transcripts: {count_of(u['sessions'], 'session')}" if u["sessions"] else "none found"
+    if not _SPEND_READ_ONLY.get():
+        try:
+            cache.parent.mkdir(parents=True, exist_ok=True)
+            _m_common.atomic_write(cache, json.dumps({'version': SPEND_VERSION,
+                                   'signature': signature, 'usage': u}, separators=(',', ':')))
+        except OSError:
+            pass  # Accounting is useful even when the optional private cache is unwritable.
     return u
 
 
@@ -811,7 +846,49 @@ def budget_text(b):
                                     f"{b['hours']:g} h" if b.get("hours") else ""]))
 
 
-def usage_line(u, budget=None, hours=None):
+def job_round_usage(inst, n, row, usage):
+    """Budget counters since the last delivered restart; lifetime totals remain untouched.
+
+    Missing counters stay unknown. Legacy receipts without active minutes use elapsed
+    time since their acknowledgement instead of charging the previous worker's hours.
+    """
+    from . import reminders as _m_reminders
+    key = _m_jobs.digest([n['id'], _m_jobs.job_key(row)])
+    with _m_reminders.lifecycle_store(inst, readonly=True) as data:
+        record = data['usage'].get(key)
+    if record is None:
+        return None
+    if not isinstance(record, dict) or record.get('job') != _m_jobs.job_key(row):
+        raise ValueError('invalid round usage receipt')
+    baseline = record.get('baseline')
+    if not isinstance(baseline, dict) or any(type(baseline.get(k)) is not int or baseline[k] < 0
+                                           for k in ('processed', 'compactions')):
+        raise ValueError('invalid round usage baseline')
+    # A pending initial restart has not yet started a replacement round. When a
+    # later round crosses its threshold its acknowledgement time must survive.
+    since = record.get('round_at') or (record.get('at') if not record.get('episode') else None)
+    if since is None:
+        return None
+    at = inst.parse_time(since)
+    if not at or at > inst.now_dt():
+        raise ValueError('invalid round usage baseline time')
+    out = {'since': since}
+    for k in ('processed', 'compactions', 'active_minutes'):
+        base, value = baseline.get(k), (usage or {}).get(k)
+        if base is not None and (type(base) is not int or base < 0):
+            raise ValueError('invalid round usage baseline')
+        if type(value) is not int or value < 0 or base is None:
+            out[k] = None
+        elif value < base:
+            raise ValueError('round usage counters regressed; retain baseline for review')
+        else:
+            out[k] = value - base
+    out['hours'] = (out['active_minutes'] / 60 if out['active_minutes'] is not None
+                    else (inst.now_dt() - at).total_seconds() / 3600)
+    return out
+
+
+def usage_line(u, budget=None, hours=None, round_usage=None):
     """One line: what a job has cost so far, and its budget."""
     if not u or not u.get("sessions") and not u.get("source", "").startswith("host"):
         return "usage: no transcripts found for this job on this machine"
@@ -821,9 +898,15 @@ def usage_line(u, budget=None, hours=None):
            + f"; active {u['active_minutes'] / 60:.1f} h (agents {u['agent_minutes'] / 60:.1f} h)"
            + f"; {count_of(u['tools'], 'tool call')}; {count_of(u['compactions'], 'compaction')}"
            + (f"; {count_of(u['subagents'], 'sub-agent')}, {round(100 * u['sub_share'])}% of tokens" if u["subagents"] else ""))
+    if round_usage is not None:
+        shown = lambda k: tokens_text(round_usage[k]) if round_usage.get(k) is not None else 'unknown'
+        out += f"; since restart: {shown('processed')} tokens, {shown('compactions')} compactions"
+        hours = round_usage['hours']
+    meter = round_usage if round_usage is not None else u
     if budget:
-        over = [f"{tokens_text(u['processed'])} of {tokens_text(budget['tokens'])} tokens"
-                for _ in [0] if budget.get("tokens") and u["processed"] > budget["tokens"]]
+        over = [f"{tokens_text(meter['processed'])} of {tokens_text(budget['tokens'])} tokens"
+                for _ in [0] if budget.get("tokens") and meter.get("processed") is not None
+                and meter["processed"] > budget["tokens"]]
         over += [f"{hours:.1f} of {budget['hours']:g} h" for _ in [0]
                  if budget.get("hours") and hours is not None and hours > budget["hours"]]
         out += f"; budget {budget_text(budget)}" + (": over (" + ", ".join(over) + ")" if over else "")
@@ -869,25 +952,61 @@ def live_usage(inst, n, row):
         return _live_usage(inst, n, row)
     values, revision = scope
     job = (str(inst.root), n['id'], _m_jobs.job_key(row))
-    key = (revision, json.dumps(n['local'], sort_keys=True), tuple(_m_guard.never_terms(n)),
-           tuple(row.get(name, '') for name in _m_jobs.JOB_COLS))
+    key = (revision, job_usage_signature(inst, n, row))
     old = values.get(job)
     if old is None or old[0] != key:
         values[job] = (key, _read_live_usage(inst, n, row))
     return values[job][1]
 
 
+@ui_discovery
+def spend_input_signature(inst):
+    """Cheap metadata revision shared by all jobs in one dashboard snapshot.
+
+    This reads no transcript body. Permission roots and file identity participate so
+    a caller's unchanged HEAD cannot mask appended, replaced or newly forbidden data.
+    """
+    sources, allowed, forbidden = spend_sources(inst)
+    paths = []
+    for runtime, cfg in sources:
+        for folder in ((cfg / 'projects',) if runtime == 'claude' else
+                       (cfg / 'sessions', cfg / 'archived_sessions')):
+            for path in spend_walk(folder):
+                if not _m_history.history_within(path, allowed) or _m_history.history_within(path, forbidden):
+                    continue
+                try:
+                    st = path.stat()
+                    paths.append((str(path), st.st_dev, st.st_ino, st.st_size,
+                                  st.st_mtime_ns, st.st_ctime_ns, st.st_mode, st.st_nlink))
+                except OSError:
+                    paths.append((str(path), None))
+    return (tuple((runtime, str(cfg)) for runtime, cfg in sources),
+            tuple(sorted(str(p) for p in allowed)), tuple(sorted(str(p) for p in forbidden)),
+            tuple(sorted(paths)))
+
+
+def job_usage_signature(inst, n, row):
+    try:
+        st = _m_jobs.handback_file(n, row).stat()
+        handback = (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
+    except OSError:
+        handback = None
+    return (spend_input_signature(inst), handback, json.dumps(n['local'], sort_keys=True),
+            tuple(_m_guard.never_terms(n)), tuple(row.get(name, '') for name in _m_jobs.JOB_COLS))
+
+
 def _live_usage(inst, n, row):
-    """An open job's usage so far, read again at most once a minute in one process (the live view asks often).
+    """An open job's usage so far, refreshed when transcript or permission metadata changes.
     What its host reported wins over what the transcripts show."""
     if str(row.get("Usage", "")).startswith("host"):
         return host_row_usage(row)
     key = (str(inst.root), n["id"], _m_jobs.job_key(row))
+    signature = job_usage_signature(inst, n, row)
     hit = _LIVE.get(key)
-    if hit and time.monotonic() - hit[0] < 60:
+    if hit and hit[0] == signature:
         return hit[1]
     u = _read_live_usage(inst, n, row)
-    _LIVE[key] = (time.monotonic(), u)
+    _LIVE[key] = (signature, u)
     return u
 
 
@@ -927,7 +1046,7 @@ def host_usage_cells(path, n):
     return {**usage_cells({**u, "source": ""}), "Usage": "host" + (f": {label}" if label else "")}
 
 
-def usage_advice(u, median_tokens=None):
+def usage_advice(u, median_tokens=None, round_usage=None):
     """Advice from a job's usage: never a gate."""
     out = []
     if not u:
@@ -935,8 +1054,9 @@ def usage_advice(u, median_tokens=None):
     if median_tokens and u["processed"] > 2 * median_tokens:
         out.append(f"advice: {tokens_text(u['processed'])} tokens, over twice the median of {tokens_text(median_tokens)} "
                    "for merged jobs here")
-    if u["compactions"] >= 3:
-        out.append(f"advice: {u['compactions']} compactions: past the context window again and again; hand back and "
+    meter = round_usage if round_usage is not None else u
+    if meter.get("compactions") is not None and meter["compactions"] >= 3:
+        out.append(f"advice: {meter['compactions']} compactions: past the context window again and again; hand back and "
                    "restart from a brief with what is done so far")
     if u["subagents"] and u["sub_share"] > 0.5:
         out.append(f"advice: sub-agents spent {round(100 * u['sub_share'])}% of its tokens: give them narrower tasks, "

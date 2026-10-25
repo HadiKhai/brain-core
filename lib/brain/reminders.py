@@ -5,6 +5,7 @@ import json
 import os
 import re
 
+from . import briefs as _m_briefs
 from . import common as _m_common
 from . import briefs as _m_briefs
 from . import guard as _m_guard
@@ -114,7 +115,8 @@ def usage_restart_item(inst, n, row):
                 raise ValueError('restart receipt bound reached')
             episode = os.urandom(12).hex()
             data['usage'][key] = {'job': _m_jobs.job_key(row), 'baseline': baseline,
-                                  'episode': episode, 'at': inst.now()}
+                                  'episode': episode, 'at': inst.now(),
+                                  'round_at': record.get('round_at') or (record.get('at') if record and not record.get('episode') else None)}
         budget_text = str(budget) if budget else 'not configured'
         shown = {k: value if value is not None else 'unknown' for k, value in delta.items()}
         command = _m_briefs.restart_command(n, row)
@@ -145,8 +147,12 @@ def acknowledge_usage_restart(inst, n, row):
         if not usage or any(type(usage.get(k)) is not int or usage[k] < 0
                             for k in ('compactions', 'processed')):
             raise ValueError('restart usage unavailable; baseline not acknowledged')
-        data['usage'][key] = {'job': _m_jobs.job_key(row), 'baseline': {
-            k: usage[k] for k in ('compactions', 'processed')}, 'episode': None, 'at': inst.now()}
+        baseline = {k: usage[k] for k in ('compactions', 'processed')}
+        active = usage.get('active_minutes')
+        if type(active) is int and active >= 0:
+            baseline['active_minutes'] = active
+        data['usage'][key] = {'job': _m_jobs.job_key(row), 'baseline': baseline,
+                              'episode': None, 'at': inst.now(), 'round_at': inst.now()}
 
 
 def inbox_source_id(n, line):

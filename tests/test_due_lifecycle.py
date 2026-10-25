@@ -118,7 +118,7 @@ class DueLifecycle(Scenario):
         self.assertEqual(dipped, first)
         self.m.acknowledge_usage_restart(self.inst, self.n, self.row)
         after = {i['condition']: i['id'] for i in self.advice()}
-        self.assertEqual(set(after), {'budget-hours', 'budget-tokens', 'compaction-limit'})
+        self.assertEqual(set(after), set())  # Delivered restart gives the replacement its own allowance.
         self.assertTrue(set(after.values()).isdisjoint(first.values()))
         self.stats['open'][0]['Job'] = 'job/brush'
         self.m.write_jobs(self.inst, self.n, [{**self.row, 'Job': 'job/brush'}])

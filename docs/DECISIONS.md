@@ -54,25 +54,51 @@ brief, then checks that the brief retains the expected runtime and model. Its
 cases cover class defaults, a node runtime pin, node and instance class routing,
 and inherited model configuration without activating inherited runtime policy.
 
-## D003: Project restart limits as protected coordinator work
 
-Usage limits produce a protected `job-restart` due item for the job's owning
-coordinator: at least three compactions or at least twice a known positive token
-limit, measured from the existing successful rebrief baseline. Each counter can
-trigger independently; missing evidence remains unknown. An open episode stays
-open through missing telemetry or a changed limit until a successful rebrief or
-terminal job evidence resolves it. Terminal handbacks, locally merged and closed
-jobs do not acquire restart work. A manual compaction-restart rebrief also sets
-the usage baseline when no usage scan preceded it.
 
-The existing episode receipt keeps due and watcher identities stable as counts
-change. Restart work blocks `due --quiet`, cannot be acknowledged or deferred,
-and belongs to the decision wake kinds, so it does not depend on informational
-usage advice. The coordinator executes the restart through the existing brief
-command; reading due never stops or launches a worker.
+## D701: Restart budgets have independent round counters
 
-Coordinator rotation uses the selected current runtime session's measured
-context with a default threshold of 300000 tokens. Explicit token and turn
-settings retain precedence, and unavailable session evidence creates no invented
-usage or rotation event. Tests cover exact boundaries, independent and unknown
-counters, terminal jobs, episode renewal and the quiet-due control path.
+Lifetime usage remains the accounting source for ledger totals, forecasts and
+historical comparisons. A successfully delivered restart brief records a private
+baseline for processed tokens, compactions and available active minutes. Ordinary
+brief regeneration does not reset that baseline. Manual compaction restart signals
+use the same acknowledgement path. Failed brief delivery leaves it unchanged.
+
+Budget and compaction warnings subtract this baseline. Active time budgets use the
+measured minutes since restart when available; older receipts fall back to elapsed
+time since acknowledgement. Unknown counters remain unknown and counter regression
+refuses rather than creating spare allowance. Opening a subsequent restart episode
+retains the current round's start. The dashboard consumes a separate `round_usage`
+projection while lifetime usage remains available.
+
+## D702: Usage caches track append offsets and permission metadata
+
+Per-transcript aggregates, including exact job time windows, persist their parsed
+byte offsets in the private spend cache. File identity, size, nanosecond timestamps,
+mode and link count invalidate reused data; replacements, truncations and same-size
+rewrites rebuild it. Growing append-only transcripts resume at the saved whole-line
+offset. Per-job total caches contain aggregate counts and a hashed input signature,
+never transcript text or workspace paths.
+
+Live snapshots share one metadata revision across jobs. That revision includes
+allowed and forbidden source roots, transcript metadata, hand-back changes and
+job bindings; an unchanged caller revision cannot retain newly appended or forbidden
+data. Cached host figures retain precedence. Read-only dashboard requests may use
+existing caches and keep progress in memory, but never publish spend files. A later
+explicit accounting request may publish that progress. Cache schema version 6
+rebuilds older aggregates automatically. Full dashboard latency also depends on
+its worktree, readiness and due callers.
+
+## D703: Routed selections are checked against returned adapter receipts
+
+`brain launch-check` compares an explicit declared provider instance, model and
+options with actual returned host receipt fields. Provider aliases in declarations
+must agree. Options may be objects or unique id/value descriptor arrays; string
+and boolean values retain their types. Empty options must be explicit. Missing,
+ambiguous or malformed fields return unknown; unequal fields return mismatch.
+Both statuses exit nonzero. The checker accepts the host's structured-content
+wrapper, bounds file reads and rejects duplicate JSON keys.
+
+The command is read-only, invokes no host, and prints no supplied identifiers or
+option values. A match attests only that returned metadata matches the declared
+route. It neither enforces provider execution nor proves which model actually ran.

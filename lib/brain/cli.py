@@ -23,6 +23,7 @@ from . import jobs as _m_jobs
 from . import handback_queue as _m_handback_queue
 from . import dispatcher as _m_dispatcher
 from . import knowledge as _m_knowledge
+from . import launch_receipts as _m_launch_receipts
 from . import land_checks as _m_land_checks
 from . import messages as _m_messages
 from . import machine as _m_machine
@@ -115,7 +116,7 @@ READ_ONLY = {"cmd_show", "cmd_tree", "cmd_status", "cmd_now", "cmd_jobs", "cmd_s
              "cmd_brief", "cmd_hire", "cmd_reports", "cmd_brains", "cmd_use", "cmd_machine", "cmd_usable",
              "cmd_item_list", "cmd_item_show", "cmd_wt_list", "cmd_selftest", "cmd_init", "cmd_hook", "cmd_hook_approve", "cmd_help",
              "cmd_dashboard", "cmd_ready", "cmd_usage", "cmd_scan", "cmd_scrub", "cmd_history",
-             "cmd_gate_lock", "cmd_version", "cmd_connect", "cmd_recall", "cmd_proposals", "cmd_changes", "cmd_heavy", "cmd_rehearse", "cmd_policy"}
+             "cmd_launch_check", "cmd_gate_lock", "cmd_version", "cmd_connect", "cmd_recall", "cmd_proposals", "cmd_changes", "cmd_heavy", "cmd_rehearse", "cmd_policy"}
 
 
 def writes(a):
@@ -188,6 +189,8 @@ def main():
         opt("--operator", required=True), opt("--title", required=True), opt("--runtimes", default="claude,codex"),
         opt("--host", default="t3"), opt("--tz", default="UTC"),
         opt("--name", help="short name for `brain -b <name>` (default: the folder's name)"))
+    cmd("launch-check", _m_launch_receipts.cmd_launch_check, "compare routed selection with returned host receipt metadata", "id",
+        opt("--selection-file", required=True), opt("--receipt-file", required=True))
     cmd("usage", _m_usage.cmd_usage, "account-wide subscription usage (agents read the machine cache)",
         opt("action", choices=["install", "uninstall"], nargs="?"), opt("--json", action="store_true"),
         opt("--refresh", action="store_true"), opt("--watch", action="store_true"),
