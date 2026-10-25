@@ -1,4 +1,5 @@
 """Hosts mechanics for Brain."""
+import contextlib
 import datetime
 import hashlib
 import json
@@ -32,6 +33,7 @@ WAKE_INTERVAL = 120
 WAKE_TIMEOUT = 10
 WAKE_DEDUP_SECONDS = 86400
 WAKE_USER_AGENT = "brain-wake/1"
+WAKE_TERMINAL_KINDS = ("machine-exited", "machine-completed")
 WAKE_CLOCK = time  # Tests can replace this binding without changing stdlib polling clocks.
 
 
@@ -78,7 +80,7 @@ def wake_start(inst, n):
 
 def wake_request_key(inst, n, reason):
     target, _ = wake_target(inst, n)
-    owner = _m_wake_turns.wake_turn_binding(inst, target) if _m_wake_turns.wake_turn_enabled(target) else ''
+    owner = _m_wake_turns.wake_turn_binding(inst, target)
     return hashlib.sha256((n['id'] + '\0' + reason + ('\0' + owner if owner else '')).encode()).hexdigest()
 
 
@@ -103,7 +105,116 @@ WAKE_BOOKKEEPING_KINDS = (
 
 def wake_known_kind(kind):
     from . import watch as _m_watch
-    return kind == 'inbox' or kind in _m_watch.WATCH_DECISION_KINDS or kind in WAKE_BOOKKEEPING_KINDS
+    return kind == 'inbox' or kind in WAKE_TERMINAL_KINDS or kind in _m_watch.WATCH_DECISION_KINDS or kind in WAKE_BOOKKEEPING_KINDS
+
+
+def wake_terminal_receipt(inst, identity):
+    """Terminal identities never expire or change with routing/redaction of a reason."""
+    if not isinstance(identity, str) or not re.fullmatch(r'[0-9a-f]{64}', identity):
+        raise ValueError('invalid terminal wake identity')
+    return inst.root / '.brain' / 'wake' / ('terminal-' + identity + '.sent')
+
+
+def wake_terminal_delivered(inst, identity, quarantine=False):
+    path = wake_terminal_receipt(inst, identity)
+    _m_common.safe_target(path)
+    try:
+        content = path.read_bytes()
+    except FileNotFoundError:
+        return False
+    if content == b'delivered\n':
+        return True
+    # Reads before the delivery fence are nonmutating. The fenced recheck
+    # preserves unknown bytes before sending, and only acceptance writes .sent.
+    if quarantine:
+        path.replace(path.with_name('terminal-invalid-' + os.urandom(8).hex() + '.bin'))
+    return False
+
+
+def wake_accept_write(path, value):
+    """Retry accepted-delivery publication without re-entering the transport."""
+    try:
+        _m_common.atomic_write(path, value)
+    except OSError:
+        _m_common.atomic_write(path, value)
+
+
+@contextlib.contextmanager
+def wake_delivery_lock(inst):
+    """Destination locks precede this nonblocking instance-wide delivery fence.
+
+    Terminal identities outlive their routes, so claim, recheck, send and receipt
+    must be serialized across destinations. Never wait holding a destination lock.
+    """
+    import fcntl
+    path = inst.root / '.brain/wake/delivery.lock'
+    _m_common.safe_target(path)
+    fd = os.open(path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(fd, 'a+') as stream:
+        if os.fstat(stream.fileno()).st_nlink != 1:
+            raise ValueError('linked wake delivery lock')
+        try:
+            fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            yield False
+            return
+        yield True
+
+
+def wake_owner_binding(inst, n):
+    target, command = wake_target(inst, n)
+    return hashlib.sha256(json.dumps([target['id'], target['local'].get('coordinator'), command]).encode()).hexdigest()
+
+
+def wake_shown_path(inst, n):
+    return wake_directory(inst, n) / ('shown-' + wake_owner_binding(inst, n) + '.json')
+
+
+def wake_shown_read(path):
+    _m_common.safe_target(path)
+    if not path.exists():
+        return set()
+    value = json.loads(path.read_text())
+    if (not isinstance(value, dict) or value.get('version') != 1 or not isinstance(value.get('ids'), list)
+            or any(not isinstance(key, str) or not re.fullmatch(r'[0-9a-f]{64}', key) for key in value['ids'])):
+        raise ValueError('invalid shown wake acknowledgements')
+    return set(value['ids'])
+
+
+def wake_shown(inst, n):
+    """Only successful snapshots for this live binding acknowledge shown work.
+
+    This does not reserve a coordinator turn or acknowledge future arrivals.
+    Legacy history has no acknowledgement authority; retain its display baseline.
+    """
+    shown = set()
+    try:
+        shown.update(wake_shown_read(wake_shown_path(inst, n)))
+    except (OSError, ValueError):
+        pass  # preserve unknown evidence; valid delivery history can still certify work
+    try:
+        binding = wake_owner_binding(inst, n)
+        shown.update(i['id'] for row in wake_history(wake_directory(inst, n))
+                     if row.get('ack_binding') == binding for i in row.get('snapshot', []))
+    except (OSError, ValueError):
+        pass  # unknown evidence never certifies delivery
+    return shown
+
+
+def wake_ack_shown(inst, n, snapshot):
+    """Keep delivery acknowledgements independently of bounded display history."""
+    if not snapshot:
+        return
+    path = wake_shown_path(inst, n)
+    shown = wake_shown(inst, n) | {i['id'] for i in snapshot}
+    try:
+        previous = wake_shown_read(path)
+    except (OSError, ValueError):
+        if path.exists():
+            path.replace(path.with_name('shown-invalid-' + os.urandom(8).hex() + '.json'))
+        previous = set()
+    if shown != previous or not path.exists():
+        wake_accept_write(path, json.dumps({'version': 1, 'ids': sorted(shown)}) + '\n')
 
 
 def wake_item_refs(items):
@@ -249,7 +360,7 @@ def wake_retire_due_pending(path, current):
         _m_common.atomic_write(path, json.dumps({**value, 'items': allowed}) + '\n')
 
 
-def wake_actionable_pending(inst, path):
+def wake_actionable_pending(inst, path, terminal_quarantine=False):
     """Retire identified old machine transitions without dropping unknown questions."""
     try:
         value, refs = wake_pending_value(path)
@@ -271,8 +382,12 @@ def wake_actionable_pending(inst, path):
                              for scope in [_m_machine.machine_scope(inst, n['id'])[1]] if scope in holds}
         except (Exception, SystemExit):
             pass  # unknown state must not retire an undelivered hold or mixed question
-    allowed = [i for i in refs if (value.get('explicit_kinds') is True or i['kind'] == 'inbox'
-                                   or i['kind'] in _m_watch.WATCH_DECISION_KINDS)
+    shown = wake_shown(inst, inst.node(urllib.parse.unquote(path.parent.name)))
+    allowed = [i for i in refs if i['id'] not in shown
+               and not (i['kind'] in WAKE_TERMINAL_KINDS and
+                        wake_terminal_delivered(inst, i['id'], quarantine=terminal_quarantine))
+               and (value.get('explicit_kinds') is True or i['kind'] == 'inbox'
+                                   or i['kind'] in _m_watch.WATCH_DECISION_KINDS or i['kind'] in WAKE_TERMINAL_KINDS)
                and i['kind'] != 'machine'
                and not (i['kind'] == 'machine-hold' and current_holds is not None and i['id'] not in current_holds)
                and not (i['kind'] == 'machine-alert' and (recovered or identity and i['id'] != identity))]
@@ -348,8 +463,13 @@ def request_wake(inst, n, reason, items=None, explicit=False):
                     refs = wake_item_refs(original)
                 except ValueError:
                     refs = original  # retain contradictory evidence for fail-open delivery
-            _m_common.atomic_write(pending, json.dumps({'items': refs, **({'binding': _m_wake_turns.wake_turn_binding(inst, target)}
-                              if _m_wake_turns.wake_turn_enabled(target) else {}),
+            shown = wake_shown(inst, target)
+            allowed = [i for i in refs if i['id'] not in shown and
+                       (i['kind'] not in WAKE_TERMINAL_KINDS or not wake_terminal_delivered(inst, i['id']))]
+            if refs and not allowed:
+                return True
+            refs = allowed
+            _m_common.atomic_write(pending, json.dumps({'items': refs, 'binding': _m_wake_turns.wake_turn_binding(inst, target),
                               **({'explicit_kinds': True} if explicit else {})}) + '\n')
         wake_start(inst, target)
         return True
@@ -374,12 +494,16 @@ def wake_reason_summary(refs, pending=()):
                      for label, count in sorted(counts.items())) or str(max(1, len(pending))) + ' new request(s)'
 
 
-def wake_delivery_reason(refs, pending):
+def wake_delivery_reason(refs, pending, inst=None):
     reasons = []
     for item in refs:
         key = item['id']
         key = key if re.fullmatch(r'[0-9a-f]{64}', key) else hashlib.sha256(key.encode()).hexdigest()
-        cause = ('escalation tier' if item['kind'] in ('overdue-question', 'blocked-overdue', 'machine-alert')
+        from . import machine as _m_machine
+        cause = (_m_machine.machine_exit_notice(inst, key)
+                 if item['kind'] in WAKE_TERMINAL_KINDS and inst is not None and hasattr(_m_machine, 'machine_exit_notice')
+                 else 'held step exited; read its recorded reason' if item['kind'] in WAKE_TERMINAL_KINDS
+                 else 'escalation tier' if item['kind'] in ('overdue-question', 'blocked-overdue', 'machine-alert')
                  else 'new or changed')
         reasons.append(cause + ' item ' + key)
     return '; '.join(reasons or ['new request ' + (path.stem if re.fullmatch(r'[0-9a-f]{64}', path.stem)
@@ -574,70 +698,84 @@ def wake_drain(inst, n, once=False):
                     return
                 if not command:
                     return
-                try:
-                    history = wake_history(directory)
-                except (OSError, ValueError):
-                    # Preserve damaged evidence, but never hold a question behind log repair.
-                    broken = directory / 'history.json'
-                    if broken.exists():
-                        broken.replace(directory / ('history-invalid-' + os.urandom(8).hex() + '.json'))
-                    history = []
-                refs = wake_delivery_items(current, target, pending)
-                action, turn_token = _m_wake_turns.wake_turn_prepare(current, target, pending, refs)
-                if action == 'hold':
-                    attempted.update(path.name for path in pending)
-                    return
-                snapshot = wake_snapshot(current, target, refs)
-                if history:
-                    before = history[-1].get('snapshot', history[-1]['items'])
-                else:
-                    # An upgraded watcher already knows old queued/delivered identities.
-                    # Do not bring those back merely because delivery logs are new.
-                    from . import watch as _m_watch
+                with wake_delivery_lock(current) as acquired:
+                    if not acquired:
+                        return
+                    pending = [path for path in pending
+                               if wake_actionable_pending(current, path, terminal_quarantine=True)]
+                    if not pending and not _m_wake_turns.wake_turn_stuck(current, target):
+                        return
                     try:
-                        known = set(_m_watch.watch_state(current).get('seen', [])) - {i['id'] for i in refs}
+                        history = wake_history(directory)
                     except (OSError, ValueError):
-                        known = set()
-                    before = [i for i in snapshot if i['id'] in known]
-                _m_common.atomic_write(last, str(WAKE_CLOCK.time()))  # failures are rate-limited too
-                inflight = directory / 'inflight.json'
-                try:
-                    _m_common.atomic_write(inflight, json.dumps({'before': before}) + '\n')
-                except OSError:
-                    pass  # comparison bookkeeping cannot suppress a question
-                try:
-                    reason = (wake_reason_summary(refs, pending) if turn_token else wake_delivery_reason(refs, pending))
-                    if action == 'reminder':
-                        reason = 'Coordinator wake remains unconsumed for 30 minutes.'
-                    sent = wake_send(command, reason=reason)
-                    status = 200 if sent else "delivery failed"
-                except WakeRefused as error:
-                    sent, status = False, error.args[0]
-                except Exception:
-                    sent, status = False, "transport error"
-                if action != 'reminder':
-                    _m_wake_turns.wake_turn_finish(current, target, turn_token, sent)
-                if sent and action != 'reminder':
-                    for path in pending:  # one generic tick covers all currently queued reasons
-                        _m_common.atomic_write(path.with_suffix(".sent"), "delivered\n")
-                        path.unlink(missing_ok=True)
-                    # Logging cannot undo delivery and cause another model wake on retry.
+                        # Preserve damaged evidence, but never hold a question behind log repair.
+                        broken = directory / 'history.json'
+                        if broken.exists():
+                            broken.replace(directory / ('history-invalid-' + os.urandom(8).hex() + '.json'))
+                        history = []
+                    refs = wake_delivery_items(current, target, pending)
+                    action, turn_token = _m_wake_turns.wake_turn_prepare(current, target, pending, refs)
+                    if action == 'hold':
+                        attempted.update(path.name for path in pending)
+                        return
+                    snapshot = wake_snapshot(current, target, refs)
+                    if history:
+                        before = history[-1].get('snapshot', history[-1]['items'])
+                    else:
+                        # An upgraded watcher already knows old queued/delivered identities.
+                        # Do not bring those back merely because delivery logs are new.
+                        from . import watch as _m_watch
+                        try:
+                            known = set(_m_watch.watch_state(current).get('seen', [])) - {i['id'] for i in refs}
+                        except (OSError, ValueError):
+                            known = set()
+                        before = [i for i in snapshot if i['id'] in known]
+                    _m_common.atomic_write(last, str(WAKE_CLOCK.time()))  # failures are rate-limited too
+                    inflight = directory / 'inflight.json'
                     try:
-                        _m_common.atomic_write(directory / 'history.json', json.dumps({'version': 1,
-                            'deliveries': (history + [{'at': WAKE_CLOCK.time(), 'items': refs, 'reason': reason,
-                                'before': before, 'snapshot': snapshot}])[-100:]}) + '\n')
+                        _m_common.atomic_write(inflight, json.dumps({'before': before}) + '\n')
                     except OSError:
-                        status = 'delivered; history write failed'
-                try:
-                    inflight.unlink(missing_ok=True)
-                except OSError:
-                    pass  # an unlocked in-flight file is ignored by readers
-                try:
-                    wake_record(directory, command, status)
-                except OSError:
-                    pass  # diagnostic bookkeeping cannot undo a successful delivery
-                if once:
-                    return
+                        pass  # comparison bookkeeping cannot suppress a question
+                    try:
+                        reason = (wake_reason_summary(refs, pending) if turn_token else wake_delivery_reason(refs, pending, current))
+                        if action == 'reminder':
+                            reason = 'Coordinator wake remains unconsumed for 30 minutes.'
+                        sent = wake_send(command, reason=reason)
+                        status = 200 if sent else "delivery failed"
+                    except WakeRefused as error:
+                        sent, status = False, error.args[0]
+                    except Exception:
+                        sent, status = False, "transport error"
+                    if action != 'reminder':
+                        _m_wake_turns.wake_turn_finish(current, target, turn_token, sent)
+                    if sent and action != 'reminder':
+                        for item in refs:
+                            if item['kind'] in WAKE_TERMINAL_KINDS:
+                                wake_accept_write(wake_terminal_receipt(current, item['id']), 'delivered\n')
+                        try:
+                            wake_ack_shown(current, target, snapshot)
+                        except OSError:
+                            status = 'delivered; shown acknowledgement write failed'
+                        for path in pending:  # one generic tick covers all currently queued reasons
+                            wake_accept_write(path.with_suffix(".sent"), "delivered\n")
+                            path.unlink(missing_ok=True)
+                        # Logging cannot undo delivery and cause another model wake on retry.
+                        try:
+                            wake_accept_write(directory / 'history.json', json.dumps({'version': 1,
+                                'deliveries': (history + [{'at': WAKE_CLOCK.time(), 'items': refs, 'reason': reason,
+                                    'before': before, 'snapshot': snapshot, 'ack_binding': wake_owner_binding(current, target)}])[-100:]}) + '\n')
+                        except OSError:
+                            status = 'delivered; history write failed'
+                    try:
+                        inflight.unlink(missing_ok=True)
+                    except OSError:
+                        pass  # an unlocked in-flight file is ignored by readers
+                    try:
+                        wake_record(directory, command, status)
+                    except OSError:
+                        pass  # diagnostic bookkeeping cannot undo a successful delivery
+                    if once:
+                        return
     except BaseException:
         owned = False  # unexpected errors leave durable pending state for due, not a crash loop
         raise

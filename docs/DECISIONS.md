@@ -69,3 +69,19 @@ The receipt is reserved before transport and consumption fences its completion,
 including a coordinator that runs due before transport returns. Consumption merges
 complete same-binding arrivals and leaves damaged records available for delivery.
 This mechanism cannot determine whether a host is idle or draining its queue.
+
+
+## D502: Durable wake acceptance is separate from display history
+
+Port the retained outbox's binding-scoped shown-item ledger and terminal receipts.
+Only successful frozen snapshots acknowledge shown identities; later arrivals
+remain deliverable. The ledger outlives bounded history. Damaged evidence does not
+certify delivery and is retained before replacement. A single retry of receipt
+publication does not call transport again.
+
+Terminal identities (`machine-exited`, `machine-completed`) outlive route changes
+and generic request TTL. Destination drains acquire a nonblocking instance-wide
+fence, recheck accepted identities, send and publish the receipt before releasing
+it. This prevents competing root/owner routes delivering one terminal event twice.
+Physical death or ambiguous remote acceptance before durable publication still
+cannot guarantee exactly-once delivery. Producers own durable reason capture.

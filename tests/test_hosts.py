@@ -1422,3 +1422,186 @@ class WakeConsumption(Scenario):
         self.enqueue(1)
         self.enqueue(2)
         self.assertEqual(self.send.call_count, 2)
+
+
+class AckAllShown(Scenario):
+    def setUp(self):
+        super().setUp()
+        patch = mock.patch.dict(os.environ, self.env)
+        patch.start()
+        self.addCleanup(patch.stop)
+        self.m = core_loader.SourceFileLoader('outbox_fixture', str(CORE / 'bin/brain')).load_module()
+        self.root = self.init('oak')
+        self.b(self.root, 'set', 'root', 'wake=fixture-send', 'coordinator=fixture-root')
+        self.inst = self.m.Instance(self.root)
+
+    def test_shown_item_queued_later_is_acknowledged_but_new_item_wakes(self):
+        m, n = self.m, self.inst.node('root')
+        refs = [{'id': str(i) * 64, 'kind': 'inbox'} for i in (1, 2, 3)]
+        group = {'root': {'items': refs[:2]}}
+        with mock.patch.object(m, 'watch_groups', return_value=group), \
+                mock.patch.object(m, 'wake_start'), mock.patch.object(m, 'WAKE_INTERVAL', 0), \
+                mock.patch.object(m, 'wake_send', return_value=True) as send:
+            self.assertTrue(m.request_wake(self.inst, n, 'fixture first', items=refs[:1]))
+            m.wake_drain(self.inst, n, once=True)
+            self.assertTrue(m.request_wake(self.inst, n, 'fixture later', items=refs[1:2]))
+            m.wake_drain(self.inst, n, once=True)
+            self.assertEqual(send.call_count, 1)
+            group['root']['items'] = refs
+            self.assertTrue(m.request_wake(self.inst, n, 'fixture mixed', items=refs[1:]))
+            m.wake_drain(self.inst, n, once=True)
+            self.assertEqual(send.call_count, 2)
+            history = m.wake_history(m.wake_directory(self.inst, n))
+            self.assertEqual(history[-1]['items'], refs[2:])
+
+    def test_failed_transport_cannot_acknowledge_snapshot(self):
+        m, n = self.m, self.inst.node('root')
+        refs = [{'id': str(i) * 64, 'kind': 'inbox'} for i in (1, 2)]
+        with mock.patch.object(m, 'watch_groups', return_value={'root': {'items': refs}}), \
+                mock.patch.object(m, 'wake_start'), mock.patch.object(m, 'WAKE_INTERVAL', 0):
+            m.request_wake(self.inst, n, 'fixture first', items=refs[:1])
+            with mock.patch.object(m, 'wake_send', return_value=False):
+                m.wake_drain(self.inst, n, once=True)
+            m.request_wake(self.inst, n, 'fixture second', items=refs[1:])
+            with mock.patch.object(m, 'wake_send', return_value=True) as send:
+                m.wake_drain(self.inst, n, once=True)
+            self.assertEqual(send.call_count, 1)
+            self.assertEqual(m.wake_history(m.wake_directory(self.inst, n))[-1]['items'], refs)
+
+    def test_enqueue_during_transport_only_covers_the_frozen_snapshot(self):
+        m, n = self.m, self.inst.node('root')
+        refs = [{'id': str(i) * 64, 'kind': 'inbox'} for i in (1, 2, 3)]
+        group = {'root': {'items': refs[:2]}}
+        with mock.patch.object(m, 'watch_groups', return_value=group), \
+                mock.patch.object(m, 'wake_start'), mock.patch.object(m, 'WAKE_INTERVAL', 0):
+            m.request_wake(self.inst, n, 'fixture first', items=refs[:1])
+            def send(command, reason=None):
+                group['root']['items'] = refs
+                m.request_wake(self.inst, n, 'fixture during send', items=refs[1:])
+                return True
+            with mock.patch.object(m, 'wake_send', side_effect=send):
+                m.wake_drain(self.inst, n, once=True)
+            with mock.patch.object(m, 'wake_send', return_value=True) as next_send:
+                m.wake_drain(self.inst, n, once=True)
+            self.assertEqual(next_send.call_count, 1)
+            self.assertEqual(m.wake_history(m.wake_directory(self.inst, n))[-1]['items'], refs[2:])
+
+    def test_successful_snapshot_is_scoped_to_coordinator_and_transport(self):
+        m, n = self.m, self.inst.node('root')
+        refs = [{'id': str(i) * 64, 'kind': 'inbox'} for i in (1, 2)]
+        with mock.patch.object(m, 'watch_groups', return_value={'root': {'items': refs}}), \
+                mock.patch.object(m, 'wake_start'), mock.patch.object(m, 'WAKE_INTERVAL', 0), \
+                mock.patch.object(m, 'wake_send', return_value=True) as send:
+            m.request_wake(self.inst, n, 'fixture first', items=refs[:1])
+            m.wake_drain(self.inst, n, once=True)
+            self.b(self.root, 'set', 'root', 'coordinator=fixture-replacement', 'wake=fixture-other-send')
+            self.inst = m.Instance(self.root)
+            n = self.inst.node('root')
+            m.request_wake(self.inst, n, 'fixture replacement', items=refs[1:])
+            m.wake_drain(self.inst, n, once=True)
+            self.assertEqual(send.call_count, 2)
+
+    def test_snapshot_acknowledgement_retries_transient_history_write(self):
+        m, n = self.m, self.inst.node('root')
+        refs = [{'id': str(i) * 64, 'kind': 'inbox'} for i in (1, 2)]
+        atomic, failed = m.atomic_write, []
+        def write(path, value):
+            if path.name == 'history.json' and not failed:
+                failed.append(True)
+                raise OSError('fixture transient history write')
+            return atomic(path, value)
+        with mock.patch.object(m, 'watch_groups', return_value={'root': {'items': refs}}), \
+                mock.patch.object(m, 'wake_start'), mock.patch.object(m, 'WAKE_INTERVAL', 0), \
+                mock.patch.object(m, 'wake_send', return_value=True) as send:
+            m.request_wake(self.inst, n, 'fixture first', items=refs[:1])
+            with mock.patch.object(m, 'atomic_write', side_effect=write):
+                m.wake_drain(self.inst, n, once=True)
+            self.assertTrue(failed)
+            m.request_wake(self.inst, n, 'fixture already shown', items=refs[1:])
+            m.wake_drain(self.inst, n, once=True)
+            self.assertEqual(send.call_count, 1)
+
+    def test_acknowledgement_outlives_display_history(self):
+        m, n = self.m, self.inst.node('root')
+        refs = [{'id': str(i) * 64, 'kind': 'inbox'} for i in (1, 2)]
+        with mock.patch.object(m, 'watch_groups', return_value={'root': {'items': refs}}), \
+                mock.patch.object(m, 'wake_start'), mock.patch.object(m, 'WAKE_INTERVAL', 0), \
+                mock.patch.object(m, 'wake_send', return_value=True) as send:
+            m.request_wake(self.inst, n, 'fixture first', items=refs[:1])
+            m.wake_drain(self.inst, n, once=True)
+            # Display history is bounded and is not an acknowledgement ledger.
+            history = m.wake_directory(self.inst, n) / 'history.json'
+            history.write_text(json.dumps({'version': 1, 'deliveries': []}))
+            m.request_wake(self.inst, n, 'fixture already shown', items=refs[1:])
+            m.wake_drain(self.inst, n, once=True)
+            self.assertEqual(send.call_count, 1)
+
+    def test_shown_receipt_preserves_corrupt_bytes_and_retries_publication(self):
+        m, n = self.m, self.inst.node('root')
+        refs = [{'id': str(i) * 64, 'kind': 'inbox'} for i in (1, 2)]
+        path = m.wake_shown_path(self.inst, n)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b'\xfftorn')
+        atomic, failed = m.atomic_write, []
+        def write(target, value):
+            if target == path and not failed:
+                failed.append(True)
+                raise OSError('fixture transient shown receipt failure')
+            return atomic(target, value)
+        with mock.patch.object(m, 'watch_groups', return_value={'root': {'items': refs}}), \
+                mock.patch.object(m, 'wake_start'), mock.patch.object(m, 'WAKE_INTERVAL', 0), \
+                mock.patch.object(m, 'wake_send', return_value=True) as send:
+            m.request_wake(self.inst, n, 'fixture first', items=refs[:1])
+            with mock.patch.object(m, 'atomic_write', side_effect=write):
+                m.wake_drain(self.inst, n, once=True)
+            self.assertTrue(failed)
+            self.assertEqual([p.read_bytes() for p in path.parent.glob('shown-invalid-*.json')], [b'\xfftorn'])
+            (path.parent / 'history.json').write_text(json.dumps({'version': 1, 'deliveries': []}))
+            m.request_wake(self.inst, n, 'fixture already shown', items=refs[1:])
+            m.wake_drain(self.inst, n, once=True)
+            self.assertEqual(send.call_count, 1)
+
+
+    def test_terminal_receipt_retry_and_cross_route_fence(self):
+        m = self.m
+        self.b(self.root, 'new', 'child', '--title', 'Child')
+        self.b(self.root, 'set', 'child', 'coordinator=fixture-child', 'wake=fixture-child-send')
+        self.inst = m.Instance(self.root)
+        owner, root = self.inst.node('child'), self.inst.node('root')
+        ref = {'id': 'a' * 64, 'kind': 'machine-exited'}
+        original, faults, calls = m.atomic_write, [], []
+        def write(path, value):
+            if path == m.wake_terminal_receipt(self.inst, ref['id']) and not faults:
+                faults.append(True)
+                raise OSError('fixture receipt publication fault')
+            return original(path, value)
+        def send(command, reason=None):
+            calls.append(command)
+            m.wake_drain(self.inst, root, once=True)
+            return True
+        with mock.patch.object(m, 'wake_start'), mock.patch.object(m, 'WAKE_INTERVAL', 0), \
+                mock.patch.object(m, 'wake_snapshot', return_value=[ref]), \
+                mock.patch.object(m, 'wake_send', side_effect=send), mock.patch.object(m, 'atomic_write', side_effect=write):
+            m.request_wake(self.inst, root, 'fixture-root', items=[ref])
+            m.request_wake(self.inst, owner, 'fixture-owner', items=[ref])
+            m.wake_drain(self.inst, owner, once=True)
+            m.wake_drain(self.inst, root, once=True)
+            self.assertEqual(calls, ['fixture-child-send'])
+            self.assertTrue(faults)
+            self.assertTrue(m.wake_terminal_delivered(self.inst, ref['id']))
+            self.assertFalse(list(m.wake_directory(self.inst, root).glob('*.pending')))
+
+    def test_same_reason_rotated_binding_gets_its_own_delivery(self):
+        m, n = self.m, self.inst.node('root')
+        ref = {'id': 'b' * 64, 'kind': 'inbox'}
+        with mock.patch.object(m, 'wake_start'), mock.patch.object(m, 'WAKE_INTERVAL', 0), \
+                mock.patch.object(m, 'wake_snapshot', return_value=[ref]), \
+                mock.patch.object(m, 'wake_send', return_value=True) as send:
+            m.request_wake(self.inst, n, 'fixture-same-reason', items=[ref])
+            m.wake_drain(self.inst, n, once=True)
+            self.b(self.root, 'set', 'root', 'coordinator=fixture-new')
+            self.inst = m.Instance(self.root)
+            n = self.inst.node('root')
+            m.request_wake(self.inst, n, 'fixture-same-reason', items=[ref])
+            m.wake_drain(self.inst, n, once=True)
+            self.assertEqual(send.call_count, 2)
