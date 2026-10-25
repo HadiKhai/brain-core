@@ -628,3 +628,30 @@ class RoundTwo(AutonomyProject):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DecisionApplicability(Scenario):
+    def test_dated_decisions_require_scope_and_external_claim_sources(self):
+        r = self.init('alice')
+        decisions = r / 'decisions.md'
+        decisions.write_text('# Decisions\n\n## 2026-05-01 10:00 +00:00: Route policy\nExternal fact: Vendor sessions expire after one hour.\nWhy: Integration contract.\n')
+        out = self.b(r, 'check')
+        self.assertIn('decision has no Applies to:', out)
+        self.assertIn('external fact has no valid Source:', out)
+        decisions.write_text(decisions.read_text() + 'Applies to: app/auth\nSource: https://vendor.example/policy\n')
+        out = self.b(r, 'check')
+        self.assertNotIn('decision has no Applies to:', out)
+        self.assertNotIn('external fact has no valid Source:', out)
+
+    def test_sources_are_explicit_and_legacy_cutoff_is_configurable(self):
+        r = self.init('alice')
+        self.b(r, 'set', 'root', 'decision_scope_since=2026-05-01T00:00:00+00:00')
+        path = r / 'decisions.md'
+        path.write_text('# Decisions\n\n## 2026-04-01 10:00 +00:00: Legacy\nWhy: Earlier choice.\n\n## 2026-05-02 10:00 +00:00: Provider rate limit\nApplies to: \nVendor fact: Provider allows ten requests.\nSource: someone said so\n')
+        out = self.b(r, 'check')
+        self.assertEqual(out.count('decision has no Applies to:'), 1)
+        self.assertIn('external fact has no valid Source:', out)
+        path.write_text(path.read_text().replace('Applies to: \n', 'Applies to: app\n').replace('someone said so', 'probe: curl --head https://vendor.example/policy'))
+        out = self.b(r, 'check')
+        self.assertNotIn('decision has no Applies to:', out)
+        self.assertNotIn('external fact has no valid Source:', out)

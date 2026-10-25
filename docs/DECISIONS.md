@@ -67,3 +67,14 @@ Proposal acceptance, hiring, recall and connection discovery apply this distinct
 without changing stored scopes. Worker-facing item output removes governance
 lines when those lines contain a forbidden principal. Final briefs remain subject
 to strict content checks.
+
+## D1002: Validate decision scope and external fact citations
+
+Dated entries in node decision logs carry an explicit `Applies to:` scope.
+`check` warns on missing scope and on external fact claims without a `Source:`
+URL or `probe:` command. Explicit fact labels and common vendor/provider policy
+phrasing trigger the citation check. This validates evidence metadata only; it
+never executes a probe or claims that a cited source proves the statement.
+
+`decision_scope_since` on a node or instance can exempt earlier dated entries.
+Without a cutoff, all dated entries are checked. Template examples are ignored.
