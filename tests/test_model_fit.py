@@ -104,4 +104,3 @@ class ModelFitRouting(Scenario):
         brief = self.b(root, 'brief', 'root', '--task', 'Inspect sample', '--class', 'build')
         self.assertIn('"model": "swift"', brief)
         self.assertIn('model=model fit (build/codex/high;', brief)
-
