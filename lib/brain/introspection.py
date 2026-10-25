@@ -173,6 +173,30 @@ def permission_request_advisories(events, job_key, now):
                         'evidence': [grants[key], event['id']]})
     return out
 
+
+def acknowledgement_wait_advisories(events, job_key, now):
+    receipts, latest = {}, None
+    for event in introspection_observed(events, now, job_key):
+        data = event['data']
+        ref = data.get('evidence', {}).get('ref')
+        if data['fact_type'] == 'handoff_delivered' and data.get('state') == 'done' and ref:
+            if data.get('reason_code') == 'ack_not_required':
+                receipts[ref] = event['id']
+            else:
+                receipts.pop(ref, None)
+        elif data['fact_type'] == 'acknowledgement_required':
+            receipts.pop(ref, None)
+        if data['fact_type'] == 'phase_changed':
+            latest = event
+    data = latest['data'] if latest else {}
+    ref = data.get('evidence', {}).get('ref')
+    if (data.get('phase') != 'acknowledgement' or data.get('state') != 'waiting'
+            or data.get('reason_code') != 'delivery_receipt' or ref not in receipts):
+        return []
+    return [{'kind': 'needless-acknowledgement-wait', 'informational': True,
+             'text': 'A delivered handoff explicitly requires no acknowledgement; continue within the existing contract.',
+             'evidence': [receipts[ref], latest['id']]}]
+
 def introspection_queue(inst, n):
     now = inst.now_dt().timestamp()
     record = _m_coordinators.coordinator_host_runs(inst, now).get(n['id'])
@@ -203,6 +227,7 @@ def introspection_snapshot(inst, n, branch=None, hours=24, limit=50):
         receipts = list(reader(inst, n, branch=row['Job'])) if reader else []
         view['advisories'] = review_class_advisories(receipts, view['job_key'])
         view['advisories'] += permission_request_advisories(facts, view['job_key'], now)
+        view['advisories'] += acknowledgement_wait_advisories(facts, view['job_key'], now)
         view['review_evidence'] = 'receipt_hook' if reader else 'unavailable'
         views.append(view)
     result = {'version': 1, 'node': n['id'], 'jobs': views, 'partial': len(selected) > limit,

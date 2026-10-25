@@ -144,3 +144,27 @@ class PermissionAdvisories(unittest.TestCase):
         self.assertEqual(self.m.permission_request_advisories([grant,changed,request],KEY,self.now),[])
         wrong=fact('permission_requested',2,phase='execution',head='c'*40,reason_code='run_checks',evidence={'ref':'grant-a'})
         self.assertEqual(self.m.permission_request_advisories([grant,wrong],KEY,self.now),[])
+
+
+class AcknowledgementAdvisories(unittest.TestCase):
+    def setUp(self):
+        self.m=core_loader.SourceFileLoader('ack_advisory_fixture',str(CORE/'bin/brain')).load_module()
+        self.now=datetime.datetime(2026,1,1,11,tzinfo=datetime.timezone.utc)
+
+    def test_wait_for_explicitly_unrequired_receipt_is_advised_until_progress(self):
+        delivered=fact('handoff_delivered',1,state='done',reason_code='ack_not_required',evidence={'ref':'delivery-a'})
+        wait=fact('phase_changed',2,phase='acknowledgement',state='waiting',reason_code='delivery_receipt',evidence={'ref':'delivery-a'})
+        result=self.m.acknowledgement_wait_advisories([delivered,wait],KEY,self.now)
+        self.assertEqual(len(result),1)
+        self.assertEqual(result[0]['kind'],'needless-acknowledgement-wait')
+        progress=fact('phase_changed',3,phase='execution',state='working')
+        self.assertEqual(self.m.acknowledgement_wait_advisories([delivered,wait,progress],KEY,self.now),[])
+
+    def test_required_missing_or_different_receipt_does_not_advise(self):
+        wait=fact('phase_changed',3,phase='acknowledgement',state='waiting',reason_code='delivery_receipt',evidence={'ref':'delivery-a'})
+        self.assertEqual(self.m.acknowledgement_wait_advisories([wait],KEY,self.now),[])
+        delivered=fact('handoff_delivered',1,state='done',reason_code='ack_not_required',evidence={'ref':'delivery-b'})
+        self.assertEqual(self.m.acknowledgement_wait_advisories([delivered,wait],KEY,self.now),[])
+        delivered['data']['evidence']['ref']='delivery-a'
+        required=fact('acknowledgement_required',2,evidence={'ref':'delivery-a'})
+        self.assertEqual(self.m.acknowledgement_wait_advisories([delivered,required,wait],KEY,self.now),[])

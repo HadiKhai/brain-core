@@ -1633,3 +1633,9 @@ For agents: introspection flags an observed permission request inside an exact
 recorded authorization scope; revocations, phase exits and changed heads prevent
 false matches. The advisory grants no authority.
 After upgrading: supply typed authorization/request facts with stable receipt refs.
+
+## Needless acknowledgement-wait advice
+
+For agents: introspection joins current acknowledgement waits to explicit
+no-ack-required delivery receipts. Required or unknown acknowledgements stay quiet.
+After upgrading: producers record actual delivery facts; printing is insufficient.

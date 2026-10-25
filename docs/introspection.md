@@ -52,3 +52,10 @@ action `reason_code` and authorization receipt in `evidence.ref`. Revocation or
 leaving that phase clears the comparison. Unknown authorization, changed heads
 and other scopes do not trigger advice. The advisory never grants authority or
 interprets contract prose; an outward action still follows its actual policy.
+
+Needless acknowledgement-wait advice joins a current `phase_changed` fact
+(`phase=acknowledgement`, `state=waiting`, `reason_code=delivery_receipt`) to an
+observed `handoff_delivered` with `state=done`, `reason_code=ack_not_required` and
+the same delivery reference. Missing delivery or an explicit
+`acknowledgement_required` fact prevents advice. A later phase transition clears
+the current wait. Printing a message is not delivery evidence.

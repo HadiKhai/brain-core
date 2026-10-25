@@ -127,3 +127,10 @@ Detect requests repeated after an explicit authorization observation only when
 job generation, head, phase, action and authorization reference all match. A
 revocation or phase exit invalidates the comparison. This is informational audit
 advice, not an authorization engine; no prose inference can grant permission.
+
+## D109: Acknowledgement waits need explicit delivery and obligation facts
+
+Advise only when the current observed phase is waiting for a named delivery
+receipt whose delivered handoff explicitly required no acknowledgement. A later
+acknowledgement requirement or progress clears the comparison. Never infer
+receipt obligations from silence or treat a formatted message as delivered.
