@@ -53,3 +53,13 @@ The regression reads the first committed ledger revision before generating a
 brief, then checks that the brief retains the expected runtime and model. Its
 cases cover class defaults, a node runtime pin, node and instance class routing,
 and inherited model configuration without activating inherited runtime policy.
+
+## D1201: Observe node gate ownership before core replacement
+
+An upgrade inventory observes each node's native gate lock as well as machine
+admission and repository train ownership. Admission may be disabled while a gate
+still runs. An exclusively held gate refuses upgrade; a retained unlocked gate
+file is idle. The observer never reads holder metadata as proof or removes locks.
+Linked, nonregular or unreadable gate inventory refuses before core mutation.
+This check covers native wrappers; unregistered external processes cannot be
+inferred from job labels or elapsed time.

@@ -243,6 +243,50 @@ class R2VersionAndUpgrade(Scenario):
         self.upgrade_attempt(m, inst)
         self.assertEqual(lock.read_bytes(), before)
 
+    def test_live_node_gate_refuses_without_admission_or_train_lock(self):
+        import fcntl
+        m = self.module()
+        inst, n = self.upgrade_fixture(m)
+        path = m.gate_path(inst.root, n["id"])
+        path.parent.mkdir(parents=True)
+        with path.open("w+") as held:
+            held.write("metadata is not ownership")
+            held.flush()
+            fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            before = path.read_bytes()
+            self.assertIn("node gate", self.upgrade_attempt(m, inst, refused=True))
+            self.assertEqual(path.read_bytes(), before)
+        self.upgrade_attempt(m, inst)
+        self.assertEqual(path.read_bytes(), before)
+
+    def test_unknown_node_gate_inventory_refuses_before_upgrade(self):
+        m = self.module()
+        inst, n = self.upgrade_fixture(m)
+        for kind in ("symlink", "hardlink", "directory", "fifo"):
+            with self.subTest(kind=kind):
+                path = m.gate_path(inst.root, n["id"])
+                path.parent.mkdir(parents=True, exist_ok=True)
+                other = path.parent / "other"
+                if kind == "symlink":
+                    other.write_text("keep")
+                    path.symlink_to(other)
+                elif kind == "hardlink":
+                    other.write_text("keep")
+                    os.link(other, path)
+                elif kind == "directory":
+                    path.mkdir()
+                else:
+                    os.mkfifo(path)
+                try:
+                    self.assertIn("node gate", self.upgrade_attempt(m, inst, refused=True))
+                finally:
+                    if path.is_dir():
+                        path.rmdir()
+                    else:
+                        path.unlink()
+                    if other.exists():
+                        other.unlink()
+
     def test_m7_parked_blocked_done_jobs_and_worktrees_upgrade_with_notice(self):
         m = self.module()
         inst, n = self.upgrade_fixture(m)
