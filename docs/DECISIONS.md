@@ -56,49 +56,22 @@ and inherited model configuration without activating inherited runtime policy.
 
 
 
-## D701: Restart budgets have independent round counters
+## D101: Configurable required separation reasons
 
-Lifetime usage remains the accounting source for ledger totals, forecasts and
-historical comparisons. A successfully delivered restart brief records a private
-baseline for processed tokens, compactions and available active minutes. Ordinary
-brief regeneration does not reset that baseline. Manual compaction restart signals
-use the same acknowledgement path. Failed brief delivery leaves it unchanged.
+The shared brief reason resolver accepts a node-local `separation_policy` of
+`warn` (the compatible default) or `required`. Required mode refuses a missing
+reason before brief output or route recording. Explicit reasons, contract reasons
+and independent review defaults satisfy it; an explicit urgent waiver remains
+available. Invalid policy values fail closed. This controls brief generation;
+it does not infer a safe agent cap or cancel overlapping work.
 
-Budget and compaction warnings subtract this baseline. Active time budgets use the
-measured minutes since restart when available; older receipts fall back to elapsed
-time since acknowledgement. Unknown counters remain unknown and counter regression
-refuses rather than creating spare allowance. Opening a subsequent restart episode
-retains the current round's start. The dashboard consumes a separate `round_usage`
-projection while lifetime usage remains available.
+## D102: Nested build-order authority stays explicit
 
-## D702: Usage caches track append offsets and permission metadata
-
-Per-transcript aggregates, including exact job time windows, persist their parsed
-byte offsets in the private spend cache. File identity, size, nanosecond timestamps,
-mode and link count invalidate reused data; replacements, truncations and same-size
-rewrites rebuild it. Growing append-only transcripts resume at the saved whole-line
-offset. Per-job total caches contain aggregate counts and a hashed input signature,
-never transcript text or workspace paths.
-
-Live snapshots share one metadata revision across jobs. That revision includes
-allowed and forbidden source roots, transcript metadata, hand-back changes and
-job bindings; an unchanged caller revision cannot retain newly appended or forbidden
-data. Cached host figures retain precedence. Read-only dashboard requests may use
-existing caches and keep progress in memory, but never publish spend files. A later
-explicit accounting request may publish that progress. Cache schema version 6
-rebuilds older aggregates automatically. Full dashboard latency also depends on
-its worktree, readiness and due callers.
-
-## D703: Routed selections are checked against returned adapter receipts
-
-`brain launch-check` compares an explicit declared provider instance, model and
-options with actual returned host receipt fields. Provider aliases in declarations
-must agree. Options may be objects or unique id/value descriptor arrays; string
-and boolean values retain their types. Empty options must be explicit. Missing,
-ambiguous or malformed fields return unknown; unequal fields return mismatch.
-Both statuses exit nonzero. The checker accepts the host's structured-content
-wrapper, bounds file reads and rejects duplicate JSON keys.
-
-The command is read-only, invokes no host, and prints no supplied identifiers or
-option values. A match attests only that returned metadata matches the declared
-route. It neither enforces provider execution nor proves which model actually ran.
+Only unchecked Markdown list tasks inside a Build order section are suggested.
+Bullets and ordered list markers may nest; completed, parked, operator-waiting or
+already-open parent entries suppress their descendants. Section heading depth
+defines its boundary. Comments and fenced examples remain excluded. Backtick code
+spans preserve exact branch names including legal commas and semicolons; plain
+mentions end at whitespace or Markdown brackets, with a terminal period ignored.
+Use code spans for branch names next to ambiguous prose punctuation. Existing
+capacity arithmetic and unreadable-ledger behavior remain unchanged.
