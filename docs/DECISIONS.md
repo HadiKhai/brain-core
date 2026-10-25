@@ -90,3 +90,14 @@ and required case/runtime coverage. A zero passes only with hash-matching source
 receipts and collector-attested full-window coverage. Missing or changed evidence
 stays unknown. The command automates scoring, not incident discovery or proof of
 the collector's completeness. Overall success requires every metric to pass.
+
+## D105: Diagnostic permits require canonical source receipts
+
+A diagnostic episode binds an open job generation, actual worktree HEAD and
+question. Source references are checked against tracked regular Git blobs and
+line bounds. Callers explicitly classify a finding as source-readable, ambiguous
+or runtime-dependent and state their answer or evidence gap. Source-readable
+findings cannot admit probes. Probe setup permits are idempotent while pending;
+two recorded setup failures refuse a third. Receipts remain private and immutable
+across a refusal. This is a supported command policy, not a shell interceptor or
+an inferred semantic classifier.

@@ -22,6 +22,7 @@ from . import instance as _m_instance
 from . import jobs as _m_jobs
 from . import handback_queue as _m_handback_queue
 from . import dispatcher as _m_dispatcher
+from . import diagnostics as _m_diagnostics
 from . import knowledge as _m_knowledge
 from . import land_checks as _m_land_checks
 from . import messages as _m_messages
@@ -325,6 +326,11 @@ def main():
         opt("action", choices=['run']), 'id', opt('--once', action='store_true'), opt('--request-id'))
     cmd("dispatch", _m_dispatcher.cmd_dispatch, "bounded read-only plan of explicit root/operator asks; empty scan is silent",
         opt('--limit', type=int, default=50), opt('--node-limit', type=int, default=200))
+    cmd("diagnose", _m_diagnostics.cmd_diagnose, "source-first diagnosis and bounded recorded probe setup permits",
+        "id", opt("action", choices=["plan", "outcome"]), opt("--branch", required=True),
+        opt("--question", required=True), opt("--source", action="append"),
+        opt("--finding", choices=["source", "ambiguous", "runtime"]), opt("--reason"),
+        opt("--attempt"), opt("--state", choices=["setup-failed", "observed"]))
     cmd("scorecard", _m_scorecard.cmd_scorecard, "score a supplied evidence window; missing evidence stays unknown",
         "id", opt("--file", required=True, help="version 1 measurement manifest"))
     cmd("show", _m_status.cmd_show, "everything about one node, including this machine's bindings", "id")

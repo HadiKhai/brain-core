@@ -1604,3 +1604,10 @@ For agents: `brain scorecard <node> --file <manifest>` scores supplied source
 receipts, timing targets and required runtime cases. Missing, changed, unsafe or
 incomplete evidence stays unknown. Synthetic test success proves no real night.
 After upgrading: no migration or collector is installed; see docs/scorecard.md.
+
+## Source-first diagnostic permits
+
+For agents: `brain diagnose` records canonical source findings before admitting
+one tracked probe attempt. Source answers do not admit probes; two setup failures
+refuse a third within the same job/HEAD/question. Probe execution is external.
+After upgrading: no migration; see docs/diagnostics.md for receipt and CLI format.
