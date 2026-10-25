@@ -118,3 +118,9 @@ restart counters and live snapshot fields. Recorded identities, decision-relevan
 numbers, dates, queue ownership, HTTP results and readiness facts remain visible
 and fingerprinted. Runtime-switch details and retained delivery results are part
 of the render, without running their commands or probes.
+
+
+The retained fingerprint test for `rehearse=required` predates removal of rehearsal
+as a readiness gate. Its current regression asserts that the retired option does
+not restore a gate or change status semantics; the fingerprint feature does not
+reintroduce that obsolete behavior.

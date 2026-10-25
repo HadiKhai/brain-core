@@ -1186,8 +1186,14 @@ class RenderedFingerprint(Scenario):
     def test_a02_current_verify_export_port(self):
         self.assert_change(lambda: self.n['fm'].__setitem__('verify_export_port', 'true'), rejected=True)
 
-    def test_a03_current_rehearse(self):
-        self.assert_change(lambda: self.n['fm'].__setitem__('rehearse', 'required'), rejected=True)
+    def test_a03_retired_rehearse_option_does_not_restore_a_gate(self):
+        # The retained test predates removal of rehearsal as a readiness gate.
+        self.m.refresh_status(self.inst, self.n)
+        before = self.m.due_evidence(self.inst, self.n)[1]
+        self.n['fm']['rehearse'] = 'required'
+        self.assertTrue(self.m.ready_state(self.inst, self.n, self.branch, display=True)['ready'])
+        self.assertEqual(before, self.m.due_evidence(self.inst, self.n)[1])
+        self.assertIsNone(self.m.status_lag(self.inst, self.n))
 
     def test_a04_current_verify_lanes(self):
         self.assert_change(lambda: self.n['fm'].__setitem__('verify_lanes', json.dumps([
