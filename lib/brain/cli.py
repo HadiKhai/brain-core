@@ -32,6 +32,7 @@ from . import policy as _m_policy
 from . import reports as _m_reports
 from . import rehearse as _m_rehearse
 from . import rotation as _m_rotation
+from . import scorecard as _m_scorecard
 from . import schedules as _m_schedules
 from . import settings_batch as _m_settings_batch
 from . import spend as _m_spend
@@ -111,7 +112,7 @@ def reexec_into_instance_core():
 
 # Commands that change nothing in the instance: they never wait for the lock.
 READ_ONLY = {"cmd_show", "cmd_tree", "cmd_status", "cmd_now", "cmd_jobs", "cmd_stale", "cmd_ui", "cmd_guard",
-             "cmd_due", "cmd_inbox", "cmd_index",
+             "cmd_due", "cmd_inbox", "cmd_index", "cmd_scorecard",
              "cmd_brief", "cmd_hire", "cmd_reports", "cmd_brains", "cmd_use", "cmd_machine", "cmd_usable",
              "cmd_item_list", "cmd_item_show", "cmd_wt_list", "cmd_selftest", "cmd_init", "cmd_hook", "cmd_hook_approve", "cmd_help",
              "cmd_dashboard", "cmd_ready", "cmd_usage", "cmd_scan", "cmd_scrub", "cmd_history",
@@ -324,6 +325,8 @@ def main():
         opt("action", choices=['run']), 'id', opt('--once', action='store_true'), opt('--request-id'))
     cmd("dispatch", _m_dispatcher.cmd_dispatch, "bounded read-only plan of explicit root/operator asks; empty scan is silent",
         opt('--limit', type=int, default=50), opt('--node-limit', type=int, default=200))
+    cmd("scorecard", _m_scorecard.cmd_scorecard, "score a supplied evidence window; missing evidence stays unknown",
+        "id", opt("--file", required=True, help="version 1 measurement manifest"))
     cmd("show", _m_status.cmd_show, "everything about one node, including this machine's bindings", "id")
     cmd("set", _m_nodes.cmd_set, "set fields: brain set <id> key=value ... (host IDs and home paths stay on this machine)",
         "id", opt("pairs", nargs="+"))

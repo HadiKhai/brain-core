@@ -1597,3 +1597,10 @@ ten minutes. Busy-run alerts require a fresh exact-thread host observation with
 an actual start and queued wakes; native pending files alone cannot prove busy.
 After upgrading: no host changes. Optional exporter schema and evidence limits
 are in docs/coordinator-observations.md; the core does not install an exporter.
+
+## Evidence-linked observation scorecards
+
+For agents: `brain scorecard <node> --file <manifest>` scores supplied source
+receipts, timing targets and required runtime cases. Missing, changed, unsafe or
+incomplete evidence stays unknown. Synthetic test success proves no real night.
+After upgrading: no migration or collector is installed; see docs/scorecard.md.

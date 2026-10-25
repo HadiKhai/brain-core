@@ -82,3 +82,11 @@ local queue pressure. Host busy alerts additionally require a fresh, bound-threa
 snapshot with an actual run start and queued wakes. Missing host facts remain
 unknown. The consumer never infers a start from an inventory update timestamp.
 Episode identities exclude display ages and reuse the ordinary watcher receipt.
+
+## D104: Score outcomes only from complete, verified observation receipts
+
+Scorecards evaluate explicit observation windows against stable numeric targets
+and required case/runtime coverage. A zero passes only with hash-matching source
+receipts and collector-attested full-window coverage. Missing or changed evidence
+stays unknown. The command automates scoring, not incident discovery or proof of
+the collector's completeness. Overall success requires every metric to pass.
