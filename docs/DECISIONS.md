@@ -101,3 +101,13 @@ findings cannot admit probes. Probe setup permits are idempotent while pending;
 two recorded setup failures refuse a third. Receipts remain private and immutable
 across a refusal. This is a supported command policy, not a shell interceptor or
 an inferred semantic classifier.
+
+## D106: Causal progress and communication metrics use typed observations
+
+Causal views join an exact ledger job generation to its contract outcome,
+observed phase transitions and declared dependency keys. Controlled reason codes
+supply owner roles, clearing conditions and next gates; absent evidence remains
+unknown. Communication metrics measure native queue pressure, recorded merges,
+joined question episodes and explicitly classified turns. Stable references
+deduplicate turns and questions. Reconstructed or future records cannot establish
+measured phases or elapsed times. Counts retain their recorded-evidence scope.

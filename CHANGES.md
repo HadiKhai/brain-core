@@ -1611,3 +1611,11 @@ For agents: `brain diagnose` records canonical source findings before admitting
 one tracked probe attempt. Source answers do not admit probes; two setup failures
 refuse a third within the same job/HEAD/question. Probe execution is external.
 After upgrading: no migration; see docs/diagnostics.md for receipt and CLI format.
+
+## Causal progress and communication metrics
+
+For agents: `brain introspect` shows recorded outcome/phase/blocker/owner/clearing
+condition/next gate and dependency states. It also reports queue depth, question
+waits, recorded merges/hour and observed decision-turn share, retaining unknowns.
+After upgrading: typed event producers supply observed phase and communication
+facts; no host query or transcript classifier is installed. See docs/introspection.md.
