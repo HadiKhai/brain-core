@@ -53,3 +53,17 @@ The regression reads the first committed ledger revision before generating a
 brief, then checks that the brief retains the expected runtime and model. Its
 cases cover class defaults, a node runtime pin, node and instance class routing,
 and inherited model configuration without activating inherited runtime policy.
+
+## D1001: Keep governance identifiers out of content screening and worker output
+
+Exact configured principal identifiers in library and specialist scope metadata
+are governance values. Screen all other metadata and content, including duplicate
+governance keys, with the existing never-name checks. Use the same frontmatter
+grammar for parsing and streaming scans. Limit on-disk exemptions to recognized
+instance library, role and lesson paths; external copies and ordinary files stay
+strict, including Git index blobs and symlinks.
+
+Proposal acceptance, hiring, recall and connection discovery apply this distinction
+without changing stored scopes. Worker-facing item output removes governance
+lines when those lines contain a forbidden principal. Final briefs remain subject
+to strict content checks.

@@ -180,7 +180,9 @@ def connect_sources(inst, n, skipped=None):
             files.append({"ref": f"{n['id']}:{rel}", "path": str(f.relative_to(inst.root))})
     for sp in _m_knowledge.find_specialists(inst):
         if sp["node"]["id"] == n["id"]:
-            if _m_guard.find_terms(sp["id"] + "\n" + _m_knowledge.specialist_text(sp), _m_knowledge.specialist_terms(inst, sp, [sp["node"], n], nodes)):
+            terms = _m_knowledge.specialist_terms(inst, sp, [sp["node"], n], nodes)
+            if (_m_guard.find_terms(sp["id"], terms)
+                    or _m_knowledge.specialist_holds_terms(sp, terms, inst.principals)):
                 skipped.append(sp["id"])
                 continue
             for name in ("role.md", "lessons.md"):
@@ -191,7 +193,9 @@ def connect_sources(inst, n, skipped=None):
         fm = it["fm"]
         if fm.get("status", "active") in ("active", "proposed") and n["id"] in (
                 [fm.get("source_node")] + _m_common.lst(fm.get("source_nodes"))):
-            if _m_guard.find_terms(it["path"].name + "\n" + it["path"].read_text(), _m_knowledge.learning_terms(inst, fm, [n], nodes)):
+            terms = _m_knowledge.learning_terms(inst, fm, [n], nodes)
+            if (_m_guard.find_terms(it["path"].name, terms)
+                    or _m_guard.find_terms(it["path"].read_text(), terms, principals=inst.principals)):
                 skipped.append(fm.get("id", it["path"].stem))
                 continue
             files.append({"ref": f"item:{fm.get('id', it['path'].stem)}", "path": str(it["path"].relative_to(inst.root))})
