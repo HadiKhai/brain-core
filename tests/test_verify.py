@@ -895,6 +895,9 @@ class VerifyInputDiagnostics(Scenario):
         r, home, wt = self.inputs_job()
         env = wt / 'apps/web/.env.local'
         env.write_text('FAKE_VALUE=first-fixture\n')
+        # Keep the whole-tree cleanliness assertion below: this fixture must let
+        # generated status facts commit instead of exercising hourly coalescing.
+        (r / '.brain/events-status-commits.json').unlink(missing_ok=True)
         self.finish(r)
         packet = json.loads(self.packet().read_text())['ready']
         files = self.private_map(packet)
@@ -905,6 +908,8 @@ class VerifyInputDiagnostics(Scenario):
         sidecar = self.packet().parent / packet['input_files_ref']
         self.assertEqual(self.git('status', '--porcelain', cwd=r), '')
         self.assertEqual(self.git('ls-files', str(sidecar.relative_to(r)), cwd=r), '')
+        self.assertEqual(self.git('check-ignore', str(sidecar.relative_to(r)), cwd=r).strip(),
+                         str(sidecar.relative_to(r)))
         # Reuse preserves the existing local map rather than multiplying sidecars.
         self.assertIn('reused the green run', self.finish(r))
         self.assertEqual(json.loads(self.packet().read_text())['ready']['input_files_ref'], packet['input_files_ref'])

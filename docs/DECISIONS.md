@@ -2066,3 +2066,19 @@ have not been written. Existing native verification logs capture the terminal
 stream without command changes; private structured evidence is opt-in. The
 configuration is a shared lane input. Collection and business assertions remain
 unchanged; synthetic proofs cover interruption, xdist timeout and fixture errors.
+
+## D20001: Bind lane evidence to the complete recorded PATH
+
+Lane context hashes include the same environment snapshot stored in the ready
+packet, including the complete PATH and the distinction between unset and empty
+values. Resolving command tokens alone cannot identify interpreters selected by
+an env shebang or helpers launched from a module. Reading readiness restores the
+recorded environment; a subsequent handback fingerprints its current environment
+and reruns lanes when that context changes. Existing executable identity checks
+remain in place.
+
+The private input-sidecar regression permits its fixture's generated status
+facts to commit before asserting whole-tree cleanliness. Hourly status commit
+coalescing otherwise leaves an unrelated generated status edit. The original
+clean-tree, private-hash, missing-evidence and reuse assertions remain intact;
+an explicit ignore-rule assertion also checks the sidecar is ignored by Git.
