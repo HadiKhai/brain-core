@@ -244,3 +244,11 @@ history. A question's internal queue-classification flag does not invalidate a
 previous display baseline. This preserves the established history schema while
 keeping already-shown questions out of the next `due --since-wake` view, including
 when the host starts before transport returns.
+
+
+## D514: Retain invalid-input warning episodes independently of host export
+
+A malformed manual worker observation remains one warning episode until that
+manual source becomes valid. Joining an optional valid host export cannot clear
+the manual warning marker. Unrelated inbox delivery and host observations still
+proceed while the damaged manual source is retained.

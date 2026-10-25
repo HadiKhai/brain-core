@@ -479,6 +479,7 @@ def watch_failures(inst, nodes, acknowledged, warnings):
         records = data.get('runs', [])
         if not isinstance(records, list):
             raise ValueError('worker runs must be a list')
+        warnings.discard('worker-runs-invalid')
     except (OSError, ValueError):
         if 'worker-runs-invalid' not in warnings:
             print('watch: worker-runs invalid; failure processing skipped')
@@ -489,7 +490,6 @@ def watch_failures(inst, nodes, acknowledged, warnings):
         records += _m_host_observations.host_export_runs(inst)
     except (OSError, ValueError, TypeError):
         pass  # unknown host export never suppresses manual records or other source work
-    warnings.discard('worker-runs-invalid')
     for n in nodes:
         rows = _m_jobs.read_jobs(n) or []
         workers = n['local'].get('workers', {})
