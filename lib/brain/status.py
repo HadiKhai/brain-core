@@ -22,6 +22,7 @@ from . import nodes as _m_nodes
 from . import recurrence as _m_recurrence
 from . import learning as _m_learning
 from . import feedback as _m_feedback
+from . import teaching as _m_teaching
 from . import proposals as _m_proposals
 from . import schedules as _m_schedules
 from . import rotation as _m_rotation
@@ -820,6 +821,9 @@ def status_facts(inst, n, state, known_merges):
     rules, roles, items = pending_imports(inst, n)
     if rules or roles or items:
         lines += ["", f"Imported, unreviewed (inactive): {rules} rule file(s), {roles} role(s), {items} proposed item(s)."]
+    teaching = _m_teaching.teaching_summary(inst, n)
+    if teaching["copies"]:
+        lines += ["", f"Checked native copies tracked: {teaching['copies']}"]
     feedback = _m_feedback.feedback_projection(inst, n)
     lines += ["", f"Open feedback: {sum(row['status'] == 'open' for row in feedback)}"]
     for metric in _m_learning.enforcement_metrics(inst, n):

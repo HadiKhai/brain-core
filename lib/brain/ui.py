@@ -20,6 +20,7 @@ from . import jobs as _m_jobs
 from . import knowledge as _m_knowledge
 from . import learning as _m_learning
 from . import feedback as _m_feedback
+from . import teaching as _m_teaching
 from . import machine as _m_machine
 from . import nodes as _m_nodes
 from . import rehearse as _m_rehearse
@@ -291,6 +292,7 @@ def ui_node(inst, n, since, cache=None, partial=False):
         "never_name": len(terms), "spend": lookback,
         "enforcement": _m_learning.enforcement_metrics(inst, n),
         "feedback": _m_feedback.feedback_projection(inst, n),
+        "native_teaching": _m_teaching.teaching_summary(inst, n),
         "jobs": {**js, "rows": [{k: hide(v) for k, v in r.items()} for r in (_m_jobs.read_jobs(n) or [])
                               if r.get("Outcome") != "external"],
                                            "open": [{k: hide(v) for k, v in r.items()} for r in js["open"]],

@@ -90,8 +90,12 @@ def run_feedback_check(inst, node, row):
     if not all(row.get(k) for k in ('job', 'check', 'before', 'after')):
         raise ValueError('map job, check and before/after evidence before closing feedback')
     root = feedback_check_root(node, row)
-    execution_node = {**node, 'home_path': root}
-    check = _m_learning.resolve_enforcing_check(execution_node, row['check'])
+    return run_check_proof(inst, root, row['check'], row['job'])
+
+
+def run_check_proof(inst, root, check_name, job=''):
+    execution_node = {'home_path': root, 'dir': root}
+    check = _m_learning.resolve_enforcing_check(execution_node, check_name)
     if check is None:
         raise ValueError('mapped check is missing or outside its job home')
     before = hashlib.sha256(check.read_bytes()).hexdigest()
@@ -121,7 +125,7 @@ def run_feedback_check(inst, node, row):
     current = _m_common.git('rev-parse', 'HEAD', cwd=root)
     if exit_code or before != after or current.returncode or current.stdout != head.stdout:
         return None
-    return {'exit_code': 0, 'at': inst.now(), 'job': row['job'], 'check': row['check'],
+    return {'exit_code': 0, 'at': inst.now(), 'job': job, 'check': check_name,
             'check_sha256': before, 'head': head.stdout.strip(),
             'output_sha256': hashlib.sha256(excerpt).hexdigest()}
 

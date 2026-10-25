@@ -25,6 +25,7 @@ from . import dispatcher as _m_dispatcher
 from . import knowledge as _m_knowledge
 from . import learning as _m_learning
 from . import feedback as _m_feedback
+from . import teaching as _m_teaching
 from . import land_checks as _m_land_checks
 from . import messages as _m_messages
 from . import machine as _m_machine
@@ -143,6 +144,8 @@ def writes(a):
         return a.new
     if name == 'cmd_index':
         return a.record
+    if name == "cmd_teach":
+        return bool(a.file)
     if name == "cmd_feedback":
         return a.action != "list"
     if name == "cmd_enforcement":
@@ -400,6 +403,9 @@ def main():
     t.add_argument("id", nargs="+"); t.add_argument("--at")
     t.add_argument("--reviewed-by", required=True, dest="reviewed_by")
     t.set_defaults(f=_m_knowledge.cmd_specialist_accept)
+    cmd("teach", _m_teaching.cmd_teach, "prepare or apply a checked native adaptation of a usable item", "item", "node",
+        opt("--branch"), opt("--file"), opt("--to"), opt("--check"), opt("--expected-sha256"),
+        opt("--consented-by", default=""))
     cmd("feedback", _m_feedback.cmd_feedback, "record corrections and close only with an executed green check", "id",
         opt("action", nargs="?", default="list", choices=["list", "add", "map", "close"]),
         opt("value", nargs="?"), opt("--principle"), opt("--job"), opt("--check"),

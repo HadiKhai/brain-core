@@ -124,3 +124,19 @@ contains check SHA256, HEAD, job, check and timestamp. Missing evidence, a faile
 check, timeout or concurrent source change leaves feedback open. Corrupt stores
 are retained with a repair notice. This proof records the executed check result,
 not the semantic adequacy of the check or an authenticated reviewer identity.
+
+## D906: Native teaching applies an adaptation through the target harness
+
+`teach` prepares a scope-checked brief, or applies an explicitly supplied native
+adaptation with `--file --to --check`. External homes require an existing
+registered worktree and matching branch. The target file stays inside that home;
+linked files, repository metadata and generated outputs refuse. Existing files
+require an exact expected content hash. Boundary crossings require every target
+owner's explicit consent even when the item scope permits use.
+
+The target's own check must pass without changing the adaptation or source
+snapshot. Failure restores only this operation's unchanged copy; unexpected
+concurrent edits are retained. Private machine receipts bind source and native
+hashes to executed proof without putting source provenance into the native copy.
+The copy remains uncommitted for the target's normal change process; teaching
+neither propagates future updates nor publishes or accepts knowledge proposals.
