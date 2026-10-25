@@ -192,3 +192,17 @@ cancels requests or treats a prior stamp as current host evidence. The workspace
 owner remains responsible for its final branch/live-owner check and removal.
 Tests cover current settlement, retained live descendants, unknown/open jobs,
 unbinding with retained references and ownership changes after a host action.
+
+## D609: Launch recorded unbound jobs without resetting their initial allowance
+
+Native maintenance can launch an unbound open job only from its recorded original
+brief and existing workspace. An exhaustive bounded host inventory must not find
+an unbound conversation already using that checkout; such work requires explicit
+adoption. A private launch-intent receipt precedes the host call, and unknown
+outcomes require unique first-prompt recovery rather than another launch.
+
+The observed replacement workspace, branch and model must match before binding.
+Fresh source ownership is checked immediately before launch and publication.
+Initial launch never acknowledges restart usage or resets a lifetime baseline.
+Tests cover one launch/binding, unknown existing workspace ownership and lost
+launch responses. Host execution and scheduler installation are separate proof.

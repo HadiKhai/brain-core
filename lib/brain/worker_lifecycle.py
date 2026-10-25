@@ -298,3 +298,105 @@ def _restart_worker(inst, n, key, rpc):
         inst.local = latest.local
         return {'job': key, 'state': 'done', 'old_thread': old, 'thread': receipt['new']}
 
+
+def launch_worker(inst, n, key, rpc=None):
+    """Launch an unbound recorded job once, preserving its initial budget."""
+    rpc = rpc or _m_rpc.call
+    try:
+        import re
+        if not isinstance(key, str) or not re.fullmatch('[0-9a-f]{24}', key) or _m_common.outward_links(inst.root):
+            raise ValueError('launch requires exact job ownership and safe local state')
+        folder = inst.root / '.brain/wake'
+        if folder.resolve() != inst.root.resolve() / '.brain/wake':
+            raise ValueError('unsafe launch receipt directory')
+        folder.mkdir(parents=True, exist_ok=True)
+        identity = _m_jobs.digest([n['id'], key])
+        path = folder / ('launch-' + identity + '.json')
+        _m_common.safe_target(path)
+        fd = os.open(folder / ('restart-' + identity + '.lock'), os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(fd, 'a+') as lock:
+            if os.fstat(lock.fileno()).st_nlink != 1:
+                raise ValueError('linked launch lock')
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fresh, current, row = restart_source(inst, n['id'], key)
+            if row is None or current['local'].get('workers', {}).get(key):
+                return {'job': key, 'state': 'idle'}
+            workspace = restart_workspace(current, row)
+            projects, inventory, callers = _m_host.lifecycle_inventory(current, rpc)
+            def publish(value):
+                _m_machine.machine_publish(inst, path, json.dumps(value, sort_keys=True) + '\n')
+            receipt = None
+            if path.exists():
+                if path.stat().st_size > 65536:
+                    raise ValueError('launch receipt exceeds bound')
+                receipt = json.loads(path.read_text())
+                if (not isinstance(receipt, dict) or receipt.get('job') != key
+                        or receipt.get('phase') not in ('launching', 'launched', 'done')
+                        or receipt.get('workspace') != workspace):
+                    raise ValueError('invalid initial launch receipt; retained for repair')
+                if receipt['phase'] == 'done':
+                    raise ValueError('initial binding was removed after launch; no duplicate launch permitted')
+            if receipt is None:
+                # A missing binding is not proof that no outside worker exists.
+                # Refuse unknown conversations already using this checkout.
+                protected = set(callers)
+                for node in fresh.nodes():
+                    protected.update(_m_jobs.thread_reference_ids(node['local'].get('coordinator', '')))
+                if len(inventory) > 256:
+                    raise ValueError('launch inventory exceeds bounded ownership sweep')
+                for tid in sorted(set(inventory) - protected):
+                    value = _m_host.host_object(rpc, 't3_thread_read', {'threadId': tid, 'limit': 1})
+                    thread = value.get('thread')
+                    if not isinstance(thread, dict) or thread.get('threadId') != tid or 'worktreePath' not in thread:
+                        raise ValueError('launch waits for known workspace ownership')
+                    if thread['worktreePath'] == workspace:
+                        raise ValueError('existing unbound conversation uses this workspace; adopt it explicitly')
+                text, selection = restart_brief(fresh, current, row)
+                marker = 'native-launch: ' + identity + '-' + os.urandom(12).hex()
+                receipt = {'job': key, 'phase': 'launching', 'workspace': workspace,
+                           'modelSelection': selection, 'marker': marker, 'at': inst.now()}
+                publish(receipt)
+                _, checked, live = restart_source(inst, n['id'], key)
+                if live is None or checked['local'].get('workers', {}).get(key) or restart_workspace(checked, live) != workspace:
+                    raise ValueError('job changed before initial launch; intent retained')
+                response = _m_host.host_object(rpc, 't3_thread_launch', {'title': row['Job'],
+                    'projectId': current['local'].get('home_project') or projects[0],
+                    'workspaceStrategy': {'type': 'existing_worktree', 'worktreePath': workspace, 'branch': row['Job']},
+                    'modelSelection': selection, 'message': marker + '\n\n' + text})
+                new = response.get('threadId')
+                if not isinstance(new, str) or not new or new in inventory:
+                    raise ValueError('initial launch outcome unknown; no repeat permitted')
+                receipt.update(phase='launched', new=new)
+                publish(receipt)
+            if receipt['phase'] == 'launching':
+                matches = []
+                for tid in sorted(set(inventory) - callers):
+                    value = _m_host.host_object(rpc, 't3_thread_read', {'threadId': tid, 'afterPosition': 0,
+                                                                   'limit': 1, 'maxCharsPerItem': 50000})
+                    items = value.get('items', [])
+                    if items and items[0].get('createdBy') == 'user' and not items[0].get('textTruncated') and (
+                            items[0].get('text', '').splitlines()[:1] == [receipt['marker']]):
+                        matches.append(tid)
+                if len(matches) != 1:
+                    raise ValueError('initial launch outcome unknown; no repeat permitted')
+                receipt.update(phase='launched', new=matches[0])
+                publish(receipt)
+            replacement = restart_thread(rpc, receipt['new'])
+            if (replacement.get('worktreePath') != workspace or replacement.get('branch') != row['Job']
+                    or replacement.get('providerInstanceId') != receipt['modelSelection']['instanceId']
+                    or replacement.get('model') != receipt['modelSelection']['model']
+                    or replacement.get('status') not in ('preparing', 'queued', 'starting', 'running', 'completed')):
+                raise ValueError('initial worker workspace/model binding is not confirmed')
+            with _m_instance.brain_lock(inst):
+                latest, bound, live = restart_source(inst, n['id'], key)
+                if live is None or bound['local'].get('workers', {}).get(key) or restart_workspace(bound, live) != workspace:
+                    raise ValueError('job changed before initial worker binding')
+                bound['local'].setdefault('workers', {})[key] = receipt['new']
+                latest.save_local()
+                receipt['phase'] = 'done'
+                publish(receipt)
+                inst.local = latest.local
+            return {'job': key, 'state': 'done', 'thread': receipt['new']}
+    except (OSError, ValueError, _m_rpc.HostRPCError, SystemExit) as error:
+        return {'job': key, 'state': 'pending', 'reason': str(error)}
+

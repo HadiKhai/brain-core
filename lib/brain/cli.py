@@ -293,7 +293,7 @@ def main():
         opt("--usage-file", dest="usage_file", help="coordinator: the job's usage as the host reports it (JSON); "
             "wins over what transcripts show"))
     cmd("lifecycle", _m_host_lifecycle.cmd_lifecycle, "execute a native host lifecycle action with fresh ownership checks",
-        opt("action", choices=("settle", "restart", "maintain", "rotate", "accept-rotation")), "id",
+        opt("action", choices=("settle", "launch", "restart", "maintain", "rotate", "accept-rotation")), "id",
         opt("--job-key", help="restart only this exact open ledger job"),
         opt("--ticket", help="accept only this exact confirmed rotation launch"),
         opt("--session-id", help="replacement runtime actual session identity; never a host thread ID substitute"))

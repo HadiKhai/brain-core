@@ -321,9 +321,9 @@ def cmd_lifecycle(a):
     inst = _m_nodes.load()
     try:
         n = inst.node(a.id)
-        if a.action == 'restart':
+        if a.action in ('restart', 'launch'):
             from . import worker_lifecycle as _m_worker
-            result = _m_worker.restart_worker(inst, n, a.job_key)
+            result = (_m_worker.launch_worker if a.action == 'launch' else _m_worker.restart_worker)(inst, n, a.job_key)
         elif a.action in ('rotate', 'accept-rotation'):
             from . import coordinator_lifecycle as _m_coordinator
             if a.action == 'rotate':
@@ -351,7 +351,12 @@ def maintain_lifecycle(inst, n, rpc=None):
         raise ValueError('lifecycle waits for readable ownership')
     for row in rows:
         if not row.get('Ended'):
-            result['restarts'].append(_m_worker.restart_worker(inst, n, _m_jobs.job_key(row), rpc=rpc))
+            key = _m_jobs.job_key(row)
+            from . import briefs as _m_briefs
+            if not n['local'].get('workers', {}).get(key) and _m_briefs.saved_brief_inputs(n, row):
+                result['restarts'].append(_m_worker.launch_worker(inst, n, key, rpc=rpc))
+            else:
+                result['restarts'].append(_m_worker.restart_worker(inst, n, key, rpc=rpc))
     result['settlement'] = settle_closed_jobs(inst, n, rpc=rpc)
     # Only rotate measured coordinators; ordinary file-only watcher reads retain
     # their existing contract and never call this native maintenance entry.

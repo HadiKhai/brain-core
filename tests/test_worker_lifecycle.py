@@ -221,3 +221,35 @@ class WorkerLifecycle(Scenario):
         self.assertEqual(selection['model'], 'fixture-model')
         self.assertTrue(self.m.lifecycle_read(self.inst)['usage'][self.m.digest(['root', self.key])]['episode'])
 
+    def initial_tick(self):
+        owner = self.m._owners['launch_worker']
+        with mock.patch.object(owner, 'restart_brief', return_value=('Draw', {
+                'instanceId': 'codex', 'model': 'fixture-model', 'options': {'reasoningEffort': 'high'}})):
+            return self.m.launch_worker(self.inst, self.n, self.key, rpc=self.rpc)
+
+    def unbound(self):
+        self.n['local']['workers'].clear()
+        self.inst.save_local()
+        self.threads.pop('old')
+
+    def test_initial_launch_binds_once_without_resetting_lifetime_budget(self):
+        self.unbound()
+        self.assertEqual(self.initial_tick()['state'], 'done')
+        self.assertEqual(self.m.Instance(self.root).local_of('root')['workers'][self.key], 'new')
+        self.assertEqual(self.initial_tick()['state'], 'idle')
+        self.assertEqual(len(self.actions('t3_thread_launch')), 1)
+        self.assertEqual(self.m.lifecycle_read(self.inst)['usage'], {})
+
+    def test_initial_launch_preserves_unknown_worker_in_same_checkout(self):
+        self.unbound()
+        self.threads['foreign'] = self.thread('foreign', 'running', 'foreign-run')
+        self.assertEqual(self.initial_tick()['state'], 'pending')
+        self.assertEqual(self.actions('t3_thread_launch'), [])
+
+    def test_initial_launch_unknown_outcome_never_repeats(self):
+        self.unbound()
+        self.launch_unknown = True
+        self.assertEqual(self.initial_tick()['state'], 'pending')
+        self.assertEqual(self.initial_tick()['state'], 'pending')
+        self.assertEqual(len(self.actions('t3_thread_launch')), 1)
+
