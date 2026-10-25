@@ -73,3 +73,12 @@ spans preserve exact branch names including legal commas and semicolons; plain
 mentions end at whitespace or Markdown brackets, with a terminal period ignored.
 Use code spans for branch names next to ambiguous prose punctuation. Existing
 capacity arithmetic and unreadable-ledger behavior remain unchanged.
+
+## D103: Coordinator pressure requires attributable queue evidence
+
+Root receives queue pressure advisories above three items or ten minutes of
+oldest-item wait. Native pending wake identities and file timestamps establish
+local queue pressure. Host busy alerts additionally require a fresh, bound-thread
+snapshot with an actual run start and queued wakes. Missing host facts remain
+unknown. The consumer never infers a start from an inventory update timestamp.
+Episode identities exclude display ages and reuse the ordinary watcher receipt.

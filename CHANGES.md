@@ -1589,3 +1589,11 @@ For agents: idle-work detection accepts nested and numbered Markdown tasks and
 exact branch names in code spans. Parent completion, parking, operator waits and
 open jobs suppress descendants. Heading depth scopes the Build order section.
 After upgrading: no migration; use code spans around punctuation-bearing branches.
+
+## Coordinator backlog and busy-run advisories
+
+For agents: root due/watch reports bound coordinator queues above three items or
+ten minutes. Busy-run alerts require a fresh exact-thread host observation with
+an actual start and queued wakes; native pending files alone cannot prove busy.
+After upgrading: no host changes. Optional exporter schema and evidence limits
+are in docs/coordinator-observations.md; the core does not install an exporter.
