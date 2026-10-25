@@ -56,7 +56,7 @@ OUTSIDE_INPUTS = ('README.md', 'docs/**', 'ui/**/*.png', 'LICENSE')
 SHARED_INPUTS = (
     'lib/brain/common.py', 'lib/brain/instance.py', 'lib/brain/cli.py',
     'lib/brain/status.py', 'lib/brain/ui_status.py', 'lib/brain/ui_server.py',
-    'lib/brain/gate_lock.py', 'lib/brain/docker_cleanup.py',
+    'lib/brain/gate_lock.py', 'lib/brain/docker_cleanup.py', 'lib/brain/resource_leases.py',
     'lib/brain/settings_batch.py', 'lib/brain/dispatcher.py',
     'lib/brain/__init__.py', 'tests/scenario.py', 'tests/core_loader.py',
     'tests/conftest.py', 'tests/lanes.py', 'tests/check_lanes.py',

@@ -168,3 +168,25 @@ bypassed. `machine_environment` exports the recorded reduction; the command runn
 must enforce its supported command form rather than rewrite arbitrary shell/Make
 syntax. Resource-free worktree creation remains light; heavy setup needs a
 runner-owned command lifetime, separate from admission-only permission.
+
+## D808: Machine-wide cooperative service leases retain uncertain lifetimes
+
+Canonical resource keys identify shared databases, previews and services across
+nodes and instances. A stable per-resource transaction lock protects one durable
+claim; stale tokens cannot release a replacement claim. Records contain opaque
+resource/scope hashes, process birth identities and boot identity, without raw
+resource names, commands or instance paths. Acquisition of several keys rolls back
+partial claims if any resource is busy.
+
+Persistent lifetimes are the default: parent death or reboot cannot prove service
+cleanup. Successful owners explicitly release after cleanup. Failed service bodies
+retain ownership for inspection. Process-scoped leases are an explicit narrower
+option; they reclaim only after all recorded process identities are gone or a
+known boot changes. A live or unknown child retains the claim after parent loss.
+Unknown child registration records uncertainty instead of permitting reclamation.
+Leases never stop a service or delete its data.
+
+Existing runners can use `configured_resource_lease(instance, node)`, reading
+comma-separated `verify_resources` canonical keys. An absent setting performs no
+lease IO. This is cooperative exclusion: every consumer of a shared service must
+use the same key and retain its lease through actual cleanup.

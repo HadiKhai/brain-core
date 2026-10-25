@@ -1994,3 +1994,91 @@ class RecordedAdmission(Scenario):
         self.assertEqual(self.m.machine_reasons(self.good, self.m.machine_policy()), [])
         unknown = {k: v for k, v in self.good.items() if k != 'cpu_idle_pct'}
         self.assertTrue(self.m.machine_reasons(unknown, self.m.machine_policy()))
+
+class ResourceLeases(unittest.TestCase):
+    def setUp(self):
+        self.m = core_loader.SourceFileLoader('lease_fixture', str(CORE / 'bin/brain')).load_module()
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.folder = Path(self.tmp.name)
+        self.inst = argparse.Namespace(root=self.folder / 'instance')
+        self.patches = [mock.patch.object(self.m, 'machine_dir', return_value=self.folder / 'machine'),
+                        mock.patch.object(self.m, 'machine_boot_id', return_value='linux:fixture-boot'),
+                        mock.patch.object(self.m, 'process_stamp', side_effect=lambda pid: 'birth-' + str(pid))]
+        for patch in self.patches:
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def test_competing_nodes_and_instances_cannot_claim_same_service(self):
+        with self.m.resource_lease(self.inst, 'app', ['database:fixture-db']) as first:
+            other = argparse.Namespace(root=self.folder / 'other-instance')
+            with self.assertRaisesRegex(ValueError, 'resource busy'):
+                with self.m.resource_lease(other, 'review', ['database:fixture-db']):
+                    self.fail('foreign lease admitted')
+            self.assertEqual(len(first), 1)
+        with self.m.resource_lease(self.inst, 'review', ['database:fixture-db']):
+            pass
+
+    def test_prior_boot_reclaims_but_unknown_identity_keeps_lease(self):
+        receipt = self.m.resource_claim(self.inst, 'app', 'service:fixture', lifetime='process')
+        with mock.patch.object(self.m.os, 'getpid', return_value=54321), \
+                mock.patch.object(self.m, 'process_stamp', side_effect=lambda pid: 'birth-54321' if pid == 54321 else 'unknown'):
+            with self.assertRaisesRegex(ValueError, 'resource busy'):
+                self.m.resource_claim(self.inst, 'other', 'service:fixture')
+        with mock.patch.object(self.m, 'machine_boot_id', return_value='linux:new-boot'):
+            replacement = self.m.resource_claim(self.inst, 'other', 'service:fixture')
+        self.assertNotEqual(receipt['token'], replacement['token'])
+        self.assertFalse(self.m.resource_release(receipt))
+
+    def test_live_child_keeps_service_after_parent_death(self):
+        receipt = self.m.resource_claim(self.inst, 'app', 'preview:fixture', lifetime='process')
+        self.m.resource_child(receipt, 12345)
+        parent = receipt['owner'][0]
+        with mock.patch.object(self.m.os, 'getpid', return_value=54321), \
+                mock.patch.object(self.m, 'process_stamp', side_effect=lambda pid: 'birth-' + str(pid) if pid in (12345, 54321) else None):
+            with self.assertRaisesRegex(ValueError, 'resource busy'):
+                self.m.resource_claim(self.inst, 'review', 'preview:fixture')
+        with mock.patch.object(self.m, 'process_stamp', side_effect=lambda pid: None if pid == 12345 else 'birth-' + str(pid)):
+            self.assertTrue(self.m.resource_release(receipt))
+
+    def test_partial_multi_claim_rolls_back_and_redacts_resource_names_in_registry(self):
+        with self.m.resource_lease(self.inst, 'app', ['service:second']):
+            with self.assertRaisesRegex(ValueError, 'resource busy'):
+                with self.m.resource_lease(self.inst, 'review', ['service:first', 'service:second']):
+                    self.fail('partial claim admitted')
+            with self.m.resource_lease(self.inst, 'review', ['service:first']):
+                pass
+        for path in (self.folder / 'machine/resource-leases').glob('*.json'):
+            text = path.read_text()
+            self.assertNotIn('service:', text)
+            self.assertNotIn('review', text)
+            self.assertNotIn(str(self.inst.root), text)
+
+    def test_linked_registry_metadata_refuses_without_touching_target(self):
+        receipt = self.m.resource_claim(self.inst, 'app', 'database:fixture')
+        path = self.folder / 'machine/resource-leases' / (receipt['resource'] + '.json')
+        target = self.folder / 'foreign.json'
+        target.write_text('private fixture')
+        path.unlink()
+        path.symlink_to(target)
+        with self.assertRaises((OSError, ValueError)):
+            self.m.resource_claim(self.inst, 'review', 'database:fixture')
+        self.assertEqual(target.read_text(), 'private fixture')
+
+
+    def test_persistent_service_survives_owner_death_and_reboot_until_explicit_cleanup(self):
+        receipt = self.m.resource_claim(self.inst, 'app', 'database:durable')
+        with mock.patch.object(self.m, 'process_stamp', return_value=None), \
+                mock.patch.object(self.m, 'machine_boot_id', return_value='linux:new-boot'):
+            # The prospective new owner must itself have a birth identity.
+            with mock.patch.object(self.m, 'process_stamp', side_effect=lambda pid: 'new-birth'):
+                with self.assertRaisesRegex(ValueError, 'resource busy'):
+                    self.m.resource_claim(self.inst, 'review', 'database:durable')
+        self.assertTrue(self.m.resource_release(receipt))
+
+    def test_failed_service_body_retains_unverified_cleanup_ownership(self):
+        with self.assertRaisesRegex(OSError, 'partial service start'):
+            with self.m.resource_lease(self.inst, 'app', ['preview:durable']):
+                raise OSError('partial service start')
+        with self.assertRaisesRegex(ValueError, 'resource busy'):
+            self.m.resource_claim(self.inst, 'review', 'preview:durable')
