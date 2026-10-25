@@ -55,6 +55,14 @@ The server sleeps without observers and reuses its snapshot until source metadat
 
 The first output line names the serving core and its commit (`brain ui core: <path> @ <commit>`); the second is the keyed address. Look at real data only through a copy of the brain (`cp -R`), never by changing the original.
 
+`--open` reuses a listener only when its private server record and authenticated
+identity match the selected instance, code version and write mode. A matching
+instance on obsolete code is stopped through its authenticated endpoint and
+replaced on the requested port with a new key. An unrelated listener, missing
+identity or legacy server without that endpoint is left running; the command
+reports the busy port instead of opening another one. Stop such a legacy server
+through the terminal that started it before reopening the dashboard.
+
 ## Components and licenses
 
 The official shadcn CLI initialized Base UI / nova with Tailwind v4. Components under `src/components/ui/` are CLI-generated. Add components through that CLI; compose them in the page files. `shared.tsx` and `dash.tsx` contain product layout compositions (page header, KPI tile, segmented bar, sparkline, section tabs), not replacement primitives. One inset content area scrolls and chains to nothing; readers and sheets have their own bounded bodies while modal.

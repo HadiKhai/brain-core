@@ -742,6 +742,72 @@ class ExpandedUI(Scenario):
                             kill.assert_not_called()
                             request.assert_not_called()
 
+    def test_open_reuses_then_replaces_an_authenticated_listener_on_the_requested_port(self):
+        import http.server
+        import socket
+        import webbrowser
+        root = self.first_paint_root()
+        inst = self.m.UIInstance(root)
+        with socket.socket() as reservation:
+            reservation.bind(('127.0.0.1', 0))
+            port = reservation.getsockname()[1]
+        servers, threads, workers, opened, errors = [], [], [], [], []
+        opened_event = threading.Event()
+        original_server, original_start = http.server.ThreadingHTTPServer, threading.Thread.start
+        def server(*args, **kwargs):
+            value = original_server(*args, **kwargs)
+            servers.append(value)
+            return value
+        def start(thread):
+            if getattr(thread._target, '__name__', '') == 'initialize':
+                workers.append(thread)
+            return original_start(thread)
+        def open_url(url):
+            opened.append(url)
+            opened_event.set()
+        def run():
+            try:
+                self.m.cmd_ui(argparse.Namespace(json=False, scan=[], open=True, write=False, port=port, every=0.05))
+            except BaseException as error:
+                errors.append(error)
+        with mock.patch.object(self.m, 'load', return_value=inst), \
+             mock.patch.object(self.m, 'UISpend', side_effect=RuntimeError('synthetic initialization held')), \
+             mock.patch.object(self.m, 'ui_code_version', side_effect=['old', 'old', 'new']), \
+             mock.patch.object(http.server, 'ThreadingHTTPServer', side_effect=server), \
+             mock.patch.object(threading.Thread, 'start', start), \
+             mock.patch.object(webbrowser, 'open', side_effect=open_url), \
+             contextlib.redirect_stdout(io.StringIO()):
+            try:
+                threads.append(threading.Thread(target=run, daemon=True))
+                threads[-1].start()
+                self.assertTrue(opened_event.wait(2), 'first owned listener did not start')
+                run()
+                self.assertEqual(errors, [])
+                self.assertEqual(opened, [opened[0], opened[0]])
+                self.assertEqual(len(servers), 1, 'matching version opened another listener')
+                opened_event.clear()
+                threads.append(threading.Thread(target=run, daemon=True))
+                threads[-1].start()
+                self.assertTrue(opened_event.wait(3), 'stale owned listener was not replaced')
+                threads[0].join(1)
+                self.assertFalse(threads[0].is_alive())
+                self.assertEqual(errors, [])
+                record = json.loads(self.m.ui_server_file(inst, port).read_text())
+                self.assertEqual(record['version'], 'new')
+                self.assertNotEqual(opened[-1], opened[0], 'replacement retained obsolete authentication key')
+                self.assertTrue(all(server.server_address[1] == port for server in servers))
+                self.assertEqual(self.m.ui_server_request(port, record['key'])['version'], 'new')
+            finally:
+                for owned in servers:
+                    if owned.fileno() >= 0:
+                        owned.shutdown()
+                for thread in threads + workers:
+                    thread.join(2)
+                self.assertFalse(any(thread.is_alive() for thread in threads + workers))
+        self.assertEqual(errors, [])
+        with socket.socket() as probe:
+            self.assertNotEqual(probe.connect_ex(('127.0.0.1', port)), 0, 'owned listener leaked')
+
     def test_partial_blocked_ages_are_unknown_without_history_and_do_not_poison_full_metadata(self):
         inst = self.m.UIInstance(self.first_paint_root())
         owner = self.m._owners['blocked_entries']
