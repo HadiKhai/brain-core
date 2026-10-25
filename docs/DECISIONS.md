@@ -190,3 +190,13 @@ Existing runners can use `configured_resource_lease(instance, node)`, reading
 comma-separated `verify_resources` canonical keys. An absent setting performs no
 lease IO. This is cooperative exclusion: every consumer of a shared service must
 use the same key and retain its lease through actual cleanup.
+
+## D809: Admit worktree setup after light checkout creation
+
+CLI dispatch no longer gates worktree creation itself. The checkout, port and job
+record are created before any heavy setup waits. A node without setup, or an
+explicit `--no-setup`, never joins machine admission. Actual setup keeps the
+existing resource-admission policy and runs inside the managed terminal context,
+so setup failure and admission refusal have durable causes. Setup duration counts
+execution separately from admission wait. This does not add arbitrary process-tree
+supervision or change heavy-command slot semantics.

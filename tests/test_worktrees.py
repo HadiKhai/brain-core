@@ -498,3 +498,19 @@ class WorktreeSetupDiagnostics(Scenario):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LightWorktreeAdmission(Scenario):
+    def test_cli_dispatch_does_not_admit_light_worktree_creation(self):
+        core = core_loader.SourceFileLoader('light_worktree_fixture', str(CORE / 'bin/brain')).load_module()
+        inst = argparse.Namespace(node=lambda key: {'id': key})
+        with mock.patch.dict(os.environ, self.env), \
+                mock.patch.object(core.sys, 'argv', ['brain', 'wt', 'add', 'app', 'job-light', '--no-setup']), \
+                mock.patch.object(core, 'try_find_root', return_value=None), \
+                mock.patch.object(core, 'load', return_value=inst), \
+                mock.patch.object(core, 'cmd_wt_add') as add, \
+                mock.patch.object(core, 'machine_wait', side_effect=AssertionError('light work must not wait')) as wait:
+            add.__name__ = 'cmd_wt_add'
+            core.main()
+        add.assert_called_once()
+        wait.assert_not_called()

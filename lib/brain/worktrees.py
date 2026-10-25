@@ -13,6 +13,7 @@ from . import guard as _m_guard
 from . import instance as _m_instance
 from . import jobs as _m_jobs
 from . import knowledge as _m_knowledge
+from . import machine as _m_machine
 from . import nodes as _m_nodes
 from . import status as _m_status
 from . import verify as _m_verify
@@ -248,9 +249,12 @@ def cmd_wt_add(a):
         env = _m_verify.verify_env(n, a.branch, {"path": str(path), "port": port, "ports": count})
         env["WORKBENCH"] = str(wb)
         print("  setup: running; waiting for completion", flush=True)
-        started = time.monotonic()
-        r = subprocess.run(["sh", str(setup)], cwd=path, env=env, capture_output=True, text=True)
-        duration = time.monotonic() - started
+        with _m_machine.machine_run('heavy', inst, n['id'], a.branch) as token:
+            _m_machine.machine_wait('heavy', inst, n['id'], job=a.branch, token=token)
+            started = time.monotonic()
+            r = subprocess.run(["sh", str(setup)], cwd=path, env=env, capture_output=True, text=True)
+            duration = time.monotonic() - started
+            token.result = r.returncode
         out = (r.stdout + r.stderr).strip()
         message = f"  setup: {'ok' if r.returncode == 0 else 'FAILED (exit ' + str(r.returncode) + ')'} in {duration:.2f}s"
         if out:
