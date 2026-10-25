@@ -29,6 +29,50 @@ from scenario import Scenario, AutonomyProject, shlex_quote
 
 
 class Workbench(Scenario):
+    def test_first_ledger_runtime_matches_worker_route_before_brief(self):
+        r = self.init("alice")
+        home = self.repo(self.tmp / "app")
+        self.b(r, "new", "app", "--title", "App", "--home", str(home))
+        node_file = r / "nodes/app/node.md"
+        baseline = re.sub(r"^runtime:.*\n", "", node_file.read_text(), flags=re.M)
+        cases = [
+            ("class-default", {"default_runtime": "claude"}, {}, {}, "codex", "runtime default"),
+            ("node-pin", {}, {}, {"runtime": "claude", "route_model_claude": "pinned-model"},
+             "claude", "pinned-model"),
+            ("node-class", {"default_runtime": "claude"}, {},
+             {"route_runtime_build": "codex", "route_model_codex_build": "node-model"}, "codex", "node-model"),
+            ("instance-class", {"route_runtime_build": "claude", "route_model_claude_build": "instance-model"},
+             {}, {}, "claude", "instance-model"),
+            ("inherited-model", {"default_runtime": "claude"}, {"route_model_codex_build": "ancestor-model"},
+             {}, "codex", "ancestor-model"),
+            ("inherited-runtime", {"default_runtime": "claude"},
+             {"route_runtime_build": "claude", "route_model_codex_build": "ancestor-model"},
+             {}, "codex", "ancestor-model"),
+        ]
+        # Clear each case's explicit keys so the instance default cannot become a node pin.
+        for branch, instance, ancestor, node, runtime, model in cases:
+            with self.subTest(branch=branch):
+                (r / "instance.md").write_text("---\nname: alice\noperator: alice\nprincipals: alice\n"
+                    "runtimes: claude,codex\nhost: t3\ntimezone: UTC\n" +
+                    "".join(f"{k}: {v}\n" for k, v in instance.items()) + "---\n")
+                (r / "node.md").write_text("---\nid: root\nowners: alice\n" +
+                    "".join(f"{k}: {v}\n" for k, v in ancestor.items()) + "---\n")
+                node_file.write_text(baseline.replace("---\n", "---\n" +
+                    "".join(f"{k}: {v}\n" for k, v in node.items()), 1))
+                before = self.git("rev-parse", "HEAD", cwd=r).strip()
+                self.b(r, "wt", "add", "app", branch)
+                ledger = "nodes/app/job-ledger.md"
+                first = self.git("log", "--reverse", "--format=%H", f"{before}..HEAD", "--", ledger, cwd=r).splitlines()[0]
+                text = self.git("show", f"{first}:{ledger}", cwd=r)
+                rows = [[cell.strip() for cell in line.strip("|").split("|")]
+                        for line in text.splitlines() if line.startswith("|")]
+                recorded = [dict(zip(rows[0], cells)) for cells in rows[2:] if cells[0] == branch]
+                self.assertEqual(len(recorded), 1)
+                self.assertEqual(recorded[0]["Runtime"], runtime)
+                brief = self.b(r, "brief", "app", "--branch", branch, "--task", "Fixture work")
+                self.assertIn(f"runtime: {runtime}", brief)
+                self.assertIn(f"model: {model}", brief)
+
     def test_failed_setup_keeps_the_worktree_and_reports_failure(self):
         r = self.init("alice")
         home = self.repo(self.tmp / "code" / "app")
