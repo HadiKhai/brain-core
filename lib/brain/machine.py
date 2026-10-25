@@ -857,7 +857,12 @@ def cmd_machine(a):
             print('watch: watcher state invalid; retained for repair (brain due root)')
         return
     if a.action in ("install", "uninstall"):
-        machine_service(inst, a.action, a.yes)
+        if not a.yes:
+            machine_service(inst, a.action, False)
+            return
+        _m_instance.unlock()
+        with _m_instance.reservation(inst, "machine-service"):
+            machine_service(_m_instance.Instance(inst.root), a.action, a.yes)
         return
     nodes = inst.nodes()
     if a.missing_homes:

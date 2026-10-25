@@ -14,9 +14,11 @@ from . import common as _m_common
 from . import connect as _m_connect
 from . import guard as _m_guard
 from . import history as _m_history
+from . import instance as _m_instance
 from . import jobs as _m_jobs
 from . import nodes as _m_nodes
 from . import ui as _m_ui
+from . import usage as _m_usage
 
 
 # Read from the runtimes' own transcripts on this machine, in the subscription folders this brain may use. Only
@@ -1072,74 +1074,75 @@ def any_cwd(path, allowed, forbidden):
 
 def spend_lookback(inst, n, since=None, also=()):
     """Every past session about a node's home (as `brain history` finds them), as aggregates only."""
-    if n["external"]:
-        match_home, _ = _m_history.history_matcher(inst, n, also)
-    else:
-        if also:
-            _m_common.die("--also requires an external git home")
-        # Exact node folders keep a parent's spend from absorbing child nodes.
-        match_home = lambda cwd, remote: spend_inside(cwd, n["dir"]) and Path(cwd).resolve() == n["dir"].resolve()
-    recorded = n["local"].get("coordinator_sessions", [])
-    coordinators = {i for i in recorded if isinstance(i, str) and SESSION_ID.fullmatch(i)} \
-        if isinstance(recorded, list) else set()
-    heads = {}
-    coordinator_ids = {"claude": set(), "codex": set()}
+    with _m_instance.released(inst, n, extra=[_m_usage.usage_file("subscriptions.json")]):
+        if n["external"]:
+            match_home, _ = _m_history.history_matcher(inst, n, also)
+        else:
+            if also:
+                _m_common.die("--also requires an external git home")
+            # Exact node folders keep a parent's spend from absorbing child nodes.
+            match_home = lambda cwd, remote: spend_inside(cwd, n["dir"]) and Path(cwd).resolve() == n["dir"].resolve()
+        recorded = n["local"].get("coordinator_sessions", [])
+        coordinators = {i for i in recorded if isinstance(i, str) and SESSION_ID.fullmatch(i)} \
+            if isinstance(recorded, list) else set()
+        heads = {}
+        coordinator_ids = {"claude": set(), "codex": set()}
 
-    def match(runtime, f, allowed, forbidden):
-        if runtime == "claude" and f.parent.name == "subagents":
-            parent = f.parent.parent.name
-            # Recorded identity vouches for descendants independently of cwd. A
-            # session admitted only by its home still cannot vouch for a foreign cwd.
-            return parent in coordinator_ids["claude"] or (
-                parent in heads and bool(match_home(any_cwd(f, allowed, forbidden), "")))
-        fh, why = _m_history.transcript_open(f, allowed, forbidden)
-        s = _m_history.history_head(f, runtime, fh) if fh else None
-        sid = claude_session_id(f) if runtime == "claude" else s["id"] if s else ""
-        if not s or not (sid in coordinators or match_home(s["cwd"], s["repo_url"])):
-            return False
-        heads[sid] = True
-        if sid in coordinators:
-            coordinator_ids[runtime].add(sid)
-        return True
-    aggs, _, _ = spend_all(inst, match=match)
-    ids = {a["id"] for a in aggs}
-    sources, allowed, forbidden = spend_sources(inst)
-    grew = True
-    while grew:  # Codex sub-agents run where their parent did; any started elsewhere still name it
-        grew = False
-        for runtime, cfg in sources:
-            if runtime != "codex":
-                continue
-            for root in (cfg / "sessions", cfg / "archived_sessions"):
-                for f in spend_walk(root) if root.is_dir() else []:
-                    m = codex_meta(f, allowed, forbidden)
-                    if not m or m[2] not in ids:
-                        continue
-                    by_coordinator = m[2] in coordinator_ids["codex"]
-                    if by_coordinator and m[0] not in coordinator_ids["codex"]:
-                        # Propagate identity even if the child was already admitted
-                        # by home, so its scratch-folder grandchildren count too.
-                        coordinator_ids["codex"].add(m[0])
-                        grew = True
-                    if m[0] not in ids and (by_coordinator or match_home(m[1], "")):
-                        agg = spend_file(inst, f, "codex", allowed, forbidden)
-                        if agg:
-                            aggs.append(agg)
-                            ids.add(agg["id"])
+        def match(runtime, f, allowed, forbidden):
+            if runtime == "claude" and f.parent.name == "subagents":
+                parent = f.parent.parent.name
+                # Recorded identity vouches for descendants independently of cwd. A
+                # session admitted only by its home still cannot vouch for a foreign cwd.
+                return parent in coordinator_ids["claude"] or (
+                    parent in heads and bool(match_home(any_cwd(f, allowed, forbidden), "")))
+            fh, why = _m_history.transcript_open(f, allowed, forbidden)
+            s = _m_history.history_head(f, runtime, fh) if fh else None
+            sid = claude_session_id(f) if runtime == "claude" else s["id"] if s else ""
+            if not s or not (sid in coordinators or match_home(s["cwd"], s["repo_url"])):
+                return False
+            heads[sid] = True
+            if sid in coordinators:
+                coordinator_ids[runtime].add(sid)
+            return True
+        aggs, _, _ = spend_all(inst, match=match)
+        ids = {a["id"] for a in aggs}
+        sources, allowed, forbidden = spend_sources(inst)
+        grew = True
+        while grew:  # Codex sub-agents run where their parent did; any started elsewhere still name it
+            grew = False
+            for runtime, cfg in sources:
+                if runtime != "codex":
+                    continue
+                for root in (cfg / "sessions", cfg / "archived_sessions"):
+                    for f in spend_walk(root) if root.is_dir() else []:
+                        m = codex_meta(f, allowed, forbidden)
+                        if not m or m[2] not in ids:
+                            continue
+                        by_coordinator = m[2] in coordinator_ids["codex"]
+                        if by_coordinator and m[0] not in coordinator_ids["codex"]:
+                            # Propagate identity even if the child was already admitted
+                            # by home, so its scratch-folder grandchildren count too.
+                            coordinator_ids["codex"].add(m[0])
                             grew = True
-    lo = since or None
-    sessions = []
-    for a in spend_once(aggs):
-        u = spend_sum([a], lo)
-        if not u["sessions"]:
-            continue
-        sessions.append({"runtime": a["runtime"], "id": opaque(a["id"]), "subagent": a["subagent"],
-                         "parent": opaque(a["parent"]) if a["parent"] else "",
-                         "start": (a["first"] or 0) * 60, "end": (a["last"] or 0) * 60,
-                         **spend_summary(u, _m_guard.never_terms(n))})
-    total = spend_sum(aggs, lo)
-    record = {"node": n["id"], "at": inst.now(), "since": lo, "total": spend_summary(total, _m_guard.never_terms(n)),
-              "days": spend_days(inst, aggs, days=0, weeks=26), "sessions": sorted(sessions, key=lambda x: x["start"])}
+                        if m[0] not in ids and (by_coordinator or match_home(m[1], "")):
+                            agg = spend_file(inst, f, "codex", allowed, forbidden)
+                            if agg:
+                                aggs.append(agg)
+                                ids.add(agg["id"])
+                                grew = True
+        lo = since or None
+        sessions = []
+        for a in spend_once(aggs):
+            u = spend_sum([a], lo)
+            if not u["sessions"]:
+                continue
+            sessions.append({"runtime": a["runtime"], "id": opaque(a["id"]), "subagent": a["subagent"],
+                             "parent": opaque(a["parent"]) if a["parent"] else "",
+                             "start": (a["first"] or 0) * 60, "end": (a["last"] or 0) * 60,
+                             **spend_summary(u, _m_guard.never_terms(n))})
+        total = spend_sum(aggs, lo)
+        record = {"node": n["id"], "at": inst.now(), "since": lo, "total": spend_summary(total, _m_guard.never_terms(n)),
+                  "days": spend_days(inst, aggs, days=0, weeks=26), "sessions": sorted(sessions, key=lambda x: x["start"])}
     f = spend_node_file(inst, n)
     f.parent.mkdir(parents=True, exist_ok=True)
     _m_common.atomic_write(f, json.dumps(record, separators=(",", ":")))
@@ -1183,7 +1186,11 @@ def cmd_spend(a):
     if a.machine:
         if a.id:
             _m_common.die("--machine counts every session here: no node")
-        aggs, total, _ = spend_all(inst)
+        def policies():
+            return [*(m["dir"] / "never-name.txt" for m in inst.nodes()),
+                    _m_usage.usage_file("subscriptions.json")]
+        with _m_instance.released(inst, [], extra=policies):
+            aggs, total, _ = spend_all(inst)
         u = spend_sum(aggs, since)
         days = spend_days(inst, aggs)
         if a.json:

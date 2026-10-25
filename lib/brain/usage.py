@@ -597,11 +597,17 @@ def usage_age(seconds):
     return f"{minutes // 60} h {minutes % 60} m" if minutes >= 60 else f"{minutes} m"
 
 
-def usage_rows(inst=None, refresh=False, before_launch=False):
+def usage_rows(inst=None, refresh=False, before_launch=False, node=None, extra=()):
     config = usage_config()
     cache = usage_cache()
     if refresh or (before_launch and not usage_cache_fresh(cache, config) and not usage_poller_live()):
-        cache = usage_refresh(config, stale_only=not refresh)
+        if inst:
+            with _m_instance.released(inst, node if node is not None else [],
+                                      extra=[usage_file("subscriptions.json"), *extra], local_keys=("fallback",)):
+                cache = usage_refresh(config, stale_only=not refresh)
+            config = usage_config()
+        else:
+            cache = usage_refresh(config, stale_only=not refresh)
     config = {**config, "max_age_seconds": usage_max_age(cache), "other_subscriptions": 0}
     brain = usage_brain_name(inst) if inst else None
     rows = []
@@ -656,7 +662,7 @@ def class_runtime(inst, job_class, runtime=None, runtimes=None):
     return chosen, reason
 
 
-def class_route(inst, job_class, runtime=None, model=None, cached_only=False, weekly_cap=None, runtimes=None):
+def class_route(inst, job_class, runtime=None, model=None, cached_only=False, weekly_cap=None, runtimes=None, node=None, extra=()):
     """Class policy, pins and weekly readings. Cached mode never contacts a provider.
 
     Usage informs this choice; even exhausted or unknown meters leave a brief available.
@@ -668,7 +674,7 @@ def class_route(inst, job_class, runtime=None, model=None, cached_only=False, we
     try:
         if usage_config()["autodetected"]:
             return chosen, None, reason + " Usage unknown: no subscriptions.json; no provider refresh."
-        rows, policy = usage_rows(inst, before_launch=not cached_only)
+        rows, policy = usage_rows(inst, before_launch=not cached_only, node=node, extra=extra)
     except (OSError, ValueError):
         rows, policy = [], {"max_age_seconds": USAGE_MAX_AGE}
     def weekly(row):
@@ -718,11 +724,11 @@ def class_route(inst, job_class, runtime=None, model=None, cached_only=False, we
     return chosen, selected, reason
 
 
-def usage_route(inst, runtimes, preferred=None, model=None, cached_only=False):
+def usage_route(inst, runtimes, preferred=None, model=None, cached_only=False, node=None, extra=()):
     try:
         if usage_config()["autodetected"]:
             return None, "Usage unknown: no subscriptions.json; keeping the configured runtime (autodetected defaults allow every brain)."
-        rows, policy = usage_rows(inst, before_launch=not cached_only)
+        rows, policy = usage_rows(inst, before_launch=not cached_only, node=node, extra=extra)
     except (OSError, ValueError):
         return None, "Usage unknown: machine subscription configuration unavailable; no subscription selected."
     allowed = [r for r in rows if r["runtime"] in runtimes]

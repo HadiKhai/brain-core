@@ -546,7 +546,10 @@ def cmd_hire(a):
     if target["external"] and not (target["home_path"] and target["home_path"].exists()):
         _m_common.die(f"{target['id']}'s home isn't on this machine (brain set {target['id']} home=<path>)")
     where, w = _m_worktrees.job_where(target, a.branch)
-    runtime, usage = worker_route(inst, target, a)
+    runtime, usage = worker_route(inst, target, a,
+        extra=[sp["dir"] / "role.md", sp["dir"] / "lessons.md", *(i["path"] for i in items),
+               *(inst.node(nid)["dir"] / "specialists" / a.specialist / "role.md" for nid in chain),
+               *([Path(a.out).expanduser()] if a.out else [])])
     head = _m_worktrees.job_run_line(where, w, a.branch, runtime, a.model, tilde_home=False)
     head = head.replace(f"  ·  runtime: {runtime}", f"  ·  runtime: {runtime}  ·  class: {a.job_class}", 1)
     out = [f"Role: worker, hired as specialist `{sp['id']}` ({sp['fm'].get('title', '')}).",
@@ -894,7 +897,7 @@ def launch_selection(inst, n, a, runtime, subscription, row, kind, model_selecti
         a.selection_line = "modelSelection: " + json.dumps(selection)
 
 
-def worker_route(inst, n, a):
+def worker_route(inst, n, a, extra=()):
     """Route all worker briefs with the same runtime pin and model usage limits."""
     row = _m_jobs.open_job(_m_jobs.read_jobs(n) or [], getattr(a, "branch", None))
     kind = _m_jobs.job_class(n, row, getattr(a, "job_class", None))
@@ -909,7 +912,7 @@ def worker_route(inst, n, a):
     model_selection = class_model_selection(inst, n, a, runtime, kind)
     runtime, subscription, usage = _m_usage.class_route(
         inst, kind, runtime=pin, model=model_selection[0] if model_selection else a.model,
-        weekly_cap=n["fm"].get("route_weekly_cap", inst.cfg.get("route_weekly_cap", 60)))
+        weekly_cap=n["fm"].get("route_weekly_cap", inst.cfg.get("route_weekly_cap", 60)), node=n, extra=extra)
     a.job_class = kind
     launch_selection(inst, n, a, runtime, subscription, row, kind, model_selection=model_selection)
     if per_class or " node.md " in a.model_source:

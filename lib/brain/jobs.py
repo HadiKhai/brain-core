@@ -380,6 +380,7 @@ def publish_handback(a):
         _m_hosts.request_wake(inst, n, 'wake:' + wake_id)
     elif a.state == "blocked" and not need:
         _m_hosts.request_wake(inst, n, "wake:" + data["wake_id"])
+    _m_instance.unlock()  # accounting follows durable publication and does not mutate shared state
     try:
         current = open_job(read_jobs(n) or [], a.branch)
         if current:
@@ -517,20 +518,34 @@ def published_train(n, row):
     return None
 
 
-def job_ended(inst, n, branch, outcome, commits="", cause="", worktree=None):
-    # Transcripts are read before the lock is taken: a long first read never holds up other commands.
+def prepare_job_usage(inst, n, branch, worktree=None):
     early = open_job(read_jobs(n) or [], branch)
     usage = None
     if early and not str(early.get("Usage", "")).startswith("host"):  # what the host reported wins
-        try:
-            usage = _m_spend.usage_cells(_m_spend.job_usage(inst, n, early, worktree), _m_guard.never_terms(n))
-        except (OSError, ValueError, RuntimeError) as e:
-            usage = {"Usage": f"not counted: {type(e).__name__}"}  # a close never fails for its accounting
+        with _m_instance.released(inst, n, extra=[_m_usage.usage_file("subscriptions.json"), handback_file(n, early)]):
+            try:
+                usage = _m_spend.usage_cells(_m_spend.job_usage(inst, n, early, worktree), _m_guard.never_terms(n))
+            except (OSError, ValueError, RuntimeError) as e:
+                usage = {"Usage": f"not counted: {type(e).__name__}"}  # a close never fails for its accounting
+    # Check before returning to a caller that may now delete the worktree.
+    current = open_job(read_jobs(n) or [], branch)
+    if early and (not current or job_key(early) != job_key(current)):
+        _m_common.die("job changed during accounting; retry from fresh state")
+    return early, usage
+
+
+def job_ended(inst, n, branch, outcome, commits="", cause="", worktree=None, prepared=None):
+    # Destructive callers prepare accounting before removal. Revalidate job identity
+    # and preserve host-reported usage after the slow scan has released state.
     with _m_instance.brain_lock(inst):
+        early, usage = prepared if prepared is not None else prepare_job_usage(inst, n, branch, worktree)
+        n = inst.node(n["id"])
         rows = ledger_rows(n)
         r = open_job(rows or [], branch)
         if not r:
             return
+        if not early or job_key(early) != job_key(r):
+            _m_common.die("job changed during accounting; retry from fresh state")
         _m_sync.retain_integration(inst, n, r)
         published = published_train(n, r)
         if published:
@@ -545,7 +560,7 @@ def job_ended(inst, n, branch, outcome, commits="", cause="", worktree=None):
         budget = _m_spend.job_budget(n, r)
         if budget:
             r["Budget"] = _m_spend.budget_text(budget)
-        if usage and early and job_key(early) == job_key(r) and not str(r.get("Usage", "")).startswith("host"):
+        if usage and r.get("Usage") == early.get("Usage") and not str(r.get("Usage", "")).startswith("host"):
             r.update(usage)
         write_jobs(inst, n, rows)
         if not n["external"] or n["local"].get("workbench") or n["home_path"]:

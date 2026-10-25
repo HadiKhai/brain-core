@@ -63,3 +63,20 @@ file is idle. The observer never reads holder metadata as proof or removes locks
 Linked, nonregular or unreadable gate inventory refuses before core mutation.
 This check covers native wrappers; unregistered external processes cannot be
 inferred from job labels or elapsed time.
+
+## D1202: Release existing state ownership for slow observations
+
+Slow network lookups, transcript scans and provider refreshes release an already
+held state lock, then revalidate their explicit policy, binding and output inputs
+before publication. Read-only callers do not acquire a state lock. The observer
+reloads local bindings on retake so unrelated concurrent writes survive. Job
+accounting fences the original job identity and preserves newer host usage.
+Destructive worktree callers prepare accounting before removal and retain the
+existing ownership and lifecycle refusal checks.
+
+Machine service operations use an independent bounded reservation after releasing
+state. Commit and core-upgrade transactions retain their existing serialization;
+this protocol does not provide cross-file crash recovery or Git/core exchange.
+Contention tests use explicit ready/release barriers. Positive controls execute
+sibling commands while the slow boundary remains paused; negative controls
+observe the actual held flock without waiting for a timing threshold.
