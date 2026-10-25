@@ -88,3 +88,21 @@ may override it in a separate provider map. Keep host id strings compatible with
 existing readers. Rebinding without a provider or unbinding removes stale local
 metadata. Check warns on a mismatch with the resolved node's explicit runtime pin
 and applies that node's redaction policy. No provider is inferred from a host id.
+
+## D1204: Generate commitments from task records and landing evidence
+
+The read-only digest uses task requirements for dated promise sources. A task is
+reported done only with its completion status, a merge commit reachable from
+local main, a code path and evidence. External completion without local proof,
+testing, parked and dropped work remain visible as unfinished commitments.
+Runnable next work requires proven completed dependencies. Missing estimates and
+promise dates stay unknown. Blocked work alone does not invent a human decision.
+
+## D1205: Generate daily measurement summaries locally
+
+An optional `daily_retro=on` root setting lets a sampler tick write the previous
+local day's completed-job summary once per machine. It records measured review
+rounds, elapsed time, failures and repeated compaction signals. Missing readings
+remain unknown. The generated output stays under `.brain/daily-retro`; it does
+not send messages or activate lessons, rules or decisions. `brain digest --retro`
+can regenerate a selected day on stdout without changing the stored snapshot.

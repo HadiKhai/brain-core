@@ -850,6 +850,11 @@ def cmd_machine(a):
         return
     if a.action == "sample":
         machine_sample_once(inst)
+        from . import digest as _m_digest
+        try:
+            _m_digest.daily_retro(inst)
+        except (OSError, ValueError, TypeError):
+            print('daily retro unavailable; retained job records are unchanged')
         from . import watch as _m_watch
         try:
             _m_watch.watch_once(inst)  # same minute timer; sampler has released its instance lock

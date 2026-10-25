@@ -32,6 +32,7 @@ from . import policy as _m_policy
 from . import reports as _m_reports
 from . import rehearse as _m_rehearse
 from . import rotation as _m_rotation
+from . import digest as _m_digest
 from . import schedules as _m_schedules
 from . import settings_batch as _m_settings_batch
 from . import spend as _m_spend
@@ -115,7 +116,7 @@ READ_ONLY = {"cmd_show", "cmd_tree", "cmd_status", "cmd_now", "cmd_jobs", "cmd_s
              "cmd_brief", "cmd_hire", "cmd_reports", "cmd_brains", "cmd_use", "cmd_machine", "cmd_usable",
              "cmd_item_list", "cmd_item_show", "cmd_wt_list", "cmd_selftest", "cmd_init", "cmd_hook", "cmd_hook_approve", "cmd_help",
              "cmd_dashboard", "cmd_ready", "cmd_usage", "cmd_scan", "cmd_scrub", "cmd_history",
-             "cmd_gate_lock", "cmd_version", "cmd_connect", "cmd_recall", "cmd_proposals", "cmd_changes", "cmd_heavy", "cmd_rehearse", "cmd_policy"}
+             "cmd_digest", "cmd_gate_lock", "cmd_version", "cmd_connect", "cmd_recall", "cmd_proposals", "cmd_changes", "cmd_heavy", "cmd_rehearse", "cmd_policy"}
 
 
 def writes(a):
@@ -447,6 +448,9 @@ def main():
         opt("--reviews", type=int, help="completed review rounds, required with --record"),
         opt("--report"), opt("--lessons", help="proposed lessons, or none: <reason>"),
         opt("--reverify", action="store_true", help="with --record: run verify even if a green run still proves it"))
+    cmd("digest", _m_digest.cmd_digest, "commitments with landing evidence; --retro summarizes recorded job measurements", "id",
+        opt("--json", action="store_true"), opt("--retro", action="store_true"),
+        opt("--day", help="retro calendar date (YYYY-MM-DD); defaults to the previous local day"))
     cmd("schedule", _m_schedules.cmd_schedule, "recurring work: brain schedule list | add <id> --when W --node N --brief B | "
         "bind <id> <host id> | unbind <id>", opt("action", choices=["list", "add", "bind", "unbind"], nargs="?",
                                                   default="list"),
