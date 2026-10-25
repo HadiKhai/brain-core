@@ -811,7 +811,49 @@ def budget_text(b):
                                     f"{b['hours']:g} h" if b.get("hours") else ""]))
 
 
-def usage_line(u, budget=None, hours=None):
+def job_round_usage(inst, n, row, usage):
+    """Budget counters since the last delivered restart; lifetime totals remain untouched.
+
+    Missing counters stay unknown. Legacy receipts without active minutes use elapsed
+    time since their acknowledgement instead of charging the previous worker's hours.
+    """
+    from . import reminders as _m_reminders
+    key = _m_jobs.digest([n['id'], _m_jobs.job_key(row)])
+    with _m_reminders.lifecycle_store(inst, readonly=True) as data:
+        record = data['usage'].get(key)
+    if record is None:
+        return None
+    if not isinstance(record, dict) or record.get('job') != _m_jobs.job_key(row):
+        raise ValueError('invalid round usage receipt')
+    baseline = record.get('baseline')
+    if not isinstance(baseline, dict) or any(type(baseline.get(k)) is not int or baseline[k] < 0
+                                           for k in ('processed', 'compactions')):
+        raise ValueError('invalid round usage baseline')
+    # A pending initial restart has not yet started a replacement round. When a
+    # later round crosses its threshold its acknowledgement time must survive.
+    since = record.get('round_at') or (record.get('at') if not record.get('episode') else None)
+    if since is None:
+        return None
+    at = inst.parse_time(since)
+    if not at or at > inst.now_dt():
+        raise ValueError('invalid round usage baseline time')
+    out = {'since': since}
+    for k in ('processed', 'compactions', 'active_minutes'):
+        base, value = baseline.get(k), (usage or {}).get(k)
+        if base is not None and (type(base) is not int or base < 0):
+            raise ValueError('invalid round usage baseline')
+        if type(value) is not int or value < 0 or base is None:
+            out[k] = None
+        elif value < base:
+            raise ValueError('round usage counters regressed; retain baseline for review')
+        else:
+            out[k] = value - base
+    out['hours'] = (out['active_minutes'] / 60 if out['active_minutes'] is not None
+                    else (inst.now_dt() - at).total_seconds() / 3600)
+    return out
+
+
+def usage_line(u, budget=None, hours=None, round_usage=None):
     """One line: what a job has cost so far, and its budget."""
     if not u or not u.get("sessions") and not u.get("source", "").startswith("host"):
         return "usage: no transcripts found for this job on this machine"
@@ -821,9 +863,15 @@ def usage_line(u, budget=None, hours=None):
            + f"; active {u['active_minutes'] / 60:.1f} h (agents {u['agent_minutes'] / 60:.1f} h)"
            + f"; {count_of(u['tools'], 'tool call')}; {count_of(u['compactions'], 'compaction')}"
            + (f"; {count_of(u['subagents'], 'sub-agent')}, {round(100 * u['sub_share'])}% of tokens" if u["subagents"] else ""))
+    if round_usage is not None:
+        shown = lambda k: tokens_text(round_usage[k]) if round_usage.get(k) is not None else 'unknown'
+        out += f"; since restart: {shown('processed')} tokens, {shown('compactions')} compactions"
+        hours = round_usage['hours']
+    meter = round_usage if round_usage is not None else u
     if budget:
-        over = [f"{tokens_text(u['processed'])} of {tokens_text(budget['tokens'])} tokens"
-                for _ in [0] if budget.get("tokens") and u["processed"] > budget["tokens"]]
+        over = [f"{tokens_text(meter['processed'])} of {tokens_text(budget['tokens'])} tokens"
+                for _ in [0] if budget.get("tokens") and meter.get("processed") is not None
+                and meter["processed"] > budget["tokens"]]
         over += [f"{hours:.1f} of {budget['hours']:g} h" for _ in [0]
                  if budget.get("hours") and hours is not None and hours > budget["hours"]]
         out += f"; budget {budget_text(budget)}" + (": over (" + ", ".join(over) + ")" if over else "")
@@ -927,7 +975,7 @@ def host_usage_cells(path, n):
     return {**usage_cells({**u, "source": ""}), "Usage": "host" + (f": {label}" if label else "")}
 
 
-def usage_advice(u, median_tokens=None):
+def usage_advice(u, median_tokens=None, round_usage=None):
     """Advice from a job's usage: never a gate."""
     out = []
     if not u:
@@ -935,8 +983,9 @@ def usage_advice(u, median_tokens=None):
     if median_tokens and u["processed"] > 2 * median_tokens:
         out.append(f"advice: {tokens_text(u['processed'])} tokens, over twice the median of {tokens_text(median_tokens)} "
                    "for merged jobs here")
-    if u["compactions"] >= 3:
-        out.append(f"advice: {u['compactions']} compactions: past the context window again and again; hand back and "
+    meter = round_usage if round_usage is not None else u
+    if meter.get("compactions") is not None and meter["compactions"] >= 3:
+        out.append(f"advice: {meter['compactions']} compactions: past the context window again and again; hand back and "
                    "restart from a brief with what is done so far")
     if u["subagents"] and u["sub_share"] > 0.5:
         out.append(f"advice: sub-agents spent {round(100 * u['sub_share'])}% of its tokens: give them narrower tasks, "

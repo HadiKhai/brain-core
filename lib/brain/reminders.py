@@ -5,6 +5,7 @@ import json
 import os
 import re
 
+from . import briefs as _m_briefs
 from . import common as _m_common
 from . import guard as _m_guard
 from . import history as _m_history
@@ -110,7 +111,8 @@ def usage_restart_item(inst, n, row):
                 raise ValueError('restart receipt bound reached')
             episode = os.urandom(12).hex()
             data['usage'][key] = {'job': _m_jobs.job_key(row), 'baseline': baseline,
-                                  'episode': episode, 'at': inst.now()}
+                                  'episode': episode, 'at': inst.now(),
+                                  'round_at': record.get('round_at') or (record.get('at') if record and not record.get('episode') else None)}
         budget_text = str(budget) if budget else 'not configured'
         return {'node': n['id'], 'kind': 'restart', 'job': _m_jobs.job_key(row), 'episode': episode,
                 'text': (f"{row['Job']}: restart from brief: {delta['compactions']} compactions since brief "
@@ -129,14 +131,21 @@ def acknowledge_usage_restart(inst, n, row):
         if key in advice:
             advice[key] = {'episode': os.urandom(12).hex(), 'conditions': {}}
         record = data['usage'].get(key)
-        if not isinstance(record, dict) or not record.get('episode'):
+        signal = _m_jobs.job_signal(inst, n, row)
+        manual_restart = bool(signal and signal.get('restart') == 'compactions' and
+                              not _m_briefs.restart_acknowledged(n, row, signal))
+        if not (isinstance(record, dict) and record.get('episode')) and not manual_restart:
             return
         usage = _m_spend.live_usage(inst, n, row)
         if not usage or any(type(usage.get(k)) is not int or usage[k] < 0
                             for k in ('compactions', 'processed')):
             raise ValueError('restart usage unavailable; baseline not acknowledged')
-        data['usage'][key] = {'job': _m_jobs.job_key(row), 'baseline': {
-            k: usage[k] for k in ('compactions', 'processed')}, 'episode': None, 'at': inst.now()}
+        baseline = {k: usage[k] for k in ('compactions', 'processed')}
+        active = usage.get('active_minutes')
+        if type(active) is int and active >= 0:
+            baseline['active_minutes'] = active
+        data['usage'][key] = {'job': _m_jobs.job_key(row), 'baseline': baseline,
+                              'episode': None, 'at': inst.now(), 'round_at': inst.now()}
 
 
 def inbox_source_id(n, line):

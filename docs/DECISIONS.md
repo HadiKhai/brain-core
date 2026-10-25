@@ -53,3 +53,18 @@ The regression reads the first committed ledger revision before generating a
 brief, then checks that the brief retains the expected runtime and model. Its
 cases cover class defaults, a node runtime pin, node and instance class routing,
 and inherited model configuration without activating inherited runtime policy.
+
+## D701: Restart budgets have independent round counters
+
+Lifetime usage remains the accounting source for ledger totals, forecasts and
+historical comparisons. A successfully delivered restart brief records a private
+baseline for processed tokens, compactions and available active minutes. Ordinary
+brief regeneration does not reset that baseline. Manual compaction restart signals
+use the same acknowledgement path. Failed brief delivery leaves it unchanged.
+
+Budget and compaction warnings subtract this baseline. Active time budgets use the
+measured minutes since restart when available; older receipts fall back to elapsed
+time since acknowledgement. Unknown counters remain unknown and counter regression
+refuses rather than creating spare allowance. Opening a subsequent restart episode
+retains the current round's start. The dashboard consumes a separate `round_usage`
+projection while lifetime usage remains available.

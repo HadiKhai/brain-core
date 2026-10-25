@@ -655,6 +655,11 @@ Worker, import, small-job and specialist briefs explicitly omit co-author attrib
 supply no trailer for any runtime or model; explicit runtime/model selection does not invent
 an attribution identity.
 
+Lifetime job usage remains cumulative. After a delivered restart brief, budget
+checks use processed tokens, compactions and available active minutes since that
+restart. Older restart receipts without active minutes use elapsed time since
+acknowledgement. Ordinary brief regeneration does not reset the allowance.
+
 `brief_max_kb` (default 8) charges UTF-8 task and embedded context bytes captured before
 assembly. Generated fixed instructions do not consume that allowance. Briefs warn above
 the allowance and refuse at twice it. Both chargeable and total bytes are reported; at
