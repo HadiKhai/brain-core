@@ -112,7 +112,7 @@ class ParallelSelftest(Scenario):
         rows = [json.loads(line) for line in (folder / 'results.jsonl').read_text().splitlines()]
         failed = [row for row in rows if row['event'] == 'phase' and row['outcome'] == 'failed']
         self.assertEqual([row['nodeid'] for row in failed], ['test_sample.py::test_timed_out_fixture'])
-        self.assertIn('Timeout >0.2s', failed[0]['longrepr'])
+        self.assertIn('Timeout (>0.2s) from pytest-timeout', failed[0]['longrepr'])
         self.assertEqual(len([row for row in rows if row['event'] == 'completed']), 2)
         self.assertEqual(rows[0]['timeout'], 0.2)
 
