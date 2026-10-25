@@ -800,3 +800,42 @@ class ForbiddenActions(Scenario):
         m = self.m
         inst = m.Instance(r)
         self.assertIsNotNone(m.pretool_decision(inst, inst.node('root'), json.loads(data)))
+
+
+class PreviewSampleReceipts(Scenario):
+    def context(self):
+        r = self.init('alice')
+        home = self.repo(self.tmp / 'web')
+        self.b(r, 'new', 'web', '--title', 'Web', '--home', str(home))
+        self.b(r, 'wt', 'add', 'web', 'job')
+        self.b(r, 'set', 'web', 'preview=https://preview.example/app')
+        m = core_loader.SourceFileLoader('preview_sample_fixture', str(CORE / 'bin/brain')).load_module()
+        inst = m.Instance(r)
+        n = inst.node('web')
+        row = m.read_jobs(n)[-1]
+        head = self.git('rev-parse', 'job', cwd=home).strip()
+        data = {'version': 1, 'node': 'web', 'job_key': m.job_key(row), 'branch': 'job', 'head': head,
+                'checked_at': inst.now_dt().isoformat(), 'renderer_threadId': 'browser-thread',
+                'urls': [{'url': n['local']['preview'], 'rendered': True, 'render_evidence': 'screenshot.png',
+                          'items': [{'page_item': 'person-' + str(i), 'source_ref': 'source.json#' + str(i),
+                                     'source_item': 'person-' + str(i)} for i in range(3)]}]}
+        return m, inst, n, data
+
+    def test_missing_samples_mismatch_wrong_url_and_stale_head_fail_closed(self):
+        m, inst, n, data = self.context()
+        self.assertTrue(m.validate_ready_preview(inst, n, 'job', data['head']))
+        for mutate in ('few', 'duplicate', 'mismatch', 'url', 'head', 'render'):
+            bad = json.loads(json.dumps(data))
+            route = bad['urls'][0]
+            if mutate == 'few': route['items'].pop()
+            if mutate == 'duplicate': route['items'][1] = route['items'][0]
+            if mutate == 'mismatch': route['items'][1]['source_item'] = 'wrong'
+            if mutate == 'url': route['url'] += '/wrong'
+            if mutate == 'head': bad['head'] = '0' * 40
+            if mutate == 'render': route['rendered'] = False
+            with self.subTest(mutate=mutate), self.assertRaises(ValueError):
+                m.record_preview_receipt(inst, n, 'job', bad)
+        m.record_preview_receipt(inst, n, 'job', data)
+        self.assertEqual(m.validate_ready_preview(inst, n, 'job', data['head']), [])
+        n['local']['preview'] += '/new'
+        self.assertTrue(m.validate_ready_preview(inst, n, 'job', data['head']))

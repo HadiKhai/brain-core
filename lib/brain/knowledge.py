@@ -763,7 +763,8 @@ def limit_records(inst, n):
     records = []
     for text in limits_of(n):
         expiry = re.findall(r"(?:^|[;\n])\s*Expires:[ \t]*([^;\n]+)", text, re.I)
-        when = inst.parse_time(expiry[0].strip()) if len(expiry) == 1 else None
+        when = (inst.parse_time(expiry[0].strip()) if len(expiry) == 1 and
+                re.search(r'(?:Z|[+-]\d{2}:?\d{2})$', expiry[0].strip()) else None)
         state = 'active'
         if expiry:
             state = 'invalid-expiry' if not when else ('expired' if when <= inst.now_dt() else 'active')

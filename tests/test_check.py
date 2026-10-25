@@ -655,3 +655,9 @@ class DecisionApplicability(Scenario):
         out = self.b(r, 'check')
         self.assertNotIn('decision has no Applies to:', out)
         self.assertNotIn('external fact has no valid Source:', out)
+
+
+    def test_malformed_external_source_is_a_warning_not_a_check_crash(self):
+        r = self.init('alice')
+        (r / 'decisions.md').write_text('## 2026-05-02 10:00 +00:00: Policy\nApplies to: app\nExternal fact: Provider requires consent.\nSource: http://[invalid\n')
+        self.assertIn('external fact has no valid Source:', self.b(r, 'check'))

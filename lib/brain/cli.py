@@ -30,6 +30,7 @@ from . import machine as _m_machine
 from . import freshness as _m_freshness
 from . import nodes as _m_nodes
 from . import policy as _m_policy
+from . import preview_evidence as _m_preview_evidence
 from . import reports as _m_reports
 from . import rehearse as _m_rehearse
 from . import rotation as _m_rotation
@@ -426,19 +427,23 @@ def main():
     t.set_defaults(f=_m_worktrees.cmd_wt_prune)
     cmd("report", _m_reports.cmd_report, "start a report: brain report <node> \"topic\" (prints its folder)", "id", "topic")
     cmd("reports", _m_reports.cmd_reports, "every report, newest first: brain reports [node]", opt("id", nargs="?"))
-    cmd("review", _m_sync.cmd_review, "brief for a review by another runtime: brain review <node> --branch B",
+    cmd("review", _m_sync.cmd_review, "brief for an independent review: brain review <node> --branch B",
         "id", opt("--branch", required=True), opt("--base"), opt("--built-by", dest="built_by"),
-        opt("--by", "--runtime", help="reviewer runtime (default: one the builder didn't use)"), opt("--focus"),
+        opt("--by", "--runtime", help="reviewer runtime (default: configured independence policy)"), opt("--focus"),
         opt("--class", dest="job_class", choices=_m_jobs.JOB_CLASSES),
         opt("--effort", choices=_m_jobs.JOB_EFFORTS),
-        opt("--why-separate", help="reason for a separate reviewer; defaults to independent second-runtime review"),
+        opt("--why-separate", help="reason for a separate reviewer; defaults to the independence policy"),
         opt("--allow-unexplained", action="store_true", help="allow an urgent launch without a reason"),
         opt("--model", help="job model for scoped usage limits"), opt("--out"),
         opt("--reason", choices=("security", "schema", "privacy"), help="exception for another full round or round 3+"),
         opt("--check-fix", action="store_true", help="only check prior blockers/majors and fix regressions"),
         opt("--findings", help="prior findings JSON: list of objects with severity and text"),
         opt("--fix-base", help="reviewed commit before the fixes; defaults to previous review head"),
-        opt("--contract", help="contract file; defaults to the job's recorded contract"))
+        opt("--contract", help="contract file; defaults to the job's recorded contract"),
+        opt("--receipt-file", help="completed review host-observation JSON; does not start another round"),
+        opt("--same-runtime-reason", help="reason for a configured expiring same-runtime exception"))
+    cmd("preview-receipt", _m_preview_evidence.cmd_preview_receipt, "record rendered preview source samples", "id",
+        opt("--branch", required=True), opt("--file", required=True))
     cmd("train", _m_train.cmd_train, "batch ready jobs onto local main, verify once, and print the release command", "id",
         opt("--jobs", nargs="+", help="explicit job order (space or comma separated); all must be ready"))
     cmd("ready", _m_verify.cmd_ready, "check a worker's ready packet against the branch and cached origin default (local main without origin)", "id",

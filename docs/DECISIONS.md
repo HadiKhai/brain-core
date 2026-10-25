@@ -105,3 +105,46 @@ expiry metadata keeps the limit active and produces a check warning. Narrative
 
 Publication policy continues to snapshot every original limit, including expired
 ones. An operational expiry never grants push, publication or deletion consent.
+
+## D1005: Review independence is a fresh non-builder thread identity
+
+Instances and nodes may select `review_independence=fresh-thread`, with optional
+`review_runtime` and `review_model`. Same-runtime and same-model reviewers then
+qualify when their actual host identity belongs to a distinct, fresh context that
+did not build the change. Missing identities or unknown/reused context refuse.
+Cross-runtime routing remains the compatibility default. A legacy same-runtime
+exception needs an absolute expiry and an explicit reason; it still requires the
+fresh-thread identity receipt before readiness.
+
+`review --receipt-file` records a completed review separately from briefing a new
+round. A receipt names the exact job generation and code head, observed builder
+and reviewer runtime/model/thread, context independence and verdict. Builder
+identity must match recorded worker bindings and the builder route. Recording
+requires an observation from the last five minutes; the immutable observation
+remains valid for the same code. Later code or a blocked verdict needs new proof.
+These are coordinator-supplied host observations, not independent live-host queries.
+
+Thread identities and receipt histories live under machine-local `.brain/`.
+The shared ledger stores only the local receipt reference and required-proof flag.
+Readiness consumes a pure validator so the gate owner can enforce it before work.
+
+## D1006: Bind preview rendering and source comparisons to code and URLs
+
+A configured preview or explicit `requires_preview_evidence=true` requires an
+exact-head receipt. Each presented preview/review URL needs a successful rendering
+observation and evidence reference, plus three distinct displayed items compared
+with their source values and references. Wrong URLs, absent rendering evidence,
+fewer than three distinct matches, future observations and stale heads refuse.
+
+The recording command stores supplied browser observations locally; it does not
+pretend to open a browser itself. Readiness uses the pure validator. A screenshot
+tour receipt and these source comparisons prove different properties.
+
+## D1007: Preserve finding closure until its code inputs change
+
+Findings have stable IDs, failure classes, severity, explicit tracked input paths
+and closure evidence. Machine-local state retains closed findings across later
+reviews and unrelated commits. A change to a bound Git object reopens the finding;
+closing it again requires evidence against the new inputs. Existing IDs cannot
+silently rebind their input scope. Review observations retain their original
+verdict while the finding-state projection provides durable closure history.

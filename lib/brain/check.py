@@ -45,7 +45,10 @@ def decision_warnings(inst, n):
             import urllib.parse
             value = source.group(1).strip()
             url = re.search(r'https?://[^\s<>)]+', value)
-            valid = bool(url and urllib.parse.urlsplit(url.group()).netloc)
+            try:
+                valid = bool(url and urllib.parse.urlsplit(url.group()).netloc)
+            except ValueError:
+                valid = False
             valid = valid or bool(re.fullmatch(r'probe:[ \t]+\S.+', value, re.I))
         if external and not valid:
             out.append(label + ': external fact has no valid Source: URL or probe: command')
