@@ -523,6 +523,28 @@ def machine_limit(policy, hour=None):
     return policy["verify_night" if night else "verify_day"]
 
 
+def machine_boot_id():
+    """Stable OS boot identity; never estimate it from uptime or wall time.
+
+    Unknown readings preserve the existing PID/start-time checks. A known boot
+    change invalidates the whole reservation before any old numeric PID probe.
+    """
+    try:
+        if sys.platform.startswith('linux'):
+            identity = Path('/proc/sys/kernel/random/boot_id').read_text().strip().lower()
+            if re.fullmatch(r'[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}', identity):
+                return 'linux:' + identity
+        elif sys.platform == 'darwin':
+            result = subprocess.run(['sysctl', '-n', 'kern.boottime'], capture_output=True,
+                                    text=True, timeout=2, env={**os.environ, 'LC_ALL': 'C'})
+            match = re.search(r'\{\s*sec\s*=\s*([0-9]+),\s*usec\s*=\s*([0-9]+)\s*\}', result.stdout)
+            if result.returncode == 0 and match and int(match[2]) < 1000000:
+                return 'darwin:' + str(int(match[1])) + ':' + str(int(match[2]))
+    except (OSError, ValueError, subprocess.SubprocessError):
+        pass
+    return None
+
+
 def process_stamp(pid, deadline=None):
     """PID plus OS start time prevents reclaiming a recycled PID as our worker."""
     def remaining():
@@ -616,10 +638,16 @@ class machine_queue:
                 and row.get("kind") in ("heavy", "verify") and row.get("state") in ("queued", "running")
                 and ("scope" not in row or (isinstance(row["scope"], list) and len(row["scope"]) == 2
                      and all(isinstance(s, str) and re.fullmatch(r"[0-9a-f]{64}", s) for s in row["scope"])))
-                and ("child" not in row or identity(row["child"])))
+                and ("child" not in row or identity(row["child"]))
+                and ("boot" not in row or (isinstance(row["boot"], str)
+                     and re.fullmatch(r"(?:linux|darwin):[a-zA-Z0-9:-]+", row["boot"]) is not None)))
 
     @staticmethod
     def alive(row):
+        if row.get("boot"):
+            current_boot = machine_boot_id()
+            if current_boot is not None and current_boot != row["boot"]:
+                return False
         for key in ("owner", "child"):
             who = row.get(key)
             if who:
@@ -677,6 +705,7 @@ def machine_wait(kind="heavy", inst=None, node=None):
     owner = [os.getpid(), process_stamp(os.getpid())]
     if owner[1] in (None, "unknown"):
         _m_common.die("machine care: cannot establish this process's start time; no heavy work started")
+    boot = machine_boot_id()
     previous, last_report, started = None, 0, time.monotonic()
     try:
         while True:
@@ -689,6 +718,8 @@ def machine_wait(kind="heavy", inst=None, node=None):
                 row = next((r for r in queue.rows if r["token"] == token), None)
                 if row is None:
                     row = {"token": token, "owner": owner, "kind": kind, "state": "queued"}
+                    if boot is not None:
+                        row["boot"] = boot
                     if inst is not None and node is not None:
                         row["scope"] = machine_scope(inst, node)
                     queue.rows.append(row)

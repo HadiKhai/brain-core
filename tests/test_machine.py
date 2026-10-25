@@ -1738,3 +1738,52 @@ else: sys.exit(91)
         self.assertEqual(result['removed'], [self.identity])
         self.assertTrue(result['errors'])
         self.assertEqual(len(json.loads(self.state_path.read_text())['volumes']), 1)
+
+
+class ReservationBootIdentity(unittest.TestCase):
+    def setUp(self):
+        self.m = core_loader.SourceFileLoader('boot_fixture', str(CORE / 'bin/brain')).load_module()
+        self.row = {'token': 'a' * 32, 'owner': [12345, 'fixture-birth'],
+                    'kind': 'verify', 'state': 'running', 'boot': 'linux:old-boot'}
+
+    def test_different_known_boot_reclaims_without_pid_probe(self):
+        with mock.patch.object(self.m, 'machine_boot_id', return_value='linux:new-boot'), \
+                mock.patch.object(self.m, 'process_stamp', side_effect=AssertionError('do not probe prior-boot PIDs')):
+            self.assertFalse(self.m.machine_queue.alive(self.row))
+
+    def test_same_missing_or_unknown_boot_preserves_identity_rules(self):
+        for boot in ('linux:old-boot', None):
+            with mock.patch.object(self.m, 'machine_boot_id', return_value=boot), \
+                    mock.patch.object(self.m, 'process_stamp', return_value='unknown'):
+                self.assertTrue(self.m.machine_queue.alive(self.row))
+        legacy = {k: v for k, v in self.row.items() if k != 'boot'}
+        with mock.patch.object(self.m, 'machine_boot_id', return_value='linux:new-boot'), \
+                mock.patch.object(self.m, 'process_stamp', return_value='fixture-birth'):
+            self.assertTrue(self.m.machine_queue.alive(legacy))
+        self.assertTrue(self.m.machine_queue.valid(legacy))
+        for invalid in ('', 12, [], 'unknown'):
+            self.assertFalse(self.m.machine_queue.valid(dict(self.row, boot=invalid)))
+
+    def test_linux_and_darwin_boot_reading_is_stable_and_failure_is_unknown(self):
+        with mock.patch.object(self.m.sys, 'platform', 'linux'), \
+                mock.patch.object(self.m.Path, 'read_text', return_value='12345678-1234-1234-1234-123456789abc\n'):
+            self.assertEqual(self.m.machine_boot_id(), 'linux:12345678-1234-1234-1234-123456789abc')
+        with mock.patch.object(self.m.sys, 'platform', 'darwin'), \
+                mock.patch.object(self.m.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, '{ sec = 12345, usec = 67 } fixture date')):
+            self.assertEqual(self.m.machine_boot_id(), 'darwin:12345:67')
+        with mock.patch.object(self.m.sys, 'platform', 'darwin'), \
+                mock.patch.object(self.m.subprocess, 'run', side_effect=OSError('unavailable')):
+            self.assertIsNone(self.m.machine_boot_id())
+
+    def test_native_admission_publishes_boot_identity(self):
+        with tempfile.TemporaryDirectory() as folder, \
+                mock.patch.object(self.m, 'machine_dir', return_value=Path(folder)), \
+                mock.patch.object(self.m, 'machine_boot_id', return_value='linux:current-boot'), \
+                mock.patch.object(self.m, 'process_stamp', return_value='fixture-birth'), \
+                mock.patch.object(self.m, 'machine_reading', return_value={}), \
+                mock.patch.object(self.m, 'machine_limit', return_value=2):
+            token = self.m.machine_wait('verify')
+            rows = json.loads((Path(folder) / 'machine-care-queue.json').read_text())
+            self.assertEqual(rows[0]['boot'], 'linux:current-boot')
+            self.m.machine_release(token)
+            self.assertEqual(json.loads((Path(folder) / 'machine-care-queue.json').read_text()), [])

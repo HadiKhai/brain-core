@@ -86,3 +86,13 @@ inspection must show no endpoints. Reinspection must match the captured resource
 metadata before deletion; Docker's own in-use refusal remains authoritative.
 Errors keep resources for a later run. No images, bind contents, compose files,
 global prune, forced disconnect or host lifecycle APIs are touched.
+
+## D803: Bind machine reservations to an explicit operating-system boot
+
+New reservations retain a boot identity in addition to parent/child process birth
+identities. Linux reads the kernel boot UUID; macOS reads `kern.boottime` seconds
+and microseconds. A known mismatch reclaims an earlier-boot reservation without
+probing its numeric PIDs. Missing or unknown boot readings preserve existing
+process identity behavior and never imply death. Legacy queue rows remain valid.
+No uptime subtraction, clock-derived estimate, service change or reboot probe is
+needed. Queue readers accept the optional field and keep old compatibility.
