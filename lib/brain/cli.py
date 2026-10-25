@@ -38,6 +38,7 @@ from . import full_gate as _m_full_gate
 from . import freshness as _m_freshness
 from . import nodes as _m_nodes
 from . import queue_priority as _m_queue_priority
+from . import model_fit as _m_model_fit
 from . import policy as _m_policy
 from . import release as _m_release
 from . import preview_evidence as _m_preview_evidence
@@ -140,7 +141,7 @@ READ_ONLY = {"cmd_show", "cmd_tree", "cmd_status", "cmd_now", "cmd_jobs", "cmd_s
              "cmd_brief", "cmd_hire", "cmd_reports", "cmd_brains", "cmd_use", "cmd_machine", "cmd_usable",
              "cmd_item_list", "cmd_item_show", "cmd_wt_list", "cmd_selftest", "cmd_init", "cmd_hook", "cmd_hook_pretool", "cmd_hook_approve", "cmd_help",
              "cmd_dashboard", "cmd_ready", "cmd_usage", "cmd_scan", "cmd_scrub", "cmd_history",
-             "cmd_launch_check", "cmd_events", "cmd_gate_lock", "cmd_version", "cmd_connect", "cmd_recall", "cmd_proposals", "cmd_changes", "cmd_heavy", "cmd_rehearse", "cmd_policy", "cmd_preview"}
+             "cmd_model_fit", "cmd_launch_check", "cmd_events", "cmd_gate_lock", "cmd_version", "cmd_connect", "cmd_recall", "cmd_proposals", "cmd_changes", "cmd_heavy", "cmd_rehearse", "cmd_policy", "cmd_preview"}
 
 
 def writes(a):
@@ -235,6 +236,9 @@ def main():
         opt("--operator", required=True), opt("--title", required=True), opt("--runtimes", default="claude,codex"),
         opt("--host", default="t3"), opt("--tz", default="UTC"),
         opt("--name", help="short name for `brain -b <name>` (default: the folder's name)"))
+    cmd("model-fit", _m_model_fit.cmd_model_fit, "learn model recommendations from comparable recorded jobs", "id",
+        opt("--class", dest="job_class", choices=_m_jobs.JOB_CLASSES, required=True),
+        opt("--runtime", required=True), opt("--effort", choices=_m_jobs.JOB_EFFORTS, default="high"))
     cmd("launch-check", _m_launch_receipts.cmd_launch_check, "compare routed selection with returned host receipt metadata", "id",
         opt("--selection-file", required=True), opt("--receipt-file", required=True))
     cmd("usage", _m_usage.cmd_usage, "account-wide subscription usage (agents read the machine cache)",

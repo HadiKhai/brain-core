@@ -1198,3 +1198,84 @@ Fresh source ownership is checked immediately before launch and publication.
 Initial launch never acknowledges restart usage or resets a lifetime baseline.
 Tests cover one launch/binding, unknown existing workspace ownership and lost
 launch responses. Host execution and scheduler installation are separate proof.
+
+## D701: Restart budgets have independent round counters
+
+Lifetime usage remains the accounting source for ledger totals, forecasts and
+historical comparisons. A successfully delivered restart brief records a private
+baseline for processed tokens, compactions and available active minutes. Ordinary
+brief regeneration does not reset that baseline. Manual compaction restart signals
+use the same acknowledgement path. Failed brief delivery leaves it unchanged.
+
+Budget and compaction warnings subtract this baseline. Active time budgets use the
+measured minutes since restart when available; older receipts fall back to elapsed
+time since acknowledgement. Unknown counters remain unknown and counter regression
+refuses rather than creating spare allowance. Opening a subsequent restart episode
+retains the current round's start. The dashboard consumes a separate `round_usage`
+projection while lifetime usage remains available.
+
+## D702: Usage caches track append offsets and permission metadata
+
+Per-transcript aggregates, including exact job time windows, persist their parsed
+byte offsets in the private spend cache. File identity, size, nanosecond timestamps,
+mode and link count invalidate reused data; replacements, truncations and same-size
+rewrites rebuild it. Growing append-only transcripts resume at the saved whole-line
+offset. Per-job total caches contain aggregate counts and a hashed input signature,
+never transcript text or workspace paths.
+
+Live snapshots share one metadata revision across jobs. That revision includes
+allowed and forbidden source roots, transcript metadata, hand-back changes and
+job bindings; an unchanged caller revision cannot retain newly appended or forbidden
+data. Cached host figures retain precedence. Read-only dashboard requests may use
+existing caches and keep progress in memory, but never publish spend files. A later
+explicit accounting request may publish that progress. Cache schema version 6
+rebuilds older aggregates automatically. Full dashboard latency also depends on
+its worktree, readiness and due callers.
+
+## D703: Routed selections are checked against returned adapter receipts
+
+`brain launch-check` compares an explicit declared provider instance, model and
+options with actual returned host receipt fields. Provider aliases in declarations
+must agree. Options may be objects or unique id/value descriptor arrays; string
+and boolean values retain their types. Empty options must be explicit. Missing,
+ambiguous or malformed fields return unknown; unequal fields return mismatch.
+Both statuses exit nonzero. The checker accepts the host's structured-content
+wrapper, bounds file reads and rejects duplicate JSON keys.
+
+The command is read-only, invokes no host, and prints no supplied identifiers or
+option values. A match attests only that returned metadata matches the declared
+route. It neither enforces provider execution nor proves which model actually ran.
+
+## D704: Model-fit learning fills only opted-in, unpinned defaults
+
+The learner groups recorded jobs by exact class, runtime and effort. It accepts
+reviewed merges and explicitly failed outcomes only when usage is measured and
+attributed entirely to the recorded model. Open, parked, switched, mixed-model,
+unknown and conflicting duplicate observations are excluded. Each model needs at
+least three reviewed merges by default. Success rate and median review rounds
+rank before median processed tokens and active hours. These recorded outcomes
+are quality proxies; the learner does not infer causal model quality or prices.
+
+`brain model-fit` reports the current evidence and recommendation without changing
+configuration. With `model_fit=on`, brief routing may use that recommendation only
+when no explicit, node, ancestor or instance model setting chose a model. Candidate
+models must be declared in `model_fit_models_<runtime>`; no undeclared model or
+runtime is introduced. `model_fit_min_samples` controls the minimum observations.
+The feature defaults off. New ledger evidence updates recommendations automatically,
+while runtime pins, effort selection and subscription/model quota checks retain
+precedence. Receipt validation remains a separate adapter boundary.
+
+## D705: Native restarts acknowledge their captured pre-launch usage
+
+`acknowledge_usage_restart(..., observed_usage=<live_usage dict>)` accepts an
+explicit captured snapshot after a replacement has launched and been bound. The
+helper never re-reads lifetime counters in this mode, so replacement startup and
+work remain charged to its new round. Processed tokens, compactions and active
+minutes must all be known nonnegative integers, with positive measured sessions
+and host/transcript provenance. Missing, unknown, boolean or regressed counters refuse without changing the existing receipt. The supplied
+snapshot is copied and lifetime totals are never mutated.
+
+Omitting the keyword retains the existing post-delivery live-read behavior.
+Explicitly passing `None` is an unavailable snapshot and never selects that fallback.
+Episode and successful-delivery requirements remain unchanged. The native caller
+owns matching the captured snapshot to its exact job/restart operation.
