@@ -1532,3 +1532,141 @@ class DockerLeftoverHooks(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DockerCleanup(Scenario):
+    """All Docker operations target a disposable stateful CLI fixture."""
+    def setUp(self):
+        super().setUp()
+        self.m = core_loader.SourceFileLoader('cleanup_fixture', str(CORE / 'bin/brain')).load_module()
+        self.root = self.init('alice')
+        self.inst = self.m.Instance(self.root)
+        self.node = self.inst.node('root')
+        self.node['fm'].update(docker_cleanup_prefixes='demo-verify-*',
+                               docker_cleanup_host='unix:///var/run/docker.sock',
+                               docker_cleanup_daemon='fixture-daemon', docker_cleanup_mode='stop')
+        self.scope = ':'.join(self.m.machine_scope(self.inst, 'root'))
+        self.identity = 'a' * 64
+        self.container = {'Id': self.identity, 'Name': '/demo-verify-one-db',
+            'Created': '2020-01-01T00:00:00Z', 'State': {'Running': True, 'Status': 'running'},
+            'Config': {'Labels': {'com.docker.compose.project': 'demo-verify-one',
+                                  'brain.docker-scope': self.scope, 'brain.owner-pid': '12345',
+                                  'brain.owner-stamp': 'fixture-birth'}},
+            'HostConfig': {'AutoRemove': False}, 'Mounts': [],
+            'NetworkSettings': {'Networks': {}}}
+        self.state_path = self.tmp / 'docker-state.json'
+        self.log_path = self.tmp / 'docker-calls.jsonl'
+        self.state = {'containers': [self.container], 'volumes': [], 'networks': [], 'daemon': 'fixture-daemon'}
+        self.save_state()
+        fake = self.tmp / 'fake-bin'
+        fake.mkdir()
+        docker = fake / 'docker'
+        docker.write_text('#!' + sys.executable + '\n' + '''import json, os, sys
+from pathlib import Path
+p = Path(os.environ['CLEANUP_STATE'])
+s = json.loads(p.read_text())
+a = sys.argv[1:]
+with open(os.environ['CLEANUP_LOG'], 'a') as f: f.write(json.dumps(a) + '\\n')
+if a[:2] == ['context','inspect']:
+ print(json.dumps([{'Endpoints':{'docker':{'Host':s.get('host','unix:///var/run/docker.sock')}}}]))
+ sys.exit(0)
+a = a[2:]
+if a[:1] == ['info']: print(json.dumps(s['daemon']))
+elif a[:1] == ['ps']: print('\\n'.join(r['Id'] for r in s['containers']))
+elif a[:1] == ['inspect']: print(json.dumps([r for r in s['containers'] if r['Id'] in a[1:]]))
+elif a[:1] == ['stop']:
+ if s.get('stop_failure'): sys.exit(1)
+ for r in s['containers']:
+  if r['Id'] in a[1:]: r['State'] = {'Running':False,'Status':'exited'}
+ p.write_text(json.dumps(s))
+else: sys.exit(91)
+''')
+        docker.chmod(0o700)
+        self.patch = mock.patch.dict(os.environ, {**self.env, 'PATH': str(fake) + os.pathsep + os.environ['PATH'],
+            'CLEANUP_STATE': str(self.state_path), 'CLEANUP_LOG': str(self.log_path),
+            'DOCKER_HOST': '', 'DOCKER_CONTEXT': ''})
+        self.patch.start()
+        self.addCleanup(self.patch.stop)
+        self.owner = mock.patch.object(self.m, 'process_stamp', return_value=None)
+        self.owner.start()
+        self.addCleanup(self.owner.stop)
+
+    def save_state(self):
+        self.state_path.write_text(json.dumps(self.state))
+
+    def sweep(self):
+        return self.m.docker_cleanup_nodes(self.inst, [self.node])
+
+    def mutations(self):
+        rows = [json.loads(line) for line in self.log_path.read_text().splitlines()] if self.log_path.exists() else []
+        return [r for r in rows if len(r) > 2 and r[2] in ('stop', 'rm', 'volume', 'network')]
+
+    def test_stops_only_proven_owned_abandoned_test_container(self):
+        result = self.sweep()
+        self.assertEqual(result['stopped'], [self.identity])
+        self.assertEqual(self.mutations(), [['--host', 'unix:///var/run/docker.sock', 'stop', self.identity]])
+        self.assertFalse(json.loads(self.state_path.read_text())['containers'][0]['State']['Running'])
+
+    def test_live_unknown_or_recycled_identity_is_retained(self):
+        for stamp in ('fixture-birth', 'unknown', 'different-birth'):
+            with self.subTest(stamp=stamp), mock.patch.object(self.m, 'process_stamp', return_value=stamp):
+                self.assertEqual(self.sweep()['stopped'], [])
+        self.assertEqual(self.mutations(), [])
+
+    def test_scope_prefix_preview_dev_and_automatically_removed_are_retained(self):
+        original = json.loads(json.dumps(self.container))
+        variants = [({'brain.docker-scope': 'foreign'}, {}),
+                    ({'com.docker.compose.project': 'demo-development'}, {}),
+                    ({'com.docker.compose.project': 'demo-verify-preview'}, {}),
+                    ({'brain.preview': 'true'}, {}), ({}, {'AutoRemove': True})]
+        for labels, config in variants:
+            self.container.update(json.loads(json.dumps(original)))
+            self.container['Config']['Labels'].update(labels)
+            self.container['HostConfig'].update(config)
+            self.save_state()
+            self.assertEqual(self.sweep()['stopped'], [])
+        self.assertEqual(self.mutations(), [])
+
+    def test_missing_owner_young_or_bind_mounted_resources_are_retained(self):
+        self.container['Config']['Labels'].pop('brain.owner-stamp')
+        self.save_state()
+        self.assertEqual(self.sweep()['stopped'], [])
+        self.container['Config']['Labels']['brain.owner-stamp'] = 'fixture-birth'
+        self.container['Created'] = '2999-01-01T00:00:00Z'
+        self.save_state()
+        self.assertEqual(self.sweep()['stopped'], [])
+        self.container['Created'] = '2020-01-01T00:00:00Z'
+        self.container['Mounts'] = [{'Type': 'bind', 'Source': '/fictional/real-data'}]
+        self.save_state()
+        self.assertEqual(self.sweep()['stopped'], [])
+        self.assertEqual(self.mutations(), [])
+
+    def test_incomplete_inventory_or_foreign_project_peer_vetoes_stop(self):
+        foreign = json.loads(json.dumps(self.container))
+        foreign['Id'] = 'b' * 64
+        foreign['Config']['Labels']['brain.docker-scope'] = 'foreign'
+        self.state['containers'].append(foreign)
+        self.save_state()
+        self.assertEqual(self.sweep()['stopped'], [])
+        self.assertEqual(self.mutations(), [])
+
+    def test_conflicting_selectors_unpinned_endpoint_or_daemon_retains(self):
+        with mock.patch.dict(os.environ, {'DOCKER_HOST': 'unix:///var/run/docker.sock', 'DOCKER_CONTEXT': 'other'}):
+            self.assertEqual(self.sweep()['stopped'], [])
+        self.state['daemon'] = 'other-daemon'
+        self.save_state()
+        self.assertEqual(self.sweep()['stopped'], [])
+        self.state['daemon'] = 'fixture-daemon'
+        self.state['host'] = 'unix:///arbitrary/forwarded.sock'
+        self.save_state()
+        self.assertEqual(self.sweep()['stopped'], [])
+        self.assertEqual(self.mutations(), [])
+
+    def test_discovery_failure_is_quiet_and_stop_failure_is_reported(self):
+        with mock.patch.object(self.m.shutil, 'which', return_value=None):
+            self.assertEqual(self.sweep()['stopped'], [])
+        self.state['stop_failure'] = True
+        self.save_state()
+        result = self.sweep()
+        self.assertEqual(result['stopped'], [])
+        self.assertTrue(result['errors'])

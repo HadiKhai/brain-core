@@ -53,3 +53,24 @@ The regression reads the first committed ledger revision before generating a
 brief, then checks that the brief retains the expected runtime and model. Its
 cases cover class defaults, a node runtime pin, node and instance class routing,
 and inherited model configuration without activating inherited runtime policy.
+
+## D801: Separate Docker diagnostics from explicitly pinned cleanup
+
+Read-only leftover reporting grants no cleanup authority. A node enables cleanup
+with `docker_cleanup_prefixes` (literal namespaces ending in `-verify-*` or
+`-job-*`), `docker_cleanup_host` (trusted local Unix endpoint), and
+`docker_cleanup_daemon` (the exact Docker daemon ID). The default mode is `stop`.
+Conflicting environment selectors, a different effective endpoint, or a changed
+daemon ID refuse mutation. Commands pin that endpoint and clear ambient Docker
+and Compose selectors; no project compose file is loaded.
+
+A container also needs the exact node/machine `brain.docker-scope` and both
+`brain.owner-pid` and `brain.owner-stamp` labels. Only a definitely absent process
+qualifies; unknown or recycled identities retain resources. Every connected
+project, Testcontainers session, named volume and network peer participates in
+ownership checks. Preview/dev/production identities, bind mounts, automatic
+removal, incomplete inventories and resources younger than 30 minutes veto work.
+Cleanup stops only immutable inspected container IDs, checks all peers immediately
+before each mutation, and reports a stopped ID only after confirmation. One
+five-second deadline bounds each hook call. Missing Docker/configuration is a
+quiet no-op; failure returns diagnostics without replacing a run's primary result.
