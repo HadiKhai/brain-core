@@ -55,3 +55,9 @@ running them. These bindings stay in `.brain/local.json`; never copy them into s
 `preview=none` clears the reminder when no preview applies. Only `preview_url=<deployed URL>`
 is explicitly shareable here. A git home, `type:code`/`kind:code` label or `stack` field identifies
 code nodes; merged jobs without a preview get a due/facts reminder.
+
+`separation_policy: required` refuses worker, specialist and review briefs without
+a separation reason. Supply `--why-separate` or the contract's `## Why separate`;
+independent reviews retain their default reason. `--allow-unexplained` records an
+explicit urgent waiver. The default `warn` preserves existing brief automation.
+This setting does not launch, cancel or consolidate agents.

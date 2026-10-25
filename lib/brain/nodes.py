@@ -611,6 +611,10 @@ def prepare_settings(inst, n, pairs, messages=None):
             except ValueError as error:
                 _m_common.die(str(error))
             fm[k] = v
+        elif k == 'separation_policy':
+            if v not in ('warn', 'required'):
+                _m_common.die('separation_policy must be warn or required')
+            fm[k] = v
         elif k == 'parallel_jobs':
             try:
                 _m_status.parallel_job_limit({'fm': {'parallel_jobs': v}})

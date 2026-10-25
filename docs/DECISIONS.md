@@ -53,3 +53,12 @@ The regression reads the first committed ledger revision before generating a
 brief, then checks that the brief retains the expected runtime and model. Its
 cases cover class defaults, a node runtime pin, node and instance class routing,
 and inherited model configuration without activating inherited runtime policy.
+
+## D101: Configurable required separation reasons
+
+The shared brief reason resolver accepts a node-local `separation_policy` of
+`warn` (the compatible default) or `required`. Required mode refuses a missing
+reason before brief output or route recording. Explicit reasons, contract reasons
+and independent review defaults satisfy it; an explicit urgent waiver remains
+available. Invalid policy values fail closed. This controls brief generation;
+it does not infer a safe agent cap or cancel overlapping work.

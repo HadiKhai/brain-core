@@ -1575,3 +1575,10 @@ For agents:
 
 After upgrading:
 - Nothing required. Offer the study to the operator for nodes whose import study is done.
+
+## Required separation reason policy
+
+For agents: `brain set <node> separation_policy=required` makes a missing
+separation reason refuse brief generation across workers, hires and reviews.
+Use `--why-separate`, a contract reason, or the explicit urgent waiver.
+After upgrading: existing nodes keep warning behavior unless they opt in.

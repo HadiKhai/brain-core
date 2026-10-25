@@ -203,12 +203,15 @@ def peer_lines(a):
 
 def separation_lines(a, n, branch, default=""):
     """One launch-reason policy for workers, specialists and independent reviewers."""
+    policy = n['fm'].get('separation_policy', 'warn')
+    if policy not in ('warn', 'required'):
+        _m_common.die('separation_policy must be warn or required')
     row = _m_jobs.open_job(_m_jobs.read_jobs(n) or [], branch) if branch else None
     contract = _m_jobs.contract_file(n, row).read_text() if row and _m_jobs.contract_file(n, row).is_file() else ""
     sections = {k.lower(): v for k, v in _m_ui.md_sections(contract).items()}
     why = a.why_separate if a.why_separate is not None else (default or sections.get("why separate") or "")
     if not why.strip():
-        if a.why_separate is not None and not a.allow_unexplained:
+        if (a.why_separate is not None or policy == 'required') and not a.allow_unexplained:
             _m_common.die("--why-separate needs a reason; use --allow-unexplained for an urgent job")
         why = ("Urgent launch: separation reason explicitly waived." if a.allow_unexplained else
                "not stated by the coordinator")
