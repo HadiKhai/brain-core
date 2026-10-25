@@ -62,13 +62,34 @@ def wake_setup_plan(inst, n):
             'status': 'plan only; no host call or local binding performed; keep the returned capability private'}
 
 
-def wake_target(inst, n):
+def wake_configured_route(inst, n):
     target = n
     while not target['local'].get('coordinator') and target.get('parent') is not None:
         target = target['parent']
     if not target['local'].get('coordinator'):
         target = inst.node('root')
     return target, target["local"].get("wake") or inst.local_of("root").get("wake_default", "")
+
+
+def wake_route_disabled(inst, n, target=None):
+    target = target or wake_configured_route(inst, n)[0]
+    return (n['local'].get('wake_enabled') == 'off' or target['local'].get('wake_enabled') == 'off'
+            or not target['local'].get('wake') and inst.local_of('root').get('wake_enabled') == 'off')
+
+
+def wake_target(inst, n):
+    target, command = wake_configured_route(inst, n)
+    return target, '' if wake_route_disabled(inst, n, target) else command
+
+
+def wake_disabled_notice(inst, n):
+    target, command = wake_configured_route(inst, n)
+    if not wake_route_disabled(inst, n, target):
+        return None
+    record = wake_read(wake_directory(inst, target), command) if command else None
+    detail = ('; retained cached delivery HTTP ' + str(record['status']) if record and type(record['status']) is int
+              else '; retained cached delivery: ' + record['status'] if record else '')
+    return 'wake delivery explicitly disabled on this machine' + detail + '; no current delivery health asserted'
 
 
 def wake_directory(inst, n):
@@ -625,6 +646,8 @@ def wake_probe(inst, n, force=False):
     """Probe a webhook at most daily per binding; return an HTTP code or safe error."""
     import fcntl
     target, command = wake_target(inst, n)
+    if wake_route_disabled(inst, n, target):
+        return "delivery explicitly disabled"
     if not command.startswith(("https://", "http://")):
         return "no webhook"
     if _m_common.outward_links(inst.root):
@@ -666,6 +689,8 @@ def wake_drain(inst, n, once=False):
     Failed deliveries remain pending; stop after ten minutes, with due retrying later.
     """
     import fcntl
+    if wake_route_disabled(inst, n):
+        return  # retain capabilities, errors and queued work; explicit off never activates a fallback
     directory = wake_directory(inst, n)
     if not directory.is_dir() or _m_common.outward_links(inst.root):
         return

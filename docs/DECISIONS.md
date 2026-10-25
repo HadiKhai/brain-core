@@ -205,3 +205,17 @@ A wall-clock rollback makes a now-future receipt invalid immediately. The separa
 transport timestamp bounds deferral to one existing rate interval; it does not wait
 for the old receipt's wall time. This preserves queued work without mutating the
 damaged receipt or inventing a successful consume/acknowledgement.
+
+
+## D511: Explicitly disabled wake delivery preserves cached refusal evidence
+
+Machine-local `wake_enabled=off` disables enqueue/drain/probe for that route,
+including inherited fallback delivery. Capabilities, queued work and cached results
+remain intact. Checks show the explicit disabled state and retained delivery result
+as evidence without claiming current health. Unspecified/on routes keep their
+existing fatal non-2xx checks; an old successful probe cannot negate a refusal.
+
+A pause label or a cached error alone never implies this disabled state. The flag
+must describe an explicit operational decision. This separates intentional disabled
+delivery from actual refusal while retaining the original evidence. It does not
+change host tasks, install anything, probe, or enable a route.

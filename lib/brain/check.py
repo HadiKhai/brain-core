@@ -301,6 +301,10 @@ def cmd_check(a):
     seen = set()
     for n in inst.nodes():
         target, command = _m_hosts.wake_target(inst, n)
+        disabled = _m_hosts.wake_disabled_notice(inst, n)
+        if disabled and not n['archived']:
+            warnings.append(n['id'] + ': ' + disabled)
+            continue
         if n["archived"] or target["id"] in seen or not command.startswith(("http://", "https://")):
             continue
         seen.add(target["id"])

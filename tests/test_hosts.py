@@ -1820,3 +1820,52 @@ class RegisteredDelegatedWake(Scenario):
         with self.assertRaises(ValueError):
             self.register()
         self.assertFalse(any(name == 'delegate_task' for name, _ in self.calls))
+
+
+class DisabledWakeDiagnostics(Scenario):
+    def test_explicit_disable_retains_cached_refusal_and_never_probes_or_drains(self):
+        patch = mock.patch.dict(os.environ, self.env)
+        patch.start()
+        self.addCleanup(patch.stop)
+        m = core_loader.SourceFileLoader('disabled_fixture', str(CORE / 'bin/brain')).load_module()
+        root = self.init('alice')
+        self.b(root, 'set', 'root', 'coordinator=fixture-root', 'wake=https://wake.invalid/fixture',
+               'wake_default=https://wake.invalid/fallback')
+        inst = m.Instance(root)
+        n = inst.node('root')
+        directory = m.wake_directory(inst, n)
+        m.wake_record(directory, n['local']['wake'], 409)
+        inst.local_of('root')['wake_enabled'] = 'off'
+        inst.save_local()
+        before = (directory / 'delivery.json').read_bytes()
+        with mock.patch.object(m, 'load', return_value=inst), \
+                mock.patch.object(m, 'collect_problems', return_value=([], [], [])), \
+                mock.patch.object(m, 'wake_probe') as probe, mock.patch.object(m, 'wake_send') as send, \
+                contextlib.redirect_stdout(io.StringIO()) as output:
+            m.cmd_check(argparse.Namespace(fix=True, live=True))
+            m.wake_drain(inst, n, once=True)
+            self.assertEqual(m.wake_target(inst, n)[1], '')
+            self.assertFalse(m.request_wake(inst, n, 'fixture-question'))
+            probe.assert_not_called()
+            send.assert_not_called()
+        self.assertIn('disabled', output.getvalue())
+        self.assertIn('409', output.getvalue())
+        self.assertEqual((directory / 'delivery.json').read_bytes(), before)
+
+    def test_active_cached_refusal_stays_a_failure(self):
+        patch = mock.patch.dict(os.environ, self.env)
+        patch.start()
+        self.addCleanup(patch.stop)
+        m = core_loader.SourceFileLoader('active_fixture', str(CORE / 'bin/brain')).load_module()
+        root = self.init('alice')
+        self.b(root, 'set', 'root', 'wake=https://wake.invalid/fixture')
+        inst = m.Instance(root)
+        n = inst.node('root')
+        m.wake_record(m.wake_directory(inst, n), n['local']['wake'], 409)
+        with mock.patch.object(m, 'load', return_value=inst), \
+                mock.patch.object(m, 'collect_problems', return_value=([], [], [])), \
+                mock.patch.object(m, 'wake_probe') as probe, contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaises(SystemExit) as error:
+                m.cmd_check(argparse.Namespace(fix=True, live=False))
+            self.assertEqual(error.exception.code, 1)
+            probe.assert_not_called()
