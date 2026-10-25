@@ -150,3 +150,13 @@ locally. The automated brief requests the work; the host provides scheduling and
 the agent supplies semantic sync/brief execution. Definition receipts make repeat
 setup idempotent and refuse changed or legacy bindings that need reconciliation.
 The core does not invent a separate scheduler daemon or an LLM summary engine.
+
+## D1210: Synchronize idle-view assertions with metadata publication
+
+The idle-view server fixture acknowledges a poll only after a complete metadata
+scan that began after that poll request. A response from an earlier publication
+cannot supply exact-build-count assertions. Control files live outside dashboard
+inputs, so the barrier itself cannot trigger a rebuild. The fixture's wall clock
+is controlled independently from real scheduling time; a dedicated regression
+advances the five-minute age boundary and still requires state invalidation.
+Production UI code, timeouts and exact cache assertions remain unchanged.
