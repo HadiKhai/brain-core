@@ -66,7 +66,7 @@ SHARED_INPUTS = (
     'lib/brain/common.py', 'lib/brain/instance.py', 'lib/brain/cli.py',
     'lib/brain/status.py', 'lib/brain/ui_status.py', 'lib/brain/ui_server.py',
     'lib/brain/gate_lock.py', 'lib/brain/spec_run.py', 'lib/brain/full_gate.py', 'lib/brain/queue_priority.py', 'lib/brain/job_env.py', 'lib/brain/release.py',
-    'lib/brain/docker_cleanup.py',
+    'lib/brain/docker_cleanup.py', 'lib/brain/resource_leases.py',
     'lib/brain/action_guard.py', 'lib/brain/preview_evidence.py', 'lib/brain/review_findings.py',
     'lib/brain/settings_batch.py', 'lib/brain/dispatcher.py',
     'lib/brain/__init__.py', 'tests/scenario.py', 'tests/core_loader.py',

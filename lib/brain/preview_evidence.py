@@ -17,6 +17,8 @@ def preview_urls(n):
     if n['local'].get('preview'):
         urls.append(n['local']['preview'])
     extra = n['local'].get('review_urls', [])
+    if isinstance(extra, str):
+        extra = json.loads(extra) if extra.strip() else []
     if not isinstance(extra, list) or any(not isinstance(u, str) for u in extra):
         raise ValueError('review_urls must be a list of presented URLs')
     return list(dict.fromkeys(urls + extra))
@@ -90,7 +92,8 @@ def record_preview_receipt(inst, n, branch, data):
 def validate_ready_preview(inst, n, branch, head, packet=None):
     try:
         urls = preview_urls(n)
-        required = n['fm'].get('requires_preview_evidence', inst.cfg.get('requires_preview_evidence', '')).lower()
+        cfg = inst.cfg if isinstance(inst.cfg, dict) else {}
+        required = str(n['fm'].get('requires_preview_evidence', cfg.get('requires_preview_evidence', ''))).lower()
         if not urls and required not in ('true', 'yes', '1', 'on'):
             return []
         row = _m_jobs.open_job(_m_jobs.read_jobs(n) or [], branch)

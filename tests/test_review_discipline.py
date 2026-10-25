@@ -426,3 +426,163 @@ class ClosedFindingInputs(Scenario):
             m.record_review_findings(inst, n, 'job', head, [dict(finding, evidence='')])
         m.record_review_findings(inst, n, 'job', head, [finding])
         self.assertEqual(m.review_finding_state(inst, n, 'job', head)[0]['state'], 'closed')
+
+
+class ReceiptReadinessIntegration(Scenario):
+    job = _test_verify.WorkerReadyPackets.job
+    context = IndependentReviewReceipts.context
+
+    def test_unconfigured_mock_settings_preserve_existing_readiness(self):
+        r, wt, m, inst, n, review = self.context()
+        n['fm'].pop('review_independence')
+        inst.cfg = mock.Mock()
+        self.assertEqual(m.ready_policy_reasons(inst, n, 'job', review['head']), [])
+        n['fm']['requires_preview_evidence'] = True
+        self.assertTrue(m.ready_policy_reasons(inst, n, 'job', review['head']))
+
+    def test_real_receipt_schemas_guard_recording_and_all_packet_read_modes(self):
+        r, wt, m, inst, n, review = self.context()
+        self.b(r, 'set', 'a', 'preview=https://preview.example/app')
+        inst = m.Instance(r)
+        n = inst.node('a')
+        owner = m.record_ready.__globals__
+        with mock.patch.dict(os.environ, self.env, clear=True), mock.patch.dict(owner, {
+                'run_verify': mock.Mock(side_effect=AssertionError('verification ran without required receipts'))}):
+            packet, reasons = m.record_ready(inst, n, 'job', 1)
+        self.assertIsNone(packet)
+        self.assertTrue(any('review receipt' in reason for reason in reasons))
+        self.assertTrue(any('preview' in reason for reason in reasons))
+        m.record_review_receipt(inst, n, 'job', review)
+        preview = {'version': 1, 'node': 'a', 'job_key': review['job_key'], 'branch': 'job', 'head': review['head'],
+                   'checked_at': inst.now_dt().isoformat(), 'renderer_threadId': 'browser-thread',
+                   'urls': [{'url': n['local']['preview'], 'rendered': True, 'render_evidence': 'render-artifact',
+                             'items': [{'page_item': str(i), 'source_ref': 'source.json#' + str(i),
+                                        'source_item': str(i)} for i in range(3)]}]}
+        path = m.record_preview_receipt(inst, n, 'job', preview)
+        log = self.tmp / 'fixture-verify.log'
+        log.write_text('fixture verifier output\n')
+        runner = mock.Mock(return_value=(0, str(log)))
+        with mock.patch.dict(os.environ, self.env, clear=True), mock.patch.dict(owner, {'run_verify': runner}):
+            packet, reasons = m.record_ready(inst, n, 'job', 1)
+        self.assertEqual(reasons, [])
+        self.assertIsNotNone(packet)
+        runner.assert_called_once()
+        row = m.open_job(m.read_jobs(n), 'job')
+        target = m.handback_file(n, row)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(json.dumps({'version': 3, 'job': 'job', 'started': row['Started'], 'state': 'done',
+                                     'summary': 'Fixture receipt integration', 'lessons': 'none: fixture',
+                                     'ready': packet, 'ready_reasons': []}))
+        for mode in ({}, {'display': True}, {'train': True}, {'train': True, 'display': True}):
+            state = m._ready_state(inst, n, 'job', **mode)
+            self.assertTrue(state['ready'], state['reasons'])
+        path.unlink()
+        for mode in ({}, {'display': True}, {'train': True}, {'train': True, 'display': True}):
+            state = m._ready_state(inst, n, 'job', **mode)
+            self.assertFalse(state['ready'])
+            self.assertTrue(any('preview' in reason for reason in state['reasons']))
+        m.record_preview_receipt(inst, n, 'job', preview)
+        (n['dir'] / 'never-name.txt').write_text('receipt\n')
+        values, keys = {}, {('a', 'job'): ('stable-job-inputs',)}
+        with mock.patch.object(m, '_ready_state', wraps=m._ready_state) as facts, m.display_cache(values, keys):
+            self.assertTrue(m.ready_state(inst, n, 'job', display=True)['ready'])
+            path.unlink()
+            state = m.ready_state(inst, n, 'job', display=True)
+            self.assertFalse(state['ready'], 'cached display ignored missing required preview evidence')
+            self.assertNotIn('receipt', ' '.join(state['reasons']))
+            self.assertTrue(any('preview' in reason for reason in state['reasons']))
+            m.record_preview_receipt(inst, n, 'job', preview)
+            self.assertTrue(m.ready_state(inst, n, 'job', display=True)['ready'])
+            facts.assert_called_once()
+
+
+class DurableFindingReadiness(Scenario):
+    job = _test_verify.WorkerReadyPackets.job
+    context = IndependentReviewReceipts.context
+
+    def finding(self, state='open'):
+        return {'id': 'range', 'class': 'boundary', 'severity': 'major', 'text': 'Check the range',
+                'paths': ['calc.py'], 'state': state, **({'evidence': 'focused range case passes'} if state == 'closed' else {})}
+
+    def pass_receipt(self, m, inst, n, receipt, reviewer, head=None, findings=None):
+        data = dict(receipt, verdict='pass', findings=[] if findings is None else findings,
+                    head=head or receipt['head'], observed_at=inst.now_dt().isoformat(),
+                    reviewer=dict(receipt['reviewer'], threadId=reviewer))
+        m.record_review_receipt(inst, n, 'job', data)
+        return data
+
+    def test_omitted_major_remains_blocking_in_validator_and_readiness_caller(self):
+        r, wt, m, inst, n, receipt = self.context()
+        m.record_review_receipt(inst, n, 'job', dict(receipt, verdict='blocked', findings=[self.finding()]))
+        self.pass_receipt(m, inst, n, receipt, 'another-reviewer')
+        self.assertTrue(m.validate_ready_reviews(inst, n, 'job', receipt['head']))
+        self.assertTrue(m.ready_policy_reasons(inst, n, 'job', receipt['head']))
+        with mock.patch.object(m, 'run_verify') as runner:
+            packet, reasons = m.record_ready(inst, n, 'job', 1)
+        self.assertIsNone(packet)
+        self.assertTrue(reasons)
+        runner.assert_not_called()
+        self.assertEqual(m.review_finding_state(inst, n, 'job', receipt['head'])[0]['state'], 'open')
+
+    def assert_input_change_reopens(self, deleted):
+        r, wt, m, inst, n, receipt = self.context()
+        m.record_review_receipt(inst, n, 'job', dict(receipt, findings=[self.finding('closed')]))
+        (wt / 'notes.txt').write_text('unrelated note\n')
+        self.git('add', 'notes.txt', cwd=wt)
+        self.git('commit', '-qm', 'unrelated input', cwd=wt)
+        head = self.git('rev-parse', 'HEAD', cwd=wt).strip()
+        self.pass_receipt(m, inst, n, receipt, 'unrelated-reviewer', head)
+        self.assertEqual(m.validate_ready_reviews(inst, n, 'job', head), [])
+        if deleted:
+            (wt / 'calc.py').unlink()
+        else:
+            (wt / 'calc.py').write_text('value = 9\n')
+        self.git('commit', '-qam', 'relevant input change', cwd=wt)
+        head = self.git('rev-parse', 'HEAD', cwd=wt).strip()
+        self.pass_receipt(m, inst, n, receipt, 'changed-reviewer', head)
+        self.assertEqual(m.review_finding_state(inst, n, 'job', head)[0]['state'], 'reopened')
+        self.assertTrue(m.validate_ready_reviews(inst, n, 'job', head))
+        self.assertTrue(m.ready_policy_reasons(inst, n, 'job', head))
+        self.pass_receipt(m, inst, n, receipt, 'closure-reviewer', head, [self.finding('closed')])
+        self.assertEqual(m.validate_ready_reviews(inst, n, 'job', head), [])
+
+    def test_unchanged_closure_survives_omission_but_changed_input_reopens(self):
+        self.assert_input_change_reopens(False)
+
+    def test_unchanged_closure_survives_omission_but_deleted_input_reopens(self):
+        self.assert_input_change_reopens(True)
+
+    def test_malformed_or_missing_union_refuses_without_replacing_durable_evidence(self):
+        r, wt, m, inst, n, receipt = self.context()
+        m.record_review_receipt(inst, n, 'job', dict(receipt, findings=[self.finding('closed')]))
+        row = m.open_job(m.read_jobs(n), 'job')
+        path = m.finding_state_path(inst, n, row)
+        original = json.loads(path.read_text())
+        variants = [dict(original, version=True), dict(original, findings={'range': []})]
+        for fields in ({'id': 'other'}, {'severity': 'unknown'}, {'state': 'reopened'}, {'inputs': {}},
+                       {'inputs': {'calc.py': '0' * 40}}, {'evidence': ''}, {'paths': [['calc.py']]}):
+            data = json.loads(json.dumps(original))
+            data['findings']['range'].update(fields)
+            variants.append(data)
+        for data in variants:
+            with self.subTest(data=data):
+                text = json.dumps(data)
+                path.write_text(text)
+                self.assertTrue(m.validate_ready_reviews(inst, n, 'job', receipt['head']))
+                self.assertTrue(m.ready_policy_reasons(inst, n, 'job', receipt['head']))
+                with self.assertRaises(ValueError):
+                    self.pass_receipt(m, inst, n, receipt, 'malformed-reviewer')
+                self.assertEqual(path.read_text(), text)
+        path.unlink()
+        self.assertTrue(m.validate_ready_reviews(inst, n, 'job', receipt['head']))
+        with self.assertRaises(ValueError):
+            self.pass_receipt(m, inst, n, receipt, 'missing-reviewer')
+        self.assertFalse(path.exists())
+
+    def test_existing_major_cannot_be_downgraded_or_closed_without_evidence(self):
+        r, wt, m, inst, n, receipt = self.context()
+        m.record_review_receipt(inst, n, 'job', dict(receipt, verdict='blocked', findings=[self.finding()]))
+        for fields in ({'severity': 'minor'}, {'state': 'closed', 'evidence': ''}):
+            with self.subTest(fields=fields), self.assertRaises(ValueError):
+                self.pass_receipt(m, inst, n, receipt, 'downgrade-reviewer', findings=[dict(self.finding(), **fields)])
+        self.assertTrue(m.validate_ready_reviews(inst, n, 'job', receipt['head']))

@@ -210,6 +210,24 @@ facts bound to job, exact head, base and execution fingerprint. Focused runs and
 imported/reused proof emit none; explicit reverify is classified separately.
 Telemetry uses the event module's controlled schema and is absent on installations
 without that module.
+## D417: Readiness policies and command cleanup share the native execution path
+
+Required review and preview receipts are checked before verification, on every
+packet read, and when reusing cached display facts. Durable unresolved or
+reopened major findings remain refusals even when a newer receipt omits them.
+
+The verifier uses the managed admission token through execution and cleanup.
+Admission and queue projections use the same stable priority order, including
+manual ordering and aging. Setup and command reservations retain distinct
+terminal identities. A node gate is acquired before machine admission; every
+cleanup runs before terminal success can be published. Numeric command failure
+and cancellation retain their original outcome when cleanup also fails.
+Configured resource leases span cleanup, and failed executions retain their
+claim. Explicit due ticks invoke configured owned-resource cleanup before
+reporting leftover diagnostics. Terminal delivery receipts remain durable across
+routing changes. Verification lane ownership and nonselective input mappings
+must pass the repository coverage checker as executable checks.
+
 ## D1301: Node-local tasks with explicit dependencies and completion evidence
 
 Store one Markdown file per task under a node's `tasks/`, using versioned,

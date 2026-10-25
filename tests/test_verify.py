@@ -544,6 +544,9 @@ class VerifyLogs(Scenario):
         self.git('add', 'stdin-check.py', cwd=wt)
         self.git('commit', '-qm', 'stdin fixture', cwd=wt)
         self.b(r, 'set', 'a', 'verify=python3 -B stdin-check.py')
+        # This assertion covers command writes; allow its generated status commit
+        # rather than the independent hourly coalescing policy.
+        (r / '.brain/events-status-commits.json').unlink(missing_ok=True)
         result = subprocess.run([sys.executable, str(r / 'core/bin/brain'), 'handback', '--summary', 'Synthetic result', 'a', '--branch', 'job',
                                  '--state', 'done', '--reviews', '1'], cwd=r, env=self.env,
                                 input='fixture-input\n', capture_output=True, text=True)

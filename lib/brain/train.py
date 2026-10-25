@@ -8,6 +8,7 @@ import os
 import shlex
 import shutil
 import subprocess
+import sys
 import uuid
 from pathlib import Path
 
@@ -300,14 +301,27 @@ def cmd_train(a):
             fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             _m_common.die("train: another train owns this repository")
+        primary = None
         try:
             run_train(inst, n, home, verify, a)
+        except BaseException as error:
+            primary = error
+            raise
         finally:
-            # Persist ejections/interrupted execution evidence even when publication stops.
-            try:
-                inst.commit([], f"{n['id']}: train state")
-            finally:
-                _m_docker_leftovers.docker_leftover_nodes(inst, [n])
+            # Attempt all finalizers, preserving any publication/execution failure.
+            errors = []
+            for action in (lambda: inst.commit([], f"{n['id']}: train state"),
+                           lambda: _m_verify.verify_cleanup(inst, n),
+                           lambda: _m_docker_leftovers.docker_leftover_nodes(inst, [n])):
+                try:
+                    action()
+                except BaseException as error:
+                    errors.append(error)
+            if errors:
+                if primary is None:
+                    raise errors[0]
+                primary.cleanup_errors = [type(error).__name__ + ': ' + str(error) for error in errors]
+                print('train: cleanup incomplete; primary failure retained', file=sys.stderr)
 
 
 def reconcile_manual_landings(inst, n):
