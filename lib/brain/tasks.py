@@ -256,6 +256,12 @@ def cmd_task(a):
 def register(sub):
     parser = sub.add_parser('task', help='node-local tasks, dependencies and completion evidence')
     actions = parser.add_subparsers(dest='action', required=True)
+    failure = actions.add_parser('event', help='record one identified failed round')
+    failure.add_argument('node')
+    failure.add_argument('task_id')
+    failure.add_argument('--event-id', required=True)
+    failure.add_argument('--reason', required=True)
+    failure.set_defaults(f=cmd_task_event)
     req = actions.add_parser('requirement-add')
     req.add_argument('node')
     req.add_argument('requirement_id')
@@ -275,3 +281,125 @@ def register(sub):
         p.add_argument('--owner')
         p.add_argument('--json', action='store_true')
         p.set_defaults(f=cmd_task)
+
+
+def prepare_start(n, task_id=None, branch=''):
+    """Refuse before worktree creation. Existing instances remain opt-in."""
+    rows = read_records(n)
+    if branch.startswith('import:'):
+        return
+    if not task_id:
+        if rows:
+            raise ValueError('this node uses tasks; starting a job requires --task-id')
+        return
+    row = rows.get(task_id)
+    if not row or row['status'] != 'ready':
+        raise ValueError('starting a job requires a ready task')
+    if any(rows.get(d, {}).get('status') not in ('merged', 'done') for d in row['depends_on']):
+        raise ValueError('task dependencies are unfinished')
+    validate(n, rows)
+
+
+def job_started(inst, n, row):
+    ident = row.get('Task')
+    if ident:
+        from . import jobs as _m_jobs
+        mutate(inst, n, ident, {'status': 'in-progress', 'job': _m_jobs.job_key(row), 'branch': row['Job']}, provider=True)
+
+
+def event(inst, n, ident, event_id, reason):
+    """One strike per recorded failure identity, even after delivery retries."""
+    if not event_id.strip() or not reason.strip():
+        raise ValueError('failure event requires an id and reason')
+    with _m_instance.brain_lock(inst):
+        rows = read_records(n)
+        if ident not in rows:
+            raise ValueError('task not found')
+        row = dict(rows[ident])
+        events = list(row.get('failure_events', []))
+        if event_id in events:
+            return row
+        if row['status'] in ('merged', 'done', 'dropped'):
+            raise ValueError('closed task cannot receive a failure')
+        row['failure_events'] = events + [event_id]
+        row['strikes'] += 1
+        if row['strikes'] >= 2:
+            row.update(status='parked', park_reason=reason, resume='Repair the failing step and explicitly set ready')
+        else:
+            row.update(status='blocked', park_reason=reason)
+        row['updated'] = inst.now()
+        rows[ident] = row
+        validate(n, rows)
+        save_record(n, row)
+        inst.commit([], n['id'] + ': task failure ' + ident)
+        return row
+
+
+def handback_event(inst, n, row, data):
+    ident = row.get('Task')
+    if not ident:
+        return
+    packet = data.get('ready') or {}
+    failed = data.get('state') == 'failed' or type(packet.get('verify_result')) is int and packet['verify_result'] != 0
+    if failed:
+        event_id = 'handback:' + str(data.get('attempt_id') or data.get('at'))
+        event(inst, n, ident, event_id, data.get('summary') or 'Verification failed')
+    elif data.get('state') == 'done' and packet.get('verify_result') == 0:
+        existing = read_records(n)[ident]
+        if existing['status'] != 'parked':
+            mutate(inst, n, ident, {'status': 'testing', 'evidence': existing['evidence'] + [
+                'Verification exit 0 at ' + data['at']]}, provider=True)
+
+
+def job_closed(inst, n, row):
+    ident = row.get('Task')
+    if not ident:
+        return
+    from . import sync as _m_sync
+    packet = _m_sync.integration_packet(inst, n, row) or {}
+    changes = {'status': 'parked', 'park_reason': row.get('Cause') or 'Job closed without proven task completion',
+               'resume': 'Start a new task job or supply verified main landing evidence'}
+    head = row.get('Head commit') or packet.get('head', '')
+    if row.get('Outcome') == 'merged' and packet.get('verify_result') == 0 and head == packet.get('head'):
+        base = packet.get('integration_base') or packet.get('main')
+        paths = _m_common.git('diff', '--name-only', base or head + '^', head, cwd=n['home_path']).stdout.splitlines()
+        if paths:
+            changes = {'status': 'merged', 'merge_sha': head, 'code_path': ', '.join(paths),
+                       'evidence': ['Verified job ' + row['Job'] + ' at ' + inst.now()], 'park_reason': '', 'resume': ''}
+    # Existing task proof remains unchanged if the job endpoint is not on main.
+    try:
+        mutate(inst, n, ident, changes, provider=True)
+    except ValueError:
+        mutate(inst, n, ident, {'status': 'parked', 'park_reason': 'Landing evidence is incomplete',
+                              'resume': 'Provide the exact verified commit already on main'}, provider=True)
+
+
+def due_tasks(inst, n):
+    """File-only task actions; a parked task is always visible until resumed."""
+    items = []
+    for row in projection(n):
+        kind = None
+        if row['status'] == 'ready' and not row['blocked_by']:
+            kind = 'task-ready'
+        elif row['status'] == 'blocked' and row['depends_on'] and not row['blocked_by']:
+            kind = 'task-unblocked'
+        elif row['status'] == 'parked':
+            kind = 'task-parked'
+        elif row['status'] in ('in-progress', 'in-review', 'testing'):
+            at = inst.parse_time(row.get('updated'))
+            if at and (inst.now_dt() - at).total_seconds() >= 900:
+                kind = 'task-stalled'
+        if kind:
+            items.append({'node': n['id'], 'kind': kind, 'task': row['id'],
+                          'episode': row['id'] + ':' + row['updated'],
+                          'text': row['id'] + ': ' + row['title'] + ('; resume: ' + row['resume'] if kind == 'task-parked' else '')})
+    return items
+
+
+def cmd_task_event(a):
+    inst = _m_nodes.load()
+    n = inst.node(a.node)
+    try:
+        print(json.dumps(event(inst, n, a.task_id, a.event_id, a.reason)))
+    except (OSError, ValueError) as error:
+        _m_common.die(str(error))

@@ -418,6 +418,7 @@ def main():
     t = wsub.add_parser("add", help="brain wt add <node> <branch> [--base REF]: new worktree + setup + port")
     t.add_argument("id"); t.add_argument("branch"); t.add_argument("--base")
     t.add_argument("--no-setup", action="store_true", dest="no_setup")
+    t.add_argument("--task-id", help="ready task to link to this job")
     t.set_defaults(f=_m_worktrees.cmd_wt_add)
     t = wsub.add_parser("list", help="brain wt list [node]")
     t.add_argument("id", nargs="?")

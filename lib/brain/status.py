@@ -596,6 +596,10 @@ def due_items(inst, n, evidence=None, include_stale=True, include_ready=True, in
         add("stale-status", lag + "; update judgement sections, then brain status <node> --refresh")
     from . import watch as _m_watch
     items.extend(_m_watch.watch_job_stalls(inst, n))
+    from . import tasks as _m_tasks
+    for task_item in _m_tasks.due_tasks(inst, n):
+        task_item["text"] = _m_guard.redact(task_item["text"], _m_guard.never_terms(n))
+        items.append(task_item)
     omitted = (['stale-status'] if not include_stale else []) + (['job'] if not include_advice else [])
     return _m_reminders.reminder_items(inst, n, items, include_handled=include_handled, omitted_kinds=omitted)
 

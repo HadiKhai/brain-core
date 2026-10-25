@@ -69,3 +69,16 @@ a code path and a commit already on local main. Parked tasks require a reason
 and resume condition and continue blocking dependents; dropping a task does not
 silently satisfy dependencies. Provider-owned tasks retain external ownership
 of their product fields; internal work can still use local records.
+
+## D1302: Task-aware jobs preserve explicit opt-in and landing proof
+
+Nodes with task records require a ready, unblocked task before creating a job
+worktree. Nodes without records keep their existing job interface, and import
+studies remain compatible. The ledger retains the task ID, while the task stores
+the stable job key and branch. Identified failed rounds count once; two failures
+park the task with an explicit resume condition.
+
+Closing a job updates its task only from a successful native verification packet
+whose head is already on main, retaining the changed code paths. Other closures
+park the task rather than claiming completion. File-only due items surface ready,
+unblocked, parked and inactive tasks without changing their state.

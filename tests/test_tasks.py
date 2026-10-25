@@ -98,3 +98,59 @@ class Tasks(Scenario):
         out = json.loads(self.b(root, 'task', 'next', 'root', '--json'))
         self.assertEqual([r['id'] for r in out], ['APP-3'])
         self.assertIn('tasks: valid', self.b(root, 'task', 'check', 'root'))
+
+    def test_job_start_requires_ready_task_and_records_exact_job(self):
+        from brain import jobs
+        self.add(status='ready')
+        with self.assertRaises(SystemExit):
+            jobs.job_started(self.inst, self.n, 'job/example', 'codex')
+        jobs.job_started(self.inst, self.n, 'job/example', 'codex', task_id='APP-1')
+        row = jobs.read_jobs(self.n)[0]
+        task = tasks.read_records(self.n)['APP-1']
+        self.assertEqual(row['Task'], 'APP-1')
+        self.assertEqual(task['job'], jobs.job_key(row))
+        self.assertEqual(task['status'], 'in-progress')
+        jobs.job_started(self.inst, self.n, 'job/example', 'codex', task_id='APP-1')
+        self.assertEqual(len(jobs.read_jobs(self.n)), 1)
+
+    def test_failure_identity_deduplication_parks_after_two_rounds(self):
+        self.add(status='ready')
+        tasks.event(self.inst, self.n, 'APP-1', 'round-1', 'Parser failed')
+        tasks.event(self.inst, self.n, 'APP-1', 'round-1', 'Parser failed')
+        self.assertEqual(tasks.read_records(self.n)['APP-1']['strikes'], 1)
+        tasks.event(self.inst, self.n, 'APP-1', 'round-2', 'Parser failed again')
+        row = tasks.read_records(self.n)['APP-1']
+        self.assertEqual(row['status'], 'parked')
+        self.assertEqual(row['strikes'], 2)
+        self.assertEqual(tasks.due_tasks(self.inst, self.n)[0]['kind'], 'task-parked')
+
+    def test_job_close_without_main_verification_parks_instead_of_completing(self):
+        from brain import jobs, sync
+        self.add(status='ready')
+        jobs.job_started(self.inst, self.n, 'job/example', 'codex', task_id='APP-1')
+        row = jobs.read_jobs(self.n)[0]
+        row.update(Outcome='merged', Ended=self.inst.now())
+        with mock.patch.object(sync, 'integration_packet', return_value=None):
+            tasks.job_closed(self.inst, self.n, row)
+        task = tasks.read_records(self.n)['APP-1']
+        self.assertEqual(task['status'], 'parked')
+        self.assertTrue(task['resume'])
+
+    def test_verified_landed_job_records_main_commit_and_changed_paths(self):
+        from brain import jobs, sync
+        self.repo(self.root)
+        base = self.git('rev-parse', 'HEAD', cwd=self.root).strip()
+        (self.root / 'engine.py').write_text('VERSION = 1\n')
+        self.git('add', 'engine.py', cwd=self.root)
+        self.git('commit', '-qm', 'Implement example', cwd=self.root)
+        head = self.git('rev-parse', 'HEAD', cwd=self.root).strip()
+        self.add(status='ready')
+        jobs.job_started(self.inst, self.n, 'job/example', 'codex', task_id='APP-1')
+        row = jobs.read_jobs(self.n)[0]
+        row.update(Outcome='merged', **{'Head commit': head})
+        with mock.patch.object(sync, 'integration_packet', return_value={'verify_result': 0, 'head': head, 'main': base}):
+            tasks.job_closed(self.inst, self.n, row)
+        row = tasks.read_records(self.n)['APP-1']
+        self.assertEqual(row['status'], 'merged')
+        self.assertEqual(row['merge_sha'], head)
+        self.assertEqual(row['code_path'], 'engine.py')
