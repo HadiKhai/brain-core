@@ -28,7 +28,7 @@ def cleanup_settings(n):
     mode = fm.get('docker_cleanup_mode', 'stop')
     if (not isinstance(patterns, str) or not isinstance(host, str) or
             not re.fullmatch(r'unix:///[^\s\x00]+', host) or
-            not isinstance(daemon, str) or not daemon or mode != 'stop'):
+            not isinstance(daemon, str) or not daemon or mode not in ('stop', 'remove')):
         return None
     patterns = patterns.split(',')
     if not patterns or any(not re.fullmatch(r'[a-z0-9][a-z0-9_-]*-(?:verify|job)-[a-z0-9_*?-]+', p.strip()) for p in patterns):
@@ -174,6 +174,80 @@ def docker_cleanup_nodes(inst, nodes):
                 confirmed = cleanup_inventory(binary, host, deadline)
                 if any(r['Id'] == row['Id'] and not r['State']['Running'] for r in confirmed):
                     result['stopped'].append(row['Id'])
+            if mode == 'remove':
+                cleanup_remove(inst, n, binary, host, patterns, deadline, result)
         except _CLEANUP_ERRORS as error:
             result['errors'].append(type(error).__name__)
     return result
+
+
+def cleanup_resource_inventory(binary, host, kind, deadline):
+    identities = cleanup_command(binary, host, [kind, 'ls', '--quiet', '--no-trunc']
+                                 if kind == 'network' else [kind, 'ls', '--quiet'], deadline).split()
+    expression = _CLEANUP_ID if kind == 'network' else re.compile(r'[a-zA-Z0-9][a-zA-Z0-9_.-]{0,254}')
+    if (len(identities) > 256 or len(set(identities)) != len(identities) or
+            any(not expression.fullmatch(identity) for identity in identities)):
+        raise ValueError('invalid resource inventory')
+    if not identities:
+        return []
+    rows = json.loads(cleanup_command(binary, host, [kind, 'inspect'] + identities, deadline))
+    key = 'Id' if kind == 'network' else 'Name'
+    if (not isinstance(rows, list) or len(rows) != len(identities) or
+            {r[key] for r in rows} != set(identities)):
+        raise ValueError('incomplete resource inventory')
+    return rows
+
+
+def cleanup_resource_owned(inst, n, row, kind, patterns, deadline):
+    # Use precisely the container ownership policy for orphan resource labels,
+    # including an absent recorded owner, age, namespace and node scope.
+    surrogate = {'Config': {'Labels': row.get('Labels')}, 'Name': row.get('Name', ''),
+                 'Created': row.get('Created' if kind == 'network' else 'CreatedAt'),
+                 'HostConfig': {'AutoRemove': False}, 'Mounts': []}
+    if not isinstance(row.get('Labels'), dict):
+        return False
+    if kind == 'network' and row.get('Containers') != {}:
+        return False
+    return cleanup_test_member(inst, n, surrogate, patterns, deadline)
+
+
+def cleanup_remove(inst, n, binary, host, patterns, deadline, result):
+    # No force and no -v: a concurrent container restart vetoes rm at the daemon,
+    # and container deletion never implicitly deletes an unrelated/anonymous volume.
+    rows = cleanup_inventory(binary, host, deadline)
+    for row in cleanup_candidates(inst, n, rows, patterns, deadline):
+        if row['State']['Running'] or row['State'].get('Status') not in ('exited', 'dead', 'created'):
+            continue
+        current = cleanup_inventory(binary, host, deadline)
+        allowed = cleanup_candidates(inst, n, current, patterns, deadline)
+        if not any(r['Id'] == row['Id'] and not r['State']['Running'] for r in allowed):
+            continue
+        cleanup_command(binary, host, ['rm', row['Id']], deadline)
+        if not any(r['Id'] == row['Id'] for r in cleanup_inventory(binary, host, deadline)):
+            result['removed'].append(row['Id'])
+    for kind in ('volume', 'network'):
+        for row in cleanup_resource_inventory(binary, host, kind, deadline):
+            try:
+                if not cleanup_resource_owned(inst, n, row, kind, patterns, deadline):
+                    continue
+                identity = row['Id' if kind == 'network' else 'Name']
+                current = cleanup_inventory(binary, host, deadline)
+                if kind == 'volume':
+                    attached = any(m.get('Type') == 'volume' and m.get('Name') == identity
+                                   for c in current for m in c['Mounts'])
+                else:
+                    attached = any(net.get('NetworkID') == identity
+                                   for c in current for net in c.get('NetworkSettings', {}).get('Networks', {}).values())
+                if attached:
+                    continue
+                fresh = json.loads(cleanup_command(binary, host, [kind, 'inspect', identity], deadline))
+                if fresh != [row] or not cleanup_resource_owned(inst, n, fresh[0], kind, patterns, deadline):
+                    continue
+                # Docker refuses an in-use volume/network even when attachment
+                # races the inventory. Never force/disconnect/remove images.
+                cleanup_command(binary, host, [kind, 'rm', identity], deadline)
+                remaining = cleanup_resource_inventory(binary, host, kind, deadline)
+                if not any(r['Id' if kind == 'network' else 'Name'] == identity for r in remaining):
+                    result['removed'].append(kind + ':' + identity)
+            except _CLEANUP_ERRORS as error:
+                result['errors'].append(type(error).__name__)

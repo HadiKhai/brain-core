@@ -1579,6 +1579,20 @@ elif a[:1] == ['stop']:
  for r in s['containers']:
   if r['Id'] in a[1:]: r['State'] = {'Running':False,'Status':'exited'}
  p.write_text(json.dumps(s))
+elif a[:1] == ['rm']:
+ if any(r['State']['Running'] for r in s['containers'] if r['Id'] in a[1:]): sys.exit(1)
+ s['containers'] = [r for r in s['containers'] if r['Id'] not in a[1:]]
+ p.write_text(json.dumps(s))
+elif a[:1] in (['volume'], ['network']):
+ kind = a[0] + 's'
+ key = 'Name' if kind == 'volumes' else 'Id'
+ if a[1] == 'ls': print('\\n'.join(r[key] for r in s[kind]))
+ elif a[1] == 'inspect': print(json.dumps([r for r in s[kind] if r[key] in a[2:]]))
+ elif a[1] == 'rm':
+  if s.get('resource_busy'): sys.exit(1)
+  s[kind] = [r for r in s[kind] if r[key] not in a[2:]]
+  p.write_text(json.dumps(s))
+ else: sys.exit(92)
 else: sys.exit(91)
 ''')
         docker.chmod(0o700)
@@ -1670,3 +1684,57 @@ else: sys.exit(91)
         result = self.sweep()
         self.assertEqual(result['stopped'], [])
         self.assertTrue(result['errors'])
+
+
+    def removable_resources(self):
+        self.node['fm']['docker_cleanup_mode'] = 'remove'
+        labels = dict(self.container['Config']['Labels'])
+        self.state['volumes'] = [{'Name': 'demo-verify-one-data', 'Labels': labels,
+                                  'CreatedAt': '2020-01-01T00:00:00Z'}]
+        self.state['networks'] = [{'Id': 'c' * 64, 'Name': 'demo-verify-one-net', 'Labels': labels,
+                                   'Created': '2020-01-01T00:00:00Z', 'Containers': {}}]
+        self.save_state()
+
+    def test_removes_stopped_owned_container_and_unused_owned_volume_network(self):
+        self.removable_resources()
+        result = self.sweep()
+        self.assertEqual(result['stopped'], [self.identity])
+        self.assertEqual(result['removed'], [self.identity, 'volume:demo-verify-one-data', 'network:' + 'c' * 64])
+        state = json.loads(self.state_path.read_text())
+        self.assertEqual([state[k] for k in ('containers', 'volumes', 'networks')], [[], [], []])
+        for command in self.mutations():
+            self.assertNotIn('--force', command)
+            self.assertNotIn('-v', command)
+            self.assertNotIn('prune', command)
+
+    def test_unused_foreign_shared_young_or_attached_resources_are_retained(self):
+        self.removable_resources()
+        self.state['volumes'][0]['Labels'] = {'brain.docker-scope': 'foreign'}
+        self.state['networks'][0]['Containers'] = {'foreign-container': {}}
+        self.save_state()
+        result = self.sweep()
+        self.assertEqual(result['removed'], [self.identity])
+        state = json.loads(self.state_path.read_text())
+        self.assertEqual(len(state['volumes']), 1)
+        self.assertEqual(len(state['networks']), 1)
+
+    def test_live_foreign_container_volume_reference_prevents_removal(self):
+        self.removable_resources()
+        foreign = json.loads(json.dumps(self.container))
+        foreign['Id'] = 'b' * 64
+        foreign['Config']['Labels'] = {'com.docker.compose.project': 'other-development'}
+        foreign['Mounts'] = [{'Type': 'volume', 'Name': 'demo-verify-one-data'}]
+        self.state['containers'].append(foreign)
+        self.save_state()
+        result = self.sweep()
+        self.assertNotIn('volume:demo-verify-one-data', result['removed'])
+        self.assertEqual(len(json.loads(self.state_path.read_text())['volumes']), 1)
+
+    def test_docker_busy_refusal_retains_resources_and_reports_error(self):
+        self.removable_resources()
+        self.state['resource_busy'] = True
+        self.save_state()
+        result = self.sweep()
+        self.assertEqual(result['removed'], [self.identity])
+        self.assertTrue(result['errors'])
+        self.assertEqual(len(json.loads(self.state_path.read_text())['volumes']), 1)

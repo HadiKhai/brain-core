@@ -74,3 +74,15 @@ Cleanup stops only immutable inspected container IDs, checks all peers immediate
 before each mutation, and reports a stopped ID only after confirmation. One
 five-second deadline bounds each hook call. Missing Docker/configuration is a
 quiet no-op; failure returns diagnostics without replacing a run's primary result.
+
+## D802: Remove only unused, explicitly owned test Docker resources
+
+`docker_cleanup_mode: remove` adds deletion after the stop pass. Container removal
+uses exact IDs without force or volume flags. A restart is refused by Docker;
+container removal never implicitly removes volumes. Volumes and networks need
+the same scope, owner and age proof as containers. Every container, including
+stopped and foreign containers, participates in the attachment veto. Network
+inspection must show no endpoints. Reinspection must match the captured resource
+metadata before deletion; Docker's own in-use refusal remains authoritative.
+Errors keep resources for a later run. No images, bind contents, compose files,
+global prune, forced disconnect or host lifecycle APIs are touched.

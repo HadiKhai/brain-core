@@ -23,3 +23,9 @@ The hook's default action is stop; the leftover diagnostic remains read-only.
 Run-close and due integrations call `docker_cleanup_nodes(instance, nodes)`.
 Its result contains exact `stopped` and `removed` IDs and `errors`. Callers keep
 their own primary outcome. Cleanup never invokes a host thread lifecycle API.
+
+To remove unused owned resources as well, set `docker_cleanup_mode: remove`.
+Volumes and networks must carry the same scope, project and owner labels as their
+containers. No volume flag accompanies container removal. Every current container
+reference protects a volume or network, and Docker's in-use refusal is honored.
+Unlabeled, shared, attached, recent or uncertain resources remain for inspection.
