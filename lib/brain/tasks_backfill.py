@@ -78,7 +78,7 @@ def candidates(inst, n):
     return list(unique.values())
 
 
-def backfill(inst, n, apply=False):
+def backfill(inst, n, apply=False, link_jobs=True):
     with _m_instance.brain_lock(inst):
         if _m_jobs.read_jobs(n) is None:
             raise ValueError('unrecognized ledger; no backfill written')
@@ -126,11 +126,13 @@ def backfill(inst, n, apply=False):
                     _m_tasks.save_record(n, requirement, 'requirements')
                 _m_tasks.save_record(n, task)
             jobs = _m_jobs.read_jobs(n) or []
-            for row in jobs:
+            linked = False
+            for row in jobs if link_jobs else []:
                 task = next((r for r in records.values() if r.get('job') == _m_jobs.job_key(row) and not row.get('Ended')), None)
-                if task:
+                if task and row.get('Task') != task['id']:
                     row['Task'] = task['id']
-            if planned and jobs:
+                    linked = True
+            if linked:
                 _m_jobs.write_jobs(inst, n, jobs)
             inst.commit([], n['id'] + ': backfill task records')
         return [task for task, _ in planned]
@@ -144,7 +146,10 @@ def migrate(inst, nodes):
         for folder in ('tasks', 'requirements', 'rules'):
             _m_tasks.read_records(n, folder)
     for n in nodes:
-        rows = backfill(inst, n, apply=True)
+        # Automatic adoption preserves source ledgers, including parked attempts.
+        # Task-side job keys/provenance retain the association; explicit backfill
+        # may subsequently attach Task cells without creating duplicate records.
+        rows = backfill(inst, n, apply=True, link_jobs=False)
         result.append({'node': n['id'], 'created': len(rows), 'version': _m_tasks.VERSION})
     return result
 

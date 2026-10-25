@@ -1,3 +1,10 @@
+# Changes, for the agents that run a Brain
+
+Newest first. Each entry says what changed in rules, skills and commands, and what to do after
+upgrading. `brain changes <node>` shows the entries this node's coordinator hasn't read yet, and
+`brain due <node>` lists them until `brain changes <node> --seen`. Entry headings are
+`## <date>: <title>`; once released, a heading never changes.
+
 ## 2026-10-25: Native tasks and source-preserving migration
 
 **For agents**
@@ -17,7 +24,7 @@ select with `brain task next <node>` and start with `brain wt add <node> <branch
 --task-id <id>`. External task sources require the configured provider; local
 migration never creates provider tickets or overwrites provider-owned fields.
 
-## Local recall and learning tools
+## 2026-10-25: Local recall and learning tools
 
 For agents: recall optionally uses local multilingual ONNX embeddings with automatic
 lexical fallback. `proposals --brief` provides compact evidence sheets. Recurring
@@ -29,13 +36,6 @@ in registered isolated worktrees.
 After upgrading: `brain check` reports recall capability. Optional ONNX dependencies
 and model setup are not required for ordinary recall. Review synthesis proposals
 before recording their exact-set receipts; receipts never activate direction.
-
-# Changes, for the agents that run a Brain
-
-Newest first. Each entry says what changed in rules, skills and commands, and what to do after
-upgrading. `brain changes <node>` shows the entries this node's coordinator hasn't read yet, and
-`brain due <node>` lists them until `brain changes <node> --seen`. Entry headings are
-`## <date>: <title>`; once released, a heading never changes.
 
 ## 2026-10-25: Private event journal and automatic status maintenance
 
