@@ -185,7 +185,8 @@ def import_brief(a):
     else:
         print(text, end="")
     sys.stdout.flush()  # A failed import-brief delivery must not acknowledge a restart.
-    _m_reminders.acknowledge_usage_restart(inst, n, row)
+    if not getattr(a, "_defer_restart_ack", False):
+        _m_reminders.acknowledge_usage_restart(inst, n, row)
 
 
 # ---------- past AI conversations about a node ----------
@@ -227,7 +228,7 @@ def cmd_brief(a):
         _m_common.die("--small cannot combine with --branch or --import")
     if a.import_study:
         return import_brief(a)
-    inst = _m_nodes.load()
+    inst = getattr(a, "_instance", None) or _m_nodes.load()
     n = inst.node(a.id)
     where, w = _m_worktrees.job_where(n, a.branch)
     if n["external"] and not (n["home_path"] and n["home_path"].exists()):
@@ -347,7 +348,7 @@ def cmd_brief(a):
         w["brief_inputs"] = {"job": _m_jobs.job_key(row), "task_file": str(task_path) if task_path else None,
                              "task": a.task if not task_path else None, "context_files": context_inputs}
         w["context_inputs"] = context_inputs
-        if signal and signal.get("restart") == "compactions":
+        if signal and signal.get("restart") == "compactions" and not getattr(a, "_defer_restart_ack", False):
             w["restart_ack"] = _m_jobs.digest([_m_jobs.job_key(row), signal])
         inst.save_local()
 

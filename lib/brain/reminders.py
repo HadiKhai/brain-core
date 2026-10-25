@@ -16,6 +16,8 @@ from . import machine as _m_machine
 from . import spend as _m_spend
 
 
+_USAGE_NOT_OBSERVED = object()
+
 LIFECYCLE_LIMIT = 2000
 LIFECYCLE_BYTES = 2 * 1024 * 1024
 ADVICE_CONDITIONS = ('median-age', 'median-tokens', 'budget-tokens', 'budget-hours',
@@ -126,10 +128,25 @@ def usage_restart_item(inst, n, row):
                          f"Owning coordinator must restart its worker with `{command}` before continuing the job.")}
 
 
-def acknowledge_usage_restart(inst, n, row):
-    """Called only after a brief was delivered; initial briefs do not reset budgets."""
+def acknowledge_usage_restart(inst, n, row, *, observed_usage=_USAGE_NOT_OBSERVED):
+    """Acknowledge delivered restart usage; ordinary briefs do not reset budgets.
+
+    Native launchers pass their captured pre-launch live_usage dict after binding
+    the replacement. Explicit snapshots require known processed, compaction and
+    active-minute counters and never trigger a later lifetime-counter read.
+    """
     if not row or row.get('Ended'):
         return
+    captured = observed_usage is not _USAGE_NOT_OBSERVED
+    if captured:
+        if (not isinstance(observed_usage, dict) or
+                type(observed_usage.get('sessions')) is not int or observed_usage['sessions'] < 1 or
+                not isinstance(observed_usage.get('source'), str) or
+                not observed_usage['source'].startswith(('host', 'transcripts:')) or any(
+                type(observed_usage.get(k)) is not int or observed_usage[k] < 0
+                for k in ('compactions', 'processed', 'active_minutes'))):
+            raise ValueError('restart usage unavailable; captured baseline not acknowledged')
+        observed_usage = dict(observed_usage)
     key = _m_jobs.digest([n['id'], _m_jobs.job_key(row)])
     with lifecycle_store(inst) as data:
         advice = data.get('advice', {})
@@ -141,12 +158,23 @@ def acknowledge_usage_restart(inst, n, row):
                               not _m_briefs.restart_acknowledged(n, row, signal))
         if not (isinstance(record, dict) and record.get('episode')) and not manual_restart:
             return
-        usage = _m_spend.live_usage(inst, n, row)
+        usage = observed_usage if captured else _m_spend.live_usage(inst, n, row)
         if not usage or any(type(usage.get(k)) is not int or usage[k] < 0
                             for k in ('compactions', 'processed')):
             raise ValueError('restart usage unavailable; baseline not acknowledged')
-        data['usage'][key] = {'job': _m_jobs.job_key(row), 'baseline': {
-            k: usage[k] for k in ('compactions', 'processed')}, 'episode': None, 'at': inst.now()}
+        if captured and isinstance(record, dict):
+            previous = record.get('baseline', {})
+            if not isinstance(previous, dict) or any(type(value) is not int or value < 0
+                    for k, value in previous.items() if k in ('compactions', 'processed', 'active_minutes')):
+                raise ValueError('invalid restart usage baseline')
+            if any(usage[k] < previous[k] for k in ('compactions', 'processed', 'active_minutes') if k in previous):
+                raise ValueError('restart usage counters regressed; baseline not acknowledged')
+        baseline = {k: usage[k] for k in ('compactions', 'processed')}
+        active = usage.get('active_minutes')
+        if type(active) is int and active >= 0:
+            baseline['active_minutes'] = active
+        data['usage'][key] = {'job': _m_jobs.job_key(row), 'baseline': baseline,
+                              'episode': None, 'at': inst.now(), 'round_at': inst.now()}
 
 
 def inbox_source_id(n, line):

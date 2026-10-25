@@ -291,7 +291,8 @@ def main():
         opt("--usage-file", dest="usage_file", help="coordinator: the job's usage as the host reports it (JSON); "
             "wins over what transcripts show"))
     cmd("lifecycle", _m_host_lifecycle.cmd_lifecycle, "execute a native host lifecycle action with fresh ownership checks",
-        opt("action", choices=("settle",)), "id")
+        opt("action", choices=("settle", "restart", "maintain")), "id",
+        opt("--job-key", help="restart only this exact open ledger job"))
     cmd("rotate", _m_rotation.cmd_rotate, "prepare a file-based coordinator handover; prints host steps", "id")
     cmd("due", _m_status.cmd_due, "coordinator actions and machine holds; empty means no output",
         opt("--since-wake", action="store_true", help="new file-only wake items compared with the wake before the latest delivery"),

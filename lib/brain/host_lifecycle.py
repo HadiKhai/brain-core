@@ -246,7 +246,28 @@ def settle_landed_jobs(inst, n, job_keys):
 def cmd_lifecycle(a):
     inst = _m_nodes.load()
     try:
-        result = settle_closed_jobs(inst, inst.node(a.id))
+        n = inst.node(a.id)
+        if a.action == 'restart':
+            from . import worker_lifecycle as _m_worker
+            result = _m_worker.restart_worker(inst, n, a.job_key)
+        elif a.action == 'maintain':
+            result = maintain_lifecycle(inst, n)
+        else:
+            result = settle_closed_jobs(inst, n)
     except (OSError, ValueError, _m_rpc.HostRPCError) as error:
         _m_common.die(str(error))
     print(json.dumps(result, sort_keys=True))
+
+
+def maintain_lifecycle(inst, n, rpc=None):
+    """Native maintenance entry; each invocation advances bounded restart work."""
+    from . import worker_lifecycle as _m_worker
+    result = {'restarts': [], 'settlement': None}
+    rows = _m_jobs.read_jobs(n)
+    if rows is None:
+        raise ValueError('lifecycle waits for readable ownership')
+    for row in rows:
+        if not row.get('Ended'):
+            result['restarts'].append(_m_worker.restart_worker(inst, n, _m_jobs.job_key(row), rpc=rpc))
+    result['settlement'] = settle_closed_jobs(inst, n, rpc=rpc)
+    return result

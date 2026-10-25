@@ -691,6 +691,9 @@ def bound_worker_threads(n, branch):
             key = job_key(row)
             if row["Job"] == branch and workers.get(key):
                 refs.append((workers[key], "worker:" + key))
+            retired = n["local"].get("retired_workers", {}).get(key, [])
+            if row["Job"] == branch and isinstance(retired, list):
+                refs.extend((thread, "retired-worker:" + key) for thread in retired if isinstance(thread, str) and thread)
     for row in _m_status.active_work(n, include_closed=True):
         name = row[0].replace("`", "").split()
         if name and name[0] == branch and len(row) > 1:

@@ -121,3 +121,28 @@ still require an explicit answer receipt.
 Tests use both native runtime record shapes and cover chat selections, exact
 free-text tool answers, ambiguous or cancelled replies, foreign/old identities,
 recurrence and failed publication. No host request is cancelled by reconciliation.
+
+## D606: Advance worker restarts through fenced native maintenance steps
+
+Native lifecycle maintenance advances one recorded restart at a time. It first
+enumerates nested host threads, preserves live children and pending questions,
+checks exact ledger, workspace and worker ownership, and interrupts only the
+observed run with a stable host request key. A later invocation must observe a
+terminal old worker before launching the recorded original task in the existing
+worktree with an explicit native model selection.
+
+A private launch-intent receipt precedes the non-idempotent host launch. Lost
+responses require unique first-prompt marker recovery from exhaustive inventory;
+they never permit another launch. Replacement workspace/model observations and
+fresh local ownership checks precede binding. Retired worker references remain
+available for eventual closed-job settlement. A captured prelaunch usage snapshot
+is acknowledged only after replacement binding; startup usage remains charged.
+Brief preparation can defer acknowledgement for this path, while ordinary brief
+delivery preserves its existing behavior.
+
+Tests exercise exact-run interruption, pending/live-child refusal, missing usage,
+changed ownership/workspaces, unknown launch outcomes, post-binding publication
+failure and replacement startup accounting. Maintenance is an explicit scheduler
+entry point; file-only status, due and watcher reads do not query or mutate host
+threads. Tests use a fake host. No live scheduling, interruption, launch or
+host-side atomic compare-and-set guarantee is established by these tests.
