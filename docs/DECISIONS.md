@@ -2014,4 +2014,3 @@ assertions require supported internal aliases, while atomic directory sync uses
 no-follow opens. Removing those assertions or relaxing escaping-link/hard-link
 checks is not a valid scope reduction. Existing durability behavior is retained
 pending a coherent publication contract.
-
