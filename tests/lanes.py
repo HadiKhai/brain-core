@@ -28,6 +28,7 @@ MODULE_LANES = (
 LANE_TESTS = {name: ('test_' + name + '.py',) for name in MODULE_LANES}
 LANE_TESTS.update({
     'messages': ('test_messages.py', 'test_worker_message_guard.py'),
+    'rotation': ('test_rotation.py', 'test_rotation_host.py'),
     'hosts': ('test_hosts.py', 'test_host_rpc.py'),
     'train': ('test_train.py', 'test_train_review.py'),
     'jobs': ('test_jobs.py', 'test_train_ejection.py', 'test_handback_queue.py', 'test_job_adoption.py', 'test_host_lifecycle.py', 'test_worker_lifecycle.py'),
@@ -60,7 +61,7 @@ SHARED_INPUTS = (
     'lib/brain/status.py', 'lib/brain/ui_status.py', 'lib/brain/ui_server.py',
     'lib/brain/gate_lock.py',
     'lib/brain/settings_batch.py', 'lib/brain/dispatcher.py',
-    'lib/brain/host_rpc.py', 'lib/brain/host_lifecycle.py', 'lib/brain/worker_lifecycle.py',
+    'lib/brain/host_rpc.py', 'lib/brain/host_lifecycle.py', 'lib/brain/worker_lifecycle.py', 'lib/brain/coordinator_lifecycle.py',
     'lib/brain/__init__.py', 'tests/scenario.py', 'tests/core_loader.py',
     'tests/conftest.py', 'tests/lanes.py', 'tests/check_lanes.py',
     'bin/**', 'templates/**', 'skills/**', 'roles/**', 'adapters/**', 'ui/**', '!ui/**/*.png',

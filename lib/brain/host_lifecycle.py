@@ -250,6 +250,14 @@ def cmd_lifecycle(a):
         if a.action == 'restart':
             from . import worker_lifecycle as _m_worker
             result = _m_worker.restart_worker(inst, n, a.job_key)
+        elif a.action in ('rotate', 'accept-rotation'):
+            from . import coordinator_lifecycle as _m_coordinator
+            if a.action == 'rotate':
+                result = _m_coordinator.rotate_coordinator(inst, n)
+            else:
+                import os
+                session = a.session_id or os.environ.get('CODEX_THREAD_ID') or os.environ.get('CLAUDE_CODE_SESSION_ID')
+                result = _m_coordinator.accept_rotation(inst, n, a.ticket, session)
         elif a.action == 'maintain':
             result = maintain_lifecycle(inst, n)
         else:
@@ -262,6 +270,7 @@ def cmd_lifecycle(a):
 def maintain_lifecycle(inst, n, rpc=None):
     """Native maintenance entry; each invocation advances bounded restart work."""
     from . import worker_lifecycle as _m_worker
+    from . import coordinator_lifecycle as _m_coordinator
     result = {'restarts': [], 'settlement': None}
     rows = _m_jobs.read_jobs(n)
     if rows is None:
@@ -270,4 +279,12 @@ def maintain_lifecycle(inst, n, rpc=None):
         if not row.get('Ended'):
             result['restarts'].append(_m_worker.restart_worker(inst, n, _m_jobs.job_key(row), rpc=rpc))
     result['settlement'] = settle_closed_jobs(inst, n, rpc=rpc)
+    # Only rotate measured coordinators; ordinary file-only watcher reads retain
+    # their existing contract and never call this native maintenance entry.
+    from . import rotation as _m_rotation
+    pending_rotation = _m_coordinator.resume_rotation(inst, n, rpc=rpc)
+    if pending_rotation is not None:
+        result['rotation'] = pending_rotation
+    elif _m_rotation.rotation_due(inst, n) is not None:
+        result['rotation'] = _m_coordinator.rotate_coordinator(inst, n, rpc=rpc)
     return result

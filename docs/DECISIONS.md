@@ -146,3 +146,29 @@ failure and replacement startup accounting. Maintenance is an explicit scheduler
 entry point; file-only status, due and watcher reads do not query or mutate host
 threads. Tests use a fake host. No live scheduling, interruption, launch or
 host-side atomic compare-and-set guarantee is established by these tests.
+
+## D607: Accept coordinator rotation from the replacement host context
+
+Automatic rotation first enumerates nested threads and registered delegated
+tasks. Live, pending, unmeasured or unmatched children keep their parent; the
+adapter has no reparent operation, so rotation waits. Old-parent task records
+remain unchanged. Recognized schedule and webhook bindings are inventoried
+before a handover and a single durable launch intent. Unknown launch outcomes
+require exact first-prompt recovery and never trigger a second launch.
+
+The replacement accepts its own launch ticket using its actual host identity,
+observed workspace and runtime session identity. Only that context can rebind
+host tasks to itself. Fresh host observations must confirm those bindings before
+the local coordinator changes. Every prior coordinator remains in rotation
+history. After another child/question check, the replacement can interrupt only
+the observed old run; settlement waits for terminal host confirmation. Native
+maintenance resumes unfinished retirement even when the fresh session is below
+the configured rotation threshold.
+
+Native calls run outside the instance writer lock. Separate action receipts
+serialize rotation while short local publication locks protect bindings. Host
+schedule changes and local binding publication are recoverable steps, not an
+atomic cross-system transaction. Tests use a fake host, cover replacement-side
+binding, child/unknown-transport refusal, uncertain launch outcomes, resumable
+retirement and writer-lock boundaries. Live host integration and scheduler
+installation remain separate validation.
