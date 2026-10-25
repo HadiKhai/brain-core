@@ -1301,8 +1301,8 @@ class RenderedFingerprint(Scenario):
         for old, new in pairs:
             with self.subTest(old=old):
                 value = [old]
-                def render(*args):
-                    lines, merged = original(*args)
+                def render(*args, **kwargs):
+                    lines, merged = original(*args, **kwargs)
                     return lines + ['', value[0]], merged
                 with mock.patch.object(self.m, 'status_facts', side_effect=render):
                     self.m.refresh_status(self.inst, self.n)

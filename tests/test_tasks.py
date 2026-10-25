@@ -271,12 +271,23 @@ class Tasks(Scenario):
                 train.finish(self.inst, self.n, path, data)
         self.assertEqual(json.loads(path.read_text())['state'], 'verified')
         self.assertTrue(all(r['Ended'] for r in jobs.read_jobs(self.n)))
-        delivered = (self.root / 'tasks/APP-1.md').read_bytes()
+        delivered = tasks.read_records(self.n)['APP-1']
         # Reconciliation runs with main unoccupied; instance records stay intact.
         self.git('checkout', '--detach', '-q', cwd=self.root)
         train.run_train(self.inst, self.n, self.root, 'false', argparse.Namespace(jobs=None))
         self.assertEqual([r['status'] for r in tasks.read_records(self.n).values()], ['merged', 'merged'])
-        self.assertEqual((self.root / 'tasks/APP-1.md').read_bytes(), delivered)
+        completed = tasks.read_records(self.n)['APP-1']
+        metadata = {'event_pending', 'landing_event'}
+        self.assertEqual({k: v for k, v in completed.items() if k not in metadata},
+                         {k: v for k, v in delivered.items() if k not in metadata})
+        self.assertNotIn('event_pending', completed)
+        from brain import events
+        landed = [e for e in events.facts(self.inst, self.n) if
+                  e['data'].get('fact_type') == 'task_landed' and e['data'].get('evidence', {}).get('ref') == 'APP-1']
+        self.assertEqual([e['ref'] for e in landed], [completed['landing_event']])
+        stable = (self.root / 'tasks/APP-1.md').read_bytes()
+        train.run_train(self.inst, self.n, self.root, 'false', argparse.Namespace(jobs=None))
+        self.assertEqual((self.root / 'tasks/APP-1.md').read_bytes(), stable)
         self.assertEqual(json.loads(path.read_text())['state'], 'reconciled')
         tasks.validate(self.n, tasks.read_records(self.n))
 
