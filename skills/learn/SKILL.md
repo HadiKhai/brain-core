@@ -20,7 +20,8 @@ description: Capture reusable knowledge (a method, style, asset, script, lesson 
    `core/bin/brain item scope <item-id> <new scope> --consented-by <everyone in the current scope>`.
    Never claim consent the operator didn't report.
 5. **A correction to a specialist or node** is a lesson. Read that target's `direction.md`
-   first. Under `## Principles`, each principle is a `### <id>: <title>` block (lowercase
+   first, along with structured Standards, Checklist and Never declarations in its role or standards.
+   Under `## Principles`, each principle is a `### <id>: <title>` block (lowercase
    letters, digits and hyphens, starting with a letter); `enforced_by: <check path>` names
    its check, or `enforced_by: wish` records that no check enforces it yet. Use
    `templates/direction.md` for the optional format (new specialists receive it).

@@ -57,11 +57,12 @@ and inherited model configuration without activating inherited runtime policy.
 ## D901: Local semantic recall is optional and fails back to lexical recall
 
 An optional, short-lived ONNX worker uses the pinned multilingual-e5-small int8
-model with query/passage prefixes, masked mean pooling and normalized cosine
+model ([pinned artifacts](https://huggingface.co/Xenova/multilingual-e5-small/tree/761b726dd34fb83930e26aab4e9ac3899aa1fa78))
+with query/passage prefixes, masked mean pooling and normalized cosine
 ranking. No daemon, API key, remote inference or torch dependency is required.
 The core remains Python 3.9 standard library only. Optional runtime packages
 are detected without importing the model. Unknown or less than 2 GB available
-RAM, missing packages, offline operation and any inference/index failure retain
+RAM, missing packages, malformed optional configuration, offline operation and any inference/index failure retain
 lexical retrieval. `brain check` reports the current mode; install and upgrade
 already run that check. `brain recall --setup` prepares the model explicitly.
 
@@ -69,7 +70,7 @@ Artifacts download lazily with pinned revision, lengths and SHA256 integrity;
 tests prohibit downloads. Ordinary recall bounds optional work to 12 seconds;
 explicit setup allows 180 seconds. Model setup has no outward publication.
 The private `.brain/semantic/` cache binds vectors to model and content hashes.
-Eligibility (scope, state, source content) is checked before embedding and every
+Linked document sources are excluded. Eligibility (scope, state, source content) is checked before embedding and every
 cache read, including deletion/revocation. Proposals remain inactive. There is
 no online provider enabled. The index covers usable library items and the target node's own knowledge,
 decision notes and report indexes. External transcript archives are not indexed.
@@ -97,7 +98,8 @@ repair notices. Inactive or out-of-scope specialist lessons never participate.
 ## D904: Enforcement uses declared rules and scoped correction evidence
 
 Stable rule ids in direction Principles and role/standard Standards, Checklist
-or Never sections carry `enforced_by` paths or `wish`. Paths are relative to the
+or Never sections carry `enforced_by` paths or `wish`. Lesson capture resolves
+that same declaration set; duplicate ids across sources refuse. Paths are relative to the
 node's bound home and cannot escape it. Check reports missing declared files;
 facts and dashboard JSON expose wish counts and percentages. Two scoped wish
 corrections emit a stable check-work notice. Rule declarations and correction
@@ -105,7 +107,7 @@ snapshots are preserved separately; installing a declared check clears that wish
 
 Task records are produced only during lesson capture or explicit
 `enforcement --sync-tasks`, using the task domain's idempotent source API.
-Read-only due, facts and dashboard calls never create tasks. Source identities
+Read-only due, facts and dashboard calls never create tasks. Source references name the declaring standards/direction file. Source identities
 are stable per target/principle so observations preserve parked/dropped progress.
 Inactive, foreign-scope and malformed evidence cannot create work. Free-form
 legacy prose is not guessed into new rule ids or silently activated.

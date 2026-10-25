@@ -85,3 +85,15 @@ class SemanticRecall(Scenario):
         documents = [x[4]['fm'] for x in found if x[4]['fm']['kind'] == 'document']
         self.assertEqual(len(documents), 2)
         self.assertTrue(all(x['source_node'] == 'app' and x['source_ref'] for x in documents))
+
+    def test_optional_configuration_and_linked_documents_fail_closed(self):
+        r, core, inst, node = self.fixture()
+        inst.local['semantic'] = False
+        import os
+        with mock.patch.dict(os.environ, {'BRAIN_USAGE_TESTING': '0', 'BRAIN_SEMANTIC_OFFLINE': '0'}):
+            self.assertFalse(core.semantic_capability(inst)[0])
+            self.assertIn('lexical', core.semantic_mode(inst))
+        source = self.tmp / 'linked-note.md'
+        source.write_text('# Notes\nconcurrent mutations\n')
+        (node['dir'] / 'knowledge.md').symlink_to(source)
+        self.assertEqual(list(core.semantic_documents(inst, node)), [])

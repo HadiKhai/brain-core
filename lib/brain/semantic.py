@@ -24,7 +24,10 @@ def semantic_capability(inst):
     """Cheap install/upgrade/check preflight: never imports a model or downloads."""
     if os.environ.get('BRAIN_SEMANTIC_OFFLINE') == '1' or os.environ.get('BRAIN_USAGE_TESTING') == '1':
         return False, 'offline or test mode'
-    if inst.local.get('semantic', {}).get('enabled', True) is False:
+    config = inst.local.get('semantic', {})
+    if not isinstance(config, dict):
+        return False, 'invalid optional recall configuration'
+    if config.get('enabled', True) is False:
         return False, 'disabled on this machine'
     try:
         if any(importlib.util.find_spec(name) is None for name in ('onnxruntime', 'tokenizers', 'numpy')):
@@ -94,9 +97,11 @@ def semantic_documents(inst, node):
     for path in paths:
         try:
             resolved = path.resolve()
-            if resolved in seen or not path.is_file() or path.stat().st_size > 1024 * 1024:
+            if resolved in seen or path.is_symlink() or not path.is_file() or path.stat().st_size > 1024 * 1024:
                 continue
             if not any(root.resolve() in resolved.parents for root in roots):
+                continue
+            if any(parent.is_symlink() for parent in path.parents if parent not in roots and any(root in parent.parents for root in roots)):
                 continue
             seen.add(resolved)
             text = path.read_text()

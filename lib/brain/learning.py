@@ -27,13 +27,14 @@ def resolve_enforcing_check(node, value):
 
 
 def enforcement_rules(folder):
-    rules = _m_knowledge.direction_principles(folder / 'direction.md')
+    rules = {key: {**rule, 'file': 'direction.md'}
+             for key, rule in _m_knowledge.direction_principles(folder / 'direction.md').items()}
     for name in ('role.md', 'standards.md'):
         extra = _m_knowledge.direction_principles(folder / name,
                     sections=('## Principles', '## Standards', '## Checklist', '## Never'))
         if set(extra) & set(rules):
             raise ValueError('ambiguous principle ids across direction and standards')
-        rules.update(extra)
+        rules.update({key: {**rule, 'file': name} for key, rule in extra.items()})
     return rules
 
 
@@ -120,7 +121,7 @@ def enforcement_task_specs(inst, node):
                 out.append({'source_id': 'enforcement-' + identity,
                             'title': 'Turn into a check: ' + label, 'principle': ident,
                             'target': target['id'], 'target_type': target['type'], 'count': len(evidence),
-                            'source_ref': str((target['dir'] / 'direction.md').relative_to(inst.root))})
+                            'source_ref': str((target['dir'] / rule['file']).relative_to(inst.root))})
         except (OSError, ValueError, SystemExit):
             continue
     return out
@@ -133,7 +134,7 @@ def enforcement_due(inst, node):
             for spec in enforcement_task_specs(inst, node)]
 
 
-def materialize_enforcement_tasks(inst, node, upsert=None):
+def materialize_enforcement_tasks(inst, node, upsert=None, require_tasks=False):
     """Called only by explicit mutations (lesson capture or enforcement --sync-tasks)."""
     if upsert is None:
         try:
@@ -141,6 +142,8 @@ def materialize_enforcement_tasks(inst, node, upsert=None):
         except ModuleNotFoundError as error:
             if error.name != __package__ + '.tasks':
                 raise
+            if require_tasks:
+                _m_common.die('task domain unavailable; enforcement notices retained for synchronization')
             return []  # independent task module may not be installed yet
         upsert = tasks.upsert_source_task
     return [upsert(inst, node, spec['source_id'], spec['title'], kind='chore',
@@ -153,7 +156,7 @@ def cmd_enforcement(a):
     inst = _m_nodes.load()
     node = inst.node(a.id)
     if a.sync_tasks:
-        rows = materialize_enforcement_tasks(inst, node)
+        rows = materialize_enforcement_tasks(inst, node, require_tasks=True)
         print(f'{len(rows)} enforcement task(s) synchronized')
         return
     metrics = enforcement_metrics(inst, node)

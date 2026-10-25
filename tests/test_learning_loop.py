@@ -87,3 +87,16 @@ class LearningEnforcement(Scenario):
             core.cmd_lesson(argparse.Namespace(node=False, at=None, specialist='editor', source='app',
                                               principle='one-place', text='a correction'))
         self.assertEqual(sync.call_args[0][1]['id'], 'root')
+
+    def test_role_rules_accept_corrections_and_keep_the_declaring_source(self):
+        r, folder = self.fixture()
+        role = folder / 'role.md'
+        role.write_text(role.read_text() + '\n## Standards\n### link-labels: Distinct navigation labels\nenforced_by: wish\n')
+        for text in ('first repeated link label', 'second repeated link label'):
+            self.b(r, 'lesson', 'editor', '--from', 'app', '--principle', 'link-labels', text)
+        core = self.core()
+        inst = core.Instance(r)
+        spec = next(spec for spec in core.enforcement_task_specs(inst, inst.node('root')) if spec['principle'] == 'link-labels')
+        self.assertEqual(spec['source_ref'], 'specialists/editor/role.md')
+        metric = next(row for row in json.loads(self.b(r, 'enforcement', 'root', '--json')) if row['target'] == 'editor')
+        self.assertEqual((metric['total'], metric['wishes']), (3, 2))

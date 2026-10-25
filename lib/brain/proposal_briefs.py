@@ -3,7 +3,7 @@ import json
 import re
 import shlex
 
-from . import nodes as _m_nodes
+from . import history as _m_history
 
 
 def proposal_claim(body):
@@ -41,7 +41,7 @@ def reviewer_brief(rows, screens, as_json=False):
         # screening as the existing full proposal view.
         start = len(sheets) - len(group['items']) - len(group['specialists']) - bool(group['rules'])
         for i in range(start, len(sheets)):
-            sheets[i] = json.loads(_m_nodes.import_text(json.dumps(sheets[i], ensure_ascii=False), terms))
+            sheets[i] = _m_history.history_screen(sheets[i], terms)
     if as_json:
         print(json.dumps(sheets, indent=1, ensure_ascii=False))
         return

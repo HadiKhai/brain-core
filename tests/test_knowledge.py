@@ -61,6 +61,9 @@ class LessonTags(Scenario):
         self.b(r, "new", "app", "--title", "App")
         self.b(r, "specialist", "new", "editor", "--title", "Editor")
         folder = r / "specialists/editor"
+        # Tag/provenance tests declare this check; existence is validated separately.
+        (r / "checks").mkdir()
+        (r / "checks/bounds.py").write_text("pass\n")
         (folder / "direction.md").write_text(
             "# Editor: direction\n\n## Principles\n"
             "### one-place: One thing, one place\nenforced_by: wish\n"

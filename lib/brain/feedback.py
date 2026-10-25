@@ -45,7 +45,9 @@ def feedback_records(node):
             if (not isinstance(proof, dict) or type(proof.get('exit_code')) is not int or proof['exit_code'] != 0
                     or not re.fullmatch(r'[0-9a-f]{64}', str(proof.get('check_sha256', '')))
                     or any(not row[k] for k in ('check', 'job', 'before', 'after'))
-                    or proof.get('job') != row['job'] or proof.get('check') != row['check']):
+                    or proof.get('job') != row['job'] or proof.get('check') != row['check']
+                    or not re.fullmatch(r'(?:[0-9a-f]{40}|[0-9a-f]{64})', str(proof.get('head', '')))
+                    or not isinstance(proof.get('at'), str) or not proof['at']):
                 raise ValueError('repair feedback.md: closed record lacks mapped green proof')
     return rows
 
@@ -62,7 +64,7 @@ def feedback_projection(inst, node):
     try:
         rows = feedback_records(node)
         return _m_history.history_screen(rows, _m_guard.never_terms(node))
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):
         return [{'id': 'feedback-state', 'status': 'open', 'comment': 'repair feedback.md: invalid or unreadable feedback ledger'}]
 
 
