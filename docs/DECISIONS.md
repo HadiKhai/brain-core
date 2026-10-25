@@ -2093,3 +2093,19 @@ facts to commit before asserting whole-tree cleanliness. Hourly status commit
 coalescing otherwise leaves an unrelated generated status edit. The original
 clean-tree, private-hash, missing-evidence and reuse assertions remain intact;
 an explicit ignore-rule assertion also checks the sidecar is ignored by Git.
+
+## D20002: Isolate completion reader cases by delivery owner
+
+Completion read-failure fixtures bind a fresh fabricated recipient for each
+independent failure mode. Successful frozen snapshots acknowledge identities for
+their delivery owner, so reusing that owner makes a later case test suppression
+of already shown work instead of unreadable completion evidence. Existing
+assertions still require unknown job or ledger notices and mixed requests to
+survive while unrelated stale notices retire. Additional assertions prove the
+recipient starts without shown identities and that a second request with the
+same identities cannot repeat delivery, including during the read failure.
+
+The native resume-brief fixture accepts the routing helper's explicit `extra`
+argument and checks its empty context list. It retains the early-acknowledgement
+trap and verifies the complete restart lifecycle record is unchanged by brief
+preparation. Runtime delivery, ownership and baseline rules remain unchanged.
