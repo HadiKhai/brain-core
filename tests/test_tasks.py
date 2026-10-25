@@ -199,3 +199,39 @@ class Tasks(Scenario):
         created = tasks_backfill.backfill(self.inst, self.n, apply=True)
         self.assertEqual(len(created), 1)
         self.assertTrue(created[0]['id'].startswith('TASK-'))
+
+    def test_rules_index_preserves_superseded_record_and_source_diary(self):
+        from brain import task_requirements
+        diary = self.root / 'decisions.md'
+        diary.write_text('Historical source stays intact\n')
+        task_requirements.add_rule(self.inst, self.n, 'D-1', 'Use exports', self.inst.now(), 'decisions.md:1')
+        task_requirements.add_rule(self.inst, self.n, 'D-2', 'Use explicit exports', self.inst.now(), 'decisions.md:2', 'D-1')
+        rules = tasks.read_records(self.n, 'rules')
+        self.assertEqual(rules['D-1']['status'], 'superseded')
+        self.assertEqual(rules['D-2']['status'], 'active')
+        index = (self.root / 'rules.md').read_text()
+        self.assertIn('## D-2', index)
+        self.assertNotIn('## D-1', index)
+        self.assertIn('- D-1: D-2', index)
+        self.assertEqual(diary.read_text(), 'Historical source stays intact\n')
+
+    def test_rules_index_refuses_to_replace_manual_content(self):
+        from brain import task_requirements
+        path = self.root / 'rules.md'
+        path.write_text('Existing manual index\n')
+        with self.assertRaises(ValueError):
+            task_requirements.add_rule(self.inst, self.n, 'D-1', 'Use exports', self.inst.now(), 'notes.md:1')
+        self.assertFalse((self.root / 'rules').exists())
+        self.assertEqual(path.read_text(), 'Existing manual index\n')
+
+    def test_migration_preflights_schema_and_is_repeatable(self):
+        from brain import tasks_backfill
+        (self.root / 'backlog.md').write_text('- Export reports\n')
+        self.assertEqual(tasks_backfill.migrate(self.inst, [self.n])[0]['created'], 1)
+        self.assertEqual(tasks_backfill.migrate(self.inst, [self.n])[0]['created'], 0)
+        path = self.root / 'requirements' / 'REQ-future.md'
+        path.write_text('---\nversion: 99\nid: REQ-future\n---\n')
+        (self.root / 'backlog.md').write_text('- Export reports\n- Add layout\n')
+        with self.assertRaises(ValueError):
+            tasks_backfill.migrate(self.inst, [self.n])
+        self.assertEqual(len(tasks.read_records(self.n)), 1)

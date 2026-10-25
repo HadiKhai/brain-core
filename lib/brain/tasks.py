@@ -256,6 +256,13 @@ def cmd_task(a):
 def register(sub):
     parser = sub.add_parser('task', help='node-local tasks, dependencies and completion evidence')
     actions = parser.add_subparsers(dest='action', required=True)
+    from . import task_requirements as _m_requirements
+    from . import tasks_backfill as _m_backfill
+    _m_requirements.register(actions)
+    migration = actions.add_parser('migrate', help='additively migrate local task sources after install/upgrade')
+    migration.add_argument('node', nargs='?')
+    migration.add_argument('--all', action='store_true')
+    migration.set_defaults(f=_m_backfill.cmd_task_migrate)
     fill = actions.add_parser('backfill', help='import node-local promises without changing source files')
     fill.add_argument('node')
     fill.add_argument('--apply', action='store_true')

@@ -143,6 +143,9 @@ def cmd_upgrade(a):
     # the new core's own link and check --fix commit whatever they change
     subprocess.run([sys.executable, newbin, "link"], env=env)
     subprocess.run([sys.executable, newbin, "check", "--fix"], env=env)
+    migration = subprocess.run([sys.executable, newbin, "task", "migrate", "--all"], env=env)
+    if migration.returncode:
+        print("! task migration needs repair; see core/docs/tasks.md before starting jobs")
     _m_usage.usage_restart(root)
 
 

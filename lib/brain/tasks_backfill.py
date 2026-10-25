@@ -122,3 +122,29 @@ def backfill(inst, n, apply=False):
                 _m_jobs.write_jobs(inst, n, jobs)
             inst.commit([], n['id'] + ': backfill task records')
         return [task for task, _ in planned]
+
+
+def migrate(inst, nodes):
+    """Install/upgrade entry point; additive and safe to repeat on each machine."""
+    result = []
+    # Fail before touching any node when an existing schema is unsupported.
+    for n in nodes:
+        for folder in ('tasks', 'requirements', 'rules'):
+            _m_tasks.read_records(n, folder)
+    for n in nodes:
+        rows = backfill(inst, n, apply=True)
+        result.append({'node': n['id'], 'created': len(rows), 'version': _m_tasks.VERSION})
+    return result
+
+
+def cmd_task_migrate(a):
+    import json
+    from . import nodes as _m_nodes
+    inst = _m_nodes.load()
+    if a.all and a.node:
+        _m_common.die('choose a node or --all')
+    nodes = [n for n in inst.nodes() if not n['archived']] if a.all else [inst.node(a.node or 'root')]
+    try:
+        print(json.dumps(migrate(inst, nodes), ensure_ascii=False))
+    except (OSError, ValueError) as error:
+        _m_common.die(str(error))

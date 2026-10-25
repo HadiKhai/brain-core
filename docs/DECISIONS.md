@@ -94,3 +94,11 @@ Existing task records and source prose are preserved. Imported prose stays in
 backlog until its runnable state and dependencies are explicit; open jobs retain
 their exact job identity. External issue references on provider-backed nodes wait
 for a provider pull rather than becoming duplicate local product issues.
+
+## D1304: Requirements retain sources and rules activate explicitly
+
+Requirements are immutable source records. Explicit rule creation builds a
+current `rules.md` index and preserves superseded rule records. Imported prose
+never activates itself, and a manually maintained rules index refuses overwrite.
+Install/upgrade runs additive task migration and documents repairs on failure;
+read-only commands never silently migrate storage or contact providers.
