@@ -53,3 +53,16 @@ runs setup or launches a thread. Host activity remains unknown. It creates no
 terminal handback; the adopted worker uses the normal contract, brief and
 handback commands as work continues. Tests use an existing dirty checkout and
 cover registration, idempotence, conflicting workers and protected checkouts.
+
+## D602: Use the native host tool bridge with explicit outcomes
+
+The host RPC client calls the app's existing ACP bridge using argument arrays,
+finite JSON and a bounded subprocess. It decodes structured and text JSON tool
+results, rejects unavailable transport and reports ambiguous delivery failures
+without retrying mutations. Provider output is never echoed into error messages.
+
+Thread organization requires one explicit singular target and rejects unknown
+argument names before transport. This protects calls made by this client; it
+does not change the external host parser or other callers. Tests mock the bridge
+and cover argument construction, decoding, missing transport, malformed data,
+rejected calls and timeout behavior without contacting a live host.
