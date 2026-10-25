@@ -100,7 +100,7 @@ WAKE_BOOKKEEPING_KINDS = (
     'missing-worktree', 'core-changes', 'rule-activation-review', 'overlapping-inputs',
     'idle-with-runnable-work', 'missing-preview', 'ledger', 'lesson-outcome',
     'handback-attempt', 'invalid-handback', 'restart-repair', 'job', 'stale-status',
-    'wake', 'watcher',
+    'wake', 'watcher', 'notification',
 )
 
 

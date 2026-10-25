@@ -119,3 +119,66 @@ class AutomatedBriefAttribution(Scenario):
             text = (CORE / 'roles' / (name + '.md')).read_text()
             self.assertIn('A cancellation with no operator message in the turn is a host event', text)
             self.assertIn('retry once or use another route', text)
+
+
+class TypedCommunication(Scenario):
+    def setUp(self):
+        super().setUp()
+        import core_loader
+        import os
+        from unittest import mock
+        p = mock.patch.dict(os.environ, self.env)
+        p.start()
+        self.addCleanup(p.stop)
+        self.m = core_loader.SourceFileLoader('typed_comms', str(CORE / 'bin/brain')).load_module()
+        self.root = self.init('alice')
+        self.b(self.root, 'set', 'root', 'coordinator=fixture-root', 'wake=fixture-send')
+        self.inst = self.m.Instance(self.root)
+
+    def spec(self, action='routine'):
+        return {'options': [{'id': 'continue', 'label': 'Continue', 'action': action},
+                            {'id': 'wait', 'label': 'Wait', 'action': 'routine'}],
+                'recommendation': 'continue', 'default': 'continue',
+                'deadline': '2020-01-01T00:00:00+00:00'}
+
+    def test_root_landings_parks_and_fyi_are_inbox_only(self):
+        from unittest import mock
+        with mock.patch.object(self.m, 'request_wake') as send:
+            for kind in ('landing', 'park', 'fyi'):
+                self.m.communication_record(self.inst, self.inst.node('root'), kind, 'Sample update', kind)
+            send.assert_not_called()
+        text = (self.root / 'inbox.md').read_text()
+        self.assertIn('landing: Sample update', text)
+        self.assertIn('park: Sample update', text)
+        self.assertIn('fyi: Sample update', text)
+
+    def test_question_schema_and_routine_default_never_execute_an_action(self):
+        from unittest import mock
+        with mock.patch.object(self.m, 'request_wake', return_value=True) as send:
+            question = self.m.communication_record(self.inst, self.inst.node('root'), 'question',
+                                                  'Which path?', 'fixture', self.spec())
+            self.assertEqual(send.call_count, 1)
+            self.m.communication_reconcile(self.inst)
+            saved = self.m.communication_read(self.inst)['questions'][question['id']]
+            self.assertEqual(saved['answer'], 'continue')
+            self.assertEqual(saved['answered_by'], 'deadline-default')
+            self.m.communication_reconcile(self.inst)
+            self.assertEqual(self.m.communication_read(self.inst)['questions'][question['id']], saved)
+
+    def test_outward_and_destructive_questions_never_expire_to_default(self):
+        from unittest import mock
+        with mock.patch.object(self.m, 'request_wake', return_value=True):
+            for action in ('outward', 'destructive'):
+                q = self.m.communication_record(self.inst, self.inst.node('root'), 'question',
+                                               'Choose action', action, self.spec(action))
+                self.m.communication_reconcile(self.inst)
+                self.assertNotIn('answer', self.m.communication_read(self.inst)['questions'][q['id']])
+
+    def test_typed_questions_reject_missing_or_unknown_action_authority(self):
+        from unittest import mock
+        with mock.patch.object(self.m, 'request_wake') as send:
+            for spec in ({}, {**self.spec(), 'default': 'unknown'},
+                         {**self.spec(), 'options': [{'id': 'continue', 'label': 'Continue'}]}):
+                with self.assertRaises(ValueError):
+                    self.m.communication_record(self.inst, self.inst.node('root'), 'question', 'Choose?', 'bad', spec)
+            send.assert_not_called()

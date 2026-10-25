@@ -94,3 +94,17 @@ automated-turn marker. The common formatter prefixes once; schedule readers also
 mark legacy records when exposing their briefs. Roles require cancellation with
 no operator message to be attributed to the host, with one retry or a file-based
 route. Generic cancellation text alone is not evidence of operator refusal.
+
+
+## D504: Typed notification channels and bounded routine defaults
+
+`notify` records idempotent, screened notifications before ringing a doorbell.
+Root landings, parks and FYIs are inbox-only; typed questions wake their answering
+coordinator. Questions require explicit option action categories, recommendation,
+absolute deadline and a matching default. Deadline reconciliation records a choice
+only when every option is routine. Any outward or destructive option disables
+this path. Core never executes an option or grants action authorization.
+
+Question state retains explicit and default answers. Answered typed question inbox
+lines are hidden by projection, preserving their original receipt bytes. Arbitrary
+external host sends remain outside the native notification API's interception.

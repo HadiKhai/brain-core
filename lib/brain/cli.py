@@ -12,6 +12,7 @@ from pathlib import Path
 
 from . import briefs as _m_briefs
 from . import check as _m_check
+from . import communication as _m_communication
 from . import common as _m_common
 from . import connect as _m_connect
 from . import guard as _m_guard
@@ -307,6 +308,10 @@ def main():
         'item_id', 'text')
     cmd('index', _m_freshness.cmd_index, 'configured upstream index freshness; never runs a generator', 'id',
         opt('--record', action='store_true', help='explicitly record current input/output fingerprints after regeneration'))
+    cmd("notify", _m_communication.cmd_notify, "record typed notification; root wakes only for questions",
+        "id", opt("kind", choices=_m_communication.COMMUNICATION_KINDS), "text",
+        opt("--key", required=True, help="stable idempotency key"), opt("--question-file"))
+    cmd("question-answer", _m_communication.cmd_question_answer, "answer one typed question", "id", "choice")
     cmd("msg", _m_messages.cmd_msg, "format start/done/blocked/question for a coordinator (does not send)",
         "id", opt("kind", choices=_m_messages.MESSAGE_KINDS), "message", opt("--branch"), opt("--report"))
     cmd("handback", _m_jobs.cmd_handback, "done/blocked/question hand-back; worker messages are start/done/blocked/question",

@@ -350,6 +350,13 @@ def inbox_lines(n, readonly=False, lifecycle_data=None):
         except (OSError, ValueError, KeyError, TypeError, SystemExit):
             continue
     root = _m_instance.instance_above(n['dir'])
+    from . import communication as _m_communication
+    try:
+        questions = _m_communication.communication_read(_m_instance.Instance(root))['questions']
+        lines = [line for line in lines if not any('<!-- communication:' + key + ' -->' in line and 'answer' in q
+                                                   for key, q in questions.items())]
+    except (OSError, ValueError, TypeError):
+        pass  # unreadable decision state cannot hide an unanswered question
     return _m_reminders.request_lines(_m_instance.Instance(root), n, lines, readonly=readonly,
                                       lifecycle_data=lifecycle_data)
 
@@ -702,6 +709,8 @@ def cmd_due(a):
     _m_docker_leftovers.docker_leftover_nodes(inst, nodes)
     state = _m_machine.machine_state(inst)
     items = [item for n in nodes for item in due_items(inst, n, include_handled=getattr(a, 'handled', False)) + changes_due(inst, n)]
+    from . import communication as _m_communication
+    items += _m_communication.communication_items(inst, nodes)
     items += consumed
     wake_seen = set()
     for n in nodes:

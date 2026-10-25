@@ -26,7 +26,7 @@ from . import verify as _m_verify
 WATCH_LOCAL_KINDS = ('unsettled-threads',)
 
 
-WATCH_DECISION_KINDS = ('handback', 'job-stall', 'blocked-overdue', 'restart', 'rotate',
+WATCH_DECISION_KINDS = ('question', 'handback', 'job-stall', 'blocked-overdue', 'restart', 'rotate',
                         'overdue-question')
 
 
@@ -567,6 +567,12 @@ def watch_scan(inst, nodes=None):
                                        'kind': 'overdue-question', 'node': n['id'],
                                        'reason': 'overdue:' + hashlib.sha256(line.encode()).hexdigest(),
                                        'text': 'Unanswered question past its threshold; inspect brain due root'})
+    from . import communication as _m_communication
+    for item in _m_communication.communication_items(inst, nodes):
+        n = inst.node(item['node'])
+        target, command = _m_hosts.wake_target(inst, n)
+        group = groups.setdefault(target['id'], {'node': target, 'items': [], 'command': command})
+        group['items'].append(item)
     completions = watch_completion_items(inst, nodes)
     if completions:
         root = inst.node('root')
@@ -616,6 +622,8 @@ def watch_run(inst, kinds=None, quiet=False, sources=None):
     warnings = set(state.get('warnings', []))
     if kinds is None:
         watch_failures(inst, nodes, failures, warnings)
+    from . import communication as _m_communication
+    _m_communication.communication_reconcile(inst)
     groups = watch_groups(inst, nodes)
     current_ids = {i['id'] for group in groups.values() for i in group['items']}
     for group in groups.values():

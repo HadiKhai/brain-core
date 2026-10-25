@@ -33,4 +33,7 @@ def cmd_msg(a):
     if not report and row:
         report = (_m_jobs.read_handback(n, row) or {}).get("report") or _m_common.tilde(_m_jobs.handback_file(n, row))
     print(_m_guard.redact(format_worker_message(a.kind, a.message, branch, report), _m_guard.never_terms(n)))
-    print("NOT SENT: use the host send")
+    if n['id'] == 'root' and a.kind != 'question':
+        print('INBOX ONLY: record landing/park/FYI with brain notify; do not host-send this update')
+    else:
+        print("NOT SENT: use the host send")
