@@ -119,3 +119,19 @@ Missing job samples or stale, unknown, expired or future readings keep fit unkno
 The estimate is account-wide and approximate; work already spent is not subtracted.
 Five-hour and model-specific capacity fit remain unknown. This read-only advisory
 uses cached usage only and cannot change routing or admission.
+
+## D206: Refresh daily throughput from durable measured facts
+
+Every jobs/dashboard snapshot computes the last fourteen calendar days from the
+ledger, using elapsed hours for today and a full day for earlier dates. Only
+merged jobs with valid non-future end times count. Rates are merges/hour and
+calendar minutes/merge; token means use measured merges only, with coverage
+counts. Recorded run/reuse counts expose reruns without inferring absent history.
+
+Native admission records monotonic delay in a context-local collector during
+readiness. The hand-back accumulates known admission delay across attempts and
+ledger consumption retains numeric counts and seconds. Older incomplete delay
+history stays unknown. Admission time includes native capacity/environment holds;
+other wait causes are unmeasured. The dashboard component displays measured
+coverage and does not infer causes from wall time. Rollups refresh on snapshot
+reads without a scheduler, host lifecycle action or generated-file writes.

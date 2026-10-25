@@ -1,5 +1,6 @@
 """Machine mechanics for Brain."""
 import contextlib
+import contextvars
 import datetime
 import hashlib
 import json
@@ -24,6 +25,7 @@ from . import ui as _m_ui
 MACHINE_DEFAULTS = {"load5_per_cpu": 0.8, "memory_free_gb": 8, "disk_free_gb": 40,
                     "verify_day": 2, "verify_night": 1, "night_start": 22, "night_end": 8}
 MACHINE_RETRY = 5
+ADMISSION_TIMING = contextvars.ContextVar("brain_admission_timing", default=None)
 
 
 def machine_valid_sample(sample):
@@ -789,6 +791,9 @@ def machine_wait(kind="heavy", inst=None, node=None):
                 if not reasons and (kind != "verify" or (position == 1 and running < machine_limit(policy))):
                     row["state"] = "running"
                     row['started_at'] = time.time()
+                    timing = ADMISSION_TIMING.get()
+                    if timing is not None:
+                        timing.append(max(0, time.monotonic() - started))
                     return token
                 estimate = queue_wait_estimate(queue.rows, row, machine_limit(policy), held=bool(reasons))
             detail = ("; ".join(reasons) if reasons else

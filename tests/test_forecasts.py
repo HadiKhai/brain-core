@@ -121,6 +121,8 @@ class JobForecasts(Scenario):
         hb = self.m.read_handback(n, row)
         self.assertGreaterEqual(hb["verify_duration"]["elapsed_seconds"], 0)
         self.assertFalse(hb["verify_duration"]["reused"])
+        self.assertGreaterEqual(hb["verify_duration"]["queue_seconds"], 0)
+        self.assertGreaterEqual(hb["admission_wait_seconds_total"], 0)
         self.assertEqual(hb["estimate"], json.loads(saved))
         self.assertEqual(hb["actual"]["tokens"], 10200000)
         self.assertEqual(hb["actual"]["active_h"], 1)
@@ -345,3 +347,10 @@ class JobForecasts(Scenario):
             lines = '\n'.join(self.m.job_budget_lines(self.inst, self.n))
         self.assertIn('0.3% weekly share', lines)
         self.assertIn('median fits headroom', lines)
+
+    def test_unknown_accounting_sources_cannot_calibrate_or_supply_token_forecasts(self):
+        for source in ('none found', 'not counted', 'not counted: OSError'):
+            rows = [{**row, 'Usage': source, 'Meter %': '1'} for row in self.rows()]
+            estimate = self.estimate(rows)
+            self.assertNotIn('tokens', estimate)
+            self.assertEqual(estimate['conversion']['source'], 'configured/default')
