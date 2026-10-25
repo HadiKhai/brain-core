@@ -146,3 +146,25 @@ exception retains the checkout. Branch and live ownership checks run again after
 the callback. The returned post-removal result contains the original workspace
 reference for host inspection without authorizing a stale-thread message.
 Default callers preserve their existing checklist and removal behavior.
+
+## D807: Record and bound held admission without guessing command semantics
+
+Queued work records its owner, cause, reading, start time and clearing condition.
+The waiting process retains its continuation and resumes on a clear CPU reading.
+The private wait producer reports at 15 minutes to the owner and at 45 minutes to
+root, once per stable wait; resumed and terminal events have separate identities.
+Due integrations can consume `machine_wait_items` and `machine_wait_notices`.
+
+Admission prefers known CPU idle and memory pressure over I/O-inflated load;
+unknown CPU data retains the existing sustained-load fallback. Telemetry uses
+bounded standard-library probes and preserves thermal recovery evidence. Legacy
+sampler recovery remains unchanged when CPU telemetry is unavailable.
+
+After `max_hold_minutes` (default 20), only a runner that explicitly proves it can
+enforce reduced parallelism may admit CPU/load-held work at one slot. Unknown
+commands fail closed through the terminal finalizer. Memory, disk, thermal and
+invalid-policy holds never degrade into unsafe execution. FIFO capacity is never
+bypassed. `machine_environment` exports the recorded reduction; the command runner
+must enforce its supported command form rather than rewrite arbitrary shell/Make
+syntax. Resource-free worktree creation remains light; heavy setup needs a
+runner-owned command lifetime, separate from admission-only permission.

@@ -1832,7 +1832,8 @@ class TerminalProducer(Scenario):
         self.patch = mock.patch.dict(os.environ, self.env)
         self.patch.start()
         self.addCleanup(self.patch.stop)
-        self.clock = argparse.Namespace(time=lambda: 100000.0)
+        self.clock = argparse.Namespace(time=lambda: 100000.0, monotonic=lambda: 100000.0,
+                                        sleep=lambda _: self.fail('unexpected admission sleep'))
 
     def waits(self):
         return json.loads((self.root / '.brain/wake/machine-holds.json').read_text())['waits']
@@ -1905,3 +1906,91 @@ class TerminalProducer(Scenario):
         row = self.waits()[token]
         self.assertEqual(row['outcome'], 'error')
         self.assertIn('cannot establish', row['reason'])
+
+
+class RecordedAdmission(Scenario):
+    def setUp(self):
+        super().setUp()
+        self.m = core_loader.SourceFileLoader('recorded_admission_fixture', str(CORE / 'bin/brain')).load_module()
+        self.root = self.init('alice')
+        self.inst = self.m.Instance(self.root)
+        self.patch = mock.patch.dict(os.environ, self.env)
+        self.patch.start()
+        self.addCleanup(self.patch.stop)
+        self.clock = argparse.Namespace(at=100000.0)
+        self.clock.time = self.clock.monotonic = lambda: self.clock.at
+        self.good = {'cpu_idle_pct': 75, 'load_per_cpu': [2, 2, 2], 'mem_free_gb': 32, 'disk_free_gb': 200}
+        self.hot = dict(self.good, cpu_idle_pct=2)
+
+    def test_recorded_hold_resumes_on_first_clear_reading(self):
+        readings = iter([self.hot, self.good])
+        def pause(seconds):
+            self.clock.at += 900
+        with mock.patch.object(self.m, 'request_wake', return_value=True) as wake:
+            with self.m.machine_run('verify', self.inst, 'root', clock=self.clock) as token:
+                self.m.machine_wait('verify', self.inst, 'root', token=token, clock=self.clock,
+                                    read=lambda: next(readings), pause=pause)
+        waits = json.loads((self.root / '.brain/wake/machine-holds.json').read_text())['waits']
+        self.assertEqual(waits[token]['resumed_at'], 100900.0)
+        self.assertEqual(waits[token]['outcome'], 'success')
+        self.assertEqual([c.kwargs['items'][0]['kind'] for c in wake.call_args_list],
+                         ['machine-resumed', 'machine-completed'])
+
+    def test_fifteen_and_fortyfive_minute_reports_are_once_per_wait(self):
+        def pause(seconds):
+            self.clock.at += 900
+            self.m.machine_wait_notices(self.inst, self.clock.at)
+            self.m.machine_wait_notices(self.inst, self.clock.at)
+            if self.clock.at >= 102700:
+                raise KeyboardInterrupt()
+        # Queue capacity, rather than resource pressure, can legitimately wait
+        # past the resource deadline. It must remain visible and report once.
+        self.good['cpu_idle_pct'] = 75
+        with mock.patch.object(self.m, 'request_wake', return_value=True) as wake, \
+                mock.patch.object(self.m, 'machine_limit', return_value=0):
+            with self.assertRaises(KeyboardInterrupt):
+                with self.m.machine_run('verify', self.inst, 'root', clock=self.clock) as token:
+                    self.m.machine_wait('verify', self.inst, 'root', token=token, clock=self.clock,
+                                        read=lambda: self.good, pause=pause)
+        kinds = [c.kwargs['items'][0]['kind'] for c in wake.call_args_list]
+        self.assertEqual(kinds.count('machine-coordinator'), 1)
+        self.assertEqual(kinds.count('machine-root'), 1)
+        self.assertEqual(kinds.count('machine-exited'), 1)
+
+    def test_maximum_hold_rejects_unknown_reduction_with_terminal_reason(self):
+        def pause(seconds):
+            self.clock.at += 1200
+        with mock.patch.object(self.m, 'request_wake', return_value=True):
+            with self.assertRaisesRegex(SystemExit, 'cannot enforce reduced parallelism'):
+                with self.m.machine_run('verify', self.inst, 'root', clock=self.clock) as token:
+                    self.m.machine_wait('verify', self.inst, 'root', token=token, clock=self.clock,
+                                        read=lambda: self.hot, pause=pause, reduction_ready=False)
+        row = json.loads((self.root / '.brain/wake/machine-holds.json').read_text())['waits'][token]
+        self.assertEqual(row['state'], 'exited')
+        self.assertIn('cannot enforce', row['reason'])
+
+    def test_supported_reduction_keeps_hard_resource_limits(self):
+        def pause(seconds):
+            self.clock.at += 1200
+        unsafe = dict(self.hot, mem_free_gb=1)
+        with mock.patch.object(self.m, 'request_wake', return_value=True):
+            with self.assertRaisesRegex(SystemExit, 'unsafe resource pressure'):
+                with self.m.machine_run('verify', self.inst, 'root', clock=self.clock) as token:
+                    self.m.machine_wait('verify', self.inst, 'root', token=token, clock=self.clock,
+                                        read=lambda: unsafe, pause=pause, reduction_ready=True)
+
+    def test_supported_cpu_reduction_is_recorded_and_exported(self):
+        def pause(seconds):
+            self.clock.at += 1200
+        with mock.patch.object(self.m, 'request_wake', return_value=True):
+            with self.m.machine_run('verify', self.inst, 'root', clock=self.clock) as token:
+                self.m.machine_wait('verify', self.inst, 'root', token=token, clock=self.clock,
+                                    read=lambda: self.hot, pause=pause, reduction_ready=True)
+                self.assertEqual(self.m.machine_environment(token, {})['BRAIN_PARALLELISM'], '1')
+        row = json.loads((self.root / '.brain/wake/machine-holds.json').read_text())['waits'][token]
+        self.assertTrue(row['reduced'])
+
+    def test_known_idle_cpu_overrides_io_load_but_unknown_cpu_keeps_load_fallback(self):
+        self.assertEqual(self.m.machine_reasons(self.good, self.m.machine_policy()), [])
+        unknown = {k: v for k, v in self.good.items() if k != 'cpu_idle_pct'}
+        self.assertTrue(self.m.machine_reasons(unknown, self.m.machine_policy()))
