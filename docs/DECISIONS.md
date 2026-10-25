@@ -1832,3 +1832,24 @@ Worktree cleanup records current journal metadata for replay without automatical
 rewriting the status document, Active work table or status archive. Explicit
 status refresh still materializes the view and caps the Now section. Other event
 projection paths remain available.
+
+
+## D18201: Validate study completion against its actual open job
+
+Handback preflight identifies an open matching import-study row before applying
+ordinary home-job review requirements. A study may publish blocked, question or
+done with absent or zero review rounds, without a home readiness packet. A branch
+name alone does not establish this exemption. Reverification and imported full
+receipts remain home verification operations and are refused for studies; queued
+requests must pass the same actual-row validation before publishing an attempt.
+
+Compatibility scenario fixtures keep the historical jobs owner of `job_started`
+separate from the native task row hook. Fabricated origin repositories provide
+local cached default refs without fetching, preserving fail-closed cleanup.
+Advisory fixtures supply the routing interface, distinguish round budget resets
+from lifetime advice, and bind independent coordinators when proving local
+recurrence or settlement scope. Batch eligibility remains advice with ready=false.
+Managed success notices are answered through their inbox episode while retaining
+source history; lesson outcomes are checked independently. Cleanup snapshot tests
+assert unchanged status bytes until an explicit refresh. Invalid reverify requests
+retain a no-additional-run assertion.

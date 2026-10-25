@@ -464,8 +464,11 @@ class AutonomyFacts(AutonomyProject):
         (wt / 'a.txt').write_text('a\n')
         self.git('add', '-A', cwd=wt); self.git('commit', '-qm', 'A', cwd=wt)
         self.git('merge', '-q', 'job-a', cwd=home)
-        self.b(r, 'wt', 'prune', 'app', '--offline')
         st = r / 'nodes/app/status.md'
+        before = st.read_bytes()
+        self.b(r, 'wt', 'prune', 'app', '--offline')
+        self.assertEqual(st.read_bytes(), before)
+        self.b(r, 'status', 'app', '--refresh')
         self.assertIn('job-a (1 commits)', st.read_text())
         self.b(r, 'status', 'app', '--refresh')
         self.assertIn('Merged since previous refresh:\n- None recorded.', st.read_text())

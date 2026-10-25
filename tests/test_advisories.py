@@ -118,7 +118,8 @@ class CoordinatorAdvisories(unittest.TestCase):
         self.now = datetime.datetime(2026, 1, 1, 12, tzinfo=datetime.timezone.utc)
         self.m = core_loader.SourceFileLoader('coordinator_advisory', str(CORE / 'bin/brain')).load_module()
         self.n = {'id': 'app', 'dir': self.root / 'nodes/app', 'local': {'coordinator': 'fixture-thread'}, 'fm': {}, 'archived': False}
-        self.inst = SimpleNamespace(root=self.root, now_dt=lambda:self.now, nodes=lambda:[self.n])
+        self.inst = SimpleNamespace(root=self.root, now_dt=lambda:self.now, nodes=lambda:[self.n],
+                                    local_of=lambda nid: {})
         (self.root / '.brain').mkdir()
 
     def pending(self, count=1, age=0):

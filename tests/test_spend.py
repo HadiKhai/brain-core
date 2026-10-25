@@ -44,6 +44,9 @@ class Spend(Scenario):
         self.r = self.init("alice")
         self.home = self.repo(self.tmp / "app")
         self.git("remote", "add", "origin", "https://github.com/Acme/App.git", cwd=self.home)
+        # Fabricated remote evidence is local: cleanup never fetches a default.
+        self.git("update-ref", "refs/remotes/origin/main", "HEAD", cwd=self.home)
+        self.git("symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main", cwd=self.home)
         self.b(self.r, "new", "app", "--title", "App", "--home", str(self.home))
         self.b(self.r, "wt", "add", "app", "job")
         self.wt = self.tmp / "app-work/worktrees/job"

@@ -153,16 +153,19 @@ class DueLifecycle(Scenario):
         self.n = self.inst.node('maple')
         self.advice_setup()
 
-    def episode_snapshot(self, state):
+    def episode_snapshot(self, state, conditions=None):
+        conditions = set(('median-age', 'median-tokens', 'budget-tokens', 'budget-hours',
+                          'compaction-limit', 'subagent-share') if conditions is None else conditions)
         items = self.advice()
-        self.assertEqual(len(items), 6)
+        self.assertEqual({i['condition'] for i in items}, conditions)
+        self.assertEqual(len(items), len(conditions))
         if state is not None:
             self.assertEqual({i['state'] for i in items}, {state})
         output = io.StringIO()
         with mock.patch.object(self.m, 'load', return_value=self.inst), contextlib.redirect_stdout(output):
             self.m.cmd_inbox(argparse.Namespace(id='maple', new=True, json=True, weekly=False))
         fresh = [i for i in json.loads(output.getvalue()) if i['kind'] == 'job']
-        self.assertEqual(len(fresh), 6)
+        self.assertEqual(len(fresh), len(conditions))
         self.assertTrue(all(i['informational'] for i in fresh))
         return {i['id'] for i in items}, {i['id'] for i in fresh}
 
@@ -249,7 +252,10 @@ class DueLifecycle(Scenario):
         self.episode_setup()
         before = self.episode_snapshot('open')
         self.m.acknowledge_usage_restart(self.inst, self.n, self.row)
-        after = self.episode_snapshot('open')
+        # A replacement gets fresh round counters; lifetime comparisons remain.
+        retained = {'median-age', 'median-tokens', 'subagent-share'}
+        after = self.episode_snapshot('open', retained)
+        self.assertEqual(self.usage, {'processed': 30, 'compactions': 3, 'subagents': 1, 'sub_share': .6})
         self.assert_episode_changed(before, after)
         for field, value in (('Started', '2026-01-15T09:00Z'), ('Job', 'job/brush')):
             self.row[field] = value
