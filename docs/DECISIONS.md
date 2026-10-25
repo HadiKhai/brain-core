@@ -93,3 +93,19 @@ it never recharges the historical lane durations. Existing records with no
 duration remain unknown. CLI job advice shows the measurement basis and flags
 runs above verify_warn_seconds (node or instance; default 600 seconds). This
 advice does not change readiness or introduce a timeout.
+
+## D204: Share queue ordering between admission and capacity forecasts
+
+Queued verification uses a stable priority view. A node can opt into landing
+priority with verify_priority=landing; other work retains normal priority. After
+ten minutes normal work ages ahead of landing requests, and legacy records with
+no enqueue timestamp retain precedence. List order breaks ties, preserving
+explicit coordinator reordering within a priority band. Running reservations
+are never preempted or reordered. Node locks and machine slot limits are unchanged.
+
+Each gate captures its expected duration at enqueue: verify_estimate_seconds,
+or the median of at least three measured completed non-reused readiness runs
+on that node. Queue and running projections simulate free slots with recorded
+start times and gate durations. Missing, overrun or unsafe evidence yields unknown.
+The projection reads recorded evidence without process probes or queue writes.
+Reported estimates describe capacity only; environmental holds are not predicted.
