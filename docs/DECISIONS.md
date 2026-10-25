@@ -2066,3 +2066,24 @@ have not been written. Existing native verification logs capture the terminal
 stream without command changes; private structured evidence is opt-in. The
 configuration is a shared lane input. Collection and business assertions remain
 unchanged; synthetic proofs cover interruption, xdist timeout and fixture errors.
+
+
+## D21001: Bind dashboard caches to current inputs
+
+The file-only first reading remains independent of repository inspection, usage aggregation,
+private cache availability and business write locks. One background worker builds the complete
+reading and retries initialization on demand after a failure.
+
+A detached observation holds lifecycle inputs for one render. Reconciliation uses copies;
+viewing never delivers queued questions, persists reminder generations, advances stall clocks
+or acknowledges machine holds. Existing recorded identities win; prospective identities are
+stable display values until an owning command records an episode. Commands outside the
+observation retain their normal transactions.
+
+Private derived caches reuse metadata only for the same code, instance, input metadata,
+usage-source metadata, access policy, machine-need state and discovery arguments. Usage
+aggregates still require an authorized opened source with matching identity and cursor.
+Changed inputs revoke completion before another slice; revoked access clears prior totals.
+Private publication requires the held-directory atomic writer; without that capability the
+view continues without persistence. Cache failures are misses. Neither cache reuse nor a
+complete display is verification or landing evidence.

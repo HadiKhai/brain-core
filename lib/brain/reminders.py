@@ -57,8 +57,12 @@ def lifecycle_read(inst):
 @contextlib.contextmanager
 def lifecycle_store(inst, readonly=False):
     """Serialize scans with updates; publishing pins the actual private directory."""
-    if readonly:
-        yield lifecycle_read(inst)
+    from . import ui_readmodel
+    view = ui_readmodel.projection(inst.root)
+    if readonly or view is not None:
+        data = (view.store(inst.root / '.brain/wake/lifecycle.json', lambda: lifecycle_read(inst))
+                if view else lifecycle_read(inst))
+        yield data
         return
     folder = inst.root / '.brain/wake'
     if folder.resolve() != inst.root.resolve() / '.brain/wake':
@@ -115,7 +119,8 @@ def usage_restart_item(inst, n, row):
         if not episode:
             if len(data['usage']) >= LIFECYCLE_LIMIT and key not in data['usage']:
                 raise ValueError('restart receipt bound reached')
-            episode = os.urandom(12).hex()
+            from . import ui_readmodel
+            episode = ui_readmodel.episode(inst, [key, baseline, record])
             data['usage'][key] = {'job': _m_jobs.job_key(row), 'baseline': baseline,
                                   'episode': episode, 'at': inst.now(),
                                   'round_at': record.get('round_at') or (record.get('at') if record and not record.get('episode') else None)}

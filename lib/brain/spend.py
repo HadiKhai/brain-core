@@ -309,6 +309,33 @@ def claude_session_id(path):
     return Path(path).name.removesuffix(".zst").removesuffix(".jsonl")
 
 
+def spend_cache_valid(agg, key, ident, runtime, stamp, packed):
+    """Malformed derived data is a miss, never authority to skip source bytes."""
+    try:
+        state = agg['state']
+        offset = state['offset']
+        schema = spend_new(runtime, None)
+        return (isinstance(agg, dict) and agg.get('v') == SPEND_VERSION and agg.get('key') == key
+                and agg.get('ino') == list(ident) and agg.get('runtime') == runtime
+                and type(offset) is int and 0 <= offset <= stamp[0]
+                and (agg.get('stamp') == stamp or (isinstance(agg.get('stamp'), list)
+                     and len(agg['stamp']) == len(stamp) and type(agg['stamp'][0]) is int
+                     and agg['stamp'][0] < stamp[0]))
+                and (not packed or offset in (0, stamp[0]))
+                and isinstance(agg.get('models'), list)
+                and all(isinstance(model, str) and SPEND_MODEL.fullmatch(model) for model in agg['models'])
+                and all(name in agg for name in schema if name not in ('id', 'parent'))
+                and all(name in state for name in schema['state'])
+                and all(isinstance(state.get(name), list) for name in ('recent', 'tools'))
+                and isinstance(agg.get('compactions'), list)
+                and all(isinstance(agg.get(name), dict) and all(
+                    isinstance(bucket, list) and len(bucket) == len(SPEND_FIELDS)
+                    and all(type(value) is int and value >= 0 for value in bucket)
+                    for bucket in agg[name].values()) for name in ('m', 'mc')))
+    except (KeyError, TypeError, ValueError, IndexError):
+        return False
+
+
 def spend_file(inst, path, runtime, allowed, forbidden, budget=None, window=None):
     """One transcript's aggregate, brought up to date; None when unreadable or outside the folders this brain may
     read (checked on the open file, as `brain history` does). A file that shrank or was replaced is read again.
@@ -340,17 +367,20 @@ def spend_file(inst, path, runtime, allowed, forbidden, budget=None, window=None
         cf = spend_cache_dir(inst) / "files" / f"{key}.json"
         # Read-only viewers retain partial progress in memory; a disk cache is optional.
         agg = known[1] if known and known[0][1] == list(ident) else None
+        from . import ui_readmodel
+        display_cache = ui_readmodel.usage_cache()
+        if display_cache is not None and display_cache.inst.root.resolve() != inst.root.resolve():
+            display_cache = None
+        loaded_private = False
+        if agg is None and display_cache is not None:
+            agg = display_cache.read("usage-" + key)
+            loaded_private = spend_cache_valid(agg, key, ident, runtime, stamp, packed)
         if agg is None:
             try:
                 agg = json.loads(cf.read_text())
             except (OSError, ValueError):
                 pass
-        if not (isinstance(agg, dict) and agg.get("v") == SPEND_VERSION and agg.get("key") == key
-                and agg.get("ino") == list(ident) and agg.get('runtime') == runtime
-                and agg["state"]["offset"] <= size
-                and (agg.get('stamp') == stamp or (isinstance(agg.get('stamp'), list)
-                     and agg['stamp'][0] < size))
-                and (not packed or agg["state"]["offset"] in (0, size))):
+        if not spend_cache_valid(agg, key, ident, runtime, stamp, packed):
             agg = {**spend_new(runtime, real), "key": key, "ino": list(ident)}
             if window is not None:
                 agg["state"].update(lo=window[0], hi=window[1])
@@ -358,6 +388,7 @@ def spend_file(inst, path, runtime, allowed, forbidden, budget=None, window=None
         # and a cache holding one is written again.
         screened = [m if not _m_guard.find_terms(m, terms) else "other" for m in agg["models"]]
         stale, agg["models"] = screened != agg["models"], screened
+        update_private = not loaded_private or stale or agg.get("stamp") != stamp or not agg.get("complete", True)
         # Who the session is, never kept on disk: Claude names a session's file by its id, its sub-agents' files
         # sit below it; a Codex transcript says so in its first line.
         if runtime == "claude":
@@ -393,6 +424,8 @@ def spend_file(inst, path, runtime, allowed, forbidden, budget=None, window=None
         # read to mark EOF in that case; the saved cursor already proves completion.
         if agg['state']['offset'] == size:
             agg['complete'] = True
+        if display_cache is not None and update_private:
+            display_cache.write("usage-" + key, {k: v for k, v in agg.items() if k not in SPEND_UNKEPT})
         agg["path"] = str(real)  # this run's own, never written
         _SPEND_MEM[mem] = ((stamp, list(ident)), agg)
     return agg

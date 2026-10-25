@@ -1245,11 +1245,38 @@ def machine_state(inst=None):
     return reading
 
 
+def machine_hold_read(path):
+    data = json.loads(path.read_text()) if path.exists() else {'version': 1, 'holds': {}}
+    if (not isinstance(data, dict) or data.get('version') != 1 or not isinstance(data.get('holds'), dict)
+            or any(not re.fullmatch(r'[0-9a-f]{64}', key) or not isinstance(row, dict)
+                   or not re.fullmatch(r'[0-9a-f]{64}', str(row.get('reason', '')))
+                   or not re.fullmatch(r'[0-9a-f]{32}', str(row.get('episode', '')))
+                   or type(row.get('reported')) is not bool for key, row in data['holds'].items())):
+        raise ValueError('invalid machine hold state')
+    waits = data.get('waits', {})
+    if (not isinstance(waits, dict) or any(not machine_queue.valid({**row, 'state': 'running'})
+            or row.get('state') not in ('admitting', 'queued', 'running', 'exited', 'completed')
+            or token != row['token'] or not isinstance(row.get('node'), str)
+            or not machine_timestamp(row.get('updated_at')) for token, row in waits.items())):
+        raise ValueError('invalid recorded machine waits')
+    retired = data.get('retired_waits', [])
+    if (not isinstance(retired, list) or any(not isinstance(token, str) or
+            not re.fullmatch(r'[0-9a-f]{32}', token) for token in retired)):
+        raise ValueError('invalid retired machine waits')
+    return data
+
+
 @contextlib.contextmanager
 def machine_hold_store(inst):
     """Short private transaction shared by due ticks and watcher delivery receipts."""
     import fcntl
     path = inst.root / '.brain/wake/machine-holds.json'
+    from . import ui_readmodel
+    view = ui_readmodel.projection(inst.root)
+    if view is not None:
+        _m_common.safe_target(path)
+        yield view.store(path, lambda: machine_hold_read(path))
+        return
     lock = path.with_suffix('.lock')
     # Guard this store's destination. An unrelated unsafe log link must not
     # prevent recording why launch refused; safe_target still rejects escapes
@@ -1263,23 +1290,7 @@ def machine_hold_store(inst):
             raise ValueError('linked machine hold lock')
         fcntl.flock(stream, fcntl.LOCK_EX)
         _m_common.safe_target(path)
-        data = json.loads(path.read_text()) if path.exists() else {'version': 1, 'holds': {}}
-        if (not isinstance(data, dict) or data.get('version') != 1 or not isinstance(data.get('holds'), dict)
-                or any(not re.fullmatch(r'[0-9a-f]{64}', key) or not isinstance(row, dict)
-                       or not re.fullmatch(r'[0-9a-f]{64}', str(row.get('reason', '')))
-                       or not re.fullmatch(r'[0-9a-f]{32}', str(row.get('episode', '')))
-                       or type(row.get('reported')) is not bool for key, row in data['holds'].items())):
-            raise ValueError('invalid machine hold state')
-        waits = data.get('waits', {})
-        if (not isinstance(waits, dict) or any(not machine_queue.valid({**row, 'state': 'running'})
-                or row.get('state') not in ('admitting', 'queued', 'running', 'exited', 'completed')
-                or token != row['token'] or not isinstance(row.get('node'), str)
-                or not machine_timestamp(row.get('updated_at')) for token, row in waits.items())):
-            raise ValueError('invalid recorded machine waits')
-        retired = data.get('retired_waits', [])
-        if (not isinstance(retired, list) or any(not isinstance(token, str) or
-                not re.fullmatch(r'[0-9a-f]{32}', token) for token in retired)):
-            raise ValueError('invalid retired machine waits')
+        data = machine_hold_read(path)
         before = json.dumps(data, sort_keys=True)
         yield data
         if json.dumps(data, sort_keys=True) != before:
@@ -1307,10 +1318,11 @@ def machine_hold_items(inst, state=None):
     active = scopes | {own[1]} if scopes and reasons else set()
     if not active and not (inst.root / '.brain/wake/machine-holds.json').exists():
         return {}
+    from . import ui_readmodel
     with machine_hold_store(inst) as data:
         previous = data['holds']
         data['holds'] = {scope: previous[scope] if scope in previous and previous[scope]['reason'] == reason
-                         else {'reason': reason, 'episode': os.urandom(16).hex(), 'reported': False}
+                         else {'reason': reason, 'episode': ui_readmodel.episode(inst, [scope, reason, previous.get(scope)], 32), 'reported': False}
                          for scope in active}
         return {scope: dict(row) for scope, row in data['holds'].items()}
 
