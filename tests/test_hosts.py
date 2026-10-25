@@ -1436,6 +1436,76 @@ class WakeConsumption(Scenario):
         self.m.wake_turn_consume(self.inst, self.n)
         self.assertEqual(self.m.wake_turn_queue(self.inst, self.n)['item_count'], 0)
 
+    def test_invalid_or_future_turn_receipts_cannot_hold_new_requests(self):
+        self.enqueue(1)
+        directory = self.m.wake_directory(self.inst, self.n)
+        path = directory / 'turn.json'
+        baseline = json.loads(path.read_text())
+        mutations = [
+            ('future', lambda v: v.update(at=self.now + 86400)),
+            ('negative-time', lambda v: v.update(at=-1)),
+            ('empty-token', lambda v: v.update(token='')),
+            ('noncanonical-token', lambda v: v.update(token='A' * 32)),
+            ('malformed-binding', lambda v: v.update(binding='z' * 64)),
+            ('empty-binding', lambda v: v.update(binding='')),
+            ('other-binding', lambda v: v.update(binding='a' * 64)),
+            ('numeric-id', lambda v: v.update(items=[{'id': 7, 'kind': 'inbox'}])),
+            ('unknown-kind', lambda v: v.update(items=[{'id': 'a' * 64, 'kind': 'unknown-kind'}])),
+            ('empty-kind', lambda v: v.update(items=[{'id': 'a' * 64, 'kind': ''}])),
+            ('duplicate-id', lambda v: v.update(items=v['items'] * 2)),
+            ('conflicting-id', lambda v: v.update(items=[v['items'][0], {**v['items'][0], 'kind': 'handback'}])),
+            ('invalid-question-flag', lambda v: v.update(items=[{**v['items'][0], 'question': 1}])),
+        ]
+        for index, (name, change) in enumerate(mutations, 2):
+            with self.subTest(case=name):
+                value = json.loads(json.dumps(baseline))
+                change(value)
+                raw = json.dumps(value).encode()
+                path.write_bytes(raw)
+                self.assertIsNone(self.m.wake_turn_consume(self.inst, self.n))
+                self.m.wake_turn_finish(self.inst, self.n, baseline['token'], True)
+                self.assertIsNone(self.m.wake_turn_stuck(self.inst, self.n))
+                self.assertEqual(path.read_bytes(), raw)
+                before = self.send.call_count
+                self.enqueue(index)
+                self.assertEqual(self.send.call_count, before + 1)
+                retained = [p.read_bytes() for p in directory.glob('turn*.json')]
+                self.assertIn(raw, retained, 'invalid or retired evidence must be preserved')
+
+    def test_clock_rollback_falls_back_within_one_existing_rate_window(self):
+        self.enqueue(1)
+        path = self.m.wake_directory(self.inst, self.n) / 'turn.json'
+        raw = path.read_bytes()
+        self.now -= 3600
+        self.m.request_wake(self.inst, self.n, 'after-rollback',
+                            items=[{'id': 'f' * 64, 'kind': 'inbox'}], explicit=True)
+        with mock.patch.object(self.m, 'WAKE_INTERVAL', 120):
+            self.m.wake_drain(self.inst, self.n, once=True)
+            self.assertEqual(self.send.call_count, 1)
+            self.now += 121
+            self.m.wake_drain(self.inst, self.n, once=True)
+        self.assertEqual(self.send.call_count, 2)
+        self.assertEqual(path.read_bytes(), raw)
+
+    def test_damaged_turn_failed_transport_preserves_queue_until_success(self):
+        self.enqueue(1)
+        directory = self.m.wake_directory(self.inst, self.n)
+        path = directory / 'turn.json'
+        value = json.loads(path.read_text())
+        value['at'] = self.now + 86400
+        raw = json.dumps(value).encode()
+        path.write_bytes(raw)
+        self.send.return_value = False
+        self.enqueue(2)
+        queued = {p.name: p.read_bytes() for p in directory.glob('*.pending')}
+        self.assertEqual(len(queued), 1)
+        self.assertEqual(path.read_bytes(), raw)
+        self.send.return_value = True
+        self.m.wake_drain(self.inst, self.n, once=True)
+        self.assertEqual(self.send.call_count, 3)
+        self.assertFalse(list(directory.glob('*.pending')))
+        self.assertEqual(path.read_bytes(), raw)
+
 
 class AckAllShown(Scenario):
     def setUp(self):

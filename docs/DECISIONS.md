@@ -190,3 +190,18 @@ can recover a doorbell after interrupted publication; root results remain inbox-
 only. Registration and observation do not replace host-owned automatic completion
 behavior. Without a configured native parent context/observer or reachable host,
 universal instantaneous delivery cannot be guaranteed by this layer.
+
+
+## D510: Invalid wake consumption receipts never suppress transport
+
+Consumption receipts require canonical binding/token identities, nonnegative finite
+nonfuture timestamps, known typed items, and distinct item/path identities.
+Malformed receipts remain byte-for-byte in place and supply no coalescing or
+consumption authority. Valid receipts for a retired binding are archived intact
+before a replacement is reserved. Transport falls back to its existing bounded
+rate window when a receipt is damaged.
+
+A wall-clock rollback makes a now-future receipt invalid immediately. The separate
+transport timestamp bounds deferral to one existing rate interval; it does not wait
+for the old receipt's wall time. This preserves queued work without mutating the
+damaged receipt or inventing a successful consume/acknowledgement.
