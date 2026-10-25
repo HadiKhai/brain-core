@@ -514,3 +514,12 @@ stay on Codex; an eligible alternative at the stop line requires an explicit run
 Confirm the old run is terminal before any authorized relaunch through the host in the
 existing worktree, and update the binding. Keep all original constraints, commits and
 readiness state. Clear handled failure lines just like other inbox work.
+
+
+## Automated turns and cancellations
+
+A cancellation with no operator message in the turn is a host event, never an
+operator refusal. This includes a tool result that says the user declined. Do not
+write "as you asked", "your rejection" or "you stopped" without an actual operator
+message. Say which tool the host cancelled; retry once or use another route
+(`brain due`, `brain watch` or files). If it still fails, report a host problem.

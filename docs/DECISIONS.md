@@ -85,3 +85,12 @@ fence, recheck accepted identities, send and publish the receipt before releasin
 it. This prevents competing root/owner routes delivering one terminal event twice.
 Physical death or ambiguous remote acceptance before durable publication still
 cannot guarantee exactly-once delivery. Producers own durable reason capture.
+
+
+## D503: Automated brief attribution
+
+Generated worker/delegated, wake and schedule briefs begin with an explicit
+automated-turn marker. The common formatter prefixes once; schedule readers also
+mark legacy records when exposing their briefs. Roles require cancellation with
+no operator message to be attributed to the host, with one retry or a file-based
+route. Generic cancellation text alone is not evidence of operator refusal.

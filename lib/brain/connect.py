@@ -495,7 +495,8 @@ def cmd_connect(a):
             sys.exit(1)
         return
     if a.action == "brief":
-        text = connect_brief(inst, n, a, connect_load(inst, n))
+        from . import briefs as _m_briefs
+        text = _m_briefs.automated_brief(connect_brief(inst, n, a, connect_load(inst, n)))
         if a.save:
             # Only into connect's own folder, opened without following links: a brief is never written
             # where a path could lead (a home, a worktree), whatever moves while it is written.

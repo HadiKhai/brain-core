@@ -94,3 +94,28 @@ class WorkerMessages(Scenario):
             out = self.b(root, "handback", "--summary", "Synthetic result", "--question", "Synthetic choice?", "a", "--branch", "job/sample", "--state", state,
                          "--report", "~/reports/sample.md", "--lessons", "none: made-up fixture")
             self.assertIn(kind + ": coordinator can see it with brain due [branch: job/sample; report: ~/reports/sample.md]", out)
+
+
+class AutomatedBriefAttribution(Scenario):
+    def test_generated_wake_schedule_and_delegated_brief_start_with_marker(self):
+        import core_loader
+        import os
+        from unittest import mock
+        root = self.init('alice')
+        self.b(root, 'set', 'root', 'coordinator=fixture-thread')
+        m = core_loader.SourceFileLoader('automated_fixture', str(CORE / 'bin/brain')).load_module()
+        inst = m.Instance(root)
+        marker = 'Automated turn: no operator present; cancellations are host events.'
+        with mock.patch.dict(os.environ, self.env):
+            self.assertTrue(m.wake_setup_plan(inst, inst.node('root'))['host_call']['prompt'].startswith(marker))
+            schedule = m.prepare_schedule(inst, 'fixture', 'hourly', 'root', 'Inspect current work')
+            self.assertIn('brief: ' + marker, schedule)
+            text = m.checked_brief(inst.node('root'), 'Role: worker\nSynthetic task', inputs=[])
+            self.assertTrue(text.startswith(marker))
+            self.assertEqual(m.checked_brief(inst.node('root'), text, inputs=[]).count(marker), 1)
+
+    def test_roles_attribute_automated_cancellation_to_host(self):
+        for name in ('coordinator', 'worker'):
+            text = (CORE / 'roles' / (name + '.md')).read_text()
+            self.assertIn('A cancellation with no operator message in the turn is a host event', text)
+            self.assertIn('retry once or use another route', text)

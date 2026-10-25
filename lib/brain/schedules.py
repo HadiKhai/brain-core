@@ -1,6 +1,7 @@
 """Schedules mechanics for Brain."""
 import re
 
+from . import briefs as _m_briefs
 from . import common as _m_common
 from . import nodes as _m_nodes
 
@@ -24,7 +25,8 @@ def read_schedules(inst):
             m = re.match(r"^(when|node|brief):\s*(.*)$", line)
             if m:
                 key = m.group(1)
-                cur[key] = m.group(2).strip()
+                cur[key] = (_m_briefs.automated_brief(m.group(2).strip()).replace('\n', ' ')
+                            if key == 'brief' else m.group(2).strip())
             elif key == "brief" and line.strip():
                 cur["brief"] += " " + line.strip()
     return out
@@ -40,7 +42,8 @@ def prepare_schedule(inst, sid, when, node, brief, existing=None):
     if sid in existing:
         _m_common.die(f"schedule '{sid}' exists")
     inst.node(node)
-    return f"\n## {sid}\n\nwhen: {when}\nnode: {node}\nbrief: {brief.strip()}\n"
+    brief = _m_briefs.automated_brief(brief.strip()).replace("\n", " ")
+    return f"\n## {sid}\n\nwhen: {when}\nnode: {node}\nbrief: {brief}\n"
 
 
 SCHEDULE_PREAMBLE = ("# Schedules\n\nRecurring work. Shared by every machine; each schedule runs on "
