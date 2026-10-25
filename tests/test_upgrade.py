@@ -170,12 +170,20 @@ class R2VersionAndUpgrade(Scenario):
         return core_loader.SourceFileLoader("r2_upgrade", str(CORE / "bin/brain")).load_module()
 
     def upgrade_fixture(self, m):
-        root = self.repo(self.tmp / "instance", {".gitmodules": '[submodule "core"]\npath = core\n'})
+        root = self.repo(self.tmp / "instance", {
+            ".gitmodules": '[submodule "core"]\npath = core\n',
+            "instance.md": '---\nname: fixture\noperator: fixture\nprincipals: fixture\nruntimes: codex\ntimezone: UTC\n---\n',
+            "node.md": '---\nid: root\ntitle: Fixture\n---\n',
+        })
+        (root / '.brain').mkdir()
         self.repo(root / "core", {"CHANGES.md": "## 2026-01-01: Fixture\n"})
         home = self.repo(self.tmp / "project")
-        n = {"id": "sample", "dir": root, "local": {}, "home_path": home}
-        inst = mock.Mock(root=root, local={"machine": "fixture"})
-        inst.nodes.return_value = [n]
+        inst = m.Instance(root)
+        inst.local['machine'] = 'fixture'
+        n = inst.node('root')
+        n['home_path'] = home
+        inst.nodes = lambda: [n]
+        inst.commit = mock.Mock()
         return inst, n
 
     def upgrade_attempt(self, m, inst, refused=False):
