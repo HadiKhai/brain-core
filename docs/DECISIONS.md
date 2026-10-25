@@ -129,3 +129,13 @@ producer source ID. Repeated observations return the existing record unchanged,
 including parked and dropped states. New observations begin in backlog with
 source provenance and an explicitly observed date. Read-only consumers never
 invoke the producer mutation API.
+
+## D1307: Task views consume the screened read-only snapshot
+
+The dashboard's global Tasks view and project Tasks tab share one board and
+explicit dependency map. They show ownership, blocked work, parked resume
+conditions, source requests and links to jobs. Dropped work has its own group;
+provider completion is labelled as external evidence. Search and ownership
+filters work locally. Task snapshots screen nested strings with the node guard,
+retain the existing keyed state endpoint and never mutate records or pull a
+provider while rendering. Malformed storage produces a repair message.

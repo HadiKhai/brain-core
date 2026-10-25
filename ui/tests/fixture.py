@@ -124,6 +124,9 @@ if __name__ == "__main__":
 
     def state_for(scenario):
         state=seed_extreme(fixture(), scenario)
+        if scenario == 'tasks':
+            from tasks_fixture import seed_tasks
+            seed_tasks(state)
         for node in state['nodes']:
             node['coordinator'] = f'http://127.0.0.1:{args.port}/conversation'
             for job in node.get('work', []):
@@ -178,7 +181,7 @@ if __name__ == "__main__":
             if parsed.path=='/api/search':
                 q=urllib.parse.parse_qs(parsed.query);one=lambda k,d:(q.get(k) or [d])[0]
                 key=one('k','')
-                if key not in ('demo','empty','long','partial','slow','many',*EXTREMES):self.send_error(403);return
+                if key not in ('demo','empty','long','partial','slow','many','tasks',*EXTREMES):self.send_error(403);return
                 if key=='slow':time.sleep(1.2)
                 searched=state_for('demo' if key in ('slow','many') else key)
                 if key=='many':  # 1,200 made-up projects for the picker's paging and ranking
@@ -189,7 +192,7 @@ if __name__ == "__main__":
                 self.send_response(200);self.send_header('Content-Type','application/json');self.end_headers();self.wfile.write(body);return
             if parsed.path in ('/api/state','/api/events'):
                 scenario=urllib.parse.parse_qs(parsed.query).get('k',[''])[0]
-                if scenario not in ('demo','empty','long','partial','error','loading','slow','many', *EXTREMES):
+                if scenario not in ('demo','empty','long','partial','error','loading','slow','many','tasks', *EXTREMES):
                     self.send_error(403);return
                 if scenario == 'error':self.send_error(503);return
                 if scenario == 'loading':time.sleep(30)

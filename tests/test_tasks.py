@@ -342,3 +342,15 @@ class Tasks(Scenario):
         self.assertEqual(same['title'], 'Repair recurring failure')
         self.assertEqual(same['status'], 'parked')
         self.assertEqual(len(tasks.read_records(self.n)), 1)
+
+    def test_ui_snapshot_screens_nested_fields_and_keeps_repair_explicit(self):
+        from brain import guard
+        self.add(description='Private word appears here', evidence=['Private word evidence'])
+        with mock.patch.object(guard, 'never_terms', return_value=[('Private word', 'private term')]):
+            state = tasks.ui_tasks(self.inst, self.n)
+        self.assertNotIn('Private word', json.dumps(state))
+        self.assertEqual(len(state['rows']), 1)
+        (self.root / 'tasks' / 'APP-1.md').write_text('---\nversion: 99\nid: APP-1\n---\n')
+        state = tasks.ui_tasks(self.inst, self.n)
+        self.assertEqual(state['rows'], [])
+        self.assertTrue(state['error'])

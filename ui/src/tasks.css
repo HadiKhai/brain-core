@@ -1,0 +1,22 @@
+.task-filters { display:flex; flex-wrap:wrap; align-items:center; gap:12px; padding:16px; }
+.task-filters > input { flex:1 1 180px; max-width:360px; }
+.task-filters label { display:flex; align-items:center; gap:8px; font-size:12px; color:var(--muted-foreground); }
+.task-filters select { max-width:220px; min-height:32px; padding:4px 8px; border:1px solid var(--border); border-radius:8px; background:var(--background); color:var(--foreground); }
+.task-filters > small { margin-inline-start:auto; color:var(--muted-foreground); }
+.task-board { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,240px),1fr)); gap:20px; padding:16px; align-items:start; }
+.task-column { min-width:0; }
+.task-column h2 { display:flex; justify-content:space-between; margin:0 0 12px; font-size:12px; font-weight:600; color:var(--muted-foreground); }
+.task-card { padding:12px 0; border-top:1px solid var(--border); min-width:0; }
+.task-reader { width:100%; display:flex; gap:8px; align-items:start; min-width:0; text-align:start; cursor:pointer; }
+.task-card-copy { min-width:0; flex:1; display:flex; flex-direction:column; gap:4px; overflow-wrap:anywhere; }
+.task-card-copy strong { font-size:13px; font-weight:500; }
+.task-card-copy small, .task-links small { font-size:11px; color:var(--muted-foreground); }
+.task-meta { display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin-top:10px; font-size:11px; color:var(--muted-foreground); }
+.task-blocker { font-size:12px; margin-top:8px; color:var(--primary); overflow-wrap:anywhere; }
+.task-links { display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin-top:10px; }
+.task-links a { font-size:12px; text-decoration:underline; }
+.task-dependencies { list-style:none; margin:0; padding:0 16px; }
+.task-dependencies li { display:flex; flex-wrap:wrap; align-items:center; gap:10px; padding:14px 0; border-bottom:1px solid var(--border); }
+.task-dependencies strong { flex:1 1 200px; font-size:13px; overflow-wrap:anywhere; }
+.task-dependencies li > span:not([data-slot]) { font-size:12px; color:var(--muted-foreground); }
+.task-dependencies small { font-size:11px; }

@@ -499,3 +499,27 @@ def upsert_source_task(inst, n, source_id, title, *, kind='chore', description='
         return mutate(inst, n, ident, {'title': title, 'kind': kind, 'description': description,
                                       'source': 'local', 'provenance': [source_id, source_ref or source_id],
                                       'requirement': req_id, 'decisions': decisions or []}, create=True)
+
+
+def ui_tasks(inst, n):
+    """Read-only snapshot, recursively screened by the node's visibility guard."""
+    from . import guard as _m_guard
+    try:
+        requirements = read_records(n, 'requirements')
+        rows = []
+        for row in projection(n):
+            req = requirements.get(row.get('requirement'), {})
+            rows.append({**row, 'request': {'quote': req.get('quote', ''), 'at': req.get('at', ''),
+                                          'ref': req.get('ref', ''), 'date_basis': req.get('date_basis', 'source-timestamp')}})
+        terms = _m_guard.never_terms(n)
+        def screen(value):
+            if isinstance(value, str):
+                return _m_guard.redact(value, terms)
+            if isinstance(value, list):
+                return [screen(x) for x in value]
+            if isinstance(value, dict):
+                return {k: screen(v) for k, v in value.items()}
+            return value
+        return {'source': source(n), 'rows': screen(rows), 'error': ''}
+    except (OSError, ValueError, TypeError, KeyError):
+        return {'source': 'unknown', 'rows': [], 'error': 'Task records need repair before they can be displayed'}
