@@ -13,6 +13,7 @@ from pathlib import Path
 from . import action_guard as _m_action_guard
 from . import briefs as _m_briefs
 from . import check as _m_check
+from . import communication as _m_communication
 from . import common as _m_common
 from . import events as _m_events
 from . import connect as _m_connect
@@ -20,6 +21,8 @@ from . import guard as _m_guard
 from . import gate_lock as _m_gate_lock
 from . import history as _m_history
 from . import hosts as _m_hosts
+from . import host_observations as _m_host_observations
+from . import host_tasks as _m_host_tasks
 from . import instance as _m_instance
 from . import job_env as _m_job_env
 from . import jobs as _m_jobs
@@ -166,7 +169,7 @@ def writes(a):
         return False  # the explicit runner takes short owned locks around execution
     if name == 'cmd_lifecycle':
         return False  # native RPC stays outside the instance lock; publication takes its own short locks
-    if name == 'cmd_dispatch':
+    if name in ('cmd_dispatch', 'cmd_host_export', 'cmd_delegate'):
         return False
     if name == "cmd_watch":
         return False  # takes a short nonblocking instance lock itself
@@ -357,6 +360,13 @@ def main():
     cmd('index', _m_freshness.cmd_index, 'configured upstream index freshness or opt-in native link generation', 'id',
         opt('--record', action='store_true', help='explicitly record current input/output fingerprints after regeneration'),
         opt('--refresh', action='store_true', help='regenerate an explicitly owned native link index'))
+    cmd("delegate", _m_host_tasks.cmd_delegate, "explicit registered native delegation with completion fallback",
+        "id", opt("--task-file", required=True), opt("--target-file", required=True), opt("--key", required=True))
+    cmd("host-export", _m_host_observations.cmd_host_export, "one bounded native export; preserves previous snapshot on failure")
+    cmd("notify", _m_communication.cmd_notify, "record typed notification; root wakes only for questions",
+        "id", opt("kind", choices=_m_communication.COMMUNICATION_KINDS), "text",
+        opt("--key", required=True, help="stable idempotency key"), opt("--question-file"))
+    cmd("question-answer", _m_communication.cmd_question_answer, "answer one typed question", "id", "choice")
     cmd("msg", _m_messages.cmd_msg, "format start/done/blocked/question for a coordinator (does not send)",
         "id", opt("kind", choices=_m_messages.MESSAGE_KINDS), "message", opt("--branch"), opt("--report"))
     cmd("handback", _m_jobs.cmd_handback, "done/blocked/question hand-back; worker messages are start/done/blocked/question",
@@ -375,7 +385,8 @@ def main():
         opt("action", choices=['run'], nargs='?'), opt('id', nargs='?'), opt('--once', action='store_true'),
         opt('--request-id'), opt('--node'), opt('--move'), opt('--before'))
     cmd("dispatch", _m_dispatcher.cmd_dispatch, "bounded read-only plan of explicit root/operator asks; empty scan is silent",
-        opt('--limit', type=int, default=50), opt('--node-limit', type=int, default=200))
+        opt('--limit', type=int, default=50), opt('--node-limit', type=int, default=200),
+        opt('--run', action='store_true', help='enqueue only current questions through the durable coalesced wake path'))
     cmd("backlog", _m_events.cmd_backlog, "append a dated backlog item", "id",
         opt("action", choices=["add"]), "item")
     cmd("show", _m_status.cmd_show, "everything about one node, including this machine's bindings", "id")

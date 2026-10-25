@@ -1962,3 +1962,68 @@ class WakeNoise(Scenario):
                 self.watch(kinds=EXPLICIT_DELIVERY_KINDS)
                 self.m.wake_drain(self.inst, root, once=True)
                 self.assertEqual(send.call_count, 3)
+
+
+class WakeVisibility(Scenario):
+    def setUp(self):
+        super().setUp()
+        env = mock.patch.dict(os.environ, self.env)
+        env.start()
+        self.addCleanup(env.stop)
+        self.m = core_loader.SourceFileLoader('visible_fixture', str(CORE / 'bin/brain')).load_module()
+        self.root = self.init('alice')
+        for nid in ('app', 'app/leaf'):
+            self.b(self.root, 'new', nid, '--title', 'Example')
+        self.b(self.root, 'set', 'app', 'coordinator=fixture-app', 'wake=fixture-send', 'wake_policy=visible')
+        self.b(self.root, 'set', 'root', 'coordinator=fixture-root', 'wake=fixture-send', 'wake_policy=questions')
+        self.inst = self.m.Instance(self.root)
+
+    def test_visible_coordinator_union_includes_unbound_descendant_inbox(self):
+        m = self.m
+        leaf = self.inst.node('app/leaf')
+        (leaf['dir'] / 'inbox.md').write_text('- Select a fixture size\n')
+        app = self.inst.node('app')
+        items = m.coordinator_due_items(self.inst, [app])
+        self.assertTrue(any(i['node'] == leaf['id'] and 'fixture size' in i['text'] for i in items))
+        groups = m.watch_groups(self.inst)
+        self.assertTrue(any(i['node'] == leaf['id'] and 'fixture size' in i['text'] for i in groups['app']['items']))
+        self.assertFalse(any('fixture size' in i['text'] for i in groups['root']['items']))
+
+    def test_root_question_policy_drops_known_results_but_preserves_question(self):
+        m, root = self.m, self.inst.node('root')
+        with mock.patch.object(m, 'wake_start'), mock.patch.object(m, 'WAKE_INTERVAL', 0), \
+                mock.patch.object(m, 'wake_send', return_value=True) as send:
+            for i, state in enumerate(('done', 'blocked'), 1):
+                m.request_wake(self.inst, root, 'fixture-result-' + state,
+                               items=[{'id': format(i, '064x'), 'kind': 'handback', 'state': state}])
+                m.wake_drain(self.inst, root, once=True)
+            self.assertEqual(send.call_count, 0)
+            m.request_wake(self.inst, root, 'fixture-question',
+                           items=[{'id': '3' * 64, 'kind': 'handback', 'state': 'question'}])
+            m.wake_drain(self.inst, root, once=True)
+            self.assertEqual(send.call_count, 1)
+
+    def test_visible_queue_matches_due_and_fresh_inbox_union(self):
+        m = self.m
+        self.inst.local_of('root')['wake_policy'] = 'visible'
+        self.inst.save_local()
+        for nid in ('root', 'app', 'app/leaf'):
+            (self.inst.node(nid)['dir'] / 'inbox.md').write_text('- Choose fixture ' + nid + '\n')
+        def key(i):
+            text = i['text'].removeprefix('inbox: ')
+            return i['node'], i['kind'], ' '.join(text.split())
+        with mock.patch.object(m, 'changes_due', return_value=[]):
+            for child_bound in (False, True):
+                self.inst.local_of('app/leaf')['coordinator'] = 'fixture-leaf' if child_bound else ''
+                if child_bound:
+                    self.inst.local_of('app/leaf')['wake_policy'] = 'visible'
+                self.inst.save_local()
+                groups = m.watch_groups(self.inst)
+                for owner in ('root', 'app') + (('app/leaf',) if child_bound else ()):
+                    n = self.inst.node(owner)
+                    visible = {key(i) for i in m.coordinator_due_items(self.inst, [n])}
+                    subtree = [x for x in self.inst.nodes() if owner == 'root' or x['id'] == owner
+                               or x['id'].startswith(owner + '/')]
+                    inbox, _ = m.inbox_items(self.inst, subtree, owner, readonly=True)
+                    visible |= {key(i) for i in inbox if not i['reported']}
+                    self.assertEqual({key(i) for i in groups[owner]['items']}, visible)

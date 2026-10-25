@@ -517,3 +517,26 @@ stay on Codex; an eligible alternative at the stop line requires an explicit run
 Confirm the old run is terminal before any authorized relaunch through the host in the
 existing worktree, and update the binding. Keep all original constraints, commits and
 readiness state. Clear handled failure lines just like other inbox work.
+
+
+## Automated turns and cancellations
+
+A cancellation with no operator message in the turn is a host event, never an
+operator refusal. This includes a tool result that says the user declined. Do not
+write "as you asked", "your rejection" or "you stopped" without an actual operator
+message. Say which tool the host cancelled; retry once or use another route
+(`brain due`, `brain watch` or files). If it still fails, report a host problem.
+
+
+## Typed communication
+
+Use `brain notify <target> question <text> --key <stable-key> --question-file <file>`
+for a decision. The JSON includes options with ids, labels and explicit
+`routine`/`outward`/`destructive` action categories, a recommendation, absolute
+deadline and matching default. Only all-routine choices can receive a deadline
+default; this records a decision and never executes or authorizes an action.
+Answer with `brain question-answer <id> <option-id>`.
+
+Send root only questions. Record landings, parks and FYIs with `brain notify root
+landing|park|fyi <text> --key <stable-key>`; these write the inbox without a wake.
+Do not bypass that route with direct host sends, schedules or completion relays.

@@ -49,11 +49,19 @@ def contract_inputs(n, branch):
     return []
 
 
+AUTOMATED_TURN_PREFIX = "Automated turn: no operator present; cancellations are host events."
+
+
+def automated_brief(text):
+    return text if text.startswith(AUTOMATED_TURN_PREFIX) else AUTOMATED_TURN_PREFIX + "\n\n" + text
+
+
 def checked_brief(n, text, worker=True, inputs=None):
     """Charge source inputs captured before assembly, never headings found in task Markdown.
 
     Legacy callers without provenance conservatively charge the entire output.
     """
+    text = automated_brief(text)
     if worker:
         text += "\n" + COMPACTION_POLICY + "\n"
     _m_guard.no_terms_in(n, text, "the brief")

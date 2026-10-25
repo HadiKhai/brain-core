@@ -1,6 +1,7 @@
 """Schedules mechanics for Brain."""
 import re
 
+from . import briefs as _m_briefs
 from . import common as _m_common
 from . import nodes as _m_nodes
 
@@ -24,7 +25,8 @@ def read_schedules(inst):
             m = re.match(r"^(when|node|provider|brief):\s*(.*)$", line)
             if m:
                 key = m.group(1)
-                cur[key] = m.group(2).strip()
+                cur[key] = (_m_briefs.automated_brief(m.group(2).strip()).replace('\n', ' ')
+                            if key == 'brief' else m.group(2).strip())
             elif key == "brief" and line.strip():
                 cur["brief"] += " " + line.strip()
     return out
@@ -40,6 +42,7 @@ def prepare_schedule(inst, sid, when, node, brief, existing=None, provider=None)
     if sid in existing:
         _m_common.die(f"schedule '{sid}' exists")
     inst.node(node)
+    brief = _m_briefs.automated_brief(brief.strip()).replace("\n", " ")
     if provider is not None and provider not in inst.runtimes:
         _m_common.die("provider must be an instance runtime: " + ", ".join(inst.runtimes))
     declared = f"provider: {provider}\n" if provider else ""

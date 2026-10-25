@@ -1423,6 +1423,89 @@ class WakeConsumption(Scenario):
         self.enqueue(2)
         self.assertEqual(self.send.call_count, 2)
 
+    def test_readonly_projection_counts_unconsumed_items_without_pending_files(self):
+        refs = [{'id': format(i, '064x'), 'kind': 'inbox'} for i in range(1, 5)]
+        self.m.request_wake(self.inst, self.n, 'fixture-batch', items=refs, explicit=True)
+        self.m.wake_drain(self.inst, self.n, once=True)
+        self.assertFalse(list(self.m.wake_directory(self.inst, self.n).glob('*.pending')))
+        directory = self.m.wake_directory(self.inst, self.n)
+        before = {p.name: p.read_bytes() for p in directory.iterdir() if p.is_file()}
+        view = self.m.wake_turn_queue(self.inst, self.n)
+        self.assertEqual(view, {'known': True, 'item_count': 4, 'oldest_at': self.now, 'unconsumed_wake': True})
+        self.assertEqual(before, {p.name: p.read_bytes() for p in directory.iterdir() if p.is_file()})
+        self.m.wake_turn_consume(self.inst, self.n)
+        self.assertEqual(self.m.wake_turn_queue(self.inst, self.n)['item_count'], 0)
+
+    def test_invalid_or_future_turn_receipts_cannot_hold_new_requests(self):
+        self.enqueue(1)
+        directory = self.m.wake_directory(self.inst, self.n)
+        path = directory / 'turn.json'
+        baseline = json.loads(path.read_text())
+        mutations = [
+            ('future', lambda v: v.update(at=self.now + 86400)),
+            ('negative-time', lambda v: v.update(at=-1)),
+            ('empty-token', lambda v: v.update(token='')),
+            ('noncanonical-token', lambda v: v.update(token='A' * 32)),
+            ('malformed-binding', lambda v: v.update(binding='z' * 64)),
+            ('empty-binding', lambda v: v.update(binding='')),
+            ('other-binding', lambda v: v.update(binding='a' * 64)),
+            ('numeric-id', lambda v: v.update(items=[{'id': 7, 'kind': 'inbox'}])),
+            ('unknown-kind', lambda v: v.update(items=[{'id': 'a' * 64, 'kind': 'unknown-kind'}])),
+            ('empty-kind', lambda v: v.update(items=[{'id': 'a' * 64, 'kind': ''}])),
+            ('duplicate-id', lambda v: v.update(items=v['items'] * 2)),
+            ('conflicting-id', lambda v: v.update(items=[v['items'][0], {**v['items'][0], 'kind': 'handback'}])),
+            ('invalid-question-flag', lambda v: v.update(items=[{**v['items'][0], 'question': 1}])),
+        ]
+        for index, (name, change) in enumerate(mutations, 2):
+            with self.subTest(case=name):
+                value = json.loads(json.dumps(baseline))
+                change(value)
+                raw = json.dumps(value).encode()
+                path.write_bytes(raw)
+                self.assertIsNone(self.m.wake_turn_consume(self.inst, self.n))
+                self.m.wake_turn_finish(self.inst, self.n, baseline['token'], True)
+                self.assertIsNone(self.m.wake_turn_stuck(self.inst, self.n))
+                self.assertEqual(path.read_bytes(), raw)
+                before = self.send.call_count
+                self.enqueue(index)
+                self.assertEqual(self.send.call_count, before + 1)
+                retained = [p.read_bytes() for p in directory.glob('turn*.json')]
+                self.assertIn(raw, retained, 'invalid or retired evidence must be preserved')
+
+    def test_clock_rollback_falls_back_within_one_existing_rate_window(self):
+        self.enqueue(1)
+        path = self.m.wake_directory(self.inst, self.n) / 'turn.json'
+        raw = path.read_bytes()
+        self.now -= 3600
+        self.m.request_wake(self.inst, self.n, 'after-rollback',
+                            items=[{'id': 'f' * 64, 'kind': 'inbox'}], explicit=True)
+        with mock.patch.object(self.m, 'WAKE_INTERVAL', 120):
+            self.m.wake_drain(self.inst, self.n, once=True)
+            self.assertEqual(self.send.call_count, 1)
+            self.now += 121
+            self.m.wake_drain(self.inst, self.n, once=True)
+        self.assertEqual(self.send.call_count, 2)
+        self.assertEqual(path.read_bytes(), raw)
+
+    def test_damaged_turn_failed_transport_preserves_queue_until_success(self):
+        self.enqueue(1)
+        directory = self.m.wake_directory(self.inst, self.n)
+        path = directory / 'turn.json'
+        value = json.loads(path.read_text())
+        value['at'] = self.now + 86400
+        raw = json.dumps(value).encode()
+        path.write_bytes(raw)
+        self.send.return_value = False
+        self.enqueue(2)
+        queued = {p.name: p.read_bytes() for p in directory.glob('*.pending')}
+        self.assertEqual(len(queued), 1)
+        self.assertEqual(path.read_bytes(), raw)
+        self.send.return_value = True
+        self.m.wake_drain(self.inst, self.n, once=True)
+        self.assertEqual(self.send.call_count, 3)
+        self.assertFalse(list(directory.glob('*.pending')))
+        self.assertEqual(path.read_bytes(), raw)
+
 
 class AckAllShown(Scenario):
     def setUp(self):
@@ -1605,3 +1688,184 @@ class AckAllShown(Scenario):
             m.request_wake(self.inst, n, 'fixture-same-reason', items=[ref])
             m.wake_drain(self.inst, n, once=True)
             self.assertEqual(send.call_count, 2)
+
+
+class NativeHostExport(Scenario):
+    def setUp(self):
+        super().setUp()
+        patch = mock.patch.dict(os.environ, self.env)
+        patch.start()
+        self.addCleanup(patch.stop)
+        self.m = core_loader.SourceFileLoader('host_export_fixture', str(CORE / 'bin/brain')).load_module()
+        self.root = self.init('alice')
+        self.b(self.root, 'set', 'root', 'host_project=fixture-project', 'coordinator=fixture-root')
+        self.inst = self.m.Instance(self.root)
+        row = dict.fromkeys(self.m.JOB_COLS, '')
+        row.update(Job='import:fixture', Started='2020-01-01T00:00Z')
+        self.m.write_jobs(self.inst, self.inst.node('root'), [row])
+        self.inst.local_of('root')['workers'] = {self.m.job_key(row): 'fixture-worker'}
+        self.inst.save_local()
+
+    def rpc(self, name, args):
+        if name == 't3_thread_list':
+            return {'threads': [{'threadId': 'fixture-root', 'status': 'running', 'latestRunId': 'run-root'},
+                                {'threadId': 'fixture-worker', 'status': 'failed', 'latestRunId': 'run-worker'}],
+                    'nextCursor': None}
+        self.assertEqual(name, 't3_pending_request_list')
+        return {'requestIds': ['private-request'] if args['threadId'] == 'fixture-worker' else []}
+
+    def test_export_has_bound_failures_and_opaque_pending_questions(self):
+        snapshot = self.m.host_export(self.inst, rpc=self.rpc)
+        self.assertNotIn('private-request', json.dumps(snapshot))
+        self.assertEqual(self.m.host_export_runs(self.inst)[0]['run'], 'run-worker')
+        self.assertEqual(len(self.m.host_observation_items(self.inst)), 1)
+
+    def test_partial_failure_preserves_previous_export_and_rotation_invalidates_it(self):
+        self.m.host_export(self.inst, rpc=self.rpc)
+        path = self.root / '.brain/host-observations.json'
+        old = path.read_bytes()
+        with self.assertRaises(ValueError):
+            self.m.host_export(self.inst, rpc=lambda *args: {'threads': []})
+        self.assertEqual(path.read_bytes(), old)
+        self.inst.local_of('root')['coordinator'] = 'fixture-replacement'
+        self.inst.save_local()
+        self.assertIsNone(self.m.host_snapshot(self.inst))
+
+    def test_sampler_opt_out_makes_no_native_calls(self):
+        with mock.patch.object(self.m, 'host_native_call') as call:
+            self.m.host_export_if_enabled(self.inst)
+            call.assert_not_called()
+
+
+class WakeIdentityTypes(Scenario):
+    def test_malformed_pending_ids_deliver_opaque_requests_without_type_errors(self):
+        patch = mock.patch.dict(os.environ, self.env)
+        patch.start()
+        self.addCleanup(patch.stop)
+        m = core_loader.SourceFileLoader('identity_fixture', str(CORE / 'bin/brain')).load_module()
+        root = self.init('alice')
+        self.b(root, 'set', 'root', 'coordinator=fixture-root', 'wake=fixture-send')
+        inst, node = m.Instance(root), None
+        node = inst.node('root')
+        directory = m.wake_directory(inst, node)
+        directory.mkdir(parents=True, exist_ok=True)
+        for index, identity in enumerate((7, True, None, [], {}, 'untrusted-identity')):
+            with self.subTest(identity=identity):
+                pending = directory / (format(index + 1, '064x') + '.pending')
+                raw = json.dumps({'items': [{'id': identity, 'kind': 'inbox'}]})
+                pending.write_text(raw)
+                with mock.patch.object(m, 'WAKE_INTERVAL', 0), mock.patch.object(m, 'wake_start'), \
+                        mock.patch.object(m, 'watch_groups', return_value={}), \
+                        mock.patch.object(m, 'wake_snapshot', return_value=[]):
+                    with mock.patch.object(m, 'wake_send', return_value=False):
+                        m.wake_drain(inst, node, once=True)
+                    self.assertEqual(pending.read_text(), raw)
+                    with mock.patch.object(m, 'wake_send', return_value=True) as send:
+                        m.wake_drain(inst, node, once=True)
+                    self.assertEqual(send.call_count, 1)
+                    self.assertFalse(pending.exists())
+                    self.assertNotIn('untrusted-identity', send.call_args.kwargs['reason'])
+
+
+class RegisteredDelegatedWake(Scenario):
+    def setUp(self):
+        super().setUp()
+        patch = mock.patch.dict(os.environ, self.env)
+        patch.start()
+        self.addCleanup(patch.stop)
+        self.m = core_loader.SourceFileLoader('delegated_fixture', str(CORE / 'bin/brain')).load_module()
+        self.root = self.init('alice')
+        self.b(self.root, 'new', 'app', '--title', 'App')
+        self.b(self.root, 'set', 'app', 'coordinator=fixture-parent', 'wake=fixture-send')
+        self.inst = self.m.Instance(self.root)
+        self.parent = 'fixture-parent'
+        self.pending_children = True
+        self.calls = []
+
+    def rpc(self, name, args):
+        self.calls.append((name, args))
+        if name == 't3_thread_list':
+            return {'currentThreadId': self.parent}
+        if name == 'delegate_task':
+            self.assertTrue(args['task'].startswith('Automated turn: no operator present; cancellations are host events.'))
+            return {'taskId': 'fixture-task', 'childThreadId': 'fixture-child'}
+        self.assertEqual(name, 'task_status')
+        return {'taskId': args['taskId'], 'status': 'completed', 'childRunId': 'fixture-run',
+                'hasPendingChildRuns': self.pending_children,
+                'workState': 'waiting_for_children' if self.pending_children else 'result_available'}
+
+    def register(self):
+        return self.m.host_delegate(self.inst, self.inst.node('app'), 'Inspect a sample',
+                                    {'providerInstanceId': 'fixture', 'model': 'fixture-model'}, 'one-task', rpc=self.rpc)
+
+    def test_registered_task_is_idempotent_and_nested_work_does_not_complete_early(self):
+        self.register()
+        self.register()
+        self.assertEqual(sum(name == 'delegate_task' for name, _ in self.calls), 1)
+        with mock.patch.object(self.m, 'wake_start'):
+            self.assertEqual(self.m.host_task_refresh(self.inst, rpc=self.rpc)['items'], [])
+            self.pending_children = False
+            self.assertEqual(len(self.m.host_task_refresh(self.inst, rpc=self.rpc)['items']), 1)
+            self.m.host_task_refresh(self.inst, rpc=self.rpc)
+        with mock.patch.object(self.m, 'WAKE_INTERVAL', 0), mock.patch.object(self.m, 'wake_send', return_value=True) as send:
+            self.m.wake_drain(self.inst, self.inst.node('app'), once=True)
+            self.m.wake_drain(self.inst, self.inst.node('app'), once=True)
+            self.assertEqual(send.call_count, 1)
+        self.assertEqual(len(self.m.host_task_items(self.inst)), 1)
+        self.assertEqual(sum(name == 'task_status' for name, _ in self.calls), 2,
+                         'immutable completion is not polled again after its receipt')
+
+    def test_wrong_parent_context_cannot_launch_or_claim_completion(self):
+        self.parent = 'different-parent'
+        with self.assertRaises(ValueError):
+            self.register()
+        self.assertFalse(any(name == 'delegate_task' for name, _ in self.calls))
+
+
+class DisabledWakeDiagnostics(Scenario):
+    def test_explicit_disable_retains_cached_refusal_and_never_probes_or_drains(self):
+        patch = mock.patch.dict(os.environ, self.env)
+        patch.start()
+        self.addCleanup(patch.stop)
+        m = core_loader.SourceFileLoader('disabled_fixture', str(CORE / 'bin/brain')).load_module()
+        root = self.init('alice')
+        self.b(root, 'set', 'root', 'coordinator=fixture-root', 'wake=https://wake.invalid/fixture',
+               'wake_default=https://wake.invalid/fallback')
+        inst = m.Instance(root)
+        n = inst.node('root')
+        directory = m.wake_directory(inst, n)
+        m.wake_record(directory, n['local']['wake'], 409)
+        inst.local_of('root')['wake_enabled'] = 'off'
+        inst.save_local()
+        before = (directory / 'delivery.json').read_bytes()
+        with mock.patch.object(m, 'load', return_value=inst), \
+                mock.patch.object(m, 'collect_problems', return_value=([], [], [])), \
+                mock.patch.object(m, 'wake_probe') as probe, mock.patch.object(m, 'wake_send') as send, \
+                contextlib.redirect_stdout(io.StringIO()) as output:
+            m.cmd_check(argparse.Namespace(fix=True, live=True))
+            m.wake_drain(inst, n, once=True)
+            self.assertEqual(m.wake_target(inst, n)[1], '')
+            self.assertFalse(m.request_wake(inst, n, 'fixture-question'))
+            probe.assert_not_called()
+            send.assert_not_called()
+        self.assertIn('disabled', output.getvalue())
+        self.assertIn('409', output.getvalue())
+        self.assertEqual((directory / 'delivery.json').read_bytes(), before)
+
+    def test_active_cached_refusal_stays_a_failure(self):
+        patch = mock.patch.dict(os.environ, self.env)
+        patch.start()
+        self.addCleanup(patch.stop)
+        m = core_loader.SourceFileLoader('active_fixture', str(CORE / 'bin/brain')).load_module()
+        root = self.init('alice')
+        self.b(root, 'set', 'root', 'wake=https://wake.invalid/fixture')
+        inst = m.Instance(root)
+        n = inst.node('root')
+        m.wake_record(m.wake_directory(inst, n), n['local']['wake'], 409)
+        with mock.patch.object(m, 'load', return_value=inst), \
+                mock.patch.object(m, 'collect_problems', return_value=([], [], [])), \
+                mock.patch.object(m, 'wake_probe') as probe, contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaises(SystemExit) as error:
+                m.cmd_check(argparse.Namespace(fix=True, live=False))
+            self.assertEqual(error.exception.code, 1)
+            probe.assert_not_called()

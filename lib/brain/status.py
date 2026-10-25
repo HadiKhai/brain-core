@@ -354,6 +354,13 @@ def inbox_lines(n, readonly=False, lifecycle_data=None):
         except (OSError, ValueError, KeyError, TypeError, SystemExit):
             continue
     root = _m_instance.instance_above(n['dir'])
+    from . import communication as _m_communication
+    try:
+        questions = _m_communication.communication_read(_m_instance.Instance(root))['questions']
+        lines = [line for line in lines if not any('<!-- communication:' + key + ' -->' in line and 'answer' in q
+                                                   for key, q in questions.items())]
+    except (OSError, ValueError, TypeError):
+        pass  # unreadable decision state cannot hide an unanswered question
     return _m_reminders.request_lines(_m_instance.Instance(root), n, lines, readonly=readonly,
                                       lifecycle_data=lifecycle_data)
 
@@ -436,6 +443,42 @@ def local_job_state(n, branch, w):
     return {"exists": exists, "tip": tip, "merged": merged}
 
 
+# Each exception describes rendered telemetry, never an input-field whitelist.
+# Keep contextual prefixes and every other byte (including semantic numbers).
+_FACT_NUMBER = r'\d[\d,]*(?:\.\d+)?[kKmMgGbB]?'
+_FACT_DURATION = r'\d+(?:\.\d+)?\s*(?:seconds?|secs?|s|minutes?|mins?|m|hours?|hrs?|h|days?|d)\b'
+FACTS_VOLATILE_PATTERNS = (
+    ('refresh_timestamp', r'(?m)(^Facts refreshed: )[^\n]*', r'\1<timestamp>'),
+    ('machine_snapshot', r'(?m)(^- machine: )[^\n]*', r'\1<live reading>'),
+    ('token_count', r'(?<![\w/])' + _FACT_NUMBER + r'(?= (?:processed )?tokens\b)', '<tokens>'),
+    ('token_median', r'(tokens, over twice the median of )' + _FACT_NUMBER, r'\1<tokens>'),
+    ('token_budget', r'(token budget )' + _FACT_NUMBER, r'\1<tokens>'),
+    ('hyphenated_token_budget', _FACT_NUMBER + r'(?=-token budget\b)', '<tokens>'),
+    ('token_share_meter', r'\d+(?:\.\d+)?%(?= of (?:its |the )?tokens\b)', '<meter>'),
+    ('token_meter', r'(token meter: )\d+(?:\.\d+)?%', r'\1<meter>'),
+    ('token_forecast_spread', r'(tokens processed \(spread )' + _FACT_NUMBER + r'–' + _FACT_NUMBER,
+     r'\1<tokens>–<tokens>'),
+    ('token_forecast_fresh', r'(\), of them )' + _FACT_NUMBER + r'(?= fresh input and output\b)', r'\1<tokens>'),
+    ('age_duration', r'(?<![\w/])((?:open|age|duration|elapsed|median(?: of)?|of which) )' + _FACT_DURATION,
+     r'\1<duration>'),
+    ('duration_spread', r'(spread )\d+(?:\.\d+)?–' + _FACT_DURATION, r'\1<duration>'),
+    ('restart_compactions', r'\b\d+(?= compactions\b)', '<count>'),
+    ('restart_count', r'\b\d+(?= restarts\b)', '<count>'),
+)
+
+
+def normalise_status_facts(lines):
+    """Normalise only named volatile render patterns; preserve facts and line order."""
+    text = '\n'.join(lines)
+    for _name, pattern, replacement in FACTS_VOLATILE_PATTERNS:
+        text = re.sub(pattern, replacement, text)
+    return text.split('\n')
+
+
+def status_fingerprint(lines):
+    return _m_jobs.digest(normalise_status_facts(lines))
+
+
 def file_state(inst, n):
     rows = _m_jobs.read_jobs(n)
     with local_job_snapshot():
@@ -456,7 +499,7 @@ def due_evidence(inst, n):
     # Hash exactly the generated display, apart from its refresh time and metadata. Retain
     # the last refresh's merge baseline so its "since previous" snapshot stays comparable.
     lines, _ = status_facts(inst, n, state, facts_meta(n).get("merged_before", []), metadata_only=True)
-    return state, _m_jobs.digest(lines), last
+    return state, status_fingerprint(lines), last
 
 
 def status_lag(inst, n, evidence=None):
@@ -716,6 +759,26 @@ def machine_due_items(inst, nodes, state, items):
               'scope': scope, 'text': _m_machine.machine_summary(state)}] if hold else [])
 
 
+def coordinator_due_items(inst, nodes, include_handled=False):
+    """Source work belongs to its nearest live coordinator, retaining source ids."""
+    from . import watch as _m_watch
+    selected = {n['id'] for n in nodes}
+    items = []
+    for source in inst.nodes():
+        if source['archived']:
+            continue
+        own = source['id'] in selected
+        if not own and _m_hosts.wake_target(inst, source)[0]['id'] not in selected:
+            continue
+        items += [i for i in due_items(inst, source, include_stale=own, include_advice=own,
+                                      include_handled=include_handled) + changes_due(inst, source)
+                  if own or i['kind'] not in (*_m_watch.WATCH_LOCAL_KINDS, 'overdue-question')]
+    items += [{**i, 'node': i.get('source', i['node'])}
+              for i in _m_watch.watch_completion_items(inst)
+              if _m_watch.watch_completion_target(inst, i)['id'] in selected]
+    return items
+
+
 def cmd_due(a):
     inst = _m_nodes.load()
     nodes = [inst.node(a.id)] if a.id else inst.nodes()
@@ -789,7 +852,20 @@ def cmd_due(a):
     _m_docker_cleanup.docker_cleanup_nodes(inst, nodes)
     _m_docker_leftovers.docker_leftover_nodes(inst, nodes)
     state = _m_machine.machine_state(inst)
-    items = [item for n in nodes for item in due_items(inst, n, include_handled=getattr(a, 'handled', False)) + changes_due(inst, n)]
+    items = coordinator_due_items(inst, nodes, include_handled=getattr(a, 'handled', False))
+    from . import communication as _m_communication
+    items += _m_communication.communication_items(inst, nodes)
+    from . import host_observations as _m_host_observations
+    try:
+        items += _m_host_observations.host_observation_items(inst, nodes)
+        from . import host_tasks as _m_host_tasks
+        items += _m_host_tasks.host_task_items(inst, nodes)
+        host_known = _m_host_observations.host_snapshot(inst) is not None
+    except (OSError, ValueError, TypeError):
+        host_known = False
+    if inst.local_of('root').get('host_export') == 'on' and not host_known:
+        items.append({'node': 'root', 'kind': 'host-observation', 'informational': True,
+                      'text': 'host export unavailable or stale; host activity unknown'})
     items += consumed
     wake_seen = set()
     for n in nodes:
@@ -892,6 +968,21 @@ def status_facts(inst, n, state, known_merges, metadata_only=False):
         lines.append(_m_guard.redact('| ' + ' | '.join(_m_jobs.cell(v) for v in values) + ' |', _m_guard.never_terms(n)))
     if len(projections) > 8:
         lines.append(f'{len(projections) - 8} more open jobs; brain jobs --live lists all recorded rows.')
+    switches = [r for r in state['jobs'] or [] if r.get('Switches')]
+    if switches:
+        lines += ['', 'Runtime switches (recorded):']
+        lines += [_m_guard.redact(f"- {r['Job']}: {r['Switches']}", _m_guard.never_terms(n)) for r in switches]
+    delivery_lines = []
+    for p in projections:
+        # Native precedence includes a versionless hand-back plus legacy ready packet.
+        packet = _m_verify.read_ready_packet(inst, n, p['branch'], p['ledger']) or {}
+        rehearsal = packet.get('rehearsal')
+        delivery = rehearsal.get('delivery') if isinstance(rehearsal, dict) else None
+        if isinstance(delivery, list):
+            delivery_lines.append(_m_guard.redact(
+                f"- {p['branch']}: " + json.dumps(delivery, sort_keys=True), _m_guard.never_terms(n)))
+    if delivery_lines:
+        lines += ['', 'Rehearsal delivery (recorded ready evidence):', *delivery_lines]
     if state["jobs"] is None:
         lines += ["- Legacy ledger: running jobs unknown."]
     lines += ["", f"Closed jobs with unsettled threads: {len(_m_jobs.unsettled_jobs(state['jobs']))}"]
@@ -955,7 +1046,7 @@ def refresh_status(inst, n, view=None):
     else:
         lines, merged = list(view["facts"]), dict.fromkeys(view["merged"])
     merged_before = view.get("merged_before", []) if view is not None else previous.get("merged", [])
-    fingerprint = _m_jobs.digest(lines)
+    fingerprint = status_fingerprint(lines)
     # Telemetry is an informational snapshot, never part of the stale-status wake fingerprint.
     lines += ["", "Machine (snapshot at refresh; live: brain due --machine):", "- " + _m_machine.machine_summary(_m_machine.machine_state(inst))]
     lines = [FACTS_START, "## Facts (generated by brain status --refresh)", "",

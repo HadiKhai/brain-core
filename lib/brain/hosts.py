@@ -62,7 +62,7 @@ def wake_setup_plan(inst, n):
             'status': 'plan only; no host call or local binding performed; keep the returned capability private'}
 
 
-def wake_target(inst, n):
+def wake_configured_route(inst, n):
     target = n
     while not target['local'].get('coordinator') and target.get('parent') is not None:
         target = target['parent']
@@ -71,8 +71,33 @@ def wake_target(inst, n):
     return target, target["local"].get("wake") or inst.local_of("root").get("wake_default", "")
 
 
+def wake_route_disabled(inst, n, target=None):
+    target = target or wake_configured_route(inst, n)[0]
+    return (n['local'].get('wake_enabled') == 'off' or target['local'].get('wake_enabled') == 'off'
+            or not target['local'].get('wake') and inst.local_of('root').get('wake_enabled') == 'off')
+
+
+def wake_target(inst, n):
+    target, command = wake_configured_route(inst, n)
+    return target, '' if wake_route_disabled(inst, n, target) else command
+
+
+def wake_disabled_notice(inst, n):
+    target, command = wake_configured_route(inst, n)
+    if not wake_route_disabled(inst, n, target):
+        return None
+    record = wake_read(wake_directory(inst, target), command) if command else None
+    detail = ('; retained cached delivery HTTP ' + str(record['status']) if record and type(record['status']) is int
+              else '; retained cached delivery: ' + record['status'] if record else '')
+    return 'wake delivery explicitly disabled on this machine' + detail + '; no current delivery health asserted'
+
+
 def wake_directory(inst, n):
     return inst.root / ".brain" / "wake" / urllib.parse.quote(n["id"], safe="")
+
+
+def wake_turn_queue(inst, n):
+    return _m_wake_turns.wake_turn_queue(inst, n)
 
 
 def wake_start(inst, n):
@@ -240,6 +265,10 @@ def wake_item_refs(items):
     """Persist identities/kinds only; contradictory pairs are corrupt, never last-wins."""
     refs = {}
     for item in items:
+        if (not isinstance(item, dict) or not isinstance(item.get('id'), str) or
+                not re.fullmatch(r'[0-9a-f]{64}', item['id']) or
+                not isinstance(item.get('kind'), str) or not item['kind']):
+            raise ValueError('invalid typed wake identity')
         key, kind = item['id'], item['kind']
         if key in refs and refs[key]['kind'] != kind:
             raise ValueError('conflicting wake identity kinds')
@@ -247,6 +276,11 @@ def wake_item_refs(items):
                     or kind == 'inbox' and '<!-- host-question:' in item.get('text', ''))
         refs[key] = {'id': key, 'kind': kind, **({'question': True} if question else {})}
     return sorted(refs.values(), key=lambda i: i['id'])
+
+
+def wake_log_refs(refs):
+    """Display history retains the established identity/kind-only shape."""
+    return [{'id': i['id'], 'kind': i['kind']} for i in refs]
 
 
 def wake_history(directory):
@@ -343,7 +377,7 @@ def wake_previous_items(directory):
                 # Only trust an in-flight comparison while a drain owns delivery.
                 value = json.loads((directory / 'inflight.json').read_text())
                 refs = value['before']
-                if isinstance(refs, list) and wake_item_refs(refs) == refs:
+                if isinstance(refs, list) and wake_log_refs(wake_item_refs(refs)) == wake_log_refs(refs):
                     return refs
     except (OSError, ValueError, KeyError, TypeError):
         pass
@@ -612,6 +646,8 @@ def wake_probe(inst, n, force=False):
     """Probe a webhook at most daily per binding; return an HTTP code or safe error."""
     import fcntl
     target, command = wake_target(inst, n)
+    if wake_route_disabled(inst, n, target):
+        return "delivery explicitly disabled"
     if not command.startswith(("https://", "http://")):
         return "no webhook"
     if _m_common.outward_links(inst.root):
@@ -653,6 +689,8 @@ def wake_drain(inst, n, once=False):
     Failed deliveries remain pending; stop after ten minutes, with due retrying later.
     """
     import fcntl
+    if wake_route_disabled(inst, n):
+        return  # retain capabilities, errors and queued work; explicit off never activates a fallback
     directory = wake_directory(inst, n)
     if not directory.is_dir() or _m_common.outward_links(inst.root):
         return
@@ -787,8 +825,8 @@ def wake_drain(inst, n, once=False):
                         # Logging cannot undo delivery and cause another model wake on retry.
                         try:
                             wake_accept_write(directory / 'history.json', json.dumps({'version': 1,
-                                'deliveries': (history + [{'at': WAKE_CLOCK.time(), 'items': refs, 'reason': reason,
-                                    'before': before, 'snapshot': snapshot, 'ack_binding': wake_owner_binding(current, target)}])[-100:]}) + '\n')
+                                'deliveries': (history + [{'at': WAKE_CLOCK.time(), 'items': wake_log_refs(refs), 'reason': reason,
+                                    'before': wake_log_refs(before), 'snapshot': wake_log_refs(snapshot), 'ack_binding': wake_owner_binding(current, target)}])[-100:]}) + '\n')
                         except OSError:
                             status = 'delivered; history write failed'
                     try:

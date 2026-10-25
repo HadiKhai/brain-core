@@ -55,3 +55,12 @@ After your second context compaction, hand back `--state blocked` with
 that resumes your commits. Record the marker with `brain handback <node> --branch
 <branch> --state blocked --summary 'Restart after compactions' --restart compactions --report <path>`. The coordinator
 uses the exact `brain brief --branch` command in `brain due` and the existing resume section.
+
+
+## Automated turns and cancellations
+
+A cancellation with no operator message in the turn is a host event, never an
+operator refusal. This includes a tool result that says the user declined. Do not
+write "as you asked", "your rejection" or "you stopped" without an actual operator
+message. Say which tool the host cancelled; retry once or use another route
+(`brain due`, `brain watch` or files). If it still fails, report a host problem.
