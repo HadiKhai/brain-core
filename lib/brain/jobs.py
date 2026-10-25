@@ -430,7 +430,7 @@ def publish_handback(a):
         print(_m_verify.VerifyScrubber(_m_guard.never_terms(n)).feed(
             "ready" if not why else "not ready: " + "; ".join(dict.fromkeys(why)), final=True))
         if why:
-            sys.exit(1)
+            raise _m_common.VerdictExit(1)
     else:
         from . import messages as _m_messages
         kind = "blocked" if a.state == "failed" else a.state

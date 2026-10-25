@@ -92,6 +92,11 @@ def inbox_append(n_dir, line, marker=None, nonblocking=False):
                 return False
         fh.write(line)
         fh.flush()
+        import os
+        os.fsync(fh.fileno())
+        if nonblocking:
+            from . import events
+            events.hook_written(n_dir)
         return True
 
 

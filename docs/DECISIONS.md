@@ -56,58 +56,46 @@ and inherited model configuration without activating inherited runtime policy.
 
 
 
-## D201: Preserve advisory launch estimates alongside measured job actuals
+## D301: Private write journal, recovery and metadata projections
 
-Launch estimates use merged work with the same declared class (legacy branch
-family inference remains a fallback). An optional contract Size section supplies
-files and added/deleted lines. The five nearest known sizes use log distances;
-without planned size, the estimate uses all same-class samples. Wall time is
-class-wide; active time and tokens require the selected runtime. Each metric
-requires three observations and shows median plus observed minimum and maximum.
+Instance CLI writers append a durable begin before changing node state, followed
+by a commit or abort under the instance lock. A partial failure leaves a pending
+operation; a locked status refresh records the mismatch and reconciles the current
+snapshot. This is write-ahead detection and explicit reconciliation, not rollback
+across files or Git. Journals rotate monthly and remain under ignored `.brain/`.
+Stop hooks append only an invalidation to a durable outbox and never acquire the
+instance lock. The next writer folds those invalidations using current hashes.
 
-Ordinary resumes retain the original launch estimate. A changed class or runtime
-recomputes it. Hand-back captures measured usage and committed Git contribution
-size, excluding uncommitted and unrelated rebased changes. Close-time accounting
-refreshes known values without replacing missing measurements with zero. Ledger
-consumption sanitizes worker actuals to numeric facts and Git identities.
+Recorded status contains generated metadata, never worker summaries, questions,
+lesson bodies or acknowledgement reasons. Display screening preserves opaque
+identities, hashes and schema keys. Damaged records are quarantined privately;
+linked journals refuse before repair or mutation. Disposable replay indexes bound
+ordinary work to newly appended bytes.
 
-Weekly share is approximate and advisory. Configurable per-runtime conversions
-start at 51 million processed tokens per percent for Codex and 68 million for
-Claude; fresh-token conversion starts at 1.1 million. Three explicitly attributed
-merged-job meter observations refine conversion. Account-wide deltas are never
-assumed attributable to one concurrent job. These estimates never affect routing,
-admission, readiness or limits.
+## D302: Compare before selecting an event projection
 
-## D202: Share specialist and ordinary launch forecasting
+Files remain the default source. Event-only status replays committed generated
+projections without reading node content; it does not reconstruct typed domain
+facts. Every refresh records an independent resource-hash comparison. The explicit
+source switch requires a full comparison day and no unexplained mismatch or
+interrupted operation, including every node for an instance-wide switch.
+Existing snapshots remain available, and recovery records are labelled as snapshot
+reconciliation rather than historical events.
 
-Specialist hires and worker briefs resolve their route first, then use the same
-saved estimate helper and persist the same record. A selected model conditions
-samples on that exact model and runtime; changing the model refreshes the
-estimate. An unspecified runtime-default model retains class/runtime forecasting
-and does not invent a model identity. Sparse model history stays sparse.
+## D303: Maintain status without a bookkeeping turn
 
-## D203: Record readiness wall duration and report slow verification
+Successful instance writes refresh affected nodes' generated facts and Active work.
+The judgement timestamp is retained. Now sections retain thirty nonempty lines;
+overflow moves to a dated status archive. Generated status commits coalesce to an
+hour, or a job close, and exclude pre-existing judgement or archive edits. A failed
+optional refresh warns and invalidates the projection while preserving the primary
+write's terminal event. A dated backlog command stores prose in the node file and
+only its resource metadata in the event journal.
 
-Each readiness attempt records monotonic wall duration, including preflight and
-admission, in its worker record. Ledger consumption retains numeric seconds and
-whether the result reused proof. Reused proof records zero new execution time;
-it never recharges the historical lane durations. Existing records with no
-duration remain unknown. CLI job advice shows the measurement basis and flags
-runs above verify_warn_seconds (node or instance; default 600 seconds). This
-advice does not change readiness or introduce a timeout.
+## D304: Explicit typed facts for delivery measurements
 
-## D204: Share queue ordering between admission and capacity forecasts
-
-Queued verification uses a stable priority view. A node can opt into landing
-priority with verify_priority=landing; other work retains normal priority. After
-ten minutes normal work ages ahead of landing requests, and legacy records with
-no enqueue timestamp retain precedence. List order breaks ties, preserving
-explicit coordinator reordering within a priority band. Running reservations
-are never preempted or reordered. Node locks and machine slot limits are unchanged.
-
-Each gate captures its expected duration at enqueue: verify_estimate_seconds,
-or the median of at least three measured completed non-reused readiness runs
-on that node. Queue and running projections simulate free slots with recorded
-start times and gate durations. Missing, overrun or unsafe evidence yields unknown.
-The projection reads recorded evidence without process probes or queue writes.
-Reported estimates describe capacity only; environmental holds are not predicted.
+A shared `record_fact` hook appends observed metadata with an exact job key,
+absolute timestamp, phase/state and bounded evidence references. Classification
+codes are identifiers, with no free-form reason text. Reconstructed facts are
+labelled separately and never count as measured observations. No phase, preview
+usability, authorization or failure classification is inferred from transcripts.

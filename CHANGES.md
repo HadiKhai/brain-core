@@ -5,6 +5,21 @@ upgrading. `brain changes <node>` shows the entries this node's coordinator hasn
 `brain due <node>` lists them until `brain changes <node> --seen`. Entry headings are
 `## <date>: <title>`; once released, a heading never changes.
 
+## 2026-10-25: Private event journal and automatic status maintenance
+
+For agents: Instance writers now record durable metadata operations, refresh affected
+status facts and archive Now overflow. `brain events <node> --compare` audits gaps;
+`brain status <node> --from-events` reads committed generated projections. These
+projections are not typed domain-fact reconstruction. `status_source=events` stays
+an explicit switch after a clean comparison day. `brain backlog <node> add <item>`
+records dated deferred work. Typed observed facts use `brain events <node> --record`
+with controlled metadata; no transcript-based classification is performed.
+
+After upgrading: Run `brain check --fix` for missing standard backlog files. Move
+handwritten Active work state prose to Now or decisions before a write regenerates
+the table. Keep snapshots during comparison. An interrupted journal requires a
+locked `brain status <node> --refresh`; see `docs/recovery.md`.
+
 ## 2026-10-25: Rehearsal is an optional diagnostic
 
 For agents: Ready, hand-back and local train landing no longer require passing

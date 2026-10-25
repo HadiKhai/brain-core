@@ -971,6 +971,10 @@ def notes_lag(inst, n, events=None, previous=None):
     paths = [str(rel / name) for name in COORDINATOR_FILES]
     dirty = _m_common.git("status", "--porcelain", "--", *paths, cwd=inst.root).stdout.split("\n")
     dirty = [l[3:] for l in dirty if l.strip()]
+    from . import events as journal_events
+    status_rel = str(rel / "status.md")
+    if status_rel in dirty and not journal_events.status_judgement_dirty(inst, n):
+        dirty.remove(status_rel)
     if dirty:
         out.append("not committed: " + ", ".join(dirty[:5]))
     return out
