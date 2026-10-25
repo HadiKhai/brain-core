@@ -79,3 +79,16 @@ class EventRecords(Scenario):
         with instance.brain_lock(inst):
             events.backfill_records(inst)
         self.assertEqual(len([e for e in events.read(inst) if e['kind'] == 'record']), 1)
+
+    def test_malformed_record_identity_is_quarantined_before_native_write(self):
+        root = self.init('demo')
+        path = root / '.brain/events.jsonl'
+        bad = {'ts': '2025-01-01 00:00 +00:00', 'node': events.node_ref('root'), 'kind': 'record',
+               'actor': 'brain', 'ref': 'a' * 32, 'data': {'record_type': 'handback', 'key': '../../foreign',
+               'object': 'b' * 64, 'after': 'c' * 64, 'before': None, 'origin': 'observed'}}
+        with path.open('a') as stream:
+            stream.write(json.dumps(bad) + '\n')
+        self.b(root, 'backlog', 'root', 'add', 'safe new item')
+        self.assertTrue(list((root / '.brain').glob('events.rejected.*')))
+        self.assertNotIn('../../foreign', path.read_text())
+        self.assertIn('safe new item', (root / 'backlog.md').read_text())

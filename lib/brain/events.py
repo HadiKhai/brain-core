@@ -138,13 +138,10 @@ def _event(line):
             raise ValueError()
         _payload(value['data'])
         if value['kind'] in ('record', 'record_applied'):
-            d = value['data']
-            if d.get('record_type') not in ('jobs', 'handback') or not isinstance(d.get('key'), str):
+            if (not re.fullmatch('n:[0-9a-f]{64}', value['node']) or
+                    not re.fullmatch('[0-9a-f]{32}', value['ref'])):
                 raise ValueError()
-            if value['kind'] == 'record' and (not all(isinstance(d.get(k), str) and re.fullmatch('[0-9a-f]{64}', d[k]) for k in ('object', 'after')) or (d.get('before') is not None and not re.fullmatch('[0-9a-f]{64}', d['before']))):
-                raise ValueError()
-            if value['kind'] == 'record_applied' and not re.fullmatch('[0-9a-f]{32}', d.get('record_ref', '')):
-                raise ValueError()
+            validate_record(value['data'], applied=value['kind'] == 'record_applied')
         if value['kind'] == 'fact':
             validate_fact(value['data'])
         if value['kind'] == 'explain' and not isinstance(value['data'].get('comparison'), str):
@@ -192,7 +189,7 @@ def _apply(state, e):
         state['opened'][e['ref']] = e
         for r in data.get('baseline', []):
             state['resources'][r['id']] = r
-    if kind in ('commit', 'reconcile', 'hook'):
+    if kind in ('commit', 'reconcile', 'hook', 'record_applied'):
         changed = False
         for r in data.get('resources', []):
             changed |= state['resources'].get(r['id'], {}).get('hash') != r['hash']
@@ -283,6 +280,15 @@ class Journal:
             _payload({'resources': list(data['state']['resources'].values()), 'views': data['state']['views']})
             if any(type(x) is not int or x < 0 for x in data['state']['hook_offsets'].values()):
                 raise ValueError()
+            for identity, entry in data['state']['records'].items():
+                if (not isinstance(identity, str) or not re.fullmatch(r'n:[0-9a-f]{64}:(?:jobs:ledger|handback:[0-9a-f]{24})', identity)
+                        or not isinstance(entry, dict) or type(entry.get('applied')) is not bool
+                        or not re.fullmatch('[0-9a-f]{32}', entry.get('ref', ''))):
+                    raise ValueError()
+                validate_record(entry)
+            for ref, owner in data['state']['pending_landings'].items():
+                if not re.fullmatch('[0-9a-f]{32}', ref) or not re.fullmatch('n:[0-9a-f]{64}', owner):
+                    raise ValueError()
             for e in data['state']['opened'].values():
                 _event((json.dumps(e) + '\n').encode())
             self.positions, self.state = data['positions'], data['state']
@@ -583,6 +589,7 @@ class Command:
         self.close_job = bool(getattr(args, "close", False)) or (args is not None and args.f.__name__ in ("cmd_wt_prune", "cmd_wt_rm"))
         self.command = command or args.f.__name__.removeprefix("cmd_")
         self.lease = None
+        self.record_paths = set()
 
     def start(self):
         self.ref = uuid.uuid4().hex
@@ -599,15 +606,17 @@ class Command:
             raise
 
     def __enter__(self):
+        nested = any(op.inst.root == self.inst.root for op in _CURRENT)
         journal(self.inst, repair=True)
-        read_comparisons(self.inst, repair=True)
-        fold_hooks(self.inst)
-        recover_records(self.inst)
-        backfill_records(self.inst)
-        if journal(self.inst).positions:
-            gap = detect_gaps(self.inst, self.node)
-            if gap and self.command not in ("status", "set") and any(source(self.inst, n) == "events" for n in self.inst.nodes()):
-                common.die("events source has unreconciled state; run status --refresh before writing")
+        if not nested:
+            read_comparisons(self.inst, repair=True)
+            fold_hooks(self.inst)
+            recover_records(self.inst)
+            if journal(self.inst).positions:
+                gap = detect_gaps(self.inst, self.node)
+                if gap and self.command not in ("status", "set") and any(source(self.inst, n) == "events" for n in self.inst.nodes()):
+                    common.die("events source has unreconciled state; run status --refresh before writing")
+            backfill_records(self.inst)
         self.start()
         _CURRENT.append(self)
         return self
@@ -1117,6 +1126,7 @@ def maintain(op, changed):
     from . import status, freshness
     dispatch_landings(op.inst)
     freshness.maintain_indexes(op.inst, op.inst.nodes())
+    changed = {**{path: None for path in op.record_paths}, **changed}
     views = {}
     _, recorded_views, _ = replay(op.inst)
     selected = {n['id']: n for n in affected_nodes(op.inst, changed, op.node)}
@@ -1298,6 +1308,9 @@ def write_record(inst, n, record_type, key, text, origin='observed'):
     Acknowledgements distinguish unfinished writes from later handwritten edits.
     """
     path = record_target(n, record_type, key)
+    common.safe_target(path)
+    if path.is_symlink() or path.parent.is_symlink():
+        raise ValueError('linked record target')
     if origin not in ('observed', 'reconstructed') or not isinstance(text, str):
         raise ValueError('invalid record source')
     with instance.brain_lock(inst):
@@ -1316,9 +1329,17 @@ def write_record(inst, n, record_type, key, text, origin='observed'):
                 raise ValueError('immutable event object collision')
         else:
             common.atomic_write(target, raw.decode())
+        directory = os.open(str(target.parent), os.O_RDONLY | getattr(os, 'O_DIRECTORY', 0))
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
         data = {'record_type': record_type, 'key': key, 'object': sha, 'before': before,
                 'after': digest(text.encode()), 'origin': origin}
         event = append(inst, n['id'], 'record', uuid.uuid4().hex, data)
+        for op in _CURRENT:
+            if op.inst.root == inst.root:
+                op.record_paths.add(path.relative_to(inst.root).as_posix())
         apply_record(inst, n, {**data, 'ref': event['ref']})
         return event['ref']
 
@@ -1338,7 +1359,8 @@ def apply_record(inst, n, entry, rebuild=False):
         common.touch(path)
     if not entry.get('applied'):
         append(inst, n['id'], 'record_applied', uuid.uuid4().hex,
-               {'record_ref': entry['ref'], 'record_type': entry['record_type'], 'key': entry['key']})
+               {'record_ref': entry['ref'], 'record_type': entry['record_type'], 'key': entry['key'],
+                'resources': resource_list(inst, {path.relative_to(inst.root).as_posix(): entry['after']})})
 
 
 def recover_records(inst, n=None, rebuild=False):
@@ -1402,3 +1424,53 @@ def dispatch_landings(inst):
         return count
     finally:
         _DISPATCHING_LANDINGS = False
+
+
+class node_write:
+    """Short native state-writer scope, including callers bypassing CLI dispatch."""
+    def __init__(self, directory, command):
+        root = instance.instance_above(directory)
+        if root is None:
+            raise ValueError('native event writer is outside an instance')
+        self.inst = instance.Instance(root)
+        n = next((n for n in self.inst.nodes() if n['dir'] == directory), None)
+        if n is None:
+            raise ValueError('native event writer has no node')
+        self.skip = any(op.inst.root == root for op in _CURRENT)
+        self.lock = instance.brain_lock(self.inst)
+        self.operation = Command(root, command=command, node=n['id'])
+
+    def __enter__(self):
+        self.lock.__enter__()
+        if self.skip:
+            return None
+        try:
+            return self.operation.__enter__()
+        except BaseException:
+            self.lock.__exit__(*__import__('sys').exc_info())
+            raise
+
+    def __exit__(self, *exc):
+        try:
+            return False if self.skip else self.operation.__exit__(*exc)
+        finally:
+            self.lock.__exit__(*exc)
+
+
+def validate_record(data, applied=False):
+    record_type, key = data.get('record_type'), data.get('key')
+    if (record_type not in _RECORD_TYPES or not isinstance(key, str) or
+            (record_type == 'jobs' and key != 'ledger') or
+            (record_type == 'handback' and not re.fullmatch('[0-9a-f]{24}', key))):
+        raise ValueError('invalid source record identity')
+    if applied:
+        if not re.fullmatch('[0-9a-f]{32}', data.get('record_ref', '')):
+            raise ValueError('invalid applied source reference')
+        return
+    for field in ('object', 'after'):
+        if not isinstance(data.get(field), str) or not re.fullmatch('[0-9a-f]{64}', data[field]):
+            raise ValueError('invalid source record fingerprint')
+    if data.get('before') is not None and not re.fullmatch('[0-9a-f]{64}', data['before']):
+        raise ValueError('invalid previous source fingerprint')
+    if data.get('origin') not in ('observed', 'reconstructed'):
+        raise ValueError('invalid source record provenance')

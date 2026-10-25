@@ -157,3 +157,23 @@ The dependency with the largest recorded wait is reported with that explicit bas
 Declared dependencies without wait events do not invent delays. An observed landing
 removes its identity from current blockers. These measurements do not predict a
 future critical path; overlapping dependency waits must not be added as wall time.
+
+## D310: Native short writers use the same event boundary as CLI writers
+
+Direct inbox, job-attempt and foreground-queue writes enter a short journal scope
+under the existing instance lock. This covers dispatcher and watcher paths that
+intentionally bypass the CLI's long-lived writer scope. Calls already inside a CLI writer retain that operation identity while reacquiring
+the short lock when necessary. In-flight parent writes are not mistaken for missing
+external events. Applied record events also update resource coverage directly, so
+native ledger publication cannot look like an unjournalled edit.
+Stop-hook inbox writes retain their lock-free invalidation outbox protocol.
+
+## D311: One canonical rendering defines generated facts and freshness
+
+Generated refreshes and stale-status fingerprints use the same metadata rendering.
+Sensitive summaries and reasons remain in source records without creating a
+permanent stale-status loop. A lesson is labelled recorded only when an outcome
+actually exists; required-but-missing and legacy-not-required states remain distinct.
+Record identities and cached record entries validate before recovery. Immutable
+source objects and their directory entry are fsynced before the journal references
+those objects.

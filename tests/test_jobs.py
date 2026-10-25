@@ -274,8 +274,10 @@ class UnifiedHandbacks(Scenario):
 
     def test_one_command_one_worker_file_for_ready_state_and_proposals(self):
         r, home, wt = self.job()
-        names = ("status.md", "brief.md", "decisions.md", "node.md", "job-ledger.md")
+        names = ("brief.md", "decisions.md", "node.md", "job-ledger.md")
         before = {name: (r / "nodes/a" / name).read_bytes() for name in names}
+        module = core_loader.SourceFileLoader("brain_generated_judgement", str(CORE / "bin/brain")).load_module()
+        judgement = module.judgement((r / "nodes/a/status.md").read_text())
         main = self.git("rev-parse", "main", cwd=home)
         self.assertEqual(self.finish(r).strip().splitlines()[-1], "ready")
         data = json.loads(self.packet().read_text())
@@ -288,6 +290,7 @@ class UnifiedHandbacks(Scenario):
         self.assertFalse((self.tmp / "app-work/scratch/ready").exists())
         self.assertEqual(len(list(self.packet().parent.glob("*.json"))), 1)
         self.assertEqual({name: (r / "nodes/a" / name).read_bytes() for name in names}, before)
+        self.assertEqual(module.judgement((r / "nodes/a/status.md").read_text()), judgement)
         self.assertEqual(self.git("rev-parse", "main", cwd=home), main)
         self.assertIn("ready to merge", self.b(r, "due", "a"))
         self.b(r, "status", "a", "--refresh")
@@ -381,9 +384,9 @@ class UnifiedHandbacks(Scenario):
         self.assertIn("missing; coordinator must record outcome", (r / "nodes/a/status.md").read_text())
         self.b(r, "jobs", "a", "--branch", "job", "--lessons", "none: fix specific to this job")
         self.assertNotIn("lesson-outcome", [i["kind"] for i in self.due(r)])
-        self.assertIn("stale-status", [i["kind"] for i in self.due(r)])
+        self.assertNotIn("stale-status", [i["kind"] for i in self.due(r)])
         self.b(r, "status", "a", "--refresh")
-        self.assertIn("none: fix specific to this job", (r / "nodes/a/status.md").read_text())
+        self.assertIn("recorded; see brain jobs", (r / "nodes/a/status.md").read_text())
         self.assertEqual([i["kind"] for i in self.due(r)], ["missing-preview", "unsettled-threads"])
         self.b(r, "jobs", "a", "--attestation-file", settlement_export(self, r, 'a', branch="job"), "--branch", "job", "--settled")
         self.b(r, "set", "a", "preview=http://localhost:4100", "preview_tour=reports/tour.md")
@@ -708,7 +711,7 @@ class ThreadSettlement(AutonomyProject):
             with self.subTest(closure=closure):
                 r, home, wt = self.project()
                 status = r / "nodes/app/status.md"
-                status.write_text(status.read_text() + "\n## Active work\n\n"
+                status.write_text(status.read_text().replace("| job-a | - | - | open |\n", "") + "\n## Active work\n\n"
                                   "| branch | thread | PR | state |\n| --- | --- | --- | --- |\n"
                                   "| job-a | fixture-worker | - | merged |\n")
                 if closure == "prune":
@@ -765,7 +768,7 @@ class ThreadSettlement(AutonomyProject):
         r, home, wt = self.project()
         self.ledger(r, [self.row("job-a")])
         status = r / "nodes/app/status.md"
-        original = status.read_text()
+        original = status.read_text().replace("| job-a | - | - | open |\n", "")
         header = "\n## Active work\n\n| branch | thread | PR | state |\n| --- | --- | --- | --- |\n"
         for rows in ("| job-a | fixture-worker-one | - | merged |\n"
                      "| job-a | fixture-worker-two | - | closed |\n",

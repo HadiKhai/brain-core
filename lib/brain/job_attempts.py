@@ -77,13 +77,15 @@ def active_attempt(n, row, strict=True):
 
 
 def write_attempt(n, row, data):
-    path = attempt_path(n, row)
-    if path.is_symlink() or path.parent.is_symlink():
-        raise ValueError('linked job attempt evidence')
-    _m_common.safe_target(path)
-    path.parent.mkdir(exist_ok=True)
-    _m_common.atomic_write(path, json.dumps(data, sort_keys=True) + '\n')
-    _m_common.touch(path)
+    from . import events
+    with events.node_write(n["dir"], "job_attempt"):
+        path = attempt_path(n, row)
+        if path.is_symlink() or path.parent.is_symlink():
+            raise ValueError('linked job attempt evidence')
+        _m_common.safe_target(path)
+        path.parent.mkdir(exist_ok=True)
+        _m_common.atomic_write(path, json.dumps(data, sort_keys=True) + '\n')
+        _m_common.touch(path)
 
 
 def begin_attempt(inst, n, row, request_id=None):
