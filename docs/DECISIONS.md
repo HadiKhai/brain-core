@@ -79,3 +79,25 @@ The helper supplies the native PreToolUse adapter with a denial reason; it does
 not install hooks or intercept tools outside that adapter. Runtime session IDs
 must be bound truthfully by the host to receive enforcement. Tests cover all
 four kinds, progress chatter, linked references and unknown/protected callers.
+
+## D604: Confirm native host settlement before publishing a settled ledger job
+
+The explicit lifecycle settlement command enumerates every bound host project
+with nested threads and checks complete, stable pagination. Recorded worker
+references, descendant edges and unquoted first-prompt job markers establish
+ownership. Coordinators, callers, open jobs, pending requests and unknown host
+activity remain protected. Unknown project threads prevent a false exhaustive
+job attestation even when known terminal workers can be safely settled.
+
+Each singular settlement call receives a fresh local-ownership and host-state
+check. A second exhaustive listing must confirm settled terminal threads before
+the existing attestation validator publishes the job receipt and ledger stamp.
+Unexpected self-settlement is immediately undone and reported. Missing transport
+or ambiguous outcomes stay pending; they never become a successful stamp.
+
+The train finish API accepts exact closed job keys and returns separate settled,
+pending and error collections. It cannot sweep unrelated jobs. Tests exercise
+nested workers, live/pending children, changed ownership, incomplete inventory,
+unattributed threads, repeated execution and exact accepted-job scoping using a
+fake native host. These tests do not establish live host integration or atomic
+host-side compare-and-set behavior between the last query and settlement.
