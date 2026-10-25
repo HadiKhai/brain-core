@@ -106,3 +106,28 @@ or probe failures leave the diagnostic unknown. This observation explains curren
 CPU activity without claiming causation or changing admission policy. Unheld
 state reads do not run the probe. Percentages above 100 are valid on multicore
 systems.
+
+## D805: One durable terminal producer through admission and cleanup
+
+A managed machine run creates its private record before admission and owns the
+terminal transition through cleanup. It retains the original cause and one stable
+terminal event identity; repeated finalization cannot overwrite an ended run.
+Success is provisional until cleanup finishes. Cleanup attempts every action,
+records secondary errors and receives the operation's primary exception explicitly;
+a handled exception in a caller cannot suppress a new cleanup failure.
+
+A definitely dead owner can recover an abandoned run. Unknown identity is recorded
+as uncertainty, never inferred death. A live managed owner's queue-release window
+cannot produce a competing recovery cause. Pending terminal records are retained
+until the transport's stable receipt confirms actual delivery. Failed enqueue is
+retried using the original event identity and reason. Cross-route transport claims
+and accepted-delivery receipts belong to the wake transport; producer code does
+not send directly. Catchable termination unwinds through the same finalizer and
+restores embedding applications' signal handlers.
+
+`machine_run(kind, instance, node, job=None, clock=None)` is the context API;
+`machine_wait(..., token=token)` admits the managed token and `token.result` holds
+the command result. `machine_cleanup(token, actions, primary=error)` runs cleanup.
+The admission-only command uses that context without changing its public behavior.
+Other command runners integrate the same context around admission, launch and
+cleanup rather than creating a second terminal path.

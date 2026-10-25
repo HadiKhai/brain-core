@@ -1821,3 +1821,87 @@ class HoldCpuDiagnostics(unittest.TestCase):
             with mock.patch.object(self.m, 'machine_reading', return_value={}):
                 self.assertNotIn('top CPU:', self.m.machine_summary(self.m.machine_state()))
                 self.assertEqual(top.call_count, 1)
+
+
+class TerminalProducer(Scenario):
+    def setUp(self):
+        super().setUp()
+        self.m = core_loader.SourceFileLoader('terminal_producer_fixture', str(CORE / 'bin/brain')).load_module()
+        self.root = self.init('alice')
+        self.inst = self.m.Instance(self.root)
+        self.patch = mock.patch.dict(os.environ, self.env)
+        self.patch.start()
+        self.addCleanup(self.patch.stop)
+        self.clock = argparse.Namespace(time=lambda: 100000.0)
+
+    def waits(self):
+        return json.loads((self.root / '.brain/wake/machine-holds.json').read_text())['waits']
+
+    def test_launch_failure_keeps_original_cause_once_and_retries_wake(self):
+        with mock.patch.object(self.m, 'request_wake', side_effect=[False, True]) as wake:
+            with self.assertRaisesRegex(OSError, 'fixture launch failed'):
+                with self.m.machine_run('verify', self.inst, 'root', 'job/leaf', clock=self.clock):
+                    raise OSError('fixture launch failed')
+            self.m.machine_wait_notices(self.inst, 100001.0)
+            self.m.machine_wait_notices(self.inst, 100002.0)
+        row = next(iter(self.waits().values()))
+        self.assertEqual(row['outcome'], 'error')
+        self.assertIn('fixture launch failed', row['reason'])
+        self.assertEqual(row['ended_at'], 100000.0)
+        self.assertEqual(wake.call_count, 2)
+        self.assertEqual(wake.call_args_list[0].kwargs['items'], wake.call_args_list[1].kwargs['items'])
+        self.assertEqual(wake.call_args.kwargs['items'][0]['kind'], 'machine-exited')
+
+    def test_cleanup_runs_all_and_handled_outer_exception_cannot_hide_failure(self):
+        seen = []
+        def fail():
+            seen.append('first')
+            raise OSError('cleanup failed')
+        with mock.patch.object(self.m, 'request_wake', return_value=True):
+            try:
+                raise ValueError('unrelated handled exception')
+            except ValueError:
+                with self.assertRaisesRegex(OSError, 'cleanup failed'):
+                    with self.m.machine_run('heavy', self.inst, 'root', clock=self.clock) as token:
+                        self.m.machine_cleanup(token, [fail, lambda: seen.append('second')], primary=None)
+        self.assertEqual(seen, ['first', 'second'])
+        row = next(iter(self.waits().values()))
+        self.assertEqual(row['outcome'], 'error')
+        self.assertIn('cleanup failed', row['reason'])
+        self.assertEqual(row['cleanup_errors'], ['OSError: cleanup failed'])
+
+    def test_cleanup_preserves_explicit_primary_and_records_secondary(self):
+        def fail():
+            raise OSError('secondary cleanup')
+        primary = ValueError('primary launcher')
+        with mock.patch.object(self.m, 'request_wake', return_value=True):
+            with self.assertRaisesRegex(ValueError, 'primary launcher'):
+                with self.m.machine_run('verify', self.inst, 'root', clock=self.clock) as token:
+                    try:
+                        raise primary
+                    finally:
+                        self.m.machine_cleanup(token, [fail], primary=primary)
+        row = next(iter(self.waits().values()))
+        self.assertIn('primary launcher', row['reason'])
+        self.assertEqual(row['cleanup_errors'], ['OSError: secondary cleanup'])
+
+    def test_success_and_nonzero_exit_have_one_immutable_terminal_transition(self):
+        with mock.patch.object(self.m, 'request_wake', return_value=True) as wake:
+            with self.m.machine_run('heavy', self.inst, 'root', clock=self.clock) as token:
+                token.result = 7
+            self.m.machine_terminal(self.inst, token, result=0)
+            self.m.machine_wait_notices(self.inst, 100010.0)
+        row = self.waits()[token]
+        self.assertEqual(row['outcome'], 'failed')
+        self.assertIn('status 7', row['reason'])
+        self.assertEqual(wake.call_count, 1)
+
+    def test_failure_before_queue_publication_still_has_a_terminal_reason(self):
+        with mock.patch.object(self.m, 'request_wake', return_value=True), \
+                mock.patch.object(self.m, 'process_stamp', return_value='unknown'):
+            with self.assertRaises(SystemExit):
+                with self.m.machine_run('verify', self.inst, 'root', clock=self.clock) as token:
+                    self.m.machine_wait('verify', self.inst, 'root', token=token)
+        row = self.waits()[token]
+        self.assertEqual(row['outcome'], 'error')
+        self.assertIn('cannot establish', row['reason'])
