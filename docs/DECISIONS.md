@@ -129,3 +129,12 @@ that same generator explicitly. No external script, shell command or host action
 is executed. Existing output must carry the native ownership marker; unmarked,
 linked, shared or out-of-boundary files are preserved. Other index formats retain
 the existing freshness warning and explicit recording workflow.
+
+## D307: Measure the first usable preview from explicit observations
+
+`events --metrics` measures the first evidence-bearing `preview_usable` observation
+following `request_received` or `job_requested`, using absolute timestamps at
+microsecond precision. A saved URL, publication event or Git commit is not evidence
+of usability. Missing request or usability evidence produces an unknown duration.
+Reconstructed history is labelled and excluded from measured observations. The
+projection is read-only and uses exact job identities.

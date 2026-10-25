@@ -901,6 +901,10 @@ def switch_gate(inst, n):
 def cmd_events(a):
     inst = nodes.load()
     n = inst.node(a.id)
+    if getattr(a, 'metrics', False):
+        from . import delivery_metrics
+        print(json.dumps(delivery_metrics.delivery_measurements(inst, n), sort_keys=True, indent=2))
+        return
     if getattr(a, 'rebuild_records', False):
         count = len(recover_records(inst, n, rebuild=True))
         print(n['id'] + ': rebuilt ' + str(count) + ' event record(s)')

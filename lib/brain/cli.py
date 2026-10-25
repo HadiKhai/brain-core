@@ -484,7 +484,7 @@ def main():
         opt("--from-events", action="store_true"), opt("--json", action="store_true"))
     cmd("events", _m_events.cmd_events, "private event metadata; --compare summarizes the last day", "id",
         opt("--compare", action="store_true"), opt("--json", action="store_true"),
-        opt("--explain", metavar="DIFFERENCE_ID"), opt("--reason"),
+        opt("--metrics", action="store_true"), opt("--explain", metavar="DIFFERENCE_ID"), opt("--reason"),
         opt("--rebuild-records", action="store_true"),
         opt("--record", metavar="FACT_TYPE"), opt("--job-key"), opt("--data", default="{}"))
     cmd("registry", _m_status.cmd_registry, "regenerate registry.md")
