@@ -141,3 +141,27 @@ notifications while retaining opaque/damaged pending requests for recovery. Type
 question flags survive queue serialization; arbitrary host sends remain outside
 this boundary. Root can retain landings and parks in inbox/event state without a
 transport wake. These settings are machine-local, never automatically installed.
+
+
+## D507: Native host exports are complete, bounded ownership snapshots
+
+An explicit `host-export` command reuses the shared native RPC bridge. It lists
+bound projects, includes subagents, follows bounded pagination, and queries pending
+request ids only for bound coordinators/open-job workers. Snapshot files retain
+status/run identities and hashed pending ids, never transcripts or question text.
+Binding rotation, unknown threads, malformed responses, deadline exhaustion and
+partial reads refuse publication and preserve prior bytes. Readers require fresh,
+complete exact-binding coverage; unknown host activity stays unknown.
+
+`host_export=on` enables this read-only export on the existing sampler. It does
+not install or start a service. Pending questions join due/wake sources; validated
+failed worker runs join the existing failure handler without replacing manual
+exports. No exporter invents coordinator start times or host queue timing. The
+shared RPC module is an integration dependency, not a second client.
+
+
+Transport item identities use the full 64-character digest, distinct from the
+shorter job keys. Question classification flags stay in queue metadata; display
+history preserves its identity/kind-only schema. Export RPC waits never hold the
+instance writer lock; a separate nonblocking export lock prevents stale concurrent
+publications.

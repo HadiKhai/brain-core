@@ -483,7 +483,12 @@ def watch_failures(inst, nodes, acknowledged, warnings):
         if 'worker-runs-invalid' not in warnings:
             print('watch: worker-runs invalid; failure processing skipped')
         warnings.add('worker-runs-invalid')
-        return
+        records = []
+    from . import host_observations as _m_host_observations
+    try:
+        records += _m_host_observations.host_export_runs(inst)
+    except (OSError, ValueError, TypeError):
+        pass  # unknown host export never suppresses manual records or other source work
     warnings.discard('worker-runs-invalid')
     for n in nodes:
         rows = _m_jobs.read_jobs(n) or []
@@ -602,7 +607,12 @@ def watch_scan(inst, nodes=None):
                                        'reason': 'overdue:' + hashlib.sha256(line.encode()).hexdigest(),
                                        'text': 'Unanswered question past its threshold; inspect brain due root'})
     from . import communication as _m_communication
-    for item in _m_communication.communication_items(inst, nodes):
+    from . import host_observations as _m_host_observations
+    try:
+        host_items = _m_host_observations.host_observation_items(inst, nodes)
+    except (OSError, ValueError, TypeError):
+        host_items = []
+    for item in _m_communication.communication_items(inst, nodes) + host_items:
         n = inst.node(item['node'])
         target, command = _m_hosts.wake_target(inst, n)
         group = groups.setdefault(target['id'], {'node': target, 'items': [], 'command': command})

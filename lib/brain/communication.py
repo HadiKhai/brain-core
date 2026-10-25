@@ -76,7 +76,7 @@ def communication_record(inst, n, kind, text, key, question=None):
     text = _m_nodes.import_text(text.strip(), terms)
     if typed:
         typed = {**typed, 'options': [{**o, 'label': _m_nodes.import_text(o['label'], terms)} for o in typed['options']]}
-    identity = _m_jobs.digest([n['id'], kind, key])
+    identity = _m_hosts.wake_binding(json.dumps([n['id'], kind, key]))
     record = {'id': identity, 'node': n['id'], 'kind': kind, 'text': text, 'at': inst.now(), **typed}
     with communication_store(inst) as data:
         records = data['questions'] if typed else data['notices']

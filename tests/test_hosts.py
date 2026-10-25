@@ -1605,3 +1605,50 @@ class AckAllShown(Scenario):
             m.request_wake(self.inst, n, 'fixture-same-reason', items=[ref])
             m.wake_drain(self.inst, n, once=True)
             self.assertEqual(send.call_count, 2)
+
+
+class NativeHostExport(Scenario):
+    def setUp(self):
+        super().setUp()
+        patch = mock.patch.dict(os.environ, self.env)
+        patch.start()
+        self.addCleanup(patch.stop)
+        self.m = core_loader.SourceFileLoader('host_export_fixture', str(CORE / 'bin/brain')).load_module()
+        self.root = self.init('alice')
+        self.b(self.root, 'set', 'root', 'host_project=fixture-project', 'coordinator=fixture-root')
+        self.inst = self.m.Instance(self.root)
+        row = dict.fromkeys(self.m.JOB_COLS, '')
+        row.update(Job='import:fixture', Started='2020-01-01T00:00Z')
+        self.m.write_jobs(self.inst, self.inst.node('root'), [row])
+        self.inst.local_of('root')['workers'] = {self.m.job_key(row): 'fixture-worker'}
+        self.inst.save_local()
+
+    def rpc(self, name, args):
+        if name == 't3_thread_list':
+            return {'threads': [{'threadId': 'fixture-root', 'status': 'running', 'latestRunId': 'run-root'},
+                                {'threadId': 'fixture-worker', 'status': 'failed', 'latestRunId': 'run-worker'}],
+                    'nextCursor': None}
+        self.assertEqual(name, 't3_pending_request_list')
+        return {'requestIds': ['private-request'] if args['threadId'] == 'fixture-worker' else []}
+
+    def test_export_has_bound_failures_and_opaque_pending_questions(self):
+        snapshot = self.m.host_export(self.inst, rpc=self.rpc)
+        self.assertNotIn('private-request', json.dumps(snapshot))
+        self.assertEqual(self.m.host_export_runs(self.inst)[0]['run'], 'run-worker')
+        self.assertEqual(len(self.m.host_observation_items(self.inst)), 1)
+
+    def test_partial_failure_preserves_previous_export_and_rotation_invalidates_it(self):
+        self.m.host_export(self.inst, rpc=self.rpc)
+        path = self.root / '.brain/host-observations.json'
+        old = path.read_bytes()
+        with self.assertRaises(ValueError):
+            self.m.host_export(self.inst, rpc=lambda *args: {'threads': []})
+        self.assertEqual(path.read_bytes(), old)
+        self.inst.local_of('root')['coordinator'] = 'fixture-replacement'
+        self.inst.save_local()
+        self.assertIsNone(self.m.host_snapshot(self.inst))
+
+    def test_sampler_opt_out_makes_no_native_calls(self):
+        with mock.patch.object(self.m, 'host_native_call') as call:
+            self.m.host_export_if_enabled(self.inst)
+            call.assert_not_called()

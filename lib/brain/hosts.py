@@ -249,6 +249,11 @@ def wake_item_refs(items):
     return sorted(refs.values(), key=lambda i: i['id'])
 
 
+def wake_log_refs(refs):
+    """Display history retains the established identity/kind-only shape."""
+    return [{'id': i['id'], 'kind': i['kind']} for i in refs]
+
+
 def wake_history(directory):
     path = directory / 'history.json'
     if not path.exists():
@@ -787,8 +792,8 @@ def wake_drain(inst, n, once=False):
                         # Logging cannot undo delivery and cause another model wake on retry.
                         try:
                             wake_accept_write(directory / 'history.json', json.dumps({'version': 1,
-                                'deliveries': (history + [{'at': WAKE_CLOCK.time(), 'items': refs, 'reason': reason,
-                                    'before': before, 'snapshot': snapshot, 'ack_binding': wake_owner_binding(current, target)}])[-100:]}) + '\n')
+                                'deliveries': (history + [{'at': WAKE_CLOCK.time(), 'items': wake_log_refs(refs), 'reason': reason,
+                                    'before': wake_log_refs(before), 'snapshot': wake_log_refs(snapshot), 'ack_binding': wake_owner_binding(current, target)}])[-100:]}) + '\n')
                         except OSError:
                             status = 'delivered; history write failed'
                     try:

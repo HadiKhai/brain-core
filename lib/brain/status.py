@@ -767,6 +767,15 @@ def cmd_due(a):
     items = coordinator_due_items(inst, nodes, include_handled=getattr(a, 'handled', False))
     from . import communication as _m_communication
     items += _m_communication.communication_items(inst, nodes)
+    from . import host_observations as _m_host_observations
+    try:
+        items += _m_host_observations.host_observation_items(inst, nodes)
+        host_known = _m_host_observations.host_snapshot(inst) is not None
+    except (OSError, ValueError, TypeError):
+        host_known = False
+    if inst.local_of('root').get('host_export') == 'on' and not host_known:
+        items.append({'node': 'root', 'kind': 'host-observation', 'informational': True,
+                      'text': 'host export unavailable or stale; host activity unknown'})
     items += consumed
     wake_seen = set()
     for n in nodes:
