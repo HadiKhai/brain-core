@@ -45,3 +45,19 @@ class NativeEventWrites(Scenario):
         self.assertIn('nodes/app/decisions.md', paths)
         self.assertIn('nodes/app/inbox.md', paths)
         self.assertEqual(events.pending(events.read(inst)), {})
+
+    def test_native_attempt_transitions_supply_observed_phase_facts_once(self):
+        _, inst, n, row = self.prepare()
+        attempt = job_attempts.begin_attempt(inst, n, row)
+        job_attempts.update_attempt(inst, n, row, attempt['id'], 'verifying')
+        job_attempts.update_attempt(inst, n, row, attempt['id'], 'verifying')
+        job_attempts.finish_attempt(inst, n, row, attempt['id'])
+        rows = [e['data'] for e in events.facts(inst, n, jobs.job_key(row))
+                if e['data']['fact_type'] == 'phase_changed']
+        self.assertEqual([(d['phase'], d['state']) for d in rows],
+                         [('admission', 'waiting'), ('execution', 'working'), ('coordination', 'waiting')])
+        self.assertEqual([d['reason_code'] for d in rows],
+                         ['attempt_queued', 'attempt_verifying', 'attempt_terminal'])
+        self.assertTrue(all(d['origin'] == 'observed' and 'at' in d for d in rows))
+        self.assertTrue(all(set(d) <= {'version', 'fact_type', 'job_key', 'origin', 'at',
+                                      'phase', 'state', 'reason_code', 'head', 'base', 'inputs'} for d in rows))

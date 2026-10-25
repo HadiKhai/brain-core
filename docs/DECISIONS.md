@@ -177,3 +177,12 @@ actually exists; required-but-missing and legacy-not-required states remain dist
 Record identities and cached record entries validate before recovery. Immutable
 source objects and their directory entry are fsynced before the journal references
 those objects.
+
+## D312: Native attempt transitions supply timing observations
+
+A changed native attempt state emits a phase fact: queued is waiting for admission,
+verifying is working in execution, and terminal is waiting for coordination. Exact
+job identity and available head/base/input fingerprints accompany the observation.
+Repeated writes of the same state emit no duplicate transition. This records native
+runner states, not model activity or an inferred result. Actual successful full
+verification remains a separate evidence-bearing fact from the verifier.
