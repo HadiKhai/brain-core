@@ -760,6 +760,33 @@ def machine_child(token, pid):
         _m_common.die("machine care: reservation disappeared; verify not started")
 
 
+def machine_top_cpu():
+    """A bounded diagnostic sample; executable names only, never argv or identity proof."""
+    try:
+        result = subprocess.run(['ps', '-A', '-o', 'pid=', '-o', 'pcpu=', '-o', 'comm='],
+                                capture_output=True, text=True, timeout=1,
+                                env={**os.environ, 'LC_ALL': 'C'})
+        if result.returncode:
+            return []
+        rows = []
+        for line in result.stdout.splitlines()[:4096]:
+            fields = line.split(None, 2)
+            if len(fields) != 3:
+                continue
+            try:
+                pid, percent = int(fields[0]), float(fields[1])
+            except ValueError:
+                continue
+            if pid <= 0 or not math.isfinite(percent) or percent < 0:
+                continue
+            command = ''.join(c for c in Path(fields[2]).name if c.isprintable())[:120]
+            if command:
+                rows.append({'pid': pid, 'cpu_percent': percent, 'command': command})
+        return sorted(rows, key=lambda r: (-r['cpu_percent'], r['pid']))[:3]
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return []
+
+
 def machine_state(inst=None):
     reading = machine_reading(inst)
     policy = machine_policy(strict=False)
@@ -767,6 +794,8 @@ def machine_state(inst=None):
     if policy.get("_error"):
         reading["held"].append(policy["_error"])
     reading["verify_limit"] = machine_limit(policy)
+    if reading["held"]:
+        reading["top_cpu"] = machine_top_cpu()
     # Reading the live view never creates state or a lock file.
     try:
         rows = json.loads((machine_dir() / "machine-care-queue.json").read_text())
@@ -855,11 +884,13 @@ def machine_hold_claim(inst, episode, scope, deliver=None):
 
 def machine_summary(reading):
     loads = reading.get("load_per_cpu")
+    top = reading.get("top_cpu", []) if reading["held"] else []
+    detail = ("; top CPU: " + ", ".join(f"{r['command']} pid={r['pid']} {r['cpu_percent']:g}%" for r in top)) if top else ""
     return ("machine: load/CPU 1/5/15m " + ("/".join(f"{v:.2f}" for v in loads) if loads else "unknown") +
             f"; free memory {reading.get('mem_free_gb', 'unknown')} GB; free disk " +
             f"{reading.get('disk_free_gb', 'unknown')} GB; thermal {reading.get('thermal', 'unknown')}; " +
             f"verifies {reading['verifying']}/{reading['verify_limit']}; queued {reading['queued']}; " +
-            ("held: " + "; ".join(reading["held"]) if reading["held"] else "heavy work allowed"))
+            ("held: " + "; ".join(reading["held"]) if reading["held"] else "heavy work allowed") + detail)
 
 
 def cmd_heavy(a):

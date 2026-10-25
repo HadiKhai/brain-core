@@ -1787,3 +1787,37 @@ class ReservationBootIdentity(unittest.TestCase):
             self.assertEqual(rows[0]['boot'], 'linux:current-boot')
             self.m.machine_release(token)
             self.assertEqual(json.loads((Path(folder) / 'machine-care-queue.json').read_text()), [])
+
+
+class HoldCpuDiagnostics(unittest.TestCase):
+    def setUp(self):
+        self.m = core_loader.SourceFileLoader('cpu_fixture', str(CORE / 'bin/brain')).load_module()
+
+    def test_top_cpu_reports_pid_percent_and_basename_without_arguments(self):
+        output = ' 42 180.5 /System/Library/Fixture Indexer\n 43 20.2 /usr/bin/python3\n 44 2.0 helper\n'
+        with mock.patch.object(self.m.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, output)) as run:
+            self.assertEqual(self.m.machine_top_cpu(), [
+                {'pid': 42, 'cpu_percent': 180.5, 'command': 'Fixture Indexer'},
+                {'pid': 43, 'cpu_percent': 20.2, 'command': 'python3'},
+                {'pid': 44, 'cpu_percent': 2.0, 'command': 'helper'}])
+            self.assertEqual(run.call_args[0][0], ['ps', '-A', '-o', 'pid=', '-o', 'pcpu=', '-o', 'comm='])
+            self.assertEqual(run.call_args[1]['timeout'], 1)
+
+    def test_bad_rows_and_command_failure_do_not_invent_a_culprit(self):
+        for output in ('bad data', '1 nan secret\n2 inf private\n-1 99 wrong\n3 -5 invalid\n', ''):
+            with mock.patch.object(self.m.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, output)):
+                self.assertEqual(self.m.machine_top_cpu(), [])
+        with mock.patch.object(self.m.subprocess, 'run', side_effect=subprocess.TimeoutExpired('ps', 1)):
+            self.assertEqual(self.m.machine_top_cpu(), [])
+
+    def test_only_hold_state_collects_and_displays_cpu_observation(self):
+        with tempfile.TemporaryDirectory() as folder, \
+                mock.patch.object(self.m, 'machine_dir', return_value=Path(folder)), \
+                mock.patch.object(self.m, 'machine_reading', return_value={'mem_free_gb': 1}), \
+                mock.patch.object(self.m, 'machine_top_cpu', return_value=[{'pid': 42, 'cpu_percent': 80, 'command': 'fixture'}]) as top:
+            state = self.m.machine_state()
+            self.assertEqual(top.call_count, 1)
+            self.assertIn('top CPU: fixture pid=42 80%', self.m.machine_summary(state))
+            with mock.patch.object(self.m, 'machine_reading', return_value={}):
+                self.assertNotIn('top CPU:', self.m.machine_summary(self.m.machine_state()))
+                self.assertEqual(top.call_count, 1)

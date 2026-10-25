@@ -96,3 +96,13 @@ probing its numeric PIDs. Missing or unknown boot readings preserve existing
 process identity behavior and never imply death. Legacy queue rows remain valid.
 No uptime subtraction, clock-derived estimate, service change or reboot probe is
 needed. Queue readers accept the optional field and keep old compatibility.
+
+## D804: Show bounded CPU observations when machine admission is held
+
+Held machine diagnostics collect up to three top CPU observations using one
+one-second `ps` command. Only PID, CPU percentage and executable basename are
+shown; command arguments and full paths are excluded. Invalid/nonfinite readings
+or probe failures leave the diagnostic unknown. This observation explains current
+CPU activity without claiming causation or changing admission policy. Unheld
+state reads do not run the probe. Percentages above 100 are valid on multicore
+systems.
