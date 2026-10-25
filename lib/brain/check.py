@@ -204,6 +204,9 @@ def collect_problems(inst):
                 warnings.append(f"{folder.relative_to(inst.root)}/lessons.md: malformed lesson tags; repair before reuse")
             if not _m_instance.resolve_ref(nodes, l["from"]):
                 warnings.append(f"{folder.relative_to(inst.root)}/lessons.md: lesson from unknown node '{l['from']}'")
+    from . import learning as _m_learning
+    for n in nodes:
+        problems.extend(_m_learning.enforcement_problems(inst, n))
     for x in _m_schedules.read_schedules(inst):
         for f in _m_schedules.SCHEDULE_FIELDS:
             if not x.get(f):

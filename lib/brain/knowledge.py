@@ -380,7 +380,7 @@ def cmd_specialist_accept(a):
         print(f"{sid}: accepted")
 
 
-def direction_principles(path):
+def direction_principles(path, sections=("## Principles",)):
     """Read explicit ids only from the Principles section; never infer or activate rules.
 
     Each ### id: title block may name one enforced_by value. Keep that value as
@@ -397,7 +397,7 @@ def direction_principles(path):
         if fenced:
             continue
         if re.match(r"^#{1,2} ", line):
-            active = line.strip() == "## Principles"
+            active = line.strip() in sections
             current = None
         elif active and line.startswith("### "):
             m = re.fullmatch(r"### ([a-z][a-z0-9-]*): .+", line)
@@ -506,6 +506,8 @@ def cmd_lesson(a):
     _m_common.safe_target(path)
     path.write_text("\n".join(lines) + "\n")
     inst.commit([path], f"lesson: {a.specialist} from {src['id']}")
+    from . import learning as _m_learning
+    _m_learning.materialize_enforcement_tasks(inst, target)
     print(line)
 
 

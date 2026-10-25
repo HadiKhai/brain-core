@@ -93,3 +93,19 @@ lessons, provenance, scope or direction. Reads remain repeatable until handled.
 Distillation proposes an evidence-backed diff and requires an explicit decision
 before applying it. Corrupt receipts, lessons and source policy fail closed with
 repair notices. Inactive or out-of-scope specialist lessons never participate.
+
+## D904: Enforcement uses declared rules and scoped correction evidence
+
+Stable rule ids in direction Principles and role/standard Standards, Checklist
+or Never sections carry `enforced_by` paths or `wish`. Paths are relative to the
+node's bound home and cannot escape it. Check reports missing declared files;
+facts and dashboard JSON expose wish counts and percentages. Two scoped wish
+corrections emit a stable check-work notice. Rule declarations and correction
+snapshots are preserved separately; installing a declared check clears that wish.
+
+Task records are produced only during lesson capture or explicit
+`enforcement --sync-tasks`, using the task domain's idempotent source API.
+Read-only due, facts and dashboard calls never create tasks. Source identities
+are stable per target/principle so observations preserve parked/dropped progress.
+Inactive, foreign-scope and malformed evidence cannot create work. Free-form
+legacy prose is not guessed into new rule ids or silently activated.

@@ -23,6 +23,7 @@ from . import jobs as _m_jobs
 from . import handback_queue as _m_handback_queue
 from . import dispatcher as _m_dispatcher
 from . import knowledge as _m_knowledge
+from . import learning as _m_learning
 from . import land_checks as _m_land_checks
 from . import messages as _m_messages
 from . import machine as _m_machine
@@ -141,6 +142,8 @@ def writes(a):
         return a.new
     if name == 'cmd_index':
         return a.record
+    if name == "cmd_enforcement":
+        return a.sync_tasks
     if name == 'cmd_due':
         return bool(getattr(a, 'synthesis_seen', None) or getattr(a, 'defer', None) or getattr(a, 'ack', None))
     if name == "cmd_changes":
@@ -394,6 +397,8 @@ def main():
     t.add_argument("id", nargs="+"); t.add_argument("--at")
     t.add_argument("--reviewed-by", required=True, dest="reviewed_by")
     t.set_defaults(f=_m_knowledge.cmd_specialist_accept)
+    cmd("enforcement", _m_learning.cmd_enforcement, "inspect enforcement and synchronize check tasks", "id",
+        opt("--sync-tasks", action="store_true"), opt("--json", action="store_true"))
     cmd("lesson", _m_knowledge.cmd_lesson, "brain lesson <specialist|node> --from <node> \"text\"", "specialist",
         opt("--from", dest="source", required=True), opt("--at"),
         opt("--node", action="store_true", help="record a correction to a node instead of a specialist"),
