@@ -675,7 +675,9 @@ def watch_run(inst, kinds=None, quiet=False, sources=None):
                 queued = True
         target = group['node']
         directory = _m_hosts.wake_directory(inst, target)
-        if not queued and group['command'] and directory.is_dir() and any(directory.glob('*.pending')):
+        from . import wake_turns as _m_wake_turns
+        if not queued and group['command'] and directory.is_dir() and (
+                any(directory.glob('*.pending')) or _m_wake_turns.wake_turn_stuck(inst, target)):
             _m_hosts.wake_start(inst, target)  # retries queued failures without another model tick
     # Screened current excerpts are recomputed; historical acknowledgement stores only digests.
     # Corrupt files remain byte-for-byte available for repair. Healthy stores

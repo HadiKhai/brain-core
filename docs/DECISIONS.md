@@ -56,16 +56,18 @@ and inherited model configuration without activating inherited runtime policy.
 
 
 
-## D401: Git-owned landing and compatible batch advice
 
-A clean main checkout is fast-forwarded by Git with autostash and ignored-file
-replacement disabled. An unoccupied main uses one compare-and-swap ref update.
-Publication never rolls back a checkout or ref. Closure requires an explicit
-successful publication receipt; ambiguous results retain the journal for repair.
-Host settlement remains pending until separately supplied, validated evidence.
+## D501: Consumption-aware wake transport is opt-in
 
-A completed job with valid recorded-base evidence and a clean merge may receive
-batch-eligibility advice after main advances. This advisory never marks it ready
-against current main: the integration result still requires verification. Ordinary
-readiness, conflict refusals and worker-owned packets remain unchanged. Display
-advice validates recorded lane evidence without executing lane-map commands.
+A machine-local `wake_coalesce=on` binding enables one outstanding wake per
+coordinator/transport pair. Legacy bindings retain delivery behavior. A separate
+turn receipt aggregates opaque identities and fixed cause counts until a visible
+`due` consumes it. Queue keys include the binding in this mode, so a new
+coordinator does not inherit an old coordinator's consumption state. One reminder
+attempt follows thirty minutes without consumption. Root due reports the stuck
+coordinator. Invalid or unwritable turn state never supplies suppressing evidence.
+
+The receipt is reserved before transport and consumption fences its completion,
+including a coordinator that runs due before transport returns. Consumption merges
+complete same-binding arrivals and leaves damaged records available for delivery.
+This mechanism cannot determine whether a host is idle or draining its queue.

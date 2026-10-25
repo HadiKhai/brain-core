@@ -23,6 +23,7 @@ from . import nodes as _m_nodes
 from . import status as _m_status
 from . import transitions as _m_transitions
 from . import upgrade as _m_upgrade
+from . import wake_turns as _m_wake_turns
 
 
 # Wake state belongs to the instance, never to an external home. Only opaque reason
@@ -75,9 +76,15 @@ def wake_start(inst, n):
                      start_new_session=True, close_fds=True)
 
 
+def wake_request_key(inst, n, reason):
+    target, _ = wake_target(inst, n)
+    owner = _m_wake_turns.wake_turn_binding(inst, target) if _m_wake_turns.wake_turn_enabled(target) else ''
+    return hashlib.sha256((n['id'] + '\0' + reason + ('\0' + owner if owner else '')).encode()).hexdigest()
+
+
 def wake_recorded(inst, n, reason):
     target, _ = wake_target(inst, n)
-    key = hashlib.sha256((n['id'] + '\0' + reason).encode()).hexdigest()
+    key = wake_request_key(inst, n, reason)
     directory = wake_directory(inst, target)
     return any((directory / (key + suffix)).exists() for suffix in ('.pending', '.sent'))
 
@@ -311,7 +318,7 @@ def request_wake(inst, n, reason, items=None, explicit=False):
             items = wake_reason_items(inst, n, reason)
             if len(items) == 1:
                 reason = 'overdue:' + items[0]['id']
-        key = hashlib.sha256((n["id"] + "\0" + reason).encode()).hexdigest()
+        key = wake_request_key(inst, n, reason)
         pending = directory / (key + ".pending")
         delivered = directory / (key + ".sent")
         if delivered.exists() and time.time() - delivered.stat().st_mtime < WAKE_DEDUP_SECONDS:
@@ -341,7 +348,9 @@ def request_wake(inst, n, reason, items=None, explicit=False):
                     refs = wake_item_refs(original)
                 except ValueError:
                     refs = original  # retain contradictory evidence for fail-open delivery
-            _m_common.atomic_write(pending, json.dumps({'items': refs, **({'explicit_kinds': True} if explicit else {})}) + '\n')
+            _m_common.atomic_write(pending, json.dumps({'items': refs, **({'binding': _m_wake_turns.wake_turn_binding(inst, target)}
+                              if _m_wake_turns.wake_turn_enabled(target) else {}),
+                              **({'explicit_kinds': True} if explicit else {})}) + '\n')
         wake_start(inst, target)
         return True
     except (Exception, SystemExit):
@@ -352,6 +361,17 @@ def wake_payload(reason):
     """Only opaque item keys and fixed cause labels may leave the instance."""
     return json.dumps({'event': 'brain-wake', 'reason': reason},
                       separators=(',', ':')).encode()
+
+
+def wake_reason_summary(refs, pending=()):
+    labels = {'inbox': 'request', 'handback': 'hand-back', 'question': 'question',
+              'overdue-question': 'overdue question'}
+    counts = {}
+    for ref in refs:
+        label = labels.get(ref['kind'], 'changed item')
+        counts[label] = counts.get(label, 0) + 1
+    return ', '.join(str(count) + ' ' + label + ('s' if count != 1 else '')
+                     for label, count in sorted(counts.items())) or str(max(1, len(pending))) + ' new request(s)'
 
 
 def wake_delivery_reason(refs, pending):
@@ -512,7 +532,7 @@ def wake_drain(inst, n, once=False):
                         path.unlink(missing_ok=True)
                     elif wake_actionable_pending(inst, path):
                         pending.append(path)
-                if not pending:
+                if not pending and not _m_wake_turns.wake_turn_stuck(inst, n):
                     return
                 last = directory / "last"
                 try:
@@ -563,6 +583,10 @@ def wake_drain(inst, n, once=False):
                         broken.replace(directory / ('history-invalid-' + os.urandom(8).hex() + '.json'))
                     history = []
                 refs = wake_delivery_items(current, target, pending)
+                action, turn_token = _m_wake_turns.wake_turn_prepare(current, target, pending, refs)
+                if action == 'hold':
+                    attempted.update(path.name for path in pending)
+                    return
                 snapshot = wake_snapshot(current, target, refs)
                 if history:
                     before = history[-1].get('snapshot', history[-1]['items'])
@@ -582,14 +606,18 @@ def wake_drain(inst, n, once=False):
                 except OSError:
                     pass  # comparison bookkeeping cannot suppress a question
                 try:
-                    reason = wake_delivery_reason(refs, pending)
+                    reason = (wake_reason_summary(refs, pending) if turn_token else wake_delivery_reason(refs, pending))
+                    if action == 'reminder':
+                        reason = 'Coordinator wake remains unconsumed for 30 minutes.'
                     sent = wake_send(command, reason=reason)
                     status = 200 if sent else "delivery failed"
                 except WakeRefused as error:
                     sent, status = False, error.args[0]
                 except Exception:
                     sent, status = False, "transport error"
-                if sent:
+                if action != 'reminder':
+                    _m_wake_turns.wake_turn_finish(current, target, turn_token, sent)
+                if sent and action != 'reminder':
                     for path in pending:  # one generic tick covers all currently queued reasons
                         _m_common.atomic_write(path.with_suffix(".sent"), "delivered\n")
                         path.unlink(missing_ok=True)
