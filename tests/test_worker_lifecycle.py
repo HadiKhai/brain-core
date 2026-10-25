@@ -207,7 +207,8 @@ class WorkerLifecycle(Scenario):
 
     def test_native_resume_brief_defers_baseline_until_replacement_binding(self):
         owner = self.m._owners['restart_worker']
-        def route(inst, n, args):
+        def route(inst, n, args, *, extra):
+            self.assertEqual(extra, [])
             args.model, args.job_class, args.effort = 'fixture-model', 'build', 'high'
             args.selection_line = 'modelSelection: ' + json.dumps({'instanceId': 'codex', 'model': 'fixture-model'})
             return 'codex', 'Fixture account snapshot'
@@ -216,10 +217,12 @@ class WorkerLifecycle(Scenario):
                 mock.patch.object(owner._m_briefs._m_knowledge, 'worker_route', side_effect=route), \
                 mock.patch.object(owner._m_reminders, 'acknowledge_usage_restart', side_effect=AssertionError('early acknowledgement')):
             self.m.usage_restart_item(self.inst, self.n, self.row)
+            before = self.m.lifecycle_read(self.inst)
             text, selection = self.m.restart_brief(self.inst, self.n, self.row)
         self.assertIn('Draw', text)
         self.assertEqual(selection['model'], 'fixture-model')
         self.assertTrue(self.m.lifecycle_read(self.inst)['usage'][self.m.digest(['root', self.key])]['episode'])
+        self.assertEqual(self.m.lifecycle_read(self.inst), before)
 
     def initial_tick(self):
         owner = self.m._owners['launch_worker']

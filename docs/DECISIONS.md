@@ -2066,3 +2066,19 @@ have not been written. Existing native verification logs capture the terminal
 stream without command changes; private structured evidence is opt-in. The
 configuration is a shared lane input. Collection and business assertions remain
 unchanged; synthetic proofs cover interruption, xdist timeout and fixture errors.
+
+## D20002: Isolate completion reader cases by delivery owner
+
+Completion read-failure fixtures bind a fresh fabricated recipient for each
+independent failure mode. Successful frozen snapshots acknowledge identities for
+their delivery owner, so reusing that owner makes a later case test suppression
+of already shown work instead of unreadable completion evidence. Existing
+assertions still require unknown job or ledger notices and mixed requests to
+survive while unrelated stale notices retire. Additional assertions prove the
+recipient starts without shown identities and that a second request with the
+same identities cannot repeat delivery, including during the read failure.
+
+The native resume-brief fixture accepts the routing helper's explicit `extra`
+argument and checks its empty context list. It retains the early-acknowledgement
+trap and verifies the complete restart lifecycle record is unchanged by brief
+preparation. Runtime delivery, ownership and baseline rules remain unchanged.
