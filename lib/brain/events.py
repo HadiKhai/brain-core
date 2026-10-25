@@ -721,7 +721,10 @@ def snapshot_view(inst, n, known_merges=None):
     hints = {}
     for cells in status.active_work(n, include_closed=True):
         if len(cells) >= 4:
-            hints.setdefault(cells[0], []).append(cells)
+            # Match the cleanup reader's supported backtick/annotation syntax.
+            branch = cells[0].replace('`', '').split()
+            if branch:
+                hints.setdefault(branch[0], []).append(cells)
     all_rows = state['jobs'] or []
     for row in all_rows:
         if row['Ended'] and row not in jobs.unsettled_jobs(all_rows):
