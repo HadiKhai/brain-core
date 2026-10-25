@@ -78,7 +78,7 @@ class GateForecasts(Scenario):
         with mock.patch.object(self.m, 'machine_dir', return_value=directory), \
                 mock.patch.object(self.inst, 'node', return_value=n), \
                 mock.patch.object(self.m, 'process_stamp', return_value='fixture'), \
-                mock.patch.object(self.m, 'machine_policy', return_value={}), \
+                mock.patch.object(self.m, 'machine_policy', return_value=self.m.MACHINE_DEFAULTS), \
                 mock.patch.object(self.m, 'machine_reading', return_value={}), \
                 mock.patch.object(self.m, 'machine_reasons', return_value=[]), \
                 mock.patch.object(self.m, 'machine_limit', return_value=1), \
