@@ -1832,3 +1832,20 @@ Worktree cleanup records current journal metadata for replay without automatical
 rewriting the status document, Active work table or status archive. Explicit
 status refresh still materializes the view and caps the Now section. Other event
 projection paths remain available.
+
+## D18301: Separate service serialization from ordinary state and verify admission
+
+Machine service install and uninstall share the instance's bounded service
+reservation. Their ordinary state lock is released while waiting for the
+reservation and while calling the service manager, then the existing released
+transaction rechecks its inputs. Dry-run previews do not acquire the reservation.
+
+Managed verification fixtures use real Instances and private storage. Cheap
+checks keep their result and terminal outcome through cleanup, and full admission
+starts only after a successful cheap check. Fitness uses heavy admission; ordinary
+verify lanes retain FIFO slot admission. Separate contention assertions prove
+fitness coexistence and verify requeue ordering, with every owned attempt finalized.
+
+Code-home admission fixtures declare a harmless verify command and a recorded
+coordinator tick before testing thermal holds. These prerequisites do not weaken
+the admission refusal, quiet output or absent-worktree assertions.

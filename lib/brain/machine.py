@@ -1386,7 +1386,14 @@ def cmd_machine(a):
             _m_release.tick_releases(inst)
         return
     if a.action in ("install", "uninstall"):
-        machine_service(inst, a.action, a.yes)
+        if a.yes:
+            # Keep service mutations serialized without holding ordinary state
+            # while either the reservation or the service manager is waiting.
+            with _m_instance.released(inst):
+                with _m_instance.reservation(inst, 'machine-service'):
+                    machine_service(inst, a.action, a.yes)
+        else:
+            machine_service(inst, a.action, a.yes)
         return
     nodes = inst.nodes()
     if a.missing_homes:

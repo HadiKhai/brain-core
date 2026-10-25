@@ -97,6 +97,7 @@ class GreenRelease(Scenario):
 
     def test_native_sampler_calls_optional_release_tick_after_watcher(self):
         m, inst, _, _ = self.setup_release()
+        inst = m.Instance(self.init('sampler'))
         owner = m.cmd_machine.__globals__
         watch = importlib.import_module(owner['__package__'] + '.watch')
         order = []

@@ -417,6 +417,12 @@ raise SystemExit(result)
                     p.stderr.close()
 
     def test_lane_owner_requeues_behind_waiting_verify(self):
+        self.lane_owner_with_waiting_verify(fitness=False)
+
+    def test_fitness_heavy_admission_coexists_with_verify_slot(self):
+        self.lane_owner_with_waiting_verify(fitness=True)
+
+    def lane_owner_with_waiting_verify(self, fitness):
         m = self.m
         root, home, wt = _test_verify.WorkerReadyPackets.job(self)
         self.b(root, 'new', 'other', '--title', 'Other', '--home', str(home))
@@ -424,55 +430,65 @@ raise SystemExit(result)
         n = inst.node('a')
         w, env = {'path': str(wt)}, dict(os.environ)
         stream = m.run_verify_stream
-        for fitness in (False, True):
-            with self.subTest(fitness=fitness):
-                started, tokens, errors, threads = [], [], [], []
-                first = 'fitness' if fitness else 'first'
-                n['fm']['verify_lanes_check'] = 'true' if fitness else ''
-                lanes = [dict(name=name, command='true', schedule='job', requires=[], always=False)
-                         for name in (["second"] if fitness else ["first", "second"])]
-                snap = dict(lanes=lanes, hashes={l['name']: 'fixture' for l in lanes},
-                            context='fixture', map_hash='fixture', config_hash='fixture')
+        started, tokens, errors, threads = [], [], [], []
+        release_waiting = threading.Event()
+        first = 'fitness' if fitness else 'first'
+        n['fm']['verify_lanes_check'] = 'true' if fitness else ''
+        lanes = [dict(name=name, command='true', schedule='job', requires=[], always=False)
+                 for name in (["second"] if fitness else ["first", "second"])]
+        snap = dict(lanes=lanes, hashes={l['name']: 'fixture' for l in lanes},
+                    context='fixture', map_hash='fixture', config_hash='fixture')
 
-                def waiting():
-                    try:
-                        m.run_verify(inst, inst.node('other'), 'waiting', 'true', w, env)
-                    except BaseException as e:
-                        errors.append(e)
+        def waiting():
+            try:
+                m.run_verify(inst, inst.node('other'), 'waiting', 'true', w, env)
+            except BaseException as e:
+                errors.append(e)
 
-                def observe(inst, n, branch, command, w, env, token, lane=None):
-                    started.append(lane or 'waiting')
-                    tokens.append(token)
-                    if lane == first:
-                        thread = threading.Thread(target=waiting)
-                        threads.append(thread)
-                        thread.start()
-                        deadline = time.monotonic() + 5
-                        while time.monotonic() < deadline:
-                            with m.machine_queue() as q:
-                                if len(q.rows) == 2:
-                                    self.assertEqual([r['state'] for r in q.rows], ['running', 'queued'])
-                                    break
-                            time.sleep(.002)
-                        else:
-                            self.fail('waiting verify did not join the queue')
-                    return stream(inst, n, branch, command, w, env, token, lane=lane)
+        def observe(inst, n, branch, command, w, env, token, lane=None):
+            started.append(lane or 'waiting')
+            tokens.append(token)
+            if fitness and lane is None:
+                self.assertTrue(release_waiting.wait(5))
+            if lane == first:
+                thread = threading.Thread(target=waiting)
+                threads.append(thread)
+                thread.start()
+                deadline = time.monotonic() + 5
+                while time.monotonic() < deadline:
+                    with m.machine_queue() as q:
+                        if len(q.rows) == 2:
+                            self.assertEqual([r['kind'] for r in q.rows],
+                                             ['heavy' if fitness else 'verify', 'verify'])
+                            self.assertEqual([r['state'] for r in q.rows],
+                                             ['running', 'running' if fitness else 'queued'])
+                            release_waiting.set()
+                            break
+                    time.sleep(.002)
+                else:
+                    self.fail('waiting verify did not join the queue')
+            return stream(inst, n, branch, command, w, env, token, lane=lane)
 
-                with mock.patch.object(m, 'machine_limit', return_value=1), \
-                        mock.patch.object(m, 'run_verify_stream', side_effect=observe), \
-                        contextlib.redirect_stdout(io.StringIO()):
-                    try:
-                        result = m.run_lanes(inst, n, 'job', w, env, snap, None, 'head', 'main', {})
-                    finally:
-                        for thread in threads:
-                            thread.join(10)
-                            self.assertFalse(thread.is_alive())
-                self.assertEqual(errors, [])
-                self.assertEqual(result['verify_result'], 0)
-                self.assertEqual(started, [first, 'waiting', 'second'])
-                self.assertEqual(len(set(tokens)), 3)
-                with m.machine_queue() as q:
-                    self.assertEqual(q.rows, [])
+        with mock.patch.object(m, 'machine_limit', return_value=1), \
+                mock.patch.object(m, 'run_verify_stream', side_effect=observe), \
+                contextlib.redirect_stdout(io.StringIO()):
+            try:
+                result = m.run_lanes(inst, n, 'job', w, env, snap, None, 'head', 'main', {})
+            finally:
+                release_waiting.set()
+                for thread in threads:
+                    thread.join(10)
+                    self.assertFalse(thread.is_alive())
+        self.assertEqual(errors, [])
+        self.assertEqual(result['verify_result'], 0)
+        self.assertEqual(started, [first, 'waiting', 'second'])
+        self.assertEqual(len(set(tokens)), 3)
+        with m.machine_queue() as q:
+            self.assertEqual(q.rows, [])
+        waits = json.loads((root / '.brain/wake/machine-holds.json').read_text())['waits']
+        self.assertEqual(len(waits), 3)
+        self.assertTrue(all(r['ended_at'] is not None and r['outcome'] == 'success'
+                            for r in waits.values()))
 
     def test_one_verify_keeps_slot_until_all_parallel_children_finish(self):
         m = self.m
@@ -744,6 +760,9 @@ raise SystemExit(result)
         home = self.tmp / "fixture-home"
         self.repo(home, {"fixture.txt": "fixture"})
         self.b(root, "set", "root", "home=" + str(home))
+        self.b(root, "set", "root", "verify=true")
+        self.b(root, 'schedule', 'add', 'fixture-tick', '--when', 'every 15 minutes',
+               '--node', 'root', '--brief', 'Inspect fixture work')
         readings = self.tmp / "readings.json"
         readings.write_text(json.dumps({**self.good, "thermal": "pressure"}))
         code = ("import core_loader,json; from pathlib import Path; "
