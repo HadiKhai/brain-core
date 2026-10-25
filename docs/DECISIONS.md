@@ -56,97 +56,35 @@ and inherited model configuration without activating inherited runtime policy.
 
 
 
-## D1001: Keep governance identifiers out of content screening and worker output
+## D1101: Inspect current work and batch dashboard repository evidence
 
-Exact configured principal identifiers in library and specialist scope metadata
-are governance values. Screen all other metadata and content, including duplicate
-governance keys, with the existing never-name checks. Use the same frontmatter
-grammar for parsing and streaming scans. Limit on-disk exemptions to recognized
-instance library, role and lesson paths; external copies and ordinary files stay
-strict, including Git index blobs and symlinks.
+The dashboard retains metadata for every recorded worktree. Git status, socket,
+readiness and file-list inspection apply to worktrees with an open ledger job or
+an active status-table row. Closed worktrees expose unknown activity values;
+they are never presented as clean or ready from an omitted inspection. Reopening
+a job or changing the active-work table invalidates repository discovery.
 
-Proposal acceptance, hiring, recall and connection discovery apply this distinction
-without changing stored scopes. Worker-facing item output removes governance
-lines when those lines contain a forbidden principal. Final briefs remain subject
-to strict content checks.
+Due evidence batches branch tips and merged membership in one local ref snapshot
+per repository and integration mode. It retains closed and unrecorded worktrees
+for reconciliation. Dashboard refreshes may reuse this evidence with the same
+file/ref metadata keys as their readiness display cache. Ref changes, worktree
+existence, bindings and ledger inputs invalidate it. The cache is context-local;
+explicit lifecycle and readiness actions read current evidence outside it.
 
-## D1002: Validate decision scope and external fact citations
+Tests cover a large closed-worktree inventory, active-row recovery, reopened
+jobs, batched ref reads, invalidation and an explicit action after cached display.
 
-Dated entries in node decision logs carry an explicit `Applies to:` scope.
-`check` warns on missing scope and on external fact claims without a `Source:`
-URL or `probe:` command. Explicit fact labels and common vendor/provider policy
-phrasing trigger the citation check. This validates evidence metadata only; it
-never executes a probe or claims that a cited source proves the statement.
+## D1102: Bind preview tours to source and artifact evidence
 
-`decision_scope_since` on a node or instance can exempt earlier dated entries.
-Without a cutoff, all dated entries are checked. Template examples are ignored.
+`preview <node> --record <receipt.json>` validates an externally captured preview
+tour before replacing its machine-local receipt. Evidence names the configured
+preview address and tour, a bound source worktree or home at a clean HEAD, an
+explicit capture time, and SHA-256 digests for the tour and its linked PNG
+screenshots. Early worktree milestones can be recorded before a main landing.
 
-## D1003: Enforce declared tool patterns with exact single-use allowances
-
-`hook pretool` matches explicit `Forbidden actions` bullets in node instructions,
-inheriting only to the nearest ownership boundary. Shell bullets are conservative
-textual glob searches over a whole command, including compound commands; `tool:`
-patterns match tool identities. This declared subset is not a shell sandbox.
-
-`allow --once` records an exact shell command, resolved working directory and node.
-It does not run the command. A locked atomic state update consumes the allowance
-before returning permission, with opaque issued/consumed audit events. Policy
-changes invalidate allowances. Hook errors fail open, matching existing runtime
-hook behavior. Runtime adapter templates register the hook; updating an adapter
-file does not install or activate it on a machine.
-
-An optional worker-message validator receives only explicit host session identity
-and raw tool arguments; the action engine never guesses a caller's role.
-
-## D1004: Expire explicit operational limits without granting outward consent
-
-A limit may declare one absolute `Expires:` timestamp. Brief generation omits the
-limit after that time, without changing its source record. Invalid or duplicate
-expiry metadata keeps the limit active and produces a check warning. Narrative
-`Lift when:` conditions remain explanatory; core does not guess that they hold.
-
-Publication policy continues to snapshot every original limit, including expired
-ones. An operational expiry never grants push, publication or deletion consent.
-
-## D1005: Review independence is a fresh non-builder thread identity
-
-Instances and nodes may select `review_independence=fresh-thread`, with optional
-`review_runtime` and `review_model`. Same-runtime and same-model reviewers then
-qualify when their actual host identity belongs to a distinct, fresh context that
-did not build the change. Missing identities or unknown/reused context refuse.
-Cross-runtime routing remains the compatibility default. A legacy same-runtime
-exception needs an absolute expiry and an explicit reason; it still requires the
-fresh-thread identity receipt before readiness.
-
-`review --receipt-file` records a completed review separately from briefing a new
-round. A receipt names the exact job generation and code head, observed builder
-and reviewer runtime/model/thread, context independence and verdict. Builder
-identity must match recorded worker bindings and the builder route. Recording
-requires an observation from the last five minutes; the immutable observation
-remains valid for the same code. Later code or a blocked verdict needs new proof.
-These are coordinator-supplied host observations, not independent live-host queries.
-
-Thread identities and receipt histories live under machine-local `.brain/`.
-The shared ledger stores only the local receipt reference and required-proof flag.
-Readiness consumes a pure validator so the gate owner can enforce it before work.
-
-## D1006: Bind preview rendering and source comparisons to code and URLs
-
-A configured preview or explicit `requires_preview_evidence=true` requires an
-exact-head receipt. Each presented preview/review URL needs a successful rendering
-observation and evidence reference, plus three distinct displayed items compared
-with their source values and references. Wrong URLs, absent rendering evidence,
-fewer than three distinct matches, future observations and stale heads refuse.
-
-The recording command stores supplied browser observations locally; it does not
-pretend to open a browser itself. Readiness uses the pure validator. A screenshot
-tour receipt and these source comparisons prove different properties.
-
-## D1007: Preserve finding closure until its code inputs change
-
-Findings have stable IDs, failure classes, severity, explicit tracked input paths
-and closure evidence. Machine-local state retains closed findings across later
-reviews and unrelated commits. A change to a bound Git object reopens the finding;
-closing it again requires evidence against the new inputs. Existing IDs cannot
-silently rebind their input scope. Review observations retain their original
-verdict while the finding-state projection provides durable closure history.
+The read-only check and due queue reject missing, stale or malformed evidence.
+A bare URL does not discharge the screenshot-tour need. Failed recording retains
+the prior receipt; changing source, address, tour binding or artifact bytes makes
+it stale. The receipt validates supplied capture evidence, not visual quality or
+the accuracy of application data. Those remain the browser review's responsibility.
+No network request, browser launch or source change occurs during validation.

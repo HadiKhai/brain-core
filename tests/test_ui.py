@@ -635,6 +635,82 @@ class ExpandedUI(Scenario):
             self.assertIsNone(module.ui_reuse_server(inst, 4747, 'new'))
             kill.assert_not_called()
 
+    def test_closed_worktrees_keep_metadata_without_git_or_socket_checks(self):
+        module = self.m._owners['cached_worktree']
+        root = self.first_paint_root()
+        inst = self.m.UIInstance(root)
+        node = inst.nodes()[0]
+        record = {'path': str(root), 'port': 4747}
+        node['local']['worktrees'] = {'job/closed': record, 'job/live': record}
+        rows = [{'Job': 'job/closed', 'Ended': '2026-01-01'}, {'Job': 'job/live', 'Ended': ''}]
+        cache = module.UIStateCache()
+        with mock.patch.object(module._m_jobs, 'read_jobs', return_value=rows), \
+             mock.patch.object(module._m_status, 'active_work', return_value=[]), \
+             mock.patch.object(module, 'ui_worktree', return_value={'branch': 'job/live'}) as inspect:
+            closed = module.cached_worktree(inst, root, 'job/closed', record, node, cache)
+            inspect.assert_not_called()
+            self.assertEqual(closed['branch'], 'job/closed')
+            self.assertTrue(closed['exists'])
+            self.assertIsNone(closed['dirty'])
+            self.assertFalse(closed['live'])
+            module.cached_worktree(inst, root, 'job/live', record, node, cache)
+            inspect.assert_called_once()
+            with mock.patch.object(module._m_status, 'active_work', return_value=[['job/closed', 'old thread', '-', 'Review']]):
+                self.assertEqual(set(module.ui_live_worktrees(node)), {'job/live'})
+
+    def test_due_repository_snapshot_batches_refs_and_display_cache_never_leaks_to_actions(self):
+        module = self.m._owners['local_job_state']
+        root = self.first_paint_root()
+        home = self.repo(self.tmp / 'repository')
+        inst = self.m.UIInstance(root)
+        node = inst.nodes()[0]
+        node['home_path'] = home
+        tip = self.git('rev-parse', 'HEAD', cwd=home).strip()
+        self.git('branch', 'job/merged', cwd=home)
+        record = {'path': str(home), 'start': '0' * 40}
+        values, keys = {}, {('root', 'job/merged'): 'first'}
+        real_git = module._m_common.git
+        with mock.patch.object(module._m_common, 'git', wraps=real_git) as git:
+            with module.local_job_snapshot(values, keys):
+                first = module.local_job_state(node, 'job/merged', record)
+                for i in range(160):
+                    module.local_job_state(node, 'job/missing-' + str(i), record)
+            self.assertEqual(first, {'exists': True, 'tip': tip, 'merged': True})
+            self.assertLess(git.call_count, 8, 'one ref scan per node, not commands per worktree')
+            git.reset_mock()
+            with module.local_job_snapshot(values, keys):
+                self.assertEqual(module.local_job_state(node, 'job/merged', record), first)
+            git.assert_not_called()
+            self.git('branch', '-D', 'job/merged', cwd=home)
+            self.assertEqual(module.local_job_state(node, 'job/merged', record)['tip'], '')
+            self.assertGreater(git.call_count, 0, 'an explicit action must read current refs')
+            keys[('root', 'job/merged')] = 'second'
+            with module.local_job_snapshot(values, keys):
+                self.assertEqual(module.local_job_state(node, 'job/merged', record)['tip'], '')
+
+    def test_input_discovery_scans_only_live_worktrees_and_reopens_on_ledger_change(self):
+        module = self.m._owners['UIInputs']
+        root = self.first_paint_root()
+        inst = self.m.UIInstance(root)
+        node = inst.nodes()[0]
+        node['home_path'], node['external'] = root, True
+        records = {f'job/closed-{i}': {'path': str(root / f'closed-{i}')} for i in range(160)}
+        records['job/live'] = {'path': str(root / 'live')}
+        node['local']['worktrees'] = records
+        rows = [{'Job': 'job/live', 'Ended': ''}]
+        with mock.patch.object(module._m_jobs, 'read_jobs', side_effect=lambda _: list(rows)), \
+             mock.patch.object(module._m_status, 'active_work', return_value=[]), \
+             mock.patch.object(module._m_common, 'git', return_value=subprocess.CompletedProcess([], 0, '', '')) as git:
+            inputs = module.UIInputs(inst)
+            inspected = {call.kwargs.get('cwd') for call in git.call_args_list}
+            self.assertEqual(inspected, {root, root / 'live'})
+            before = inputs.topology
+            rows.append({'Job': 'job/closed-1', 'Ended': ''})
+            self.assertNotEqual(module.UIInputs.topology_key(inst), before)
+            rows[:] = []
+            with mock.patch.object(module._m_status, 'active_work', return_value=[['`job/closed-2`', 'thread', '-', 'working']]):
+                self.assertEqual(set(module.ui_live_worktrees(node)), {'job/closed-2'})
+
     def test_legacy_server_ownership_requires_python_brain_ui_and_the_same_brain(self):
         # Cwd/argv cannot prove the selected instance: BRAIN_ROOT can override cwd,
         # and re-exec can consume the original CLI selector before ps observes it.
@@ -665,6 +741,129 @@ class ExpandedUI(Scenario):
                             self.assertFalse(module.ui_legacy_owner(12345, root))
                             kill.assert_not_called()
                             request.assert_not_called()
+
+    def test_open_reuses_then_replaces_an_authenticated_listener_on_the_requested_port(self):
+        import http.server
+        import socket
+        import webbrowser
+        root = self.first_paint_root()
+        inst = self.m.UIInstance(root)
+        with socket.socket() as reservation:
+            reservation.bind(('127.0.0.1', 0))
+            port = reservation.getsockname()[1]
+        servers, threads, workers, opened, errors = [], [], [], [], []
+        opened_event = threading.Event()
+        original_server, original_start = http.server.ThreadingHTTPServer, threading.Thread.start
+        def server(*args, **kwargs):
+            value = original_server(*args, **kwargs)
+            servers.append(value)
+            return value
+        def start(thread):
+            if getattr(thread._target, '__name__', '') == 'initialize':
+                workers.append(thread)
+            return original_start(thread)
+        def open_url(url):
+            opened.append(url)
+            opened_event.set()
+        def run():
+            try:
+                self.m.cmd_ui(argparse.Namespace(json=False, scan=[], open=True, write=False, port=port, every=0.05))
+            except BaseException as error:
+                errors.append(error)
+        with mock.patch.object(self.m, 'load', return_value=inst), \
+             mock.patch.object(self.m, 'UISpend', side_effect=RuntimeError('synthetic initialization held')), \
+             mock.patch.object(self.m, 'ui_code_version', side_effect=['old', 'old', 'new']), \
+             mock.patch.object(http.server, 'ThreadingHTTPServer', side_effect=server), \
+             mock.patch.object(threading.Thread, 'start', start), \
+             mock.patch.object(webbrowser, 'open', side_effect=open_url), \
+             contextlib.redirect_stdout(io.StringIO()):
+            try:
+                threads.append(threading.Thread(target=run, daemon=True))
+                threads[-1].start()
+                self.assertTrue(opened_event.wait(2), 'first owned listener did not start')
+                run()
+                self.assertEqual(errors, [])
+                self.assertEqual(opened, [opened[0], opened[0]])
+                self.assertEqual(len(servers), 1, 'matching version opened another listener')
+                opened_event.clear()
+                threads.append(threading.Thread(target=run, daemon=True))
+                threads[-1].start()
+                self.assertTrue(opened_event.wait(3), 'stale owned listener was not replaced')
+                threads[0].join(1)
+                self.assertFalse(threads[0].is_alive())
+                self.assertEqual(errors, [])
+                record = json.loads(self.m.ui_server_file(inst, port).read_text())
+                self.assertEqual(record['version'], 'new')
+                self.assertNotEqual(opened[-1], opened[0], 'replacement retained obsolete authentication key')
+                self.assertTrue(all(server.server_address[1] == port for server in servers))
+                self.assertEqual(self.m.ui_server_request(port, record['key'])['version'], 'new')
+            finally:
+                for owned in servers:
+                    if owned.fileno() >= 0:
+                        owned.shutdown()
+                for thread in threads + workers:
+                    thread.join(2)
+                self.assertFalse(any(thread.is_alive() for thread in threads + workers))
+        self.assertEqual(errors, [])
+        with socket.socket() as probe:
+            self.assertNotEqual(probe.connect_ex(('127.0.0.1', port)), 0, 'owned listener leaked')
+
+    def test_preview_tour_receipt_binds_source_and_artifacts_and_never_clears_on_a_bare_url(self):
+        import hashlib
+        root = self.first_paint_root()
+        home = self.repo(self.tmp / 'preview-source')
+        inst = self.m.UIInstance(root)
+        node = inst.nodes()[0]
+        node['home_path'], node['external'] = home, True
+        node['local']['preview'] = 'http://127.0.0.1:4999/'
+        folder = self.tmp / 'preview-evidence'
+        folder.mkdir()
+        image = folder / 'overview.png'
+        # A synthetic PNG header; the receipt checks format and bytes, not visual quality.
+        image.write_bytes(b'\x89PNG\r\n\x1a\n' + b'\0' * 4 + b'IHDR' + (1280).to_bytes(4, 'big') + (720).to_bytes(4, 'big'))
+        tour = folder / 'index.md'
+        tour.write_text('# Preview tour\n\n![Overview](overview.png)\n')
+        node['local']['preview_tour'] = str(tour)
+        module = self.m._owners['cmd_report']
+        self.assertEqual(module.preview_evidence(inst, node)['state'], 'missing')
+        def preview_due():
+            state = {'jobs': [], 'worktrees': {}, 'handbacks': {}, 'inbox': []}
+            with mock.patch.object(self.m, 'due_evidence', return_value=(state, '', '')):
+                return [row['kind'] for row in self.m.due_items(inst, node, include_stale=False, include_advice=False)]
+        self.assertIn('preview-evidence', preview_due())
+        def artifact(path):
+            return {'path': str(path), 'sha256': hashlib.sha256(path.read_bytes()).hexdigest()}
+        receipt = {'version': 1, 'url': node['local']['preview'], 'branch': '',
+                   'head': self.git('rev-parse', 'HEAD', cwd=home).strip(),
+                   'checked_at': inst.now_dt().isoformat(), 'tour': artifact(tour), 'screenshots': [artifact(image)]}
+        input_path = folder / 'receipt.json'
+        input_path.write_text(json.dumps(receipt))
+        with mock.patch.object(module._m_nodes, 'load', return_value=inst), contextlib.redirect_stdout(io.StringIO()):
+            module.cmd_preview(argparse.Namespace(id='root', record=str(input_path), json=False))
+        self.assertEqual(module.preview_evidence(inst, node)['state'], 'verified')
+        self.assertNotIn('preview-evidence', preview_due())
+        image.write_bytes(image.read_bytes() + b'changed')
+        self.assertEqual(module.preview_evidence(inst, node)['state'], 'stale')
+        self.assertIn('preview-evidence', preview_due())
+        image.write_bytes(image.read_bytes()[:-7])
+        self.git('commit', '--allow-empty', '-qm', 'next preview revision', cwd=home)
+        self.assertEqual(module.preview_evidence(inst, node)['state'], 'stale')
+        before = module.preview_receipt_file(inst, node).read_bytes()
+        receipt['head'] = self.git('rev-parse', 'HEAD', cwd=home).strip()
+        receipt['screenshots'] = []
+        input_path.write_text(json.dumps(receipt))
+        with mock.patch.object(module._m_nodes, 'load', return_value=inst), self.assertRaises(SystemExit):
+            module.cmd_preview(argparse.Namespace(id='root', record=str(input_path), json=False))
+        self.assertEqual(module.preview_receipt_file(inst, node).read_bytes(), before)
+        receipt['screenshots'] = [artifact(image)]
+        for changed in ({'url': 'https://example.invalid/other'}, {'branch': 'unbound'},
+                        {'head': '0' * 40}, {'checked_at': 'not-a-date'}, {'version': True},
+                        {'screenshots': [artifact(image), artifact(image)]}):
+            with self.subTest(changed=list(changed)), self.assertRaises(ValueError):
+                module.validate_preview_evidence(inst, node, {**receipt, **changed})
+        node['local']['preview_tour'] = str(folder / 'another.md')
+        with self.assertRaises(ValueError):
+            module.validate_preview_evidence(inst, node, receipt)
 
     def test_partial_blocked_ages_are_unknown_without_history_and_do_not_poison_full_metadata(self):
         inst = self.m.UIInstance(self.first_paint_root())

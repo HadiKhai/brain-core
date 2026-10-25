@@ -5,6 +5,8 @@ import json
 import re
 import sys
 import urllib.parse
+from contextlib import contextmanager
+from contextvars import ContextVar
 from pathlib import Path
 
 from . import briefs as _m_briefs
@@ -20,6 +22,7 @@ from . import knowledge as _m_knowledge
 from . import machine as _m_machine
 from . import nodes as _m_nodes
 from . import proposals as _m_proposals
+from . import reports as _m_reports
 from . import schedules as _m_schedules
 from . import rotation as _m_rotation
 from . import reminders as _m_reminders
@@ -372,8 +375,55 @@ def facts_meta(n):
         return {}
 
 
+_LOCAL_JOB_SNAPSHOT = ContextVar('brain_local_job_snapshot', default=None)
+
+
+@contextmanager
+def local_job_snapshot(values=None, keys=None):
+    """Batch one read's refs; optional metadata keys reuse display evidence only."""
+    if values is None and _LOCAL_JOB_SNAPSHOT.get() is not None:
+        yield
+        return
+    token = _LOCAL_JOB_SNAPSHOT.set((values if values is not None else {}, keys or {}, {}))
+    try:
+        yield
+    finally:
+        _LOCAL_JOB_SNAPSHOT.reset(token)
+
+
 def local_job_state(n, branch, w):
     """Only files and local git refs. Unlike worktree_state, never asks gh or a remote."""
+    scope = _LOCAL_JOB_SNAPSHOT.get()
+    if scope is not None:
+        values, keys, repositories = scope
+        job = (n['id'], branch)
+        key = keys.get(job)
+        old = values.get(job)
+        if key is not None and old is not None and old[0] == key:
+            return dict(old[1])
+        home = n['home_path']
+        repository = (home, n['fm'].get('merge', 'local'))
+        if repository not in repositories:
+            tips, merged = {}, set()
+            if home and home.exists():
+                target = _m_worktrees.integration_target(n)
+                refs = _m_common.git('for-each-ref', '--format=%(refname:strip=2)%00%(objectname)',
+                                     'refs/heads/', cwd=home)
+                if not refs.returncode:
+                    tips = dict(line.split('\0', 1) for line in refs.stdout.splitlines() if '\0' in line)
+                if target:
+                    refs = _m_common.git('for-each-ref', '--format=%(refname:strip=2)',
+                                         '--merged=' + target, 'refs/heads/', cwd=home)
+                    if not refs.returncode:
+                        merged = set(refs.stdout.splitlines())
+            repositories[repository] = tips, merged
+        tips, merged = repositories[repository]
+        tip = tips.get(branch, '')
+        result = {'exists': Path(w['path']).is_dir(), 'tip': tip,
+                  'merged': bool(tip and tip != w.get('start') and branch in merged)}
+        if key is not None:
+            values[job] = (key, result)
+        return dict(result)
     home = n["home_path"]
     exists = Path(w["path"]).is_dir()
     if not home or not home.exists():
@@ -387,7 +437,8 @@ def local_job_state(n, branch, w):
 
 def file_state(inst, n):
     rows = _m_jobs.read_jobs(n)
-    wts = {b: {**w, **local_job_state(n, b, w)} for b, w in sorted(n["local"].get("worktrees", {}).items())}
+    with local_job_snapshot():
+        wts = {b: {**w, **local_job_state(n, b, w)} for b, w in sorted(n["local"].get("worktrees", {}).items())}
     from . import job_attempts as _m_attempts
     projections = {_m_jobs.job_key(r): _m_attempts.job_projection(inst, n, r) for r in rows or []}
     signals = {key: value['signal'] for key, value in projections.items()}
@@ -531,6 +582,13 @@ def due_items(inst, n, evidence=None, include_stale=True, include_ready=True, in
             episode=_m_jobs.digest([sorted(_m_jobs.job_key(r) for r in state['jobs'] or []
                                           if r.get('Ended') and r.get('Outcome') == 'merged'),
                                     sorted((b, w.get('tip')) for b, w in state['worktrees'].items() if w.get('merged'))]))
+    elif code_node(n) and any(str(value or '').strip().casefold() not in ('', 'none') for value in
+                              (n['local'].get('preview'), n['fm'].get('preview_url'))):
+        preview = _m_reports.preview_evidence(inst, n)
+        if preview['state'] != 'verified':
+            add('preview-evidence', 'preview screenshot tour is missing or stale; inspect the local preview, '
+                'capture its screens, then record source-bound evidence with brain preview <node> --record <receipt.json>',
+                condition='source-bound-preview-tour')
     if state["jobs"] is None:
         add("ledger", "job-ledger.md is a legacy file; reconcile jobs without overwriting it")
     unsettled = _m_jobs.unsettled_jobs(state["jobs"])
