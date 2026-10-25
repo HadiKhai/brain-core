@@ -1,4 +1,5 @@
 """Worktrees mechanics for Brain."""
+import argparse
 import json
 import os
 import shutil
@@ -11,6 +12,7 @@ from . import common as _m_common
 from . import guard as _m_guard
 from . import instance as _m_instance
 from . import jobs as _m_jobs
+from . import knowledge as _m_knowledge
 from . import nodes as _m_nodes
 from . import status as _m_status
 from . import verify as _m_verify
@@ -213,6 +215,9 @@ def cmd_wt_add(a):
             _m_common.die(f"{_m_common.tilde(path)} belongs to job {owner}; create a fresh worktree")
     if path.exists() or path.is_symlink():
         _m_common.die(f"{_m_common.tilde(path)} already exists; create a fresh worktree")
+    # Record the same default/pin selection as the first worker brief, before setup.
+    route = argparse.Namespace(branch=a.branch, model=None)
+    runtime, _ = _m_knowledge.worker_route(inst, n, route)
     exists = _m_common.git("rev-parse", "--verify", "--quiet", f"refs/heads/{a.branch}", cwd=home).returncode == 0
     base = a.base or default_base(home)
     args = ["worktree", "add", str(path), a.branch] if exists else ["worktree", "add", "-b", a.branch, str(path), base]
@@ -228,7 +233,7 @@ def cmd_wt_add(a):
         "created": inst.now()}
     inst.local_of(n["id"]).setdefault("workbench", str(wb))
     inst.save_local()
-    _m_jobs.job_started(inst, n, a.branch, n["fm"].get("runtime") or inst.cfg.get("default_runtime", ""))
+    _m_jobs.job_started(inst, n, a.branch, runtime)
     print(f"worktree: {_m_common.tilde(path)}\n  branch {a.branch}{'' if exists else ' (new, from ' + base + ')'}  ·  "
           f"{port_text(port, count)}")
     setup = n["dir"] / SETUP_FILE
