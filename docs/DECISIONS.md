@@ -228,6 +228,17 @@ reporting leftover diagnostics. Terminal delivery receipts remain durable across
 routing changes. Verification lane ownership and nonselective input mappings
 must pass the repository coverage checker as executable checks.
 
+## D418: Sampler release checks are optional and setup owns its admission
+
+The native machine sampler invokes an optional release tick after its watcher.
+The release extension owns explicit node opt-in, exact proof checks, scheduling
+windows and durable attempt caps. Missing extension is compatible; dependency
+failures inside an installed extension stay visible. Ordinary worktree creation
+requires no heavy admission. Its optional setup command owns managed admission
+and records the actual setup result separately from later verification. Its
+configured resource lease spans cleanup and retains failed claims. Release
+review checks also validate the durable finding union after job closure.
+
 ## D1301: Node-local tasks with explicit dependencies and completion evidence
 
 Store one Markdown file per task under a node's `tasks/`, using versioned,

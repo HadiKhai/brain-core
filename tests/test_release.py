@@ -1,6 +1,7 @@
 """Release preflight is pure; mocked transport proves no forced or partial push."""
 import datetime
 import hashlib
+import importlib
 import json
 import subprocess
 import sys
@@ -92,3 +93,44 @@ class GreenRelease(Scenario):
         self.assertFalse(marker.exists())
         self.assertEqual(run(data['origin_base']).returncode, 0)
         self.assertTrue(marker.is_file())
+
+
+    def test_native_sampler_calls_optional_release_tick_after_watcher(self):
+        m, inst, _, _ = self.setup_release()
+        owner = m.cmd_machine.__globals__
+        watch = importlib.import_module(owner['__package__'] + '.watch')
+        order = []
+        with mock.patch.object(m, 'load', return_value=inst), \
+                mock.patch.object(m, 'machine_sample_once', side_effect=lambda i: order.append('sample')), \
+                mock.patch.object(watch, 'watch_once', side_effect=lambda i: order.append('watch')), \
+                mock.patch.object(m, 'tick_releases', side_effect=lambda i: order.append('release')):
+            m.cmd_machine(SimpleNamespace(action='sample'))
+        self.assertEqual(order, ['sample', 'watch', 'release'])
+
+    def test_release_tick_is_disabled_without_explicit_node_setting(self):
+        m, inst, n, _ = self.setup_release()
+        n['fm'].pop('release_auto')
+        inst.nodes = lambda: [n]
+        with mock.patch.object(m, 'run_release', side_effect=AssertionError('disabled release ran')):
+            self.assertEqual(m.tick_releases(inst), [])
+
+
+import test_review_discipline as _review_tests
+
+
+class ReleaseReviewUnion(Scenario):
+    job = _review_tests.DurableFindingReadiness.job
+    context = _review_tests.DurableFindingReadiness.context
+    finding = _review_tests.DurableFindingReadiness.finding
+    pass_receipt = _review_tests.DurableFindingReadiness.pass_receipt
+
+    def test_closed_job_release_cannot_omit_an_open_durable_major(self):
+        root, wt, m, inst, n, receipt = self.context()
+        m.record_review_receipt(inst, n, 'job', dict(receipt, verdict='blocked', findings=[self.finding()]))
+        self.pass_receipt(m, inst, n, receipt, 'another-reviewer')
+        rows = m.read_jobs(n)
+        row = m.open_job(rows, 'job')
+        row.update(Ended=inst.now(), Outcome='merged', **{'Head commit': receipt['head']})
+        m.write_jobs(inst, n, rows)
+        with self.assertRaisesRegex(ValueError, 'open or reopened'):
+            m.release_reviews(inst, n, [dict(key=m.job_key(row), head=receipt['head'], branch='job')])

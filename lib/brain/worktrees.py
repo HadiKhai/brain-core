@@ -256,9 +256,13 @@ def cmd_wt_add(a):
         env = _m_verify.verify_env(n, a.branch, {"path": str(path), "port": port, "ports": count})
         env["WORKBENCH"] = str(wb)
         print("  setup: running; waiting for completion", flush=True)
-        started = time.monotonic()
-        r = subprocess.run(["sh", str(setup)], cwd=path, env=env, capture_output=True, text=True)
-        duration = time.monotonic() - started
+        with _m_verify.verification_resources(inst, n) as resources, \
+                _m_verify.command_reservation(inst, n, a.branch, kind='heavy') as token:
+            started = time.monotonic()
+            r = subprocess.run(["sh", str(setup)], cwd=path, env=env, capture_output=True, text=True)
+            duration = time.monotonic() - started
+            token.result = r.returncode
+            resources['failed'] = bool(r.returncode)
         out = (r.stdout + r.stderr).strip()
         message = f"  setup: {'ok' if r.returncode == 0 else 'FAILED (exit ' + str(r.returncode) + ')'} in {duration:.2f}s"
         if out:

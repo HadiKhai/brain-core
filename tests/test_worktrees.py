@@ -456,7 +456,7 @@ class WorktreeSetupDiagnostics(Scenario):
         home = self.repo(self.tmp / 'app', {'.gitignore': '.env\nsetup-started\n',
                          'verify.py': "from pathlib import Path\nassert Path('.env').read_text() == 'GENERATED=prepared-fixture\\n'\n"})
         self.b(r, 'new', 'a', '--title', 'A', '--home', str(home))
-        self.b(r, 'set', 'a', 'verify=python3 -B verify.py')
+        self.b(r, 'set', 'a', 'verify=python3 -B verify.py', 'verify_resources=fixture-service')
         release = home / 'allow-setup'
         (r / 'nodes/a/worktree-setup.sh').write_text(
             'touch setup-started\nwhile ! test -f "$MAIN/allow-setup"; do sleep 0.02; done\n'
@@ -480,11 +480,14 @@ class WorktreeSetupDiagnostics(Scenario):
         self.assertLess(output.index('setup: ok'), output.index('launch a worker'))
         self.assertEqual((wt / '.env').read_text(), 'GENERATED=prepared-fixture\n')
         self.assertTrue(self.finish(r).strip().endswith('ready'))
+        lease = next((self.tmp / '.local/state/brain/resource-leases').glob('*.json'))
+        self.assertEqual(json.loads(lease.read_text())['state'], 'released')
 
     def test_setup_failure_reports_duration_masks_words_and_returns_failure(self):
         r = self.init('alice')
         home = self.repo(self.tmp / 'app')
         self.b(r, 'new', 'a', '--title', 'A', '--home', str(home))
+        self.b(r, 'set', 'a', 'verify_resources=fixture-service')
         (r / 'nodes/a/never-name.txt').write_text('HiddenFixture\n')
         (r / 'nodes/a/worktree-setup.sh').write_text('echo HiddenFixture\nexit 7\n')
         process = subprocess.run([sys.executable, str(r / 'core/bin/brain'), 'wt', 'add', 'a', 'job'],
@@ -494,7 +497,25 @@ class WorktreeSetupDiagnostics(Scenario):
         self.assertNotIn('hiddenfixture', (process.stdout + process.stderr).casefold())
         self.assertNotIn('launch a worker', process.stdout)
         self.assertTrue((self.tmp / 'app-work/worktrees/job').exists())
+        lease = next((self.tmp / '.local/state/brain/resource-leases').glob('*.json'))
+        self.assertEqual(json.loads(lease.read_text())['state'], 'active')
 
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LightWorktreeAdmission(Scenario):
+    def test_cli_dispatch_does_not_admit_light_worktree_creation(self):
+        core = core_loader.SourceFileLoader('light_worktree_fixture', str(CORE / 'bin/brain')).load_module()
+        inst = argparse.Namespace(node=lambda key: {'id': key})
+        with mock.patch.dict(os.environ, self.env), \
+                mock.patch.object(core.sys, 'argv', ['brain', 'wt', 'add', 'app', 'job-light', '--no-setup']), \
+                mock.patch.object(core, 'try_find_root', return_value=None), \
+                mock.patch.object(core, 'load', return_value=inst), \
+                mock.patch.object(core, 'cmd_wt_add') as add, \
+                mock.patch.object(core, 'machine_wait', side_effect=AssertionError('light work must not wait')) as wait:
+            add.__name__ = 'cmd_wt_add'
+            core.main()
+        add.assert_called_once()
+        wait.assert_not_called()

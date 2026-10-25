@@ -612,11 +612,6 @@ def main():
             with open(os.devnull, "w") as sink:
                 os.dup2(sink.fileno(), sys.stdout.fileno())
         return
-    if a.f == _m_worktrees.cmd_wt_add:
-        inst = _m_nodes.load()
-        node = inst.node(a.id)
-        token = _m_machine.machine_wait(inst=inst, node=node["id"])
-        _m_machine.machine_release(token)
     if a.f == _m_machine.cmd_machine and a.action == "sample":
         a.f(a)  # sampler and watcher each take a short nonblocking instance lock
         return

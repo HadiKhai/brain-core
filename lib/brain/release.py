@@ -16,6 +16,7 @@ from . import common as _m_common
 from . import jobs as _m_jobs
 from . import nodes as _m_nodes
 from . import review as _m_review
+from . import review_findings as _m_review_findings
 
 
 def release_ref(home, name):
@@ -43,6 +44,11 @@ def release_reviews(inst, n, entries):
         validator(inst, n, row, entry['head'], receipt)
         if receipt['verdict'] != 'pass':
             raise ValueError('release review is blocked')
+        findings = _m_review_findings.read_finding_state(inst, n, row, required=True)['findings']
+        if any(f['severity'] in ('blocker', 'major') and
+               (f['state'] != 'closed' or _m_review_findings.finding_inputs(
+                   n['home_path'], entry['head'], f['paths']) != f['inputs']) for f in findings.values()):
+            raise ValueError('release has open or reopened durable review findings')
 
 
 def release_candidate(inst, n, number):
