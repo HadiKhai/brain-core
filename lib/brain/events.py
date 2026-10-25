@@ -834,7 +834,7 @@ def comparison(inst, n, current=None, record=True):
     return result
 
 
-def reconcile(inst, node=None):
+def reconcile(inst, node=None, snapshot=False):
     state, _, opened = replay(inst)
     dead = [ref for ref in opened if not lease_live(inst, ref)]
     actual = resource_list(inst, resources(inst))
@@ -846,6 +846,10 @@ def reconcile(inst, node=None):
     foreign = [e for ref, e in opened.items()
                if ref not in {op.ref for op in _CURRENT} and lease_live(inst, ref)]
     if foreign:
+        # Snapshot rendering does not own an active writer's event baseline.
+        # Leave it untouched; explicit/event-source reconciliation stays strict.
+        if snapshot:
+            return
         # A node refresh may proceed beside a released writer, but must not
         # adopt that writer's pending bytes or close its operation. Explicit
         # whole-instance reconciliation still refuses every live foreign lease.

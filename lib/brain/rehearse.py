@@ -1562,8 +1562,6 @@ def rehearse(inst, n, branch, local_diff_dir=None):
         subprocess.run([*prefix, 'git', '-C', str(candidate), 'remote', 'remove', 'origin'],
                        env=prep_env, capture_output=True, check=True)
         frozen_inst = _m_instance.Instance(frozen)
-        from . import rehearse_external
-        frozen_inst = rehearse_external.freeze_declared(frozen_inst, folder / 'external')
         freeze_machine_inputs(frozen_inst, frozen_now)
         nodes = frozen_inst.nodes()
         diagnostic_terms = []

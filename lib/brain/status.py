@@ -1431,7 +1431,7 @@ def cmd_status(a):
     for n in ([inst.node(a.id)] if a.id else inst.nodes()):
         if a.refresh:
             from . import events
-            events.reconcile(inst, node=n)
+            events.reconcile(inst, node=n, snapshot=events.source(inst, n) != 'events')
             events.comparison(inst, n)
             view = events.events_view_without_current(inst, n) if events.source(inst, n) == "events" else None
             refresh_status(inst, n, view)

@@ -1996,3 +1996,22 @@ A fabricated study uses an `import:` prefix followed by a supported commit hash.
 An arbitrary label is an ordinary job and must not gain the study exemption.
 The existing single-owner queue fixture uses a valid study identity for its
 positive zero-review case and retains ordinary-job and invalid-flag refusals.
+## D18701: Separate snapshot refresh from active journal reconciliation
+
+Snapshot-backed status refresh leaves event baseline reconciliation deferred while
+a foreign writer holds a live lease. It renders the existing snapshot sources
+without adopting pending bytes or closing the writer. Idle refresh still recovers
+interrupted records. Explicit reconciliation and event-backed refresh retain
+their existing live-owner refusals and replay rules.
+
+Optional rehearsal preparation no longer invokes the declared external-capture
+helper. The standalone helper and its tests remain available, but a machine-local
+declaration alone does not activate it in rehearsal. Optional rehearsal policy,
+its original baseline assertions and its failure outcomes remain unchanged.
+
+Contained-directory alias publication remains unresolved: existing containment
+assertions require supported internal aliases, while atomic directory sync uses
+no-follow opens. Removing those assertions or relaxing escaping-link/hard-link
+checks is not a valid scope reduction. Existing durability behavior is retained
+pending a coherent publication contract.
+
