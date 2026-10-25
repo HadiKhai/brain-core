@@ -207,7 +207,7 @@ class Tasks(Scenario):
             entries.append({**entries[-1], 'branch': row['Job'], 'key': jobs.job_key(row)})
         tip = self.git('rev-parse', 'main', cwd=self.root).strip()
         data = dict(version=1, batch='train/fixture', state='verified', base=base, tip=tip,
-                    accepted=entries, ended=self.inst.now(),
+                    accepted=entries, ended=self.inst.now(), publication_succeeded=True,
                     runs=[dict(jobs=[e['branch'] for e in entries], head=tip, result=0, log='fixture.log')])
         path = self.root / 'job-trains' / 'fixture.json'
         path.parent.mkdir()

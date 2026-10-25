@@ -1258,6 +1258,8 @@ class RenderedFingerprint(Scenario):
         self.assert_change(change)
 
     def test_c_native_restart_counters(self):
+        # Restart counters describe an active worker, before its terminal handback.
+        self.hb.unlink()
         usage = {'compactions': 4, 'processed': 1000, 'subagents': 0, 'sub_share': 0}
         with mock.patch.object(self.m, 'live_usage', return_value=usage):
             self.m.refresh_status(self.inst, self.n)
