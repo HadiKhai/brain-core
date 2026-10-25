@@ -53,3 +53,19 @@ The regression reads the first committed ledger revision before generating a
 brief, then checks that the brief retains the expected runtime and model. Its
 cases cover class defaults, a node runtime pin, node and instance class routing,
 and inherited model configuration without activating inherited runtime policy.
+
+## D1301: Node-local tasks with explicit dependencies and completion evidence
+
+Store one Markdown file per task under a node's `tasks/`, using versioned,
+JSON-valued frontmatter and a free-text description. Requirements have separate
+`requirements/REQ-*.md` records preserving their exact quote, date and source.
+Task decision references distinguish shared repository entries (`repo:D123`)
+from private entries (`private:D-123`); neither reference copies decision text.
+
+Task mutations validate the complete node dependency graph before writing.
+Cycles, missing dependencies, unsupported schemas and linked storage refuse.
+Active work requires an exact live ledger job; completion requires evidence,
+a code path and a commit already on local main. Parked tasks require a reason
+and resume condition and continue blocking dependents; dropping a task does not
+silently satisfy dependencies. Provider-owned tasks retain external ownership
+of their product fields; internal work can still use local records.

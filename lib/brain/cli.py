@@ -37,6 +37,7 @@ from . import settings_batch as _m_settings_batch
 from . import spend as _m_spend
 from . import status as _m_status
 from . import sync as _m_sync
+from . import tasks as _m_tasks
 from . import train as _m_train
 from . import transitions as _m_transitions
 from . import ui as _m_ui
@@ -121,6 +122,10 @@ READ_ONLY = {"cmd_show", "cmd_tree", "cmd_status", "cmd_now", "cmd_jobs", "cmd_s
 def writes(a):
     """Does this command, with these options, change anything in the instance?"""
     name = a.f.__name__
+    if name == "cmd_requirement":
+        return True
+    if name == "cmd_task":
+        return a.action in ("add", "set", "backfill", "sync", "event", "requirement-add")
     if name == 'cmd_proposals':
         return bool(getattr(a, 'approve_all', False))
     if name == 'cmd_land_check':
@@ -170,6 +175,8 @@ def main():
                     "default: the one whose folders you are in, else `brain use`)")
     ap.add_argument("-a", "--all", action="store_true", help="with no command: every brain's dashboard")
     sub = ap.add_subparsers(dest="cmd", metavar="<command>")
+
+    _m_tasks.register(sub)
 
     def cmd(name, fn, h, *args):
         s = sub.add_parser(name, help=h, description=h)
