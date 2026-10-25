@@ -109,3 +109,13 @@ on that node. Queue and running projections simulate free slots with recorded
 start times and gate durations. Missing, overrun or unsafe evidence yields unknown.
 The projection reads recorded evidence without process probes or queue writes.
 Reported estimates describe capacity only; environmental holds are not predicted.
+
+## D205: Compare whole-job wave forecasts with fresh weekly headroom
+
+The jobs/usage budget view sums complete per-job weekly-share forecasts against
+the selected subscription's fresh seven-day reading and recorded stop line. It
+shows the median sum, observed-maximum sum, and whether each fits current headroom.
+Missing job samples or stale, unknown, expired or future readings keep fit unknown.
+The estimate is account-wide and approximate; work already spent is not subtracted.
+Five-hour and model-specific capacity fit remain unknown. This read-only advisory
+uses cached usage only and cannot change routing or admission.

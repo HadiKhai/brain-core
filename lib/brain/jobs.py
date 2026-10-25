@@ -1147,13 +1147,13 @@ def estimate_line(estimate):
     return out + ". Advisory, never a limit or gate."
 
 
-def launch_forecast(inst, n, row, kind, runtime, model=None):
+def launch_forecast(inst, n, row, kind, runtime, model=None, rows=None):
     """Both launch paths retain one estimate until the selected route changes."""
     model = model if model and model != "runtime default" else None
     saved = saved_forecast((row or {}).get("Forecast"))
     if saved and (saved["class"], saved["runtime"], saved.get("model")) == (kind, runtime, model):
         return saved
-    return estimate_job(inst, n, read_jobs(n) or [], kind, runtime, planned_size(n, row), model=model)
+    return estimate_job(inst, n, (read_jobs(n) or []) if rows is None else rows, kind, runtime, planned_size(n, row), model=model)
 
 
 def record_job_forecast(inst, n, row, estimate):
@@ -1284,6 +1284,41 @@ def forecast_lines(rows, planned=None):
     return out
 
 
+def wave_allowance(inst, n, rows, planned, subscription, now=None, max_age_seconds=120):
+    """Compare a complete wave forecast with fresh account-weekly headroom; never an admission gate."""
+    now = time.time() if now is None else now
+    window = subscription.get("windows", {}).get("seven_day", {})
+    read_at = window.get("read_at", subscription.get("read_at"))
+    used = forecast_number(window.get("used_percent"))
+    reset = forecast_number(window.get("resets_at"))
+    if (not _m_usage.usage_number(read_at) or not 0 <= now - read_at <= max_age_seconds or
+            not read_at or window.get("source", subscription.get("source")) == "unknown" or
+            window.get("absent") or window.get("expired") or reset is None or reset <= now or
+            used is None or used > 100):
+        return None
+    stop = forecast_number(subscription.get("stop_percent", 85))
+    if stop is None or not 0 < stop <= 100:
+        return None
+    values, missing = [], 0
+    for row in planned:
+        kind = row.get("Class") or job_kind(row["Job"], rows)
+        runtime = row.get("Runtime") or subscription.get("runtime")
+        estimate = launch_forecast(inst, n, row, kind, runtime, row.get("Model"), rows=rows)
+        share = estimate.get("weekly_percent")
+        if not isinstance(share, dict):
+            missing += 1
+        else:
+            values.append(share)
+    total = sum(value["median"] for value in values) if values and not missing else None
+    upper = sum(value["max"] for value in values) if values and not missing else None
+    headroom = max(0, stop - used)
+    return {"jobs": len(planned), "missing_jobs": missing, "forecast_percent": total,
+            "upper_percent": upper, "headroom_percent": headroom,
+            "fits": total <= headroom if total is not None else None,
+            "range_fits": upper <= headroom if upper is not None else None,
+            "basis": "whole-job approximate account-weekly share; elapsed work not subtracted"}
+
+
 def job_budget_lines(inst, n, planned=None):
     """Compare ledger wall time with fresh routed reset windows, never infer token allowance."""
     rows = read_jobs(n) or []
@@ -1314,7 +1349,17 @@ def job_budget_lines(inst, n, planned=None):
         remaining = min((w["resets_at"] - time.time()) / 3600 for w in windows)
         out.append(f"current route {selected['label']}: {len(these)} open/planned job(s), typical serial full-job time {estimate:g} h "
                    f"{'fits' if estimate <= remaining else 'exceeds'} {remaining:.1f} h until the next recorded reset; "
-                   "elapsed time not subtracted; weekly token share is an approximate forecast, never a limit.")
+                   "elapsed time not subtracted.")
+        wave = wave_allowance(inst, n, rows, these, selected, max_age_seconds=policy["max_age_seconds"])
+        if not wave or wave["forecast_percent"] is None:
+            out.append(f"current route {selected['label']}: weekly allowance fit unknown (fresh weekly reading and three measured samples per job required).")
+        else:
+            out.append(f"current route {selected['label']}: {wave['jobs']} open/planned whole-job forecast "
+                       f"{wave['forecast_percent']:.3g}% weekly share (observed-max sum {wave['upper_percent']:.3g}%), "
+                       f"{wave['headroom_percent']:.3g}% headroom to the recorded stop line; median "
+                       f"{'fits' if wave['fits'] else 'exceeds'} headroom"
+                       + ("; observed range may exceed it" if not wave["range_fits"] else "")
+                       + ". Approximate, account-wide; elapsed work not subtracted; five-hour/model-specific fit unknown; advisory only.")
     return out
 
 
