@@ -48,15 +48,17 @@ def screen(inst, value):
 def private_path(path):
     common.safe_target(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    if path.parent.is_symlink() or path.is_symlink():
+    if path.is_symlink():
         common.die("event storage must not be linked")
-    return path
+    # Contained directory links are supported by the instance guard. Use their
+    # physical parent for no-follow opens and descriptor identity comparisons.
+    return path.parent.resolve() / path.name
 
 
 def append_line(path, value):
     """One O_APPEND write, fsync'd; directory-relative and without following links."""
     from . import history
-    private_path(path)
+    path = private_path(path)
     line = (json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True) + "\n").encode()
     dfd = os.open(str(path.parent), history.HISTORY_DIR_FLAGS)
     fd = None
@@ -340,8 +342,8 @@ class Journal:
         return self
 
     def save(self):
-        private_path(self.path)
-        common.atomic_write(self.path, json.dumps({'version': 2, 'positions': self.positions, 'state': self.state},
+        path = private_path(self.path)
+        common.atomic_write(path, json.dumps({'version': 2, 'positions': self.positions, 'state': self.state},
                                                  separators=(',', ':'), sort_keys=True))
         self.index_stamp, self.dirty = _stamp(self.path), False
 
@@ -585,11 +587,13 @@ class Command:
         self.inst = instance.Instance(root)
         ids = {n["id"] for n in self.inst.nodes()}
         candidates = [getattr(args, "id", None), getattr(args, "node", None), getattr(args, "source", None)] if args else [node]
-        self.node = next((target for target in candidates if target in ids), "root")
+        self.node = next((target for target in candidates if isinstance(target, str) and target in ids), "root")
         self.close_job = bool(getattr(args, "close", False)) or (args is not None and args.f.__name__ in ("cmd_wt_prune", "cmd_wt_rm"))
         self.command = command or args.f.__name__.removeprefix("cmd_")
         self.lease = None
         self.record_paths = set()
+        self.study_handback = (self.command == 'handback' and
+                               str(getattr(args, 'branch', '')).startswith('import:'))
 
     def start(self):
         self.ref = uuid.uuid4().hex
@@ -828,7 +832,7 @@ def comparison(inst, n, current=None, record=True):
     return result
 
 
-def reconcile(inst):
+def reconcile(inst, node=None):
     state, _, opened = replay(inst)
     dead = [ref for ref in opened if not lease_live(inst, ref)]
     actual = resource_list(inst, resources(inst))
@@ -837,7 +841,22 @@ def reconcile(inst):
               for k in state.keys() | actual_map.keys())
     if not dead and not gap and not journal(inst).state["faults"] and not journal(inst).state["invalid"]:
         return
-    if any(lease_live(inst, ref) for ref in opened if ref not in {op.ref for op in _CURRENT}):
+    foreign = [e for ref, e in opened.items()
+               if ref not in {op.ref for op in _CURRENT} and lease_live(inst, ref)]
+    if foreign:
+        # A node refresh may proceed beside a released writer, but must not
+        # adopt that writer's pending bytes or close its operation. Explicit
+        # whole-instance reconciliation still refuses every live foreign lease.
+        scopes = {e['node'] for e in foreign}
+        owners = [n['id'] for n in inst.nodes() if node_ref(n['id']) in scopes and n['id'] != 'root']
+        scopes.update(node_ref(n['id']) for n in inst.nodes()
+                      if any(n['id'].startswith(owner + '/') for owner in owners))
+        changed = [actual_map.get(k) or state[k] for k in state.keys() | actual_map.keys()
+                   if state.get(k, {}).get('hash') != actual_map.get(k, {}).get('hash')]
+        if (node is not None and node_ref(node['id']) not in scopes and not dead
+                and not journal(inst).state['faults'] and not journal(inst).state['invalid']
+                and all(r.get('scope') in scopes for r in changed)):
+            return
         common.die("another write is active; cannot reconcile its snapshot")
     # Keep evidence of the gap before installing a new baseline.
     for n in inst.nodes():
@@ -1122,7 +1141,7 @@ def own_transformation(inst, n, before):
     common.atomic_write(private_path(inst.root / '.brain/events-status-commits.json'), json.dumps(saved, sort_keys=True))
 
 
-def status_commit(inst, n, force=False):
+def status_commit(inst, n, force=False, message=None):
     if status_judgement_dirty(inst, n):
         return
     path = n['dir'] / 'status.md'
@@ -1136,7 +1155,7 @@ def status_commit(inst, n, force=False):
     blobs = _status_bytes(inst, n)
     if archive.exists() and (blobs[3] == blobs[4] or _owned_judgement(inst, n, blobs)):
         want.append(archive.relative_to(inst.root).as_posix())
-    inst._commit(inst.root, want, n['id'] + ': refresh status facts')
+    inst._commit(inst.root, want, message or n['id'] + ': refresh status facts')
     saved[node_ref(n['id'])] = {'at': inst.now()}
     common.atomic_write(private_path(inst.root / '.brain/events-status-commits.json'), json.dumps(saved, sort_keys=True))
 
@@ -1160,7 +1179,9 @@ def maintain(op, changed):
     views = {}
     # Cleanup records current metadata for replay, but never rewrites the status
     # document or its archive. An explicit refresh still materializes the view.
-    materialize = op.command not in ('wt_prune', 'wt_rm')
+    local_only = (op.command == 'set' and changed and
+                  set(changed) <= {'.brain/local.json', '.brain/inbox-seen.json'})
+    materialize = op.command not in ('wt_prune', 'wt_rm') and not op.study_handback and not local_only
     _, recorded_views, _ = replay(op.inst)
     selected = {n['id']: n for n in affected_nodes(op.inst, changed, op.node)}
     for n in op.inst.nodes():
@@ -1184,7 +1205,11 @@ def maintain(op, changed):
             status.refresh_status(op.inst, n, view)
             active_table(op.inst, n, view)
             ledger = (n["dir"] / "job-ledger.md").relative_to(op.inst.root).as_posix()
-            status_commit(op.inst, n, op.close_job and ledger in changed)
+            force = op.command in ('new', 'merge', 'changes') or (op.close_job and ledger in changed)
+            message = None
+            if op.command == 'merge':
+                message = common.git('log', '-1', '--format=%s', cwd=op.inst.root).stdout.strip()
+            status_commit(op.inst, n, force, message=message)
     return views
 
 

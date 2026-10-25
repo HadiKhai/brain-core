@@ -1832,3 +1832,23 @@ Worktree cleanup records current journal metadata for replay without automatical
 rewriting the status document, Active work table or status archive. Explicit
 status refresh still materializes the view and caps the Now section. Other event
 projection paths remain available.
+
+## D18101: Preserve operation and generated-status ownership
+
+Journal command routing accepts scalar node selectors; collections of item IDs
+do not identify a node. A node refresh beside a live released writer may leave
+that writer's pending subtree untouched. It cannot reconcile the same subtree,
+global machine state, damaged journals or interrupted operations. Explicit
+instance reconciliation retains its live-writer refusal.
+
+Generated facts and recorded Now/archive transformations do not imply missing
+coordinator judgement. Unowned prose remains visible as uncommitted work. Node
+creation, merge and change acknowledgement finish with generated status committed;
+routine refresh retains hourly throttling. Machine-only binding changes and
+import-study handbacks record their event view without rewriting coordinator
+status. Cleanup still never materializes status implicitly.
+
+Metadata-only status retains typed restart reasons while excluding private
+handback prose. Event writes resolve validated contained directory aliases to a
+physical parent before no-follow opens and descriptor comparisons; linked files,
+hard links and moved descriptors remain refused.

@@ -1011,7 +1011,9 @@ def status_facts(inst, n, state, known_merges, metadata_only=False):
                       "legacy; outcome not required")), _m_guard.never_terms(n)) for r in lessons] or ["- None."]
     lines += ["", "Finished jobs awaiting coordinator:"]
     if metadata_only:
-        lines += ["- " + r["Job"] + ": " + ("ready to merge" if i.get("ready") else "finished; inspect hand-back")
+        lines += ["- " + r["Job"] + ": " + ("restart: compactions" if i['kind'] == 'restart' else
+                  "restart: usage" if i['kind'] == 'job-restart' else
+                  "ready to merge" if i.get("ready") else "finished; inspect hand-back")
                   for i in due if i["kind"] in ("handback", "restart", "job-restart")
                   for r in state["jobs"] or [] if _m_jobs.job_key(r) == i.get("job")] or ["- None."]
     else:
@@ -1417,7 +1419,7 @@ def cmd_status(a):
     for n in ([inst.node(a.id)] if a.id else inst.nodes()):
         if a.refresh:
             from . import events
-            events.reconcile(inst)
+            events.reconcile(inst, node=n)
             events.comparison(inst, n)
             view = events.events_view_without_current(inst, n) if events.source(inst, n) == "events" else None
             refresh_status(inst, n, view)
