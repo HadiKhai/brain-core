@@ -132,7 +132,7 @@ def import_brief(a):
         _m_common.die("--import needs an external git home on this machine")
     home = n["home_path"]
     head = _m_common.git("rev-parse", "--verify", "-q", "HEAD", cwd=home).stdout.strip() or "unborn"
-    runtime, usage = _m_knowledge.worker_route(inst, n, a)
+    runtime, usage = _m_knowledge.worker_route(inst, n, a, extra=[Path(a.out).expanduser()] if a.out else [])
     out = [f"Role: import worker for node `{n['id']}` ({n['fm'].get('title', '')}).",
            f"Run in: {n['dir']}  ·  runtime: {runtime}  ·  class: {a.job_class}" + (f"  ·  model: {a.model}" if a.model else ""),
            "The rules, agents and skills where you run come first (axiom 7); this brief adds to them.",
@@ -246,8 +246,6 @@ def cmd_brief(a):
         a.context_file = saved.get("context_files", [])
     if signal and signal.get("restart") and not (a.task_file or a.task):
         _m_common.die("restart brief has no recorded task; supply the original --task or --task-file")
-    why_lines = separation_lines(a, n, a.branch)
-    shared = why_lines + peer_lines(a)
     context, context_inputs, inputs = [], [], []
     for name in a.context_file or []:
         try:
@@ -266,9 +264,12 @@ def cmd_brief(a):
         inputs.append(("Shared context", body))
         context_inputs.append(str(path))
         context += [f"### Context from {_m_common.tilde(path)}", "", body, ""]
+    runtime, usage = _m_knowledge.worker_route(inst, n, a,
+        extra=[*context_inputs, *([Path(a.out).expanduser()] if a.out else [])])
+    why_lines = separation_lines(a, n, a.branch)
+    shared = why_lines + peer_lines(a)
     if context:
         shared += ["## Shared context", "", "Gathered once by the coordinator; use these findings before rereading sources.", "", *context]
-    runtime, usage = _m_knowledge.worker_route(inst, n, a)
     forecast = _m_jobs.launch_forecast(inst, n, row, a.job_class, runtime, a.model)
     head = _m_worktrees.job_run_line(where, w, a.branch, runtime, a.model)
     head = head.replace(f"  ·  runtime: {runtime}", f"  ·  runtime: {runtime}  ·  class: {a.job_class}", 1)

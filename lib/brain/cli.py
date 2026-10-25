@@ -475,6 +475,7 @@ def main():
         "bind <id> <host id> | unbind <id>", opt("action", choices=["list", "add", "bind", "unbind"], nargs="?",
                                                   default="list"),
         opt("id", nargs="?"), opt("host_id", nargs="?"), opt("--when"), opt("--node", default="root"), opt("--brief"),
+        opt("--provider", help="runtime explicitly selected in the host schedule (add/bind only)"),
         opt("-v", "--verbose", action="store_true"))
     cmd("sync", _m_sync.cmd_sync, "what changed in a node (and its home) since the last sync; --all: every external home",
         opt("id", nargs="?"), opt("--all", action="store_true"),

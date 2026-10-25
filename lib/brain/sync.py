@@ -60,7 +60,8 @@ def cmd_review(a):
     model_selection = _m_knowledge.class_model_selection(inst, n, a, reviewer, kind)
     reviewer, subscription, usage = _m_usage.class_route(inst, kind, runtime=pin,
         model=model_selection[0] if model_selection else a.model,
-        weekly_cap=n["fm"].get("route_weekly_cap", inst.cfg.get("route_weekly_cap", 60)), runtimes=others)
+        weekly_cap=n["fm"].get("route_weekly_cap", inst.cfg.get("route_weekly_cap", 60)), runtimes=others,
+        node=n, extra=[Path(a.out).expanduser()] if a.out else [])
     usage += (" Independent review requires a fresh non-builder thread; same runtime and model are allowed."
               if fresh or exception else " Independent review uses the other runtime from the builder.")
     _m_knowledge.launch_selection(inst, n, a, reviewer, subscription, row, kind, model_selection=model_selection)
@@ -380,7 +381,8 @@ def sync_one(inst, n, a):
         if (home / ".git").exists():
             has_remote = bool(_m_common.git("remote", cwd=home).stdout.strip())
             if has_remote and not a.offline:
-                r = _m_common.git("fetch", "--all", "--prune", "--quiet", cwd=home)
+                with _m_instance.released(inst, n):
+                    r = _m_common.git("fetch", "--all", "--prune", "--quiet", cwd=home)
                 print("fetched" if r.returncode == 0 else f"fetch failed: {r.stderr.strip()[:200]}")
             _m_verify.main_notice(n)
             can_mark = sync_external_merges(inst, n, since, getattr(a, "reset_main", False))
@@ -403,9 +405,10 @@ def sync_one(inst, n, a):
             url = _m_nodes.remote_url(home)
             if has_remote and not a.offline and "github.com" in url and shutil.which("gh"):
                 try:
-                    r = subprocess.run(["gh", "pr", "list", "--state", "open", "-L", "30", "--json",
-                                        "number,title,author,headRefName,updatedAt,isDraft,reviewDecision"],
-                                       cwd=home, capture_output=True, text=True, timeout=30)
+                    with _m_instance.released(inst, n):
+                        r = subprocess.run(["gh", "pr", "list", "--state", "open", "-L", "30", "--json",
+                                            "number,title,author,headRefName,updatedAt,isDraft,reviewDecision"],
+                                           cwd=home, capture_output=True, text=True, timeout=30)
                     prs = json.loads(r.stdout) if r.returncode == 0 else None
                 except (subprocess.TimeoutExpired, ValueError):
                     prs = None

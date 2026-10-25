@@ -56,35 +56,37 @@ and inherited model configuration without activating inherited runtime policy.
 
 
 
-## D1101: Inspect current work and batch dashboard repository evidence
+## D1201: Observe node gate ownership before core replacement
 
-The dashboard retains metadata for every recorded worktree. Git status, socket,
-readiness and file-list inspection apply to worktrees with an open ledger job or
-an active status-table row. Closed worktrees expose unknown activity values;
-they are never presented as clean or ready from an omitted inspection. Reopening
-a job or changing the active-work table invalidates repository discovery.
+An upgrade inventory observes each node's native gate lock as well as machine
+admission and repository train ownership. Admission may be disabled while a gate
+still runs. An exclusively held gate refuses upgrade; a retained unlocked gate
+file is idle. The observer never reads holder metadata as proof or removes locks.
+Linked, nonregular or unreadable gate inventory refuses before core mutation.
+This check covers native wrappers; unregistered external processes cannot be
+inferred from job labels or elapsed time.
 
-Due evidence batches branch tips and merged membership in one local ref snapshot
-per repository and integration mode. It retains closed and unrecorded worktrees
-for reconciliation. Dashboard refreshes may reuse this evidence with the same
-file/ref metadata keys as their readiness display cache. Ref changes, worktree
-existence, bindings and ledger inputs invalidate it. The cache is context-local;
-explicit lifecycle and readiness actions read current evidence outside it.
+## D1202: Release existing state ownership for slow observations
 
-Tests cover a large closed-worktree inventory, active-row recovery, reopened
-jobs, batched ref reads, invalidation and an explicit action after cached display.
+Slow network lookups, transcript scans and provider refreshes release an already
+held state lock, then revalidate their explicit policy, binding and output inputs
+before publication. Read-only callers do not acquire a state lock. The observer
+reloads local bindings on retake so unrelated concurrent writes survive. Job
+accounting fences the original job identity and preserves newer host usage.
+Destructive worktree callers prepare accounting before removal and retain the
+existing ownership and lifecycle refusal checks.
 
-## D1102: Bind preview tours to source and artifact evidence
+Machine service operations use an independent bounded reservation after releasing
+state. Commit and core-upgrade transactions retain their existing serialization;
+this protocol does not provide cross-file crash recovery or Git/core exchange.
+Contention tests use explicit ready/release barriers. Positive controls execute
+sibling commands while the slow boundary remains paused; negative controls
+observe the actual held flock without waiting for a timing threshold.
 
-`preview <node> --record <receipt.json>` validates an externally captured preview
-tour before replacing its machine-local receipt. Evidence names the configured
-preview address and tour, a bound source worktree or home at a clean HEAD, an
-explicit capture time, and SHA-256 digests for the tour and its linked PNG
-screenshots. Early worktree milestones can be recorded before a main landing.
+## D1203: Record schedule providers explicitly
 
-The read-only check and due queue reject missing, stale or malformed evidence.
-A bare URL does not discharge the screenshot-tour need. Failed recording retains
-the prior receipt; changing source, address, tour binding or artifact bytes makes
-it stale. The receipt validates supplied capture evidence, not visual quality or
-the accuracy of application data. Those remain the browser review's responsibility.
-No network request, browser launch or source change occurs during validation.
+A schedule may declare a shared runtime provider; its machine-local host binding
+may override it in a separate provider map. Keep host id strings compatible with
+existing readers. Rebinding without a provider or unbinding removes stale local
+metadata. Check warns on a mismatch with the resolved node's explicit runtime pin
+and applies that node's redaction policy. No provider is inferred from a host id.

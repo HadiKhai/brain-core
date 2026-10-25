@@ -414,12 +414,14 @@ def cmd_wt_rm(a):
     reason = removal_refusal(n, a.branch, w) if w else ""
     if reason:
         _m_common.die(f"{a.branch}: {reason}; worktree retained")
-    state = worktree_state(home, w, a.branch, n) if w else (None, False, "")
+    with _m_instance.released(inst, n):
+        state = worktree_state(home, w, a.branch, n) if w else (None, False, "")
+    prepared = _m_jobs.prepare_job_usage(inst, n, a.branch, (w or {}).get("path"))
     _m_jobs.print_job_handback(n, a.branch)
     _m_jobs.print_worktree_threads(n, a.branch)
     remove_worktree(inst, n, a.branch, a.force)
     _m_jobs.job_ended(inst, n, a.branch, "merged" if state[1] else "abandoned", job_commits(home, w, a.branch), a.cause or "",
-              worktree=(w or {}).get("path"))
+              worktree=(w or {}).get("path"), prepared=prepared)
     print(f"removed the worktree for {a.branch} (the branch itself stays)")
 
 
@@ -428,7 +430,8 @@ def cmd_wt_prune(a):
     inst = _m_nodes.load()
     n, home = git_home(inst, a.id)
     if not a.dry_run and _m_common.git("remote", cwd=home).stdout.strip() and not a.offline:
-        _m_common.git("fetch", "--all", "--prune", "--quiet", cwd=home)
+        with _m_instance.released(inst, n):
+            _m_common.git("fetch", "--all", "--prune", "--quiet", cwd=home)
     removed, kept = [], []
     for br, w in sorted(n["local"].get("worktrees", {}).items()):
         reason = removal_refusal(n, br, w)
@@ -438,7 +441,8 @@ def cmd_wt_prune(a):
         if not integration_target(n):
             kept.append(f"{br} (origin default unavailable; run git remote set-head origin -a)")
             continue
-        dirty, merged, ahead = worktree_state(home, w, br, n)
+        with _m_instance.released(inst, n):
+            dirty, merged, ahead = worktree_state(home, w, br, n)
         if dirty is None or (merged and dirty == 0):
             if dirty is not None:
                 entries = _m_common.git("ls-files", "--stage", "-z", cwd=w["path"])
@@ -455,9 +459,10 @@ def cmd_wt_prune(a):
             _m_jobs.print_job_handback(n, br)
             _m_jobs.print_worktree_threads(n, br, dry_run=a.dry_run)
             if not a.dry_run:
+                prepared = _m_jobs.prepare_job_usage(inst, inst.node(n["id"]), br, w.get("path"))
                 remove_worktree(inst, inst.node(n["id"]), br)
                 _m_jobs.job_ended(inst, n, br, "merged" if merged else "abandoned", job_commits(home, w, br),
-                          "" if merged else "worktree was gone", worktree=w.get("path"))
+                          "" if merged else "worktree was gone", worktree=w.get("path"), prepared=prepared)
             removed.append(br)
         else:
             kept.append(f"{br} ({'uncommitted work' if dirty else 'not merged'})")
