@@ -454,7 +454,8 @@ def main():
         opt("--report"), opt("--lessons", help="proposed lessons, or none: <reason>"),
         opt("--reverify", action="store_true", help="with --record: run verify even if a green run still proves it"))
     cmd("host", _m_host_actions.cmd_host, "explicit coordinator provisioning and host wake/watch actions",
-        opt("action", choices=['provision', 'wake-setup', 'watch']), "id", opt("--model"), opt("--url"))
+        opt("action", choices=['provision', 'wake-setup', 'watch', 'schedule']), "id", opt("--model"), opt("--url"),
+        opt("--schedule-id"), opt("--provider", help="explicit host runtime for schedule binding"))
     cmd("digest", _m_digest.cmd_digest, "commitments with landing evidence; --retro summarizes recorded job measurements", "id",
         opt("--json", action="store_true"), opt("--retro", action="store_true"),
         opt("--day", help="retro calendar date (YYYY-MM-DD); defaults to the previous local day"))

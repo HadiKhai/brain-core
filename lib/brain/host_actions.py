@@ -7,6 +7,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import subprocess
 
 from . import common as _m_common
@@ -165,12 +166,77 @@ def watch_change(inst, nid, url):
     return result
 
 
+def schedule_trigger(when):
+    if when == 'hourly':
+        return {'type':'interval', 'everyMs':3600000}
+    interval = re.fullmatch(r'every ([1-9][0-9]*) minutes', when)
+    if interval:
+        return {'type':'interval', 'everyMs':int(interval[1]) * 60000}
+    clock = re.fullmatch(r'(daily|weekdays) ([0-2][0-9]:[0-5][0-9])', when)
+    if clock and int(clock[2][:2]) < 24:
+        result = {'type':'fixed_time', 'timeOfDay':clock[2]}
+        if clock[1] == 'weekdays':
+            result['weekdays'] = [1, 2, 3, 4, 5]
+        return result
+    raise ValueError('host schedule supports hourly, every N minutes, daily HH:MM or weekdays HH:MM')
+
+
+def provision_schedule(inst, nid, sid, provider=None):
+    n = inst.node(nid)
+    coordinator = _coordinator_context(inst, n)
+    record = next((row for row in _m_schedules.read_schedules(inst) if row['id'] == sid), None)
+    target = _m_instance.resolve_ref(inst.nodes(), record.get('node')) if record else None
+    if not record or not target or target['id'] != nid or not record.get('brief'):
+        raise ValueError('schedule must exist and target this node')
+    if provider is not None and provider not in inst.runtimes:
+        raise ValueError('provider must be an instance runtime')
+    trigger = schedule_trigger(record.get('when', ''))
+    definition = hashlib.sha256(json.dumps(record, sort_keys=True).encode()).hexdigest()
+    with _m_instance.brain_lock(inst):
+        inst.local = inst._load_local()
+        bound = inst.local.get('schedules', {}).get(sid)
+        receipt = inst.local.get('host_schedule_receipts', {}).get(sid, {})
+        if bound:
+            if receipt == {'definition':definition, 'coordinator':coordinator, 'task':bound, 'provider':provider}:
+                return bound
+            raise ValueError('existing host schedule differs or has no receipt; reconcile it before provisioning')
+    prompt = record['brief']
+    if not prompt.startswith(AUTOMATED):
+        prompt = AUTOMATED + '\n' + prompt
+    key = hashlib.sha256((nid + '\0' + sid + '\0' + coordinator + '\0' + definition).encode()).hexdigest()
+    result = host_call(inst, 'schedule_task', {'title':sid, 'prompt':prompt, 'schedule':trigger,
+                       'bindToCurrentThread':True, 'clientRequestId':'schedule-' + key})
+    task = result.get('scheduledTaskId')
+    if result.get('boundThreadId') != coordinator or not isinstance(task, str) or not task:
+        raise ValueError('host schedule did not confirm the bound coordinator')
+    with _m_instance.brain_lock(inst):
+        inst.local = inst._load_local()
+        current = next((row for row in _m_schedules.read_schedules(inst) if row['id'] == sid), None)
+        if (current != record or inst.local_of(nid).get('coordinator') != coordinator or
+                inst.local.get('schedules', {}).get(sid) not in (None, '', task)):
+            raise ValueError('schedule changed during host setup; reconcile the returned host task')
+        inst.local.setdefault('schedules', {})[sid] = task
+        inst.local.setdefault('host_schedule_receipts', {})[sid] = {
+            'definition':definition, 'coordinator':coordinator, 'task':task, 'provider':provider}
+        if provider:
+            inst.local.setdefault('schedule_providers', {})[sid] = provider
+        else:
+            inst.local.get('schedule_providers', {}).pop(sid, None)
+        inst.save_local()
+    return task
+
+
 def cmd_host(a):
     inst = _m_nodes.load()
     try:
         if a.action == 'wake-setup':
             provision_wake(inst, a.id)
             print('host wake task bound to this coordinator; capability saved privately')
+        elif a.action == 'schedule':
+            if not a.schedule_id:
+                raise ValueError('host schedule requires --schedule-id')
+            provision_schedule(inst, a.id, a.schedule_id, a.provider)
+            print('host recurring task bound to this coordinator')
         elif a.action == 'watch':
             if not a.url:
                 raise ValueError('host watch requires --url')

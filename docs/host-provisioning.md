@@ -33,3 +33,18 @@ the bound coordinator and checks the returned confirmation. The host maintains
 checks/reviews/conflict watching. This command does not infer merge readiness.
 Live host reachability, remote access and provider behavior require an actual
 host session; synthetic host tests prove the core request/binding behavior.
+
+## Recurring sync and briefs
+
+Add a portable record, then apply it from that node's bound coordinator:
+
+```
+brain schedule add morning --when "daily 09:00" --node app --brief "Run node-sync, then node-brief." --provider codex
+brain host schedule app --schedule-id morning --provider codex
+```
+
+Supported triggers are `hourly`, `every N minutes`, `daily HH:MM` and
+`weekdays HH:MM`. Wall-clock triggers use the host's local timezone; ensure the
+host clock matches the intended schedule. The host executes the automated agent
+brief. Repeating unchanged setup reuses its binding; changed records and unknown
+legacy bindings require reconciliation rather than creating duplicate tasks.

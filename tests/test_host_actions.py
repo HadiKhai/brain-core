@@ -107,6 +107,45 @@ class HostActions(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'did not confirm'):
                 self.m.watch_change(self.inst, 'root', 'https://example.com/org/repo/pull/1')
 
+    def test_schedule_bridge_creates_structured_trigger_and_preserves_records(self):
+        self.inst.local_of('root').update(coordinator='thread-1', host_project='project-1')
+        self.inst.save_local()
+        path = self.root / 'schedules.md'
+        path.write_text('## morning\nwhen: daily 09:00\nnode: root\nbrief: Run node-sync then node-brief.\n')
+        before = path.read_bytes()
+        with mock.patch.object(self.m, 'host_call', side_effect=[{'threadId':'thread-1'},
+                {'boundThreadId':'thread-1', 'scheduledTaskId':'schedule-1'}]) as call:
+            self.m.provision_schedule(self.inst, 'root', 'morning', 'codex')
+        request = call.call_args.args[2]
+        self.assertEqual(request['schedule'], {'type':'fixed_time','timeOfDay':'09:00'})
+        self.assertTrue(request['prompt'].startswith('Automated turn:'))
+        self.assertEqual(path.read_bytes(), before)
+        self.assertEqual(self.inst.local['schedule_providers']['morning'], 'codex')
+        with mock.patch.object(self.m, 'host_call', return_value={'threadId':'thread-1'}) as call:
+            self.m.provision_schedule(self.inst, 'root', 'morning', 'codex')
+            self.assertEqual(call.call_count, 1)
+        path.write_text(path.read_text().replace('09:00','10:00'))
+        with mock.patch.object(self.m, 'host_call', return_value={'threadId':'thread-1'}) as call:
+            with self.assertRaisesRegex(ValueError, 'reconcile'):
+                self.m.provision_schedule(self.inst, 'root', 'morning', 'codex')
+            self.assertEqual(call.call_count, 1)
+
+    def test_schedule_trigger_validation_and_node_scope(self):
+        for invalid in ['daily 25:00','hourly; execute','every 0 minutes','tomorrow']:
+            with self.subTest(invalid=invalid):
+                with self.assertRaises(ValueError):
+                    self.m.schedule_trigger(invalid)
+        self.assertEqual(self.m.schedule_trigger('every 5 minutes'), {'type':'interval','everyMs':300000})
+        self.assertEqual(self.m.schedule_trigger('weekdays 07:30'),
+                         {'type':'fixed_time','timeOfDay':'07:30','weekdays':[1,2,3,4,5]})
+        self.inst.local_of('root').update(coordinator='thread-1')
+        self.inst.save_local()
+        (self.root / 'schedules.md').write_text('## other\nwhen: hourly\nnode: child\nbrief: Check work.\n')
+        with mock.patch.object(self.m, 'host_call', return_value={'threadId':'thread-1'}) as call:
+            with self.assertRaisesRegex(ValueError, 'this node'):
+                self.m.provision_schedule(self.inst, 'root', 'other')
+            self.assertEqual(call.call_count, 1)
+
     def test_transport_uses_native_acp_without_a_shell(self):
         envelope = {'structuredContent': {'threadId':'thread-1'}}
         result = mock.Mock(returncode=0, stdout=json.dumps(envelope))

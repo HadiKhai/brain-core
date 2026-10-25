@@ -140,3 +140,13 @@ the old file intact. A directory-sync failure is reported after the new complete
 file is visible, so an error does not imply rollback. Tests prove ordering and
 failure behavior; physical power loss and cross-file/Git transactions require
 separate evidence. Durability still depends on filesystem and storage guarantees.
+
+## D1209: Apply portable recurring schedules from their coordinator
+
+The native host bridge converts a declared hourly, minute interval, daily or
+weekday record into a structured host trigger. Creation must run in the target's
+bound coordinator, and only a response confirming that coordinator may be bound
+locally. The automated brief requests the work; the host provides scheduling and
+the agent supplies semantic sync/brief execution. Definition receipts make repeat
+setup idempotent and refuse changed or legacy bindings that need reconciliation.
+The core does not invent a separate scheduler daemon or an LLM summary engine.
