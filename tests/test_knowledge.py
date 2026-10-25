@@ -909,3 +909,17 @@ class OperationalLimitExpiry(Scenario):
         m = core_loader.SourceFileLoader('limit_future_fixture', str(CORE / 'bin/brain')).load_module()
         inst = m.Instance(r)
         self.assertEqual([row['state'] for row in m.limit_records(inst, inst.node('root'))], ['active', 'active'])
+
+
+class GovernanceLinkedDirectory(Scenario):
+    def test_linked_library_directory_never_exempts_foreign_content(self):
+        r = self.init('alice')
+        m = core_loader.SourceFileLoader('linked_governance_fixture', str(CORE / 'bin/brain')).load_module()
+        library = r / 'library'
+        shutil.rmtree(library)
+        outside = self.tmp / 'unrelated-library'
+        outside.mkdir()
+        file = outside / 'item.md'
+        file.write_text('---\nscope: alice\n---\nContent\n')
+        library.symlink_to(outside, target_is_directory=True)
+        self.assertFalse(m.governance_file(m.Instance(r).node('root'), library / 'item.md'))

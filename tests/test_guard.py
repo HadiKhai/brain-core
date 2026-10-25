@@ -839,3 +839,19 @@ class PreviewSampleReceipts(Scenario):
         self.assertEqual(m.validate_ready_preview(inst, n, 'job', data['head']), [])
         n['local']['preview'] += '/new'
         self.assertTrue(m.validate_ready_preview(inst, n, 'job', data['head']))
+
+
+class GuardAllowanceRenewal(Scenario):
+    def test_changed_policy_can_receive_a_new_exact_allowance(self):
+        r = self.init('alice')
+        rules = r / 'AGENTS.md'
+        rules.write_text('## Forbidden actions\n- git push*\n')
+        self.b(r, 'allow', 'root', 'git push', '--once', '--cwd', str(r))
+        rules.write_text(rules.read_text() + '- rm -rf*\n')
+        self.b(r, 'allow', 'root', 'git push', '--once', '--cwd', str(r))
+        m = core_loader.SourceFileLoader('allowance_renewal_fixture', str(CORE / 'bin/brain')).load_module()
+        inst = m.Instance(r)
+        self.assertIsNone(m.pretool_decision(inst, inst.node('root'),
+            {'cwd': str(r), 'tool_name': 'Bash', 'tool_input': {'command': 'git push'}}))
+        state = json.loads(m.allowance_path(inst, inst.node('root')).read_text())
+        self.assertEqual([e['event'] for e in state['events']], ['issued', 'invalidated', 'issued', 'consumed'])

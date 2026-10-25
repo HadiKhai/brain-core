@@ -134,9 +134,13 @@ def cmd_allow(a):
     digest = action_fingerprint(action)
     with _m_instance.brain_lock(inst):
         state = allowance_state(inst, n)
-        if digest in state['allowances']:
+        policy = action_fingerprint({'rules': rules})
+        prior = state['allowances'].get(digest)
+        if isinstance(prior, dict) and prior.get('policy') == policy:
             _m_common.die('an unconsumed allowance already exists for this exact action')
-        state['allowances'][digest] = {'policy': action_fingerprint({'rules': rules}), 'issued_at': inst.now()}
+        if digest in state['allowances']:
+            state['events'].append({'event': 'invalidated', 'action': digest, 'at': inst.now()})
+        state['allowances'][digest] = {'policy': policy, 'issued_at': inst.now()}
         state['events'].append({'event': 'issued', 'action': digest, 'at': inst.now()})
         save_allowances(inst, n, state)
     print('one-shot allowance recorded for this exact node, working folder and command')

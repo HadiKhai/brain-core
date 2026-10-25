@@ -132,7 +132,13 @@ def governance_file(n, path):
         return False
     try:
         parts = owner.relative_to(n["dir"].absolute()).parts
+        relative = path.relative_to(n["dir"].absolute())
     except ValueError:
+        return False
+    # A real instance path cannot acquire a governance exemption through a
+    # linked library/specialist directory, even when the final file is regular.
+    if any(n["dir"].joinpath(*relative.parts[:index]).is_symlink()
+           for index in range(1, len(relative.parts) + 1)):
         return False
     if (len(parts) % 2 or any(parts[i] != "nodes" for i in range(0, len(parts), 2))
             or not (owner / "node.md").is_file()):

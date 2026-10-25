@@ -148,3 +148,14 @@ reviews and unrelated commits. A change to a bound Git object reopens the findin
 closing it again requires evidence against the new inputs. Existing IDs cannot
 silently rebind their input scope. Review observations retain their original
 verdict while the finding-state projection provides durable closure history.
+
+## D1008: Preserve guard scope through policy changes and linked directories
+
+A fresh explicit allowance can replace an obsolete allowance for the same exact
+action after the declared rule set changes. The old authorization is recorded as
+invalidated before the new one is issued; an unconsumed current-policy allowance
+still cannot be duplicated.
+
+Governance exemptions require real instance paths below the instance root.
+Linked intermediate library or specialist directories never grant an exemption
+to foreign file contents, even when the final file itself is regular.
