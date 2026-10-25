@@ -1626,3 +1626,10 @@ For agents: introspection compares explicit major/blocker classes across distinc
 independent receipt rounds and links recurring classes to their observed reviews.
 After upgrading: the review receipt hook supplies classifications. Without it,
 review evidence is unavailable; no transcript classification is attempted.
+
+## Repeated permission-request advice
+
+For agents: introspection flags an observed permission request inside an exact
+recorded authorization scope; revocations, phase exits and changed heads prevent
+false matches. The advisory grants no authority.
+After upgrading: supply typed authorization/request facts with stable receipt refs.

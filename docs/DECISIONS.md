@@ -120,3 +120,10 @@ reviewer-thread/head rounds qualify. Duplicate receipts and reused contexts do
 not create rounds; spelling normalization never interprets finding prose. Advice
 is historical and informational, with receipt evidence. It does not reopen or
 close findings, validate host independence or replace the review gate.
+
+## D108: Permission-repeat advice must match an explicit authority observation
+
+Detect requests repeated after an explicit authorization observation only when
+job generation, head, phase, action and authorization reference all match. A
+revocation or phase exit invalidates the comparison. This is informational audit
+advice, not an authorization engine; no prose inference can grant permission.

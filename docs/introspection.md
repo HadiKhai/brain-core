@@ -45,3 +45,10 @@ reviewed head, so duplicate exports do not manufacture recurrence. Minor finding
 other jobs and receipts declaring reused/builder context do not establish it.
 The historical recurrence is informational even if a later finding was closed;
 the receipt subsystem owns current finding state and input-bound reopening.
+
+A repeated-permission advisory requires an observed `authorization_granted` and
+later `permission_requested` with the same exact job generation, head, phase,
+action `reason_code` and authorization receipt in `evidence.ref`. Revocation or
+leaving that phase clears the comparison. Unknown authorization, changed heads
+and other scopes do not trigger advice. The advisory never grants authority or
+interprets contract prose; an outward action still follows its actual policy.

@@ -118,3 +118,29 @@ class ReviewClassRecurrence(unittest.TestCase):
         reused=self.receipt('review-d')
         reused['reviewer']['context_reused']=True
         self.assertEqual(self.m.review_class_advisories([first,wrong,minor,reused],KEY),[])
+
+
+class PermissionAdvisories(unittest.TestCase):
+    def setUp(self):
+        self.m=core_loader.SourceFileLoader('permission_advisory_fixture',str(CORE/'bin/brain')).load_module()
+        self.now=datetime.datetime(2026,1,1,11,tzinfo=datetime.timezone.utc)
+
+    def test_request_inside_exact_observed_authorization_is_advised(self):
+        grant=fact('authorization_granted',1,phase='execution',head=HEAD,reason_code='run_checks',evidence={'ref':'grant-a'})
+        request=fact('permission_requested',2,phase='execution',head=HEAD,reason_code='run_checks',evidence={'ref':'grant-a'})
+        result=self.m.permission_request_advisories([grant,request],KEY,self.now)
+        self.assertEqual(len(result),1)
+        self.assertEqual(result[0]['kind'],'repeated-permission-request')
+        self.assertEqual(len(result[0]['evidence']),2)
+        self.assertTrue(result[0]['informational'])
+
+    def test_scope_changes_revocation_and_unknown_authority_do_not_advise(self):
+        grant=fact('authorization_granted',1,phase='execution',head=HEAD,reason_code='run_checks',evidence={'ref':'grant-a'})
+        request=fact('permission_requested',4,phase='execution',head=HEAD,reason_code='run_checks',evidence={'ref':'grant-a'})
+        self.assertEqual(self.m.permission_request_advisories([request],KEY,self.now),[])
+        revoked=fact('authorization_revoked',3,phase='execution',head=HEAD,reason_code='run_checks',evidence={'ref':'grant-a'})
+        self.assertEqual(self.m.permission_request_advisories([grant,revoked,request],KEY,self.now),[])
+        changed=fact('phase_changed',3,phase='review',state='working',head=HEAD)
+        self.assertEqual(self.m.permission_request_advisories([grant,changed,request],KEY,self.now),[])
+        wrong=fact('permission_requested',2,phase='execution',head='c'*40,reason_code='run_checks',evidence={'ref':'grant-a'})
+        self.assertEqual(self.m.permission_request_advisories([grant,wrong],KEY,self.now),[])
