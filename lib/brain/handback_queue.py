@@ -45,12 +45,14 @@ def read_queue_request(n, identity):
 
 
 def write_queue_request(n, data):
-    path = queue_path(n, data['id'])
-    if path.is_symlink() or path.parent.is_symlink():
-        raise ValueError('linked handback request evidence')
-    _m_common.safe_target(path)
-    path.parent.mkdir(exist_ok=True)
-    _m_common.atomic_write(path, json.dumps(data, sort_keys=True) + '\n')
+    from . import events
+    with events.node_write(n["dir"], "handback_queue"):
+        path = queue_path(n, data['id'])
+        if path.is_symlink() or path.parent.is_symlink():
+            raise ValueError('linked handback request evidence')
+        _m_common.safe_target(path)
+        path.parent.mkdir(exist_ok=True)
+        _m_common.atomic_write(path, json.dumps(data, sort_keys=True) + '\n')
 
 
 def enqueue_handback(inst, n, row, args):

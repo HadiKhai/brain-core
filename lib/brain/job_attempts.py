@@ -77,13 +77,28 @@ def active_attempt(n, row, strict=True):
 
 
 def write_attempt(n, row, data):
-    path = attempt_path(n, row)
-    if path.is_symlink() or path.parent.is_symlink():
-        raise ValueError('linked job attempt evidence')
-    _m_common.safe_target(path)
-    path.parent.mkdir(exist_ok=True)
-    _m_common.atomic_write(path, json.dumps(data, sort_keys=True) + '\n')
-    _m_common.touch(path)
+    from . import events
+    with events.node_write(n["dir"], "job_attempt"):
+        path = attempt_path(n, row)
+        if path.is_symlink() or path.parent.is_symlink():
+            raise ValueError('linked job attempt evidence')
+        _m_common.safe_target(path)
+        path.parent.mkdir(exist_ok=True)
+        previous = current_attempt(n, row, strict=False)
+        _m_common.atomic_write(path, json.dumps(data, sort_keys=True) + '\n')
+        _m_common.touch(path)
+
+        if (previous or {}).get('state') != data.get('state'):
+            phase = {'queued': ('admission', 'waiting'), 'verifying': ('execution', 'working'),
+                     'terminal': ('coordination', 'waiting')}.get(data.get('state'))
+            if phase:
+                binding = data.get('binding') or {}
+                evidence = {key: binding[key] for key in ('head', 'base', 'inputs')
+                            if isinstance(binding.get(key), str) and re.fullmatch('[0-9a-f]{7,64}', binding[key])}
+                inst = _m_instance.Instance(_m_instance.instance_above(n['dir']))
+                events.record_fact(inst, n, 'phase_changed', _m_jobs.job_key(row),
+                                   phase=phase[0], state=phase[1],
+                                   reason_code='attempt_' + data['state'], **evidence)
 
 
 def begin_attempt(inst, n, row, request_id=None):

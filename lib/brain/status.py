@@ -455,7 +455,7 @@ def due_evidence(inst, n):
     last = _m_common.git("log", "-1", "--format=%H %cI", "--", *paths, cwd=inst.root).stdout.strip()
     # Hash exactly the generated display, apart from its refresh time and metadata. Retain
     # the last refresh's merge baseline so its "since previous" snapshot stays comparable.
-    lines, _ = status_facts(inst, n, state, facts_meta(n).get("merged_before", []))
+    lines, _ = status_facts(inst, n, state, facts_meta(n).get("merged_before", []), metadata_only=True)
     return state, _m_jobs.digest(lines), last
 
 
@@ -898,7 +898,7 @@ def status_facts(inst, n, state, known_merges, metadata_only=False):
     due = due_items(inst, n, (state, "", ""), include_stale=False, include_advice=False, include_handled=True)
     lessons = sorted([r for r in state["jobs"] or [] if r["Ended"] and r["Outcome"] == "merged"], key=merge_time, reverse=True)
     lines += ["", "Lesson outcomes (merged jobs):"]
-    lines += [_m_guard.redact(f"- {r['Job']}: " + (("recorded; see brain jobs" if metadata_only else r.get("Lessons")) or
+    lines += [_m_guard.redact(f"- {r['Job']}: " + (("recorded; see brain jobs" if metadata_only and r.get("Lessons") else r.get("Lessons")) or
                      ("missing; coordinator must record outcome" if r.get("Lesson check") == "required" else
                       "legacy; outcome not required")), _m_guard.never_terms(n)) for r in lessons] or ["- None."]
     lines += ["", "Finished jobs awaiting coordinator:"]
@@ -951,7 +951,7 @@ def refresh_status(inst, n, view=None):
     previous = facts_meta(n)
     if view is None:
         state = file_state(inst, n)
-        lines, merged = status_facts(inst, n, state, previous.get("merged", []))
+        lines, merged = status_facts(inst, n, state, previous.get("merged", []), metadata_only=True)
     else:
         lines, merged = list(view["facts"]), dict.fromkeys(view["merged"])
     merged_before = view.get("merged_before", []) if view is not None else previous.get("merged", [])

@@ -282,7 +282,8 @@ class AutonomyDue(AutonomyProject):
         before = (r / 'nodes/app/status.md').read_bytes()
         ledger = (r / 'nodes/app/job-ledger.md').read_bytes()
         self.b(r, 'handback', "--summary", "Synthetic result", 'app', '--branch', 'job-a', '--state', 'done', '--report', 'reports/result.md')
-        self.assertEqual((r / 'nodes/app/status.md').read_bytes(), before)
+        self.assertNotEqual((r / 'nodes/app/status.md').read_bytes(), before)
+        self.assertIn('| job-a | - | - | done |', (r / 'nodes/app/status.md').read_text())
         self.assertEqual((r / 'nodes/app/job-ledger.md').read_bytes(), ledger)
         self.assertEqual([i['state'] for i in self.due(r) if i['kind'] == 'handback'], ['done'])
         self.assertIn('brain handback app --branch job-a', self.b(r, 'brief', 'app', '--branch', 'job-a'))
@@ -333,7 +334,7 @@ class AutonomyDue(AutonomyProject):
         self.git('add', 'nodes/app/status.md', cwd=r); self.git('commit', '-qm', 'app: refresh', cwd=r)
         self.assertEqual(self.due(r), [])
         self.b(r, 'handback', "--summary", "Synthetic result", 'app', '--branch', 'job-a', '--state', 'blocked', '--report', 'report.md')
-        self.assertIn('stale-status', [i['kind'] for i in self.due(r)])
+        self.assertNotIn('stale-status', [i['kind'] for i in self.due(r)])
         self.b(r, 'status', 'app', '--refresh')
         self.assertEqual([i['kind'] for i in self.due(r)], ['handback'])
         # A worker commit changes no displayed fact until its signal or merge state changes.
@@ -399,8 +400,9 @@ class AutonomyFacts(AutonomyProject):
         st.write_text(original)
         self.b(r, 'status', 'app', '--refresh')
         text = st.read_text()
-        self.assertEqual(text.split('<!-- brain:facts v1 -->')[0] +
-                         text.split('<!-- /brain:facts -->')[1][2:], original)
+        outside = text.split('<!-- brain:facts v1 -->')[0] + text.split('<!-- /brain:facts -->')[1][2:]
+        outside = re.sub(r'(?ms)\n## Active work\n.*', '', outside)
+        self.assertEqual(outside, original)
         self.assertIn('Open worktrees (this machine):\n- job-a: present', text)
         self.assertIn('runtime activity unknown', text)
         self.assertIn('Updated: 2020-01-01 00:00 +00:00', self.b(r, 'status', 'app'))
@@ -428,7 +430,7 @@ class AutonomyFacts(AutonomyProject):
         after = st.read_text().split('<!-- brain:facts-state ', 1)[1].split(' -->', 1)[0]
         self.assertEqual(json.loads(before)['fingerprint'], json.loads(after)['fingerprint'])
         self.b(r, 'handback', "--summary", "Synthetic result", 'app', '--branch', 'job-a', '--state', 'done')
-        self.assertIn('stale-status', [i['kind'] for i in self.due(r)])
+        self.assertNotIn('stale-status', [i['kind'] for i in self.due(r)])
         self.b(r, 'status', 'app', '--refresh')
         self.assertNotIn('stale-status', [i['kind'] for i in self.due(r)])
         self.git('merge', '-qm', 'merge worker', 'job-a', cwd=home)
@@ -463,7 +465,6 @@ class AutonomyFacts(AutonomyProject):
         self.git('add', '-A', cwd=wt); self.git('commit', '-qm', 'A', cwd=wt)
         self.git('merge', '-q', 'job-a', cwd=home)
         self.b(r, 'wt', 'prune', 'app', '--offline')
-        self.b(r, 'status', 'app', '--refresh')
         st = r / 'nodes/app/status.md'
         self.assertIn('job-a (1 commits)', st.read_text())
         self.b(r, 'status', 'app', '--refresh')
@@ -1058,10 +1059,13 @@ class NodeHygiene(Scenario):
         r, inst, n = self.node()
         self.block(n, '2020-01-01T00:00:00Z')
         before = (n['dir'] / 'status.md').read_bytes()
+        commits = self.git('rev-list', '--count', 'HEAD', cwd=r)
         first = json.loads(self.b(r, 'inbox', 'app', '--new', '--json'))
         self.assertTrue(any(i['kind'] == 'blocked-overdue' for i in first))
         self.assertEqual(json.loads(self.b(r, 'inbox', 'app', '--new', '--json')), [])
-        self.assertEqual((n['dir'] / 'status.md').read_bytes(), before)
+        after = (n['dir'] / 'status.md').read_bytes()
+        self.assertEqual(self.m.FACTS_RE.sub('', after.decode()), self.m.FACTS_RE.sub('', before.decode()))
+        self.assertEqual(self.git('rev-list', '--count', 'HEAD', cwd=r), commits)
         for name in ('roles/coordinator.md', 'adapters/hosts/t3.md'):
             self.assertIn('committing unchanged status', (CORE / name).read_text())
 

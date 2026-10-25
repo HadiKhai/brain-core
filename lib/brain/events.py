@@ -86,7 +86,7 @@ class JournalError(ValueError):
     pass
 
 
-_KINDS = {'begin', 'commit', 'abort', 'hook', 'reconcile', 'explain', 'damage', 'fact'}
+_KINDS = {'begin', 'commit', 'abort', 'hook', 'reconcile', 'explain', 'damage', 'fact', 'record', 'record_applied'}
 _JOURNALS = {}
 
 
@@ -137,6 +137,11 @@ def _event(line):
         if not re.fullmatch(r'[0-9]{4}-[0-9]{2}-[0-9]{2} .*', value['ts']):
             raise ValueError()
         _payload(value['data'])
+        if value['kind'] in ('record', 'record_applied'):
+            if (not re.fullmatch('n:[0-9a-f]{64}', value['node']) or
+                    not re.fullmatch('[0-9a-f]{32}', value['ref'])):
+                raise ValueError()
+            validate_record(value['data'], applied=value['kind'] == 'record_applied')
         if value['kind'] == 'fact':
             validate_fact(value['data'])
         if value['kind'] == 'explain' and not isinstance(value['data'].get('comparison'), str):
@@ -162,16 +167,29 @@ def read(inst):
 
 def _blank():
     return {'resources': {}, 'views': {}, 'opened': {}, 'faults': {}, 'invalid': {},
-            'hook_offsets': {}, 'legacy_hooks': {}, 'explained': {}, 'resolved': {}}
+            'hook_offsets': {}, 'legacy_hooks': {}, 'explained': {}, 'resolved': {}, 'records': {}, 'pending_landings': {}}
 
 
 def _apply(state, e):
     data, kind = e['data'], e['kind']
+    if kind == 'fact':
+        if data['fact_type'] in ('landed', 'task_landed', 'job_landed'):
+            state['pending_landings'][e['ref']] = e['node']
+        elif data['fact_type'] == 'dependencies_reconciled':
+            state['pending_landings'].pop(data.get('evidence', {}).get('ref'), None)
+    if kind == 'record':
+        identity = e['node'] + ':' + data['record_type'] + ':' + data['key']
+        state['records'][identity] = {**data, 'ref': e['ref'], 'applied': False}
+    if kind == 'record_applied':
+        identity = e['node'] + ':' + data['record_type'] + ':' + data['key']
+        entry = state['records'].get(identity)
+        if entry and entry['ref'] == data['record_ref']:
+            entry['applied'] = True
     if kind == 'begin':
         state['opened'][e['ref']] = e
         for r in data.get('baseline', []):
             state['resources'][r['id']] = r
-    if kind in ('commit', 'reconcile', 'hook'):
+    if kind in ('commit', 'reconcile', 'hook', 'record_applied'):
         changed = False
         for r in data.get('resources', []):
             changed |= state['resources'].get(r['id'], {}).get('hash') != r['hash']
@@ -262,6 +280,15 @@ class Journal:
             _payload({'resources': list(data['state']['resources'].values()), 'views': data['state']['views']})
             if any(type(x) is not int or x < 0 for x in data['state']['hook_offsets'].values()):
                 raise ValueError()
+            for identity, entry in data['state']['records'].items():
+                if (not isinstance(identity, str) or not re.fullmatch(r'n:[0-9a-f]{64}:(?:jobs:ledger|handback:[0-9a-f]{24})', identity)
+                        or not isinstance(entry, dict) or type(entry.get('applied')) is not bool
+                        or not re.fullmatch('[0-9a-f]{32}', entry.get('ref', ''))):
+                    raise ValueError()
+                validate_record(entry)
+            for ref, owner in data['state']['pending_landings'].items():
+                if not re.fullmatch('[0-9a-f]{32}', ref) or not re.fullmatch('n:[0-9a-f]{64}', owner):
+                    raise ValueError()
             for e in data['state']['opened'].values():
                 _event((json.dumps(e) + '\n').encode())
             self.positions, self.state = data['positions'], data['state']
@@ -562,6 +589,7 @@ class Command:
         self.close_job = bool(getattr(args, "close", False)) or (args is not None and args.f.__name__ in ("cmd_wt_prune", "cmd_wt_rm"))
         self.command = command or args.f.__name__.removeprefix("cmd_")
         self.lease = None
+        self.record_paths = set()
 
     def start(self):
         self.ref = uuid.uuid4().hex
@@ -578,13 +606,17 @@ class Command:
             raise
 
     def __enter__(self):
+        nested = any(op.inst.root == self.inst.root for op in _CURRENT)
         journal(self.inst, repair=True)
-        read_comparisons(self.inst, repair=True)
-        fold_hooks(self.inst)
-        if journal(self.inst).positions:
-            gap = detect_gaps(self.inst, self.node)
-            if gap and self.command not in ("status", "set") and any(source(self.inst, n) == "events" for n in self.inst.nodes()):
-                common.die("events source has unreconciled state; run status --refresh before writing")
+        if not nested:
+            read_comparisons(self.inst, repair=True)
+            fold_hooks(self.inst)
+            recover_records(self.inst)
+            if journal(self.inst).positions:
+                gap = detect_gaps(self.inst, self.node)
+                if gap and self.command not in ("status", "set") and any(source(self.inst, n) == "events" for n in self.inst.nodes()):
+                    common.die("events source has unreconciled state; run status --refresh before writing")
+            backfill_records(self.inst)
         self.start()
         _CURRENT.append(self)
         return self
@@ -878,6 +910,14 @@ def switch_gate(inst, n):
 def cmd_events(a):
     inst = nodes.load()
     n = inst.node(a.id)
+    if getattr(a, 'metrics', False):
+        from . import delivery_metrics
+        print(json.dumps(delivery_metrics.delivery_measurements(inst, n), sort_keys=True, indent=2))
+        return
+    if getattr(a, 'rebuild_records', False):
+        count = len(recover_records(inst, n, rebuild=True))
+        print(n['id'] + ': rebuilt ' + str(count) + ' event record(s)')
+        return
     if getattr(a, 'record', None):
         try:
             fields = json.loads(a.data)
@@ -1083,7 +1123,10 @@ def affected_nodes(inst, changed, preferred):
 
 
 def maintain(op, changed):
-    from . import status
+    from . import status, freshness
+    dispatch_landings(op.inst)
+    freshness.maintain_indexes(op.inst, op.inst.nodes())
+    changed = {**{path: None for path in op.record_paths}, **changed}
     views = {}
     _, recorded_views, _ = replay(op.inst)
     selected = {n['id']: n for n in affected_nodes(op.inst, changed, op.node)}
@@ -1208,10 +1251,226 @@ def record_fact(inst, n, fact_type, job_key=None, **fields):
         raise ValueError('fact timestamp cannot be in the future')
     with instance.brain_lock(inst):
         journal(inst, repair=True)
-        return append(inst, n['id'], 'fact', uuid.uuid4().hex, data)
+        event = append(inst, n['id'], 'fact', uuid.uuid4().hex, data)
+        try:
+            dispatch_landings(inst)
+        except (Exception, SystemExit):
+            print('brain: fact saved; dependency reconciliation pending', file=__import__('sys').stderr)
+        return event
 
 
 def facts(inst, n, job_key=None):
     """Ordered explicit audit read, scoped to the opaque node and optional exact job key."""
     return [e for e in read(inst) if e['kind'] == 'fact' and same_node(e['node'], n['id'])
             and (job_key is None or e['data'].get('job_key') == job_key)]
+
+
+_RECORD_TYPES = ('jobs', 'handback')
+
+
+def record_target(n, record_type, key):
+    if record_type == 'jobs' and key == 'ledger':
+        return n['dir'] / 'job-ledger.md'
+    if record_type == 'handback' and re.fullmatch(r'[0-9a-f]{24}', key):
+        return n['dir'] / 'job-handbacks' / (key + '.json')
+    raise ValueError('invalid event record identity')
+
+
+def record_identity(n, record_type, key):
+    record_target(n, record_type, key)
+    return node_ref(n['id']) + ':' + record_type + ':' + key
+
+
+def record_object(inst, data):
+    sha = data['object']
+    if not isinstance(sha, str) or not re.fullmatch('[0-9a-f]{64}', sha):
+        raise ValueError('invalid record object')
+    path = private_path(inst.root / '.brain/event-objects' / (sha + '.json'))
+    raw = path.read_bytes()
+    if digest(raw) != sha or path.stat().st_nlink != 1:
+        raise ValueError('event record object is damaged')
+    obj = json.loads(raw)
+    if (not isinstance(obj, dict) or obj.get('version') != 1 or not isinstance(obj.get('text'), str)
+            or obj.get('record_type') != data['record_type'] or obj.get('key') != data['key']):
+        raise ValueError('invalid event record object')
+    return obj
+
+
+def record_read(inst, n, record_type, key='ledger'):
+    entry = journal(inst).state['records'].get(record_identity(n, record_type, key))
+    return record_object(inst, entry)['text'] if entry else None
+
+
+def write_record(inst, n, record_type, key, text, origin='observed'):
+    """Journal an immutable source object before materializing its conventional file.
+
+    Prose remains private in objects; the journal contains only identity and hashes.
+    Acknowledgements distinguish unfinished writes from later handwritten edits.
+    """
+    path = record_target(n, record_type, key)
+    common.safe_target(path)
+    if path.is_symlink() or path.parent.is_symlink():
+        raise ValueError('linked record target')
+    if origin not in ('observed', 'reconstructed') or not isinstance(text, str):
+        raise ValueError('invalid record source')
+    with instance.brain_lock(inst):
+        store = journal(inst, repair=True)
+        identity = record_identity(n, record_type, key)
+        previous = store.state['records'].get(identity)
+        if previous and record_object(inst, previous)['text'] == text and path.exists() and path.read_text() == text:
+            return previous['ref']
+        before = digest(path.read_bytes()) if path.exists() else None
+        obj = {'version': 1, 'record_type': record_type, 'key': key, 'text': text}
+        raw = (json.dumps(obj, ensure_ascii=False, sort_keys=True, separators=(',', ':')) + '\n').encode()
+        sha = digest(raw)
+        target = private_path(inst.root / '.brain/event-objects' / (sha + '.json'))
+        if target.exists():
+            if target.read_bytes() != raw or target.stat().st_nlink != 1:
+                raise ValueError('immutable event object collision')
+        else:
+            common.atomic_write(target, raw.decode())
+        directory = os.open(str(target.parent), os.O_RDONLY | getattr(os, 'O_DIRECTORY', 0))
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+        data = {'record_type': record_type, 'key': key, 'object': sha, 'before': before,
+                'after': digest(text.encode()), 'origin': origin}
+        event = append(inst, n['id'], 'record', uuid.uuid4().hex, data)
+        for op in _CURRENT:
+            if op.inst.root == inst.root:
+                op.record_paths.add(path.relative_to(inst.root).as_posix())
+        apply_record(inst, n, {**data, 'ref': event['ref']})
+        return event['ref']
+
+
+def apply_record(inst, n, entry, rebuild=False):
+    path = record_target(n, entry['record_type'], entry['key'])
+    common.safe_target(path)
+    if path.is_symlink() or path.parent.is_symlink():
+        raise ValueError('linked record target')
+    text = record_object(inst, entry)['text']
+    current = digest(path.read_bytes()) if path.exists() else None
+    if current != entry['after']:
+        if current != entry['before'] and not (rebuild and current is None):
+            raise ValueError('record target changed independently; reconcile without overwriting it')
+        path.parent.mkdir(exist_ok=True)
+        common.atomic_write(path, text)
+        common.touch(path)
+    if not entry.get('applied'):
+        append(inst, n['id'], 'record_applied', uuid.uuid4().hex,
+               {'record_ref': entry['ref'], 'record_type': entry['record_type'], 'key': entry['key'],
+                'resources': resource_list(inst, {path.relative_to(inst.root).as_posix(): entry['after']})})
+
+
+def recover_records(inst, n=None, rebuild=False):
+    """Retry pending materializations; explicit rebuild also restores missing projections."""
+    changed = []
+    nodes_by_ref = {node_ref(node['id']): node for node in ([n] if n else inst.nodes())}
+    for identity, entry in list(journal(inst).state['records'].items()):
+        owner = nodes_by_ref.get(identity.split(':jobs:')[0].split(':handback:')[0])
+        if owner and (rebuild or not entry.get('applied')):
+            apply_record(inst, owner, entry, rebuild=rebuild)
+            changed.append(entry['ref'])
+    return changed
+
+
+def backfill_records(inst):
+    """Label existing snapshots as reconstructed sources, never invented past events."""
+    from . import jobs
+    store = journal(inst)
+    for n in inst.nodes():
+        ledger = n['dir'] / jobs.JOBS_FILE
+        if ledger.exists() and jobs.read_jobs(n) is not None and record_identity(n, 'jobs', 'ledger') not in store.state['records']:
+            write_record(inst, n, 'jobs', 'ledger', ledger.read_text(), origin='reconstructed')
+        for row in jobs.read_jobs(n) or []:
+            path = jobs.handback_file(n, row)
+            key = jobs.job_key(row)
+            if path.exists() and record_identity(n, 'handback', key) not in store.state['records']:
+                write_record(inst, n, 'handback', key, path.read_text(), origin='reconstructed')
+
+
+_DISPATCHING_LANDINGS = False
+
+
+def dispatch_landings(inst):
+    """Idempotent task dependency application; pending event ids survive a failed call."""
+    global _DISPATCHING_LANDINGS
+    if _DISPATCHING_LANDINGS or not journal(inst).state['pending_landings']:
+        return 0
+    import importlib
+    try:
+        tasks = importlib.import_module('.tasks', __package__)
+    except ModuleNotFoundError as error:
+        if error.name != __package__ + '.tasks':
+            raise
+        return 0
+    reconcile_dependencies = getattr(tasks, 'reconcile_dependencies', None)
+    if reconcile_dependencies is None:
+        return 0  # an older tasks capability keeps its durable pending events
+    _DISPATCHING_LANDINGS = True
+    try:
+        owners = {node_ref(n['id']): n['id'] for n in inst.nodes()}
+        count = 0
+        for ref, owner in list(journal(inst).state['pending_landings'].items()):
+            if owner not in owners:
+                continue
+            reconcile_dependencies(inst, changed_node=owners[owner], event_id=ref)
+            append(inst, owners[owner], 'fact', uuid.uuid4().hex,
+                   {'fact_type': 'dependencies_reconciled', 'job_key': None,
+                    'at': inst.now_dt().isoformat(timespec='microseconds'), 'origin': 'observed',
+                    'evidence': {'ref': ref}})
+            count += 1
+        return count
+    finally:
+        _DISPATCHING_LANDINGS = False
+
+
+class node_write:
+    """Short native state-writer scope, including callers bypassing CLI dispatch."""
+    def __init__(self, directory, command):
+        root = instance.instance_above(directory)
+        if root is None:
+            raise ValueError('native event writer is outside an instance')
+        self.inst = instance.Instance(root)
+        n = next((n for n in self.inst.nodes() if n['dir'] == directory), None)
+        if n is None:
+            raise ValueError('native event writer has no node')
+        self.skip = any(op.inst.root == root for op in _CURRENT)
+        self.lock = instance.brain_lock(self.inst)
+        self.operation = Command(root, command=command, node=n['id'])
+
+    def __enter__(self):
+        self.lock.__enter__()
+        if self.skip:
+            return None
+        try:
+            return self.operation.__enter__()
+        except BaseException:
+            self.lock.__exit__(*__import__('sys').exc_info())
+            raise
+
+    def __exit__(self, *exc):
+        try:
+            return False if self.skip else self.operation.__exit__(*exc)
+        finally:
+            self.lock.__exit__(*exc)
+
+
+def validate_record(data, applied=False):
+    record_type, key = data.get('record_type'), data.get('key')
+    if (record_type not in _RECORD_TYPES or not isinstance(key, str) or
+            (record_type == 'jobs' and key != 'ledger') or
+            (record_type == 'handback' and not re.fullmatch('[0-9a-f]{24}', key))):
+        raise ValueError('invalid source record identity')
+    if applied:
+        if not re.fullmatch('[0-9a-f]{32}', data.get('record_ref', '')):
+            raise ValueError('invalid applied source reference')
+        return
+    for field in ('object', 'after'):
+        if not isinstance(data.get(field), str) or not re.fullmatch('[0-9a-f]{64}', data[field]):
+            raise ValueError('invalid source record fingerprint')
+    if data.get('before') is not None and not re.fullmatch('[0-9a-f]{64}', data['before']):
+        raise ValueError('invalid previous source fingerprint')
+    if data.get('origin') not in ('observed', 'reconstructed'):
+        raise ValueError('invalid source record provenance')

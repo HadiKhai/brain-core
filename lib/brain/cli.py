@@ -143,7 +143,7 @@ def writes(a):
     """Does this command, with these options, change anything in the instance?"""
     name = a.f.__name__
     if name == "cmd_events":
-        return bool(a.explain or a.record)
+        return bool(a.explain or a.record or a.rebuild_records)
     if name == "cmd_wt_prune":
         return not a.dry_run
     if name == 'cmd_preview':
@@ -164,6 +164,8 @@ def writes(a):
         return False  # native execution owns short locks and machine admission
     if name == 'cmd_land_check':
         return False  # the explicit runner takes short owned locks around execution
+    if name == 'cmd_lifecycle':
+        return False  # native RPC stays outside the instance lock; publication takes its own short locks
     if name == 'cmd_dispatch':
         return False
     if name == "cmd_watch":
@@ -179,7 +181,7 @@ def writes(a):
     if name == "cmd_inbox":
         return a.new or bool(getattr(a, "add", None))
     if name == 'cmd_index':
-        return a.record
+        return a.record or bool(getattr(a, "refresh", False))
     if name == 'cmd_due':
         return bool(getattr(a, 'defer', None) or getattr(a, 'ack', None))
     if name == "cmd_changes":
@@ -352,8 +354,9 @@ def main():
         opt('--weekly', action='store_true', help='read-only sweep of unresolved requests aged at least seven days'))
     cmd('answer', _m_status.cmd_answer, 'record text for exactly one current inbox episode, retaining source/history',
         'item_id', 'text')
-    cmd('index', _m_freshness.cmd_index, 'configured upstream index freshness; never runs a generator', 'id',
-        opt('--record', action='store_true', help='explicitly record current input/output fingerprints after regeneration'))
+    cmd('index', _m_freshness.cmd_index, 'configured upstream index freshness or opt-in native link generation', 'id',
+        opt('--record', action='store_true', help='explicitly record current input/output fingerprints after regeneration'),
+        opt('--refresh', action='store_true', help='regenerate an explicitly owned native link index'))
     cmd("msg", _m_messages.cmd_msg, "format start/done/blocked/question for a coordinator (does not send)",
         "id", opt("kind", choices=_m_messages.MESSAGE_KINDS), "message", opt("--branch"), opt("--report"))
     cmd("handback", _m_jobs.cmd_handback, "done/blocked/question hand-back; worker messages are start/done/blocked/question",
@@ -549,7 +552,8 @@ def main():
         opt("--from-events", action="store_true"), opt("--json", action="store_true"))
     cmd("events", _m_events.cmd_events, "private event metadata; --compare summarizes the last day", "id",
         opt("--compare", action="store_true"), opt("--json", action="store_true"),
-        opt("--explain", metavar="DIFFERENCE_ID"), opt("--reason"),
+        opt("--metrics", action="store_true"), opt("--explain", metavar="DIFFERENCE_ID"), opt("--reason"),
+        opt("--rebuild-records", action="store_true"),
         opt("--record", metavar="FACT_TYPE"), opt("--job-key"), opt("--data", default="{}"))
     cmd("registry", _m_status.cmd_registry, "regenerate registry.md")
     cmd("link", _m_hosts.cmd_link, "create runtime links (axiom 22); --command puts 'brain' on your PATH; --global adds a "

@@ -34,6 +34,15 @@ an explicit switch after a clean comparison day. `brain backlog <node> add <item
 records dated deferred work. Typed observed facts use `brain events <node> --record`
 with controlled metadata; no transcript-based classification is performed.
 
+Ledger and hand-back files are materialized from immutable private event sources;
+`brain events <node> --rebuild-records` restores missing projections while refusing
+independent edits. This is per-file replay, not a cross-file/Git/upgrade transaction.
+`brain events <node> --metrics` reports explicit preview, phase, rework and dependency
+observations. Native attempt transitions provide timing facts; a saved URL alone
+never proves usability. `upstream_generator=links` opts a configured upstream index
+into native maintenance; `brain index <node> --refresh` runs it explicitly. Existing
+unmarked index output is preserved, and no external generator command is executed.
+
 After upgrading: Run `brain check --fix` for missing standard backlog files. Move
 handwritten Active work state prose to Now or decisions before a write regenerates
 the table. Keep snapshots during comparison. An interrupted journal requires a

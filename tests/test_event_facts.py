@@ -53,3 +53,18 @@ class EventFacts(Scenario):
         event = events.record_fact(inst, inst.node('root'), 'request_received', 'a' * 24,
                                    origin='reconstructed', at='2025-01-01T00:00:00+00:00')
         self.assertEqual(event['data']['origin'], 'reconstructed')
+
+    def test_landing_reconciliation_retains_failed_delivery_and_acknowledges_once(self):
+        root = self.init('demo')
+        inst = instance.Instance(root)
+        tasks = mock.Mock()
+        tasks.reconcile_dependencies.side_effect = RuntimeError('temporary')
+        with mock.patch('importlib.import_module', return_value=tasks):
+            event = events.record_fact(inst, inst.node('root'), 'task_landed', evidence={'ref': 'TASK-1'})
+            self.assertIn(event['ref'], events.journal(inst).state['pending_landings'])
+            tasks.reconcile_dependencies.side_effect = None
+            with instance.brain_lock(inst):
+                self.assertEqual(events.dispatch_landings(inst), 1)
+                self.assertEqual(events.dispatch_landings(inst), 0)
+        tasks.reconcile_dependencies.assert_called_with(inst, changed_node='root', event_id=event['ref'])
+        self.assertEqual(events.journal(inst).state['pending_landings'], {})
