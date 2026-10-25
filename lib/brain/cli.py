@@ -130,6 +130,8 @@ def writes(a):
         return bool(getattr(a, 'approve_all', False))
     if name == 'cmd_land_check':
         return False  # the explicit runner takes short owned locks around execution
+    if name == 'cmd_lifecycle':
+        return False  # native RPC stays outside the instance lock; publication takes its own short locks
     if name == 'cmd_dispatch':
         return False
     if name == "cmd_watch":

@@ -186,3 +186,10 @@ job identity and available head/base/input fingerprints accompany the observatio
 Repeated writes of the same state emit no duplicate transition. This records native
 runner states, not model activity or an inferred result. Actual successful full
 verification remains a separate evidence-bearing fact from the verifier.
+
+## D313: Lifecycle RPC runs outside the outer CLI writer lock
+
+The lifecycle dispatcher bypasses the CLI's instance lock and event Command scope,
+matching native dispatch and watch. Its RPC cannot hold that outer lock while
+waiting on the host. Lifecycle publication retains its receipt locks and short
+instance locks; ledger writes retain the event-backed write_jobs source hook.
