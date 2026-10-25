@@ -514,17 +514,9 @@ def _ui_state(inst, problems=None, scan=None, spend_budget=2.0, machine_spend=No
         usage_policy = {"stop_percent": None, "max_age_seconds": 120}
         usage_routing_policy = {}
     machine = _m_machine.machine_state(inst)
-    due = []
-    for n in nodes:
-        key = (node_keys.get(n['id']), int(time.time() // 300)) if node_keys is not None else None
-        old = cache.due.get(n['id']) if cache is not None else None
-        if old is None or old[0] != key:
-            items_due = _m_status.due_items(inst, n)
-            if cache is not None:
-                cache.due[n['id']] = (key, items_due)
-        else:
-            items_due = old[1]
-        due.extend(dict(item) for item in items_due)
+    # The CLI's read-only projection includes routed completion notices. Copy
+    # its items before adding display fields so their durable identities stay intact.
+    due = [dict(item) for item in _m_status.coordinator_due_items(inst, nodes)]
     branches = {(n["id"], _m_jobs.job_key(r)): r["Job"] for n in nodes for r in (_m_jobs.read_jobs(n) or [])}
     for item in due:  # the job's own name, for a card that otherwise reads "this job"
         if item.get("job") and (item["node"], item["job"]) in branches:

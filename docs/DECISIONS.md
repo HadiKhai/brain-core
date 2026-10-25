@@ -1863,3 +1863,24 @@ No scheduler, background service or implicit cleanup invocation is added.
 Parallel selftests use the pinned runner's work-stealing scheduler with worker
 restarts disabled and unchanged canonical suite selection. Focused dispatch
 proof cannot establish the duration or readiness of a complete suite.
+
+## D18501: Compare recovery snapshots at one instance time
+
+The dashboard recovery scenario fixes the existing instance clock while comparing
+completed SSE contents with a later state request. Derived ages and forecast
+measurement timestamps then describe the same observation. Server scheduling,
+retry barriers and demand still use the real monotonic clock. The scenario keeps
+its complete payload equality, private-error screening, partial-to-complete
+transition and single initialization worker assertions. Runtime publication and
+refresh semantics are unchanged.
+
+## D18502: Dashboard due uses the coordinator read projection
+
+The dashboard reads `coordinator_due_items` once for its selected nodes, matching
+the CLI's routing of ordinary needs, unread changes and completion notices. It
+copies items before adding display fields and retains their existing IDs. A read
+does not reconcile events or deliver completions. The ledger scenario preserves
+all landing notices, verifies repeated reads retain their identities, and checks
+that viewing preserves ledger, completion journal and watch delivery state and
+does not invoke provider polling or host delivery. Existing reminder lifecycle
+reconciliation is unchanged.
