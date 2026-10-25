@@ -56,95 +56,22 @@ and inherited model configuration without activating inherited runtime policy.
 
 
 
-## D801: Separate Docker diagnostics from explicitly pinned cleanup
+## D901: Local semantic recall is optional and fails back to lexical recall
 
-Read-only leftover reporting grants no cleanup authority. A node enables cleanup
-with `docker_cleanup_prefixes` (literal namespaces ending in `-verify-*` or
-`-job-*`), `docker_cleanup_host` (trusted local Unix endpoint), and
-`docker_cleanup_daemon` (the exact Docker daemon ID). The default mode is `stop`.
-Conflicting environment selectors, a different effective endpoint, or a changed
-daemon ID refuse mutation. Commands pin that endpoint and clear ambient Docker
-and Compose selectors; no project compose file is loaded.
+An optional, short-lived ONNX worker uses the pinned multilingual-e5-small int8
+model with query/passage prefixes, masked mean pooling and normalized cosine
+ranking. No daemon, API key, remote inference or torch dependency is required.
+The core remains Python 3.9 standard library only. Optional runtime packages
+are detected without importing the model. Unknown or less than 2 GB available
+RAM, missing packages, offline operation and any inference/index failure retain
+lexical retrieval. `brain check` reports the current mode; install and upgrade
+already run that check. `brain recall --setup` prepares the model explicitly.
 
-A container also needs the exact node/machine `brain.docker-scope` and both
-`brain.owner-pid` and `brain.owner-stamp` labels. Only a definitely absent process
-qualifies; unknown or recycled identities retain resources. Every connected
-project, Testcontainers session, named volume and network peer participates in
-ownership checks. Preview/dev/production identities, bind mounts, automatic
-removal, incomplete inventories and resources younger than 30 minutes veto work.
-Cleanup stops only immutable inspected container IDs, checks all peers immediately
-before each mutation, and reports a stopped ID only after confirmation. One
-five-second deadline bounds each hook call. Missing Docker/configuration is a
-quiet no-op; failure returns diagnostics without replacing a run's primary result.
-
-## D802: Remove only unused, explicitly owned test Docker resources
-
-`docker_cleanup_mode: remove` adds deletion after the stop pass. Container removal
-uses exact IDs without force or volume flags. A restart is refused by Docker;
-container removal never implicitly removes volumes. Volumes and networks need
-the same scope, owner and age proof as containers. Every container, including
-stopped and foreign containers, participates in the attachment veto. Network
-inspection must show no endpoints. Reinspection must match the captured resource
-metadata before deletion; Docker's own in-use refusal remains authoritative.
-Errors keep resources for a later run. No images, bind contents, compose files,
-global prune, forced disconnect or host lifecycle APIs are touched.
-
-## D803: Bind machine reservations to an explicit operating-system boot
-
-New reservations retain a boot identity in addition to parent/child process birth
-identities. Linux reads the kernel boot UUID; macOS reads `kern.boottime` seconds
-and microseconds. A known mismatch reclaims an earlier-boot reservation without
-probing its numeric PIDs. Missing or unknown boot readings preserve existing
-process identity behavior and never imply death. Legacy queue rows remain valid.
-No uptime subtraction, clock-derived estimate, service change or reboot probe is
-needed. Queue readers accept the optional field and keep old compatibility.
-
-## D804: Show bounded CPU observations when machine admission is held
-
-Held machine diagnostics collect up to three top CPU observations using one
-one-second `ps` command. Only PID, CPU percentage and executable basename are
-shown; command arguments and full paths are excluded. Invalid/nonfinite readings
-or probe failures leave the diagnostic unknown. This observation explains current
-CPU activity without claiming causation or changing admission policy. Unheld
-state reads do not run the probe. Percentages above 100 are valid on multicore
-systems.
-
-## D805: One durable terminal producer through admission and cleanup
-
-A managed machine run creates its private record before admission and owns the
-terminal transition through cleanup. It retains the original cause and one stable
-terminal event identity; repeated finalization cannot overwrite an ended run.
-Success is provisional until cleanup finishes. Cleanup attempts every action,
-records secondary errors and receives the operation's primary exception explicitly;
-a handled exception in a caller cannot suppress a new cleanup failure.
-
-A definitely dead owner can recover an abandoned run. Unknown identity is recorded
-as uncertainty, never inferred death. A live managed owner's queue-release window
-cannot produce a competing recovery cause. Pending terminal records are retained
-until the transport's stable receipt confirms actual delivery. Failed enqueue is
-retried using the original event identity and reason. Cross-route transport claims
-and accepted-delivery receipts belong to the wake transport; producer code does
-not send directly. Catchable termination unwinds through the same finalizer and
-restores embedding applications' signal handlers.
-
-`machine_run(kind, instance, node, job=None, clock=None)` is the context API;
-`machine_wait(..., token=token)` admits the managed token and `token.result` holds
-the command result. `machine_cleanup(token, actions, primary=error)` runs cleanup.
-The admission-only command uses that context without changing its public behavior.
-Other command runners integrate the same context around admission, launch and
-cleanup rather than creating a second terminal path.
-
-## D806: Keep worktree cleanup facts separate from host settlement
-
-`worktree_cleanup_result(node, branch)` returns versioned facts: workspace
-presence, every recorded job incarnation, thread references and the required
-host inspection sequence. It never attests host settlement or thread ownership.
-Missing workspaces forbid messaging stale threads. The host owns liveness,
-pending-request, coordinator and open-job protection checks.
-
-`remove_worktree(..., thread_hook=callback)` optionally runs that host integration
-before deletion. Only an explicit `True` result permits removal; refusal or an
-exception retains the checkout. Branch and live ownership checks run again after
-the callback. The returned post-removal result contains the original workspace
-reference for host inspection without authorizing a stale-thread message.
-Default callers preserve their existing checklist and removal behavior.
+Artifacts download lazily with pinned revision, lengths and SHA256 integrity;
+tests prohibit downloads. Ordinary recall bounds optional work to 12 seconds;
+explicit setup allows 180 seconds. Model setup has no outward publication.
+The private `.brain/semantic/` cache binds vectors to model and content hashes.
+Eligibility (scope, state, source content) is checked before embedding and every
+cache read, including deletion/revocation. Proposals remain inactive. There is
+no online provider enabled. The index covers usable library items and the target node's own knowledge,
+decision notes and report indexes. External transcript archives are not indexed.

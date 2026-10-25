@@ -626,11 +626,8 @@ def knowledge_tokens(text):
     return out
 
 
-def knowledge_ranked(inst, n, contexts, exclude=(), states=("active",), required=None):
-    """Explainable lexical ranking of items whose scope covers n's owners; only `states` count (usable items
-    are exactly `brain usable`: active and in scope). With `required`, that context must match.
-    [(score, id, title, why, item)], best first."""
-    ranked = []
+def knowledge_candidates(inst, n, exclude=(), states=("active",)):
+    """Apply the same scope, state and source-content policy before any retrieval."""
     nodes = inst.nodes()
     for item in inst.items():
         fm = item["fm"]
@@ -640,6 +637,16 @@ def knowledge_ranked(inst, n, contexts, exclude=(), states=("active",), required
             continue
         if _m_guard.find_terms(item["path"].read_text(), learning_terms(inst, fm, [n], nodes)):
             continue
+        yield item
+
+
+def knowledge_ranked(inst, n, contexts, exclude=(), states=("active",), required=None):
+    """Explainable lexical ranking of items whose scope covers n's owners; only `states` count (usable items
+    are exactly `brain usable`: active and in scope). With `required`, that context must match.
+    [(score, id, title, why, item)], best first."""
+    ranked = []
+    for item in knowledge_candidates(inst, n, exclude, states):
+        fm = item["fm"]
         body = _m_common.read_fm(item["path"])[1]
         words = knowledge_tokens(" ".join(str(fm.get(k, "")) for k in ("id", "title", "kind", "keywords")) + " " + body)
         score, why, hit = 0, [], set()
@@ -703,26 +710,42 @@ def cmd_recall(a):
     n = inst.node(a.id)
     problem = " ".join(a.words)
     terms = knowledge_tokens(problem)
-    if not terms:
+    if not terms and not getattr(a, "setup", False):
         _m_common.die("describe the problem in a few words: brain recall <node> \"what goes wrong\"")
     contexts = [("problem", terms, 4),
                 ("labels/stack", knowledge_tokens(n["fm"].get("labels", "") + " " + n["fm"].get("stack", "")), 1)]
     forbidden = _m_guard.never_terms(n)
-    found = knowledge_ranked(inst, n, contexts, required="problem")[:a.limit]
-    waiting = knowledge_ranked(inst, n, contexts, states=("proposed",), required="problem")
+    from . import semantic as _m_semantic
+    if getattr(a, 'setup', False):
+        try:
+            _m_semantic.local_embed(inst, [], setup=True)
+            print('local semantic model prepared')
+        except (Exception, SystemExit):
+            print('local semantic setup unavailable; lexical recall remains available')
+        return
+    semantic = _m_semantic.semantic_ranked(inst, n, problem)
+    model_name = _m_semantic.MODEL_ID if semantic is not None else None
+    if semantic is not None:
+        found, waiting = semantic
+        found = found[:max(0, a.limit)]
+    else:
+        found = knowledge_ranked(inst, n, contexts, required="problem")[:max(0, a.limit)]
+        waiting = knowledge_ranked(inst, n, contexts, states=("proposed",), required="problem")
     if a.json:
         rows = [{"id": key, "title": _m_guard.redact(title, forbidden), "kind": item["fm"].get("kind", ""),
-                 "from": item["fm"].get("source_node", ""), "score": -score, "why": why}
+                 "from": item["fm"].get("source_node", ""), "score": -score, "why": why,
+                 **({"ref": item["fm"]["source_ref"]} if item["fm"].get("kind") == "document" else {})}
                 for score, key, title, why, item in found]
-        print(json.dumps(_m_history.history_screen({"node": n["id"], "items": rows, "proposed": [r[1] for r in waiting]},
+        print(json.dumps(_m_history.history_screen({"node": n["id"], "items": rows, "proposed": [r[1] for r in waiting], **({"model": model_name} if model_name else {})},
                                         forbidden), indent=1, ensure_ascii=False))
         return
     if not found:
         print(f"{n['id']}: nothing learned yet matches that")
     for score, key, title, why, item in found:
         src = item["fm"].get("source_node", "")
+        read = item["fm"].get("source_ref", "") if item["fm"].get("kind") == "document" else f"brain item show {key} --node {n['id']}"
         print(_m_guard.redact(f"- `{key}` ({item['fm'].get('kind', '')}, from {src}): {title} — {'; '.join(why)}. "
-                     f"Read: brain item show {key} --node {n['id']}", forbidden))
+                     f"Read: {read}", forbidden))
     if waiting:
         print(f"{len(waiting)} unreviewed proposal(s) also match: {', '.join(r[1] for r in waiting[:10])}"
               f"{' …' if len(waiting) > 10 else ''}. They help only once accepted: brain proposals")
