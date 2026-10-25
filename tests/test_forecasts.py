@@ -250,3 +250,42 @@ class JobForecasts(Scenario):
         self.assertEqual(changed["samples"], 5)
         self.assertEqual(changed["conversion"]["processed_per_percent"], 68000000)
         self.assertIn("0 measured for claude", switched)
+
+    def test_model_conditioning_excludes_other_models_and_invalidates_saved_route(self):
+        rows = self.rows(3)
+        other = [{**r, 'Job': r['Job'] + '-other', 'Model': 'other-model', 'Hours': '90',
+                  'Fresh in': '900000000'} for r in rows]
+        f = self.m.estimate_job(self.inst, self.n, rows + other, 'build', 'codex', model='sample-model')
+        self.assertEqual(f['wall_h']['max'], 3)
+        self.assertEqual(f['tokens']['max'], 15300000)
+        self.assertEqual(f['model'], 'sample-model')
+        self.assertIn('sample-model', self.m.estimate_line(f))
+        sparse = self.m.estimate_job(self.inst, self.n, rows[:2] + other, 'build', 'codex', model='sample-model')
+        self.assertFalse(sparse['enough_data'])
+        self.assertNotIn('tokens', sparse)
+
+    def test_hire_and_brief_share_saved_forecast_and_model_switch_recomputes(self):
+        home = self.repo(self.tmp / 'app')
+        self.b(self.root, 'new', 'app', '--title', 'App', '--home', str(home))
+        self.b(self.root, 'set', 'app', 'runtime=codex')
+        self.b(self.root, 'specialist', 'new', 'tester', '--title', 'Tester')
+        self.b(self.root, 'wt', 'add', 'app', 'job/sample')
+        inst = self.m.Instance(self.root)
+        n = inst.node('app')
+        row = self.m.open_job(self.m.read_jobs(n), 'job/sample')
+        self.m.write_jobs(inst, n, self.rows() + [row])
+        args = ('--branch', 'job/sample', '--class', 'build', '--model', 'sample-model')
+        hired = self.b(self.root, 'hire', 'tester', 'app', *args, '--task', 'Test fixture')
+        estimate = next(line for line in hired.splitlines() if line.startswith('Forecast'))
+        self.assertIn('5 similar merged jobs', estimate)
+        saved = self.m.open_job(self.m.read_jobs(n), 'job/sample')['Forecast']
+        self.assertEqual(json.loads(saved)['model'], 'sample-model')
+        brief = self.b(self.root, 'brief', 'app', *args)
+        self.assertIn(estimate, brief.splitlines())
+        self.assertEqual(self.m.open_job(self.m.read_jobs(n), 'job/sample')['Forecast'], saved)
+        switched = self.b(self.root, 'hire', 'tester', 'app', '--branch', 'job/sample',
+                          '--class', 'build', '--model', 'other-model', '--task', 'Test fixture')
+        self.assertIn('0 similar merged jobs', switched)
+        self.assertEqual(json.loads(self.m.open_job(self.m.read_jobs(n), 'job/sample')['Forecast'])['model'], 'other-model')
+        no_branch = self.b(self.root, 'hire', 'tester', 'app', '--class', 'docs', '--task', 'Read fixture')
+        self.assertIn('Forecast docs:', no_branch)

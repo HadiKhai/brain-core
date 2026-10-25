@@ -75,3 +75,11 @@ Claude; fresh-token conversion starts at 1.1 million. Three explicitly attribute
 merged-job meter observations refine conversion. Account-wide deltas are never
 assumed attributable to one concurrent job. These estimates never affect routing,
 admission, readiness or limits.
+
+## D202: Share specialist and ordinary launch forecasting
+
+Specialist hires and worker briefs resolve their route first, then use the same
+saved estimate helper and persist the same record. A selected model conditions
+samples on that exact model and runtime; changing the model refreshes the
+estimate. An unspecified runtime-default model retains class/runtime forecasting
+and does not invent a model identity. Sparse model history stays sparse.

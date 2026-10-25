@@ -1060,7 +1060,7 @@ def meter_conversion(inst, n, runtime, rows):
             "samples": len(pairs)}
 
 
-def estimate_job(inst, n, rows, kind, runtime, size=None):
+def estimate_job(inst, n, rows, kind, runtime, size=None, model=None):
     """Same explicit class (legacy branch inference as fallback), nearest five sizes.
 
     Rank by the sum of log size ratios so files and lines have equal influence.
@@ -1071,7 +1071,8 @@ def estimate_job(inst, n, rows, kind, runtime, size=None):
     for row in rows:
         hours = forecast_number(row.get("Hours"))
         if (not row.get("Ended") or row.get("Outcome") != "merged" or hours is None or
-                (row.get("Class") or job_kind(row["Job"], rows)) != kind):
+                (row.get("Class") or job_kind(row["Job"], rows)) != kind or
+                (model and (row.get("Model") != model or row.get("Runtime") != runtime))):
             continue
         distance = 0
         if size is not None:
@@ -1086,7 +1087,7 @@ def estimate_job(inst, n, rows, kind, runtime, size=None):
     samples = nearest(samples)
     def spread(values):
         return {"median": statistics.median(values), "min": min(values), "max": max(values)}
-    out = {"version": 1, "class": kind, "runtime": runtime, "size": size, "samples": len(samples),
+    out = {"version": 1, "class": kind, "runtime": runtime, "model": model, "size": size, "samples": len(samples),
            "enough_data": len(samples) >= 3, "selection": "nearest 5 sizes" if size else "all class sizes",
            "conversion": meter_conversion(inst, n, runtime, rows)}
     if out["enough_data"]:
@@ -1110,6 +1111,8 @@ def estimate_line(estimate):
     if not estimate:
         return "Forecast: unavailable; no saved launch estimate."
     out = f"Forecast {estimate['class']}: {estimate['samples']} similar merged jobs ({estimate['selection']}); "
+    if estimate.get("model"):
+        out += f"model {estimate['model']}; "
     if not estimate["enough_data"]:
         return out + "too little data (need 3 merged jobs). Advisory, never a limit or gate."
     def show(key, label, render):
@@ -1131,6 +1134,15 @@ def estimate_line(estimate):
     return out + ". Advisory, never a limit or gate."
 
 
+def launch_forecast(inst, n, row, kind, runtime, model=None):
+    """Both launch paths retain one estimate until the selected route changes."""
+    model = model if model and model != "runtime default" else None
+    saved = saved_forecast((row or {}).get("Forecast"))
+    if saved and (saved["class"], saved["runtime"], saved.get("model")) == (kind, runtime, model):
+        return saved
+    return estimate_job(inst, n, read_jobs(n) or [], kind, runtime, planned_size(n, row), model=model)
+
+
 def record_job_forecast(inst, n, row, estimate):
     if not row:
         return
@@ -1139,7 +1151,8 @@ def record_job_forecast(inst, n, row, estimate):
         current = open_job(rows or [], row["Job"])
         saved = saved_forecast((current or {}).get("Forecast"))
         if current and job_key(current) == job_key(row) and (not saved or
-                (saved["class"], saved["runtime"]) != (estimate["class"], estimate["runtime"])):
+                (saved["class"], saved["runtime"], saved.get("model")) !=
+                (estimate["class"], estimate["runtime"], estimate.get("model"))):
             current["Forecast"] = json.dumps(estimate, sort_keys=True)
             write_jobs(inst, n, rows)
             inst.commit([], f"{n['id']}: launch forecast")

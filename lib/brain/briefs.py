@@ -266,11 +266,7 @@ def cmd_brief(a):
     if context:
         shared += ["## Shared context", "", "Gathered once by the coordinator; use these findings before rereading sources.", "", *context]
     runtime, usage = _m_knowledge.worker_route(inst, n, a)
-    forecast = _m_jobs.saved_forecast((row or {}).get("Forecast"))
-    if forecast and (forecast["class"], forecast["runtime"]) != (a.job_class, runtime):
-        forecast = None
-    forecast = forecast or _m_jobs.estimate_job(
-        inst, n, _m_jobs.read_jobs(n) or [], a.job_class, runtime, _m_jobs.planned_size(n, row))
+    forecast = _m_jobs.launch_forecast(inst, n, row, a.job_class, runtime, a.model)
     head = _m_worktrees.job_run_line(where, w, a.branch, runtime, a.model)
     head = head.replace(f"  ·  runtime: {runtime}", f"  ·  runtime: {runtime}  ·  class: {a.job_class}", 1)
     task_path = Path(a.task_file).expanduser().resolve() if a.task_file else None
