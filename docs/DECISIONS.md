@@ -2014,3 +2014,12 @@ assertions require supported internal aliases, while atomic directory sync uses
 no-follow opens. Removing those assertions or relaxing escaping-link/hard-link
 checks is not a valid scope reduction. Existing durability behavior is retained
 pending a coherent publication contract.
+
+## D18801: Publish through the parent resolved inside containment
+
+The target check returns the canonical parent it has already verified stays inside
+the instance, preserving the final filename and the existing escaping-link and
+hard-link checks. Atomic publication uses that checked parent for its temporary
+file, replacement and no-follow directory open. An internal directory alias thus
+retains its supported behavior without removing directory fsync. File sync still
+precedes replacement, and directory sync errors still propagate after publication.

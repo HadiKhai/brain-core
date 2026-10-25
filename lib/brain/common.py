@@ -75,8 +75,9 @@ def safe_target(path):
     if root is None:
         return
     top = root.resolve()
+    parent = p.parent.resolve()
     for q in [p.parent] + ([p] if p.is_symlink() else []):
-        real = q.resolve()
+        real = parent if q == p.parent else q.resolve()
         if real != top and top not in real.parents:
             die(f"{p} leads out of the brain through a link; brain writes only inside it (remove the link)")
     try:
@@ -85,6 +86,7 @@ def safe_target(path):
         shared = False
     if shared:  # a hard link: writing it would change the same file wherever else it is linked
         die(f"{p} is hard-linked to another file; brain won't write a file shared with another place (copy it)")
+    return parent / p.name  # publish through the parent checked inside containment
 
 
 def hard_linked(entry):
@@ -186,7 +188,7 @@ def atomic_write(path, text):
     This is one-file persistence ordering, not a transaction across records.
     """
     path = Path(path)
-    safe_target(path)
+    path = safe_target(path) or path
     tmp = None
     try:
         with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", newline="", dir=path.parent,
