@@ -235,7 +235,7 @@ class HandbackLifecycle(Scenario):
                 self.assertFalse(m.queue_terminal(inst, n, request['id'], claimed['lease'], 'terminal'))
             self.assertEqual(m.read_queue_request(n, request['id'])['state'], 'terminal')
             # Queue validation uses the same bound import-study row as direct handback.
-            study = {**row, 'Job': 'import:fixture'}
+            study = {**row, 'Job': 'import:' + 'a' * 40}
             m.write_jobs(inst, n, [row, study])
             study_args = argparse.Namespace(**{**vars(args), 'branch': study['Job'],
                                               'state': 'done', 'reviews': 0})

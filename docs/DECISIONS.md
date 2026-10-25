@@ -1988,3 +1988,11 @@ source-bound screenshot-tour need until a real receipt is recorded.
 
 Integrated fixture files have explicit, unique status, rehearsal and dashboard
 lane ownership. Existing command selection and worker policy are unchanged.
+
+
+## D18602: Queue study fixtures use the native study identity grammar
+
+A fabricated study uses an `import:` prefix followed by a supported commit hash.
+An arbitrary label is an ordinary job and must not gain the study exemption.
+The existing single-owner queue fixture uses a valid study identity for its
+positive zero-review case and retains ordinary-job and invalid-flag refusals.
