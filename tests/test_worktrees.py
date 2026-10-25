@@ -403,6 +403,102 @@ class PruneSafety(AutonomyProject):
         self.assertTrue(wt.exists())
 
 
+class ReleasedCleanupGeneration(AutonomyProject):
+    def cleanup_during_accounting(self, action, change):
+        r, home, wt = PruneSafety.merged(self)
+        ledger = r / 'nodes/app/job-ledger.md'
+        before = ledger.read_bytes()
+        loader = core_loader.SourceFileLoader('cleanup_generation_fixture', str(CORE / 'bin/brain'))
+        spec = importlib.util.spec_from_loader(loader.name, loader)
+        m = importlib.util.module_from_spec(spec)
+        loader.exec_module(m)
+        entered, resume = threading.Event(), threading.Event()
+        errors, output = [], io.StringIO()
+
+        def accounting(*args):
+            entered.set()
+            if not resume.wait(10):
+                raise AssertionError('accounting barrier was not released')
+            return {}
+
+        def cleanup():
+            try:
+                with m.brain_lock(inst):
+                    args = argparse.Namespace(id='app', branch='job-a', force=True,
+                                              cause='fixture cleanup', dry_run=False, offline=True)
+                    (m.cmd_wt_prune if action == 'prune' else m.cmd_wt_rm)(args)
+            except BaseException as e:
+                errors.append(e)
+
+        with mock.patch.dict(os.environ, self.env, clear=True):
+            inst = m.Instance(r)
+            with mock.patch.object(m, 'load', return_value=inst), \
+                 mock.patch.object(m, 'job_usage', side_effect=accounting), \
+                 mock.patch.object(m, 'usage_cells', return_value={}), \
+                 contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
+                worker = threading.Thread(target=cleanup)
+                worker.start()
+                try:
+                    self.assertTrue(entered.wait(10), 'command never reached accounting')
+                    self.assertIsNone(m._LOCK['fh'], 'accounting must release the writer lock')
+                    if change == 'branch':
+                        (wt / 'later.txt').write_text('new work\n')
+                        self.git('add', '.', cwd=wt)
+                        self.git('commit', '-qm', 'new unmerged work', cwd=wt)
+                    elif change == 'integration':
+                        (home / 'sibling.txt').write_text('integration changed\n')
+                        self.git('add', '.', cwd=home)
+                        self.git('commit', '-qm', 'advance integration', cwd=home)
+                    elif change == 'dirty':
+                        (wt / 'done.txt').write_text('unfinished edit\n')
+                    elif change == 'untracked':
+                        (wt / 'untracked.txt').write_text('unfinished work\n')
+                finally:
+                    resume.set()
+                    worker.join(10)
+                self.assertFalse(worker.is_alive(), 'cleanup did not finish')
+        if change:
+            self.assertTrue(wt.exists(), output.getvalue())
+            self.assertEqual(ledger.read_bytes(), before, output.getvalue())
+            self.assertIn('cleanup inputs changed', output.getvalue() + '\n'.join(map(str, errors)))
+            self.assertIn('job-a', json.loads((r / '.brain/local.json').read_text())['nodes']['app']['worktrees'])
+            self.assertTrue(all(isinstance(e, SystemExit) for e in errors), errors)
+        else:
+            self.assertEqual(errors, [], output.getvalue())
+            self.assertFalse(wt.exists(), output.getvalue())
+            self.assertIn('merged', self.b(r, 'jobs', 'app', '--branch', 'job-a'))
+
+    def test_prune_retains_new_branch_commit(self):
+        self.cleanup_during_accounting('prune', 'branch')
+
+    def test_prune_retains_moved_integration(self):
+        self.cleanup_during_accounting('prune', 'integration')
+
+    def test_prune_retains_new_dirty_work(self):
+        self.cleanup_during_accounting('prune', 'dirty')
+
+    def test_prune_retains_new_untracked_work(self):
+        self.cleanup_during_accounting('prune', 'untracked')
+
+    def test_rm_retains_new_branch_commit(self):
+        self.cleanup_during_accounting('rm', 'branch')
+
+    def test_rm_retains_moved_integration(self):
+        self.cleanup_during_accounting('rm', 'integration')
+
+    def test_rm_retains_new_dirty_work_even_with_force(self):
+        self.cleanup_during_accounting('rm', 'dirty')
+
+    def test_rm_retains_new_untracked_work_even_with_force(self):
+        self.cleanup_during_accounting('rm', 'untracked')
+
+    def test_prune_unchanged_generation_closes_merged(self):
+        self.cleanup_during_accounting('prune', None)
+
+    def test_rm_unchanged_generation_closes_merged(self):
+        self.cleanup_during_accounting('rm', None)
+
+
 class WorktreeGuardUnits(unittest.TestCase):
     def setUp(self):
         loader = core_loader.SourceFileLoader('prune_fixture', str(CORE / 'bin/brain'))

@@ -185,3 +185,16 @@ new binding and retain the returned thread/task/watch identity locally for
 reconciliation. Do not claim that the old coordinator is current, publish its
 wake URL, discard the known result, or blindly repeat the host operation. Pinning
 also rechecks the binding before clearing its pending operation marker.
+
+## D1214: Fence worktree cleanup across released accounting
+
+Removal and pruning observe the checkout identity, exact branch and integration
+refs, local ancestry, and complete tracked/untracked porcelain status before a
+released scan. After accounting retakes the instance lock, fresh local Git reads
+must match that generation before removal or ledger closure. Changed or
+unreadable evidence retains the workspace, including for explicit forced removal.
+The final outcome uses the rechecked ancestry; squash-merge evidence is reusable
+only for unchanged inputs. Display caches cannot supply destructive evidence.
+Existing submodule retention and live-work checks remain in force. This is a
+bounded revalidation, not a lease excluding concurrent external Git writes after
+the final observation; Git's own removal refusal remains necessary.
