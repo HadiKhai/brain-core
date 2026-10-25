@@ -189,6 +189,9 @@ def collect_problems(inst):
                 p(f"{nid}: {where} contains {label} (see: brain guard {nid})")
             for e in errs:
                 p(f"{nid}: couldn't check for never-name words: {e}")
+            for record in _m_knowledge.limit_records(inst, n):
+                if record['state'] == 'invalid-expiry':
+                    warnings.append(f"{nid}: a limit has invalid Expires: metadata; it remains active")
             for lim in _m_knowledge.limits_of(n):
                 missing = [k for k in ("Why:", "Lift when:") if k.lower() not in lim.lower()]
                 if missing:

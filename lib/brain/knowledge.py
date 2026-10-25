@@ -757,8 +757,25 @@ def limits_of(n):
     return out
 
 
+
+def limit_records(inst, n):
+    """Explicit absolute expiries affect operational briefs, never publication consent."""
+    records = []
+    for text in limits_of(n):
+        expiry = re.findall(r"(?:^|[;\n])\s*Expires:[ \t]*([^;\n]+)", text, re.I)
+        when = inst.parse_time(expiry[0].strip()) if len(expiry) == 1 else None
+        state = 'active'
+        if expiry:
+            state = 'invalid-expiry' if not when else ('expired' if when <= inst.now_dt() else 'active')
+        records.append({'text': text, 'state': state, 'expires_at': when.isoformat() if when else None})
+    return records
+
 def limits_lines(n):
-    lims = limits_of(n)
+    root = n
+    while root.get('parent'):
+        root = root['parent']
+    inst = _m_instance.Instance(root['dir'])
+    lims = [row['text'] for row in limit_records(inst, n) if row['state'] != 'expired']
     return (["## Limits", ""] + [f"- {l}" for l in lims] + [""]) if lims else []
 
 

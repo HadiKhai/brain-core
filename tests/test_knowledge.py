@@ -884,3 +884,28 @@ class RuleSnapshotActivation(unittest.TestCase):
                         pending = proposals.pending_rule_snapshot(inst, node)
                         self.assertEqual(pending['digest'], hashlib.sha256(reviewed).hexdigest())
                         self.assertEqual(source.read_bytes(), reviewed)
+
+
+class OperationalLimitExpiry(Scenario):
+    def test_explicit_expiry_lifts_operational_limit_but_preserves_policy_snapshot(self):
+        r = self.init('alice')
+        (r / 'brief.md').write_text('# Brief\n\n## Limits\n- Temporary cap. Why: maintenance; Lift when: expiry; Expires: 2020-01-01T00:00:00+00:00\n- Permanent cap. Why: safety; Lift when: explicit choice\n- Unclear cap. Why: safety; Lift when: review; Expires: tomorrow\n')
+        m = core_loader.SourceFileLoader('limit_expiry_fixture', str(CORE / 'bin/brain')).load_module()
+        inst = m.Instance(r)
+        n = inst.node('root')
+        records = m.limit_records(inst, n)
+        self.assertEqual([row['state'] for row in records], ['expired', 'active', 'invalid-expiry'])
+        text = '\n'.join(m.limits_lines(n))
+        self.assertNotIn('Temporary cap', text)
+        self.assertIn('Permanent cap', text)
+        self.assertIn('Unclear cap', text)
+        self.assertEqual(len(m.limit_snapshot(n)), 3)
+        self.assertEqual(m.publication_decision(inst, n, 'push')['decision'], 'unknown')
+        self.assertIn('invalid Expires:', self.b(r, 'check'))
+
+    def test_expiry_is_absolute_and_narrative_clearing_conditions_do_not_grant_permission(self):
+        r = self.init('alice')
+        (r / 'brief.md').write_text('# Brief\n\n## Limits\n- Wait for green. Why: verification; Lift when: the tests pass\n- Future limit. Why: maintenance; Lift when: expiry; Expires: 2099-01-01T00:00:00+00:00\n')
+        m = core_loader.SourceFileLoader('limit_future_fixture', str(CORE / 'bin/brain')).load_module()
+        inst = m.Instance(r)
+        self.assertEqual([row['state'] for row in m.limit_records(inst, inst.node('root'))], ['active', 'active'])

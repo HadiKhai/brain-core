@@ -95,3 +95,13 @@ file does not install or activate it on a machine.
 
 An optional worker-message validator receives only explicit host session identity
 and raw tool arguments; the action engine never guesses a caller's role.
+
+## D1004: Expire explicit operational limits without granting outward consent
+
+A limit may declare one absolute `Expires:` timestamp. Brief generation omits the
+limit after that time, without changing its source record. Invalid or duplicate
+expiry metadata keeps the limit active and produces a check warning. Narrative
+`Lift when:` conditions remain explanatory; core does not guess that they hold.
+
+Publication policy continues to snapshot every original limit, including expired
+ones. An operational expiry never grants push, publication or deletion consent.
