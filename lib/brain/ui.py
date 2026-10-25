@@ -21,6 +21,7 @@ from . import knowledge as _m_knowledge
 from . import machine as _m_machine
 from . import nodes as _m_nodes
 from . import rehearse as _m_rehearse
+from . import reports as _m_reports
 from . import schedules as _m_schedules
 from . import spend as _m_spend
 from . import status as _m_status
@@ -237,6 +238,17 @@ def ui_state(inst, problems=None, scan=None, spend_budget=2.0, machine_spend=Non
         return _ui_state(inst, problems, scan, spend_budget, machine_spend, cache, node_keys)
 
 
+def ui_round_usage(inst, n, row, used):
+    # Additive API: an older accounting backend has no replacement-round meter.
+    reader = getattr(_m_spend, 'job_round_usage', None)
+    if reader is None:
+        return None
+    try:
+        return reader(inst, n, row, used)
+    except (OSError, ValueError):
+        return {'state': 'unavailable', 'processed': None, 'compactions': None, 'hours': None}
+
+
 def ui_node(inst, n, since, cache=None, partial=False):
     """The expensive repository/readiness part, reusable independently for each node."""
     home_commits = []
@@ -275,6 +287,7 @@ def ui_node(inst, n, since, cache=None, partial=False):
         r.update(work_metadata.get(r["Job"], {}))
         used = None if partial else _m_spend.live_usage(inst, n, r)
         r["usage"] = _m_spend.spend_summary(used, terms) if used and used["sessions"] else None
+        r['round_usage'] = None if partial else ui_round_usage(inst, n, r, used)
         r["budget"] = _m_spend.job_budget(n, r)
     try:
         back = json.loads(_m_spend.spend_node_file(inst, n).read_text())
@@ -705,6 +718,8 @@ class UIInputs:
         self.worker_stamp, self.worker_context_stamp = None, None
         self.worker_records, self.worker_context, self.worker_nodes = [], {}, {}
         self.worker_rows = ()
+        self.round_stamp, self.round_records, self.round_error = None, {}, None
+        self.preview_records = {}
         self.slow_files = set()
         self.slow_at, self.slow_rows = float('-inf'), []
         self.trees = []
@@ -854,8 +869,50 @@ class UIInputs:
                 parent = parent['parent']
             out[n['id']] = (global_rows, json.dumps(n['local'], sort_keys=True), homes, tuple(sorted(set(key))),
                             self.worker_nodes.get(n['id'], ()),
+                            self.round_usage_key(n),
+                            self.preview_evidence_key(inst, n),
                             self.core_revision if _m_rehearse.required(n) else None)
         return out
+
+    def preview_evidence_key(self, inst, n):
+        receipt = _m_reports.preview_receipt_file(inst, n)
+        stamp = self.stamp(receipt)
+        old = self.preview_records.get(n['id'])
+        if old is None or old[0] != stamp:
+            paths = set()
+            try:
+                data = json.loads(receipt.read_text())
+                artifacts = [data.get('tour'), *(data.get('screenshots') or [])[:100]]
+                for value in artifacts:
+                    if isinstance(value, dict) and isinstance(value.get('path'), str):
+                        path = Path(value['path'])
+                        if path.is_absolute():
+                            paths.add(path)
+            except (OSError, ValueError, TypeError, AttributeError):
+                pass
+            self.preview_records[n['id']] = stamp, paths
+        return stamp, tuple(sorted(self.stamp(path) for path in self.preview_records[n['id']][1]))
+
+    def round_usage_key(self, n):
+        # One metadata-gated read per refresh; each node depends only on its own jobs.
+        path = self.root / '.brain/wake/lifecycle.json'
+        stamp = self.stamp(path)
+        if stamp != self.round_stamp:
+            self.round_records, self.round_error = {}, None
+            try:
+                data = json.loads(path.read_text())
+                records = data.get('usage') if isinstance(data, dict) else None
+                if not isinstance(records, dict):
+                    raise ValueError('invalid usage receipts')
+                self.round_records = records
+            except FileNotFoundError:
+                pass
+            except (OSError, ValueError):
+                self.round_error = stamp
+            self.round_stamp = stamp
+        keys = [_m_jobs.digest([n['id'], _m_jobs.job_key(row)])
+                for row in (_m_jobs.read_jobs(n) or []) if not row.get('Ended')]
+        return self.round_error, tuple((key, json.dumps(self.round_records.get(key), sort_keys=True)) for key in keys)
 
     def worktree_keys(self, inst, signature):
         rows = {row[0]: row for row in self.fast_rows}
@@ -1158,7 +1215,8 @@ def cmd_ui(a):
                             for row in n['jobs']['open']:
                                 used = _m_spend.live_usage(i, real, row)
                                 rows.append({**row, 'usage': _m_spend.spend_summary(used, _m_guard.never_terms(real))
-                                             if used and used['sessions'] else None})
+                                             if used and used['sessions'] else None,
+                                             'round_usage': ui_round_usage(i, real, row, used)})
                             refreshed = {**n, 'jobs': {**n['jobs'], 'open': rows}}
                             updated.append(refreshed)
                             if n['id'] in cache.nodes:
