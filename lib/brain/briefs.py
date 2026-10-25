@@ -341,6 +341,8 @@ def cmd_brief(a):
             inputs.append(("Resume context", json.dumps(row, ensure_ascii=False)))
     inputs += contract_inputs(n, a.branch)
     contract = _m_jobs.contract_lines(inst, n, a.branch)
+    from . import tasks as _m_tasks
+    out += _m_tasks.brief_index(inst, n)
     out += attribution_lines(runtime, a.model) + shared + ["## Task", "", task.strip(), ""] + contract
     out += _m_knowledge.knowledge_lines(inst, n, task, inputs=inputs) + _m_knowledge.node_knowledge_lines(n) + _m_knowledge.recall_hint(n)
     out += _m_knowledge.limits_lines(n)

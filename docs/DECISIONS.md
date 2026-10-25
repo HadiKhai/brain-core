@@ -1279,3 +1279,91 @@ Omitting the keyword retains the existing post-delivery live-read behavior.
 Explicitly passing `None` is an unavailable snapshot and never selects that fallback.
 Episode and successful-delivery requirements remain unchanged. The native caller
 owns matching the captured snapshot to its exact job/restart operation.
+
+## D1305: External task ownership and durable state writeback
+
+`tasks.source=linear` selects an opt-in stdlib GraphQL adapter; local remains the
+default. Linear owns issue identifiers, product text, workflow, priority, assignee
+and blocker relations. Pulls preserve internal job, requirement and decision data,
+validate complete pagination before writing, and retain mirrors on errors.
+Provider completion is displayed as provider evidence, separately from a local
+verified code landing. Parked internal work retains its resume condition.
+
+Job state writes persist retry intent before the API request. Requests contain
+only issue/state UUIDs, never internal task metadata. Product issue creation
+searches the configured team for a matching title before creating an issue.
+Credentials come only from the process environment and are never persisted.
+Read-only dashboard/due paths perform no provider requests. Wakes and job starts
+pull explicitly; failed writes remain pending for the next sync.
+
+API contract: [Linear GraphQL](https://linear.app/developers/graphql), with field
+and relation definitions from the [official schema](https://github.com/linear/linear/blob/master/packages/sdk/src/schema.graphql).
+
+## D1306: Stable source tasks preserve progress across producer retries
+
+`upsert_source_task` derives a local task and requirement identity from a stable
+producer source ID. Repeated observations return the existing record unchanged,
+including parked and dropped states. New observations begin in backlog with
+source provenance and an explicitly observed date. Read-only consumers never
+invoke the producer mutation API.
+
+## D1307: Task views consume the screened read-only snapshot
+
+The dashboard's global Tasks view and project Tasks tab share one board and
+explicit dependency map. They show ownership, blocked work, parked resume
+conditions, source requests and links to jobs. Dropped work has its own group;
+provider completion is labelled as external evidence. Search and ownership
+filters work locally. Task snapshots screen nested strings with the node guard,
+retain the existing keyed state endpoint and never mutate records or pull a
+provider while rendering. Malformed storage produces a repair message.
+
+## D1308: Cross-node dependencies and scoped completion retain obligations
+
+Task references may use `node:id` within the same owner set and sealing boundary.
+Dependency, parent and successor cycles refuse before writes. A landing event
+reevaluates dependent blocked tasks idempotently; holds and explicit pauses remain
+in force until explicitly removed. Reconsideration dates never authorize unpause.
+
+Code completion requires a changed task baseline, delivering commit on intended
+main and changed paths covering every declared scope. An open successor cannot
+close transferred work. Operations require scoped, dated passed receipts; reports
+add an exact node-local artifact digest/version. Provider completion remains an
+external fact. Drops require their decision reference.
+
+Task IDs survive attempts and branch aliases. Plain-Git and operational attempts
+can be registered without running host actions. Parked obligations retain owner,
+reason, resume condition, review date and next action in cold briefs. Aging uses
+last substantive progress and a stable episode, never a bookkeeping refresh.
+
+## D1309: Stopped-work imports retain evidence without inventing delivery
+
+A versioned source register groups aliases under stable obligations and retains
+raw heads, scope and receipt references. Importing it creates open reconciliation
+tasks, including for uncertain or retired implementations. Replays preserve task
+progress. Dashboard delivery labels are derived from current scoped evidence;
+stale or unknown completion is visible as unproven rather than silently counted.
+Task landing facts carry bounded references and fingerprints, with retry intent
+retained until the metadata-only event journal confirms publication.
+
+## D1310: Dispatch plans require task-specific authority and contract
+
+The task engine exposes native launch commands only after dependency, hold,
+capacity, explicit decision authority, contract completeness and code-scope
+checks. It never treats a detected Markdown entry as execution authority.
+Actual host launch and rebinding stay with the configured lifecycle adapter;
+plan generation creates neither a thread nor a worktree.
+
+## D1311: Train task completion validates the whole final graph
+
+Train finalization publishes linked task outcomes after the atomic ledger update
+and before marking its write-ahead journal complete. The accepted job identities,
+successful check on the exact integration tip, main ancestry and scoped delivery
+proof determine completion. Missing proof parks the obligation with a resume
+condition; changed task bindings retain the journal for reconciliation.
+
+All prospective task outcomes and dependencies validate together before any task
+file is replaced. Per-task receipt identities make interrupted publication
+replayable without resetting later progress or duplicating evidence. Pending
+landing facts publish only after every outcome is durable. External completion
+intent enters the existing provider sync outbox; finalization performs no network
+request.

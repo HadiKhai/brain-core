@@ -153,6 +153,10 @@ def writes(a):
         return not a.dry_run
     if name == 'cmd_preview':
         return bool(a.record)
+    if name == "cmd_task_flow":
+        return a.action in ("attempt", "alias", "reconcile")
+    if name == "cmd_task_provider":
+        return True
     if name == "cmd_task_sources":
         return a.action == "rule-add"
     if name == "cmd_task_migrate":

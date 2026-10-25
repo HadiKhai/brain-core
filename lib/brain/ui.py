@@ -340,7 +340,9 @@ def ui_node(inst, n, since, cache=None, partial=False):
         reps = sorted((wb / "reports").glob("*/index.md"), reverse=True)[:5] if (wb / "reports").is_dir() else []
     except SystemExit:
         reps = []
+    from . import tasks as _m_tasks
     row = {
+        "tasks": _m_tasks.ui_tasks(inst, n),
         "id": n["id"], "title": fm.get("title", ""), "parent": n["parent"]["id"] if n["parent"] else None,
         "owners": n["owners"], "labels": _m_common.lst(fm.get("labels")), "runtime": fm.get("runtime", ""),
         "preview": hide(loc.get("preview", "")), "preview_tour": hide(loc.get("preview_tour", "")),

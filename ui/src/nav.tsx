@@ -86,6 +86,7 @@ export function Navigation({ s, route, go, onAdd, onNotice }: {
             {long && <div className="tree-filter"><Search size={14} /><SidebarInput aria-label="Filter projects" placeholder="Filter projects" value={filter} onChange={(e) => setFilter(e.target.value)} /></div>}
             <SidebarMenu className="brain-tree">
               {item("projects", "All projects", FolderTree, rows.length)}
+              {item("tasks", "Tasks", Workflow, nodes.reduce((total, n) => total + list(n.tasks?.rows).length, 0))}
               {shown.filter(({ node }) => !hidden.has(node.id)).map(({ node: n, depth }) => {
                 const work = open.filter((f) => f.node.id === n.id);
                 const children = nodes.some((c) => c.parent === n.id && !c.archived);

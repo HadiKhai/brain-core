@@ -692,6 +692,8 @@ def wake_drain(inst, n, once=False):
     import fcntl
     if wake_route_disabled(inst, n):
         return  # retain capabilities, errors and queued work; explicit off never activates a fallback
+    from . import tasks as _m_tasks
+    _m_tasks.provider_pull_on_wake(inst, n)
     directory = wake_directory(inst, n)
     if not directory.is_dir() or _m_common.outward_links(inst.root):
         return

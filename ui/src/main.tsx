@@ -17,6 +17,7 @@ import { Usage } from "./usage";
 import { AddProjects } from "./imports";
 import { Project, Projects, ancestors, projectState } from "./project";
 import { Graph } from "./graph";
+import { Tasks } from "./tasks";
 import { RecordPicker } from "./picker";
 import { readRoute, writeRoute, type Route } from "./routes";
 import { list, needsView, count, threads, learningRows, type RecordData } from "./model";
@@ -53,6 +54,7 @@ function heading(s: RecordData | null, route: Route, go: (r: Partial<Route> & { 
         subtitle: n ? [projectState(n), n.runtime, n.owners?.length ? n.owners.join(", ") : "", n.updated_ago ? "updated " + n.updated_ago : ""].filter(Boolean).join(" · ") : undefined };
     }
     case "specialists": return { title: "Specialists", crumbs: agentsCrumb(go), subtitle: s ? `${count(list(s.specialists).length, "role")} · ${count(list(s.specialists).reduce((a, sp) => a + list(sp.jobs).length, 0), "hire")}` : undefined };
+    case "tasks": return { title: "Tasks", subtitle: "Commitments, dependencies and linked jobs" };
     case "jobs": return { title: "Jobs", crumbs: agentsCrumb(go), subtitle: s ? `${nodes.reduce((a, n) => a + list(n.jobs?.rows).length, 0)} recorded · ${nodes.reduce((a, n) => a + list(n.jobs?.open).length, 0)} open` : undefined };
     case "threads": return { title: "Threads", crumbs: agentsCrumb(go), subtitle: s ? `${open.length} open across ${count(new Set(open.map((f) => f.node.id)).size, "project")}` : undefined };
     case "usage": return { title: "Usage", crumbs: agentsCrumb(go), subtitle: s ? `${count(list(s.usage).length, "subscription")} · default stop line ${s.usage_policy?.stop_percent ?? "unknown"}%` : undefined };
@@ -346,6 +348,7 @@ function App() {
                 <>
                   <div data-page="overview" hidden={v !== "overview"}><Overview s={s} go={go} onAdd={() => setAdd(true)} active={v === "overview"} /></div>
                   <div data-page="inbox" hidden={v !== "inbox"}><InboxView s={s} go={go} tab={route.tab} active={v === "inbox"} /></div>
+                  {v === "tasks" && <div data-page="tasks"><Tasks s={s} go={go} /></div>}
                   <div data-page="projects" hidden={v !== "projects"}><Projects s={s} go={go} onAdd={() => setAdd(true)} /></div>
                   {v === "project" && <div data-page="project"><Project key={route.node || ""} s={s} route={route} go={go} active /></div>}
                   <div data-page="specialists" hidden={v !== "specialists"}><Specialists s={s} active={v === "specialists"} item={v === "specialists" ? route.item : null} /></div>
