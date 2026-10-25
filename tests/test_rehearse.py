@@ -1261,7 +1261,11 @@ class RehearsalNativeCore(Scenario):
                     mock.patch.object(rehearsal, 'time', clock), \
                     mock.patch.object(rehearsal._m_nodes, 'find_root', return_value=r), \
                     contextlib.redirect_stdout(io.StringIO()) as stdout:
-                rehearsal.cmd_rehearse(argparse.Namespace(id='engine', branch='job'))
+                try:
+                    rehearsal.cmd_rehearse(argparse.Namespace(id='engine', branch='job'))
+                except SystemExit:
+                    evidence = list((self.tmp / 'core-home-work/scratch/rehearse').glob('*.json'))
+                    self.fail(stdout.getvalue() + '\n' + '\n'.join(p.read_text() for p in evidence))
             output = stdout.getvalue()
             self.assertIn('rehearse: passed', output)
             self.assertEqual(1, len(posts))

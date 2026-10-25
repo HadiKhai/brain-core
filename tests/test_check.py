@@ -52,6 +52,7 @@ class FixtureGitConfig(Scenario):
 class AutonomyAtomicWrites(AutonomyProject):
     def failed_replace(self, r, destination, args):
         before = destination.read_bytes()
+        mode = destination.stat().st_mode & 0o777
         names = {p.name for p in destination.parent.iterdir()}
         head = self.git('rev-parse', 'HEAD', cwd=r)
         code = """
@@ -76,7 +77,13 @@ runpy.run_path(brain, run_name='__main__')
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('injected replacement failure', result.stderr)
         self.assertEqual(destination.read_bytes(), before)
-        self.assertEqual({p.name for p in destination.parent.iterdir()}, names, 'temporary file leaked')
+        self.assertEqual(destination.stat().st_mode & 0o777, mode)
+        # Recovery may create the durable comparison index before the injected write.
+        durable = {'events-compare-index.json'} if destination.parent == r / '.brain' else set()
+        after_names = {p.name for p in destination.parent.iterdir()}
+        self.assertEqual(after_names - durable, names - durable, 'temporary file leaked')
+        if 'events-compare-index.json' in after_names:
+            json.loads((destination.parent / 'events-compare-index.json').read_text())
         self.assertEqual(self.git('rev-parse', 'HEAD', cwd=r), head)
         return result.stdout
 
@@ -84,6 +91,7 @@ runpy.run_path(brain, run_name='__main__')
         r, home, wt = self.project()
         status = r / 'nodes/app/status.md'
         status.chmod(0o640)
+        (r / 'nodes/app/inbox.md').write_text('- 2035-01-01 00:00 +00:00 from worker: Pending atomic input.\n')
         self.failed_replace(r, status, ['status', 'app', '--refresh'])
         self.b(r, 'status', 'app', '--refresh')
         self.assertIn('<!-- /brain:facts -->', status.read_text())
@@ -159,12 +167,16 @@ m.main()
 
     def kill_write(self, root, destination, args, phase):
         before = destination.read_bytes()
+        mode = destination.stat().st_mode & 0o777
+        head = self.git('rev-parse', 'HEAD', cwd=root)
         proc, after = self.paused_write(root, destination, args, phase)
         proc.kill()
         proc.communicate(timeout=5)
         self.assertEqual(proc.returncode, -9)
         self.assertNotEqual(before, after, 'fixture must change the destination')
         self.assertEqual(destination.read_bytes(), before if phase == 'before' else after)
+        self.assertEqual(destination.stat().st_mode & 0o777, mode)
+        self.assertEqual(self.git('rev-parse', 'HEAD', cwd=root), head)
         # This command takes the instance lock and must not wedge on the dead writer's pid.
         follow = subprocess.run([sys.executable, str(root / 'core/bin/brain'), *args], cwd=root,
                                 env=self.env, capture_output=True, text=True, timeout=10)
@@ -184,6 +196,7 @@ m.main()
                     r, home, wt = self.project()
                     node = r / 'nodes/app'
                     if command == 'status':
+                        (node / 'inbox.md').write_text('- 2035-01-01 00:00 +00:00 from worker: Pending crash input.\n')
                         dest, args = node / 'status.md', ['status', 'app', '--refresh']
                     elif command == 'handback':
                         self.b(r, 'handback', "--summary", "Synthetic result", 'app', '--branch', 'job-a', '--state', 'blocked')

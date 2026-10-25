@@ -450,6 +450,12 @@ class ImportAutonomy(Scenario):
         self.assertNotIn("import-review", [i["kind"] for i in again])
         child = json.loads(self.b(r, "inbox", "source", "--new", "--json"))
         self.assertEqual(sum(i["kind"] == "import-review" for i in child), 1)
+        due = self.b(r, "due", "source")
+        self.assertNotIn("stale-status", due)
+        self.assertIn("rule-activation-review", due)
+        self.assertIn("1 rule file(s), 1 role(s), 2 proposed item(s)", (node / "status.md").read_text())
+        # A manual input change still requires an explicit facts refresh.
+        (node / "inbox.md").write_text('- 2035-01-01 00:00 +00:00 from worker: Review imported content.\n')
         self.assertIn("stale-status", self.b(r, "due", "source"))
         self.b(r, "status", "source", "--refresh")
         self.assertNotIn("stale-status", self.b(r, "due", "source"))

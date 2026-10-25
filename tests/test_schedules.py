@@ -103,9 +103,21 @@ class Schedules(Scenario):
         f = r / "schedules.md"
         f.write_text("# Schedules\n\n## tick\nwhen: hourly\nnode: root\n"
                      "brief: Check work.\n  Report blockers.\nprovider: codex\n")
+        before = f.read_bytes()
         out = self.b(r, "schedule", "list", "--verbose")
-        self.assertIn("brief: Check work. Report blockers.\n", out)
-        self.assertNotIn("brief: Check work. Report blockers. provider:", out)
+        prefix = "Automated turn: no operator present; cancellations are host events."
+        brief = prefix + "  Check work. Report blockers."
+        self.assertIn("brief: " + brief + "\n", out)
+        self.assertNotIn(brief + " provider:", out)
+        self.assertEqual(out.count(prefix), 1)
+        self.assertEqual(f.read_bytes(), before)
+        loader = core_loader.SourceFileLoader('schedule_fixture', str(CORE / 'bin/brain'))
+        spec = importlib.util.spec_from_loader(loader.name, loader)
+        module = importlib.util.module_from_spec(spec)
+        loader.exec_module(module)
+        schedule = module.read_schedules(module.Instance(r))[0]
+        self.assertEqual(schedule['brief'], brief)
+        self.assertEqual(schedule['provider'], 'codex')
 
     def test_invalid_provider_refuses_before_writing(self):
         r = self.init("alice")
