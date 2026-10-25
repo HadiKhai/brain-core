@@ -690,9 +690,19 @@ def cmd_due(a):
                 _m_hosts.wake_start(inst, target)
             except OSError:
                 pass
+    from . import wake_turns as _m_wake_turns
+    consumed, wake_views = [], []
+    if not a.quiet:
+        for n in nodes:
+            value = _m_wake_turns.wake_turn_consume(inst, n, consume=False)
+            if value:
+                wake_views.append((n, value))
+                consumed.append({'node': n['id'], 'kind': 'wake-reasons',
+                                 'text': _m_hosts.wake_reason_summary(value['items'])})
     _m_docker_leftovers.docker_leftover_nodes(inst, nodes)
     state = _m_machine.machine_state(inst)
     items = [item for n in nodes for item in due_items(inst, n, include_handled=getattr(a, 'handled', False)) + changes_due(inst, n)]
+    items += consumed
     wake_seen = set()
     for n in nodes:
         target, _ = _m_hosts.wake_target(inst, n)
@@ -705,6 +715,10 @@ def cmd_due(a):
         if _m_watch.watch_state_invalid(inst):
             items.append({'node': 'root', 'kind': 'watcher',
                           'text': 'watcher state invalid; restore .brain/watch.json before watching'})
+    if a.id == 'root':
+        items += [{'node': n['id'], 'kind': 'wake', 'text': text}
+                  for n in inst.nodes() if not n['archived']
+                  for text in [_m_wake_turns.wake_turn_stuck(inst, n)] if text]
     items += machine_due_items(inst, nodes, state, items)
     if not a.quiet and getattr(a, "machine", False):
         items = [i for i in items if i["kind"] != "machine"] + [
@@ -736,6 +750,11 @@ def cmd_due(a):
                   (f" (handled: {item['handling']['reason']}; resume: {item['handling'].get('resume_condition') or item['handling'].get('until')})"
                    if item.get('handling') and _m_reminders.reminder_handled(inst, item) else '') +
                   (f" (escalated: {item['age_hours']:g}h old, over 48h)" if item.get("escalated") else ""))
+
+    # A failed render/closed output never acknowledges reasons the coordinator did not see.
+    sys.stdout.flush()
+    for n, value in wake_views:
+        _m_wake_turns.wake_turn_consume(inst, n, shown=value)
 
 
 def missing_preview(n, state):

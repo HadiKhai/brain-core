@@ -53,3 +53,19 @@ The regression reads the first committed ledger revision before generating a
 brief, then checks that the brief retains the expected runtime and model. Its
 cases cover class defaults, a node runtime pin, node and instance class routing,
 and inherited model configuration without activating inherited runtime policy.
+
+
+## D501: Consumption-aware wake transport is opt-in
+
+A machine-local `wake_coalesce=on` binding enables one outstanding wake per
+coordinator/transport pair. Legacy bindings retain delivery behavior. A separate
+turn receipt aggregates opaque identities and fixed cause counts until a visible
+`due` consumes it. Queue keys include the binding in this mode, so a new
+coordinator does not inherit an old coordinator's consumption state. One reminder
+attempt follows thirty minutes without consumption. Root due reports the stuck
+coordinator. Invalid or unwritable turn state never supplies suppressing evidence.
+
+The receipt is reserved before transport and consumption fences its completion,
+including a coordinator that runs due before transport returns. Consumption merges
+complete same-binding arrivals and leaves damaged records available for delivery.
+This mechanism cannot determine whether a host is idle or draining its queue.

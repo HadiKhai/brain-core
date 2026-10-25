@@ -1339,3 +1339,86 @@ class StopHook(Scenario):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class WakeConsumption(Scenario):
+    """Consumption-aware transports opt in; legacy delivery remains immediate."""
+    def setUp(self):
+        super().setUp()
+        environment = mock.patch.dict(os.environ, self.env, clear=True)
+        environment.start()
+        self.addCleanup(environment.stop)
+        self.m = core_loader.SourceFileLoader("brain_consumption", str(CORE / "bin/brain")).load_module()
+        self.r = self.init("alice")
+        self.b(self.r, "set", "root", "coordinator=fixture-thread", "wake=fixture-send", "wake_coalesce=on")
+        self.inst = self.m.Instance(self.r)
+        self.n = self.inst.node("root")
+        self.now = 1000000
+        self.clock = mock.Mock()
+        self.clock.time.side_effect = lambda: self.now
+        self.clock.monotonic.side_effect = lambda: self.now
+        for patch in (mock.patch.object(self.m, "WAKE_CLOCK", self.clock),
+                      mock.patch.object(self.m, "WAKE_INTERVAL", 0),
+                      mock.patch.object(self.m, "wake_start"),
+                      mock.patch.object(self.m, "wake_snapshot", return_value=[])):
+            patch.start()
+            self.addCleanup(patch.stop)
+        sending = mock.patch.object(self.m, "wake_send", return_value=True)
+        self.send = sending.start()
+        self.addCleanup(sending.stop)
+
+    def enqueue(self, number):
+        self.assertTrue(self.m.request_wake(self.inst, self.n, "fixture:" + str(number),
+                        items=[{"id": format(number, "064x"), "kind": "inbox"}], explicit=True))
+        self.m.wake_drain(self.inst, self.n, once=True)
+        self.now += 1
+
+    def test_burst_is_one_transport_until_consumed_then_rearms(self):
+        for i in range(1, 21):
+            self.enqueue(i)
+        self.assertEqual(self.send.call_count, 1)
+        summary = self.m.wake_turn_consume(self.inst, self.n)
+        self.assertEqual(len(summary["items"]), 20)
+        self.assertFalse(list(self.m.wake_directory(self.inst, self.n).glob("*.pending")))
+        self.enqueue(21)
+        self.assertEqual(self.send.call_count, 2)
+
+    def test_reminder_is_once_after_thirty_minutes(self):
+        self.enqueue(1)
+        self.now += 1800
+        self.m.wake_drain(self.inst, self.n, once=True)
+        self.assertEqual(self.send.call_count, 2)
+        self.now += 1800
+        self.m.wake_drain(self.inst, self.n, once=True)
+        self.assertEqual(self.send.call_count, 2)
+        self.assertIn("unconsumed", self.m.wake_turn_stuck(self.inst, self.n))
+
+    def test_damaged_turn_never_suppresses_new_work(self):
+        self.enqueue(1)
+        directory = self.m.wake_directory(self.inst, self.n)
+        (directory / "turn.json").write_text("{torn")
+        self.enqueue(2)
+        self.assertEqual(self.send.call_count, 2)
+        self.assertEqual((directory / "turn.json").read_text(), "{torn")
+
+    def test_failed_transport_does_not_create_consumption_receipt(self):
+        self.send.return_value = False
+        self.enqueue(1)
+        self.send.return_value = True
+        self.m.wake_drain(self.inst, self.n, once=True)
+        self.assertEqual(self.send.call_count, 2)
+        self.assertEqual(len(self.m.wake_turn_consume(self.inst, self.n)["items"]), 1)
+
+    def test_binding_rotation_does_not_inherit_old_turn(self):
+        self.enqueue(1)
+        self.b(self.r, "set", "root", "coordinator=fixture-new")
+        self.inst = self.m.Instance(self.r)
+        self.n = self.inst.node("root")
+        self.enqueue(2)
+        self.assertEqual(self.send.call_count, 2)
+
+    def test_consumption_during_transport_does_not_recreate_turn(self):
+        self.send.side_effect = lambda *args, **kw: bool(self.m.wake_turn_consume(self.inst, self.n))
+        self.enqueue(1)
+        self.enqueue(2)
+        self.assertEqual(self.send.call_count, 2)

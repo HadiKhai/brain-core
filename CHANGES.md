@@ -1575,3 +1575,11 @@ For agents:
 
 After upgrading:
 - Nothing required. Offer the study to the operator for nodes whose import study is done.
+
+
+## Consumption-aware wakes
+
+For agents: machine-local `wake_coalesce=on` enables one outstanding coordinator
+wake until visible due consumes it, with one reminder attempt after thirty minutes.
+After upgrading: existing transports keep their delivery behavior; enable this only
+for a coordinator that runs due on every wake. No host queue behavior is inferred.

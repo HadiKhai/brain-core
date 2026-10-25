@@ -598,7 +598,7 @@ def prepare_settings(inst, n, pairs, messages=None):
             inst.local_of(n["id"])["coordinator_sessions"] = list(reversed(dict.fromkeys(reversed(ids))))
             fm.pop("coordinator_sessions", None)
             messages.append("  coordinator_sessions: this machine (.brain/local.json)")
-        elif k in _m_common.LOCAL_KEYS or k in ("synced_at", "workbench", "wake", "wake_default"):
+        elif k in _m_common.LOCAL_KEYS or k in ("synced_at", "workbench", "wake", "wake_default", "wake_coalesce"):
             inst.local_of(n["id"])[k] = str(Path(v).expanduser().resolve()) if k == "workbench" else v
             fm.pop(k, None)
             messages.append(f"  {k}: this machine (.brain/local.json)")
