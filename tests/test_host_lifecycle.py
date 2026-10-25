@@ -116,6 +116,14 @@ class HostLifecycle(Scenario):
         self.assertEqual(result['pending'], [])
         self.assertEqual(result['errors'], [])
         self.assertNotIn('fixture-live', self.settled_calls())
+        key = self.m.job_key(self.closed)
+        self.assertNotIn(key, self.m.Instance(self.root).local_of('root')['workers'])
+        self.assertIn('fixture-worker', self.m.Instance(self.root).local_of('root')['retired_workers'][key])
+        self.threads['fixture-child'].update(status='running', activeRunId='child-run')
+        with mock.patch.object(self.m._owners['settle_closed_jobs']._m_rpc, 'call', side_effect=self.rpc):
+            again = self.m.settle_landed_jobs(self.inst, self.n, [key])
+        self.assertEqual(again['settled'], [])
+        self.assertTrue(again['pending'])
 
     def test_train_hook_preserves_pending_and_reports_errors_without_calls(self):
         with mock.patch.object(self.m._owners['settle_closed_jobs']._m_rpc, 'call', side_effect=self.rpc):

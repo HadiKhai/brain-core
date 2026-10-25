@@ -302,16 +302,35 @@ def settle_landed_jobs(inst, n, job_keys):
         result['errors'].append('settlement requires a collection of exact ledger job keys')
         return result
     requested = list(dict.fromkeys(job_keys))
+    inst = _m_instance.Instance(inst.root)
+    n = inst.node(n['id'])
+    bindings = {key: n['local'].get('workers', {}).get(key) for key in requested}
+    verified = []
     try:
-        observation = settle_closed_jobs(inst, n, job_keys=requested)
+        observation = settle_closed_jobs(inst, n, job_keys=requested, revalidate=True)
+        verified = observation['settled_jobs']
         result['pending'] = observation['retained']
     except (OSError, ValueError, _m_rpc.HostRPCError) as error:
         result['errors'].append(str(error))
     rows = _m_jobs.read_jobs(n)
     for key in requested:
         row = next((r for r in rows or [] if _m_jobs.job_key(r) == key), None)
-        if row and _m_jobs.closed_job(row) and row.get('Settled'):
-            result['settled'].append(key)
+        if key in verified and row and _m_jobs.closed_job(row) and row.get('Settled'):
+            with _m_instance.brain_lock(inst):
+                latest = _m_instance.Instance(inst.root)
+                current = latest.node(n['id'])
+                row = next((r for r in _m_jobs.read_jobs(current) or [] if _m_jobs.job_key(r) == key), None)
+                if (not row or not _m_jobs.closed_job(row) or not row.get('Settled')
+                        or current['local'].get('workers', {}).get(key) != bindings[key]):
+                    result['pending'].append({'job': key, 'reason': 'ownership changed before worker unbinding'})
+                    continue
+                reference = current['local'].get('workers', {}).pop(key, None)
+                if reference:
+                    retired = current['local'].setdefault('retired_workers', {}).setdefault(key, [])
+                    if reference not in retired:
+                        retired.append(reference)
+                latest.save_local()
+                result['settled'].append(key)
         elif not any(p.get('job') == key for p in result['pending']):
             result['pending'].append({'job': key, 'reason': 'native settlement unconfirmed'})
     return result

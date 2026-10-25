@@ -193,6 +193,10 @@ owner remains responsible for its final branch/live-owner check and removal.
 Tests cover current settlement, retained live descendants, unknown/open jobs,
 unbinding with retained references and ownership changes after a host action.
 
+The accepted-job finish API also forces this fresh validation before reporting
+success and unbinding workers. A historical stamp cannot override a currently
+live descendant; accepted-job references remain retained after unbinding.
+
 ## D609: Launch recorded unbound jobs without resetting their initial allowance
 
 Native maintenance can launch an unbound open job only from its recorded original
