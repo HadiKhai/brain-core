@@ -7,11 +7,12 @@ from scenario import Scenario
 
 
 class MergeTrain(Scenario):
+    fixture_init_in_process = True
     def project(self, command="python3 -B verify.py", settings=()):
         root = self.init("alice")
         home = self.repo(self.tmp / "app", {"verify.py": "from pathlib import Path\nassert not Path('bad').exists()\n", "shared": "base\n"})
-        self.b(root, "new", "a", "--title", "A", "--home", str(home))
-        self.b(root, "set", "a", "verify=" + command, *settings)
+        self.fixture_b(root, "new", "a", "--title", "A", "--home", str(home))
+        self.fixture_b(root, "set", "a", "verify=" + command, *settings)
         self.root, self.home = root, home
         return root, home
 
@@ -215,11 +216,13 @@ class MergeTrain(Scenario):
         self.b(root, "handback", "--summary", "Synthetic result", "a", "--branch", "one", "--state", "done", "--reviews", "0", ok=False)
         self.assertIn("not ready/open", self.b(root, "train", "a", "--jobs", "one", ok=False))
 
-    def test_refuses_pr_mode_and_checked_out_main(self):
+    def test_refuses_pr_mode_and_dirty_checked_out_main(self):
         root, home = self.project()
         self.job("one")
         main = self.git("rev-parse", "main", cwd=home)
-        self.assertIn("main is checked out", self.b(root, "train", "a", ok=False))
+        (home / "shared").write_text("operator edit\n")
+        self.assertIn("dirty or changed", self.b(root, "train", "a", ok=False))
+        self.assertFalse((root / "nodes/a/job-trains").exists())
         (root / 'nodes/a/publication-policy.json').write_text(json.dumps({
             'version': 1, 'node': 'a', 'reviewer': 'alice', 'reviewed_at': '2026-01-01 00:00 +00:00',
             'rules': [], 'consent': {'node': 'a', 'actions': ['pr']}}))

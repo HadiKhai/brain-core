@@ -10,33 +10,60 @@ import subprocess
 import sys
 from pathlib import Path
 
+from . import action_guard as _m_action_guard
 from . import briefs as _m_briefs
 from . import check as _m_check
+from . import communication as _m_communication
+from . import communication_policy as _m_communication_policy
 from . import common as _m_common
+from . import events as _m_events
 from . import connect as _m_connect
 from . import guard as _m_guard
 from . import gate_lock as _m_gate_lock
 from . import history as _m_history
 from . import hosts as _m_hosts
+from . import host_observations as _m_host_observations
+from . import host_tasks as _m_host_tasks
+from . import host_instances as _m_host_instances
+from . import metadata_recovery as _m_metadata_recovery
+from . import host_lifecycle as _m_host_lifecycle
 from . import instance as _m_instance
+from . import job_env as _m_job_env
+from . import introspection as _m_introspection
 from . import jobs as _m_jobs
 from . import handback_queue as _m_handback_queue
 from . import dispatcher as _m_dispatcher
+from . import diagnostics as _m_diagnostics
 from . import knowledge as _m_knowledge
+from . import launch_receipts as _m_launch_receipts
+from . import learning as _m_learning
+from . import feedback as _m_feedback
+from . import teaching as _m_teaching
 from . import land_checks as _m_land_checks
 from . import messages as _m_messages
 from . import machine as _m_machine
+from . import full_gate as _m_full_gate
 from . import freshness as _m_freshness
 from . import nodes as _m_nodes
+from . import queue_priority as _m_queue_priority
+from . import model_fit as _m_model_fit
 from . import policy as _m_policy
+from . import release as _m_release
+from . import preview_evidence as _m_preview_evidence
+from . import preview_stdio as _m_preview_stdio
 from . import reports as _m_reports
 from . import rehearse as _m_rehearse
 from . import rotation as _m_rotation
+from . import host_actions as _m_host_actions
+from . import digest as _m_digest
+from . import scorecard as _m_scorecard
 from . import schedules as _m_schedules
 from . import settings_batch as _m_settings_batch
+from . import spec_run as _m_spec_run
 from . import spend as _m_spend
 from . import status as _m_status
 from . import sync as _m_sync
+from . import tasks as _m_tasks
 from . import train as _m_train
 from . import transitions as _m_transitions
 from . import ui as _m_ui
@@ -49,9 +76,18 @@ from . import watch as _m_watch
 
 def cmd_selftest(a):
     tests = _m_common.CORE / "tests"
-    args = [sys.executable, "-m", "unittest", "discover", "-s", str(tests), "-t", str(tests)]
+    jobs = getattr(a, 'jobs', 1)
+    if type(jobs) is not int or not 1 <= jobs <= 32:
+        _m_common.die('selftest --jobs must be between 1 and 32')
+    if jobs == 1:
+        args = [sys.executable, "-m", "unittest", "discover", "-s", str(tests), "-t", str(tests)]
+    else:
+        args = [sys.executable, '-m', 'pytest', '-p', 'no:cacheprovider', '-n', str(jobs),
+                '--max-worker-restart=0', '--dist=worksteal', str(tests / 'test_brain.py')]
     if a.verbose:
         args.append("-v")
+    elif jobs > 1:
+        args.append('-q')
     if a.k:
         args += ["-k", a.k]
     env = {**os.environ, "BRAIN_CORE": str(_m_common.CORE), "BRAIN_NO_REEXEC": "1"}
@@ -98,8 +134,10 @@ def reexec_into_instance_core():
     """`brain` on PATH points at one core; for another instance, use that instance's own core."""
     if os.environ.get("BRAIN_NO_REEXEC") or (len(sys.argv) > 1 and sys.argv[1] in ("init", "selftest")):
         return
-    if len(sys.argv) > 1 and sys.argv[1] == "ui" and (_m_common.CORE / ".git").is_file():
-        return  # a core worktree (a dashboard in development) serves its own build
+    if len(sys.argv) > 1 and sys.argv[1] in ('ui', 'rehearse') and (_m_common.CORE / '.git').is_file():
+        if sys.argv[1] == 'rehearse':
+            print('rehearse: using the current worktree core; instance-core re-execution disabled', file=sys.stderr)
+        return  # an explicitly selected development worktree executes its own build
     root = _m_nodes.try_find_root()
     if not root:
         return
@@ -111,21 +149,49 @@ def reexec_into_instance_core():
 
 # Commands that change nothing in the instance: they never wait for the lock.
 READ_ONLY = {"cmd_show", "cmd_tree", "cmd_status", "cmd_now", "cmd_jobs", "cmd_stale", "cmd_ui", "cmd_guard",
-             "cmd_due", "cmd_inbox", "cmd_index",
+             "cmd_due", "cmd_inbox", "cmd_index", "cmd_scorecard", "cmd_introspect",
              "cmd_brief", "cmd_hire", "cmd_reports", "cmd_brains", "cmd_use", "cmd_machine", "cmd_usable",
-             "cmd_item_list", "cmd_item_show", "cmd_wt_list", "cmd_selftest", "cmd_init", "cmd_hook", "cmd_hook_approve", "cmd_help",
+             "cmd_item_list", "cmd_item_show", "cmd_wt_list", "cmd_selftest", "cmd_init", "cmd_hook", "cmd_hook_pretool", "cmd_hook_approve", "cmd_help",
              "cmd_dashboard", "cmd_ready", "cmd_usage", "cmd_scan", "cmd_scrub", "cmd_history",
-             "cmd_gate_lock", "cmd_version", "cmd_connect", "cmd_recall", "cmd_proposals", "cmd_changes", "cmd_heavy", "cmd_rehearse", "cmd_policy"}
+             "cmd_digest", "cmd_model_fit", "cmd_launch_check", "cmd_events", "cmd_gate_lock", "cmd_version", "cmd_connect", "cmd_recall", "cmd_proposals", "cmd_changes", "cmd_heavy", "cmd_rehearse", "cmd_policy", "cmd_preview"}
 
 
 def writes(a):
     """Does this command, with these options, change anything in the instance?"""
     name = a.f.__name__
+    if name == "cmd_host_instance":
+        return a.action in ("remember", "route")
+    if name == "cmd_events":
+        return bool(a.explain or a.record or a.rebuild_records)
+    if name == "cmd_wt_prune":
+        return not a.dry_run
+    if name == 'cmd_preview':
+        return bool(a.record)
+    if name == "cmd_task_flow":
+        return a.action in ("attempt", "alias", "reconcile")
+    if name == "cmd_task_provider":
+        return True
+    if name == "cmd_task_sources":
+        return a.action == "rule-add"
+    if name == "cmd_task_migrate":
+        return True
+    if name == "cmd_task_backfill":
+        return a.apply
+    if name == "cmd_requirement":
+        return True
+    if name == "cmd_task":
+        return a.action in ("add", "set", "backfill", "sync", "event", "requirement-add")
     if name == 'cmd_proposals':
         return bool(getattr(a, 'approve_all', False))
+    if name in ('cmd_full_run', 'cmd_spec_run'):
+        return False  # native execution owns short locks and machine admission
     if name == 'cmd_land_check':
         return False  # the explicit runner takes short owned locks around execution
-    if name == 'cmd_dispatch':
+    if name == 'cmd_host':
+        return False  # host calls use short local binding transactions
+    if name == 'cmd_lifecycle':
+        return False  # native RPC stays outside the instance lock; publication takes its own short locks
+    if name in ('cmd_dispatch', 'cmd_host_export', 'cmd_delegate'):
         return False
     if name == "cmd_watch":
         return False  # takes a short nonblocking instance lock itself
@@ -136,13 +202,19 @@ def writes(a):
     if name == "cmd_machine":
         return a.action == "sample" or a.yes
     if name == "cmd_status":
-        return a.refresh
+        return a.refresh or getattr(a, "project", False)
     if name == "cmd_inbox":
-        return a.new
+        return a.new or bool(getattr(a, "add", None))
     if name == 'cmd_index':
-        return a.record
+        return a.record or bool(getattr(a, "refresh", False))
+    if name == "cmd_teach":
+        return bool(a.file)
+    if name == "cmd_feedback":
+        return a.action != "list"
+    if name == "cmd_enforcement":
+        return a.sync_tasks
     if name == 'cmd_due':
-        return bool(getattr(a, 'defer', None) or getattr(a, 'ack', None))
+        return bool(getattr(a, 'synthesis_seen', None) or getattr(a, 'defer', None) or getattr(a, 'ack', None))
     if name == "cmd_changes":
         return a.seen
     if name == "cmd_connect":
@@ -153,7 +225,7 @@ def writes(a):
     if name == "cmd_check":
         return bool(a.fix)
     if name == "cmd_jobs":
-        return a.start or a.close or a.lessons is not None or a.switch is not None or bool(a.contract_file) \
+        return a.start or a.close or bool(getattr(a, "settled", False)) or a.lessons is not None or a.switch is not None or bool(a.contract_file) \
             or bool(a.usage_file)
     if name == "cmd_ready":
         return a.record
@@ -170,6 +242,8 @@ def main():
                     "default: the one whose folders you are in, else `brain use`)")
     ap.add_argument("-a", "--all", action="store_true", help="with no command: every brain's dashboard")
     sub = ap.add_subparsers(dest="cmd", metavar="<command>")
+
+    _m_tasks.register(sub)
 
     def cmd(name, fn, h, *args):
         s = sub.add_parser(name, help=h, description=h)
@@ -188,6 +262,11 @@ def main():
         opt("--operator", required=True), opt("--title", required=True), opt("--runtimes", default="claude,codex"),
         opt("--host", default="t3"), opt("--tz", default="UTC"),
         opt("--name", help="short name for `brain -b <name>` (default: the folder's name)"))
+    cmd("model-fit", _m_model_fit.cmd_model_fit, "learn model recommendations from comparable recorded jobs", "id",
+        opt("--class", dest="job_class", choices=_m_jobs.JOB_CLASSES, required=True),
+        opt("--runtime", required=True), opt("--effort", choices=_m_jobs.JOB_EFFORTS, default="high"))
+    cmd("launch-check", _m_launch_receipts.cmd_launch_check, "compare routed selection with returned host receipt metadata", "id",
+        opt("--selection-file", required=True), opt("--receipt-file", required=True))
     cmd("usage", _m_usage.cmd_usage, "account-wide subscription usage (agents read the machine cache)",
         opt("action", choices=["install", "uninstall"], nargs="?"), opt("--json", action="store_true"),
         opt("--refresh", action="store_true"), opt("--watch", action="store_true"),
@@ -196,7 +275,9 @@ def main():
         opt("--no-load", action="store_true", help="install: write the LaunchAgent without loading it"))
     cmd("new", _m_nodes.cmd_new, "create a node", "id", opt("--title", required=True), opt("--owners", default=""),
         opt("--labels", default=""), opt("--runtime"), opt("--home", help="a path outside the instance"),
-        opt("--home-url", dest="home_url"))
+        opt("--home-url", dest="home_url"), opt("--brief", help="initial node outcome"),
+        opt("--coordinator", action="store_true", help="also provision the host project and coordinator"),
+        opt("--model", help="coordinator model; otherwise use configured routing"))
     cmd("scan", _m_nodes.cmd_scan, "discover git repos without writing (given folders are depth 0)",
         opt("dirs", nargs="+"), opt("--json", action="store_true"), opt("--depth", type=int, default=4))
     cmd("adopt", _m_nodes.cmd_adopt, "make existing git repositories node homes, then print study commands",
@@ -245,11 +326,13 @@ def main():
         opt("--save", action="store_true", help="brief: save it in .brain/connect/<node>/briefs/ and print its path"),
         opt("--json", action="store_true"))
     cmd("recall", _m_knowledge.cmd_recall, "what every project learned that may help with a problem here: "
-        "brain recall <node> \"what goes wrong\"", "id", opt("words", nargs="+"),
-        opt("--limit", type=int, default=10), opt("--json", action="store_true"))
+        "brain recall <node> \"what goes wrong\"", opt("id", nargs="?", default="root"), opt("words", nargs="*"),
+        opt("--limit", type=int, default=10), opt("--setup", action="store_true", help="prepare the optional local multilingual ONNX model"),
+        opt("--json", action="store_true"))
     cmd("proposals", _m_status.cmd_proposals, "everything waiting for review, node by node, with full text and the commands "
         "to accept or reject several at once", opt("id", nargs="?"),
         opt("--only", help="only these nodes (comma-separated)"), opt("--json", action="store_true"),
+        opt("--brief", action="store_true", help="compact independent reviewer sheet with claim, citation and decision commands"),
         opt('--approve-all', action='store_true', help='activate one complete independently reviewed rules snapshot'),
         opt('--review-manifest', help='complete coordinator-supplied snapshot review JSON'))
     cmd('policy', _m_policy.cmd_policy, 'inspect explicit reviewed publication policy; never publishes', 'id',
@@ -265,6 +348,12 @@ def main():
                                                                help="every session on this machine, per runtime"),
         opt("--also", action="append", metavar="FOLDER", help="also sessions run in this folder (repeatable)"),
         opt("--json", action="store_true"))
+    cmd('preview', _m_reports.cmd_preview, 'record/check source-bound local screenshot-tour evidence', 'id',
+        opt('--record', metavar='RECEIPT_JSON'), opt('--json', action='store_true'))
+    cmd('preview-adapter', _m_preview_stdio.cmd_preview_adapter, 'trust an explicit machine-private local preview driver', 'id',
+        opt('--register', required=True, metavar='PRIVATE_JSON'))
+    cmd('preview-upgrade', _m_preview_stdio.cmd_preview_upgrade, 'reconcile the existing preview protocol for exact landed main', 'id',
+        opt('--head', required=True))
     cmd("ui", _m_ui.cmd_ui, "a live view of this brain in your browser: projects, work in flight, worktrees, activity "
         "(read-only by default, this machine only)", opt("--port", type=int, default=_m_ui.UI_PORT),
         opt("--every", type=float, default=3.0, help="seconds between refreshes"),
@@ -277,7 +366,8 @@ def main():
     cmd("jobs", _m_jobs.cmd_jobs, "jobs per node: open ones and their age, median hours and review rounds, causes",
         opt("id", nargs="?"), opt("--branch"), opt("--job-key", help="select one ledger job when a branch was reused"), opt("--lessons", help="learned item ids, or none: <reason>"),
         opt("--switch", help="record provider switch: old -> new: reason"),
-        opt("--start", action="store_true", help="coordinator: start an import:<snapshot> study"),
+        opt("--start", action="store_true", help="coordinator: start an import study or adopt an existing --thread"),
+        opt("--thread", help="with --start/--branch: adopt an existing worker and its linked Git checkout"),
         opt("--close", action="store_true", help="coordinator: close a processed study, manually landed job, or parked job with --reason"),
         opt("--reason", help="one-line reason to explicitly close parked work"),
         opt("--live", action="store_true", help="read-only JSON rows joining ledger, hand-back, attempts and recorded queues; host activity unknown"),
@@ -288,9 +378,15 @@ def main():
             ", ".join(f"## {f}" for f in _m_jobs.CONTRACT_FIELDS) + "; an optional ## Budget, e.g. 20M tokens, 3 h)"),
         opt("--usage-file", dest="usage_file", help="coordinator: the job's usage as the host reports it (JSON); "
             "wins over what transcripts show"))
+    cmd("lifecycle", _m_host_lifecycle.cmd_lifecycle, "execute a native host lifecycle action with fresh ownership checks",
+        opt("action", choices=("settle", "launch", "restart", "maintain", "rotate", "accept-rotation")), "id",
+        opt("--job-key", help="restart only this exact open ledger job"),
+        opt("--ticket", help="accept only this exact confirmed rotation launch"),
+        opt("--session-id", help="replacement runtime actual session identity; never a host thread ID substitute"))
     cmd("rotate", _m_rotation.cmd_rotate, "prepare a file-based coordinator handover; prints host steps", "id")
     cmd("due", _m_status.cmd_due, "coordinator actions and machine holds; empty means no output",
         opt("--since-wake", action="store_true", help="new file-only wake items compared with the wake before the latest delivery"),
+        opt("--synthesis-seen", metavar="SET", help="record an exact synthesis set after its proposal has been reviewed"),
         opt("--machine", action="store_true", help="also show informational machine readings, even without node actions"),
         opt('--defer', nargs=2, metavar=('ITEM_ID', 'UNTIL'), help='defer an eligible reminder until an absolute timestamp'),
         opt('--ack', metavar='ITEM_ID', help='acknowledge a current parked/blocked handback episode'),
@@ -302,11 +398,22 @@ def main():
         opt("--quiet", action="store_true", help="no output; exit 1 for node actions, including its held work, 0 otherwise"))
     cmd("inbox", _m_status.cmd_inbox, "needs in a node's subtree (default: calling node); --new remembers per reporter",
         opt("id", nargs="?"), opt("--json", action="store_true"), opt("--new", action="store_true"),
+        opt('--add', help='append a screened inbox item'),
         opt('--weekly', action='store_true', help='read-only sweep of unresolved requests aged at least seven days'))
     cmd('answer', _m_status.cmd_answer, 'record text for exactly one current inbox episode, retaining source/history',
         'item_id', 'text')
-    cmd('index', _m_freshness.cmd_index, 'configured upstream index freshness; never runs a generator', 'id',
-        opt('--record', action='store_true', help='explicitly record current input/output fingerprints after regeneration'))
+    cmd('index', _m_freshness.cmd_index, 'configured upstream index freshness or opt-in native link generation', 'id',
+        opt('--record', action='store_true', help='explicitly record current input/output fingerprints after regeneration'),
+        opt('--refresh', action='store_true', help='regenerate an explicitly owned native link index'))
+    cmd("delegate", _m_host_tasks.cmd_delegate, "explicit registered native delegation with completion fallback",
+        "id", opt("--task-file", required=True), opt("--target-file", required=True), opt("--key", required=True))
+    cmd("host-export", _m_host_observations.cmd_host_export, "one bounded native export; preserves previous snapshot on failure")
+    cmd("notify", _m_communication.cmd_notify, "record typed notification; root wakes only for questions",
+        "id", opt("kind", choices=_m_communication.COMMUNICATION_KINDS), "text",
+        opt("--key", required=True, help="stable idempotency key"), opt("--question-file"))
+    cmd("question-answer", _m_communication.cmd_question_answer, "answer one typed question", "id", "choice")
+    cmd('morning-brief', _m_communication_policy.cmd_morning_brief, 'publish a retained quiet-hours inbox brief; never wakes', 'id',
+        opt('--operator', action='store_true', help='root only: aggregate retained notices once per local delivery day'))
     cmd("msg", _m_messages.cmd_msg, "format start/done/blocked/question for a coordinator (does not send)",
         "id", opt("kind", choices=_m_messages.MESSAGE_KINDS), "message", opt("--branch"), opt("--report"))
     cmd("handback", _m_jobs.cmd_handback, "done/blocked/question hand-back; worker messages are start/done/blocked/question",
@@ -319,11 +426,26 @@ def main():
         opt("--need-human", help="question or blocked need to append to the node inbox"),
         opt("--reviews", type=int, help="completed review rounds; runs verify for done (or reuses a green run that "
             "still proves this commit)"),
+        opt("--full-receipt", help="adopt a native exact-candidate full-run receipt without rerunning"),
         opt("--reverify", action="store_true", help="run verify even when an earlier green run still proves it"))
-    cmd("queue", _m_handback_queue.cmd_queue, "explicit foreground hand-back request runner; no service or recovery",
-        opt("action", choices=['run']), 'id', opt('--once', action='store_true'), opt('--request-id'))
+    cmd("queue", _m_queue_priority.cmd_gate_queue, "run one hand-back or explicitly reorder queued native verify tokens",
+        opt("action", choices=['run'], nargs='?'), opt('id', nargs='?'), opt('--once', action='store_true'),
+        opt('--request-id'), opt('--node'), opt('--move'), opt('--before'),
+        opt('--recover', action='store_true', help='recover one exact quiescent queue runner; unknown descendants stay retained'))
     cmd("dispatch", _m_dispatcher.cmd_dispatch, "bounded read-only plan of explicit root/operator asks; empty scan is silent",
-        opt('--limit', type=int, default=50), opt('--node-limit', type=int, default=200))
+        opt('--limit', type=int, default=50), opt('--node-limit', type=int, default=200),
+        opt('--run', action='store_true', help='enqueue only current questions through the durable coalesced wake path'))
+    cmd("backlog", _m_events.cmd_backlog, "append a dated backlog item", "id",
+        opt("action", choices=["add"]), "item")
+    cmd("introspect", _m_introspection.cmd_introspect, "recorded causal job progress and communication metrics",
+        "id", opt("--branch"), opt("--hours", type=float, default=24), opt("--limit", type=int, default=50))
+    cmd("diagnose", _m_diagnostics.cmd_diagnose, "source-first diagnosis and bounded recorded probe setup permits",
+        "id", opt("action", choices=["plan", "outcome"]), opt("--branch", required=True),
+        opt("--question", required=True), opt("--source", action="append"),
+        opt("--finding", choices=["source", "ambiguous", "runtime"]), opt("--reason"),
+        opt("--attempt"), opt("--state", choices=["setup-failed", "observed"]))
+    cmd("scorecard", _m_scorecard.cmd_scorecard, "score a supplied evidence window; missing evidence stays unknown",
+        "id", opt("--file", required=True, help="version 1 measurement manifest"))
     cmd("show", _m_status.cmd_show, "everything about one node, including this machine's bindings", "id")
     cmd("set", _m_nodes.cmd_set, "set fields: brain set <id> key=value ... (host IDs and home paths stay on this machine)",
         "id", opt("pairs", nargs="+"))
@@ -332,6 +454,12 @@ def main():
     t = settings_sub.add_parser("batch", help="JSON array of set/schedule-add operations; one bookkeeping commit")
     t.add_argument("file", help="UTF-8 JSON batch file")
     t.set_defaults(f=_m_settings_batch.cmd_settings_batch)
+    t = settings_sub.add_parser("recover", help="explicitly complete an owned interrupted metadata packet")
+    t.add_argument("file", help="private settings-batch packet")
+    t.set_defaults(f=_m_metadata_recovery.cmd_settings_recover)
+    cmd("host-instance", _m_host_instances.cmd_host_instance, "private addressed host inventory; execution remains local",
+        opt("action", choices=['list', 'remember', 'route', 'plan']), opt("name", nargs='?'),
+        opt("--node", default='root'), opt("--machine"), opt("--adapter"), opt("--file"))
     cmd("relabel", _m_nodes.cmd_relabel, "brain relabel <id> key:value ... (key:- removes)", "id", opt("labels", nargs="+"))
     cmd("owners", _m_nodes.cmd_owners, "change owners: brain owners <id> a,b  ('' = same as parent)", "id", "owners")
     cmd("seal", _m_guard.cmd_seal, "give a node new owners and an external home (the sealing procedure's mechanics)",
@@ -391,6 +519,15 @@ def main():
     t.add_argument("id", nargs="+"); t.add_argument("--at")
     t.add_argument("--reviewed-by", required=True, dest="reviewed_by")
     t.set_defaults(f=_m_knowledge.cmd_specialist_accept)
+    cmd("teach", _m_teaching.cmd_teach, "prepare or apply a checked native adaptation of a usable item", "item", "node",
+        opt("--branch"), opt("--file"), opt("--to"), opt("--check"), opt("--expected-sha256"),
+        opt("--consented-by", default=""))
+    cmd("feedback", _m_feedback.cmd_feedback, "record corrections and close only with an executed green check", "id",
+        opt("action", nargs="?", default="list", choices=["list", "add", "map", "close"]),
+        opt("value", nargs="?"), opt("--principle"), opt("--job"), opt("--check"),
+        opt("--before"), opt("--after"), opt("--json", action="store_true"))
+    cmd("enforcement", _m_learning.cmd_enforcement, "inspect enforcement and synchronize check tasks", "id",
+        opt("--sync-tasks", action="store_true"), opt("--json", action="store_true"))
     cmd("lesson", _m_knowledge.cmd_lesson, "brain lesson <specialist|node> --from <node> \"text\"", "specialist",
         opt("--from", dest="source", required=True), opt("--at"),
         opt("--node", action="store_true", help="record a correction to a node instead of a specialist"),
@@ -411,46 +548,74 @@ def main():
     t = wsub.add_parser("add", help="brain wt add <node> <branch> [--base REF]: new worktree + setup + port")
     t.add_argument("id"); t.add_argument("branch"); t.add_argument("--base")
     t.add_argument("--no-setup", action="store_true", dest="no_setup")
+    t.add_argument("--task-id", help="ready task to link to this job")
     t.set_defaults(f=_m_worktrees.cmd_wt_add)
+    t = wsub.add_parser('env', help='set machine-local per-worktree environment overrides; values are never printed')
+    t.add_argument('id'); t.add_argument('branch'); t.add_argument('pairs', nargs='*')
+    t.add_argument('--unset', action='append', default=[])
+    t.set_defaults(f=_m_job_env.cmd_job_env)
     t = wsub.add_parser("list", help="brain wt list [node]")
     t.add_argument("id", nargs="?")
     t.set_defaults(f=_m_worktrees.cmd_wt_list)
     t = wsub.add_parser("rm", help="brain wt rm <node> <branch> [--force] [--cause 'why it was dropped']")
     t.add_argument("id"); t.add_argument("branch"); t.add_argument("--force", action="store_true")
     t.add_argument("--cause", help="why the job ended without a merge; kept in the node's job-ledger.md")
+    t.add_argument('--settle-threads', action='store_true', help='tell and freshly settle exact closed-job threads before removal; retain while pending')
     t.set_defaults(f=_m_worktrees.cmd_wt_rm)
     t = wsub.add_parser("prune", help="brain wt prune <node>: remove clean worktrees whose branch is merged")
+    t.add_argument('--settle-threads', action='store_true', help='tell and freshly settle exact closed-job threads before removal; retain while pending')
     t.add_argument("id"); t.add_argument("--dry-run", action="store_true", dest="dry_run")
     t.add_argument("--offline", action="store_true")
     t.set_defaults(f=_m_worktrees.cmd_wt_prune)
     cmd("report", _m_reports.cmd_report, "start a report: brain report <node> \"topic\" (prints its folder)", "id", "topic")
     cmd("reports", _m_reports.cmd_reports, "every report, newest first: brain reports [node]", opt("id", nargs="?"))
-    cmd("review", _m_sync.cmd_review, "brief for a review by another runtime: brain review <node> --branch B",
+    cmd("review", _m_sync.cmd_review, "brief for an independent review: brain review <node> --branch B",
         "id", opt("--branch", required=True), opt("--base"), opt("--built-by", dest="built_by"),
-        opt("--by", "--runtime", help="reviewer runtime (default: one the builder didn't use)"), opt("--focus"),
+        opt("--by", "--runtime", help="reviewer runtime (default: configured independence policy)"), opt("--focus"),
         opt("--class", dest="job_class", choices=_m_jobs.JOB_CLASSES),
         opt("--effort", choices=_m_jobs.JOB_EFFORTS),
-        opt("--why-separate", help="reason for a separate reviewer; defaults to independent second-runtime review"),
+        opt("--why-separate", help="reason for a separate reviewer; defaults to the independence policy"),
         opt("--allow-unexplained", action="store_true", help="allow an urgent launch without a reason"),
         opt("--model", help="job model for scoped usage limits"), opt("--out"),
         opt("--reason", choices=("security", "schema", "privacy"), help="exception for another full round or round 3+"),
         opt("--check-fix", action="store_true", help="only check prior blockers/majors and fix regressions"),
         opt("--findings", help="prior findings JSON: list of objects with severity and text"),
         opt("--fix-base", help="reviewed commit before the fixes; defaults to previous review head"),
-        opt("--contract", help="contract file; defaults to the job's recorded contract"))
+        opt("--contract", help="contract file; defaults to the job's recorded contract"),
+        opt("--receipt-file", help="completed review host-observation JSON; does not start another round"),
+        opt("--same-runtime-reason", help="reason for a configured expiring same-runtime exception"))
+    cmd("preview-receipt", _m_preview_evidence.cmd_preview_receipt, "record rendered preview source samples", "id",
+        opt("--branch", required=True), opt("--file", required=True))
+    cmd('release', _m_release.cmd_release, 'inspect or execute an opted-in reviewed full-green release', 'id',
+        opt('--run', action='store_true'))
     cmd("train", _m_train.cmd_train, "batch ready jobs onto local main, verify once, and print the release command", "id",
         opt("--jobs", nargs="+", help="explicit job order (space or comma separated); all must be ready"))
+    cmd("land", _m_train.cmd_land, "batch land ready jobs; host settlement requires fresh separate evidence", "id",
+        opt("--jobs", nargs="+", help="explicit job order (space or comma separated); all must be ready"))
+    cmd("full-run", _m_full_gate.cmd_full_run, "run the native full gate and retain exact-candidate evidence without publishing completion", "id",
+        opt("--branch", required=True), opt("--reviews", required=True, type=int))
+    cmd("spec-run", _m_spec_run.cmd_spec_run, "run one focused command with native admission; never records full readiness", "id",
+        opt("--branch", required=True), opt("--command", nargs=argparse.REMAINDER, required=True))
     cmd("ready", _m_verify.cmd_ready, "check a worker's ready packet against the branch and cached origin default (local main without origin)", "id",
         opt("--branch", required=True), opt("--record", action="store_true", help="worker: run node verify and record"),
         opt("--summary", help="one-line hand-back result (required for --record with schema v3)"),
         opt("--question", help="one-line coordinator choice for a question hand-back"),
         opt("--reviews", type=int, help="completed review rounds, required with --record"),
         opt("--report"), opt("--lessons", help="proposed lessons, or none: <reason>"),
+        opt("--full-receipt", help="with --record: adopt a native full-run receipt"),
         opt("--reverify", action="store_true", help="with --record: run verify even if a green run still proves it"))
+    cmd("host", _m_host_actions.cmd_host, "explicit coordinator provisioning and host wake/watch actions",
+        opt("action", choices=['provision', 'wake-setup', 'watch', 'schedule']), "id", opt("--model"), opt("--url"),
+        opt("--schedule-id"), opt("--provider", help="explicit host runtime for schedule binding"),
+        opt("--require-no-auto-settle", action="store_true", help="refuse provisioning if the adapter cannot enforce this policy"))
+    cmd("digest", _m_digest.cmd_digest, "commitments with landing evidence; --retro summarizes recorded job measurements", "id",
+        opt("--json", action="store_true"), opt("--retro", action="store_true"),
+        opt("--day", help="retro calendar date (YYYY-MM-DD); defaults to the previous local day"))
     cmd("schedule", _m_schedules.cmd_schedule, "recurring work: brain schedule list | add <id> --when W --node N --brief B | "
         "bind <id> <host id> | unbind <id>", opt("action", choices=["list", "add", "bind", "unbind"], nargs="?",
                                                   default="list"),
         opt("id", nargs="?"), opt("host_id", nargs="?"), opt("--when"), opt("--node", default="root"), opt("--brief"),
+        opt("--provider", help="runtime explicitly selected in the host schedule (add/bind only)"),
         opt("-v", "--verbose", action="store_true"))
     cmd("sync", _m_sync.cmd_sync, "what changed in a node (and its home) since the last sync; --all: every external home",
         opt("id", nargs="?"), opt("--all", action="store_true"),
@@ -463,6 +628,10 @@ def main():
     t.set_defaults(f=_m_hosts.cmd_hook, event="stop")
     t = hsub.add_parser("approve", help="trust this instance and its project hooks in Codex (writes its config)")
     t.set_defaults(f=_m_hosts.cmd_hook_approve)
+    t = hsub.add_parser("pretool", help="check declared forbidden tool actions; reads runtime JSON on stdin")
+    t.set_defaults(f=_m_action_guard.cmd_hook_pretool)
+    cmd("allow", _m_action_guard.cmd_allow, "allow one exact forbidden shell command once", "id", "action",
+        opt("--once", action="store_true", required=True), opt("--cwd"), opt("--tool", default="Bash"))
     cmd("wake", _m_hosts.cmd_wake, "wake a node coordinator (or root); inbox remains the record", "id",
         opt("reason", nargs="?"), opt("--drain", action="store_true", help=argparse.SUPPRESS))
     cmd("watch", _m_watch.cmd_watch, "queue wakes only for new actionable file items",
@@ -471,7 +640,14 @@ def main():
         opt("--iso", action="store_true"))
     cmd("tree", _m_status.cmd_tree, "show the node tree")
     cmd("status", _m_status.cmd_status, "status timestamps; --refresh regenerates only one node's facts block",
-        opt("id", nargs="?"), opt("--refresh", action="store_true"))
+        opt("id", nargs="?"), opt("--refresh", action="store_true"),
+        opt("--project", action="store_true", help="explicit phase for configured generated-facts ownership"),
+        opt("--from-events", action="store_true"), opt("--json", action="store_true"))
+    cmd("events", _m_events.cmd_events, "private event metadata; --compare summarizes the last day", "id",
+        opt("--compare", action="store_true"), opt("--json", action="store_true"),
+        opt("--metrics", action="store_true"), opt("--explain", metavar="DIFFERENCE_ID"), opt("--reason"),
+        opt("--rebuild-records", action="store_true"),
+        opt("--record", metavar="FACT_TYPE"), opt("--job-key"), opt("--data", default="{}"))
     cmd("registry", _m_status.cmd_registry, "regenerate registry.md")
     cmd("link", _m_hosts.cmd_link, "create runtime links (axiom 22); --command puts 'brain' on your PATH; --global adds a "
         "pointer to this Brain in each runtime's user-wide instructions",
@@ -482,7 +658,8 @@ def main():
     cmd("check", _m_check.cmd_check, "verify what can be checked mechanically; --fix repairs the safe things",
         opt("--fix", action="store_true"),
         opt("--live", action="store_true", help="send real webhook probes; default check only reads cached results"))
-    cmd("gate-lock", _m_gate_lock.cmd_gate_lock, "serialize a command across this instance",
+    cmd("gate-lock", _m_gate_lock.cmd_gate_lock, "serialize a command for one node",
+        opt("--node", help="node id (default: unambiguous current folder)"),
         opt("--label"), opt("command", nargs=argparse.REMAINDER))
     cmd("heavy", _m_machine.cmd_heavy, "wait until the machine admits new heavy work",
         opt("--node", help="coordinator whose work is waiting (default root)"))
@@ -501,7 +678,8 @@ def main():
         opt("id", nargs="?"), opt("--seen", action="store_true", help="mark every entry read on this machine"),
         opt("--all", action="store_true"), opt("--json", action="store_true"))
     cmd("selftest", cmd_selftest, "run the core's scenario tests in throwaway folders",
-        opt("-v", "--verbose", action="store_true"), opt("-k"))
+        opt("-v", "--verbose", action="store_true"), opt("-k"),
+        opt("--jobs", type=int, default=1, help="parallel pytest workers (requires requirements-test.txt); 1 uses stdlib unittest"))
     def cmd_help(a):
         ap.print_help()
     sub.add_parser("help", help="show this help").set_defaults(f=cmd_help)
@@ -531,11 +709,6 @@ def main():
             with open(os.devnull, "w") as sink:
                 os.dup2(sink.fileno(), sys.stdout.fileno())
         return
-    if a.f == _m_worktrees.cmd_wt_add:
-        inst = _m_nodes.load()
-        node = inst.node(a.id)
-        token = _m_machine.machine_wait(inst=inst, node=node["id"])
-        _m_machine.machine_release(token)
     if a.f == _m_machine.cmd_machine and a.action == "sample":
         a.f(a)  # sampler and watcher each take a short nonblocking instance lock
         return
@@ -547,6 +720,7 @@ def main():
                 + ", ".join(str(p.relative_to(Path(root).resolve())) if Path(root).resolve() in p.parents else str(p)
                             for p in out[:5]) + ("…" if len(out) > 5 else "") + "; remove them (brain check lists them)")
         with _m_instance.brain_lock(root):
-            a.f(a)
+            with _m_events.Command(root, a):
+                a.f(a)
     else:
         a.f(a)

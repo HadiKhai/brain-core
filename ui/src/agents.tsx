@@ -8,11 +8,12 @@ import { Kpi, SectionTabs } from "./dash";
 import { PagedRows } from "./inbox";
 import { RecordPicker } from "./picker";
 import type { Found } from "./search";
-import { flight, threads, tone, jobTitle, hasMeasuredUsage, list, hireRow, closed, count, time, tokens, allJobs, nowOf, stamp, jobState, label, type RecordData } from "./model";
+import { flight, threads, tone, jobTitle, hasMeasuredUsage, list, hireRow, closed, count, time, tokens, allJobs, nowOf, stamp, jobState, label, budgetUsage, type RecordData } from "./model";
 import type { Route } from "./routes";
 import { ThreadLink } from "./thread-link";
 import { WorkStatus, workStatus } from "./work-status";
 import { ReviewActions } from "./review";
+import { Throughput } from "./throughput";
 
 type Go = (r: Partial<Route> & { view: string }) => void;
 export const totalTokens = (r: RecordData) => ["Fresh in", "Cache read", "Cache write", "Output"].reduce((a, k) => a + (Number(r[k]) || 0), 0);
@@ -74,12 +75,13 @@ function SpecialistPanel({ s, sp, open, onOpenChange }: { s: RecordData; sp: Rec
 }
 
 function UsageFlags({ n, r }: { n: RecordData; r: RecordData }) {
-  const u = r._open?.usage, b = r._open?.budget;
+  const u = r._open?.usage, b = r._open?.budget, round = budgetUsage(r._open);
   return <>
     {u && n.jobs.median_tokens && u.processed > 2 * n.jobs.median_tokens && <Status>Tokens over twice median</Status>}
-    {u && b?.tokens && u.processed > b.tokens && <Status>Over token budget</Status>}
-    {b?.hours && r._open?.age_h > b.hours && <Status>Over time budget</Status>}
-    {u?.compactions >= 3 && <Status>{count(u.compactions, "compaction")}</Status>}
+    {round.processed != null && b?.tokens && round.processed > b.tokens && <Status>Over token budget</Status>}
+    {round.hours != null && b?.hours && round.hours > b.hours && <Status>Over time budget</Status>}
+    {round.compactions != null && round.compactions >= 3 && <Status>{count(round.compactions, "compaction")}</Status>}
+    {r._open?.round_usage?.state === "unavailable" && <Status>Round usage unavailable</Status>}
     {u?.subagents && u.sub_share > 0.5 ? <Status>Sub-agents {Math.round(u.sub_share * 100)}%</Status> : null}
   </>;
 }
@@ -98,7 +100,7 @@ export function Jobs({ s, active, go }: { s: RecordData; active: boolean; go: Go
   return (
     <>
       <ScreenAction active={active}>{next ? <JobReview node={next.node} job={next.job} primary trigger="Check active job" /> : <Reader title="Job history" text="No jobs are in progress. Open a finished job below to see its outcome and lessons." trigger="Check job history" primary />}</ScreenAction>
-      <section className="surface kpi-band compact" aria-label="Jobs at a glance">
+      <section className="surface kpi-band compact shrink-0" aria-label="Jobs at a glance">
         <div className="kpi-row">
           <Kpi label="Open" value={jobs.filter((r) => kind(r) === "open").length} note={`across ${count(new Set(jobs.filter((r) => kind(r) === "open").map((r) => r._node.id)).size, "project")}`} />
           <Kpi label="Merged · 7 days" value={merged7} note={`${jobs.filter((r) => kind(r) === "merged").length} all time`} />
@@ -106,6 +108,7 @@ export function Jobs({ s, active, go }: { s: RecordData; active: boolean; go: Go
           <Kpi label="Median tokens" value={medTokens == null ? "—" : tokens(medTokens)} note="measured jobs" />
         </div>
         <Bars unit="hours" label="Finished job durations, oldest to newest" entries={jobs.filter((r) => Number(r.Hours) > 0).sort((a, b) => stamp(a.Started) - stamp(b.Started)).slice(-40).map((r) => ({ key: `${r._node.title} · ${jobTitle(r.Job)}`, tokens: r.Hours }))} />
+        {nodes.some(n => Array.isArray(n.jobs?.throughput)) && <div className="px-4 pb-4"><Reader title="Daily throughput" text="" trigger="Daily throughput"><Throughput embedded nodes={project ? nodes.filter(n => n.id === project.id) : nodes} /></Reader></div>}
       </section>
       <section className="surface" aria-label="Job ledger">
         <FilterToolbar query={query} onQuery={setQuery} placeholder="Search jobs">

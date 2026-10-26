@@ -1,5 +1,6 @@
 """File-only actionable-work watcher; no host queries, provider calls or model turns."""
 import hashlib
+import contextlib
 import json
 import math
 import os
@@ -26,7 +27,7 @@ from . import verify as _m_verify
 WATCH_LOCAL_KINDS = ('unsettled-threads',)
 
 
-WATCH_DECISION_KINDS = ('handback', 'job-stall', 'blocked-overdue', 'restart', 'rotate',
+WATCH_DECISION_KINDS = ('coordinator-queue', 'coordinator-busy', 'delegated-completion', 'question', 'handback', 'job-stall', 'blocked-overdue', 'restart', 'job-restart', 'rotate',
                         'overdue-question')
 
 
@@ -76,13 +77,17 @@ def watch_job_stalls(inst, n):
         return []  # do not create private watcher state for ordinary nodes, including init
     if _m_common.outward_links(inst.root):
         raise ValueError('unsafe job stall state')
-    directory.mkdir(parents=True, exist_ok=True)
-    _m_common.safe_target(lock)
-    fd = os.open(lock, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
-    with os.fdopen(fd, 'a+') as stream:
-        if os.fstat(stream.fileno()).st_nlink != 1:
-            raise ValueError('linked job stall lock')
-        fcntl.flock(stream, fcntl.LOCK_EX)
+    from . import ui_readmodel
+    view = ui_readmodel.projection(inst.root)
+    if view is None:
+        directory.mkdir(parents=True, exist_ok=True)
+        _m_common.safe_target(lock)
+        fd = os.open(lock, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    with contextlib.nullcontext(None) if view else os.fdopen(fd, 'a+') as stream:
+        if stream is not None:
+            if os.fstat(stream.fileno()).st_nlink != 1:
+                raise ValueError('linked job stall lock')
+            fcntl.flock(stream, fcntl.LOCK_EX)
         _m_common.safe_target(path)
         data = watch_read(path, {'version': 1, 'jobs': {}})
         if (data.get('version') != 1 or not isinstance(data.get('jobs'), dict)
@@ -138,7 +143,7 @@ def watch_job_stalls(inst, n):
                               'text': _m_nodes.import_text(
                                   f"{row['Job']} {match[1]} {minutes:g} min without an event; inspect the job",
                                   _m_guard.never_terms(n))})
-        if current != data['jobs'] or not path.exists():
+        if view is None and (current != data['jobs'] or not path.exists()):
             _m_machine.machine_publish(inst, path, json.dumps({'version': 1, 'jobs': current}, sort_keys=True) + '\n')
     return items
 
@@ -235,12 +240,14 @@ def watch_items(inst, n):
                  for b, w in n['local'].get('worktrees', {}).items()}
     signals = {_m_jobs.job_key(r): _m_jobs.job_signal(inst, n, r) for r in rows or []}
     state = {'jobs': rows, 'worktrees': worktrees, 'handbacks': signals, 'inbox': _m_status.inbox_lines(n)}
-    # Refresh evidence generates facts, Git logs and usage displays; none belongs on this path.
-    items = _m_status.due_items(inst, n, evidence=(state, '', ''), include_stale=False,
-                                include_ready=False, include_advice=False) + _m_status.changes_due(inst, n)
+    visible = n['local'].get('wake_policy') == 'visible'
+    own = _m_hosts.wake_target(inst, n)[0]['id'] == n['id']
+    evidence = _m_status.due_evidence(inst, n) if visible and own else (state, '', '')
+    items = _m_status.due_items(inst, n, evidence=evidence, include_stale=visible and own,
+                                include_ready=False, include_advice=visible and own) + _m_status.changes_due(inst, n)
     out = []
     for item in items:
-        if item['kind'] in ('stale-status', 'machine') or (item['kind'] == 'inbox' and item.get('informational')):
+        if (item['kind'] == 'machine' or item['kind'] == 'stale-status' and not visible) or (item['kind'] == 'inbox' and item.get('informational')):
             continue
         direct_reason = None
         handback_episode = None
@@ -422,7 +429,7 @@ def watch_completion_items(inst, nodes=None, strict=False, unknown=None):
                 if kind:
                     identity = watch_completion_scope(n['id'], row, kind) + watch_digest([n['id'], _m_jobs.job_key(row), kind, evidence])[:32]
                     out.append({'id': identity,
-                                'node': 'root', 'kind': kind,
+                                'node': 'root', 'source': n['id'], 'kind': kind,
                                 'text': ('A job has new recorded ready evidence; inspect coordinator due queues'
                                          if kind == 'job-ready' else
                                          'A job has landed in its ledger; inspect coordinator due queues')})
@@ -432,6 +439,12 @@ def watch_completion_items(inst, nodes=None, strict=False, unknown=None):
                 if strict:
                     unknown.add(watch_completion_scope(n['id'], row, 'job-landed' if row['Ended'] else 'job-ready'))
     return out
+
+
+def watch_completion_target(inst, item):
+    source = inst.node(item.get('source', 'root'))
+    target, _ = _m_hosts.wake_target(inst, source)
+    return target if target['local'].get('wake_policy') == 'visible' else inst.node('root')
 
 
 def watch_route_allows_switch(reason):
@@ -471,12 +484,17 @@ def watch_failures(inst, nodes, acknowledged, warnings):
         records = data.get('runs', [])
         if not isinstance(records, list):
             raise ValueError('worker runs must be a list')
+        warnings.discard('worker-runs-invalid')
     except (OSError, ValueError):
         if 'worker-runs-invalid' not in warnings:
             print('watch: worker-runs invalid; failure processing skipped')
         warnings.add('worker-runs-invalid')
-        return
-    warnings.discard('worker-runs-invalid')
+        records = []
+    from . import host_observations as _m_host_observations
+    try:
+        records += _m_host_observations.host_export_runs(inst)
+    except (OSError, ValueError, TypeError):
+        pass  # unknown host export never suppresses manual records or other source work
     for n in nodes:
         rows = _m_jobs.read_jobs(n) or []
         workers = n['local'].get('workers', {})
@@ -546,6 +564,32 @@ def watch_groups(inst, nodes=None):
         return watch_untracked(watch_scan(inst, nodes))
 
 
+def watch_inbox_rollup(inst, group):
+    """Include every fresh printed inbox item without acknowledging the reporter.
+
+    Reporter-scoped identities keep root's rollup independent of child delivery.
+    Work already in the reporter's due queue retains its ordinary source episode.
+    """
+    reporter = group['node']['id']
+    nodes = [n for n in inst.nodes() if reporter == 'root' or n['id'] == reporter
+             or n['id'].startswith(reporter + '/')]
+    items, _ = _m_status.inbox_items(inst, nodes, reporter, readonly=True)
+    def key(item):
+        return (item['node'], item['kind'], ' '.join(item['text'].split()))
+    visible = {key(i) for i in group['items']}
+    for item in items:
+        if item['reported']:
+            continue
+        n = inst.node(item['node'])
+        text = item['text'].removeprefix('inbox: ') if item['kind'] == 'inbox' else item['text']
+        entry = {'node': item['node'], 'kind': item['kind'],
+                 'text': _m_nodes.import_text(text, _m_guard.never_terms(n))[:400],
+                 'id': watch_digest(['inbox-rollup', reporter, item['id']])}
+        if key(entry) not in visible:
+            group['items'].append(entry)
+            visible.add(key(entry))
+
+
 def watch_scan(inst, nodes=None):
     """Collect source facts only while the due receipt transaction owns its lock."""
     nodes = nodes if nodes is not None else [n for n in inst.nodes() if not n['archived']]
@@ -567,12 +611,30 @@ def watch_scan(inst, nodes=None):
                                        'kind': 'overdue-question', 'node': n['id'],
                                        'reason': 'overdue:' + hashlib.sha256(line.encode()).hexdigest(),
                                        'text': 'Unanswered question past its threshold; inspect brain due root'})
+    from . import communication as _m_communication
+    from . import host_observations as _m_host_observations
+    try:
+        from . import host_tasks as _m_host_tasks
+        host_items = (_m_host_observations.host_observation_items(inst, nodes) +
+                      _m_host_tasks.host_task_items(inst, nodes))
+    except (OSError, ValueError, TypeError):
+        host_items = []
+    for item in _m_communication.communication_items(inst, nodes) + host_items:
+        n = inst.node(item['node'])
+        target, command = _m_hosts.wake_target(inst, n)
+        if target['id'] == 'root' and item['kind'] == 'delegated-completion':
+            continue  # root result notifications remain in files/inbox
+        group = groups.setdefault(target['id'], {'node': target, 'items': [], 'command': command})
+        group['items'].append(item)
     completions = watch_completion_items(inst, nodes)
-    if completions:
-        root = inst.node('root')
-        group = groups.setdefault('root', {'node': root, 'items': [],
-                                          'command': _m_hosts.wake_target(inst, root)[1]})
-        group['items'].extend(completions)
+    for item in completions:
+        target = watch_completion_target(inst, item)
+        group = groups.setdefault(target['id'], {'node': target, 'items': [],
+                                                'command': _m_hosts.wake_target(inst, target)[1]})
+        group['items'].append({**item, 'node': item.get('source', target['id'])})
+    for group in groups.values():
+        if group['node']['local'].get('wake_policy') == 'visible':
+            watch_inbox_rollup(inst, group)
     state = _m_machine.machine_state(inst)
     for group in groups.values():
         for item in _m_status.machine_due_items(inst, [group['node']], state, []):
@@ -616,6 +678,8 @@ def watch_run(inst, kinds=None, quiet=False, sources=None):
     warnings = set(state.get('warnings', []))
     if kinds is None:
         watch_failures(inst, nodes, failures, warnings)
+    from . import communication as _m_communication
+    _m_communication.communication_reconcile(inst)
     groups = watch_groups(inst, nodes)
     current_ids = {i['id'] for group in groups.values() for i in group['items']}
     for group in groups.values():
@@ -637,7 +701,8 @@ def watch_run(inst, kinds=None, quiet=False, sources=None):
         items = {i['id']: i for i in group['items']}
         current.extend(items.values())
         added = sorted(key for key in set(items) - seen
-                       if (watch_decision_item(items[key]) if kinds is None else items[key]['kind'] in kinds)
+                       if ((watch_decision_item(items[key]) or group['node']['local'].get('wake_policy') == 'visible')
+                           if kinds is None else items[key]['kind'] in kinds)
                        and (sources is None or items[key]['node'] in sources))
         queued = False
         if added and group['command']:
@@ -675,7 +740,9 @@ def watch_run(inst, kinds=None, quiet=False, sources=None):
                 queued = True
         target = group['node']
         directory = _m_hosts.wake_directory(inst, target)
-        if not queued and group['command'] and directory.is_dir() and any(directory.glob('*.pending')):
+        from . import wake_turns as _m_wake_turns
+        if not queued and group['command'] and directory.is_dir() and (
+                any(directory.glob('*.pending')) or _m_wake_turns.wake_turn_stuck(inst, target)):
             _m_hosts.wake_start(inst, target)  # retries queued failures without another model tick
     # Screened current excerpts are recomputed; historical acknowledgement stores only digests.
     # Corrupt files remain byte-for-byte available for repair. Healthy stores

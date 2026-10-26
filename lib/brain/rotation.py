@@ -57,14 +57,14 @@ def rotation_due(inst, n):
         except (ValueError, TypeError):
             return default
     context, turns = measured["context"], measured["turns"]
-    if (context is not None and context >= limit("rotate_tokens", 150000)) or turns >= limit("rotate_turns", 50):
+    if (context is not None and context >= limit("rotate_tokens", 300000)) or turns >= limit("rotate_turns", 50):
         return (f"coordinator context {context if context is not None else 'unknown'} tokens, {turns} turns; "
                 f"run brain rotate {n['id']} and follow the host handover steps")
     return None
 
 
 def cmd_rotate(a):
-    inst = _m_nodes.load()
+    inst = getattr(a, '_instance', None) or _m_nodes.load()
     n = inst.node(a.id)
     if _m_common.outward_links(inst.root):
         _m_common.die("rotation refused: unsafe instance links; repair before preparing a handover")
@@ -88,6 +88,8 @@ def cmd_rotate(a):
     lines = [f"# Coordinator handover: {n['id']}", "", f"Prepared: {inst.now()}", "",
              "Start from these files. Read node.md, brief.md and the coordinator role before acting.",
              "The old thread must stay available until host tasks and pending requests have been reconciled.", ""]
+    from . import tasks as _m_tasks
+    lines += _m_tasks.brief_index(inst, n)
     for name in ("status.md", "decisions.md", "backlog.md", "inbox.md"):
         path = n["dir"] / name
         try:

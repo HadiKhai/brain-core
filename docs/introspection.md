@@ -1,0 +1,94 @@
+# Recorded introspection
+
+`brain introspect <node> [--branch <branch>] [--hours 24] [--limit 50]` shows causal
+job progress and communication metrics. It is a read-only projection. It does not
+query a host, read transcripts, execute gates or grant authority.
+
+For each exact job generation it reads the contract Outcome, latest observed
+`phase_changed` fact and named dependency keys. Explicit reason codes identify a
+blocker, responsible role, clearing condition and next gate. Supported codes are
+`review_pending`, `operator_decision`, `capacity_wait`, `dependency_pending`,
+`tests_pending`, `integration_pending` and `authorization_pending`. Missing causal
+facts remain null. A dependency's `recorded_merged` label reports the ledger,
+without upgrading it to verified feature delivery. The ledger remains the source
+for a closed attempt; the view does not change it.
+
+Typed facts use the event store's `record_fact`/`facts` hooks. Observed timestamps,
+exact job keys and event IDs supply attribution. Future, reconstructed and
+wrong-job events cannot establish current observed phases or durations. Recording
+an event is a collector's assertion, not independent confirmation of its meaning.
+
+Communication metrics cover the selected interval:
+
+- Queue depth and oldest wait come from native pending wake files or a fresh,
+  exact-thread host snapshot. Native zero means no native pending items; it says
+  nothing about an unexported host queue.
+- Recorded merges per hour use ledger rows whose merged Ended timestamps fall in
+  the interval. This measures recorded merges, not deployed features.
+- `question_opened` and `question_answered` facts join on a stable question episode
+  in `evidence.ref`. Answered mean wait covers answers in the interval; oldest open
+  wait includes unresolved questions opened before it.
+- `turn_completed` facts join on stable turn IDs in `evidence.ref` and explicitly
+  classify `reason_code` as `decision` or `routine`. Their share covers observed,
+  classified turns only. Conflicting labels are excluded and counted. No observed
+  turns yields null, not a zero decision share.
+
+Facts contain controlled metadata only. Free-form bodies, permission prose and
+transcripts are never interpreted as classifications. Keep the event journal and
+source receipts private to the instance.
+
+Repeated review-class advice consumes the review receipt reader when available.
+It compares explicit major/blocker classes for the same exact job generation
+across independent receipt rounds. Case, spaces and hyphens normalize taxonomy
+spelling; no finding prose is classified. A round is its reviewer thread plus
+reviewed head, so duplicate exports do not manufacture recurrence. Minor findings,
+other jobs and receipts declaring reused/builder context do not establish it.
+The historical recurrence is informational even if a later finding was closed;
+the receipt subsystem owns current finding state and input-bound reopening.
+
+A repeated-permission advisory requires an observed `authorization_granted` and
+later `permission_requested` with the same exact job generation, head, phase,
+action `reason_code` and authorization receipt in `evidence.ref`. Revocation or
+leaving that phase clears the comparison. Unknown authorization, changed heads
+and other scopes do not trigger advice. The advisory never grants authority or
+interprets contract prose; an outward action still follows its actual policy.
+
+Needless acknowledgement-wait advice joins a current `phase_changed` fact
+(`phase=acknowledgement`, `state=waiting`, `reason_code=delivery_receipt`) to an
+observed `handoff_delivered` with `state=done`, `reason_code=ack_not_required` and
+the same delivery reference. Missing delivery or an explicit
+`acknowledgement_required` fact prevents advice. A later phase transition clears
+the current wait. Printing a message is not delivery evidence.
+
+Unchanged-input rerun advice compares consecutive `verify_completed` observations
+with `state=done`, `reason_code=full_pass`, full `head`/`base` identities, an `inputs`
+fingerprint and a distinct run reference in `evidence.ref`. Same head/base/inputs
+establish a repeated successful full run. Changed evidence, `full_failed` or
+`forced_reverify` reset the comparison. Duplicate exports of one run do not count.
+This deliberately detects the exact-head case; it does not guess whether an
+unrelated commit could have reused proof or override verifier reuse checks.
+
+Infrastructure-displacement advice starts from an observed
+`product_work_requested` with `product=true` and an outcome reference. It compares
+elapsed `phase_changed` execution/working intervals explicitly marked
+`product=true` or `product=false`. Unknown classifications and other phases are
+not counted. Infrastructure exceeding product phase time produces informational
+advice until matching `product_outcome_delivered` proof is recorded. These are
+classified phase durations, not measured CPU time or transcript-derived activity;
+the advice does not claim that necessary setup was unauthorized.
+
+Testing-without-usable-preview advice counts more than two distinct completed
+`verify_completed`/`test_completed` run refs at the actual current branch head.
+A saved URL alone is not usability proof. A current-head `preview_usable` receipt
+with `state=done` suppresses advice; a later `preview_unusable` invalidates it.
+An explicit `preview_exempt` receipt or existing `preview=none` binding exempts the
+work. Unknown current heads stay unknown. Producers must retain rendering/data
+check evidence behind the receipt reference; this reader never claims a live
+browser check or starts a backend for a missing feature.
+
+The first-product-test timer starts at the first observed
+`product_work_requested` for an outcome reference. Duplicate observations of that
+reference do not reset it. After 60 minutes without a recorded observed
+`product_test_started` (`product=true`, with a run ref), it advises on the missing
+record. A matching outcome delivery also ends the timer. Reconstructed starts
+cannot establish measured execution; unexported external tests remain unknown.

@@ -274,8 +274,10 @@ class UnifiedHandbacks(Scenario):
 
     def test_one_command_one_worker_file_for_ready_state_and_proposals(self):
         r, home, wt = self.job()
-        names = ("status.md", "brief.md", "decisions.md", "node.md", "job-ledger.md")
+        names = ("brief.md", "decisions.md", "node.md", "job-ledger.md")
         before = {name: (r / "nodes/a" / name).read_bytes() for name in names}
+        module = core_loader.SourceFileLoader("brain_generated_judgement", str(CORE / "bin/brain")).load_module()
+        judgement = module.judgement((r / "nodes/a/status.md").read_text())
         main = self.git("rev-parse", "main", cwd=home)
         self.assertEqual(self.finish(r).strip().splitlines()[-1], "ready")
         data = json.loads(self.packet().read_text())
@@ -288,6 +290,7 @@ class UnifiedHandbacks(Scenario):
         self.assertFalse((self.tmp / "app-work/scratch/ready").exists())
         self.assertEqual(len(list(self.packet().parent.glob("*.json"))), 1)
         self.assertEqual({name: (r / "nodes/a" / name).read_bytes() for name in names}, before)
+        self.assertEqual(module.judgement((r / "nodes/a/status.md").read_text()), judgement)
         self.assertEqual(self.git("rev-parse", "main", cwd=home), main)
         self.assertIn("ready to merge", self.b(r, "due", "a"))
         self.b(r, "status", "a", "--refresh")
@@ -323,8 +326,10 @@ class UnifiedHandbacks(Scenario):
         self.finish(r)
         self.git("commit", "--allow-empty", "-qm", "main moves", cwd=home)
         text = self.b(r, "due", "a")
-        self.assertIn("finished but not ready", text)
-        self.assertIn("main moved", text)
+        self.assertIn("eligible for batch; exact-result verification required", text)
+        handback, = [i for i in self.due(r) if i["kind"] == "handback"]
+        self.assertIs(handback["ready"], False)
+        self.assertIn("main moved", self.b(r, "ready", "a", "--branch", "job", ok=False))
         self.git("rebase", "main", cwd=wt)
         (wt / "calc.py").write_text("value = 3\n")
         self.git("commit", "-qam", "wrong value", cwd=wt)
@@ -374,6 +379,15 @@ class UnifiedHandbacks(Scenario):
     def test_merged_required_lesson_outcomes_due_and_facts_clear_on_resolution(self):
         r, home, wt = self.job()
         self.finish(r)
+        notice, = [i for i in self.due(r) if i['kind'] == 'inbox']
+        self.assertRegex(notice['text'], r'command completed: command completed successfully .*<!-- machine-wait:[0-9a-f]+:completed -->')
+        inbox = r / 'nodes/a/inbox.md'
+        source = inbox.read_bytes()
+        request, = [i for i in json.loads(self.b(r, 'inbox', 'a', '--json'))
+                    if i['kind'] == 'inbox' and ':completed -->' in i['text']]
+        self.b(r, 'answer', request['id'], 'Observed successful fixture verification')
+        self.assertEqual(inbox.read_bytes(), source)
+        self.assertNotIn('inbox', [i['kind'] for i in self.due(r)])
         self.git("merge", "-q", "job", cwd=home)
         self.b(r, "wt", "prune", "a", "--offline")
         self.assertEqual(len([i for i in self.due(r) if i["kind"] == "lesson-outcome"]), 1)
@@ -381,14 +395,20 @@ class UnifiedHandbacks(Scenario):
         self.assertIn("missing; coordinator must record outcome", (r / "nodes/a/status.md").read_text())
         self.b(r, "jobs", "a", "--branch", "job", "--lessons", "none: fix specific to this job")
         self.assertNotIn("lesson-outcome", [i["kind"] for i in self.due(r)])
-        self.assertIn("stale-status", [i["kind"] for i in self.due(r)])
+        self.assertNotIn("stale-status", [i["kind"] for i in self.due(r)])
         self.b(r, "status", "a", "--refresh")
-        self.assertIn("none: fix specific to this job", (r / "nodes/a/status.md").read_text())
+        self.assertIn("recorded; see brain jobs", (r / "nodes/a/status.md").read_text())
         self.assertEqual([i["kind"] for i in self.due(r)], ["missing-preview", "unsettled-threads"])
         self.b(r, "jobs", "a", "--attestation-file", settlement_export(self, r, 'a', branch="job"), "--branch", "job", "--settled")
         self.b(r, "set", "a", "preview=http://localhost:4100", "preview_tour=reports/tour.md")
         self.b(r, "status", "a", "--refresh")
-        self.assertEqual(self.due(r), [])
+        pending = self.due(r)
+        self.assertNotIn('lesson-outcome', [i['kind'] for i in pending])
+        preview, = pending
+        self.assertEqual((preview['node'], preview['kind'], preview['condition']),
+                         ('a', 'preview-evidence', 'source-bound-preview-tour'))
+        self.assertEqual(json.loads(self.b(r, 'preview', 'a', '--json')),
+                         {'state': 'missing', 'reason': 'no source-bound screenshot tour recorded'})
 
     def test_unbound_home_does_not_break_read_only_due_or_ready(self):
         r, home, wt = self.job()
@@ -574,12 +594,22 @@ class ThreadSettlement(AutonomyProject):
                  self.row("job-settled", settled="2026-01-01T13:00+00:00")]
         ledger = self.ledger(r, rows)
         before = ledger.read_bytes()
+        inherited = [i for i in self.due(r, 'root') if i['node'] == 'app']
+        self.assertIn('missing-worktree', [i['kind'] for i in inherited])
+        self.assertIn('missing-preview', [i['kind'] for i in inherited])
+        # A distinct child coordinator owns actionable needs; root retains backlog.
+        self.b(r, 'set', 'app', 'coordinator=fixture-app-thread')
         for node in ("app", "root"):
             due = self.due(r, node)
             item = next(i for i in due if i["kind"] == "unsettled-threads" and i["node"] == "app")
             self.assertEqual(item["count"], 151)
             if node == "root":
-                self.assertEqual([i["kind"] for i in due if i["node"] == "app"], ["unsettled-threads"])
+                child = [i for i in due if i['node'] == 'app']
+                landed = [i for i in child if i['kind'] == 'job-landed']
+                self.assertEqual(len(landed), sum(bool(r['Ended']) and r['Outcome'] == 'merged' for r in rows))
+                self.assertTrue(all(i['source'] == 'app' for i in landed))
+                self.assertEqual(len({i['id'] for i in landed}), len(landed))
+                self.assertEqual([i['kind'] for i in child if i['kind'] != 'job-landed'], ['unsettled-threads'])
             self.assertIn("151 closed job(s)", item["text"])
         self.assertIn("151 closed job(s)", self.b(r, "jobs", "app"))
         self.assertIn("unsettled job-0 (brain-job:", self.b(r, "jobs", "app"))
@@ -708,7 +738,7 @@ class ThreadSettlement(AutonomyProject):
             with self.subTest(closure=closure):
                 r, home, wt = self.project()
                 status = r / "nodes/app/status.md"
-                status.write_text(status.read_text() + "\n## Active work\n\n"
+                status.write_text(status.read_text().replace("| job-a | - | - | open |\n", "") + "\n## Active work\n\n"
                                   "| branch | thread | PR | state |\n| --- | --- | --- | --- |\n"
                                   "| job-a | fixture-worker | - | merged |\n")
                 if closure == "prune":
@@ -765,7 +795,7 @@ class ThreadSettlement(AutonomyProject):
         r, home, wt = self.project()
         self.ledger(r, [self.row("job-a")])
         status = r / "nodes/app/status.md"
-        original = status.read_text()
+        original = status.read_text().replace("| job-a | - | - | open |\n", "")
         header = "\n## Active work\n\n| branch | thread | PR | state |\n| --- | --- | --- | --- |\n"
         for rows in ("| job-a | fixture-worker-one | - | merged |\n"
                      "| job-a | fixture-worker-two | - | closed |\n",
@@ -842,6 +872,7 @@ class AutonomyHandbackPaths(AutonomyProject):
 
 
 class Workflow(Scenario):
+    fixture_init_in_process = True
     """Less ceremony: core changes reach every coordinator, green verify runs are reused, contracts and advice."""
 
     job = _test_verify.WorkerReadyPackets.job
@@ -937,7 +968,8 @@ class Workflow(Scenario):
         self.b(r, "wt", "add", "a", "other")
         self.b(r, "wt", "add", "a", "third")
         m = core_loader.SourceFileLoader("brain_aggregation_ledger", str(CORE / "bin/brain")).load_module()
-        node = {"id": "a", "dir": r / "nodes/a"}
+        inst = m.Instance(r)
+        node = inst.node("a")
         rows = m.read_jobs(node)
         for row in rows:
             f = m.contract_file(node, row)
@@ -946,7 +978,7 @@ class Workflow(Scenario):
         # Old open jobs still count after forty newer completed entries.
         history = [{**rows[0], "Job": "closed-" + str(i), "Ended": rows[0]["Started"],
                     "Outcome": "abandoned", "Hours": "1"} for i in range(40)]
-        m.write_jobs(None, node, rows + history)
+        m.write_jobs(inst, node, rows + history)
         out = self.b(r, "jobs", "a")
         self.assertEqual(out.count("overlapping inputs with"), 3)
         lines = out.splitlines()
@@ -1245,8 +1277,10 @@ class Workflow(Scenario):
         self.b(r, "set", "a", f"verify=python3 -B verify.py && echo run >> {runs}")
         self.assertNotIn("reused", self.b(r, "handback", "--summary", "Synthetic result", "a", "--branch", "job", "--state", "done", "--reviews", "1"))
         # --reverify forces a run, so it needs one to force.
-        self.assertIn("--reverify forces a verify run", self.b(r, "handback", "--summary", "Synthetic result", "a", "--branch", "job", "--state",
+        before = runs.read_bytes()
+        self.assertIn("--reverify requires --state done --reviews N", self.b(r, "handback", "--summary", "Synthetic result", "a", "--branch", "job", "--state",
                                                                 "done", "--reverify", ok=False))
+        self.assertEqual(runs.read_bytes(), before)
         # A submodule change counts, whatever git's config hides.
         m = SourceFileLoader("brain_workflow_r1", str(CORE / "bin/brain")).load_module()
         m.machine_dir = lambda: self.tmp / "machine"

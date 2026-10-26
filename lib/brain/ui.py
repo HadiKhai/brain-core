@@ -2,6 +2,7 @@
 import argparse
 import contextlib
 import json
+import math
 import os
 import re
 import shutil
@@ -18,9 +19,13 @@ from . import guard as _m_guard
 from . import instance as _m_instance
 from . import jobs as _m_jobs
 from . import knowledge as _m_knowledge
+from . import learning as _m_learning
+from . import feedback as _m_feedback
+from . import teaching as _m_teaching
 from . import machine as _m_machine
 from . import nodes as _m_nodes
 from . import rehearse as _m_rehearse
+from . import reports as _m_reports
 from . import schedules as _m_schedules
 from . import spend as _m_spend
 from . import status as _m_status
@@ -28,6 +33,8 @@ from . import usage as _m_usage
 from . import ui_review as _m_ui_review
 from . import ui_status as _m_ui_status
 from . import ui_server as _m_ui_server
+from . import ui_fill as _m_ui_fill
+from . import ui_readmodel as _m_ui_readmodel
 from . import verify as _m_verify
 from . import worktrees as _m_worktrees
 
@@ -80,7 +87,7 @@ def ui_meters(inst, state, cache):
     nodes = []
     now = inst.now_dt()
     for n in state['nodes']:
-        worktrees = [{**w, 'listening': ui_listening(w)} for w in n['worktrees']]
+        worktrees = [{**w, 'listening': ui_listening(w) if w.get('live', True) else []} for w in n['worktrees']]
         jobs = {**n['jobs'], 'open': [{**r, 'age_h': round(_m_status.elapsed(inst.parse_time(r['Started']), now) / 3600, 1)}
                                     for r in n['jobs']['open']]}
         def age(row):
@@ -125,14 +132,28 @@ def ui_worktree(inst, home, branch, w, n=None):
     return d
 
 
-def cached_worktree(inst, home, branch, w, n, cache):
+def ui_live_worktrees(n):
+    """Repository inspection belongs to current work, including ledger repair rows."""
+    rows = _m_jobs.read_jobs(n) or []
+    branches = {row['Job'] for row in rows if not row.get('Ended')}
+    closed = {row['Job'] for row in rows if row.get('Ended')} - branches
+    branches.update(row[0].strip().strip('`') for row in _m_status.active_work(n)
+                    if row and row[0].strip().strip('`') not in closed)
+    return {branch: w for branch, w in n['local'].get('worktrees', {}).items() if branch in branches}
+
+
+def cached_worktree(inst, home, branch, w, n, cache, live=None):
+    if not (branch in ui_live_worktrees(n) if live is None else live):
+        return {'branch': branch, 'path': _m_common.tilde(Path(w['path'])), 'port': w.get('port'),
+                'ports': w.get('ports', 1), 'exists': Path(w['path']).exists(), 'live': False,
+                'listening': [], 'dirty': None, 'ahead': None, 'last': None, 'wrote': None}
     if cache is None:
-        return ui_worktree(inst, home, branch, w, n)
+        return {**ui_worktree(inst, home, branch, w, n), 'live': True}
     job = (n['id'], branch)
     key = cache.worktree_keys.get(job)
     old = cache.worktrees.get(job)
     if old is None or old[0] != key:
-        cache.worktrees[job] = (key, ui_worktree(inst, home, branch, w, n))
+        cache.worktrees[job] = (key, {**ui_worktree(inst, home, branch, w, n), 'live': True})
     return cache.worktrees[job][1]
 
 
@@ -146,6 +167,53 @@ def ui_commits(cwd, since, all_refs=False):
         if len(parts) == 3 and parts[0].isdigit():
             out.append({"t": int(parts[0]), "sha": parts[1], "subject": parts[2]})
     return out
+
+
+
+CPU_READING_CACHE = {}
+
+def machine_utilization():
+    """Bounded stdlib-only probes; iowait is not CPU busy time on Linux."""
+    cached = CPU_READING_CACHE.get(sys.platform)
+    if cached and 0 <= time.monotonic() - cached[0] < 5:
+        return dict(cached[1])
+    result = {}
+    try:
+        if sys.platform == 'darwin':
+            top = subprocess.run(['top', '-l', '2', '-s', '1', '-n', '0'], capture_output=True,
+                                 text=True, timeout=3, env={**os.environ, 'LC_ALL': 'C'})
+            matches = re.findall(r'CPU usage:.*?([\d.]+)% idle', top.stdout)
+            if top.returncode == 0 and len(matches) >= 2:
+                result['cpu_idle_pct'] = float(matches[-1])
+            pressure = subprocess.run(['memory_pressure', '-Q'], capture_output=True,
+                                      text=True, timeout=1, env={**os.environ, 'LC_ALL': 'C'})
+            match = re.search(r'System-wide memory free percentage:\s*(\d+)%', pressure.stdout)
+            if pressure.returncode == 0 and match:
+                result['memory_pressure_pct'] = 100 - float(match[1])
+        elif sys.platform.startswith('linux'):
+            def counters():
+                values = list(map(int, Path('/proc/stat').read_text().splitlines()[0].split()[1:]))
+                # guest time is already included in user/nice; iowait leaves CPUs idle.
+                return sum(values[:8]), values[3] + (values[4] if len(values) > 4 else 0)
+            first = counters()
+            time.sleep(0.05)
+            second = counters()
+            total, idle = second[0] - first[0], second[1] - first[1]
+            if total > 0 and 0 <= idle <= total:
+                result['cpu_idle_pct'] = round(100 * idle / total, 1)
+            try:
+                psi = Path('/proc/pressure/memory').read_text()
+                match = re.search(r'^some avg10=([\d.]+)', psi, re.M)
+                if match:
+                    result['memory_pressure_pct'] = float(match[1])
+            except OSError:
+                pass
+    except (OSError, ValueError, IndexError, subprocess.SubprocessError):
+        pass
+    # Bad or unavailable probes stay unknown, rather than becoming admission evidence.
+    result = {k: v for k, v in result.items() if math.isfinite(v) and 0 <= v <= 100}
+    CPU_READING_CACHE[sys.platform] = (time.monotonic(), dict(result))
+    return result
 
 
 def machine_load():
@@ -173,7 +241,7 @@ def machine_load():
             d["mem_free_gb"], d["mem_total_gb"] = round(sum(pages.values()) * page / 1e9, 1), round(total / 1e9)
         elif Path("/proc/meminfo").exists():
             mi = dict(re.findall(r"(\w+):\s+(\d+)", Path("/proc/meminfo").read_text()))
-            d["mem_free_gb"], d["mem_total_gb"] = round((int(mi["MemFree"]) + int(mi["Inactive"])) * 1024 / 1e9, 1), round(int(mi["MemTotal"]) * 1024 / 1e9)
+            d["mem_free_gb"], d["mem_total_gb"] = round(int(mi.get("MemAvailable", int(mi["MemFree"]) + int(mi["Inactive"]))) * 1024 / 1e9, 1), round(int(mi["MemTotal"]) * 1024 / 1e9)
     except (OSError, AttributeError, ValueError, KeyError, subprocess.SubprocessError):
         pass
     try:
@@ -195,6 +263,7 @@ def machine_load():
         pass
     if "mem_free_gb" in d:
         d["memory_pressure"] = "low-free-memory" if d["mem_free_gb"] < 8 else "normal"
+    d.update(machine_utilization())
     return d
 
 
@@ -215,13 +284,27 @@ class UIInstance(_m_instance.Instance):
         return self._items
 
 
+@_m_ui_readmodel.read_view
 def ui_state(inst, problems=None, scan=None, spend_budget=2.0, machine_spend=None, cache=None, node_keys=None):
     readiness = _m_verify.display_cache(cache.ready, cache.worktree_keys) if cache is not None else contextlib.nullcontext()
     usage = _m_spend.live_usage_snapshot(cache.usage, cache.usage_revision) if cache is not None else contextlib.nullcontext()
-    with _m_common.git_read_snapshot(), _m_spend.spend_read_only(), readiness, usage:
+    jobs = _m_status.local_job_snapshot(cache.local_jobs, cache.worktree_keys) if cache is not None else _m_status.local_job_snapshot()
+    with _m_common.git_read_snapshot(), _m_spend.spend_read_only(), readiness, usage, jobs:
         return _ui_state(inst, problems, scan, spend_budget, machine_spend, cache, node_keys)
 
 
+def ui_round_usage(inst, n, row, used):
+    # Additive API: an older accounting backend has no replacement-round meter.
+    reader = getattr(_m_spend, 'job_round_usage', None)
+    if reader is None:
+        return None
+    try:
+        return reader(inst, n, row, used)
+    except (OSError, ValueError):
+        return {'state': 'unavailable', 'processed': None, 'compactions': None, 'hours': None}
+
+
+@_m_ui_readmodel.read_view
 def ui_node(inst, n, since, cache=None, partial=False):
     """The expensive repository/readiness part, reusable independently for each node."""
     home_commits = []
@@ -242,9 +325,12 @@ def ui_node(inst, n, since, cache=None, partial=False):
     hide = lambda t: _m_guard.redact(t, terms) if terms and isinstance(t, str) else t  # noqa: E731
     if not partial and n["external"] and n["home_path"] and n["home_path"].exists():
         home = n["home_path"]
-        wts = [{k: hide(v) for k, v in cached_worktree(inst, home, b, w, n, cache).items()}
+        live = ui_live_worktrees(n)
+        wts = [{k: hide(v) for k, v in cached_worktree(inst, home, b, w, n, cache, live=b in live).items()}
                for b, w in sorted(loc.get("worktrees", {}).items())]
         for wt, branch in zip(wts, sorted(loc.get("worktrees", {}))):
+            if not wt.get('live', True):
+                continue
             state = _m_verify.ready_state(inst, n, branch, display=True)
             wt["ready"] = {"ready": state["ready"], "reasons": [hide(x) for x in state["reasons"]],
                            "packet": {k: hide(v) for k, v in state["packet"].items() if k not in ("input_files", "input_files_ref")}
@@ -257,6 +343,7 @@ def ui_node(inst, n, since, cache=None, partial=False):
         r.update(work_metadata.get(r["Job"], {}))
         used = None if partial else _m_spend.live_usage(inst, n, r)
         r["usage"] = _m_spend.spend_summary(used, terms) if used and used["sessions"] else None
+        r['round_usage'] = None if partial else ui_round_usage(inst, n, r, used)
         r["budget"] = _m_spend.job_budget(n, r)
     try:
         back = json.loads(_m_spend.spend_node_file(inst, n).read_text())
@@ -273,7 +360,9 @@ def ui_node(inst, n, since, cache=None, partial=False):
         reps = sorted((wb / "reports").glob("*/index.md"), reverse=True)[:5] if (wb / "reports").is_dir() else []
     except SystemExit:
         reps = []
+    from . import tasks as _m_tasks
     row = {
+        "tasks": _m_tasks.ui_tasks(inst, n),
         "id": n["id"], "title": fm.get("title", ""), "parent": n["parent"]["id"] if n["parent"] else None,
         "owners": n["owners"], "labels": _m_common.lst(fm.get("labels")), "runtime": fm.get("runtime", ""),
         "preview": hide(loc.get("preview", "")), "preview_tour": hide(loc.get("preview_tour", "")),
@@ -287,6 +376,9 @@ def ui_node(inst, n, since, cache=None, partial=False):
         "blocked": _m_status.status_section(n, "blocked"),
         "blocked_metadata": [_m_ui_status.ui_blocked_metadata(inst, n, t, file_only=partial) for t in _m_status.status_section(n, "blocked")], "decisions": ui_decisions(inst, n), "limits": _m_knowledge.limits_of(n),
         "never_name": len(terms), "spend": lookback,
+        "enforcement": _m_learning.enforcement_metrics(inst, n),
+        "feedback": _m_feedback.feedback_projection(inst, n),
+        "native_teaching": _m_teaching.teaching_summary(inst, n),
         "jobs": {**js, "rows": [{k: hide(v) for k, v in r.items()} for r in (_m_jobs.read_jobs(n) or [])
                               if r.get("Outcome") != "external"],
                                            "open": [{k: hide(v) for k, v in r.items()} for r in js["open"]],
@@ -297,6 +389,7 @@ def ui_node(inst, n, since, cache=None, partial=False):
     return row, home_commits
 
 
+@_m_ui_readmodel.read_view
 def ui_initial_state(inst, scan=None):
     """A file-only first reading; repository, readiness and usage fill in afterwards."""
     nodes = inst.nodes()
@@ -328,6 +421,7 @@ class UIStateCache:
     def __init__(self):
         self.nodes, self.due = {}, {}
         self.ready, self.worktrees, self.worktree_keys = {}, {}, {}
+        self.local_jobs = {}
         self.usage, self.usage_revision = {}, None
         self.problems, self.problem_key, self.problem_at = None, None, float('-inf')
 
@@ -398,6 +492,8 @@ def _ui_state(inst, problems=None, scan=None, spend_budget=2.0, machine_spend=No
                                             "time": fm.get("learned_at"), "owners": _m_common.lst(fm.get("source_owners"))},
                              "accepted_at": fm.get("accepted_at"), "accepted_by": fm.get("accepted_by")}))
     specialists = []
+    enforcement = {(row["id"], metric["type"], metric["target"]): metric
+                   for row in out_nodes for metric in row.get("enforcement", [])}
     for sp in _m_knowledge.find_specialists(inst):
         lesson_path = sp["dir"] / "lessons.md"
         role_body = _m_common.read_fm(sp["dir"] / "role.md")[1]
@@ -410,6 +506,7 @@ def _ui_state(inst, problems=None, scan=None, spend_budget=2.0, machine_spend=No
                                  "hire_command": "brain hire " + shlex.quote(sp["id"]) + " " + shlex.quote(sp["node"]["id"]) + " --task 'Describe the task'",
                                  "scope": _m_common.lst(sp["fm"].get("scope")), "status": sp["fm"].get("status", "active"),
                                  "imported": sp["fm"].get("imported") == "true",
+                                 "enforcement": enforcement.get((sp["node"]["id"], "specialist", sp["id"])),
                                  "lessons": _m_knowledge.parse_lessons(lesson_path) if lesson_path.exists() else [],
                                  "jobs": [r for r in inst.local.get("hires", [])
                                           if r.get("specialist") == sp["id"] and r.get("at") == sp["node"]["id"]]}))
@@ -421,17 +518,9 @@ def _ui_state(inst, problems=None, scan=None, spend_budget=2.0, machine_spend=No
         usage_policy = {"stop_percent": None, "max_age_seconds": 120}
         usage_routing_policy = {}
     machine = _m_machine.machine_state(inst)
-    due = []
-    for n in nodes:
-        key = (node_keys.get(n['id']), int(time.time() // 300)) if node_keys is not None else None
-        old = cache.due.get(n['id']) if cache is not None else None
-        if old is None or old[0] != key:
-            items_due = _m_status.due_items(inst, n)
-            if cache is not None:
-                cache.due[n['id']] = (key, items_due)
-        else:
-            items_due = old[1]
-        due.extend(dict(item) for item in items_due)
+    # The CLI's read-only projection includes routed completion notices. Copy
+    # its items before adding display fields so their durable identities stay intact.
+    due = [dict(item) for item in _m_status.coordinator_due_items(inst, nodes)]
     branches = {(n["id"], _m_jobs.job_key(r)): r["Job"] for n in nodes for r in (_m_jobs.read_jobs(n) or [])}
     for item in due:  # the job's own name, for a card that otherwise reads "this job"
         if item.get("job") and (item["node"], item["job"]) in branches:
@@ -622,6 +711,7 @@ class UISpend:
             self.queue.clear()
             self.pending.clear()
             self.dirty, self.published = True, float('-inf')
+            self.value = {'complete': False, 'files': 0, 'read': 0, 'runtimes': {}, 'since_week': None}
         self.permissions = permissions
         self.allowed, self.forbidden = allowed, forbidden
         files = {}
@@ -644,12 +734,16 @@ class UISpend:
             self.revision += 1
             self.dirty = True
         self.stamps = files
+        if self.queue:
+            # New/changed inputs revoke completion immediately, before the next slice.
+            self.value = {**self.value, 'complete': False, 'files': len(files)}
+            self.published = float('-inf')
 
     def advance(self):
         # Passive tabs reserve CPU for metadata and genuine workspace changes;
         # unfinished files still advance on every slice and publish completion.
         deadline = time.monotonic() + self.BUDGET * (0.5 if self.background else 1)
-        with _m_spend.spend_read_only():
+        with _m_spend.spend_read_only(), _m_ui_readmodel.ReadModel(self.inst, '').usage_scope():
             while self.queue and time.monotonic() < deadline:
                 runtime, path = self.queue.popleft()
                 self.pending.discard(path)
@@ -677,15 +771,59 @@ class UISpend:
         return False
 
 
+class UIInputTree:
+    """Reuse directory listings, never file metadata or source contents."""
+    def __init__(self):
+        self.listings = {}
+
+    def paths(self, root, ignored_dirs=None, ignored_files=None):
+        ignored_dirs, ignored_files = ignored_dirs or {}, ignored_files or {}
+        paths, visited = {root}, set()
+
+        def visit(directory, top=False):
+            # os.walk does not descend through child directory links. Check again
+            # even for a cached child: replacement must not authorize traversal.
+            if not top and directory.is_symlink():
+                return
+            visited.add(directory)
+            stamp = UIInputs.stamp(directory)
+            old = self.listings.get(directory)
+            if old is None or old[0] != stamp:
+                try:
+                    with os.scandir(directory) as entries:
+                        dirs, files = [], []
+                        for entry in entries:
+                            (dirs if entry.is_dir() else files).append(directory / entry.name)
+                    old = (stamp, tuple(dirs), tuple(files))
+                    self.listings[directory] = old
+                except OSError:
+                    self.listings.pop(directory, None)
+                    return
+            dirs = [p for p in old[1] if p.name not in ignored_dirs.get(directory, ())]
+            paths.update(p for p in old[2] if p.name not in ignored_files.get(directory, ()))
+            paths.update(dirs)
+            for child in dirs:
+                visit(child)
+
+        visit(root, top=True)
+        for directory in list(self.listings):
+            if (directory == root or root in directory.parents) and directory not in visited:
+                del self.listings[directory]
+        return paths
+
+
 class UIInputs:
     """Metadata only: no transcript parsing, Git status, readiness hashes or cache writes per poll."""
     def __init__(self, inst):
         self.root = inst.root
+        self.inventory = UIInputTree()
         self.files = set()
         self.worker_path = self.root / '.brain/worker-runs.json'
         self.worker_stamp, self.worker_context_stamp = None, None
         self.worker_records, self.worker_context, self.worker_nodes = [], {}, {}
         self.worker_rows = ()
+        self.round_stamp, self.round_records, self.round_error = None, {}, None
+        self.preview_records = {}
         self.slow_files = set()
         self.slow_at, self.slow_rows = float('-inf'), []
         self.trees = []
@@ -704,10 +842,11 @@ class UIInputs:
         self.core_revision, self.core_at = None, None
         for n in inst.nodes():
             loc = n['local']
-            homes = [n['home_path']] if n['home_path'] else []
-            homes += [Path(w['path']) for w in loc.get('worktrees', {}).values() if w.get('path')]
+            live = ui_live_worktrees(n)
+            homes = [n['home_path']] if n['external'] and n['home_path'] else []
+            homes += [Path(w['path']) for w in live.values() if w.get('path')]
             watched = self.node_paths.setdefault(n['id'], set())
-            for w in loc.get('worktrees', {}).values():
+            for w in live.values():
                 if w.get('path'):
                     self.verify_globs.append((n['id'], Path(w['path']),
                                               _m_common.lst(n['fm'].get('verify_inputs')) or
@@ -798,12 +937,12 @@ class UIInputs:
     @staticmethod
     def topology_key(inst):
         # Coordinator/preview/status edits do not change the watched repositories.
-        return (tuple((n['id'], str(n['home_path']), str(n['local'].get('workbench')), n['fm'].get('verify_inputs'), n['fm'].get('rehearse'), tuple(sorted(
+        return (tuple((n['id'], str(n['home_path']), str(n['local'].get('workbench')), n['fm'].get('verify_inputs'), n['fm'].get('rehearse'), tuple(sorted(ui_live_worktrees(n))), tuple(sorted(
                     (b, str(w.get('path'))) for b, w in n['local'].get('worktrees', {}).items())))
                       for n in inst.nodes()),
                 tuple(UIInputs.stamp(_m_usage.usage_file(name)) for name in ('subscriptions.json', 'brains.json')),
                 tuple(UIInputs.stamp(Path(w['path']) / '.git') for n in inst.nodes()
-                      for w in n['local'].get('worktrees', {}).values()
+                      for w in ui_live_worktrees(n).values()
                       if w.get('path') and (Path(w['path']) / '.git').is_file()))
 
     def node_keys(self, inst, signature):
@@ -834,8 +973,50 @@ class UIInputs:
                 parent = parent['parent']
             out[n['id']] = (global_rows, json.dumps(n['local'], sort_keys=True), homes, tuple(sorted(set(key))),
                             self.worker_nodes.get(n['id'], ()),
+                            self.round_usage_key(n),
+                            self.preview_evidence_key(inst, n),
                             self.core_revision if _m_rehearse.required(n) else None)
         return out
+
+    def preview_evidence_key(self, inst, n):
+        receipt = _m_reports.preview_receipt_file(inst, n)
+        stamp = self.stamp(receipt)
+        old = self.preview_records.get(n['id'])
+        if old is None or old[0] != stamp:
+            paths = set()
+            try:
+                data = json.loads(receipt.read_text())
+                artifacts = [data.get('tour'), *(data.get('screenshots') or [])[:100]]
+                for value in artifacts:
+                    if isinstance(value, dict) and isinstance(value.get('path'), str):
+                        path = Path(value['path'])
+                        if path.is_absolute():
+                            paths.add(path)
+            except (OSError, ValueError, TypeError, AttributeError):
+                pass
+            self.preview_records[n['id']] = stamp, paths
+        return stamp, tuple(sorted(self.stamp(path) for path in self.preview_records[n['id']][1]))
+
+    def round_usage_key(self, n):
+        # One metadata-gated read per refresh; each node depends only on its own jobs.
+        path = self.root / '.brain/wake/lifecycle.json'
+        stamp = self.stamp(path)
+        if stamp != self.round_stamp:
+            self.round_records, self.round_error = {}, None
+            try:
+                data = json.loads(path.read_text())
+                records = data.get('usage') if isinstance(data, dict) else None
+                if not isinstance(records, dict):
+                    raise ValueError('invalid usage receipts')
+                self.round_records = records
+            except FileNotFoundError:
+                pass
+            except (OSError, ValueError):
+                self.round_error = stamp
+            self.round_stamp = stamp
+        keys = [_m_jobs.digest([n['id'], _m_jobs.job_key(row)])
+                for row in (_m_jobs.read_jobs(n) or []) if not row.get('Ended')]
+        return self.round_error, tuple((key, json.dumps(self.round_records.get(key), sort_keys=True)) for key in keys)
 
     def worktree_keys(self, inst, signature):
         rows = {row[0]: row for row in self.fast_rows}
@@ -865,7 +1046,7 @@ class UIInputs:
                 records = [self.stamp(_m_jobs.handback_file(n, row)) for row in job_rows]
                 home = Path(w['path'])
                 git_rows = []
-                for directory in self.home_git.get(home, set()):
+                for directory in self.home_git.get(home, set()) | self.home_git.get(n['home_path'], set()):
                     git_rows.extend(self.stamp(directory / name) for name in ('HEAD', 'index', 'packed-refs', 'config'))
                     # Read only the job and integration refs, not unrelated workers' branch tips.
                     refs = ['refs/heads/' + branch, 'refs/heads/main', 'refs/remotes/origin/HEAD']
@@ -878,7 +1059,7 @@ class UIInputs:
                         pass
                     git_rows.extend(self.stamp(directory / ref) for ref in refs)
                 extras = tuple(self.stamp(path) for path in sorted(self.verify_paths.get(home, set())))
-                result[(n['id'], branch)] = (tuple(semantic), tuple(records), self.home_keys.get(home),
+                result[(n['id'], branch)] = (tuple(semantic), tuple(records), self.stamp(home), self.home_keys.get(home),
                                              tuple(git_rows), extras)
         return result
 
@@ -886,16 +1067,15 @@ class UIInputs:
     def stamp(path):
         try:
             st = path.stat()
-            return (str(path), st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns)
+            return (str(path), st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns,
+                    st.st_ctime_ns, st.st_mode, st.st_nlink)
         except OSError:
             return (str(path), None)
 
     def source_signature(self):
         paths = set()
         for root in self.source_trees:
-            paths.add(root)
-            for top, dirs, files in os.walk(root):
-                paths.update(Path(top) / name for name in [*dirs, *files])
+            paths.update(self.inventory.paths(root))
         return tuple(sorted(self.stamp(path) for path in paths))
 
     def worker_signature(self, rows):
@@ -969,17 +1149,12 @@ class UIInputs:
         # Brain source and recorded aggregates matter. The installed core, object store,
         # machine sampler, locks and transcript-cache output are not dashboard inputs.
         for root in [self.root, *self.trees]:
-            paths.add(root)
-            for top, dirs, files in os.walk(root):
-                path = Path(top)
-                if path == self.root:
-                    dirs[:] = [d for d in dirs if d not in ('core', '.git')]
-                if path == self.root / '.brain':
-                    dirs[:] = [d for d in dirs if d != 'spend']
-                    files = [f for f in files if f not in ('machine.json', 'lock')]
-                dirs.sort()
-                paths.update(path / name for name in files)
-                paths.update(path / name for name in dirs if path / name != self.root / '.brain')
+            indexed = self.inventory.paths(root,
+                ignored_dirs={self.root: {'core', '.git'},
+                              self.root / '.brain': {'spend', 'ui-cache', 'ui-servers'}},
+                ignored_files={self.root / '.brain': {'machine.json', 'lock'}})
+            indexed.discard(self.root / '.brain')
+            paths.update(indexed)
         # Explicit look-back commands publish node aggregates; dashboard polls do not.
         paths.update((self.root / '.brain/spend/nodes').glob('*.json'))
         paths.discard(self.worker_path)
@@ -1054,7 +1229,7 @@ def cmd_ui(a):
     interval = max(0.05, a.every)
     box = {'json': b'', 'version': 0, 'clients': 0, 'last_poll': float('-inf'),
            'telemetry': time.monotonic(), 'request': 0, 'checked': 0,
-           'partial': True, 'built_at': time.time(), 'building': True, 'error': '', 'stopped': False}
+           'partial': True, 'metadata_ready': False, 'built_at': time.time(), 'building': True, 'error': '', 'stopped': False}
 
     def touch(wait=False):
         with cond:
@@ -1069,9 +1244,20 @@ def cmd_ui(a):
     def publish(st, complete=False):
         st = {**st, "review": {"enabled": reviews.enabled}}
         with cond:
-            box.update(state=st, json=json.dumps(st, sort_keys=True).encode(), version=box['version'] + 1)
             if complete:
-                box.update(partial=False, built_at=time.time(), building=False, error='')
+                box['metadata_ready'] = True
+            if box['metadata_ready']:
+                brain = dict(st['brain'])
+                if _m_ui_fill.complete(st):
+                    brain.pop('filling_in', None)
+                else:
+                    brain['filling_in'] = True
+                st = {**st, 'brain': brain}
+            box.update(state=st, json=json.dumps(st, sort_keys=True).encode(), version=box['version'] + 1)
+            if box['metadata_ready']:
+                box['partial'] = not _m_ui_fill.complete(st)
+            if complete:
+                box.update(built_at=time.time(), building=False, error='')
             cond.notify_all()
 
     def refresh(inputs, signature, spend, cache, source_signature, permissions):
@@ -1121,8 +1307,10 @@ def cmd_ui(a):
                         spend.discover()
                         source_signature = sources
                     metadata_at = time.monotonic()
-                if spend.advance():
-                    publish({**box['state'], 'spend': spend.value})
+                if box['partial']:
+                    _m_ui_fill.advance_warm(spend, seconds=0.25)
+                if spend.advance() or (box['partial'] and _m_ui_fill.complete({'spend': spend.value})):
+                    publish({**box['state'], 'spend': spend.value}, complete=box['partial'])
                 if spend.revision != live_revision and time.monotonic() - live_at >= 60:
                     i = UIInstance(inst.root)
                     nodes = {n['id']: n for n in i.nodes()}
@@ -1138,7 +1326,8 @@ def cmd_ui(a):
                             for row in n['jobs']['open']:
                                 used = _m_spend.live_usage(i, real, row)
                                 rows.append({**row, 'usage': _m_spend.spend_summary(used, _m_guard.never_terms(real))
-                                             if used and used['sessions'] else None})
+                                             if used and used['sessions'] else None,
+                                             'round_usage': ui_round_usage(i, real, row, used)})
                             refreshed = {**n, 'jobs': {**n['jobs'], 'open': rows}}
                             updated.append(refreshed)
                             if n['id'] in cache.nodes:
@@ -1158,7 +1347,7 @@ def cmd_ui(a):
                     cond.notify_all()
             with cond:
                 if box['request'] == box['checked']:
-                    cond.wait(timeout=interval)
+                    cond.wait(timeout=min(interval, 0.05) if box['partial'] else interval)
 
     class H(http.server.BaseHTTPRequestHandler):
         def log_message(self, *args):
@@ -1303,16 +1492,35 @@ def cmd_ui(a):
                     current = UIInstance(inst.root)
                     spend = UISpend(current)
                     spend.discover()
-                    spend.advance()
+                    _m_ui_fill.advance_warm(spend)
                     inputs = UIInputs(current)
                     signature = inputs.signature()
                     cache = UIStateCache()
                     cache.worktree_keys = inputs.worktree_keys(current, signature)
                     cache.usage_revision = (spend.revision, spend.permissions)
-                    full = ui_state(current, cache.problems_for(current, signature), scan, machine_spend=spend.value,
-                                    cache=cache, node_keys=inputs.node_keys(current, signature))
                     source_signature = inputs.source_signature()
                     permissions = inputs.permission_key()
+                    machine = _m_machine.machine_state(current)
+                    model = _m_ui_readmodel.ReadModel(current, version)
+                    binding = (signature, source_signature, permissions,
+                               {k: machine.get(k) for k in ('held', 'queued', 'waiting_scopes', 'verifying', 'verify_limit')},
+                               scan)
+                    full = model.metadata(binding)
+                    if full is None:
+                        full = ui_state(current, cache.problems_for(current, signature), scan, machine_spend=spend.value,
+                                        cache=cache, node_keys=inputs.node_keys(current, signature))
+                        # Never bind a result to inputs that changed during its construction.
+                        if inputs.signature() == signature:
+                            model.save_metadata(binding, full)
+                    else:
+                        full = ui_meters(current, {**full, 'spend': spend.value}, cache)
+                    latest_sources = inputs.source_signature()
+                    latest_permissions = inputs.permission_key()
+                    if latest_sources != source_signature or latest_permissions != permissions:
+                        spend.discover()
+                        spend.advance()
+                        full = {**full, 'spend': spend.value}
+                    source_signature, permissions = latest_sources, latest_permissions
                 with cond:
                     if box['stopped']:
                         return

@@ -32,22 +32,32 @@ owners may have worked there since: run `core/bin/brain sync <id>` and fold what
 The sampler wakes only for marked inbox questions/results, question/blocked/done
 hand-backs, stalled jobs, overdue blockers/questions and existing restart/rotation
 needs. Bookkeeping remains in `brain due`; explicit watcher kinds can request it.
-The additional job-restart wake feature is parked and is not included here.
-Existing usage advice and restart/rebrief behavior remain available.
+A protected `job-restart` item blocks `brain due --quiet` when a running job
+reaches three compactions or twice its known positive token limit. Restart the
+worker with the exact brief command before continuing that job. Successful
+rebrief delivery establishes the next usage baseline. Automatic host stop and
+relaunch delivery remains separate from this due obligation.
 
-Serialize full gates sharing an instance with
-`brain gate-lock --label "component verify" -- CMD [ARGS...]`.
-The wrapper does not replace machine admission. Keep the wrapper outside the
-complete queue, standalone gate or forced hand-back command. Native
-`run_verify_stream` validates and forwards the gate descriptor alongside its
-bootstrap pipe, so a wrapped full verify may nest under a wrapped hand-back and
-keeps the gate locked if the parent dies while verification continues. Exec
-nesting also shares it. Every other Python subprocess boundary in a queue/direct
-runner must pass `BRAIN_GATE_FD` with `pass_fds`, while retaining its existing FDs.
-A subprocess that closes it refuses promptly; do not work around that refusal by
-removing an inner wrapper. Keep any existing turn-file protection until the CLI
-and all queue/direct/forced-handback routes are installed and confirmed.
-The lock stays at `.brain/gate.lock`; never unlink or replace it.
+Serialize a node's full gates with
+`brain gate-lock --node <node> --label "component verify" -- CMD [ARGS...]`.
+Different nodes may gate concurrently; existing native machine admission alone
+limits their capacity (two slots by day by default, configurable below). Labels
+are descriptive only. Omitting `--node` requires an unambiguous node folder,
+registered home, workbench or worktree; an ambiguous/unbound folder refuses.
+Keep the wrapper outside the complete queue, standalone gate or forced hand-back
+command. Native `run_verify` and `run_lanes` acquire this same node lock before
+machine admission; a lane run holds it across all its lanes while each command
+joins the machine queue afresh. This prevents own-node waiters occupying slots.
+`run_verify_stream` validates and forwards the node descriptor alongside its
+bootstrap pipe. A child keeps ownership if its parent dies. Exec nesting shares
+ownership only for the same node. Every other Python subprocess boundary in an
+external queue/direct runner must pass `BRAIN_GATE_FD` with `pass_fds`, retaining
+its existing FDs and the `BRAIN_GATE_PATH`/`BRAIN_GATE_NODE` environment. Closed,
+stale, unlocked or mismatched inherited proof refuses promptly.
+The stable locks live at `.brain/gates/<sha256-node-id>.lock`; never unlink or
+replace them. Instance-wide gate locks and cross-node turn files must not surround
+these routes: they defeat node independence. The wrapper provides exclusion;
+it does not replace native machine admission or reserve an additional slot.
 
 ## Write as you go (axioms 16 and 17)
 
@@ -476,7 +486,7 @@ in order; repeating an ID moves it last. The last id is the current coordinator.
 runtime id from its shell (`CODEX_THREAD_ID` or `CLAUDE_CODE_SESSION_ID`), never substitute a T3 host thread id. Spend counts all recorded
 sessions, even from scratch folders, through the normal subscription/privacy gates.
 
-`brain due <node>` raises `rotate` at 150,000 input-context tokens or 50 conversation
+`brain due <node>` raises `rotate` at 300,000 input-context tokens or 50 conversation
 turns. `rotate_tokens=` and `rotate_turns=` configure these thresholds. Claude input includes
 fresh, cache-read and cache-write tokens; Codex's input already includes its cached tokens.
 These are the latest response's accounting counts, never a sum of the conversation's text.
@@ -507,3 +517,26 @@ stay on Codex; an eligible alternative at the stop line requires an explicit run
 Confirm the old run is terminal before any authorized relaunch through the host in the
 existing worktree, and update the binding. Keep all original constraints, commits and
 readiness state. Clear handled failure lines just like other inbox work.
+
+
+## Automated turns and cancellations
+
+A cancellation with no operator message in the turn is a host event, never an
+operator refusal. This includes a tool result that says the user declined. Do not
+write "as you asked", "your rejection" or "you stopped" without an actual operator
+message. Say which tool the host cancelled; retry once or use another route
+(`brain due`, `brain watch` or files). If it still fails, report a host problem.
+
+
+## Typed communication
+
+Use `brain notify <target> question <text> --key <stable-key> --question-file <file>`
+for a decision. The JSON includes options with ids, labels and explicit
+`routine`/`outward`/`destructive` action categories, a recommendation, absolute
+deadline and matching default. Only all-routine choices can receive a deadline
+default; this records a decision and never executes or authorizes an action.
+Answer with `brain question-answer <id> <option-id>`.
+
+Send root only questions. Record landings, parks and FYIs with `brain notify root
+landing|park|fyi <text> --key <stable-key>`; these write the inbox without a wake.
+Do not bypass that route with direct host sends, schedules or completion relays.

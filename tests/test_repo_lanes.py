@@ -62,10 +62,18 @@ class RepositoryLanes(unittest.TestCase):
             root = Path(folder)
             shutil.copytree(lanes.ROOT / 'tests', root / 'tests', ignore=shutil.ignore_patterns('__pycache__'))
             shutil.copytree(lanes.ROOT / 'lib', root / 'lib', ignore=shutil.ignore_patterns('__pycache__'))
-            path = root / 'lib/brain/jobs.py'
-            source = path.read_text()
-            self.assertIn('from . import sync as _m_sync\n', source)
-            path.write_text(source.replace('from . import sync as _m_sync\n', ''))
+            edge = 'from . import sync as _m_sync\n'
+            removed = []
+            for path in (root / 'lib/brain').glob('*.py'):
+                source = path.read_text()
+                if edge in source:
+                    removed.append(path.stem)
+                    path.write_text(''.join(line for line in source.splitlines(keepends=True)
+                                            if line.strip() != edge.strip()))
+            self.assertIn('jobs', removed)
+            self.assertIn('tasks', removed)
+            graph = {p.stem: lanes.imports(lanes.parse(p)) for p in (root / 'lib/brain').glob('*.py')}
+            self.assertNotIn('sync', lanes.closure(graph, {'jobs', 'nodes', 'common', 'instance'}))
             with self.assertRaisesRegex(ValueError, 'nonselective module input missing: .*lib/brain/sync.py'):
                 check_lanes.check(root)
 
@@ -110,7 +118,7 @@ class RepositoryLanes(unittest.TestCase):
         result = check_lanes.check(mapping=mapping)
         self.assertEqual(result['unit_files'], len(list((lanes.ROOT / 'tests').glob('test_*.py'))))
         self.assertGreater(result['lanes'], 1)
-        self.assertEqual(set(result['outside_job_lanes']), {'live.py', 'ui-checks.js', 'ui-fitness.js'})
+        self.assertEqual(set(result['outside_job_lanes']), {'live.py', 'ui-checks.js', 'ui-fitness.js', 'nightly_rehearse.py'})
         sys.path.insert(0, str(lanes.ROOT / 'lib'))
         from brain.verify_lanes import matches
         self.assertTrue(all(matches('lib/brain/common.py', lane['inputs']) for lane in mapping))

@@ -214,7 +214,7 @@ def lane_snapshot(n, w, env, inputs):
             if not pat.startswith('!') and not any(matches(path, [pat]) for path in files):
                 warnings.append('lane ' + lane['name'] + ' positive glob matches no tracked files: ' + pat)
     tools = []
-    # PATH and interpreter identity are part of the toolchain, as are standard project pins.
+    # Resolved executable identities and project pins define the toolchain.
     commands = [lane['command'] for lane in lanes] + [n['fm'].get('verify_lanes_check', '')]
     executables = {'sh', 'python3', 'node', 'npm', 'yarn', 'pnpm', 'cargo', 'go', 'ruby', 'java'}
     for command in commands:
@@ -228,16 +228,19 @@ def lane_snapshot(n, w, env, inputs):
     for tool in sorted(executables):
         path = shutil.which(tool, path=env.get('PATH', os.defpath))
         try:
+            path = str(Path(path).resolve()) if path else None
             stat = Path(path).stat() if path else None
             tools.append([tool, path, [stat.st_size, stat.st_mtime_ns] if stat else None])
         except OSError:
             raise ValueError('cannot inspect verify toolchain')
     context = _m_jobs.digest([map_hash, sorted((k, v) for k, v in n['fm'].items() if k.startswith('verify')),
                            sorted((k, v) for k, v in files.items() if Path(k).name in LOCK_NAMES or Path(k).name.endswith('.lock')),
-                           platform.platform(), sys.version, str(n['home_path']), str(w['path']), env.get('PATH'), tools,
-                           sorted((k, v) for k, v in env.items() if k in LANE_ENV_KEYS)])
+                           platform.platform(), sys.version, str(n['home_path']), str(w['path']), tools,
+                           [(key, env.get(key)) for key in sorted(LANE_ENV_KEYS)]])
+    evidence_context = _m_jobs.digest(['lane-evidence-v2', context, lane_environment(env)])
     hashes = {l['name']: _m_jobs.digest([inputs, sorted((p, v) for p, v in files.items() if matches(p, l['inputs']))]) for l in lanes}
-    return dict(lanes=lanes, map_hash=map_hash, config_hash=lane_config_hash(n), context=context, hashes=hashes, files=files, warnings=warnings)
+    return dict(lanes=lanes, map_hash=map_hash, config_hash=lane_config_hash(n), context=context,
+                evidence_context=evidence_context, hashes=hashes, files=files, warnings=warnings)
 
 
 def changed_since(cwd, head, current):

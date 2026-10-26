@@ -52,6 +52,7 @@ class FixtureGitConfig(Scenario):
 class AutonomyAtomicWrites(AutonomyProject):
     def failed_replace(self, r, destination, args):
         before = destination.read_bytes()
+        mode = destination.stat().st_mode & 0o777
         names = {p.name for p in destination.parent.iterdir()}
         head = self.git('rev-parse', 'HEAD', cwd=r)
         code = """
@@ -62,10 +63,13 @@ brain = sys.argv[2]
 sys.argv = sys.argv[2:]
 original_replace = os.replace
 def fail_replace(src, dst, **kwargs):
-    if Path(dst) == target:
-        assert Path(src).parent == target.parent
-        assert Path(src).read_bytes() != target.read_bytes()
-        assert Path(src).stat().st_size > 0
+    from brain.history import history_fd_path
+    source = Path(history_fd_path(kwargs['src_dir_fd'])) / src if 'src_dir_fd' in kwargs else Path(src)
+    destination = Path(history_fd_path(kwargs['dst_dir_fd'])) / dst if 'dst_dir_fd' in kwargs else Path(dst)
+    if destination == target:
+        assert source.parent == target.parent
+        assert source.read_bytes() != target.read_bytes()
+        assert source.stat().st_size > 0
         raise OSError('injected replacement failure')
     return original_replace(src, dst, **kwargs)
 os.replace = fail_replace
@@ -76,7 +80,13 @@ runpy.run_path(brain, run_name='__main__')
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('injected replacement failure', result.stderr)
         self.assertEqual(destination.read_bytes(), before)
-        self.assertEqual({p.name for p in destination.parent.iterdir()}, names, 'temporary file leaked')
+        self.assertEqual(destination.stat().st_mode & 0o777, mode)
+        # Recovery may create the durable comparison index before the injected write.
+        durable = {'events-compare-index.json'} if destination.parent == r / '.brain' else set()
+        after_names = {p.name for p in destination.parent.iterdir()}
+        self.assertEqual(after_names - durable, names - durable, 'temporary file leaked')
+        if 'events-compare-index.json' in after_names:
+            json.loads((destination.parent / 'events-compare-index.json').read_text())
         self.assertEqual(self.git('rev-parse', 'HEAD', cwd=r), head)
         return result.stdout
 
@@ -84,6 +94,7 @@ runpy.run_path(brain, run_name='__main__')
         r, home, wt = self.project()
         status = r / 'nodes/app/status.md'
         status.chmod(0o640)
+        (r / 'nodes/app/inbox.md').write_text('- 2035-01-01 00:00 +00:00 from worker: Pending atomic input.\n')
         self.failed_replace(r, status, ['status', 'app', '--refresh'])
         self.b(r, 'status', 'app', '--refresh')
         self.assertIn('<!-- /brain:facts -->', status.read_text())
@@ -129,10 +140,12 @@ original = os.replace
 paused = False
 def replace(src, dst, **kwargs):
     global paused
-    if Path(dst) != Path(target) or paused:
+    source_path = Path(m.history_fd_path(kwargs['src_dir_fd'])) / src if 'src_dir_fd' in kwargs else Path(src)
+    destination = Path(m.history_fd_path(kwargs['dst_dir_fd'])) / dst if 'dst_dir_fd' in kwargs else Path(dst)
+    if destination != Path(target) or paused:
         return original(src, dst, **kwargs)
     paused = True
-    Path(candidate).write_bytes(Path(src).read_bytes())
+    Path(candidate).write_bytes(source_path.read_bytes())
     if phase == 'after':
         original(src, dst, **kwargs)
     Path(marker).write_text('paused')
@@ -159,12 +172,16 @@ m.main()
 
     def kill_write(self, root, destination, args, phase):
         before = destination.read_bytes()
+        mode = destination.stat().st_mode & 0o777
+        head = self.git('rev-parse', 'HEAD', cwd=root)
         proc, after = self.paused_write(root, destination, args, phase)
         proc.kill()
         proc.communicate(timeout=5)
         self.assertEqual(proc.returncode, -9)
         self.assertNotEqual(before, after, 'fixture must change the destination')
         self.assertEqual(destination.read_bytes(), before if phase == 'before' else after)
+        self.assertEqual(destination.stat().st_mode & 0o777, mode)
+        self.assertEqual(self.git('rev-parse', 'HEAD', cwd=root), head)
         # This command takes the instance lock and must not wedge on the dead writer's pid.
         follow = subprocess.run([sys.executable, str(root / 'core/bin/brain'), *args], cwd=root,
                                 env=self.env, capture_output=True, text=True, timeout=10)
@@ -184,6 +201,7 @@ m.main()
                     r, home, wt = self.project()
                     node = r / 'nodes/app'
                     if command == 'status':
+                        (node / 'inbox.md').write_text('- 2035-01-01 00:00 +00:00 from worker: Pending crash input.\n')
                         dest, args = node / 'status.md', ['status', 'app', '--refresh']
                     elif command == 'handback':
                         self.b(r, 'handback', "--summary", "Synthetic result", 'app', '--branch', 'job-a', '--state', 'blocked')
@@ -628,3 +646,36 @@ class RoundTwo(AutonomyProject):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DecisionApplicability(Scenario):
+    def test_dated_decisions_require_scope_and_external_claim_sources(self):
+        r = self.init('alice')
+        decisions = r / 'decisions.md'
+        decisions.write_text('# Decisions\n\n## 2026-05-01 10:00 +00:00: Route policy\nExternal fact: Vendor sessions expire after one hour.\nWhy: Integration contract.\n')
+        out = self.b(r, 'check')
+        self.assertIn('decision has no Applies to:', out)
+        self.assertIn('external fact has no valid Source:', out)
+        decisions.write_text(decisions.read_text() + 'Applies to: app/auth\nSource: https://vendor.example/policy\n')
+        out = self.b(r, 'check')
+        self.assertNotIn('decision has no Applies to:', out)
+        self.assertNotIn('external fact has no valid Source:', out)
+
+    def test_sources_are_explicit_and_legacy_cutoff_is_configurable(self):
+        r = self.init('alice')
+        self.b(r, 'set', 'root', 'decision_scope_since=2026-05-01T00:00:00+00:00')
+        path = r / 'decisions.md'
+        path.write_text('# Decisions\n\n## 2026-04-01 10:00 +00:00: Legacy\nWhy: Earlier choice.\n\n## 2026-05-02 10:00 +00:00: Provider rate limit\nApplies to: \nVendor fact: Provider allows ten requests.\nSource: someone said so\n')
+        out = self.b(r, 'check')
+        self.assertEqual(out.count('decision has no Applies to:'), 1)
+        self.assertIn('external fact has no valid Source:', out)
+        path.write_text(path.read_text().replace('Applies to: \n', 'Applies to: app\n').replace('someone said so', 'probe: curl --head https://vendor.example/policy'))
+        out = self.b(r, 'check')
+        self.assertNotIn('decision has no Applies to:', out)
+        self.assertNotIn('external fact has no valid Source:', out)
+
+
+    def test_malformed_external_source_is_a_warning_not_a_check_crash(self):
+        r = self.init('alice')
+        (r / 'decisions.md').write_text('## 2026-05-02 10:00 +00:00: Policy\nApplies to: app\nExternal fact: Provider requires consent.\nSource: http://[invalid\n')
+        self.assertIn('external fact has no valid Source:', self.b(r, 'check'))

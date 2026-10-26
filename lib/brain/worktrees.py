@@ -12,7 +12,9 @@ from . import common as _m_common
 from . import guard as _m_guard
 from . import instance as _m_instance
 from . import jobs as _m_jobs
+from . import tasks as _m_tasks
 from . import knowledge as _m_knowledge
+from . import machine as _m_machine
 from . import nodes as _m_nodes
 from . import status as _m_status
 from . import verify as _m_verify
@@ -208,6 +210,21 @@ def cmd_wt_add(a):
         _m_common.die(f"that branch name contains {', '.join(_m_guard.find_terms(a.branch, _m_guard.never_terms(n)))}: pick another")
     for warning in _m_status.code_setup_warnings(inst, n):
         print("! " + warning)
+    if not _m_tasks.provider_pull_on_wake(inst, n):
+        _m_common.die("external task sync is unknown; no worktree started")
+    try:
+        _m_tasks.prepare_start(n, getattr(a, "task_id", None), a.branch)
+    except ValueError as error:
+        _m_common.die(str(error))
+    # Even a setup-free start must not publish a job under native resource pressure.
+    # Healthy light creation needs no reservation; held starts use the managed
+    # admission lifecycle, including its real terminal outcome and owned release.
+    policy = _m_machine.machine_policy()
+    if _m_machine.machine_reasons(_m_machine.machine_reading(inst), policy):
+        with _m_instance.released(inst, n), \
+                _m_machine.machine_run('heavy', inst, n['id'], a.branch) as token:
+            _m_machine.machine_wait('heavy', inst, n['id'], job=a.branch, token=token)
+        n = inst.node(a.id)  # released admission reloads validated local bindings
     wb = workbench(inst, n, create=True)
     path = wb / "worktrees" / a.branch.replace("/", "-")
     for owner, record in n["local"].get("worktrees", {}).items():
@@ -233,10 +250,13 @@ def cmd_wt_add(a):
         "created": inst.now()}
     inst.local_of(n["id"]).setdefault("workbench", str(wb))
     inst.save_local()
-    _m_jobs.job_started(inst, n, a.branch, runtime)
+    _m_jobs.job_started(inst, n, a.branch, runtime, task_id=getattr(a, "task_id", None))
     print(f"worktree: {_m_common.tilde(path)}\n  branch {a.branch}{'' if exists else ' (new, from ' + base + ')'}  ·  "
           f"{port_text(port, count)}")
     setup = n["dir"] / SETUP_FILE
+    from . import events
+    if setup.exists() and not a.no_setup:
+        events.checkpoint_setup()
     _m_instance.unlock()  # the setup can take minutes and touches only the worktree
     try:
         for module in reuse_submodules(home, path):
@@ -248,9 +268,13 @@ def cmd_wt_add(a):
         env = _m_verify.verify_env(n, a.branch, {"path": str(path), "port": port, "ports": count})
         env["WORKBENCH"] = str(wb)
         print("  setup: running; waiting for completion", flush=True)
-        started = time.monotonic()
-        r = subprocess.run(["sh", str(setup)], cwd=path, env=env, capture_output=True, text=True)
-        duration = time.monotonic() - started
+        with _m_verify.verification_resources(inst, n) as resources, \
+                _m_verify.command_reservation(inst, n, a.branch, kind='heavy') as token:
+            started = time.monotonic()
+            r = subprocess.run(["sh", str(setup)], cwd=path, env=env, capture_output=True, text=True)
+            duration = time.monotonic() - started
+            token.result = r.returncode
+            resources['failed'] = bool(r.returncode)
         out = (r.stdout + r.stderr).strip()
         message = f"  setup: {'ok' if r.returncode == 0 else 'FAILED (exit ' + str(r.returncode) + ')'} in {duration:.2f}s"
         if out:
@@ -317,6 +341,54 @@ def job_commits(home, w, branch):
     return c if c.isdigit() else ""
 
 
+def cleanup_generation(home, w, branch, n):
+    """Fresh local cleanup evidence, deliberately outside the display Git cache.
+
+    This detects changes across released scans; it is not a lease against Git
+    writers after the final observation. Git's removal and live-work checks stay
+    authoritative. No network lookup belongs in the final locked observation.
+    """
+    def query(*args, cwd=home, accepted=(0,)):
+        result = subprocess.run(["git", "-C", str(cwd), *args], capture_output=True,
+                                env={**os.environ, "GIT_OPTIONAL_LOCKS": "0"})
+        if result.returncode not in accepted:
+            raise ValueError("cleanup Git evidence unavailable")
+        return result
+
+    remote = query("remote").stdout.split()
+    base = (query("symbolic-ref", "refs/remotes/origin/HEAD").stdout.strip().decode()
+            if b"origin" in remote else "refs/heads/main")
+    if n["fm"].get("merge", "local") != "pr":
+        base = base.replace("refs/remotes/origin/", "refs/heads/", 1)
+    tip = query("rev-parse", "--verify", "refs/heads/" + branch).stdout.strip()
+    target = query("rev-parse", "--verify", base).stdout.strip()
+    ancestor = query("merge-base", "--is-ancestor", tip.decode(), target.decode(), accepted=(0, 1)).returncode == 0
+    path = Path(w["path"])
+    identity, checkout, head, status = None, None, None, None
+    if path.exists():
+        stat = path.stat()
+        identity = (stat.st_dev, stat.st_ino)
+        checkout = query("symbolic-ref", "--quiet", "HEAD", cwd=path).stdout.strip()
+        head = query("rev-parse", "--verify", "HEAD", cwd=path).stdout.strip()
+        status = query("status", "--porcelain=v1", "-z", "--untracked-files=all", cwd=path).stdout
+    return {"base": base, "target": target, "tip": tip, "ancestor": ancestor,
+            "identity": identity, "checkout": checkout, "head": head, "status": status}
+
+
+def cleanup_recheck(home, w, branch, n, generation, state):
+    """Retain on a changed generation; preserve squash evidence only for its exact refs."""
+    try:
+        current = cleanup_generation(home, w, branch, n)
+    except (OSError, ValueError):
+        current = None
+    if current != generation:
+        _m_common.die(f"{branch}: cleanup inputs changed or unreadable; worktree retained; retry from fresh state")
+    # A positive remote squash lookup remains evidence only for unchanged inputs.
+    merged = current["tip"].decode() != w.get("start") and (current["ancestor"] or state[1])
+    return (None if current["status"] is None else len(current["status"].split(b"\0")) - 1,
+            merged, state[2])
+
+
 def removal_refusal(n, branch, w):
     """File-derived live-work checks; force never overrides ownership or liveness."""
     path = Path(w["path"]).resolve()
@@ -336,6 +408,10 @@ def removal_refusal(n, branch, w):
         return "job ledger cannot be read safely"
     # Cleanup closes its own current row; every other claimant is live work.
     own = _m_jobs.open_job(rows, branch)
+    if own:
+        refusal = _m_jobs.publication_refusal(n, own)
+        if refusal:
+            return refusal
     for row in rows:
         if row is own or row.get("Ended"):
             continue
@@ -353,19 +429,56 @@ def removal_refusal(n, branch, w):
     return ""
 
 
-def remove_worktree(inst, n, branch, force=False):
+def worktree_cleanup_result(n, branch, removed=False, record=None):
+    """Portable facts for a host-owned tell/settle hook, never host authorization.
+
+    Keep every recorded incarnation and reference visible. The host must verify
+    liveness, coordinator protection, pending requests and current ownership.
+    A missing workspace forbids messaging its old thread.
+    """
+    record = record or n['local'].get('worktrees', {}).get(branch) or {}
+    exists = bool(record.get('path') and Path(record['path']).is_dir())
+    rows = [r for r in (_m_jobs.read_jobs(n) or []) if r['Job'] == branch]
+    threads = [{'id': identity, 'reference': reference, 'source': source}
+               for reference, source in _m_jobs.bound_worker_threads(n, branch)
+               for identity in sorted(_m_jobs.thread_reference_ids(reference))]
+    return {'version': 1, 'node': n['id'], 'branch': branch,
+            'phase': 'removed' if removed else 'before-remove',
+            'workspace': record.get('path'), 'workspace_exists': exists,
+            'jobs': [{'key': _m_jobs.job_key(row), 'closed': _m_jobs.closed_job(row),
+                      'started': row.get('Started'), 'ended': row.get('Ended')} for row in rows],
+            'threads': threads, 'requires_host_validation': True,
+            'host_actions': ['inspect', 'tell-if-safe', 'settle-if-safe'] if exists and not removed
+                            else ['inspect', 'settle-if-safe']}
+
+
+def remove_worktree(inst, n, branch, force=False, thread_hook=None):
     w = n["local"].get("worktrees", {}).get(branch)
     if not w:
         _m_common.die(f"{n['id']}: no worktree for '{branch}' made by brain on this machine")
     reason = removal_refusal(n, branch, w)
     if reason:
         _m_common.die(f"{branch}: {reason}; worktree retained")
+    if thread_hook is not None:
+        if thread_hook(worktree_cleanup_result(n, branch, record=w)) is not True:
+            _m_common.die(f"{branch}: thread cleanup not confirmed; worktree retained")
+        fresh = _m_instance.Instance(inst.root)
+        n = fresh.node(n['id'])
+        if n['local'].get('worktrees', {}).get(branch) != w:
+            _m_common.die(f"{branch}: worktree binding changed; worktree retained")
+        inst.local = fresh.local
+        # Host work can take time. Recheck current branch and live job ownership
+        # after the callback; the original preflight grants no lasting permission.
+        reason = removal_refusal(n, branch, w)
+        if reason:
+            _m_common.die(f"{branch}: {reason}; worktree retained")
     if Path(w["path"]).exists():
         r = _m_common.git("worktree", "remove", *(["--force"] if force else []), w["path"], cwd=n["home_path"])
         if r.returncode:
             _m_common.die(f"{branch}: {r.stderr.strip()} (uncommitted work? --force discards it)")
     inst.local_of(n["id"])["worktrees"].pop(branch)
     inst.save_local()
+    return worktree_cleanup_result(n, branch, removed=True, record=w)
 
 
 def cmd_wt_rm(a):
@@ -375,12 +488,22 @@ def cmd_wt_rm(a):
     reason = removal_refusal(n, a.branch, w) if w else ""
     if reason:
         _m_common.die(f"{a.branch}: {reason}; worktree retained")
-    state = worktree_state(home, w, a.branch, n) if w else (None, False, "")
+    if not w:
+        _m_common.die(f"{n['id']}: no worktree for '{a.branch}' made by brain on this machine")
+    with _m_instance.released(inst, n):
+        try:
+            generation = cleanup_generation(home, w, a.branch, n)
+        except (OSError, ValueError):
+            _m_common.die(f"{a.branch}: cleanup inputs unreadable; worktree retained")
+        state = worktree_state(home, w, a.branch, n)
+        cleanup_recheck(home, w, a.branch, n, generation, state)
+    prepared = _m_jobs.prepare_job_usage(inst, n, a.branch, (w or {}).get("path"))
     _m_jobs.print_job_handback(n, a.branch)
     _m_jobs.print_worktree_threads(n, a.branch)
-    remove_worktree(inst, n, a.branch, a.force)
+    state = cleanup_recheck(home, w, a.branch, n, generation, state)
+    remove_worktree(inst, n, a.branch, a.force, thread_hook=cleanup_thread_callback(inst, n, a))
     _m_jobs.job_ended(inst, n, a.branch, "merged" if state[1] else "abandoned", job_commits(home, w, a.branch), a.cause or "",
-              worktree=(w or {}).get("path"))
+              worktree=(w or {}).get("path"), prepared=prepared)
     print(f"removed the worktree for {a.branch} (the branch itself stays)")
 
 
@@ -389,7 +512,8 @@ def cmd_wt_prune(a):
     inst = _m_nodes.load()
     n, home = git_home(inst, a.id)
     if not a.dry_run and _m_common.git("remote", cwd=home).stdout.strip() and not a.offline:
-        _m_common.git("fetch", "--all", "--prune", "--quiet", cwd=home)
+        with _m_instance.released(inst, n):
+            _m_common.git("fetch", "--all", "--prune", "--quiet", cwd=home)
     removed, kept = [], []
     for br, w in sorted(n["local"].get("worktrees", {}).items()):
         reason = removal_refusal(n, br, w)
@@ -399,7 +523,14 @@ def cmd_wt_prune(a):
         if not integration_target(n):
             kept.append(f"{br} (origin default unavailable; run git remote set-head origin -a)")
             continue
-        dirty, merged, ahead = worktree_state(home, w, br, n)
+        with _m_instance.released(inst, n):
+            try:
+                generation = cleanup_generation(home, w, br, n)
+            except (OSError, ValueError):
+                kept.append(f"{br} (cleanup inputs unreadable; worktree retained)")
+                continue
+            dirty, merged, ahead = worktree_state(home, w, br, n)
+            cleanup_recheck(home, w, br, n, generation, (dirty, merged, ahead))
         if dirty is None or (merged and dirty == 0):
             if dirty is not None:
                 entries = _m_common.git("ls-files", "--stage", "-z", cwd=w["path"])
@@ -416,9 +547,11 @@ def cmd_wt_prune(a):
             _m_jobs.print_job_handback(n, br)
             _m_jobs.print_worktree_threads(n, br, dry_run=a.dry_run)
             if not a.dry_run:
-                remove_worktree(inst, inst.node(n["id"]), br)
+                prepared = _m_jobs.prepare_job_usage(inst, inst.node(n["id"]), br, w.get("path"))
+                dirty, merged, ahead = cleanup_recheck(home, w, br, n, generation, (dirty, merged, ahead))
+                remove_worktree(inst, inst.node(n["id"]), br, thread_hook=cleanup_thread_callback(inst, n, a))
                 _m_jobs.job_ended(inst, n, br, "merged" if merged else "abandoned", job_commits(home, w, br),
-                          "" if merged else "worktree was gone", worktree=w.get("path"))
+                          "" if merged else "worktree was gone", worktree=w.get("path"), prepared=prepared)
             removed.append(br)
         else:
             kept.append(f"{br} ({'uncommitted work' if dirty else 'not merged'})")
@@ -427,3 +560,10 @@ def cmd_wt_prune(a):
     print(f"{'would remove' if a.dry_run else 'removed'}: {', '.join(removed) or 'none'}")
     if kept:
         print(f"kept: {', '.join(kept)}")
+
+
+def cleanup_thread_callback(inst, n, args):
+    if not getattr(args, 'settle_threads', False):
+        return None
+    from . import host_lifecycle as _m_host_lifecycle
+    return lambda facts: _m_host_lifecycle.worktree_thread_hook(inst, n, facts, tell=True)

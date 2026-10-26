@@ -164,6 +164,7 @@ if [ "$MODIFY_PATH" = 1 ] && ! on_path "$BIN_DIR"; then
   NEW_SHELL=1
 fi
 echo
+brain task migrate --all || echo "! task migration needs repair; see core/docs/tasks.md before starting jobs"
 if brain check >/dev/null 2>&1; then echo "✓ checks pass"; else echo "! run 'brain check' to see what's left"; fi
 cat <<EOF
 

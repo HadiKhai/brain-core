@@ -1,5 +1,7 @@
 """Instance mechanics for Brain."""
 import datetime
+import contextlib
+import hashlib
 import json
 import os
 import re
@@ -69,7 +71,7 @@ class Instance:
 
     def save_local(self):
         _m_common.safe_target(self.local_path)
-        self.local_path.parent.mkdir(exist_ok=True)
+        _m_common.durable_makedirs(self.local_path.parent)
         _m_common.atomic_write(self.local_path, json.dumps(self.local, indent=2, sort_keys=True) + "\n")
 
     def local_of(self, nid):
@@ -287,6 +289,101 @@ def unlock():
         fh.close()
         _LOCK["fh"] = None
         os.environ.pop("BRAIN_LOCK_HELD", None)
+
+
+def state_signature(inst, node=None, extra=(), local_keys=()):
+    """Watch policy and selected bindings; each site adds only its own source files.
+
+    Ledger rows are re-read under the retaken lock. Inbox/status/other jobs and
+    unrelated local settings must not invalidate work that does not read them.
+    No private values enter a diagnostic or an artifact.
+    """
+    paths = [inst.root / "instance.md"]
+    nodes = [] if node is None else ([node] if isinstance(node, dict) else list(node))
+    for n in nodes:
+        while n:
+            paths.extend(n["dir"] / x for x in ("node.md", "never-name.txt"))
+            n = n.get("parent")
+    paths.extend(Path(p) for p in (extra() if callable(extra) else extra))
+    h = hashlib.sha256()
+    def visit(p):
+        h.update(str(p).encode())
+        try:
+            st = p.lstat()
+            h.update(str((st.st_dev, st.st_ino, st.st_mode, st.st_mtime_ns, st.st_ctime_ns, st.st_size)).encode())
+            if p.is_symlink():
+                h.update(os.readlink(p).encode())
+            elif p.is_dir():
+                for child in sorted(p.iterdir()):
+                    visit(child)
+            # Identity and both change clocks catch edits without reading bodies.
+        except FileNotFoundError:
+            h.update(b"missing")
+    for p in sorted(set(paths)):
+        visit(p)
+    local = inst._load_local()
+    selected = {k: local.get(k) for k in local_keys}
+    selected["nodes"] = {n["id"]: local.get("nodes", {}).get(n["id"], {}) for n in nodes}
+    h.update(json.dumps(selected, sort_keys=True).encode())
+    return h.digest()
+
+
+@contextlib.contextmanager
+def released(inst, node=None, extra=(), local_keys=()):
+    """Release an existing writer lock, then validate and reload before publication.
+
+    Readers, hook descendants and nested unlocked scopes retain main's lock-free
+    behavior. Only the enclosing writer owns validation and the binding reload.
+    """
+    if _LOCK["fh"] is None:
+        yield
+        return
+    with brain_lock(inst):
+        before = state_signature(inst, node, extra, local_keys)
+        unlock()
+        try:
+            yield
+        finally:
+            with brain_lock(inst):
+                try:
+                    after = state_signature(inst, node, extra, local_keys)
+                    local = inst._load_local()
+                except (OSError, ValueError, TypeError, AttributeError):
+                    _m_common.die("state changed during the unlocked step; retry from fresh state")
+                if before != after:
+                    _m_common.die("state changed during the unlocked step; retry from fresh state")
+                inst.local = local
+
+
+@contextlib.contextmanager
+def reservation(inst, name, blocking=True):
+    """An independent, bounded operation lock. Never wait while holding state."""
+    import fcntl
+    path = inst.root / ".brain" / (name + ".lock")
+    _m_common.safe_target(path)
+    path.parent.mkdir(exist_ok=True)
+    fh = open(path, "a+")
+    try:
+        if os.fstat(fh.fileno()).st_nlink != 1 or path.is_symlink():
+            _m_common.die("operation reservation is linked; remove it")
+        deadline = time.monotonic() + LOCK_WAIT
+        while True:
+            try:
+                fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if not blocking:
+                    yield False
+                    return
+                if _LOCK["fh"] is not None:
+                    raise RuntimeError("cannot wait for an operation reservation under the state lock")
+                if time.monotonic() >= deadline:
+                    _m_common.die(f"another brain command has held this operation's lock for {LOCK_WAIT // 60} minutes; "
+                                  f"try again (lock: {_m_common.tilde(path)})")
+                time.sleep(0.05)
+        yield True
+    finally:
+        fh.close()
 
 
 def resolve_ref(nodes, ref):

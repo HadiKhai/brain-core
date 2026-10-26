@@ -1,7 +1,7 @@
 // Hash routes. Old addresses keep working: Agents opens Jobs, Import checklist opens the add-projects
 // sheet over Overview, and `node=` on any page opens that project's page.
 export type Route = { view: string; node: string | null; thread: string | null; item: string | null; tab: string | null; state: string | null; add: boolean };
-export const views = ["overview", "inbox", "projects", "project", "specialists", "jobs", "threads", "usage", "learnings", "graph"];
+export const views = ["overview", "inbox", "projects", "project", "specialists", "jobs", "threads", "usage", "learnings", "graph", "tasks"];
 export function readRoute(): Route {
   const p = new URLSearchParams(location.hash.slice(1));
   let view = p.get("view") || "overview";

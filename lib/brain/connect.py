@@ -180,7 +180,9 @@ def connect_sources(inst, n, skipped=None):
             files.append({"ref": f"{n['id']}:{rel}", "path": str(f.relative_to(inst.root))})
     for sp in _m_knowledge.find_specialists(inst):
         if sp["node"]["id"] == n["id"]:
-            if _m_guard.find_terms(sp["id"] + "\n" + _m_knowledge.specialist_text(sp), _m_knowledge.specialist_terms(inst, sp, [sp["node"], n], nodes)):
+            terms = _m_knowledge.specialist_terms(inst, sp, [sp["node"], n], nodes)
+            if (_m_guard.find_terms(sp["id"], terms)
+                    or _m_knowledge.specialist_holds_terms(sp, terms, inst.principals)):
                 skipped.append(sp["id"])
                 continue
             for name in ("role.md", "lessons.md"):
@@ -191,13 +193,49 @@ def connect_sources(inst, n, skipped=None):
         fm = it["fm"]
         if fm.get("status", "active") in ("active", "proposed") and n["id"] in (
                 [fm.get("source_node")] + _m_common.lst(fm.get("source_nodes"))):
-            if _m_guard.find_terms(it["path"].name + "\n" + it["path"].read_text(), _m_knowledge.learning_terms(inst, fm, [n], nodes)):
+            terms = _m_knowledge.learning_terms(inst, fm, [n], nodes)
+            if (_m_guard.find_terms(it["path"].name, terms)
+                    or _m_guard.find_terms(it["path"].read_text(), terms, principals=inst.principals)):
                 skipped.append(fm.get("id", it["path"].stem))
                 continue
             files.append({"ref": f"item:{fm.get('id', it['path'].stem)}", "path": str(it["path"].relative_to(inst.root))})
     for f in files:
         f["parts"] = connect_parts(inst.root / f["path"], f["ref"])
     return [f for f in files if f["parts"]]
+
+
+def connect_inputs(inst, n, a=None):
+    """Candidate source paths, not whole node folders or unrelated job records.
+
+    Re-enumerate paths on retake to detect newly admitted sources/nodes, without
+    reading source bodies under the lock. Libraries may cite any selected node.
+    """
+    def selected():
+        return [m for m in inst.nodes() if n["id"] == "root" or m["id"] == n["id"] or
+                m["id"].startswith(n["id"] + "/")]
+    watched = selected()
+    def paths():
+        nodes = inst.nodes()
+        chosen = selected()
+        out = [m["dir"] / "node.md" for m in chosen]
+        out += [m["dir"] / "never-name.txt" for m in nodes]
+        d = connect_dir(inst, n)
+        if a is None:  # A new plan discards the previous run; all of that run matters.
+            out.append(d)
+            out += [m["dir"] / rel for m in chosen for rel in CONNECT_FILES]
+            out += [m["dir"] / "library" for m in nodes]
+            out += [p for m in chosen for role in (m["dir"] / "specialists").glob("*/role.md")
+                    for p in (role, role.parent / "lessons.md")]
+        else:
+            out.append(d / "plan.json")
+            if a.action == "brief":
+                if a.final:
+                    out += [d / "digests", d / "themes.md"]
+                name = "final.md" if a.final else "+".join(connect_name(x) for x in dict.fromkeys(a.nodes)) + ".md"
+                if a.save:
+                    out.append(d / "briefs" / name)
+        return out
+    return watched, paths
 
 
 def connect_plan(inst, n, a):
@@ -213,30 +251,33 @@ def connect_plan(inst, n, a):
             os.close(fd)
         if started and not a.fresh:
             die_for(n, f"{n['id']}: digests exist from an earlier plan; finish that run, or pass --fresh to discard it")
-    nodes = [m for m in inst.nodes() if m["id"] != n["id"] and not m["archived"] and
-             (n["id"] == "root" or m["id"].startswith(n["id"] + "/"))]
-    if a.only:
-        wanted = set(_m_common.lst(a.only))
-        unknown = wanted - {m["id"] for m in nodes}
-        if unknown:
-            die_for(n, f"not below {n['id']}: {', '.join(sorted(unknown))}")
-        nodes = [m for m in nodes if m["id"] in wanted]
-    rows, held = [], []
-    for m in nodes:
-        files = connect_sources(inst, m, held)
-        home = m["home_path"] if m["external"] and m["home_path"] and m["home_path"].exists() and \
-            _m_nodes.repo_root(m["home_path"]) else None
-        if not files and not home:
-            continue
-        rows.append({"id": m["id"], "title": m["fm"].get("title", ""), "owners": m["owners"], "sealed": m["sealed"],
-                     "files": files, "code": bool(home),
-                     "home_commit": _m_common.git("rev-parse", "--verify", "-q", "HEAD", cwd=home).stdout.strip() if home else "",
-                     "tokens": sum(p["tokens"] for f in files for p in f["parts"])})
-    if len(rows) < 2:
-        die_for(n, f"{n['id']}: fewer than two nodes below it have anything to compare")
-    plan = {"node": n["id"], "planned_at": inst.now(), "snapshot": _m_common.git("rev-parse", "--verify", "-q", "HEAD",
-            cwd=inst.root).stdout.strip(), "identity": instance_identity(inst), "nodes": rows,
-            "skipped": len(set(held))}
+    watched, extra = connect_inputs(inst, n)
+    with _m_instance.released(inst, watched, extra=extra):
+        nodes = [m for m in inst.nodes() if m["id"] != n["id"] and not m["archived"] and
+                 (n["id"] == "root" or m["id"].startswith(n["id"] + "/"))]
+        if a.only:
+            wanted = set(_m_common.lst(a.only))
+            unknown = wanted - {m["id"] for m in nodes}
+            if unknown:
+                die_for(n, f"not below {n['id']}: {', '.join(sorted(unknown))}")
+            nodes = [m for m in nodes if m["id"] in wanted]
+        rows, held = [], []
+        for m in nodes:
+            files = connect_sources(inst, m, held)
+            home = m["home_path"] if m["external"] and m["home_path"] and m["home_path"].exists() and \
+                _m_nodes.repo_root(m["home_path"]) else None
+            if not files and not home:
+                continue
+            rows.append({"id": m["id"], "title": m["fm"].get("title", ""), "owners": m["owners"], "sealed": m["sealed"],
+                         "files": files, "code": bool(home),
+                         "home_commit": _m_common.git("rev-parse", "--verify", "-q", "HEAD", cwd=home).stdout.strip() if home else "",
+                         "tokens": sum(p["tokens"] for f in files for p in f["parts"])})
+        if len(rows) < 2:
+            die_for(n, f"{n['id']}: fewer than two nodes below it have anything to compare")
+        plan = {"node": n["id"], "planned_at": inst.now(), "snapshot": _m_common.git("rev-parse", "--verify", "-q", "HEAD",
+                cwd=inst.root).stdout.strip(), "identity": instance_identity(inst), "nodes": rows,
+                "skipped": len(set(held))}
+        dirty = _m_common.git("status", "--porcelain", "--", *[str(m["dir"].relative_to(inst.root)) for m in nodes], cwd=inst.root)
     fd = connect_open(inst, n, create=True)
     try:
         connect_inside(inst, n, fd)
@@ -252,7 +293,6 @@ def connect_plan(inst, n, a):
         connect_publish(inst, n, fd, tmp, "plan.json")
     finally:
         os.close(fd)
-    dirty = _m_common.git("status", "--porcelain", "--", *[str(m["dir"].relative_to(inst.root)) for m in nodes], cwd=inst.root)
     return plan, bool(dirty.stdout.strip())
 
 
@@ -495,7 +535,10 @@ def cmd_connect(a):
             sys.exit(1)
         return
     if a.action == "brief":
-        text = connect_brief(inst, n, a, connect_load(inst, n))
+        from . import briefs as _m_briefs
+        watched, extra = connect_inputs(inst, n, a)
+        with _m_instance.released(inst, watched, extra=extra):
+            text = _m_briefs.automated_brief(connect_brief(inst, n, a, connect_load(inst, n)))
         if a.save:
             # Only into connect's own folder, opened without following links: a brief is never written
             # where a path could lead (a home, a worktree), whatever moves while it is written.
@@ -526,9 +569,13 @@ def cmd_connect(a):
         return
     if a.nodes or a.final:
         _m_common.die("nodes and --final go with `brief`")  # names nothing
-    if a.action == "plan" and not a.fresh and connect_read(inst, n, "plan.json"):
-        plan, dirty = connect_load(inst, n), False
-    else:
+    plan = None
+    if a.action == "plan" and not a.fresh:
+        watched, extra = connect_inputs(inst, n, a)
+        with _m_instance.released(inst, watched, extra=extra):
+            if connect_read(inst, n, "plan.json"):
+                plan, dirty = connect_load(inst, n), False
+    if plan is None:
         plan, dirty = connect_plan(inst, n, a)
     # The overview names every planned node, so it hides every planned node's words; readers' briefs and
     # ledgers use their own node's, so a node's id is never blanked out of the reads it must record.

@@ -1,6 +1,7 @@
 """Schedules mechanics for Brain."""
 import re
 
+from . import briefs as _m_briefs
 from . import common as _m_common
 from . import nodes as _m_nodes
 
@@ -21,16 +22,17 @@ def read_schedules(inst):
             out.append(cur)
             key = None
         elif cur is not None:
-            m = re.match(r"^(when|node|brief):\s*(.*)$", line)
+            m = re.match(r"^(when|node|provider|brief):\s*(.*)$", line)
             if m:
                 key = m.group(1)
-                cur[key] = m.group(2).strip()
+                cur[key] = (_m_briefs.automated_brief(m.group(2).strip()).replace('\n', ' ')
+                            if key == 'brief' else m.group(2).strip())
             elif key == "brief" and line.strip():
                 cur["brief"] += " " + line.strip()
     return out
 
 
-def prepare_schedule(inst, sid, when, node, brief, existing=None):
+def prepare_schedule(inst, sid, when, node, brief, existing=None, provider=None):
     """Validate an addition and return its text, without creating files or bindings."""
     if not all(isinstance(x, str) and x.strip() for x in (sid, when, node, brief)):
         _m_common.die("schedule add needs id, when, node and brief strings")
@@ -40,18 +42,42 @@ def prepare_schedule(inst, sid, when, node, brief, existing=None):
     if sid in existing:
         _m_common.die(f"schedule '{sid}' exists")
     inst.node(node)
-    return f"\n## {sid}\n\nwhen: {when}\nnode: {node}\nbrief: {brief.strip()}\n"
+    brief = _m_briefs.automated_brief(brief.strip()).replace("\n", " ")
+    if provider is not None and provider not in inst.runtimes:
+        _m_common.die("provider must be an instance runtime: " + ", ".join(inst.runtimes))
+    declared = f"provider: {provider}\n" if provider else ""
+    return f"\n## {sid}\n\nwhen: {when}\nnode: {node}\n{declared}brief: {brief.strip()}\n"
 
 
 SCHEDULE_PREAMBLE = ("# Schedules\n\nRecurring work. Shared by every machine; each schedule runs on "
                      "one machine only (`brain schedule list` shows which).\n")
 
 
+def schedule_provider(inst, schedule):
+    """An explicit host runtime, never inferred from task ids or the node's pin.
+
+    A machine's binding overrides the shared declaration. Keep legacy string task
+    ids intact so existing schedule, machine and rotation readers still work.
+    """
+    sid = schedule["id"]
+    if inst.local.get("schedules", {}).get(sid):
+        provider = inst.local.get("schedule_providers", {}).get(sid)
+        if provider:
+            return provider
+    return schedule.get("provider")
+
+
 def cmd_schedule(a):
     inst = _m_nodes.load()
     bound = inst.local.setdefault("schedules", {})
+    provider = getattr(a, "provider", None)
+    if provider is not None:
+        if a.action not in ("add", "bind"):
+            _m_common.die("--provider is only used with schedule add or bind")
+        if provider not in inst.runtimes:
+            _m_common.die("provider must be an instance runtime: " + ", ".join(inst.runtimes))
     if a.action == "add":
-        addition = prepare_schedule(inst, a.id, a.when, a.node, a.brief)
+        addition = prepare_schedule(inst, a.id, a.when, a.node, a.brief, provider=provider)
         f = inst.root / "schedules.md"
         head = "" if f.exists() else SCHEDULE_PREAMBLE
         _m_common.safe_target(f)
@@ -68,8 +94,13 @@ def cmd_schedule(a):
             if not a.host_id:
                 _m_common.die("brain schedule bind <id> <host schedule id>")
             bound[a.id] = a.host_id
+            if provider:
+                inst.local.setdefault("schedule_providers", {})[a.id] = provider
+            else:
+                inst.local.get("schedule_providers", {}).pop(a.id, None)
         else:
             bound.pop(a.id, None)
+            inst.local.get("schedule_providers", {}).pop(a.id, None)
         inst.save_local()
         print(f"{a.id}: {'runs on this machine (' + a.host_id + ')' if a.action == 'bind' else 'not on this machine'}")
         return

@@ -18,7 +18,7 @@ class IdleView(Scenario):
             self.stop_server(process)
         super().tearDown()
 
-    def start_server(self, transcript=False, partial=False, projects=False):
+    def start_server(self, transcript=False, partial=False, projects=False, hold_spend=False):
         config = self.tmp / 'config'
         config.mkdir(exist_ok=True)
         self.env['BRAIN_CONFIG'] = str(config / 'brains.json')
@@ -55,10 +55,24 @@ class IdleView(Scenario):
                 text = (folder / 'demo.jsonl').read_text()
                 for i in range(6):
                     (folder / f'chunk-{i}.jsonl').write_text(text * 3)
+        poll_file = self.tmp / ('ui-poll-' + str(len(self.servers)))
+        clock_file = self.tmp / ('ui-clock-' + str(len(self.servers)))
+        poll_file.write_text('0')
+        clock_file.write_text(str(int(time.time() // 300) * 300 + 60))
         script = '''
 import sys
+import time as fixture_time
+from pathlib import Path
+from types import SimpleNamespace
 sys.path.insert(0, sys.argv[1] + '/lib')
 from brain import ui, cli
+poll_file, clock_file = Path(sys.argv[3]), Path(sys.argv[4])
+spend_gate = poll_file.with_suffix('.spend') if sys.argv[5] == 'hold' else None
+# Keep wall-clock age invalidation independent of machine load. Dedicated clock
+# coverage below still drives a real age-boundary invalidation explicitly.
+ui.time = SimpleNamespace(time=lambda: float(clock_file.read_text()),
+                          monotonic=fixture_time.monotonic, sleep=fixture_time.sleep)
+observed_poll = 0
 build = ui.ui_state
 if hasattr(ui, 'UI_TELEMETRY_SECONDS'):
     ui.UI_TELEMETRY_SECONDS = 0.05
@@ -100,23 +114,38 @@ def counted_ready(inst, node, branch, *args, **kwargs):
     return ready(inst, node, branch, *args, **kwargs)
 setattr(ui._m_verify, ready_name, counted_ready)
 background_slices = 0
+spend_started = False
 advance = ui.UISpend.advance
 def counted_advance(self):
-    global background_slices
+    global background_slices, spend_started
     if getattr(self, 'background', False):
         background_slices += 1
+    if spend_gate is not None and spend_started and not spend_gate.exists():
+        return False
+    spend_started = True
     return advance(self)
 ui.UISpend.advance = counted_advance
+if spend_gate is not None:
+    # Publish one genuine incomplete slice, then let the test release parsing.
+    # Startup warming must not finish the tiny fixture before it is observed.
+    ui._m_ui_fill.advance_warm = lambda spend, seconds=1.0: spend.advance()
 meters = ui.ui_meters
 def counted_meters(*args, **kwargs):
     result = meters(*args, **kwargs)
     result['_test_background_slices'] = background_slices
+    result['_test_seen_poll'] = observed_poll
     return result
 ui.ui_meters = counted_meters
 signature = ui.UIInputs.signature
 def fast_signature(self):
+    global observed_poll
+    request = int(poll_file.read_text())
     self.slow_at = float('-inf')  # exercise file discovery without a 15-second test wait
-    return signature(self)
+    result = signature(self)
+    # A request arriving during a scan must wait for a subsequent complete scan.
+    if request == int(poll_file.read_text()):
+        observed_poll = request
+    return result
 ui.UIInputs.signature = fast_signature
 calls = 0
 def counted(*args, **kwargs):
@@ -126,6 +155,7 @@ def counted(*args, **kwargs):
         kwargs['spend_budget'] = 0.000001
     result = build(*args, **kwargs)
     result['_test_builds'] = calls
+    result['_test_seen_poll'] = observed_poll
     result['_test_node_builds'] = dict(node_calls)
     result['_test_checks'] = checks
     result['_test_ready_calls'] = dict(ready_calls)
@@ -135,19 +165,37 @@ ui.ui_state = counted
 sys.argv = ['brain', 'ui', '--port', '0', '--every', '0.05']
 cli.main()
 '''
-        process = subprocess.Popen([sys.executable, '-u', '-c', script, str(CORE), 'partial' if partial else 'normal'], cwd=root,
+        process = subprocess.Popen([sys.executable, '-u', '-c', script, str(CORE), 'partial' if partial else 'normal', str(poll_file), str(clock_file), 'hold' if hold_spend else 'free'], cwd=root,
                                    env=self.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         self.servers.append(process)
         self.assertTrue(process.stdout.readline().startswith('brain ui core:'))
         address = process.stdout.readline().split(': ', 1)[1].split()[0]
         base, key = address.split('?k=')
+        generation = [0]
+        def control(path, value):
+            incoming = path.with_suffix('.next')
+            incoming.write_text(str(value))
+            incoming.replace(path)
         def state():
-            with urllib.request.urlopen(base + 'api/state?k=' + key, timeout=10) as response:
-                return json.load(response)
+            generation[0] += 1
+            requested = generation[0]
+            state.last_poll = requested
+            control(poll_file, requested)
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                with urllib.request.urlopen(base + 'api/state?k=' + key, timeout=10) as response:
+                    value = json.load(response)
+                if value.get('_test_seen_poll', -1) >= requested:
+                    return value
+            self.fail('dashboard did not publish after the requested metadata scan')
+        state.last_poll = 0
+        state.advance_clock = lambda seconds: control(clock_file, float(clock_file.read_text()) + seconds)
+        state.release_spend = lambda: poll_file.with_suffix('.spend').touch()
         # These tests exercise settled-state caching, after the file-only first reading.
         deadline = time.monotonic() + 5
         while time.monotonic() < deadline:
-            if not state()['brain'].get('filling_in'):
+            reading = state()
+            if (reading.get('_test_builds') if hold_spend else not reading['brain'].get('filling_in')):
                 break
             time.sleep(0.01)
         else:
@@ -158,6 +206,20 @@ cli.main()
     def stop_server(process):
         process.terminate()
         process.communicate(timeout=5)
+
+    def test_polls_acknowledge_metadata_and_clock_changes_still_rebuild(self):
+        root, state = self.start_server()
+        before = state()
+        self.assertIn('_test_seen_poll', before)
+        self.assertEqual(before['_test_seen_poll'], state.last_poll)
+        state.advance_clock(300)
+        changed = state()
+        self.assertGreater(changed['_test_builds'], before['_test_builds'],
+                           'controlled age boundary must invalidate state')
+        for _ in range(3):
+            latest = state()
+            self.assertEqual(latest['_test_seen_poll'], state.last_poll)
+            self.assertEqual(latest['_test_builds'], changed['_test_builds'])
 
     def test_unchanged_reads_reuse_state_and_changed_inputs_are_published(self):
         root, state = self.start_server()
@@ -232,9 +294,13 @@ cli.main()
         self.assertFalse(list((root / '.brain/spend').rglob('*.json')))
 
     def test_partial_spend_advances_without_source_changes_or_full_rebuilds(self):
-        root, state = self.start_server(transcript=True, partial=True)
+        root, state = self.start_server(transcript=True, partial=True, hold_spend=True)
         before = state()
         self.assertTrue(before['_test_initial_incomplete'])
+        self.assertFalse(before['spend']['complete'])
+        self.assertEqual(before['spend']['files'], 7)
+        self.assertLess(before['spend']['read'], 7)
+        state.release_spend()
         deadline = time.monotonic() + 15
         latest = before
         while not latest['spend']['complete'] and time.monotonic() < deadline:
@@ -404,6 +470,7 @@ cli.main()
         def scope(revision):
             return spend.live_usage_snapshot(values, revision) if hasattr(spend, 'live_usage_snapshot') else contextlib.nullcontext()
         with mock.patch.object(spend, 'job_usage', return_value={'sessions': 1}) as count, \
+             mock.patch.object(spend, 'spend_input_signature', return_value=('fixture',)), \
              mock.patch.object(spend.time, 'monotonic', return_value=0) as clock:
             with scope(1):
                 spend.live_usage(inst, node, row)

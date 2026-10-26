@@ -49,12 +49,28 @@ class Rotation(Scenario):
     def due(self):
         return [x for x in json.loads(self.b(self.r, 'due', 'app', '--json')) if x['kind'] == 'rotate']
 
+    def test_fix3_default_boundary_and_unknown_current_session(self):
+        self.transcript('codex', [self.usage(299999)])
+        self.assertEqual(self.due(), [])
+        self.transcript('codex', [self.usage(300000)])
+        self.assertEqual(len(self.due()), 1)
+        self.b(self.r, 'set', 'app', 'rotate_tokens=400000')
+        self.assertEqual(self.due(), [])
+        self.transcript('codex', [self.usage(400000)])
+        self.assertEqual(len(self.due()), 1)
+        self.bind([self.sid, '22222222-new'])
+        self.assertEqual(self.due(), [])
+        self.bind()
+        self.b(self.r, 'set', 'app', 'rotate_tokens=200000')
+        self.transcript('codex', [self.usage(200000)])
+        self.assertEqual(len(self.due()), 1)
+
     def test_codex_context_includes_cache_once_and_latest_usage_wins(self):
         self.transcript('codex', [self.usage(100000, 90000)])
         self.assertEqual(self.due(), [])
-        self.transcript('codex', [self.usage(160000, 90000)])
+        self.transcript('codex', [self.usage(300000, 90000)])
         self.assertEqual(len(self.due()), 1)
-        self.transcript('codex', [self.usage(160000), self.usage(100000, rid='two')])
+        self.transcript('codex', [self.usage(300000), self.usage(100000, rid='two')])
         self.assertEqual(self.due(), [])
 
     def test_claude_cache_and_deduplicated_turns(self):
@@ -63,7 +79,7 @@ class Rotation(Scenario):
                 'content': [{'type': 'text', 'text': 'TRANSCRIPT MUST NOT BE COPIED'}],
                 'usage': {'input_tokens': fresh, 'cache_read_input_tokens': read,
                           'cache_creation_input_tokens': write}}}
-        self.transcript('claude', [response('one', 10000, 130000, 20000)] * 60)
+        self.transcript('claude', [response('one', 10000, 270000, 20000)] * 60)
         self.assertEqual(len(self.due()), 1)
         self.transcript('claude', [response('one', 10000, 80000, 10000)] * 60)
         self.assertEqual(self.due(), [])
@@ -84,7 +100,7 @@ class Rotation(Scenario):
         self.assertEqual(self.due(), [])
 
     def test_incremental_context_and_cache_keep_only_numeric_metadata(self):
-        path = self.transcript('codex', [self.usage(160000),
+        path = self.transcript('codex', [self.usage(300000),
             {'type': 'response_item', 'payload': {'type': 'message', 'role': 'assistant',
                 'content': [{'type': 'output_text', 'text': 'PRIVATE-FIXTURE-TEXT'}]}}])
         self.assertEqual(len(self.due()), 1)
@@ -101,7 +117,7 @@ class Rotation(Scenario):
             self.assertNotIn(str(self.tmp / 'scratch'), text)
 
     def test_coordinator_session_does_not_override_subscription_privacy(self):
-        self.transcript('codex', [self.usage(160000)])
+        self.transcript('codex', [self.usage(300000)])
         path = self.cfg / 'subscriptions.json'
         config = json.loads(path.read_text())
         config['subscriptions'][0]['brains'] = ['other-brain']
@@ -109,11 +125,11 @@ class Rotation(Scenario):
         self.assertEqual(self.due(), [])
 
     def test_current_session_only_and_custom_thresholds(self):
-        self.transcript('codex', [self.usage(160000)])
+        self.transcript('codex', [self.usage(300000)])
         self.bind([self.sid, '22222222-bbbb'])
         self.assertEqual(self.due(), [])
         self.bind()
-        self.b(self.r, 'set', 'app', 'rotate_tokens=170000')
+        self.b(self.r, 'set', 'app', 'rotate_tokens=310000')
         self.assertEqual(self.due(), [])
         self.b(self.r, 'set', 'app', 'rotate_tokens=bad')
         self.assertEqual(len(self.due()), 1)
@@ -136,7 +152,7 @@ class Rotation(Scenario):
         self.b(self.r, 'set', 'app', 'wake=https://example.invalid/SECRET-CAPABILITY')
         wake = self.r / '.brain/wake/app'; wake.mkdir(parents=True)
         (wake / ('a' * 64 + '.pending')).touch()
-        self.transcript('codex', [self.usage(160000), {'type': 'response_item', 'payload': {
+        self.transcript('codex', [self.usage(300000), {'type': 'response_item', 'payload': {
             'type': 'message', 'role': 'assistant', 'content': [{'type': 'output_text',
                 'text': 'TRANSCRIPT MUST NOT BE COPIED'}]}}])
         out = self.b(self.r, 'rotate', 'app')
@@ -218,16 +234,16 @@ class Rotation(Scenario):
         m = SourceFileLoader('rotation_selection', str(CORE / 'bin/brain')).load_module()
         inst = m.Instance(self.r); n = inst.node('app')
         for i in range(30):
-            self.transcript('codex', [self.usage(160000)], sid='unrelated-' + str(i))
+            self.transcript('codex', [self.usage(300000)], sid='unrelated-' + str(i))
         evidence = ({'jobs': [], 'worktrees': {}, 'handbacks': {}, 'inbox': []}, None, '')
         with mock.patch.dict(os.environ, self.env, clear=True), mock.patch.object(m, 'codex_meta', wraps=m.codex_meta) as meta:
             m.due_items(inst, n, evidence=evidence, include_stale=False)
             self.assertEqual(meta.call_count, 0)
-            self.transcript('codex', [self.usage(160000)])
+            self.transcript('codex', [self.usage(300000)])
             for _ in range(3):
                 items = m.due_items(inst, n, evidence=evidence, include_stale=False)
                 self.assertTrue(any(item['kind'] == 'rotate' for item in items))
-            self.assertEqual(m.coordinator_measure(inst, n)['context'], 160000)
+            self.assertEqual(m.coordinator_measure(inst, n)['context'], 300000)
             self.assertLessEqual(meta.call_count, 1)
 
     def test_claude_file_stem_drives_both_spend_and_rotation(self):
@@ -235,12 +251,12 @@ class Rotation(Scenario):
             {'type': 'user', 'cwd': str(self.tmp / 'scratch'), 'sessionId': '99999999-old',
              'message': {'content': 'fixture copied leading record'}},
             {'type': 'assistant', 'message': {'id': 'one', 'model': 'fixture-model',
-                                            'usage': {'input_tokens': 160000}}}])
+                                            'usage': {'input_tokens': 300000}}}])
         self.assertEqual(len(self.due()), 1)
         self.assertEqual(len(json.loads(self.b(self.r, 'spend', 'app', '--json'))['sessions']), 1)
 
     def test_rebound_coordinator_needs_its_runtime_session_before_rotation(self):
-        self.transcript('codex', [self.usage(160000)])
+        self.transcript('codex', [self.usage(300000)])
         self.b(self.r, 'rotate', 'app')
         self.b(self.r, 'set', 'app', 'coordinator=new-host-thread')
         due = self.due()
@@ -264,7 +280,7 @@ class Rotation(Scenario):
         self.assertEqual([old['coordinator'] for old in sidecar['previous']], ['host-thread', 'second-host-thread'])
 
     def test_session_selection_uses_last_duplicate_for_rotation(self):
-        self.transcript('codex', [self.usage(160000)])
+        self.transcript('codex', [self.usage(300000)])
         self.transcript('codex', [self.usage(100000)], sid='22222222-other')
         self.b(self.r, 'set', 'app', 'coordinator_sessions:=' + self.sid + ',22222222-other,' + self.sid)
         self.assertEqual(len(self.due()), 1)

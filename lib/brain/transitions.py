@@ -80,6 +80,14 @@ def append_inbox(n_dir, who, text, inst):
 
 
 def inbox_append(n_dir, line, marker=None, nonblocking=False):
+    if nonblocking:
+        return _inbox_append(n_dir, line, marker, nonblocking=True)
+    from . import events
+    with events.node_write(n_dir, "inbox"):
+        return _inbox_append(n_dir, line, marker)
+
+
+def _inbox_append(n_dir, line, marker=None, nonblocking=False):
     """One append, shared by CLI writers and hooks. Hooks never wait for an inbox writer."""
     import fcntl
     target = n_dir / "inbox.md"
@@ -92,6 +100,11 @@ def inbox_append(n_dir, line, marker=None, nonblocking=False):
                 return False
         fh.write(line)
         fh.flush()
+        import os
+        os.fsync(fh.fileno())
+        if nonblocking:
+            from . import events
+            events.hook_written(n_dir)
         return True
 
 

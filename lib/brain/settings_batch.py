@@ -77,6 +77,9 @@ def plan_settings_batch(inst, operations):
 
 def publish_settings_batch(inst, planned, count):
     """Retain a private recovery packet on publication failures; never repair operator data."""
+    from . import metadata_recovery as _m_metadata_recovery
+    if _m_metadata_recovery.unfinished_settings_batches(inst):
+        _m_common.die('unfinished settings batch owns metadata; ask the coordinator before recovery')
     planned = {path: text for path, text in planned.items() if not path.exists() or path.read_text() != text}
     if not planned:
         return None
@@ -97,14 +100,14 @@ def publish_settings_batch(inst, planned, count):
         return None
     folder = inst.root / ".brain" / "settings-batches"
     _m_common.safe_target(folder / "pending.json")
-    folder.mkdir(parents=True, mode=0o700, exist_ok=True)
+    _m_common.durable_makedirs(folder)
     packet = folder / (uuid.uuid4().hex + ".json")
     record = {"state": "pending", "base": _m_common.git("rev-parse", "HEAD", cwd=inst.root).stdout.strip(),
               "before": before, "after": after, "operations": count}
     try:
         _m_common.atomic_write(packet, json.dumps(record, indent=2) + "\n")
         for path, text in planned.items():
-            path.parent.mkdir(exist_ok=True)
+            _m_common.durable_makedirs(path.parent)
             _m_common.atomic_write(path, text)
         inst.commit_settings_batch(shared, f"settings: batch {count} operations")
         record.update(state="committed" if shared else "applied-local", head=_m_common.git("rev-parse", "HEAD", cwd=inst.root).stdout.strip())

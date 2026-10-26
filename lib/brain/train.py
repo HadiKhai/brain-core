@@ -1,11 +1,18 @@
-"""Local merge trains. Staging is disposable; publication is a compare-and-swap fast-forward."""
+"""Local merge trains. Git owns fast-forwards; Brain never rolls publication back."""
 import fcntl
 import json
+import importlib
+import hashlib
+import time
 import os
 import shlex
 import shutil
+import subprocess
+import sys
+import uuid
 from pathlib import Path
 
+from . import briefs as _m_briefs
 from . import common as _m_common
 from . import docker_leftovers as _m_docker_leftovers
 from . import guard as _m_guard
@@ -15,6 +22,7 @@ from . import land_checks as _m_land_checks
 from . import nodes as _m_nodes
 from . import spend as _m_spend
 from . import status as _m_status
+from . import tasks as _m_tasks
 from . import verify as _m_verify
 from . import worktrees as _m_worktrees
 
@@ -30,10 +38,19 @@ def ancestor(home, base, head):
     return _m_common.git("merge-base", "--is-ancestor", base, head, cwd=home).returncode == 0
 
 
-def main_unoccupied(home):
+def main_checkouts(home):
     r = _m_common.git("worktree", "list", "--porcelain", "-z", cwd=home)
-    if r.returncode or "branch refs/heads/main" in r.stdout.split("\0"):
-        _m_common.die("train: main is checked out or worktrees unreadable; detach main in its coordinator-owned checkout first; never change the operator checkout")
+    if r.returncode:
+        _m_common.die("train: worktrees unreadable; cannot establish main occupancy")
+    checkouts = []
+    for record in r.stdout.split("\0\0"):
+        fields = record.split("\0")
+        if "branch refs/heads/main" in fields:
+            path = next((f[9:] for f in fields if f.startswith("worktree ")), "")
+            head = next((f[5:] for f in fields if f.startswith("HEAD ")), "")
+            if not path or not head:
+                _m_common.die("train: worktrees unreadable; cannot establish main occupancy")
+            checkouts.append((path, head))
     for token in r.stdout.split("\0"):
         if not token.startswith("worktree "):
             continue
@@ -52,6 +69,136 @@ def main_unoccupied(home):
                 _m_common.die("train: rebase state unreadable; cannot establish main occupancy")
             if name == "refs/heads/main":
                 _m_common.die("train: main is checked out in a rebase; leave the operator checkout untouched")
+    if len(checkouts) > 1:
+        _m_common.die("train: main is checked out in multiple worktrees; detach extra checkouts before retrying")
+    return checkouts
+
+
+def checkout_clean_at(path, base, tip):
+    """Read-only checks, including index flags that can hide independent edits."""
+    location = _m_common.git("rev-parse", "--absolute-git-dir", cwd=path)
+    if location.returncode:
+        return False
+    gitdir = Path(location.stdout.removesuffix("\n"))
+    if any((gitdir / state).exists() for state in (
+            "index.lock", "MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "BISECT_LOG", "sequencer")):
+        return False
+    flags = _m_common.git("ls-files", "-v", "-z", cwd=path)
+    others = _m_common.git("ls-files", "--others", "--exclude-standard", "-z", cwd=path)
+    if flags.returncode or others.returncode or others.stdout or any(
+            entry and not entry.startswith("H ") for entry in flags.stdout.split("\0")):
+        return False
+    return all(_m_common.git(*args, cwd=path).returncode == 0 for args in (
+        ("diff-index", "--cached", "--quiet", "--ignore-submodules=none", base, "--"),
+        ("diff-files", "--quiet", "--ignore-submodules=none", "--")))
+
+
+def landing_failure(home, path, tip, reason):
+    """Observe and report; never repair a ref, index, or checkout after failure."""
+    current = _m_common.git("rev-parse", "--verify", "refs/heads/main", cwd=home)
+    message = "train: " + reason + "; no success recorded; main=" + (
+        current.stdout.strip() if not current.returncode else "unreadable: " + current.stderr.strip())
+    if path is not None:
+        branch = _m_common.git("symbolic-ref", "-q", "HEAD", cwd=path)
+        head = _m_common.git("rev-parse", "--verify", "HEAD", cwd=path)
+        status = _m_common.git("--no-optional-locks", "status", "--porcelain=v1",
+                               "--untracked-files=all", "--ignore-submodules=none", cwd=path)
+        command = "git -C " + shlex.quote(str(path))
+        message += ("\ncheckout=" + str(path) + "; HEAD=" + head.stdout.strip() +
+                    "; branch=" + branch.stdout.strip() + "\ngit status (porcelain):\n" +
+                    (status.stdout if not status.returncode else status.stderr) +
+                    "\nRecovery: preserve any local edits first; inspect with " + command +
+                    " status; then " + command + " merge --ff-only --no-overwrite-ignore --no-autostash " + tip +
+                    "; reconcile the retained train journal before rerunning train or pushing.")
+    else:
+        message += "\nRecovery: inspect main and the retained train journal; reconcile any other writer's publication before rerunning train. Intended tip=" + tip
+    _m_common.die(message)
+
+
+def landing_preflight(home, main, tip):
+    checkouts = main_checkouts(home)
+    for path, head in checkouts:
+        if head != main or not checkout_clean_at(path, main, tip):
+            landing_failure(home, path, tip, "operator checkout is dirty or changed")
+    return checkouts
+
+
+def owned_fast_forward(home, main, tip, action):
+    """Git's ref log must record this invocation's exact base-to-tip update."""
+    location = _m_common.git('rev-parse', '--git-path', 'logs/refs/heads/main', cwd=home)
+    if location.returncode:
+        return False
+    path = Path(location.stdout.removesuffix('\n'))
+    if not path.is_absolute():
+        path = Path(home) / path
+    try:
+        with path.open('rb') as stream:
+            stream.seek(0, os.SEEK_END)
+            size = stream.tell()
+            stream.seek(max(0, size - 4096))
+            lines = stream.read().splitlines()
+        record, message = lines[-1].rsplit(b'\t', 1)
+        old, new, _ = record.split(b' ', 2)
+    except (OSError, IndexError, ValueError):
+        return False
+    return (old == main.encode('ascii') and new == tip.encode('ascii') and
+            message == (action + ': Fast-forward').encode('ascii'))
+
+
+def publish_main(home, main, tip, batch):
+    """Git owns checked-out fast-forwards; otherwise publish by one CAS. No undo."""
+    checkouts = landing_preflight(home, main, tip)
+    path = checkouts[0][0] if checkouts else None
+    if ref(home, "refs/heads/main") != main or not ancestor(home, main, tip):
+        landing_failure(home, path, tip, "main moved; no update")
+    boundary = landing_preflight(home, main, tip)
+    if boundary != checkouts:
+        landing_failure(home, boundary[0][0] if boundary else path, tip, 'main occupancy changed before publication')
+    action = 'brain-land-' + uuid.uuid4().hex
+    try:
+        if path is None:
+            result = _m_common.git("update-ref", "-m", batch, "refs/heads/main", tip, main, cwd=home)
+        else:
+            # Git must protect ignored files at the actual checkout boundary too.
+            # Explicitly disable configured autostash: late edits must cause refusal.
+            result = _m_common.git("merge", "--ff-only", "--no-overwrite-ignore", "--no-autostash", tip,
+                                   cwd=path, env={**os.environ, 'GIT_REFLOG_ACTION': action})
+    except (OSError, subprocess.SubprocessError) as error:
+        landing_failure(home, path, tip, "publication interrupted: " + str(error))
+    if result.returncode:
+        reason = "Git fast-forward failed" if path else "main changed during publication"
+        landing_failure(home, path, tip, reason + ": " + result.stdout + result.stderr)
+    if ref(home, "refs/heads/main") != tip:
+        landing_failure(home, path, tip, "main changed after publication")
+    actual = main_checkouts(home)
+    if ([p for p, _ in actual] != [p for p, _ in checkouts]
+            or any(head != tip for _, head in actual)):
+        landing_failure(home, actual[0][0] if actual else path, tip, 'main occupancy changed during publication')
+    if path is not None and not owned_fast_forward(home, main, tip, action):
+        landing_failure(home, path, tip, 'publication ownership unknown; expected Git fast-forward receipt absent')
+    if path is not None:
+        branch = _m_common.git("symbolic-ref", "-q", "HEAD", cwd=path)
+        if branch.returncode or branch.stdout.strip() != "refs/heads/main" or not checkout_clean_at(path, tip, tip):
+            landing_failure(home, path, tip, "checkout changed during fast-forward")
+
+
+def conflicting_jobs(n, rows, accepted, tip):
+    """Coordinator advice only; leave unlanded workers' evidence and gates alone."""
+    if rows is None:
+        _m_common.die("train: ledger unreadable; no main update")
+    landed = {entry["branch"] for entry in accepted}
+    conflicts = []
+    for row in rows:
+        branch = row["Job"]
+        if row.get("Ended") or branch in landed or _m_briefs.import_job(branch):
+            continue
+        head = ref(n["home_path"], "refs/heads/" + branch)
+        result = _m_common.git("merge-tree", "--write-tree", tip, head, cwd=n["home_path"])
+        if result.returncode == 1:
+            conflicts.append({"branch": branch, "key": _m_jobs.job_key(row), "head": head})
+        elif result.returncode:
+            _m_common.die("train: merge cleanliness is unknown; no main update")
+    return conflicts
 
 
 def save(path, data):
@@ -66,9 +213,13 @@ def finish(inst, n, path, data):
         _m_common.die("train: ledger unreadable; retain journal and repair before continuing")
     reconciled = False
     for entry in data["accepted"]:
-        row = next((r for r in rows if _m_jobs.job_key(r) == entry["key"]), None)
-        if not row or (row.get("Ended") and row.get("Head commit") != entry["head"]):
+        matches = [r for r in rows if _m_jobs.job_key(r) == entry['key']]
+        row = matches[0] if len(matches) == 1 else None
+        if (not row or row['Job'] != entry['branch'] or
+                (row.get("Ended") and row.get("Head commit") != entry["head"])):
             _m_common.die("train: ledger job changed; retain journal for coordinator reconciliation")
+        if data.get('publication_succeeded') is not True:
+            _m_common.die('train: publication ownership unknown; no ledger rows changed')
         reconciled = reconciled or bool(row.get("Ended"))
         started, ended = inst.parse_time(row["Started"]), inst.parse_time(data["ended"])
         if not str(row.get("Usage", "")).startswith("host"):
@@ -81,12 +232,18 @@ def finish(inst, n, path, data):
                     "Base commit": entry["base"], "Head commit": entry["head"],
                     "Hours": f"{_m_status.elapsed(started, ended) / 3600:.1f}" if started and ended else ""})
     _m_jobs.write_jobs(inst, n, rows)  # one atomic ledger replacement, all jobs or none
+    _m_tasks.train_finished(inst, n, rows, data)
     data["state"] = "reconciled" if reconciled else "complete"
     save(path, data)
     inst.commit([], f"{n['id']}: train merged")
     for entry in data["accepted"]:
         row = next(r for r in rows if _m_jobs.job_key(r) == entry["key"])
         _m_jobs.print_thread_checklist(n, row)
+    if data['accepted']:
+        print('train: settlement pending; inspect and settle through the host, then record '
+              'fresh evidence with brain jobs ' + n['id'] +
+              ' --settled --all-closed --attestation-file <fresh-export.json>. '
+              'Printed instructions perform no host settlement.')
 
 
 def journals(n):
@@ -128,7 +285,7 @@ def cmd_train(a):
         _m_common.die("train: node has no full verify command")
     if _m_verify.integration_ref(home) not in ("refs/heads/main", "refs/remotes/origin/main"):
         _m_common.die("train: requires local main and a valid cached origin/main default (no fetch is performed)")
-    main_unoccupied(home)
+    landing_preflight(home, ref(home, "refs/heads/main"), ref(home, "refs/heads/main"))
     # One train per repository, including invocations from other brains. No stale-lock timeout.
     common = Path(_m_common.git("rev-parse", "--git-common-dir", cwd=home).stdout.strip())
     if not common.is_absolute():
@@ -146,21 +303,121 @@ def cmd_train(a):
             fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             _m_common.die("train: another train owns this repository")
+        primary = None
         try:
             run_train(inst, n, home, verify, a)
+        except BaseException as error:
+            primary = error
+            raise
         finally:
-            # Persist ejections/interrupted execution evidence even when publication stops.
-            try:
-                inst.commit([], f"{n['id']}: train state")
-            finally:
-                _m_docker_leftovers.docker_leftover_nodes(inst, [n])
+            # Attempt all finalizers, preserving any publication/execution failure.
+            errors = []
+            for action in (lambda: inst.commit([], f"{n['id']}: train state"),
+                           lambda: _m_verify.verify_cleanup(inst, n),
+                           lambda: _m_docker_leftovers.docker_leftover_nodes(inst, [n])):
+                try:
+                    action()
+                except BaseException as error:
+                    errors.append(error)
+            if errors:
+                if primary is None:
+                    raise errors[0]
+                primary.cleanup_errors = [type(error).__name__ + ': ' + str(error) for error in errors]
+                print('train: cleanup incomplete; primary failure retained', file=sys.stderr)
+
+
+def reconcile_manual_landings(inst, n):
+    """Close only completed exact-head jobs whose commits are already in local main."""
+    closed = []
+    with _m_instance.brain_lock(inst):
+        current = _m_instance.Instance(inst.root).node(n['id'])
+        for row in _m_jobs.read_jobs(current) or []:
+            if row.get('Ended') or _m_briefs.import_job(row['Job']):
+                continue
+            if _m_jobs.publication_refusal(current, row) or not _m_jobs.manual_landing(current, row):
+                continue
+            state = _m_verify.ready_state(inst, current, row['Job'], train=True)
+            if not state['ready']:
+                continue
+            _m_jobs.close_ledger_job(inst, current, row['Job'], preview=False)
+            closed.append(_m_jobs.job_key(row))
+            print('train: reconciled manual landing ' + row['Job'])
+    if closed and 'preview_upgrade' in n['local']:
+        from . import preview_upgrade as _m_preview_upgrade
+        result = _m_preview_upgrade.landed_preview(inst, n, _m_preview_upgrade.preview_landed_head(n))
+        print('train: reconciled preview ' + result['state'])
+    return closed
+
+
+def post_publication(inst, n, path, data):
+    """Host settlement runs outside the instance lock; failure cannot undo landing."""
+    if data.get('publication_succeeded') is True and 'preview_upgrade' in n['local']:
+        from . import preview_upgrade as _m_preview_upgrade
+        preview = _m_preview_upgrade.landed_preview(inst, n, data['tip'])
+        with _m_instance.brain_lock(inst):
+            current = json.loads(path.read_text())
+            if current.get('tip') != data.get('tip') or current.get('accepted') != data.get('accepted'):
+                raise ValueError('train journal changed; preview receipt retained separately')
+            current['preview_upgrade'] = preview
+            save(path, current)
+        print('train: preview ' + preview['state'])
+    if not data.get('settle_requested') or data.get('publication_succeeded') is not True:
+        return None
+    keys = [entry['key'] for entry in data['accepted']]
+    if not keys:
+        return None
+    if set((data.get('settlement') or {}).get('settled', [])) == set(keys):
+        return data['settlement']
+    _m_instance.unlock()
+    try:
+        module = importlib.import_module('.host_lifecycle', __package__)
+        result = module.settle_landed_jobs(inst, n, keys)
+        if (not isinstance(result, dict) or not all(isinstance(result.get(k), list) for k in ('settled', 'pending', 'errors'))
+                or any(key not in keys for key in result['settled'])):
+            raise ValueError('invalid settlement result')
+    except (Exception, SystemExit) as error:
+        result = dict(settled=[], pending=[dict(job=key, reason='settlement unconfirmed') for key in keys],
+                      errors=[type(error).__name__])
+    with _m_instance.brain_lock(inst):
+        current = json.loads(path.read_text())
+        if current.get('tip') != data.get('tip') or current.get('accepted') != data.get('accepted'):
+            raise ValueError('train journal changed; settlement result retained by native lifecycle')
+        current['settlement'] = result
+        save(path, current)
+    print('train: landed ' + data['tip'] + '; settlement ' +
+          ('complete' if not result['pending'] and not result['errors'] else 'pending'))
+    return result
+
+
+def cmd_land(a):
+    """One coordinator command reconciles, gates, publishes and safely settles."""
+    inst = _m_nodes.load()
+    n, _ = _m_worktrees.git_home(inst, a.id)
+    reconcile_manual_landings(inst, n)
+    a.settle = True
+    return cmd_train(a)
+
+
+def train_configuration(n):
+    """Keep execution inputs while excluding thread routing from publication proof."""
+    routing = {'workers', 'coordinator', 'coordinator_sessions'}
+    return _m_jobs.digest([str(n['home_path']),
+                          {k: v for k, v in n['fm'].items() if k not in routing},
+                          {k: v for k, v in n['local'].items() if k not in routing}])
 
 
 def run_train(inst, n, home, verify, a):
     folder, records = journals(n)
     main = ref(home, "refs/heads/main")
     for path, data in records:
+        if data["state"] in ("publishing", "publication_failed"):
+            checkouts = main_checkouts(home)
+            landing_failure(home, checkouts[0][0] if checkouts else None, data["tip"],
+                            "unresolved publication; reconcile retained journal " + str(path))
         if data["state"] == "verified" and ancestor(home, data["tip"], main):
+            if data.get("publication_succeeded") is not True:
+                _m_common.die("train: publication ownership unknown; reconcile retained journal before retrying")
+            landing_preflight(home, main, main)
             finish(inst, n, path, data)
         elif data["state"] in ("building", "verified"):
             # Main wasn't published. Never reuse uncommitted execution evidence.
@@ -203,6 +460,11 @@ def run_train(inst, n, home, verify, a):
         for branch, why in refused:
             print(_m_guard.redact("train: not queued " + branch + ": " + why, _m_guard.never_terms(n)))
     if not queue:
+        for old_path, old_data in records:
+            if old_data.get('state') in ('complete', 'reconciled'):
+                if getattr(a, 'settle', False):
+                    old_data['settle_requested'] = True
+                post_publication(inst, n, old_path, old_data)
         print("train: no ready jobs")
         return
     date = inst.now_dt().strftime("%Y-%m-%d")
@@ -212,7 +474,10 @@ def run_train(inst, n, home, verify, a):
     batch = f"train/{date}-{number}"
     path = folder / f"{date}-{number}.json"
     data = {"version": 1, "batch": batch, "state": "building", "base": main,
-            "queued": queue, "accepted": [], "ejected": [], "runs": []}
+            "queued": queue, "accepted": [], "ejected": [], "runs": [],
+            "settle_requested": getattr(a, 'settle', False),
+            "origin_base": _m_common.git('rev-parse', '--verify', '--quiet',
+                                          'refs/remotes/origin/main^{commit}', cwd=home).stdout.strip()}
     save(path, data)
     wb = _m_worktrees.workbench(inst, n, create=True)
     stage = wb / "scratch" / batch.replace("/", "-")
@@ -227,6 +492,7 @@ def run_train(inst, n, home, verify, a):
     # Reserve ports through the existing allocator, without creating a ledger job for staging.
     inst.local_of(n["id"]).setdefault("worktrees", {})[batch] = {**w, "base": main, "start": main}
     inst.save_local()
+    expected_configuration = train_configuration(n)
     _m_instance.unlock()
     try:
         setup = n["dir"] / _m_worktrees.SETUP_FILE
@@ -266,7 +532,9 @@ def run_train(inst, n, home, verify, a):
         def check(entries):
             head = ref(stage, "HEAD")
             inputs = _m_verify.verify_inputs(n, w)
+            started = time.monotonic()
             result, log = _m_verify.run_verify(inst, n, batch, verify, w, env)
+            duration = time.monotonic() - started
             if dirty(stage) or ref(stage, "HEAD") != head or _m_verify.verify_inputs(n, w) != inputs:
                 _m_common.die("train: verify changed staging state; no main update")
             if result:
@@ -279,8 +547,14 @@ def run_train(inst, n, home, verify, a):
                     with os.fdopen(fd, "wb") as pinned:
                         shutil.copyfileobj(source, pinned)
                 log = str(target)
-            data["runs"].append({"jobs": [e["branch"] for e in entries], "head": head, "result": result, "log": log})
+            data["runs"].append({"jobs": [e["branch"] for e in entries], "head": head, "result": result,
+                                 "log": log, "seconds": duration, "command": verify,
+                                 "log_digest": hashlib.sha256(Path(log).read_bytes()).hexdigest()})
             save(path, data)
+            if result == 0:
+                for entry in entries:
+                    _m_verify.record_full_fact(inst, n, entry['branch'], head, main,
+                                              _m_jobs.digest([verify, inputs]))
             return result, log
 
         verified_inputs = None
@@ -345,14 +619,14 @@ def run_train(inst, n, home, verify, a):
         with _m_instance.brain_lock(inst):
             fresh = _m_instance.Instance(inst.root)
             current = fresh.node(n["id"])
-            if current["home_path"] != home or current["fm"] != n["fm"] or current["local"] != inst.node(n["id"])["local"]:
+            if train_configuration(current) != expected_configuration:
                 _m_common.die("train: configuration changed; no main update")
             for entry in accepted:
                 entry_ready(fresh, current, entry)
                 entry["commits"] = int(_m_common.git("rev-list", "--count", entry["base"] + ".." + entry["head"], cwd=home).stdout)
             if dirty(stage) or ref(stage, "HEAD") != tip or _m_verify.verify_inputs(n, w) != verified_inputs:
                 _m_common.die("train: staged verification evidence changed; no main update")
-            main_unoccupied(home)
+            landing_preflight(home, main, tip)
             if ref(home, "refs/heads/main") != main or not ancestor(home, main, tip):
                 _m_common.die("train: main moved; no update")
             if current['fm'].get('land_check', '').strip():
@@ -376,12 +650,21 @@ def run_train(inst, n, home, verify, a):
             except (OSError, ValueError) as error:
                 release_step = None
                 release_note = _m_guard.redact(str(error), _m_guard.never_terms(n))
-            data.update(state="verified", tip=tip, accepted=accepted, ended=_m_jobs.stamp(inst))
-            save(path, data)  # write-ahead intent makes crash recovery unambiguous
-            result = _m_common.git("update-ref", "-m", batch, "refs/heads/main", tip, main, cwd=home)
-            if result.returncode:
-                _m_common.die("train: main changed during publication; journal retained")
+            conflicts = conflicting_jobs(current, _m_jobs.read_jobs(current), accepted, tip)
+            data.update(state="publishing", tip=tip, accepted=accepted, rebase=conflicts, ended=_m_jobs.stamp(inst))
+            save(path, data)  # An interrupted publication always requires operator reconciliation.
+            try:
+                publish_main(home, main, tip, batch)
+            except BaseException:
+                data["state"] = "publication_failed"
+                save(path, data)
+                raise
+            data.update(state="verified", publication_succeeded=True)
+            save(path, data)
             finish(fresh, current, path, data)
+            for entry in conflicts:
+                print(_m_guard.redact("train: rebase required (conflicts with landed main): " + entry["branch"], _m_guard.never_terms(current)))
+        post_publication(fresh, current, path, data)
         print(f"train: {batch} merged {len(accepted)} job(s); {len(data['runs'])} full verify run(s)")
         print('Release when ready: ' + release_step if release_step else 'No push step: ' + release_note)
     finally:

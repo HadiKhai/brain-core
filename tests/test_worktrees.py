@@ -350,6 +350,20 @@ class PruneSafety(AutonomyProject):
         self.assertIn('open ledger job job-a', self.b(r, 'wt', 'prune', 'app', '--offline'))
         self.assertTrue(wt.exists())
 
+    def test_unknown_ownership_survives_repeated_refresh_and_removal(self):
+        r, home, wt = self.merged()
+        self.close_job(r)
+        status = r / 'nodes/app/status.md'
+        for state in ('unknown', '', 'review — merged into preview'):
+            with self.subTest(state=state):
+                status.write_text('## Active work\n| Branch | Thread | PR | State |\n'
+                                  '| `job-a` (fixture annotation) | fixture-thread | - | ' + state + ' |\n')
+                for _ in range(2):
+                    self.b(r, 'status', 'app', '--refresh')
+                self.assertIn('live bound thread', self.b(r, 'wt', 'prune', 'app', '--offline'))
+                self.assertIn('live bound thread', self.b(r, 'wt', 'rm', 'app', 'job-a', '--force', ok=False))
+                self.assertTrue(wt.exists())
+
     def test_local_mode_follows_origin_default_named_master(self):
         r, home, wt = self.project()
         self.git('branch', '-m', 'main', 'master', cwd=home)
@@ -401,6 +415,102 @@ class PruneSafety(AutonomyProject):
         out = self.b(r, 'wt', 'prune', 'app', '--offline')
         self.assertIn('origin default unavailable; run git remote set-head origin -a', out)
         self.assertTrue(wt.exists())
+
+
+class ReleasedCleanupGeneration(AutonomyProject):
+    def cleanup_during_accounting(self, action, change):
+        r, home, wt = PruneSafety.merged(self)
+        ledger = r / 'nodes/app/job-ledger.md'
+        before = ledger.read_bytes()
+        loader = core_loader.SourceFileLoader('cleanup_generation_fixture', str(CORE / 'bin/brain'))
+        spec = importlib.util.spec_from_loader(loader.name, loader)
+        m = importlib.util.module_from_spec(spec)
+        loader.exec_module(m)
+        entered, resume = threading.Event(), threading.Event()
+        errors, output = [], io.StringIO()
+
+        def accounting(*args):
+            entered.set()
+            if not resume.wait(10):
+                raise AssertionError('accounting barrier was not released')
+            return {}
+
+        def cleanup():
+            try:
+                with m.brain_lock(inst):
+                    args = argparse.Namespace(id='app', branch='job-a', force=True,
+                                              cause='fixture cleanup', dry_run=False, offline=True)
+                    (m.cmd_wt_prune if action == 'prune' else m.cmd_wt_rm)(args)
+            except BaseException as e:
+                errors.append(e)
+
+        with mock.patch.dict(os.environ, self.env, clear=True):
+            inst = m.Instance(r)
+            with mock.patch.object(m, 'load', return_value=inst), \
+                 mock.patch.object(m, 'job_usage', side_effect=accounting), \
+                 mock.patch.object(m, 'usage_cells', return_value={}), \
+                 contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
+                worker = threading.Thread(target=cleanup)
+                worker.start()
+                try:
+                    self.assertTrue(entered.wait(10), 'command never reached accounting')
+                    self.assertIsNone(m._LOCK['fh'], 'accounting must release the writer lock')
+                    if change == 'branch':
+                        (wt / 'later.txt').write_text('new work\n')
+                        self.git('add', '.', cwd=wt)
+                        self.git('commit', '-qm', 'new unmerged work', cwd=wt)
+                    elif change == 'integration':
+                        (home / 'sibling.txt').write_text('integration changed\n')
+                        self.git('add', '.', cwd=home)
+                        self.git('commit', '-qm', 'advance integration', cwd=home)
+                    elif change == 'dirty':
+                        (wt / 'done.txt').write_text('unfinished edit\n')
+                    elif change == 'untracked':
+                        (wt / 'untracked.txt').write_text('unfinished work\n')
+                finally:
+                    resume.set()
+                    worker.join(10)
+                self.assertFalse(worker.is_alive(), 'cleanup did not finish')
+        if change:
+            self.assertTrue(wt.exists(), output.getvalue())
+            self.assertEqual(ledger.read_bytes(), before, output.getvalue())
+            self.assertIn('cleanup inputs changed', output.getvalue() + '\n'.join(map(str, errors)))
+            self.assertIn('job-a', json.loads((r / '.brain/local.json').read_text())['nodes']['app']['worktrees'])
+            self.assertTrue(all(isinstance(e, SystemExit) for e in errors), errors)
+        else:
+            self.assertEqual(errors, [], output.getvalue())
+            self.assertFalse(wt.exists(), output.getvalue())
+            self.assertIn('merged', self.b(r, 'jobs', 'app', '--branch', 'job-a'))
+
+    def test_prune_retains_new_branch_commit(self):
+        self.cleanup_during_accounting('prune', 'branch')
+
+    def test_prune_retains_moved_integration(self):
+        self.cleanup_during_accounting('prune', 'integration')
+
+    def test_prune_retains_new_dirty_work(self):
+        self.cleanup_during_accounting('prune', 'dirty')
+
+    def test_prune_retains_new_untracked_work(self):
+        self.cleanup_during_accounting('prune', 'untracked')
+
+    def test_rm_retains_new_branch_commit(self):
+        self.cleanup_during_accounting('rm', 'branch')
+
+    def test_rm_retains_moved_integration(self):
+        self.cleanup_during_accounting('rm', 'integration')
+
+    def test_rm_retains_new_dirty_work_even_with_force(self):
+        self.cleanup_during_accounting('rm', 'dirty')
+
+    def test_rm_retains_new_untracked_work_even_with_force(self):
+        self.cleanup_during_accounting('rm', 'untracked')
+
+    def test_prune_unchanged_generation_closes_merged(self):
+        self.cleanup_during_accounting('prune', None)
+
+    def test_rm_unchanged_generation_closes_merged(self):
+        self.cleanup_during_accounting('rm', None)
 
 
 class WorktreeGuardUnits(unittest.TestCase):
@@ -456,7 +566,7 @@ class WorktreeSetupDiagnostics(Scenario):
         home = self.repo(self.tmp / 'app', {'.gitignore': '.env\nsetup-started\n',
                          'verify.py': "from pathlib import Path\nassert Path('.env').read_text() == 'GENERATED=prepared-fixture\\n'\n"})
         self.b(r, 'new', 'a', '--title', 'A', '--home', str(home))
-        self.b(r, 'set', 'a', 'verify=python3 -B verify.py')
+        self.b(r, 'set', 'a', 'verify=python3 -B verify.py', 'verify_resources=fixture-service')
         release = home / 'allow-setup'
         (r / 'nodes/a/worktree-setup.sh').write_text(
             'touch setup-started\nwhile ! test -f "$MAIN/allow-setup"; do sleep 0.02; done\n'
@@ -480,11 +590,14 @@ class WorktreeSetupDiagnostics(Scenario):
         self.assertLess(output.index('setup: ok'), output.index('launch a worker'))
         self.assertEqual((wt / '.env').read_text(), 'GENERATED=prepared-fixture\n')
         self.assertTrue(self.finish(r).strip().endswith('ready'))
+        lease = next((self.tmp / '.local/state/brain/resource-leases').glob('*.json'))
+        self.assertEqual(json.loads(lease.read_text())['state'], 'released')
 
     def test_setup_failure_reports_duration_masks_words_and_returns_failure(self):
         r = self.init('alice')
         home = self.repo(self.tmp / 'app')
         self.b(r, 'new', 'a', '--title', 'A', '--home', str(home))
+        self.b(r, 'set', 'a', 'verify_resources=fixture-service')
         (r / 'nodes/a/never-name.txt').write_text('HiddenFixture\n')
         (r / 'nodes/a/worktree-setup.sh').write_text('echo HiddenFixture\nexit 7\n')
         process = subprocess.run([sys.executable, str(r / 'core/bin/brain'), 'wt', 'add', 'a', 'job'],
@@ -494,7 +607,25 @@ class WorktreeSetupDiagnostics(Scenario):
         self.assertNotIn('hiddenfixture', (process.stdout + process.stderr).casefold())
         self.assertNotIn('launch a worker', process.stdout)
         self.assertTrue((self.tmp / 'app-work/worktrees/job').exists())
+        lease = next((self.tmp / '.local/state/brain/resource-leases').glob('*.json'))
+        self.assertEqual(json.loads(lease.read_text())['state'], 'active')
 
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LightWorktreeAdmission(Scenario):
+    def test_cli_dispatch_does_not_admit_light_worktree_creation(self):
+        core = core_loader.SourceFileLoader('light_worktree_fixture', str(CORE / 'bin/brain')).load_module()
+        inst = argparse.Namespace(node=lambda key: {'id': key})
+        with mock.patch.dict(os.environ, self.env), \
+                mock.patch.object(core.sys, 'argv', ['brain', 'wt', 'add', 'app', 'job-light', '--no-setup']), \
+                mock.patch.object(core, 'try_find_root', return_value=None), \
+                mock.patch.object(core, 'load', return_value=inst), \
+                mock.patch.object(core, 'cmd_wt_add') as add, \
+                mock.patch.object(core, 'machine_wait', side_effect=AssertionError('light work must not wait')) as wait:
+            add.__name__ = 'cmd_wt_add'
+            core.main()
+        add.assert_called_once()
+        wait.assert_not_called()

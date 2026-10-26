@@ -3,6 +3,7 @@ import contextlib
 import contextvars
 import fnmatch
 import hashlib
+import importlib
 import json
 import math
 import os
@@ -180,6 +181,15 @@ def packet_main_matches(n, packet, main):
             packet.get("integration_base", packet.get("main")) == base)
 
 
+class ReadyStateResult(dict):
+    """Dictionary-compatible result with cache-private policy provenance."""
+    def __init__(self, data, policy_reasons=(), head=''):
+        super().__init__(data)
+        self.policy_reasons = tuple(policy_reasons)
+        self.policy_head = head
+
+
+
 _DISPLAY_CACHE = contextvars.ContextVar('brain_ui_ready_cache', default=None)
 
 
@@ -206,7 +216,46 @@ def ready_state(inst, n, branch, train=False, display=False):
     if previous is None or previous[0] != key:
         result = _ready_state(inst, n, branch, train, display)
         values[job] = (key, result)
+    else:
+        result = previous[1]
+        if isinstance(result, ReadyStateResult):
+            policy = ready_policy_reasons(inst, n, branch, result.policy_head, result.get('packet'))
+            if tuple(policy) != result.policy_reasons:
+                # Preserve cached Git/input facts. Only replace reasons contributed
+                # by policy validators, including recovery from a former refusal.
+                reasons = [reason for reason in result.get('reasons', []) if reason not in result.policy_reasons]
+                reasons.extend(policy)
+                result = ReadyStateResult({**result, 'ready': not reasons, 'reasons': reasons}, policy, result.policy_head)
+                values[job] = (key, result)
     return values[job][1]
+
+
+def ready_policy_reasons(inst, n, branch, head, packet=None):
+    """Use independently owned receipt validators; absent required APIs fail closed."""
+    reasons = []
+    cfg = getattr(inst, 'cfg', {})
+    cfg = cfg if isinstance(cfg, dict) else {}
+    for module_name, function in (('.review', 'validate_ready_reviews'),
+                                  ('.preview_evidence', 'validate_ready_preview')):
+        try:
+            validator = getattr(importlib.import_module(module_name, __package__), function, None)
+        except ImportError:
+            validator = None
+        if validator is not None:
+            reasons.extend(validator(inst, n, branch, head, packet=packet))
+            continue
+        if module_name == '.review':
+            row = _m_jobs.open_job(_m_jobs.read_jobs(n) or [], branch)
+            required = (n['fm'].get('review_independence', cfg.get('review_independence')) == 'fresh-thread'
+                        or (row or {}).get('Review identity required') == 'true')
+        else:
+            required = (bool(n['local'].get('preview') or n['local'].get('review_urls'))
+                        or str(n['fm'].get('requires_preview_evidence', cfg.get('requires_preview_evidence', ''))).lower()
+                        in ('true', 'yes', '1', 'on'))
+        if required:
+            reasons.append(function + ' unavailable; required receipt policy cannot be validated')
+    scrubber = VerifyScrubber(_m_guard.never_terms(n))
+    return [scrubber.feed(reason, final=True) for reason in reasons]
 
 
 def current_ready_reasons(reasons):
@@ -215,8 +264,8 @@ def current_ready_reasons(reasons):
     return [reason for reason in reasons if isinstance(reason, str) and reason != legacy]
 
 
-def _ready_state(inst, n, branch, train=False, display=False):
-    display = display and not train
+def _ready_state(inst, n, branch, train=False, display=False, advisory=False):
+    display = display and (not train or advisory)
     reasons, head, main = ready_preflight(n, branch)
     row = _m_jobs.open_job(_m_jobs.read_jobs(n) or [], branch)
     signal = _m_jobs.read_handback(n, row) if row else None
@@ -228,6 +277,8 @@ def _ready_state(inst, n, branch, train=False, display=False):
         if (not isinstance(old_remote, str) or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", old_remote)
                 or _m_common.git("merge-base", "--is-ancestor", old_remote, remote, cwd=n["home_path"]).returncode):
             reasons.append("recorded remote base is not an ancestor of current integration main")
+    policy_reasons = ready_policy_reasons(inst, n, branch, head, packet)
+    reasons.extend(policy_reasons)
     if row:
         from . import job_attempts as _m_attempts
         attempt = _m_attempts.current_attempt(n, row, strict=False)
@@ -252,6 +303,8 @@ def _ready_state(inst, n, branch, train=False, display=False):
             reasons.append("ready packet identifies a different job or format")
         if packet.get("head") != head:
             reasons.append("branch head changed; return to worker")
+        if packet.get('verify_cheap', '') != n['fm'].get('verify_cheap', '').strip():
+            reasons.append('cheap verification configuration changed; hand back again')
         if not train and not packet_main_matches(n, packet, main):
             reasons.append("main moved; return to worker to rebase and verify again")
         w = n["local"].get("worktrees", {}).get(branch)
@@ -312,8 +365,28 @@ def _ready_state(inst, n, branch, train=False, display=False):
             reasons.append("packet has no valid check time")
     scrubber = VerifyScrubber(_m_guard.never_terms(n))
     reasons = [scrubber.feed(reason, final=True) for reason in reasons]
-    return {"ready": not reasons, "reasons": reasons, "packet": packet,
-            "validation": "recorded" if display else "full"}
+    return ReadyStateResult({"ready": not reasons, "reasons": reasons, "packet": packet,
+                             "validation": "recorded" if display else "full"}, policy_reasons, head)
+
+
+def due_ready_state(inst, n, branch):
+    """Offer batch advice without promoting old-base proof to current readiness."""
+    ordinary = ready_state(inst, n, branch, display=True)
+    moved = {"worker must rebase on current main",
+             "worker must rebase on current local main as well as origin default for merge=local",
+             "main moved; return to worker to rebase and verify again"}
+    if (ordinary['ready'] or n['fm'].get('merge', 'local') == 'pr'
+            or not ordinary['reasons'] or any(r not in moved for r in ordinary['reasons'])):
+        return ordinary
+    recorded = _ready_state(inst, n, branch, train=True, display=True, advisory=True)
+    if not recorded['ready']:
+        return ordinary
+    result = _m_common.git('merge-tree', '--write-tree', 'refs/heads/main',
+                           'refs/heads/' + branch, cwd=n['home_path'])
+    if result.returncode:
+        return ordinary  # conflict or unreadable classification keeps every refusal
+    return {**ordinary, 'ready': False, 'reasons': [],
+            'batch_advice': 'eligible for batch; exact-result verification required'}
 
 
 VERIFY_INPUTS = ".env,.env.*"  # files git doesn't track that verify reads, unless the node names its own
@@ -322,7 +395,8 @@ def verify_inputs(n, w, files=None):
     """Keep the existing digest contract: exact files plus ports decide validity and reuse.
     The optional map lets a caller compare and diagnose the same single snapshot."""
     files = verify_input_files(n, w) if files is None else files
-    return _m_jobs.digest([sorted(files.items()), w.get("port"), w.get("ports", 1)])
+    return _m_jobs.digest([sorted(files.items()), w.get("port"), w.get("ports", 1)]
+                          + ([w['env']] if w.get('env') else []))
 
 
 def verify_reuse(n, branch, previous, head, main, verify, cwd, inputs=None, port_context=None):
@@ -335,7 +409,8 @@ def verify_reuse(n, branch, previous, head, main, verify, cwd, inputs=None, port
             and p.get("verify_command") == verify and type(p.get("verify_result")) is int and p["verify_result"] == 0
             and packet_main_matches(n, p, main) and type(p.get("review_rounds")) is int and p["review_rounds"] >= 1
             and isinstance(p.get("checked_at"), str) and sha(p.get("head")) and p.get("inputs") == inputs
-            and port_context is not None and p.get('verify_port_context') == port_context):
+            and port_context is not None and p.get('verify_port_context') == port_context
+            and p.get('verify_cheap', '') == n['fm'].get('verify_cheap', '').strip()):
         return None  # only a complete green packet, for the same inputs, can stand for a new run
     base = p.get("verified_head") or p["head"]
     if not sha(base) or (base != p["head"] and _m_common.git("merge-base", "--is-ancestor", base, p["head"], cwd=cwd).returncode):
@@ -458,26 +533,116 @@ def verify_log_dir(inst, n, branch):
     return parent / "job-handbacks", dfd, key, check
 
 
+class _ResourceCommandFailure(Exception):
+    pass
+
+
 @contextlib.contextmanager
-def verify_reservation(inst, n):
-    """Reserve one command's whole run; subsequent commands join the queue afresh."""
-    token = _m_machine.machine_wait("verify", inst, n["id"])
+def verification_resources(inst, n):
+    state = {'failed': False}
+    if not n.get('fm', {}).get('verify_resources'):
+        yield state
+        return
     try:
-        from . import job_attempts as _m_attempts
-        _m_attempts.attempt_phase('verifying')
-        yield token
-    finally:
-        _m_machine.machine_release(token)
+        module = importlib.import_module('.resource_leases', __package__)
+    except ImportError:
+        _m_common.die('configured verification resources require the native lease module')
+    try:
+        with module.configured_resource_lease(inst, n):
+            yield state
+            if state['failed']:
+                raise _ResourceCommandFailure('command failed; resource cleanup remains unconfirmed')
+    except _ResourceCommandFailure:
+        pass  # preserve the command result while the native lease retains its claim
+
+
+def verify_cleanup(inst, n):
+    try:
+        module = importlib.import_module('.docker_cleanup', __package__)
+    except ModuleNotFoundError as error:
+        if error.name != __package__ + '.docker_cleanup':
+            raise
+        return
+    report = module.docker_cleanup_nodes(inst, [n])
+    if report.get('errors'):
+        raise ValueError('verification resource cleanup incomplete')
+
+
+def queued_attempt_phase():
+    from . import job_attempts as _m_attempts
+    try:
+        _m_attempts.attempt_phase('queued')
+    except (OSError, ValueError):
+        pass  # unreadable phase evidence remains unknown; publication rechecks it
+
+
+@contextlib.contextmanager
+def command_reservation(inst, n, branch=None, kind='verify'):
+    """One producer context spans native admission, execution and every cleanup."""
+    managed = getattr(_m_machine, 'machine_run', None)
+    with managed(kind, inst, n['id'], branch, release=False) if managed else contextlib.nullcontext(None) as run:
+        primary = None
+        token = run
         try:
-            _m_attempts.attempt_phase('queued')
-        except (OSError, ValueError):
-            pass  # Preserve unknown evidence; publication rechecks job/attempt ownership.
-        _m_docker_leftovers.docker_leftover_nodes(inst, [n])
+            token = (_m_machine.machine_wait(kind, inst, n['id'], job=branch, token=run)
+                     if managed else _m_machine.machine_wait(kind, inst, n['id']))
+            if kind == 'verify':
+                from . import job_attempts as _m_attempts
+                _m_attempts.attempt_phase('verifying')
+            yield token
+        except BaseException as error:
+            primary = error
+            raise
+        finally:
+            actions = []
+            if token is not None:
+                actions.append(lambda: _m_machine.machine_release(token))
+            if kind == 'verify':
+                actions.append(queued_attempt_phase)
+            actions.extend([lambda: verify_cleanup(inst, n),
+                            lambda: _m_docker_leftovers.docker_leftover_nodes(inst, [n])])
+            if managed:
+                finish = getattr(_m_machine, 'machine_finish_intent', None)
+                if finish is not None:
+                    actions.insert(0, lambda: finish(inst, run, primary))
+                failure = primary or (_ResourceCommandFailure('nonzero command result') if run.result else None)
+                _m_machine.machine_cleanup(run, actions, primary=failure)
+            else:
+                errors = []
+                for action in actions:
+                    try:
+                        action()
+                    except BaseException as error:
+                        errors.append(error)
+                if errors and primary is None:
+                    raise errors[0]
+
+
+@contextlib.contextmanager
+def verify_reservation(inst, n, branch=None):
+    with command_reservation(inst, n, branch) as token:
+        yield token
+
+
+def run_cheap_checks(inst, n, branch, w, env):
+    command = n['fm'].get('verify_cheap', '').strip()
+    if not command:
+        return None
+    with command_reservation(inst, n, branch, kind='heavy') as token:
+        return run_verify_stream(inst, n, branch, command, w, env, token, lane='cheap')
 
 
 def run_verify(inst, n, branch, verify, w, env):
-    with verify_reservation(inst, n) as token:
-        return run_verify_stream(inst, n, branch, verify, w, env, token)
+    with _m_gate_lock.node_gate(inst, n, env, branch) as gate_env, verification_resources(inst, n) as resources:
+        if verify == n.get('fm', {}).get('verify', '').strip():
+            cheap = run_cheap_checks(inst, n, branch, w, gate_env)
+            if cheap and cheap[0]:
+                resources['failed'] = True
+                return cheap
+        with verify_reservation(inst, n, branch) as token:
+            result = run_verify_stream(inst, n, branch, verify, w, gate_env, token)
+            resources['failed'] = bool(result[0])
+            return result
 
 
 def run_verify_stream(inst, n, branch, verify, w, env, token, lane=None):
@@ -551,8 +716,10 @@ def run_verify_stream(inst, n, branch, verify, w, env, token, lane=None):
             deadline = started + VERIFY_PROGRESS_SECONDS
             # The bootstrap cannot exec the verify until its PID/start stamp is durable.
             # EOF before publication means no verify starts. The bootstrap FD closes
-            # before exec; only the validated instance gate FD survives into the real gate.
-            instance_gate_fd = _m_gate_lock.gate_inherited_fd(inst.root, env)
+            # before exec; only the validated node gate FD survives into the real gate.
+            node_gate_fd = _m_gate_lock.gate_inherited_fd(inst.root, env, n['id'])
+            from . import handback_queue as _m_queue
+            queue_fd = _m_queue.queue_descendant_fd()
             gate_read, gate_write = os.pipe()
             bootstrap = ("import json,os,sys,signal; fd=int(sys.argv[1]); data=bytearray()\n"
                          "while True:\n"
@@ -569,7 +736,8 @@ def run_verify_stream(inst, n, branch, verify, w, env, token, lane=None):
                 proc = subprocess.Popen([sys.executable, "-I", "-S", "-c", bootstrap, str(gate_read)],
                                         cwd=w["path"], env=env, stdout=subprocess.PIPE,
                                         stderr=subprocess.STDOUT, pass_fds=(gate_read,) +
-                                        ((instance_gate_fd,) if instance_gate_fd is not None else ()))
+                                        ((node_gate_fd,) if node_gate_fd is not None else ()) +
+                                        ((queue_fd,) if queue_fd is not None else ()))
                 os.close(gate_read)
                 gate_read = None
                 _m_machine.machine_child(token, proc.pid)
@@ -613,6 +781,8 @@ def run_verify_stream(inst, n, branch, verify, w, env, token, lane=None):
                 # Always retain context for failures outside the named convention as well.
                 say("verify overall tail:")
                 say("\n".join(overall))
+            if hasattr(token, 'result'):
+                token.result = proc.returncode
             return proc.returncode, str(folder / name)
     finally:
         if proc is not None:
@@ -627,7 +797,9 @@ def verify_env(n, branch, w):
     """Expose reserved ports without claiming generic application environment names."""
     ports = {"PORT": str(w["port"]), "PORTS": str(w.get("ports", 1)),
              "PORT_LAST": str(w["port"] + w.get("ports", 1) - 1)}
-    env = {**os.environ, "MAIN": str(n["home_path"]), "WORKTREE": w["path"], "BRANCH": branch,
+    from . import job_env as _m_job_env
+    overrides = _m_job_env.apply_job_env(os.environ, w)
+    env = {**overrides, "MAIN": str(n["home_path"]), "WORKTREE": w["path"], "BRANCH": branch,
            "NODE": n["id"], **{"BRAIN_" + key: value for key, value in ports.items()}}
     if n["fm"].get("verify_export_port") == "true":
         for key, value in ports.items():
@@ -644,7 +816,7 @@ def verify_port_context(n, env):
 def lane_packet_valid(packet, snap):
     rows = packet.get("verify_lanes")
     expected = [l for l in snap['lanes'] if l['schedule'] != 'nightly']
-    if (packet.get('lane_context_hash') != snap['context'] or packet.get('lane_map_hash') != snap['map_hash']
+    if (packet.get('lane_context_hash') != snap['evidence_context'] or packet.get('lane_map_hash') != snap['map_hash']
             or not isinstance(rows, list) or len(rows) != len(expected)):
         return False
     for row, lane in zip(rows, expected):
@@ -665,58 +837,66 @@ def lane_evidence_valid(row):
 
 
 def run_lanes(inst, n, branch, w, env, snap, previous, head, main, inputs, force=False):
-    prior = previous if isinstance(previous, dict) else {}
-    eligible = (prior.get('version') == 1 and prior.get('node') == n['id']
-                and prior.get('branch') == branch and prior.get('verify_command') == n['fm'].get('verify', '').strip()
-                and isinstance(prior.get('checked_at'), str) and inst.parse_time(prior['checked_at'])
-                and packet_main_matches(n, prior, main)
-                and prior.get('lane_context_hash') == snap['context'] and prior.get('inputs') == inputs
-                and prior.get('verify_port_context') == verify_port_context(n, env)
-                and type(prior.get('review_rounds')) is int and prior['review_rounds'] >= 1)
-    history = prior.get('lane_green', prior.get('verify_lanes', []))
-    old = {r['name']: r for r in history if isinstance(r, dict) and isinstance(r.get('name'), str)} if eligible and isinstance(history, list) else {}
-    rows, results, check = [], {}, None
-    command = n['fm'].get('verify_lanes_check', '').strip()
-    if command:
-        with verify_reservation(inst, n) as token:
-            start = time.monotonic()
-            result, log = run_verify_stream(inst, n, branch, command, w, env, token, lane='fitness')
-            check = dict(command=command, result=result, duration=time.monotonic()-start, log=log)
-    for lane in snap['lanes']:
-        if lane['schedule'] == 'nightly':
-            continue
-        name = lane['name']
-        previous_lane = old.get(name, {})
-        changed = _m_lanes.changed_since(w['path'], previous_lane.get('verified_head'), head) if previous_lane else None
-        reuse = (not force and eligible and type(previous_lane.get('result')) is int and previous_lane['result'] == 0
-                 and previous_lane.get('status') == 'passed' and lane_evidence_valid(previous_lane)
-                 and Path(previous_lane['log']).is_file() and previous_lane.get('command') == lane['command']
-                 and previous_lane.get('input_hash') == snap['hashes'][name] and changed is not None
-                 and not lane['always'] and not any(_m_lanes.matches(p, lane['strict_inputs']) for p in changed))
-        row = dict(name=name, command=lane['command'], input_hash=snap['hashes'][name],
-                   result=None, duration=0, log=None, reused=False, verified_head=head, status='skipped')
-        if check and check['result'] or any(results.get(req) != 0 for req in lane['requires']):
-            pass
-        elif reuse:
-            row.update(previous_lane, reused=True)
-        else:
-            with verify_reservation(inst, n) as token:
-                print('verify lane: ' + name, flush=True)
+    with _m_gate_lock.node_gate(inst, n, env, branch) as env, verification_resources(inst, n) as resources:
+        prior = previous if isinstance(previous, dict) else {}
+        eligible = (prior.get('version') == 1 and prior.get('node') == n['id']
+                    and prior.get('branch') == branch and prior.get('verify_command') == n['fm'].get('verify', '').strip()
+                    and isinstance(prior.get('checked_at'), str) and inst.parse_time(prior['checked_at'])
+                    and packet_main_matches(n, prior, main)
+                    and prior.get('lane_context_hash') == snap['evidence_context'] and prior.get('inputs') == inputs
+                    and prior.get('verify_port_context') == verify_port_context(n, env)
+                    and type(prior.get('review_rounds')) is int and prior['review_rounds'] >= 1)
+        history = prior.get('lane_green', prior.get('verify_lanes', []))
+        old = {r['name']: r for r in history if isinstance(r, dict) and isinstance(r.get('name'), str)} if eligible and isinstance(history, list) else {}
+        rows, results, check = [], {}, None
+        cheap = run_cheap_checks(inst, n, branch, w, env)
+        if cheap and cheap[0]:
+            resources['failed'] = True
+            return dict(verify_lanes=[], verify_result=cheap[0], verify_reused=False,
+                        verify_lanes_check=dict(command=n['fm']['verify_cheap'], result=cheap[0],
+                                                duration=0, log=cheap[1]))
+        command = n['fm'].get('verify_lanes_check', '').strip()
+        if command:
+            with command_reservation(inst, n, branch, kind='heavy') as token:
                 start = time.monotonic()
-                result, log = run_verify_stream(inst, n, branch, lane['command'], w, env, token, lane=name)
-                row.update(result=result, log=log, duration=time.monotonic()-start,
-                           status='passed' if result == 0 else 'failed')
-        if row['result'] == 0:
-            old[name] = dict(row)
-        rows.append(row)
-        results[name] = row['result']
-    result = next((r['result'] or 1 for r in rows if r['result'] != 0), 0)
-    if check and check['result']:
-        result = check['result']
-    return dict(verify_lanes=rows, lane_green=list(old.values()), lane_map_hash=snap['map_hash'], lane_config_hash=snap['config_hash'], lane_context_hash=snap['context'],
-                verify_lane_env=_m_lanes.lane_environment(env),
-                verify_lanes_check=check, verify_result=result,
-                verify_reused=bool(rows) and all(r['reused'] for r in rows) and not check)
+                result, log = run_verify_stream(inst, n, branch, command, w, env, token, lane='fitness')
+                check = dict(command=command, result=result, duration=time.monotonic()-start, log=log)
+        for lane in snap['lanes']:
+            if lane['schedule'] == 'nightly':
+                continue
+            name = lane['name']
+            previous_lane = old.get(name, {})
+            changed = _m_lanes.changed_since(w['path'], previous_lane.get('verified_head'), head) if previous_lane else None
+            reuse = (not force and eligible and type(previous_lane.get('result')) is int and previous_lane['result'] == 0
+                     and previous_lane.get('status') == 'passed' and lane_evidence_valid(previous_lane)
+                     and Path(previous_lane['log']).is_file() and previous_lane.get('command') == lane['command']
+                     and previous_lane.get('input_hash') == snap['hashes'][name] and changed is not None
+                     and not lane['always'] and not any(_m_lanes.matches(p, lane['strict_inputs']) for p in changed))
+            row = dict(name=name, command=lane['command'], input_hash=snap['hashes'][name],
+                       result=None, duration=0, log=None, reused=False, verified_head=head, status='skipped')
+            if check and check['result'] or any(results.get(req) != 0 for req in lane['requires']):
+                pass
+            elif reuse:
+                row.update(previous_lane, reused=True)
+            else:
+                with verify_reservation(inst, n, branch) as token:
+                    print('verify lane: ' + name, flush=True)
+                    start = time.monotonic()
+                    result, log = run_verify_stream(inst, n, branch, lane['command'], w, env, token, lane=name)
+                    row.update(result=result, log=log, duration=time.monotonic()-start,
+                               status='passed' if result == 0 else 'failed')
+            if row['result'] == 0:
+                old[name] = dict(row)
+            rows.append(row)
+            results[name] = row['result']
+        result = next((r['result'] or 1 for r in rows if r['result'] != 0), 0)
+        if check and check['result']:
+            result = check['result']
+        resources['failed'] = bool(result)
+        return dict(verify_lanes=rows, lane_green=list(old.values()), lane_map_hash=snap['map_hash'], lane_config_hash=snap['config_hash'], lane_context_hash=snap['evidence_context'],
+                    verify_lane_env=_m_lanes.lane_environment(env),
+                    verify_lanes_check=check, verify_result=result,
+                    verify_reused=bool(rows) and all(r['reused'] for r in rows) and not check)
 
 
 def show_lanes(n, packet):
@@ -731,8 +911,37 @@ def show_lanes(n, packet):
         print(_m_guard.redact('verify lanes check: exit %s; log: %s' % (check.get('result'), check.get('log')), _m_guard.never_terms(n)))
 
 
-def record_ready(inst, n, branch, reviews, previous=None, reverify=False):
+def record_full_fact(inst, n, branch, head, base, inputs, forced=False):
+    """Only actual successful full execution emits this optional typed observation."""
+    try:
+        events = importlib.import_module('.events', __package__)
+    except ModuleNotFoundError as error:
+        if error.name == __package__ + '.events':
+            return False
+        raise
+    row = _m_jobs.open_job(_m_jobs.read_jobs(n) or [], branch)
+    if not row:
+        return False
+    events.record_fact(inst, n, 'verify_completed', job_key=_m_jobs.job_key(row),
+                       state='done', phase='execution', head=head, base=base, inputs=inputs,
+                       reason_code='forced_reverify' if forced else 'full_pass')
+    return True
+
+
+def moved_ref_details(n, branch, head, head_after, main, main_after, integration_base, integration_after):
+    ref = integration_ref(n['home_path'])
+    local_ref = (ref.replace('refs/remotes/origin/', 'refs/heads/', 1)
+                 if n['fm'].get('merge', 'local') != 'pr' else ref)
+    return list(dict.fromkeys(
+        '%s %s -> %s' % (name, old or 'missing', new or 'missing')
+        for name, old, new in (('refs/heads/' + branch, head, head_after),
+                               (ref, main, main_after), (local_ref, integration_base, integration_after))
+        if old != new))
+
+
+def record_ready(inst, n, branch, reviews, previous=None, reverify=False, full_receipt=None):
     reasons, head, main = ready_preflight(n, branch)
+    reasons.extend(ready_policy_reasons(inst, n, branch, head, previous))
     from . import rehearse as _m_rehearse
     rehearsal = _m_rehearse.read_evidence(n, branch, head)
     verify = n["fm"].get("verify", "").strip()
@@ -759,6 +968,16 @@ def record_ready(inst, n, branch, reviews, previous=None, reverify=False):
                 print(_m_guard.redact('verify warning: ' + warning, _m_guard.never_terms(n)))
     except (ValueError, OSError, UnicodeError, RecursionError) as error:
         return None, ['verify lanes invalid: ' + _m_guard.redact(str(error), _m_guard.never_terms(n))]
+    if full_receipt is not None:
+        if reverify:
+            return None, ['full receipt cannot be combined with --reverify']
+        from . import full_gate as _m_full_gate
+        try:
+            packet = _m_full_gate.adopt_full_receipt(inst, n, branch, full_receipt, head, main,
+                                                   inputs, port_context, snap, reviews)
+        except (OSError, ValueError, KeyError, TypeError):
+            return None, ['full receipt missing, changed, failed or stale; run full-run on this exact candidate']
+        return packet, []
     reuse = None if reverify or snap or (previous or {}).get('verify_lanes') is not None else verify_reuse(n, branch, previous, head, main, verify, w["path"], inputs, port_context)
     # The CLI holds brain_lock here. Do not sweep an operator's dirty .gitignore into
     # the worker hand-back commit just because we added the local-output exclusion.
@@ -775,7 +994,7 @@ def record_ready(inst, n, branch, reviews, previous=None, reverify=False):
               + (f": since then only {len(changed)} file(s) under verify_skip changed" if changed else
                  ": nothing changed since") + " (--reverify runs it again)")
         return {"version": 1, "node": n["id"], "branch": branch, "head": head, "main": main,
-                "integration_base": integration_base, "verify_command": verify, "verify_result": 0, "verified_head": base, "verify_reused": True,
+                "integration_base": integration_base, "verify_command": verify, "verify_cheap": n["fm"].get("verify_cheap", "").strip(), "verify_result": 0, "verified_head": base, "verify_reused": True,
                 "inputs": inputs, "input_files_ref": input_ref, "verify_log": previous.get("verify_log"), "rehearsal": rehearsal,
                 "verify_port_context": port_context,
                 "review_rounds": reviews, "checked_at": _m_jobs.stamp(inst)}, []
@@ -800,13 +1019,8 @@ def record_ready(inst, n, branch, reviews, previous=None, reverify=False):
     integration_after = integration_parent(n, main_after)
     if after or head_after != head or main_after != main or integration_after != integration_base:
         # What passed isn't the commit on main that was asked about: never record it as evidence.
-        ref = integration_ref(n["home_path"])
-        local_ref = ref.replace("refs/remotes/origin/", "refs/heads/", 1)
-        moved = list(dict.fromkeys(
-            "%s %s -> %s" % (name, old or "missing", new or "missing")
-            for name, old, new in (("refs/heads/" + branch, head, head_after),
-                                   (ref, main, main_after), (local_ref, integration_base, integration_after))
-            if old != new))
+        moved = moved_ref_details(n, branch, head, head_after, main, main_after,
+                                 integration_base, integration_after)
         return None, input_reasons + ["verify changed the job's branch, local main or worktree ("
                       + "; ".join(after + moved)
                       + "); commit or discard what it changed, then hand back again"]
@@ -814,12 +1028,15 @@ def record_ready(inst, n, branch, reviews, previous=None, reverify=False):
         return None, input_reasons
     input_ref = write_verify_input_files(inst, n, branch, inputs, input_files, log_path)
     packet = {"version": 1, "node": n["id"], "branch": branch, "head": head, "main": main,
-              "integration_base": integration_base, "verify_command": verify, "verify_result": result, "verify_log": log_path, "verified_head": head,
+              "integration_base": integration_base, "verify_command": verify, "verify_cheap": n["fm"].get("verify_cheap", "").strip(), "verify_result": result, "verify_log": log_path, "verified_head": head,
               "inputs": inputs, "input_files_ref": input_ref, "review_rounds": reviews, "checked_at": _m_jobs.stamp(inst), "rehearsal": rehearsal}
     packet['verify_port_context'] = port_context
     if lane_evidence:
         packet.update(lane_evidence)
         show_lanes(n, packet)
+    elif result == 0:
+        record_full_fact(inst, n, branch, head, main,
+                         _m_jobs.digest([verify, inputs, port_context]), forced=reverify)
     return packet, []
 
 

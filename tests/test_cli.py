@@ -28,6 +28,46 @@ CORE = Path(os.environ.get("BRAIN_CORE") or Path(__file__).resolve().parent.pare
 from scenario import Scenario, AutonomyProject, shlex_quote
 
 
+class FixtureSetup(Scenario):
+    def test_in_process_initialization_restores_context_and_clones_independent_core(self):
+        environment, argv, cwd = dict(os.environ), list(sys.argv), Path.cwd()
+        self.fixture_init_in_process = True
+        first = self.init('first')
+        second = self.init('second', operator='other')
+        self.assertEqual(dict(os.environ), environment)
+        self.assertEqual(sys.argv, argv)
+        self.assertEqual(Path.cwd(), cwd)
+        for root, operator in ((first, 'first'), (second, 'other')):
+            self.assertIn('principals: ' + operator, (root / 'instance.md').read_text())
+            self.assertTrue((root / 'CLAUDE.md').is_symlink())
+            self.assertEqual(self.git('status', '--porcelain', cwd=root), '')
+            self.assertIn('root:', self.b(root, 'tree'))
+            self.assertTrue((root / '.brain/events.jsonl').is_file())
+        source = CORE / 'bin/brain'
+        left, right = first / 'core/bin/brain', second / 'core/bin/brain'
+        self.assertEqual(left.read_bytes(), source.read_bytes())
+        self.assertEqual(right.read_bytes(), source.read_bytes())
+        self.assertNotEqual((left.stat().st_dev, left.stat().st_ino),
+                            (right.stat().st_dev, right.stat().st_ino))
+        left.write_text('changed only in the first fixture\n')
+        self.assertEqual(right.read_bytes(), source.read_bytes())
+        self.assertEqual(left.stat().st_nlink, 1)
+        self.assertEqual(right.stat().st_nlink, 1)
+        self.assertFalse((first / 'core/.git').exists())
+
+    def test_setup_failures_restore_context_and_evidence_keeps_real_subprocess(self):
+        environment, argv, cwd = dict(os.environ), list(sys.argv), Path.cwd()
+        with self.assertRaisesRegex(AssertionError, 'fixture command failed'):
+            self.fixture_cli(['not-a-command'], cwd=self.tmp, brain=CORE / 'bin/brain')
+        self.assertEqual(dict(os.environ), environment)
+        self.assertEqual(sys.argv, argv)
+        self.assertEqual(Path.cwd(), cwd)
+        with mock.patch.object(self, '_evidence', object(), create=True), \
+                mock.patch.object(self, 'run_', return_value='real child') as child:
+            self.assertEqual(self.fixture_cli(['now'], cwd=self.tmp, brain=CORE / 'bin/brain'), 'real child')
+            child.assert_called_once_with(['now'], cwd=self.tmp, brain=CORE / 'bin/brain')
+
+
 class SettlementDocsHelp(unittest.TestCase):
     def test_settlement_guides_require_export_for_each_recording_command(self):
         for name in ('roles/coordinator.md', 'skills/home-job/SKILL.md',

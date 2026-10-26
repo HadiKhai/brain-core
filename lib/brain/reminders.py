@@ -5,7 +5,9 @@ import json
 import os
 import re
 
+from . import briefs as _m_briefs
 from . import common as _m_common
+from . import briefs as _m_briefs
 from . import guard as _m_guard
 from . import history as _m_history
 from . import jobs as _m_jobs
@@ -14,6 +16,8 @@ from . import status as _m_status
 from . import machine as _m_machine
 from . import spend as _m_spend
 
+
+_USAGE_NOT_OBSERVED = object()
 
 LIFECYCLE_LIMIT = 2000
 LIFECYCLE_BYTES = 2 * 1024 * 1024
@@ -53,8 +57,12 @@ def lifecycle_read(inst):
 @contextlib.contextmanager
 def lifecycle_store(inst, readonly=False):
     """Serialize scans with updates; publishing pins the actual private directory."""
-    if readonly:
-        yield lifecycle_read(inst)
+    from . import ui_readmodel
+    view = ui_readmodel.projection(inst.root)
+    if readonly or view is not None:
+        data = (view.store(inst.root / '.brain/wake/lifecycle.json', lambda: lifecycle_read(inst))
+                if view else lifecycle_read(inst))
+        yield data
         return
     folder = inst.root / '.brain/wake'
     if folder.resolve() != inst.root.resolve() / '.brain/wake':
@@ -82,13 +90,11 @@ def usage_restart_item(inst, n, row):
     if row.get('Ended'):
         return None
     usage = _m_spend.live_usage(inst, n, row)
-    if not usage:
-        return None
-    counts = {k: usage.get(k) for k in ('compactions', 'processed')}
-    if any(type(v) is not int or v < 0 for v in counts.values()):
-        return None
+    counts = {k: (usage or {}).get(k) for k in ('compactions', 'processed')}
+    counts = {k: v if type(v) is int and v >= 0 else None for k, v in counts.items()}
     key = _m_jobs.digest([n['id'], _m_jobs.job_key(row)])
     budget = (_m_spend.job_budget(n, row) or {}).get('tokens')
+    budget = budget if type(budget) in (int, float) and budget > 0 else None
     with lifecycle_store(inst) as data:
         record = data['usage'].get(key, {})
         if not isinstance(record, dict):
@@ -97,46 +103,85 @@ def usage_restart_item(inst, n, row):
         if (not isinstance(baseline, dict) or any(type(baseline.get(k)) is not int or baseline[k] < 0
                                                for k in counts)):
             raise ValueError('invalid restart usage baseline')
-        if any(counts[k] < baseline[k] for k in counts):
+        if any(value is not None and value < baseline[k] for k, value in counts.items()):
             raise ValueError('restart usage counters regressed; retain the baseline for review')
-        delta = {k: max(0, counts[k] - baseline[k]) for k in counts}
-        if delta['compactions'] < 3 and (not budget or delta['processed'] < 2 * budget):
-            return None
+        delta = {k: value - baseline[k] if value is not None else None for k, value in counts.items()}
         episode = record.get('episode')
         if episode is not None and not re.fullmatch(r'[0-9a-f]{24}', str(episode)):
             raise ValueError('invalid restart episode')
+        # Independent positive evidence opens a need. Once open, only a
+        # delivered rebrief or terminal job evidence resolves it, never a
+        # missing counter or a subsequently increased budget.
+        crossed = ((delta['compactions'] is not None and delta['compactions'] >= 3) or
+                   (budget is not None and delta['processed'] is not None and delta['processed'] >= 2 * budget))
+        if not episode and not crossed:
+            return None
         if not episode:
             if len(data['usage']) >= LIFECYCLE_LIMIT and key not in data['usage']:
                 raise ValueError('restart receipt bound reached')
-            episode = os.urandom(12).hex()
+            from . import ui_readmodel
+            episode = ui_readmodel.episode(inst, [key, baseline, record])
             data['usage'][key] = {'job': _m_jobs.job_key(row), 'baseline': baseline,
-                                  'episode': episode, 'at': inst.now()}
+                                  'episode': episode, 'at': inst.now(),
+                                  'round_at': record.get('round_at') or (record.get('at') if record and not record.get('episode') else None)}
         budget_text = str(budget) if budget else 'not configured'
-        return {'node': n['id'], 'kind': 'restart', 'job': _m_jobs.job_key(row), 'episode': episode,
-                'text': (f"{row['Job']}: restart from brief: {delta['compactions']} compactions since brief "
-                         f"(threshold 3); {delta['processed']} processed tokens since brief "
+        shown = {k: value if value is not None else 'unknown' for k, value in delta.items()}
+        command = _m_briefs.restart_command(n, row)
+        return {'node': n['id'], 'kind': 'job-restart', 'job': _m_jobs.job_key(row), 'episode': episode,
+                'blocking': True, 'protected': True,
+                'text': (f"{row['Job']}: BLOCKING job restart from brief: {shown['compactions']} compactions since brief "
+                         f"(threshold 3); {shown['processed']} processed tokens since brief "
                          f"(token budget {budget_text}; threshold twice the budget). "
-                         'Coordinator: regenerate the job brief and restart its worker; no automatic stop.')}
+                         f"Owning coordinator must restart its worker with `{command}` before continuing the job.")}
 
 
-def acknowledge_usage_restart(inst, n, row):
-    """Called only after a brief was delivered; initial briefs do not reset budgets."""
+def acknowledge_usage_restart(inst, n, row, *, observed_usage=_USAGE_NOT_OBSERVED):
+    """Acknowledge delivered restart usage; ordinary briefs do not reset budgets.
+
+    Native launchers pass their captured pre-launch live_usage dict after binding
+    the replacement. Explicit snapshots require known processed, compaction and
+    active-minute counters and never trigger a later lifetime-counter read.
+    """
     if not row or row.get('Ended'):
         return
+    captured = observed_usage is not _USAGE_NOT_OBSERVED
+    if captured:
+        if (not isinstance(observed_usage, dict) or
+                type(observed_usage.get('sessions')) is not int or observed_usage['sessions'] < 1 or
+                not isinstance(observed_usage.get('source'), str) or
+                not observed_usage['source'].startswith(('host', 'transcripts:')) or any(
+                type(observed_usage.get(k)) is not int or observed_usage[k] < 0
+                for k in ('compactions', 'processed', 'active_minutes'))):
+            raise ValueError('restart usage unavailable; captured baseline not acknowledged')
+        observed_usage = dict(observed_usage)
     key = _m_jobs.digest([n['id'], _m_jobs.job_key(row)])
     with lifecycle_store(inst) as data:
         advice = data.get('advice', {})
         if key in advice:
             advice[key] = {'episode': os.urandom(12).hex(), 'conditions': {}}
         record = data['usage'].get(key)
-        if not isinstance(record, dict) or not record.get('episode'):
+        signal = _m_jobs.job_signal(inst, n, row)
+        manual_restart = bool(signal and signal.get('restart') == 'compactions' and
+                              not _m_briefs.restart_acknowledged(n, row, signal))
+        if not (isinstance(record, dict) and record.get('episode')) and not manual_restart:
             return
-        usage = _m_spend.live_usage(inst, n, row)
+        usage = observed_usage if captured else _m_spend.live_usage(inst, n, row)
         if not usage or any(type(usage.get(k)) is not int or usage[k] < 0
                             for k in ('compactions', 'processed')):
             raise ValueError('restart usage unavailable; baseline not acknowledged')
-        data['usage'][key] = {'job': _m_jobs.job_key(row), 'baseline': {
-            k: usage[k] for k in ('compactions', 'processed')}, 'episode': None, 'at': inst.now()}
+        if captured and isinstance(record, dict):
+            previous = record.get('baseline', {})
+            if not isinstance(previous, dict) or any(type(value) is not int or value < 0
+                    for k, value in previous.items() if k in ('compactions', 'processed', 'active_minutes')):
+                raise ValueError('invalid restart usage baseline')
+            if any(usage[k] < previous[k] for k in ('compactions', 'processed', 'active_minutes') if k in previous):
+                raise ValueError('restart usage counters regressed; baseline not acknowledged')
+        baseline = {k: usage[k] for k in ('compactions', 'processed')}
+        active = usage.get('active_minutes')
+        if type(active) is int and active >= 0:
+            baseline['active_minutes'] = active
+        data['usage'][key] = {'job': _m_jobs.job_key(row), 'baseline': baseline,
+                              'episode': None, 'at': inst.now(), 'round_at': inst.now()}
 
 
 def inbox_source_id(n, line):

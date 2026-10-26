@@ -487,15 +487,36 @@ elif sys.argv[1] == 'ui':
                 flags = rehearsal.compare({'ui': result('{"nodes": []}')}, {'ui': result(new)})
                 self.assertTrue(flags)
 
+    def test_private_sidecar_retains_exact_transaction_operands_even_when_lanes_equal(self):
+        inst = SimpleNamespace(root=self.tmp / 'source')
+        node = dict(home_path=self.tmp / 'candidate')
+        directory = self.tmp / 'transaction-local-only'
+        evidence = dict(before={'events.jsonl': {'hex': b'old sample bytes'.hex()}},
+                        after={'events.jsonl': {'hex': b'new sample bytes'.hex()}},
+                        observations=[{'type': 'sample-observation'}], verdict='unproven')
+        row = dict(stdout='', stderr='', code=0, timeout=False, transaction_evidence=evidence)
+        rehearsal.write_local_diff(inst, node, directory, {'refresh': row}, {'refresh': row})
+        path = next(directory.glob('*.diff'))
+        records = [json.loads(line) for line in path.read_text().splitlines() if line.startswith('{')][1:]
+        self.assertEqual(2, len(records))
+        self.assertEqual(['installed', 'candidate'], [r['lane'] for r in records])
+        self.assertEqual([evidence, evidence], [r['transaction_evidence'] for r in records])
+        self.assertEqual(0o600, stat.S_IMODE(path.stat().st_mode))
+
     def test_local_diff_retains_newline_only_delta_and_refuses_public_directory(self):
         inst = SimpleNamespace(root=self.tmp / 'source')
         node = dict(home_path=self.tmp / 'candidate')
         directory = self.tmp / 'local-only'
-        row = dict(stdout='same\n', stderr='', code=0, timeout=False)
+        row = dict(stdout='same\n', stderr='', code=0, timeout=False,
+                   writes=[dict(path='brain/.brain/events.jsonl', operation='modified', unexpected=True)],
+                   denied_attempts=[dict(event='open', path='/fabricated/private-target')])
         rehearsal.write_local_diff(inst, node, directory, {'check': row},
                                    {'check': dict(row, stdout='same')})
         raw = next(directory.glob('*.diff')).read_text()
         self.assertIn('No newline at end of stdout', raw)
+        self.assertEqual(2, raw.count('brain/.brain/events.jsonl'))
+        self.assertEqual(2, raw.count('/fabricated/private-target'))
+        self.assertEqual(0o600, stat.S_IMODE(next(directory.glob('*.diff')).stat().st_mode))
         directory.chmod(0o755)
         with self.assertRaises(rehearsal.RehearsalError):
             rehearsal.write_local_diff(inst, node, directory, {}, {})
@@ -1069,7 +1090,7 @@ class FrozenClock(Scenario):
         original = rehearsal.snapshot(self.root)
         lane = rehearsal.run_lane
         seen = []
-        def inspect(source, core, folder, nodes, commands):
+        def inspect(source, core, folder, nodes, commands, **kwargs):
             seen.append((source, folder))
             self.assertNotEqual(self.root, source)
             self.assertEqual(source.parent, folder.parent)
@@ -1078,7 +1099,7 @@ class FrozenClock(Scenario):
                 (self.root / 'live-only').write_text('concurrent writer')
                 self.git('add', 'live-only', cwd=self.root)
                 self.git('commit', '-qm', 'live-only drift', cwd=self.root)
-            return lane(source, core, folder, nodes, commands)
+            return lane(source, core, folder, nodes, commands, **kwargs)
         with mock.patch.object(rehearsal, 'run_lane', side_effect=inspect):
             printed = self.publish_private_diff()
         self.assertIn('rehearse: passed', printed)

@@ -9,6 +9,7 @@ import { list, needsView, needRows, needAsk, count, time, flight, threads, jobTi
 import { ThreadLink } from "./thread-link";
 import { ReaderRow } from "./detail-panel";
 import { WorkStatus } from "./work-status";
+import { Tasks } from "./tasks";
 import type { Route } from "./routes";
 
 type Go = (r: Partial<Route> & { view: string }) => void;
@@ -48,7 +49,7 @@ export function Project({ s, route, go, active }: { s: RecordData; route: Route;
         </div>
       </section>
       <section className="surface" aria-label="Work">
-        <SectionTabs value={route.tab && ["needs", "threads", "jobs", "activity"].includes(route.tab) ? route.tab : needs.length ? "needs" : "threads"}
+        <SectionTabs value={route.tab && ["needs", "threads", "jobs", "activity", "tasks"].includes(route.tab) ? route.tab : needs.length ? "needs" : "threads"}
           onValue={(tab) => go({ view: "project", node: n.id, tab })}
           tabs={[
             { id: "needs", label: "Needs you", count: needs.length, body: needs.length ? <PagedRows items={needs} noun="item" render={(a: RecordData, i) =>
@@ -57,6 +58,7 @@ export function Project({ s, route, go, active }: { s: RecordData; route: Route;
                   : "first_seen" in a ? <RequestRow key={a.id || i} s={s} item={a} go={go} showProject={false} compact /> : <DueRow key={"d" + i} s={s} item={a} go={go} showProject={false} />} /> : <Empty text="Nothing needs you here." action="Questions and coordinator steps for this project arrive here." /> },
             { id: "threads", label: "Threads", count: work.length, body: work.length ? <PagedRows resetKey={route.thread || ""} items={[...work].sort((a, b) => Number(b.job.branch === route.thread) - Number(a.job.branch === route.thread))} noun="thread" render={(f, i) => <ThreadRow key={f.job.branch + i} s={s} f={f} go={go} showProject={false} highlight={route.thread === f.job.branch} />} />
                 : <Empty text="No threads in flight." action="Start a job from this project's coordinator." /> },
+            { id: "tasks", label: "Tasks", count: list(n.tasks?.rows).length, body: <Tasks s={s} go={go} node={n.id} /> },
             { id: "jobs", label: "Jobs", count: rows.length, body: <DataTable rows={rows} name="jobs" columns={[
                 { key: "Job", label: "Job", render: (r) => <Text>{jobTitle(r.Job)}</Text> },
                 { key: "Started", label: "Started", render: (r) => time(r.Started, s.brain?.tz) },

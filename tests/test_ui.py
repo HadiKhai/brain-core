@@ -202,6 +202,256 @@ class ExpandedUI(Scenario):
         self.m = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
         loader.exec_module(self.m)
 
+    def test_complete_build_is_a_detached_business_projection(self):
+        root = self.init('demo')
+        self.b(root, 'new', 'project', '--title', 'Field Guide')
+        inst = self.m.UIInstance(root)
+        node = inst.node('project')
+        line = '- 2026-01-01 00:00 +00:00 from worker: question: Pick a shape? <!-- host-question:shape -->\n'
+        queue = self.m.hook_question_queue(node)
+        queue.mkdir(parents=True, exist_ok=True)
+        (queue / 'shape.json').write_text(json.dumps({'line': line, 'marker': '<!-- host-question:shape -->'}))
+        def business():
+            return {str(p.relative_to(root)): (p.read_bytes(), p.stat().st_mtime_ns)
+                    for p in root.rglob('*') if p.is_file() and not p.is_symlink()
+                    and '.git' not in p.parts and 'core' not in p.relative_to(root).parts}
+        before = business()
+        with mock.patch('fcntl.flock', side_effect=AssertionError('display acquired a business lock')), \
+             mock.patch.object(self.m, 'usage_refresh', side_effect=AssertionError('provider call')):
+            first = self.m.ui_state(inst, problems=0)
+            again = self.m.ui_state(self.m.UIInstance(root), problems=0)
+        self.assertEqual(before, business())
+        self.assertTrue(any('Pick a shape?' in i['text'] for i in first['inbox']))
+        self.assertEqual([i['id'] for i in first['due']], [i['id'] for i in again['due']])
+        # Explicit command reads retain their delivery behavior after projection exits.
+        self.m.inbox_lines(node)
+        self.assertFalse((queue / 'shape.json').exists())
+        self.assertIn('Pick a shape?', (node['dir'] / 'inbox.md').read_text())
+
+    def test_readmodel_cache_validates_binding_and_keeps_metadata_separate_from_usage(self):
+        ReadModel = self.m.ReadModel
+        root = self.init('demo')
+        model = ReadModel(self.m.UIInstance(root), 'code-one')
+        self.assertIsNone(model.metadata([('source', 1)]))
+        payload = {'brain': {'title': 'Field Guide'}, 'spend': {'complete': True}, 'nodes': []}
+        with mock.patch.object(model, 'write') as write:
+            model.save_metadata([('source', 1)], payload)
+        record = write.call_args.args[1]
+        self.assertNotIn('spend', record['state'])
+        with mock.patch.object(model, 'read', return_value=record):
+            self.assertEqual(model.metadata([('source', 1)])['brain']['title'], 'Field Guide')
+            self.assertIsNone(model.metadata([('source', 2)]))
+            other = ReadModel(self.m.UIInstance(root), 'code-two')
+            with mock.patch.object(other, 'read', return_value=record):
+                self.assertIsNone(other.metadata([('source', 1)]))
+
+    def test_usage_cache_reopens_authorized_source_and_rejects_replaced_file(self):
+        ReadModel = self.m.ReadModel
+        root = self.init('demo')
+        model = ReadModel(self.m.UIInstance(root), 'code-one')
+        path = self.tmp / 'session.jsonl'
+        path.write_text('{"timestamp":"2026-01-01T00:00:00Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":12,"output_tokens":3}}}}\n')
+        # A cache hit still goes through spend_file's opened-descriptor ownership proof.
+        spend = self.m._owners['spend_file']
+        with mock.patch.object(model, 'write') as write:
+            with model.usage_scope():
+                first = spend.spend_file(self.m.UIInstance(root), path, 'codex', {self.tmp}, set())
+        self.assertTrue(first['complete'])
+        self.assertTrue(write.called)
+        record = write.call_args.args[1]
+        spend._SPEND_MEM.clear()
+        with mock.patch.object(model, 'read', return_value=record), \
+             mock.patch.object(spend, 'spend_read', side_effect=AssertionError('unchanged transcript replayed')):
+            with model.usage_scope():
+                second = spend.spend_file(self.m.UIInstance(root), path, 'codex', {self.tmp}, set())
+        self.assertEqual(first['mc'], second['mc'])
+        spend._SPEND_MEM.clear()
+        with mock.patch.object(model, 'read', return_value=record):
+            with model.usage_scope():
+                self.assertIsNone(spend.spend_file(self.m.UIInstance(root), path, 'codex', set(), {self.tmp}))
+        replacement = path.with_suffix('.new')
+        replacement.write_text('{}\n')
+        replacement.replace(path)
+        spend._SPEND_MEM.clear()
+        with mock.patch.object(model, 'read', return_value=record), mock.patch.object(model, 'write'):
+            with model.usage_scope():
+                third = spend.spend_file(self.m.UIInstance(root), path, 'codex', {self.tmp}, set())
+        self.assertEqual(third['state']['offset'], 3)
+        self.assertNotEqual(first['ino'], third['ino'])
+
+    def test_ui_restart_projection_is_stable_and_preserves_native_receipt_identity(self):
+        root = self.first_paint_root()
+        inst = self.m.UIInstance(root)
+        node = inst.nodes()[0]
+        row = {'Job': 'job/palette', 'Started': '2026-01-01T00:00Z', 'Ended': ''}
+        usage = {'processed': 200, 'compactions': 3}
+        with mock.patch.object(self.m, 'live_usage', return_value=usage):
+            with self.m.observe(inst):
+                projected = self.m.usage_restart_item(inst, node, row)
+                self.assertEqual(projected, self.m.usage_restart_item(inst, node, row))
+                self.assertTrue(projected['protected'])
+                self.assertFalse((root / '.brain/wake').exists())
+            actual = self.m.usage_restart_item(inst, node, row)
+            path = root / '.brain/wake/lifecycle.json'
+            before = path.read_bytes()
+            with self.m.observe(inst):
+                self.assertEqual(self.m.usage_restart_item(inst, node, row), actual)
+            self.assertEqual(path.read_bytes(), before)
+        with self.assertRaisesRegex(RuntimeError, 'fixture'):
+            with self.m.observe(inst):
+                raise RuntimeError('fixture')
+        self.assertFalse(bool(self.m.projection(inst.root)))
+        observations = []
+        with self.m.observe(inst):
+            worker = threading.Thread(target=lambda: observations.append(bool(self.m.projection(inst.root))))
+            worker.start()
+            worker.join(1)
+            self.assertFalse(worker.is_alive())
+        self.assertEqual(observations, [False])
+
+    def test_ui_retains_pending_answer_until_command_applies_it_exactly_once(self):
+        root = self.first_paint_root()
+        inst = self.m.UIInstance(root)
+        node = inst.nodes()[0]
+        line = '- 2026-01-01 00:00 +00:00 from worker: question: Which color? <!-- host-question:color -->'
+        (root / 'inbox.md').write_text(line + '\n')
+        episode = self.m.request_episode_id(inst, node, line)
+        folder = root / '.brain/wake/conversation-answers'
+        folder.mkdir(parents=True)
+        pending = folder / 'color.json'
+        pending.write_text(json.dumps({'node': 'root', 'state': 'pending', 'marker': '<!-- host-question:color -->',
+                                      'episode': episode, 'answer': 'Blue', 'source': 'conversation-option',
+                                      'origin': 'fixture-origin', 'evidence': 'fixture-evidence', 'at': inst.now()}))
+        before = {str(p.relative_to(root)): p.read_bytes() for p in root.rglob('*') if p.is_file()}
+        state = self.m.ui_state(inst, problems=0, machine_spend={})
+        self.assertTrue(any('Which color?' in i['text'] for i in state['inbox']))
+        self.assertEqual({str(p.relative_to(root)): p.read_bytes() for p in root.rglob('*') if p.is_file()}, before)
+        self.m.inbox_lines(node)
+        self.m.inbox_lines(node)
+        self.assertFalse(pending.exists())
+        self.assertTrue(pending.with_suffix('.done').exists())
+        answers = self.m.lifecycle_read(inst)['answers']
+        self.assertEqual([(a['id'], a['answer']) for a in answers], [(episode, 'Blue')])
+        after = self.m.ui_state(self.m.UIInstance(root), problems=0, machine_spend={})
+        self.assertFalse(any('Which color?' in i['text'] for i in after['inbox']))
+
+    def test_ui_hold_projection_keeps_recorded_episode_and_command_claims_once(self):
+        root = self.first_paint_root()
+        inst = self.m.UIInstance(root)
+        scope = self.m.machine_scope(inst, 'root')
+        state = {'queued': 1, 'waiting_scopes': [scope], 'held': ['thermal pressure'], 'verify_limit': 1}
+        path = root / '.brain/wake/machine-holds.json'
+        with self.m.observe(inst):
+            first = self.m.machine_hold_items(inst, state)
+            self.assertEqual(first, self.m.machine_hold_items(inst, state))
+        self.assertFalse(path.exists())
+        self.assertFalse(path.with_suffix('.lock').exists())
+        recorded = self.m.machine_hold_items(inst, state)
+        before = path.read_bytes()
+        with self.m.observe(inst):
+            self.assertEqual(self.m.machine_hold_items(inst, state), recorded)
+        self.assertEqual(path.read_bytes(), before)
+        episode = recorded[scope[1]]['episode']
+        self.assertTrue(self.m.machine_hold_claim(inst, episode, scope[1]))
+        self.assertFalse(self.m.machine_hold_claim(inst, episode, scope[1]))
+
+    def test_ui_frozen_observation_preserves_clock_and_reports_existing_stall(self):
+        root = self.first_paint_root()
+        self.git('init', '-q', '-b', 'main', cwd=root)
+        inst = self.m.UIInstance(root)
+        node = inst.nodes()[0]
+        row = {'Job': 'job/palette', 'Started': '2026-01-01T00:00Z', 'Ended': ''}
+        self.m.write_jobs(inst, node, [row])
+        (root / 'status.md').write_text('## Active work\n\n| Branch | Thread | PR | State |\n'
+                                       '| --- | --- | --- | --- |\n| job/palette | fixture | - | frozen |\n')
+        now = datetime.datetime(2026, 1, 15, tzinfo=datetime.timezone.utc)
+        with mock.patch.object(self.m.UIInstance, 'now_dt', return_value=now):
+            with self.m.observe(inst):
+                self.assertEqual(self.m.watch_job_stalls(inst, node), [])
+            self.assertFalse(list((root / '.brain/wake').glob('job-stalls-*')))
+            self.assertEqual(self.m.watch_job_stalls(inst, node), [])
+        path = next((root / '.brain/wake').glob('job-stalls-*.json'))
+        before = path.read_bytes()
+        with mock.patch.object(self.m.UIInstance, 'now_dt', return_value=now + datetime.timedelta(minutes=16)):
+            with self.m.observe(inst):
+                items = self.m.watch_job_stalls(inst, node)
+                self.assertEqual(items, self.m.watch_job_stalls(inst, node))
+            self.assertEqual(path.read_bytes(), before)
+            self.assertEqual([i['kind'] for i in items], ['job-stall'])
+
+    def test_private_readmodel_cache_rejects_links_and_malformed_aggregates(self):
+        root = self.init('demo')
+        inst = self.m.UIInstance(root)
+        model = self.m.ReadModel(inst, 'code-one')
+        folder = root / '.brain/ui-cache'
+        folder.mkdir(mode=0o700)
+        outside = self.tmp / 'other.json'
+        outside.write_text('{"private": "outside"}')
+        (folder / 'metadata.json').symlink_to(outside)
+        self.assertIsNone(model.read('metadata'))
+        (folder / 'metadata.json').unlink()
+        os.link(outside, folder / 'metadata.json')
+        self.assertIsNone(model.read('metadata'))
+        self.assertEqual(outside.read_text(), '{"private": "outside"}')
+        spend = self.m._owners['spend_file']
+        for corrupt in ({}, {'state': None}, {'state': {'offset': -1}}, [], None):
+            self.assertFalse(spend.spend_cache_valid(corrupt, 'key', (1, 2), 'codex', [3, 4, 5, 6, 1], False))
+
+    def test_usage_discovery_revokes_completion_before_next_slice_and_clears_revoked_totals(self):
+        root = self.init('demo')
+        inst = self.m.UIInstance(root)
+        spend = self.m.UISpend(inst)
+        spend.permissions = (frozenset({self.tmp}), frozenset())
+        spend.value = {'complete': True, 'files': 1, 'read': 1, 'runtimes': {'codex': {'tokens': 20}}}
+        path = self.tmp / 'sessions/session.jsonl'
+        path.parent.mkdir()
+        path.write_text('{}\n')
+        with mock.patch.object(self.m, 'spend_sources', return_value=([('codex', self.tmp)], {self.tmp}, set())):
+            spend.discover()
+        self.assertFalse(spend.value['complete'])
+        self.assertTrue(spend.queue)
+        with mock.patch.object(self.m, 'spend_sources', return_value=([], set(), {self.tmp})):
+            spend.discover()
+        self.assertFalse(spend.value['complete'])
+        self.assertEqual(spend.value['runtimes'], {})
+        self.assertFalse(spend.aggs)
+
+    def test_usage_completion_controls_full_dashboard_without_discarding_partial_values(self):
+        import urllib.request
+        root = self.init('demo')
+        allowed = threading.Event()
+        spend = mock.Mock(inst=self.m.UIInstance(root), value={'complete': False, 'files': 2, 'read': 1},
+                          revision=0, permissions=None)
+        spend.refresh_view.return_value = False
+        def advance():
+            if allowed.is_set() and not spend.value['complete']:
+                spend.value = {'complete': True, 'files': 2, 'read': 2}
+                return True
+            return False
+        spend.advance.side_effect = advance
+        with self.integration_server(root, lambda inst: spend, cleanup=allowed.set) as (ready, get, workers, before):
+            self.assertTrue(ready.wait(2))
+            deadline = time.monotonic() + 5
+            while True:
+                with get('/api/state') as response:
+                    state = json.load(response)
+                if (state.get('spend') or {}).get('read') == 1:
+                    break
+                self.assertLess(time.monotonic(), deadline)
+                time.sleep(0.02)
+            self.assertTrue(state['brain']['filling_in'])
+            self.assertEqual(state['spend']['files'], 2)
+            with get('/api/loading') as response:
+                self.assertTrue(json.load(response)['filling_in'])
+            allowed.set()
+            while state['brain'].get('filling_in'):
+                self.assertLess(time.monotonic(), deadline)
+                with get('/api/state') as response:
+                    state = json.load(response)
+            self.assertEqual(state['spend']['read'], 2)
+            with get('/api/loading') as response:
+                self.assertFalse(json.load(response)['filling_in'])
+
     @contextlib.contextmanager
     def integration_server(self, root, spend, cleanup=lambda: None, every=0.05):
         import http.server
@@ -328,6 +578,9 @@ class ExpandedUI(Scenario):
                                 if line.startswith(b'data: '):
                                     full = json.loads(line[6:])
                             self.assertNotIn(answered[2:], full['nodes'][0]['inbox'])
+                            self.assertEqual(snapshot(), before)
+                            # Only the explicit ordinary reader applies queued business state.
+                            self.m.inbox_lines(inst.nodes()[0])
                             self.assertNotEqual(lifecycle.read_bytes(), before[0])
                             if with_queue:
                                 self.assertEqual(list(queue.iterdir()), [])
@@ -341,6 +594,7 @@ class ExpandedUI(Scenario):
 
     def test_initial_failure_recovers_on_same_server_refresh_without_another_worker(self):
         root = self.first_paint_root()
+        fixed = self.m.UIInstance(root).now_dt()
         real_state = self.m.ui_state
         for stage in ('discover', 'state'):
             with self.subTest(stage=stage):
@@ -371,7 +625,10 @@ class ExpandedUI(Scenario):
                 if stage == 'discover':
                     spend.discover.side_effect = fault
                 stream = None
-                with mock.patch.object(self.m, 'ui_state', side_effect=state):
+                # Compare publication contents at one instance time; request/retry
+                # scheduling still uses the real monotonic clock.
+                with mock.patch.object(self.m.UIInstance, 'now_dt', return_value=fixed), \
+                     mock.patch.object(self.m, 'ui_state', side_effect=state):
                     with self.integration_server(root, lambda _: spend, release_retry.set) as (ready, get, workers, start):
                         try:
                             self.assertTrue(ready.wait(0.5))
@@ -635,6 +892,153 @@ class ExpandedUI(Scenario):
             self.assertIsNone(module.ui_reuse_server(inst, 4747, 'new'))
             kill.assert_not_called()
 
+    def test_closed_worktrees_keep_metadata_without_git_or_socket_checks(self):
+        module = self.m._owners['cached_worktree']
+        root = self.first_paint_root()
+        inst = self.m.UIInstance(root)
+        node = inst.nodes()[0]
+        record = {'path': str(root), 'port': 4747}
+        node['local']['worktrees'] = {'job/closed': record, 'job/live': record}
+        rows = [{'Job': 'job/closed', 'Ended': '2026-01-01'}, {'Job': 'job/live', 'Ended': ''}]
+        cache = module.UIStateCache()
+        with mock.patch.object(module._m_jobs, 'read_jobs', return_value=rows), \
+             mock.patch.object(module._m_status, 'active_work', return_value=[]), \
+             mock.patch.object(module, 'ui_worktree', return_value={'branch': 'job/live'}) as inspect:
+            closed = module.cached_worktree(inst, root, 'job/closed', record, node, cache)
+            inspect.assert_not_called()
+            self.assertEqual(closed['branch'], 'job/closed')
+            self.assertTrue(closed['exists'])
+            self.assertIsNone(closed['dirty'])
+            self.assertFalse(closed['live'])
+            module.cached_worktree(inst, root, 'job/live', record, node, cache)
+            inspect.assert_called_once()
+            with mock.patch.object(module._m_status, 'active_work', return_value=[['job/closed', 'old thread', '-', 'Review']]):
+                self.assertEqual(set(module.ui_live_worktrees(node)), {'job/live'})
+
+    def test_due_repository_snapshot_batches_refs_and_display_cache_never_leaks_to_actions(self):
+        module = self.m._owners['local_job_state']
+        root = self.first_paint_root()
+        home = self.repo(self.tmp / 'repository')
+        inst = self.m.UIInstance(root)
+        node = inst.nodes()[0]
+        node['home_path'] = home
+        tip = self.git('rev-parse', 'HEAD', cwd=home).strip()
+        self.git('branch', 'job/merged', cwd=home)
+        record = {'path': str(home), 'start': '0' * 40}
+        values, keys = {}, {('root', 'job/merged'): 'first'}
+        real_git = module._m_common.git
+        with mock.patch.object(module._m_common, 'git', wraps=real_git) as git:
+            with module.local_job_snapshot(values, keys):
+                first = module.local_job_state(node, 'job/merged', record)
+                for i in range(160):
+                    module.local_job_state(node, 'job/missing-' + str(i), record)
+            self.assertEqual(first, {'exists': True, 'tip': tip, 'merged': True})
+            self.assertLess(git.call_count, 8, 'one ref scan per node, not commands per worktree')
+            git.reset_mock()
+            with module.local_job_snapshot(values, keys):
+                self.assertEqual(module.local_job_state(node, 'job/merged', record), first)
+            git.assert_not_called()
+            self.git('branch', '-D', 'job/merged', cwd=home)
+            self.assertEqual(module.local_job_state(node, 'job/merged', record)['tip'], '')
+            self.assertGreater(git.call_count, 0, 'an explicit action must read current refs')
+            keys[('root', 'job/merged')] = 'second'
+            with module.local_job_snapshot(values, keys):
+                self.assertEqual(module.local_job_state(node, 'job/merged', record)['tip'], '')
+
+    def test_input_tree_reuses_inventory_and_detects_nested_changes(self):
+        module = self.m._owners['UIInputs']
+        root = self.tmp / 'inputs'
+        nested = root / 'nested'
+        nested.mkdir(parents=True)
+        source = nested / 'source.md'
+        source.write_text('one')
+        tree = module.UIInputTree()
+        with mock.patch.object(module.os, 'scandir', wraps=os.scandir) as scan:
+            first = tree.paths(root)
+            scans = scan.call_count
+            self.assertEqual(tree.paths(root), first)
+            self.assertEqual(scan.call_count, scans)
+            old = module.UIInputs.stamp(source)
+            source.write_text('changed in place')
+            self.assertNotEqual(module.UIInputs.stamp(source), old)
+            added = nested / 'added.md'
+            added.write_text('new')
+            self.assertIn(added, tree.paths(root))
+            self.assertGreater(scan.call_count, scans)
+            source.unlink()
+            self.assertNotIn(source, tree.paths(root))
+            shutil.rmtree(nested)
+            self.assertNotIn(added, tree.paths(root))
+        outside = self.tmp / 'outside'
+        outside.mkdir()
+        (outside / 'private.md').write_text('outside')
+        nested.symlink_to(outside, target_is_directory=True)
+        self.assertIn(nested, tree.paths(root))
+        self.assertNotIn(nested / 'private.md', tree.paths(root))
+
+    def test_input_discovery_scans_only_live_worktrees_and_reopens_on_ledger_change(self):
+        module = self.m._owners['UIInputs']
+        root = self.first_paint_root()
+        inst = self.m.UIInstance(root)
+        node = inst.nodes()[0]
+        node['home_path'], node['external'] = root, True
+        records = {f'job/closed-{i}': {'path': str(root / f'closed-{i}')} for i in range(160)}
+        records['job/live'] = {'path': str(root / 'live')}
+        node['local']['worktrees'] = records
+        rows = [{'Job': 'job/live', 'Ended': ''}]
+        with mock.patch.object(module._m_jobs, 'read_jobs', side_effect=lambda _: list(rows)), \
+             mock.patch.object(module._m_status, 'active_work', return_value=[]), \
+             mock.patch.object(module._m_common, 'git', return_value=subprocess.CompletedProcess([], 0, '', '')) as git:
+            inputs = module.UIInputs(inst)
+            inspected = {call.kwargs.get('cwd') for call in git.call_args_list}
+            self.assertEqual(inspected, {root, root / 'live'})
+            before = inputs.topology
+            rows.append({'Job': 'job/closed-1', 'Ended': ''})
+            self.assertNotEqual(module.UIInputs.topology_key(inst), before)
+            rows[:] = []
+            with mock.patch.object(module._m_status, 'active_work', return_value=[['`job/closed-2`', 'thread', '-', 'working']]):
+                self.assertEqual(set(module.ui_live_worktrees(node)), {'job/closed-2'})
+
+    def test_indexed_inputs_preserve_full_walk_inventory_and_file_currentness(self):
+        module = self.m._owners['UIInputs']
+        root = self.first_paint_root()
+        inst = self.m.UIInstance(root)
+        inputs = module.UIInputs(inst)
+        sources = root / 'sessions'
+        nested = sources / 'nested'
+        nested.mkdir(parents=True)
+        source = nested / 'session.jsonl'
+        source.write_text('{}\n')
+        inputs.source_trees = [sources]
+
+        def full_walk(top, ignored_dirs=None, ignored_files=None):
+            paths = {top}
+            for directory, dirs, files in os.walk(top):
+                directory = Path(directory)
+                dirs[:] = [name for name in dirs if name not in (ignored_dirs or {}).get(directory, ())]
+                paths.update(directory / name for name in dirs)
+                paths.update(directory / name for name in files
+                             if name not in (ignored_files or {}).get(directory, ()))
+            return paths
+
+        def compare():
+            actual = inputs.signature(), inputs.source_signature()
+            with mock.patch.object(inputs.inventory, 'paths', side_effect=full_walk):
+                self.assertEqual(actual, (inputs.signature(), inputs.source_signature()))
+            return actual
+
+        before = compare()
+        parent_stamp = module.UIInputs.stamp(nested)
+        source.write_text('{"changed":true}\n')
+        self.assertEqual(module.UIInputs.stamp(nested), parent_stamp)
+        changed = compare()
+        self.assertNotEqual(before, changed, 'in-place writes must invalidate cached inventories')
+        (nested / 'new.jsonl').write_text('{}\n')
+        added = compare()
+        self.assertNotEqual(changed, added)
+        shutil.rmtree(nested)
+        self.assertNotEqual(added, compare())
+
     def test_legacy_server_ownership_requires_python_brain_ui_and_the_same_brain(self):
         # Cwd/argv cannot prove the selected instance: BRAIN_ROOT can override cwd,
         # and re-exec can consume the original CLI selector before ps observes it.
@@ -665,6 +1069,175 @@ class ExpandedUI(Scenario):
                             self.assertFalse(module.ui_legacy_owner(12345, root))
                             kill.assert_not_called()
                             request.assert_not_called()
+
+    def test_open_reuses_then_replaces_an_authenticated_listener_on_the_requested_port(self):
+        import http.server
+        import socket
+        import webbrowser
+        root = self.first_paint_root()
+        inst = self.m.UIInstance(root)
+        with socket.socket() as reservation:
+            reservation.bind(('127.0.0.1', 0))
+            port = reservation.getsockname()[1]
+        servers, threads, workers, opened, errors = [], [], [], [], []
+        opened_event = threading.Event()
+        original_server, original_start = http.server.ThreadingHTTPServer, threading.Thread.start
+        def server(*args, **kwargs):
+            value = original_server(*args, **kwargs)
+            servers.append(value)
+            return value
+        def start(thread):
+            if getattr(thread._target, '__name__', '') == 'initialize':
+                workers.append(thread)
+            return original_start(thread)
+        def open_url(url):
+            opened.append(url)
+            opened_event.set()
+        def run():
+            try:
+                self.m.cmd_ui(argparse.Namespace(json=False, scan=[], open=True, write=False, port=port, every=0.05))
+            except BaseException as error:
+                errors.append(error)
+        with mock.patch.object(self.m, 'load', return_value=inst), \
+             mock.patch.object(self.m, 'UISpend', side_effect=RuntimeError('synthetic initialization held')), \
+             mock.patch.object(self.m, 'ui_code_version', side_effect=['old', 'old', 'new']), \
+             mock.patch.object(http.server, 'ThreadingHTTPServer', side_effect=server), \
+             mock.patch.object(threading.Thread, 'start', start), \
+             mock.patch.object(webbrowser, 'open', side_effect=open_url), \
+             contextlib.redirect_stdout(io.StringIO()):
+            try:
+                threads.append(threading.Thread(target=run, daemon=True))
+                threads[-1].start()
+                self.assertTrue(opened_event.wait(2), 'first owned listener did not start')
+                run()
+                self.assertEqual(errors, [])
+                self.assertEqual(opened, [opened[0], opened[0]])
+                self.assertEqual(len(servers), 1, 'matching version opened another listener')
+                opened_event.clear()
+                threads.append(threading.Thread(target=run, daemon=True))
+                threads[-1].start()
+                self.assertTrue(opened_event.wait(3), 'stale owned listener was not replaced')
+                threads[0].join(1)
+                self.assertFalse(threads[0].is_alive())
+                self.assertEqual(errors, [])
+                record = json.loads(self.m.ui_server_file(inst, port).read_text())
+                self.assertEqual(record['version'], 'new')
+                self.assertNotEqual(opened[-1], opened[0], 'replacement retained obsolete authentication key')
+                self.assertTrue(all(server.server_address[1] == port for server in servers))
+                self.assertEqual(self.m.ui_server_request(port, record['key'])['version'], 'new')
+            finally:
+                for owned in servers:
+                    if owned.fileno() >= 0:
+                        owned.shutdown()
+                for thread in threads + workers:
+                    thread.join(2)
+                self.assertFalse(any(thread.is_alive() for thread in threads + workers))
+        self.assertEqual(errors, [])
+        with socket.socket() as probe:
+            self.assertNotEqual(probe.connect_ex(('127.0.0.1', port)), 0, 'owned listener leaked')
+
+    def test_preview_tour_receipt_binds_source_and_artifacts_and_never_clears_on_a_bare_url(self):
+        import hashlib
+        root = self.first_paint_root()
+        home = self.repo(self.tmp / 'preview-source')
+        inst = self.m.UIInstance(root)
+        node = inst.nodes()[0]
+        node['home_path'], node['external'] = home, True
+        node['local']['preview'] = 'http://127.0.0.1:4999/'
+        folder = self.tmp / 'preview-evidence'
+        folder.mkdir()
+        image = folder / 'overview.png'
+        # A synthetic PNG header; the receipt checks format and bytes, not visual quality.
+        image.write_bytes(b'\x89PNG\r\n\x1a\n' + b'\0' * 4 + b'IHDR' + (1280).to_bytes(4, 'big') + (720).to_bytes(4, 'big'))
+        tour = folder / 'index.md'
+        tour.write_text('# Preview tour\n\n![Overview](overview.png)\n')
+        node['local']['preview_tour'] = str(tour)
+        module = self.m._owners['cmd_report']
+        self.assertEqual(module.preview_evidence(inst, node)['state'], 'missing')
+        def preview_due():
+            state = {'jobs': [], 'worktrees': {}, 'handbacks': {}, 'inbox': []}
+            with mock.patch.object(self.m, 'due_evidence', return_value=(state, '', '')):
+                return [row['kind'] for row in self.m.due_items(inst, node, include_stale=False, include_advice=False)]
+        self.assertIn('preview-evidence', preview_due())
+        def artifact(path):
+            return {'path': str(path), 'sha256': hashlib.sha256(path.read_bytes()).hexdigest()}
+        receipt = {'version': 1, 'url': node['local']['preview'], 'branch': '',
+                   'head': self.git('rev-parse', 'HEAD', cwd=home).strip(),
+                   'checked_at': inst.now_dt().isoformat(), 'tour': artifact(tour), 'screenshots': [artifact(image)]}
+        input_path = folder / 'receipt.json'
+        input_path.write_text(json.dumps(receipt))
+        with mock.patch.object(module._m_nodes, 'load', return_value=inst), contextlib.redirect_stdout(io.StringIO()):
+            module.cmd_preview(argparse.Namespace(id='root', record=str(input_path), json=False))
+        self.assertEqual(module.preview_evidence(inst, node)['state'], 'verified')
+        self.assertNotIn('preview-evidence', preview_due())
+        ui = self.m._owners['UIInputs']
+        inputs = ui.UIInputs(inst)
+        before_key = inputs.node_keys(inst, inputs.signature())['root']
+        image.write_bytes(image.read_bytes() + b'changed')
+        self.assertNotEqual(inputs.node_keys(inst, inputs.signature())['root'], before_key,
+                            'external screenshot metadata did not invalidate cached preview evidence')
+        self.assertEqual(module.preview_evidence(inst, node)['state'], 'stale')
+        self.assertIn('preview-evidence', preview_due())
+        image.write_bytes(image.read_bytes()[:-7])
+        self.git('commit', '--allow-empty', '-qm', 'next preview revision', cwd=home)
+        self.assertEqual(module.preview_evidence(inst, node)['state'], 'stale')
+        before = module.preview_receipt_file(inst, node).read_bytes()
+        receipt['head'] = self.git('rev-parse', 'HEAD', cwd=home).strip()
+        receipt['screenshots'] = []
+        input_path.write_text(json.dumps(receipt))
+        with mock.patch.object(module._m_nodes, 'load', return_value=inst), self.assertRaises(SystemExit):
+            module.cmd_preview(argparse.Namespace(id='root', record=str(input_path), json=False))
+        self.assertEqual(module.preview_receipt_file(inst, node).read_bytes(), before)
+        receipt['screenshots'] = [artifact(image)]
+        for changed in ({'url': 'https://example.invalid/other'}, {'branch': 'unbound'},
+                        {'head': '0' * 40}, {'checked_at': 'not-a-date'}, {'version': True},
+                        {'screenshots': [artifact(image), artifact(image)]}):
+            with self.subTest(changed=list(changed)), self.assertRaises(ValueError):
+                module.validate_preview_evidence(inst, node, {**receipt, **changed})
+        node['local']['preview_tour'] = str(folder / 'another.md')
+        with self.assertRaises(ValueError):
+            module.validate_preview_evidence(inst, node, receipt)
+
+    def test_round_usage_payload_keeps_lifetime_and_reports_unknown_receipts(self):
+        module = self.m._owners['ui_node']
+        root = self.first_paint_root()
+        inst = self.m.UIInstance(root)
+        node = inst.nodes()[0]
+        row = {'Job': 'job/live', 'Started': '2026-01-01T00:00:00Z', 'Ended': ''}
+        total = {'sessions': 1, 'processed': 900000, 'compactions': 8}
+        round_usage = {'processed': 2000, 'compactions': 0, 'hours': 0.25}
+        with mock.patch.object(module._m_jobs, 'jobs_summary', side_effect=lambda *_: {'open': [dict(row)], 'forecasts': []}), \
+             mock.patch.object(module._m_spend, 'live_usage', return_value=total), \
+             mock.patch.object(module._m_spend, 'spend_summary', side_effect=lambda value, _: value), \
+             mock.patch.object(module._m_spend, 'job_round_usage', create=True, return_value=round_usage) as rounds:
+            output = module.ui_node(inst, node, '')[0]['jobs']['open'][0]
+            self.assertEqual(output['usage'], total)
+            self.assertEqual(output['round_usage'], round_usage)
+            rounds.assert_called_once()
+            rounds.side_effect = ValueError('private invalid receipt detail')
+            output = module.ui_node(inst, node, '')[0]['jobs']['open'][0]
+            self.assertEqual(output['usage'], total)
+            self.assertEqual(output['round_usage'], {'state': 'unavailable', 'processed': None, 'compactions': None, 'hours': None})
+            self.assertNotIn('private invalid receipt detail', json.dumps(output))
+
+    def test_round_receipt_metadata_invalidates_only_its_job_node_cache(self):
+        module = self.m._owners['UIInputs']
+        root = self.first_paint_root()
+        other = root / 'nodes/amber'
+        other.mkdir()
+        (other / 'node.md').write_text('---\nid: amber\ntitle: Amber\n---\n')
+        inst = self.m.UIInstance(root)
+        row = {'Job': 'job/live', 'Started': '2026-01-01T00:00:00Z', 'Ended': ''}
+        with mock.patch.object(module._m_jobs, 'read_jobs', side_effect=lambda n: [row] if n['id'] == 'meadow' else []):
+            inputs = module.UIInputs(inst)
+            before = inputs.node_keys(inst, inputs.signature())
+            path = root / '.brain/wake/lifecycle.json'
+            path.parent.mkdir(exist_ok=True)
+            key = module._m_jobs.digest(['meadow', module._m_jobs.job_key(row)])
+            path.write_text(json.dumps({'usage': {key: {'job': module._m_jobs.job_key(row), 'round_at': '2026-01-02T00:00:00Z'}}}))
+            after = inputs.node_keys(inst, inputs.signature())
+            self.assertNotEqual(before['meadow'], after['meadow'])
+            self.assertEqual(before['amber'], after['amber'])
 
     def test_partial_blocked_ages_are_unknown_without_history_and_do_not_poison_full_metadata(self):
         inst = self.m.UIInstance(self.first_paint_root())
@@ -733,15 +1306,36 @@ class ExpandedUI(Scenario):
         rows = [{"Job":f"job-{i}", "Started":"2026-01-01T00:00:00+00:00", "Ended":"2026-01-01T01:00:00+00:00",
                  "Hours":"1", "Reviews":"2", "Outcome":"merged", "Lesson check":"required"} for i in range(65)]
         self.m.write_jobs(inst, node, rows)
-        with mock.patch.object(self.m, "usage_refresh", side_effect=AssertionError("UI must never poll")):
+        def files():
+            # Reminder lifecycle receipts reconcile on reads. Completion facts
+            # and their delivery state must remain untouched by the dashboard.
+            paths = [node['dir'] / 'job-ledger.md']
+            for pattern in ('events*', 'watch*'):
+                for path in (root / '.brain').glob(pattern):
+                    paths.extend(path.rglob('*') if path.is_dir() else [path])
+            return {str(p.relative_to(root)): p.read_bytes() for p in paths
+                    if p.is_file() and not p.is_symlink()}
+        before = files()
+        with mock.patch.object(self.m, "usage_refresh", side_effect=AssertionError("UI must never poll")), \
+             mock.patch.object(self.m, "wake_send", side_effect=AssertionError("UI must never call a host")):
             state = self.m.ui_state(inst)
+        self.assertEqual(files(), before)
         ui_node = next(n for n in state["nodes"] if n["id"] == "project")
         self.assertEqual(len(ui_node["jobs"]["rows"]), 65)
         self.assertEqual(ui_node["jobs"]["median_reviews"], 2)
         self.assertEqual(len([d for d in state["due"] if d["kind"] == "lesson-outcome"]), 65)
+        landed = [d['id'] for d in state['due'] if d['kind'] == 'job-landed']
+        self.assertEqual(len(landed), 65)
+        self.assertEqual(len(set(landed)), 65)
         # The live view adds branch names; stable item IDs also appear in `brain due --json`.
         self.assertEqual([d.get("branch") for d in state["due"] if d["kind"] == "lesson-outcome"][:2], ["job-0", "job-1"])
         self.assertEqual([{k: v for k, v in d.items() if k != "branch"} for d in state["due"]], json.loads(self.b(root, "due", "--json")))
+        after_cli = files()
+        with mock.patch.object(self.m, "usage_refresh", side_effect=AssertionError("UI must never poll")), \
+             mock.patch.object(self.m, "wake_send", side_effect=AssertionError("UI must never call a host")):
+            again = self.m.ui_state(self.m.Instance(root))
+        self.assertEqual([d['id'] for d in again['due'] if d['kind'] == 'job-landed'], landed)
+        self.assertEqual(files(), after_cli)
 
     def test_ui_search_ranks_folds_and_pages(self):
         names = ["Mariana", "Bruno Ana", "Ánalyst", "Ana Lima", "ana", "Zed"]

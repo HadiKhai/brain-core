@@ -118,7 +118,7 @@ class DueLifecycle(Scenario):
         self.assertEqual(dipped, first)
         self.m.acknowledge_usage_restart(self.inst, self.n, self.row)
         after = {i['condition']: i['id'] for i in self.advice()}
-        self.assertEqual(set(after), {'budget-hours', 'budget-tokens', 'compaction-limit'})
+        self.assertEqual(set(after), set())  # Delivered restart gives the replacement its own allowance.
         self.assertTrue(set(after.values()).isdisjoint(first.values()))
         self.stats['open'][0]['Job'] = 'job/brush'
         self.m.write_jobs(self.inst, self.n, [{**self.row, 'Job': 'job/brush'}])
@@ -153,16 +153,19 @@ class DueLifecycle(Scenario):
         self.n = self.inst.node('maple')
         self.advice_setup()
 
-    def episode_snapshot(self, state):
+    def episode_snapshot(self, state, conditions=None):
+        conditions = set(('median-age', 'median-tokens', 'budget-tokens', 'budget-hours',
+                          'compaction-limit', 'subagent-share') if conditions is None else conditions)
         items = self.advice()
-        self.assertEqual(len(items), 6)
+        self.assertEqual({i['condition'] for i in items}, conditions)
+        self.assertEqual(len(items), len(conditions))
         if state is not None:
             self.assertEqual({i['state'] for i in items}, {state})
         output = io.StringIO()
         with mock.patch.object(self.m, 'load', return_value=self.inst), contextlib.redirect_stdout(output):
             self.m.cmd_inbox(argparse.Namespace(id='maple', new=True, json=True, weekly=False))
         fresh = [i for i in json.loads(output.getvalue()) if i['kind'] == 'job']
-        self.assertEqual(len(fresh), 6)
+        self.assertEqual(len(fresh), len(conditions))
         self.assertTrue(all(i['informational'] for i in fresh))
         return {i['id'] for i in items}, {i['id'] for i in fresh}
 
@@ -249,7 +252,10 @@ class DueLifecycle(Scenario):
         self.episode_setup()
         before = self.episode_snapshot('open')
         self.m.acknowledge_usage_restart(self.inst, self.n, self.row)
-        after = self.episode_snapshot('open')
+        # A replacement gets fresh round counters; lifetime comparisons remain.
+        retained = {'median-age', 'median-tokens', 'subagent-share'}
+        after = self.episode_snapshot('open', retained)
+        self.assertEqual(self.usage, {'processed': 30, 'compactions': 3, 'subagents': 1, 'sub_share': .6})
         self.assert_episode_changed(before, after)
         for field, value in (('Started', '2026-01-15T09:00Z'), ('Job', 'job/brush')):
             self.row[field] = value
@@ -657,6 +663,121 @@ class DueLifecycle(Scenario):
         self.inst.cfg['host'] = 'unsupported'
         self.assertIn('gap', self.m.wake_setup_plan(self.inst, self.n))
 
+    def test_fix3_restart_thresholds_are_independent_blocking_and_protected(self):
+        row = self.identity_row()
+        cases = [
+            ({'compactions': 2, 'processed': 199}, 100, False),
+            ({'compactions': 3, 'processed': 0}, 100, True),
+            ({'compactions': 0, 'processed': 200}, 100, True),
+            ({'compactions': 3, 'processed': None}, None, True),
+            ({'compactions': None, 'processed': 200}, 100, True),
+            ({'compactions': None, 'processed': None}, 100, False),
+            ({'compactions': 0, 'processed': 999}, None, False),
+            ({'compactions': 0, 'processed': 999}, 0, False),
+            ({'compactions': 0, 'processed': 999}, -10, False),
+            ({'compactions': 0, 'processed': 999}, True, False),
+        ]
+        for index, (counts, budget, expected) in enumerate(cases):
+            with self.subTest(counts=counts, budget=budget):
+                current = {**row, 'Job': 'job/threshold-' + str(index)}
+                with mock.patch.object(self.m, 'live_usage', return_value=counts), \
+                        mock.patch.object(self.m, 'job_budget', return_value={'tokens': budget}):
+                    item = self.m.usage_restart_item(self.inst, self.n, current)
+                self.assertEqual(item is not None, expected)
+                if item:
+                    self.assertEqual(item['kind'], 'job-restart')
+                    self.assertTrue(item['blocking'])
+                    self.assertTrue(item['protected'])
+                    self.assertFalse(item.get('informational', False))
+                    self.assertIn('BLOCKING', item['text'])
+                    self.assertIn(self.m.restart_command(self.n, current), item['text'])
+                    self.assertTrue(self.m.watch_decision_item(item))
+                    for action in ('ack', 'defer'):
+                        self.assertFalse(self.m.reminder_eligible(item, action))
+
+    def test_fix3_completed_jobs_do_not_restart_and_other_nodes_do_not_own_need(self):
+        row = self.identity_row()
+        self.m.write_jobs(self.inst, self.n, [row])
+        self.n['local']['worktrees'] = {row['Job']: {'path': str(self.root)}}
+        usage = {**self.m.spend_sum([]), 'compactions': 3, 'processed': 200, 'sessions': 1}
+        with mock.patch.object(self.m, 'live_usage', return_value=usage), \
+                mock.patch.object(self.m, 'job_budget', return_value={'tokens': 100}), \
+                mock.patch.object(self.m, 'local_job_state', return_value={'exists': True, 'merged': False}):
+            due = self.m.due_items(self.inst, self.n, include_stale=False, include_ready=False, include_advice=False)
+            need = next(i for i in due if i['kind'] == 'job-restart')
+            self.assertEqual((need['node'], need['job']), ('root', self.m.job_key(row)))
+            self.b(self.root, 'new', 'app', '--title', 'App')
+            child = self.m.Instance(self.root).node('app')
+            self.assertFalse(any(i['kind'] == 'job-restart' for i in self.m.due_items(
+                self.inst, child, include_stale=False, include_ready=False, include_advice=False)))
+            watched = next(i for i in self.m.watch_items(self.inst, self.n) if i['kind'] == 'job-restart')
+            self.assertTrue(self.m.watch_decision_item(watched))
+            for terminal in ('done', 'failed', 'blocked', 'question'):
+                signal = {'job': row['Job'], 'started': row['Started'], 'state': terminal}
+                with mock.patch.object(self.m, 'job_signal', return_value=signal):
+                    self.assertFalse(any(i['kind'] == 'job-restart' for i in self.m.due_items(
+                        self.inst, self.n, include_stale=False, include_ready=False, include_advice=False)))
+            with mock.patch.object(self.m, 'local_job_state', return_value={'exists': True, 'merged': True}):
+                self.assertFalse(any(i['kind'] == 'job-restart' for i in self.m.due_items(
+                    self.inst, self.n, include_stale=False, include_ready=False, include_advice=False)))
+            self.assertIsNone(self.m.usage_restart_item(self.inst, self.n, {**row, 'Ended': '2026-01-15T10:00Z'}))
+
+    def test_fix3_manual_restart_rebrief_establishes_baseline_without_usage_scan(self):
+        row = self.identity_row()
+        signal = {'job': row['Job'], 'started': row['Started'], 'state': 'blocked',
+                  'restart': 'compactions', 'restart_id': 'a' * 32}
+        with mock.patch.object(self.m, 'live_usage', return_value={'compactions': 3, 'processed': 200}), \
+                mock.patch.object(self.m, 'job_signal', return_value=signal), \
+                mock.patch.object(self.m, 'job_budget', return_value={'tokens': 100}):
+            # The manual restart due path does not call usage_restart_item.
+            # Its successful rebrief must still consume the old worker's usage.
+            self.m.acknowledge_usage_restart(self.inst, self.n, row)
+            self.assertIsNone(self.m.usage_restart_item(self.inst, self.n, row))
+
+    def test_fix3_quiet_due_blocks_owner_until_restart_boundary(self):
+        row = self.identity_row()
+        state = {'jobs': [row], 'worktrees': {row['Job']: {'exists': True, 'merged': False}},
+                 'handbacks': {self.m.job_key(row): None}, 'inbox': []}
+        with mock.patch.object(self.m, 'load', return_value=self.inst), \
+                mock.patch.object(self.m, 'due_evidence', return_value=(state, '', '')), \
+                mock.patch.object(self.m, 'status_lag', return_value=None), \
+                mock.patch.object(self.m, 'changes_due', return_value=[]), \
+                mock.patch.object(self.m, 'watch_once'), \
+                mock.patch.object(self.m, 'live_usage', return_value={'compactions': 3, 'processed': 200}), \
+                mock.patch.object(self.m, 'runaway_jobs', return_value=[]):
+            args = argparse.Namespace(id='root', quiet=True, json=False)
+            with self.assertRaises(SystemExit) as result:
+                self.m.cmd_due(args)
+            self.assertEqual(result.exception.code, 1)
+            self.m.acknowledge_usage_restart(self.inst, self.n, row)
+            with self.assertRaises(SystemExit) as result:
+                self.m.cmd_due(args)
+            self.assertEqual(result.exception.code, 0)
+
+    def test_fix3_usage_episode_survives_unknown_and_rearms_only_after_rebrief(self):
+        row = self.identity_row()
+        usage = {'compactions': 3, 'processed': 100}
+        with mock.patch.object(self.m, 'live_usage', side_effect=lambda *a: usage), \
+                mock.patch.object(self.m, 'job_budget', return_value={'tokens': 100}):
+            first = self.m.usage_restart_item(self.inst, self.n, row)
+            usage = None
+            unknown = self.m.usage_restart_item(self.inst, self.n, row)
+            self.assertEqual(first['episode'], unknown['episode'])
+            self.assertIn('unknown', unknown['text'])
+            with mock.patch.object(self.m, 'job_budget', return_value={'tokens': 10000}):
+                self.assertEqual(first['episode'], self.m.usage_restart_item(self.inst, self.n, row)['episode'])
+            usage = {'compactions': 4, 'processed': 150}
+            self.assertEqual(first['episode'], self.m.usage_restart_item(self.inst, self.n, row)['episode'])
+            self.m.acknowledge_usage_restart(self.inst, self.n, row)
+            self.assertIsNone(self.m.usage_restart_item(self.inst, self.n, row))
+            usage = {'compactions': 6, 'processed': 349}
+            self.assertIsNone(self.m.usage_restart_item(self.inst, self.n, row))
+            usage['processed'] = 350
+            again = self.m.usage_restart_item(self.inst, self.n, row)
+            self.assertNotEqual(first['episode'], again['episode'])
+            other = {**row, 'Started': '2026-01-15T11:00Z'}
+            self.assertNotEqual(again['episode'], self.m.usage_restart_item(self.inst, self.n, other)['episode'])
+
     def test_r1_usage_restart_is_stable_and_rebrief_baseline_resets(self):
         row = {**dict.fromkeys(self.m.JOB_COLS, ''), 'Job': 'job-fixture',
                'Started': '2026-01-15T09:00:00Z'}
@@ -679,8 +800,8 @@ class DueLifecycle(Scenario):
             evidence = ({'jobs': [row], 'worktrees': {}, 'handbacks': {self.m.job_key(row): None}, 'inbox': []}, '', '')
             due = self.m.due_items(self.inst, self.n, evidence=evidence, include_stale=False,
                                    include_ready=False, include_advice=False)
-            self.assertEqual(sum(i['kind'] == 'restart' for i in due), 1)
-            self.assertEqual(next(i for i in due if i['kind'] == 'restart')['episode'], again['episode'])
+            self.assertEqual(sum(i['kind'] == 'job-restart' for i in due), 1)
+            self.assertEqual(next(i for i in due if i['kind'] == 'job-restart')['episode'], again['episode'])
             self.assertEqual(row['Ended'], '')
             self.assertIsNone(self.m.usage_restart_item(self.inst, self.n, {**row, 'Ended': '2026-01-15T11:00Z'}))
         args = argparse.Namespace(id='root', small=False, branch=None, import_study=False,

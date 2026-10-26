@@ -11,6 +11,15 @@ Before launching, run `brain usage`. Use only a subscription allowed for this br
 the stop line; follow the subscription and host instance in the brief. Unknown usage must be
 stated; never run a polling loop in an agent.
 
+When the host exposes its native MCP transport, the explicit single-command path
+is `brain new <id> --title "…" --runtime <runtime> --brief "<outcome>"
+--coordinator [--model <configured model>]`. It creates the node, registers its
+host workspace, starts and pins its coordinator. Use `brain host provision <id>`
+for an existing node. The new coordinator runs `brain host wake-setup <id>` itself
+so its webhook cannot bind the parent caller. Interrupted launches retain a pending
+marker: inspect and bind their actual host result before retrying. See
+`docs/host-provisioning.md`. Without native transport, follow the steps below.
+
 1. **Collect the details.** Infer what you can and ask only for what's missing:
    - the id (lowercase, dashes);
    - the title;

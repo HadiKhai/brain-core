@@ -63,6 +63,15 @@ class WatchExtension(Scenario):
         path.parent.mkdir(exist_ok=True)
         path.write_text(json.dumps(value))
 
+    def completion_recipient(self, case):
+        # Each read-failure case needs an owner that has not already received
+        # these identities in an earlier case's successful frozen snapshot.
+        self.inst.local_of('root')['coordinator'] = 'fixture-root-' + str(case)
+        self.inst.save_local()
+        root = self.inst.node('root')
+        self.assertEqual(self.m.wake_shown(self.inst, root), set())
+        return root
+
     def test_rotate_counts_deduplicate_until_coordinator_episode_changes(self):
         root = self.inst.node('root')
         root['local']['coordinator_sessions'] = ['fixture-session-a']
@@ -317,6 +326,7 @@ class WatchExtension(Scenario):
             return original(path, *args, **kwargs)
         question = {'id': 'd' * 64, 'kind': 'inbox'}
         for mode in ('handback', 'packet'):
+            root = self.completion_recipient(mode)
             with self.subTest(mode=mode), mock.patch.object(self.m, 'changes_due', return_value=[]), \
                     mock.patch.object(self.m, 'wake_start'), mock.patch.object(self.m, 'WAKE_INTERVAL', 0), \
                     mock.patch.object(self.m, 'wake_send', return_value=True) as send:
@@ -333,6 +343,13 @@ class WatchExtension(Scenario):
                 self.assertIn('job-ready', [i['kind'] for i in history[-1]['items']])
                 if mixed:
                     self.assertIn(question, history[-1]['items'])
+                # A different request reason cannot redeliver the same shown
+                # identities, even while the completion read remains unknown.
+                with failure:
+                    self.m.request_wake(self.inst, root, 'repeat ' + mode,
+                                        items=history[-1]['items'], explicit=True)
+                    self.m.wake_drain(self.inst, root, once=True)
+                self.assertEqual(send.call_count, 1)
                 self.watch()
                 self.assertFalse(list(self.m.wake_directory(self.inst, root).glob('*.pending')))
 
@@ -408,6 +425,7 @@ class WatchExtension(Scenario):
                         mock.patch.object(self.m, 'watch_recorded_ready', side_effect=unavailable(SystemExit)),
                         mock.patch.object(self.m, 'watch_recorded_ready', side_effect=unavailable(RuntimeError))]
             for index, failure in enumerate(failures):
+                root = self.completion_recipient(index)
                 self.m.request_wake(self.inst, root, 'two jobs and a question ' + str(index), items=[stale, unknown, question], explicit=True)
                 with failure:
                     self.m.wake_drain(self.inst, root, once=True)
@@ -416,6 +434,11 @@ class WatchExtension(Scenario):
                 self.assertNotIn(stale['id'], [i['id'] for i in refs])
                 self.assertIn(unknown['id'], [i['id'] for i in refs])
                 self.assertIn(question, refs)
+                with failure:
+                    self.m.request_wake(self.inst, root, 'repeat jobs ' + str(index),
+                                        items=[stale, unknown, question], explicit=True)
+                    self.m.wake_drain(self.inst, root, once=True)
+                self.assertEqual(send.call_count, index + 1)
 
     def test_unknown_unrelated_ledger_does_not_keep_stale_ready_notice(self):
         home, n, w, row = self.project()
@@ -440,6 +463,7 @@ class WatchExtension(Scenario):
         with mock.patch.object(self.m, 'wake_start'), mock.patch.object(self.m, 'WAKE_INTERVAL', 0), \
                 mock.patch.object(self.m, 'wake_send', return_value=True) as send:
             for index, error in enumerate((None, SystemExit, RuntimeError)):
+                root = self.completion_recipient(index)
                 self.m.request_wake(self.inst, root, 'stale job and a question ' + str(index), items=[stale, unknown, question], explicit=True)
                 failure = (mock.patch.object(self.m, 'read_jobs', side_effect=unavailable(error))
                            if error else contextlib.nullcontext())
@@ -450,6 +474,11 @@ class WatchExtension(Scenario):
                 self.assertNotIn(stale['id'], [i['id'] for i in refs])
                 self.assertIn(unknown['id'], [i['id'] for i in refs])
                 self.assertIn(question, refs)
+                with failure:
+                    self.m.request_wake(self.inst, root, 'repeat ledger ' + str(index),
+                                        items=[stale, unknown, question], explicit=True)
+                    self.m.wake_drain(self.inst, root, once=True)
+                self.assertEqual(send.call_count, index + 1)
 
     def test_completion_owned_envelopes_preserve_process_interrupts(self):
         n = self.inst.node('root')

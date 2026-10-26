@@ -16,6 +16,45 @@ from . import schedules as _m_schedules
 from . import status as _m_status
 
 
+def decision_warnings(inst, n):
+    """Validate decision metadata; a citation is not independent verification of a fact."""
+    path = n['dir'] / 'decisions.md'
+    if not path.is_file():
+        return []
+    cutoff_text = n['fm'].get('decision_scope_since', inst.cfg.get('decision_scope_since'))
+    cutoff = inst.parse_time(cutoff_text) if cutoff_text else None
+    if cutoff_text and not cutoff:
+        return [f"{n['id']}: invalid decision_scope_since timestamp"]
+    text = re.sub(r'(?ms)^```.*?^```[^\n]*', '', path.read_text())
+    headings = list(re.finditer(r'^## (\d{4}-\d{2}-\d{2})[^\n]*', text, re.M))
+    out = []
+    for index, heading in enumerate(headings):
+        date = inst.parse_time(heading.group(1) + 'T00:00:00+00:00')
+        if cutoff and date and date.date() < cutoff.date():
+            continue
+        body = text[heading.end():headings[index + 1].start() if index + 1 < len(headings) else len(text)]
+        label = f"{n['id']}: decisions.md:{text.count(chr(10), 0, heading.start()) + 1}"
+        if not re.search(r'^Applies to:[ \t]*(\S[^\n]*)', body, re.M | re.I):
+            out.append(label + ': decision has no Applies to: scope')
+        external = (re.search(r'^(?:External|Vendor|Provider|Policy) fact:', body, re.M | re.I) or
+                    re.search(r'\b(?:vendor|provider|upstream)\b[^.\n]{0,120}\b(?:requires?|allows?|limits?|supports?|expires?|retains?|policy)\b',
+                              heading.group() + body, re.I))
+        source = re.search(r'^Source:[ \t]*(\S[^\n]*)', body, re.M | re.I)
+        valid = False
+        if source:
+            import urllib.parse
+            value = source.group(1).strip()
+            url = re.search(r'https?://[^\s<>)]+', value)
+            try:
+                valid = bool(url and urllib.parse.urlsplit(url.group()).netloc)
+            except ValueError:
+                valid = False
+            valid = valid or bool(re.fullmatch(r'probe:[ \t]+\S.+', value, re.I))
+        if external and not valid:
+            out.append(label + ': external fact has no valid Source: URL or probe: command')
+    return out
+
+
 def collect_problems(inst):
     """Returns (problems, warnings, fixable) for the axioms that can be checked mechanically."""
     problems, warnings, fixable = [], [], []
@@ -73,6 +112,7 @@ def collect_problems(inst):
                                 "add '; since: <brain now timestamp>; recommendation: <action>; default: <fallback>'")
             warnings.extend(_m_status.code_setup_warnings(inst, n))
             warnings.extend(_m_guard.redact(w, _m_guard.never_terms(n)) for w in _m_status.dead_note_paths(inst, n))
+        warnings.extend(decision_warnings(inst, n))
         future, dated = _m_status.future_entries(inst, n)
         problems.extend(future)
         warnings.extend(dated)
@@ -119,6 +159,9 @@ def collect_problems(inst):
                 if not (l.is_symlink() and os.readlink(l) == "AGENTS.md"):
                     p(f"{nid}: {link} must be a link to AGENTS.md (axiom 22)")
                     fixable.append("links")
+        if n["id"] == "root" and not (n["dir"] / "backlog.md").exists():
+            p("root: missing backlog.md")
+            fixable.append("backlog")
         if n["id"] != "root":
             for rel in template_files:
                 if rel.name != ".gitkeep" and not (n["dir"] / rel).exists():
@@ -152,6 +195,9 @@ def collect_problems(inst):
                 p(f"{nid}: {where} contains {label} (see: brain guard {nid})")
             for e in errs:
                 p(f"{nid}: couldn't check for never-name words: {e}")
+            for record in _m_knowledge.limit_records(inst, n):
+                if record['state'] == 'invalid-expiry':
+                    warnings.append(f"{nid}: a limit has invalid Expires: metadata; it remains active")
             for lim in _m_knowledge.limits_of(n):
                 missing = [k for k in ("Why:", "Lift when:") if k.lower() not in lim.lower()]
                 if missing:
@@ -204,14 +250,25 @@ def collect_problems(inst):
                 warnings.append(f"{folder.relative_to(inst.root)}/lessons.md: malformed lesson tags; repair before reuse")
             if not _m_instance.resolve_ref(nodes, l["from"]):
                 warnings.append(f"{folder.relative_to(inst.root)}/lessons.md: lesson from unknown node '{l['from']}'")
-    for x in _m_schedules.read_schedules(inst):
+    from . import learning as _m_learning
+    for n in nodes:
+        problems.extend(_m_learning.enforcement_problems(inst, n))
+    schedules = _m_schedules.read_schedules(inst)
+    for x in schedules:
         for f in _m_schedules.SCHEDULE_FIELDS:
             if not x.get(f):
                 p(f"schedules.md: '{x['id']}' is missing '{f}'")
-        if x.get("node") and not _m_instance.resolve_ref(nodes, x["node"]):
+        target = _m_instance.resolve_ref(nodes, x.get("node"))
+        if x.get("node") and not target:
             p(f"schedules.md: '{x['id']}' names unknown node '{x['node']}'")
+        provider = _m_schedules.schedule_provider(inst, x)
+        pin = target["fm"].get("runtime") if target else None
+        if provider and pin and provider != pin:
+            warnings.append(_m_guard.redact(
+                f"schedule '{x['id']}' provider '{provider}' differs from node '{target['id']}' runtime pin '{pin}'",
+                _m_guard.never_terms(target)))
     for sid in inst.local.get("schedules", {}):
-        if not any(x["id"] == sid for x in _m_schedules.read_schedules(inst)):
+        if not any(x["id"] == sid for x in schedules):
             warnings.append(f"this machine runs schedule '{sid}', which schedules.md no longer lists: remove it "
                             f"in the host, then brain schedule unbind {sid}")
     if registry_stale(inst):
@@ -257,6 +314,11 @@ def apply_fixes(inst, kinds):
         inst.save_local()
     if "links" in kinds:
         done += [f"linked {l.relative_to(inst.root)}" for l in _m_hosts.link_runtimes(inst)]
+    if "backlog" in kinds:
+        path = inst.root / "backlog.md"
+        _m_common.atomic_write(path, "")
+        _m_common.touch(path)
+        done.append("root: added backlog.md")
     if "templates" in kinds:
         for n in inst.nodes():
             if n["id"] == "root":
@@ -291,6 +353,8 @@ def apply_fixes(inst, kinds):
 
 def cmd_check(a):
     inst = _m_nodes.load()
+    from . import semantic as _m_semantic
+    print(_m_semantic.semantic_mode(inst))
     problems, warnings, fixable = collect_problems(inst)
     if a.fix and fixable:
         for d in apply_fixes(inst, fixable):
@@ -301,6 +365,10 @@ def cmd_check(a):
     seen = set()
     for n in inst.nodes():
         target, command = _m_hosts.wake_target(inst, n)
+        disabled = _m_hosts.wake_disabled_notice(inst, n)
+        if disabled and not n['archived']:
+            warnings.append(n['id'] + ': ' + disabled)
+            continue
         if n["archived"] or target["id"] in seen or not command.startswith(("http://", "https://")):
             continue
         seen.add(target["id"])
@@ -339,7 +407,7 @@ def cmd_check(a):
         print("\n".join(f"✗ {x}" for x in problems))
         if fixable:
             print("(some can be fixed with: brain check --fix)")
-        sys.exit(1)
+        raise _m_common.VerdictExit(1)
     print(f"✓ {len(inst.nodes())} nodes, {len(inst.items())} items: all checks pass")
 
 

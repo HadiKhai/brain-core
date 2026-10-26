@@ -124,8 +124,85 @@ def record_freshness(inst, n):
 def cmd_index(a):
     inst = _m_nodes.load()
     n = inst.node(a.id)
-    if a.record:
+    if getattr(a, 'refresh', False):
+        try:
+            regenerate_index(inst, n)
+        except (OSError, ValueError):
+            _m_common.die('managed index regeneration refused; check declared scope and output ownership')
+    elif a.record:
         record_freshness(inst, n)
     state = freshness_state(inst, n)
     print(_m_guard.redact(n['id'], _m_guard.never_terms(n)) + ': index ' +
           (state['state'] if state else 'unconfigured'))
+
+
+MANAGED_INDEX_MARKER = '<!-- brain:upstream-index v1 -->'
+
+
+def regenerate_index(inst, n):
+    """Opt-in native link index; never execute a command or replace an unowned file."""
+    import urllib.parse
+    contract = freshness_contract(n)
+    if contract is None or n['fm'].get('upstream_generator') != 'links':
+        raise ValueError('configure upstream_generator=links and explicit inputs/output')
+    home = n.get('home_path')
+    if not home or not home.is_dir():
+        raise ValueError('node home is unavailable')
+    home = home.resolve()
+    target = home / contract['output']
+    # A missing output still needs containment, boundary and link checks.
+    for path in [target, *target.parents]:
+        if path == home:
+            break
+        if path.is_symlink():
+            raise ValueError('managed index paths must not be linked')
+    if home not in target.resolve().parents:
+        raise ValueError('managed index is outside its node home')
+    for other in inst.nodes():
+        if other['id'] == n['id']:
+            continue
+        for boundary in (other['dir'], other.get('home_path')):
+            if boundary:
+                boundary = boundary.resolve()
+                if home != boundary and home not in boundary.parents:
+                    continue
+                if boundary != home and (target.resolve() == boundary or boundary in target.resolve().parents):
+                    raise ValueError('managed index crosses another node boundary')
+    inputs = {name: freshness_hash(inst, n, name) for name in contract['inputs']}
+    existing = None
+    if target.exists():
+        freshness_hash(inst, n, contract['output'])
+        existing = target.read_text()
+        if not existing.startswith(MANAGED_INDEX_MARKER + '\n'):
+            raise ValueError('existing index is not owned by the native link generator')
+    lines = [MANAGED_INDEX_MARKER, '# Source index', '', '| Source | SHA-256 |', '| --- | --- |']
+    for name, fingerprint in inputs.items():
+        label = name.replace('\\', '\\\\').replace('|', '\\|').replace('[', '\\[').replace(']', '\\]')
+        lines.append('| [' + label + '](' + urllib.parse.quote(name, safe='/') + ') | `' + fingerprint + '` |')
+    text = '\n'.join(lines) + '\n'
+    if existing != text:
+        if not target.parent.is_dir():
+            raise ValueError('managed index parent must already exist')
+        _m_common.safe_target(target)
+        _m_common.atomic_write(target, text)
+    current = freshness_measure(inst, n)
+    if current['inputs'] != inputs:
+        raise ValueError('upstream inputs changed during generation; receipt not recorded')
+    record_freshness(inst, n)
+    return existing != text
+
+
+def maintain_indexes(inst, nodes):
+    """Run only explicitly opted-in native generators at writer maintenance."""
+    changed = []
+    for n in nodes:
+        if n['fm'].get('upstream_generator') != 'links':
+            continue
+        if (freshness_state(inst, n) or {}).get('state') == 'fresh':
+            continue
+        try:
+            if regenerate_index(inst, n):
+                changed.append(n['id'])
+        except (OSError, ValueError, SystemExit):
+            print('brain: managed source index needs repair; existing content retained', file=__import__('sys').stderr)
+    return changed

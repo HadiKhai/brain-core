@@ -5,11 +5,15 @@ import json
 import re
 import sys
 import urllib.parse
+from contextlib import contextmanager
+from contextvars import ContextVar
 from pathlib import Path
 
 from . import briefs as _m_briefs
 from . import check as _m_check
 from . import common as _m_common
+from . import docker_cleanup as _m_docker_cleanup
+from . import conversation_answers as _m_conversation_answers
 from . import docker_leftovers as _m_docker_leftovers
 from . import guard as _m_guard
 from . import history as _m_history
@@ -19,7 +23,12 @@ from . import jobs as _m_jobs
 from . import knowledge as _m_knowledge
 from . import machine as _m_machine
 from . import nodes as _m_nodes
+from . import recurrence as _m_recurrence
+from . import learning as _m_learning
+from . import feedback as _m_feedback
+from . import teaching as _m_teaching
 from . import proposals as _m_proposals
+from . import reports as _m_reports
 from . import schedules as _m_schedules
 from . import rotation as _m_rotation
 from . import reminders as _m_reminders
@@ -292,7 +301,7 @@ def active_work(n, include_closed=False):
         if line.startswith("## "):
             inside = line[3:].strip().lower().startswith("active work")
         elif inside and line.startswith("|"):
-            cells = [c.strip() for c in line.strip().strip("|").split("|")]
+            cells = [_m_jobs.uncell(c) for c in re.split(r"(?<!\\)\|", line.strip()[1:-1])]
             if cells and not set("".join(cells)) <= set("-: ") and cells[0].lower() != "branch":
                 rows.append(cells)
     return [r for r in rows if include_closed or not active_work_closed(r)]
@@ -325,6 +334,8 @@ def machine_transition_line(n, line):
 
 
 def inbox_lines(n, readonly=False, lifecycle_data=None):
+    from . import ui_readmodel
+    readonly = readonly or ui_readmodel.projection(_m_instance.instance_above(n['dir'])) is not None
     f = n["dir"] / "inbox.md"
     # Filter the historical record on read. Never rewrite or discard episode history.
     lines = [l for l in f.read_text().splitlines() if l.startswith("- ")
@@ -334,7 +345,7 @@ def inbox_lines(n, readonly=False, lifecycle_data=None):
     queue = hook_question_queue(n)
     if not queue.exists() or _m_common.outward_links(_m_instance.instance_above(n["dir"])):
         root = _m_instance.instance_above(n['dir'])
-        return _m_reminders.request_lines(_m_instance.Instance(root), n, lines, readonly=readonly,
+        return _m_conversation_answers.answer_lines(_m_instance.Instance(root), n, lines, readonly=readonly,
                                           lifecycle_data=lifecycle_data)
     for pending in sorted(queue.glob("*.json")):
         try:
@@ -350,7 +361,14 @@ def inbox_lines(n, readonly=False, lifecycle_data=None):
         except (OSError, ValueError, KeyError, TypeError, SystemExit):
             continue
     root = _m_instance.instance_above(n['dir'])
-    return _m_reminders.request_lines(_m_instance.Instance(root), n, lines, readonly=readonly,
+    from . import communication as _m_communication
+    try:
+        questions = _m_communication.communication_read(_m_instance.Instance(root))['questions']
+        lines = [line for line in lines if not any('<!-- communication:' + key + ' -->' in line and 'answer' in q
+                                                   for key, q in questions.items())]
+    except (OSError, ValueError, TypeError):
+        pass  # unreadable decision state cannot hide an unanswered question
+    return _m_conversation_answers.answer_lines(_m_instance.Instance(root), n, lines, readonly=readonly,
                                       lifecycle_data=lifecycle_data)
 
 
@@ -372,8 +390,55 @@ def facts_meta(n):
         return {}
 
 
+_LOCAL_JOB_SNAPSHOT = ContextVar('brain_local_job_snapshot', default=None)
+
+
+@contextmanager
+def local_job_snapshot(values=None, keys=None):
+    """Batch one read's refs; optional metadata keys reuse display evidence only."""
+    if values is None and _LOCAL_JOB_SNAPSHOT.get() is not None:
+        yield
+        return
+    token = _LOCAL_JOB_SNAPSHOT.set((values if values is not None else {}, keys or {}, {}))
+    try:
+        yield
+    finally:
+        _LOCAL_JOB_SNAPSHOT.reset(token)
+
+
 def local_job_state(n, branch, w):
     """Only files and local git refs. Unlike worktree_state, never asks gh or a remote."""
+    scope = _LOCAL_JOB_SNAPSHOT.get()
+    if scope is not None:
+        values, keys, repositories = scope
+        job = (n['id'], branch)
+        key = keys.get(job)
+        old = values.get(job)
+        if key is not None and old is not None and old[0] == key:
+            return dict(old[1])
+        home = n['home_path']
+        repository = (home, n['fm'].get('merge', 'local'))
+        if repository not in repositories:
+            tips, merged = {}, set()
+            if home and home.exists():
+                target = _m_worktrees.integration_target(n)
+                refs = _m_common.git('for-each-ref', '--format=%(refname:strip=2)%00%(objectname)',
+                                     'refs/heads/', cwd=home)
+                if not refs.returncode:
+                    tips = dict(line.split('\0', 1) for line in refs.stdout.splitlines() if '\0' in line)
+                if target:
+                    refs = _m_common.git('for-each-ref', '--format=%(refname:strip=2)',
+                                         '--merged=' + target, 'refs/heads/', cwd=home)
+                    if not refs.returncode:
+                        merged = set(refs.stdout.splitlines())
+            repositories[repository] = tips, merged
+        tips, merged = repositories[repository]
+        tip = tips.get(branch, '')
+        result = {'exists': Path(w['path']).is_dir(), 'tip': tip,
+                  'merged': bool(tip and tip != w.get('start') and branch in merged)}
+        if key is not None:
+            values[job] = (key, result)
+        return dict(result)
     home = n["home_path"]
     exists = Path(w["path"]).is_dir()
     if not home or not home.exists():
@@ -385,22 +450,63 @@ def local_job_state(n, branch, w):
     return {"exists": exists, "tip": tip, "merged": merged}
 
 
-def due_evidence(inst, n):
+# Each exception describes rendered telemetry, never an input-field whitelist.
+# Keep contextual prefixes and every other byte (including semantic numbers).
+_FACT_NUMBER = r'\d[\d,]*(?:\.\d+)?[kKmMgGbB]?'
+_FACT_DURATION = r'\d+(?:\.\d+)?\s*(?:seconds?|secs?|s|minutes?|mins?|m|hours?|hrs?|h|days?|d)\b'
+FACTS_VOLATILE_PATTERNS = (
+    ('refresh_timestamp', r'(?m)(^Facts refreshed: )[^\n]*', r'\1<timestamp>'),
+    ('machine_snapshot', r'(?m)(^- machine: )[^\n]*', r'\1<live reading>'),
+    ('token_count', r'(?<![\w/])' + _FACT_NUMBER + r'(?= (?:processed )?tokens\b)', '<tokens>'),
+    ('token_median', r'(tokens, over twice the median of )' + _FACT_NUMBER, r'\1<tokens>'),
+    ('token_budget', r'(token budget )' + _FACT_NUMBER, r'\1<tokens>'),
+    ('hyphenated_token_budget', _FACT_NUMBER + r'(?=-token budget\b)', '<tokens>'),
+    ('token_share_meter', r'\d+(?:\.\d+)?%(?= of (?:its |the )?tokens\b)', '<meter>'),
+    ('token_meter', r'(token meter: )\d+(?:\.\d+)?%', r'\1<meter>'),
+    ('token_forecast_spread', r'(tokens processed \(spread )' + _FACT_NUMBER + r'–' + _FACT_NUMBER,
+     r'\1<tokens>–<tokens>'),
+    ('token_forecast_fresh', r'(\), of them )' + _FACT_NUMBER + r'(?= fresh input and output\b)', r'\1<tokens>'),
+    ('age_duration', r'(?<![\w/])((?:open|age|duration|elapsed|median(?: of)?|of which) )' + _FACT_DURATION,
+     r'\1<duration>'),
+    ('duration_spread', r'(spread )\d+(?:\.\d+)?–' + _FACT_DURATION, r'\1<duration>'),
+    ('restart_compactions', r'\b\d+(?= compactions\b)', '<count>'),
+    ('restart_count', r'\b\d+(?= restarts\b)', '<count>'),
+)
+
+
+def normalise_status_facts(lines):
+    """Normalise only named volatile render patterns; preserve facts and line order."""
+    text = '\n'.join(lines)
+    for _name, pattern, replacement in FACTS_VOLATILE_PATTERNS:
+        text = re.sub(pattern, replacement, text)
+    return text.split('\n')
+
+
+def status_fingerprint(lines):
+    return _m_jobs.digest(normalise_status_facts(lines))
+
+
+def file_state(inst, n):
     rows = _m_jobs.read_jobs(n)
-    wts = {b: {**w, **local_job_state(n, b, w)} for b, w in sorted(n["local"].get("worktrees", {}).items())}
+    with local_job_snapshot():
+        wts = {b: {**w, **local_job_state(n, b, w)} for b, w in sorted(n["local"].get("worktrees", {}).items())}
     from . import job_attempts as _m_attempts
     projections = {_m_jobs.job_key(r): _m_attempts.job_projection(inst, n, r) for r in rows or []}
     signals = {key: value['signal'] for key, value in projections.items()}
+    return {"jobs": rows, "worktrees": wts, "handbacks": signals, "job_projections": projections, "inbox": inbox_lines(n)}
+
+
+def due_evidence(inst, n):
+    state = file_state(inst, n)
     # Node's own commits only, excluding status (including its generated refresh commit) and children.
     names = ["brief.md", "decisions.md", "backlog.md", "node.md", "inbox.md", "sources", "AGENTS.md", _m_jobs.JOBS_FILE,
              "job-handbacks", "job-attempts", "handback-queue"]
     paths = [str((n["dir"] / name).relative_to(inst.root)) for name in names]
     last = _m_common.git("log", "-1", "--format=%H %cI", "--", *paths, cwd=inst.root).stdout.strip()
-    state = {"jobs": rows, "worktrees": wts, "handbacks": signals, "job_projections": projections, "inbox": inbox_lines(n)}
     # Hash exactly the generated display, apart from its refresh time and metadata. Retain
     # the last refresh's merge baseline so its "since previous" snapshot stays comparable.
-    lines, _ = status_facts(inst, n, state, facts_meta(n).get("merged_before", []))
-    return state, _m_jobs.digest(lines), last
+    lines, _ = status_facts(inst, n, state, facts_meta(n).get("merged_before", []), metadata_only=True)
+    return state, status_fingerprint(lines), last
 
 
 def status_lag(inst, n, evidence=None):
@@ -447,10 +553,10 @@ def runnable_work(n, rows):
     path = n['dir'] / 'backlog.md'
     if slots <= 0 or not path.exists():
         return []
-    tasks, inside, fence = [], False, None
+    tasks, section_depth, fence, parents = [], None, None, []
     text = re.sub(r'<!--.*?-->', '', path.read_text(), flags=re.S)
-    for line in text.splitlines():
-        marker = re.match(r'^ {0,3}(`{3,}|~{3,})(.*)$', line)
+    for line in text.expandtabs(4).splitlines():
+        marker = re.match(r'^ *(`{3,}|~{3,})(.*)$', line)
         if marker:
             run, suffix = marker.groups()
             if fence is None:
@@ -460,17 +566,36 @@ def runnable_work(n, rows):
             continue
         if fence:
             continue
-        if re.match(r'^#{1,2}\s', line):
-            inside = line.strip().casefold() == '## build order'
+        heading = re.fullmatch(r' {0,3}(#{1,6}) +(.+?) *#* *', line)
+        if heading:
+            depth, title = len(heading[1]), heading[2].strip().casefold()
+            if title == 'build order':
+                section_depth = depth
+                parents = []
+            elif section_depth is not None and depth <= section_depth:
+                section_depth, parents = None, []
             continue
-        match = re.fullmatch(r'- \[ \]\s+(.+)', line)
-        if not inside or not match:
+        match = re.fullmatch(r'( *)(?:[-+*]|[0-9]{1,9}[.)]) +(.+)', line)
+        if section_depth is None or not match:
             continue
-        task = match[1].strip()
-        if re.search(r'\(\s*(?:parked\s*:[^)]*|waits\s*:\s*operator\s*)\)', task, re.I):
-            continue
-        branches = re.findall(r'''(?<![\w/.-])job/[^\s`'"<>()\[\],;:]+''', task)
-        if any(branch.rstrip('.') in opened for branch in branches):
+        indent, body = len(match[1]), match[2].strip()
+        while parents and parents[-1][0] >= indent:
+            parents.pop()
+        checkbox = re.fullmatch(r'\[([ xX])\] +(.+)', body)
+        task = checkbox[2].strip() if checkbox else body
+        # Code spans delimit full branch identities, including legal punctuation.
+        # In plain text whitespace/brackets delimit them; a final sentence period
+        # is ignored. Use code spans when punctuation would otherwise be ambiguous.
+        spans = re.findall(r'`+([^`]+)`+', task)
+        plain = re.sub(r'`+[^`]+`+', '', task)
+        branches = [span.strip() for span in spans if span.strip().startswith('job/')]
+        branches += [b.rstrip('.') for b in re.findall(r"(?<![\w/.-])job/[^\s<>()\[\]`]+", plain)]
+        blocked = bool((parents and parents[-1][1]) or
+                       (checkbox and checkbox[1] != ' ') or
+                       re.search(r'\(\s*(?:parked\s*:[^)]*|waits\s*:\s*operator\s*)\)', task, re.I) or
+                       any(branch in opened for branch in branches))
+        parents.append((indent, blocked))
+        if not checkbox or blocked:
             continue
         tasks.append(task)
         if len(tasks) == slots:
@@ -487,6 +612,9 @@ def due_items(inst, n, evidence=None, include_stale=True, include_ready=True, in
     items = []
     def add(kind, text, **extra):
         items.append({"node": n["id"], "kind": kind, "text": _m_guard.redact(text, _m_guard.never_terms(n)), **extra})
+    if n['id'] == 'root':
+        from . import coordinator_advisories as _m_coordinator_advisories
+        items.extend(_m_coordinator_advisories.coordinator_advisories(inst))
     snapshot = _m_proposals.pending_rule_snapshot(inst, n)
     if snapshot:
         episode = _m_jobs.digest([n['id'], 'rule-activation-review', snapshot['digest']])
@@ -508,6 +636,13 @@ def due_items(inst, n, evidence=None, include_stale=True, include_ready=True, in
             episode=_m_jobs.digest([sorted(_m_jobs.job_key(r) for r in state['jobs'] or []
                                           if r.get('Ended') and r.get('Outcome') == 'merged'),
                                     sorted((b, w.get('tip')) for b, w in state['worktrees'].items() if w.get('merged'))]))
+    elif code_node(n) and any(str(value or '').strip().casefold() not in ('', 'none') for value in
+                              (n['local'].get('preview'), n['fm'].get('preview_url'))):
+        preview = _m_reports.preview_evidence(inst, n)
+        if preview['state'] != 'verified':
+            add('preview-evidence', 'preview screenshot tour is missing or stale; inspect the local preview, '
+                'capture its screens, then record source-bound evidence with brain preview <node> --record <receipt.json>',
+                condition='source-bound-preview-tour')
     if state["jobs"] is None:
         add("ledger", "job-ledger.md is a legacy file; reconcile jobs without overwriting it")
     unsettled = _m_jobs.unsettled_jobs(state["jobs"])
@@ -541,9 +676,9 @@ def due_items(inst, n, evidence=None, include_stale=True, include_ready=True, in
             add("restart", f"{branch}: restart: compactions; resume with `{command}`",
                 job=_m_jobs.job_key(row), state=signal["state"])
         elif signal and not _m_briefs.restart_acknowledged(n, row, signal):
-            ready = _m_verify.ready_state(inst, n, branch, display=True) if include_ready and signal["state"] == "done" and not _m_briefs.import_job(branch) else None
-            detail = ("ready to merge" if ready["ready"] else
-                      "finished but not ready (" + "; ".join(ready["reasons"]) + ")") if ready else (signal["state"] + "; node study, no home ready evidence required"
+            ready = _m_verify.due_ready_state(inst, n, branch) if include_ready and signal["state"] == "done" and not _m_briefs.import_job(branch) else None
+            detail = (ready.get("batch_advice") or ("ready to merge" if ready["ready"] else
+                      "finished but not ready (" + "; ".join(ready["reasons"]) + ")")) if ready else (signal["state"] + "; node study, no home ready evidence required"
                                            if _m_briefs.import_job(branch) else signal["state"])
             summary = signal.get('summary') or 'summary missing (legacy)'
             add("handback", f"{branch}: {detail}; {summary}; review report {signal.get('report', '')} and record the next step",
@@ -563,7 +698,8 @@ def due_items(inst, n, evidence=None, include_stale=True, include_ready=True, in
             add("invalid-handback", f"{branch}: unreadable worker signal; ask the worker to write it again", job=_m_jobs.job_key(row))
         if not _m_briefs.import_job(branch) and (not w or not w["exists"]):
             add("missing-worktree", f"{branch}: open ledger job has no worktree on this machine", job=_m_jobs.job_key(row))
-        if not any(i['kind'] == 'restart' and i.get('job') == _m_jobs.job_key(row) for i in items):
+        if (not (w and w['merged']) and (not signal or _m_briefs.restart_acknowledged(n, row, signal))
+                and not any(i['kind'] == 'restart' and i.get('job') == _m_jobs.job_key(row) for i in items)):
             try:
                 restart = _m_reminders.usage_restart_item(inst, n, row)
             except (OSError, ValueError):
@@ -596,6 +732,14 @@ def due_items(inst, n, evidence=None, include_stale=True, include_ready=True, in
         add("stale-status", lag + "; update judgement sections, then brain status <node> --refresh")
     from . import watch as _m_watch
     items.extend(_m_watch.watch_job_stalls(inst, n))
+    from . import tasks as _m_tasks
+    for task_item in _m_tasks.due_tasks(inst, n):
+        task_item["text"] = _m_guard.redact(task_item["text"], _m_guard.never_terms(n))
+        items.append(task_item)
+
+    items.extend(_m_recurrence.synthesis_due(inst, n))
+    items.extend(_m_learning.enforcement_due(inst, n))
+    items.extend(_m_feedback.feedback_due(inst, n))
     omitted = (['stale-status'] if not include_stale else []) + (['job'] if not include_advice else [])
     return _m_reminders.reminder_items(inst, n, items, include_handled=include_handled, omitted_kinds=omitted)
 
@@ -629,8 +773,33 @@ def machine_due_items(inst, nodes, state, items):
               'scope': scope, 'text': _m_machine.machine_summary(state)}] if hold else [])
 
 
+def coordinator_due_items(inst, nodes, include_handled=False):
+    """Source work belongs to its nearest live coordinator, retaining source ids."""
+    from . import watch as _m_watch
+    selected = {n['id'] for n in nodes}
+    items = []
+    for source in inst.nodes():
+        if source['archived']:
+            continue
+        own = source['id'] in selected
+        if not own and _m_hosts.wake_target(inst, source)[0]['id'] not in selected:
+            continue
+        items += [i for i in due_items(inst, source, include_stale=own, include_advice=own,
+                                      include_handled=include_handled) + changes_due(inst, source)
+                  if own or i['kind'] not in (*_m_watch.WATCH_LOCAL_KINDS, 'overdue-question')]
+    items += [{**i, 'node': i.get('source', i['node'])}
+              for i in _m_watch.watch_completion_items(inst)
+              if _m_watch.watch_completion_target(inst, i)['id'] in selected]
+    return items
+
+
 def cmd_due(a):
     inst = _m_nodes.load()
+    if getattr(a, "synthesis_seen", None):
+        if not a.id or a.quiet or a.json or a.machine or getattr(a, 'defer', None) or getattr(a, 'ack', None):
+            _m_common.die("--synthesis-seen needs one node id and no display/reminder options")
+        _m_recurrence.synthesis_seen(inst, inst.node(a.id), a.synthesis_seen)
+        return
     nodes = [inst.node(a.id)] if a.id else inst.nodes()
     defer, ack = getattr(a, 'defer', None), getattr(a, 'ack', None)
     if defer or ack:
@@ -690,9 +859,35 @@ def cmd_due(a):
                 _m_hosts.wake_start(inst, target)
             except OSError:
                 pass
+    from . import wake_turns as _m_wake_turns
+    consumed, wake_views = [], []
+    if not a.quiet:
+        for n in nodes:
+            value = _m_wake_turns.wake_turn_consume(inst, n, consume=False)
+            if value:
+                wake_views.append((n, value))
+                consumed.append({'node': n['id'], 'kind': 'wake-reasons',
+                                 'text': _m_hosts.wake_reason_summary(value['items'])})
+    _m_docker_cleanup.docker_cleanup_nodes(inst, nodes)
     _m_docker_leftovers.docker_leftover_nodes(inst, nodes)
     state = _m_machine.machine_state(inst)
-    items = [item for n in nodes for item in due_items(inst, n, include_handled=getattr(a, 'handled', False)) + changes_due(inst, n)]
+    items = coordinator_due_items(inst, nodes, include_handled=getattr(a, 'handled', False))
+    from . import communication as _m_communication
+    items += _m_communication.communication_items(inst, nodes)
+    from . import communication_policy
+    items += communication_policy.morning_items(inst, nodes)
+    from . import host_observations as _m_host_observations
+    try:
+        items += _m_host_observations.host_observation_items(inst, nodes)
+        from . import host_tasks as _m_host_tasks
+        items += _m_host_tasks.host_task_items(inst, nodes)
+        host_known = _m_host_observations.host_snapshot(inst) is not None
+    except (OSError, ValueError, TypeError):
+        host_known = False
+    if inst.local_of('root').get('host_export') == 'on' and not host_known:
+        items.append({'node': 'root', 'kind': 'host-observation', 'informational': True,
+                      'text': 'host export unavailable or stale; host activity unknown'})
+    items += consumed
     wake_seen = set()
     for n in nodes:
         target, _ = _m_hosts.wake_target(inst, n)
@@ -705,6 +900,10 @@ def cmd_due(a):
         if _m_watch.watch_state_invalid(inst):
             items.append({'node': 'root', 'kind': 'watcher',
                           'text': 'watcher state invalid; restore .brain/watch.json before watching'})
+    if a.id == 'root':
+        items += [{'node': n['id'], 'kind': 'wake', 'text': text}
+                  for n in inst.nodes() if not n['archived']
+                  for text in [_m_wake_turns.wake_turn_stuck(inst, n)] if text]
     items += machine_due_items(inst, nodes, state, items)
     if not a.quiet and getattr(a, "machine", False):
         items = [i for i in items if i["kind"] != "machine"] + [
@@ -737,6 +936,11 @@ def cmd_due(a):
                    if item.get('handling') and _m_reminders.reminder_handled(inst, item) else '') +
                   (f" (escalated: {item['age_hours']:g}h old, over 48h)" if item.get("escalated") else ""))
 
+    # A failed render/closed output never acknowledges reasons the coordinator did not see.
+    sys.stdout.flush()
+    for n, value in wake_views:
+        _m_wake_turns.wake_turn_consume(inst, n, shown=value)
+
 
 def missing_preview(n, state):
     code = code_node(n)
@@ -751,7 +955,7 @@ def display_time(inst, value):
     return _m_usage.usage_time(parsed.timestamp(), inst) if parsed else "unknown (legacy time)"
 
 
-def status_facts(inst, n, state, known_merges):
+def status_facts(inst, n, state, known_merges, metadata_only=False):
     """The displayed facts only: no hidden git tips, file hashes or judgement timestamp."""
     merged = {_m_jobs.job_key(r): r for r in state["jobs"] or [] if r["Ended"] and r["Outcome"] == "merged"}
     for r in state["jobs"] or []:
@@ -772,7 +976,7 @@ def status_facts(inst, n, state, known_merges):
     projections = [state.get('job_projections', {}).get(_m_jobs.job_key(r)) or _m_attempts.job_projection(inst, n, r)
                    for r in state['jobs'] or [] if not r['Ended']]
     lines += [_m_guard.redact(f"- {p['branch']}: {p['state']}; host activity unknown; " + ('runtime activity unknown; ' if p['state'] == 'open' else '') +
-                     (p['summary'] or ('last hand-back (historical): ' + p['historical_summary'] if p['historical_summary'] else 'summary not recorded')) +
+                     ('summary retained in worker record' if metadata_only else (p['summary'] or ('last hand-back (historical): ' + p['historical_summary'] if p['historical_summary'] else 'summary not recorded'))) +
                      f"; started {display_time(inst, p['ledger']['Started'])}; {p['ledger']['Reviews'] or '0'} reviews", _m_guard.never_terms(n))
               for p in projections] or ["- None."]
     lines += ['', 'Active work (generated from ledger and worker records; host activity unknown):', '',
@@ -780,25 +984,47 @@ def status_facts(inst, n, state, known_merges):
     for p in projections[:8]:
         queue = p['admission'] or p['queue']
         queued = (str(queue.get('position') or 'unknown') + '; owner ' + str(queue.get('owner') or 'unknown')) if queue else 'unknown'
-        summary = p['summary'] or ('historical: ' + p['historical_summary'] if p['historical_summary'] else 'not recorded')
+        summary = 'retained in worker record' if metadata_only else p['summary'] or ('historical: ' + p['historical_summary'] if p['historical_summary'] else 'not recorded')
         values = (p['branch'], p['state'], summary, queued, p['next_action'])
         lines.append(_m_guard.redact('| ' + ' | '.join(_m_jobs.cell(v) for v in values) + ' |', _m_guard.never_terms(n)))
     if len(projections) > 8:
         lines.append(f'{len(projections) - 8} more open jobs; brain jobs --live lists all recorded rows.')
+    switches = [r for r in state['jobs'] or [] if r.get('Switches')]
+    if switches:
+        lines += ['', 'Runtime switches (recorded):']
+        lines += [_m_guard.redact(f"- {r['Job']}: {r['Switches']}", _m_guard.never_terms(n)) for r in switches]
+    delivery_lines = []
+    for p in projections:
+        # Native precedence includes a versionless hand-back plus legacy ready packet.
+        packet = _m_verify.read_ready_packet(inst, n, p['branch'], p['ledger']) or {}
+        rehearsal = packet.get('rehearsal')
+        delivery = rehearsal.get('delivery') if isinstance(rehearsal, dict) else None
+        if isinstance(delivery, list):
+            delivery_lines.append(_m_guard.redact(
+                f"- {p['branch']}: " + json.dumps(delivery, sort_keys=True), _m_guard.never_terms(n)))
+    if delivery_lines:
+        lines += ['', 'Rehearsal delivery (recorded ready evidence):', *delivery_lines]
     if state["jobs"] is None:
         lines += ["- Legacy ledger: running jobs unknown."]
     lines += ["", f"Closed jobs with unsettled threads: {len(_m_jobs.unsettled_jobs(state['jobs']))}"]
     due = due_items(inst, n, (state, "", ""), include_stale=False, include_advice=False, include_handled=True)
     lessons = sorted([r for r in state["jobs"] or [] if r["Ended"] and r["Outcome"] == "merged"], key=merge_time, reverse=True)
     lines += ["", "Lesson outcomes (merged jobs):"]
-    lines += [_m_guard.redact(f"- {r['Job']}: " + (r.get("Lessons") or
+    lines += [_m_guard.redact(f"- {r['Job']}: " + (("recorded; see brain jobs" if metadata_only and r.get("Lessons") else r.get("Lessons")) or
                      ("missing; coordinator must record outcome" if r.get("Lesson check") == "required" else
                       "legacy; outcome not required")), _m_guard.never_terms(n)) for r in lessons] or ["- None."]
     lines += ["", "Finished jobs awaiting coordinator:"]
-    lines += ["- " + i["text"] + (" (acknowledged; reason: " + i['handling']['reason'] +
-              '; resume: ' + (i['handling'].get('resume_condition') or i['handling'].get('until') or '') + ')'
-              if _m_reminders.reminder_handled(inst, i) else '')
-              for i in due if i["kind"] in ("handback", "restart")] or ["- None."]
+    if metadata_only:
+        lines += ["- " + r["Job"] + ": " + ("restart: compactions" if i['kind'] == 'restart' else
+                  "restart: usage" if i['kind'] == 'job-restart' else
+                  "ready to merge" if i.get("ready") else "finished; inspect hand-back")
+                  for i in due if i["kind"] in ("handback", "restart", "job-restart")
+                  for r in state["jobs"] or [] if _m_jobs.job_key(r) == i.get("job")] or ["- None."]
+    else:
+        lines += ["- " + i["text"] + (" (acknowledged; reason: " + i['handling']['reason'] +
+                  '; resume: ' + (i['handling'].get('resume_condition') or i['handling'].get('until') or '') + ')'
+                  if _m_reminders.reminder_handled(inst, i) else '')
+                  for i in due if i["kind"] in ("handback", "restart", "job-restart")] or ["- None."]
     forecasts = _m_jobs.forecast_lines(state["jobs"] or [])
     if forecasts:
         lines += ["", "Forecasts (merged ledger durations):"] + ["- " + _m_guard.redact(s, _m_guard.never_terms(n)) for s in forecasts]
@@ -809,6 +1035,13 @@ def status_facts(inst, n, state, known_merges):
     rules, roles, items = pending_imports(inst, n)
     if rules or roles or items:
         lines += ["", f"Imported, unreviewed (inactive): {rules} rule file(s), {roles} role(s), {items} proposed item(s)."]
+    teaching = _m_teaching.teaching_summary(inst, n)
+    if teaching["copies"]:
+        lines += ["", f"Checked native copies tracked: {teaching['copies']}"]
+    feedback = _m_feedback.feedback_projection(inst, n)
+    lines += ["", f"Open feedback: {sum(row['status'] == 'open' for row in feedback)}"]
+    for metric in _m_learning.enforcement_metrics(inst, n):
+        lines += [f"{metric['type']} {metric['target']}: {metric['wishes']}/{metric['total']} wishes ({metric['wish_percent']}%)."]
     human = [i for i in attention_items(inst, [n]) if i[1] not in ("stale",)]
     lines += ["", f"Due: {sum(not i.get('informational') and not _m_reminders.reminder_handled(inst, i) for i in due)} · Needs the human (attention sources, excluding stale status): {len(human)}"]
     compact, count = [], 0
@@ -827,7 +1060,25 @@ def status_facts(inst, n, state, known_merges):
     return compact, merged
 
 
-def refresh_status(inst, n):
+def facts_block(inst, n, view=None):
+    previous = facts_meta(n)
+    if view is None:
+        state = file_state(inst, n)
+        lines, merged = status_facts(inst, n, state, previous.get("merged", []), metadata_only=True)
+    else:
+        lines, merged = list(view["facts"]), dict.fromkeys(view["merged"])
+    merged_before = view.get("merged_before", []) if view is not None else previous.get("merged", [])
+    fingerprint = status_fingerprint(lines)
+    # Telemetry is an informational snapshot, never part of the stale-status wake fingerprint.
+    lines += ["", "Machine (snapshot at refresh; live: brain due --machine):", "- " + _m_machine.machine_summary(_m_machine.machine_state(inst))]
+    lines = [FACTS_START, "## Facts (generated by brain status --refresh)", "",
+             "Facts refreshed: " + inst.now(), "", *lines, "",
+             "<!-- brain:facts-state " + json.dumps({"fingerprint": fingerprint, "merged": list(merged),
+                 "merged_before": merged_before}, sort_keys=True) + " -->", FACTS_END]
+    return "\n".join(lines)
+
+
+def refresh_status(inst, n, view=None):
     f = n["dir"] / "status.md"
     text = ""
     if f.exists():
@@ -836,18 +1087,7 @@ def refresh_status(inst, n):
     if (text.count(FACTS_START) != text.count(FACTS_END) or text.count(FACTS_START) > 1 or
             (FACTS_START in text and not FACTS_RE.search(text))):
         _m_common.die("status.md has incomplete or duplicate facts markers; repair them before refreshing")
-    previous = facts_meta(n)
-    evidence = due_evidence(inst, n)
-    state, fingerprint, _ = evidence
-    lines, merged = status_facts(inst, n, state, previous.get("merged", []))
-    fingerprint = _m_jobs.digest(lines)
-    # Telemetry is an informational snapshot, never part of the stale-status wake fingerprint.
-    lines += ["", "Machine (snapshot at refresh; live: brain due --machine):", "- " + _m_machine.machine_summary(_m_machine.machine_state(inst))]
-    lines = [FACTS_START, "## Facts (generated by brain status --refresh)", "",
-             "Facts refreshed: " + inst.now(), "", *lines, "",
-             "<!-- brain:facts-state " + json.dumps({"fingerprint": fingerprint, "merged": list(merged),
-                 "merged_before": previous.get("merged", [])}, sort_keys=True) + " -->", FACTS_END]
-    block = "\n".join(lines)
+    block = facts_block(inst, n, view)
     old = FACTS_RE.search(text)
     if old:
         suffix = text[old.end():]
@@ -954,6 +1194,13 @@ def inbox_items(inst, nodes=None, reporter="root", readonly=False, requests_only
 
 def cmd_inbox(a):
     inst = _m_nodes.load()
+    if getattr(a, "add", None):
+        n = inst.node(a.id or "root")
+        text = _m_nodes.import_text(" ".join(a.add.split()), _m_guard.never_terms(n))
+        _m_transitions.append_inbox(n["dir"], "brain", text, inst)
+        inst.commit([n["dir"] / "inbox.md"], n["id"] + ": inbox item")
+        print(n["id"] + ": inbox item added")
+        return
     # Default to the calling node, including external homes/workbenches. Explicit root is instance-wide.
     here = _m_hosts.node_at(inst, Path.cwd())
     if not here:
@@ -1037,6 +1284,8 @@ def cmd_proposals(a):
     """Everything waiting for review, a node at a time, with full text: read it here, then accept or reject several
     at once. Nothing here accepts anything."""
     if getattr(a, 'approve_all', False):
+        if getattr(a, "brief", False):
+            _m_common.die("--brief cannot activate proposals")
         return _m_proposals.cmd_proposal_activation(a)
     if getattr(a, 'review_manifest', None):
         _m_common.die('--review-manifest requires --approve-all')
@@ -1081,6 +1330,9 @@ def cmd_proposals(a):
                                                     src_terms[i["path"]]),
                                 "path": str(i["path"].relative_to(inst.root)),
                                 "body": clean(_m_common.read_fm(i["path"])[1].strip(), src_terms[i["path"]])} for i in it]})
+    if getattr(a, "brief", False):
+        from . import proposal_briefs as _m_proposal_briefs
+        return _m_proposal_briefs.reviewer_brief(rows, screens, a.json)
     if a.json:
         print(json.dumps([_m_history.history_screen(row, group) for row, group in zip(rows, screens)], indent=1,
                          ensure_ascii=False))
@@ -1162,12 +1414,31 @@ def cmd_tree(a):
 
 
 def cmd_status(a):
+    if getattr(a, 'project', False):
+        from . import status_projection
+        inst = _m_nodes.load()
+        if not a.id or a.refresh or a.from_events:
+            _m_common.die('status --project requires one node and no other status mode')
+        changed = status_projection.project_owned(inst, inst.node(a.id))
+        print('status projection: ' + ('updated' if changed else 'unchanged'))
+        return
     inst = _m_nodes.load()
+    if getattr(a, "from_events", False):
+        from . import events
+        if not a.id or a.refresh:
+            _m_common.die("--from-events needs one node and cannot refresh snapshot files")
+        view = events.events_view(inst, inst.node(a.id))
+        print(json.dumps(view, sort_keys=True) if getattr(a, "json", False) else events.render(view), end="\n" if getattr(a, "json", False) else "")
+        return
     if a.refresh and not a.id:
         _m_common.die("--refresh needs a node id: only its coordinator writes status.md")
     for n in ([inst.node(a.id)] if a.id else inst.nodes()):
         if a.refresh:
-            refresh_status(inst, n)
+            from . import events
+            events.reconcile(inst, node=n, snapshot=events.source(inst, n) != 'events')
+            events.comparison(inst, n)
+            view = events.events_view_without_current(inst, n) if events.source(inst, n) == "events" else None
+            refresh_status(inst, n, view)
         print(f"{n['id']:<28} {status_line(n)}")
 
 
@@ -1297,13 +1568,16 @@ def runaway_jobs(inst, n, structured=False, readonly=False):
             why['median-age'] = f"open {r['age_h']} h, over twice the median of {j['median_hours']} h"
         if u and j["median_tokens"] and u["processed"] > 2 * j["median_tokens"]:
             why['median-tokens'] = f"{_m_spend.tokens_text(u['processed'])} tokens, over twice the median of {_m_spend.tokens_text(j['median_tokens'])}"
+        round_usage = _m_spend.job_round_usage(inst, n, r, u)
+        meter = round_usage if round_usage is not None else u
+        hours = round_usage['hours'] if round_usage is not None else r['age_h']
         b = _m_spend.job_budget(n, r)
-        if b and u and b.get("tokens") and u["processed"] > b["tokens"]:
+        if b and meter and b.get("tokens") and meter.get("processed") is not None and meter["processed"] > b["tokens"]:
             why['budget-tokens'] = f"over its {_m_spend.tokens_text(b['tokens'])}-token budget"
-        if b and b.get("hours") and r["age_h"] > b["hours"]:
+        if b and b.get("hours") and hours > b["hours"]:
             why['budget-hours'] = f"over its {b['hours']:g}-hour budget"
-        if u and u["compactions"] >= 3:
-            why['compaction-limit'] = f"{u['compactions']} compactions"
+        if meter and meter.get("compactions") is not None and meter["compactions"] >= 3:
+            why['compaction-limit'] = f"{meter['compactions']} compactions"
         if u and u["subagents"] and u["sub_share"] > 0.5:
             why['subagent-share'] = f"sub-agents spent {round(100 * u['sub_share'])}% of its tokens"
         if structured:

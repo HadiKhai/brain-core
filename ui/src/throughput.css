@@ -1,0 +1,1 @@
+.reading-sheet:has(.daily-throughput) { width: min(1100px, 100vw) !important; }

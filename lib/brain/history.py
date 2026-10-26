@@ -1302,10 +1302,29 @@ def history_range(spec, by_id):
     return [spec]
 
 
+def history_brief_inputs(inst, n, a):
+    out = history_dir(inst, n)[1]
+    paths = [out / "manifest.json", _m_usage.usage_file("subscriptions.json")]
+    # Ordinary reader briefs rely on the manifest, not other readers' notes.
+    if a.final:
+        paths.append(out / "notes")
+    elif a.merge:
+        lo, _, hi = a.merge.partition("-")
+        if re.fullmatch(r"b[0-9]+(?:-b[0-9]+)?", a.merge):
+            low, high = int(lo[1:]), int((hi or lo)[1:])
+            paths += [p for p in (out / "notes").glob("b*.md")
+                      if re.fullmatch(r"b[0-9]+", p.stem) and low <= int(p.stem[1:]) <= high]
+    if a.out:
+        paths.append(Path(a.out).expanduser())
+    return paths
+
+
 def cmd_history(a):
     """Past AI conversations about a node, ready for readers who never compact away what they read."""
     inst = _m_instance.Instance(_m_nodes.find_root())
     n = inst.node(a.id)
+    if a.out and a.action != "brief":
+        _m_common.die("--out goes with history brief")
     if a.action == "check":
         out, m = history_load(inst, n)
         lines, ok = history_check(inst, n, out, m)
@@ -1314,8 +1333,10 @@ def cmd_history(a):
             sys.exit(1)
         return
     if a.action == "brief":
-        out, m = history_load(inst, n)
-        text = history_brief(inst, n, a, out, m)
+        with _m_instance.released(inst, n, extra=lambda: history_brief_inputs(inst, n, a),
+                                  local_keys=("fallback",)):
+            out, m = history_load(inst, n)
+            text = history_brief(inst, n, a, out, m)
         if a.out:
             write_out(inst, n, a.out, text)
         else:

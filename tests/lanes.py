@@ -27,21 +27,33 @@ MODULE_LANES = (
 )
 LANE_TESTS = {name: ('test_' + name + '.py',) for name in MODULE_LANES}
 LANE_TESTS.update({
-    'train': ('test_train.py', 'test_train_review.py'),
-    'jobs': ('test_jobs.py', 'test_train_ejection.py', 'test_handback_queue.py'),
-    'status': ('test_status.py', 'test_inbox_noise.py'),
-    'reminders': ('test_due_lifecycle.py',),
-    'worktrees': ('test_worktrees.py', 'test_prune_orphans.py', 'test_prune_states.py',
-                  'test_prune_thread_targets.py'),
-    'rehearse': ('test_rehearse.py', 'test_rehearse_frozen.py'),
-    'ui': ('test_ui.py', 'test_ui_idle.py', 'test_ui_review.py', 'test_ui_status.py'),
+    'machine': ('test_machine.py', 'test_machine_durability.py'),
+    'events': ('test_events.py', 'test_event_facts.py', 'test_event_review.py', 'test_delivery_metrics.py', 'test_event_records.py', 'test_managed_index.py', 'test_native_event_writes.py'),
+    'introspection': ('test_advisories.py', 'test_introspection.py'),
+    'tasks': ('test_tasks.py', 'test_task_dispatch.py'),
+    'hosts': ('test_hosts.py', 'test_launch_receipts.py', 'test_host_rpc.py', 'test_host_actions.py'),
+    'usage': ('test_usage.py', 'test_usage_cache.py', 'test_usage_rounds.py', 'test_model_fit.py'),
+    'cli': ('test_cli.py', 'test_selftest_parallel.py'),
+    'train': ('test_train.py', 'test_train_review.py', 'test_train_landing.py', 'test_land.py', 'test_train_automation.py', 'test_release.py', 'test_preview_upgrade.py', 'test_preview_stdio.py'),
+    'jobs': ('test_jobs.py', 'test_train_ejection.py', 'test_handback_queue.py', 'test_queue_priority.py', 'test_forecasts.py', 'test_gate_forecasts.py', 'test_throughput.py', 'test_job_adoption.py', 'test_host_lifecycle.py', 'test_worker_lifecycle.py'),
+    'knowledge': ('test_knowledge.py', 'test_semantic_recall.py', 'test_recurrence.py', 'test_learning_loop.py', 'test_feedback.py', 'test_teach.py'),
+    'status': ('test_status.py', 'test_inbox_noise.py', 'test_status_projection.py'),
+    'reminders': ('test_due_lifecycle.py', 'test_conversation_answers.py'),
+    'worktrees': ('test_worktrees.py', 'test_prune_orphans.py', 'test_prune_states.py', 'test_prune_thread_targets.py', 'test_job_env.py', 'test_lock_sites.py', 'test_atomic_durability.py'),
+    'rehearse': ('test_rehearse.py', 'test_rehearse_frozen.py', 'test_rehearse_external.py'),
+    'ui': ('test_ui.py', 'test_ui_idle.py', 'test_ui_review.py', 'test_ui_status.py', 'test_digest.py', 'test_ui_fill.py'),
     'watch': ('test_watch.py', 'test_watch_extension.py', 'test_decision_gate.py'),
-    'verify': ('test_verify.py', 'test_verify_train_hooks.py'),
+    'verify': ('test_verify.py', 'test_verify_train_hooks.py', 'test_spec_run.py', 'test_gate_context.py', 'test_full_gate.py', 'test_cheap_checks.py', 'test_ready_policies.py', 'test_verify_ownership.py'),
     'review': ('test_review_discipline.py',),
     'catch-all': ('test_repo_lanes.py',),
+    'messages': ('test_messages.py', 'test_worker_message_guard.py', 'test_communication_policy.py'),
+    'rotation': ('test_rotation.py', 'test_rotation_host.py'),
+    'diagnostics': ('test_diagnostics.py',),
+    'scorecard': ('test_scorecard.py',),
 })
 COMPATIBILITY = 'test_brain.py'
 OUTSIDE_JOB_LANES = {
+    'nightly_rehearse.py': 'strict real-core rehearsal diagnostic; explicit optional/nightly verification',
     'live.py': 'real runtime/model calls; separate live verification',
     'ui-checks.js': 'browser assertions; separate browser verification',
     'ui-fitness.js': 'browser layout assertions; separate browser verification',
@@ -50,18 +62,25 @@ SUPPORT = ('scenario.py', 'core_loader.py', 'conftest.py', 'lanes.py', 'check_la
 # Only these modules have separately audited dispatch/call selection. The gate
 # requires all remaining core modules in every lane, even after import refactors.
 SELECTIVE_MODULES = ('train',)
-EXTRA_INPUTS = {'ui': ('tests/live.py', 'tests/ui-checks.js', 'tests/ui-fitness.js')}
+EXTRA_INPUTS = {'rehearse': ('tests/nightly_rehearse.py',), 'ui': ('tests/live.py', 'tests/ui-checks.js', 'tests/ui-fitness.js')}
 # Mirror the development node's existing documentation/image skip policy.
 OUTSIDE_INPUTS = ('README.md', 'docs/**', 'ui/**/*.png', 'LICENSE')
 SHARED_INPUTS = (
+    'lib/brain/rehearse_external.py', 'lib/brain/rehearse_transactions.py',
+    'lib/brain/launch_receipts.py',
+    'lib/brain/events.py',
     'lib/brain/common.py', 'lib/brain/instance.py', 'lib/brain/cli.py',
     'lib/brain/status.py', 'lib/brain/ui_status.py', 'lib/brain/ui_server.py',
-    'lib/brain/gate_lock.py',
-    'lib/brain/settings_batch.py', 'lib/brain/dispatcher.py',
+    'lib/brain/gate_lock.py', 'lib/brain/spec_run.py', 'lib/brain/full_gate.py', 'lib/brain/queue_priority.py', 'lib/brain/job_env.py', 'lib/brain/release.py',
+    'lib/brain/docker_cleanup.py', 'lib/brain/resource_leases.py',
+    'lib/brain/action_guard.py', 'lib/brain/preview_evidence.py', 'lib/brain/review_findings.py',
+    'lib/brain/diagnostics.py', 'lib/brain/introspection.py', 'lib/brain/scorecard.py',
+    'lib/brain/settings_batch.py', 'lib/brain/metadata_recovery.py', 'lib/brain/dispatcher.py',
+    'lib/brain/host_rpc.py', 'lib/brain/host_lifecycle.py', 'lib/brain/worker_lifecycle.py', 'lib/brain/coordinator_lifecycle.py',
     'lib/brain/__init__.py', 'tests/scenario.py', 'tests/core_loader.py',
     'tests/conftest.py', 'tests/lanes.py', 'tests/check_lanes.py',
     'bin/**', 'templates/**', 'skills/**', 'roles/**', 'adapters/**', 'ui/**', '!ui/**/*.png',
-    'install.sh', 'MODEL.md', 'CHANGES.md', '.gitignore', 'requirements-test.txt',
+    'install.sh', 'MODEL.md', 'CHANGES.md', '.gitignore', 'requirements-test.txt', 'pytest.ini',
 )
 
 
@@ -161,7 +180,7 @@ def source_inputs(tree, train_symbols):
                 and not (isinstance(node.value, ast.Name) and node.value.id == 'self')):
             uses_train = True
         if isinstance(node, ast.Constant) and isinstance(node.value, str):
-            if node.value in {'train', '.train', '_m_train', 'cmd_train'}:
+            if node.value in {'train', 'land', '.train', '_m_train', 'cmd_train', 'cmd_land'}:
                 uses_train = True
         if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
                 and node.func.id == 'getattr' and len(node.args) >= 2

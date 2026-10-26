@@ -478,6 +478,16 @@ with `brain proposals`, accept several at once, and every later brief in any pro
 them. Mid-task, `brain recall garden-notes "builds fail after the upgrade"` lists what every
 project learned that this one may use.
 
+Recall can use a local multilingual ONNX model when optional `onnxruntime`,
+`tokenizers` and `numpy` packages are available to its Python interpreter. The core
+remains standard-library-only. `brain recall --setup` prepares the pinned model;
+ordinary first use may prepare it lazily. No model is fetched during tests.
+`BRAIN_SEMANTIC_NO_DOWNLOAD=1` prevents downloads, and
+`BRAIN_SEMANTIC_OFFLINE=1` selects lexical recall. Missing dependencies, weak or
+unknown memory capacity and optional-model failures automatically use lexical
+recall. `brain check` reports the mode. Local vectors live under `.brain/semantic/`;
+no text is sent to an inference service.
+
 Imported rules land in `sources/import-proposals.md` as **imported and unreviewed**; roles and
 lessons start proposed and unusable. After actual review, accept a lesson with
 `brain item accept <id> --reviewed-by sam`, or reject it with `brain item reject <id>`. Workers
@@ -605,10 +615,17 @@ You mostly talk to coordinators, and they run `brain` for you. By hand:
 | `brain item add/list/show/scope/quarantine/restore` | the library, provenance and scopes |
 | `brain item accept <id>... --reviewed-by sam` / `brain item reject <id>...` | review proposed learning; rejected items stay unusable |
 | `brain proposals [node]` | everything waiting for review, in full, with commands to accept or reject several at once |
+| `brain proposals [node] --brief [--json]` | compact independent-review sheets with claim, citation, scope and decision commands |
 | `brain recall <node> "<problem>"` | what every project learned that this one may use, for a problem met mid-task |
 | `brain connect <node> [check\|brief <child>\|brief --final]` | what the projects below a node share: digests, then proposed shared items and specialists |
 | `brain usable <item> <node>` | may this node use this item? |
 | `brain specialist new`, `brain lesson`, `brain hire` | reusable experts, their lessons, a brief that brings both |
+| `brain due <node> --synthesis-seen <set>` | acknowledge an exact reviewed synthesis set; does not activate direction |
+| `brain enforcement <node> [--json]` | declared checks and wish percentages; two scoped wish corrections produce check-work notices |
+| `brain enforcement <node> --sync-tasks` | synchronize idempotent check tasks; lesson capture also produces them automatically |
+| `brain feedback <node> add "comment"` | assign a correction a stable id; map its principle, job, check and before/after evidence with `map` |
+| `brain feedback <node> close <id> --after "evidence"` | execute the mapped check; only unchanged green proof closes the record |
+| `brain teach <item> <node> [--branch <job>]` | prepare a native adaptation brief; apply with `--file --to --check` in the target worktree |
 </details>
 
 <details>
@@ -654,6 +671,31 @@ There is no automatic rollback, host schedule creation or hourly squashing.
 Worker, import, small-job and specialist briefs explicitly omit co-author attribution. They
 supply no trailer for any runtime or model; explicit runtime/model selection does not invent
 an attribution identity.
+
+Lifetime job usage remains cumulative. After a delivered restart brief, budget
+checks use processed tokens, compactions and available active minutes since that
+restart. Older restart receipts without active minutes use elapsed time since
+acknowledgement. Ordinary brief regeneration does not reset the allowance.
+
+`brain model-fit <node> --class build --runtime codex --effort high` reports
+recommendations learned from comparable, measured job outcomes. Declare candidates
+with `model_fit_models_codex=sample-fast,sample-steady` (or the corresponding runtime
+key). At least three reviewed merges per model are required by default; change
+`model_fit_min_samples` to set another positive sample count. Recorded success and
+review rounds rank ahead of token and active-time costs. These are quality proxies,
+not prices or causal performance claims. Unknown, mixed and incomparable data is
+excluded.
+
+Set `model_fit=on` in node.md or instance.md to use learned choices for otherwise
+unpinned model defaults. It defaults off. Explicit and inherited model settings,
+runtime pins, effort and quota checks keep precedence. Without enough attributed
+samples or a declared candidate list, the existing runtime default remains.
+
+`brain launch-check <node> --selection-file selection.json --receipt-file receipt.json`
+checks the returned host provider, model and options against the declared selection.
+It rejects mismatches and unknown fields without calling the host or claiming
+execution enforcement. Keep receipt files private; the result prints only status
+and field names.
 
 `brief_max_kb` (default 8) charges UTF-8 task and embedded context bytes captured before
 assembly. Generated fixed instructions do not consume that allowance. Briefs warn above

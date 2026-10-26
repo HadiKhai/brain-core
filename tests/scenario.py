@@ -20,14 +20,46 @@ import sys
 import tempfile
 import time
 import unittest
+import types
 from pathlib import Path
 
 CORE = Path(os.environ.get("BRAIN_CORE") or Path(__file__).resolve().parent.parent)
 
+# Source-only per-worker APFS template; instance state is always initialized anew.
+_core_template = None
+
+
+def clone_fixture_core(source, destination, **kwargs):
+    global _core_template
+    if Path(source) != CORE or sys.platform != 'darwin':
+        return shutil.copytree(source, destination, **kwargs)
+    if _core_template is None:
+        _core_template = tempfile.TemporaryDirectory(prefix='brain-test-core-')
+        shutil.copytree(source, Path(_core_template.name) / 'core', **kwargs)
+    # APFS clones have independent inodes and copy-on-write file contents. Never
+    # use hard links: scenarios deliberately edit their installed core copies.
+    subprocess.run(['/bin/cp', '-cR', str(Path(_core_template.name) / 'core'),
+                    str(destination)], check=True, capture_output=True, text=True)
+    return str(destination)
+
 
 class Scenario(unittest.TestCase):
+    fixture_init_in_process = False
     def setUp(self):
+        # A real verify may enclose the test runner. Its descriptor stays open and
+        # locked; its environment proof must not identify our temporary instances.
+        gate_keys = ('BRAIN_GATE_FD', 'BRAIN_GATE_PATH', 'BRAIN_GATE_NODE')
+        enclosing_gate = {key: os.environ[key] for key in gate_keys if key in os.environ}
+        def restore_gate_environment():
+            for key in gate_keys:
+                os.environ.pop(key, None)
+            os.environ.update(enclosing_gate)
+        self.addCleanup(restore_gate_environment)
+        for key in gate_keys:
+            os.environ.pop(key, None)
         self.tmp = Path(tempfile.mkdtemp(prefix="brain-test-")).resolve()
+        if getattr(self, 'retain_rehearsal_evidence', False):
+            self.start_native_evidence()
         self.env = {**os.environ, "HOME": str(self.tmp), "BRAIN_NO_REEXEC": "1",
                     "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t",
                     "GIT_COMMITTER_EMAIL": "t@t", "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1",
@@ -46,7 +78,86 @@ class Scenario(unittest.TestCase):
             self.env.pop(k, None)
 
     def tearDown(self):
-        shutil.rmtree(self.tmp, ignore_errors=True)
+        # Diagnostic finalizers must run before removal, not in addCleanup.
+        retainers = getattr(self, '_before_fixture_delete', ())
+        preserve = False
+        for retain in retainers:
+            try:
+                preserve = retain() is False or preserve
+            except BaseException:
+                preserve = True  # Retention must not replace a test exception.
+        if preserve:
+            return
+        try:
+            shutil.rmtree(self.tmp, ignore_errors=True)
+        except BaseException as error:
+            for retain in retainers:
+                try:
+                    retain(error)
+                except BaseException:
+                    pass  # Keep the original teardown exception.
+            raise
+
+    def start_native_evidence(self):
+        if not os.environ.get('BRAIN_REHEARSAL_EVIDENCE_DIR') or hasattr(self, '_native_evidence'):
+            return
+        from brain import rehearse
+        self._native_retention = rehearse.NativeRetention(self.tmp, 'before-helper-initialization',
+            nodeid=self.id(), fixture=str(self.tmp), root='UNKNOWN', trace_path='UNKNOWN',
+            before='UNKNOWN', after='UNKNOWN', observations='UNKNOWN',
+            validation_instant='UNKNOWN', validator_result='UNKNOWN',
+            ordered_trace_hex='UNKNOWN', exception={})
+        self._native_evidence = self._native_retention.packet
+        from brain import rehearse_transactions
+        validation_token = rehearse_transactions._validation_retainer.set(self._native_retention)
+        self.addCleanup(rehearse_transactions._validation_retainer.reset, validation_token)
+        self._native_evidence_preserve = False
+        self._native_children = []
+        token = rehearse._retention_children.set(self._native_children)
+        self.addCleanup(rehearse._retention_children.reset, token)
+        self._before_fixture_delete = [*getattr(self, '_before_fixture_delete', ()),
+                                       self.before_native_fixture_delete]
+        # unittest omits tearDown if setUp raises; retain at the same pre-delete
+        # boundary through cleanup too. A second call is harmless after removal.
+        self.addCleanup(self.before_native_fixture_delete)
+
+    def update_native_evidence(self, **fields):
+        if hasattr(self, '_native_retention'):
+            self._native_retention.checkpoint(**fields)
+
+    def native_evidence_exception(self, error):
+        if hasattr(self, '_native_retention'):
+            self._native_retention.exception(error)
+
+    def capture_native_trace(self, field, trace, required=False):
+        if not hasattr(self, '_native_retention'):
+            return
+        try:
+            if trace is not None and trace.exists():
+                self._native_evidence[field] = trace.read_bytes().hex()
+        except BaseException as error:
+            self._native_retention.incomplete = True
+            self._native_retention.exception(error)
+        finally:
+            self.retain_native_evidence()
+
+    def before_native_fixture_delete(self, error=None):
+        if not hasattr(self, '_native_retention') or not self.tmp.exists():
+            return True
+        if error is not None:
+            self._native_retention.incomplete = True
+            self._native_retention.exception(error)
+        if any(child.incomplete and (child.owned == self.tmp or self.tmp in child.owned.parents)
+               for child in self._native_children):
+            self._native_retention.incomplete = True
+        return self._native_retention.checkpoint(stage='before-fixture-delete', teardown='before-delete')
+
+    def retain_native_evidence(self):
+        if not hasattr(self, '_native_retention'):
+            return True
+        result = self._native_retention.checkpoint()
+        self._native_evidence_preserve = not result
+        return result
 
     # helpers
     def run_(self, args, cwd, ok=True, brain=None):
@@ -67,9 +178,49 @@ class Scenario(unittest.TestCase):
 
     def init(self, name, operator=None):
         root = self.tmp / name
-        self.run_(["init", str(root), "--operator", operator or name, "--title", f"{name} brain",
-                   "--tz", "UTC"], cwd=self.tmp, brain=CORE / "bin" / "brain")
+        args = ["init", str(root), "--operator", operator or name, "--title", f"{name} brain",
+                "--tz", "UTC"]
+        if self.fixture_init_in_process:
+            self.fixture_cli(args, cwd=self.tmp, brain=CORE / 'bin/brain')
+        else:
+            self.run_(args, cwd=self.tmp, brain=CORE / 'bin/brain')
         return root
+
+
+    def fixture_cli(self, args, cwd, brain=None):
+        """Fresh command state for setup only; never replace an asserted CLI call."""
+        if getattr(self, '_evidence', None):
+            return self.run_(args, cwd=cwd, brain=brain)
+        stdout, stderr = io.StringIO(), io.StringIO()
+        previous = Path.cwd()
+        packages = {key for key in sys.modules if key.startswith('_brain_fixture_')}
+        try:
+            with mock.patch.dict(os.environ, self.env, clear=True), \
+                    mock.patch.object(sys, 'argv', [str(brain or cwd / 'core/bin/brain'), *args]), \
+                    mock.patch.object(sys, 'dont_write_bytecode', True), \
+                    contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                os.chdir(cwd)
+                module = core_loader.SourceFileLoader('fixture_setup', str(brain or cwd / 'core/bin/brain')).load_module()
+                nodes = module._owners['cmd_init']
+                copy = types.SimpleNamespace(**vars(shutil))
+                copy.copytree = clone_fixture_core
+                with mock.patch.object(nodes, 'shutil', copy):
+                    try:
+                        module.main()
+                    except SystemExit as error:
+                        if error.code not in (None, 0):
+                            self.fail('fixture command failed: ' + ' '.join(args) + '\n' + stdout.getvalue() + stderr.getvalue())
+        finally:
+            os.chdir(previous)
+            # The next setup call gets new TOUCHED, context variables and caches,
+            # just as a subprocess would; no fixture package survives the call.
+            for key in list(sys.modules):
+                if key.startswith('_brain_fixture_') and key not in packages:
+                    del sys.modules[key]
+        return stdout.getvalue() + stderr.getvalue()
+
+    def fixture_b(self, root, *args):
+        return self.fixture_cli(list(args), cwd=root)
 
     def b(self, root, *args, ok=True):
         return self.run_(list(args), cwd=root, ok=ok)
@@ -97,10 +248,11 @@ class Scenario(unittest.TestCase):
 
 
 class AutonomyProject(Scenario):
+    fixture_init_in_process = True
     def project(self):
         r = self.init('alice')
         home = self.repo(self.tmp / 'code' / 'app')
-        self.b(r, 'new', 'app', '--title', 'App', '--home', str(home))
+        self.fixture_b(r, 'new', 'app', '--title', 'App', '--home', str(home))
         self.b(r, 'wt', 'add', 'app', 'job-a')
         local = json.loads((r / '.brain' / 'local.json').read_text())
         wt = Path(local['nodes']['app']['worktrees']['job-a']['path'])

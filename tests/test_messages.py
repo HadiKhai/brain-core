@@ -94,3 +94,180 @@ class WorkerMessages(Scenario):
             out = self.b(root, "handback", "--summary", "Synthetic result", "--question", "Synthetic choice?", "a", "--branch", "job/sample", "--state", state,
                          "--report", "~/reports/sample.md", "--lessons", "none: made-up fixture")
             self.assertIn(kind + ": coordinator can see it with brain due [branch: job/sample; report: ~/reports/sample.md]", out)
+
+
+class AutomatedBriefAttribution(Scenario):
+    def test_generated_wake_schedule_and_delegated_brief_start_with_marker(self):
+        import core_loader
+        import os
+        from unittest import mock
+        root = self.init('alice')
+        self.b(root, 'set', 'root', 'coordinator=fixture-thread')
+        m = core_loader.SourceFileLoader('automated_fixture', str(CORE / 'bin/brain')).load_module()
+        inst = m.Instance(root)
+        marker = 'Automated turn: no operator present; cancellations are host events.'
+        with mock.patch.dict(os.environ, self.env):
+            self.assertTrue(m.wake_setup_plan(inst, inst.node('root'))['host_call']['prompt'].startswith(marker))
+            schedule = m.prepare_schedule(inst, 'fixture', 'hourly', 'root', 'Inspect current work')
+            self.assertIn('brief: ' + marker, schedule)
+            text = m.checked_brief(inst.node('root'), 'Role: worker\nSynthetic task', inputs=[])
+            self.assertTrue(text.startswith(marker))
+            self.assertEqual(m.checked_brief(inst.node('root'), text, inputs=[]).count(marker), 1)
+
+    def test_roles_attribute_automated_cancellation_to_host(self):
+        for name in ('coordinator', 'worker'):
+            text = (CORE / 'roles' / (name + '.md')).read_text()
+            self.assertIn('A cancellation with no operator message in the turn is a host event', text)
+            self.assertIn('retry once or use another route', text)
+
+
+class TypedCommunication(Scenario):
+    def setUp(self):
+        super().setUp()
+        import core_loader
+        import os
+        from unittest import mock
+        p = mock.patch.dict(os.environ, self.env)
+        p.start()
+        self.addCleanup(p.stop)
+        self.m = core_loader.SourceFileLoader('typed_comms', str(CORE / 'bin/brain')).load_module()
+        self.root = self.init('alice')
+        self.b(self.root, 'set', 'root', 'coordinator=fixture-root', 'wake=fixture-send')
+        self.inst = self.m.Instance(self.root)
+
+    def test_absent_store_reconciliation_is_a_byte_identical_observation(self):
+        communication = rehearse = self.m
+        from unittest import mock
+        path = self.root / '.brain/communications.json'
+        self.assertFalse(path.exists())
+        before = rehearse.snapshot(self.root)
+        with mock.patch.object(communication, 'communication_store',
+                               side_effect=AssertionError('absent observation took a write lock')):
+            communication.communication_reconcile(self.inst)
+        self.assertEqual(before, rehearse.snapshot(self.root))
+
+    def test_existing_store_still_locks_and_retains_invalid_bytes(self):
+        communication = self.m
+        path = self.root / '.brain/communications.json'
+        path.write_text('{"version":1,"questions":{},"notices":{}}')
+        communication.communication_reconcile(self.inst)
+        self.assertTrue((self.root / '.brain/communications.lock').is_file())
+        path.write_text('{"version":1,"questions":[]}')
+        before = path.read_bytes()
+        with self.assertRaises(ValueError):
+            communication.communication_reconcile(self.inst)
+        self.assertEqual(before, path.read_bytes())
+
+    def spec(self, action='routine'):
+        return {'options': [{'id': 'continue', 'label': 'Continue', 'action': action},
+                            {'id': 'wait', 'label': 'Wait', 'action': 'routine'}],
+                'recommendation': 'continue', 'default': 'continue',
+                'deadline': '2020-01-01T00:00:00+00:00'}
+
+    def test_root_landings_parks_and_fyi_are_inbox_only(self):
+        from unittest import mock
+        with mock.patch.object(self.m, 'request_wake') as send:
+            for kind in ('landing', 'park', 'fyi'):
+                self.m.communication_record(self.inst, self.inst.node('root'), kind, 'Sample update', kind)
+            send.assert_not_called()
+        text = (self.root / 'inbox.md').read_text()
+        self.assertIn('landing: Sample update', text)
+        self.assertIn('park: Sample update', text)
+        self.assertIn('fyi: Sample update', text)
+
+    def test_question_schema_and_routine_default_never_execute_an_action(self):
+        from unittest import mock
+        with mock.patch.object(self.m, 'request_wake', return_value=True) as send:
+            question = self.m.communication_record(self.inst, self.inst.node('root'), 'question',
+                                                  'Which path?', 'fixture', self.spec())
+            self.assertEqual(send.call_count, 1)
+            self.m.communication_reconcile(self.inst)
+            saved = self.m.communication_read(self.inst)['questions'][question['id']]
+            self.assertEqual(saved['answer'], 'continue')
+            self.assertEqual(saved['answered_by'], 'deadline-default')
+            self.m.communication_reconcile(self.inst)
+            self.assertEqual(self.m.communication_read(self.inst)['questions'][question['id']], saved)
+
+    def test_outward_and_destructive_questions_never_expire_to_default(self):
+        from unittest import mock
+        with mock.patch.object(self.m, 'request_wake', return_value=True):
+            for action in ('outward', 'destructive'):
+                q = self.m.communication_record(self.inst, self.inst.node('root'), 'question',
+                                               'Choose action', action, self.spec(action))
+                self.m.communication_reconcile(self.inst)
+                self.assertNotIn('answer', self.m.communication_read(self.inst)['questions'][q['id']])
+
+    def test_typed_questions_reject_missing_or_unknown_action_authority(self):
+        from unittest import mock
+        with mock.patch.object(self.m, 'request_wake') as send:
+            for spec in ({}, {**self.spec(), 'default': 'unknown'},
+                         {**self.spec(), 'options': [{'id': 'continue', 'label': 'Continue'}]}):
+                with self.assertRaises(ValueError):
+                    self.m.communication_record(self.inst, self.inst.node('root'), 'question', 'Choose?', 'bad', spec)
+            send.assert_not_called()
+
+    def test_typed_question_inflight_baseline_excludes_previously_shown_question(self):
+        from unittest import mock
+        m, n = self.m, self.inst.node('root')
+        with mock.patch.object(m, 'wake_start'), mock.patch.object(m, 'WAKE_INTERVAL', 0):
+            m.communication_record(self.inst, n, 'question', 'First fixture question', 'first', self.spec('outward'))
+            with mock.patch.object(m, 'wake_send', return_value=True):
+                m.wake_drain(self.inst, n, once=True)
+            m.communication_record(self.inst, n, 'question', 'Second fixture question', 'second', self.spec('outward'))
+            observed = []
+            def send(*args, **kwargs):
+                observed.extend(m.watch_since_wake(self.inst, [n]))
+                return True
+            with mock.patch.object(m, 'wake_send', side_effect=send):
+                m.wake_drain(self.inst, n, once=True)
+            questions = [i for i in observed if i['kind'] == 'question']
+            self.assertEqual(len(questions), 1)
+            self.assertTrue(questions[0]['text'].startswith('Second fixture question'))
+
+
+class NativeDispatcher(Scenario):
+    def setUp(self):
+        super().setUp()
+        import core_loader
+        import os
+        from unittest import mock
+        patch = mock.patch.dict(os.environ, self.env)
+        patch.start()
+        self.addCleanup(patch.stop)
+        self.m = core_loader.SourceFileLoader('dispatcher_fixture', str(CORE / 'bin/brain')).load_module()
+        self.root = self.init('alice')
+        self.b(self.root, 'set', 'root', 'coordinator=fixture-root', 'wake=fixture-send', 'wake_coalesce=on', 'wake_policy=questions')
+        self.inst = self.m.Instance(self.root)
+
+    def question(self):
+        from unittest import mock
+        import datetime
+        spec = {'options': [{'id': 'continue', 'label': 'Continue', 'action': 'routine'},
+                            {'id': 'wait', 'label': 'Wait', 'action': 'routine'}],
+                'recommendation': 'continue', 'default': 'continue',
+                'deadline': (self.inst.now_dt() + datetime.timedelta(hours=1)).isoformat()}
+        with mock.patch.object(self.m, 'request_wake'):
+            return self.m.communication_record(self.inst, self.inst.node('root'), 'question',
+                                               'Choose a fixture path', 'fixture-question', spec)
+
+    def test_native_dispatch_routes_question_once_without_result_relays(self):
+        from unittest import mock
+        self.question()
+        for kind in ('fyi', 'landing', 'park'):
+            self.m.communication_record(self.inst, self.inst.node('root'), kind, 'Sample update', kind)
+        with mock.patch.object(self.m, 'wake_start'), mock.patch.object(self.m, 'WAKE_INTERVAL', 0), \
+                mock.patch.object(self.m, 'wake_send', return_value=True) as send:
+            result = self.m.dispatch_run(self.inst)
+            self.assertEqual(result['accepted'], 1)
+            self.assertEqual(self.m.dispatch_run(self.inst)['accepted'], 0)
+            self.m.wake_drain(self.inst, self.inst.node('root'), once=True)
+            self.assertEqual(send.call_count, 1)
+
+    def test_failed_enqueue_is_not_a_dispatch_receipt(self):
+        from unittest import mock
+        self.question()
+        with mock.patch.object(self.m, 'request_wake', side_effect=[False, True]) as enqueue:
+            self.assertEqual(self.m.dispatch_run(self.inst)['accepted'], 0)
+            self.assertEqual(self.m.dispatch_run(self.inst)['accepted'], 1)
+            self.assertEqual(self.m.dispatch_run(self.inst)['accepted'], 0)
+            self.assertEqual(enqueue.call_count, 2)

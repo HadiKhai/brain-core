@@ -34,6 +34,7 @@ class WorkerReadyPackets(Scenario):
         owner = m.record_ready.__globals__
         inst = mock.Mock(root=self.tmp, parse_time=lambda value: value)
         inst.now_dt.return_value = datetime.datetime(2026, 1, 1, tzinfo=datetime.timezone.utc)
+        inst.now.return_value = '2026-01-01 00:00 +00:00'
         head, main = '1' * 40, '2' * 40
         w = {'path': str(self.tmp), 'port': 4100, 'ports': 3}
         log = self.tmp / 'verify.log'
@@ -543,6 +544,9 @@ class VerifyLogs(Scenario):
         self.git('add', 'stdin-check.py', cwd=wt)
         self.git('commit', '-qm', 'stdin fixture', cwd=wt)
         self.b(r, 'set', 'a', 'verify=python3 -B stdin-check.py')
+        # This assertion covers command writes; allow its generated status commit
+        # rather than the independent hourly coalescing policy.
+        (r / '.brain/events-status-commits.json').unlink(missing_ok=True)
         result = subprocess.run([sys.executable, str(r / 'core/bin/brain'), 'handback', '--summary', 'Synthetic result', 'a', '--branch', 'job',
                                  '--state', 'done', '--reviews', '1'], cwd=r, env=self.env,
                                 input='fixture-input\n', capture_output=True, text=True)
@@ -891,6 +895,9 @@ class VerifyInputDiagnostics(Scenario):
         r, home, wt = self.inputs_job()
         env = wt / 'apps/web/.env.local'
         env.write_text('FAKE_VALUE=first-fixture\n')
+        # Keep the whole-tree cleanliness assertion below: this fixture must let
+        # generated status facts commit instead of exercising hourly coalescing.
+        (r / '.brain/events-status-commits.json').unlink(missing_ok=True)
         self.finish(r)
         packet = json.loads(self.packet().read_text())['ready']
         files = self.private_map(packet)
@@ -901,6 +908,8 @@ class VerifyInputDiagnostics(Scenario):
         sidecar = self.packet().parent / packet['input_files_ref']
         self.assertEqual(self.git('status', '--porcelain', cwd=r), '')
         self.assertEqual(self.git('ls-files', str(sidecar.relative_to(r)), cwd=r), '')
+        self.assertEqual(self.git('check-ignore', str(sidecar.relative_to(r)), cwd=r).strip(),
+                         str(sidecar.relative_to(r)))
         # Reuse preserves the existing local map rather than multiplying sidecars.
         self.assertIn('reused the green run', self.finish(r))
         self.assertEqual(json.loads(self.packet().read_text())['ready']['input_files_ref'], packet['input_files_ref'])

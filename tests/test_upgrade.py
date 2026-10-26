@@ -140,6 +140,35 @@ class InstallAndUpgrade(Scenario):
         self.assertEqual(ledger.read_bytes(), before)
         self.assertTrue(Path(worktree["path"]).is_dir())
 
+    def test_automatic_task_migration_preserves_jobs_and_explicit_backfill_links(self):
+        m = core_loader.SourceFileLoader('brain_upgrade_migration', str(CORE / 'bin/brain')).load_module()
+        root = self.init('demo')
+        inst = m.Instance(root)
+        node = inst.node('root')
+        with mock.patch.dict(os.environ, self.env, clear=True):
+            m.job_started(inst, node, 'job/example', 'codex')
+            ledger = root / 'job-ledger.md'
+            before = ledger.read_bytes()
+            row = m.read_jobs(node)[0]
+            key = m.job_key(row)
+            backfill = m._owners['cmd_task_migrate']
+            self.assertEqual(backfill.migrate(inst, [node])[0]['created'], 1)
+            self.assertEqual(ledger.read_bytes(), before)
+            tasks = backfill._m_tasks
+            records = tasks.read_records(node)
+            task = next(iter(records.values()))
+            self.assertEqual(task['job'], key)
+            self.assertIn('job:' + key, task['provenance'])
+            self.assertEqual(task['raw_receipts'][0]['raw'], row)
+            self.assertEqual(backfill.migrate(inst, [node])[0]['created'], 0)
+            self.assertEqual(ledger.read_bytes(), before)
+            self.assertEqual(backfill.backfill(inst, node, apply=True), [])
+            self.assertEqual(m.read_jobs(node)[0]['Task'], task['id'])
+            linked = ledger.read_bytes()
+            self.assertEqual(backfill.backfill(inst, node, apply=True), [])
+            self.assertEqual(ledger.read_bytes(), linked)
+            self.assertEqual(tasks.read_records(node), records)
+
 
 
 class ReleaseNotes(Scenario):
@@ -170,12 +199,20 @@ class R2VersionAndUpgrade(Scenario):
         return core_loader.SourceFileLoader("r2_upgrade", str(CORE / "bin/brain")).load_module()
 
     def upgrade_fixture(self, m):
-        root = self.repo(self.tmp / "instance", {".gitmodules": '[submodule "core"]\npath = core\n'})
+        root = self.repo(self.tmp / "instance", {
+            ".gitmodules": '[submodule "core"]\npath = core\n',
+            "instance.md": '---\nname: fixture\noperator: fixture\nprincipals: fixture\nruntimes: codex\ntimezone: UTC\n---\n',
+            "node.md": '---\nid: root\ntitle: Fixture\n---\n',
+        })
+        (root / '.brain').mkdir()
         self.repo(root / "core", {"CHANGES.md": "## 2026-01-01: Fixture\n"})
         home = self.repo(self.tmp / "project")
-        n = {"id": "sample", "dir": root, "local": {}, "home_path": home}
-        inst = mock.Mock(root=root, local={"machine": "fixture"})
-        inst.nodes.return_value = [n]
+        inst = m.Instance(root)
+        inst.local['machine'] = 'fixture'
+        n = inst.node('root')
+        n['home_path'] = home
+        inst.nodes = lambda: [n]
+        inst.commit = mock.Mock()
         return inst, n
 
     def upgrade_attempt(self, m, inst, refused=False):
@@ -242,6 +279,50 @@ class R2VersionAndUpgrade(Scenario):
         before = lock.read_bytes()
         self.upgrade_attempt(m, inst)
         self.assertEqual(lock.read_bytes(), before)
+
+    def test_live_node_gate_refuses_without_admission_or_train_lock(self):
+        import fcntl
+        m = self.module()
+        inst, n = self.upgrade_fixture(m)
+        path = m.gate_path(inst.root, n["id"])
+        path.parent.mkdir(parents=True)
+        with path.open("w+") as held:
+            held.write("metadata is not ownership")
+            held.flush()
+            fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            before = path.read_bytes()
+            self.assertIn("node gate", self.upgrade_attempt(m, inst, refused=True))
+            self.assertEqual(path.read_bytes(), before)
+        self.upgrade_attempt(m, inst)
+        self.assertEqual(path.read_bytes(), before)
+
+    def test_unknown_node_gate_inventory_refuses_before_upgrade(self):
+        m = self.module()
+        inst, n = self.upgrade_fixture(m)
+        for kind in ("symlink", "hardlink", "directory", "fifo"):
+            with self.subTest(kind=kind):
+                path = m.gate_path(inst.root, n["id"])
+                path.parent.mkdir(parents=True, exist_ok=True)
+                other = path.parent / "other"
+                if kind == "symlink":
+                    other.write_text("keep")
+                    path.symlink_to(other)
+                elif kind == "hardlink":
+                    other.write_text("keep")
+                    os.link(other, path)
+                elif kind == "directory":
+                    path.mkdir()
+                else:
+                    os.mkfifo(path)
+                try:
+                    self.assertIn("node gate", self.upgrade_attempt(m, inst, refused=True))
+                finally:
+                    if path.is_dir():
+                        path.rmdir()
+                    else:
+                        path.unlink()
+                    if other.exists():
+                        other.unlink()
 
     def test_m7_parked_blocked_done_jobs_and_worktrees_upgrade_with_notice(self):
         m = self.module()
