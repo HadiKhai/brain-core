@@ -10,10 +10,37 @@ import importlib.util
 import itertools
 import sys
 import types
+from functools import lru_cache
 from pathlib import Path
 
 
 _serial = itertools.count()
+
+
+@lru_cache(maxsize=256)
+def _compiled_source(path, source):
+    # Cache only immutable code, never a module or its initialized globals. Read
+    # the source on every load: even same-size edits with restored mtimes count.
+    # Bounding this cache also bounds retention of temporary installed cores.
+    return compile(source, path, 'exec', dont_inherit=True)
+
+
+class _FixtureSourceLoader(importlib.machinery.SourceFileLoader):
+    def get_code(self, fullname):
+        return _compiled_source(self.path, self.get_data(self.path))
+
+
+class _FixtureFinder:
+    def __init__(self, package_name):
+        self.prefix = package_name + '.'
+
+    def find_spec(self, fullname, path=None, target=None):
+        if not fullname.startswith(self.prefix):
+            return None
+        spec = importlib.machinery.PathFinder.find_spec(fullname, path, target)
+        if spec is not None and isinstance(spec.loader, importlib.machinery.SourceFileLoader):
+            spec.loader = _FixtureSourceLoader(fullname, spec.loader.path)
+        return spec
 
 
 class CoreModule(types.ModuleType):
@@ -52,19 +79,25 @@ class SourceFileLoader(importlib.machinery.SourceFileLoader):
         self.package_name = package_name
         spec = importlib.util.spec_from_file_location(
             package_name, package_dir / '__init__.py',
+            loader=_FixtureSourceLoader(package_name, str(package_dir / '__init__.py')),
             submodule_search_locations=[str(package_dir)])
         package = importlib.util.module_from_spec(spec)
         sys.modules[package_name] = package
-        spec.loader.exec_module(package)
-        owners = {}
-        for path in sorted(package_dir.glob('*.py')):
-            if path.stem == '__init__':
-                continue
-            part = importlib.import_module('.' + path.stem, package_name)
-            for name in vars(part):
-                if not name.startswith('__') and not name.startswith('_m_'):
-                    owners[name] = part
-        # The flat fixture API predates the task row hook with the same name.
-        owners['job_started'] = importlib.import_module('.jobs', package_name)
+        finder = _FixtureFinder(package_name)
+        sys.meta_path.insert(0, finder)
+        try:
+            spec.loader.exec_module(package)
+            owners = {}
+            for path in sorted(package_dir.glob('*.py')):
+                if path.stem == '__init__':
+                    continue
+                part = importlib.import_module('.' + path.stem, package_name)
+                for name in vars(part):
+                    if not name.startswith('__') and not name.startswith('_m_'):
+                        owners[name] = part
+            # The flat fixture API predates the task row hook with the same name.
+            owners['job_started'] = importlib.import_module('.jobs', package_name)
+        finally:
+            sys.meta_path.remove(finder)
         module._owners = owners
         module.__class__ = CoreModule

@@ -29,6 +29,85 @@ from scenario import Scenario, AutonomyProject, shlex_quote
 
 
 class FixtureSetup(Scenario):
+    def fixture_source(self):
+        core = self.tmp / 'source-core'
+        (core / 'bin').mkdir(parents=True)
+        package = core / 'lib/brain'
+        package.mkdir(parents=True)
+        (core / 'bin/brain').write_text('# modular fixture\n')
+        (package / '__init__.py').write_text('package_state = []\n')
+        (package / 'jobs.py').write_text('def job_started(): return None\n')
+        return core, package
+
+    def load_fixture_source(self, core):
+        loader = core_loader.SourceFileLoader('compiled_fixture', str(core / 'bin/brain'))
+        module = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+        try:
+            loader.exec_module(module)
+        finally:
+            package = getattr(loader, 'package_name', None)
+            if package is not None:
+                self.addCleanup(lambda: [sys.modules.pop(key, None) for key in list(sys.modules)
+                                         if key == package or key.startswith(package + '.')])
+        return module
+
+    def test_compiled_source_reuses_code_but_executes_fresh_module_state(self):
+        core, package = self.fixture_source()
+        (package / 'state.py').write_text(
+            'import os\nloaded_env = os.environ.get("BRAIN_FIXTURE_SENTINEL")\n'
+            'items = []\ndef remember(value):\n items.append(value)\n return items\n')
+        before = list(sys.meta_path)
+        with mock.patch.dict(os.environ, {'BRAIN_FIXTURE_SENTINEL': 'first'}):
+            first = self.load_fixture_source(core)
+        self.assertEqual(first.remember('only first'), ['only first'])
+        with mock.patch.dict(os.environ, {'BRAIN_FIXTURE_SENTINEL': 'second'}):
+            second = self.load_fixture_source(core)
+        self.assertIs(first.remember.__code__, second.remember.__code__)
+        self.assertIsNot(first._owners['items'], second._owners['items'])
+        self.assertEqual(first.loaded_env, 'first')
+        self.assertEqual(second.loaded_env, 'second')
+        self.assertEqual(second.items, [])
+        self.assertEqual(second.remember('only second'), ['only second'])
+        self.assertEqual(first.items, ['only first'])
+        self.assertEqual(second.remember.__code__.co_filename, str(package / 'state.py'))
+        self.assertEqual(sys.meta_path, before)
+        self.assertEqual(list(core.rglob('__pycache__')), [])
+
+    def test_compiled_source_observes_same_metadata_edits_and_restores_failed_imports(self):
+        core, package = self.fixture_source()
+        source = package / 'state.py'
+        source.write_text('value = "first"\ndef current(): return value\n')
+        first = self.load_fixture_source(core)
+        stamp = source.stat()
+        source.write_text('value = "other"\ndef current(): return value\n')
+        os.utime(source, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
+        self.assertEqual(source.stat().st_size, stamp.st_size)
+        self.assertEqual(source.stat().st_mtime_ns, stamp.st_mtime_ns)
+        second = self.load_fixture_source(core)
+        self.assertEqual(first.current(), 'first')
+        self.assertEqual(second.current(), 'other')
+        before = list(sys.meta_path)
+        source.write_text('value = !!!\n')
+        with self.assertRaises(SyntaxError):
+            self.load_fixture_source(core)
+        self.assertEqual(sys.meta_path, before)
+        source.write_text('value = "fixed"\ndef current(): return value\n')
+        self.assertEqual(self.load_fixture_source(core).current(), 'fixed')
+        source.unlink()
+        loader = core_loader._FixtureSourceLoader('missing', str(source))
+        with self.assertRaises(FileNotFoundError):
+            loader.get_code('missing')
+        self.assertEqual(list(core.rglob('__pycache__')), [])
+
+    def test_single_file_fixture_keeps_ordinary_loader(self):
+        source = self.tmp / 'legacy.py'
+        source.write_text('legacy_state = []\n')
+        loader = core_loader.SourceFileLoader('legacy_fixture', str(source))
+        module = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+        loader.exec_module(module)
+        self.assertEqual(module.legacy_state, [])
+        self.assertFalse(hasattr(loader, 'package_name'))
+
     def test_atomic_template_and_owned_module_restoration(self):
         import scenario
         import types
