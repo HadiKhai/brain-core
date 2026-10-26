@@ -177,6 +177,57 @@ class MachineDurability(unittest.TestCase):
         self.assertEqual(list(outside.iterdir()), [])
         folder.unlink()
 
+    def _assert_local_physical_replacement_refused(self, boundary):
+        storage = self.root/'state'
+        storage.mkdir()
+        (self.root/'.brain').symlink_to(storage)
+        original = storage/'local.json'
+        original.write_text('retained original bytes')
+        victim = self.root/'victim'
+        victim.mkdir()
+        (victim/'local.json').write_text('foreign bytes')
+        retained = self.root/'retained-state'
+        replaced = []
+
+        def replace():
+            storage.rename(retained)
+            storage.symlink_to(victim)
+            replaced.append(True)
+
+        checked, dumps = self.m.safe_target, json.dumps
+
+        def validate(path):
+            physical = checked(path)
+            if Path(path) == self.inst.local_path:
+                replace()
+            return physical
+
+        def serialize(value, *args, **kwargs):
+            if value is self.inst.local:
+                replace()
+            return dumps(value, *args, **kwargs)
+
+        owner, name, callback = ((self.m, 'safe_target', validate) if boundary == 'validation'
+                                 else (json, 'dumps', serialize))
+        refusal = None
+        with mock.patch.object(owner, name, side_effect=callback):
+            try:
+                self.inst.save_local()
+            except OSError as error:
+                refusal = error
+        self.assertEqual(replaced, [True], 'the real save_local boundary must be reached once')
+        self.assertEqual({p.name: p.read_bytes() for p in victim.iterdir()},
+                         {'local.json': b'foreign bytes'})
+        self.assertEqual({p.name: p.read_bytes() for p in retained.iterdir()},
+                         {'local.json': b'retained original bytes'})
+        self.assertIsNotNone(refusal, 'physical replacement must refuse publication')
+
+    def test_local_physical_alias_after_validation_refuses_foreign_publication(self):
+        self._assert_local_physical_replacement_refused('validation')
+
+    def test_local_physical_alias_before_publication_refuses_foreign_publication(self):
+        self._assert_local_physical_replacement_refused('publication')
+
     def test_recovery_completes_partial_metadata_once_and_preserves_foreign_edits(self):
         recovery = importlib.import_module('.metadata_recovery', self.package)
         a, b = self.root/'node.md', self.root/'schedules.md'
