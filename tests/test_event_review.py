@@ -1,4 +1,5 @@
 """r1 regressions: fabricated brains only, one module per focused run."""
+import contextlib
 import datetime
 import json
 import sys
@@ -193,7 +194,7 @@ class ReviewRegressions(Scenario):
         events.read_comparisons(inst, repair=True)
         consumed = path.stat().st_size
         events.append_line(path, {'id': 'recent', 'ts': inst.now(), 'node': 'app', 'kind': 'comparison', 'equal': True})
-        original_open, seeks = Path.open, []
+        original_open, seeks = events.private_open, []
         class Reader:
             def __init__(self, stream): self.stream = stream
             def __enter__(self): return self
@@ -203,10 +204,11 @@ class ReviewRegressions(Scenario):
             def seek(self, offset):
                 seeks.append(offset)
                 return self.stream.seek(offset)
+        @contextlib.contextmanager
         def opened(p, *args, **kwargs):
-            stream = original_open(p, *args, **kwargs)
-            return Reader(stream) if p == path and args == ('rb',) else stream
-        with mock.patch.object(Path, 'open', opened):
+            with original_open(p, *args, **kwargs) as stream:
+                yield Reader(stream) if p == path else stream
+        with mock.patch.object(events, 'private_open', opened):
             rows = events.read_comparisons(inst)
         self.assertEqual({r['id'] for r in rows}, {'first-real', 'recent'})
         self.assertTrue(seeks and min(seeks) >= consumed - 256, seeks)

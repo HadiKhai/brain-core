@@ -616,6 +616,7 @@ class RehearsalEperm(RehearsalFixture):
         folder.mkdir()
         (folder / 'brain').mkdir()
         process = mock.Mock(pid=43210, returncode=0)
+        process.poll.return_value = 0
         process.communicate.return_value = ('quiet', '')
         with mock.patch.object(rehearsal, 'sandbox_prefix', return_value=[]), \
                 mock.patch.object(rehearsal.subprocess, 'Popen', return_value=process), \
@@ -1808,6 +1809,30 @@ class RehearsalSandbox(Scenario):
         self.assertNotIn(str(outside), json.dumps(r))
         r = self.runner('from pathlib import Path\nPath("unapproved").mkdir()\n')
         self.assertEqual(1, r['unexpected'])
+
+    def test_repeated_pathlib_builtin_and_os_open_attempts_are_individually_audited(self):
+        outside = self.tmp / 'outside'
+        outside.write_text('unchanged')
+        for operation, attempts in (('Path(target).write_text("changed")', 2),
+                                    ('open(target, "w").close()', 2),
+                                    ('os.close(os.open(target, os.O_WRONLY | os.O_TRUNC))', 2),
+                                    ('separate_attempts()', 4)):
+            with self.subTest(operation=operation):
+                script = ('import os\nfrom pathlib import Path\ntarget=' + repr(str(outside)) +
+                          '\ndef lowlevel():\n    os.close(os.open(target, os.O_WRONLY | os.O_CREAT | os.O_TRUNC))\n'
+                          'def separate_attempts():\n    try:\n        open(target, "w").close()\n'
+                          '    except OSError:\n        pass\n    lowlevel()\n'
+                          '\nfor _ in range(2):\n    try:\n        ' + operation +
+                          '\n    except OSError:\n        pass\n')
+                raw = []
+                row = self.runner(script, raw_output=raw)
+                self.assertEqual(0, row['code'])
+                self.assertEqual(1, row['unexpected'])
+                self.assertEqual(attempts, row['denied_attempts'])
+                self.assertEqual([dict(event='open', path=str(outside))] * attempts,
+                                 raw[0]['denied_attempts'])
+                self.assertEqual('unchanged', outside.read_text())
+
 
     def test_unexpected_copy_mutation_is_detected(self):
         r = self.runner('from pathlib import Path\nPath("node.md").write_text("changed")\n')
