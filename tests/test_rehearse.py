@@ -1148,6 +1148,180 @@ class RehearsalCoverageFaultTypes(unittest.TestCase):
 
 
 class RehearsalCloneCaches(Scenario):
+    def test_frozen_aggregate_bootstrap_covers_read_and_ui_without_provider_discovery(self):
+        from brain import instance, rehearse_external
+        source = self.init('accounting-source')
+        lane = self.tmp / 'accounting-clone'
+        lane.mkdir()
+        rehearsal.copy_brain(source, lane / 'brain', self.tmp)
+        inst = instance.Instance(lane / 'brain')
+        clock = inst.now_dt().isoformat()
+        (lane / 'rehearse-clock').write_text(clock)
+        rehearsal.freeze_machine_inputs(inst, clock)
+        accounting = rehearse_external.freeze_accounting(inst, clock, self.tmp / 'accounting.json')
+        for args in (['due', '--json'], ['ui', '--json']):
+            with self.subTest(args=args):
+                raw = []
+                row = rehearsal.run_command(lane / 'brain/core', lane, args, 'read', [],
+                                            raw_output=raw, accounting=accounting)
+                self.assertEqual(0, row['code'], raw[0]['stderr'])
+                self.assertEqual(0, row['unexpected'])
+                if args[0] == 'ui':
+                    usage = json.loads(raw[0]['stdout'])['spend']
+                    self.assertFalse(usage['complete'])
+                    self.assertIsNone(usage['since_week'])
+
+    def test_status_overflow_and_commit_stamps_require_exact_owned_projection(self):
+        import copy
+        from brain import rehearse_transactions as transactions
+        source = self.init('overflow-source')
+        (source / 'status.md').write_text('# Demo\n\n## Now\n' +
+                                        ''.join('- item %d\n' % i for i in range(35)))
+        (source / 'status-archive.md').write_text('retained archive\n')
+        self.git('add', 'status.md', 'status-archive.md', cwd=source)
+        self.git('commit', '-m', 'fixture status baseline', cwd=source)
+        lane = self.tmp / 'overflow-clone'
+        lane.mkdir()
+        rehearsal.copy_brain(source, lane / 'brain', self.tmp)
+        raw = []
+        row = rehearsal.run_command(lane / 'brain/core', lane,
+                                    ['status', 'root', '--refresh'], 'refresh', [], raw_output=raw)
+        self.assertEqual(0, row['code'])
+        self.assertEqual('proven', row['transaction_evidence'], raw[0]['transaction_evidence']['diagnostics'])
+        self.assertEqual(0, row['unexpected'])
+        self.assertIn('- item 34', (lane / 'brain/status-archive.md').read_text())
+        self.assertTrue((lane / 'brain/.brain/events-status-commits.json').is_file())
+        packet = raw[0]['transaction_evidence']
+        now = datetime.datetime.fromisoformat(packet['validation_instant'])
+        def validate(after, observations):
+            return transactions.validate(packet['before'], after, observations,
+                                         packet['owner_pid'], 'status', now)
+        observations = [o for o in packet['observations'] if not o['type'].startswith('projection-')]
+        self.assertEqual((set(), 'unproven'), validate(packet['after'], observations))
+        damaged = copy.deepcopy(packet['after'])
+        damaged['status-archives']['status-archive.md']['sha256'] = '0' * 64
+        self.assertEqual((set(), 'unproven'), validate(damaged, packet['observations']))
+        damaged = copy.deepcopy(packet['after'])
+        damaged['status-archives']['status-archive.md']['mode'] ^= 0o100
+        self.assertEqual((set(), 'unproven'), validate(damaged, packet['observations']))
+        damaged = copy.deepcopy(packet['after'])
+        damaged['events-status-commits.json']['hex'] = b'{}'.hex()
+        self.assertEqual((set(), 'unproven'), validate(damaged, packet['observations']))
+
+    def test_multiple_interrupted_operations_consume_each_deleted_resource_once(self):
+        from brain import events, instance
+        source = self.init('interrupted-source')
+        self.b(source, 'backlog', 'root', 'add', 'retained source')
+        inst = instance.Instance(source)
+        with mock.patch.dict(os.environ, self.env), instance.brain_lock(inst):
+            for ref in ('a' * 32, 'b' * 32):
+                events.append(inst, 'root', 'begin', ref, {'command': 'fixture'})
+        (source / 'backlog.md').unlink()
+        lane = self.tmp / 'interrupted-clone'
+        lane.mkdir()
+        rehearsal.copy_brain(source, lane / 'brain', self.tmp)
+        raw = []
+        row = rehearsal.run_command(lane / 'brain/core', lane,
+                                    ['status', 'root', '--refresh'], 'refresh', [], raw_output=raw)
+        self.assertEqual(0, row['code'])
+        self.assertEqual('proven', row['transaction_evidence'], raw[0]['transaction_evidence']['diagnostics'])
+        self.assertEqual(0, row['unexpected'])
+        records = [o['record'] for o in raw[0]['transaction_evidence']['observations']
+                   if o['type'] == 'event' and o['record']['kind'] == 'reconcile']
+        self.assertEqual(2, len(records))
+        self.assertEqual(1, sum(r['hash'] is None for e in records for r in e['data']['resources']))
+
+    def test_preparation_records_and_hook_acknowledgements_are_owned_and_exact(self):
+        import copy
+        from brain import events, instance, jobs, rehearse_transactions as transactions
+        source = self.init('preparation-source')
+        # A valid, pre-existing ledger has no reconstructed event object yet.
+        ledger = source / 'job-ledger.md'
+        ledger.write_text(jobs.JOBS_MARK + '\n\n| ' + ' | '.join(jobs.JOB_COLS) +
+                          ' |\n| ' + ' | '.join(['---'] * len(jobs.JOB_COLS)) + ' |\n')
+        with mock.patch.dict(os.environ, self.env):
+            events.hook_written(source)
+        original = {p.relative_to(source).as_posix(): p.read_bytes()
+                    for p in (source / '.brain').rglob('*') if p.is_file()}
+        lane = self.tmp / 'preparation-clone'
+        lane.mkdir()
+        rehearsal.copy_brain(source, lane / 'brain', self.tmp)
+        raw = []
+        row = rehearsal.run_command(lane / 'brain/core', lane,
+                                    ['status', 'root', '--refresh'], 'refresh', [], raw_output=raw)
+        self.assertEqual(0, row['code'])
+        self.assertEqual('proven', row['transaction_evidence'], raw[0]['transaction_evidence']['diagnostics'])
+        self.assertEqual(0, row['unexpected'])
+        packet = raw[0]['transaction_evidence']
+        now = datetime.datetime.fromisoformat(packet['validation_instant'])
+        def validate(after, observations):
+            return transactions.validate(packet['before'], after, observations,
+                                         packet['owner_pid'], 'status', now)
+        tags = [o['record']['kind'] for o in packet['observations'] if o['type'] == 'event']
+        self.assertTrue({'record', 'record_applied', 'hook'} <= set(tags))
+        for writer in ('record', 'apply', 'hooks'):
+            observations = [o for o in packet['observations']
+                            if not (o['type'].startswith('writer-') and o['writer']['kind'] == writer)]
+            self.assertEqual((set(), 'unproven'), validate(packet['after'], observations))
+        damaged = copy.deepcopy(packet['after'])
+        next(iter(damaged['event-objects']['entries'].values()))['text_sha256'] = '0' * 64
+        self.assertEqual((set(), 'unproven'), validate(damaged, packet['observations']))
+        damaged = copy.deepcopy(packet['after'])
+        damaged['hook-events-offset']['hex'] = b'0'.hex()
+        self.assertEqual((set(), 'unproven'), validate(damaged, packet['observations']))
+        self.assertEqual(original, {p.relative_to(source).as_posix(): p.read_bytes()
+                                   for p in (source / '.brain').rglob('*') if p.is_file()})
+
+    def test_cloned_lease_files_do_not_transfer_or_release_the_source_lock(self):
+        import fcntl
+        source = self.init('lease-source')
+        directory = source / '.brain/events-leases'
+        directory.mkdir(exist_ok=True)
+        lease = directory / ('a' * 32)
+        with lease.open('wb') as held:
+            fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            clone = self.tmp / 'lease-clone'
+            rehearsal.copy_brain(source, clone, self.tmp)
+            self.assertEqual([], list((clone / '.brain/events-leases').iterdir()))
+            self.assertTrue(lease.exists())
+            with lease.open('rb') as foreign:
+                with self.assertRaises(BlockingIOError):
+                    fcntl.flock(foreign, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+    def test_streamed_comparison_history_preserves_schema_prefix_and_native_cache(self):
+        from brain import events, instance, rehearse_transactions as transactions
+        root = self.init('stream-history')
+        inst = instance.Instance(root)
+        history = root / '.brain/events-compare.jsonl'
+        rows = [dict(id=format(i, '032x'), ts=inst.now(), node=events.node_ref('root'),
+                     kind='comparison', equal=True, resources=[], view_equal=True,
+                     interrupted=[], faults=[], out_of_scope=[]) for i in range(1000)]
+        history.write_text(''.join(json.dumps(r) + '\n' for r in rows))
+        spools = self.tmp / 'spools'
+        spools.mkdir(mode=0o700)
+        with mock.patch.dict(os.environ, self.env), instance.brain_lock(inst):
+            events.read_comparisons(inst, repair=True)
+        with mock.patch.object(transactions, 'CAPTURE_BYTES', 65536):
+            self.assertIsNone(transactions.capture(root))
+            before = transactions.capture(root, stream_dir=spools)
+            self.assertIsNotNone(before)
+            old = transactions.check_comparisons(before, inst.now_dt())
+            self.assertEqual(1000, len(old))
+            added = {**rows[-1], 'id': format(1000, '032x')}
+            with history.open('a') as stream:
+                stream.write(json.dumps(added) + '\n')
+            with mock.patch.dict(os.environ, self.env), instance.brain_lock(inst):
+                events.read_comparisons(inst, repair=True)
+            after = transactions.capture(root, stream_dir=spools)
+            current = transactions.check_comparisons(after, inst.now_dt())
+            self.assertTrue(transactions._prefix_preserved(before, after, 'events-compare.jsonl'))
+            self.assertEqual(old, current[:len(old)])
+            self.assertEqual([added], current[len(old):])
+            captured = Path(after['events-compare-index.json']['stream']['path'])
+            captured.write_bytes(captured.read_bytes().replace(b'"equal":true', b'"equal":null', 1))
+            with self.assertRaises(transactions.EvidenceError):
+                transactions.check_comparisons(after, inst.now_dt())
+
     def test_cloned_native_fix_with_existing_job_preserves_owned_history_proof(self):
         import shutil
         from brain import rehearse_transactions as transactions

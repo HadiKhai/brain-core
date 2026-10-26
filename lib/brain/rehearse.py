@@ -556,6 +556,35 @@ def copy_brain(source, dest, private_root):
             if current != entry:
                 raise RehearsalError('replaced Brain clone cache', code='unowned-brain-clone')
             os.unlink(name, dir_fd=fd)
+        # flock ownership is a kernel capability, not copyable file content.
+        # Keep every begin record, but do not pretend copied empty lease files
+        # still represent live writers in this new private process universe.
+        try:
+            leases = os.open('events-leases', os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                             dir_fd=fd)
+        except FileNotFoundError:
+            leases = None
+        if leases is not None:
+            try:
+                directory_stat = os.fstat(leases)
+                if directory_stat.st_uid != os.getuid():
+                    raise RehearsalError('foreign cloned lease directory', code='unowned-brain-clone')
+                entries = {}
+                for name in os.listdir(leases):
+                    entry = os.stat(name, dir_fd=leases, follow_symlinks=False)
+                    if (not re.fullmatch('[0-9a-f]{32}', name) or not stat.S_ISREG(entry.st_mode)
+                            or entry.st_uid != os.getuid() or entry.st_nlink != 1 or entry.st_size):
+                        raise RehearsalError('ambiguous cloned lease', code='unowned-brain-clone')
+                    entries[name] = entry
+                current = os.stat('events-leases', dir_fd=fd, follow_symlinks=False)
+                if (current.st_dev, current.st_ino) != (directory_stat.st_dev, directory_stat.st_ino):
+                    raise RehearsalError('replaced cloned lease directory', code='unowned-brain-clone')
+                for name, entry in entries.items():
+                    if os.stat(name, dir_fd=leases, follow_symlinks=False) != entry:
+                        raise RehearsalError('replaced cloned lease', code='unowned-brain-clone')
+                    os.unlink(name, dir_fd=leases)
+            finally:
+                os.close(leases)
     finally:
         os.close(fd)
 
@@ -1284,14 +1313,15 @@ def report_leftover(inst, n, row):
     _m_transitions.inbox_append(n['dir'], '- ' + inst.now() + ' from rehearse: ' + text + '\n')
 
 
-def run_command(core, lane, args, kind, roots, terms=(), cache=None, raw_output=None, on_leftover=None):
+def run_command(core, lane, args, kind, roots, terms=(), cache=None, raw_output=None, on_leftover=None,
+                accounting=None):
     retention = NativeRetention(lane, 'before-command-setup',
         args=args, kind=kind, root=str(lane / 'brain'), before='UNKNOWN', after='UNKNOWN', observations='UNKNOWN',
         validation_instant='UNKNOWN', validator_result='UNKNOWN', raw_trace_hex='UNKNOWN')
     token = _m_transactions._validation_retainer.set(retention)
     try:
         return _run_command(core, lane, args, kind, roots, terms, cache, raw_output,
-                            on_leftover, retention)
+                            on_leftover, retention, accounting)
     except BaseException as error:
         retention.exception(error)
         raise
@@ -1307,7 +1337,8 @@ def run_command(core, lane, args, kind, roots, terms=(), cache=None, raw_output=
         _m_transactions._validation_retainer.reset(token)
 
 
-def _run_command(core, lane, args, kind, roots, terms, cache, raw_output, on_leftover, retention):
+def _run_command(core, lane, args, kind, roots, terms, cache, raw_output, on_leftover, retention,
+                 accounting=None):
     deadline = ui_probe_deadline(args)  # Validate before starting anything.
     brain = lane / 'brain'
     home = lane / 'home'
@@ -1349,9 +1380,11 @@ def pin():
 '''.replace('__CLOCK_MODULES__', repr(FROZEN_WALL_CLOCK_MODULES)))
     # Copy the supervising implementation, never a candidate-supplied validator.
     (bootstrap / 'rehearsal_transactions.py').write_bytes(Path(_m_transactions.__file__).read_bytes())
+    (bootstrap / 'rehearsal_accounting.py').write_bytes(Path(_m_rehearse_external.__file__).read_bytes())
     # Every Python helper inherits this supervisor. Detached wake drains remain
     # in the command's group, and each Python parent reaps its children on exit.
     (bootstrap / 'sitecustomize.py').write_text('''import atexit, os, subprocess
+from pathlib import Path
 children = []
 original = subprocess.Popen
 class SupervisedPopen(original):
@@ -1381,6 +1414,12 @@ try:
     if os.environ.get('BRAIN_REHEARSAL_NOW'):
         from rehearsal_clock import pin
         pin()
+    if (os.environ.get('BRAIN_REHEARSAL_ACCOUNTING') and
+            (Path(os.environ['BRAIN_ROOT']) / 'core/lib/brain/spend.py').is_file()):
+        from rehearsal_accounting import install_accounting
+        install_accounting(os.environ['BRAIN_REHEARSAL_ACCOUNTING'],
+                           os.environ['BRAIN_REHEARSAL_ACCOUNTING_SHA256'],
+                           os.environ['BRAIN_REHEARSAL_NOW'])
 except BaseException:
     # Sticky across helpers: an ignored helper failure must still refuse evidence.
     try:
@@ -1475,6 +1514,9 @@ runpy.run_path(entry, run_name='__main__')
     if clock is not None:
         bind_git_executable(env)
         env['BRAIN_REHEARSAL_NOW'] = clock
+        if accounting is not None:
+            env['BRAIN_REHEARSAL_ACCOUNTING'] = accounting['path']
+            env['BRAIN_REHEARSAL_ACCOUNTING_SHA256'] = accounting['sha256']
         epoch = int(datetime.datetime.fromisoformat(clock).timestamp())
         env['GIT_TEST_DATE_NOW'] = str(epoch)
         # Git parses relative --since dates itself. Prove this executable honors
@@ -1487,6 +1529,15 @@ runpy.run_path(entry, run_name='__main__')
     trace = home / '.local/state/brain/rehearsal-transactions.jsonl'
     transaction_before = None
     capture_before_metadata = {}
+    stream_dir = None
+    copy_owner = _m_rehearse_external.ACTIVE_COPIES.get()
+    if copy_owner is not None:
+        while getattr(copy_owner, 'parent_copies', None) is not None:
+            copy_owner = copy_owner.parent_copies
+        if not copy_owner.safe():
+            raise RehearsalError('history capture owner changed')
+        stream_dir = copy_owner.bulk / 'observer-history'
+        stream_dir.mkdir(mode=0o700, exist_ok=True)
     if kind in ('fix', 'refresh'):
         _m_common.atomic_write(trace, '', private=True, create=True)
         env['BRAIN_REHEARSAL_TRANSACTIONS'] = str(trace)
@@ -1494,7 +1545,9 @@ runpy.run_path(entry, run_name='__main__')
         retention.checkpoint(stage='capture-before', capture_before_metadata=capture_before_metadata,
                              trace_path=str(trace))
         try:
-            transaction_before = _m_transactions.capture(brain, capture_before_metadata)
+            transaction_before = (_m_transactions.capture(brain, capture_before_metadata, stream_dir=stream_dir)
+                                  if stream_dir is not None else
+                                  _m_transactions.capture(brain, capture_before_metadata))
         finally:
             retention.checkpoint(before=transaction_before if sys.exc_info()[0] is None else 'UNKNOWN',
                                  capture_before_metadata=capture_before_metadata)
@@ -1598,7 +1651,9 @@ runpy.run_path(entry, run_name='__main__')
     if kind in ('fix', 'refresh'):
         retention.checkpoint(stage='capture-after')
         try:
-            transaction_after = _m_transactions.capture(brain, capture_after_metadata)
+            transaction_after = (_m_transactions.capture(brain, capture_after_metadata, stream_dir=stream_dir)
+                                 if stream_dir is not None else
+                                 _m_transactions.capture(brain, capture_after_metadata))
         finally:
             retention.checkpoint(after=transaction_after if sys.exc_info()[0] is None else 'UNKNOWN',
                                  capture_after_metadata=capture_after_metadata)
@@ -1853,7 +1908,7 @@ def rehearsal_ui_json_args(core, args):
     return args
 
 
-def run_lane(source, core, folder, nodes, commands, on_leftover=None):
+def run_lane(source, core, folder, nodes, commands, on_leftover=None, accounting=None):
     retention = NativeRetention(folder, 'before-lane-setup')
     folder.mkdir()
     copy_brain(source, folder / 'brain', folder.parent)
@@ -1890,7 +1945,7 @@ def run_lane(source, core, folder, nodes, commands, on_leftover=None):
                 results[key] = run_command(lane / 'brain/core', lane,
                                            rehearsal_ui_json_args(lane / 'brain/core', args), kind,
                                            [lane / 'brain', folder / 'brain', source, core, folder, lane], terms, cache,
-                                           raw_output=raw, on_leftover=on_leftover)
+                                           raw_output=raw, on_leftover=on_leftover, accounting=accounting)
             raw_outputs[key] = raw[0]
         except BaseException as error:
             retention.exception(error)
@@ -2030,6 +2085,8 @@ def rehearse(inst, n, branch, local_diff_dir=None):
             diagnostic_ids.extend(value for value in
                                   [node['id'], node['fm'].get('id'), *node.get('owners', [])] if value)
         commands, job_ids = rehearsal_commands(nodes)
+        accounting = _m_rehearse_external.freeze_accounting(
+            frozen_inst, frozen_now, folder / 'rehearse-accounting.json')
         diagnostic_ids.extend(job_ids)
         # Seed the same real delivery result into both command copies. Otherwise
         # a new check's cache miss would POST inside the network-denying sandbox.
@@ -2048,10 +2105,12 @@ def rehearse(inst, n, branch, local_diff_dir=None):
             report_leftover(inst, n, row)
         observations = [external_inputs(frozen_inst)]
         with rehearsal_phase('baseline'):
-            old = run_lane(frozen, baseline, folder / 'before', nodes, commands, on_leftover=on_leftover)
+            old = run_lane(frozen, baseline, folder / 'before', nodes, commands, on_leftover=on_leftover,
+                           accounting=accounting)
         observations.append(external_inputs(frozen_inst))
         with rehearsal_phase('candidate'):
-            new = run_lane(frozen, candidate, folder / 'after_', nodes, commands, on_leftover=on_leftover)
+            new = run_lane(frozen, candidate, folder / 'after_', nodes, commands, on_leftover=on_leftover,
+                           accounting=accounting)
         observations.append(external_inputs(frozen_inst))
         flags = compare(old, new, expected)
         drift_comparisons = []
@@ -2104,6 +2163,8 @@ def rehearse(inst, n, branch, local_diff_dir=None):
                 'frozen_now': frozen_now,
                 'integration_base': integration_base,
                 'checked_at': _m_jobs.stamp(frozen_inst), 'passed': not flags, 'regressions': flags,
+                'inventory_sha256': comparison_digest(commands),
+                'accounting_snapshot_sha256': accounting['sha256'],
                 'warnings': warnings, 'diagnostics': diagnostics,
                 'write_diagnostics': [dict(lane=label, command=key, unexpected=row['unexpected'],
                     path_digests=row.get('unexpected_path_digests', []),

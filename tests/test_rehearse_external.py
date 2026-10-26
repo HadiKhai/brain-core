@@ -21,6 +21,52 @@ class OwnedCopyLifecycle(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.parent = Path(self.temp.name).resolve()
 
+    def test_frozen_accounting_uses_only_attested_aggregates(self):
+        import contextlib
+        import hashlib
+        from types import SimpleNamespace
+        from brain import spend, jobs
+        row = dict(Job='job/sample', Started='2026-01-01 00:00 +00:00', Ended='')
+        missing = {**row, 'Job': 'job/unavailable'}
+        node = dict(id='demo', dir=self.parent, local={})
+        inst = SimpleNamespace(root=self.parent, nodes=lambda: [node])
+        usage = {k: 3 for k in (*spend.SPEND_TOKENS, 'processed', 'compactions', 'sessions',
+                                'tools', 'subagents', 'active_minutes', 'agent_minutes')}
+        usage.update(models={'safe-model': 3}, runtimes={}, source='transcripts: 1 session')
+        key = jobs.digest([node['id'], jobs.job_key(row), ''])
+        cache = self.parent / '.brain/spend/jobs' / (key + '.json')
+        cache.parent.mkdir(parents=True)
+        cache.write_text(json.dumps(dict(version=spend.SPEND_VERSION, signature='a' * 64, usage=usage)))
+        original = cache.read_bytes()
+        target = self.parent / 'accounting.json'
+        with mock.patch.object(jobs, 'read_jobs', return_value=[row, missing]), \
+                mock.patch.object(spend, 'brain_terms', return_value=[]), \
+                mock.patch.object(spend, 'spend_sources', side_effect=AssertionError('provider discovery')):
+            binding = rehearse_external.freeze_accounting(inst, '2035-01-01T00:00:00+00:00', target)
+        self.assertEqual(original, cache.read_bytes())
+        self.assertEqual(hashlib.sha256(target.read_bytes()).hexdigest(), binding['sha256'])
+        packet = json.loads(target.read_text())
+        entry = packet['entries'][jobs.digest([node['id'], jobs.job_key(row)])]
+        self.assertEqual(hashlib.sha256(original).hexdigest(), entry['evidence']['sha256'])
+        with contextlib.ExitStack() as restore:
+            for name in ('job_usage', 'live_usage', '_live_usage', '_read_live_usage',
+                         'spend_machine', 'spend_input_signature', 'spend_sources'):
+                restore.callback(setattr, spend, name, getattr(spend, name))
+            with mock.patch.object(spend, 'spend_terms', return_value=[]):
+                rehearse_external.install_accounting(target, binding['sha256'], packet['frozen_now'])
+                self.assertEqual(usage, spend.live_usage(inst, node, row))
+                self.assertIsNone(spend.live_usage(inst, node, missing))
+                self.assertFalse(spend.spend_machine(inst)['complete'])
+                self.assertIsNone(spend.spend_machine(inst)['since_week'])
+                self.assertIn(binding['sha256'], spend.spend_input_signature(inst))
+                with self.assertRaises(ValueError):
+                    spend.spend_sources(inst)
+                with self.assertRaises(ValueError):
+                    spend.live_usage(inst, node, {**row, 'Started': 'other generation'})
+                target.write_text('{}')
+                with self.assertRaises(ValueError):
+                    rehearse_external.install_accounting(target, binding['sha256'], packet['frozen_now'])
+
     def test_killed_owner_removes_only_its_bulk_and_keeps_small_receipt(self):
         import time
         foreign = self.parent / 'foreign'

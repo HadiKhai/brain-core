@@ -67,6 +67,43 @@ their operation boundaries.
 Outward aliases, replaced physical ancestors and shared files remain refused.
 Each sync failure propagates; no multi-file transaction, namespace lock or
 physical power-loss guarantee is implied.
+
+## D40004: Lease preparation writers and prove their exact projections
+
+Locked command preparation starts its native operation before folding hooks or
+reconstructing record sources. Event-source refusals inspect coverage without
+publishing repairs first. Preparation failures close their own lease and retain
+the original error even if terminal publication fails. A copied empty lease
+file cannot transfer a kernel lock: private clones discard only their own fresh
+copies and preserve all begin records for native reconciliation.
+
+Rehearsal attests each record object by its content address, schema and text hash;
+record materialization and hook acknowledgements require matching native writer,
+lock and lease evidence. Hook and reconciliation batches share one observed
+resource operand, verified again at completion. Reconciliation consumes each deleted-resource tombstone once, even when it closes
+several interrupted operations. Archive rollover and status-commit stamps require
+exact independently derived bytes and permissions under the live operation.
+Historical prefixes, live foreign leases, lifecycle completion and unexplained
+residual writes remain strict.
+
+## D40005: Freeze aggregate accounting and stream large history evidence
+
+Both rehearsal cores consume one digest-bound snapshot of existing Brain-owned
+accounting aggregates at the frozen instant. Missing aggregates remain unknown.
+The snapshot binds immutable job-generation fields and explicit worktree scope;
+provider directories, configuration, credentials and transcripts are not copied
+or discovered. Machine totals without an authorized aggregate remain explicitly
+incomplete, and any unplanned provider accounting discovery refuses. Accounting writers retain their strict counter-generation checks;
+usage readers use the fail-soft generation handling from the integration train.
+
+Large journal and comparison operands stream into private owned spool files,
+with source identity, stable metadata and whole-file digests checked on capture
+and consumption. Comparison history and its native cache are independently
+replayed and reconstructed with bounded reads. Unsupported or damaged evidence
+still refuses proof; the ordinary capture bound remains 32 MiB. Bulk spools use
+the same owned terminal cleanup as the clones.
+
+
 ## D40003: Count nested open callbacks as one audited operation
 
 Python 3.9 pathlib uses an opener for io.open, producing a second os.open audit
