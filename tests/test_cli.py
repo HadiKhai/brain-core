@@ -29,6 +29,122 @@ from scenario import Scenario, AutonomyProject, shlex_quote
 
 
 class FixtureSetup(Scenario):
+    def test_cached_setup_relocates_worktrees_and_never_shares_mutable_state(self):
+        import scenario
+        built = []
+        children = []
+        def child():
+            case = Scenario()
+            case.fixture_init_in_process = case.fixture_templates = True
+            case.setUp()
+            children.append(case)
+            self.addCleanup(case.doCleanups)
+            self.addCleanup(case.tearDown)
+            return case
+        def build(case):
+            built.append(case.tmp)
+            root = case.init('alice')
+            home = case.repo(case.tmp / 'app')
+            case.b(root, 'new', 'app', '--title', 'App', '--home', str(home))
+            worktree = case.tmp / 'worker'
+            case.git('worktree', 'add', '-qb', 'job', str(worktree), cwd=home)
+            script = case.tmp / 'binding.txt'
+            script.write_text(str(home))
+            (case.tmp / 'absolute-link').symlink_to(home)
+            return {'root': root, 'home': home, 'worktree': worktree, 'command': str(script)}
+        with mock.patch.object(scenario, '_setup_templates', {}), \
+                mock.patch.object(scenario, '_instance_templates', {}), \
+                mock.patch.object(scenario, '_repo_templates', {}):
+            try:
+                first, second = child(), child()
+                left = first.cached_setup('isolation-control', lambda: build(first))
+                right = second.cached_setup('isolation-control', lambda: build(second))
+                self.assertEqual(built, [first.tmp])
+                self.assertEqual(Path(right['command']).read_text(), str(right['home']))
+                self.assertEqual((second.tmp / 'absolute-link').resolve(), right['home'])
+                for case, tree in ((first, left), (second, right)):
+                    self.assertEqual(case.git('status', '--porcelain', cwd=tree['root']), '')
+                    self.assertEqual(case.git('status', '--porcelain', cwd=tree['worktree']), '')
+                    self.assertEqual(Path(case.git('rev-parse', '--show-toplevel', cwd=tree['worktree']).strip()),
+                                     tree['worktree'])
+                    binding = json.loads((tree['root'] / '.brain/local.json').read_text())
+                    self.assertEqual(binding['nodes']['app']['home'], str(tree['home']))
+                    prefix = Path(case.env['PYTHONPYCACHEPREFIX'])
+                    self.assertEqual(case.env['PYTHONDONTWRITEBYTECODE'], '1')
+                    self.assertTrue((prefix / (tree['root'] / 'core/lib/brain').relative_to(tree['root'].anchor)).is_symlink())
+                for relative in ('README.md', '.git/config'):
+                    a, b = left['home'] / relative, right['home'] / relative
+                    self.assertNotEqual((a.stat().st_dev, a.stat().st_ino), (b.stat().st_dev, b.stat().st_ino))
+                    self.assertEqual(a.stat().st_nlink, 1)
+                    self.assertEqual(b.stat().st_nlink, 1)
+                (left['worktree'] / 'README.md').write_text('only the first worktree\n')
+                (left['root'] / 'core/bin/brain').write_text('changed first installed core\n')
+                self.assertEqual((right['worktree'] / 'README.md').read_text(), 'hello\n')
+                self.assertEqual((right['root'] / 'core/bin/brain').read_bytes(), (CORE / 'bin/brain').read_bytes())
+                first.tearDown()
+                self.assertIn('app', second.b(right['root'], 'tree'))
+                raw = subprocess.run([sys.executable, str(right['root'] / 'core/bin/brain'), 'tree'],
+                                     cwd=right['root'], env=second.env, capture_output=True, text=True)
+                self.assertEqual(raw.returncode, 0, raw.stdout + raw.stderr)
+                self.assertIn('app', raw.stdout)
+                self.assertEqual(second.git('status', '--porcelain', cwd=right['worktree']), '')
+            finally:
+                for cache in (scenario._setup_templates, scenario._instance_templates, scenario._repo_templates):
+                    for template in cache.values():
+                        template.directory.cleanup()
+
+    def test_instance_templates_preserve_registration_operator_and_independent_git(self):
+        import scenario
+        cases = []
+        with mock.patch.object(scenario, '_instance_templates', {}):
+            try:
+                for _ in range(2):
+                    case = Scenario()
+                    case.fixture_init_in_process = case.fixture_templates = True
+                    case.setUp()
+                    cases.append(case)
+                    self.addCleanup(case.doCleanups)
+                    self.addCleanup(case.tearDown)
+                    case.env['BRAIN_CONFIG'] = str(case.tmp / 'custom/brains.json')
+                    root = case.init('alice')
+                    second = case.init('bob', operator='other')
+                    registration = json.loads(Path(case.env['BRAIN_CONFIG']).read_text())
+                    self.assertEqual(registration['default'], 'alice')
+                    self.assertEqual(registration['brains'], {'alice': {'root': str(root)}, 'bob': {'root': str(second)}})
+                    self.assertIn('principals: other', (second / 'instance.md').read_text())
+                    self.assertEqual(case.git('status', '--porcelain', cwd=root), '')
+                    self.assertEqual(case.git('status', '--porcelain', cwd=second), '')
+                    nested = case.repo(case.tmp / 'nested' / 'repositories' / 'app')
+                    self.assertEqual(case.git('status', '--porcelain', cwd=nested), '')
+                self.assertEqual(len(scenario._instance_templates), 2)
+                first, second = (case.tmp / 'alice' for case in cases)
+                before = (second / '.git/config').read_bytes()
+                (first / '.git/config').write_text('changed first config\n')
+                self.assertEqual((second / '.git/config').read_bytes(), before)
+            finally:
+                for template in scenario._instance_templates.values():
+                    template.directory.cleanup()
+
+    def test_failed_setup_snapshot_is_never_published(self):
+        import scenario
+        case = Scenario()
+        case.setUp()
+        self.addCleanup(case.doCleanups)
+        self.addCleanup(case.tearDown)
+        candidates = []
+        def broken_copy(source, destination):
+            candidates.append(destination.parent)
+            destination.mkdir()
+            (destination / 'partial').write_text('incomplete\n')
+            raise OSError('injected snapshot failure')
+        with mock.patch.object(scenario, '_setup_templates', {}), \
+                mock.patch.object(scenario, '_copy_fixture_tree', side_effect=broken_copy):
+            with self.assertRaisesRegex(OSError, 'injected snapshot failure'):
+                case.cached_setup('broken', lambda: case.tmp)
+            self.assertEqual(scenario._setup_templates, {})
+            self.assertEqual(len(candidates), 1)
+            self.assertFalse(candidates[0].exists())
+
     def test_concurrent_runtime_cache_initialization_compiles_each_core_source_once(self):
         import scenario
         source, package = self.fixture_source()

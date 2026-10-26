@@ -676,6 +676,7 @@ class History(Scenario):
 
 
 class HistorySizes(History):
+    fixture_templates = True
     # Both History.setUp and the extra instance below only construct fixtures;
     # history, containment and Git assertions still use their original paths.
     fixture_init_in_process = True

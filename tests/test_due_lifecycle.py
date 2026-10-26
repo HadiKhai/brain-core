@@ -13,6 +13,7 @@ from scenario import CORE, Scenario
 
 
 class DueLifecycle(Scenario):
+    fixture_templates = True
     fixture_init_in_process = True
     def setUp(self):
         super().setUp()

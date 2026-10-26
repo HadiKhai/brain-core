@@ -30,6 +30,8 @@ from scenario import Scenario, AutonomyProject, shlex_quote
 
 
 class Usage(Scenario):
+    fixture_templates = True
+    fixture_init_in_process = True
     def setUp(self):
         super().setUp()
         self.cfg = self.tmp / "config"
