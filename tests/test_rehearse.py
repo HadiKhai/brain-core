@@ -1125,6 +1125,31 @@ class RehearsalCoverageFaultTypes(unittest.TestCase):
 
 
 class RehearsalCloneCaches(Scenario):
+    def test_cloned_native_fix_with_existing_job_preserves_owned_history_proof(self):
+        import shutil
+        from brain import rehearse_transactions as transactions
+        source = self.init('native-fix-source')
+        home = self.tmp / 'candidate-home'
+        shutil.copytree(CORE, home, symlinks=True, ignore=shutil.ignore_patterns('.git', '__pycache__'))
+        self.git('init', '-q', '-b', 'main', cwd=home)
+        self.git('add', '.', cwd=home)
+        self.git('commit', '-qm', 'candidate fixture', cwd=home)
+        self.b(source, 'new', 'engine', '--title', 'Engine', '--home', str(home))
+        self.b(source, 'wt', 'add', 'engine', 'job')
+        self.b(source, 'check', '--fix')
+        lane = self.tmp / 'fix-clone'
+        lane.mkdir()
+        rehearsal.copy_brain(source, lane / 'brain', self.tmp)
+        rehearsal.materialize_git(lane / 'brain', lane / 'brain')
+        raw = []
+        row = rehearsal.run_command(lane / 'brain/core', lane,
+            ['check', '--fix'], 'fix', [], raw_output=raw)
+        packet = raw[0]['transaction_evidence']
+        transactions._persist_fixture_evidence(lane, raw, row)
+        self.assertEqual(0, row['code'])
+        self.assertEqual('proven', row['transaction_evidence'], packet['diagnostics'])
+        self.assertEqual(0, row['unexpected'])
+
     retain_rehearsal_evidence = True
 
     def test_native_copied_caches_are_removed_before_each_lane_capture(self):
