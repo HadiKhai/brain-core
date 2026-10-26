@@ -2195,3 +2195,26 @@ copying. This retains the real interrupted-copy failure, partial-directory
 cleanup, cache and content checks, and module ownership and context restoration
 assertions. Separate real-platform clone, inode and launcher controls continue
 to exercise the actual platform implementation.
+
+## D30005: Opt audited history and wake fixtures into fresh initialization
+
+HistorySizes and QuestionWake explicitly use the existing in-process fixture
+initializer. HistorySizes inherits its initial construction from History.setUp;
+its additional instance in the named-folder test is independently initialized.
+QuestionWake initializes after loading its own isolated core and before any
+transport or process mocks enter. The fixture helper loads and discards a
+different package, preserving that test-owned core and its later mocks.
+
+These calls construct instances without asserting initializer output, launcher
+behavior or subprocess operands. Every original method body, assertion and
+subcase remains unchanged, including inherited history methods, containment
+mutations, live webhook requests, hanging transports, detached workers and
+mocked wake-launcher checks. Other commands keep their existing execution paths.
+
+Scenario remains default-off. Initializer and launcher controls retain real
+subprocess execution, and evidence-bearing fixture calls retain the existing
+real-process fallback. Each opt-in call still runs initialization against a new
+instance directory with independent Git, journal, index, registry and local
+state; only source files use the existing platform-specific clone optimization.
+Connections, EventViews and RoundTwo already opt in directly or through their
+base class, so their bootstrap paths require no additional change.

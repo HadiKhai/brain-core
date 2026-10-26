@@ -250,6 +250,10 @@ class LockHotfix(Scenario):
 
 
 class QuestionWake(Scenario):
+    # Initialization precedes transport mocks and creates only fixture state.
+    # Keep all asserted CLI, HTTP, child-process and wake-launcher calls real.
+    fixture_init_in_process = True
+
     def setUp(self):
         super().setUp()
         environment = mock.patch.dict(os.environ, self.env, clear=True)

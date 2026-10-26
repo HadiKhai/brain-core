@@ -675,6 +675,10 @@ class History(Scenario):
 
 
 class HistorySizes(History):
+    # Both History.setUp and the extra instance below only construct fixtures;
+    # history, containment and Git assertions still use their original paths.
+    fixture_init_in_process = True
+
     def test_extraction_taken_back_when_its_folder_moves_into_the_home(self):
         from core_loader import SourceFileLoader
         self.b(self.r, "history", "garden")
