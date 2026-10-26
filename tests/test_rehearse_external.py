@@ -157,6 +157,104 @@ class OwnedCopyLifecycle(unittest.TestCase):
             self.assertTrue(outer.unknown)
         self.assertTrue(outer.bulk.exists())
 
+    def _nested_rollback_failure(self, failure):
+        primary = OSError('fixture terminal publication failure')
+        secondary = OSError('fixture rollback ' + failure + ' failure')
+        caught = None
+        fired = False
+        with mock.patch.dict(os.environ, {'BRAIN_REHEARSAL_EVIDENCE_DIR': ''}):
+            with rehearse_external.OwnedCopies(parent=self.parent) as ancestor:
+                with rehearse_external.OwnedCopies(parent=ancestor.bulk) as outer:
+                    owner = rehearse_external.OwnedCopies(parent=outer.bulk)
+                    staged = owner.root / ('retiring-' + owner.run)
+                    original_identity = owner.identities[1]
+                    publish, identity, rename = owner.publish, owner.identity, Path.rename
+                    terminal_failed = False
+                    calls = 0
+                    def fail_publication():
+                        nonlocal calls, terminal_failed
+                        calls += 1
+                        if calls == 2:
+                            terminal_failed = True
+                            raise primary
+                        publish()
+                    def inspect(path):
+                        nonlocal fired
+                        if terminal_failed and failure == 'identity':
+                            fired = True
+                            raise secondary
+                        return identity(path)
+                    def move(path, target):
+                        nonlocal fired
+                        if path == staged and failure == 'rename':
+                            fired = True
+                            raise secondary
+                        return rename(path, target)
+                    with mock.patch.object(owner, 'publish', side_effect=fail_publication), \
+                            mock.patch.object(owner, 'identity', side_effect=inspect), \
+                            mock.patch.object(Path, 'rename', autospec=True, side_effect=move):
+                        try:
+                            with owner:
+                                (owner.bulk / 'original').write_bytes(b'fixture original bytes')
+                        except BaseException as error:
+                            caught = error
+                    self.assertTrue(fired)
+                # The parent has exited: its exceptional cleanup must retain bytes.
+            self.assertTrue(ancestor.bulk.exists())
+            self.assertTrue(outer.bulk.exists())
+            self.assertTrue(staged.exists())
+            self.assertEqual(original_identity, identity(staged))
+            self.assertEqual(b'fixture original bytes', (staged / 'original').read_bytes())
+            self.assertTrue(owner.unknown)
+            self.assertTrue(outer.unknown)
+            self.assertTrue(ancestor.unknown)
+            self.assertIs(caught, primary)
+            self.assertIs(caught.__cause__, secondary)
+
+    def test_nested_evidence_off_rollback_identity_failure_retains_original_bytes(self):
+        self._nested_rollback_failure('identity')
+
+    def test_nested_evidence_off_rollback_rename_failure_retains_original_bytes(self):
+        self._nested_rollback_failure('rename')
+
+    def _nested_refusal_checkpoint_failure(self, body_failure):
+        primary = ValueError('fixture body failure') if body_failure else None
+        secondary = OSError('fixture refusal checkpoint failure')
+        caught = None
+        with mock.patch.dict(os.environ, {'BRAIN_REHEARSAL_EVIDENCE_DIR': ''}):
+            with rehearse_external.OwnedCopies(parent=self.parent) as ancestor:
+                with rehearse_external.OwnedCopies(parent=ancestor.bulk) as outer:
+                    owner = rehearse_external.OwnedCopies(parent=outer.bulk)
+                    retain = rehearse.NativeRetention(owner.bulk, 'fixture')
+                    def checkpoint(**fields):
+                        if 'bulk_cleanup' in fields:
+                            raise secondary
+                        return fields.get('stage') != 'before-native-delete'
+                    with mock.patch.object(rehearse, 'NativeRetention', return_value=retain), \
+                            mock.patch.object(retain, 'checkpoint', side_effect=checkpoint):
+                        try:
+                            with owner:
+                                (owner.bulk / 'original').write_bytes(b'fixture original bytes')
+                                if primary is not None:
+                                    raise primary
+                        except BaseException as error:
+                            caught = error
+            self.assertTrue(ancestor.bulk.exists())
+            self.assertTrue(outer.bulk.exists())
+            self.assertEqual(b'fixture original bytes', (owner.bulk / 'original').read_bytes())
+            self.assertTrue(owner.unknown)
+            self.assertTrue(outer.unknown)
+            self.assertTrue(ancestor.unknown)
+            self.assertIs(caught, primary if body_failure else secondary)
+            if body_failure:
+                self.assertIs(caught.__cause__, secondary)
+
+    def test_nested_evidence_off_refusal_checkpoint_failure_retains_original_bytes(self):
+        self._nested_refusal_checkpoint_failure(False)
+
+    def test_nested_evidence_off_refusal_checkpoint_failure_preserves_body_error(self):
+        self._nested_refusal_checkpoint_failure(True)
+
     def test_linked_parent_refuses_before_allocation(self):
         link = self.parent / 'alias'
         link.symlink_to(self.parent, target_is_directory=True)
