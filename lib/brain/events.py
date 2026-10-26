@@ -663,19 +663,44 @@ class Command:
 
     def __enter__(self):
         nested = any(op.inst.root == self.inst.root for op in _CURRENT)
+        # Refused writes must not first publish repairs or reconstructed sources.
+        # Read the retained state without changing it before admitting a writer.
+        if (not nested and self.command not in ("status", "set")
+                and any(source(self.inst, n) == "events" for n in self.inst.nodes())
+                and journal(self.inst).positions and detect_gaps(self.inst, self.node, record=False)):
+            common.die("events source has unreconciled state; run status --refresh before writing")
         journal(self.inst, repair=True)
         if not nested:
             read_comparisons(self.inst, repair=True)
-            fold_hooks(self.inst)
-            recover_records(self.inst)
             if journal(self.inst).positions:
-                gap = detect_gaps(self.inst, self.node)
-                if gap and self.command not in ("status", "set") and any(source(self.inst, n) == "events" for n in self.inst.nodes()):
-                    common.die("events source has unreconciled state; run status --refresh before writing")
-            backfill_records(self.inst)
+                detect_gaps(self.inst, self.node)
         self.start()
         _CURRENT.append(self)
-        return self
+        try:
+            if not nested:
+                # These are durable writers too: their journal records and hook
+                # acknowledgements belong to this live, locked operation.
+                fold_hooks(self.inst)
+                recover_records(self.inst)
+                backfill_records(self.inst)
+            return self
+        except BaseException as primary:
+            # __exit__ is not called when __enter__ raises. Preserve the primary
+            # failure and leave partial preparation unresolved for reconciliation.
+            secondary = None
+            try:
+                self.finish(False)
+            except BaseException as error:
+                secondary = error
+            try:
+                self.close_lease()
+            except BaseException as error:
+                secondary = secondary or error
+            finally:
+                _CURRENT.pop()
+            if secondary is not None:
+                raise primary from secondary
+            raise
 
     def close_lease(self):
         try:
@@ -927,19 +952,23 @@ def reconcile(inst, node=None, snapshot=False):
         leases = {ref: stack.enter_context(dead_lease(inst, ref)) for ref in dead}
         marker = stack.enter_context(common.directory_target(inst.root / '.brain/events-repair-needed.json', private=True))
         marker_st = marker.stat()
+        # One locked snapshot feeds both comparison and reconciliation. Rendering
+        # every node twice repeats the same expensive Git/accounting reads and
+        # can observe two different external states within one repair.
+        views = {n['id']: snapshot_view(inst, n) for n in inst.nodes() if not n['archived']}
         # Keep evidence of the gap before installing a new baseline.
         for n in inst.nodes():
-            comparison(inst, n)
+            comparison(inst, n, current=views.get(n['id']))
         current = resource_list(inst, resources(inst))
         existing = {r['id'] for r in current}
-        current += [{**r, 'hash': None} for key, r in state.items() if key not in existing]
-        views = {n['id']: snapshot_view(inst, n) for n in inst.nodes() if not n['archived']}
         for ref in dead or [uuid.uuid4().hex]:
             lease = leases.get(ref)
             if lease:
                 lease[0].check_file(lease[1])
             append(inst, opened.get(ref, {}).get("node", "root"), 'reconcile', ref,
-                   {'resources': current, 'views': views, 'flagged': True, 'clear_faults': True})
+                   {'resources': current + [{**r, 'hash': None}
+                       for key, r in journal(inst).state['resources'].items() if key not in existing],
+                    'views': views, 'flagged': True, 'clear_faults': True})
             if lease:
                 st = os.fstat(lease[1])
                 lease[0].unlink_owned(lease[0].path.name, (st.st_dev, st.st_ino))
@@ -1302,7 +1331,7 @@ def maintain(op, changed):
     return views
 
 
-def detect_gaps(inst, preferred):
+def detect_gaps(inst, preferred, record=True):
     """Cheap pre-write coverage check: one resource scan, no Git or status rendering."""
     recorded, views, opened = replay(inst)
     actual = {r['id']: r for r in resource_list(inst, resources(inst))}
@@ -1319,7 +1348,8 @@ def detect_gaps(inst, preferred):
     for nid in sorted(affected):
         result = {'id': uuid.uuid4().hex, 'ts': inst.now(), 'node': node_ref(nid), 'kind': 'coverage', 'equal': not changed and not dead and not faults,
                   'resources': sorted(changed), 'view_equal': None, 'interrupted': dead, 'faults': faults}
-        append_line(inst.root / '.brain/events-compare.jsonl', screen(inst, result))
+        if record:
+            append_line(inst.root / '.brain/events-compare.jsonl', screen(inst, result))
     return bool(changed or dead or faults)
 
 

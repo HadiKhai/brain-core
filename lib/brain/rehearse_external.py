@@ -481,3 +481,134 @@ def freeze_declared(inst, directory):
     captured = Instance(inst.root)
     captured.local = local
     return captured
+
+
+def freeze_accounting(inst, clock, destination):
+    """Attest existing Brain-owned aggregates; never discover provider inputs."""
+    import hashlib
+    import re
+    from . import jobs, spend, guard
+    packet = dict(version=1, frozen_now=clock, fields=['Job', 'Started', 'Ended'], entries={},
+                  machine_usage=dict(complete=False, files=0, read=0, runtimes={}, since_week=None),
+                  machine_evidence=dict(kind='unavailable'))
+    terms = spend.brain_terms(inst)
+    for node in inst.nodes():
+        for row in jobs.read_jobs(node) or []:
+            identity = jobs.digest([node['id'], jobs.job_key(row)])
+            binding = jobs.digest([row.get(k, '') for k in packet['fields']])
+            usage, evidence = None, dict(kind='unavailable')
+            if str(row.get('Usage', '')).startswith('host'):
+                usage = spend.host_row_usage(row)
+                ledger = node['dir'] / jobs.JOBS_FILE
+                if any(p.is_symlink() for p in (ledger, *ledger.parents)):
+                    raise ValueError('linked accounting ledger')
+                fd = os.open(ledger, os.O_RDONLY | os.O_NOFOLLOW)
+                try:
+                    st = os.fstat(fd)
+                    if (not stat.S_ISREG(st.st_mode) or st.st_uid != os.getuid()
+                            or st.st_nlink != 1 or st.st_size > 32 * 1024 * 1024):
+                        raise ValueError('invalid accounting ledger')
+                    with os.fdopen(os.dup(fd), 'rb') as stream:
+                        raw = stream.read(32 * 1024 * 1024 + 1)
+                    current, attached = os.fstat(fd), ledger.lstat()
+                    def stable(value):
+                        return (value.st_dev, value.st_ino, value.st_size, value.st_mtime_ns, value.st_ctime_ns)
+                    if len(raw) != st.st_size or stable(st) != stable(current) or stable(st) != stable(attached):
+                        raise ValueError('changing accounting ledger')
+                finally:
+                    os.close(fd)
+                observed = [r for r in jobs.read_jobs(node) or [] if jobs.job_key(r) == jobs.job_key(row)]
+                if observed != [row] or stable(ledger.lstat()) != stable(st):
+                    raise ValueError('accounting ledger generation changed')
+                evidence = dict(kind='host-ledger', dev=st.st_dev, ino=st.st_ino,
+                    bytes=len(raw), mtime_ns=st.st_mtime_ns, sha256=hashlib.sha256(raw).hexdigest())
+            else:
+                key = jobs.digest([node['id'], jobs.job_key(row), ''])
+                path = inst.root / '.brain/spend/jobs' / (key + '.json')
+                try:
+                    if any(p.is_symlink() for p in (path, *path.parents)):
+                        raise ValueError('linked accounting aggregate')
+                    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+                    try:
+                        st = os.fstat(fd)
+                        if (not stat.S_ISREG(st.st_mode) or st.st_uid != os.getuid()
+                                or st.st_nlink != 1 or st.st_size > 1024 * 1024):
+                            raise ValueError('invalid accounting aggregate')
+                        raw = os.read(fd, 1024 * 1024 + 1)
+                        current = os.fstat(fd)
+                        if (len(raw) != st.st_size or
+                                (current.st_dev, current.st_ino, current.st_size, current.st_mtime_ns,
+                                 current.st_ctime_ns) !=
+                                (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns)):
+                            raise ValueError('changing accounting aggregate')
+                    finally:
+                        os.close(fd)
+                    attached = path.lstat()
+                    if (attached.st_dev, attached.st_ino, attached.st_size, attached.st_mtime_ns, attached.st_ctime_ns) != (
+                            st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns):
+                        raise ValueError('replaced accounting aggregate')
+                    saved = json.loads(raw)
+                    candidate = saved.get('usage')
+                    if saved.get('version') != spend.SPEND_VERSION or not isinstance(candidate, dict):
+                        raise ValueError('invalid accounting aggregate')
+                    if not isinstance(saved.get('signature'), str) or re.fullmatch('[0-9a-f]{64}', saved['signature']) is None:
+                        raise ValueError('invalid accounting aggregate provenance')
+                    if any(type(candidate.get(k)) is not int or candidate[k] < 0 for k in
+                           (*spend.SPEND_TOKENS, 'processed', 'compactions', 'sessions', 'tools',
+                            'subagents', 'active_minutes', 'agent_minutes')):
+                        raise ValueError('invalid accounting counters')
+                    usage = copy.deepcopy(candidate)
+                    evidence = dict(kind='cached-aggregate', dev=st.st_dev, ino=st.st_ino,
+                        bytes=len(raw), mtime_ns=st.st_mtime_ns, signature=saved.get('signature'),
+                        sha256=hashlib.sha256(raw).hexdigest())
+                except FileNotFoundError:
+                    pass
+            if usage is not None:
+                usage['models'] = spend.spend_models(usage.get('models', {}), terms)
+                # These are the aggregate API fields, never transcript context.
+                allowed = set(spend.SPEND_TOKENS) | {'tools', 'compactions', 'auto_compactions',
+                    'sessions', 'subagents', 'sub_tokens', 'agent_minutes', 'models', 'runtimes',
+                    'largest_compaction', 'processed', 'sub_share', 'active_minutes', 'source'}
+                if set(usage) - allowed or guard.find_terms(json.dumps(usage), terms):
+                    raise ValueError('protected accounting aggregate')
+            worktree = node.get('local', {}).get('worktrees', {}).get(row.get('Job'), {}).get('path')
+            packet['entries'][identity] = dict(binding=binding, usage=usage, evidence=evidence,
+                                               worktree=worktree)
+    body = (json.dumps(packet, sort_keys=True) + '\n').encode()
+    destination = Path(destination)
+    with destination.open('xb') as stream:
+        os.fchmod(stream.fileno(), 0o600)
+        stream.write(body)
+    return dict(path=str(destination), sha256=hashlib.sha256(body).hexdigest())
+
+
+def install_accounting(path, expected, clock):
+    """Bind trusted frozen aggregates into either isolated core, with no fallback."""
+    import hashlib
+    from brain import spend, jobs
+    raw = Path(path).read_bytes()
+    if hashlib.sha256(raw).hexdigest() != expected:
+        raise ValueError('accounting snapshot digest changed')
+    packet = json.loads(raw)
+    if packet.get('version') != 1 or packet.get('frozen_now') != clock:
+        raise ValueError('accounting snapshot clock changed')
+    def frozen(inst, node, row, worktree=None):
+        identity = jobs.digest([node['id'], jobs.job_key(row)])
+        entry = packet['entries'].get(identity)
+        binding = jobs.digest([row.get(k, '') for k in packet['fields']])
+        if entry is None or entry['binding'] != binding:
+            raise ValueError('accounting snapshot binding changed')
+        if worktree is not None and str(worktree) != entry.get('worktree'):
+            raise ValueError('accounting snapshot scope changed')
+        usage = copy.deepcopy(entry['usage'])
+        if usage is not None:
+            usage['models'] = spend.spend_models(usage.get('models', {}), spend.spend_terms(inst))
+        return usage
+    spend.job_usage = spend.live_usage = spend._live_usage = spend._read_live_usage = frozen
+    # UI machine totals have no authorized aggregate here. Keep them explicitly
+    # incomplete rather than treating an empty provider HOME as measured zero.
+    spend.spend_machine = lambda inst, budget=2.0: copy.deepcopy(packet['machine_usage'])
+    spend.spend_input_signature = lambda inst: ('rehearsal-accounting-v1', expected, clock)
+    def refuse_discovery(inst):
+        raise ValueError('provider accounting discovery is outside the frozen aggregate contract')
+    spend.spend_sources = refuse_discovery
