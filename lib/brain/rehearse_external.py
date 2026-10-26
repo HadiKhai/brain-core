@@ -103,9 +103,21 @@ class OwnedCopies:
         try:
             try:
                 self.retire(kind)
-            except BaseException:
-                self.native_scope.__exit__(*sys.exc_info())
-                raise
+            except BaseException as retirement_error:
+                if error is None:
+                    self.native_scope.__exit__(*sys.exc_info())
+                    raise
+                # Native finalization must see the original body object and
+                # traceback, even when retirement publication already failed.
+                try:
+                    self.native_scope.__exit__(kind, error, traceback)
+                except BaseException as native_error:
+                    secondary = error.__cause__ if native_error is error else native_error
+                else:
+                    secondary = error.__cause__
+                if secondary is not None and secondary is not retirement_error:
+                    retirement_error.__cause__ = secondary
+                raise error.with_traceback(traceback) from retirement_error
             return self.native_scope.__exit__(kind, error, traceback)
         finally:
             if self.previous_term is not None:

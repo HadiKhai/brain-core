@@ -164,11 +164,17 @@ class OwnedCopyLifecycle(unittest.TestCase):
         original_traceback = None
         caught = None
         entries = []
+        native_exceptions = []
         checkpoint = rehearse.NativeRetention.checkpoint
+        exception = rehearse.NativeRetention.exception
         with mock.patch.dict(os.environ, {'BRAIN_REHEARSAL_EVIDENCE_DIR': ''}):
             with rehearse_external.OwnedCopies(parent=self.parent) as ancestor:
                 with rehearse_external.OwnedCopies(parent=ancestor.bulk) as outer:
                     owner = rehearse_external.OwnedCopies(parent=outer.bulk)
+                    def capture_exception(retention, error):
+                        if retention.owned == owner.bulk:
+                            native_exceptions.append(error)
+                        return exception(retention, error)
                     def fail_checkpoint(retention, **fields):
                         if retention.owned == owner.bulk and fields.get('stage') == 'before-native-delete':
                             entries.append((owner.unknown, outer.unknown, ancestor.unknown))
@@ -184,6 +190,7 @@ class OwnedCopyLifecycle(unittest.TestCase):
                                 original_traceback = sys.exc_info()[2]
                                 raise
                     with mock.patch.object(owner, 'publish', side_effect=retirement), \
+                            mock.patch.object(rehearse.NativeRetention, 'exception', capture_exception), \
                             mock.patch.object(rehearse.NativeRetention, 'checkpoint', fail_checkpoint):
                         try:
                             with owner:
@@ -199,6 +206,8 @@ class OwnedCopyLifecycle(unittest.TestCase):
             self.assertEqual(b'fixture original operands\x00\xff', (owner.bulk / 'original').read_bytes())
             self.assertEqual([(True, True, True)], entries)
             self.assertIs(caught, primary if body_failure else retirement)
+            self.assertEqual(1, len(native_exceptions))
+            self.assertIs(native_exceptions[0], caught)
             if body_failure:
                 tracebacks = []
                 cursor = caught.__traceback__
