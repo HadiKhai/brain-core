@@ -70,9 +70,8 @@ class Instance:
         return data
 
     def save_local(self):
-        target = _m_common.safe_target(self.local_path) or self.local_path.parent.resolve() / self.local_path.name
-        _m_common.durable_makedirs(target.parent)
-        _m_common.atomic_write(target, json.dumps(self.local, indent=2, sort_keys=True) + "\n")
+        with _m_common.durable_directory_target(self.local_path) as target:
+            target.atomic_write(json.dumps(self.local, indent=2, sort_keys=True) + "\n")
 
     def local_of(self, nid):
         return self.local["nodes"].setdefault(nid, {})

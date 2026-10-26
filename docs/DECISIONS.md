@@ -7,8 +7,14 @@ Durable directory creation holds that parent's component descriptors, opens each
 child without following links, and checks identity and physical location before
 and after syncing its parent. Existing entries are synced again before deeper
 creation, so an interrupted earlier call cannot skip ancestor persistence.
-Local settings retain the selected physical filename through directory creation
-and atomic publication; a later alias change cannot redirect either operation.
+Local settings hold the same checked directory descriptor chain through durable
+descent and atomic publication. The initially selected physical name enters
+descent without further alias resolution; replacement with an internal alias
+is refused. Retargeting only the original alias keeps the selected directory.
+
+Other callers that separately create directories and publish files establish
+separate authority lifetimes; this local-settings guarantee does not bridge
+their operation boundaries.
 
 Outward aliases, replaced physical ancestors and shared files remain refused.
 Each sync failure propagates; no multi-file transaction, namespace lock or
