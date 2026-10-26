@@ -3,10 +3,12 @@ import contextlib
 import fcntl
 import json
 import os
+import stat
 
 from . import common as _m_common
 from . import guard as _m_guard
 from . import hosts as _m_hosts
+from . import instance as _m_instance
 from . import jobs as _m_jobs
 from . import nodes as _m_nodes
 from . import transitions as _m_transitions
@@ -68,6 +70,26 @@ def communication_question(inst, spec):
             'default': spec['default'], 'deadline': deadline.isoformat()}
 
 
+def communication_published(n, marker):
+    """Observe the direct-publication marker under the inbox writer's lock."""
+    path = n['dir'] / 'inbox.md'
+    path = _m_common.safe_target(path) or path
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except FileNotFoundError:
+        return False
+    with os.fdopen(fd, 'r') as inbox:
+        info = os.fstat(inbox.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+            raise ValueError('cannot establish notification publication from a nonregular or linked inbox')
+        fcntl.flock(inbox.fileno(), fcntl.LOCK_SH)
+        published = marker in inbox.read()
+        if published:
+            # Also complete durability if an earlier append stopped before fsync.
+            os.fsync(inbox.fileno())
+        return published
+
+
 def communication_record(inst, n, kind, text, key, question=None):
     if kind not in COMMUNICATION_KINDS or not isinstance(key, str) or not key.strip() or not isinstance(text, str) or not text.strip():
         raise ValueError('notification requires a known kind, stable key and text')
@@ -79,8 +101,8 @@ def communication_record(inst, n, kind, text, key, question=None):
     identity = _m_hosts.wake_binding(json.dumps([n['id'], kind, key]))
     record = {'id': identity, 'node': n['id'], 'kind': kind, 'text': text, 'at': inst.now(), **typed}
     from . import communication_policy
-    if not typed and communication_policy.quiet_now(inst):
-        record['deferred'] = True
+    defer = not typed and communication_policy.quiet_now(inst)
+    marker = '<!-- communication:' + identity + ' -->'
     with communication_store(inst) as data:
         records = data['questions'] if typed else data['notices']
         previous = records.get(identity)
@@ -91,15 +113,36 @@ def communication_record(inst, n, kind, text, key, question=None):
             record = previous
         else:
             records[identity] = record
-    if record.get('deferred'):
-        return record  # durable source retained; morning publication owns its inbox delivery
-    marker = '<!-- communication:' + identity + ' -->'
+        if defer and not record.get('deferred') and not (previous and communication_published(n, marker)):
+            # Only an unpublished receipt becomes pending morning work. A quiet
+            # retry of a delivered notice must suppress delivery without deferral.
+            record['deferred'] = True
+    if defer or record.get('deferred'):
+        return record  # quiet retries never deliver; only deferred receipts are morning work
     # Receipt first: interrupted inbox publication is recoverable by the next same-key call.
-    _m_transitions.inbox_append(n['dir'], '- ' + inst.now() + ' from notification: ' + kind + ': ' + text + ' ' + marker + '\n', marker)
+    line = '- ' + inst.now() + ' from notification: ' + kind + ': ' + text + ' ' + marker + '\n'
+    if typed:
+        _m_transitions.inbox_append(n['dir'], line, marker)
+    else:
+        # Re-read after saving the receipt: a quiet retry may have deferred it
+        # meanwhile. Hold this lock through append so marker inspection cannot
+        # mistake an in-flight direct publication for pending morning delivery.
+        # Inbox append also takes the instance writer lock; preserve that order
+        # for library callers as well as the already-locked CLI path.
+        with _m_instance.brain_lock(inst), communication_store(inst) as data:
+            record = data['notices'][identity]
+            if record.get('deferred'):
+                return record
+            if communication_policy.quiet_now(inst):
+                if not communication_published(n, marker):
+                    record['deferred'] = True
+                return record
+            _m_transitions.inbox_append(n['dir'], line, marker)
     if typed and 'answer' not in record:
         _m_hosts.request_wake(inst, n, 'question:' + identity,
                               items=[{'id': identity, 'kind': 'question'}])
-    elif n['id'] != 'root' and not record.get('deferred'):
+    elif (n['id'] != 'root' and not record.get('deferred') and
+          (typed or not communication_policy.quiet_now(inst))):
         # Coordinator doorbells may include results; root's channel carries questions only.
         target, _ = _m_hosts.wake_target(inst, n)
         if target['id'] != 'root':

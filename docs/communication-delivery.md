@@ -8,6 +8,16 @@ an absent policy preserves existing notification behavior.
 
 During that window, landing, park and FYI notices are retained in the local
 communication store without inbox publication or a coordinator doorbell.
+Same-key recovery rechecks the current policy, including when an earlier attempt
+saved a receipt outside quiet hours and stopped before publication. A retry in
+quiet hours durably defers that retained notice without changing its identity or
+content. A receipt already published directly keeps its non-deferred state: its
+existing inbox marker is checked under the inbox writer's lock before deciding
+whether morning work is pending. Unknown publication state refuses recovery
+without changing the receipt. Both quiet retry paths suppress inbox and wake
+delivery. Direct publication rechecks retained deferral under the communication
+store lock, preventing a paused publisher from overtaking a quiet retry.
+Deferral remains in force after quiet hours until morning publication.
 `brain morning-brief <node>` publishes one immutable snapshot of deferred notices
 per local date in that node's inbox. Repeated calls do not publish another brief.
 Interrupted publication recovers the exact prior snapshot; later work remains

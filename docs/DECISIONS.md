@@ -2630,3 +2630,25 @@ launcher help and current patches on the real owning module.
 ### Launcher help control dependency ownership
 
 Keep the real launcher help negative-import control in the canonical train-owned test class. Its unchanged literal train command/module assertions are dependencies recognized by the strict lane scanner. The control still executes the real launcher subprocess; no fixture initialization path or dependency-scanner exemption is introduced.
+
+## Current quiet policy applies to same-key notice recovery
+
+A nonquestion retry validates the current quiet policy before recovering its
+durable receipt. When quiet hours apply, it persists deferral on that receipt
+under the communication store lock, after checking for a content collision.
+Stable identity, timestamp and content remain unchanged. Existing deferral is
+never cleared by a later retry: morning publication retains ownership of the
+pending notice and its exactly-once inbox marker. Typed questions keep their
+immediate path and existing action authority. This changes no host transport,
+schedule or root routing policy.
+
+A completed direct publication must not become pending morning work on a quiet
+retry. Legacy receipts establish that state from their existing inbox marker,
+read under the inbox writer's lock; observation or durability errors refuse the
+retry before deferral changes. Content collision validation still comes first.
+Both published and unpublished quiet retries suppress inbox and wake delivery.
+Direct notice append rechecks the durable receipt and current quiet policy under
+the communication store lock, serializing it with recovery after the initial
+receipt has been saved. Existing deferral remains owned by morning delivery.
+The instance writer lock precedes this publication critical section, matching
+the inbox event writer's lock order even when called outside CLI dispatch.
