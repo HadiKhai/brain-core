@@ -183,65 +183,80 @@ def retained_temporary_directory(copies=None):
     retention = NativeRetention(owned, 'before-native-setup')
     children = []
     token = _retention_children.set(children)
+    primary_error = None
     try:
         yield str(owned)
     except BaseException as error:
-        retention.exception(error)
+        primary_error = error
+        try:
+            retention.exception(error)
+        except BaseException as diagnostic_error:
+            if copies is None:
+                raise
+            retention.incomplete = True
+            if copies is not None:
+                copies.retain_unknown()
+            raise error from diagnostic_error
         raise
     finally:
-        if any(child.incomplete and (child.owned == owned or owned in child.owned.parents)
-               for child in children):
-            retention.incomplete = True
-        _retention_children.reset(token)
-        saved = retention.checkpoint(stage='before-native-delete') is True
-        if copies is None:
-            if retention.incomplete or not saved:
-                temporary._finalizer.detach()
-            else:
-                temporary.cleanup()
-        else:
-            parent = _m_rehearse_external.ACTIVE_COPIES.get()
-            approved = (saved and not retention.incomplete and copies.retirement_ready
-                        and copies.safe() and copies.processes_ended())
-            if approved:
-                # Keep the exact inode recoverable until terminal publication has
-                # succeeded. No post-delete publication can erase the last copy.
-                staged = copies.root / ('retiring-' + copies.run)
-                moved = False
-                try:
-                    if staged.exists() or staged.is_symlink():
-                        raise OSError('owned retirement destination occupied')
-                    copies.bulk.rename(staged)
-                    moved = True
-                    copies.receipt['state'] = 'removed'
-                    copies.publish()
-                    valid = (copies.identity(copies.root) == copies.identities[0]
-                             and copies.identity(staged) == copies.identities[1]
-                             and not copies.bulk.exists() and not copies.bulk.is_symlink()
-                             and not (copies.root / 'cleanup.json').is_symlink()
-                             and json.loads((copies.root / 'cleanup.json').read_text()) == copies.receipt
-                             and copies.processes_ended())
-                    if not valid:
-                        raise OSError('owned retirement identity changed')
-                    shutil.rmtree(staged)
-                except BaseException:
-                    retention.incomplete = True
-                    copies.unknown = True
-                    copies.receipt['state'] = 'retained-cleanup-error'
-                    if (moved and not copies.bulk.exists() and not copies.bulk.is_symlink()
-                            and copies.identity(copies.root) == copies.identities[0]
-                            and staged.exists() and copies.identity(staged) == copies.identities[1]):
-                        staged.rename(copies.bulk)
-                    if parent is not None:
-                        parent.unknown = True
-                    raise
-            else:
+        try:
+            if any(child.incomplete and (child.owned == owned or owned in child.owned.parents)
+                   for child in children):
                 retention.incomplete = True
-                copies.unknown = True
-                copies.receipt.update(state='retained', refusal='native-retention-or-ownership-incomplete')
-                retention.checkpoint(bulk_cleanup=dict(copies.receipt))
-                if parent is not None:
-                    parent.unknown = True
+            _retention_children.reset(token)
+            saved = retention.checkpoint(stage='before-native-delete') is True
+            if copies is None:
+                if retention.incomplete or not saved:
+                    temporary._finalizer.detach()
+                else:
+                    temporary.cleanup()
+            else:
+                approved = (saved and not retention.incomplete and copies.retirement_ready
+                            and copies.safe() and copies.processes_ended())
+                if approved:
+                    # Keep the exact inode recoverable until terminal publication has
+                    # succeeded. No post-delete publication can erase the last copy.
+                    staged = copies.root / ('retiring-' + copies.run)
+                    moved = False
+                    try:
+                        if staged.exists() or staged.is_symlink():
+                            raise OSError('owned retirement destination occupied')
+                        copies.bulk.rename(staged)
+                        moved = True
+                        copies.receipt['state'] = 'removed'
+                        copies.publish()
+                        valid = (copies.identity(copies.root) == copies.identities[0]
+                                 and copies.identity(staged) == copies.identities[1]
+                                 and not copies.bulk.exists() and not copies.bulk.is_symlink()
+                                 and not (copies.root / 'cleanup.json').is_symlink()
+                                 and json.loads((copies.root / 'cleanup.json').read_text()) == copies.receipt
+                                 and copies.processes_ended())
+                        if not valid:
+                            raise OSError('owned retirement identity changed')
+                        shutil.rmtree(staged)
+                    except BaseException as error:
+                        retention.incomplete = True
+                        copies.retain_unknown()
+                        copies.receipt['state'] = 'retained-cleanup-error'
+                        try:
+                            if (moved and not copies.bulk.exists() and not copies.bulk.is_symlink()
+                                    and copies.identity(copies.root) == copies.identities[0]
+                                    and staged.exists() and copies.identity(staged) == copies.identities[1]):
+                                staged.rename(copies.bulk)
+                        except BaseException as rollback_error:
+                            raise error from rollback_error
+                        raise
+                else:
+                    retention.incomplete = True
+                    copies.retain_unknown()
+                    copies.receipt.update(state='retained', refusal='native-retention-or-ownership-incomplete')
+                    retention.checkpoint(bulk_cleanup=dict(copies.receipt))
+        except BaseException as cleanup_error:
+            if copies is not None:
+                copies.retain_unknown()
+            if copies is not None and primary_error is not None:
+                raise primary_error from cleanup_error
+            raise
 
 
 @contextlib.contextmanager
