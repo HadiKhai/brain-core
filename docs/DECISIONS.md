@@ -73,6 +73,8 @@ Owned copy scopes capture their enclosing in-memory owners on entry. A known
 refusal or cleanup failure marks that entire chain uncertain before inspecting,
 restoring, publishing or checkpointing retained copies. This state is monotonic;
 successful cleanup retains all existing ownership and process predicates.
+An already-incomplete child capture marks the captured owner chain before the
+first pre-delete checkpoint, including when that checkpoint itself fails.
 Staged rollback remains best-effort under the original inode checks. A secondary
 rollback or checkpoint error is chained to the primary exception using Python 3.9
 exception causes; the primary exception and surviving original bytes remain
