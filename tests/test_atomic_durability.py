@@ -60,7 +60,7 @@ class AtomicDurability(unittest.TestCase):
             return real_replace(source, target, **kwargs)
         with mock.patch.object(self.m.os, 'fsync', side_effect=sync), mock.patch.object(self.m.os, 'replace', side_effect=replace):
             self.m.atomic_write(self.path, 'new')
-        self.assertEqual(events, ['file', 'replace', 'directory'])
+        self.assertEqual(events, ['file', 'file', 'replace', 'directory'])
         self.assertEqual(self.path.read_text(), 'new')
 
     def test_prepublication_sync_failure_preserves_old_file(self):
@@ -120,19 +120,96 @@ class AtomicDurability(unittest.TestCase):
                 else:
                     self.assertEqual(staging, [])
 
-    def test_public_mode_is_restored_only_after_private_staging_is_published(self):
+    def test_public_mode_is_prepared_only_after_private_staging_is_synced(self):
         self.path.chmod(0o644)
-        replace = os.replace
+        replace, sync, fdopen = os.replace, os.fsync, os.fdopen
         modes = []
+
+        class Writer:
+            def __init__(writer, *args, **kwargs):
+                writer.stream = fdopen(*args, **kwargs)
+            def __enter__(writer):
+                return writer
+            def __exit__(writer, *args):
+                return writer.stream.__exit__(*args)
+            def fileno(writer):
+                return writer.stream.fileno()
+            def write(writer, text):
+                mode = stat.S_IMODE(os.fstat(writer.fileno()).st_mode)
+                self.assertEqual(mode, 0o600)
+                modes.append(('write', mode))
+                return writer.stream.write(text)
+            def flush(writer):
+                modes.append(('flush', stat.S_IMODE(os.fstat(writer.fileno()).st_mode)))
+                return writer.stream.flush()
+
+        def synced(fd):
+            st = os.fstat(fd)
+            modes.append(('directory-sync', None) if stat.S_ISDIR(st.st_mode)
+                         else ('file-sync', stat.S_IMODE(st.st_mode)))
+            return sync(fd)
+
         def observe(source, target, **kwargs):
-            modes.append(stat.S_IMODE(os.stat(source, dir_fd=kwargs['src_dir_fd']).st_mode))
+            modes.append(('replace', stat.S_IMODE(os.stat(source, dir_fd=kwargs['src_dir_fd']).st_mode)))
             self.assertEqual(self.path.read_text(), 'old')
             return replace(source, target, **kwargs)
-        with mock.patch.object(self.m.os, 'replace', side_effect=observe):
+        with mock.patch.object(self.m.os, 'replace', side_effect=observe), \
+                mock.patch.object(self.m.os, 'fsync', side_effect=synced), \
+                mock.patch.object(self.m.os, 'fdopen', side_effect=Writer):
             self.m.atomic_write(self.path, 'new')
-        self.assertEqual(modes, [0o600])
+        self.assertEqual(modes, [('write', 0o600), ('flush', 0o600),
+                                 ('file-sync', 0o600), ('file-sync', 0o644),
+                                 ('replace', 0o644), ('directory-sync', None)])
         self.assertEqual(self.path.read_text(), 'new')
         self.assertEqual(stat.S_IMODE(self.path.stat().st_mode), 0o644)
+
+    def test_intended_mode_preserves_existing_defaults_new_and_keeps_private(self):
+        for existing, private, intended in ((0o640, False, 0o640),
+                                            (None, False, 0o644),
+                                            (0o644, True, 0o600),
+                                            (None, True, 0o600)):
+            with self.subTest(existing=existing, private=private):
+                self.path.unlink(missing_ok=True)
+                if existing is not None:
+                    self.path.write_text('old')
+                    self.path.chmod(existing)
+                self.m.atomic_write(self.path, 'new', private=private)
+                self.assertEqual(self.path.read_text(), 'new')
+                self.assertEqual(stat.S_IMODE(self.path.stat().st_mode), intended)
+
+    def test_mode_preparation_failures_never_publish_and_leave_private_staging(self):
+        chmod, sync = os.fchmod, os.fsync
+        for phase in ('chmod', 'mode-sync'):
+            for cleanup_fails in (False, True):
+                with self.subTest(phase=phase, cleanup_fails=cleanup_fails):
+                    self.path.chmod(0o644)
+                    primary = OSError('mode preparation failed')
+                    cleanup = OSError('cleanup failed')
+                    def changed(fd, mode):
+                        if phase == 'chmod' and mode == 0o644:
+                            raise primary
+                        return chmod(fd, mode)
+                    def synced(fd):
+                        st = os.fstat(fd)
+                        if phase == 'mode-sync' and stat.S_ISREG(st.st_mode) and stat.S_IMODE(st.st_mode) == 0o644:
+                            raise primary
+                        return sync(fd)
+                    unlink = mock.patch.object(self.m.os, 'unlink', side_effect=cleanup) if cleanup_fails else mock.patch.object(self.m.os, 'unlink', wraps=os.unlink)
+                    with mock.patch.object(self.m.os, 'fchmod', side_effect=changed), \
+                            mock.patch.object(self.m.os, 'fsync', side_effect=synced), \
+                            mock.patch.object(self.m.os, 'replace') as replace, unlink:
+                        with self.assertRaises(OSError) as raised:
+                            self.m.atomic_write(self.path, 'new')
+                    self.assertIs(raised.exception, primary)
+                    replace.assert_not_called()
+                    self.assertEqual(self.path.read_text(), 'old')
+                    self.assertEqual(stat.S_IMODE(self.path.stat().st_mode), 0o644)
+                    staging = [path for path in self.path.parent.iterdir() if path != self.path]
+                    self.assertEqual(len(staging), int(cleanup_fails))
+                    if cleanup_fails:
+                        self.assertIs(raised.exception.__cause__, cleanup)
+                        self.assertEqual(stat.S_IMODE(staging[0].stat().st_mode), 0o600)
+                        staging[0].unlink()
 
     def test_replace_and_cleanup_failure_leaves_private_staging_and_old_target(self):
         self.path.chmod(0o644)
