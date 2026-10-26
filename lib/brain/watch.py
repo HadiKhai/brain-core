@@ -1,5 +1,6 @@
 """File-only actionable-work watcher; no host queries, provider calls or model turns."""
 import hashlib
+import contextlib
 import json
 import math
 import os
@@ -76,13 +77,17 @@ def watch_job_stalls(inst, n):
         return []  # do not create private watcher state for ordinary nodes, including init
     if _m_common.outward_links(inst.root):
         raise ValueError('unsafe job stall state')
-    directory.mkdir(parents=True, exist_ok=True)
-    _m_common.safe_target(lock)
-    fd = os.open(lock, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
-    with os.fdopen(fd, 'a+') as stream:
-        if os.fstat(stream.fileno()).st_nlink != 1:
-            raise ValueError('linked job stall lock')
-        fcntl.flock(stream, fcntl.LOCK_EX)
+    from . import ui_readmodel
+    view = ui_readmodel.projection(inst.root)
+    if view is None:
+        directory.mkdir(parents=True, exist_ok=True)
+        _m_common.safe_target(lock)
+        fd = os.open(lock, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    with contextlib.nullcontext(None) if view else os.fdopen(fd, 'a+') as stream:
+        if stream is not None:
+            if os.fstat(stream.fileno()).st_nlink != 1:
+                raise ValueError('linked job stall lock')
+            fcntl.flock(stream, fcntl.LOCK_EX)
         _m_common.safe_target(path)
         data = watch_read(path, {'version': 1, 'jobs': {}})
         if (data.get('version') != 1 or not isinstance(data.get('jobs'), dict)
@@ -138,7 +143,7 @@ def watch_job_stalls(inst, n):
                               'text': _m_nodes.import_text(
                                   f"{row['Job']} {match[1]} {minutes:g} min without an event; inspect the job",
                                   _m_guard.never_terms(n))})
-        if current != data['jobs'] or not path.exists():
+        if view is None and (current != data['jobs'] or not path.exists()):
             _m_machine.machine_publish(inst, path, json.dumps({'version': 1, 'jobs': current}, sort_keys=True) + '\n')
     return items
 

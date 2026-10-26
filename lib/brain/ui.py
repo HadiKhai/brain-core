@@ -34,6 +34,7 @@ from . import ui_review as _m_ui_review
 from . import ui_status as _m_ui_status
 from . import ui_server as _m_ui_server
 from . import ui_fill as _m_ui_fill
+from . import ui_readmodel as _m_ui_readmodel
 from . import verify as _m_verify
 from . import worktrees as _m_worktrees
 
@@ -283,6 +284,7 @@ class UIInstance(_m_instance.Instance):
         return self._items
 
 
+@_m_ui_readmodel.read_view
 def ui_state(inst, problems=None, scan=None, spend_budget=2.0, machine_spend=None, cache=None, node_keys=None):
     readiness = _m_verify.display_cache(cache.ready, cache.worktree_keys) if cache is not None else contextlib.nullcontext()
     usage = _m_spend.live_usage_snapshot(cache.usage, cache.usage_revision) if cache is not None else contextlib.nullcontext()
@@ -302,6 +304,7 @@ def ui_round_usage(inst, n, row, used):
         return {'state': 'unavailable', 'processed': None, 'compactions': None, 'hours': None}
 
 
+@_m_ui_readmodel.read_view
 def ui_node(inst, n, since, cache=None, partial=False):
     """The expensive repository/readiness part, reusable independently for each node."""
     home_commits = []
@@ -386,6 +389,7 @@ def ui_node(inst, n, since, cache=None, partial=False):
     return row, home_commits
 
 
+@_m_ui_readmodel.read_view
 def ui_initial_state(inst, scan=None):
     """A file-only first reading; repository, readiness and usage fill in afterwards."""
     nodes = inst.nodes()
@@ -707,6 +711,7 @@ class UISpend:
             self.queue.clear()
             self.pending.clear()
             self.dirty, self.published = True, float('-inf')
+            self.value = {'complete': False, 'files': 0, 'read': 0, 'runtimes': {}, 'since_week': None}
         self.permissions = permissions
         self.allowed, self.forbidden = allowed, forbidden
         files = {}
@@ -729,12 +734,16 @@ class UISpend:
             self.revision += 1
             self.dirty = True
         self.stamps = files
+        if self.queue:
+            # New/changed inputs revoke completion immediately, before the next slice.
+            self.value = {**self.value, 'complete': False, 'files': len(files)}
+            self.published = float('-inf')
 
     def advance(self):
         # Passive tabs reserve CPU for metadata and genuine workspace changes;
         # unfinished files still advance on every slice and publish completion.
         deadline = time.monotonic() + self.BUDGET * (0.5 if self.background else 1)
-        with _m_spend.spend_read_only():
+        with _m_spend.spend_read_only(), _m_ui_readmodel.ReadModel(self.inst, '').usage_scope():
             while self.queue and time.monotonic() < deadline:
                 runtime, path = self.queue.popleft()
                 self.pending.discard(path)
@@ -762,10 +771,52 @@ class UISpend:
         return False
 
 
+class UIInputTree:
+    """Reuse directory listings, never file metadata or source contents."""
+    def __init__(self):
+        self.listings = {}
+
+    def paths(self, root, ignored_dirs=None, ignored_files=None):
+        ignored_dirs, ignored_files = ignored_dirs or {}, ignored_files or {}
+        paths, visited = {root}, set()
+
+        def visit(directory, top=False):
+            # os.walk does not descend through child directory links. Check again
+            # even for a cached child: replacement must not authorize traversal.
+            if not top and directory.is_symlink():
+                return
+            visited.add(directory)
+            stamp = UIInputs.stamp(directory)
+            old = self.listings.get(directory)
+            if old is None or old[0] != stamp:
+                try:
+                    with os.scandir(directory) as entries:
+                        dirs, files = [], []
+                        for entry in entries:
+                            (dirs if entry.is_dir() else files).append(directory / entry.name)
+                    old = (stamp, tuple(dirs), tuple(files))
+                    self.listings[directory] = old
+                except OSError:
+                    self.listings.pop(directory, None)
+                    return
+            dirs = [p for p in old[1] if p.name not in ignored_dirs.get(directory, ())]
+            paths.update(p for p in old[2] if p.name not in ignored_files.get(directory, ()))
+            paths.update(dirs)
+            for child in dirs:
+                visit(child)
+
+        visit(root, top=True)
+        for directory in list(self.listings):
+            if (directory == root or root in directory.parents) and directory not in visited:
+                del self.listings[directory]
+        return paths
+
+
 class UIInputs:
     """Metadata only: no transcript parsing, Git status, readiness hashes or cache writes per poll."""
     def __init__(self, inst):
         self.root = inst.root
+        self.inventory = UIInputTree()
         self.files = set()
         self.worker_path = self.root / '.brain/worker-runs.json'
         self.worker_stamp, self.worker_context_stamp = None, None
@@ -1016,16 +1067,15 @@ class UIInputs:
     def stamp(path):
         try:
             st = path.stat()
-            return (str(path), st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns)
+            return (str(path), st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns,
+                    st.st_ctime_ns, st.st_mode, st.st_nlink)
         except OSError:
             return (str(path), None)
 
     def source_signature(self):
         paths = set()
         for root in self.source_trees:
-            paths.add(root)
-            for top, dirs, files in os.walk(root):
-                paths.update(Path(top) / name for name in [*dirs, *files])
+            paths.update(self.inventory.paths(root))
         return tuple(sorted(self.stamp(path) for path in paths))
 
     def worker_signature(self, rows):
@@ -1099,17 +1149,12 @@ class UIInputs:
         # Brain source and recorded aggregates matter. The installed core, object store,
         # machine sampler, locks and transcript-cache output are not dashboard inputs.
         for root in [self.root, *self.trees]:
-            paths.add(root)
-            for top, dirs, files in os.walk(root):
-                path = Path(top)
-                if path == self.root:
-                    dirs[:] = [d for d in dirs if d not in ('core', '.git')]
-                if path == self.root / '.brain':
-                    dirs[:] = [d for d in dirs if d != 'spend']
-                    files = [f for f in files if f not in ('machine.json', 'lock')]
-                dirs.sort()
-                paths.update(path / name for name in files)
-                paths.update(path / name for name in dirs if path / name != self.root / '.brain')
+            indexed = self.inventory.paths(root,
+                ignored_dirs={self.root: {'core', '.git'},
+                              self.root / '.brain': {'spend', 'ui-cache', 'ui-servers'}},
+                ignored_files={self.root / '.brain': {'machine.json', 'lock'}})
+            indexed.discard(self.root / '.brain')
+            paths.update(indexed)
         # Explicit look-back commands publish node aggregates; dashboard polls do not.
         paths.update((self.root / '.brain/spend/nodes').glob('*.json'))
         paths.discard(self.worker_path)
@@ -1453,10 +1498,29 @@ def cmd_ui(a):
                     cache = UIStateCache()
                     cache.worktree_keys = inputs.worktree_keys(current, signature)
                     cache.usage_revision = (spend.revision, spend.permissions)
-                    full = ui_state(current, cache.problems_for(current, signature), scan, machine_spend=spend.value,
-                                    cache=cache, node_keys=inputs.node_keys(current, signature))
                     source_signature = inputs.source_signature()
                     permissions = inputs.permission_key()
+                    machine = _m_machine.machine_state(current)
+                    model = _m_ui_readmodel.ReadModel(current, version)
+                    binding = (signature, source_signature, permissions,
+                               {k: machine.get(k) for k in ('held', 'queued', 'waiting_scopes', 'verifying', 'verify_limit')},
+                               scan)
+                    full = model.metadata(binding)
+                    if full is None:
+                        full = ui_state(current, cache.problems_for(current, signature), scan, machine_spend=spend.value,
+                                        cache=cache, node_keys=inputs.node_keys(current, signature))
+                        # Never bind a result to inputs that changed during its construction.
+                        if inputs.signature() == signature:
+                            model.save_metadata(binding, full)
+                    else:
+                        full = ui_meters(current, {**full, 'spend': spend.value}, cache)
+                    latest_sources = inputs.source_signature()
+                    latest_permissions = inputs.permission_key()
+                    if latest_sources != source_signature or latest_permissions != permissions:
+                        spend.discover()
+                        spend.advance()
+                        full = {**full, 'spend': spend.value}
+                    source_signature, permissions = latest_sources, latest_permissions
                 with cond:
                     if box['stopped']:
                         return

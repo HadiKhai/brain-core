@@ -202,6 +202,220 @@ class ExpandedUI(Scenario):
         self.m = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
         loader.exec_module(self.m)
 
+    def test_complete_build_is_a_detached_business_projection(self):
+        root = self.init('demo')
+        self.b(root, 'new', 'project', '--title', 'Field Guide')
+        inst = self.m.UIInstance(root)
+        node = inst.node('project')
+        line = '- 2026-01-01 00:00 +00:00 from worker: question: Pick a shape? <!-- host-question:shape -->\n'
+        queue = self.m.hook_question_queue(node)
+        queue.mkdir(parents=True, exist_ok=True)
+        (queue / 'shape.json').write_text(json.dumps({'line': line, 'marker': '<!-- host-question:shape -->'}))
+        def business():
+            return {str(p.relative_to(root)): (p.read_bytes(), p.stat().st_mtime_ns)
+                    for p in root.rglob('*') if p.is_file() and not p.is_symlink()
+                    and '.git' not in p.parts and 'core' not in p.relative_to(root).parts}
+        before = business()
+        with mock.patch('fcntl.flock', side_effect=AssertionError('display acquired a business lock')), \
+             mock.patch.object(self.m, 'usage_refresh', side_effect=AssertionError('provider call')):
+            first = self.m.ui_state(inst, problems=0)
+            again = self.m.ui_state(self.m.UIInstance(root), problems=0)
+        self.assertEqual(before, business())
+        self.assertTrue(any('Pick a shape?' in i['text'] for i in first['inbox']))
+        self.assertEqual([i['id'] for i in first['due']], [i['id'] for i in again['due']])
+        # Explicit command reads retain their delivery behavior after projection exits.
+        self.m.inbox_lines(node)
+        self.assertFalse((queue / 'shape.json').exists())
+        self.assertIn('Pick a shape?', (node['dir'] / 'inbox.md').read_text())
+
+    def test_readmodel_cache_validates_binding_and_keeps_metadata_separate_from_usage(self):
+        ReadModel = self.m.ReadModel
+        root = self.init('demo')
+        model = ReadModel(self.m.UIInstance(root), 'code-one')
+        self.assertIsNone(model.metadata([('source', 1)]))
+        payload = {'brain': {'title': 'Field Guide'}, 'spend': {'complete': True}, 'nodes': []}
+        with mock.patch.object(model, 'write') as write:
+            model.save_metadata([('source', 1)], payload)
+        record = write.call_args.args[1]
+        self.assertNotIn('spend', record['state'])
+        with mock.patch.object(model, 'read', return_value=record):
+            self.assertEqual(model.metadata([('source', 1)])['brain']['title'], 'Field Guide')
+            self.assertIsNone(model.metadata([('source', 2)]))
+            other = ReadModel(self.m.UIInstance(root), 'code-two')
+            with mock.patch.object(other, 'read', return_value=record):
+                self.assertIsNone(other.metadata([('source', 1)]))
+
+    def test_usage_cache_reopens_authorized_source_and_rejects_replaced_file(self):
+        ReadModel = self.m.ReadModel
+        root = self.init('demo')
+        model = ReadModel(self.m.UIInstance(root), 'code-one')
+        path = self.tmp / 'session.jsonl'
+        path.write_text('{"timestamp":"2026-01-01T00:00:00Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":12,"output_tokens":3}}}}\n')
+        # A cache hit still goes through spend_file's opened-descriptor ownership proof.
+        spend = self.m._owners['spend_file']
+        with mock.patch.object(model, 'write') as write:
+            with model.usage_scope():
+                first = spend.spend_file(self.m.UIInstance(root), path, 'codex', {self.tmp}, set())
+        self.assertTrue(first['complete'])
+        self.assertTrue(write.called)
+        record = write.call_args.args[1]
+        spend._SPEND_MEM.clear()
+        with mock.patch.object(model, 'read', return_value=record), \
+             mock.patch.object(spend, 'spend_read', side_effect=AssertionError('unchanged transcript replayed')):
+            with model.usage_scope():
+                second = spend.spend_file(self.m.UIInstance(root), path, 'codex', {self.tmp}, set())
+        self.assertEqual(first['mc'], second['mc'])
+        spend._SPEND_MEM.clear()
+        with mock.patch.object(model, 'read', return_value=record):
+            with model.usage_scope():
+                self.assertIsNone(spend.spend_file(self.m.UIInstance(root), path, 'codex', set(), {self.tmp}))
+        replacement = path.with_suffix('.new')
+        replacement.write_text('{}\n')
+        replacement.replace(path)
+        spend._SPEND_MEM.clear()
+        with mock.patch.object(model, 'read', return_value=record), mock.patch.object(model, 'write'):
+            with model.usage_scope():
+                third = spend.spend_file(self.m.UIInstance(root), path, 'codex', {self.tmp}, set())
+        self.assertEqual(third['state']['offset'], 3)
+        self.assertNotEqual(first['ino'], third['ino'])
+
+    def test_ui_restart_projection_is_stable_and_preserves_native_receipt_identity(self):
+        root = self.first_paint_root()
+        inst = self.m.UIInstance(root)
+        node = inst.nodes()[0]
+        row = {'Job': 'job/palette', 'Started': '2026-01-01T00:00Z', 'Ended': ''}
+        usage = {'processed': 200, 'compactions': 3}
+        with mock.patch.object(self.m, 'live_usage', return_value=usage):
+            with self.m.observe(inst):
+                projected = self.m.usage_restart_item(inst, node, row)
+                self.assertEqual(projected, self.m.usage_restart_item(inst, node, row))
+                self.assertTrue(projected['protected'])
+                self.assertFalse((root / '.brain/wake').exists())
+            actual = self.m.usage_restart_item(inst, node, row)
+            path = root / '.brain/wake/lifecycle.json'
+            before = path.read_bytes()
+            with self.m.observe(inst):
+                self.assertEqual(self.m.usage_restart_item(inst, node, row), actual)
+            self.assertEqual(path.read_bytes(), before)
+        with self.assertRaisesRegex(RuntimeError, 'fixture'):
+            with self.m.observe(inst):
+                raise RuntimeError('fixture')
+        self.assertFalse(bool(self.m.projection(inst.root)))
+        observations = []
+        with self.m.observe(inst):
+            worker = threading.Thread(target=lambda: observations.append(bool(self.m.projection(inst.root))))
+            worker.start()
+            worker.join(1)
+            self.assertFalse(worker.is_alive())
+        self.assertEqual(observations, [False])
+
+    def test_ui_retains_pending_answer_until_command_applies_it_exactly_once(self):
+        root = self.first_paint_root()
+        inst = self.m.UIInstance(root)
+        node = inst.nodes()[0]
+        line = '- 2026-01-01 00:00 +00:00 from worker: question: Which color? <!-- host-question:color -->'
+        (root / 'inbox.md').write_text(line + '\n')
+        episode = self.m.request_episode_id(inst, node, line)
+        folder = root / '.brain/wake/conversation-answers'
+        folder.mkdir(parents=True)
+        pending = folder / 'color.json'
+        pending.write_text(json.dumps({'node': 'root', 'state': 'pending', 'marker': '<!-- host-question:color -->',
+                                      'episode': episode, 'answer': 'Blue', 'source': 'conversation-option',
+                                      'origin': 'fixture-origin', 'evidence': 'fixture-evidence', 'at': inst.now()}))
+        before = {str(p.relative_to(root)): p.read_bytes() for p in root.rglob('*') if p.is_file()}
+        state = self.m.ui_state(inst, problems=0, machine_spend={})
+        self.assertTrue(any('Which color?' in i['text'] for i in state['inbox']))
+        self.assertEqual({str(p.relative_to(root)): p.read_bytes() for p in root.rglob('*') if p.is_file()}, before)
+        self.m.inbox_lines(node)
+        self.m.inbox_lines(node)
+        self.assertFalse(pending.exists())
+        self.assertTrue(pending.with_suffix('.done').exists())
+        answers = self.m.lifecycle_read(inst)['answers']
+        self.assertEqual([(a['id'], a['answer']) for a in answers], [(episode, 'Blue')])
+        after = self.m.ui_state(self.m.UIInstance(root), problems=0, machine_spend={})
+        self.assertFalse(any('Which color?' in i['text'] for i in after['inbox']))
+
+    def test_ui_hold_projection_keeps_recorded_episode_and_command_claims_once(self):
+        root = self.first_paint_root()
+        inst = self.m.UIInstance(root)
+        scope = self.m.machine_scope(inst, 'root')
+        state = {'queued': 1, 'waiting_scopes': [scope], 'held': ['thermal pressure'], 'verify_limit': 1}
+        path = root / '.brain/wake/machine-holds.json'
+        with self.m.observe(inst):
+            first = self.m.machine_hold_items(inst, state)
+            self.assertEqual(first, self.m.machine_hold_items(inst, state))
+        self.assertFalse(path.exists())
+        self.assertFalse(path.with_suffix('.lock').exists())
+        recorded = self.m.machine_hold_items(inst, state)
+        before = path.read_bytes()
+        with self.m.observe(inst):
+            self.assertEqual(self.m.machine_hold_items(inst, state), recorded)
+        self.assertEqual(path.read_bytes(), before)
+        episode = recorded[scope[1]]['episode']
+        self.assertTrue(self.m.machine_hold_claim(inst, episode, scope[1]))
+        self.assertFalse(self.m.machine_hold_claim(inst, episode, scope[1]))
+
+    def test_ui_frozen_observation_preserves_clock_and_reports_existing_stall(self):
+        root = self.first_paint_root()
+        self.git('init', '-q', '-b', 'main', cwd=root)
+        inst = self.m.UIInstance(root)
+        node = inst.nodes()[0]
+        row = {'Job': 'job/palette', 'Started': '2026-01-01T00:00Z', 'Ended': ''}
+        self.m.write_jobs(inst, node, [row])
+        (root / 'status.md').write_text('## Active work\n\n| Branch | Thread | PR | State |\n'
+                                       '| --- | --- | --- | --- |\n| job/palette | fixture | - | frozen |\n')
+        now = datetime.datetime(2026, 1, 15, tzinfo=datetime.timezone.utc)
+        with mock.patch.object(self.m.UIInstance, 'now_dt', return_value=now):
+            with self.m.observe(inst):
+                self.assertEqual(self.m.watch_job_stalls(inst, node), [])
+            self.assertFalse(list((root / '.brain/wake').glob('job-stalls-*')))
+            self.assertEqual(self.m.watch_job_stalls(inst, node), [])
+        path = next((root / '.brain/wake').glob('job-stalls-*.json'))
+        before = path.read_bytes()
+        with mock.patch.object(self.m.UIInstance, 'now_dt', return_value=now + datetime.timedelta(minutes=16)):
+            with self.m.observe(inst):
+                items = self.m.watch_job_stalls(inst, node)
+                self.assertEqual(items, self.m.watch_job_stalls(inst, node))
+            self.assertEqual(path.read_bytes(), before)
+            self.assertEqual([i['kind'] for i in items], ['job-stall'])
+
+    def test_private_readmodel_cache_rejects_links_and_malformed_aggregates(self):
+        root = self.init('demo')
+        inst = self.m.UIInstance(root)
+        model = self.m.ReadModel(inst, 'code-one')
+        folder = root / '.brain/ui-cache'
+        folder.mkdir(mode=0o700)
+        outside = self.tmp / 'other.json'
+        outside.write_text('{"private": "outside"}')
+        (folder / 'metadata.json').symlink_to(outside)
+        self.assertIsNone(model.read('metadata'))
+        (folder / 'metadata.json').unlink()
+        os.link(outside, folder / 'metadata.json')
+        self.assertIsNone(model.read('metadata'))
+        self.assertEqual(outside.read_text(), '{"private": "outside"}')
+        spend = self.m._owners['spend_file']
+        for corrupt in ({}, {'state': None}, {'state': {'offset': -1}}, [], None):
+            self.assertFalse(spend.spend_cache_valid(corrupt, 'key', (1, 2), 'codex', [3, 4, 5, 6, 1], False))
+
+    def test_usage_discovery_revokes_completion_before_next_slice_and_clears_revoked_totals(self):
+        root = self.init('demo')
+        inst = self.m.UIInstance(root)
+        spend = self.m.UISpend(inst)
+        spend.permissions = (frozenset({self.tmp}), frozenset())
+        spend.value = {'complete': True, 'files': 1, 'read': 1, 'runtimes': {'codex': {'tokens': 20}}}
+        path = self.tmp / 'sessions/session.jsonl'
+        path.parent.mkdir()
+        path.write_text('{}\n')
+        with mock.patch.object(self.m, 'spend_sources', return_value=([('codex', self.tmp)], {self.tmp}, set())):
+            spend.discover()
+        self.assertFalse(spend.value['complete'])
+        self.assertTrue(spend.queue)
+        with mock.patch.object(self.m, 'spend_sources', return_value=([], set(), {self.tmp})):
+            spend.discover()
+        self.assertFalse(spend.value['complete'])
+        self.assertEqual(spend.value['runtimes'], {})
+        self.assertFalse(spend.aggs)
+
     def test_usage_completion_controls_full_dashboard_without_discarding_partial_values(self):
         import urllib.request
         root = self.init('demo')
@@ -364,6 +578,9 @@ class ExpandedUI(Scenario):
                                 if line.startswith(b'data: '):
                                     full = json.loads(line[6:])
                             self.assertNotIn(answered[2:], full['nodes'][0]['inbox'])
+                            self.assertEqual(snapshot(), before)
+                            # Only the explicit ordinary reader applies queued business state.
+                            self.m.inbox_lines(inst.nodes()[0])
                             self.assertNotEqual(lifecycle.read_bytes(), before[0])
                             if with_queue:
                                 self.assertEqual(list(queue.iterdir()), [])
@@ -728,6 +945,37 @@ class ExpandedUI(Scenario):
             with module.local_job_snapshot(values, keys):
                 self.assertEqual(module.local_job_state(node, 'job/merged', record)['tip'], '')
 
+    def test_input_tree_reuses_inventory_and_detects_nested_changes(self):
+        module = self.m._owners['UIInputs']
+        root = self.tmp / 'inputs'
+        nested = root / 'nested'
+        nested.mkdir(parents=True)
+        source = nested / 'source.md'
+        source.write_text('one')
+        tree = module.UIInputTree()
+        with mock.patch.object(module.os, 'scandir', wraps=os.scandir) as scan:
+            first = tree.paths(root)
+            scans = scan.call_count
+            self.assertEqual(tree.paths(root), first)
+            self.assertEqual(scan.call_count, scans)
+            old = module.UIInputs.stamp(source)
+            source.write_text('changed in place')
+            self.assertNotEqual(module.UIInputs.stamp(source), old)
+            added = nested / 'added.md'
+            added.write_text('new')
+            self.assertIn(added, tree.paths(root))
+            self.assertGreater(scan.call_count, scans)
+            source.unlink()
+            self.assertNotIn(source, tree.paths(root))
+            shutil.rmtree(nested)
+            self.assertNotIn(added, tree.paths(root))
+        outside = self.tmp / 'outside'
+        outside.mkdir()
+        (outside / 'private.md').write_text('outside')
+        nested.symlink_to(outside, target_is_directory=True)
+        self.assertIn(nested, tree.paths(root))
+        self.assertNotIn(nested / 'private.md', tree.paths(root))
+
     def test_input_discovery_scans_only_live_worktrees_and_reopens_on_ledger_change(self):
         module = self.m._owners['UIInputs']
         root = self.first_paint_root()
@@ -750,6 +998,46 @@ class ExpandedUI(Scenario):
             rows[:] = []
             with mock.patch.object(module._m_status, 'active_work', return_value=[['`job/closed-2`', 'thread', '-', 'working']]):
                 self.assertEqual(set(module.ui_live_worktrees(node)), {'job/closed-2'})
+
+    def test_indexed_inputs_preserve_full_walk_inventory_and_file_currentness(self):
+        module = self.m._owners['UIInputs']
+        root = self.first_paint_root()
+        inst = self.m.UIInstance(root)
+        inputs = module.UIInputs(inst)
+        sources = root / 'sessions'
+        nested = sources / 'nested'
+        nested.mkdir(parents=True)
+        source = nested / 'session.jsonl'
+        source.write_text('{}\n')
+        inputs.source_trees = [sources]
+
+        def full_walk(top, ignored_dirs=None, ignored_files=None):
+            paths = {top}
+            for directory, dirs, files in os.walk(top):
+                directory = Path(directory)
+                dirs[:] = [name for name in dirs if name not in (ignored_dirs or {}).get(directory, ())]
+                paths.update(directory / name for name in dirs)
+                paths.update(directory / name for name in files
+                             if name not in (ignored_files or {}).get(directory, ()))
+            return paths
+
+        def compare():
+            actual = inputs.signature(), inputs.source_signature()
+            with mock.patch.object(inputs.inventory, 'paths', side_effect=full_walk):
+                self.assertEqual(actual, (inputs.signature(), inputs.source_signature()))
+            return actual
+
+        before = compare()
+        parent_stamp = module.UIInputs.stamp(nested)
+        source.write_text('{"changed":true}\n')
+        self.assertEqual(module.UIInputs.stamp(nested), parent_stamp)
+        changed = compare()
+        self.assertNotEqual(before, changed, 'in-place writes must invalidate cached inventories')
+        (nested / 'new.jsonl').write_text('{}\n')
+        added = compare()
+        self.assertNotEqual(changed, added)
+        shutil.rmtree(nested)
+        self.assertNotEqual(added, compare())
 
     def test_legacy_server_ownership_requires_python_brain_ui_and_the_same_brain(self):
         # Cwd/argv cannot prove the selected instance: BRAIN_ROOT can override cwd,

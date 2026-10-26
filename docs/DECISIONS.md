@@ -2199,3 +2199,36 @@ journal, derived index, Git history or machine binding is copied between brains.
 Other platforms retain ordinary independent file copies. Installed core edits
 remain private to each fixture, and initialization/launcher subprocess controls
 remain in the suite.
+
+## D21001: Bind dashboard caches to current inputs
+
+The file-only first reading remains independent of repository inspection, usage aggregation,
+private cache availability and business write locks. One background worker builds the complete
+reading and retries initialization on demand after a failure.
+
+A detached observation holds lifecycle inputs for one render. Reconciliation uses copies;
+viewing never delivers queued questions, persists reminder generations, advances stall clocks
+or acknowledges machine holds. Existing recorded identities win; prospective identities are
+stable display values until an owning command records an episode. Commands outside the
+observation retain their normal transactions.
+
+Private derived caches reuse metadata only for the same code, instance, input metadata,
+usage-source metadata, access policy, machine-need state and discovery arguments. Usage
+aggregates still require an authorized opened source with matching identity and cursor.
+Changed inputs revoke completion before another slice; revoked access clears prior totals.
+Private publication requires the held-directory atomic writer; without that capability the
+view continues without persistence. Cache failures are misses. Neither cache reuse nor a
+complete display is verification or landing evidence.
+
+## D28001: Reuse dashboard directory inventories without caching file stamps
+
+Keep a process-local inventory of each input directory, bound to its current identity,
+mode, link count and modification/change timestamps. Reuse its child names only while
+that binding is unchanged. Continue checking every known file's metadata on each reading,
+so in-place writes invalidate the reading even when parent directory timestamps do not
+change. Rescan changed directories and discard removed descendants. Do not descend through
+child directory symlinks or change the existing input exclusions.
+
+The index contains no source contents and writes no files. It does not replace source
+authorization, usage aggregation, private publication or the completion marker. Its reuse
+alone establishes neither complete warm performance nor browser paint timing.

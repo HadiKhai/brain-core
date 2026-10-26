@@ -334,6 +334,8 @@ def machine_transition_line(n, line):
 
 
 def inbox_lines(n, readonly=False, lifecycle_data=None):
+    from . import ui_readmodel
+    readonly = readonly or ui_readmodel.projection(_m_instance.instance_above(n['dir'])) is not None
     f = n["dir"] / "inbox.md"
     # Filter the historical record on read. Never rewrite or discard episode history.
     lines = [l for l in f.read_text().splitlines() if l.startswith("- ")
