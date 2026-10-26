@@ -895,9 +895,11 @@ class VerifyInputDiagnostics(Scenario):
         r, home, wt = self.inputs_job()
         env = wt / 'apps/web/.env.local'
         env.write_text('FAKE_VALUE=first-fixture\n')
-        # Keep the whole-tree cleanliness assertion below: this fixture must let
-        # generated status facts commit instead of exercising hourly coalescing.
+        # Setup can cross a minute boundary: wt add updates local bindings and
+        # refreshes root facts, whose commit is hourly-coalesced. The handback
+        # below only maintains node a, so flush root's setup facts explicitly too.
         (r / '.brain/events-status-commits.json').unlink(missing_ok=True)
+        self.b(r, 'status', 'root', '--refresh')
         self.finish(r)
         packet = json.loads(self.packet().read_text())['ready']
         files = self.private_map(packet)
