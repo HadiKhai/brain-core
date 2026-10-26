@@ -7,6 +7,7 @@ import uuid
 import fcntl
 import stat
 import subprocess
+import contextlib
 from pathlib import Path
 
 from . import common, guard, instance, nodes
@@ -46,41 +47,37 @@ def screen(inst, value):
 
 
 def private_path(path):
-    # Keep the checked parent before mkdir or any open can follow a changed alias.
-    path = common.safe_target(path) or path.parent.resolve() / path.name
-    path.parent.mkdir(parents=True, exist_ok=True)
-    if path.is_symlink():
-        common.die("event storage must not be linked")
-    return path
+    # Compatibility path preparation only; filesystem consumers hold authority.
+    with common.directory_target(path, create=True, private=True) as target:
+        return target.path
+
+
+@contextlib.contextmanager
+def private_open(path, mode='rb'):
+    with common.directory_target(path, private=True) as target:
+        with os.fdopen(target.open(), mode) as stream:
+            yield stream
+            target.check_file(stream.fileno())
+
+
+def private_read(path):
+    with common.directory_target(path, private=True) as target:
+        return target.read_bytes()
 
 
 def append_line(path, value):
     """One O_APPEND write, fsync'd; directory-relative and without following links."""
-    from . import history
-    path = private_path(path)
     line = (json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True) + "\n").encode()
-    dfd = os.open(str(path.parent), history.HISTORY_DIR_FLAGS)
-    fd = None
-    try:
-        if history.history_fd_path(dfd) != str(path.parent.absolute()):
-            raise OSError("event directory moved")
-        fd = os.open(path.name, os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0),
-                     0o600, dir_fd=dfd)
-        st = os.fstat(fd)
-        if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1:
-            raise OSError("event storage is not a private regular file")
-        if history.history_fd_path(dfd) != str(path.parent.absolute()):
-            raise OSError("event directory moved")
-        if history.history_fd_path(fd) != str(path.absolute()):
-            raise OSError("event file moved")
-        if os.write(fd, line) != len(line):
-            raise OSError("short event append; reconciliation required")
-        os.fsync(fd)
-        os.fsync(dfd)
-    finally:
-        if fd is not None:
+    with common.directory_target(path, create=True, private=True) as target:
+        fd = target.open(os.O_WRONLY | os.O_CREAT | os.O_APPEND)
+        try:
+            target.check_file(fd)
+            if os.write(fd, line) != len(line):
+                raise OSError("short event append; reconciliation required")
+            os.fsync(fd)
+            os.fsync(target.fd)
+        finally:
             os.close(fd)
-        os.close(dfd)
 
 
 class JournalError(ValueError):
@@ -153,15 +150,19 @@ def _event(line):
 
 
 def _paths(inst):
-    folder = inst.root / '.brain'
-    return sorted(folder.glob('events-????-??.jsonl')) + ([folder / 'events.jsonl'] if (folder / 'events.jsonl').exists() else [])
+    with common.directory_target(inst.root / '.brain/events.jsonl', private=True) as target:
+        names = os.listdir(target.fd)
+        target.check()
+        folder = target.path.parent
+        return ([folder / name for name in sorted(names) if re.fullmatch(r'events-\d{4}-\d{2}\.jsonl', name)]
+                + ([folder / 'events.jsonl'] if 'events.jsonl' in names else []))
 
 
 def read(inst):
     """Explicit audit read. Historical structure/identities are never re-screened."""
     records = []
     for path in _paths(inst):
-        with path.open('rb') as stream:
+        with private_open(path) as stream:
             records.extend(_event(line) for line in stream)
     return records
 
@@ -223,32 +224,36 @@ def _apply(state, e):
         state['legacy_hooks'][e['ref']] = True
 
 
+def _stream_anchor(stream, offset):
+    stream.seek(max(0, offset - 256))
+    return digest(stream.read(min(offset, 256)))
+
+
 def _anchor(path, offset):
-    with path.open('rb') as stream:
-        stream.seek(max(0, offset - 256))
-        return digest(stream.read(min(offset, 256)))
+    with private_open(path) as stream:
+        return _stream_anchor(stream, offset)
 
 
 def _stamp(path):
     try:
-        st = path.stat()
-        return (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns)
+        with common.directory_target(path, private=True) as target:
+            st = target.stat()
+            return (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns) if st else None
     except FileNotFoundError:
         return None
 
 
 def quarantine(inst, name, payload):
     """Retain damaged bytes privately; never echo or embed them in journal records."""
-    path = private_path(inst.root / '.brain' / (name + '.rejected.' + uuid.uuid4().hex))
-    fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, 'O_NOFOLLOW', 0), 0o600)
-    try:
-        with os.fdopen(fd, 'wb') as stream:
+    path = inst.root / '.brain' / (name + '.rejected.' + uuid.uuid4().hex)
+    with common.directory_target(path, create=True, private=True) as target:
+        with os.fdopen(target.open(os.O_WRONLY | os.O_CREAT | os.O_EXCL), 'wb') as stream:
             stream.write(payload)
             stream.flush()
             os.fsync(stream.fileno())
-    except BaseException:
-        raise
-    return path
+            target.check_file(stream.fileno())
+        os.fsync(target.fd)
+        return target.path
 
 
 class Journal:
@@ -263,13 +268,15 @@ class Journal:
         self.dirty = False
 
     def load_index(self):
-        stamp = _stamp(self.path)
-        if self.loaded and stamp == self.index_stamp:
-            return
-        self.loaded = True
-        self.index_stamp = stamp
         try:
-            data = json.loads(self.path.read_text())
+            with common.directory_target(self.path, private=True) as target:
+                st = target.stat()
+                stamp = (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns) if st else None
+                if self.loaded and stamp == self.index_stamp:
+                    return
+                self.loaded = True
+                self.index_stamp = stamp
+                data = json.loads(target.read_bytes())
             if (data['version'] != 2 or set(data['state']) != set(_blank())
                     or not all(isinstance(x, dict) for x in data['state'].values())
                     or not isinstance(data['positions'], dict)):
@@ -294,6 +301,8 @@ class Journal:
                 _event((json.dumps(e) + '\n').encode())
             self.positions, self.state = data['positions'], data['state']
         except (FileNotFoundError, ValueError, KeyError, TypeError):
+            self.loaded = True
+            self.index_stamp = None
             self.positions, self.state = {}, _blank()
         self.dirty = False
 
@@ -303,35 +312,44 @@ class Journal:
         found = {}
         reset = False
         for path in paths:
-            private_path(path)
-            dev, ino, size, mtime = _stamp(path)
-            key = '%s:%s' % (dev, ino)
-            found[key] = (path, size, mtime)
-            old = self.positions.get(key)
-            if old and (size < old['offset'] or (size == old['offset'] and mtime != old['mtime'])
-                        or (size > old['offset'] and _anchor(path, old['offset']) != old['anchor'])):
-                reset = True
+            with private_open(path) as stream:
+                st = os.fstat(stream.fileno())
+                key = '%s:%s' % (st.st_dev, st.st_ino)
+                size, mtime = st.st_size, st.st_mtime_ns
+                found[key] = (path, st)
+                old = self.positions.get(key)
+                if old and (size < old['offset'] or (size == old['offset'] and mtime != old['mtime'])
+                            or (size > old['offset'] and _stream_anchor(stream, old['offset']) != old['anchor'])):
+                    reset = True
         if set(self.positions) - set(found):
             reset = True
         if reset:
             self.positions, self.state = {}, _blank()
             self.dirty = True
-        for key, (path, size, mtime) in found.items():
+        for key, (path, st) in found.items():
             old = self.positions.get(key)
             offset = old['offset'] if old else 0
-            if old and offset == size:
+            if old and offset == st.st_size:
                 continue
-            with path.open('rb') as stream:
+            # Bound descriptor use independently of the number of monthly files.
+            # The second open must still name the exact observed generation.
+            with private_open(path) as stream:
+                generation = common.DirectoryTarget.generation(st)
+                if common.DirectoryTarget.generation(os.fstat(stream.fileno())) != generation:
+                    raise OSError('journal changed before replaying')
                 stream.seek(offset)
                 for line in stream:
                     _apply(self.state, _event(line))
                 offset = stream.tell()
-            self.positions[key] = {'offset': offset, 'mtime': mtime, 'anchor': _anchor(path, offset)}
+                anchor = _stream_anchor(stream, offset)
+                if common.DirectoryTarget.generation(os.fstat(stream.fileno())) != generation:
+                    raise OSError('journal changed while replaying')
+            self.positions[key] = {'offset': offset, 'mtime': st.st_mtime_ns, 'anchor': anchor}
             self.dirty = True
         marker = self.inst.root / '.brain/events-repair-needed.json'
-        if marker.exists():
+        if _stamp(marker):
             try:
-                note = json.loads(marker.read_text())
+                note = json.loads(private_read(marker))
                 if note['ref'] not in self.state['resolved']:
                     self.state['faults'].setdefault(note['ref'], note['reason'])
             except (ValueError, KeyError, TypeError):
@@ -341,19 +359,21 @@ class Journal:
         return self
 
     def save(self):
-        path = private_path(self.path)
-        common.atomic_write(path, json.dumps({'version': 2, 'positions': self.positions, 'state': self.state},
-                                                 separators=(',', ':'), sort_keys=True))
-        self.index_stamp, self.dirty = _stamp(self.path), False
+        with common.directory_target(self.path, create=True, private=True) as target:
+            target.atomic_write(json.dumps({'version': 2, 'positions': self.positions, 'state': self.state},
+                                           separators=(',', ':'), sort_keys=True))
+            st = target.stat()
+            self.index_stamp = (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns)
+            self.dirty = False
 
     def repair(self):
         # Publish a durable flag before rewriting damaged advisory bytes.
-        marker = private_path(self.inst.root / '.brain/events-repair-needed.json')
+        marker = self.inst.root / '.brain/events-repair-needed.json'
         note = {'ref': uuid.uuid4().hex, 'reason': 'journal_damage'}
-        common.atomic_write(marker, json.dumps(note))
+        common.atomic_write(marker, json.dumps(note), private=True, create=True)
         for path in _paths(self.inst):
             good, bad = [], []
-            with path.open('rb') as stream:
+            with private_open(path) as stream:
                 for line in stream:
                     try:
                         _event(line)
@@ -362,7 +382,7 @@ class Journal:
                         bad.append(line)
             if bad:
                 quarantine(self.inst, 'events', b''.join(bad))
-                common.atomic_write(path, b''.join(good).decode('utf-8'))
+                common.atomic_write(path, b''.join(good).decode('utf-8'), private=True)
         # A cache is derived and disposable. A corrupt marker is replaced by the flag above.
         self.positions, self.state = {}, _blank()
         self.loaded, self.index_stamp, self.dirty = True, _stamp(self.path), True
@@ -379,18 +399,24 @@ class Journal:
                   'ref': ref, 'data': {'version': VERSION, **data}}
         if scrub:
             record = screen(self.inst, record)
-        path = private_path(self.inst.root / '.brain/events.jsonl')
-        if path.exists() and path.stat().st_size:
-            with path.open('rb') as stream:
-                first = _event(stream.readline())
-            month = first['ts'][:7]
-            if not re.fullmatch(r'[0-9]{4}-[0-9]{2}', month):
-                raise JournalError('invalid journal rotation month')
-            if month != self.inst.now()[:7]:
-                archive = private_path(path.parent / ('events-' + month + '.jsonl'))
-                if archive.exists():
-                    raise JournalError('journal rotation archive already exists')
-                os.replace(path, archive)
+        path = self.inst.root / '.brain/events.jsonl'
+        with common.directory_target(path, create=True, private=True) as target:
+            current = target.stat()
+            if current and current.st_size:
+                with os.fdopen(target.open(), 'rb') as stream:
+                    first = _event(stream.readline())
+                    target.check_file(stream.fileno())
+                month = first['ts'][:7]
+                if not re.fullmatch(r'[0-9]{4}-[0-9]{2}', month):
+                    raise JournalError('invalid journal rotation month')
+                if month != self.inst.now()[:7]:
+                    name = 'events-' + month + '.jsonl'
+                    if target.stat(name):
+                        raise JournalError('journal rotation archive already exists')
+                    target.check()
+                    os.replace(target.path.name, name, src_dir_fd=target.fd, dst_dir_fd=target.fd)
+                    os.fsync(target.fd)
+            path = target.path
         append_line(path, record)
         self.sync(persist=True)
         return record
@@ -446,8 +472,8 @@ def resources(inst):
     walk(inst.root)
     for name in ("local.json", "inbox-seen.json"):
         path = inst.root / ".brain" / name
-        if path.exists():
-            result[".brain/" + name] = digest(path.read_bytes())
+        if _stamp(path):
+            result[".brain/" + name] = digest(private_read(path))
     # Ready packets are Brain-owned state in workbenches, not external Git operations.
     for n in inst.nodes():
         wb = n["local"].get("workbench")
@@ -487,27 +513,27 @@ def pending(records):
 
 def fold_hooks(inst):
     path = inst.root / '.brain/hook-events.jsonl'
-    if not path.exists():
+    st = _stamp(path)
+    if st is None:
         return
     store = journal(inst)
-    st = path.stat()
-    token = '%s:%s' % (st.st_dev, st.st_ino)
+    token = '%s:%s' % st[:2]
     cursor = inst.root / '.brain/hook-events-offset'
     try:
-        saved = int(cursor.read_text()) if cursor.exists() else 0
-        if saved < 0 or saved > st.st_size:
+        saved = int(private_read(cursor)) if _stamp(cursor) else 0
+        if saved < 0 or saved > st[2]:
             raise ValueError()
     except (ValueError, UnicodeError):
-        quarantine(inst, 'hook-events-offset', cursor.read_bytes())
+        quarantine(inst, 'hook-events-offset', private_read(cursor))
         store.fault('hook_cursor_damage')
         saved = 0
     # The journal ack is authoritative if a process died before saving the cursor.
     offset = max(saved, store.state['hook_offsets'].get(token, 0))
-    if offset > st.st_size:
+    if offset > st[2]:
         store.fault('hook_outbox_truncated')
         offset = 0
     current = None
-    with path.open('rb') as stream:
+    with private_open(path) as stream:
         stream.seek(offset)
         while True:
             line = stream.readline()
@@ -542,7 +568,7 @@ def fold_hooks(inst):
                     fresh.append({'id': old['id'], 'scope': old.get('scope', '*'), 'hash': None})
             append(inst, data['node'], 'hook', data['ref'], {'resources': fresh, 'at': data['ts'], 'outbox': packet}, scrub=False)
             offset = end
-    common.atomic_write(cursor, str(offset))
+    common.atomic_write(cursor, str(offset), private=True, create=True)
 
 
 def hook_written(n_dir):
@@ -564,20 +590,39 @@ def lease_path(inst, ref, create=False):
 
 def lease_live(inst, ref):
     p = lease_path(inst, ref)
-    if not p.exists():
-        return False
     try:
-        fd = os.open(str(p), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        with common.directory_target(p, private=True) as target:
+            fd = target.open()
+            try:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    return True
+                target.check_file(fd)
+                return False
+            finally:
+                os.close(fd)
     except FileNotFoundError:
         return False
-    try:
+
+
+@contextlib.contextmanager
+def dead_lease(inst, ref):
+    """Keep a dead lease locked through reconciliation and exact-inode cleanup."""
+    with contextlib.ExitStack() as stack:
+        try:
+            target = stack.enter_context(common.directory_target(lease_path(inst, ref), private=True))
+            fd = target.open()
+        except FileNotFoundError:
+            yield None
+            return
+        stack.callback(os.close, fd)
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
-            return True
-        return False
-    finally:
-        os.close(fd)
+            common.die('another write is active; cannot reconcile its snapshot')
+        target.check_file(fd)
+        yield target, fd
 
 
 class Command:
@@ -593,6 +638,7 @@ class Command:
         if getattr(args, "project", False) and self.command == "status":
             self.command = "project_status"
         self.lease = None
+        self.lease_target = None
         self.record_paths = set()
         self.study_handback = (self.command == 'handback' and
                                str(getattr(args, 'branch', '')).startswith('import:'))
@@ -600,12 +646,16 @@ class Command:
     def start(self):
         self.ref = uuid.uuid4().hex
         self.before = resources(self.inst)
-        self.lease = os.open(str(lease_path(self.inst, self.ref, create=True)), os.O_RDWR | os.O_CREAT | os.O_EXCL, 0o600)
-        fcntl.flock(self.lease, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        data = {"command": self.command}
-        if not journal(self.inst).positions:
-            data["baseline"] = resource_list(self.inst, self.before)
+        self.lease_target = common.directory_target(lease_path(self.inst, self.ref), create=True, private=True)
+        self.lease_target.__enter__()
         try:
+            self.lease = self.lease_target.open(os.O_RDWR | os.O_CREAT | os.O_EXCL)
+            fcntl.flock(self.lease, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            os.fsync(self.lease)
+            os.fsync(self.lease_target.fd)
+            data = {"command": self.command}
+            if not journal(self.inst).positions:
+                data["baseline"] = resource_list(self.inst, self.before)
             append(self.inst, self.node, "begin", self.ref, data)
         except BaseException:
             self.close_lease()
@@ -628,10 +678,18 @@ class Command:
         return self
 
     def close_lease(self):
-        if self.lease is not None:
-            os.close(self.lease)
+        try:
+            if self.lease is not None:
+                st = os.fstat(self.lease)
+                try:
+                    self.lease_target.unlink_owned(self.lease_target.path.name, (st.st_dev, st.st_ino))
+                finally:
+                    os.close(self.lease)
+        finally:
             self.lease = None
-            lease_path(self.inst, self.ref).unlink(missing_ok=True)
+            if self.lease_target is not None:
+                self.lease_target.__exit__(None, None, None)
+                self.lease_target = None
 
     def changes(self, after):
         # While setup/verify releases the lock, other commands may complete. Their recorded
@@ -865,18 +923,28 @@ def reconcile(inst, node=None, snapshot=False):
                 and all(r.get('scope') in scopes for r in changed)):
             return
         common.die("another write is active; cannot reconcile its snapshot")
-    # Keep evidence of the gap before installing a new baseline.
-    for n in inst.nodes():
-        comparison(inst, n)
-    current = resource_list(inst, resources(inst))
-    existing = {r['id'] for r in current}
-    current += [{**r, 'hash': None} for key, r in state.items() if key not in existing]
-    views = {n['id']: snapshot_view(inst, n) for n in inst.nodes() if not n['archived']}
-    for ref in dead or [uuid.uuid4().hex]:
-        append(inst, opened.get(ref, {}).get("node", "root"), 'reconcile', ref,
-               {'resources': current, 'views': views, 'flagged': True, 'clear_faults': True})
-        lease_path(inst, ref).unlink(missing_ok=True)
-    (inst.root / ".brain/events-repair-needed.json").unlink(missing_ok=True)
+    with contextlib.ExitStack() as stack:
+        leases = {ref: stack.enter_context(dead_lease(inst, ref)) for ref in dead}
+        marker = stack.enter_context(common.directory_target(inst.root / '.brain/events-repair-needed.json', private=True))
+        marker_st = marker.stat()
+        # Keep evidence of the gap before installing a new baseline.
+        for n in inst.nodes():
+            comparison(inst, n)
+        current = resource_list(inst, resources(inst))
+        existing = {r['id'] for r in current}
+        current += [{**r, 'hash': None} for key, r in state.items() if key not in existing]
+        views = {n['id']: snapshot_view(inst, n) for n in inst.nodes() if not n['archived']}
+        for ref in dead or [uuid.uuid4().hex]:
+            lease = leases.get(ref)
+            if lease:
+                lease[0].check_file(lease[1])
+            append(inst, opened.get(ref, {}).get("node", "root"), 'reconcile', ref,
+                   {'resources': current, 'views': views, 'flagged': True, 'clear_faults': True})
+            if lease:
+                st = os.fstat(lease[1])
+                lease[0].unlink_owned(lease[0].path.name, (st.st_dev, st.st_ino))
+        if marker_st:
+            marker.unlink_owned(marker.path.name, (marker_st.st_dev, marker_st.st_ino))
 
 
 def read_comparisons(inst, repair=False):
@@ -887,7 +955,7 @@ def read_comparisons(inst, repair=False):
     if stamp is None:
         return []
     try:
-        saved = json.loads(cache.read_text())
+        saved = json.loads(private_read(cache))
         if (saved['version'] != 1 or not isinstance(saved['rows'], list) or not isinstance(saved['first'], dict)
                 or saved['identity'] != list(stamp[:2]) or stamp[2] < saved['offset']
                 or (stamp[2] == saved['offset'] and stamp[3] != saved['mtime'])
@@ -903,7 +971,7 @@ def read_comparisons(inst, repair=False):
     if not all(valid(r) for r in saved['rows']) or not all(valid(r) for r in saved['first'].values()):
         saved.update(offset=0, rows=[], first={})
     rows, first = saved['rows'], saved['first']
-    with path.open('rb') as stream:
+    with private_open(path) as stream:
         stream.seek(saved['offset'])
         for line in stream:
             try:
@@ -926,7 +994,7 @@ def read_comparisons(inst, repair=False):
     rows = [r for r in rows if (now - inst.parse_time(r['ts'])).total_seconds() <= 86400]
     saved.update(rows=rows, first=first, mtime=stamp[3], anchor=_anchor(path, saved['offset']))
     if repair:
-        common.atomic_write(private_path(cache), json.dumps(saved, separators=(',', ':'), sort_keys=True))
+        common.atomic_write(cache, json.dumps(saved, separators=(',', ':'), sort_keys=True), private=True, create=True)
     return rows + [r for r in first.values() if r not in rows]
 
 
@@ -1099,7 +1167,7 @@ def _status_bytes(inst, n):
 def _status_stamps(inst):
     path = inst.root / '.brain/events-status-commits.json'
     try:
-        value = json.loads(path.read_text())
+        value = json.loads(private_read(path))
         return value if isinstance(value, dict) else {}
     except (OSError, ValueError):
         return {}
@@ -1145,7 +1213,7 @@ def own_transformation(inst, n, before):
     saved[node_ref(n['id'])] = {**_stamp_for(inst, n), **before,
                                'owned_judgement': digest(judgement(path.read_bytes().decode()).encode()),
                                'owned_archive': digest(archive.read_bytes() if archive.exists() else b'')}
-    common.atomic_write(private_path(inst.root / '.brain/events-status-commits.json'), json.dumps(saved, sort_keys=True))
+    common.atomic_write(inst.root / '.brain/events-status-commits.json', json.dumps(saved, sort_keys=True), private=True, create=True)
 
 
 def status_commit(inst, n, force=False, message=None):
@@ -1164,7 +1232,7 @@ def status_commit(inst, n, force=False, message=None):
         want.append(archive.relative_to(inst.root).as_posix())
     inst._commit(inst.root, want, message or n['id'] + ': refresh status facts')
     saved[node_ref(n['id'])] = {'at': inst.now()}
-    common.atomic_write(private_path(inst.root / '.brain/events-status-commits.json'), json.dumps(saved, sort_keys=True))
+    common.atomic_write(inst.root / '.brain/events-status-commits.json', json.dumps(saved, sort_keys=True), private=True, create=True)
 
 
 def affected_nodes(inst, changed, preferred):
@@ -1263,8 +1331,9 @@ def outbox_pending(inst):
     path = inst.root / '.brain/hook-events.jsonl'
     cursor = inst.root / '.brain/hook-events-offset'
     try:
-        offset = int(cursor.read_text()) if cursor.exists() else 0
-        return offset < 0 or (path.exists() and path.stat().st_size != offset)
+        offset = int(private_read(cursor)) if _stamp(cursor) else 0
+        stamp = _stamp(path)
+        return offset < 0 or (stamp is not None and stamp[2] != offset)
     except (ValueError, OSError, UnicodeError):
         return True
 
@@ -1366,9 +1435,9 @@ def record_object(inst, data):
     sha = data['object']
     if not isinstance(sha, str) or not re.fullmatch('[0-9a-f]{64}', sha):
         raise ValueError('invalid record object')
-    path = private_path(inst.root / '.brain/event-objects' / (sha + '.json'))
-    raw = path.read_bytes()
-    if digest(raw) != sha or path.stat().st_nlink != 1:
+    path = inst.root / '.brain/event-objects' / (sha + '.json')
+    raw = private_read(path)
+    if digest(raw) != sha:
         raise ValueError('event record object is damaged')
     obj = json.loads(raw)
     if (not isinstance(obj, dict) or obj.get('version') != 1 or not isinstance(obj.get('text'), str)
@@ -1398,23 +1467,20 @@ def write_record(inst, n, record_type, key, text, origin='observed'):
         store = journal(inst, repair=True)
         identity = record_identity(n, record_type, key)
         previous = store.state['records'].get(identity)
-        if previous and record_object(inst, previous)['text'] == text and path.exists() and path.read_text() == text:
+        if previous and record_object(inst, previous)['text'] == text and _stamp(path) and private_read(path).decode() == text:
             return previous['ref']
-        before = digest(path.read_bytes()) if path.exists() else None
+        before = digest(private_read(path)) if _stamp(path) else None
         obj = {'version': 1, 'record_type': record_type, 'key': key, 'text': text}
         raw = (json.dumps(obj, ensure_ascii=False, sort_keys=True, separators=(',', ':')) + '\n').encode()
         sha = digest(raw)
-        target = private_path(inst.root / '.brain/event-objects' / (sha + '.json'))
-        if target.exists():
-            if target.read_bytes() != raw or target.stat().st_nlink != 1:
-                raise ValueError('immutable event object collision')
-        else:
-            common.atomic_write(target, raw.decode())
-        directory = os.open(str(target.parent), os.O_RDONLY | getattr(os, 'O_DIRECTORY', 0))
-        try:
-            os.fsync(directory)
-        finally:
-            os.close(directory)
+        path_object = inst.root / '.brain/event-objects' / (sha + '.json')
+        with common.directory_target(path_object, private=True, create=True) as target:
+            if target.stat():
+                if target.read_bytes() != raw:
+                    raise ValueError('immutable event object collision')
+            else:
+                target.atomic_write(raw.decode())
+            os.fsync(target.fd)
         data = {'record_type': record_type, 'key': key, 'object': sha, 'before': before,
                 'after': digest(text.encode()), 'origin': origin}
         event = append(inst, n['id'], 'record', uuid.uuid4().hex, data)
@@ -1431,13 +1497,14 @@ def apply_record(inst, n, entry, rebuild=False):
     if path.is_symlink() or path.parent.is_symlink():
         raise ValueError('linked record target')
     text = record_object(inst, entry)['text']
-    current = digest(path.read_bytes()) if path.exists() else None
-    if current != entry['after']:
-        if current != entry['before'] and not (rebuild and current is None):
-            raise ValueError('record target changed independently; reconcile without overwriting it')
-        path.parent.mkdir(exist_ok=True)
-        common.atomic_write(path, text)
-        common.touch(path)
+    with common.directory_target(path, private=True, create=True) as target:
+        st = target.stat()
+        current = digest(target.read_bytes()) if st else None
+        if current != entry['after']:
+            if current != entry['before'] and not (rebuild and current is None):
+                raise ValueError('record target changed independently; reconcile without overwriting it')
+            target.atomic_write(text, expected=target.generation(st))
+            common.touch(path)
     if not entry.get('applied'):
         append(inst, n['id'], 'record_applied', uuid.uuid4().hex,
                {'record_ref': entry['ref'], 'record_type': entry['record_type'], 'key': entry['key'],

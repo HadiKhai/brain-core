@@ -63,10 +63,13 @@ brain = sys.argv[2]
 sys.argv = sys.argv[2:]
 original_replace = os.replace
 def fail_replace(src, dst, **kwargs):
-    if Path(dst) == target:
-        assert Path(src).parent == target.parent
-        assert Path(src).read_bytes() != target.read_bytes()
-        assert Path(src).stat().st_size > 0
+    from brain.history import history_fd_path
+    source = Path(history_fd_path(kwargs['src_dir_fd'])) / src if 'src_dir_fd' in kwargs else Path(src)
+    destination = Path(history_fd_path(kwargs['dst_dir_fd'])) / dst if 'dst_dir_fd' in kwargs else Path(dst)
+    if destination == target:
+        assert source.parent == target.parent
+        assert source.read_bytes() != target.read_bytes()
+        assert source.stat().st_size > 0
         raise OSError('injected replacement failure')
     return original_replace(src, dst, **kwargs)
 os.replace = fail_replace
@@ -137,10 +140,12 @@ original = os.replace
 paused = False
 def replace(src, dst, **kwargs):
     global paused
-    if Path(dst) != Path(target) or paused:
+    source_path = Path(m.history_fd_path(kwargs['src_dir_fd'])) / src if 'src_dir_fd' in kwargs else Path(src)
+    destination = Path(m.history_fd_path(kwargs['dst_dir_fd'])) / dst if 'dst_dir_fd' in kwargs else Path(dst)
+    if destination != Path(target) or paused:
         return original(src, dst, **kwargs)
     paused = True
-    Path(candidate).write_bytes(Path(src).read_bytes())
+    Path(candidate).write_bytes(source_path.read_bytes())
     if phase == 'after':
         original(src, dst, **kwargs)
     Path(marker).write_text('paused')

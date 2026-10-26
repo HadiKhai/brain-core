@@ -61,9 +61,8 @@ def read_fm(path):
 
 
 def write_fm(path, fm, body):
-    safe_target(path)
     lines = "\n".join(f"{k}: {v}" for k, v in fm.items())
-    Path(path).write_text(f"---\n{lines}\n---\n{body}")
+    atomic_write(path, f"---\n{lines}\n---\n{body}")
     touch(path)
 
 
@@ -180,34 +179,192 @@ def outward_links(root):
     return bad
 
 
-def atomic_write(path, text):
+class DirectoryTarget:
+    """A checked physical parent held until its last read, publication or cleanup.
+
+    Paths are labels, never the authority for a later filesystem operation. Each
+    physical component is opened without following links, relative to its held
+    predecessor. This is not a namespace lock against arbitrary external renames.
+    """
+    def __init__(self, path, *, create=False, private=False):
+        path = Path(path)
+        self.path = safe_target(path) or path.parent.resolve() / path.name
+        self.create, self.private = create, private
+        self.chain = []
+        self.fd = None
+
+    def __enter__(self):
+        flags = os.O_RDONLY | getattr(os, 'O_DIRECTORY', 0) | os.O_NOFOLLOW
+        try:
+            self.fd = os.open(self.path.anchor, flags)
+            self.chain.append((None, self.path.anchor, self.fd))
+            for name in self.path.parent.parts[1:]:
+                parent = self.fd
+                try:
+                    child = os.open(name, flags, dir_fd=parent)
+                except FileNotFoundError:
+                    if not self.create:
+                        raise
+                    self.check()
+                    try:
+                        os.mkdir(name, 0o700 if self.private else 0o777, dir_fd=parent)
+                        os.fsync(parent)
+                    except FileExistsError:
+                        pass
+                    child = os.open(name, flags, dir_fd=parent)
+                self.fd = child
+                self.chain.append((parent, name, child))
+            self.check()
+            self.stat()  # refuse linked/shared targets before any mutation
+            return self
+        except BaseException:
+            self.__exit__(None, None, None)
+            raise
+
+    def __exit__(self, *exc):
+        for _, _, fd in reversed(self.chain):
+            os.close(fd)
+        self.chain = []
+        self.fd = None
+
+    def check(self):
+        from . import history
+        for parent, name, child in self.chain[1:]:
+            current = os.stat(name, dir_fd=parent, follow_symlinks=False)
+            held = os.fstat(child)
+            if not stat.S_ISDIR(current.st_mode) or (current.st_dev, current.st_ino) != (held.st_dev, held.st_ino):
+                raise OSError('publication directory moved')
+        # Also detect a moved ancestor, including the instance itself.
+        if self.chain:
+            expected = Path(self.path.anchor).joinpath(*(name for _, name, _ in self.chain[1:]))
+            if history.history_fd_path(self.fd) != str(expected):
+                raise OSError('publication directory moved')
+
+    def stat(self, name=None):
+        self.check()
+        if name is not None and (name in ('', '.', '..') or Path(name).name != name):
+            raise ValueError('publication requires one directory-relative filename')
+        try:
+            st = os.stat(name or self.path.name, dir_fd=self.fd, follow_symlinks=False)
+        except FileNotFoundError:
+            return None
+        if stat.S_ISLNK(st.st_mode):
+            if self.private:
+                die('event storage must not be linked')
+        elif not stat.S_ISREG(st.st_mode):
+            raise OSError('publication target is not a regular file')
+        elif st.st_nlink != 1:
+            die('publication target is hard-linked to another file')
+        return st
+
+    def open(self, flags=os.O_RDONLY, mode=0o600):
+        before = self.stat()
+        # Never truncate before validating the opened inode.
+        fd = os.open(self.path.name, (flags & ~os.O_TRUNC) | os.O_NOFOLLOW, mode, dir_fd=self.fd)
+        try:
+            self.check_file(fd)
+            after = os.fstat(fd)
+            if before and (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino):
+                raise OSError('publication file changed')
+            if flags & os.O_TRUNC:
+                os.ftruncate(fd, 0)
+            return fd
+        except BaseException:
+            try:
+                if flags & os.O_CREAT and flags & os.O_EXCL:
+                    st = os.fstat(fd)
+                    self.unlink_owned(self.path.name, (st.st_dev, st.st_ino))
+            finally:
+                os.close(fd)
+            raise
+
+    def check_file(self, fd):
+        self.check()
+        held, current = os.fstat(fd), self.stat()
+        if (not stat.S_ISREG(held.st_mode) or held.st_nlink != 1 or current is None
+                or (held.st_dev, held.st_ino) != (current.st_dev, current.st_ino)):
+            raise OSError('publication file moved or is not a private regular file')
+
+    def read_bytes(self):
+        with os.fdopen(self.open(), 'rb') as stream:
+            before = self.generation(os.fstat(stream.fileno()))
+            data = stream.read()
+            self.check_file(stream.fileno())
+            if self.generation(os.fstat(stream.fileno())) != before:
+                raise OSError('publication file changed while reading')
+            return data
+
+    @staticmethod
+    def generation(st):
+        return (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns, st.st_mode, st.st_nlink) if st else None
+
+    def unlink_owned(self, name, identity):
+        # Cleanup is only of our captured inode in our original directory. A
+        # replaced name belongs to somebody else, even when it looks like a temp.
+        if name in ('', '.', '..') or Path(name).name != name:
+            raise ValueError('cleanup requires one directory-relative filename')
+        try:
+            st = os.stat(name, dir_fd=self.fd, follow_symlinks=False)
+        except FileNotFoundError:
+            return False
+        if (st.st_dev, st.st_ino) != identity:
+            return False
+        os.unlink(name, dir_fd=self.fd)
+        os.fsync(self.fd)
+        return True
+
+    def atomic_write(self, text, *, expected=Ellipsis):
+        prior = self.stat()
+        if expected is not Ellipsis and self.generation(prior) != expected:
+            raise OSError('publication target changed')
+        name = '.' + self.path.name + '.' + os.urandom(12).hex()
+        fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=self.fd)
+        # Retain the staging descriptor through replacement/cleanup, so even
+        # inode reuse cannot make an unknown replacement look like our temp.
+        with os.fdopen(fd, 'w', encoding='utf-8', newline='') as stream:
+            owned = os.fstat(stream.fileno())
+            identity = (owned.st_dev, owned.st_ino)
+            published = False
+            try:
+                if prior and stat.S_ISREG(prior.st_mode):
+                    os.fchmod(stream.fileno(), stat.S_IMODE(prior.st_mode))
+                stream.write(text)
+                stream.flush()
+                os.fsync(stream.fileno())
+                current = self.stat()
+                if self.generation(current) != self.generation(prior):
+                    raise OSError('publication target changed')
+                staging = os.stat(name, dir_fd=self.fd, follow_symlinks=False)
+                if (staging.st_dev, staging.st_ino) != identity or staging.st_nlink != 1:
+                    raise OSError('publication temporary file changed')
+                os.replace(name, self.path.name, src_dir_fd=self.fd, dst_dir_fd=self.fd)
+                published = True
+                os.fsync(self.fd)
+            except BaseException as primary:
+                if not published:
+                    try:
+                        self.unlink_owned(name, identity)
+                    except OSError as cleanup:
+                        # A failed cleanup must not replace the write/replace
+                        # failure that tells callers whether publication ran.
+                        raise primary from cleanup
+                raise
+
+
+
+def directory_target(path, *, create=False, private=False):
+    return DirectoryTarget(path, create=create, private=private)
+
+
+def atomic_write(path, text, *, private=False, create=False):
     """Sync file data, replace atomically, then sync its parent directory.
 
     Pre-publication failures preserve the old file. A parent-sync error is reported
     after the complete new file is visible; callers must not assume rollback.
     This is one-file persistence ordering, not a transaction across records.
     """
-    path = Path(path)
-    path = safe_target(path) or path
-    tmp = None
-    try:
-        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", newline="", dir=path.parent,
-                                         prefix="." + path.name + ".", delete=False) as stream:
-            tmp = Path(stream.name)
-            if path.exists():
-                os.fchmod(stream.fileno(), stat.S_IMODE(path.stat().st_mode))
-            stream.write(text)
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(tmp, path)
-        directory = os.open(path.parent, os.O_RDONLY | getattr(os, 'O_DIRECTORY', 0) | os.O_NOFOLLOW)
-        try:
-            os.fsync(directory)
-        finally:
-            os.close(directory)
-    finally:
-        if tmp and tmp.exists():
-            tmp.unlink()
+    with directory_target(path, create=create, private=private) as target:
+        target.atomic_write(text)
 
 
 def lst(value):

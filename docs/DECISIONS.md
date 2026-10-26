@@ -1,5 +1,39 @@
 # Code decisions
 
+## D28002: Preserve the publication error when temporary cleanup fails
+
+Before replacement, a failed atomic write removes only its captured temporary
+inode. If that cleanup also fails, the original publication exception remains
+the reported error, with the cleanup error chained as its cause. Failed cleanup
+may leave the owned temporary file behind. A post-replacement directory sync
+failure still reports the persistence error with the complete new file visible.
+
+## D21003: Hold directory authority through publication and private reads
+
+An accepted folder shortcut supplies a checked physical parent. Publication opens
+that parent component by component without following links, holds its directory
+descriptors, and uses relative names for creation, replacement and cleanup. A
+later alias change cannot select a different publication directory. Descriptor
+identity and location checks refuse detected directory moves. These checks do
+not provide a namespace lock against arbitrary external renames during a kernel
+operation.
+
+`atomic_write(path, text, private=True, create=True)` also supports private caches
+and metadata in newly created directories. New private directories use mode 0700
+and new files use 0600; replacement preserves an existing regular file's mode.
+File flush/fsync precedes replacement and parent fsync follows it. A post-replace
+sync error reports failure with the complete new file already visible. This is
+per-file persistence ordering, not a multi-file transaction or power-loss proof.
+
+Private journal readers, objects, appenders and leases use held directory
+authority too. Lease cleanup holds the original directory and inode; explicit
+reconciliation locks dead leases through publication and never removes a
+replacement name. Temporary cleanup requires the captured inode and leaves
+unknown replacements intact. Final symlink, hardlink and live-owner refusals
+remain enforced. Fault-injection fixtures address relative names through the
+supplied descriptors while retaining their old/new bytes, modes, staging,
+durability and recovery assertions.
+
 ## D20003: Preserve automatic adoption sources and deterministic runtime proofs
 
 Install and upgrade task migration retain ledger bytes. Imported task records keep

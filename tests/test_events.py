@@ -17,6 +17,76 @@ from brain import events, instance, transitions
 
 
 class EventAppend(Scenario):
+    def test_canonical_parent_retarget_refuses_append_and_private_read(self):
+        r = self.init('demo')
+        for operation in ('append', 'read', 'index'):
+            with self.subTest(operation=operation):
+                storage = r / ('storage-' + operation)
+                storage.mkdir()
+                outside = self.tmp / ('outside-' + operation)
+                outside.mkdir()
+                target = storage / 'record'
+                target.write_bytes(b'owned\n')
+                (outside / 'record').write_bytes(b'foreign\n')
+                before = {p.name: p.read_bytes() for p in outside.iterdir()}
+                checked = events.common.safe_target
+
+                def retarget(path):
+                    result = checked(path)
+                    if path == target:
+                        storage.rename(r / ('retained-' + operation))
+                        storage.symlink_to(outside)
+                    return result
+
+                with mock.patch.object(events.common, 'safe_target', side_effect=retarget):
+                    with self.assertRaises((OSError, SystemExit)):
+                        if operation == 'append':
+                            events.append_line(target, {'fixture': True})
+                        elif operation == 'read':
+                            events.private_read(target)
+                        else:
+                            store = events.Journal(instance.Instance(r))
+                            store.path = target
+                            store.load_index()
+                self.assertEqual({p.name: p.read_bytes() for p in outside.iterdir()}, before)
+                self.assertEqual((r / ('retained-' + operation) / 'record').read_bytes(), b'owned\n')
+
+    def test_lease_close_uses_original_directory_and_preserves_replacement_inode(self):
+        r = self.init('demo')
+        inst = instance.Instance(r)
+        op = events.Command(r, command='fixture')
+        op.start()
+        lease = events.lease_path(inst, op.ref)
+        retained = lease.with_name('retained-lease')
+        try:
+            lease.rename(retained)
+            lease.write_bytes(b'foreign replacement\n')
+            op.close_lease()
+            self.assertEqual(lease.read_bytes(), b'foreign replacement\n')
+            self.assertTrue(retained.exists())
+        finally:
+            op.close_lease()
+
+    def test_lease_close_after_alias_retarget_does_not_remove_foreign_lease(self):
+        r = self.init('demo')
+        inst = instance.Instance(r)
+        op = events.Command(r, command='fixture')
+        op.start()
+        old = r / '.brain/events-leases'
+        moved = r / '.brain/retained-leases'
+        outside = self.tmp / 'outside'
+        outside.mkdir()
+        foreign = outside / op.ref
+        foreign.write_bytes(b'foreign lease\n')
+        try:
+            old.rename(moved)
+            old.symlink_to(outside)
+            op.close_lease()
+            self.assertEqual(foreign.read_bytes(), b'foreign lease\n')
+            self.assertFalse((moved / op.ref).exists())
+        finally:
+            op.close_lease()
+
     def test_alias_retarget_after_validation_keeps_checked_publication_target(self):
         r = self.init('demo')
         safe_target = events.common.safe_target

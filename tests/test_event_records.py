@@ -34,12 +34,12 @@ class EventRecords(Scenario):
         inst = instance.Instance(root)
         n = inst.node('root')
         path = n['dir'] / jobs.JOBS_FILE
-        original = events.common.atomic_write
-        def fail_projection(target, text):
-            if target == path:
+        original = events.common.DirectoryTarget.atomic_write
+        def fail_projection(target, text, **kwargs):
+            if target.path == path:
                 raise OSError('simulated interruption')
-            return original(target, text)
-        with mock.patch.object(events.common, 'atomic_write', side_effect=fail_projection):
+            return original(target, text, **kwargs)
+        with mock.patch.object(events.common.DirectoryTarget, 'atomic_write', autospec=True, side_effect=fail_projection):
             with self.assertRaises(OSError):
                 events.write_record(inst, n, 'jobs', 'ledger', 'durable record\n')
         self.assertFalse(path.exists())
