@@ -12,6 +12,7 @@ import core_loader
 
 
 class VerifyLanes(Scenario):
+    fixture_init_in_process = True
     job = test_verify.WorkerReadyPackets.job
     record = test_verify.WorkerReadyPackets.record
     packet = test_verify.WorkerReadyPackets.packet

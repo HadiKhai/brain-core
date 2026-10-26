@@ -7,11 +7,12 @@ from scenario import Scenario
 
 
 class MergeTrain(Scenario):
+    fixture_init_in_process = True
     def project(self, command="python3 -B verify.py", settings=()):
         root = self.init("alice")
         home = self.repo(self.tmp / "app", {"verify.py": "from pathlib import Path\nassert not Path('bad').exists()\n", "shared": "base\n"})
-        self.b(root, "new", "a", "--title", "A", "--home", str(home))
-        self.b(root, "set", "a", "verify=" + command, *settings)
+        self.fixture_b(root, "new", "a", "--title", "A", "--home", str(home))
+        self.fixture_b(root, "set", "a", "verify=" + command, *settings)
         self.root, self.home = root, home
         return root, home
 

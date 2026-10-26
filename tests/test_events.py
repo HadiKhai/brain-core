@@ -260,6 +260,7 @@ class EventAppend(Scenario):
 
 
 class EventViews(Scenario):
+    fixture_init_in_process = True
     def tracked_state(self, root, paths):
         return {name: ((root / name).read_bytes() if (root / name).exists() else None,
                        self.git('ls-files', '--stage', '--', name, cwd=root),

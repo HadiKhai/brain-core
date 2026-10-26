@@ -31,21 +31,23 @@ from scenario import Scenario, AutonomyProject, shlex_quote
 class Connections(Scenario):
     """Learning across nodes: items and specialists from several sources, review in bulk, recall, connect."""
 
+    fixture_init_in_process = True
+
     H = "a" * 40
 
     def setUp(self):
         super().setUp()
         self.r = self.init("alice")
         for p in ("ben", "cleo"):
-            self.b(self.r, "principal", "add", p)
+            self.fixture_b(self.r, "principal", "add", p)
         self.homes = {}
         for nid, owners in (("app", ""), ("lab", ""), ("client", "alice,ben"), ("cleos", "cleo")):
             h = self.repo(self.tmp / f"{nid}-home", {"main.ts": f"export const {nid} = 1\n", "README.md": "hi\n"})
             self.homes[nid] = h
-            self.b(self.r, "new", nid, "--title", nid.title(), "--home", str(h), *(["--owners", owners] if owners else []))
-        self.b(self.r, "new", "studio", "--title", "Studio")
+            self.fixture_b(self.r, "new", nid, "--title", nid.title(), "--home", str(h), *(["--owners", owners] if owners else []))
+        self.fixture_b(self.r, "new", "studio", "--title", "Studio")
         for nid in ("studio/a", "studio/b"):
-            self.b(self.r, "new", nid, "--title", nid)
+            self.fixture_b(self.r, "new", nid, "--title", nid)
         with open(self.r / "nodes/app/decisions.md", "a") as fh:
             fh.write("\n## 2026-01-01 10:00 +00:00: Queue host KV writes\nWhy: the host drops writes above 10/s.\n")
         (self.r / "nodes/lab/knowledge.md").write_text("# Knowledge\n\n## Failures and fixes\n\n- Writes dropped; a queue fixed it.\n")

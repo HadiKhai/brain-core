@@ -2149,3 +2149,19 @@ after proving automatic projection stayed suppressed. It asserts stale status
 and unchanged bytes before explicit refresh, then retains byte inequality and
 currentness checks and requires the exact generated preview line. The original
 clock-based suppression control remains intact without extending its scope.
+
+## D27001: Isolate fast fixture construction from subprocess contracts
+
+Scenario setup may explicitly opt into fresh in-process CLI state for fixture
+initialization and named setup commands. Assertions still call the real launcher
+through the existing subprocess helpers. Each setup call restores environment,
+arguments and working directory and discards its isolated package, so command
+caches and touched paths do not carry into another call. Evidence capture keeps
+the original child process path.
+
+On macOS, fixture initialization clones a source-only core template with APFS
+copy-on-write files. It runs native initialization anew for every instance; no
+journal, derived index, Git history or machine binding is copied between brains.
+Other platforms retain ordinary independent file copies. Installed core edits
+remain private to each fixture, and initialization/launcher subprocess controls
+remain in the suite.
