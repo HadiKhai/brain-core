@@ -295,7 +295,7 @@ def ui_state(inst, problems=None, scan=None, spend_budget=2.0, machine_spend=Non
 
 def ui_round_usage(inst, n, row, used):
     # Additive API: an older accounting backend has no replacement-round meter.
-    reader = getattr(_m_spend, 'job_round_usage', None)
+    reader = getattr(_m_spend, 'job_round_usage_read', None) or getattr(_m_spend, 'job_round_usage', None)
     if reader is None:
         return None
     try:

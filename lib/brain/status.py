@@ -1568,13 +1568,17 @@ def runaway_jobs(inst, n, structured=False, readonly=False):
             why['median-age'] = f"open {r['age_h']} h, over twice the median of {j['median_hours']} h"
         if u and j["median_tokens"] and u["processed"] > 2 * j["median_tokens"]:
             why['median-tokens'] = f"{_m_spend.tokens_text(u['processed'])} tokens, over twice the median of {_m_spend.tokens_text(j['median_tokens'])}"
-        round_usage = _m_spend.job_round_usage(inst, n, r, u)
+        round_usage = _m_spend.job_round_usage_read(inst, n, r, u)
+        if round_usage is not None and round_usage.get('state') in ('regressed', 'unavailable'):
+            why['usage-repair'] = ('usage counters regressed below the retained restart baseline; current round unavailable'
+                                   if round_usage['state'] == 'regressed' else
+                                   'round usage unavailable; retain receipt for review')
         meter = round_usage if round_usage is not None else u
         hours = round_usage['hours'] if round_usage is not None else r['age_h']
         b = _m_spend.job_budget(n, r)
         if b and meter and b.get("tokens") and meter.get("processed") is not None and meter["processed"] > b["tokens"]:
             why['budget-tokens'] = f"over its {_m_spend.tokens_text(b['tokens'])}-token budget"
-        if b and b.get("hours") and hours > b["hours"]:
+        if b and b.get("hours") and hours is not None and hours > b["hours"]:
             why['budget-hours'] = f"over its {b['hours']:g}-hour budget"
         if meter and meter.get("compactions") is not None and meter["compactions"] >= 3:
             why['compaction-limit'] = f"{meter['compactions']} compactions"

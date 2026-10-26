@@ -1,5 +1,6 @@
 """Round budgets retain lifetime accounting and restart only on delivered rebriefs."""
 import datetime
+import json
 from unittest import mock
 
 import core_loader
@@ -77,6 +78,47 @@ class UsageRounds(Scenario):
         self.usage['processed'] = 200
         with self.assertRaisesRegex(ValueError, 'regressed'):
             self.m.job_round_usage(self.inst, self.n, self.row, self.usage)
+
+    def test_regressed_round_read_is_flagged_without_rewriting_strict_baseline(self):
+        self.restart()
+        self.usage['processed'] = 420
+        self.assertIsNotNone(self.m.usage_restart_item(self.inst, self.n, self.row))
+        before = self.m.lifecycle_read(self.inst)
+        for counter in ('processed', 'compactions', 'active_minutes'):
+            with self.subTest(counter=counter):
+                usage = {**self.usage, counter: 0}
+                with self.assertRaisesRegex(ValueError, 'regressed'):
+                    self.m.job_round_usage(self.inst, self.n, self.row, usage)
+                read = self.m.job_round_usage_read(self.inst, self.n, self.row, usage)
+                self.assertEqual(read['state'], 'regressed')
+                for name in ('processed', 'compactions', 'active_minutes', 'hours'):
+                    self.assertIsNone(read[name])
+                self.assertEqual(self.m.lifecycle_read(self.inst), before)
+                with self.assertRaisesRegex(ValueError, 'regressed'):
+                    self.m.acknowledge_usage_restart(self.inst, self.n, self.row,
+                                                    observed_usage=usage)
+                self.assertEqual(self.m.lifecycle_read(self.inst), before)
+
+    def test_relaunched_lower_usage_keeps_status_due_and_ui_available_and_flagged(self):
+        self.restart()
+        self.row.update(Usage='host', **{'Fresh in': '10', 'Compactions': '0', 'Active h': '0.1'})
+        self.m.write_jobs(self.inst, self.n, [self.row])
+        self.usage.update(processed=10, fresh=10, compactions=0, active_minutes=6)
+        baseline = self.m.lifecycle_read(self.inst)['usage']
+        warnings = self.m.runaway_jobs(self.inst, self.n, readonly=True)
+        self.assertTrue(any('counters regressed' in line for line in warnings))
+        self.b(self.root, 'status', 'root')
+        due = json.loads(self.b(self.root, 'due', 'root', '--json'))
+        self.assertTrue(any(item.get('job') == self.m.job_key(self.row)
+                            and item.get('condition') == 'usage-repair' for item in due))
+        output = json.loads(self.b(self.root, 'ui', '--json'))
+        node = next(node for node in output['nodes'] if node['id'] == 'root')
+        job = next(job for job in node['jobs']['open'] if job['Job'] == self.row['Job'])
+        self.assertEqual(job['usage']['processed'], 10)
+        self.assertEqual(job['round_usage']['state'], 'regressed')
+        self.assertIsNone(job['round_usage']['processed'])
+        self.assertTrue(any(item.get('condition') == 'usage-repair' for item in output['due']))
+        self.assertEqual(self.m.lifecycle_read(self.inst)['usage'], baseline)
 
     def test_legacy_baseline_uses_elapsed_time_without_fabricating_active_counts(self):
         key = self.m.digest([self.n['id'], self.m.job_key(self.row)])

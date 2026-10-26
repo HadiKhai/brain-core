@@ -881,6 +881,10 @@ def budget_text(b):
                                     f"{b['hours']:g} h" if b.get("hours") else ""]))
 
 
+class RoundUsageRegression(ValueError):
+    """A retained round belongs to counters newer than the current observation."""
+
+
 def job_round_usage(inst, n, row, usage):
     """Budget counters since the last delivered restart; lifetime totals remain untouched.
 
@@ -915,12 +919,25 @@ def job_round_usage(inst, n, row, usage):
         if type(value) is not int or value < 0 or base is None:
             out[k] = None
         elif value < base:
-            raise ValueError('round usage counters regressed; retain baseline for review')
+            raise RoundUsageRegression('round usage counters regressed; retain baseline for review')
         else:
             out[k] = value - base
     out['hours'] = (out['active_minutes'] / 60 if out['active_minutes'] is not None
                     else (inst.now_dt() - at).total_seconds() / 3600)
     return out
+
+
+def job_round_usage_read(inst, n, row, usage):
+    """Display uncertainty without resetting a baseline or relaxing writer validation."""
+    try:
+        return job_round_usage(inst, n, row, usage)
+    except RoundUsageRegression:
+        # A relaunch can change counter generations. Do not mix generations or
+        # infer a restart instant from a read: keep every round counter unknown.
+        return {'state': 'regressed', 'processed': None, 'compactions': None,
+                'active_minutes': None, 'hours': None}
+    except (OSError, ValueError):
+        return {'state': 'unavailable', 'processed': None, 'compactions': None, 'hours': None}
 
 
 def usage_line(u, budget=None, hours=None, round_usage=None):
@@ -936,6 +953,10 @@ def usage_line(u, budget=None, hours=None, round_usage=None):
     if round_usage is not None:
         shown = lambda k: tokens_text(round_usage[k]) if round_usage.get(k) is not None else 'unknown'
         out += f"; since restart: {shown('processed')} tokens, {shown('compactions')} compactions"
+        if round_usage.get('state') == 'regressed':
+            out += '; usage counters regressed; baseline retained for review'
+        elif round_usage.get('state') == 'unavailable':
+            out += '; round usage unavailable; receipt retained for review'
         hours = round_usage['hours']
     meter = round_usage if round_usage is not None else u
     if budget:

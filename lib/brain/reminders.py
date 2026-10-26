@@ -22,7 +22,7 @@ _USAGE_NOT_OBSERVED = object()
 LIFECYCLE_LIMIT = 2000
 LIFECYCLE_BYTES = 2 * 1024 * 1024
 ADVICE_CONDITIONS = ('median-age', 'median-tokens', 'budget-tokens', 'budget-hours',
-                     'compaction-limit', 'subagent-share')
+                     'compaction-limit', 'subagent-share', 'usage-repair')
 
 
 def lifecycle_empty():

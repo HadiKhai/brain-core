@@ -469,7 +469,7 @@ def publish_handback(a):
             started, used, budget = inst.parse_time(current["Started"]), _m_spend.live_usage(inst, n, current), _m_spend.job_budget(n, current)
             if (used and used["sessions"]) or budget:  # the worker sees its spend against its budget
                 print(_m_guard.redact(_m_spend.usage_line(used, budget, _m_status.elapsed(started, inst.now_dt()) / 3600 if started else None,
-                                      round_usage=_m_spend.job_round_usage(inst, n, current, used)),
+                                      round_usage=_m_spend.job_round_usage_read(inst, n, current, used)),
                              _m_guard.never_terms(n)))
     except (OSError, ValueError, RuntimeError):
         pass  # accounting never blocks a hand-back
@@ -1758,7 +1758,7 @@ def cmd_jobs(a):
                             "   (over twice the median in tokens)" if heavy else ""), _m_guard.never_terms(n)))
             if job_key(r) in overlaps:
                 print(_m_guard.redact("        " + r["Job"] + ": " + overlaps[job_key(r)], _m_guard.never_terms(n)))
-            round_usage = _m_spend.job_round_usage(inst, n, r, u)
+            round_usage = _m_spend.job_round_usage_read(inst, n, r, u)
             for line in job_advice(inst, n, r) + [_m_spend.usage_line(u, _m_spend.job_budget(n, r), r["age_h"], round_usage=round_usage)] + \
                     _m_spend.usage_advice(u, j["median_tokens"], round_usage=round_usage):
                 print(_m_guard.redact("        " + line, _m_guard.never_terms(n)))

@@ -97,6 +97,9 @@ class SourceFileLoader(importlib.machinery.SourceFileLoader):
                         owners[name] = part
             # The flat fixture API predates the task row hook with the same name.
             owners['job_started'] = importlib.import_module('.jobs', package_name)
+            # The legacy flat API's structured digest belongs to jobs; the
+            # transaction observer's later byte digest is a different contract.
+            owners['digest'] = importlib.import_module('.jobs', package_name)
         finally:
             sys.meta_path.remove(finder)
         module._owners = owners
