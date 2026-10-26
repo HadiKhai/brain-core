@@ -1,6 +1,5 @@
 """Explicit machine-local external snapshots for optional isolated comparisons."""
 import copy
-import json
 import os
 from pathlib import Path
 
@@ -11,10 +10,11 @@ def freeze_declared(inst, directory):
     A declaration is local.json's rehearse_external = {version: 1, roots: [...]}.
     Unknown bindings remain observable through the existing drift detector. Copies
     preserve dirty/untracked/ignored bytes; this is a fixed capture, not an atomic
-    historical transaction with concurrent source writers.
+    historical transaction with concurrent source writers. Return a real Instance
+    with independent in-memory bindings, without publishing into the caller.
     """
     from . import rehearse
-    declaration = inst.local.get('rehearse_external')
+    declaration = getattr(inst, 'local', {}).get('rehearse_external')
     if declaration is None:
         return inst
     def refuse():
@@ -81,5 +81,9 @@ def freeze_declared(inst, directory):
                 tree['path'] = remap(tree['path'])
     # The declaration is preparation-only; it cannot become a live observation.
     local.pop('rehearse_external')
-    (inst.root / '.brain/local.json').write_text(json.dumps(local))
-    return type(inst)(inst.root)
+    # Capturing operands must never publish into the caller, which may be live.
+    # The preparation owner alone persists these bindings into its private copy.
+    from .instance import Instance
+    captured = Instance(inst.root)
+    captured.local = local
+    return captured

@@ -6,6 +6,7 @@ Published evidence is redacted. Optional raw diffs stay in a private local sidec
 """
 import collections
 import contextlib
+import contextvars
 import datetime
 import difflib
 import errno
@@ -22,6 +23,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path
+import traceback
 
 from . import common as _m_common
 from . import guard as _m_guard
@@ -30,6 +32,7 @@ from . import instance as _m_instance
 from . import jobs as _m_jobs
 from . import nodes as _m_nodes
 from . import transitions as _m_transitions
+from . import rehearse_transactions as _m_transactions
 from . import upgrade as _m_upgrade
 from . import verify as _m_verify
 
@@ -38,6 +41,163 @@ class RehearsalError(Exception):
     def __init__(self, message, code='unclassified-harness-error'):
         super().__init__(message)
         self.code = code
+
+
+_retention_children = contextvars.ContextVar('rehearsal_retention_children', default=None)
+
+
+class NativeRetention:
+    """Opt-in diagnostics only; unavailable operands never imply validation."""
+    def __init__(self, owned, stage, **fields):
+        self.owned = Path(owned)
+        self.destination = os.environ.get('BRAIN_REHEARSAL_EVIDENCE_DIR')
+        self.incomplete = False
+        self.packet = dict(version=1, status='INCOMPLETE', stage=stage,
+                           owned=str(owned), invocation=[sys.executable, *sys.argv],
+                           retention_errors=[],
+                           native_receipt_linkage='post-run manifest binds artifact hashes to native receipt',
+                           limits='sequential/non-atomic; context-local threads; uncatchable termination and storage failure may prevent retention',
+                           **fields)
+        children = _retention_children.get()
+        if self.destination and children is not None:
+            children.append(self)
+        self.checkpoint()
+
+    def checkpoint(self, **fields):
+        if not self.destination:
+            return True
+        self.packet.update(fields)
+        if self.incomplete:
+            self.packet['status'] = 'INCOMPLETE'
+        try:
+            source = Path(__file__).resolve().parents[2]
+            if 'source_binding' not in self.packet:
+                def git(*args):
+                    return subprocess.run(['git', '-C', str(source), *args], check=True,
+                                          capture_output=True, timeout=5).stdout
+                names = ('bin/brain', 'lib/brain/rehearse.py', 'lib/brain/rehearse_transactions.py',
+                         'lib/brain/events.py', 'lib/brain/instance.py', 'tests/scenario.py',
+                         'tests/test_rehearse.py', 'tests/nightly_rehearse.py')
+                self.packet['source_binding'] = dict(
+                    head=git('rev-parse', 'HEAD').decode().strip(),
+                    tree=git('rev-parse', 'HEAD^{tree}').decode().strip(),
+                    diff_sha256=hashlib.sha256(git('diff', '--binary', 'HEAD')).hexdigest(),
+                    source_hashes={name: hashlib.sha256((source / name).read_bytes()).hexdigest()
+                                   for name in names})
+            observer = self.packet.get('observer_path')
+            if isinstance(observer, str):
+                self.packet['observer_sha256'] = hashlib.sha256(Path(observer).read_bytes()).hexdigest()
+            root = self.packet.get('root')
+            if isinstance(root, str) and root != 'UNKNOWN' and 'native_core_hashes' not in self.packet:
+                core = Path(root) / 'core'
+                if core.exists():
+                    self.packet['native_core_hashes'] = {
+                        name: hashlib.sha256((core / name).read_bytes()).hexdigest()
+                        if (core / name).is_file() else 'UNKNOWN'
+                        for name in ('bin/brain', 'lib/brain/events.py',
+                                     'lib/brain/rehearse_transactions.py')}
+            directory = Path(self.destination)
+            for parent in (directory, *directory.parents):
+                if parent.is_symlink() or (parent / '.git').exists() or (
+                        (parent / 'HEAD').is_file() and (parent / 'objects').is_dir()):
+                    raise ValueError('private evidence destination refused')
+            permissions = directory.stat()
+            if (not directory.is_absolute() or permissions.st_uid != os.getuid()
+                    or stat.S_IMODE(permissions.st_mode) != 0o700
+                    or directory.resolve() == self.owned.resolve()
+                    or self.owned.resolve() in directory.resolve().parents
+                    or source == directory.resolve() or source in directory.resolve().parents):
+                raise ValueError('private evidence destination refused')
+            body = (json.dumps(self.packet, sort_keys=True) + '\n').encode()
+            fd, filename = tempfile.mkstemp(prefix='native-retention-', suffix='.json', dir=directory)
+            with os.fdopen(fd, 'wb') as stream:
+                stream.write(body)
+                stream.flush()
+                os.fsync(stream.fileno())
+            dfd = os.open(str(directory), os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(dfd)
+            finally:
+                os.close(dfd)
+            self.artifact = dict(path=filename, sha256=hashlib.sha256(body).hexdigest())
+        except BaseException as error:
+            # A diagnostic error must never replace an assertion/native exception.
+            self.incomplete = True
+            self.packet.update(status='INCOMPLETE', preserved_owned=str(self.owned))
+            self.packet['retention_errors'].append(dict(category=type(error).__name__,
+                                                        stage=self.packet['stage']))
+            try:
+                fd, filename = tempfile.mkstemp(prefix='unsaved-native-retention-',
+                                                suffix='.json', dir=self.owned)
+                with os.fdopen(fd, 'wb') as stream:
+                    stream.write((json.dumps(self.packet, sort_keys=True) + '\n').encode())
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                dfd = os.open(str(self.owned), os.O_RDONLY | os.O_DIRECTORY)
+                try:
+                    os.fsync(dfd)
+                finally:
+                    os.close(dfd)
+            except BaseException:
+                pass  # The owned directory remains the sole recovery source.
+            print('native retention=INCOMPLETE category=' + type(error).__name__, flush=True)
+        return not self.incomplete
+
+    def exception(self, error):
+        return self.checkpoint(exception=dict(category=type(error).__name__,
+            stack=[dict(function=f.name, line=f.lineno)
+                   for f in traceback.extract_tb(error.__traceback__)]))
+
+    def validation_call(self, before, after, observations, owner_pid, command, now,
+                        diagnostics, caller):
+        return NativeRetention(self.owned, 'validation-call', before=before, after=after,
+            observations=observations, owner_pid=owner_pid, validator_command=command,
+            validation_instant=now.isoformat(), diagnostics=diagnostics,
+            validator_result='UNKNOWN', caller=caller,
+            context={key: self.packet[key] for key in
+                     ('nodeid', 'fixture', 'root', 'trace_path', 'args', 'kind')
+                     if key in self.packet})
+
+    def bind_command_sources(self, core, bootstrap):
+        if not self.destination:
+            return
+        try:
+            self.checkpoint(
+                bootstrap_hashes={path.name: hashlib.sha256(path.read_bytes()).hexdigest()
+                                  for path in bootstrap.iterdir() if path.is_file()},
+                native_core_hashes={name: hashlib.sha256((core / name).read_bytes()).hexdigest()
+                                   if (core / name).is_file() else 'UNKNOWN'
+                                   for name in ('bin/brain', 'lib/brain/events.py',
+                                                'lib/brain/rehearse_transactions.py')})
+        except BaseException as error:
+            self.incomplete = True
+            self.exception(error)
+
+
+@contextlib.contextmanager
+def retained_temporary_directory():
+    """Keep only this owned temporary tree when opt-in persistence fails."""
+    temporary = tempfile.TemporaryDirectory(prefix='brain-rehearse-')
+    retention = NativeRetention(temporary.name, 'before-native-setup')
+    children = []
+    token = _retention_children.set(children)
+    try:
+        yield temporary.name
+    except BaseException as error:
+        retention.exception(error)
+        raise
+    finally:
+        # Detach BEFORE cleanup, including when setup never produced a lane.
+        if any(child.incomplete and (child.owned == Path(temporary.name) or
+                                    Path(temporary.name) in child.owned.parents)
+               for child in children):
+            retention.incomplete = True
+        _retention_children.reset(token)
+        retention.checkpoint(stage='before-native-delete')
+        if retention.incomplete:
+            temporary._finalizer.detach()
+        else:
+            temporary.cleanup()
 
 
 @contextlib.contextmanager
@@ -294,6 +454,49 @@ def copy_tree(source, dest):
         shutil.copytree(source, dest, symlinks=True)
     relocate_links(source, dest)
     capture_gitfiles(source, dest)
+
+
+def copy_brain(source, dest, private_root):
+    """Drop inode-bound indexes only from this newly copied private Brain."""
+    private_root, dest = Path(private_root), Path(dest)
+    owner = private_root.lstat()
+    if (private_root.resolve() != private_root or not stat.S_ISDIR(owner.st_mode)
+            or owner.st_uid != os.getuid() or stat.S_IMODE(owner.st_mode) != 0o700
+            or private_root not in dest.parents or dest.parent.resolve() != dest.parent):
+        raise RehearsalError('unowned Brain clone', code='unowned-brain-clone')
+    copy_tree(source, dest)  # refuses an existing destination; never edits source
+    clone = dest.lstat()
+    if (dest.resolve() != dest or not stat.S_ISDIR(clone.st_mode)
+            or clone.st_uid != os.getuid()):
+        raise RehearsalError('ambiguous Brain clone', code='unowned-brain-clone')
+    directory = dest / '.brain'
+    if not directory.exists() and not directory.is_symlink():
+        return
+    fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        initial = os.fstat(fd)
+        if initial.st_uid != os.getuid():
+            raise RehearsalError('foreign Brain clone metadata', code='unowned-brain-clone')
+        caches = {}
+        for name in ('events-index.json', 'events-compare-index.json'):
+            try:
+                entry = os.stat(name, dir_fd=fd, follow_symlinks=False)
+            except FileNotFoundError:
+                continue
+            if (not stat.S_ISREG(entry.st_mode) or entry.st_uid != os.getuid()
+                    or entry.st_nlink != 1):
+                raise RehearsalError('ambiguous Brain clone cache', code='unowned-brain-clone')
+            caches[name] = entry
+        current = directory.lstat()
+        if (current.st_dev, current.st_ino) != (initial.st_dev, initial.st_ino):
+            raise RehearsalError('replaced Brain clone metadata', code='unowned-brain-clone')
+        for name, entry in caches.items():
+            current = os.stat(name, dir_fd=fd, follow_symlinks=False)
+            if current != entry:
+                raise RehearsalError('replaced Brain clone cache', code='unowned-brain-clone')
+            os.unlink(name, dir_fd=fd)
+    finally:
+        os.close(fd)
 
 
 def capture_gitfiles(source, dest):
@@ -1021,6 +1224,29 @@ def report_leftover(inst, n, row):
 
 
 def run_command(core, lane, args, kind, roots, terms=(), cache=None, raw_output=None, on_leftover=None):
+    retention = NativeRetention(lane, 'before-command-setup',
+        args=args, kind=kind, root=str(lane / 'brain'), before='UNKNOWN', after='UNKNOWN', observations='UNKNOWN',
+        validation_instant='UNKNOWN', validator_result='UNKNOWN', raw_trace_hex='UNKNOWN')
+    token = _m_transactions._validation_retainer.set(retention)
+    try:
+        return _run_command(core, lane, args, kind, roots, terms, cache, raw_output,
+                            on_leftover, retention)
+    except BaseException as error:
+        retention.exception(error)
+        raise
+    finally:
+        trace_path = retention.packet.get('trace_path')
+        if retention.destination and trace_path is not None:
+            try:
+                retention.checkpoint(command_finally_trace_hex=Path(trace_path).read_bytes().hex())
+            except BaseException as error:
+                retention.incomplete = True
+                retention.exception(error)
+        retention.checkpoint(stage='command-finally')
+        _m_transactions._validation_retainer.reset(token)
+
+
+def _run_command(core, lane, args, kind, roots, terms, cache, raw_output, on_leftover, retention):
     deadline = ui_probe_deadline(args)  # Validate before starting anything.
     brain = lane / 'brain'
     home = lane / 'home'
@@ -1060,6 +1286,8 @@ def pin():
             if getattr(module, 'time', None) is time:
                 module.time = wall
 '''.replace('__CLOCK_MODULES__', repr(FROZEN_WALL_CLOCK_MODULES)))
+    # Copy the supervising implementation, never a candidate-supplied validator.
+    (bootstrap / 'rehearsal_transactions.py').write_bytes(Path(_m_transactions.__file__).read_bytes())
     # Every Python helper inherits this supervisor. Detached wake drains remain
     # in the command's group, and each Python parent reaps its children on exit.
     (bootstrap / 'sitecustomize.py').write_text('''import atexit, os, subprocess
@@ -1080,6 +1308,15 @@ def reap():
 atexit.register(reap)
 try:
     import rehearsal_audit
+    if os.environ.get('BRAIN_REHEARSAL_TRANSACTIONS'):
+        import sys
+        from pathlib import Path
+        library = Path(os.environ['BRAIN_ROOT']) / 'core/lib'
+        if (library / 'brain/events.py').is_file():
+            sys.path.insert(0, str(library))
+            from brain import events
+            from rehearsal_transactions import install_observer
+            install_observer(events, os.environ['BRAIN_ROOT'], os.environ['BRAIN_REHEARSAL_TRANSACTIONS'])
     if os.environ.get('BRAIN_REHEARSAL_NOW'):
         from rehearsal_clock import pin
         pin()
@@ -1101,7 +1338,7 @@ except BaseException:
     startup_failed.unlink(missing_ok=True)
     # OS sandboxing is the enforcement boundary. The audit hook additionally
     # observes Python attempts even when candidate code catches a denied write.
-    (bootstrap / 'rehearsal_audit.py').write_text('''import os, pathlib, sys
+    (bootstrap / 'rehearsal_audit.py').write_text('''import json, os, pathlib, sys
 boundary = pathlib.Path(os.environ['BRAIN_REHEARSAL_BOUNDARY']).resolve()
 marker = pathlib.Path(os.environ['BRAIN_REHEARSAL_MARKER'])
 busy = False
@@ -1127,7 +1364,8 @@ def audit(event, args):
                 continue
             p = pathlib.Path(os.fsdecode(name)).resolve()
             if p != pathlib.Path('/dev/null') and boundary != p and boundary not in p.parents:
-                marker.write_text('attempted')
+                with marker.open('a') as stream:
+                    stream.write(json.dumps(dict(event=event, path=str(p))) + '\\n')
     finally:
         busy = False
 sys.addaudithook(audit)
@@ -1168,6 +1406,21 @@ runpy.run_path(entry, run_name='__main__')
                                env=env, capture_output=True, text=True, timeout=5)
         if check.returncode or check.stdout.strip() != '--max-age=' + str(epoch - 86400):
             raise RehearsalError('Git frozen clock binding failed', code='git-frozen-clock-binding-failed')
+    trace = home / '.local/state/brain/rehearsal-transactions.jsonl'
+    transaction_before = None
+    capture_before_metadata = {}
+    if kind in ('fix', 'refresh'):
+        trace.parent.mkdir(parents=True, exist_ok=True)
+        trace.write_text('')
+        env['BRAIN_REHEARSAL_TRANSACTIONS'] = str(trace)
+        retention.bind_command_sources(core, bootstrap)
+        retention.checkpoint(stage='capture-before', capture_before_metadata=capture_before_metadata,
+                             trace_path=str(trace))
+        try:
+            transaction_before = _m_transactions.capture(brain, capture_before_metadata)
+        finally:
+            retention.checkpoint(before=transaction_before if sys.exc_info()[0] is None else 'UNKNOWN',
+                                 capture_before_metadata=capture_before_metadata)
     before = snapshot(lane, cache)
     start = time.monotonic()
     p = subprocess.Popen([*sandbox_prefix(lane), sys.executable, '-B', str(audit), str(lane), str(violation),
@@ -1214,7 +1467,11 @@ runpy.run_path(entry, run_name='__main__')
         # Stop remaining processes in this command's group. Any detached helper
         # still inherits the OS sandbox and cannot write to the live machine.
         stop_group()
+        retention.packet.update(stdout=locals().get('out', 'UNKNOWN'),
+                                stderr=locals().get('err', 'UNKNOWN'), owner_pid=p.pid,
+                                code=p.returncode, timeout=timed_out, signal_audit=signal_audit)
     elapsed = time.monotonic() - start
+    retention.checkpoint(stage='command-boundary')
     if startup_failed.exists() or startup_failed.is_symlink() or (clock is not None and
                                   (not clock_bound.is_file() or clock_bound.read_text() != clock)):
         raise RehearsalError('probe frozen clock binding failed', code='probe-frozen-clock-binding-failed')
@@ -1247,15 +1504,70 @@ runpy.run_path(entry, run_name='__main__')
                          for line in [*normalized.splitlines(), *semantic.splitlines()] if '✗' in line}
     after = snapshot(lane, cache)
     changed = {k for k in before.keys() | after.keys() if before.get(k) != after.get(k)}
+    transaction_after, observations, proven = None, [], set()
+    transaction_verdict = 'unproven'
+    diagnostics, capture_after_metadata = {}, {}
+    validation_now, raw_trace_hex = None, None
+    if kind in ('fix', 'refresh'):
+        retention.checkpoint(stage='capture-after')
+        try:
+            transaction_after = _m_transactions.capture(brain, capture_after_metadata)
+        finally:
+            retention.checkpoint(after=transaction_after if sys.exc_info()[0] is None else 'UNKNOWN',
+                                 capture_after_metadata=capture_after_metadata)
+        try:
+            trace_bytes = trace.read_bytes()
+            raw_trace_hex = trace_bytes.hex()
+            observations = _m_transactions.lines(trace_bytes)
+        except (OSError, ValueError) as error:
+            observations = None
+            diagnostics.update(checkpoint='trace-parse', exception_category=type(error).__name__)
+        finally:
+            retention.checkpoint(stage='trace-parse-finally', raw_trace_hex=raw_trace_hex,
+                                 observations=observations, diagnostics=diagnostics)
+        if not timed_out and not leftovers:
+            validation_now = (datetime.datetime.fromisoformat(clock) if clock is not None else
+                              datetime.datetime.now().astimezone())
+            retention.checkpoint(stage='validate', validation_instant=validation_now.isoformat(),
+                                 validator_command='status' if kind == 'refresh' else 'check')
+            try:
+                proven, transaction_verdict = _m_transactions.validate(
+                    transaction_before, transaction_after, observations, p.pid,
+                    'status' if kind == 'refresh' else 'check',
+                    validation_now, diagnostics=diagnostics)
+                retention.checkpoint(validator_result=dict(proven_paths=sorted(proven),
+                                                           verdict=transaction_verdict))
+            finally:
+                retention.checkpoint(stage='validator-finally', diagnostics=diagnostics)
+        else:
+            diagnostics.update(checkpoint='supervision-bypass', exception_category='Timeout' if timed_out else 'Leftovers')
+    unexpected_paths = sorted(k for k in changed if not allowed_write(k, kind) and k not in proven)
+    denied_attempts = [json.loads(line) for line in violation.read_text().splitlines()] if violation.exists() else []
     if raw_output is not None:
-        raw_output.append(dict(stdout=out, stderr=err, code=p.returncode, timeout=timed_out))
+        raw_output.append(dict(stdout=out, stderr=err, code=p.returncode, timeout=timed_out,
+            writes=[dict(path=k, operation=('created' if k not in before else
+                                          'removed' if k not in after else 'modified'),
+                         unexpected=k in unexpected_paths) for k in sorted(changed)],
+            denied_attempts=denied_attempts,
+            transaction_evidence=dict(before=transaction_before, after=transaction_after,
+                observations=observations, owner_pid=p.pid, verdict=transaction_verdict,
+                validator_command='status' if kind == 'refresh' else 'check',
+                validation_instant=validation_now.isoformat() if validation_now is not None else None,
+                diagnostics=diagnostics, capture_before_metadata=capture_before_metadata,
+                capture_after_metadata=capture_after_metadata, raw_trace_hex=raw_trace_hex)))
+    retention.checkpoint(stage='command-result', raw_output=raw_output,
+                         status='CAPTURED')
     result = {'text': text, 'semantic_text': semantic_text,
             'stdout': stdout, 'stderr': stderr, 'semantic_stdout': semantic_stdout,
             'semantic_stderr': semantic_stderr, 'stderr_digest': stderr_digest,
             'error_diagnostics': error_diagnostics, 'normalization_tokens': normalization_tokens,
             'code': p.returncode, 'timeout': timed_out,
             'leftovers': leftovers, 'signal_audit': signal_audit,
-            'seconds': elapsed, 'unexpected': sum(not allowed_write(k, kind) for k in changed) + int(violation.exists())}
+            'seconds': elapsed, 'unexpected': len(unexpected_paths) + int(violation.exists()),
+            # Raw paths stay in the private sidecar; fingerprints let a local
+            # operator attribute a known path without publishing private names.
+            'unexpected_path_digests': [hashlib.sha256(os.fsencode(k)).hexdigest() for k in unexpected_paths],
+            'denied_attempts': len(denied_attempts), 'transaction_evidence': transaction_verdict}
     if ui_summary is not None:
         result['ui_comparison'] = ui_summary
     return result
@@ -1420,8 +1732,9 @@ def external_inputs(inst):
 
 
 def run_lane(source, core, folder, nodes, commands, on_leftover=None):
+    retention = NativeRetention(folder, 'before-lane-setup')
     folder.mkdir()
-    copy_tree(source, folder / 'brain')
+    copy_brain(source, folder / 'brain', folder.parent)
     materialize_git(source, folder / 'brain')
     # A core submodule's .git file would otherwise point back to live metadata.
     old_core = folder / 'brain/core'
@@ -1444,17 +1757,24 @@ def run_lane(source, core, folder, nodes, commands, on_leftover=None):
             lane = folder / ('mutation-' + kind)
             if kind not in mutations:
                 lane.mkdir()
-                copy_tree(folder / 'brain', lane / 'brain')
+                copy_brain(folder / 'brain', lane / 'brain', folder.parent)
                 (lane / 'rehearse-clock').write_text(clock)
                 mutations[kind] = lane
         else:
             lane = folder
         raw = []
-        with rehearsal_phase(('baseline' if folder.name == 'before' else 'candidate') + ':' + key):
-            results[key] = run_command(lane / 'brain/core', lane, args, kind,
-                                       [lane / 'brain', folder / 'brain', source, core, folder, lane], terms, cache,
-                                       raw_output=raw, on_leftover=on_leftover)
-        raw_outputs[key] = raw[0]
+        try:
+            with rehearsal_phase(('baseline' if folder.name == 'before' else 'candidate') + ':' + key):
+                results[key] = run_command(lane / 'brain/core', lane, args, kind,
+                                           [lane / 'brain', folder / 'brain', source, core, folder, lane], terms, cache,
+                                           raw_output=raw, on_leftover=on_leftover)
+            raw_outputs[key] = raw[0]
+        except BaseException as error:
+            retention.exception(error)
+            raise
+        finally:
+            retention.checkpoint(stage='lane-command-finally', command=key,
+                                 raw_output=raw, raw_outputs=raw_outputs, results=results)
     # This intermediate never leaves the rehearsal's private temporary directory.
     with (folder / 'probe-outputs.json').open('x') as stream:
         os.fchmod(stream.fileno(), 0o600)
@@ -1483,6 +1803,14 @@ def write_local_diff(inst, n, directory, before, after, metadata=None):
     with os.fdopen(fd, 'w') as stream:
         stream.write('# Local rehearsal diff\n' + json.dumps(metadata or {}, sort_keys=True) + '\n')
         for key in sorted(before.keys() | after.keys()):
+            # Equal writes on both sides are still safety failures. A unified
+            # output diff alone would erase their attribution entirely.
+            for label, rows in (('installed', before), ('candidate', after)):
+                row = rows.get(key) or {}
+                stream.write(json.dumps(dict(lane=label, command=key,
+                    writes=row.get('writes', []), denied_attempts=row.get('denied_attempts', []),
+                    transaction_evidence=row.get('transaction_evidence')),
+                    sort_keys=True) + '\n')
             def lines(value):
                 if value is None:
                     return ['missing command\n']
@@ -1524,13 +1852,13 @@ def rehearse(inst, n, branch, local_diff_dir=None):
         raise RehearsalError('candidate branch or cached integration main missing', code='candidate-branch-or-cached-integration-main-missing')
     # Probe admission before any candidate is executed. The sandbox protects live
     # homes even when local.json points to them; they are read-only observations.
-    with tempfile.TemporaryDirectory(prefix='brain-rehearse-') as td:
+    with retained_temporary_directory() as td:
         folder = Path(td).resolve()
         sandbox_self_check(folder)
         frozen = folder / 'source'
         (folder / 'rehearse-clock').write_text(inst.now_dt().isoformat())
         frozen_now = read_clock(folder / 'rehearse-clock')
-        copy_tree(inst.root, frozen)
+        copy_brain(inst.root, frozen, folder)
         validate_frozen_links(frozen)
         materialize_git(frozen, frozen)
         # The copy is common fixed input, not an atomic historical snapshot.
@@ -1562,6 +1890,12 @@ def rehearse(inst, n, branch, local_diff_dir=None):
         subprocess.run([*prefix, 'git', '-C', str(candidate), 'remote', 'remove', 'origin'],
                        env=prep_env, capture_output=True, check=True)
         frozen_inst = _m_instance.Instance(frozen)
+        from . import rehearse_external
+        captured_inst = rehearse_external.freeze_declared(frozen_inst, folder / 'external')
+        if captured_inst is not frozen_inst:
+            # This root is the owned source copy, never the live caller's root.
+            (frozen / '.brain/local.json').write_text(json.dumps(captured_inst.local))
+            frozen_inst = captured_inst
         freeze_machine_inputs(frozen_inst, frozen_now)
         nodes = frozen_inst.nodes()
         diagnostic_terms = []
@@ -1580,6 +1914,7 @@ def rehearse(inst, n, branch, local_diff_dir=None):
         delivery = probe_delivery(delivery_inst, delivery_inst.nodes(), frozen_inst)
         expected = expected_change_notices(frozen_inst, nodes, baseline, candidate)
         original = snapshot(frozen)
+        captured_external = snapshot(folder / 'external')
         # Equal-length paths prevent measured sizes from changing warning
         # thresholds, top-section selection, and section order before normalization.
         leftovers = []
@@ -1606,6 +1941,8 @@ def rehearse(inst, n, branch, local_diff_dir=None):
             flags.append('rehearsal process cleanup incomplete')
         if snapshot(frozen) != original:
             flags.append('frozen brain changed during rehearsal; evidence refused')
+        if snapshot(folder / 'external') != captured_external:
+            flags.append('captured external inputs changed during rehearsal; evidence refused')
         warnings, diagnostics = [], []
         for key, result in old.items():
             if key in ('check', 'fix') and not baseline_conditions(key, result) and not drift_comparisons:
@@ -1643,6 +1980,11 @@ def rehearse(inst, n, branch, local_diff_dir=None):
                 'integration_base': integration_base,
                 'checked_at': _m_jobs.stamp(frozen_inst), 'passed': not flags, 'regressions': flags,
                 'warnings': warnings, 'diagnostics': diagnostics,
+                'write_diagnostics': [dict(lane=label, command=key, unexpected=row['unexpected'],
+                    path_digests=row.get('unexpected_path_digests', []),
+                    denied_attempts=row.get('denied_attempts', 0))
+                    for label, rows in (('baseline', old), ('candidate', new))
+                    for key, row in rows.items() if row['unexpected']],
                 'drift_comparisons': drift_comparisons,
                 'leftovers': leftovers,
                 'signal_audit': [entry for lane_results in (old, new) for command_result in lane_results.values()

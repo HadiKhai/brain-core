@@ -105,6 +105,13 @@ def communication_record(inst, n, kind, text, key, question=None):
 
 def communication_reconcile(inst):
     """Record a routine choice at its deadline. No command/action executes here."""
+    # An absent store is an empty observation at this instant. A concurrent
+    # creator remains responsible for its own locked publication; a later tick
+    # reconciles it. Existing stores always take the original exclusive lock.
+    path = inst.root / '.brain/communications.json'
+    _m_common.safe_target(path)
+    if not path.exists():
+        return
     with communication_store(inst) as data:
         for q in data['questions'].values():
             spec = communication_question(inst, q)

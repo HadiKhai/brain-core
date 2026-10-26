@@ -2232,3 +2232,80 @@ child directory symlinks or change the existing input exclusions.
 The index contains no source contents and writes no files. It does not replace source
 authorization, usage aggregation, private publication or the completion marker. Its reuse
 alone establishes neither complete warm performance nor browser paint timing.
+
+## D21002: Separate captured operands from rehearsal publication
+
+Optional external capture constructs independent bindings on a real Instance;
+the capture helper never rewrites its caller's local configuration. Only the
+rehearsal's private preparation copy persists those bindings. Both command lanes
+read the same detached captures outside their writable boundaries. Unknown or
+undeclared operands retain drift detection; source capture is fixed input rather
+than a claim of an atomic historical snapshot. Captured bytes are audited after
+both lanes. Native journal ownership, live leases and process cleanup remain real.
+
+Unexpected-write policy remains strict, including journal writes. Private raw
+sidecars retain each changed path and operation and each denied Python write
+attempt, even when both lanes performed the same writes. Published evidence
+contains counts and SHA-256 fingerprints of filesystem-encoded lane-relative
+paths, never raw paths or contents. These diagnostics attribute a failed run;
+they do not turn it into a pass. Rehearsal remains advisory for readiness and
+landing, and the original real-core diagnostic remains optional with unchanged
+assertions.
+
+## D21004: Prove native transaction effects before comparing journal writes
+
+An absent communications store is an empty observation. Reconciliation does not
+create a directory, lock or store for that observation. Existing stores retain
+the exclusive lock, typed validation and routine-only deadline defaults.
+
+Rehearsal retains exact private before/after journal bytes and separately observes
+native command entry, append, finish and lease closure. A journal mutation can
+compare as expected only when those observations belong to the launched process,
+match its command and live lease, preserve prior records, account for every new
+record and comparison, and agree with independent replay and derived indexes.
+Unknown kinds, missing or reordered records, duplicates, foreign ownership,
+corrupt indexes, unresolved partial writes and unexplained residual paths fail
+closed. No product path gains a write permission from transaction evidence.
+
+The observer runs only in isolated mutating probes and keeps native publication,
+locking, journal history and the original optional acceptance assertions intact.
+Private evidence never enters the public diagnostic channels. This is an advisory
+comparison contract, not readiness, release or arbitrary-code authenticity proof.
+
+D21004 evidence addendum: an explicitly requested isolated diagnostic may persist
+its authentic private operands, supervision fields, source/bootstrap identities
+and rejection checkpoint before assertions and teardown. Storage is owner-only
+outside repositories; public diagnostics contain only screened checkpoint/category
+and an artifact name/hash. A post-run manifest binds the native receipt to that
+immutable packet. Evidence collection does not alter transaction acceptance,
+permissions, journal records or assertions, and cannot recover prior lost bytes.
+
+## D21005: Attribute pre-begin coverage separately from comparisons
+
+Native coverage runs under the instance lock before an event lease exists. The
+isolated observer witnesses the native lock acquisition, command identity and
+explicitly absent lease at entry, each coverage publication and exit. It captures
+the operands consumed by the native detector without moving its computation.
+The later begin and live lease cannot supply missing pre-begin ownership.
+
+Coverage and comparison history have distinct strict native schemas. Every new
+history row must match one ordered observation, and each complete detector call
+must match all affected nodes and its exact resource, interruption and fault
+operands. Historical bytes, independent replay, indexes, terminal ownership and
+residual-write checks still bind acceptance. Missing, caught or partial evidence
+fails closed. An old incomplete capture remains unproven; a new positive requires
+a separately retained authentic capture. No producer fields or path permissions
+are added by this proof.
+
+## D21006: Retain actual helper evidence before fixture deletion
+
+An explicitly requested private diagnostic initializes an incomplete capsule
+before native helper initialization, saves the actual capture operands and
+ordered trace incrementally, and forwards validator diagnostics with its exact
+invocation instant and result. Early assertions and exceptions retain partial
+evidence with unreached fields explicitly unavailable. A pre-delete fixture hook
+persists again before removal; failed retention preserves the owned fixture and
+marks evidence incomplete. Owner-only artifacts bind source identities and a
+post-run receipt manifest. Uncatchable termination can still prevent retention.
+This instrumentation changes no native publication, acceptance rule, assertion,
+schema or write permission and supplies no qualification by itself.

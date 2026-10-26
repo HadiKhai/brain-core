@@ -58,6 +58,8 @@ class Scenario(unittest.TestCase):
         for key in gate_keys:
             os.environ.pop(key, None)
         self.tmp = Path(tempfile.mkdtemp(prefix="brain-test-")).resolve()
+        if getattr(self, 'retain_rehearsal_evidence', False):
+            self.start_native_evidence()
         self.env = {**os.environ, "HOME": str(self.tmp), "BRAIN_NO_REEXEC": "1",
                     "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t",
                     "GIT_COMMITTER_EMAIL": "t@t", "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1",
@@ -76,7 +78,86 @@ class Scenario(unittest.TestCase):
             self.env.pop(k, None)
 
     def tearDown(self):
-        shutil.rmtree(self.tmp, ignore_errors=True)
+        # Diagnostic finalizers must run before removal, not in addCleanup.
+        retainers = getattr(self, '_before_fixture_delete', ())
+        preserve = False
+        for retain in retainers:
+            try:
+                preserve = retain() is False or preserve
+            except BaseException:
+                preserve = True  # Retention must not replace a test exception.
+        if preserve:
+            return
+        try:
+            shutil.rmtree(self.tmp, ignore_errors=True)
+        except BaseException as error:
+            for retain in retainers:
+                try:
+                    retain(error)
+                except BaseException:
+                    pass  # Keep the original teardown exception.
+            raise
+
+    def start_native_evidence(self):
+        if not os.environ.get('BRAIN_REHEARSAL_EVIDENCE_DIR') or hasattr(self, '_native_evidence'):
+            return
+        from brain import rehearse
+        self._native_retention = rehearse.NativeRetention(self.tmp, 'before-helper-initialization',
+            nodeid=self.id(), fixture=str(self.tmp), root='UNKNOWN', trace_path='UNKNOWN',
+            before='UNKNOWN', after='UNKNOWN', observations='UNKNOWN',
+            validation_instant='UNKNOWN', validator_result='UNKNOWN',
+            ordered_trace_hex='UNKNOWN', exception={})
+        self._native_evidence = self._native_retention.packet
+        from brain import rehearse_transactions
+        validation_token = rehearse_transactions._validation_retainer.set(self._native_retention)
+        self.addCleanup(rehearse_transactions._validation_retainer.reset, validation_token)
+        self._native_evidence_preserve = False
+        self._native_children = []
+        token = rehearse._retention_children.set(self._native_children)
+        self.addCleanup(rehearse._retention_children.reset, token)
+        self._before_fixture_delete = [*getattr(self, '_before_fixture_delete', ()),
+                                       self.before_native_fixture_delete]
+        # unittest omits tearDown if setUp raises; retain at the same pre-delete
+        # boundary through cleanup too. A second call is harmless after removal.
+        self.addCleanup(self.before_native_fixture_delete)
+
+    def update_native_evidence(self, **fields):
+        if hasattr(self, '_native_retention'):
+            self._native_retention.checkpoint(**fields)
+
+    def native_evidence_exception(self, error):
+        if hasattr(self, '_native_retention'):
+            self._native_retention.exception(error)
+
+    def capture_native_trace(self, field, trace, required=False):
+        if not hasattr(self, '_native_retention'):
+            return
+        try:
+            if trace is not None and trace.exists():
+                self._native_evidence[field] = trace.read_bytes().hex()
+        except BaseException as error:
+            self._native_retention.incomplete = True
+            self._native_retention.exception(error)
+        finally:
+            self.retain_native_evidence()
+
+    def before_native_fixture_delete(self, error=None):
+        if not hasattr(self, '_native_retention') or not self.tmp.exists():
+            return True
+        if error is not None:
+            self._native_retention.incomplete = True
+            self._native_retention.exception(error)
+        if any(child.incomplete and (child.owned == self.tmp or self.tmp in child.owned.parents)
+               for child in self._native_children):
+            self._native_retention.incomplete = True
+        return self._native_retention.checkpoint(stage='before-fixture-delete', teardown='before-delete')
+
+    def retain_native_evidence(self):
+        if not hasattr(self, '_native_retention'):
+            return True
+        result = self._native_retention.checkpoint()
+        self._native_evidence_preserve = not result
+        return result
 
     # helpers
     def run_(self, args, cwd, ok=True, brain=None):

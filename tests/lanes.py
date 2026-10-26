@@ -65,7 +65,7 @@ EXTRA_INPUTS = {'rehearse': ('tests/nightly_rehearse.py',), 'ui': ('tests/live.p
 # Mirror the development node's existing documentation/image skip policy.
 OUTSIDE_INPUTS = ('README.md', 'docs/**', 'ui/**/*.png', 'LICENSE')
 SHARED_INPUTS = (
-    'lib/brain/rehearse_external.py',
+    'lib/brain/rehearse_external.py', 'lib/brain/rehearse_transactions.py',
     'lib/brain/launch_receipts.py',
     'lib/brain/events.py',
     'lib/brain/common.py', 'lib/brain/instance.py', 'lib/brain/cli.py',

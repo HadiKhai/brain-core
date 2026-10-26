@@ -9,11 +9,14 @@ import io
 import json
 import logging
 import signal
+import shutil
+import stat
 import os
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import traceback
 import unittest
 from unittest import mock
 
@@ -24,6 +27,268 @@ from scenario import Scenario, CORE
 
 def result(text='', code=0, seconds=0.01, unexpected=0):
     return dict(text=text, code=code, seconds=seconds, unexpected=unexpected, timeout=False)
+
+
+class RehearsalRetention(unittest.TestCase):
+    """Failure injection stops before acceptance work; only retention is exercised."""
+    def setUp(self):
+        self.directory = Path(tempfile.mkdtemp(prefix='rehearsal-retention-'))
+        self.addCleanup(shutil.rmtree, self.directory)
+        destination = os.environ.get('BRAIN_REHEARSAL_EVIDENCE_DIR')
+        if destination:
+            self.evidence = Path(tempfile.mkdtemp(prefix='retention-test-', dir=destination))
+        else:
+            self.evidence = self.directory / 'evidence'
+            self.evidence.mkdir(mode=0o700)
+        self.environment = mock.patch.dict(os.environ, {
+            'BRAIN_REHEARSAL_EVIDENCE_DIR': str(self.evidence)})
+        self.environment.start()
+        self.addCleanup(self.environment.stop)
+
+    def packets(self):
+        return [json.loads(p.read_text()) for p in sorted(self.evidence.glob('*.json'))]
+
+    def fixture(self, cls):
+        case = cls('runTest')
+        case.setUp()
+        self.addCleanup(case.doCleanups)
+        self.addCleanup(case.tearDown)
+        return case
+
+    def test_optional_setup_exception_is_retained_before_fixture_delete(self):
+        from nightly_rehearse import RehearsalNativeCore
+        case = self.fixture(RehearsalNativeCore)
+        error = AssertionError('sample early optional setup')
+        with mock.patch.object(case, 'init', side_effect=error):
+            with self.assertRaises(AssertionError) as caught:
+                case.test_real_core_cli_clean_candidate_and_byte_identical_source()
+        self.assertIs(error, caught.exception)
+        case.tearDown()
+        packets = self.packets()
+        self.assertTrue(packets, 'optional setup lost its partial packet')
+        self.assertTrue(any(p.get('exception', {}).get('category') == 'AssertionError' for p in packets))
+        self.assertFalse(case.tmp.exists())
+
+    def test_helper_initialization_exception_is_retained(self):
+        case = self.fixture(RehearsalSandbox)
+        error = AssertionError('sample helper setup')
+        with mock.patch.object(case, 'init', side_effect=error):
+            with self.assertRaises(AssertionError) as caught:
+                case.native_transaction_evidence()
+        self.assertIs(error, caught.exception)
+        self.assertTrue(self.packets(), 'helper entry did not initialize retention')
+        self.assertTrue(any(p.get('exception', {}).get('category') == 'AssertionError'
+                            for p in self.packets()))
+
+    def test_native_capture_exception_retains_partial_operands(self):
+        lane = self.directory / 'lane'
+        (lane / 'brain').mkdir(parents=True)
+        error = ValueError('sample capture failure')
+        with mock.patch.object(rehearsal._m_transactions, 'capture', side_effect=error):
+            with self.assertRaises(ValueError) as caught:
+                rehearsal.run_command(lane / 'brain/core', lane, [], 'fix', [])
+        self.assertIs(error, caught.exception)
+        self.assertTrue(self.packets(), 'capture exception bypassed native retention')
+        packet = next(p for p in reversed(self.packets()) if p.get('exception'))
+        self.assertEqual('UNKNOWN', packet['before'])
+        self.assertEqual('UNKNOWN', packet['after'])
+
+    def command(self, stage):
+        lane = self.directory / stage
+        (lane / 'brain').mkdir(parents=True)
+        process = mock.Mock(returncode=0, pid=54321)
+        process.communicate.return_value = ('sample output', '')
+        before, after, observed = {'sample': 'before'}, {'sample': 'after'}, []
+        error = AssertionError('sample ' + stage)
+        retention = rehearsal.NativeRetention(lane, 'before-command-setup',
+            before='UNKNOWN', after='UNKNOWN', observations='UNKNOWN',
+            validation_instant='UNKNOWN', validator_result='UNKNOWN', raw_trace_hex='UNKNOWN')
+        capture = [before, error] if stage == 'capture-after' else [before, after]
+        validator = mock.Mock(side_effect=error) if stage == 'validator' else mock.Mock(return_value=(set(), 'unproven'))
+        parser = mock.Mock(side_effect=ValueError('sample parse')) if stage == 'parse' else mock.Mock(return_value=observed)
+        with mock.patch.object(rehearsal, 'NativeRetention', return_value=retention), \
+                mock.patch.object(rehearsal, 'sandbox_prefix', return_value=[]), \
+                mock.patch.object(rehearsal.subprocess, 'Popen', return_value=process), \
+                mock.patch.object(rehearsal.os, 'killpg'), \
+                mock.patch.object(rehearsal._m_transactions, 'capture', side_effect=capture), \
+                mock.patch.object(rehearsal._m_transactions, 'lines', parser), \
+                mock.patch.object(rehearsal._m_transactions, 'validate', validator):
+            if stage in ('capture-after', 'validator'):
+                with self.assertRaises(AssertionError) as caught:
+                    rehearsal.run_command(lane / 'brain/core', lane, [], 'fix', [])
+                self.assertIs(error, caught.exception)
+            else:
+                rehearsal.run_command(lane / 'brain/core', lane, [], 'fix', [])
+        return before, after, validator
+
+    def test_after_capture_failure_retains_before_and_actual_trace(self):
+        before, _, validator = self.command('capture-after')
+        packets = self.packets()
+        packet = next(p for p in packets if p.get('stage') == 'command-finally')
+        self.assertEqual(before, packet['before'])
+        self.assertEqual('UNKNOWN', packet['after'])
+        self.assertEqual('', packet['command_finally_trace_hex'])
+        validator.assert_not_called()
+
+    def test_parse_failure_retains_exact_parse_input_and_actual_validator_operands(self):
+        before, after, validator = self.command('parse')
+        packet = next(p for p in self.packets() if p.get('stage') == 'validator-finally')
+        self.assertEqual(before, packet['before'])
+        self.assertEqual(after, packet['after'])
+        self.assertEqual('', packet['raw_trace_hex'])
+        self.assertIsNone(packet['observations'])
+        self.assertIsNone(validator.call_args.args[2])
+        self.assertEqual(validator.call_args.args[5].isoformat(), packet['validation_instant'])
+        self.assertEqual('unproven', packet['validator_result']['verdict'])
+
+    def test_validator_exception_retains_actual_call_and_finally_diagnostics(self):
+        before, after, validator = self.command('validator')
+        packet = next(p for p in self.packets() if p.get('stage') == 'validator-finally')
+        self.assertEqual((before, after, [], 54321, 'check'), validator.call_args.args[:5])
+        self.assertEqual(validator.call_args.args[5].isoformat(), packet['validation_instant'])
+        self.assertEqual('UNKNOWN', packet['validator_result'])
+        self.assertEqual('AssertionError', next(p for p in self.packets()
+                         if p.get('stage') == 'command-finally')['exception']['category'])
+
+    def test_persistence_failure_is_sticky_and_preserves_fixture_before_delete(self):
+        from nightly_rehearse import RehearsalNativeCore
+        case = self.fixture(RehearsalNativeCore)
+        self.addCleanup(shutil.rmtree, case.tmp, True)
+        invalid = self.directory / 'not-a-directory'
+        invalid.write_text('sample')
+        case._native_retention.destination = str(invalid)
+        error = AssertionError('sample original exception')
+        with mock.patch.object(case, 'init', side_effect=error):
+            with self.assertRaises(AssertionError) as caught:
+                case.test_real_core_cli_clean_candidate_and_byte_identical_source()
+        self.assertIs(error, caught.exception)
+        case.tearDown()
+        self.assertTrue(case.tmp.exists())
+        self.assertTrue(list(case.tmp.glob('unsaved-native-retention-*.json')))
+        case._native_retention.destination = str(self.evidence)
+        self.assertFalse(case.retain_native_evidence())
+        self.assertEqual('INCOMPLETE', case._native_evidence['status'])
+
+    def native_setup_failure(self, persistence_failure=False, off=False):
+        from types import SimpleNamespace
+        folders = []
+        error = AssertionError('sample native setup')
+        def setup(folder):
+            folders.append(folder)
+            (folder / 'sole-operand').write_bytes(b'sample operand')
+            raise error
+        invalid = self.directory / 'invalid-destination'
+        invalid.write_text('sample')
+        target = '' if off else str(invalid if persistence_failure else self.evidence)
+        with mock.patch.dict(os.environ, {'BRAIN_REHEARSAL_EVIDENCE_DIR': target}), \
+                mock.patch.object(rehearsal._m_verify, 'ready_refs', return_value=('a', 'b')), \
+                mock.patch.object(rehearsal._m_verify, 'integration_parent', return_value='b'), \
+                mock.patch.object(rehearsal, 'sandbox_self_check', side_effect=setup):
+            with self.assertRaises(AssertionError) as caught:
+                rehearsal.rehearse(SimpleNamespace(), dict(external=True), 'sample')
+        self.assertIs(error, caught.exception)
+        return folders[0]
+
+    def test_native_temporary_directory_preserves_unsaved_operands_before_delete(self):
+        folder = self.native_setup_failure(persistence_failure=True)
+        self.addCleanup(shutil.rmtree, folder, True)
+        self.assertEqual(b'sample operand', (folder / 'sole-operand').read_bytes())
+        self.assertTrue(list(folder.glob('unsaved-native-retention-*.json')))
+
+    def test_native_early_exception_persists_then_cleans_owned_temporary_directory(self):
+        folder = self.native_setup_failure()
+        self.assertFalse(folder.exists())
+        self.assertTrue(any(p.get('stage') == 'before-native-delete' and
+                            p.get('exception', {}).get('category') == 'AssertionError'
+                            for p in self.packets()))
+
+    def test_evidence_off_keeps_fixture_and_native_cleanup_unchanged(self):
+        from nightly_rehearse import RehearsalNativeCore
+        with mock.patch.dict(os.environ, {'BRAIN_REHEARSAL_EVIDENCE_DIR': ''}):
+            case = self.fixture(RehearsalNativeCore)
+            with mock.patch.object(case, 'init', side_effect=AssertionError('sample off')):
+                with self.assertRaises(AssertionError):
+                    case.test_real_core_cli_clean_candidate_and_byte_identical_source()
+            case.tearDown()
+            self.assertFalse(case.tmp.exists())
+            self.assertFalse(hasattr(case, '_native_evidence'))
+            self.assertFalse(self.native_setup_failure(off=True).exists())
+        self.assertEqual([], self.packets())
+
+    def test_private_artifacts_bind_source_hashes_and_modes(self):
+        self.test_native_capture_exception_retains_partial_operands()
+        paths = list(self.evidence.glob('*.json'))
+        self.assertTrue(paths)
+        for path in paths:
+            self.assertEqual(0o600, stat.S_IMODE(path.stat().st_mode))
+            packet = json.loads(path.read_text())
+            for name, digest in packet['source_binding']['source_hashes'].items():
+                self.assertEqual(hashlib.sha256((CORE / name).read_bytes()).hexdigest(), digest)
+
+    def test_direct_validator_calls_retain_exact_inputs_and_results_before_assertions(self):
+        from brain import rehearse_transactions as transactions
+        case = self.fixture(RehearsalSandbox)
+        instant = datetime.datetime(2026, 1, 2, tzinfo=datetime.timezone.utc)
+        for pid, command in ((12345, 'check'), (23456, 'status')):
+            diagnostics = {}
+            actual = transactions.validate(None, None, [], pid, command, instant,
+                                           diagnostics=diagnostics)
+            packets = [p for p in self.packets() if p.get('stage') == 'validation-call-finally']
+            packet = next(p for p in packets if p['owner_pid'] == pid)
+            self.assertIsNone(packet['before'])
+            self.assertIsNone(packet['after'])
+            self.assertEqual([], packet['observations'])
+            self.assertEqual(command, packet['validator_command'])
+            self.assertEqual(instant.isoformat(), packet['validation_instant'])
+            self.assertEqual(diagnostics, packet['diagnostics'])
+            self.assertEqual(dict(proven_paths=sorted(actual[0]), verdict=actual[1]),
+                             packet['validator_result'])
+            self.assertEqual(case.id(), packet['context']['nodeid'])
+            self.assertEqual('test_direct_validator_calls_retain_exact_inputs_and_results_before_assertions',
+                             packet['caller']['function'])
+        self.assertEqual(2, len(packets))
+
+    def test_direct_validator_exception_keeps_final_diagnostics_and_original_exception(self):
+        from brain import rehearse_transactions as transactions
+        self.fixture(RehearsalSandbox)
+        error = RuntimeError('sample validator failure')
+        def fail(*args):
+            args[-1]['checkpoint'] = 'sample-final-checkpoint'
+            raise error
+        with mock.patch.object(transactions, '_validate', side_effect=fail):
+            with self.assertRaises(RuntimeError) as caught:
+                transactions.validate(None, None, [], 12345, 'check',
+                                      datetime.datetime.now(datetime.timezone.utc))
+        self.assertIs(error, caught.exception)
+        packet = next(p for p in self.packets() if p.get('stage') == 'validation-call-finally')
+        self.assertEqual('sample-final-checkpoint', packet['diagnostics']['checkpoint'])
+        self.assertEqual('UNKNOWN', packet['validator_result'])
+        self.assertEqual('RuntimeError', packet['exception']['category'])
+
+    def test_nested_native_retention_preserves_only_owned_unsaved_tree(self):
+        invalid = self.directory / 'invalid-nested-destination'
+        invalid.write_text('sample')
+        foreign = self.directory / 'foreign'
+        foreign.mkdir()
+        with rehearsal.retained_temporary_directory() as outer:
+            with rehearsal.retained_temporary_directory() as inner:
+                child = rehearsal.NativeRetention(Path(inner) / 'lane', 'sample')
+                child.owned.mkdir()
+                child.destination = str(invalid)
+                self.assertFalse(child.checkpoint())
+        self.addCleanup(shutil.rmtree, outer, True)
+        self.addCleanup(shutil.rmtree, inner, True)
+        self.assertTrue(Path(inner).exists())
+        self.assertFalse(Path(outer).exists())
+        self.assertTrue(foreign.exists())
+
+    def test_validator_off_keeps_result_and_creates_no_packets(self):
+        from brain import rehearse_transactions as transactions
+        with mock.patch.dict(os.environ, {'BRAIN_REHEARSAL_EVIDENCE_DIR': ''}):
+            self.fixture(RehearsalSandbox)
+            self.assertEqual((set(), 'unproven'), transactions.validate(
+                None, None, [], 12345, 'check', datetime.datetime.now(datetime.timezone.utc)))
+        self.assertEqual([], self.packets())
 
 
 class RehearsalComparison(unittest.TestCase):
@@ -400,6 +665,28 @@ class RehearsalEperm(RehearsalFixture):
 
 
 class RehearsalStability(RehearsalFixture):
+    def test_frozen_brain_drops_only_derived_clone_caches(self):
+        history = {'events.jsonl': b'exact journal\n',
+                   'events-compare.jsonl': b'exact comparison history\n',
+                   'other-cache.json': b'preserved other cache'}
+        metadata = self.root / '.brain'
+        metadata.mkdir()
+        for name, payload in {**history, 'events-index.json': b'original index',
+                              'events-compare-index.json': b'original comparison index'}.items():
+            (metadata / name).write_bytes(payload)
+        original = {p.name: p.read_bytes() for p in metadata.iterdir()}
+        seen = []
+        def inspect(source, *unused, **kwargs):
+            seen.append(source)
+            self.assertFalse((source / '.brain/events-index.json').exists())
+            self.assertFalse((source / '.brain/events-compare-index.json').exists())
+            for name, payload in history.items():
+                self.assertEqual(payload, (source / '.brain' / name).read_bytes())
+        with mock.patch.object(rehearsal, 'freeze_machine_inputs'):
+            self.run_rehearsal(inspect_lane=inspect)
+        self.assertEqual(2, len(seen))
+        self.assertEqual(original, {p.name: p.read_bytes() for p in metadata.iterdir()})
+
     def test_report_observations_ignore_assets_but_track_index_operands(self):
         from types import SimpleNamespace
         workbench = self.tmp / 'external-work'
@@ -740,15 +1027,626 @@ class RehearsalStability(RehearsalFixture):
 
 
 @unittest.skipUnless(sys.platform == 'darwin', 'requires macOS OS sandbox')
+class RehearsalCoverageFaultTypes(unittest.TestCase):
+    def coverage(self, reasons=()):
+        from brain import events, rehearse_transactions as transactions
+        records = [dict(ts='2026-01-02 03:04 +00:00', node=events.node_ref('root'),
+                        kind='damage', actor='brain', ref=ref, data=dict(reason=reason))
+                   for ref, reason in reasons]
+        body = b''.join((json.dumps(row) + '\n').encode() for row in records)
+        state, replayed = transactions.replay({'events.jsonl': dict(hex=body.hex())}, events)
+        self.assertEqual(records, replayed)
+        operand = dict(recorded={}, opened={}, actual=[], nodes=['root'], preferred='root',
+                       leases={}, faults=dict(reasons))
+        return events, transactions, state, operand
+
+    def test_empty_raw_fault_map_emits_empty_row_list(self):
+        events, transactions, state, operand = self.coverage()
+        rows, gap = transactions.coverage_fields(events, state, operand)
+        self.assertIs(type(operand['faults']), dict)
+        self.assertIs(type(rows[0]['faults']), list)
+        self.assertEqual([], rows[0]['faults'])
+        self.assertTrue(rows[0]['equal'])
+        self.assertFalse(gap)
+
+    def test_nonempty_raw_fault_map_preserves_values_and_native_row_order(self):
+        reasons = [('b' * 32, 'sample damage'), ('a' * 32, 'other damage')]
+        events, transactions, state, operand = self.coverage(reasons)
+        rows, gap = transactions.coverage_fields(events, state, operand)
+        self.assertEqual(dict(reasons), operand['faults'])
+        self.assertEqual(dict(reasons), state['faults'])
+        self.assertEqual([ref for ref, _ in reasons], rows[0]['faults'])
+        self.assertFalse(rows[0]['equal'])
+        self.assertTrue(gap)
+
+    def test_raw_fault_list_and_other_wrong_types_are_refused(self):
+        for reasons in ([], [('b' * 32, 'sample damage')]):
+            events, transactions, state, operand = self.coverage(reasons)
+            for raw in ([], list(state['faults']), (), None, '', False):
+                with self.subTest(reasons=reasons, raw=raw):
+                    operand['faults'] = raw
+                    with self.assertRaises(transactions.EvidenceError):
+                        transactions.coverage_fields(events, state, operand)
+
+    def test_forged_raw_fault_keys_are_refused(self):
+        events, transactions, state, operand = self.coverage([('b' * 32, 'sample damage')])
+        for raw in ({}, {'a' * 32: 'sample damage'},
+                    {'b' * 32: 'sample damage', 'a' * 32: 'other damage'}):
+            with self.subTest(raw=raw):
+                operand['faults'] = raw
+                with self.assertRaises(transactions.EvidenceError):
+                    transactions.coverage_fields(events, state, operand)
+
+    def test_forged_raw_fault_values_are_refused(self):
+        events, transactions, state, operand = self.coverage([('b' * 32, 'sample damage')])
+        for reason in ('forged damage', '', None, False, ['sample damage']):
+            with self.subTest(reason=reason):
+                operand['faults'] = {'b' * 32: reason}
+                with self.assertRaises(transactions.EvidenceError):
+                    transactions.coverage_fields(events, state, operand)
+
+
+class RehearsalCloneCaches(Scenario):
+    retain_rehearsal_evidence = True
+
+    def test_native_copied_caches_are_removed_before_each_lane_capture(self):
+        from brain import events, instance, rehearse_transactions as transactions
+        source = self.init('source')
+        inst = instance.Instance(source)
+        with mock.patch.dict(os.environ, self.env):
+            events.comparison(inst, inst.node('root'))
+            events.read_comparisons(inst, repair=True)
+            events.journal(inst).sync(persist=True)
+        names = ('events-index.json', 'events-compare-index.json',
+                 'events.jsonl', 'events-compare.jsonl')
+        original = {name: (source / '.brain' / name).read_bytes()
+                    for name in names if (source / '.brain' / name).exists()}
+        # init's index really is inode-bound: an ordinary copy is stale.
+        ordinary = self.tmp / 'ordinary'
+        rehearsal.copy_tree(source, ordinary)
+        snap = transactions.capture(ordinary)
+        with self.assertRaises(transactions.EvidenceError):
+            transactions.check_index(snap, transactions.replay(snap, events)[0])
+        (self.tmp / 'rehearse-clock').write_text(inst.now_dt().isoformat())
+        captured = []
+        def command(core, lane, args, kind, *unused, **kwargs):
+            root = lane / 'brain'
+            before = transactions.capture(root)
+            self.assertNotIn('events-index.json', before)
+            self.assertNotIn('events-compare-index.json', before)
+            for name in ('events.jsonl', 'events-compare.jsonl'):
+                if name in original:
+                    self.assertEqual(original[name], (root / '.brain' / name).read_bytes())
+            with mock.patch.dict(os.environ, self.env):
+                native = instance.Instance(root)
+                events.journal(native).sync(persist=True)
+                events.read_comparisons(native, repair=True)
+            rebuilt = transactions.capture(root)
+            transactions.check_index(rebuilt, transactions.replay(rebuilt, events)[0], required=True)
+            transactions.check_comparisons(rebuilt, inst.now_dt())
+            captured.append(lane.name)
+            kwargs['raw_output'].append({})
+            return result()
+        for folder in ('before', 'after_'):
+            with mock.patch.object(rehearsal, 'run_command', side_effect=command):
+                rehearsal.run_lane(source, source / 'core', self.tmp / folder, [],
+                    [('read', [], 'read'), ('fix', [], 'fix'), ('refresh', [], 'refresh')])
+        self.assertEqual(['before', 'mutation-fix', 'mutation-refresh',
+                          'after_', 'mutation-fix', 'mutation-refresh'], captured)
+        self.assertEqual(original, {name: (source / '.brain' / name).read_bytes() for name in original})
+
+    def test_cloned_native_refresh_rebuilds_and_preserves_transaction_refusals(self):
+        import copy
+        from brain import events, instance, rehearse_transactions as transactions
+        source = self.init('native-source')
+        self.b(source, 'check', '--fix')
+        with mock.patch.dict(os.environ, self.env):
+            inst = instance.Instance(source)
+            with instance.brain_lock(inst):
+                events.read_comparisons(inst, repair=True)
+        original = {p.name: p.read_bytes() for p in (source / '.brain').iterdir() if p.is_file()}
+        self.assertIn('events-index.json', original)
+        self.assertIn('events-compare-index.json', original)
+        lane = self.tmp / 'native-clone'
+        lane.mkdir()
+        rehearsal.copy_brain(source, lane / 'brain', self.tmp)
+        for attempt in range(2):
+            raw, row, failure = [], None, None
+            try:
+                row = rehearsal.run_command(lane / 'brain/core', lane,
+                    ['status', 'root', '--refresh'], 'refresh', [], raw_output=raw)
+            except BaseException as error:
+                failure = type(error).__name__
+                raise
+            finally:
+                transactions._persist_fixture_evidence(lane, raw, row, failure)
+            self.assertEqual(0, row['code'])
+            self.assertEqual('proven', row['transaction_evidence'])
+            self.assertEqual(0, row['unexpected'])
+            packet = raw[0]['transaction_evidence']
+            now = datetime.datetime.fromisoformat(packet['validation_instant'])
+            def validate(after, observations, pid=packet['owner_pid']):
+                return transactions.validate(packet['before'], after, observations, pid, 'status', now)
+            proven, verdict = validate(packet['after'], packet['observations'])
+            self.assertEqual('proven', verdict)
+            self.assertEqual((set(), 'unproven'), validate(packet['after'], []))
+            self.assertEqual((set(), 'unproven'), validate(packet['after'], packet['observations'],
+                                                          packet['owner_pid'] + 100000))
+            for name in ('events-index.json', 'events-compare-index.json'):
+                damaged = copy.deepcopy(packet['after'])
+                self.assertIn(name, damaged)
+                damaged[name]['hex'] = b'{}'.hex()
+                self.assertEqual((set(), 'unproven'), validate(damaged, packet['observations']))
+            residual = {'brain/.brain/unknown-state.json', 'brain/private.txt'}
+            self.assertEqual(residual, {p for p in proven | residual
+                if not rehearsal.allowed_write(p, 'refresh') and p not in proven})
+            if attempt == 0:
+                self.assertNotIn('events-index.json', packet['before'])
+            else:
+                self.assertIn('events-index.json', packet['before'])
+                self.assertIn('events-compare-index.json', packet['before'])
+        self.assertEqual(original, {p.name: p.read_bytes() for p in (source / '.brain').iterdir()
+                                    if p.is_file()})
+
+    def test_clone_cache_refuses_alias_foreign_and_existing_destinations(self):
+        source = self.tmp / 'source'
+        (source / '.brain').mkdir(parents=True)
+        cache = source / '.brain/events-index.json'
+        cache.write_bytes(b'operator-cache')
+        history = source / '.brain/events.jsonl'
+        history.write_bytes(b'exact history\n')
+        def copied(source, dest):
+            dest.mkdir()
+            (dest / '.brain').symlink_to(source / '.brain', target_is_directory=True)
+        with mock.patch.object(rehearsal, 'copy_tree', side_effect=copied):
+            with self.assertRaises(OSError):
+                rehearsal.copy_brain(source, self.tmp / 'linked-directory', self.tmp)
+        def linked_cache(source, dest):
+            (dest / '.brain').mkdir(parents=True)
+            (dest / '.brain/events-index.json').symlink_to(cache)
+        with mock.patch.object(rehearsal, 'copy_tree', side_effect=linked_cache):
+            with self.assertRaises(rehearsal.RehearsalError):
+                rehearsal.copy_brain(source, self.tmp / 'linked-cache', self.tmp)
+        def shared_cache(source, dest):
+            (dest / '.brain').mkdir(parents=True)
+            os.link(cache, dest / '.brain/events-index.json')
+        with mock.patch.object(rehearsal, 'copy_tree', side_effect=shared_cache):
+            with self.assertRaises(rehearsal.RehearsalError):
+                rehearsal.copy_brain(source, self.tmp / 'shared-cache', self.tmp)
+        with mock.patch.object(rehearsal.os, 'getuid', return_value=os.getuid() + 1):
+            with self.assertRaises(rehearsal.RehearsalError):
+                rehearsal.copy_brain(source, self.tmp / 'foreign', self.tmp)
+        with self.assertRaises(FileExistsError):
+            rehearsal.copy_brain(source, source, self.tmp)
+        alias = self.tmp / 'alias'
+        alias.symlink_to(self.tmp, target_is_directory=True)
+        with self.assertRaises(rehearsal.RehearsalError):
+            rehearsal.copy_brain(source, alias / 'ambiguous', self.tmp)
+        self.assertEqual(b'operator-cache', cache.read_bytes())
+        self.assertEqual(b'exact history\n', history.read_bytes())
+        self.assertFalse((self.tmp / 'foreign').exists())
+        self.assertFalse((self.tmp / 'ambiguous').exists())
+
+    def test_native_comparison_first_excludes_coverage_and_uses_node_ref(self):
+        from brain import events, instance, rehearse_transactions as transactions
+        root = self.init('prefix')
+        inst = instance.Instance(root)
+        now = inst.now_dt()
+        def row(number, node, kind, days=0):
+            value = dict(id=format(number, '032x'), ts=(now - datetime.timedelta(days=days)).isoformat(),
+                         node=node, kind=kind, equal=True, resources=[], view_equal=None,
+                         interrupted=[], faults=[])
+            if kind == 'comparison':
+                value.update(view_equal=True, out_of_scope=[])
+            return value
+        prefixes = [
+            [row(1, 'root', 'coverage'), row(2, events.node_ref('other'), 'coverage')],
+            [row(3, 'root', 'coverage'), row(4, 'root', 'comparison', 2),
+             row(5, events.node_ref('root'), 'comparison'), row(6, 'other', 'comparison'),
+             row(7, 'root', 'comparison', 3), row(8, 'other', 'coverage')],
+        ]
+        for rows in prefixes:
+            with self.subTest(kinds=[r['kind'] for r in rows]):
+                path = root / '.brain/events-compare.jsonl'
+                path.write_bytes(b''.join((json.dumps(r) + '\n').encode() for r in rows))
+                cache = root / '.brain/events-compare-index.json'
+                cache.unlink(missing_ok=True)
+                with mock.patch.dict(os.environ, self.env):
+                    events.read_comparisons(inst, repair=True)
+                snapshot = transactions.capture(root)
+                self.assertEqual(rows, transactions.check_comparisons(snapshot, now))
+                saved = json.loads(cache.read_text())
+                expected = {} if len(rows) == 2 else {
+                    events.node_ref('root'): rows[4], events.node_ref('other'): rows[3]}
+                self.assertEqual(expected, saved['first'])
+                import copy
+                for field in ('first', 'rows', 'anchor', 'identity', 'offset'):
+                    forged = copy.deepcopy(snapshot)
+                    bad = copy.deepcopy(saved)
+                    if field == 'first':
+                        bad[field] = {events.node_ref('root'): rows[0]}
+                    elif field == 'rows':
+                        bad[field] = list(reversed(bad[field]))
+                    elif field == 'anchor':
+                        bad[field] = '0' * 64
+                    elif field == 'identity':
+                        bad[field][1] += 1
+                    else:
+                        bad[field] += 1
+                    forged['events-compare-index.json']['hex'] = json.dumps(bad).encode().hex()
+                    with self.subTest(forged=field):
+                        with self.assertRaises(transactions.EvidenceError):
+                            transactions.check_comparisons(forged, now)
+                damaged = copy.deepcopy(snapshot)
+                damaged['events-compare.jsonl']['hex'] += b'{broken\n'.hex()
+                with self.assertRaises((transactions.EvidenceError, ValueError)):
+                    transactions.check_comparisons(damaged, now)
+
+
+
 class RehearsalSandbox(Scenario):
-    def runner(self, script, args=(), terms=(), kind='read'):
+    retain_rehearsal_evidence = True
+
+    def runner(self, script, args=(), terms=(), kind='read', raw_output=None):
         lane = self.tmp / 'lane'
         lane.mkdir(exist_ok=True)
         (lane / 'brain').mkdir(exist_ok=True)
         core = lane / 'brain/core'
         (core / 'bin').mkdir(parents=True, exist_ok=True)
         (core / 'bin/brain').write_text(script)
-        return rehearsal.run_command(core, lane, list(args), kind, [], terms)
+        return rehearsal.run_command(core, lane, list(args), kind, [], terms, raw_output=raw_output)
+
+    def native_transaction_evidence(self, failure=None, prepare=None, compare=False):
+        trace = None
+        try:
+            self.start_native_evidence()
+            from brain import events, instance, rehearse_transactions as transactions
+            self.update_native_evidence(stage='helper-initialization',
+                                        observer_path=str(Path(transactions.__file__).resolve()))
+            root = self.tmp / ('transaction-' + (failure or 'success'))
+            self.update_native_evidence(root=str(root))
+            root = self.init('transaction-' + (failure or 'success'))
+            inst = instance.Instance(root)
+            if prepare is not None:
+                prepare(inst)
+            trace = self.tmp / ('transaction-' + (failure or 'success') + '.jsonl')
+            self.update_native_evidence(trace_path=str(trace), stage='trace-initialization')
+            trace.write_text('')
+            before_diagnostics = {}
+            self.update_native_evidence(stage='capture-before', before_diagnostics=before_diagnostics)
+            before = transactions.capture(root, diagnostics=before_diagnostics)
+            self.update_native_evidence(before=before, stage='native-command')
+            # Restore only these local observation seams. Native publication,
+            # journal validation, leases, locking and maintenance all run unchanged.
+            with contextlib.ExitStack() as restore, mock.patch.dict(os.environ, self.env):
+                for owner, name in ((events.Command, '__enter__'), (events.Command, '__exit__'),
+                                    (events.Command, 'finish'), (events.Command, 'close_lease'),
+                                    (events.Journal, 'append'), (events, 'comparison'),
+                                    (events, 'snapshot_view'), (events, 'detect_gaps'),
+                                    (instance.brain_lock, '__enter__'), (instance.brain_lock, '__exit__')):
+                    restore.callback(setattr, owner, name, getattr(owner, name))
+                transactions.install_observer(events, root, trace)
+                try:
+                    with instance.brain_lock(inst), events.Command(root, command='check'):
+                        if compare:
+                            events.comparison(inst, inst.node('root'))
+                        if failure == 'partial':
+                            (root / 'inbox.md').write_text('Sample partial change\n')
+                        if failure:
+                            raise RuntimeError('sample command failure')
+                except RuntimeError:
+                    if not failure:
+                        raise
+            self.capture_native_trace('command_boundary_trace_hex', trace, required=True)
+            after_diagnostics = {}
+            self.update_native_evidence(stage='capture-after', after_diagnostics=after_diagnostics)
+            after = transactions.capture(root, diagnostics=after_diagnostics)
+            self.update_native_evidence(after=after, stage='parse-trace')
+            trace_bytes = trace.read_bytes()
+            self.update_native_evidence(ordered_trace_hex=trace_bytes.hex())
+            observed = transactions.lines(trace_bytes)
+            self.update_native_evidence(observations=observed, stage='helper-return')
+            return root, inst, before, after, observed
+        except BaseException as error:
+            self.native_evidence_exception(error)
+            raise
+        finally:
+            # This separately labelled trace never replaces the actual parse input.
+            self.capture_native_trace('helper_finally_trace_hex', trace)
+
+    def test_saved_incomplete_coverage_packet_preserves_native_schema_and_refusal(self):
+        from brain import rehearse_transactions as transactions
+        path = os.environ.get('BRAIN_REHEARSAL_NEGATIVE_PACKET')
+        if not path:
+            self.skipTest('private historical operand not supplied')
+        body = Path(path).read_bytes()
+        self.assertEqual('3cbc882a1f3e05b259791b7db2662f90c664a0204f9690515317716bb342bf92',
+                         hashlib.sha256(body).hexdigest())
+        packet = json.loads(body)
+        evidence = packet['raw'][0]['transaction_evidence']
+        instant = datetime.datetime.fromisoformat(evidence['validation_instant'])
+        # Shape admission must never stand in for the absent coverage observer.
+        rows = transactions.check_comparisons(evidence['after'], instant)
+        self.assertEqual(['coverage', 'comparison'], [r['kind'] for r in rows])
+        self.assertEqual((set(), 'unproven'), transactions.validate(
+            evidence['before'], evidence['after'], evidence['observations'],
+            evidence['owner_pid'], evidence['validator_command'], instant))
+        self.assertEqual(body, Path(path).read_bytes())
+
+    def test_nonempty_coverage_faults_remain_unproven_and_rows_keep_native_order(self):
+        import copy
+        from brain import events, instance, rehearse_transactions as transactions
+        reasons = [('b' * 32, 'sample damage'), ('a' * 32, 'other damage')]
+        def prepare(inst):
+            with instance.brain_lock(inst):
+                for ref, reason in reasons:
+                    events.append(inst, 'root', 'damage', ref, dict(reason=reason))
+        _, inst, before, after, observed = self.native_transaction_evidence('abort', prepare=prepare)
+        end = next(r for r in observed if r['type'] == 'coverage-exit')
+        self.assertEqual(dict(reasons), end['operands']['faults'])
+        self.assertIs(end['result'], True)
+        row = next(r['record'] for r in observed if r['type'] == 'coverage-row')
+        self.assertEqual([ref for ref, _ in reasons], row['faults'])
+        self.assertIs(row['equal'], False)
+        def refuse(rows, checkpoint):
+            diagnostics = {}
+            self.assertEqual((set(), 'unproven'), transactions.validate(
+                before, after, rows, os.getpid(), 'check', inst.now_dt(), diagnostics=diagnostics))
+            self.assertEqual(checkpoint, diagnostics['checkpoint'])
+        # Exact nonempty operands pass coverage validation but grant no final proof.
+        refuse(observed, 'replay-final')
+        for faults in ([], list(dict(reasons)), {}, {'c' * 32: 'sample damage'},
+                       {'b' * 32: 'forged damage', 'a' * 32: 'other damage'}):
+            rows = copy.deepcopy(observed)
+            next(r for r in rows if r['type'] == 'coverage-exit')['operands']['faults'] = faults
+            with self.subTest(raw_faults=faults):
+                refuse(rows, 'lifecycle.coverage-exit')
+        for faults in (dict(reasons), list(reversed([ref for ref, _ in reasons]))):
+            rows = copy.deepcopy(observed)
+            next(r for r in rows if r['type'] == 'coverage-row')['record']['faults'] = faults
+            with self.subTest(row_faults=faults):
+                refuse(rows, 'lifecycle.coverage-exit')
+
+    def test_native_commit_and_abort_have_content_owned_proof(self):
+        from brain import rehearse_transactions as transactions
+        for failure in (None, 'abort'):
+            with self.subTest(failure=failure):
+                root, inst, before, after, observed = self.native_transaction_evidence(failure)
+                proven, verdict = transactions.validate(before, after, observed, os.getpid(), 'check', inst.now_dt())
+                self.assertEqual('proven', verdict)
+                self.assertIn('brain/.brain/events.jsonl', proven)
+                self.assertTrue(any(o.get('record', {}).get('kind') == ('abort' if failure else 'commit')
+                                    for o in observed))
+                self.assertFalse(list((root / '.brain/events-leases').iterdir()))
+
+    def test_transaction_forgery_missing_duplicate_reorder_and_corruption_fail_closed(self):
+        import copy
+        from brain import rehearse_transactions as transactions
+        _, inst, before, after, observed = self.native_transaction_evidence()
+        def check(a, rows, pid=os.getpid()):
+            return transactions.validate(before, a, rows, pid, 'check', inst.now_dt())
+        self.assertEqual('proven', check(after, observed)[1])
+        mutations = [[], observed[:-1], list(reversed(observed)), observed + observed,
+                     [o for o in observed if o['type'] != 'close']]
+        foreign = copy.deepcopy(observed)
+        for row in foreign:
+            row['pid'] += 100000
+        mutations.append(foreign)
+        for rows in mutations:
+            with self.subTest(rows=len(rows)):
+                self.assertEqual((set(), 'unproven'), check(after, rows))
+        corrupt = copy.deepcopy(after)
+        index = json.loads(bytes.fromhex(corrupt['events-index.json']['hex']))
+        index['state']['views'] = {}
+        index['state']['resources'] = {}
+        corrupt['events-index.json']['hex'] = json.dumps(index).encode().hex()
+        self.assertEqual((set(), 'unproven'), check(corrupt, observed))
+        for edit in ('truncate', 'duplicate', 'foreign-owner', 'malformed'):
+            damaged = copy.deepcopy(after)
+            payload = bytes.fromhex(damaged['events.jsonl']['hex'])
+            if edit == 'truncate':
+                payload = payload.rsplit(b'\n', 2)[0] + b'\n'
+            elif edit == 'duplicate':
+                payload += payload.splitlines(keepends=True)[-1]
+            elif edit == 'foreign-owner':
+                rows = payload.splitlines(keepends=True)
+                row = json.loads(rows[-1])
+                row['node'] = 'n:' + 'f' * 64
+                rows[-1] = (json.dumps(row) + '\n').encode()
+                payload = b''.join(rows)
+            else:
+                payload += b'{broken\n'
+            damaged['events.jsonl']['hex'] = payload.hex()
+            with self.subTest(edit=edit):
+                self.assertEqual((set(), 'unproven'), check(damaged, observed))
+
+    def test_coverage_has_pre_begin_lock_and_no_retroactive_lease(self):
+        try:
+            self.start_native_evidence()
+            from brain import rehearse_transactions as transactions
+            _, inst, before, after, observed = self.native_transaction_evidence()
+            self.update_native_evidence(stage='coverage-assertions')
+            kinds = [r['type'] for r in observed]
+            start = kinds.index('coverage-enter')
+            stop = kinds.index('coverage-exit')
+            begin = next(i for i, r in enumerate(observed) if r.get('record', {}).get('kind') == 'begin')
+            self.assertLess(start, stop)
+            self.assertLess(stop, begin)
+            self.assertTrue(all(r['owner']['lease'] is None and r['owner']['ref'] is None
+                                for r in observed[start:stop + 1]))
+            self.assertTrue(all(r['owner']['lock']['pid'] == os.getpid() for r in observed[start:stop + 1]))
+            rows = transactions.check_comparisons(after, inst.now_dt())
+            self.assertEqual('coverage', rows[0]['kind'])
+            self.assertIsNone(rows[0]['view_equal'])
+            self.assertNotIn('out_of_scope', rows[0])
+            owner_pid, command, instant, diagnostics = os.getpid(), 'check', inst.now_dt(), {}
+            self.update_native_evidence(stage='validate', owner_pid=owner_pid, validator_command=command,
+                                        validation_instant=instant.isoformat(), diagnostics=diagnostics)
+            try:
+                validation = transactions.validate(before, after, observed, owner_pid, command, instant,
+                                                   diagnostics=diagnostics)
+                self.update_native_evidence(validator_result=dict(proven_paths=sorted(validation[0]),
+                                                                  verdict=validation[1]),
+                                            status=('CAPTURED' if before is not None and after is not None
+                                                    else 'INCOMPLETE'), stage='verdict-assertion')
+            finally:
+                self.retain_native_evidence()
+            self.assertEqual('proven', validation[1])
+        except BaseException as error:
+            self.native_evidence_exception(error)
+            raise
+        finally:
+            if hasattr(self, '_native_evidence'):
+                self.retain_native_evidence()
+
+    def test_every_coverage_operand_owner_row_and_lifetime_is_required(self):
+        import copy
+        from brain import rehearse_transactions as transactions
+        _, inst, before, after, observed = self.native_transaction_evidence(compare=True)
+        self.assertEqual('proven', transactions.validate(
+            before, after, observed, os.getpid(), 'check', inst.now_dt())[1])
+        def reject(rows, snapshot=after):
+            self.assertEqual((set(), 'unproven'), transactions.validate(
+                before, snapshot, rows, os.getpid(), 'check', inst.now_dt()))
+        for kind in ('coverage-enter', 'coverage-row', 'coverage-exit'):
+            with self.subTest(missing=kind):
+                reject([r for r in observed if r['type'] != kind])
+            for field, value in (('pid', -1), ('command', 'status'), ('lease', True), ('ref', 'f' * 32),
+                                 ('node', 'unrelated')):
+                rows = copy.deepcopy(observed)
+                next(r for r in rows if r['type'] == kind)['owner'][field] = value
+                with self.subTest(kind=kind, owner=field):
+                    reject(rows)
+            for field in ('serial', 'pid', 'depth', 'ino'):
+                rows = copy.deepcopy(observed)
+                next(r for r in rows if r['type'] == kind)['owner']['lock'][field] = -1
+                with self.subTest(kind=kind, lock=field):
+                    reject(rows)
+        rows = copy.deepcopy(observed)
+        end = next(r for r in rows if r['type'] == 'coverage-exit')
+        end['owner']['lock']['serial'] += 1
+        reject(rows)
+        for field, value in (('actual', []), ('recorded', {}), ('opened', {'f' * 32: {}}),
+                             ('nodes', []), ('leases', {'f' * 32: True}), ('faults', ['forged']),
+                             ('preferred', 'unrelated')):
+            rows = copy.deepcopy(observed)
+            next(r for r in rows if r['type'] == 'coverage-exit')['operands'][field] = value
+            with self.subTest(operand=field):
+                reject(rows)
+        rows = copy.deepcopy(observed)
+        end = next(r for r in rows if r['type'] == 'coverage-exit')
+        end['result'] = not end['result']
+        reject(rows)
+        for kind in ('coverage-row', 'coverage-enter', 'coverage-exit'):
+            i = next(i for i, r in enumerate(observed) if r['type'] == kind)
+            reject(observed[:i] + [observed[i]] + observed[i:])
+        rows = copy.deepcopy(observed)
+        i = next(i for i, r in enumerate(rows) if r['type'] == 'coverage-exit')
+        rows.append(rows.pop(i))
+        reject(rows)
+        for kind in ('coverage', 'comparison'):
+            snapshot = copy.deepcopy(after)
+            history = transactions.lines(transactions.blob(snapshot, 'events-compare.jsonl'))
+            row = next(r for r in history if r['kind'] == kind)
+            row['view_equal'] = True if kind == 'coverage' else None
+            snapshot['events-compare.jsonl']['hex'] = b''.join(
+                (json.dumps(r) + '\n').encode() for r in history).hex()
+            reject(observed, snapshot)
+        for edit in ('missing', 'duplicate', 'reorder', 'unknown', 'malformed', 'prefix', 'cache'):
+            snapshot = copy.deepcopy(after)
+            payload = transactions.blob(snapshot, 'events-compare.jsonl')
+            history = payload.splitlines(keepends=True)
+            if edit == 'missing':
+                payload = b''.join(history[1:])
+            elif edit == 'duplicate':
+                payload += history[-1]
+            elif edit == 'reorder':
+                payload = b''.join(reversed(history))
+            elif edit == 'unknown':
+                row = json.loads(history[-1]); row['kind'] = 'unknown'
+                payload = b''.join(history[:-1]) + (json.dumps(row) + '\n').encode()
+            elif edit == 'malformed':
+                payload += b'{broken\n'
+            elif edit == 'prefix':
+                # Existing historical bytes are preserved independently of rows.
+                name = 'events.jsonl'
+                snapshot[name]['hex'] = (' ' + bytes.fromhex(snapshot[name]['hex']).decode()).encode().hex()
+            else:
+                snapshot['events-compare-index.json'] = dict(snapshot['events-compare.jsonl'], hex=b'{}'.hex())
+            snapshot['events-compare.jsonl']['hex'] = payload.hex()
+            with self.subTest(history=edit):
+                reject(observed, snapshot)
+
+    def test_caught_observer_failure_keeps_native_publication_unproven(self):
+        from brain import rehearse_transactions as transactions
+        with mock.patch.object(transactions.os, 'pread', side_effect=OSError('sample observer failure')):
+            _, inst, before, after, observed = self.native_transaction_evidence()
+        self.assertTrue(any(r['type'] == 'invalid' for r in observed))
+        self.assertTrue(any(r.get('record', {}).get('kind') == 'commit' for r in observed))
+        self.assertEqual((set(), 'unproven'), transactions.validate(
+            before, after, observed, os.getpid(), 'check', inst.now_dt()))
+
+    def test_partial_failure_retains_open_begin_and_stays_unexpected(self):
+        from brain import events, rehearse_transactions as transactions
+        root, inst, before, after, observed = self.native_transaction_evidence('partial')
+        self.assertEqual((set(), 'unproven'), transactions.validate(
+            before, after, observed, os.getpid(), 'check', inst.now_dt()))
+        self.assertTrue(events.replay(inst)[2])
+        self.assertEqual('Sample partial change\n', (root / 'inbox.md').read_text())
+        self.assertFalse(list((root / '.brain/events-leases').iterdir()))
+
+    def test_live_foreign_lease_is_retained_and_never_adopted(self):
+        from brain import events, rehearse_transactions as transactions
+        owner = []
+        def prepare(inst):
+            operation = events.Command(inst.root, command='status')
+            operation.start()
+            owner.append(operation)
+            self.addCleanup(operation.close_lease)
+        root, inst, before, after, observed = self.native_transaction_evidence(prepare=prepare)
+        self.assertEqual((set(), 'unproven'), transactions.validate(
+            before, after, observed, os.getpid(), 'check', inst.now_dt()))
+        self.assertTrue(events.lease_live(inst, owner[0].ref))
+        self.assertIn(owner[0].ref, events.replay(inst)[2])
+        self.assertEqual(before['events-leases'], after['events-leases'])
+
+    def test_unowned_native_append_never_becomes_expected_by_path(self):
+        import uuid
+        from brain import events, rehearse_transactions as transactions
+        root, inst, before, after, observed = self.native_transaction_evidence()
+        events.append(inst, 'root', 'begin', uuid.uuid4().hex, {'command': 'check'})
+        forged = transactions.capture(root)
+        self.assertEqual((set(), 'unproven'), transactions.validate(
+            before, forged, observed, os.getpid(), 'check', inst.now_dt()))
+        self.assertFalse(rehearsal.allowed_write('brain/.brain/events.jsonl', 'fix'))
+
+    def test_real_refresh_command_proves_journal_without_allowing_residuals(self):
+        lane = self.tmp / 'native-lane'
+        lane.mkdir()
+        raw, row, failure = [], None, None
+        try:
+            root = self.init('native-lane/brain')
+            row = rehearsal.run_command(root / 'core', lane, ['status', 'root', '--refresh'],
+                                        'refresh', [], raw_output=raw)
+        except BaseException as error:
+            failure = type(error).__name__
+            raise
+        finally:
+            rehearsal._m_transactions._persist_fixture_evidence(lane, raw, row, failure)
+        self.assertEqual(0, row['code'])
+        self.assertEqual('proven', row['transaction_evidence'])
+        self.assertEqual(0, row['unexpected'])
+        self.assertTrue(raw[0]['transaction_evidence']['observations'])
+        self.assertTrue(raw[0]['transaction_evidence']['after']['events.jsonl']['hex'])
+
+    def test_unexplained_residual_write_survives_a_proven_transaction(self):
+        from brain import rehearse_transactions as transactions
+        _, inst, before, after, observed = self.native_transaction_evidence()
+        proven, verdict = transactions.validate(before, after, observed, os.getpid(), 'check', inst.now_dt())
+        self.assertEqual('proven', verdict)
+        changed = proven | {'brain/.brain/unknown-state.json', 'brain/private.txt'}
+        residual = {p for p in changed if not rehearsal.allowed_write(p, 'refresh') and p not in proven}
+        self.assertEqual({'brain/.brain/unknown-state.json', 'brain/private.txt'}, residual)
 
     def test_registered_hook_latency_is_measured(self):
         clock = mock.Mock()
@@ -863,10 +1761,14 @@ class RehearsalSandbox(Scenario):
         outside.write_text('unchanged')
         script = ('from pathlib import Path\ntry:\n    Path(' + repr(str(outside)) +
                   ').write_text("changed")\nexcept OSError:\n    pass\n')
-        r = self.runner(script)
+        raw = []
+        r = self.runner(script, raw_output=raw)
         self.assertEqual(0, r['code'])
         self.assertEqual(1, r['unexpected'])
         self.assertEqual('unchanged', outside.read_text())
+        self.assertEqual([dict(event='open', path=str(outside))], raw[0]['denied_attempts'])
+        self.assertEqual(1, r['denied_attempts'])
+        self.assertNotIn(str(outside), json.dumps(r))
         r = self.runner('from pathlib import Path\nPath("unapproved").mkdir()\n')
         self.assertEqual(1, r['unexpected'])
 
@@ -874,6 +1776,17 @@ class RehearsalSandbox(Scenario):
         r = self.runner('from pathlib import Path\nPath("node.md").write_text("changed")\n')
         self.assertEqual(0, r['code'])
         self.assertEqual(1, r['unexpected'])
+
+    def test_write_attribution_retains_strict_journal_failure(self):
+        raw = []
+        r = self.runner('from pathlib import Path\nPath(".brain").mkdir()\n'
+                        'Path(".brain/events.jsonl").write_text("journal bytes")\n', raw_output=raw)
+        self.assertEqual(1, r['unexpected'])
+        self.assertEqual([hashlib.sha256(b'brain/.brain/events.jsonl').hexdigest()],
+                         r['unexpected_path_digests'])
+        self.assertIn(dict(path='brain/.brain/events.jsonl', operation='created', unexpected=True),
+                      raw[0]['writes'])
+        self.assertNotIn('journal bytes', json.dumps(raw))
 
     def test_never_name_output_is_redacted_without_publishing_it(self):
         printed = io.StringIO()

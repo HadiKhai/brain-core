@@ -135,6 +135,29 @@ class TypedCommunication(Scenario):
         self.b(self.root, 'set', 'root', 'coordinator=fixture-root', 'wake=fixture-send')
         self.inst = self.m.Instance(self.root)
 
+    def test_absent_store_reconciliation_is_a_byte_identical_observation(self):
+        communication = rehearse = self.m
+        from unittest import mock
+        path = self.root / '.brain/communications.json'
+        self.assertFalse(path.exists())
+        before = rehearse.snapshot(self.root)
+        with mock.patch.object(communication, 'communication_store',
+                               side_effect=AssertionError('absent observation took a write lock')):
+            communication.communication_reconcile(self.inst)
+        self.assertEqual(before, rehearse.snapshot(self.root))
+
+    def test_existing_store_still_locks_and_retains_invalid_bytes(self):
+        communication = self.m
+        path = self.root / '.brain/communications.json'
+        path.write_text('{"version":1,"questions":{},"notices":{}}')
+        communication.communication_reconcile(self.inst)
+        self.assertTrue((self.root / '.brain/communications.lock').is_file())
+        path.write_text('{"version":1,"questions":[]}')
+        before = path.read_bytes()
+        with self.assertRaises(ValueError):
+            communication.communication_reconcile(self.inst)
+        self.assertEqual(before, path.read_bytes())
+
     def spec(self, action='routine'):
         return {'options': [{'id': 'continue', 'label': 'Continue', 'action': action},
                             {'id': 'wait', 'label': 'Wait', 'action': 'routine'}],

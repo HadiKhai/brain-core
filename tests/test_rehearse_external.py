@@ -1,14 +1,61 @@
 """Declared snapshots use fabricated repositories only; no rehearsal is run."""
 import json
+import copy
 from pathlib import Path
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'lib'))
 from brain import instance, rehearse, rehearse_external
 from scenario import Scenario
+from unittest import mock
 
 
 class DeclaredExternalSnapshot(Scenario):
+    def test_comparison_uses_captured_operands_during_peer_publication(self):
+        inst, home, tree = self.fixture()
+        (home / 'bin').mkdir()
+        (home / 'bin/brain').write_text('fixture')
+        self.git('add', '.', cwd=home)
+        self.git('commit', '-qm', 'candidate entry', cwd=home)
+        head = self.git('rev-parse', 'HEAD', cwd=home).strip()
+        bench = Path(inst.node('app')['local']['workbench'])
+        inst.local['rehearse_external']['roots'] = [str(home), str(bench)]
+        (inst.root / '.brain/local.json').write_text(json.dumps(inst.local))
+        original = rehearse.snapshot(inst.root)
+        observed = []
+        def lane(source, core, folder, nodes, commands, **kwargs):
+            captured = instance.Instance(source).node('app')
+            observed.append(rehearse.snapshot(captured['home_path']))
+            self.assertNotEqual(captured['home_path'], home)
+            self.assertNotEqual(captured['local']['workbench'], str(bench))
+            (home / 'README.md').write_text('peer publication ' + str(len(observed)))
+            (bench / 'peer-report').write_text('peer report ' + str(len(observed)))
+            return {'hook': dict(text='', code=0, timeout=False, unexpected=0, seconds=.01)}
+        with mock.patch.dict('os.environ', self.env), \
+                mock.patch.object(rehearse, 'sandbox_self_check'), \
+                mock.patch.object(rehearse, 'sandbox_prefix', return_value=[]), \
+                mock.patch.object(rehearse, 'probe_delivery', return_value=[]), \
+                mock.patch.object(rehearse._m_verify, 'ready_refs', return_value=(head, head)), \
+                mock.patch.object(rehearse._m_verify, 'integration_parent', return_value=head), \
+                mock.patch.object(rehearse, 'run_lane', side_effect=lane):
+            evidence = rehearse.rehearse(inst, inst.node('app'), 'job/sample')
+        self.assertTrue(evidence['passed'], evidence['regressions'])
+        self.assertEqual(2, len(observed))
+        self.assertEqual(observed[0], observed[1])
+        self.assertEqual(original, rehearse.snapshot(inst.root))
+
+    def test_capture_never_rewrites_source_and_retains_real_instance(self):
+        inst, home, tree = self.fixture()
+        original = rehearse.snapshot(inst.root)
+        bindings = copy.deepcopy(inst.local)
+        captured = rehearse_external.freeze_declared(inst, self.tmp / 'captured')
+        self.assertEqual(original, rehearse.snapshot(inst.root))
+        self.assertEqual(bindings, inst.local)
+        self.assertIsInstance(captured, instance.Instance)
+        self.assertIsNot(captured, inst)
+        self.assertNotEqual(captured.node('app')['home_path'], home)
+        self.assertNotEqual(captured.local['nodes']['app']['worktrees']['job/sample']['path'], str(tree))
+
     def fixture(self):
         root = self.init('demo')
         home = self.repo(self.tmp / 'source')

@@ -18,11 +18,24 @@ from scenario import Scenario, CORE
 
 @unittest.skipUnless(sys.platform == 'darwin', 'requires macOS OS sandbox')
 class RehearsalNativeCore(Scenario):
+    retain_rehearsal_evidence = True
+
     def test_real_core_cli_clean_candidate_and_byte_identical_source(self):
+        try:
+            self._real_core_cli_clean_candidate_and_byte_identical_source()
+        except BaseException as error:
+            self.native_evidence_exception(error)
+            raise
+        finally:
+            self.retain_native_evidence()
+
+    def _real_core_cli_clean_candidate_and_byte_identical_source(self):
         import http.server
         import shutil
         import threading
+        self.update_native_evidence(stage='optional-setup')
         r = self.init('sample')
+        self.update_native_evidence(root=str(r))
         home = self.tmp / 'core-home'
         shutil.copytree(CORE, home, symlinks=True, ignore=shutil.ignore_patterns('.git', '__pycache__'))
         self.git('init', '-q', '-b', 'main', cwd=home)
@@ -56,6 +69,7 @@ class RehearsalNativeCore(Scenario):
         local_file.write_text(json.dumps(local))
         original_brain = rehearsal.snapshot(r)
         original_home = rehearsal.snapshot(home)
+        self.update_native_evidence(stage='optional-command')
         try:
             import argparse
             # Control only the parent's elapsed timer; the real CLI subprocesses,
@@ -73,6 +87,7 @@ class RehearsalNativeCore(Scenario):
                     evidence = list((self.tmp / 'core-home-work/scratch/rehearse').glob('*.json'))
                     self.fail(stdout.getvalue() + '\n' + '\n'.join(p.read_text() for p in evidence))
             output = stdout.getvalue()
+            self.update_native_evidence(stage='optional-assertions')
             self.assertIn('rehearse: passed', output)
             self.assertEqual(1, len(posts))
             self.assertEqual(original_brain, rehearsal.snapshot(r))
