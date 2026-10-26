@@ -2491,3 +2491,80 @@ effects as pending; they do not trigger release, rollback or replay. Direct-chil
 exit never supplies product/descendant quiescence. Product fencing and retained
 snapshot restoration remain product responsibilities. See
 [the supported driver contract](preview-adapters.md).
+
+## D30003: Publish complete fixture templates and clean only owned modules
+
+Build the source-only fixture template in a private temporary directory and
+publish it only after copytree succeeds. A failed copy removes that partial
+directory and leaves the cache empty, allowing the next initialization to retry
+from complete source. Initialization still creates every instance's state anew.
+
+Fixture commands execute a fresh, unregistered wrapper rather than reusing the
+named module in sys.modules. The modular loader selects a namespace with no
+preexisting root or descendants and exposes that exact namespace before loading.
+The caller removes only that package and its descendants in finally, including
+when loading or command execution fails. Preexisting wrappers, packages and
+unrelated modules survive with their original objects and state. Environment,
+argv, cwd and bytecode restoration and real assertion/evidence subprocess paths
+remain unchanged. Regression controls inject a partial copy and import failure,
+exercise command success and failure, and preserve colliding and unrelated module
+objects while checking owned-package cleanup.
+
+## D30004: Keep forced-platform template publication coverage portable
+
+The template publication regression forces the Darwin branch to exercise atomic
+cache construction on every host. Scope a deterministic clone subprocess fake
+to its recovery call: require the exact executable, flags, constructed template,
+destination and subprocess options, then copy that actual template using the
+saved real copytree and return a completed result. Wrong operands fail before
+copying. This retains the real interrupted-copy failure, partial-directory
+cleanup, cache and content checks, and module ownership and context restoration
+assertions. Separate real-platform clone, inode and launcher controls continue
+to exercise the actual platform implementation.
+
+## D30005: Opt audited history and wake fixtures into fresh initialization
+
+HistorySizes and QuestionWake explicitly use the existing in-process fixture
+initializer. HistorySizes inherits its initial construction from History.setUp;
+its additional instance in the named-folder test is independently initialized.
+QuestionWake initializes after loading its own isolated core and before any
+transport or process mocks enter. The fixture helper loads and discards a
+different package, preserving that test-owned core and its later mocks.
+
+These calls construct instances without asserting initializer output, launcher
+behavior or subprocess operands. Every original method body, assertion and
+subcase remains unchanged, including inherited history methods, containment
+mutations, live webhook requests, hanging transports, detached workers and
+mocked wake-launcher checks. Other commands keep their existing execution paths.
+
+Scenario remains default-off. Initializer and launcher controls retain real
+subprocess execution, and evidence-bearing fixture calls retain the existing
+real-process fallback. Each opt-in call still runs initialization against a new
+instance directory with independent Git, journal, index, registry and local
+state; only source files use the existing platform-specific clone optimization.
+Connections, EventViews and RoundTwo already opt in directly or through their
+base class, so their bootstrap paths require no additional change.
+
+
+## D40003: Resolve command-only handlers after CLI parsing
+
+The CLI used to import every command module and bind every handler before
+argparse selected a command. Keep the complete parser, its metadata from the
+owning modules, and shared dispatch/guard dependencies. Represent command-only
+handlers with a small CLI-local deferred reference, then resolve only the selected
+reference after parsing. Normal package-relative import returns the real module;
+attribute lookup returns its current handler. Do not cache functions or replace
+module objects, import loaders, fixture packages, or subprocess CLI execution.
+
+Resolution occurs before the existing scrub/scan/machine comparisons, writes
+classification, outward-link checks, instance lock and command-event context.
+Brain selection, instance-core reexecution, help, argument definitions and error
+handling retain their existing order. Shared imports remain eager where parser
+metadata or dispatch requires them; this change does not claim to eliminate that
+shared dependency graph. Contract controls cover unused modules during real
+launcher help and current patches on the real owning module.
+
+
+### Launcher help control dependency ownership
+
+Keep the real launcher help negative-import control in the canonical train-owned test class. Its unchanged literal train command/module assertions are dependencies recognized by the strict lane scanner. The control still executes the real launcher subprocess; no fixture initialization path or dependency-scanner exemption is introduced.

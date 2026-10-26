@@ -29,6 +29,214 @@ from scenario import Scenario, AutonomyProject, shlex_quote
 
 
 class FixtureSetup(Scenario):
+    def fixture_source(self):
+        core = self.tmp / 'source-core'
+        (core / 'bin').mkdir(parents=True)
+        package = core / 'lib/brain'
+        package.mkdir(parents=True)
+        (core / 'bin/brain').write_text('# modular fixture\n')
+        (package / '__init__.py').write_text('package_state = []\n')
+        (package / 'jobs.py').write_text('def job_started(): return None\n')
+        return core, package
+
+    def load_fixture_source(self, core):
+        loader = core_loader.SourceFileLoader('compiled_fixture', str(core / 'bin/brain'))
+        module = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+        try:
+            loader.exec_module(module)
+        finally:
+            package = getattr(loader, 'package_name', None)
+            if package is not None:
+                self.addCleanup(lambda: [sys.modules.pop(key, None) for key in list(sys.modules)
+                                         if key == package or key.startswith(package + '.')])
+        return module
+
+
+    def test_deferred_command_uses_real_module_and_current_patch(self):
+        loader = core_loader.SourceFileLoader('deferred_cli_fixture', str(CORE / 'bin/brain'))
+        module = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+        try:
+            loader.exec_module(module)
+            package = loader.package_name
+            cli = sys.modules[package + '.cli']
+            owner = sys.modules[package + '.diagnostics']
+            command = cli._Command('diagnostics', 'cmd_diagnose')
+            self.assertIs(command.resolve(), owner.cmd_diagnose)
+            args = argparse.Namespace()
+            with mock.patch.object(owner, 'cmd_diagnose', return_value='patched') as execute:
+                self.assertIs(command.resolve(), execute)
+                self.assertEqual(command(args), 'patched')
+                execute.assert_called_once_with(args)
+            self.assertIs(command.resolve(), owner.cmd_diagnose)
+            self.assertIs(sys.modules[package + '.diagnostics'], owner)
+        finally:
+            package = getattr(loader, 'package_name', None)
+            if package is not None:
+                for name in list(sys.modules):
+                    if name == package or name.startswith(package + '.'):
+                        del sys.modules[name]
+
+    def test_compiled_source_reuses_code_but_executes_fresh_module_state(self):
+        core, package = self.fixture_source()
+        (package / 'state.py').write_text(
+            'import os\nloaded_env = os.environ.get("BRAIN_FIXTURE_SENTINEL")\n'
+            'items = []\ndef remember(value):\n items.append(value)\n return items\n')
+        before = list(sys.meta_path)
+        with mock.patch.dict(os.environ, {'BRAIN_FIXTURE_SENTINEL': 'first'}):
+            first = self.load_fixture_source(core)
+        self.assertEqual(first.remember('only first'), ['only first'])
+        with mock.patch.dict(os.environ, {'BRAIN_FIXTURE_SENTINEL': 'second'}):
+            second = self.load_fixture_source(core)
+        self.assertIs(first.remember.__code__, second.remember.__code__)
+        self.assertIsNot(first._owners['items'], second._owners['items'])
+        self.assertEqual(first.loaded_env, 'first')
+        self.assertEqual(second.loaded_env, 'second')
+        self.assertEqual(second.items, [])
+        self.assertEqual(second.remember('only second'), ['only second'])
+        self.assertEqual(first.items, ['only first'])
+        self.assertEqual(second.remember.__code__.co_filename, str(package / 'state.py'))
+        self.assertEqual(sys.meta_path, before)
+        self.assertEqual(list(core.rglob('__pycache__')), [])
+
+    def test_compiled_source_observes_same_metadata_edits_and_restores_failed_imports(self):
+        core, package = self.fixture_source()
+        source = package / 'state.py'
+        source.write_text('value = "first"\ndef current(): return value\n')
+        first = self.load_fixture_source(core)
+        stamp = source.stat()
+        source.write_text('value = "other"\ndef current(): return value\n')
+        os.utime(source, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
+        self.assertEqual(source.stat().st_size, stamp.st_size)
+        self.assertEqual(source.stat().st_mtime_ns, stamp.st_mtime_ns)
+        second = self.load_fixture_source(core)
+        self.assertEqual(first.current(), 'first')
+        self.assertEqual(second.current(), 'other')
+        before = list(sys.meta_path)
+        source.write_text('value = !!!\n')
+        with self.assertRaises(SyntaxError):
+            self.load_fixture_source(core)
+        self.assertEqual(sys.meta_path, before)
+        source.write_text('value = "fixed"\ndef current(): return value\n')
+        self.assertEqual(self.load_fixture_source(core).current(), 'fixed')
+        source.unlink()
+        loader = core_loader._FixtureSourceLoader('missing', str(source))
+        with self.assertRaises(FileNotFoundError):
+            loader.get_code('missing')
+        self.assertEqual(list(core.rglob('__pycache__')), [])
+
+    def test_single_file_fixture_keeps_ordinary_loader(self):
+        source = self.tmp / 'legacy.py'
+        source.write_text('legacy_state = []\n')
+        loader = core_loader.SourceFileLoader('legacy_fixture', str(source))
+        module = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+        loader.exec_module(module)
+        self.assertEqual(module.legacy_state, [])
+        self.assertFalse(hasattr(loader, 'package_name'))
+
+    def test_atomic_template_and_owned_module_restoration(self):
+        import scenario
+        import types
+
+        failures = []
+        source = self.tmp / 'source'
+        source.mkdir()
+        (source / 'complete').write_text('complete source\n')
+        partials = []
+        real_copytree = shutil.copytree
+
+        def interrupted_copy(src, dst, **kwargs):
+            partials.append(Path(dst).parent)
+            Path(dst).mkdir()
+            (Path(dst) / 'partial').write_text('interrupted\n')
+            raise OSError('injected partial copy')
+
+        with mock.patch.object(scenario, 'CORE', source), \
+                mock.patch.object(scenario, '_core_template', None), \
+                mock.patch.object(sys, 'platform', 'darwin'):
+            try:
+                with mock.patch.object(scenario.shutil, 'copytree', interrupted_copy):
+                    with self.assertRaisesRegex(OSError, 'injected partial copy'):
+                        scenario.clone_fixture_core(source, self.tmp / 'failed')
+                if scenario._core_template is not None:
+                    failures.append('failed template was published')
+                if any(path.exists() for path in partials):
+                    failures.append('partial template was not discarded')
+                destination = self.tmp / 'recovered'
+
+                def clone_template(argv, **options):
+                    template = Path(scenario._core_template.name) / 'core'
+                    self.assertEqual(argv, ['/bin/cp', '-cR', str(template), str(destination)])
+                    self.assertEqual(options, {'check': True, 'capture_output': True, 'text': True})
+                    real_copytree(template, destination)
+                    return subprocess.CompletedProcess(argv, 0, stdout='', stderr='')
+
+                with mock.patch.object(scenario.subprocess, 'run', side_effect=clone_template) as clone:
+                    scenario.clone_fixture_core(source, destination)
+                clone.assert_called_once_with(
+                    ['/bin/cp', '-cR', str(Path(scenario._core_template.name) / 'core'), str(destination)],
+                    check=True, capture_output=True, text=True)
+                if sorted(p.name for p in destination.iterdir()) != ['complete']:
+                    failures.append('next copy reused the partial template')
+                elif (destination / 'complete').read_text() != 'complete source\n':
+                    failures.append('next copy changed source contents')
+            finally:
+                if scenario._core_template is not None:
+                    scenario._core_template.cleanup()
+
+        for outcome in ('success', 'command-error', 'loader-error'):
+            environment = dict(os.environ)
+            argv, argv_values = sys.argv, list(sys.argv)
+            cwd, bytecode = Path.cwd(), sys.dont_write_bytecode
+            wrapper = types.ModuleType('fixture_setup')
+            wrapper.state = object()
+            collision = types.ModuleType('_brain_fixture_720001')
+            collision.state = object()
+            foreign = types.ModuleType('_brain_fixture_foreign_during_call')
+            preserved = {'fixture_setup': wrapper, '_brain_fixture_720001': collision}
+            original_exec = core_loader.SourceFileLoader.exec_module
+
+            def execute(loader, module):
+                sys.modules[foreign.__name__] = foreign
+                if outcome == 'loader-error':
+                    real_import = core_loader.importlib.import_module
+
+                    def broken_import(name, package=None):
+                        real_import(name, package)
+                        raise RuntimeError('injected loader error')
+
+                    with mock.patch.object(core_loader.importlib, 'import_module', broken_import):
+                        original_exec(loader, module)
+                else:
+                    original_exec(loader, module)
+
+            with mock.patch.dict(sys.modules, preserved), \
+                    mock.patch.object(core_loader, '_serial', iter([720001, 720002])), \
+                    mock.patch.object(core_loader.SourceFileLoader, 'exec_module', execute):
+                before = dict(sys.modules)
+                if outcome == 'loader-error':
+                    with self.assertRaisesRegex(RuntimeError, 'injected loader error'):
+                        self.fixture_cli(['--help'], self.tmp, CORE / 'bin/brain')
+                elif outcome == 'command-error':
+                    with self.assertRaisesRegex(AssertionError, 'fixture command failed'):
+                        self.fixture_cli(['not-a-command'], self.tmp, CORE / 'bin/brain')
+                else:
+                    self.assertIn('usage:', self.fixture_cli(['--help'], self.tmp, CORE / 'bin/brain'))
+                for name, module in preserved.items():
+                    if sys.modules.get(name) is not module:
+                        failures.append(outcome + ': replaced preexisting ' + name)
+                if sys.modules.get(foreign.__name__) is not foreign:
+                    failures.append(outcome + ': deleted unrelated module')
+                leaked = [name for name in sys.modules if name.startswith('_brain_fixture_')
+                          and name not in before and name != foreign.__name__]
+                if leaked:
+                    failures.append(outcome + ': leaked owned modules ' + repr(leaked))
+                self.assertEqual(dict(os.environ), environment)
+                self.assertIs(sys.argv, argv)
+                self.assertEqual(sys.argv, argv_values)
+                self.assertEqual(Path.cwd(), cwd)
+                self.assertIs(sys.dont_write_bytecode, bytecode)
+        self.assertEqual(failures, [], '\n'.join(failures))
+
     def test_in_process_initialization_restores_context_and_clones_independent_core(self):
         environment, argv, cwd = dict(os.environ), list(sys.argv), Path.cwd()
         self.fixture_init_in_process = True

@@ -34,8 +34,13 @@ def clone_fixture_core(source, destination, **kwargs):
     if Path(source) != CORE or sys.platform != 'darwin':
         return shutil.copytree(source, destination, **kwargs)
     if _core_template is None:
-        _core_template = tempfile.TemporaryDirectory(prefix='brain-test-core-')
-        shutil.copytree(source, Path(_core_template.name) / 'core', **kwargs)
+        candidate = tempfile.TemporaryDirectory(prefix='brain-test-core-')
+        try:
+            shutil.copytree(source, Path(candidate.name) / 'core', **kwargs)
+        except BaseException:
+            candidate.cleanup()
+            raise
+        _core_template = candidate
     # APFS clones have independent inodes and copy-on-write file contents. Never
     # use hard links: scenarios deliberately edit their installed core copies.
     subprocess.run(['/bin/cp', '-cR', str(Path(_core_template.name) / 'core'),
@@ -193,14 +198,16 @@ class Scenario(unittest.TestCase):
             return self.run_(args, cwd=cwd, brain=brain)
         stdout, stderr = io.StringIO(), io.StringIO()
         previous = Path.cwd()
-        packages = {key for key in sys.modules if key.startswith('_brain_fixture_')}
+        loader = core_loader.SourceFileLoader('fixture_setup', str(brain or cwd / 'core/bin/brain'))
         try:
             with mock.patch.dict(os.environ, self.env, clear=True), \
                     mock.patch.object(sys, 'argv', [str(brain or cwd / 'core/bin/brain'), *args]), \
                     mock.patch.object(sys, 'dont_write_bytecode', True), \
                     contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
                 os.chdir(cwd)
-                module = core_loader.SourceFileLoader('fixture_setup', str(brain or cwd / 'core/bin/brain')).load_module()
+                spec = importlib.util.spec_from_loader(loader.name, loader)
+                module = importlib.util.module_from_spec(spec)
+                loader.exec_module(module)
                 nodes = module._owners['cmd_init']
                 copy = types.SimpleNamespace(**vars(shutil))
                 copy.copytree = clone_fixture_core
@@ -214,9 +221,11 @@ class Scenario(unittest.TestCase):
             os.chdir(previous)
             # The next setup call gets new TOUCHED, context variables and caches,
             # just as a subprocess would; no fixture package survives the call.
-            for key in list(sys.modules):
-                if key.startswith('_brain_fixture_') and key not in packages:
-                    del sys.modules[key]
+            package = getattr(loader, 'package_name', None)
+            if package is not None:
+                for key in list(sys.modules):
+                    if key == package or key.startswith(package + '.'):
+                        del sys.modules[key]
         return stdout.getvalue() + stderr.getvalue()
 
     def fixture_b(self, root, *args):
