@@ -463,6 +463,51 @@ class EventViews(Scenario):
                     with self.assertRaises(SystemExit):
                         events.reconcile(inst, node=inst.node('other'))
 
+    def test_released_root_writer_keeps_event_reconciliation_out_of_descendants(self):
+        r = self.init('demo')
+        self.b(r, 'new', 'app', '--title', 'App')
+        inst = instance.Instance(r)
+        with instance.brain_lock(r):
+            with events.Command(r, command='fixture', node='root') as op:
+                (r / 'backlog.md').write_text('- root writer pending\n')
+                before = (r / '.brain/events.jsonl').read_bytes()
+                forged = argparse.Namespace(ref=op.ref, inst=argparse.Namespace(root=r / 'foreign'))
+                for current in ([], [forged]):
+                    with mock.patch.object(events, '_CURRENT', current):
+                        # File-backed refresh still defers a healthy live writer.
+                        events.reconcile(inst, node=inst.node('app'), snapshot=True)
+                        with self.assertRaisesRegex(SystemExit, 'another write is active'):
+                            events.reconcile(inst, node=inst.node('app'))
+                        self.assertEqual((r / '.brain/events.jsonl').read_bytes(), before)
+                        self.assertTrue(events.lease_live(inst, op.ref))
+
+    def test_snapshot_refresh_does_not_hide_partial_or_damaged_operations_beside_live_writer(self):
+        for fault in ('partial', 'damage', 'invalid'):
+            with self.subTest(fault=fault):
+                r = self.init('demo-' + fault)
+                for nid in ('app', 'other'):
+                    self.b(r, 'new', nid, '--title', nid)
+                inst = instance.Instance(r)
+                with instance.brain_lock(r):
+                    with events.Command(r, command='fixture', node='app') as op:
+                        ref = 'a' * 32
+                        if fault == 'partial':
+                            events.append(inst, 'other', 'begin', ref, {'command': 'interrupted'})
+                            (r / 'nodes/other/backlog.md').write_text('- partial write\n')
+                        elif fault == 'damage':
+                            events.append(inst, 'other', 'damage', ref, {'reason': 'fixture damage'})
+                        else:
+                            events.append(inst, 'other', 'commit', ref,
+                                          {'invalidate': [events.node_ref('other')]})
+                        before = (r / '.brain/events.jsonl').read_bytes()
+                        pending = events.pending(events.read(inst))
+                        with mock.patch.object(events, '_CURRENT', []):
+                            with self.assertRaisesRegex(SystemExit, 'another write is active'):
+                                events.reconcile(inst, node=inst.node('other'), snapshot=True)
+                            self.assertEqual((r / '.brain/events.jsonl').read_bytes(), before)
+                            self.assertEqual(events.pending(events.read(inst)), pending)
+                            self.assertTrue(events.lease_live(inst, op.ref))
+
     records = EventAppend.records
     commits = EventAppend.commits
     def view(self, root, node='app'):

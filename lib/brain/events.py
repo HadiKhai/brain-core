@@ -843,24 +843,25 @@ def reconcile(inst, node=None, snapshot=False):
               for k in state.keys() | actual_map.keys())
     if not dead and not gap and not journal(inst).state["faults"] and not journal(inst).state["invalid"]:
         return
-    foreign = [e for ref, e in opened.items()
-               if ref not in {op.ref for op in _CURRENT} and lease_live(inst, ref)]
+    ours = {op.ref for op in _CURRENT if op.inst.root == inst.root}
+    foreign = [e for ref, e in opened.items() if ref not in ours and lease_live(inst, ref)]
     if foreign:
         # Snapshot rendering does not own an active writer's event baseline.
-        # Leave it untouched; explicit/event-source reconciliation stays strict.
-        if snapshot:
+        # Defer only a healthy live operation, never a separate partial write or
+        # damaged replay. Explicit/event-source reconciliation stays strict.
+        healthy = not dead and not journal(inst).state['faults'] and not journal(inst).state['invalid']
+        if snapshot and node is not None and healthy:
             return
         # A node refresh may proceed beside a released writer, but must not
         # adopt that writer's pending bytes or close its operation. Explicit
         # whole-instance reconciliation still refuses every live foreign lease.
         scopes = {e['node'] for e in foreign}
-        owners = [n['id'] for n in inst.nodes() if node_ref(n['id']) in scopes and n['id'] != 'root']
+        owners = [n['id'] for n in inst.nodes() if node_ref(n['id']) in scopes]
         scopes.update(node_ref(n['id']) for n in inst.nodes()
-                      if any(n['id'].startswith(owner + '/') for owner in owners))
+                      if any(owner == 'root' or n['id'].startswith(owner + '/') for owner in owners))
         changed = [actual_map.get(k) or state[k] for k in state.keys() | actual_map.keys()
                    if state.get(k, {}).get('hash') != actual_map.get(k, {}).get('hash')]
-        if (node is not None and node_ref(node['id']) not in scopes and not dead
-                and not journal(inst).state['faults'] and not journal(inst).state['invalid']
+        if (node is not None and node_ref(node['id']) not in scopes and healthy
                 and all(r.get('scope') in scopes for r in changed)):
             return
         common.die("another write is active; cannot reconcile its snapshot")
