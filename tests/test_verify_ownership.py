@@ -78,6 +78,10 @@ class NativeVerifierLifecycle(Scenario):
                 result, log, _ = self.execute(setup, code)
                 self.assertEqual(result, 0)
                 self.assertEqual(log.read_text(), 'owned lease inherited\n')
+                recorded = m.read_queue_request(n, request['id'])['run']
+                self.assertEqual(len(recorded['processes']), 1)
+                self.assertEqual(recorded['owner'], claimed['owner'])
+                self.assertEqual(recorded['lease_identity'], [os.fstat(fd).st_dev, os.fstat(fd).st_ino])
                 m.queue_terminal(inst, n, request['id'], claimed['lease'], 'interrupted')
 
     def terminal(self, inst):

@@ -1,8 +1,8 @@
 """Durable requests and an explicitly caller-owned foreground handback runner.
 
-Recovery is explicit and limited to a quiescent pre-dispatch run or its exact
-published terminal receipt. Dispatched descendants without shutdown proof stay
-unknown. No daemon, signalling or adoption of legacy leases.
+Recovery is explicit: quiescent pre-dispatch work, exact terminal publication,
+or recorded local verifier processes through owned_runs. Unknown descendants
+retain the lease. No daemon, process-group signalling or legacy-run adoption.
 """
 import argparse
 import contextlib
@@ -86,7 +86,7 @@ def recover_request(inst, n, data):
     if not host or run.get('host') != host:
         raise ValueError('runner host is foreign or unknown; preserve lease without probing its PID')
     stamp = _m_machine.process_stamp(owner[0])
-    if stamp == 'unknown' or stamp == owner[1]:
+    if stamp is not None:
         raise ValueError('runner is live or unknown; preserve lease')
     row = _m_jobs.open_job(_m_jobs.read_jobs(n) or [], data['args'].get('branch'))
     attempt = _m_attempts.current_attempt(n, row) if row else None
@@ -239,7 +239,8 @@ def queue_publication_context(n, request):
 def queue_projection(n, identity, strict=False):
     try:
         data = read_queue_request(n, identity)
-        waiting = sorted((read_queue_request(n, p.stem) for p in queue_path(n, identity).parent.glob('*.json')),
+        waiting = sorted((read_queue_request(n, p.stem) for p in queue_path(n, identity).parent.glob('*.json')
+                          if re.fullmatch('[0-9a-f]{32}', p.stem)),
                          key=lambda r: (r['at'], r['id']))
         waiting = [r['id'] for r in waiting if r['state'] == 'queued']
         return {'request_id': identity, 'state': data['state'], 'owner': data['owner'],
@@ -256,11 +257,16 @@ def run_queue_once(inst, n, identity=None, recover=False):
     if recover and identity is None:
         raise ValueError('recovery requires an explicit request ID')
     if identity is None:
-        waiting = sorted((read_queue_request(n, p.stem) for p in (n['dir'] / 'handback-queue').glob('*.json')),
+        waiting = sorted((read_queue_request(n, p.stem) for p in (n['dir'] / 'handback-queue').glob('*.json')
+                          if re.fullmatch('[0-9a-f]{32}', p.stem)),
                          key=lambda r: (r['at'], r['id']))
         identity = next((r['id'] for r in waiting if r['state'] == 'queued'), None)
     if identity is None:
         return None
+    if recover:
+        from . import owned_runs
+        if owned_runs.takeover_owned_run(inst, n, identity):
+            return identity
     with claim_handback(inst, n, identity, recover=recover) as request:
         if request is None:
             return identity  # publication already exists; never replay its wake

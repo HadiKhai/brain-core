@@ -874,3 +874,338 @@ print(enqueue_handback(i,n,r,a)['id'],flush=True)
         self.assertEqual(final['Outcome'],'closed')
         self.assertEqual(final['Cause'],'Coordinator parked this synthetic job')
         self.assertTrue(home.is_dir())
+
+    @contextlib.contextmanager
+    def owned_takeover_fixture(self):
+        m, inst, n, row = self.fixture()
+        args = argparse.Namespace(id='root', branch=row['Job'], state='blocked', summary='Fixture result')
+        stamps = {os.getpid(): 'controller', 12345: 'owner', 12346: 'child'}
+        with mock.patch.dict(os.environ, self.env, clear=True), mock.patch.object(
+                m, 'attempt_binding', return_value={'head':'a', 'base':'b', 'inputs':'c'}), \
+                mock.patch.object(m, 'process_stamp', side_effect=lambda pid: stamps.get(pid)), \
+                mock.patch.object(m, 'owned_process_parent', return_value=os.getpid()):
+            request = m.enqueue_handback(inst, n, row, args)
+            with m.claim_handback(inst, n, request['id']) as claimed:
+                m.queue_dispatch(inst, n, claimed)
+                m.queue_child(12346)
+            data = m.read_queue_request(n, request['id'])
+            data['owner'] = [12345, 'owner']
+            data['run']['owner'] = data['owner']
+            m.write_queue_request(n, data)
+            stamps[12345] = None
+            yield m, inst, n, row, request['id'], stamps
+
+    def takeover_refusal(self, change, reason):
+        with self.owned_takeover_fixture() as (m, inst, n, row, identity, stamps):
+            data = m.read_queue_request(n, identity)
+            change(data, stamps, inst)
+            m.write_queue_request(n, data)
+            before = m.queue_path(n, identity).read_bytes(), m.attempt_path(n, row).read_bytes()
+            with mock.patch('os.kill') as signal:
+                with self.assertRaisesRegex(ValueError, reason):
+                    m.run_queue_once(inst, n, identity, recover=True)
+                signal.assert_not_called()
+            self.assertEqual(before, (m.queue_path(n, identity).read_bytes(), m.attempt_path(n, row).read_bytes()))
+            audit = json.loads(m.queue_path(n, identity).with_suffix('.takeover.json').read_text())
+            self.assertEqual(audit['state'], 'refused')
+            self.assertTrue(audit['reason'])
+            self.assertFalse(m.handback_file(n, row).exists())
+
+    def test_owned_takeover_foreign_host(self):
+        self.takeover_refusal(lambda d, s, i: d['run'].update(host='foreign'), 'host')
+
+    def test_owned_takeover_reused_child_pid(self):
+        self.takeover_refusal(lambda d, s, i: s.update({12346:'another-start'}), 'process')
+
+    def test_owned_takeover_reused_owner_pid(self):
+        self.takeover_refusal(lambda d, s, i: s.update({12345:'another-start'}), 'owner')
+
+    def test_owned_takeover_unknown_child(self):
+        self.takeover_refusal(lambda d, s, i: s.update({12346:'unknown'}), 'process')
+
+    def test_owned_takeover_stale_lease(self):
+        self.takeover_refusal(lambda d, s, i: d.update(lease='e'*32), 'lease')
+
+    def test_owned_takeover_expired_lease(self):
+        self.takeover_refusal(lambda d, s, i: d['run'].update(takeover_until=0), 'expired')
+
+    def test_owned_takeover_live_owner(self):
+        self.takeover_refusal(lambda d, s, i: s.update({12345:'owner'}), 'owner')
+
+    def test_owned_takeover_crashed_run_is_settled_without_replay(self):
+        with self.owned_takeover_fixture() as (m, inst, n, row, identity, stamps):
+            stamps[12346] = None
+            with mock.patch('os.kill') as signal, mock.patch.object(m, 'cmd_handback') as publish:
+                self.assertEqual(m.run_queue_once(inst, n, identity, recover=True), identity)
+                signal.assert_not_called()
+                publish.assert_not_called()
+            self.assertEqual(m.read_queue_request(n, identity)['state'], 'interrupted')
+            self.assertEqual(m.current_attempt(n, row)['state'], 'interrupted')
+            self.assertFalse(m.handback_file(n, row).exists())
+            audit = json.loads(m.queue_path(n, identity).with_suffix('.takeover.json').read_text())
+            self.assertEqual(audit['state'], 'settled')
+
+    def test_owned_takeover_partial_run_intent_precedes_stop_and_concurrent_refuses(self):
+        """A live partial run is retained; an intent still serializes contenders."""
+        with self.owned_takeover_fixture() as (m, inst, n, row, identity, stamps):
+            before = m.queue_path(n, identity).read_bytes(), m.attempt_path(n, row).read_bytes()
+            original = m.write_takeover
+            def intent(n, identity, audit):
+                original(n, identity, audit)
+                if audit['state'] == 'intent':
+                    with self.assertRaisesRegex(ValueError, 'takeover.*owner|already'):
+                        m.run_queue_once(inst, n, identity, recover=True)
+            with mock.patch.object(m, 'write_takeover', side_effect=intent), \
+                    mock.patch('os.kill') as kill, mock.patch.object(m, 'cmd_handback') as publish:
+                with self.assertRaisesRegex(ValueError, 'lifetime-bound'):
+                    m.run_queue_once(inst, n, identity, recover=True)
+                kill.assert_not_called()
+                publish.assert_not_called()
+            self.assertEqual(before, (m.queue_path(n, identity).read_bytes(), m.attempt_path(n, row).read_bytes()))
+            audit = json.loads(m.queue_path(n, identity).with_suffix('.takeover.json').read_text())
+            self.assertEqual(audit['state'], 'refused')
+            self.assertEqual(audit['signalled'], [])
+
+    def test_owned_takeover_rechecks_after_intent(self):
+        with self.owned_takeover_fixture() as (m, inst, n, row, identity, stamps):
+            original = m.write_takeover
+            def changed(n, identity, audit):
+                original(n, identity, audit)
+                if audit['state'] == 'intent':
+                    stamps[12346] = 'reused-after-intent'
+            before = m.queue_path(n, identity).read_bytes()
+            with mock.patch.object(m, 'write_takeover', side_effect=changed), mock.patch('os.kill') as signal:
+                with self.assertRaisesRegex(ValueError, 'process'):
+                    m.run_queue_once(inst, n, identity, recover=True)
+                signal.assert_not_called()
+            self.assertEqual(m.queue_path(n, identity).read_bytes(), before)
+
+    def test_owned_takeover_replaced_inode(self):
+        with self.owned_takeover_fixture() as (m, inst, n, row, identity, stamps):
+            path = m.queue_path(n, identity).with_suffix('.lease')
+            path.rename(path.with_suffix('.retained'))
+            path.write_text('foreign lease')
+            before = m.queue_path(n, identity).read_bytes()
+            with mock.patch('os.kill') as signal:
+                with self.assertRaisesRegex(ValueError, 'lease'):
+                    m.run_queue_once(inst, n, identity, recover=True)
+                signal.assert_not_called()
+            self.assertEqual(path.read_text(), 'foreign lease')
+            self.assertEqual(m.queue_path(n, identity).read_bytes(), before)
+
+    def test_owned_takeover_foreign_owner_record(self):
+        self.takeover_refusal(lambda d, s, i: d.update(owner=[12347, 'foreign']), 'owner')
+
+    def test_owned_takeover_changed_attempt_binding(self):
+        self.takeover_refusal(lambda d, s, i: (d.update(binding={'head':'other'}), s.update({12346: None})), 'binding')
+
+    def test_owned_takeover_last_signal_check_preserves_reused_pid(self):
+        self.takeover_refusal(lambda d, s, i: s.update({12346:'replacement'}), 'identity')
+
+    def test_owned_takeover_registration_refuses_foreign_child(self):
+        with self.owned_takeover_fixture() as (m, inst, n, row, identity, stamps):
+            request = m.enqueue_handback(inst, n, row, argparse.Namespace(
+                id='root', branch=row['Job'], state='blocked', summary='Fixture result'))
+            with m.claim_handback(inst, n, request['id']) as claimed:
+                m.queue_dispatch(inst, n, claimed)
+                with mock.patch.object(m, 'owned_process_parent', return_value=999):
+                    with self.assertRaisesRegex(ValueError, 'identity'):
+                        m.queue_child(12346)
+
+    def test_owned_takeover_pending_stop_is_not_repeated(self):
+        with self.owned_takeover_fixture() as (m, inst, n, row, identity, stamps):
+            before = m.queue_path(n, identity).read_bytes()
+            with mock.patch('os.kill') as kill:
+                with self.assertRaisesRegex(ValueError, 'lifetime-bound'):
+                    m.run_queue_once(inst, n, identity, recover=True)
+                kill.assert_not_called()
+            # Preserve evidence from a legacy uncertain signal; never replay it.
+            audit = json.loads(m.queue_path(n, identity).with_suffix('.takeover.json').read_text())
+            audit['signalled'] = [[12346, 'child']]
+            m.write_takeover(n, identity, audit)
+            with mock.patch('os.kill') as kill:
+                with self.assertRaisesRegex(ValueError, 'previous partial'):
+                    m.run_queue_once(inst, n, identity, recover=True)
+                kill.assert_not_called()
+            self.assertEqual(m.queue_path(n, identity).read_bytes(), before)
+
+    def test_owned_takeover_real_crash_child_and_foreign_process(self):
+        """Real OS processes and inherited flock; only fabricated instance data."""
+        m, inst, n, row = self.fixture()
+        args = argparse.Namespace(id='root', branch=row['Job'], state='blocked', summary='Fixture result')
+        # The helper is the original Brain runner. Its direct child inherits the
+        # lease; runner os._exit simulates a crash without closing that child's FD.
+        script = '''import os,sys,json,subprocess
+sys.path.insert(0,sys.argv[1])
+from brain import instance,handback_queue as q,owned_runs as owned,lifecycle_identity
+lifecycle_identity.lifecycle_host_identity=lambda:'fixture-boot-a'
+from pathlib import Path
+inst=instance.Instance(Path(sys.argv[2])); n=inst.node('root')
+with q.claim_handback(inst,n,sys.argv[3]) as request:
+ q.queue_dispatch(inst,n,request)
+ fd=q.queue_descendant_fd()
+ control=int(sys.argv[4])
+ child=subprocess.Popen([sys.executable,'-c','import os,sys; os.read(int(sys.argv[1]),1)',str(control)],pass_fds=(fd,control),stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+ owned.queue_child(child.pid)
+ print(json.dumps([os.getpid(),child.pid]),flush=True)
+ os._exit(0)
+'''
+        with mock.patch.dict(os.environ, self.env, clear=True), mock.patch.object(
+                m, 'attempt_binding', return_value={'head':'a', 'base':'b', 'inputs':'c'}):
+            request = m.enqueue_handback(inst, n, row, args)
+            foreign = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'], env=self.env)
+            control_read, control_write = os.pipe()
+            runner = subprocess.Popen([sys.executable, '-B', '-c', script, str(CORE/'lib'),
+                                       str(inst.root), request['id'], str(control_read)], env=self.env,
+                                      pass_fds=(control_read,),
+                                      stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            os.close(control_read)
+            child = None
+            try:
+                # Child inherits no stdout pipe, so the crashed runner can be reaped.
+                import select
+                ready, _, _ = select.select([runner.stdout], [], [], 5)
+                self.assertTrue(ready, 'runner never published child ownership')
+                line = runner.stdout.readline()
+                if not line:
+                    self.fail(runner.stderr.read())
+                owner, child = json.loads(line)
+                self.assertEqual(runner.wait(timeout=5), 0)
+                data = m.read_queue_request(n, request['id'])
+                self.assertEqual(data['owner'][0], owner)
+                self.assertEqual(data['run']['processes'][0][0], child)
+                self.assertEqual(m.process_stamp(child), data['run']['processes'][0][1])
+                foreign_stamp = m.process_stamp(foreign.pid)
+                before = m.queue_path(n, request['id']).read_bytes(), m.attempt_path(n, row).read_bytes()
+                with mock.patch.object(m, 'cmd_handback') as publish:
+                    with self.assertRaisesRegex(ValueError, 'lifetime-bound'):
+                        m.run_queue_once(inst, n, request['id'], recover=True)
+                    publish.assert_not_called()
+                self.assertEqual(before, (m.queue_path(n, request['id']).read_bytes(), m.attempt_path(n, row).read_bytes()))
+                self.assertEqual(m.process_stamp(child), data['run']['processes'][0][1])
+                # Let the child exit through its pipe, then reconcile absence.
+                os.close(control_write)
+                control_write = None
+                import time
+                deadline = time.monotonic() + 5
+                while m.process_stamp(child) is not None and time.monotonic() < deadline:
+                    time.sleep(.02)
+                self.assertIsNone(m.process_stamp(child))
+                m.run_queue_once(inst, n, request['id'], recover=True)
+                self.assertEqual(m.process_stamp(foreign.pid), foreign_stamp)
+                self.assertIsNone(foreign.poll())
+                self.assertEqual(m.read_queue_request(n, request['id'])['state'], 'interrupted')
+            finally:
+                # These exact Popen objects were created by this test. No scan,
+                # broad kill or cleanup of any process belonging to another run.
+                if runner.poll() is None:
+                    runner.terminate()
+                    runner.wait(timeout=5)
+                foreign.terminate()
+                foreign.wait(timeout=5)
+                if control_write is not None:
+                    os.close(control_write)  # releases only this test child's pipe
+                runner.stdout.close()
+                runner.stderr.close()
+
+    def test_owned_takeover_concurrent_process_owner_refuses(self):
+        with self.owned_takeover_fixture() as (m, inst, n, row, identity, stamps):
+            path = m.queue_path(n, identity).with_suffix('.takeover.lock')
+            script = ('import fcntl,sys\n'
+                      'with open(sys.argv[1],"a+") as f:\n'
+                      ' fcntl.flock(f,fcntl.LOCK_EX)\n'
+                      ' print("locked",flush=True)\n'
+                      ' sys.stdin.read(1)\n')
+            holder = subprocess.Popen([sys.executable, '-c', script, str(path)], env=self.env,
+                                      stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+            try:
+                import select
+                self.assertTrue(select.select([holder.stdout], [], [], 5)[0])
+                self.assertEqual(holder.stdout.readline().strip(), 'locked')
+                before = m.queue_path(n, identity).read_bytes()
+                with mock.patch('os.kill') as signal:
+                    with self.assertRaisesRegex(ValueError, 'takeover already'):
+                        m.run_queue_once(inst, n, identity, recover=True)
+                    signal.assert_not_called()
+                self.assertEqual(m.queue_path(n, identity).read_bytes(), before)
+            finally:
+                holder.stdin.write('x')
+                holder.stdin.flush()
+                holder.wait(timeout=5)
+                holder.stdin.close()
+                holder.stdout.close()
+
+    def test_owned_takeover_held_descendant_lease_prevents_settlement(self):
+        import fcntl
+        with self.owned_takeover_fixture() as (m, inst, n, row, identity, stamps):
+            stamps[12346] = None
+            path = m.queue_path(n, identity).with_suffix('.lease')
+            held = os.open(path, os.O_RDWR)
+            try:
+                fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                before = m.queue_path(n, identity).read_bytes()
+                with mock.patch('os.kill') as signal:
+                    with self.assertRaisesRegex(ValueError, 'descendant lease'):
+                        m.run_queue_once(inst, n, identity, recover=True)
+                    signal.assert_not_called()
+                self.assertEqual(m.queue_path(n, identity).read_bytes(), before)
+                self.assertEqual(m.current_attempt(n, row)['state'], 'queued')
+            finally:
+                os.close(held)
+
+    def test_owned_takeover_pid_reused_after_observation_never_signals(self):
+        with self.owned_takeover_fixture() as (m, inst, n, row, identity, stamps):
+            before = m.queue_path(n, identity).read_bytes(), m.attempt_path(n, row).read_bytes()
+            observed = []
+            def reuse_after_observation(pid):
+                stamp = stamps.get(pid)
+                if pid == 12346 and stamp == 'child':
+                    observed.append(stamp)
+                    stamps[pid] = 'foreign-replacement'
+                return stamp
+            with mock.patch.object(m, 'process_stamp', side_effect=reuse_after_observation), \
+                    mock.patch('os.kill') as kill:
+                with self.assertRaises(ValueError):
+                    m.run_queue_once(inst, n, identity, recover=True)
+                self.assertEqual(observed, ['child'])
+                kill.assert_not_called()
+            self.assertEqual(before, (m.queue_path(n, identity).read_bytes(), m.attempt_path(n, row).read_bytes()))
+            audit = json.loads(m.queue_path(n, identity).with_suffix('.takeover.json').read_text())
+            self.assertEqual(audit['state'], 'refused')
+            self.assertIn('lifetime-bound', audit['reason'])
+
+    def takeover_audit_queue_control(self, live):
+        with self.owned_takeover_fixture() as (m, inst, n, row, identity, stamps):
+            if not live:
+                stamps[12346] = None
+            with mock.patch('os.kill') as kill:
+                if live:
+                    with self.assertRaises(ValueError):
+                        m.run_queue_once(inst, n, identity, recover=True)
+                else:
+                    self.assertEqual(m.run_queue_once(inst, n, identity, recover=True), identity)
+                kill.assert_not_called()
+            audit_path = m.queue_path(n, identity).with_suffix('.takeover.json')
+            audit = json.loads(audit_path.read_text())
+            self.assertEqual(audit['state'], 'refused' if live else 'settled')
+            second = {**row, 'Job': 'job/second', 'Started': '2026-01-02T00:00Z'}
+            m.write_jobs(inst, n, [row, second])
+            queued = m.enqueue_handback(inst, n, second, argparse.Namespace(
+                id='root', branch=second['Job'], state='blocked', summary='Second fixture result'))
+            before = audit_path.read_bytes()
+            for strict in (False, True):
+                projection = m.queue_projection(n, queued['id'], strict=strict)
+                self.assertEqual((projection['state'], projection['position']), ('queued', 1))
+            with self.assertRaisesRegex(ValueError, 'invalid handback request ID'):
+                m.read_queue_request(n, identity + '.takeover')
+            with mock.patch.object(m, 'cmd_handback') as publish:
+                self.assertEqual(m.run_queue_once(inst, n), queued['id'])
+                publish.assert_called_once()
+                self.assertEqual(publish.call_args.args[0]._queue_request['id'], queued['id'])
+            self.assertEqual(audit_path.read_bytes(), before)
+
+    def test_owned_takeover_success_audit_keeps_queue_selection_and_projection(self):
+        self.takeover_audit_queue_control(live=False)
+
+    def test_owned_takeover_refused_audit_keeps_queue_selection_and_projection(self):
+        self.takeover_audit_queue_control(live=True)
