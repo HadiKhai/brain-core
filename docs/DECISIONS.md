@@ -1,5 +1,19 @@
 # Code decisions
 
+## D40002: Persist directories through checked physical authority
+
+An internal directory alias selects a physical parent inside its instance once.
+Durable directory creation holds that parent's component descriptors, opens each
+child without following links, and checks identity and physical location before
+and after syncing its parent. Existing entries are synced again before deeper
+creation, so an interrupted earlier call cannot skip ancestor persistence.
+Local settings retain the selected physical filename through directory creation
+and atomic publication; a later alias change cannot redirect either operation.
+
+Outward aliases, replaced physical ancestors and shared files remain refused.
+Each sync failure propagates; no multi-file transaction, namespace lock or
+physical power-loss guarantee is implied.
+
 ## D30002: Native retention owns final bulk deletion
 
 Bulk scopes supply exact allocated-directory identity, synced terminal receipts

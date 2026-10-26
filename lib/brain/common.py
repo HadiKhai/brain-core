@@ -191,21 +191,18 @@ def durable_makedirs(path, mode=0o700):
     """Create directories and persist ancestor entries before publishing children.
 
     Re-sync existing entries too: a prior interrupted call may have created them
-    without completing its parent sync. Links are never adopted as directories.
+    without completing its parent sync. An internal alias selects its checked
+    physical directory once; subsequent operations never follow that alias.
     """
     path = Path(os.path.abspath(path))
-    safe_target(path / '.persistence-target')
+    checked = safe_target(path / '.persistence-target')
+    path = checked.parent if checked is not None else path.resolve()
     root = next((p for p in [path, *path.parents] if (p / 'instance.md').is_file()
                  and (p / 'node.md').is_file()), path.anchor)
     root = Path(root)
-    parent = root
-    for part in path.relative_to(root).parts:
-        child = parent / part
-        if child.is_symlink():
-            raise ValueError('directory persistence refuses linked ancestors')
-        child.mkdir(mode=mode, exist_ok=True)
-        sync_directory(parent)
-        parent = child
+    with directory_target(root / '.persistence-target') as target:
+        for part in path.relative_to(root).parts:
+            target.durable_child(part, mode)
 
 
 class DirectoryTarget:
@@ -268,6 +265,24 @@ class DirectoryTarget:
             expected = Path(self.path.anchor).joinpath(*(name for _, name, _ in self.chain[1:]))
             if history.history_fd_path(self.fd) != str(expected):
                 raise OSError('publication directory moved')
+
+    def durable_child(self, name, mode=0o700):
+        """Hold a child and persist its entry before any deeper mutation."""
+        if name in ('', '.', '..') or Path(name).name != name:
+            raise ValueError('directory persistence requires one relative name')
+        self.check()
+        parent = self.fd
+        try:
+            os.mkdir(name, mode, dir_fd=parent)
+        except FileExistsError:
+            pass
+        child = os.open(name, os.O_RDONLY | getattr(os, 'O_DIRECTORY', 0) | os.O_NOFOLLOW,
+                        dir_fd=parent)
+        self.fd = child
+        self.chain.append((parent, name, child))
+        self.check()
+        os.fsync(parent)
+        self.check()
 
     def stat(self, name=None):
         self.check()

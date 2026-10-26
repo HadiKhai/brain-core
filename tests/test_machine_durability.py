@@ -133,6 +133,50 @@ class MachineDurability(unittest.TestCase):
         self.m.atomic_write(folder/'record', 'complete')
         self.assertEqual((folder/'record').read_text(), 'complete')
 
+    def test_local_alias_retarget_after_validation_keeps_physical_target(self):
+        storage = self.root/'state'
+        storage.mkdir()
+        alias = self.root/'.brain'
+        alias.symlink_to(storage)
+        outside_tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(outside_tmp.cleanup)
+        outside = Path(outside_tmp.name).resolve()
+        foreign = outside/'local.json'
+        foreign.write_text('foreign bytes')
+        checked = self.m.safe_target
+
+        def retarget(path):
+            physical = checked(path)
+            if Path(path) == self.inst.local_path:
+                alias.unlink()
+                alias.symlink_to(outside)
+            return physical
+
+        with mock.patch.object(self.m, 'safe_target', side_effect=retarget):
+            self.inst.save_local()
+        self.assertEqual(json.loads((storage/'local.json').read_text()), self.inst.local)
+        self.assertEqual({p.name: p.read_bytes() for p in outside.iterdir()},
+                         {'local.json': b'foreign bytes'})
+
+    def test_directory_move_during_ancestor_sync_refuses_deeper_creation(self):
+        folder = self.root/'new'
+        folder.mkdir()
+        outside_tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(outside_tmp.cleanup)
+        outside = Path(outside_tmp.name).resolve()/'moved-directory'
+        real_sync = os.fsync
+
+        def sync(fd):
+            real_sync(fd)
+            folder.rename(outside)
+            folder.symlink_to(outside)
+
+        with mock.patch.object(self.m.os, 'fsync', side_effect=sync):
+            with self.assertRaisesRegex(OSError, 'directory moved'):
+                self.m.durable_makedirs(folder/'nested')
+        self.assertEqual(list(outside.iterdir()), [])
+        folder.unlink()
+
     def test_recovery_completes_partial_metadata_once_and_preserves_foreign_edits(self):
         recovery = importlib.import_module('.metadata_recovery', self.package)
         a, b = self.root/'node.md', self.root/'schedules.md'
