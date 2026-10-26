@@ -19,6 +19,7 @@ EXPLICIT_DELIVERY_KINDS = {'inbox', 'handback', 'unsettled-threads', 'overlappin
                            'machine-repair', 'restart', 'rotate', 'overdue-question'}
 
 class Watcher(Scenario):
+    fixture_templates = True
     fixture_init_in_process = True
     def setUp(self):
         super().setUp()
@@ -26,9 +27,13 @@ class Watcher(Scenario):
         self.patch.start()
         self.addCleanup(self.patch.stop)
         self.m = core_loader.SourceFileLoader('watch_fixture', str(CORE / 'bin/brain')).load_module()
+        self.root = self.cached_setup('watch', self.watch_fixture)
+        self.inst = self.m.Instance(self.root)
+
+    def watch_fixture(self):
         self.root = self.init('oak')
         self.b(self.root, 'set', 'root', 'wake=fixture-send', 'coordinator=fixture-root')
-        self.inst = self.m.Instance(self.root)
+        return self.root
 
     def watch(self, kinds=None):
         with contextlib.redirect_stdout(io.StringIO()):

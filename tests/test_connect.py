@@ -30,6 +30,7 @@ from scenario import Scenario, AutonomyProject, shlex_quote
 
 class Connections(Scenario):
     """Learning across nodes: items and specialists from several sources, review in bulk, recall, connect."""
+    fixture_templates = True
 
     fixture_init_in_process = True
 
@@ -37,6 +38,9 @@ class Connections(Scenario):
 
     def setUp(self):
         super().setUp()
+        self.r, self.homes = self.cached_setup('connections', self.connection_fixture)
+
+    def connection_fixture(self):
         self.r = self.init("alice")
         for p in ("ben", "cleo"):
             self.fixture_b(self.r, "principal", "add", p)
@@ -54,6 +58,8 @@ class Connections(Scenario):
         (self.r / "nodes/lab/never-name.txt").write_text("Quokkasoft\n")
         self.git("add", "-A", cwd=self.r)
         self.git("commit", "-qm", "fixture", cwd=self.r)
+        return self.r, self.homes
+
 
     def add(self, iid, *args, ok=True):
         return self.b(self.r, "item", "add", iid, "--title", iid.replace("-", " "), "--kind", "method", "--ref", "x",
