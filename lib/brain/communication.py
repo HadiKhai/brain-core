@@ -79,8 +79,7 @@ def communication_record(inst, n, kind, text, key, question=None):
     identity = _m_hosts.wake_binding(json.dumps([n['id'], kind, key]))
     record = {'id': identity, 'node': n['id'], 'kind': kind, 'text': text, 'at': inst.now(), **typed}
     from . import communication_policy
-    if not typed and communication_policy.quiet_now(inst):
-        record['deferred'] = True
+    defer = not typed and communication_policy.quiet_now(inst)
     with communication_store(inst) as data:
         records = data['questions'] if typed else data['notices']
         previous = records.get(identity)
@@ -91,6 +90,10 @@ def communication_record(inst, n, kind, text, key, question=None):
             record = previous
         else:
             records[identity] = record
+        if defer:
+            # Recovery keeps immutable receipt content, but obeys today's policy.
+            # Persist deferral so an interrupted notice remains due for morning.
+            record['deferred'] = True
     if record.get('deferred'):
         return record  # durable source retained; morning publication owns its inbox delivery
     marker = '<!-- communication:' + identity + ' -->'

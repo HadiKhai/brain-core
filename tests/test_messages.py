@@ -164,6 +164,87 @@ class TypedCommunication(Scenario):
                 'recommendation': 'continue', 'default': 'continue',
                 'deadline': '2020-01-01T00:00:00+00:00'}
 
+    def quiet_recovery_child(self):
+        self.b(self.root, 'new', 'child', '--title', 'Synthetic child')
+        self.b(self.root, 'set', 'child', 'coordinator=fixture-child', 'wake=fixture-send')
+        self.inst = self.m.Instance(self.root)
+        self.inst.local_of('root')['message_policy'] = {'quiet_start': '00:00', 'quiet_end': '07:00'}
+        self.inst.save_local()
+        child = self.inst.node('child')
+        self.assertEqual(self.m.wake_target(self.inst, child)[0]['id'], 'child')
+        return child
+
+    def test_interrupted_notice_retry_defers_under_current_quiet_policy(self):
+        import datetime
+        from unittest import mock
+        child = self.quiet_recovery_child()
+        inbox = child['dir'] / 'inbox.md'
+        before = inbox.read_bytes() if inbox.exists() else None
+        outside = datetime.datetime.fromisoformat('2026-01-01T23:59:00+00:00')
+        with mock.patch.object(self.m.Instance, 'now_dt', return_value=outside) as clock, \
+                mock.patch.object(self.m, 'request_wake') as send:
+            with mock.patch.object(self.m, 'inbox_append', side_effect=OSError('fixture receipt interruption')):
+                with self.assertRaisesRegex(OSError, 'fixture receipt interruption'):
+                    self.m.communication_record(self.inst, child, 'fyi', 'Retained update', 'recovery')
+            original = next(iter(self.m.communication_read(self.inst)['notices'].values()))
+            self.assertNotIn('deferred', original)
+            send.assert_not_called()
+            clock.return_value = datetime.datetime.fromisoformat('2026-01-02T00:01:00+00:00')
+            retry = self.m.communication_record(self.inst, child, 'fyi', 'Retained update', 'recovery')
+            send.assert_not_called()
+            self.assertEqual(inbox.read_bytes() if inbox.exists() else None, before)
+            self.assertEqual(retry, {**original, 'deferred': True})
+            self.assertEqual(self.m.communication_read(self.inst)['notices'][original['id']], retry)
+            self.assertEqual(self.m.morning_brief(self.inst, child)['state'], 'quiet')
+            clock.return_value = datetime.datetime.fromisoformat('2026-01-02T07:00:00+00:00')
+            self.assertEqual(self.m.morning_brief(self.inst, child)['items'], [original['id']])
+            self.assertEqual(self.m.morning_brief(self.m.Instance(self.root), child)['state'], 'already-published')
+            self.assertEqual(self.m.communication_record(self.inst, child, 'fyi', 'Retained update', 'recovery'), retry)
+            self.assertEqual(inbox.read_text().count('Retained update'), 1)
+            self.assertEqual(inbox.read_text().count('<!-- morning-brief:'), 1)
+            self.assertNotIn('<!-- communication:', inbox.read_text())
+            send.assert_not_called()
+
+    def test_interrupted_question_retry_still_bypasses_quiet_policy(self):
+        import datetime
+        from unittest import mock
+        child = self.quiet_recovery_child()
+        with mock.patch.object(self.m.Instance, 'now_dt', return_value=datetime.datetime.fromisoformat(
+                '2026-01-01T23:59:00+00:00')) as clock, mock.patch.object(self.m, 'request_wake') as send:
+            with mock.patch.object(self.m, 'inbox_append', side_effect=OSError('fixture receipt interruption')):
+                with self.assertRaisesRegex(OSError, 'fixture receipt interruption'):
+                    self.m.communication_record(self.inst, child, 'question', 'Choose recovery?', 'question-recovery', self.spec('outward'))
+            original = next(iter(self.m.communication_read(self.inst)['questions'].values()))
+            clock.return_value = datetime.datetime.fromisoformat('2026-01-02T00:01:00+00:00')
+            retry = self.m.communication_record(self.inst, child, 'question', 'Choose recovery?', 'question-recovery', self.spec('outward'))
+            self.assertEqual(retry, original)
+            self.assertNotIn('deferred', retry)
+            send.assert_called_once_with(self.inst, child, 'question:' + retry['id'],
+                                         items=[{'id': retry['id'], 'kind': 'question'}])
+            self.assertEqual((child['dir'] / 'inbox.md').read_text().count('<!-- communication:'), 1)
+            self.m.communication_reconcile(self.inst)
+            self.assertNotIn('answer', self.m.communication_read(self.inst)['questions'][retry['id']])
+
+    def test_interrupted_notice_quiet_retry_rejects_content_collision(self):
+        import datetime
+        from unittest import mock
+        child = self.quiet_recovery_child()
+        inbox = child['dir'] / 'inbox.md'
+        before_inbox = inbox.read_bytes() if inbox.exists() else None
+        with mock.patch.object(self.m.Instance, 'now_dt', return_value=datetime.datetime.fromisoformat(
+                '2026-01-01T23:59:00+00:00')) as clock, mock.patch.object(self.m, 'request_wake') as send:
+            with mock.patch.object(self.m, 'inbox_append', side_effect=OSError('fixture receipt interruption')):
+                with self.assertRaisesRegex(OSError, 'fixture receipt interruption'):
+                    self.m.communication_record(self.inst, child, 'park', 'Original content', 'collision')
+            store = self.root / '.brain/communications.json'
+            original = store.read_bytes()
+            clock.return_value = datetime.datetime.fromisoformat('2026-01-02T00:01:00+00:00')
+            with self.assertRaisesRegex(ValueError, 'stable notification key already names different content'):
+                self.m.communication_record(self.inst, child, 'park', 'Changed content', 'collision')
+            self.assertEqual(store.read_bytes(), original)
+            self.assertEqual(inbox.read_bytes() if inbox.exists() else None, before_inbox)
+            send.assert_not_called()
+
     def test_root_landings_parks_and_fyi_are_inbox_only(self):
         from unittest import mock
         with mock.patch.object(self.m, 'request_wake') as send:

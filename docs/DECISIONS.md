@@ -2485,3 +2485,14 @@ Later notices remain retained for a subsequent day. Empty calls reserve nothing.
 The instance timezone and explicit quiet-hour policy apply; questions keep their
 existing immediate path. This local boundary neither sends host messages nor
 configures schedules, and an inbox receipt does not prove person delivery.
+
+## Current quiet policy applies to same-key notice recovery
+
+A nonquestion retry validates the current quiet policy before recovering its
+durable receipt. When quiet hours apply, it persists deferral on that receipt
+under the communication store lock, after checking for a content collision.
+Stable identity, timestamp and content remain unchanged. Existing deferral is
+never cleared by a later retry: morning publication retains ownership of the
+pending notice and its exactly-once inbox marker. Typed questions keep their
+immediate path and existing action authority. This changes no host transport,
+schedule or root routing policy.
