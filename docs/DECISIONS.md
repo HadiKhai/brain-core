@@ -2115,3 +2115,13 @@ the browser engine and this conservative timing definition. Audit every view, pa
 lists, compare graph entity identities, and inspect every project's jobs, tasks and threads.
 Preserve unavailable readings as unavailable. A synthetic acceptance result qualifies its
 recorded data envelope, not arbitrary production sizes or the integrated release gate.
+
+Completeness compares each request and coordinator step as a nonempty display record,
+including project context and the job title where shown. Require exact record inventories
+and reject blank, duplicate, ambiguous or substituted rows. Compare every overview KPI
+label and value with the backend, retaining unavailable machine readings as unavailable.
+Challenge the same oracle with blanked request/step bodies, repeated/substituted rows
+and altered KPI values; all negative controls must be rejected before acceptance passes.
+For first-data paint, derive the oracle from the actual HTTP response delivered to the
+app. Do not add a second state request to the measured navigation merely to obtain
+expected values; that changes the workload instead of observing the displayed reading.

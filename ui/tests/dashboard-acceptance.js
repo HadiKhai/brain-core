@@ -1,8 +1,8 @@
 // Evaluate this function in a browser on the actual authenticated brain ui URL.
 // It never injects state, intercepts requests, or changes backend records.
-async function dashboardAcceptance(mode = 'views') {
+async function dashboardAcceptance(mode = 'views', model, oracle, deliveredReading) {
   const check = (value, message) => { if (!value) throw Error(message); };
-  const normalize = text => String(text).replace(/\s+/g, ' ').trim();
+  const normalize = text => String(text ?? '').replace(/\s+/g, ' ').trim();
   const tick = () => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
   const settle = () => new Promise(resolve => setTimeout(resolve, 20));
   const wait = async predicate => {
@@ -16,21 +16,31 @@ async function dashboardAcceptance(mode = 'views') {
   check(!window.__STATE__, 'Injected snapshots cannot qualify serving acceptance');
   const key = new URLSearchParams(location.search).get('k');
   check(key, 'Use the authenticated app URL');
+  check(model && oracle, 'Load the source display model and strict oracle');
+  let state;
+  if (mode === 'first-reading') {
+    check(deliveredReading?.brain && Array.isArray(deliveredReading.nodes), 'Observe the app HTTP reading before measuring paint');
+    state = deliveredReading;
+  } else {
+    const response = await fetch('/api/state?k=' + encodeURIComponent(key));
+    check(response.ok, 'Real backend state unavailable');
+    state = await response.json();
+  }
   if (mode === 'first-reading') {
     await wait(() => {
       const page = document.querySelector('[data-page="overview"]:not([hidden])');
-      return page?.innerText.includes('Choose notebook cover 00?') && page.querySelectorAll('[data-kpi]').length === 5;
+      if (!page?.innerText.includes('Choose notebook cover 00?')) return false;
+      try { oracle.compareOverview(state, oracle.renderedOverview(page)); return true; }
+      catch { return false; }
     });
     await tick(); // A second animation frame bounds the preceding DOM's first paint.
     const upperBoundMs = performance.now();
     check(upperBoundMs < 2000, 'First real data paint exceeded two seconds');
     return { domFirstDataPaintUpperBoundMs: upperBoundMs,
       paint: performance.getEntriesByType('paint').map(entry => ({ name: entry.name, ms: entry.startTime })),
+      overviewKpis: oracle.renderedOverview(document.querySelector('[data-page="overview"]')),
       actualURL: location.origin + location.pathname, snapshotInjected: false };
   }
-  const response = await fetch('/api/state?k=' + encodeURIComponent(key));
-  check(response.ok, 'Real backend state unavailable');
-  const state = await response.json();
   check(!state.brain.filling_in && state.spend?.complete === true, 'Metadata and usage must both be complete');
   check(state.spend.read === state.spend.files && state.spend.read > 0, 'All real transcripts must be counted');
   const route = async (view, extra = '') => {
@@ -39,17 +49,39 @@ async function dashboardAcceptance(mode = 'views') {
     await settle();
     return document.querySelector(`[data-page="${view}"]:not([hidden])`);
   };
-  const pages = async (root, expected, rowSelector) => {
+  const negativeControls = [], rowEvidence = {};
+  const reject = (name, operation, reason) => {
+    let error;
+    try { operation(); } catch (failure) { error = failure; }
+    check(error && reason.test(error.message), 'Negative control was not rejected: ' + name);
+    negativeControls.push(name);
+  };
+  const pages = async (root, expected, rowSelector, projector, name, run) => {
     const frame = root.querySelector('[data-list-frame]');
     check(frame, 'Missing real data list');
     const button = label => [...frame.querySelectorAll('button')].find(b => b.textContent.trim() === label);
     const first = button('First');
     if (first && !first.disabled) { first.click(); await settle(); }
-    let count = 0, texts = [];
+    let count = 0, texts = [], records = [];
     for (let i = 0; i < 200; i++) {
       const rows = [...frame.querySelectorAll(rowSelector)];
       count += rows.length;
       texts.push(...rows.map(row => normalize(row.innerText)));
+      if (projector) {
+        const actual = rows.map(projector);
+        records.push(...actual);
+        if (i === 0 && rows.length >= 2) {
+          const blank = rows[0].cloneNode(true);
+          blank.querySelector('.row-text').textContent = '';
+          reject(`${run}/blank-${name}`, () => oracle.compareRows([actual[0]], [projector(blank)]), /Blank display body/);
+          reject(`${run}/duplicate-${name}`, () => oracle.compareRows(actual.slice(0, 2), [actual[0], actual[0]]), /Duplicate/);
+          const substituted = rows[0].cloneNode(true);
+          const context = name === 'step' && substituted.querySelector('.row-line > small')
+            ? '.row-line > small' : '.row-line > strong';
+          substituted.querySelector(context).textContent = 'Unrelated notebook';
+          reject(`${run}/substituted-${name}-project`, () => oracle.compareRows([actual[0]], [projector(substituted)]), /substituted/);
+        }
+      }
       const next = button('Next');
       check(next, 'Missing pagination control');
       if (next.disabled) break;
@@ -58,30 +90,37 @@ async function dashboardAcceptance(mode = 'views') {
       await wait(() => frame.querySelector('.page-position').textContent !== position);
     }
     check(count === expected.length, `Rendered ${count} rows; backend has ${expected.length}`);
+    if (projector) {
+      oracle.compareRows(expected, records);
+      if (run === 0) rowEvidence[name] = { expected, rendered: records };
+      return count;
+    }
     const joined = texts.join(' ');
-    for (const text of expected) check(joined.includes(normalize(text)), 'Backend value absent from paginated DOM: ' + text);
+    for (const text of expected) {
+      check(normalize(text), 'Blank expected display value');
+      check(joined.includes(normalize(text)), 'Backend value absent from paginated DOM: ' + text);
+    }
     return count;
   };
   const runs = [];
   for (let run = 0; run < 3; run++) {
     const views = {};
     let root = await route('overview');
-    check(root.querySelectorAll('[data-kpi]').length === 5, 'Overview KPIs missing');
+    oracle.compareOverview(state, oracle.renderedOverview(root));
     check(root.innerText.includes('Choose notebook cover 00?'), 'Overview lacks real inbox data');
     views.overview = 5;
+    views.overviewKpis = oracle.renderedOverview(root);
+    const changed = root.cloneNode(true);
+    changed.querySelector('.kpi-value').textContent = '999999';
+    reject(`${run}/alter-kpi`, () => oracle.compareOverview(state, oracle.renderedOverview(changed)), /Wrong overview KPI/);
     root = await route('projects');
     views.projects = await pages(root, state.nodes.filter(n => !n.archived).map(n => n.title), 'tbody tr');
     root = await route('inbox');
     // Backend needs have shared IDs across due/inbox; the UI intentionally deduplicates them.
-    const unique = rows => [...new Map(rows.filter(row => !row.informational && !['job', 'advice'].includes(row.kind))
-      .map(row => [row.id || row.kind + ':' + row.node + ':' + row.text, row])).values()];
-    const inbox = unique(state.inbox);
-    const q = inbox.map(row => row.text.includes('Choose notebook cover') ? row.text.match(/Choose notebook cover \d+\?/)[0] : '');
-    views.inbox = await pages(root, q, '[data-item]');
-    const inboxIds = new Set(inbox.map(row => row.id));
+    const { inbox, due: steps } = model.needsView(state);
+    views.inbox = await pages(root, inbox.map(row => oracle.request(state, row)), '[data-item]', oracle.renderedRequest, 'request', run);
     root = await route('inbox', '&tab=due');
-    const steps = unique(state.due).filter(row => !inboxIds.has(row.id));
-    views.coordinatorSteps = await pages(root, steps.map(() => ''), '[data-item]');
+    views.coordinatorSteps = await pages(root, steps.map(row => oracle.step(state, row)), '[data-item]', oracle.renderedStep, 'step', run);
     root = await route('specialists');
     views.specialists = await pages(root, state.specialists.map(row => row.title), '[data-item]');
     root = await route('jobs');
@@ -137,6 +176,6 @@ async function dashboardAcceptance(mode = 'views') {
     runs.push(views);
   }
   await route('overview');
-  return { runs, allViewsComplete: true, actualURL: location.origin + location.pathname,
+  return { runs, negativeControls, rowEvidence, allViewsComplete: true, actualURL: location.origin + location.pathname,
     browser: navigator.userAgent, injectedSnapshot: false };
 }
