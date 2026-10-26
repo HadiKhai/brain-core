@@ -2218,3 +2218,22 @@ instance directory with independent Git, journal, index, registry and local
 state; only source files use the existing platform-specific clone optimization.
 Connections, EventViews and RoundTwo already opt in directly or through their
 base class, so their bootstrap paths require no additional change.
+
+
+## D40003: Resolve command-only handlers after CLI parsing
+
+The CLI used to import every command module and bind every handler before
+argparse selected a command. Keep the complete parser, its metadata from the
+owning modules, and shared dispatch/guard dependencies. Represent command-only
+handlers with a small CLI-local deferred reference, then resolve only the selected
+reference after parsing. Normal package-relative import returns the real module;
+attribute lookup returns its current handler. Do not cache functions or replace
+module objects, import loaders, fixture packages, or subprocess CLI execution.
+
+Resolution occurs before the existing scrub/scan/machine comparisons, writes
+classification, outward-link checks, instance lock and command-event context.
+Brain selection, instance-core reexecution, help, argument definitions and error
+handling retain their existing order. Shared imports remain eager where parser
+metadata or dispatch requires them; this change does not claim to eliminate that
+shared dependency graph. Contract controls cover unused modules during real
+launcher help and current patches on the real owning module.

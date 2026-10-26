@@ -51,6 +51,48 @@ class FixtureSetup(Scenario):
                                          if key == package or key.startswith(package + '.')])
         return module
 
+    def test_launcher_help_defers_command_only_modules(self):
+        script = """import runpy, sys
+sys.argv = [sys.argv[1], '--help']
+try:
+    runpy.run_path(sys.argv[0], run_name='__main__')
+except SystemExit as error:
+    assert error.code == 0, error.code
+else:
+    raise AssertionError('help did not exit through argparse')
+for name in ('diagnostics', 'full_gate', 'spec_run', 'train', 'dispatcher', 'scorecard'):
+    assert 'brain.' + name not in sys.modules, name
+"""
+        result = subprocess.run([sys.executable, '-B', '-c', script, str(CORE / 'bin/brain')],
+                                cwd=self.tmp, env=self.env, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        for command in ('diagnose', 'full-run', 'spec-run', 'train', 'dispatch', 'scorecard'):
+            self.assertIn(command, result.stdout)
+
+    def test_deferred_command_uses_real_module_and_current_patch(self):
+        loader = core_loader.SourceFileLoader('deferred_cli_fixture', str(CORE / 'bin/brain'))
+        module = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+        try:
+            loader.exec_module(module)
+            package = loader.package_name
+            cli = sys.modules[package + '.cli']
+            owner = sys.modules[package + '.diagnostics']
+            command = cli._Command('diagnostics', 'cmd_diagnose')
+            self.assertIs(command.resolve(), owner.cmd_diagnose)
+            args = argparse.Namespace()
+            with mock.patch.object(owner, 'cmd_diagnose', return_value='patched') as execute:
+                self.assertIs(command.resolve(), execute)
+                self.assertEqual(command(args), 'patched')
+                execute.assert_called_once_with(args)
+            self.assertIs(command.resolve(), owner.cmd_diagnose)
+            self.assertIs(sys.modules[package + '.diagnostics'], owner)
+        finally:
+            package = getattr(loader, 'package_name', None)
+            if package is not None:
+                for name in list(sys.modules):
+                    if name == package or name.startswith(package + '.'):
+                        del sys.modules[name]
+
     def test_compiled_source_reuses_code_but_executes_fresh_module_state(self):
         core, package = self.fixture_source()
         (package / 'state.py').write_text(
