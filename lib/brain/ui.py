@@ -771,10 +771,52 @@ class UISpend:
         return False
 
 
+class UIInputTree:
+    """Reuse directory listings, never file metadata or source contents."""
+    def __init__(self):
+        self.listings = {}
+
+    def paths(self, root, ignored_dirs=None, ignored_files=None):
+        ignored_dirs, ignored_files = ignored_dirs or {}, ignored_files or {}
+        paths, visited = {root}, set()
+
+        def visit(directory, top=False):
+            # os.walk does not descend through child directory links. Check again
+            # even for a cached child: replacement must not authorize traversal.
+            if not top and directory.is_symlink():
+                return
+            visited.add(directory)
+            stamp = UIInputs.stamp(directory)
+            old = self.listings.get(directory)
+            if old is None or old[0] != stamp:
+                try:
+                    with os.scandir(directory) as entries:
+                        dirs, files = [], []
+                        for entry in entries:
+                            (dirs if entry.is_dir() else files).append(directory / entry.name)
+                    old = (stamp, tuple(dirs), tuple(files))
+                    self.listings[directory] = old
+                except OSError:
+                    self.listings.pop(directory, None)
+                    return
+            dirs = [p for p in old[1] if p.name not in ignored_dirs.get(directory, ())]
+            paths.update(p for p in old[2] if p.name not in ignored_files.get(directory, ()))
+            paths.update(dirs)
+            for child in dirs:
+                visit(child)
+
+        visit(root, top=True)
+        for directory in list(self.listings):
+            if (directory == root or root in directory.parents) and directory not in visited:
+                del self.listings[directory]
+        return paths
+
+
 class UIInputs:
     """Metadata only: no transcript parsing, Git status, readiness hashes or cache writes per poll."""
     def __init__(self, inst):
         self.root = inst.root
+        self.inventory = UIInputTree()
         self.files = set()
         self.worker_path = self.root / '.brain/worker-runs.json'
         self.worker_stamp, self.worker_context_stamp = None, None
@@ -1033,9 +1075,7 @@ class UIInputs:
     def source_signature(self):
         paths = set()
         for root in self.source_trees:
-            paths.add(root)
-            for top, dirs, files in os.walk(root):
-                paths.update(Path(top) / name for name in [*dirs, *files])
+            paths.update(self.inventory.paths(root))
         return tuple(sorted(self.stamp(path) for path in paths))
 
     def worker_signature(self, rows):
@@ -1109,17 +1149,12 @@ class UIInputs:
         # Brain source and recorded aggregates matter. The installed core, object store,
         # machine sampler, locks and transcript-cache output are not dashboard inputs.
         for root in [self.root, *self.trees]:
-            paths.add(root)
-            for top, dirs, files in os.walk(root):
-                path = Path(top)
-                if path == self.root:
-                    dirs[:] = [d for d in dirs if d not in ('core', '.git')]
-                if path == self.root / '.brain':
-                    dirs[:] = [d for d in dirs if d not in ('spend', 'ui-cache', 'ui-servers')]
-                    files = [f for f in files if f not in ('machine.json', 'lock')]
-                dirs.sort()
-                paths.update(path / name for name in files)
-                paths.update(path / name for name in dirs if path / name != self.root / '.brain')
+            indexed = self.inventory.paths(root,
+                ignored_dirs={self.root: {'core', '.git'},
+                              self.root / '.brain': {'spend', 'ui-cache', 'ui-servers'}},
+                ignored_files={self.root / '.brain': {'machine.json', 'lock'}})
+            indexed.discard(self.root / '.brain')
+            paths.update(indexed)
         # Explicit look-back commands publish node aggregates; dashboard polls do not.
         paths.update((self.root / '.brain/spend/nodes').glob('*.json'))
         paths.discard(self.worker_path)

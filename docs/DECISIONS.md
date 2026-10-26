@@ -2087,3 +2087,16 @@ Changed inputs revoke completion before another slice; revoked access clears pri
 Private publication requires the held-directory atomic writer; without that capability the
 view continues without persistence. Cache failures are misses. Neither cache reuse nor a
 complete display is verification or landing evidence.
+
+## D28001: Reuse dashboard directory inventories without caching file stamps
+
+Keep a process-local inventory of each input directory, bound to its current identity,
+mode, link count and modification/change timestamps. Reuse its child names only while
+that binding is unchanged. Continue checking every known file's metadata on each reading,
+so in-place writes invalidate the reading even when parent directory timestamps do not
+change. Rescan changed directories and discard removed descendants. Do not descend through
+child directory symlinks or change the existing input exclusions.
+
+The index contains no source contents and writes no files. It does not replace source
+authorization, usage aggregation, private publication or the completion marker. Its reuse
+alone establishes neither complete warm performance nor browser paint timing.

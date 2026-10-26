@@ -945,6 +945,37 @@ class ExpandedUI(Scenario):
             with module.local_job_snapshot(values, keys):
                 self.assertEqual(module.local_job_state(node, 'job/merged', record)['tip'], '')
 
+    def test_input_tree_reuses_inventory_and_detects_nested_changes(self):
+        module = self.m._owners['UIInputs']
+        root = self.tmp / 'inputs'
+        nested = root / 'nested'
+        nested.mkdir(parents=True)
+        source = nested / 'source.md'
+        source.write_text('one')
+        tree = module.UIInputTree()
+        with mock.patch.object(module.os, 'scandir', wraps=os.scandir) as scan:
+            first = tree.paths(root)
+            scans = scan.call_count
+            self.assertEqual(tree.paths(root), first)
+            self.assertEqual(scan.call_count, scans)
+            old = module.UIInputs.stamp(source)
+            source.write_text('changed in place')
+            self.assertNotEqual(module.UIInputs.stamp(source), old)
+            added = nested / 'added.md'
+            added.write_text('new')
+            self.assertIn(added, tree.paths(root))
+            self.assertGreater(scan.call_count, scans)
+            source.unlink()
+            self.assertNotIn(source, tree.paths(root))
+            shutil.rmtree(nested)
+            self.assertNotIn(added, tree.paths(root))
+        outside = self.tmp / 'outside'
+        outside.mkdir()
+        (outside / 'private.md').write_text('outside')
+        nested.symlink_to(outside, target_is_directory=True)
+        self.assertIn(nested, tree.paths(root))
+        self.assertNotIn(nested / 'private.md', tree.paths(root))
+
     def test_input_discovery_scans_only_live_worktrees_and_reopens_on_ledger_change(self):
         module = self.m._owners['UIInputs']
         root = self.first_paint_root()
@@ -967,6 +998,46 @@ class ExpandedUI(Scenario):
             rows[:] = []
             with mock.patch.object(module._m_status, 'active_work', return_value=[['`job/closed-2`', 'thread', '-', 'working']]):
                 self.assertEqual(set(module.ui_live_worktrees(node)), {'job/closed-2'})
+
+    def test_indexed_inputs_preserve_full_walk_inventory_and_file_currentness(self):
+        module = self.m._owners['UIInputs']
+        root = self.first_paint_root()
+        inst = self.m.UIInstance(root)
+        inputs = module.UIInputs(inst)
+        sources = root / 'sessions'
+        nested = sources / 'nested'
+        nested.mkdir(parents=True)
+        source = nested / 'session.jsonl'
+        source.write_text('{}\n')
+        inputs.source_trees = [sources]
+
+        def full_walk(top, ignored_dirs=None, ignored_files=None):
+            paths = {top}
+            for directory, dirs, files in os.walk(top):
+                directory = Path(directory)
+                dirs[:] = [name for name in dirs if name not in (ignored_dirs or {}).get(directory, ())]
+                paths.update(directory / name for name in dirs)
+                paths.update(directory / name for name in files
+                             if name not in (ignored_files or {}).get(directory, ()))
+            return paths
+
+        def compare():
+            actual = inputs.signature(), inputs.source_signature()
+            with mock.patch.object(inputs.inventory, 'paths', side_effect=full_walk):
+                self.assertEqual(actual, (inputs.signature(), inputs.source_signature()))
+            return actual
+
+        before = compare()
+        parent_stamp = module.UIInputs.stamp(nested)
+        source.write_text('{"changed":true}\n')
+        self.assertEqual(module.UIInputs.stamp(nested), parent_stamp)
+        changed = compare()
+        self.assertNotEqual(before, changed, 'in-place writes must invalidate cached inventories')
+        (nested / 'new.jsonl').write_text('{}\n')
+        added = compare()
+        self.assertNotEqual(changed, added)
+        shutil.rmtree(nested)
+        self.assertNotEqual(added, compare())
 
     def test_legacy_server_ownership_requires_python_brain_ui_and_the_same_brain(self):
         # Cwd/argv cannot prove the selected instance: BRAIN_ROOT can override cwd,
