@@ -435,7 +435,9 @@ elif sys.argv[1] == 'ui':
             (dest / 'note').write_text('private mutation')
             self.assertEqual('original', (dest / 'second').read_text())
             self.assertEqual(original, rehearsal.snapshot(source))
-        self.assertFalse(list(self.tmp.glob('.rehearse-copy-*')))
+        for receipt in self.tmp.glob('.rehearse-copy-*/cleanup.json'):
+            self.assertEqual('removed', json.loads(receipt.read_text())['state'])
+            self.assertFalse((receipt.parent / 'bulk').exists())
 
     def test_macos_attempts_copy_on_write_then_falls_back_without_live_writes(self):
         source = self.repo(self.tmp / 'source', {'note': 'original'})
@@ -451,14 +453,17 @@ elif sys.argv[1] == 'ui':
             (partial / 'incomplete').write_text('partial clone')
             return subprocess.CompletedProcess(args, 1, b'', b'unsupported')
         with mock.patch.object(rehearsal.sys, 'platform', 'darwin'), \
-                mock.patch.object(rehearsal.subprocess, 'run', side_effect=unavailable) as cp:
+                mock.patch.object(rehearsal._m_rehearse_external, 'owned_run', side_effect=unavailable) as cp:
             rehearsal.copy_tree(source, dest)
         cp.assert_called_once()
         self.assertFalse((dest / 'incomplete').exists())
         self.assertEqual('original', (dest / 'alias').read_text())
         (dest / 'note').write_text('candidate write')
         self.assertEqual(original, rehearsal.snapshot(source))
-        self.assertEqual([dest], list(dest.parent.iterdir()))
+        receipts = list(dest.parent.glob('.rehearse-copy-*/cleanup.json'))
+        self.assertEqual(1, len(receipts))
+        self.assertEqual('removed', json.loads(receipts[0].read_text())['state'])
+        self.assertEqual({dest, receipts[0].parent}, set(dest.parent.iterdir()))
 
     def test_existing_destination_is_never_removed(self):
         source = self.repo(self.tmp / 'source')

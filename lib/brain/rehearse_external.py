@@ -1,7 +1,173 @@
 """Explicit machine-local external snapshots for optional isolated comparisons."""
 import copy
+import contextvars
+import json
 import os
+import signal
+import stat
+import subprocess
+import tempfile
+import threading
+import sys
+import uuid
 from pathlib import Path
+
+
+ACTIVE_COPIES = contextvars.ContextVar('rehearsal_owned_copies', default=None)
+
+
+class OwnedCopies:
+    """Exact-owned copy and process evidence for native retention cleanup.
+
+    Never adopt a preexisting path or recover a capability from a receipt. The
+    receipt is evidence, not deletion authority. Unknown processes retain bytes.
+    """
+    def __init__(self, parent=None, prefix='brain-rehearse-'):
+        if parent is not None:
+            parent = Path(parent).absolute()
+            if any(p.is_symlink() for p in (parent, *parent.parents)):
+                raise ValueError('linked owned-copy parent refused')
+        self.root = Path(tempfile.mkdtemp(prefix=prefix, dir=parent)).resolve()
+        self.bulk = self.root / 'bulk'
+        self.bulk.mkdir(mode=0o700)
+        self.pid = os.getpid()
+        self.run = uuid.uuid4().hex
+        self.identities = [self.identity(p) for p in (self.root, self.bulk)]
+        self.processes = []
+        self.signals = []
+        self.unknown = False
+        self.retirement_ready = False
+        self.receipt = dict(version=1, run=self.run, owner_pid=self.pid,
+                            directories=self.identities, state='running')
+        self.publish()
+
+    @staticmethod
+    def identity(path):
+        value = path.lstat()
+        if (not stat.S_ISDIR(value.st_mode) or value.st_uid != os.getuid()
+                or stat.S_IMODE(value.st_mode) != 0o700):
+            raise ValueError('owned copy is not a directory')
+        return [value.st_dev, value.st_ino]
+
+    def publish(self):
+        from .common import atomic_write
+        atomic_write(self.root / 'cleanup.json', json.dumps(self.receipt, sort_keys=True) + '\n')
+
+    def record(self, **facts):
+        if not self.safe():
+            self.unknown = True
+            raise ValueError('owned copy identity changed')
+        self.receipt.update(facts)
+        self.publish()
+
+    def safe(self):
+        try:
+            return (os.getpid() == self.pid and self.bulk.parent == self.root
+                    and not any(p.is_symlink() for p in (self.root, *self.root.parents, self.bulk))
+                    and self.identities == [self.identity(p) for p in (self.root, self.bulk)]
+                    and not (self.root / 'cleanup.json').is_symlink()
+                    and json.loads((self.root / 'cleanup.json').read_text()) == self.receipt)
+        except (OSError, ValueError):
+            return False
+
+    def processes_ended(self):
+        if self.unknown:
+            return False
+        for process in self.processes:
+            if process.poll() is None:
+                return False
+            try:
+                os.killpg(process.pid, 0)
+            except ProcessLookupError:
+                continue
+            except OSError:
+                return False
+            return False  # descendants or a reused group: retain, never signal here
+        return True
+
+    def __enter__(self):
+        self.previous_term = None
+        if ACTIVE_COPIES.get() is None and threading.current_thread() is threading.main_thread():
+            self.previous_term = signal.getsignal(signal.SIGTERM)
+            def cancel(signum, frame):
+                raise KeyboardInterrupt
+            signal.signal(signal.SIGTERM, cancel)
+        self.token = ACTIVE_COPIES.set(self)
+        from .rehearse import retained_temporary_directory
+        self.native_scope = retained_temporary_directory(copies=self)
+        self.native_scope.__enter__()
+        return self
+
+    def __exit__(self, kind, error, traceback):
+        try:
+            try:
+                self.retire(kind)
+            except BaseException:
+                self.native_scope.__exit__(*sys.exc_info())
+                raise
+            return self.native_scope.__exit__(kind, error, traceback)
+        finally:
+            if self.previous_term is not None:
+                signal.signal(signal.SIGTERM, self.previous_term)
+
+    def retire(self, kind):
+        ACTIVE_COPIES.reset(self.token)
+        owned = self.safe()
+        # Bulk owns evidence only. Native retention alone decides deletion.
+        self.receipt.update(terminal='success' if kind is None else kind.__name__,
+                            signal_audit=self.signals,
+                            processes=[dict(pid=p.pid, returncode=p.poll()) for p in self.processes])
+        ended = self.processes_ended()
+        self.receipt.update(state='retained', processes_ended=ended)
+        parent = ACTIVE_COPIES.get()
+        try:
+            if owned:
+                self.publish()
+                self.retirement_ready = ended and self.safe()
+            if not self.retirement_ready:
+                self.unknown = True
+                if parent is not None:
+                    parent.unknown = True
+        except BaseException:
+            self.unknown = True
+            if parent is not None:
+                parent.unknown = True
+            raise
+        return False
+
+
+def owned_run(args, *, capture_output=False, text=False, env=None, timeout=None, check=False):
+    """Supervise only processes started for the current copy operation."""
+    owner = ACTIVE_COPIES.get()
+    if owner is None:
+        return subprocess.run(args, capture_output=capture_output, text=text, env=env,
+                              timeout=timeout, check=check)
+    process = subprocess.Popen(args, env=env, text=text, start_new_session=True,
+                               stdout=subprocess.PIPE if capture_output else None,
+                               stderr=subprocess.PIPE if capture_output else None)
+    owner.processes.append(process)
+    try:
+        out, err = process.communicate(timeout=timeout)
+    finally:
+        audit = dict(pid=process.pid, pgid=process.pid, signal=int(signal.SIGKILL), result='attempted')
+        owner.signals.append(audit)
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+            audit['result'] = 'sent'
+        except ProcessLookupError:
+            audit['result'] = 'absent'
+        except OSError:
+            audit['result'] = 'denied-or-unknown'
+            owner.unknown = True
+        if not owner.unknown:
+            process.wait()
+    result = subprocess.CompletedProcess(args, process.returncode, out, err)
+    if owner.unknown:
+        from .rehearse import RehearsalError
+        raise RehearsalError('owned copy process cleanup unknown', code='owned-copy-process-cleanup-unknown')
+    if check:
+        result.check_returncode()
+    return result
 
 
 def freeze_declared(inst, directory):

@@ -1,6 +1,11 @@
 """Declared snapshots use fabricated repositories only; no rehearsal is run."""
 import json
 import copy
+import os
+import subprocess
+import tempfile
+import unittest
+from unittest import mock
 from pathlib import Path
 import sys
 from pathlib import Path
@@ -8,6 +13,231 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'lib'))
 from brain import instance, rehearse, rehearse_external
 from scenario import Scenario
 from unittest import mock
+
+
+class OwnedCopyLifecycle(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.parent = Path(self.temp.name).resolve()
+
+    def test_success_failure_timeout_and_cancel_remove_only_owned_bulk(self):
+        foreign = self.parent / 'foreign'
+        foreign.mkdir()
+        (foreign / 'keep').write_text('unowned')
+        for error in (None, ValueError('private-canary'),
+                      subprocess.TimeoutExpired(['private-canary'], 1), KeyboardInterrupt()):
+            with self.subTest(terminal=type(error).__name__):
+                owner = rehearse_external.OwnedCopies(parent=self.parent)
+                try:
+                    with owner:
+                        (owner.bulk / 'copy').write_text('private-canary')
+                        # Even an internal link cannot authorize target deletion.
+                        (owner.bulk / 'outside').symlink_to(foreign, target_is_directory=True)
+                        if error is not None:
+                            raise error
+                except BaseException as caught:
+                    self.assertIs(caught, error)
+                self.assertFalse(owner.bulk.exists())
+                receipt = (owner.root / 'cleanup.json').read_text()
+                self.assertEqual('removed', json.loads(receipt)['state'])
+                self.assertNotIn('private-canary', receipt)
+                self.assertEqual(['cleanup.json'], [p.name for p in owner.root.iterdir()])
+                self.assertEqual('unowned', (foreign / 'keep').read_text())
+
+    def test_live_denied_or_unknown_process_retains_and_proven_absence_removes(self):
+        for code, group in ((None, None), (0, None), (0, PermissionError()),
+                            (0, ProcessLookupError())):
+            with self.subTest(code=code, group=type(group).__name__):
+                owner = rehearse_external.OwnedCopies(parent=self.parent)
+                process = mock.Mock(pid=424242)
+                process.poll.return_value = code
+                owner.processes.append(process)
+                with mock.patch.object(rehearse_external.os, 'killpg', side_effect=group):
+                    with owner:
+                        (owner.bulk / 'keep').touch()
+                removed = code == 0 and isinstance(group, ProcessLookupError)
+                self.assertEqual(not removed, owner.bulk.exists())
+                self.assertEqual(removed, owner.receipt['processes_ended'])
+
+    def test_missing_changed_owner_replaced_root_and_linked_bulk_retain(self):
+        for change in ('missing', 'owner', 'pid', 'root', 'link'):
+            owner = rehearse_external.OwnedCopies(parent=self.parent)
+            with self.subTest(change=change), owner:
+                (owner.bulk / 'keep').write_text('retained')
+                if change == 'missing':
+                    (owner.root / 'cleanup.json').unlink()
+                elif change == 'owner':
+                    (owner.root / 'cleanup.json').write_text('{}')
+                elif change == 'pid':
+                    owner.pid += 1
+                elif change == 'root':
+                    owner.root.rename(owner.root.with_name(owner.root.name + '-moved'))
+                    owner.root.mkdir()
+                    (owner.root / 'bulk').mkdir()
+                else:
+                    moved = owner.root / 'moved'
+                    owner.bulk.rename(moved)
+                    owner.bulk.symlink_to(moved, target_is_directory=True)
+            self.assertTrue(owner.bulk.exists())
+
+    def test_inner_uncertainty_prevents_outer_deletion(self):
+        with rehearse_external.OwnedCopies(parent=self.parent) as outer:
+            with rehearse_external.OwnedCopies(parent=outer.bulk) as inner:
+                inner.unknown = True
+        self.assertTrue(inner.bulk.exists())
+        self.assertTrue(outer.bulk.exists())
+
+    def test_identity_change_during_terminal_publication_retains_both_copies(self):
+        # All replacements and sentinels belong to this disposable fixture.
+        # Publication/process checks separate the initial proof from deletion.
+        for changed in ('bulk', 'root', 'receipt'):
+            with self.subTest(changed=changed):
+                with rehearse_external.OwnedCopies(parent=self.parent) as outer:
+                    owner = rehearse_external.OwnedCopies(parent=outer.bulk)
+                    displaced = owner.root.with_name(owner.root.name + '-displaced')
+                    publish = owner.publish
+
+                    fired = False
+                    def replace_after_publish():
+                        nonlocal fired
+                        publish()
+                        if fired:
+                            return
+                        fired = True
+                        if changed == 'bulk':
+                            owner.bulk.rename(displaced)
+                            owner.bulk.mkdir(mode=0o700)
+                        elif changed == 'root':
+                            owner.root.rename(displaced)
+                            owner.root.mkdir(mode=0o700)
+                            owner.bulk.mkdir(mode=0o700)
+                        else:
+                            (owner.root / 'cleanup.json').write_text('{}')
+                        (owner.bulk / 'replacement').write_text('fixture sentinel')
+
+                    with mock.patch.object(owner, 'publish', side_effect=replace_after_publish), owner:
+                        (owner.bulk / 'original').write_text('fixture copy')
+                    self.assertTrue(owner.bulk.exists())
+                    self.assertEqual('fixture sentinel', (owner.bulk / 'replacement').read_text())
+                    if changed != 'receipt':
+                        original = displaced / ('bulk/original' if changed == 'root' else 'original')
+                        self.assertEqual('fixture copy', original.read_text())
+                    self.assertNotEqual('removed', owner.receipt['state'])
+                    self.assertTrue(outer.unknown)
+                self.assertTrue(outer.bulk.exists())
+
+    def test_native_retention_unknown_or_incomplete_preserves_owned_bulk(self):
+        for saved, incomplete in ((None, False), (False, False), (True, True)):
+            with self.subTest(saved=saved, incomplete=incomplete):
+                owner = rehearse_external.OwnedCopies(parent=self.parent)
+                retain = mock.Mock(incomplete=incomplete)
+                retain.checkpoint.return_value = saved
+                with mock.patch.object(rehearse, 'NativeRetention', return_value=retain), owner:
+                    (owner.bulk / 'keep').write_text('fixture bytes')
+                self.assertEqual('fixture bytes', (owner.bulk / 'keep').read_text())
+                self.assertEqual('retained', owner.receipt['state'])
+                self.assertIn('refusal', owner.receipt)
+
+    def test_native_terminal_publication_failure_restores_owned_bulk(self):
+        with rehearse_external.OwnedCopies(parent=self.parent) as outer:
+            owner = rehearse_external.OwnedCopies(parent=outer.bulk)
+            publish = owner.publish
+            calls = 0
+            def fail_terminal_publication():
+                nonlocal calls
+                calls += 1
+                if calls == 2:
+                    raise OSError('fixture terminal publication failure')
+                publish()
+            with mock.patch.object(owner, 'publish', side_effect=fail_terminal_publication):
+                with self.assertRaises(OSError), owner:
+                    (owner.bulk / 'keep').write_text('fixture bytes')
+            self.assertEqual('fixture bytes', (owner.bulk / 'keep').read_text())
+            self.assertTrue(outer.unknown)
+        self.assertTrue(outer.bulk.exists())
+
+    def test_linked_parent_refuses_before_allocation(self):
+        link = self.parent / 'alias'
+        link.symlink_to(self.parent, target_is_directory=True)
+        with self.assertRaises(ValueError):
+            rehearse_external.OwnedCopies(parent=link)
+        self.assertEqual([link], list(self.parent.iterdir()))
+
+    def test_owned_subprocess_timeout_and_cancel_reap_before_cleanup(self):
+        for error in (subprocess.TimeoutExpired(['private-canary'], 1), KeyboardInterrupt()):
+            owner = rehearse_external.OwnedCopies(parent=self.parent)
+            process = mock.Mock(pid=424242, returncode=-9)
+            process.communicate.side_effect = error
+            process.poll.return_value = -9
+            kill_sent = False
+            def kill_owned_group(pgid, sig):
+                nonlocal kill_sent
+                self.assertEqual(process.pid, pgid)
+                if not kill_sent:
+                    self.assertEqual(rehearse_external.signal.SIGKILL, sig)
+                    kill_sent = True
+                    return
+                self.assertEqual(0, sig)
+                raise ProcessLookupError()
+            with mock.patch.object(rehearse_external.subprocess, 'Popen', return_value=process) as popen, \
+                    mock.patch.object(rehearse_external.os, 'killpg', side_effect=kill_owned_group):
+                with self.assertRaises(type(error)), owner:
+                    rehearse_external.owned_run(['private-canary'], capture_output=True, timeout=1)
+            self.assertTrue(popen.call_args.kwargs['start_new_session'])
+            process.wait.assert_called_once()
+            self.assertFalse(owner.bulk.exists())
+            self.assertNotIn('private-canary', (owner.root / 'cleanup.json').read_text())
+
+    def test_owned_subprocess_success_failure_and_denied_stop(self):
+        for code in (0, 1):
+            owner = rehearse_external.OwnedCopies(parent=self.parent)
+            process = mock.Mock(pid=424242, returncode=code)
+            process.communicate.return_value = (b'private-canary', b'')
+            process.poll.return_value = code
+            kill_sent = False
+            def kill_owned_group(pgid, sig):
+                nonlocal kill_sent
+                self.assertEqual(process.pid, pgid)
+                if not kill_sent:
+                    self.assertEqual(rehearse_external.signal.SIGKILL, sig)
+                    kill_sent = True
+                    return
+                self.assertEqual(0, sig)
+                raise ProcessLookupError()
+            with mock.patch.object(rehearse_external.subprocess, 'Popen', return_value=process), \
+                    mock.patch.object(rehearse_external.os, 'killpg', side_effect=kill_owned_group):
+                with owner:
+                    result = rehearse_external.owned_run(['example'], capture_output=True)
+                    self.assertEqual(code, result.returncode)
+            self.assertFalse(owner.bulk.exists())
+        denied = rehearse_external.OwnedCopies(parent=self.parent)
+        with mock.patch.object(rehearse_external.subprocess, 'Popen', return_value=process), \
+                mock.patch.object(rehearse_external.os, 'killpg', side_effect=PermissionError) as kill:
+            with self.assertRaises(rehearse.RehearsalError), denied:
+                rehearse_external.owned_run(['example'], capture_output=True)
+        kill.assert_called_once()
+        self.assertTrue(denied.bulk.exists())
+
+    def test_failed_evidence_sync_keeps_bulk_and_blocks_outer_cleanup(self):
+        with rehearse_external.OwnedCopies(parent=self.parent) as outer:
+            inner = rehearse_external.OwnedCopies(parent=outer.bulk)
+            with mock.patch.object(inner, 'publish', side_effect=OSError('sync failed')):
+                with self.assertRaises(OSError), inner:
+                    (inner.bulk / 'keep').touch()
+        self.assertTrue(inner.bulk.exists())
+        self.assertTrue(outer.bulk.exists())
+
+    def test_term_cancellation_unwinds_cleanup_and_restores_previous_handler(self):
+        previous = mock.Mock()
+        owner = rehearse_external.OwnedCopies(parent=self.parent)
+        with mock.patch.object(rehearse_external.signal, 'getsignal', return_value=previous), \
+                mock.patch.object(rehearse_external.signal, 'signal') as install:
+            with self.assertRaises(KeyboardInterrupt), owner:
+                handler = install.call_args.args[1]
+                handler(rehearse_external.signal.SIGTERM, None)
+        install.assert_called_with(rehearse_external.signal.SIGTERM, previous)
+        self.assertFalse(owner.bulk.exists())
 
 
 class DeclaredExternalSnapshot(Scenario):
@@ -55,6 +285,22 @@ class DeclaredExternalSnapshot(Scenario):
         self.assertIsNot(captured, inst)
         self.assertNotEqual(captured.node('app')['home_path'], home)
         self.assertNotEqual(captured.local['nodes']['app']['worktrees']['job/sample']['path'], str(tree))
+    def test_declared_clone_scope_removes_success_and_partial_failure_copies(self):
+        inst, home, tree = self.fixture()
+        original = rehearse.snapshot(home)
+        with rehearse_external.OwnedCopies(parent=self.tmp) as owner:
+            private = rehearse_external.freeze_declared(inst, owner.bulk / 'captured')
+            self.assertTrue(private.node('app')['home_path'].is_dir())
+        self.assertFalse(owner.bulk.exists())
+        def fail(source, target):
+            target.mkdir()
+            (target / 'partial').write_text('fabricated private bytes')
+            raise OSError('fabricated copy failure')
+        with rehearse_external.OwnedCopies(parent=self.tmp) as failed:
+            with mock.patch.object(rehearse, 'copy_tree', side_effect=fail), self.assertRaises(OSError):
+                rehearse_external.freeze_declared(inst, failed.bulk / 'captured')
+        self.assertFalse(failed.bulk.exists())
+        self.assertEqual(original, rehearse.snapshot(home))
 
     def fixture(self):
         root = self.init('demo')

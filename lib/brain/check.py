@@ -83,6 +83,8 @@ def collect_problems(inst):
     tdir = _m_common.CORE / "templates" / "node"
     template_files = [f.relative_to(tdir) for f in tdir.rglob("*") if f.is_file()]
     nodes = inst.nodes()
+    from . import reports as _m_reports
+    warnings.extend(_m_reports.report_size_warnings(inst, nodes))
     for n in nodes:
         fm, nid = n["fm"], n["id"]
         from . import freshness as _m_freshness
