@@ -290,9 +290,11 @@ def cmd_handback(a):
         return publish_handback(a)
     finally:
         # Terminal publication retires before returning (including a not-ready exit).
-        # Exceptions retire only this attempt, never a concurrent replacement.
+        # Queued exceptions retain the dispatched run and its attempt for explicit
+        # reconciliation. Losing its capability must not publish interruption.
         try:
-            _m_attempts.finish_attempt(inst, n, row, identity, 'interrupted')
+            if not getattr(a, '_queue_request', None):
+                _m_attempts.finish_attempt(inst, n, row, identity, 'interrupted')
         except (OSError, ValueError):
             pass  # unreadable/ambiguous evidence stays unknown; never overwrite it
         finally:
@@ -365,11 +367,6 @@ def publish_handback(a):
             detail = _m_guard.redact('; '.join(reasons), _m_guard.never_terms(n))
             _m_common.die('head, base, inputs or attempt changed; no stale handback published' + ('; ' + detail if detail else ''))
         request = getattr(a, '_queue_request', None)
-        if request:
-            from . import handback_queue as _m_queue
-            claim = _m_queue.read_queue_request(n, request['id'])
-            if claim.get('state') != 'running' or claim.get('lease') != request['lease']:
-                _m_common.die('handback request lease changed; no duplicate publication')
         if packet and packet.get("version") == 1 and "integration_base" not in packet:
             preflight, head, main = _m_verify.ready_preflight(n, a.branch)
             if not preflight and packet.get("head") == head and _m_verify.packet_main_matches(n, packet, main):
@@ -438,15 +435,19 @@ def publish_handback(a):
             data["first_ready"] = first
         if study:
             data.update(ready_required=False, review_rounds=a.reviews)
+        if request:
+            from . import handback_queue as _m_queue
+            claim = _m_queue.queue_publication_context(n, request)
+            if (claim['job_key'] != job_key(current) or claim['attempt_id'] != attempt['id']
+                    or claim['binding'] != attempt['binding'] or attempt.get('request_id') != claim['id']):
+                _m_common.die('queued job or attempt changed; preserve running evidence')
+            if not _m_queue.queue_terminal(inst, n, claim['id'], claim['lease'], 'terminal'):
+                _m_common.die('queue publication refused; preserve running evidence')
         f.parent.mkdir(exist_ok=True)
         from . import events
         events.write_record(inst, n, "handback", job_key(row), json.dumps(data, indent=2) + "\n")
         _m_common.touch(f)
         _m_attempts.finish_attempt(inst, n, current, a._attempt_id, 'terminal')
-        request = getattr(a, '_queue_request', None)
-        if request:
-            from . import handback_queue as _m_queue
-            _m_queue.queue_terminal(inst, n, request['id'], request['lease'], 'terminal')
         question_created = False
         if inbox_question:
             wake_id = data["wake_id"]

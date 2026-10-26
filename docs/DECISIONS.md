@@ -1,5 +1,21 @@
 # Code decisions
 
+## D31004: Fence queued terminal publication with the live foreground capability
+
+Final queued publication and invalidation reread the job, attempt and dispatched
+request under the instance writer lock. They validate the current host/run and
+the original process-owned lease descriptor/inode before terminal mutation. A
+False queue terminal result refuses handback, attempt retirement and wake writes.
+Queued exceptions retain running reconciliation evidence and never replace or
+remove an unknown lease; unqueued attempt cleanup retains its existing behavior.
+
+The queue terminal transition precedes handback/attempt publication under that
+lock. These remain separate durable file writes: a later storage failure can
+leave partial evidence requiring explicit reconciliation. This does not provide
+a multi-file transaction, an external namespace lock, descendant shutdown proof
+or a native host settlement capability. Existing exact-publication recovery and
+its quiescence/host/binding predicates remain unchanged.
+
 ## D28002: Preserve the publication error when temporary cleanup fails
 
 Before replacement, a failed atomic write removes only its captured temporary

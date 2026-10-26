@@ -215,6 +215,27 @@ def queue_terminal(inst, n, identity, lease, state):
         return True
 
 
+def queue_publication_context(n, request):
+    """Re-read the exact dispatched claim under the caller's instance writer lock.
+
+    A token or copied request is insufficient: the current process must still
+    hold the original lease inode. Refusal leaves reconciliation evidence intact.
+    """
+    data = read_queue_request(n, request['id'])
+    queue_owned_context(n, data)
+    claimed = QUEUE_LEASE.get()[3]
+    fields = ('id', 'node', 'job_key', 'attempt_id', 'binding', 'args', 'lease', 'owner')
+    run, host = data.get('run', {}), _m_lifecycle_identity.lifecycle_host_identity()
+    if (any(data.get(key) != request.get(key) or data.get(key) != claimed.get(key) for key in fields)
+            or data['state'] != 'running' or data.get('node') != n['id']
+            or data['args'].get('id') != n['id'] or not host
+            or type(run.get('version')) is not int or run.get('version') != 1
+            or run.get('id') != data['lease'] or run.get('phase') != 'dispatched'
+            or run.get('host') != host or run.get('host') != claimed.get('run', {}).get('host')):
+        raise ValueError('queue publication ownership changed; preserve running evidence')
+    return data
+
+
 def queue_projection(n, identity, strict=False):
     try:
         data = read_queue_request(n, identity)
@@ -244,19 +265,24 @@ def run_queue_once(inst, n, identity=None, recover=False):
         if request is None:
             return identity  # publication already exists; never replay its wake
         queue_dispatch(inst, n, request)
-        row = _m_jobs.open_job(_m_jobs.read_jobs(n) or [], request['args'].get('branch'))
-        attempt = _m_attempts.current_attempt(n, row) if row else None
-        if (request.get('node') != n['id'] or request['args'].get('id') != n['id']
-                or not row or _m_jobs.job_key(row) != request['job_key'] or not attempt
-                or attempt['id'] != request['attempt_id'] or attempt['state'] != 'queued'
-                or request['binding'] != attempt['binding']
-                or not _m_attempts.attempt_matches(n, row, attempt)):
-            queue_terminal(inst, n, identity, request['lease'], 'invalidated')
-            if row:
-                _m_attempts.finish_attempt(inst, n, row, request['attempt_id'], 'invalidated')
-            return identity
+        with _m_instance.brain_lock(inst):
+            inst = _m_instance.Instance(inst.root)
+            n = inst.node(n['id'])
+            claim = queue_publication_context(n, request)
+            row = _m_jobs.open_job(_m_jobs.read_jobs(n) or [], claim['args'].get('branch'))
+            attempt = _m_attempts.current_attempt(n, row) if row else None
+            if (not row or _m_jobs.job_key(row) != claim['job_key'] or not attempt
+                    or attempt['id'] != claim['attempt_id'] or attempt['state'] != 'queued'
+                    or attempt.get('request_id') != identity or claim['binding'] != attempt['binding']
+                    or not _m_attempts.attempt_matches(n, row, attempt)):
+                if not queue_terminal(inst, n, identity, claim['lease'], 'invalidated'):
+                    raise ValueError('queue invalidation refused; preserve running evidence')
+                if row:
+                    _m_attempts.finish_attempt(inst, n, row, claim['attempt_id'], 'invalidated')
+                return identity
+            _m_attempts.update_attempt(inst, n, row, attempt['id'], 'queued', owner=claim['owner'])
+        _m_instance.unlock()
         args = argparse.Namespace(**{key: request['args'].get(key) for key in QUEUE_ARGS})
-        _m_attempts.update_attempt(inst, n, row, attempt['id'], 'queued', owner=request['owner'])
         args._attempt_id, args._queue_request, args.enqueue = attempt['id'], request, False
         # This is the native synchronous writer/verifier, including its own FIFO
         # reservation. Exceptions retain evidence; there is no takeover/signalling.

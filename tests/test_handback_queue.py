@@ -258,6 +258,144 @@ class HandbackLifecycle(Scenario):
                 self.assertEqual(before, {p.name: p.read_bytes()
                                           for p in (n['dir'] / 'handback-queue').glob('*.json')})
 
+    def publication_case(self, fault=None, invalidation=False):
+        """Dispatch for real, then revoke authority at the final writer boundary."""
+        m, inst, n, row = self.fixture()
+        args = argparse.Namespace(id='root', branch=row['Job'], state='blocked', summary='Fixture result',
+                                  question=None, lessons='none: fixture', report=None, reviews=None)
+        binding = {'head': 'a', 'base': 'b', 'inputs': 'c'}
+        captured = {}
+        original_publish, original_dispatch = m.publish_handback, m.queue_dispatch
+
+        def revoke(request):
+            data = m.read_queue_request(n, request['id'])
+            self.assertEqual(data['run']['phase'], 'dispatched')
+            lease = m.queue_path(n, request['id']).with_suffix('.lease')
+            if fault == 'failure':
+                m.attempt_phase('verifying')
+            if fault in ('inode', 'unlink', 'failure'):
+                lease.unlink()
+                if fault != 'unlink':
+                    lease.write_text('foreign lease: preserve me\n')
+            elif fault == 'copied':
+                m.QUEUE_LEASE.set(None)  # claim_handback resets its own outer token
+            elif fault in ('process', 'host', 'run', 'request'):
+                if fault == 'process':
+                    data['owner'] = [os.getpid() + 1, 'foreign-process']
+                elif fault == 'host':
+                    data['run']['host'] = 'foreign-boot'
+                elif fault == 'run':
+                    data['run']['id'] = 'f' * 32
+                else:
+                    data['attempt_id'] = 'f' * 32
+                m.write_queue_request(n, data)
+            captured['queue'] = m.queue_path(n, request['id']).read_bytes()
+            captured['attempt'] = m.attempt_path(n, row).read_bytes()
+            captured['lease'] = lease.read_bytes() if lease.exists() else None
+
+        def publish(a):
+            revoke(a._queue_request)
+            if fault == 'failure':
+                raise ValueError('fixture verifier failure after capability loss')
+            return original_publish(a)
+
+        def dispatch(*values):
+            original_dispatch(*values)
+            revoke(values[2])
+
+        with mock.patch.dict(os.environ, self.env, clear=True), \
+                mock.patch.object(m, 'load', return_value=inst), mock.patch.object(m.Instance, 'commit'), \
+                mock.patch.object(m, 'attempt_binding', return_value=binding) as current_binding, \
+                mock.patch.object(m, 'request_wake') as wake, \
+                mock.patch.object(m, 'write_record', wraps=m.write_record) as writes, \
+                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            request = m.enqueue_handback(inst, n, row, args)
+            if invalidation:
+                current_binding.return_value = {**binding, 'inputs': 'drift'}
+            with mock.patch.object(m, 'queue_dispatch', side_effect=dispatch if invalidation else original_dispatch), \
+                    mock.patch.object(m, 'publish_handback', side_effect=original_publish if invalidation else publish), \
+                    contextlib.ExitStack() as stack:
+                if fault == 'false':
+                    stack.enter_context(mock.patch.object(m, 'queue_terminal', return_value=False))
+                try:
+                    m.run_queue_once(inst, n, request['id'])
+                except (SystemExit, ValueError, OSError):
+                    if fault is None:
+                        raise
+            queue = m.read_queue_request(n, request['id'])
+            attempt = m.current_attempt(n, row)
+            handback = m.handback_file(n, row)
+            if fault is not None:
+                self.assertFalse(handback.exists(), 'refused capability published a terminal handback')
+                self.assertFalse(any(call.args[2] == 'handback' for call in writes.call_args_list),
+                                 'refused capability wrote terminal handback evidence')
+                self.assertEqual(m.attempt_path(n, row).read_bytes(), captured['attempt'],
+                                 'refused capability mutated the retained attempt')
+                self.assertEqual(m.queue_path(n, request['id']).read_bytes(), captured['queue'])
+                lease = m.queue_path(n, request['id']).with_suffix('.lease')
+                self.assertEqual(lease.read_bytes() if lease.exists() else None, captured['lease'])
+                self.assertEqual(queue['state'], 'running')
+                self.assertIn(attempt['state'], ('queued', 'verifying'))
+                wake.assert_not_called()
+                self.assertFalse((n['dir'] / 'inbox.md').exists())
+            else:
+                self.assertEqual(queue['state'], 'invalidated' if invalidation else 'terminal')
+                self.assertEqual(attempt['state'], queue['state'])
+                if invalidation:
+                    self.assertFalse(handback.exists())
+                    wake.assert_not_called()
+                else:
+                    self.assertEqual(m.read_handback(n, row)['attempt_id'], request['attempt_id'])
+                    wake.assert_called_once()
+
+    def test_publication_inode_loss(self):
+        self.publication_case('inode')
+
+    def test_publication_unlinked_lease(self):
+        self.publication_case('unlink')
+
+    def test_publication_copied_capability(self):
+        self.publication_case('copied')
+
+    def test_publication_foreign_process(self):
+        self.publication_case('process')
+
+    def test_publication_foreign_host(self):
+        self.publication_case('host')
+
+    def test_publication_changed_run(self):
+        self.publication_case('run')
+
+    def test_publication_changed_request(self):
+        self.publication_case('request')
+
+    def test_publication_terminal_false(self):
+        self.publication_case('false')
+
+    def test_publication_failure_retains_running_attempt(self):
+        self.publication_case('failure')
+
+    def test_publication_owned_control(self):
+        self.publication_case()
+
+    def test_invalidation_inode_loss(self):
+        self.publication_case('inode', invalidation=True)
+
+    def test_invalidation_copied_capability(self):
+        self.publication_case('copied', invalidation=True)
+
+    def test_invalidation_foreign_host(self):
+        self.publication_case('host', invalidation=True)
+
+    def test_invalidation_changed_run(self):
+        self.publication_case('run', invalidation=True)
+
+    def test_invalidation_terminal_false(self):
+        self.publication_case('false', invalidation=True)
+
+    def test_invalidation_owned_control(self):
+        self.publication_case(invalidation=True)
+
     def test_crash_recovery_is_explicit_and_fenced_before_dispatch(self):
         m, inst, n, row = self.fixture()
         args = argparse.Namespace(id='root', branch=row['Job'], state='blocked', summary='Fixture result',
