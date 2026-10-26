@@ -13,6 +13,7 @@ class WorkerLifecycle(Scenario):
         self.root = self.init('oak')
         self.git('checkout', '-b', 'job/palette', cwd=self.root)
         self.m = core_loader.SourceFileLoader('restart_fixture', str(CORE / 'bin/brain')).load_module()
+        self.jobs = self.m._owners['restart_worker']._m_jobs
         self.inst = self.m.Instance(self.root)
         self.inst.local_of('root')
         self.n = self.inst.node('root')
@@ -77,7 +78,7 @@ class WorkerLifecycle(Scenario):
         self.assertEqual(len(self.actions('t3_thread_launch')), 1)
         self.assertEqual(self.tick()['state'], 'idle')
         self.assertEqual(len(self.actions('t3_thread_launch')), 1)
-        receipt = self.m.lifecycle_read(self.inst)['usage'][self.m.digest(['root', self.key])]
+        receipt = self.m.lifecycle_read(self.inst)['usage'][self.jobs.digest(['root', self.key])]
         self.assertEqual(receipt['baseline'], {'processed': 800, 'compactions': 3, 'active_minutes': 4})
 
     def test_restart_receipt_from_another_boot_never_launches_replacement(self):
@@ -122,7 +123,7 @@ class WorkerLifecycle(Scenario):
         self.assertEqual(self.tick()['state'], 'pending')
         self.assertEqual(self.tick()['state'], 'pending')
         self.assertEqual(len(self.actions('t3_thread_launch')), 1)
-        self.assertTrue(self.m.lifecycle_read(self.inst)['usage'][self.m.digest(['root', self.key])]['episode'])
+        self.assertTrue(self.m.lifecycle_read(self.inst)['usage'][self.jobs.digest(['root', self.key])]['episode'])
 
     def test_closed_or_changed_binding_never_relaunches(self):
         self.tick()
@@ -151,7 +152,7 @@ class WorkerLifecycle(Scenario):
             return result
         self.rpc = startup
         self.assertEqual(self.tick()['state'], 'done')
-        receipt = self.m.lifecycle_read(self.inst)['usage'][self.m.digest(['root', self.key])]
+        receipt = self.m.lifecycle_read(self.inst)['usage'][self.jobs.digest(['root', self.key])]
         self.assertEqual(receipt['baseline']['processed'], 800)
         self.assertEqual(self.tick()['state'], 'idle')
 
@@ -171,7 +172,7 @@ class WorkerLifecycle(Scenario):
         self.usage.update(processed=900, compactions=4, active_minutes=5)
         self.assertEqual(self.tick()['state'], 'done')
         self.assertEqual(len(self.actions('t3_thread_launch')), 1)
-        self.assertEqual(self.m.lifecycle_read(self.inst)['usage'][self.m.digest(['root', self.key])]['baseline']['processed'], 800)
+        self.assertEqual(self.m.lifecycle_read(self.inst)['usage'][self.jobs.digest(['root', self.key])]['baseline']['processed'], 800)
 
     def test_changed_worktree_or_pending_handback_never_stops(self):
         self.git('checkout', 'main', cwd=self.root)
@@ -248,15 +249,15 @@ class WorkerLifecycle(Scenario):
                 mock.patch.object(owner._m_reminders, 'acknowledge_usage_restart', side_effect=AssertionError('early acknowledgement')):
             self.m.usage_restart_item(self.inst, self.n, self.row)
             before = self.m.lifecycle_read(self.inst)
-            before_usage = before['usage'][self.m.digest(['root', self.key])]
+            before_usage = before['usage'][self.jobs.digest(['root', self.key])]
             text, selection = self.m.restart_brief(self.inst, self.n, self.row)
         routed.assert_called_once()
         self.assertIn('Draw', text)
         self.assertEqual(selection['model'], 'fixture-model')
         self.assertEqual(selection['options'], {'reasoningEffort': 'high'})
-        self.assertEqual(self.m.lifecycle_read(self.inst)['usage'][self.m.digest(['root', self.key])], before_usage)
+        self.assertEqual(self.m.lifecycle_read(self.inst)['usage'][self.jobs.digest(['root', self.key])], before_usage)
         self.assertEqual(self.m.Instance(self.root).local_of('root')['workers'][self.key], 'old')
-        self.assertTrue(self.m.lifecycle_read(self.inst)['usage'][self.m.digest(['root', self.key])]['episode'])
+        self.assertTrue(self.m.lifecycle_read(self.inst)['usage'][self.jobs.digest(['root', self.key])]['episode'])
         self.assertEqual(self.m.lifecycle_read(self.inst), before)
 
     def initial_tick(self):
