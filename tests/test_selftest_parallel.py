@@ -16,6 +16,30 @@ from scenario import CORE, Scenario
 
 
 class ParallelSelftest(Scenario):
+    def test_explicit_serial_method_does_not_serialize_unrelated_class_methods(self):
+        folder, env, command = self.result_fixture(
+            'import time, unittest\nfrom pathlib import Path\n'
+            'class HandbackLifecycle(unittest.TestCase):\n'
+            ' def test_regular(self): time.sleep(.1); Path("regular.done").touch()\n'
+            ' def test_p6_cli_enqueue_foreground_terminal_and_live_join(self):\n'
+            '  assert Path("regular.done").exists()\n')
+        (folder / 'test_sample.py').rename(folder / 'test_brain.py')
+        shutil.copyfile(CORE / 'tests/lanes.py', folder / 'lanes.py')
+        command[-1] = 'test_brain.py'
+        workers = min(2, os.cpu_count() or 1)
+        result = subprocess.run(command + ['-n', str(workers), '--max-worker-restart=0'],
+                                cwd=folder, env=env, capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        rows = [json.loads(line) for line in (folder / 'results.jsonl').read_text().splitlines()]
+        completed = [row for row in rows if row['event'] == 'completed']
+        self.assertEqual(len(completed), 2)
+        self.assertTrue(all(row['outcome'] == 'passed' for row in completed))
+        lanes = [row for row in rows if row['event'] == 'lane']
+        self.assertEqual([row['lane'] for row in lanes],
+                         ['parallel', 'serial'] if workers > 1 else ['parallel'])
+        if workers > 1:
+            self.assertEqual([row['tests'] for row in lanes], [1, 1])
+
     def test_canonical_serial_lane_waits_for_parallel_workers_without_dropping_tests(self):
         source = ('import time, unittest\nfrom pathlib import Path\n'
                   'class ParallelFixture(unittest.TestCase):\n'
