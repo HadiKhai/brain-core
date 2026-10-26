@@ -11,6 +11,7 @@ from pathlib import Path
 from . import common as _m_common
 from . import host_lifecycle as _m_host
 from . import host_rpc as _m_rpc
+from . import host_instances as _m_host_instances
 from . import instance as _m_instance
 from . import jobs as _m_jobs
 from . import machine as _m_machine
@@ -97,7 +98,7 @@ def rotation_action_store(inst, n):
 
 
 def rotate_coordinator(inst, n, rpc=None):
-    rpc = rpc or _m_rpc.call
+    rpc = _m_host_instances.routed_host_rpc(inst, n['id'], rpc or _m_rpc.call)
     try:
         with rotation_action_store(inst, n) as (receipt, publish):
             fresh = _m_instance.Instance(inst.root)
@@ -172,7 +173,7 @@ def rotate_coordinator(inst, n, rpc=None):
 
 
 def accept_rotation(inst, n, ticket, session_id, rpc=None):
-    rpc = rpc or _m_rpc.call
+    rpc = _m_host_instances.routed_host_rpc(inst, n['id'], rpc or _m_rpc.call)
     try:
         if not isinstance(session_id, str) or not session_id.strip() or any(c.isspace() for c in session_id):
             raise ValueError('rotation needs the new runtime actual session identity; none invented')
@@ -223,7 +224,8 @@ def accept_rotation(inst, n, ticket, session_id, rpc=None):
                 bound = latest.node(n['id'])
                 if bound['local'].get('coordinator') not in (old, new):
                     raise ValueError('coordinator changed before replacement binding')
-                bound['local']['coordinator'] = new
+                _m_host_instances.set_owned_host_binding(latest, n['id'], 'coordinator',
+                                                        bound['local'].get('coordinator'), new)
                 sessions = bound['local'].setdefault('coordinator_sessions', [])
                 if session_id not in sessions:
                     sessions.append(session_id)
@@ -279,7 +281,7 @@ def accept_rotation(inst, n, ticket, session_id, rpc=None):
 
 def resume_rotation(inst, n, rpc=None):
     """Resume durable acceptance/settlement even after the new session is below threshold."""
-    rpc = rpc or _m_rpc.call
+    rpc = _m_host_instances.routed_host_rpc(inst, n['id'], rpc or _m_rpc.call)
     try:
         with rotation_action_store(inst, n) as (receipt, _):
             if receipt is None or receipt['phase'] == 'done':

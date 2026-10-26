@@ -7,6 +7,7 @@ import time
 
 from . import common as _m_common
 from . import hosts as _m_hosts
+from . import host_instances as _m_host_instances
 from . import jobs as _m_jobs
 from . import nodes as _m_nodes
 
@@ -65,11 +66,14 @@ def _host_export(inst, rpc=None):
     if inst.cfg.get('host') != 't3' or _m_common.outward_links(inst.root):
         raise ValueError('host export requires a safe t3 instance')
     bindings = host_bindings(inst)
+    guards = [_m_host_instances.routed_host_rpc(inst, nid, lambda *_: None) for nid in {b['node'] for b in bindings}]
     observed, threads = inst.now_dt().isoformat(), {}
     deadline = HOST_EXPORT_CLOCK.monotonic() + 60
     def call(name, arguments):
         if HOST_EXPORT_CLOCK.monotonic() >= deadline:
             raise ValueError('host export budget exceeded; previous snapshot retained')
+        for guard in guards:
+            guard(name, arguments)
         value = rpc(name, arguments)
         if not isinstance(value, dict):
             raise ValueError('invalid native host response')

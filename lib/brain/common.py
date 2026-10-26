@@ -179,6 +179,35 @@ def outward_links(root):
     return bad
 
 
+def sync_directory(path):
+    directory = os.open(path, os.O_RDONLY | getattr(os, 'O_DIRECTORY', 0) | os.O_NOFOLLOW)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+
+
+def durable_makedirs(path, mode=0o700):
+    """Create directories and persist ancestor entries before publishing children.
+
+    Re-sync existing entries too: a prior interrupted call may have created them
+    without completing its parent sync. Links are never adopted as directories.
+    """
+    path = Path(os.path.abspath(path))
+    safe_target(path / '.persistence-target')
+    root = next((p for p in [path, *path.parents] if (p / 'instance.md').is_file()
+                 and (p / 'node.md').is_file()), path.anchor)
+    root = Path(root)
+    parent = root
+    for part in path.relative_to(root).parts:
+        child = parent / part
+        if child.is_symlink():
+            raise ValueError('directory persistence refuses linked ancestors')
+        child.mkdir(mode=mode, exist_ok=True)
+        sync_directory(parent)
+        parent = child
+
+
 class DirectoryTarget:
     """A checked physical parent held until its last read, publication or cleanup.
 

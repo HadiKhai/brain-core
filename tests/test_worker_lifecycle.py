@@ -208,19 +208,27 @@ class WorkerLifecycle(Scenario):
     def test_native_resume_brief_defers_baseline_until_replacement_binding(self):
         owner = self.m._owners['restart_worker']
         def route(inst, n, args, *, extra):
-            self.assertEqual(extra, [])
+            self.assertEqual(extra, [])  # No shared context or output paths in this restart.
+            self.assertTrue(args._defer_restart_ack)
+            self.assertEqual(args.branch, self.row['Job'])
             args.model, args.job_class, args.effort = 'fixture-model', 'build', 'high'
-            args.selection_line = 'modelSelection: ' + json.dumps({'instanceId': 'codex', 'model': 'fixture-model'})
+            args.selection_line = 'modelSelection: ' + json.dumps({'instanceId': 'codex', 'model': 'fixture-model',
+                'options': {'reasoningEffort': args.effort}})
             return 'codex', 'Fixture account snapshot'
         with mock.patch.dict(os.environ, self.env, clear=True), \
                 mock.patch.object(owner._m_spend, 'live_usage', return_value=self.usage), \
-                mock.patch.object(owner._m_briefs._m_knowledge, 'worker_route', side_effect=route), \
+                mock.patch.object(owner._m_briefs._m_knowledge, 'worker_route', autospec=True, side_effect=route) as routed, \
                 mock.patch.object(owner._m_reminders, 'acknowledge_usage_restart', side_effect=AssertionError('early acknowledgement')):
             self.m.usage_restart_item(self.inst, self.n, self.row)
             before = self.m.lifecycle_read(self.inst)
+            before_usage = before['usage'][self.m.digest(['root', self.key])]
             text, selection = self.m.restart_brief(self.inst, self.n, self.row)
+        routed.assert_called_once()
         self.assertIn('Draw', text)
         self.assertEqual(selection['model'], 'fixture-model')
+        self.assertEqual(selection['options'], {'reasoningEffort': 'high'})
+        self.assertEqual(self.m.lifecycle_read(self.inst)['usage'][self.m.digest(['root', self.key])], before_usage)
+        self.assertEqual(self.m.Instance(self.root).local_of('root')['workers'][self.key], 'old')
         self.assertTrue(self.m.lifecycle_read(self.inst)['usage'][self.m.digest(['root', self.key])]['episode'])
         self.assertEqual(self.m.lifecycle_read(self.inst), before)
 

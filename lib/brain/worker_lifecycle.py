@@ -11,6 +11,7 @@ from . import briefs as _m_briefs
 from . import common as _m_common
 from . import host_lifecycle as _m_host
 from . import host_rpc as _m_rpc
+from . import host_instances as _m_host_instances
 from . import instance as _m_instance
 from . import jobs as _m_jobs
 from . import machine as _m_machine
@@ -142,7 +143,7 @@ def restart_worker(inst, n, job_key, rpc=None):
     The caller may schedule this explicit native maintenance entry. File-only
     due/watch/UI reads never execute host lifecycle actions.
     """
-    rpc = rpc or _m_rpc.call
+    rpc = _m_host_instances.routed_host_rpc(inst, n['id'], rpc or _m_rpc.call)
     result = {'job': job_key, 'state': 'pending'}
     try:
         return _restart_worker(inst, n, job_key, rpc)
@@ -301,7 +302,7 @@ def _restart_worker(inst, n, key, rpc):
 
 def launch_worker(inst, n, key, rpc=None):
     """Launch an unbound recorded job once, preserving its initial budget."""
-    rpc = rpc or _m_rpc.call
+    rpc = _m_host_instances.routed_host_rpc(inst, n['id'], rpc or _m_rpc.call)
     try:
         import re
         if not isinstance(key, str) or not re.fullmatch('[0-9a-f]{24}', key) or _m_common.outward_links(inst.root):

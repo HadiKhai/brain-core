@@ -4,6 +4,7 @@ import re
 
 from . import common as _m_common
 from . import host_rpc as _m_rpc
+from . import host_instances as _m_host_instances
 from . import instance as _m_instance
 from . import jobs as _m_jobs
 from . import nodes as _m_nodes
@@ -105,7 +106,7 @@ def terminal_host_thread(rpc, identity):
 
 
 def settle_closed_jobs(inst, n, rpc=None, job_keys=None, revalidate=False, tell=False, workspace=None):
-    rpc = rpc or _m_rpc.call
+    rpc = _m_host_instances.routed_host_rpc(inst, n['id'], rpc or _m_rpc.call)
     if _m_common.outward_links(inst.root):
         raise ValueError('lifecycle refused: unsafe instance links')
     rows = _m_jobs.read_jobs(n)

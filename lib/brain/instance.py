@@ -71,7 +71,7 @@ class Instance:
 
     def save_local(self):
         _m_common.safe_target(self.local_path)
-        self.local_path.parent.mkdir(exist_ok=True)
+        _m_common.durable_makedirs(self.local_path.parent)
         _m_common.atomic_write(self.local_path, json.dumps(self.local, indent=2, sort_keys=True) + "\n")
 
     def local_of(self, nid):

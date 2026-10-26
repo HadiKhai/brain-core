@@ -23,6 +23,8 @@ from . import history as _m_history
 from . import hosts as _m_hosts
 from . import host_observations as _m_host_observations
 from . import host_tasks as _m_host_tasks
+from . import host_instances as _m_host_instances
+from . import metadata_recovery as _m_metadata_recovery
 from . import host_lifecycle as _m_host_lifecycle
 from . import instance as _m_instance
 from . import job_env as _m_job_env
@@ -155,6 +157,8 @@ READ_ONLY = {"cmd_show", "cmd_tree", "cmd_status", "cmd_now", "cmd_jobs", "cmd_s
 def writes(a):
     """Does this command, with these options, change anything in the instance?"""
     name = a.f.__name__
+    if name == "cmd_host_instance":
+        return a.action in ("remember", "route")
     if name == "cmd_events":
         return bool(a.explain or a.record or a.rebuild_records)
     if name == "cmd_wt_prune":
@@ -442,6 +446,12 @@ def main():
     t = settings_sub.add_parser("batch", help="JSON array of set/schedule-add operations; one bookkeeping commit")
     t.add_argument("file", help="UTF-8 JSON batch file")
     t.set_defaults(f=_m_settings_batch.cmd_settings_batch)
+    t = settings_sub.add_parser("recover", help="explicitly complete an owned interrupted metadata packet")
+    t.add_argument("file", help="private settings-batch packet")
+    t.set_defaults(f=_m_metadata_recovery.cmd_settings_recover)
+    cmd("host-instance", _m_host_instances.cmd_host_instance, "private addressed host inventory; execution remains local",
+        opt("action", choices=['list', 'remember', 'route', 'plan']), opt("name", nargs='?'),
+        opt("--node", default='root'), opt("--machine"), opt("--adapter"), opt("--file"))
     cmd("relabel", _m_nodes.cmd_relabel, "brain relabel <id> key:value ... (key:- removes)", "id", opt("labels", nargs="+"))
     cmd("owners", _m_nodes.cmd_owners, "change owners: brain owners <id> a,b  ('' = same as parent)", "id", "owners")
     cmd("seal", _m_guard.cmd_seal, "give a node new owners and an external home (the sealing procedure's mechanics)",
@@ -588,7 +598,8 @@ def main():
         opt("--reverify", action="store_true", help="with --record: run verify even if a green run still proves it"))
     cmd("host", _m_host_actions.cmd_host, "explicit coordinator provisioning and host wake/watch actions",
         opt("action", choices=['provision', 'wake-setup', 'watch', 'schedule']), "id", opt("--model"), opt("--url"),
-        opt("--schedule-id"), opt("--provider", help="explicit host runtime for schedule binding"))
+        opt("--schedule-id"), opt("--provider", help="explicit host runtime for schedule binding"),
+        opt("--require-no-auto-settle", action="store_true", help="refuse provisioning if the adapter cannot enforce this policy"))
     cmd("digest", _m_digest.cmd_digest, "commitments with landing evidence; --retro summarizes recorded job measurements", "id",
         opt("--json", action="store_true"), opt("--retro", action="store_true"),
         opt("--day", help="retro calendar date (YYYY-MM-DD); defaults to the previous local day"))

@@ -12,6 +12,7 @@ import subprocess
 
 from . import common as _m_common
 from . import hosts as _m_hosts
+from . import host_instances as _m_host_instances
 from . import instance as _m_instance
 from . import knowledge as _m_knowledge
 from . import nodes as _m_nodes
@@ -61,11 +62,29 @@ def _bind(inst, nid, **values):
             pending.setdefault('returned_bindings', {}).update(values)
             inst.save_local()
             raise ValueError('host binding changed during provisioning; host result retained for reconciliation')
+        try:
+            route = _m_host_instances.require_local_host(inst, nid)
+        except ValueError:
+            pending = local.setdefault('host_setup_pending', {'operation': 'coordinator', 'started': inst.now()})
+            pending.setdefault('returned_bindings', {}).update(values)
+            inst.save_local()
+            raise
         local.update(values)
+        if route['instance'] is not None:
+            inst.local['host_instances'][route['instance']]['nodes'][nid].update(
+                {k: v for k, v in values.items() if k in _m_host_instances.HOST_BINDING_FIELDS})
         inst.save_local()
 
 
-def provision_coordinator(inst, nid, selection):
+def host_action_call(inst, nid, tool, arguments):
+    _m_host_instances.require_local_host(_m_instance.Instance(inst.root), nid)
+    return host_call(inst, tool, arguments)
+
+
+def provision_coordinator(inst, nid, selection, require_no_auto_settle=False):
+    _m_host_instances.require_local_host(_m_instance.Instance(inst.root), nid)
+    if require_no_auto_settle:
+        _m_host_instances.require_host_capability(inst, nid, 'disable_auto_settle')
     n = inst.node(nid)
     if not selection.get('model') or not selection.get('instanceId') or selection['model'] == 'runtime default':
         raise ValueError('coordinator requires a configured model and provider instance')
@@ -83,13 +102,13 @@ def provision_coordinator(inst, nid, selection):
     if not coordinator:
         local = inst.local_of(nid)
         if not local.get('host_project'):
-            project = host_call(inst, 't3_project_create', {'title':n['fm'].get('title', nid),
+            project = host_action_call(inst, nid, 't3_project_create', {'title':n['fm'].get('title', nid),
                                 'workspaceRoot':str(n['dir'].resolve()), 'createWorkspaceRootIfMissing':False})
             if not isinstance(project.get('id'), str) or not project['id']:
                 raise ValueError('host project creation returned no id; inspect the pending operation')
             _bind(inst, nid, host_project=project['id'])
         if n['sealed'] and n.get('external') and not inst.local_of(nid).get('home_project'):
-            project = host_call(inst, 't3_project_create', {'title':n['fm'].get('title', nid) + ' home',
+            project = host_action_call(inst, nid, 't3_project_create', {'title':n['fm'].get('title', nid) + ' home',
                                 'workspaceRoot':str(n['home_path'].resolve()), 'createWorkspaceRootIfMissing':False})
             if not isinstance(project.get('id'), str) or not project['id']:
                 raise ValueError('home project creation returned no id; inspect the pending operation')
@@ -97,14 +116,14 @@ def provision_coordinator(inst, nid, selection):
         message = (AUTOMATED + '\nRole: coordinator of node ' + nid + '. Read the instance instructions, '
                    'core/roles/coordinator.md and every file in this node. Continue the request in brief.md. '
                    'Run brain host wake-setup ' + nid + ' from this coordinator to provision its wake binding.')
-        launched = host_call(inst, 't3_thread_launch', {'title':n['fm'].get('title', nid) + ' · coordinator',
+        launched = host_action_call(inst, nid, 't3_thread_launch', {'title':n['fm'].get('title', nid) + ' · coordinator',
             'projectId':inst.local_of(nid)['host_project'], 'workspaceStrategy':{'type':'root'},
             'modelSelection':selection, 'message':message})
         coordinator = launched.get('threadId')
         if not isinstance(coordinator, str) or not coordinator:
             raise ValueError('host launch returned no thread id; inspect the pending operation')
         _bind(inst, nid, coordinator=coordinator)
-    host_call(inst, 't3_thread_organize', {'threadId':coordinator, 'action':'pin'})
+    host_action_call(inst, nid, 't3_thread_organize', {'threadId':coordinator, 'action':'pin'})
     with _m_instance.brain_lock(inst):
         inst.local = inst._load_local()
         if inst.local_of(nid).get('coordinator') != coordinator:
@@ -116,7 +135,7 @@ def provision_coordinator(inst, nid, selection):
 
 def _coordinator_context(inst, n):
     coordinator = n['local'].get('coordinator')
-    if not coordinator or host_call(inst, 't3_thread_configuration', {}).get('threadId') != coordinator:
+    if not coordinator or host_action_call(inst, n['id'], 't3_thread_configuration', {}).get('threadId') != coordinator:
         raise ValueError('run this host action inside the bound coordinator thread')
     return coordinator
 
@@ -142,7 +161,7 @@ def provision_wake(inst, nid):
     identity = hashlib.sha256((nid + '\0' + coordinator).encode()).hexdigest()
     arguments = {**plan['host_call'], 'clientRequestId':'wake-' + identity}
     arguments['prompt'] = AUTOMATED + '\n' + arguments['prompt']
-    result = host_call(inst, 'schedule_task', arguments)
+    result = host_action_call(inst, nid, 'schedule_task', arguments)
     sid = result.get('scheduledTaskId')
     if result.get('boundThreadId') != coordinator or not isinstance(sid, str) or not sid:
         raise ValueError('host schedule did not confirm the bound coordinator; no wake binding written')
@@ -167,7 +186,7 @@ def provision_wake(inst, nid):
 def watch_change(inst, nid, url):
     n = inst.node(nid)
     coordinator = _coordinator_context(inst, n)
-    result = host_call(inst, 'watch_pull_request', {'url':url, 'threadId':coordinator})
+    result = host_action_call(inst, nid, 'watch_pull_request', {'url':url, 'threadId':coordinator})
     if result.get('watching') is not True:
         raise ValueError('host did not confirm pull-request watch')
     with _m_instance.brain_lock(inst):
@@ -218,7 +237,7 @@ def provision_schedule(inst, nid, sid, provider=None):
     if not prompt.startswith(AUTOMATED):
         prompt = AUTOMATED + '\n' + prompt
     key = hashlib.sha256((nid + '\0' + sid + '\0' + coordinator + '\0' + definition).encode()).hexdigest()
-    result = host_call(inst, 'schedule_task', {'title':sid, 'prompt':prompt, 'schedule':trigger,
+    result = host_action_call(inst, nid, 'schedule_task', {'title':sid, 'prompt':prompt, 'schedule':trigger,
                        'bindToCurrentThread':True, 'clientRequestId':'schedule-' + key})
     task = result.get('scheduledTaskId')
     if result.get('boundThreadId') != coordinator or not isinstance(task, str) or not task:
@@ -266,7 +285,8 @@ def cmd_host(a):
                                        job_class='build', effort=None)
             _m_knowledge.worker_route(inst, n, route)
             selection = json.loads(route.selection_line.partition(': ')[2]) if route.model != 'runtime default' else {}
-            coordinator = provision_coordinator(inst, a.id, selection)
+            coordinator = provision_coordinator(inst, a.id, selection,
+                                                require_no_auto_settle=getattr(a, 'require_no_auto_settle', False))
             print('coordinator: ' + inst.thread_link(coordinator))
     except (OSError, ValueError, TypeError, KeyError, subprocess.TimeoutExpired) as error:
         _m_common.die(str(error) if isinstance(error, ValueError) else 'host operation interrupted; inspect pending host state')

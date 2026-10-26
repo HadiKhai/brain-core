@@ -27,6 +27,7 @@ MODULE_LANES = (
 )
 LANE_TESTS = {name: ('test_' + name + '.py',) for name in MODULE_LANES}
 LANE_TESTS.update({
+    'machine': ('test_machine.py', 'test_machine_durability.py'),
     'events': ('test_events.py', 'test_event_facts.py', 'test_event_review.py', 'test_delivery_metrics.py', 'test_event_records.py', 'test_managed_index.py', 'test_native_event_writes.py'),
     'introspection': ('test_advisories.py', 'test_introspection.py'),
     'tasks': ('test_tasks.py',),
@@ -74,7 +75,7 @@ SHARED_INPUTS = (
     'lib/brain/docker_cleanup.py', 'lib/brain/resource_leases.py',
     'lib/brain/action_guard.py', 'lib/brain/preview_evidence.py', 'lib/brain/review_findings.py',
     'lib/brain/diagnostics.py', 'lib/brain/introspection.py', 'lib/brain/scorecard.py',
-    'lib/brain/settings_batch.py', 'lib/brain/dispatcher.py',
+    'lib/brain/settings_batch.py', 'lib/brain/metadata_recovery.py', 'lib/brain/dispatcher.py',
     'lib/brain/host_rpc.py', 'lib/brain/host_lifecycle.py', 'lib/brain/worker_lifecycle.py', 'lib/brain/coordinator_lifecycle.py',
     'lib/brain/__init__.py', 'tests/scenario.py', 'tests/core_loader.py',
     'tests/conftest.py', 'tests/lanes.py', 'tests/check_lanes.py',

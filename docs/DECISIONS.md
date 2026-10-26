@@ -2367,3 +2367,40 @@ before mutation. A partial transport failure reports the threads already freshly
 confirmed, retains the job and never invents exhaustive completion. Host atomic
 ownership/settlement and dispatched-descendant shutdown still require their real
 capabilities; no PID-only cancellation or automatic takeover is introduced.
+
+## D30001: Address hosts privately and complete interrupted metadata explicitly
+
+Addressed host descriptors live only in the machine-local bindings file. Each
+entry names one machine, adapter and node binding set. Selecting a remote entry
+produces a remote plan; it never redirects the native bridge to another machine.
+Local execution checks the selected adapter and exact bindings before each
+native request. Inventory registration does not register a provider or replace
+active bindings. Conflicting entries require explicit reconciliation. Ordinary
+inventory output omits host IDs and machine names.
+
+Coordinator provisioning may require an adapter capability before creating any
+pending operation or host resource. The T3 adapter supports pinning and PR
+watching, but exposes no control to disable idle auto-settlement. Requiring that
+control refuses provisioning; pinning alone does not satisfy it.
+
+Local binding saves and settings batches persist ancestor directory entries
+before publishing child records. Atomic file publication retains data-sync,
+replacement and parent-sync ordering. Existing directory entries are re-synced
+so a retry does not assume an interrupted mkdir was durable.
+
+An unfinished settings packet retains exact before/after metadata and owns the
+next publication. Explicit recovery completes only named metadata files under
+the writer lock, while Git HEAD and target/index states still match the packet.
+Foreign changes, links, competing packets and unknown commit outcomes refuse
+recovery. A path-limited commit preserves unrelated staged entries. Completed
+packets make repeated completion idempotent. This is process-interruption
+recoverability, not atomic cross-file visibility or a guarantee about physical
+power loss, Git storage durability or host transactions.
+
+## D28005: Include explicit recovery in every consumer lane
+
+Metadata recovery is a nonselective runtime module, including when loaded only
+inside an explicit command handler. Its callable source is a shared lane input,
+so changing recovery invalidates every consumer's verification. A regression
+checks this selection and keeps the durability tests owned exactly once by the
+machine lane. Recovery ownership, refusal and persistence semantics are unchanged.

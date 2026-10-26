@@ -167,3 +167,29 @@ syncing the directory is reported after the complete new file becomes visible.
 The ordering tests in `tests/test_atomic_durability.py` cover both cases. They do
 not simulate power loss or establish a cross-file/Git transaction, and persistence
 of newly created ancestor directories is outside this one-file guarantee.
+
+
+## Interrupted settings batches
+
+`brain settings batch operations.json` saves an exact private recovery packet
+before changing metadata. An unfinished packet blocks another settings batch.
+After inspecting the packet and current Git state, the owner can explicitly run:
+
+```sh
+brain settings recover /path/to/instance/.brain/settings-batches/packet.json
+```
+
+Recovery completes the packet's after-state only when every target is still
+exactly its before-state or after-state and Git HEAD has not changed. It refuses
+foreign file/index changes, linked targets, non-metadata paths and competing
+unfinished packets. It never rolls back other work. A crash during recovery
+leaves the packet available for another explicit completion; a crash after a
+Git commit but before its receipt requires manual commit-outcome reconciliation.
+Unrelated staged files remain staged. A completed receipt prevents another
+bookkeeping commit on repetition.
+
+Local binding saves and settings publication sync created ancestor entries and
+re-sync existing entries on retry. Other multi-file operations retain their own
+recovery contracts. These ordering and owned child-process tests do not establish
+physical storage, universal host, provider-exhaustion or Git power-loss durability,
+nor atomic visibility across metadata files.

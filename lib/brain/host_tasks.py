@@ -10,6 +10,8 @@ from . import briefs as _m_briefs
 from . import common as _m_common
 from . import host_observations as _m_host_observations
 from . import hosts as _m_hosts
+from . import host_instances as _m_host_instances
+from . import instance as _m_instance
 from . import nodes as _m_nodes
 from . import transitions as _m_transitions
 
@@ -57,6 +59,7 @@ def host_task_store(inst):
 def host_delegate(inst, n, task, target, key, rpc=None):
     """Explicit delegation; persist a stable host idempotency key before the call."""
     rpc = rpc or _m_host_observations.host_native_call
+    rpc = _m_host_instances.routed_host_rpc(inst, n['id'], rpc)
     parent = n['local'].get('coordinator')
     if (not isinstance(parent, str) or not parent or not isinstance(key, str) or not key or
             not isinstance(task, str) or not task.strip() or not isinstance(target, dict) or
@@ -91,6 +94,9 @@ def host_delegate(inst, n, task, target, key, rpc=None):
 
 def host_task_refresh(inst, rpc=None):
     rpc = rpc or _m_host_observations.host_native_call
+    for node in inst.nodes():
+        if node['local'].get('host_instance') is not None:
+            _m_host_instances.require_local_host(_m_instance.Instance(inst.root), node['id'])
     context = rpc('t3_thread_list', {'limit': 1})
     parent = context.get('currentThreadId') if isinstance(context, dict) else None
     if not isinstance(parent, str) or not parent:
@@ -100,6 +106,7 @@ def host_task_refresh(inst, rpc=None):
     deadline = time.monotonic() + 60
     for key, row in registry['tasks'].items():
         n = inst.node(row['node'])
+        _m_host_instances.require_local_host(_m_instance.Instance(inst.root), n['id'])
         if (not row.get('taskId') or row['parent_thread'] != parent or
                 n['local'].get('coordinator') != row['parent_thread']):
             continue
