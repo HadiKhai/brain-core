@@ -816,6 +816,7 @@ class QuestionWake(Scenario):
 
 
 class StopHook(Scenario):
+    fixture_init_in_process = True
     def test_relay_only_exit_captures_questions_but_skips_note_reminders(self):
         r = self.init("alice")
         (r / "brief.md").write_text("Changed notes\n")

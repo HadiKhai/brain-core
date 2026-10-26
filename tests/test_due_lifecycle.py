@@ -13,6 +13,7 @@ from scenario import CORE, Scenario
 
 
 class DueLifecycle(Scenario):
+    fixture_init_in_process = True
     def setUp(self):
         super().setUp()
         self.env['BRAIN_NO_UPDATE_CHECK'] = '1'

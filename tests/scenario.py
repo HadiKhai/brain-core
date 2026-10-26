@@ -29,6 +29,74 @@ CORE = Path(os.environ.get("BRAIN_CORE") or Path(__file__).resolve().parent.pare
 # Per-worker APFS template; instance state is always initialized anew. Checked
 # bytecode avoids recompiling unchanged core sources in every real CLI child.
 _core_template = None
+_core_bytecode = {}
+_runtime_bytecode = None
+_bytecode_lock = threading.RLock()
+
+
+def compiled_fixture_core(source, identity):
+    """Share immutable checked code, never initialized modules or instance state."""
+    with _bytecode_lock:
+        return _compiled_fixture_core(source, identity)
+
+
+def _compiled_fixture_core(source, identity):
+    key = str(identity)
+    if key not in _core_bytecode:
+        candidate = tempfile.TemporaryDirectory(prefix='brain-test-bytecode-')
+        try:
+            for module in (Path(source) / 'lib/brain').glob('*.py'):
+                cache = Path(candidate.name) / (module.stem + '.' + sys.implementation.cache_tag + '.pyc')
+                py_compile.compile(str(module), cfile=str(cache), doraise=True,
+                                   invalidation_mode=py_compile.PycInvalidationMode.CHECKED_HASH)
+        except BaseException:
+            candidate.cleanup()
+            raise
+        _core_bytecode[key] = candidate
+    return Path(_core_bytecode[key].name)
+
+
+def fixture_runtime_cache(core):
+    """A worker-private prefix for both stdlib and copied-core import caches.
+
+    Checked hashes reject changed sources even when size and mtime are restored.
+    Children run with -B, so sharing immutable cache files cannot publish changed
+    bytecode back into another fixture. CPython restores each installed filename.
+    """
+    with _bytecode_lock:
+        return _fixture_runtime_cache(core)
+
+
+def _fixture_runtime_cache(core):
+    global _runtime_bytecode
+    if _runtime_bytecode is None:
+        candidate = tempfile.TemporaryDirectory(prefix='brain-test-runtime-cache-')
+        try:
+            # Compile the already loaded stdlib once, rather than losing Apple's
+            # redirected caches when selecting a private cache prefix. Never
+            # compile dependencies or write to a system/user cache directory.
+            stdlib = Path(os.__file__).parent
+            sources = {Path(module.__file__) for module in list(sys.modules.values())
+                       if getattr(module, '__file__', None) and str(module.__file__).endswith('.py')}
+            for source in sources:
+                if stdlib not in source.parents or 'site-packages' in source.parts:
+                    continue
+                relative = source.absolute().relative_to(source.anchor)
+                cache = Path(candidate.name) / relative.parent / (source.stem + '.' + sys.implementation.cache_tag + '.pyc')
+                py_compile.compile(str(source), cfile=str(cache), doraise=True,
+                                   invalidation_mode=py_compile.PycInvalidationMode.CHECKED_HASH)
+        except BaseException:
+            candidate.cleanup()
+            raise
+        _runtime_bytecode = candidate
+    prefix = Path(_runtime_bytecode.name)
+    package = Path(core).resolve() / 'lib/brain'
+    if package.is_dir():
+        cached = prefix / package.relative_to(package.anchor)
+        if not cached.exists():
+            cached.parent.mkdir(parents=True, exist_ok=True)
+            cached.symlink_to(compiled_fixture_core(CORE, CORE), target_is_directory=True)
+    return prefix
 
 
 def clone_fixture_core(source, destination, **kwargs):
@@ -39,10 +107,10 @@ def clone_fixture_core(source, destination, **kwargs):
         candidate = tempfile.TemporaryDirectory(prefix='brain-test-core-')
         try:
             shutil.copytree(source, Path(candidate.name) / 'core', **kwargs)
-            for module in (Path(candidate.name) / 'core/lib/brain').glob('*.py'):
-                cache = module.parent / '__pycache__' / (module.stem + '.' + sys.implementation.cache_tag + '.pyc')
-                py_compile.compile(str(module), cfile=str(cache), doraise=True,
-                                   invalidation_mode=py_compile.PycInvalidationMode.CHECKED_HASH)
+            package = Path(candidate.name) / 'core/lib/brain'
+            if package.is_dir():
+                shutil.copytree(compiled_fixture_core(Path(candidate.name) / 'core', CORE),
+                                package / '__pycache__')
         except BaseException:
             candidate.cleanup()
             raise
@@ -91,10 +159,10 @@ class Scenario(unittest.TestCase):
 
     # helpers
     def run_(self, args, cwd, ok=True, brain=None):
-        # Apple's Python redirects caches by default. Read the checked caches
-        # carried by fixture clones; the real launcher still forbids writes.
-        r = subprocess.run([sys.executable, '-X', 'pycache_prefix=',
-                            str(brain or (cwd / "core" / "bin" / "brain")), *args], cwd=cwd,
+        launcher = Path(brain or (cwd / 'core/bin/brain'))
+        cache = fixture_runtime_cache(launcher.resolve().parent.parent)
+        r = subprocess.run([sys.executable, '-B', '-X', 'pycache_prefix=' + str(cache),
+                            str(launcher), *args], cwd=cwd,
                            env=self.env, capture_output=True, text=True)
         if ok is True and r.returncode:
             self.fail(f"brain {' '.join(args)} failed:\n{r.stdout}\n{r.stderr}")

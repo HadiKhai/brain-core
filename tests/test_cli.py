@@ -29,6 +29,80 @@ from scenario import Scenario, AutonomyProject, shlex_quote
 
 
 class FixtureSetup(Scenario):
+    def test_concurrent_runtime_cache_initialization_compiles_each_core_source_once(self):
+        import scenario
+        source, package = self.fixture_source()
+        results, errors = [], []
+        original_compile = scenario.py_compile.compile
+        with mock.patch.object(scenario, 'CORE', source), \
+                mock.patch.object(scenario, '_runtime_bytecode', None), \
+                mock.patch.object(scenario.py_compile, 'compile', wraps=original_compile) as compile_source:
+            try:
+                def initialize():
+                    try:
+                        results.append(scenario.fixture_runtime_cache(source))
+                    except BaseException as error:
+                        errors.append(error)
+                threads = [threading.Thread(target=initialize) for _ in range(8)]
+                for thread in threads:
+                    thread.start()
+                for thread in threads:
+                    thread.join(timeout=10)
+                self.assertFalse(any(thread.is_alive() for thread in threads))
+                self.assertEqual(errors, [])
+                self.assertEqual(len(results), 8)
+                self.assertEqual(len(set(results)), 1)
+                compiled = [call.args[0] for call in compile_source.call_args_list
+                            if Path(call.args[0]).parent == package]
+                self.assertEqual(sorted(compiled), sorted(str(path) for path in package.glob('*.py')))
+            finally:
+                if scenario._runtime_bytecode is not None:
+                    scenario._runtime_bytecode.cleanup()
+
+    def test_private_runtime_cache_reuses_code_without_poisoning_other_cores(self):
+        import scenario
+        source, package = self.fixture_source()
+        state = package / 'state.py'
+        state.write_text('def current(): return "first"\n')
+        (source / 'bin/brain').write_text(
+            'import sys\nfrom pathlib import Path\n'
+            'sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))\n'
+            'from brain.state import current\nprint(current())\nprint(current.__code__.co_filename)\n')
+        first, second = self.tmp / 'one', self.tmp / 'two'
+        shutil.copytree(source, first)
+        shutil.copytree(source, second)
+        with mock.patch.object(scenario, 'CORE', source), \
+                mock.patch.object(scenario, '_runtime_bytecode', None):
+            try:
+                def read(core):
+                    return self.run_([], self.tmp, brain=core / 'bin/brain').splitlines()
+                self.assertEqual(read(first), ['first', str(first / 'lib/brain/state.py')])
+                self.assertEqual(read(second), ['first', str(second / 'lib/brain/state.py')])
+                prefix = Path(scenario._runtime_bytecode.name)
+                links = [prefix / (core / 'lib/brain').relative_to(core.anchor)
+                         for core in (first, second)]
+                self.assertTrue(all(link.is_symlink() for link in links))
+                self.assertEqual(links[0].resolve(), links[1].resolve())
+                cache = next(links[0].glob('state.*.pyc'))
+                before = cache.read_bytes()
+                self.assertEqual(int.from_bytes(before[4:8], 'little'), 3)
+                changed = first / 'lib/brain/state.py'
+                stamp = changed.stat()
+                changed.write_text('def current(): return "other"\n')
+                os.utime(changed, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
+                self.assertEqual(changed.stat().st_size, stamp.st_size)
+                self.assertEqual(read(first), ['other', str(changed)])
+                self.assertEqual(read(second)[0], 'first')
+                self.assertEqual(cache.read_bytes(), before)
+                self.assertEqual(list(first.rglob('__pycache__')), [])
+                self.assertEqual(list(second.rglob('__pycache__')), [])
+                changed.unlink()
+                missing = self.run_([], self.tmp, ok=False, brain=first / 'bin/brain')
+                self.assertIn('ModuleNotFoundError', missing)
+            finally:
+                if scenario._runtime_bytecode is not None:
+                    scenario._runtime_bytecode.cleanup()
+
     def test_commit_avoids_existing_path_queries_and_preserves_owned_deletions(self):
         root = self.init('alice')
         deleted = root / 'deleted.txt'

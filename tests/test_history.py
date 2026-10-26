@@ -30,6 +30,7 @@ from scenario import Scenario, AutonomyProject, shlex_quote
 
 class History(Scenario):
     """brain history: past sessions about a home, extracted without a model into batches readers finish."""
+    fixture_init_in_process = True
 
     def setUp(self):
         super().setUp()

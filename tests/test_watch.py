@@ -19,6 +19,7 @@ EXPLICIT_DELIVERY_KINDS = {'inbox', 'handback', 'unsettled-threads', 'overlappin
                            'machine-repair', 'restart', 'rotate', 'overdue-question'}
 
 class Watcher(Scenario):
+    fixture_init_in_process = True
     def setUp(self):
         super().setUp()
         self.patch = mock.patch.dict(os.environ, self.env)
