@@ -203,6 +203,8 @@ def retained_temporary_directory(copies=None):
             if any(child.incomplete and (child.owned == owned or owned in child.owned.parents)
                    for child in children):
                 retention.incomplete = True
+                if copies is not None:
+                    copies.retain_unknown()
             _retention_children.reset(token)
             saved = retention.checkpoint(stage='before-native-delete') is True
             if copies is None:
