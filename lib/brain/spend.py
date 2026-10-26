@@ -10,6 +10,7 @@ import re
 import time
 from pathlib import Path
 
+from . import briefs as _m_briefs
 from . import common as _m_common
 from . import connect as _m_connect
 from . import guard as _m_guard
@@ -19,6 +20,9 @@ from . import jobs as _m_jobs
 from . import nodes as _m_nodes
 from . import ui as _m_ui
 from . import usage as _m_usage
+from . import usage_cache as _m_usage_cache
+from . import timings as _m_timings
+from . import command_reads as _m_command_reads
 
 
 # Read from the runtimes' own transcripts on this machine, in the subscription folders this brain may use. Only
@@ -289,6 +293,7 @@ def brain_terms(inst):
 
 # A dashboard may aggregate in memory, but viewing it must never publish spend caches.
 _SPEND_READ_ONLY = ContextVar('brain_spend_read_only', default=False)
+_SPEND_SESSION_HINTS = ContextVar('brain_spend_session_hints', default=None)
 
 
 @contextmanager
@@ -336,7 +341,13 @@ def spend_cache_valid(agg, key, ident, runtime, stamp, packed):
         return False
 
 
+@_m_timings.timed("usage_read")
 def spend_file(inst, path, runtime, allowed, forbidden, budget=None, window=None):
+    with _m_usage_cache.database(inst, readonly=_SPEND_READ_ONLY.get()) as cache:
+        return _spend_file(inst, path, runtime, allowed, forbidden, budget, window, cache)
+
+
+def _spend_file(inst, path, runtime, allowed, forbidden, budget, window, cache):
     """One transcript's aggregate, brought up to date; None when unreadable or outside the folders this brain may
     read (checked on the open file, as `brain history` does). A file that shrank or was replaced is read again.
     With a window ([lo, hi] seconds), only what happened inside it, to the second; cached by exact window."""
@@ -344,9 +355,13 @@ def spend_file(inst, path, runtime, allowed, forbidden, budget=None, window=None
         real = Path(path).resolve()
     except (OSError, RuntimeError):
         return None
-    fh, ident = _m_history.transcript_open(real, allowed, forbidden)
+    # Validate the raw descriptor before cache lookup. An unchanged compressed
+    # aggregate needs neither a decompressor process nor transcript bytes.
+    fh, ident = _m_history.history_open(real, allowed, forbidden)
     if not fh:
         return None
+    hints = _SPEND_SESSION_HINTS.get()
+    hint = hints.get(str(real)) if hints else None
     with fh:
         try:
             st = os.fstat(fh.fileno())
@@ -354,8 +369,10 @@ def spend_file(inst, path, runtime, allowed, forbidden, budget=None, window=None
             stamp = [size, st.st_mtime_ns, st.st_ctime_ns, st.st_mode, st.st_nlink]
         except OSError:
             return None
-        packed = isinstance(fh, _m_history.Decompressed)
-        mem = (str(inst.root.resolve()), str(real), runtime, tuple(window) if window else None)
+        packed = str(real).endswith('.zst')
+        if packed and not _m_history.ZSTD:
+            return None
+        mem = (str(inst.root.resolve()), str(real), runtime, tuple(window) if window else None, bool(hint))
         known = _SPEND_MEM.get(mem)
         terms = spend_terms(inst)
         if known and known[0] == (stamp, list(ident)) and known[1].get("complete", True) and \
@@ -377,7 +394,9 @@ def spend_file(inst, path, runtime, allowed, forbidden, budget=None, window=None
             loaded_private = spend_cache_valid(agg, key, ident, runtime, stamp, packed)
         if agg is None:
             try:
-                agg = json.loads(cf.read_text())
+                agg = cache.get("file:" + key)
+                if agg is None:
+                    agg = json.loads(cf.read_text())
             except (OSError, ValueError):
                 pass
         if not spend_cache_valid(agg, key, ident, runtime, stamp, packed):
@@ -395,6 +414,8 @@ def spend_file(inst, path, runtime, allowed, forbidden, budget=None, window=None
             sub = real.parent.name == "subagents"
             agg.update(id=f"{real.parent.parent.name}/{claude_session_id(real)}" if sub else claude_session_id(real), subagent=sub,
                        parent=real.parent.parent.name if sub else "")
+        elif hint:
+            agg.update(id=hint['id'], parent=hint['parent'])
         elif not agg.get("id"):
             meta = codex_meta(real, allowed, forbidden)
             if meta:
@@ -405,7 +426,11 @@ def spend_file(inst, path, runtime, allowed, forbidden, budget=None, window=None
                 agg["published"] = False
             try:
                 if agg["state"]["offset"] < size:
-                    agg["complete"] = spend_read(agg, fh, budget)
+                    if packed:
+                        with _m_history.Decompressed(os.fdopen(os.dup(fh.fileno()), 'rb')) as unpacked:
+                            agg["complete"] = spend_read(agg, unpacked, budget)
+                    else:
+                        agg["complete"] = spend_read(agg, fh, budget)
             except OSError:
                 return None
             if packed:
@@ -415,9 +440,10 @@ def spend_file(inst, path, runtime, allowed, forbidden, budget=None, window=None
             try:
                 if not _SPEND_READ_ONLY.get():  # explicit accounting may persist windowed aggregates too
                     agg["published"] = True
+                    kept = {k: v for k, v in agg.items() if k not in SPEND_UNKEPT}
+                    cache.put("file:" + key, kept)
                     cf.parent.mkdir(parents=True, exist_ok=True)
-                    _m_common.atomic_write(cf, json.dumps({k: v for k, v in agg.items() if k not in SPEND_UNKEPT},
-                                                separators=(",", ":")), private=True)
+                    _m_common.atomic_write(cf, json.dumps(kept, separators=(",", ":")), private=True)
             except OSError:
                 agg["published"] = False  # still right for this run; publish on the next explicit read
         # A time slice can end exactly after the final whole line. There is no next
@@ -426,6 +452,8 @@ def spend_file(inst, path, runtime, allowed, forbidden, budget=None, window=None
             agg['complete'] = True
         if display_cache is not None and update_private:
             display_cache.write("usage-" + key, {k: v for k, v in agg.items() if k not in SPEND_UNKEPT})
+        if hint:
+            agg.update(id=hint['id'], parent=hint['parent'])
         agg["path"] = str(real)  # this run's own, never written
         _SPEND_MEM[mem] = ((stamp, list(ident)), agg)
     return agg
@@ -657,6 +685,45 @@ def codex_mark(path, allowed, forbidden):
     return ""
 
 
+@ui_discovery
+def codex_index(inst, cfg, allowed, forbidden):
+    """One metadata scan per command; persist only opaque session/location identities."""
+    out = []
+    with _m_usage_cache.database(inst, readonly=_SPEND_READ_ONLY.get()) as cache:
+        for root in (cfg / 'sessions', cfg / 'archived_sessions'):
+            for path in spend_walk(root) if root.is_dir() else []:
+                if not path.name.startswith('rollout-'):
+                    continue
+                try:
+                    if (not _m_history.history_within(path, allowed) or
+                            _m_history.history_within(path, forbidden)):
+                        continue
+                    st = path.stat()
+                    stamp = [st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns,
+                             st.st_mode, st.st_nlink]
+                    key = 'discovery:' + opaque(str(path))
+                    saved = cache.get(key)
+                    if not (isinstance(saved, dict) and saved.get('version') == SPEND_VERSION
+                            and saved.get('stamp') == stamp and isinstance(saved.get('places'), list)
+                            and all(isinstance(saved.get(k), str) for k in ('id', 'parent', 'job'))):
+                        meta = codex_meta(path, allowed, forbidden)
+                        if not meta:
+                            continue
+                        sid, cwd, parent = meta
+                        places = []
+                        if cwd and os.path.isabs(cwd):
+                            place = Path(cwd).resolve()
+                            places = [opaque(str(p)) for p in (place, *place.parents)]
+                        saved = dict(version=SPEND_VERSION, stamp=stamp, id=opaque(sid),
+                                     parent=opaque(parent) if parent else '', places=places,
+                                     job=codex_mark(path, allowed, forbidden))
+                        cache.put(key, saved)
+                    out.append((path, saved, st.st_mtime))
+                except (OSError, ValueError, RuntimeError):
+                    continue
+    return out
+
+
 def job_window(inst, row):
     a = inst.parse_time(row.get("Started", ""))
     b = inst.parse_time(row.get("Ended", "")) if row.get("Ended") else None
@@ -724,21 +791,16 @@ def job_sessions(inst, n, row, worktree=None):
         else:
             # Every Codex transcript written to since the job started, wherever its day folder: a resumed session
             # keeps writing to the file of the day it began.
-            mine = []
-            for root in (cfg / "sessions", cfg / "archived_sessions"):
-                for f in spend_walk(root) if root.is_dir() else []:
-                    try:
-                        if f.name.startswith("rollout-") and touched(f):
-                            m = codex_meta(f, allowed, forbidden)
-                            if m:
-                                mine.append((f, *m))
-                    except OSError:
-                        pass
-            for f, sid, cwd, parent in mine:
-                if wt and spend_inside(cwd, wt):
-                    in_wt.add(str(f.resolve()))
-                if sid in ids or (wt and spend_inside(cwd, wt)) or (
-                        any(spend_inside(cwd, p) for p in places) and codex_mark(f, allowed, forbidden) == key):
+            mine = [(f, m['id'], m['places'], m['parent'], m['job'])
+                    for f, m, changed in codex_index(inst, cfg, allowed, forbidden) if changed >= start - 60]
+            place_keys = {opaque(str(p.resolve())) for p in places}
+            wt_key = opaque(str(wt.resolve())) if wt else None
+            id_keys = {opaque(i) for i in ids}
+            for f, sid, locations, parent, mark in mine:
+                here = wt_key is not None and wt_key in locations
+                if here:
+                    in_wt.add(str(f))
+                if sid in id_keys or here or (place_keys.intersection(locations) and mark == key):
                     take("codex", f)
             metas += mine
     keep = [a for a in aggs if not a["subagent"] and (a["path"] in in_wt or a["job"] == key or a["id"] in ids)]
@@ -754,21 +816,36 @@ def job_sessions(inst, n, row, worktree=None):
     grew = True
     while grew:  # Codex sub-agents are sessions of their own that name their parent, at any depth
         grew = False
-        for f, sid, cwd, parent in metas:
-            if parent in chosen and sid not in chosen:
+        selected = {opaque(sid) for sid in chosen}
+        for f, sid, locations, parent, mark in metas:
+            if parent in selected and sid not in selected:
                 agg = take("codex", f) or next((x for x in aggs if x["path"] == str(f.resolve())), None)
                 if agg:
                     keep.append(agg)
-                    chosen.add(sid)
+                    chosen.add(agg['id'])
+                    selected.add(sid)
                     grew = True
     return keep
 
 
+@_m_timings.timed("job_usage")
 def job_usage(inst, n, row, worktree=None):
     """What a job cost, counted only while it was open: tokens by kind, active time, compactions, sub-agents,
     tool calls and the models that ran it."""
-    signature = hashlib.sha256(json.dumps(job_usage_signature(inst, n, row),
-                                          sort_keys=True).encode()).hexdigest()
+    signal = _m_jobs.job_signal(inst, n, row)
+    finished = bool(row.get('Ended') or (signal and not _m_briefs.restart_acknowledged(n, row, signal)))
+    merged_tip = ''
+    if not finished:
+        from . import status
+        work = n['local'].get('worktrees', {}).get(row['Job'])
+        local = status.local_job_state(n, row['Job'], work) if work else {}
+        if local.get('merged'):
+            finished, merged_tip = True, local.get('tip', '')
+    revision = job_usage_signature(inst, n, row)
+    # Terminal worker/ledger records fix the accounting episode. Unrelated live
+    # transcripts cannot invalidate every finished job on every dashboard read.
+    stable = (revision[0][:3], revision[1], merged_tip, *revision[3:]) if finished else revision
+    signature = hashlib.sha256(json.dumps(stable, sort_keys=True).encode()).hexdigest()
     key = _m_jobs.digest([n['id'], _m_jobs.job_key(row), str(worktree or '')])
     cache = spend_cache_dir(inst) / 'jobs' / (key + '.json')
     try:
@@ -1041,6 +1118,7 @@ def spend_input_signature(inst):
             tuple(sorted(paths)))
 
 
+@_m_command_reads.memo
 def job_usage_signature(inst, n, row):
     try:
         st = _m_jobs.handback_file(n, row).stat()
@@ -1054,7 +1132,10 @@ def job_usage_signature(inst, n, row):
 def _live_usage(inst, n, row):
     """An open job's usage so far, refreshed when transcript or permission metadata changes.
     What its host reported wins over what the transcripts show."""
-    if str(row.get("Usage", "")).startswith("host"):
+    if str(row.get("Usage", "")).startswith("host") or (
+            _m_jobs.closed_job(row) and row_usage(row) is not None):
+        # Closure records the final measured aggregate in the source ledger.
+        # Its later read never rediscovers every historical session.
         return host_row_usage(row)
     key = (str(inst.root), n["id"], _m_jobs.job_key(row))
     signature = job_usage_signature(inst, n, row)
@@ -1067,7 +1148,8 @@ def _live_usage(inst, n, row):
 
 
 def _read_live_usage(inst, n, row):
-    if str(row.get('Usage', '')).startswith('host'):
+    if str(row.get('Usage', '')).startswith('host') or (
+            _m_jobs.closed_job(row) and row_usage(row) is not None):
         return host_row_usage(row)
     try:
         return job_usage(inst, n, row)
@@ -1219,7 +1301,15 @@ def spend_machine(inst, budget=2.0):
     hit = _MACHINE.get(str(inst.root))
     if hit and hit["complete"] and time.monotonic() - hit["at"] < 60:
         return hit["value"]
-    aggs, total, done = spend_all(inst, budget=budget)
+    sources, allowed, forbidden = spend_sources(inst)
+    hints = ({str(path): meta for runtime, cfg in sources if runtime == 'codex'
+              for path, meta, changed in codex_index(inst, cfg, allowed, forbidden)}
+             if budget is None else {})  # bounded views must not bootstrap an unbounded discovery first
+    token = _SPEND_SESSION_HINTS.set(hints)
+    try:
+        aggs, total, done = spend_all(inst, budget=budget)
+    finally:
+        _SPEND_SESSION_HINTS.reset(token)
     value = {"complete": done, "files": total, "read": len(aggs), "runtimes": spend_days(inst, aggs),
              "since_week": spend_summary(spend_sum(aggs, time.time() - 7 * 86400), brain_terms(inst)) if done else None}
     _MACHINE[str(inst.root)] = {"at": time.monotonic(), "complete": done, "value": value}
@@ -1410,6 +1500,7 @@ def cmd_spend(a):
 _COORDINATOR_FILES = {}  # selected paths per process/sid; accounting itself memoizes unchanged files
 
 
+@_m_command_reads.memo
 def coordinator_measure(inst, n):
     """Current coordinator only. Reject unrelated file names before any transcript open."""
     ids = n["local"].get("coordinator_sessions", [])

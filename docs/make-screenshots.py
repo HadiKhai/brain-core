@@ -276,7 +276,7 @@ def build(base):
 
 
 def snapshot(root, b, theme, out, hash_="", size=(1440, 1000), stress=False):
-    st = json.loads(b("ui", "--json", "--scan", root.parent / "code"))
+    st = json.loads(b("ui", "--json", "--wait", "--scan", root.parent / "code"))
     st["brain"].update(root="~/Brain", machine="studio-mac", others=[])
     st["machine"].update(cpus=12, load=[4.2, 3.9, 3.1], mem_free_gb=21.4, mem_total_gb=36, disk_free_gb=312,
                          disk_total_gb=994)
@@ -320,7 +320,7 @@ def snapshot(root, b, theme, out, hash_="", size=(1440, 1000), stress=False):
 
 
 def check_ui(root, b):
-    state = json.loads(b("ui", "--json", "--scan", root.parent / "code"))
+    state = json.loads(b("ui", "--json", "--wait", "--scan", root.parent / "code"))
     html = (CORE / "ui" / "index.html").read_text()
     html = html.replace('<script>\n"use strict";', "<script>window.__STATE__=" + json.dumps(state).replace("</", "<\\/") + ';</script>\n<script>\n"use strict";', 1)
     checks = (CORE / "tests" / "ui-checks.js").read_text()

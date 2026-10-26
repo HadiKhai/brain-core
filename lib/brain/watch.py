@@ -10,6 +10,7 @@ from pathlib import Path
 
 from . import briefs as _m_briefs
 from . import common as _m_common
+from . import timings as _m_timings
 from . import guard as _m_guard
 from . import hosts as _m_hosts
 from . import instance as _m_instance
@@ -659,7 +660,7 @@ def watch_since_wake(inst, nodes):
     return list({i['id']: i for i in out}.values())
 
 
-def watch_run(inst, kinds=None, quiet=False, sources=None):
+def watch_run(inst, kinds=None, quiet=False, sources=None, groups=None):
     path = inst.root / '.brain' / 'watch.json'
     try:
         state = watch_state(inst)
@@ -680,7 +681,7 @@ def watch_run(inst, kinds=None, quiet=False, sources=None):
         watch_failures(inst, nodes, failures, warnings)
     from . import communication as _m_communication
     _m_communication.communication_reconcile(inst)
-    groups = watch_groups(inst, nodes)
+    groups = watch_groups(inst, nodes) if groups is None else groups
     current_ids = {i['id'] for group in groups.values() for i in group['items']}
     for group in groups.values():
         if group.get('episodes_known', True):
@@ -764,7 +765,7 @@ def watch_run(inst, kinds=None, quiet=False, sources=None):
             print(f'watch: {count} new item(s) queued')
 
 
-def watch_once(inst, kinds=None, quiet=False, sources=None):
+def watch_once(inst, kinds=None, quiet=False, sources=None, groups=None):
     """Share the sampler's short, nonblocking instance-lock discipline."""
     import fcntl
     folder = inst.root / '.brain'
@@ -788,7 +789,8 @@ def watch_once(inst, kinds=None, quiet=False, sources=None):
         _m_instance._LOCK['fh'], _m_instance._LOCK['depth'] = stream, 1
         os.environ['BRAIN_LOCK_HELD'] = f'{inst.root.resolve()}|{os.getpid()}'
         try:
-            watch_run(inst, kinds=kinds, quiet=quiet, sources=sources)
+            with _m_timings.phase('watch_write'):
+                watch_run(inst, kinds=kinds, quiet=quiet, sources=sources, groups=groups)
         finally:
             _m_instance._LOCK['depth'] = 0
             _m_instance.unlock()

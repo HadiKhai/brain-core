@@ -5,6 +5,7 @@ import json
 import re
 import sys
 import urllib.parse
+import uuid
 from contextlib import contextmanager
 from contextvars import ContextVar
 from pathlib import Path
@@ -20,6 +21,7 @@ from . import history as _m_history
 from . import hosts as _m_hosts
 from . import instance as _m_instance
 from . import jobs as _m_jobs
+from . import ui as _m_ui
 from . import knowledge as _m_knowledge
 from . import machine as _m_machine
 from . import nodes as _m_nodes
@@ -38,6 +40,8 @@ from . import upgrade as _m_upgrade
 from . import usage as _m_usage
 from . import verify as _m_verify
 from . import worktrees as _m_worktrees
+from . import command_reads as _m_command_reads
+from . import timings as _m_timings
 
 
 def status_line(n):
@@ -49,6 +53,7 @@ def status_line(n):
     return m.group() if m else "(no Updated line)"
 
 
+@_m_command_reads.memo
 def updated_at(inst, n):
     m = re.search(r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2}(?::\d{2})?(?: ?(?:Z|[+-]\d{2}:?\d{2}))?)", status_line(n))
     return inst.parse_time(m.group(1)) if m else None
@@ -114,6 +119,7 @@ def ago(inst, d):
     return "just now"
 
 
+@_m_command_reads.memo
 def status_section(n, heading, physical=False):
     """Bullet lines under `## <heading>` in a node's status.md."""
     f = n["dir"] / "status.md"
@@ -135,6 +141,7 @@ NOW_LINE_LIMIT = 30
 BLOCKED_HOURS = 48
 
 
+@_m_command_reads.memo
 def code_node(n):
     return bool(n["fm"].get("stack")) or any(
         l in ("type:code", "kind:code") for l in _m_common.lst(n["fm"].get("labels"))) or bool(
@@ -161,6 +168,7 @@ def empty_blocked(text):
     return bool(re.fullmatch(r"\(?\s*(?:none|nothing)(?:\s+(?:right now|blocked|currently|yet|at present))?[.!]?\s*\)?", text, re.I))
 
 
+@_m_command_reads.memo
 def blocked_entries(inst, n, file_only=False):
     """Stable source text, with age kept separate so a ticking clock cannot re-notify."""
     if n["archived"]:
@@ -191,8 +199,7 @@ def blocked_entries(inst, n, file_only=False):
         # Legacy entries still age: use this bullet's introduction, never the status Updated line.
         if not since and not file_only:
             needle = first_lines[index]
-            history = _m_common.git("log", "--reverse", "--format=%cI", "-S", needle, "--",
-                          str(source.relative_to(inst.root)), cwd=inst.root).stdout.splitlines()
+            history = _m_command_reads.history_dates(inst, source, needle)
             since = inst.parse_time(history[0]) if history else datetime.datetime.fromtimestamp(
                 source.stat().st_mtime, inst.zone())
         # File-only bootstrap cannot infer when a legacy bullet appeared.
@@ -291,6 +298,7 @@ def active_work_closed(row):
         row[3].strip().casefold()))
 
 
+@_m_command_reads.memo
 def active_work(n, include_closed=False):
     """Rows of the 'Active work' table in status.md (branch, thread, PR, state), minus the header."""
     f = n["dir"] / "status.md"
@@ -307,6 +315,7 @@ def active_work(n, include_closed=False):
     return [r for r in rows if include_closed or not active_work_closed(r)]
 
 
+@_m_command_reads.memo
 def overdue_questions(inst, n, lines):
     try:
         minutes = max(1, float(n["fm"].get("question_minutes", 10)))
@@ -333,6 +342,7 @@ def machine_transition_line(n, line):
                              r'\[machine episode [0-9a-f]{24} (?:open|close)\]', line) is not None)
 
 
+@_m_command_reads.memo
 def inbox_lines(n, readonly=False, lifecycle_data=None):
     from . import ui_readmodel
     readonly = readonly or ui_readmodel.projection(_m_instance.instance_above(n['dir'])) is not None
@@ -379,6 +389,7 @@ FACTS_END = "<!-- /brain:facts -->"
 FACTS_RE = re.compile(re.escape(FACTS_START) + r".*?" + re.escape(FACTS_END), re.S)
 
 
+@_m_command_reads.memo
 def facts_meta(n):
     f = n["dir"] / "status.md"
     block = FACTS_RE.search(f.read_text()) if f.exists() else None
@@ -422,15 +433,14 @@ def local_job_state(n, branch, w):
             tips, merged = {}, set()
             if home and home.exists():
                 target = _m_worktrees.integration_target(n)
-                refs = _m_common.git('for-each-ref', '--format=%(refname:strip=2)%00%(objectname)',
-                                     'refs/heads/', cwd=home)
-                if not refs.returncode:
-                    tips = dict(line.split('\0', 1) for line in refs.stdout.splitlines() if '\0' in line)
+                refs = _m_common.branch_refs(home)
+                tips = {name[len('refs/heads/'):]: tip for name, tip in (refs or {}).items()
+                        if name.startswith('refs/heads/')}
                 if target:
-                    refs = _m_common.git('for-each-ref', '--format=%(refname:strip=2)',
-                                         '--merged=' + target, 'refs/heads/', cwd=home)
-                    if not refs.returncode:
-                        merged = set(refs.stdout.splitlines())
+                    graph = _m_common.git('rev-list', target, cwd=home)
+                    if not graph.returncode:
+                        ancestors = set(graph.stdout.splitlines())
+                        merged = {name for name, tip in tips.items() if tip in ancestors}
             repositories[repository] = tips, merged
         tips, merged = repositories[repository]
         tip = tips.get(branch, '')
@@ -486,6 +496,8 @@ def status_fingerprint(lines):
     return _m_jobs.digest(normalise_status_facts(lines))
 
 
+@_m_command_reads.memo
+@_m_timings.timed("file_state")
 def file_state(inst, n):
     rows = _m_jobs.read_jobs(n)
     with local_job_snapshot():
@@ -496,16 +508,20 @@ def file_state(inst, n):
     return {"jobs": rows, "worktrees": wts, "handbacks": signals, "job_projections": projections, "inbox": inbox_lines(n)}
 
 
+@_m_command_reads.memo
+@_m_timings.timed("due_evidence")
 def due_evidence(inst, n):
     state = file_state(inst, n)
     # Node's own commits only, excluding status (including its generated refresh commit) and children.
     names = ["brief.md", "decisions.md", "backlog.md", "node.md", "inbox.md", "sources", "AGENTS.md", _m_jobs.JOBS_FILE,
              "job-handbacks", "job-attempts", "handback-queue"]
     paths = [str((n["dir"] / name).relative_to(inst.root)) for name in names]
-    last = _m_common.git("log", "-1", "--format=%H %cI", "--", *paths, cwd=inst.root).stdout.strip()
+    previous = facts_meta(n)
+    last = ("" if previous else
+            _m_common.git("log", "-1", "--format=%H %cI", "--", *paths, cwd=inst.root).stdout.strip())
     # Hash exactly the generated display, apart from its refresh time and metadata. Retain
     # the last refresh's merge baseline so its "since previous" snapshot stays comparable.
-    lines, _ = status_facts(inst, n, state, facts_meta(n).get("merged_before", []), metadata_only=True)
+    lines, _ = status_facts(inst, n, state, previous.get("merged_before", []), metadata_only=True)
     return state, status_fingerprint(lines), last
 
 
@@ -539,6 +555,7 @@ def parallel_job_limit(n):
     return int(value)
 
 
+@_m_command_reads.memo
 def runnable_work(n, rows):
     """Explicit backlog tasks only; prose and other sections grant no work authority."""
     if rows is None or paused(n):
@@ -744,6 +761,7 @@ def due_items(inst, n, evidence=None, include_stale=True, include_ready=True, in
     return _m_reminders.reminder_items(inst, n, items, include_handled=include_handled, omitted_kinds=omitted)
 
 
+@_m_command_reads.memo
 def changes_due(inst, n):
     """Unread core changes, for a node whose coordinator runs here (the root always)."""
     if n["id"] != "root" and not n["local"].get("coordinator"):
@@ -793,8 +811,31 @@ def coordinator_due_items(inst, nodes, include_handled=False):
     return items
 
 
+def unsettled_thread_items(inst, n):
+    """The root rollup needs settlement counts, not every descendant's full due scan."""
+    if n['archived']:
+        return []
+    unsettled = _m_jobs.unsettled_jobs(_m_jobs.read_jobs(n))
+    if not unsettled:
+        return []
+    item = {'node': n['id'], 'kind': 'unsettled-threads', 'count': len(unsettled),
+            'text': _m_guard.redact(f"{len(unsettled)} closed job(s) with unsettled threads; inspect brain jobs {n['id']}; "
+                    "find each job's threads through the host, check safety, settle, then record --branch <branch> --settled",
+                    _m_guard.never_terms(n))}
+    try:
+        # This is a partial observation. Reconcile a detached copy, retaining all
+        # existing identities without retiring unrelated reminder episodes.
+        with _m_reminders.lifecycle_store(inst, readonly=True) as data:
+            previous = data['reminders'].get(n['id'], {})
+            omitted = [r.get('kind') for r in previous.values() if isinstance(r, dict)
+                       and r.get('kind') != 'unsettled-threads']
+            return _m_reminders.reminder_reconcile(inst, n, [item], data, omitted_kinds=omitted)
+    except (OSError, ValueError):
+        return [{**item, 'id': _m_reminders.reminder_key(item), 'lifecycle_error': 'receipt state unknown; no suppression'}]
+
+
 def cmd_due(a):
-    inst = _m_nodes.load()
+    inst = _m_ui.UIInstance(_m_nodes.load().root)
     if getattr(a, "synthesis_seen", None):
         if not a.id or a.quiet or a.json or a.machine or getattr(a, 'defer', None) or getattr(a, 'ack', None):
             _m_common.die("--synthesis-seen needs one node id and no display/reminder options")
@@ -846,8 +887,12 @@ def cmd_due(a):
     # Transport receipt expiry must not turn an unchanged escalation into new work.
     try:
         if not _m_common.outward_links(inst.root):
+            # Preserve the watch receipt scan/reconciliation transaction, while
+            # the instance lock covers only receipt and wake publication.
+            with _m_timings.phase('watch_compute'):
+                groups = _m_watch.watch_groups(inst)
             _m_watch.watch_once(inst, kinds=('overdue-question',), quiet=True,
-                                sources={n['id'] for n in escalation_nodes})
+                                sources={n['id'] for n in escalation_nodes}, groups=groups)
     except (OSError, ValueError):
         pass  # keep display available; invalid acknowledgements never replay the backlog
     for n in escalation_nodes:
@@ -911,8 +956,7 @@ def cmd_due(a):
     if a.id == "root":
         # Retain the informational descendant backlog in the ordinary due view.
         items += [item for n in inst.nodes() if n["id"] != "root"
-                  for item in due_items(inst, n, include_stale=False, include_advice=False)
-                  if item["kind"] == "unsettled-threads"]
+                  for item in unsettled_thread_items(inst, n)]
     if a.id == "root":
         for n in escalation_nodes:
             if n["id"] == "root" or n["archived"]:
@@ -942,6 +986,7 @@ def cmd_due(a):
         _m_wake_turns.wake_turn_consume(inst, n, shown=value)
 
 
+@_m_command_reads.memo
 def missing_preview(n, state):
     code = code_node(n)
     merged = any(r["Ended"] and r["Outcome"] == "merged" for r in state["jobs"] or []) or \
@@ -955,6 +1000,8 @@ def display_time(inst, value):
     return _m_usage.usage_time(parsed.timestamp(), inst) if parsed else "unknown (legacy time)"
 
 
+@_m_command_reads.memo
+@_m_timings.timed("status_facts")
 def status_facts(inst, n, state, known_merges, metadata_only=False):
     """The displayed facts only: no hidden git tips, file hashes or judgement timestamp."""
     merged = {_m_jobs.job_key(r): r for r in state["jobs"] or [] if r["Ended"] and r["Outcome"] == "merged"}
@@ -1178,8 +1225,7 @@ def inbox_items(inst, nodes=None, reporter="root", readonly=False, requests_only
                 sources += [i["path"] for i in proposed if queue[i["path"]] == nid]
                 source = next((p for p in sources if p.is_file()), source)
             needle = text.removeprefix("inbox: ") if kind == "inbox" else text
-            history = _m_common.git("log", "--reverse", "--format=%cI", "-S", needle, "--",
-                          str(source.relative_to(inst.root)), cwd=inst.root).stdout.splitlines()
+            history = _m_command_reads.history_dates(inst, source, needle)
             first = history[0] if history else datetime.datetime.fromtimestamp(
                 source.stat().st_mtime if source.exists() else inst.now_dt().timestamp(), inst.zone()).isoformat(timespec="seconds")
         out.append({"id": key, "node": nid, "kind": kind, "text": _m_guard.redact(text, _m_guard.never_terms(n)),
@@ -1193,7 +1239,7 @@ def inbox_items(inst, nodes=None, reporter="root", readonly=False, requests_only
 
 
 def cmd_inbox(a):
-    inst = _m_nodes.load()
+    inst = _m_ui.UIInstance(_m_nodes.load().root)
     if getattr(a, "add", None):
         n = inst.node(a.id or "root")
         text = _m_nodes.import_text(" ".join(a.add.split()), _m_guard.never_terms(n))
@@ -1234,12 +1280,50 @@ def cmd_inbox(a):
         (f" (escalated: {item['age_hours']:g}h old, over 48h)" if item.get("escalated") else "") + "\n" for item in items)
     sys.stdout.write(output)
     if a.new:
-        # Delivery comes first, under the same lock. A crash before saving repeats an item.
+        # Delivery precedes acknowledgement. Computing and printing hold no
+        # instance lock; simultaneous readers may repeat delivery, never lose it.
         sys.stdout.flush()
-        f = inst.root / ".brain" / "inbox-seen.json"
-        f.parent.mkdir(exist_ok=True)
+        publish_inbox_seen(inst, reporter, state)
+
+
+def publish_inbox_seen(inst, reporter, state):
+    try:
+        _publish_inbox_seen(inst, reporter, state)
+    except (OSError, ValueError, SystemExit):
+        print('brain: inbox delivered; seen markers not saved, retain state for repair', file=sys.stderr)
+
+
+def _publish_inbox_seen(inst, reporter, state):
+    from . import events
+    with _m_instance.brain_lock(inst), _m_timings.phase("seen_write"):
+        f = inst.root / ".brain/inbox-seen.json"
+        try:
+            saved = json.loads(events.private_read(f))
+        except FileNotFoundError:
+            saved = {"version": 2, "reporters": {}}
+        if isinstance(saved, dict) and saved.get("version") in (None, 1):
+            saved = {"version": 2, "reporters": {}}  # legacy acknowledgements are unscoped; repeat safely
+        if (not isinstance(saved, dict) or saved.get("version") != 2
+                or not isinstance(saved.get("reporters"), dict)):
+            raise ValueError("invalid inbox seen markers; retain for repair")
+        reporters = saved["reporters"]
+        current = reporters.get(reporter, {})
+        if not isinstance(current, dict):
+            raise ValueError("invalid inbox reporter; retain for repair")
+        for key, value in state.items():
+            previous = current.get(key)
+            if isinstance(previous, dict) and previous.get("reported_at"):
+                value["reported_at"] = previous["reported_at"]
         reporters[reporter] = state
-        _m_common.atomic_write(f, json.dumps({"version": 2, "reporters": reporters}, indent=2) + "\n", private=True)
+        text = json.dumps({"version": 2, "reporters": reporters}, indent=2) + "\n"
+        # Journal the private resource itself, without rendering or refreshing
+        # shared status documents inside the short acknowledgement transaction.
+        events.append(inst, reporter, "begin", ref := uuid.uuid4().hex,
+                      {"command": "inbox_seen"})
+        _m_common.atomic_write(f, text, private=True, create=True)
+        events.append(inst, reporter, "commit", ref,
+                      {"command": "inbox_seen", "resources": events.resource_list(
+                          inst, {".brain/inbox-seen.json": events.digest(text.encode())})})
 
 
 def answer_inbox(inst, item_id, text):
@@ -1535,6 +1619,8 @@ def proposal_nodes(inst, items):
             else i["fm"].get("source_node") for i in items}
 
 
+@_m_command_reads.memo
+@_m_timings.timed("pending_imports")
 def pending_imports(inst, n):
     rules = n["dir"] / "sources/import-proposals.md"
     rules_pending = False
@@ -1554,6 +1640,7 @@ def pending_imports(inst, n):
     return int(rules_pending), roles, items
 
 
+@_m_timings.timed("runaway_checks")
 def runaway_jobs(inst, n, structured=False, readonly=False):
     """Open jobs past what this node's jobs usually take: twice the median in hours or tokens, over budget,
     compacting again and again, or mostly spent by sub-agents."""
@@ -1562,6 +1649,8 @@ def runaway_jobs(inst, n, structured=False, readonly=False):
         return []
     j, out = _m_jobs.jobs_summary(inst, n), []
     for r in j["open"]:
+        # Open ledger records include stopped workers awaiting settlement. Their
+        # latched advice stays visible; final usage is a cached observation.
         u = _m_spend.live_usage(inst, n, r)
         why = {}
         if j["median_hours"] is not None and r["age_h"] > 2 * j["median_hours"]:
@@ -1591,6 +1680,7 @@ def runaway_jobs(inst, n, structured=False, readonly=False):
     return out
 
 
+@_m_command_reads.memo
 def attention_items(inst, nodes, readonly=False, lifecycle_data=None):
     """[(node id, kind, text)]: what waits on the operator, node by node."""
     out = []

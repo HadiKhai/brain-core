@@ -26,6 +26,8 @@ import urllib.parse
 import unicodedata
 from pathlib import Path
 
+from . import command_reads as _m_command_reads
+
 
 CORE = Path(__file__).resolve().parents[2]
 ENTRY_POINT = CORE / "bin" / "brain"
@@ -104,6 +106,7 @@ def shared_file(path):
         return False
 
 
+@_m_command_reads.memo
 def outward_links(root):
     """Links in what brain commands write that lead out of the brain: its own files, .brain/, and in the root and
     every node folder their files, library, specialists, job records, sources and reports, and the nodes below.
@@ -468,6 +471,33 @@ def git_read_snapshot():
         _GIT_READS.reset(token)
 
 
+def branch_refs(cwd):
+    """One branch enumeration per repository in a read snapshot."""
+    reads = _GIT_READS.get()
+    key = (str(Path(cwd or Path.cwd()).absolute()), 'branch-ref-snapshot')
+    if reads is not None and key in reads:
+        return reads[key]
+    result = git('for-each-ref', '--format=%(refname)%00%(objectname)%00%(objecttype)',
+                 'refs/heads/', 'refs/remotes/', cwd=cwd)
+    refs = ({parts[0]: parts[1] for line in result.stdout.splitlines()
+             for parts in [line.split('\0')] if len(parts) == 3 and parts[2] == 'commit'}
+            if not result.returncode else None)
+    if reads is not None:
+        reads[key] = refs
+        trees = git('worktree', 'list', '--porcelain', '-z', cwd=cwd)
+        if not trees.returncode:
+            path = branch = None
+            for field in trees.stdout.split('\0'):
+                if field.startswith('worktree '):
+                    path, branch = field[len('worktree '):], None
+                elif field.startswith('branch refs/heads/'):
+                    branch = field[len('branch refs/heads/'):]
+                elif not field and path is not None:
+                    reads[(str(Path(path).absolute()), 'worktree-branch')] = branch
+                    path = None
+    return refs
+
+
 def git(*args, cwd=None, check=False, env=None):
     reads = _GIT_READS.get()
     key = (str(Path(cwd or Path.cwd()).absolute()), args)
@@ -482,6 +512,23 @@ def git(*args, cwd=None, check=False, env=None):
     cacheable = (reads is not None and read_only and env is None
                  and not any(str(a).startswith('--output') for a in args))
     result = reads.get(key) if cacheable else None
+    tree_key = (key[0], 'worktree-branch')
+    if (result is None and cacheable and query in (('symbolic-ref', '--short', 'HEAD'),
+                                                  ('symbolic-ref', '--quiet', '--short', 'HEAD'))
+            and tree_key in reads):
+        branch = reads[tree_key]
+        result = subprocess.CompletedProcess(['git', *args], 0 if branch else 1,
+                                             (branch + '\n') if branch else '', '')
+        reads[key] = result
+    # Display snapshots enumerate refs once per repository instead of spawning
+    # rev-parse for every ledger row. Writers never enter this optional scope.
+    if (result is None and cacheable and len(args) == 4 and args[:3] == ('rev-parse', '--verify', '--quiet')
+            and re.fullmatch(r'refs/(?:heads|remotes)/[^~^: ?*\[\]\\]+(?:\^\{commit\})?', args[3])):
+        refs = branch_refs(cwd)
+        if refs is not None:
+            tip = refs.get(args[3].removesuffix('^{commit}'))
+            result = subprocess.CompletedProcess(['git', *args], 0 if tip else 1, (tip + '\n') if tip else '', '')
+            reads[key] = result
     if result is None:
         result = subprocess.run(["git", *(["-C", str(cwd)] if cwd else []), *args],
                                 capture_output=True, text=True, errors="replace", check=False, env=env)

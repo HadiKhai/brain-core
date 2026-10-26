@@ -10,6 +10,8 @@ import subprocess
 import time
 from pathlib import Path
 
+from . import timings as _m_timings
+
 from . import common as _m_common
 
 
@@ -247,6 +249,7 @@ class brain_lock:
         except (OSError, ValueError):
             return False
 
+    @_m_timings.timed("lock_wait")
     def __enter__(self):
         if _LOCK["fh"] is None and not self.owner_is_running_us():
             import fcntl

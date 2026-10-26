@@ -443,6 +443,7 @@ class Spend(Scenario):
         self.assertNotIn("zeta", self.b(self.r, "spend", "--machine", "--json").lower())
         for f in (self.r / ".brain/spend/files").glob("*.json"):  # caches written before the word was added too
             self.assertNotIn("zeta", f.read_text().lower())
+        self.assertNotIn(b'zeta', (self.r / '.brain/usage.sqlite').read_bytes().lower())
         # A transcript with no folder of its own is in no place, wherever the command runs.
         rows = [{"type": "user", "sessionId": "19191919-nocwd", "message": {"role": "user", "content": "Hi."},
                  "timestamp": self.at(0)},
@@ -469,6 +470,7 @@ class Spend(Scenario):
         self.assertNotIn("theta", json.dumps(value).lower())
         for f in (self.r / ".brain/spend/files").glob("*.json"):
             self.assertNotIn("theta", f.read_text().lower())
+        self.assertNotIn(b'theta', (self.r / '.brain/usage.sqlite').read_bytes().lower())
 
     def test_a_response_that_grew_after_the_job_began_counts_its_growth(self):
         ledger = self.node / "job-ledger.md"
@@ -625,6 +627,94 @@ class Spend(Scenario):
         self.b(self.r, "wt", "rm", "app", "job", "--force", "--cause", "measured")
         self.assertEqual((self.row()["Fresh in"], self.row()["Usage"]), ("410", "transcripts: 2 sessions"))
 
+    def test_sqlite_usage_cache_incremental_invalidation_and_recount(self):
+        """Whole-line offsets survive processes; every source generation wins."""
+        m = core_loader.SourceFileLoader('speed_cache_fixture', str(CORE / 'bin/brain')).load_module()
+        path = self.cl(self.wt, '11111111-cache', 'A fabricated task.', [
+            ('said', 1, 'm1', (10, 20, 30, 40))])
+        inst = m.Instance(self.r)
+        allowed = {self.claude.resolve()}
+
+        def read():
+            m._SPEND_MEM.clear()  # simulate a new command/process
+            return m.spend_file(inst, path, 'claude', allowed, set())
+
+        def full():
+            agg = m.spend_new('claude', path)
+            with path.open('rb') as stream:
+                m.spend_read(agg, stream)
+            agg.update(path=str(path), id=path.stem)
+            return m.spend_sum([agg])
+
+        with mock.patch.dict(os.environ, self.env):
+            first = read()
+            self.assertEqual(m.spend_sum([first]), full())
+            database = self.r / '.brain/usage.sqlite'
+            self.assertEqual(database.read_bytes()[:16], b'SQLite format 3\x00')
+            self.assertEqual(database.stat().st_mode & 0o777, 0o600)
+            with mock.patch.object(m, 'spend_read', wraps=m.spend_read) as parse:
+                self.assertEqual(m.spend_sum([read()]), full())
+                self.assertEqual(parse.call_count, 1)  # only the independent full recount
+            original = path.read_bytes()
+            self.cl(self.wt, '11111111-cache', 'A fabricated task.', [
+                ('said', 2, 'm2', (5, 6, 7, 8))])
+            offsets = []
+            real_read = m.spend_read
+            def capture(agg, stream, budget=None):
+                offsets.append(agg['state']['offset'])
+                return real_read(agg, stream, budget)
+            with mock.patch.object(m, 'spend_read', side_effect=capture):
+                appended = read()
+            self.assertEqual(offsets, [len(original)])
+            self.assertEqual(m.spend_sum([appended]), full())
+            path.write_bytes(original)  # truncate
+            self.assertEqual(m.spend_sum([read()]), full())
+            replacement = path.with_suffix('.replacement')
+            replacement.write_bytes(path.read_bytes().replace(b'"input_tokens":10', b'"input_tokens":90'))
+            replacement.replace(path)  # rotate, even at the same length
+            self.assertEqual(m.spend_sum([read()]), full())
+            path.unlink()
+            self.assertIsNone(read())
+            # No session id, source path or transcript text enters SQLite.
+            data = database.read_bytes()
+            for private in (b'11111111-cache', str(path).encode(), b'A fabricated task.'):
+                self.assertNotIn(private, data)
+
+    def test_sqlite_cache_damage_and_refused_storage_fail_soft(self):
+        m = core_loader.SourceFileLoader('speed_cache_damage', str(CORE / 'bin/brain')).load_module()
+        path = self.cl(self.wt, '11111111-cache', 'A fabricated task.', [('said', 1, 'm1', (1, 2, 3, 4))])
+        inst = m.Instance(self.r)
+        cache = self.r / '.brain/usage.sqlite'
+        cache.write_bytes(b'not a database')
+        with mock.patch.dict(os.environ, self.env):
+            used = m.spend_file(inst, path, 'claude', {self.claude}, set())
+            self.assertEqual(m.spend_sum([used])['processed'], 10)
+            m._SPEND_MEM.clear()
+            cache.unlink()
+            outside = self.tmp / 'outside-cache'; outside.write_text('sentinel')
+            cache.symlink_to(outside)
+            used = m.spend_file(inst, path, 'claude', {self.claude}, set())
+            self.assertEqual(m.spend_sum([used])['processed'], 10)
+            self.assertEqual(outside.read_text(), 'sentinel')
+
+    def test_bounded_machine_view_does_not_bootstrap_all_session_headers(self):
+        m = core_loader.SourceFileLoader('bounded_machine_fixture', str(CORE / 'bin/brain')).load_module()
+        with mock.patch.dict(os.environ, self.env), \
+                mock.patch.object(m, 'codex_index', side_effect=AssertionError('unbounded discovery')), \
+                mock.patch.object(m, 'spend_all', return_value=([], 0, False)) as scan:
+            value = m.spend_machine(m.Instance(self.r), budget=.01)
+        self.assertFalse(value['complete'])
+        self.assertIsNone(value['since_week'])
+        scan.assert_called_once()
+        self.assertEqual(scan.call_args.kwargs['budget'], .01)
+
+    def test_finished_usage_uses_the_recorded_final_ledger_counts(self):
+        m = core_loader.SourceFileLoader('speed_finished_fixture', str(CORE / 'bin/brain')).load_module()
+        row = {**self.row(), 'Ended': self.at(10), 'Outcome': 'merged',
+               'Usage': 'transcripts: 1 session', 'Fresh in': '12', 'Output': '3'}
+        inst = m.Instance(self.r)
+        with mock.patch.object(m, 'job_usage', side_effect=AssertionError('recounted finished job')):
+            self.assertEqual(m.live_usage(inst, inst.node('app'), row)['processed'], 15)
 
 
 if __name__ == "__main__":

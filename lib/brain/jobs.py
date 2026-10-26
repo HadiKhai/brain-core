@@ -1,5 +1,6 @@
 """Jobs mechanics for Brain."""
 import hashlib
+import functools
 import json
 import math
 import os
@@ -10,6 +11,7 @@ import time
 from pathlib import Path
 
 from . import briefs as _m_briefs
+from . import command_reads as _m_command_reads
 from . import common as _m_common
 from . import docker_leftovers as _m_docker_leftovers
 from . import guard as _m_guard
@@ -48,6 +50,7 @@ def uncell(v):
     return re.sub(r"\\(.)", r"\1", v.strip())
 
 
+@_m_command_reads.memo
 def read_jobs(n):
     """Rows of the node's ledger; None if a file of that name exists but isn't one (brain never overwrites it)."""
     f = n["dir"] / JOBS_FILE
@@ -139,13 +142,20 @@ def digest(value):
 
 
 def job_key(row):
-    return digest([row["Job"], row["Started"]])
+    return job_identity(row["Job"], row["Started"])
+
+
+@functools.lru_cache(maxsize=4096)
+def job_identity(branch, started):
+    # Identity is immutable input, never cached ledger state or mutable rows.
+    return digest([branch, started])
 
 
 def handback_file(n, row):
     return n["dir"] / "job-handbacks" / (job_key(row) + ".json")
 
 
+@_m_command_reads.memo
 def read_handback(n, row, strict=False):
     f = handback_file(n, row)
     try:
@@ -166,6 +176,7 @@ def read_handback(n, row, strict=False):
     return None
 
 
+@_m_command_reads.memo
 def job_signal(inst, n, row, strict=False):
     """Effective worker signal, including supported legacy completion evidence.
 
@@ -712,6 +723,7 @@ def contract_problems(text):
     return [f for f in CONTRACT_FIELDS if not sections.get(f.lower(), "").strip()]
 
 
+@_m_command_reads.memo
 def job_input_path(n, value):
     """Canonicalize declarations and recorded context with the same alias policy."""
     import posixpath
@@ -722,6 +734,7 @@ def job_input_path(n, value):
         return posixpath.normpath(str(path))
 
 
+@_m_command_reads.memo
 def job_inputs(n, row):
     """Explicit inputs only: prose and Git refs are not evidence of shared reads."""
     f = contract_file(n, row)
@@ -747,16 +760,18 @@ def inputs_overlap(left, right, root=""):
                or matches(p, q) or matches(q, p) for p in left for q in right)
 
 
+@_m_command_reads.memo
 def job_overlaps(n, rows, include_resolved=False):
     """Shared context resolves the advice; jobs may still show that softer fact."""
     def context(row):
         return {job_input_path(n, v) for v in n["local"].get("worktrees", {}).get(row["Job"], {}).get("context_inputs", [])}
-    opened = [(r, job_inputs(n, r), context(r)) for r in rows if not r["Ended"]]
+    opened = [(r, job_key(r), job_inputs(n, r), context(r)) for r in rows if not r["Ended"]]
+    root = job_input_path(n, ".")
     out = {}
-    for row, inputs, shared in opened:
+    for row, key, inputs, shared in opened:
         peers, resolved = set(), set()
-        for peer, other, peer_shared in opened:
-            if job_key(peer) == job_key(row) or not inputs_overlap(inputs, other, root=job_input_path(n, ".")):
+        for peer, peer_key, other, peer_shared in opened:
+            if peer_key == key or not inputs_overlap(inputs, other, root=root):
                 continue
             if shared & peer_shared:
                 resolved.add(peer["Job"])
@@ -770,7 +785,7 @@ def job_overlaps(n, rows, include_resolved=False):
             lines.append("shares context with " + ", ".join(sorted(resolved)) +
                          "; overlap advice resolved; merge if one concern")
         if lines:
-            out[job_key(row)] = "; ".join(lines)
+            out[key] = "; ".join(lines)
     return out
 
 
@@ -1019,14 +1034,17 @@ def job_preview_after_landing(inst, n, row):
     return result
 
 
+@_m_command_reads.memo
 def jobs_summary(inst, n):
     """Finished and open jobs of one node, with medians, for `brain jobs` and the live view."""
     import statistics
     all_rows = read_jobs(n) or []
     rows = [r for r in all_rows if r.get("Outcome") != "external"]
     done = [r for r in rows if r["Ended"]]
-    hours = [float(r["Hours"]) for r in done if r["Outcome"] == "merged" and r["Hours"]]
-    reviews = [int(r["Reviews"] or 0) for r in done if r["Outcome"] == "merged"]
+    hours = [value for r in done if r["Outcome"] == "merged"
+             for value in [forecast_number(r.get("Hours"))] if value is not None]
+    reviews = [int(r.get("Reviews") or 0) for r in done if r["Outcome"] == "merged"
+               and re.fullmatch(r'[0-9]+', str(r.get("Reviews") or 0))]
     measured = [u for u in (_m_spend.row_usage(r) for r in done if r["Outcome"] == "merged") if u and u["processed"]]
     def med(xs):
         if not xs:

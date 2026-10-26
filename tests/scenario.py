@@ -326,6 +326,10 @@ class Scenario(unittest.TestCase):
 
     # helpers
     def run_(self, args, cwd, ok=True, brain=None):
+        # Existing scenarios assert complete UI data; the default JSON CLI may
+        # now return an honest initial observation while its fill is running.
+        if args and args[0] == 'ui' and '--json' in args and '--wait' not in args:
+            args = [*args, '--wait']
         launcher = Path(brain or (cwd / 'core/bin/brain'))
         cache = fixture_runtime_cache(launcher.resolve().parent.parent)
         r = subprocess.run([sys.executable, '-B', '-X', 'pycache_prefix=' + str(cache),

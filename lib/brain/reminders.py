@@ -2,11 +2,13 @@
 import contextlib
 import fcntl
 import json
+import pickle
 import os
 import re
 
 from . import briefs as _m_briefs
 from . import common as _m_common
+from . import command_reads as _m_command_reads
 from . import briefs as _m_briefs
 from . import guard as _m_guard
 from . import history as _m_history
@@ -76,15 +78,19 @@ def lifecycle_store(inst, readonly=False):
             raise ValueError('unsafe lifecycle lock')
         fcntl.flock(lock, fcntl.LOCK_EX)
         data = lifecycle_read(inst)
-        before = json.dumps(data, sort_keys=True)
+        # This is only an in-memory change detector; no pickle is read or kept.
+        # Most observations do not change receipts, so avoid encoding their
+        # entire JSON ledger twice on every job/node observation.
+        before = pickle.dumps(data, protocol=4)
         yield data
-        after = json.dumps(data, sort_keys=True)
-        if len(after.encode()) > LIFECYCLE_BYTES:
-            raise ValueError('lifecycle state exceeds its bound; retain history for review')
-        if before != after:
+        if before != pickle.dumps(data, protocol=4):
+            after = json.dumps(data, sort_keys=True)
+            if len(after.encode()) > LIFECYCLE_BYTES:
+                raise ValueError('lifecycle state exceeds its bound; retain history for review')
             _m_machine.machine_publish(inst, folder / 'lifecycle.json', after + '\n')
 
 
+@_m_command_reads.memo
 def usage_restart_item(inst, n, row):
     """One protected restart need per job and successful rebrief baseline."""
     if row.get('Ended'):

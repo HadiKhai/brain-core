@@ -24,6 +24,8 @@ from . import nodes as _m_nodes
 from . import status as _m_status
 from . import tasks as _m_tasks
 from . import ui as _m_ui
+from . import timings as _m_timings
+from . import command_reads as _m_command_reads
 
 
 class _Command:
@@ -119,7 +121,7 @@ def reexec_into_instance_core():
 
 # Commands that change nothing in the instance: they never wait for the lock.
 READ_ONLY = {"cmd_show", "cmd_tree", "cmd_status", "cmd_now", "cmd_jobs", "cmd_stale", "cmd_ui", "cmd_guard",
-             "cmd_due", "cmd_inbox", "cmd_index", "cmd_scorecard", "cmd_introspect",
+             "cmd_due", "cmd_inbox", "cmd_timings", "cmd_index", "cmd_scorecard", "cmd_introspect",
              "cmd_brief", "cmd_hire", "cmd_reports", "cmd_brains", "cmd_use", "cmd_machine", "cmd_usable",
              "cmd_item_list", "cmd_item_show", "cmd_wt_list", "cmd_selftest", "cmd_init", "cmd_hook", "cmd_hook_pretool", "cmd_hook_approve", "cmd_help",
              "cmd_dashboard", "cmd_ready", "cmd_usage", "cmd_scan", "cmd_scrub", "cmd_history",
@@ -174,7 +176,7 @@ def writes(a):
     if name == "cmd_status":
         return a.refresh or getattr(a, "project", False)
     if name == "cmd_inbox":
-        return a.new or bool(getattr(a, "add", None))
+        return bool(getattr(a, "add", None))
     if name == 'cmd_index':
         return a.record or bool(getattr(a, "refresh", False))
     if name == "cmd_teach":
@@ -205,6 +207,11 @@ def writes(a):
 
 
 def main():
+    with _m_timings.command(), _m_timings.phase('dispatch'):
+        _main()
+
+
+def _main():
     take_brain_flag()
     reexec_into_instance_core()
     ap = argparse.ArgumentParser(prog="brain", description=__doc__.splitlines()[0])
@@ -330,7 +337,8 @@ def main():
         opt("--write", action="store_true", help="allow explicit keyed local proposal reviews as the configured operator"),
         opt("--scan", nargs="+", action="extend", default=[], help="discover import candidates in DIR... (read-only)"),
         opt("--open", action="store_true", help="open it in the browser"),
-        opt("--json", action="store_true", help="print the state once, as JSON"))
+        opt("--json", action="store_true", help="print an initial or dated cached JSON observation"),
+        opt("--wait", action="store_true", help="with --json: compute a fresh complete snapshot before returning"))
     cmd("stale", _m_status.cmd_stale, "freshness check: is <id>'s status.md behind a time the host gave (e.g. a thread's "
         "updatedAt, in UTC)?", "id", "host_time", opt("--grace", type=int, default=5, help="minutes allowed"))
     cmd("jobs", _m_jobs.cmd_jobs, "jobs per node: open ones and their age, median hours and review rounds, causes",
@@ -613,6 +621,8 @@ def main():
         opt("id", nargs="?"), opt("--refresh", action="store_true"),
         opt("--project", action="store_true", help="explicit phase for configured generated-facts ownership"),
         opt("--from-events", action="store_true"), opt("--json", action="store_true"))
+    cmd("timings", _m_timings.cmd_timings, "recent command durations and automatic slow profiles",
+        opt("--slow", action="store_true"), opt("--command"), opt("--json", action="store_true"))
     cmd("events", _m_events.cmd_events, "private event metadata; --compare summarizes the last day", "id",
         opt("--compare", action="store_true"), opt("--json", action="store_true"),
         opt("--metrics", action="store_true"), opt("--explain", metavar="DIFFERENCE_ID"), opt("--reason"),
@@ -684,6 +694,15 @@ def main():
     if a.f == _m_machine.cmd_machine and a.action == "sample":
         a.f(a)  # sampler and watcher each take a short nonblocking instance lock
         return
+    if (a.f.__name__ in ("cmd_due", "cmd_inbox", "cmd_status", "cmd_jobs") or
+            (a.f.__name__ == 'cmd_ui' and getattr(a, 'json', False))) and (
+            not writes(a) or (a.f.__name__ == "cmd_inbox" and not getattr(a, "add", None))):
+        handler = a.f
+        def read_handler(args):
+            with _m_command_reads.snapshot(), _m_timings.phase("compute"):
+                return handler(args)
+        read_handler.__name__ = handler.__name__
+        a.f = read_handler
     root = _m_nodes.try_find_root() if writes(a) else None
     if root:
         out = _m_common.outward_links(root)

@@ -637,6 +637,150 @@ class AutonomyInbox(Scenario):
 
 
 
+    def test_command_timings_phases_profiles_filters_and_fail_soft(self):
+        root = self.init('demo')
+        m = core_loader.SourceFileLoader('command_timing_fixture', str(CORE / 'bin/brain')).load_module()
+        tm = m._owners['cmd_timings']
+        journal = root / '.brain/events.jsonl'
+        before = journal.read_bytes() if journal.exists() else None
+        with mock.patch.dict(os.environ, {**self.env, 'BRAIN_ROOT': str(root)}), \
+                mock.patch.object(sys, 'argv', ['brain', 'now']), mock.patch.object(tm, 'SLOW_SECONDS', 0):
+            with tm.command():
+                with tm.phase('fixture'):
+                    sum(range(100))
+        self.assertEqual(journal.read_bytes() if journal.exists() else None, before)
+        self.assertTrue((root / '.brain/timings/events.jsonl').is_file())
+        rows = json.loads(self.b(root, 'timings', '--slow', '--command', 'now', '--json'))
+        self.assertEqual(len(rows), 1)
+        self.assertGreaterEqual(rows[0]['phases']['fixture'], 0)
+        profile = json.loads((root / '.brain/timings' / rows[0]['profile']).read_text())
+        self.assertTrue(profile['top'])
+        self.assertLessEqual(len(profile['top']), 30)
+        self.assertNotIn(str(self.tmp), json.dumps(profile))
+        self.assertIn('No matching', self.b(root, 'timings', '--command', 'absent'))
+        with mock.patch.dict(os.environ, {**self.env, 'BRAIN_ROOT': str(root)}), \
+                mock.patch.object(tm, 'publish', side_effect=PermissionError('fixture')):
+            with tm.command():
+                pass  # optional telemetry cannot turn a successful read into failure
+        self.assertEqual(m.pending(m.read(m.Instance(root))), {})
+
+    def test_long_inbox_read_does_not_block_status_refresh(self):
+        self.assert_read_does_not_block_status('inbox')
+
+    def test_due_scan_does_not_hold_instance_lock_and_publication_does(self):
+        self.assert_read_does_not_block_status('due')
+
+    def assert_read_does_not_block_status(self, command):
+        root = self.init('demo')
+        marker, release = self.tmp / 'reading', self.tmp / 'release'
+        script = '''import sys, time
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from brain import cli, status, watch, instance
+command = sys.argv[4]
+original = status.inbox_items if command == 'inbox' else watch.watch_scan
+def slow(*args, **kwargs):
+    assert instance._LOCK['fh'] is None, 'read computation holds the instance lock'
+    Path(sys.argv_marker).write_text('reading')
+    deadline = time.monotonic() + 15
+    while not Path(sys.argv_release).exists():
+        if time.monotonic() > deadline:
+            raise RuntimeError('test reader was never released')
+        time.sleep(.01)
+    return original(*args, **kwargs)
+if command == 'inbox':
+    status.inbox_items = slow
+else:
+    watch.watch_scan = slow
+    publish = watch.watch_run
+    def checked_publish(*args, **kwargs):
+        assert instance._LOCK['fh'] is not None, 'receipt publication lost its instance lock'
+        assert kwargs.get('groups') is not None, 'publication would recompute groups under lock'
+        return publish(*args, **kwargs)
+    watch.watch_run = checked_publish
+sys.argv_marker, sys.argv_release = sys.argv[2:4]
+sys.argv = ['brain', command, 'root'] + (['--new'] if command == 'inbox' else [])
+cli.main()
+'''
+        env = {**self.env, 'BRAIN_ROOT': str(root)}
+        reader = subprocess.Popen([sys.executable, '-B', '-c', script, str(CORE / 'lib'), str(marker), str(release), command],
+                                  env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        try:
+            deadline = time.monotonic() + 8
+            while not marker.exists() and reader.poll() is None and time.monotonic() < deadline:
+                time.sleep(.01)
+            self.assertTrue(marker.exists(), 'reader did not reach the controlled computation')
+            start = time.monotonic()
+            writer = subprocess.run([sys.executable, '-B', str(CORE / 'bin/brain'), 'status', 'root', '--refresh'],
+                                    env=env, capture_output=True, text=True, timeout=5)
+            self.assertEqual(writer.returncode, 0, writer.stdout + writer.stderr)
+            self.assertIsNone(reader.poll(), 'reader must still be computing when status refresh finishes')
+            self.assertLess(time.monotonic() - start, 5)
+        finally:
+            release.write_text('release')
+            try:
+                stdout, stderr = reader.communicate(timeout=8)
+            except subprocess.TimeoutExpired:
+                reader.kill(); stdout, stderr = reader.communicate()
+        self.assertEqual(reader.returncode, 0, stdout + stderr)
+        rows = json.loads(self.b(root, 'timings', '--command', command, '--json'))
+        if command == 'inbox':
+            self.assertIn('lock_wait', rows[-1]['phases'])
+            self.assertIn('seen_write', rows[-1]['phases'])
+        else:
+            self.assertIn('watch_compute', rows[-1]['phases'])
+
+    def test_runaway_scope_keeps_live_and_unsettled_but_excludes_closed_settled(self):
+        root = self.init('demo')
+        m = core_loader.SourceFileLoader('runaway_scope_fixture', str(CORE / 'bin/brain')).load_module()
+        inst, node = m.Instance(root), m.Instance(root).node('root')
+        row = {**dict.fromkeys(m.JOB_COLS, ''), 'Job': 'job/live', 'Started': inst.now_dt().isoformat()}
+        closed = {**row, 'Job': 'job/closed', 'Ended': inst.now_dt().isoformat(), 'Outcome': 'merged', 'Settled': 'yes'}
+        ended = {**row, 'Job': 'job/terminal'}
+        rows = [closed, ended, row]
+        summary = {'open': [{**ended, 'age_h': 1}, {**row, 'age_h': 1}], 'median_hours': None, 'median_tokens': None}
+        with mock.patch.object(m, 'read_jobs', return_value=rows), \
+                mock.patch.object(m, 'jobs_summary', return_value=summary), \
+                mock.patch.object(m, 'job_signal', side_effect=lambda i, n, r: {'state': 'done'} if r['Job'] == ended['Job'] else None), \
+                mock.patch.object(m, 'live_usage', return_value=None) as usage:
+            self.assertEqual(m.runaway_jobs(inst, node), [])
+            self.assertEqual([call.args[2]['Job'] for call in usage.call_args_list], ['job/terminal', 'job/live'])
+
+    def test_runaway_malformed_historical_counters_remain_unknown(self):
+        root = self.init('demo')
+        m = core_loader.SourceFileLoader('runaway_unknown_fixture', str(CORE / 'bin/brain')).load_module()
+        inst = m.Instance(root); node = inst.node('root')
+        row = {**dict.fromkeys(m.JOB_COLS, ''), 'Job': 'job/live', 'Started': inst.now_dt().isoformat()}
+        invalid = {**row, 'Job': 'job/closed', 'Ended': inst.now_dt().isoformat(),
+                   'Outcome': 'merged', 'Settled': 'yes', 'Hours': 'unknown', 'Reviews': 'corrupt'}
+        with mock.patch.object(m, 'read_jobs', return_value=[invalid, row]), \
+                mock.patch.object(m, 'live_usage', return_value=None):
+            summary = m.jobs_summary(inst, node)
+            self.assertIsNone(summary['median_hours'])
+            self.assertIsNone(summary['median_reviews'])
+            self.assertEqual(m.runaway_jobs(inst, node), [])
+
+    def test_read_snapshot_shares_facts_and_ledger_but_expires_after_call(self):
+        root = self.init('demo')
+        m = core_loader.SourceFileLoader('snapshot_scope_fixture', str(CORE / 'bin/brain')).load_module()
+        reads = m._owners['memo']
+        inst = m.Instance(root); node = inst.node('root')
+        path = root / m.JOBS_FILE
+        path.write_text(m.JOBS_MARK + '\n')
+        with mock.patch.dict(os.environ, {**self.env, 'BRAIN_ROOT': str(root)}):
+            with reads.snapshot():
+                first = m.read_jobs(node)
+                path.write_text('legacy')
+                self.assertIs(m.read_jobs(node), first)
+            self.assertIsNone(m.read_jobs(node))
+            path.write_text(m.JOBS_MARK + '\n')
+            state = m.file_state(inst, node)
+            with reads.snapshot():
+                first = m.status_facts(inst, node, state, [], metadata_only=True)
+                self.assertIs(m.status_facts(inst, node, state, [], metadata_only=True), first)
+            self.assertIsNot(m.status_facts(inst, node, state, [], metadata_only=True), first)
+
+
 class NodeHygiene(Scenario):
     def setUp(self):
         super().setUp()

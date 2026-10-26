@@ -230,6 +230,94 @@ class ExpandedUI(Scenario):
             with self.assertRaises(AssertionError):
                 acceptance.validate({**state, 'items': {'all': []}}, manifest)
         self.assertEqual(before, acceptance.business_snapshot(inst.root))
+    def test_json_cold_partial_warm_full_and_changed_visibility_is_unknown(self):
+        root = self.init('demo')
+        env = {**self.env, 'BRAIN_ROOT': str(root)}
+        def fast():
+            result = subprocess.run([sys.executable, '-B', str(CORE / 'bin/brain'), 'ui', '--json'],
+                                    env=env, capture_output=True, text=True, timeout=5)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            return json.loads(result.stdout)
+        first = fast()
+        self.assertTrue(first['brain']['filling_in'])
+        self.assertEqual(first['problems'], 'unknown')
+        self.assertEqual(first['readiness'], 'unknown')
+        self.assertEqual(first['source']['kind'], 'initial-partial')
+        self.assertIsNone(first['source']['age_seconds'])
+        full = json.loads(self.b(root, 'ui', '--json', '--wait'))
+        self.assertFalse(full['brain']['filling_in'])
+        self.assertIsInstance(full['problems'], int)
+        warm = fast()
+        self.assertEqual(warm['source']['kind'], 'cached-full')
+        self.assertEqual(warm['source']['built_at'], full['source']['built_at'])
+        self.assertGreaterEqual(warm['source']['age_seconds'], 0)
+        (root / 'never-name.txt').write_text('Sequoia\n')
+        changed = fast()
+        self.assertEqual(changed['problems'], 'unknown')
+        self.assertEqual(changed['readiness'], 'unknown')
+        self.assertNotIn('sequoia', json.dumps(changed).lower())
+        self.b(root, 'ui', '--json', '--wait')  # join/finish the owned fill before fixture cleanup
+
+    def test_json_failed_fill_stays_unknown_and_retains_failure_metadata(self):
+        root = self.init('demo')
+        module = __import__(self.m._owners['ui_state'].__package__ + '.ui_json', fromlist=['background'])
+        with mock.patch.object(sys, 'argv', ['brain', 'ui']), \
+                mock.patch.object(module, 'ui_json_build', side_effect=OSError('fixture failure')):
+            module.ui_json_background(str(root), '[]')
+        with mock.patch.object(module, 'ui_json_request_fill', return_value=True):
+            state = module.ui_json_read(self.m.UIInstance(root), [], wait=False)
+        self.assertEqual(state['problems'], 'unknown')
+        self.assertEqual(state['readiness'], 'unknown')
+        self.assertTrue(state['loading']['failed'])
+        self.assertTrue(state['loading']['filling_in'])
+        fresh = module.ui_json_read(self.m.UIInstance(root), [], wait=True)
+        self.assertEqual(fresh['source']['kind'], 'fresh-full')
+        warm = module.ui_json_read(self.m.UIInstance(root), [], wait=False)
+        self.assertFalse(warm['loading']['failed'])
+        self.assertEqual(warm['source']['kind'], 'cached-full')
+
+    def test_json_background_fill_computes_without_instance_lock(self):
+        root = self.init('demo')
+        marker, release = self.tmp / 'filling', self.tmp / 'fill-release'
+        script = '''import sys, time
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from brain import ui_json, instance
+root, marker, release = sys.argv[2:5]
+original = ui_json.ui_json_build
+def slow(*args, **kwargs):
+    assert instance._LOCK['fh'] is None
+    Path(marker).write_text('filling')
+    deadline = time.monotonic() + 15
+    while not Path(release).exists():
+        if time.monotonic() >= deadline:
+            raise RuntimeError('fill release missing')
+        time.sleep(.01)
+    return original(*args, **kwargs)
+ui_json.ui_json_build = slow
+ui_json.ui_json_background(root, '[]')
+'''
+        env = {**self.env, 'BRAIN_ROOT': str(root)}
+        worker = subprocess.Popen([sys.executable, '-B', '-c', script, str(CORE / 'lib'),
+                                   str(root), str(marker), str(release)], env=env,
+                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        try:
+            deadline = time.monotonic() + 5
+            while not marker.exists() and worker.poll() is None and time.monotonic() < deadline:
+                time.sleep(.01)
+            self.assertTrue(marker.exists(), 'fill did not reach its computation')
+            result = subprocess.run([sys.executable, '-B', str(CORE / 'bin/brain'), 'status', 'root', '--refresh'],
+                                    env=env, capture_output=True, text=True, timeout=5)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIsNone(worker.poll(), 'fill should still be waiting for the test release')
+        finally:
+            release.write_text('release')
+            try:
+                output, error = worker.communicate(timeout=15)
+            except subprocess.TimeoutExpired:
+                worker.kill(); output, error = worker.communicate()
+        self.assertEqual(worker.returncode, 0, output + error)
+        self.assertTrue((root / '.brain/ui-cache/json-snapshot.json').is_file())
 
     def test_complete_build_is_a_detached_business_projection(self):
         root = self.init('demo')

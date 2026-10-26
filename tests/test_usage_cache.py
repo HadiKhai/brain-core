@@ -59,6 +59,12 @@ class UsageCache(Scenario):
         self.assertEqual(second['processed'], 32)
         self.assertTrue(offsets)
         self.assertTrue(all(offset == old_size for offset in offsets), offsets)
+        import sqlite3
+        with sqlite3.connect(str(self.root / '.brain/usage.sqlite')) as cache:
+            records = [json.loads(row[0]) for row in cache.execute('SELECT value FROM aggregates')]
+        windows = [record for record in records if record.get('state', {}).get('lo') is not None]
+        self.assertTrue(windows, 'windowed parser progress must be kept in SQLite too')
+        self.assertTrue(all(record['state']['offset'] == self.path.stat().st_size for record in windows))
         for cache in (self.root / '.brain/spend/files').glob('*.json'):
             self.assertNotIn(str(self.wt), cache.read_text())
             self.assertNotIn('fixture', cache.read_text())
@@ -109,3 +115,15 @@ class UsageCache(Scenario):
         self.assertFalse((self.root / '.brain/spend').exists())
         self.m.job_usage(self.inst, self.n, self.row)
         self.assertTrue(list((self.root / '.brain/spend/files').glob('*.json')))
+
+
+    def test_finished_usage_is_reused_but_subscription_revocation_invalidates_it(self):
+        with mock.patch.object(self.m, 'job_signal', return_value={'state': 'done'}):
+            first = self.m.job_usage(self.inst, self.n, self.row)
+            self.assertEqual(first['processed'], 11)
+            self.append('late', '2026-01-15T10:02:00.000Z', 20)
+            self.n['local']['workers'] = {'unrelated-job': 'fixture-worker'}
+            with mock.patch.object(self.m, 'job_sessions', side_effect=AssertionError('recounted terminal episode')):
+                self.assertEqual(self.m.job_usage(self.inst, self.n, self.row), first)
+            self.forbidden.add(self.cfg)
+            self.assertEqual(self.m.job_usage(self.inst, self.n, self.row)['processed'], 0)

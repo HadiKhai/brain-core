@@ -2715,3 +2715,33 @@ and altered KPI values; all negative controls must be rejected before acceptance
 For first-data paint, derive the oracle from the actual HTTP response delivered to the
 app. Do not add a second state request to the measured navigation merely to obtain
 expected values; that changes the workload instead of observing the displayed reading.
+
+## D40005: Bound read commands with shared observations and dated UI snapshots
+
+A read command shares session discovery, local Git inventories, ledger parsing
+and status facts for its lifetime. SQLite keeps rebuildable usage aggregates and
+opaque session-discovery metadata under the ignored private state directory.
+Parser offsets consume appended whole lines; changed file identity, truncation
+or same-size rewrite invalidates the aggregate. Final ledger or worker episodes reuse their
+measured totals, and runaway advice inspects live or unsettled work only. Cache failures
+leave source-based reads available. Existing JSON aggregates remain compatible.
+
+Every CLI invocation records elapsed and phase durations, including instance-lock
+wait, in `.brain/timings/events.jsonl`. The operational journal retains its
+existing transaction records. Commands over five seconds also save cumulative
+function profiles. `brain timings --slow --command due` retrieves observations;
+arguments, transcript text and raw session identities never enter these records.
+
+Inbox computation and due watcher scans run outside the exclusive instance lock.
+Inbox delivery precedes a short transaction that rereads and merges reporter
+acknowledgements. Watch scans retain their scan/reconciliation receipt transaction;
+only receipt and wake publication uses the short instance-lock phase.
+
+`brain ui --json` returns an honest initial projection on a cache miss: problems
+and readiness are unknown, and filling-in/source metadata explains its scope.
+A background fill computes without an exclusive instance lock. A completed private
+snapshot can be returned with its observation time and age; changed visibility,
+permissions, code or scan selection refuses reuse. `--wait` requests a fresh full
+snapshot for scripts and release rehearsals. Cached UI observations grant no action
+or readiness authority: check, guard and the native readiness gates remain current
+and unchanged.

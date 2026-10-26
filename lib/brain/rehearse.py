@@ -4,6 +4,7 @@ The macOS sandbox is a prerequisite, not an optional best-effort safeguard. Othe
 platforms refuse until they have an equivalent OS-enforced write/network boundary.
 Published evidence is redacted. Optional raw diffs stay in a private local sidecar.
 """
+import ast
 import collections
 import contextlib
 import contextvars
@@ -1797,6 +1798,42 @@ def external_inputs(inst):
     return comparison_digest([bindings, records])
 
 
+def rehearsal_ui_json_args(core, args):
+    """Request full JSON on either CLI generation, refusing unknown capability."""
+    if args[:2] != ['ui', '--json'] or '--wait' not in args:
+        return args
+    marker = core / 'lib/brain/ui_json.py'
+    try:
+        before = marker.lstat()
+    except FileNotFoundError:
+        try:
+            executable = (core / 'bin/brain').lstat()
+            if not stat.S_ISREG(executable.st_mode):
+                raise ValueError()
+        except (OSError, ValueError):
+            raise RehearsalError('UI JSON capability unavailable', code='ambiguous-ui-json-capability') from None
+        return [arg for arg in args if arg != '--wait']  # legacy JSON is synchronous
+    except OSError:
+        raise RehearsalError('UI JSON capability unreadable', code='ambiguous-ui-json-capability') from None
+    try:
+        if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or before.st_size > 65536:
+            raise ValueError()
+        fd = os.open(marker, os.O_RDONLY | os.O_NOFOLLOW)
+        with os.fdopen(fd, encoding='utf-8') as stream:
+            held = os.fstat(stream.fileno())
+            if (held.st_dev, held.st_ino) != (before.st_dev, before.st_ino) or held.st_nlink != 1:
+                raise ValueError()
+            tree = ast.parse(stream.read(65537))
+        values = [row.value for row in tree.body if isinstance(row, ast.Assign)
+                  and any(isinstance(target, ast.Name) and target.id == 'UI_JSON_WAIT' for target in row.targets)]
+        if (len(values) != 1 or not isinstance(values[0], ast.Constant)
+                or type(values[0].value) is not int or values[0].value != 1):
+            raise ValueError()
+    except (OSError, ValueError, SyntaxError, UnicodeError):
+        raise RehearsalError('UI JSON capability ambiguous', code='ambiguous-ui-json-capability') from None
+    return args
+
+
 def run_lane(source, core, folder, nodes, commands, on_leftover=None):
     retention = NativeRetention(folder, 'before-lane-setup')
     folder.mkdir()
@@ -1831,7 +1868,8 @@ def run_lane(source, core, folder, nodes, commands, on_leftover=None):
         raw = []
         try:
             with rehearsal_phase(('baseline' if folder.name == 'before' else 'candidate') + ':' + key):
-                results[key] = run_command(lane / 'brain/core', lane, args, kind,
+                results[key] = run_command(lane / 'brain/core', lane,
+                                           rehearsal_ui_json_args(lane / 'brain/core', args), kind,
                                            [lane / 'brain', folder / 'brain', source, core, folder, lane], terms, cache,
                                            raw_output=raw, on_leftover=on_leftover)
             raw_outputs[key] = raw[0]
@@ -1905,7 +1943,7 @@ def rehearsal_commands(nodes):
                                  ['ready', node['id'], '--branch', row['Job']], 'read'))
         commands.append(('refresh:' + str(i), ['status', node['id'], '--refresh'], 'refresh'))
     commands += [('check', ['check'], 'read'), ('fix', ['check', '--fix'], 'fix'),
-                 ('ui', ['ui', '--json'], 'read'), ('hook', ['hook', 'stop'], 'hook')]
+                 ('ui', ['ui', '--json', '--wait'], 'read'), ('hook', ['hook', 'stop'], 'hook')]
     return commands, jobs
 
 

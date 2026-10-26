@@ -1203,9 +1203,12 @@ def cmd_ui(a):
         scan = json.loads(output.getvalue())
     reviews = _m_ui_review.Reviews(inst.root, enabled=getattr(a, "write", False))
     key = secrets.token_urlsafe(18)  # other accounts on this machine can reach 127.0.0.1 too; they don't get this
+    if getattr(a, 'wait', False) and not a.json:
+        _m_common.die('--wait requires --json')
     if a.json:
+        from . import ui_json
         with _m_common.git_read_snapshot():
-            print(json.dumps(ui_state(inst, len(_m_check.collect_problems(inst)[0]), scan, spend_budget=None), indent=1))
+            print(json.dumps(ui_json.ui_json_read(inst, scan, wait=getattr(a, 'wait', False)), indent=1))
         return
     version = _m_ui_server.ui_code_version()
     if a.open:

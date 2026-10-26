@@ -1,0 +1,135 @@
+"""Always-on command and phase measurements; automatic metadata-only slow profiles."""
+import contextlib
+import contextvars
+import cProfile
+import functools
+import json
+import pstats
+import re
+import sys
+import time
+import uuid
+from pathlib import Path
+
+SLOW_SECONDS = 5.0
+_CURRENT = contextvars.ContextVar('brain_command_timing', default=None)
+
+
+def record(name, seconds):
+    current = _CURRENT.get()
+    if current is not None:
+        current[name] = current.get(name, 0.0) + max(0.0, seconds)
+
+
+@contextlib.contextmanager
+def phase(name):
+    start = time.perf_counter()
+    try:
+        yield
+    finally:
+        record(name, time.perf_counter() - start)
+
+
+def timed(name):
+    def decorate(fn):
+        @functools.wraps(fn)
+        def run(*args, **kwargs):
+            with phase(name):
+                return fn(*args, **kwargs)
+        return run
+    return decorate
+
+
+@contextlib.contextmanager
+def command():
+    from . import usage_cache
+    start = time.perf_counter()
+    phases = {}
+    token = _CURRENT.set(phases)
+    # Function totals are sufficient for top-N diagnostics. Omitting caller
+    # edges and individual C builtins keeps ordinary read commands inexpensive.
+    profiler = cProfile.Profile(subcalls=False, builtins=False)
+    profiler.enable()
+    success = False
+    try:
+        with usage_cache.batch():
+            yield
+        success = True
+    except SystemExit as error:
+        success = error.code in (None, 0)
+        raise
+    finally:
+        profiler.disable()
+        elapsed = time.perf_counter() - start
+        _CURRENT.reset(token)
+        # Telemetry never changes the command's outcome, even on damaged storage.
+        try:
+            publish(elapsed, phases, profiler, success)
+        except (Exception, SystemExit):
+            pass
+
+
+def publish(elapsed, phases, profiler, success):
+    from . import common, events, guard, instance, nodes
+    root = nodes.try_find_root()
+    if root is None:
+        return
+    inst = instance.Instance(root)
+    # Only a registered command word, never its arguments or raw invocation.
+    name = sys.argv[1] if len(sys.argv) > 1 else 'dashboard'
+    if not re.fullmatch('[a-z][a-z0-9-]{0,40}', name):
+        name = 'help'
+    identity = uuid.uuid4().hex
+    data = dict(command=name, elapsed_s=round(elapsed, 6), slow=elapsed > SLOW_SECONDS,
+                success=success, phases={k: round(v, 6) for k, v in phases.items()})
+    if elapsed > SLOW_SECONDS:
+        # Filenames alone (no absolute source paths, arguments, locals or callers).
+        rows = sorted(pstats.Stats(profiler).stats.items(), key=lambda row: row[1][3], reverse=True)[:30]
+        top = [dict(function=Path(k[0]).name + ':' + str(k[1]) + ':' + k[2],
+                    calls=v[1], self_s=round(v[2], 6), cumulative_s=round(v[3], 6)) for k, v in rows]
+        terms = [t for n in inst.nodes() for t in guard.never_terms(n)]
+        for row in top:
+            row['function'] = nodes.import_text(row['function'], terms, metadata=True)
+        profile = {'command': name, 'elapsed_s': data['elapsed_s'], 'top': top}
+        filename = identity + '.json'
+        common.atomic_write(inst.root / '.brain/timings' / filename,
+                            json.dumps(profile, indent=2) + '\n', private=True, create=True)
+        data['profile'] = filename
+    events.append_line(inst.root / '.brain/timings/events.jsonl',
+                       dict(ts=inst.now(), node=events.node_ref('root'), kind='timing',
+                            actor='brain', ref=identity, data=data))
+
+
+def cmd_timings(a):
+    from . import events, nodes
+    inst = nodes.load()
+    records = []
+    paths = [inst.root / '.brain/timings/events.jsonl']
+    for path in paths:
+        try:
+            with events.private_open(path) as stream:
+                for line in stream:
+                    try:
+                        row = json.loads(line)
+                        data = row.get('data', {})
+                        if (row.get('kind') == 'timing' and isinstance(data, dict)
+                                and isinstance(data.get('elapsed_s'), (int, float))
+                                and (not a.slow or data.get('slow'))
+                                and (not a.command or data.get('command') == a.command)):
+                            records.append(dict(ts=row.get('ts'), **data))
+                    except (ValueError, TypeError, AttributeError):
+                        continue
+        except (OSError, ValueError, SystemExit):
+            continue
+    records = records[-50:]
+    if a.json:
+        print(json.dumps(records, indent=2))
+    elif not records:
+        print('No matching command timings.')
+    else:
+        for row in records:
+            phases = ', '.join(k + '=' + format(v, '.3f') + 's' for k, v in row.get('phases', {}).items()
+                               if isinstance(v, (int, float)))
+            print(f"{row['ts']} {row.get('command', '?')}: {row['elapsed_s']:.3f}s" +
+                  (' slow' if row.get('slow') else '') + ('; ' + phases if phases else '') +
+                  ('; profile .brain/timings/' + row['profile'] if row.get('profile') else ''))

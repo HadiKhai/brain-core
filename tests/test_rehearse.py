@@ -329,6 +329,29 @@ class RehearsalRetention(unittest.TestCase):
 
 
 class RehearsalComparison(unittest.TestCase):
+    def test_ui_json_full_snapshot_capability_is_read_from_each_core(self):
+        with tempfile.TemporaryDirectory(prefix='ui-capability-') as directory:
+            core = Path(directory)
+            (core / 'bin').mkdir()
+            (core / 'bin/brain').write_text('# fabricated legacy CLI\n')
+            args = ['ui', '--json', '--wait']
+            self.assertEqual(rehearsal.rehearsal_ui_json_args(core, args), ['ui', '--json'])
+            self.assertEqual(args, ['ui', '--json', '--wait'])
+            marker = core / 'lib/brain/ui_json.py'
+            marker.parent.mkdir(parents=True)
+            marker.write_text('UI_JSON_WAIT = 1\n')
+            self.assertEqual(rehearsal.rehearsal_ui_json_args(core, args), args)
+            for text in ('', 'UI_JSON_WAIT = True\n', 'UI_JSON_WAIT = unknown\n',
+                         'UI_JSON_WAIT = 1\nUI_JSON_WAIT = 0\n'):
+                marker.write_text(text)
+                with self.assertRaisesRegex(rehearsal.RehearsalError, 'capability ambiguous'):
+                    rehearsal.rehearsal_ui_json_args(core, args)
+            marker.unlink()
+            marker.symlink_to(core / 'bin/brain')
+            with self.assertRaises(rehearsal.RehearsalError):
+                rehearsal.rehearsal_ui_json_args(core, args)
+
+
     def test_ui_crash_after_partial_output_is_baseline_incomplete(self):
         complete = '{"nodes":[{"id":"engine","worktrees":[]}]}'
         candidate = result(complete)
