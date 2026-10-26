@@ -1500,13 +1500,13 @@ runpy.run_path(entry, run_name='__main__')
                                  capture_before_metadata=capture_before_metadata)
     before = snapshot(lane, cache)
     start = time.monotonic()
+    owner = _m_rehearse_external.ACTIVE_COPIES.get()
+    if owner is not None:
+        owner.before_process()
     p = subprocess.Popen([*sandbox_prefix(lane), sys.executable, '-B', str(audit), str(lane), str(violation),
                           str(core / 'bin/brain'), *args],
                          cwd=unrelated if kind == 'hook' else brain, env=env, stdin=subprocess.PIPE,
                          stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors='replace', start_new_session=True)
-    owner = _m_rehearse_external.ACTIVE_COPIES.get()
-    if owner is not None:
-        owner.processes.append(p)
     timed_out = False
     leftovers = []
     signal_audit = []
@@ -1535,6 +1535,8 @@ runpy.run_path(entry, run_name='__main__')
             return False
         return True
     try:
+        if owner is not None:
+            owner.track_process(p)
         out, err = p.communicate(json.dumps({'cwd': str(unrelated)}) if kind == 'hook' else '', timeout=deadline)
     except subprocess.TimeoutExpired as error:
         timed_out = True
@@ -1551,7 +1553,7 @@ runpy.run_path(entry, run_name='__main__')
         if stop_group():
             p.wait()
         elif owner is not None:
-            owner.unknown = True
+            owner.retain_unknown()
         retention.packet.update(stdout=locals().get('out', 'UNKNOWN'),
                                 stderr=locals().get('err', 'UNKNOWN'), owner_pid=p.pid,
                                 code=p.returncode, timeout=timed_out, signal_audit=signal_audit)

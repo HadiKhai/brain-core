@@ -67,6 +67,52 @@ their operation boundaries.
 Outward aliases, replaced physical ancestors and shared files remain refused.
 Each sync failure propagates; no multi-file transaction, namespace lock or
 physical power-loss guarantee is implied.
+## D40003: Count nested open callbacks as one audited operation
+
+Python 3.9 pathlib uses an opener for io.open, producing a second os.open audit
+callback inside the same operation. Consume that callback only when an identical
+path/flags pair was already recorded from its exact parent frame. Consuming the
+pair also requires the captured standard-library Path.open code in both frames.
+It clears the pair; another operation must produce another record. Built-in open,
+direct os.open and repeated pathlib attempts remain individually observed. The
+violation marker is created before a pair can be consumed, so write refusal,
+unexpected-write outcomes and path permissions do not change.
+
+## D40002: Journal the strict rehearsal fixture's binding changes
+
+The real-core fixture configures its fabricated delivery binding through the
+native settings command before freezing its source. Directly rewriting machine
+bindings after the last native transaction left an unexplained baseline gap.
+An unrelated check repair correctly refused to adopt that gap. Keep that
+refusal, complete history/replay checks and all original rehearsal assertions;
+fix the fixture's writer instead of granting paths or forgiving residual state.
+The delivery server's finalizer also encloses this setup command.
+
+## D40001: Preserve an owned allocation capability across worker death
+
+The outer copy scope starts a separate cleanup guardian and transfers the exact
+new allocation over an anonymous socket. A receipt alone never grants cleanup
+authority. Normal exit still uses native retention, then dismisses the guardian.
+On worker death, recovery requires the captured directory identities, immutable
+receipt binding, a dead owner and proven absence of every registered process
+group. A live registered group may be stopped only while its leader still has
+the witnessed OS start identity. Launch gaps, denied or reused groups, explicit
+uncertainty, changed identities and invalid receipts retain bytes. Nested copy
+scopes register launches with their enclosing guardian.
+Every successful publication transfers a complete receipt witness; recovery
+requires exact equality, including mutable metadata, before any filesystem move.
+
+Recovery reuses native checkpoint, staged retirement and publication checks. It
+can recover the same captured inode if worker death interrupted staged deletion.
+Repeat cancellation signals are deferred during terminal cleanup and handlers
+are restored afterward. The existing body exception remains primary, including
+retirement publication failure. This is process recovery, not a guarantee after
+all supervisors die or storage/ownership evidence becomes unavailable.
+
+Report warnings use logical regular-file bytes strictly above one binary GiB.
+Traversal remains bounded, metadata-only and link-refusing; unknown sizes never
+become known-small results.
+
 ## D31003: Keep the owned-copy body exception primary during exit
 
 When retirement publication fails while a body exception is already unwinding,

@@ -21,6 +21,167 @@ class OwnedCopyLifecycle(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.parent = Path(self.temp.name).resolve()
 
+    def test_killed_owner_removes_only_its_bulk_and_keeps_small_receipt(self):
+        import time
+        foreign = self.parent / 'foreign'
+        foreign.mkdir()
+        (foreign / 'keep').write_text('foreign bytes')
+        program = '''
+import sys, time
+from brain.rehearse_external import OwnedCopies
+with OwnedCopies(parent=sys.argv[1]) as copies:
+    (copies.bulk / 'copy').write_bytes(b'x' * 4096)
+    print(copies.root, flush=True)
+    time.sleep(60)
+'''
+        env = {**os.environ, 'PYTHONPATH': str(Path(__file__).resolve().parents[1] / 'lib')}
+        env.pop('BRAIN_REHEARSAL_EVIDENCE_DIR', None)
+        process = subprocess.Popen([sys.executable, '-B', '-c', program, str(self.parent)],
+                                   env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        try:
+            root = Path(process.stdout.readline().strip())
+            self.assertEqual(self.parent, root.parent)
+            self.assertTrue((root / 'bulk/copy').is_file())
+            process.kill()  # only the worker this fixture just started
+            process.communicate(timeout=5)
+            deadline = time.monotonic() + 5
+            while (root / 'bulk').exists() and time.monotonic() < deadline:
+                time.sleep(.02)
+            self.assertFalse((root / 'bulk').exists())
+            self.assertEqual(['cleanup.json'], [p.name for p in root.iterdir()])
+            receipt = json.loads((root / 'cleanup.json').read_text())
+            self.assertEqual('removed', receipt['state'])
+            self.assertEqual('owner-exit', receipt['terminal'])
+            self.assertEqual('foreign bytes', (foreign / 'keep').read_text())
+        finally:
+            if process.poll() is None:
+                process.kill()
+            process.communicate(timeout=5)
+
+    def test_kill_recovery_covers_live_child_staging_and_preserves_refusals(self):
+        import time
+        program = '''
+import json, os, subprocess, sys, time
+from pathlib import Path
+from brain import rehearse, rehearse_external as external
+mode = sys.argv[2]
+copies = external.OwnedCopies(parent=sys.argv[1])
+original = rehearse.shutil.rmtree
+def deleting(path, *args, **kwargs):
+    if Path(path).name == 'retiring-' + copies.run:
+        print(copies.root, flush=True)
+        time.sleep(60)
+    return original(path, *args, **kwargs)
+if mode == 'staging':
+    rehearse.shutil.rmtree = deleting
+with copies:
+    (copies.bulk / 'keep').write_text('owned bytes')
+    if mode == 'child':
+        copies.before_process()
+        child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'],
+            start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        copies.track_process(child)
+        (copies.bulk / 'pid').write_text(str(child.pid))
+    if mode == 'uncertain':
+        copies.retain_unknown()
+    if mode == 'receipt':
+        (copies.root / 'cleanup.json').write_text('{}')
+    if mode == 'metadata':
+        path = copies.root / 'cleanup.json'
+        data = json.loads(path.read_text())
+        data['state'] = 'foreign-change'
+        path.write_text(json.dumps(data))
+    if mode != 'staging':
+        print(copies.root, flush=True)
+        time.sleep(60)
+'''
+        env = {**os.environ, 'PYTHONPATH': str(Path(__file__).resolve().parents[1] / 'lib')}
+        env.pop('BRAIN_REHEARSAL_EVIDENCE_DIR', None)
+        for mode in ('child', 'staging', 'uncertain', 'receipt', 'metadata'):
+            with self.subTest(mode=mode):
+                process = subprocess.Popen([sys.executable, '-B', '-c', program, str(self.parent), mode],
+                    env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                try:
+                    root = Path(process.stdout.readline().strip())
+                    self.assertEqual(self.parent, root.parent)
+                    child_pid = int((root / 'bulk/pid').read_text()) if mode == 'child' else None
+                    process.kill()
+                    process.communicate(timeout=5)
+
+                    expected = mode in ('child', 'staging')
+                    deadline = time.monotonic() + (7 if expected else .2)
+                    while time.monotonic() < deadline:
+                        if expected and list(root.iterdir()) == [root / 'cleanup.json']:
+                            break
+                        time.sleep(.02)
+                    self.assertEqual(expected, list(root.iterdir()) == [root / 'cleanup.json'])
+                    if child_pid is not None:
+                        with self.assertRaises(ProcessLookupError):
+                            os.killpg(child_pid, 0)
+                    if not expected:
+                        self.assertEqual('owned bytes', (root / 'bulk/keep').read_text())
+                finally:
+                    if process.poll() is None:
+                        process.kill()
+                    process.communicate(timeout=5)
+
+    def test_terminal_cleanup_ignores_repeat_cancellation_and_restores_handlers(self):
+        import signal
+        handlers = [signal.getsignal(s) for s in (signal.SIGTERM, signal.SIGINT)]
+        original = rehearse.shutil.rmtree
+        seen = []
+        def deleting(path, *args, **kwargs):
+            if Path(path).name.startswith('retiring-'):
+                seen.append(path)
+                os.kill(os.getpid(), signal.SIGTERM)
+                os.kill(os.getpid(), signal.SIGINT)
+            return original(path, *args, **kwargs)
+        error = AssertionError('original body failure')
+        owner = rehearse_external.OwnedCopies(parent=self.parent)
+        with mock.patch.object(rehearse.shutil, 'rmtree', side_effect=deleting):
+            with self.assertRaises(AssertionError) as caught:
+                with owner:
+                    (owner.bulk / 'copy').write_text('owned')
+                    raise error
+        self.assertIs(error, caught.exception)
+        self.assertEqual(1, len(seen))
+        self.assertFalse(owner.bulk.exists())
+        self.assertEqual(handlers, [signal.getsignal(s) for s in (signal.SIGTERM, signal.SIGINT)])
+
+    def test_registration_failure_still_stops_and_reaps_its_started_process(self):
+        owner = rehearse_external.OwnedCopies(parent=self.parent)
+        error = OSError('registration unavailable')
+        message = owner.guardian_message
+        def registering(value):
+            if value['type'] == 'process':
+                owner.retain_unknown()
+                raise error
+            return message(value)
+        with self.assertRaises(OSError) as caught:
+            with owner, mock.patch.object(owner, 'guardian_message', side_effect=registering):
+                rehearse_external.owned_run([sys.executable, '-c', 'import time; time.sleep(60)'])
+        self.assertIs(error, caught.exception)
+        self.assertEqual(1, len(owner.processes))
+        process = owner.processes[0]
+        self.assertIsNotNone(process.poll())
+        with self.assertRaises(ProcessLookupError):
+            os.killpg(process.pid, 0)
+        self.assertTrue(owner.bulk.exists())
+
+    def test_guardian_setup_failure_restores_context_and_signal_handler(self):
+        import signal
+        previous = signal.getsignal(signal.SIGTERM)
+        owner = rehearse_external.OwnedCopies(parent=self.parent)
+        error = OSError('supervisor launch failure')
+        with mock.patch.object(rehearse_external, '_guardian_popen', side_effect=error):
+            with self.assertRaises(OSError) as caught:
+                with owner:
+                    self.fail('setup failure entered body')
+        self.assertIs(error, caught.exception)
+        self.assertIsNone(rehearse_external.ACTIVE_COPIES.get())
+        self.assertEqual(previous, signal.getsignal(signal.SIGTERM))
+        self.assertTrue(owner.bulk.is_dir())
+
     def test_success_failure_timeout_and_cancel_remove_only_owned_bulk(self):
         foreign = self.parent / 'foreign'
         foreign.mkdir()
