@@ -2141,3 +2141,11 @@ Explicit status refresh and other commands retain their existing behavior.
 Regression coverage crosses the existing instance clock seam while retaining the
 original plan, digest, gating and clean-tree assertions. Connected controls cover
 private plan variants, saved and unsaved briefs, and genuine shared mutations.
+
+## D22004: Make explicit-refresh assertions depend on semantic fixture inputs
+
+The shared-creation regression changes the fixture's published-preview input
+after proving automatic projection stayed suppressed. It asserts stale status
+and unchanged bytes before explicit refresh, then retains byte inequality and
+currentness checks and requires the exact generated preview line. The original
+clock-based suppression control remains intact without extending its scope.

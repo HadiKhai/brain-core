@@ -260,6 +260,158 @@ class EventAppend(Scenario):
 
 
 class EventViews(Scenario):
+    def tracked_state(self, root, paths):
+        return {name: ((root / name).read_bytes() if (root / name).exists() else None,
+                       self.git('ls-files', '--stage', '--', name, cwd=root),
+                       self.git('diff', '--cached', '--binary', '--', name, cwd=root))
+                for name in paths}
+
+    def projection_dirt(self, root, prefix=''):
+        status = root / prefix / 'status.md'
+        archive = root / prefix / 'status-archive.md'
+        text = __import__('re').sub(r'(?ms)^## Now\n.*?(?=^## |\Z)',
+                                   '## Now\n\n' + ''.join('- operator note %d\n' % i for i in range(35)) + '\n',
+                                   status.read_text())
+        status.write_text(text + '\nOperator fact: retain this prose.\n')
+        archive.write_text('operator archive\n')
+        names = [str(status.relative_to(root)), str(archive.relative_to(root))]
+        self.git('add', '--', *names, cwd=root)
+        status.write_text(status.read_text() + '\nUnstaged operator prose.\n')
+        archive.write_text(archive.read_text() + 'unstaged archive\n')
+        return names
+
+    def test_new_root_and_child_preserve_preexisting_tracked_and_staged_state(self):
+        r = self.init('demo')
+        self.b(r, 'new', 'projects', '--title', 'Projects')
+        paths = self.projection_dirt(r) + self.projection_dirt(r, 'nodes/projects')
+        (r / 'foreign.txt').write_text('staged foreign fixture\n')
+        self.git('add', '--', 'foreign.txt', cwd=r)
+        paths.append('foreign.txt')
+        private = r / '.brain/private-fixture'
+        private.write_bytes(b'private fixture\n')
+        before = self.tracked_state(r, paths)
+        self.b(r, 'new', 'other', '--title', 'Other')
+        self.b(r, 'new', 'projects/app', '--title', 'App')
+        self.assertEqual(self.tracked_state(r, paths), before)
+        self.assertEqual(private.read_bytes(), b'private fixture\n')
+        for node in ('nodes/other', 'nodes/projects/nodes/app'):
+            self.assertIn('Facts refreshed:', (r / node / 'status.md').read_text())
+        self.assertEqual(events.pending(events.read(instance.Instance(r))), {})
+
+    def adoption_projection_case(self, parent, count):
+        r = self.init('demo')
+        if parent != 'root':
+            self.b(r, 'new', parent, '--title', 'Projects')
+        homes = [self.repo(self.tmp / ('code' + str(i))) for i in range(count)]
+        external = [{p.relative_to(h): p.read_bytes() for p in h.rglob('*')
+                     if p.is_file() and '.git' not in p.parts} for h in homes]
+        paths = self.projection_dirt(r)
+        if parent != 'root':
+            paths += self.projection_dirt(r, 'nodes/' + parent)
+        before = self.tracked_state(r, paths)
+        head = self.git('rev-parse', 'HEAD', cwd=r).strip()
+        self.b(r, 'adopt', *map(str, homes), '--parent', parent)
+        self.assertEqual(self.tracked_state(r, paths), before)
+        messages = self.git('log', '--format=%s', head + '..HEAD', cwd=r)
+        self.assertNotIn('refresh status facts', messages)
+        inst = instance.Instance(r)
+        for i, home in enumerate(homes):
+            nid = ('code' + str(i)) if parent == 'root' else parent + '/code' + str(i)
+            n = inst.node(nid)
+            self.assertIn('Facts refreshed:', (n['dir'] / 'status.md').read_text())
+            self.assertIn('import:', (n['dir'] / 'job-ledger.md').read_text())
+            self.assertEqual({p.relative_to(home): p.read_bytes() for p in home.rglob('*')
+                              if p.is_file() and '.git' not in p.parts}, external[i])
+        self.assertEqual(events.pending(events.read(inst)), {})
+        self.assertTrue(events.read(inst)[-1]['data']['maintenance_ok'])
+
+    def test_adopt_root_multi_defers_projection(self):
+        self.adoption_projection_case('root', 2)
+
+    def test_adopt_root_single_defers_projection(self):
+        self.adoption_projection_case('root', 1)
+
+    def test_adopt_child_single_defers_projection(self):
+        self.adoption_projection_case('projects', 1)
+
+    def test_adopt_child_multi_defers_projection(self):
+        self.adoption_projection_case('projects', 2)
+
+    def test_explicit_import_first_duplicate_and_explicit_refresh_freshness(self):
+        from brain import briefs, jobs, status
+        r = self.init('demo')
+        home = self.repo(self.tmp / 'code')
+        self.b(r, 'new', 'app', '--title', 'App', '--home', str(home))
+        inst = instance.Instance(r)
+        n = inst.node('app')
+        branch = briefs.import_job_id(home)
+        paths = self.projection_dirt(r, 'nodes/app')
+        before = self.tracked_state(r, paths)
+        for _ in range(2):
+            self.b(r, 'jobs', 'app', '--branch', branch, '--start')
+            self.assertEqual(self.tracked_state(r, paths), before)
+            self.assertEqual(len(jobs.read_jobs(instance.Instance(r).node('app'))), 1)
+        self.assertIsNotNone(status.status_lag(instance.Instance(r), n))
+        self.b(r, 'jobs', 'app', '--branch', 'import:wrong', '--start', ok=False)
+        self.assertEqual(self.tracked_state(r, paths), before)
+        self.assertEqual(events.read(instance.Instance(r))[-1]['kind'], 'abort')
+        self.b(r, 'status', 'app', '--refresh')
+        self.assertIsNone(status.status_lag(instance.Instance(r), instance.Instance(r).node('app')))
+        self.assertIn('operator note 34', (n['dir'] / 'status-archive.md').read_text())
+        self.assertEqual(events.pending(events.read(instance.Instance(r))), {})
+
+    def test_creation_abort_partial_and_private_connect_keep_native_lifecycle(self):
+        r = self.init('demo')
+        inst = instance.Instance(r)
+        before = (r / 'status.md').read_bytes()
+        clock = inst.now_dt() + __import__('datetime').timedelta(minutes=2)
+        with mock.patch.object(instance.Instance, 'now_dt', return_value=clock), instance.brain_lock(r):
+            with events.Command(r, command='connect'):
+                pass
+            self.assertEqual((r / 'status.md').read_bytes(), before)
+            with self.assertRaises(RuntimeError):
+                with events.Command(r, command='new'):
+                    raise RuntimeError('before body write')
+            self.assertEqual(events.read(inst)[-1]['kind'], 'abort')
+            with self.assertRaises(RuntimeError):
+                with events.Command(r, command='adopt') as op:
+                    self.assertTrue(events.lease_live(inst, op.ref))
+                    (r / 'backlog.md').write_text('partial fixture\n')
+                    raise RuntimeError('after body write')
+            self.assertFalse(events.lease_live(inst, op.ref))
+        self.assertEqual(len(events.pending(events.read(inst))), 1)
+        self.assertEqual((r / 'status.md').read_bytes(), before)
+
+    def test_shared_creation_defers_tracked_projection_until_explicit_refresh(self):
+        from brain import common, nodes, status
+        r = self.init('demo')
+        path = r / 'status.md'
+        before = path.read_bytes()
+        inst = instance.Instance(r)
+        clock = inst.now_dt() + __import__('datetime').timedelta(minutes=2)
+        with mock.patch.object(instance.Instance, 'now_dt', return_value=clock), instance.brain_lock(r):
+            with events.Command(r, command='new') as op:
+                self.assertTrue(events.lease_live(op.inst, op.ref))
+                nodes.create_node(inst, 'app', 'App')
+            self.assertFalse(events.lease_live(op.inst, op.ref))
+        self.assertEqual(path.read_bytes(), before)
+        self.assertTrue((r / 'nodes/app/status.md').exists())
+        self.assertEqual(events.pending(events.read(inst)), {})
+        self.assertTrue(events.read(inst)[-1]['data']['maintenance_ok'])
+        self.assertNotEqual(events.replay(inst)[1], {})
+        node_path = r / 'node.md'
+        fm, body = common.read_fm(node_path)
+        fm['preview_url'] = 'https://example.invalid/shared-explicit-refresh-fixture'
+        common.write_fm(node_path, fm, body)
+        inst = instance.Instance(r)
+        self.assertIsNotNone(status.status_lag(inst, inst.node('root')))
+        self.assertEqual(path.read_bytes(), before)
+        self.b(r, 'status', 'root', '--refresh')
+        self.assertNotEqual(path.read_bytes(), before)
+        self.assertIsNone(status.status_lag(instance.Instance(r), instance.Instance(r).node('root')))
+        self.assertIn('\nPublished preview: https://example.invalid/shared-explicit-refresh-fixture\n',
+                      path.read_text())
+
     def test_connect_shared_mutation_still_materializes_projection(self):
         for during_maintenance in (False, True):
             with self.subTest(during_maintenance=during_maintenance):

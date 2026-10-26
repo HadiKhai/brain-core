@@ -1676,6 +1676,7 @@ def cmd_jobs(a):
                 if a.close or not n["external"] or not n["home_path"] or a.branch != _m_briefs.import_job_id(n["home_path"]):
                     _m_common.die("--start needs the current import snapshot and cannot combine with --close")
                 job_started(inst, n, a.branch, n["fm"].get("runtime", ""))
+                a._validated_import_start = True
         n = inst.node(a.id)
         rows = ledger_rows(n)
         r = next((r for r in reversed(rows or []) if r["Job"] == a.branch), None)

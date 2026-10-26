@@ -584,6 +584,7 @@ class Command:
     """One command operation; a crash or partial failure leaves its begin unresolved."""
     def __init__(self, root, args=None, command=None, node="root"):
         self.inst = instance.Instance(root)
+        self.args = args
         ids = {n["id"] for n in self.inst.nodes()}
         candidates = [getattr(args, "id", None), getattr(args, "node", None), getattr(args, "source", None)] if args else [node]
         self.node = next((target for target in candidates if isinstance(target, str) and target in ids), "root")
@@ -1193,8 +1194,14 @@ def maintain(op, changed):
     # A connect operation that actually changes tracked state still projects it.
     private_connect = (op.command == 'connect' and not changed
                        and not op.changes(resources(op.inst)))
+    # Shared creation keeps its body writes and current replay metadata, but
+    # leaves tracked status documents to the existing explicit refresh command.
+    # Import starts opt in only after the body validates the current snapshot.
+    explicit_refresh = (op.command in ('new', 'adopt') or
+                        (op.command == 'jobs' and
+                         getattr(op.args, '_validated_import_start', False)))
     materialize = (op.command not in ('wt_prune', 'wt_rm') and not op.study_handback
-                   and not local_only and not private_connect)
+                   and not local_only and not private_connect and not explicit_refresh)
     _, recorded_views, _ = replay(op.inst)
     selected = {n['id']: n for n in affected_nodes(op.inst, changed, op.node)}
     for n in op.inst.nodes():
