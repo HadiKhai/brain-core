@@ -9,6 +9,7 @@ import shutil
 import shlex
 import subprocess
 import sys
+from functools import lru_cache
 from pathlib import Path
 
 from . import common as _m_common
@@ -35,6 +36,7 @@ def recorded_lane_environment(env, recorded):
     return restored
 
 
+@lru_cache(maxsize=1024)
 def glob_regex(pattern):
     original = pattern
     if pattern.startswith('!'):

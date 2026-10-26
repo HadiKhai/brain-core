@@ -1386,8 +1386,10 @@ except BaseException:
 boundary = pathlib.Path(os.environ['BRAIN_REHEARSAL_BOUNDARY']).resolve()
 marker = pathlib.Path(os.environ['BRAIN_REHEARSAL_MARKER'])
 busy = False
+recorded_open = None
+pathlib_open_code = pathlib.Path.open.__code__
 def audit(event, args):
-    global busy
+    global busy, recorded_open
     if busy:
         return
     paths = []
@@ -1408,8 +1410,23 @@ def audit(event, args):
                 continue
             p = pathlib.Path(os.fsdecode(name)).resolve()
             if p != pathlib.Path('/dev/null') and boundary != p and boundary not in p.parents:
+                # Python 3.9 pathlib passes an opener to io.open. Its nested
+                # os.open callback represents the same operation, after the
+                # high-level callback has already recorded the violation.
+                # Consume only that exact parent-frame/path/flags pair once.
+                caller = sys._getframe(1)
+                if (event == 'open' and args[1] is None and caller.f_back is not None
+                        and caller.f_back.f_code is pathlib_open_code
+                        and recorded_open == (str(p), args[2], id(caller.f_back))):
+                    recorded_open = None
+                    del caller
+                    continue
                 with marker.open('a') as stream:
                     stream.write(json.dumps(dict(event=event, path=str(p))) + '\\n')
+                recorded_open = ((str(p), args[2], id(caller))
+                                 if event == 'open' and isinstance(args[1], str)
+                                 and caller.f_code is pathlib_open_code else None)
+                del caller
     finally:
         busy = False
 sys.addaudithook(audit)

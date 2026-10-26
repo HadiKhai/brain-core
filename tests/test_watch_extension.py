@@ -10,6 +10,7 @@ from scenario import CORE, Scenario
 
 
 class WatchExtension(Scenario):
+    fixture_init_in_process = True
     def setUp(self):
         super().setUp()
         env = mock.patch.dict(os.environ, self.env)

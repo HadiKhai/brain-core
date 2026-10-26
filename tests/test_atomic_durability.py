@@ -120,6 +120,36 @@ class AtomicDurability(unittest.TestCase):
                 else:
                     self.assertEqual(staging, [])
 
+    def test_public_mode_is_restored_only_after_private_staging_is_published(self):
+        self.path.chmod(0o644)
+        replace = os.replace
+        modes = []
+        def observe(source, target, **kwargs):
+            modes.append(stat.S_IMODE(os.stat(source, dir_fd=kwargs['src_dir_fd']).st_mode))
+            self.assertEqual(self.path.read_text(), 'old')
+            return replace(source, target, **kwargs)
+        with mock.patch.object(self.m.os, 'replace', side_effect=observe):
+            self.m.atomic_write(self.path, 'new')
+        self.assertEqual(modes, [0o600])
+        self.assertEqual(self.path.read_text(), 'new')
+        self.assertEqual(stat.S_IMODE(self.path.stat().st_mode), 0o644)
+
+    def test_replace_and_cleanup_failure_leaves_private_staging_and_old_target(self):
+        self.path.chmod(0o644)
+        primary, cleanup = OSError('replace failed'), OSError('cleanup failed')
+        with mock.patch.object(self.m.os, 'replace', side_effect=primary), \
+                mock.patch.object(self.m.os, 'unlink', side_effect=cleanup):
+            with self.assertRaises(OSError) as raised:
+                self.m.atomic_write(self.path, 'new')
+        self.assertIs(raised.exception, primary)
+        self.assertIs(raised.exception.__cause__, cleanup)
+        self.assertEqual(self.path.read_text(), 'old')
+        self.assertEqual(stat.S_IMODE(self.path.stat().st_mode), 0o644)
+        staging = [path for path in self.path.parent.iterdir() if path != self.path]
+        self.assertEqual(len(staging), 1)
+        self.assertEqual(staging[0].read_text(), 'new')
+        self.assertEqual(stat.S_IMODE(staging[0].stat().st_mode), 0o600)
+
     def test_parent_retarget_during_file_sync_preserves_foreign_bytes_and_cleans_owned_temp(self):
         folder = self.path.parent / 'storage'
         folder.mkdir()

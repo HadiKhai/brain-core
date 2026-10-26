@@ -250,6 +250,7 @@ class LockHotfix(Scenario):
 
 
 class QuestionWake(Scenario):
+    fixture_templates = True
     # Initialization precedes transport mocks and creates only fixture state.
     # Keep all asserted CLI, HTTP, child-process and wake-launcher calls real.
     fixture_init_in_process = True
@@ -260,6 +261,11 @@ class QuestionWake(Scenario):
         environment.start()
         self.addCleanup(environment.stop)
         self.module = core_loader.SourceFileLoader("brain_wake_test", str(CORE / "bin/brain")).load_module()
+        self.r, self.calls, self.command = self.cached_setup('wake', self.wake_fixture)
+        self.inst = self.module.Instance(self.r)
+        self.n = self.inst.node("a")
+
+    def wake_fixture(self):
         self.r = self.init("alice")
         self.b(self.r, "new", "a", "--title", "Alpha")
         self.calls = self.tmp / "calls"
@@ -268,8 +274,7 @@ class QuestionWake(Scenario):
                           ")\nwith p.open('a') as f: f.write(sys.stdin.read()+'\\n')\n")
         self.command = shlex_quote(sys.executable) + " " + shlex_quote(str(script))
         self.b(self.r, "set", "a", "coordinator=synthetic-thread", "wake=" + self.command)
-        self.inst = self.module.Instance(self.r)
-        self.n = self.inst.node("a")
+        return self.r, self.calls, self.command
 
     def enqueue(self, reason, node=None):
         with mock.patch.object(self.module, "wake_start") as start:
@@ -816,6 +821,7 @@ class QuestionWake(Scenario):
 
 
 class StopHook(Scenario):
+    fixture_init_in_process = True
     def test_relay_only_exit_captures_questions_but_skips_note_reminders(self):
         r = self.init("alice")
         (r / "brief.md").write_text("Changed notes\n")

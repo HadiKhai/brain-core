@@ -30,6 +30,7 @@ from scenario import Scenario, AutonomyProject, shlex_quote
 
 class Spend(Scenario):
     """Time and tokens per job from the runtimes' own transcripts: counted once, attributed to the right job."""
+    fixture_init_in_process = True
 
     def setUp(self):
         super().setUp()

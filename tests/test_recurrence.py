@@ -9,7 +9,12 @@ from scenario import CORE, Scenario
 
 
 class LessonRecurrence(Scenario):
+    fixture_templates = True
+    fixture_init_in_process = True
     def fixture(self):
+        return self.cached_setup('recurrence', self.recurrence_fixture)
+
+    def recurrence_fixture(self):
         r = self.init("alice")
         self.b(r, "new", "app", "--title", "App")
         self.b(r, "specialist", "new", "editor", "--title", "Editor")

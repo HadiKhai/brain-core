@@ -872,10 +872,12 @@ class AutonomyHandbackPaths(AutonomyProject):
 
 
 class Workflow(Scenario):
+    fixture_templates = True
     fixture_init_in_process = True
     """Less ceremony: core changes reach every coordinator, green verify runs are reused, contracts and advice."""
 
-    job = _test_verify.WorkerReadyPackets.job
+    def job(self):
+        return self.cached_setup('ready-job', lambda: _test_verify.WorkerReadyPackets.job(self))
 
     def test_missing_launch_reason_warns_coordinator_without_addressing_worker(self):
         r, home, wt = self.job()

@@ -593,11 +593,11 @@ class ExpandedUI(Scenario):
                     lock.close()
 
     def test_initial_failure_recovers_on_same_server_refresh_without_another_worker(self):
-        root = self.first_paint_root()
-        fixed = self.m.UIInstance(root).now_dt()
         real_state = self.m.ui_state
         for stage in ('discover', 'state'):
             with self.subTest(stage=stage):
+                root = self.first_paint_root('recovery-' + stage)
+                fixed = self.m.UIInstance(root).now_dt()
                 failed, retry_entered, release_retry = threading.Event(), threading.Event(), threading.Event()
                 attempts, active = [], [0, 0]
                 sentinel = 'fabricated-private-initialization-error'
@@ -719,8 +719,8 @@ class ExpandedUI(Scenario):
                 self.assertEqual(len(workers), 1)
             self.assertEqual(len(attempts), 3, 'shutdown restarted initialization')
 
-    def first_paint_root(self):
-        root = self.tmp / "alice"
+    def first_paint_root(self, name='alice'):
+        root = self.tmp / name
         root.mkdir()
         (root / "instance.md").write_text("---\nname: alice\nprincipals: alice\ntimezone: UTC\n---\n")
         (root / "node.md").write_text("---\nid: root\ntitle: Alice workspace\nowners: alice\nhome: here\n---\n")

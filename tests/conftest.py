@@ -1,6 +1,7 @@
 """Canonical collection and flushed controller-side test evidence."""
 import importlib.metadata
 import json
+import math
 import os
 from pathlib import Path
 
@@ -10,9 +11,50 @@ import pytest
 def pytest_addoption(parser):
     parser.addoption('--completed-results', metavar='PATH',
                      help='create an exclusive JSONL stream of test phases and completions')
+    parser.addoption('--duration-order', metavar='PATH',
+                     help='schedule longer tests first using prior completed-results JSONL')
+
+
+@pytest.hookimpl(trylast=True)
+def pytest_collection_modifyitems(config, items):
+    path = config.getoption('--duration-order')
+    if not path or not items:
+        return
+    durations, suffixes = {}, {}
+    try:
+        with open(path, encoding='utf-8') as stream:
+            for line in stream:
+                row = json.loads(line)
+                if not isinstance(row, dict):
+                    raise ValueError('expected result objects')
+                if row.get('event') != 'completed':
+                    continue
+                nodeid, duration = row.get('nodeid'), row.get('duration')
+                if (not isinstance(nodeid, str) or '::' not in nodeid
+                        or type(duration) not in (int, float)
+                        or not math.isfinite(duration) or duration < 0):
+                    raise ValueError('invalid completed duration')
+                durations[nodeid] = max(durations.get(nodeid, 0), duration)
+                # Canonical compatibility collection reexports classes from the
+                # module lanes. Keep their class/method identity across both.
+                suffix = nodeid.split('::', 1)[1]
+                suffixes[suffix] = max(suffixes.get(suffix, 0), duration)
+        if not durations:
+            raise ValueError('no completed durations')
+        def score(item):
+            return durations.get(item.nodeid, suffixes.get(item.nodeid.split('::', 1)[-1], 0))
+        if not any(item.nodeid in durations or item.nodeid.split('::', 1)[-1] in suffixes for item in items):
+            raise ValueError('no matching collected tests')
+        # Stable sorting changes only order, never the collected inventory.
+        items.sort(key=lambda item: -score(item))
+    except (OSError, ValueError, TypeError) as error:
+        raise pytest.UsageError('cannot use duration-order: ' + str(error)) from error
 
 
 def pytest_configure(config):
+    workers = getattr(config.option, 'numprocesses', 0)
+    if isinstance(workers, int) and workers > (os.cpu_count() or 1):
+        raise pytest.UsageError('workers exceed available CPU cores')
     # xdist forwards reports to this single writer; workers never open the path.
     if not hasattr(config, 'workerinput'):
         stream = None
@@ -24,6 +66,95 @@ def pytest_configure(config):
             except OSError as error:
                 raise pytest.UsageError('cannot create completed-results: ' + str(error)) from error
         config.pluginmanager.register(CompletedResults(config, stream), 'completed-results-writer')
+
+
+@pytest.hookimpl(optionalhook=True)
+def pytest_xdist_auto_num_workers(config):
+    return os.cpu_count() or 1
+
+
+@pytest.hookimpl(tryfirst=True, optionalhook=True)
+def pytest_xdist_make_scheduler(config, log):
+    if config.option.collectonly or not any(
+            Path(arg.split('::', 1)[0]).name == 'test_brain.py' for arg in config.args):
+        return None
+    from xdist.scheduler.load import LoadScheduling
+    from lanes import SERIAL_CLASSES, SERIAL_TESTS
+
+    class SerialAfterParallel(LoadScheduling):
+        def __init__(self, config, log):
+            super().__init__(config, log)
+            self.serial_node = None
+            self.serial_indices = []
+            self.serial_started = False
+
+        @property
+        def tests_finished(self):
+            if self.serial_indices and not self.serial_started:
+                return False
+            return super().tests_finished
+
+        @property
+        def has_pending(self):
+            return bool(self.serial_indices and not self.serial_started) or super().has_pending
+
+        def announce(self, lane, count, workers):
+            writer = config.pluginmanager.getplugin('completed-results-writer')
+            if writer is not None:
+                writer.emit(dict(event='lane', lane=lane, tests=count, workers=workers))
+
+        def schedule(self):
+            if self.collection is not None:
+                for node in self.nodes:
+                    self.check_schedule(node)
+                return
+            assert self.collection_is_completed
+            if not self._check_nodes_have_same_collection():
+                return
+            self.collection = next(iter(self.node2collection.values()))
+            self.serial_indices = [i for i, name in enumerate(self.collection)
+                                   if len(name.split('::')) > 2 and (
+                                       name.split('::')[1] in SERIAL_CLASSES
+                                       or name.split('::', 1)[1] in SERIAL_TESTS)]
+            serial = set(self.serial_indices)
+            self.pending[:] = [i for i in range(len(self.collection)) if i not in serial]
+            self.maxschedchunk = 2  # bounded lookahead and balanced duration order
+            if len(self.nodes) == 1 or not self.serial_indices:
+                self.serial_started = True
+                self.pending.extend(self.serial_indices)
+            else:
+                self.serial_node = self.nodes[-1]
+            self.announce('parallel', len(self.pending), len(self.nodes) - bool(self.serial_node))
+            for node in self.nodes:
+                self.check_schedule(node)
+            if not self.pending:
+                for node in self.nodes:
+                    if node is not self.serial_node:
+                        node.shutdown()
+            self.start_serial_if_ready()
+
+        def check_schedule(self, node, duration=0):
+            if node is self.serial_node and not self.serial_started:
+                return
+            super().check_schedule(node, duration)
+
+        def remove_node(self, node):
+            crashed = super().remove_node(node)
+            self.start_serial_if_ready()
+            return crashed
+
+        def start_serial_if_ready(self):
+            if (self.serial_node is None or self.serial_started or self.pending
+                    or any(node is not self.serial_node for node in self.nodes)):
+                return
+            self.serial_started = True
+            self.pending[:] = self.serial_indices
+            self.announce('serial', len(self.pending), 1)
+            self.check_schedule(self.serial_node)
+            if not self.pending:
+                self.serial_node.shutdown()
+
+    return SerialAfterParallel(config, log)
 
 
 class CompletedResults:

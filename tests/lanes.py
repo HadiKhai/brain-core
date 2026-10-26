@@ -19,6 +19,18 @@ import json
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+# Canonical full verification runs these deadline/lock probes only after every
+# parallel worker finishes its pytest session. The collected inventory is intact.
+SERIAL_CLASSES = (
+    'DecisionGate', 'RehearsalPipeline',
+)
+SERIAL_TESTS = (
+    'ReviewReadSets::test_machine_reservation_times_out',
+    'LockHotfix::test_sleeping_drain_and_second_drain_never_block_instance',
+    'HandbackLifecycle::test_p6_cli_enqueue_foreground_terminal_and_live_join',
+    'HandbackLifecycle::test_m3_cli_empty_scan_silent_then_one_synthetic_ask',
+    'RepositoryLanes::test_unassigned_duplicate_and_removed_tests_fail',
+)
 MODULE_LANES = (
     'briefs', 'check', 'cli', 'connect', 'guard', 'history', 'hosts', 'jobs',
     'knowledge', 'machine', 'messages', 'nodes', 'rehearse', 'rotation',

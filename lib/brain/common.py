@@ -30,7 +30,7 @@ from pathlib import Path
 CORE = Path(__file__).resolve().parents[2]
 ENTRY_POINT = CORE / "bin" / "brain"
 NODE_FIELDS = ["id", "title", "owners", "labels", "home", "runtime", "created"]
-LOCAL_KEYS = ["coordinator", "host_project", "home_project", "preview", "preview_tour", "review_urls"]  # per machine (axiom 23)
+LOCAL_KEYS = ["coordinator", "host_project", "home_project", "host_instance", "preview", "preview_tour", "review_urls"]  # per machine (axiom 23)
 ITEM_FIELDS = ["id", "title", "kind", "source_node", "source_ref", "learned_at",
                "source_owners", "scope", "status"]
 STALE_DAYS = 7
@@ -363,8 +363,6 @@ class DirectoryTarget:
             identity = (owned.st_dev, owned.st_ino)
             published = False
             try:
-                if prior and stat.S_ISREG(prior.st_mode):
-                    os.fchmod(stream.fileno(), stat.S_IMODE(prior.st_mode))
                 stream.write(text)
                 stream.flush()
                 os.fsync(stream.fileno())
@@ -376,6 +374,11 @@ class DirectoryTarget:
                     raise OSError('publication temporary file changed')
                 os.replace(name, self.path.name, src_dir_fd=self.fd, dst_dir_fd=self.fd)
                 published = True
+                # Failed publication/cleanup must leave only a private staging
+                # inode. Restore the old mode only on the published inode.
+                if prior and stat.S_ISREG(prior.st_mode):
+                    self.check_file(stream.fileno())
+                    os.fchmod(stream.fileno(), stat.S_IMODE(prior.st_mode))
                 os.fsync(self.fd)
             except BaseException as primary:
                 if not published:
