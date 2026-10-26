@@ -29,6 +29,98 @@ from scenario import Scenario, AutonomyProject, shlex_quote
 
 
 class FixtureSetup(Scenario):
+    def test_atomic_template_and_owned_module_restoration(self):
+        import scenario
+        import types
+
+        failures = []
+        source = self.tmp / 'source'
+        source.mkdir()
+        (source / 'complete').write_text('complete source\n')
+        partials = []
+        real_copytree = shutil.copytree
+
+        def interrupted_copy(src, dst, **kwargs):
+            partials.append(Path(dst).parent)
+            Path(dst).mkdir()
+            (Path(dst) / 'partial').write_text('interrupted\n')
+            raise OSError('injected partial copy')
+
+        with mock.patch.object(scenario, 'CORE', source), \
+                mock.patch.object(scenario, '_core_template', None), \
+                mock.patch.object(sys, 'platform', 'darwin'):
+            try:
+                with mock.patch.object(scenario.shutil, 'copytree', interrupted_copy):
+                    with self.assertRaisesRegex(OSError, 'injected partial copy'):
+                        scenario.clone_fixture_core(source, self.tmp / 'failed')
+                if scenario._core_template is not None:
+                    failures.append('failed template was published')
+                if any(path.exists() for path in partials):
+                    failures.append('partial template was not discarded')
+                destination = self.tmp / 'recovered'
+                scenario.clone_fixture_core(source, destination)
+                if sorted(p.name for p in destination.iterdir()) != ['complete']:
+                    failures.append('next copy reused the partial template')
+                elif (destination / 'complete').read_text() != 'complete source\n':
+                    failures.append('next copy changed source contents')
+            finally:
+                if scenario._core_template is not None:
+                    scenario._core_template.cleanup()
+
+        for outcome in ('success', 'command-error', 'loader-error'):
+            environment = dict(os.environ)
+            argv, argv_values = sys.argv, list(sys.argv)
+            cwd, bytecode = Path.cwd(), sys.dont_write_bytecode
+            wrapper = types.ModuleType('fixture_setup')
+            wrapper.state = object()
+            collision = types.ModuleType('_brain_fixture_720001')
+            collision.state = object()
+            foreign = types.ModuleType('_brain_fixture_foreign_during_call')
+            preserved = {'fixture_setup': wrapper, '_brain_fixture_720001': collision}
+            original_exec = core_loader.SourceFileLoader.exec_module
+
+            def execute(loader, module):
+                sys.modules[foreign.__name__] = foreign
+                if outcome == 'loader-error':
+                    real_import = core_loader.importlib.import_module
+
+                    def broken_import(name, package=None):
+                        real_import(name, package)
+                        raise RuntimeError('injected loader error')
+
+                    with mock.patch.object(core_loader.importlib, 'import_module', broken_import):
+                        original_exec(loader, module)
+                else:
+                    original_exec(loader, module)
+
+            with mock.patch.dict(sys.modules, preserved), \
+                    mock.patch.object(core_loader, '_serial', iter([720001, 720002])), \
+                    mock.patch.object(core_loader.SourceFileLoader, 'exec_module', execute):
+                before = dict(sys.modules)
+                if outcome == 'loader-error':
+                    with self.assertRaisesRegex(RuntimeError, 'injected loader error'):
+                        self.fixture_cli(['--help'], self.tmp, CORE / 'bin/brain')
+                elif outcome == 'command-error':
+                    with self.assertRaisesRegex(AssertionError, 'fixture command failed'):
+                        self.fixture_cli(['not-a-command'], self.tmp, CORE / 'bin/brain')
+                else:
+                    self.assertIn('usage:', self.fixture_cli(['--help'], self.tmp, CORE / 'bin/brain'))
+                for name, module in preserved.items():
+                    if sys.modules.get(name) is not module:
+                        failures.append(outcome + ': replaced preexisting ' + name)
+                if sys.modules.get(foreign.__name__) is not foreign:
+                    failures.append(outcome + ': deleted unrelated module')
+                leaked = [name for name in sys.modules if name.startswith('_brain_fixture_')
+                          and name not in before and name != foreign.__name__]
+                if leaked:
+                    failures.append(outcome + ': leaked owned modules ' + repr(leaked))
+                self.assertEqual(dict(os.environ), environment)
+                self.assertIs(sys.argv, argv)
+                self.assertEqual(sys.argv, argv_values)
+                self.assertEqual(Path.cwd(), cwd)
+                self.assertIs(sys.dont_write_bytecode, bytecode)
+        self.assertEqual(failures, [], '\n'.join(failures))
+
     def test_in_process_initialization_restores_context_and_clones_independent_core(self):
         environment, argv, cwd = dict(os.environ), list(sys.argv), Path.cwd()
         self.fixture_init_in_process = True

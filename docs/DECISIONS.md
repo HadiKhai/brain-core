@@ -2165,3 +2165,21 @@ journal, derived index, Git history or machine binding is copied between brains.
 Other platforms retain ordinary independent file copies. Installed core edits
 remain private to each fixture, and initialization/launcher subprocess controls
 remain in the suite.
+
+## D30003: Publish complete fixture templates and clean only owned modules
+
+Build the source-only fixture template in a private temporary directory and
+publish it only after copytree succeeds. A failed copy removes that partial
+directory and leaves the cache empty, allowing the next initialization to retry
+from complete source. Initialization still creates every instance's state anew.
+
+Fixture commands execute a fresh, unregistered wrapper rather than reusing the
+named module in sys.modules. The modular loader selects a namespace with no
+preexisting root or descendants and exposes that exact namespace before loading.
+The caller removes only that package and its descendants in finally, including
+when loading or command execution fails. Preexisting wrappers, packages and
+unrelated modules survive with their original objects and state. Environment,
+argv, cwd and bytecode restoration and real assertion/evidence subprocess paths
+remain unchanged. Regression controls inject a partial copy and import failure,
+exercise command success and failure, and preserve colliding and unrelated module
+objects while checking owned-package cleanup.

@@ -43,7 +43,13 @@ class SourceFileLoader(importlib.machinery.SourceFileLoader):
         package_dir = Path(self.path).resolve().parent.parent / 'lib' / 'brain'
         if not package_dir.is_dir():
             return super().exec_module(module)
-        package_name = '_brain_fixture_{}'.format(next(_serial))
+        while True:
+            package_name = '_brain_fixture_{}'.format(next(_serial))
+            if not any(key == package_name or key.startswith(package_name + '.')
+                       for key in sys.modules):
+                break
+        # Expose ownership before imports so a caller can clean a failed load.
+        self.package_name = package_name
         spec = importlib.util.spec_from_file_location(
             package_name, package_dir / '__init__.py',
             submodule_search_locations=[str(package_dir)])
