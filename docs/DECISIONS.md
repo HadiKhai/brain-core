@@ -2479,3 +2479,15 @@ Later notices remain retained for a subsequent day. Empty calls reserve nothing.
 The instance timezone and explicit quiet-hour policy apply; questions keep their
 existing immediate path. This local boundary neither sends host messages nor
 configures schedules, and an inbox receipt does not prove person delivery.
+
+## Explicit local preview transport
+
+Trusted product preview registration uses a separately versioned, machine-private
+JSON packet and finite JSON over stdio. The registered executable, literal argv,
+file digests and clean checkout identity are pinned and revalidated. Each actual
+landing/reconciliation process bootstraps its own adapter before the existing
+three-method lifecycle engine resolves it. Transport faults retain unknown
+effects as pending; they do not trigger release, rollback or replay. Direct-child
+exit never supplies product/descendant quiescence. Product fencing and retained
+snapshot restoration remain product responsibilities. See
+[the supported driver contract](preview-adapters.md).

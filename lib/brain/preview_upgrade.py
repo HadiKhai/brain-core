@@ -17,6 +17,7 @@ import stat
 from . import common as _m_common
 from . import instance as _m_instance
 from . import lifecycle_identity as _m_lifecycle_identity
+from . import preview_stdio as _m_preview_stdio
 
 
 PREVIEW_ADAPTERS = {}
@@ -168,7 +169,11 @@ def upgrade_preview(inst, n, head, adapters=None):
             return pending('preview resource is also configured for another node')
     except (OSError, ValueError, KeyError, TypeError):
         return pending('explicit complete per-node preview protocol required')
-    adapters = PREVIEW_ADAPTERS if adapters is None else adapters
+    if adapters is None:
+        try:
+            adapters = _m_preview_stdio.bootstrap_preview_adapters(n, PREVIEW_ADAPTERS)
+        except (OSError, ValueError, TypeError, KeyError, RecursionError):
+            return pending('trusted preview adapter registration unavailable or changed')
     adapter = adapters.get(config['adapter'])
     if (adapter is None or getattr(adapter, 'protocol', None) != config['protocol']
             or any(not callable(getattr(adapter, method, None)) for method in ('acquire', 'step', 'release'))):

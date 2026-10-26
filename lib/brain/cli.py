@@ -50,6 +50,7 @@ from . import model_fit as _m_model_fit
 from . import policy as _m_policy
 from . import release as _m_release
 from . import preview_evidence as _m_preview_evidence
+from . import preview_stdio as _m_preview_stdio
 from . import reports as _m_reports
 from . import rehearse as _m_rehearse
 from . import rotation as _m_rotation
@@ -349,6 +350,10 @@ def main():
         opt("--json", action="store_true"))
     cmd('preview', _m_reports.cmd_preview, 'record/check source-bound local screenshot-tour evidence', 'id',
         opt('--record', metavar='RECEIPT_JSON'), opt('--json', action='store_true'))
+    cmd('preview-adapter', _m_preview_stdio.cmd_preview_adapter, 'trust an explicit machine-private local preview driver', 'id',
+        opt('--register', required=True, metavar='PRIVATE_JSON'))
+    cmd('preview-upgrade', _m_preview_stdio.cmd_preview_upgrade, 'reconcile the existing preview protocol for exact landed main', 'id',
+        opt('--head', required=True))
     cmd("ui", _m_ui.cmd_ui, "a live view of this brain in your browser: projects, work in flight, worktrees, activity "
         "(read-only by default, this machine only)", opt("--port", type=int, default=_m_ui.UI_PORT),
         opt("--every", type=float, default=3.0, help="seconds between refreshes"),
