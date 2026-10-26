@@ -18,9 +18,15 @@ class PreviewUpgrade(Scenario):
         self.calls = []
         class Adapter:
             protocol = 'fixture-v1'
+            def acquire(adapter, context):
+                adapter.ownership = {key: context[key] for key in ('resource', 'host', 'run_id')}
+                adapter.ownership.update(lease='fixture-lease', receipt='fixture-owner')
+                return dict(adapter.ownership)
+            def release(adapter, context):
+                return dict(ownership=context['ownership'], released=True, quiescent=True)
             def step(adapter, step, context):
                 self.calls.append((step, dict(context)))
-                return dict(ok=True, receipt='fixture-' + step)
+                return dict(ok=True, receipt='fixture-' + step, ownership=context['ownership'], quiescent=True)
         return m, inst, n, Adapter()
 
     def test_protocol_order_and_durable_per_head_idempotence(self):
@@ -182,6 +188,92 @@ class PreviewUpgrade(Scenario):
             self.assertEqual(m.upgrade_preview(inst, n, 'a'*40,
                 adapters={'fixture': adapter})['state'], 'pending')
         self.assertEqual(self.calls, calls)
+
+    def test_step_only_adapter_cannot_cross_product_boundary(self):
+        m, inst, n, adapter = self.preview()
+        adapter.acquire = None
+        with mock.patch.object(m, 'preview_landed_head', return_value='a'*40):
+            result = m.upgrade_preview(inst, n, 'a'*40, adapters={'fixture': adapter})
+        self.assertEqual(result['state'], 'pending')
+        self.assertEqual(self.calls, [])
+        self.assertFalse(m.preview_folder(n).exists())
+
+    def foreign_claim(self, field):
+        m, inst, n, adapter = self.preview()
+        original = adapter.acquire
+        adapter.acquire = lambda context: {**original(context), field: 'foreign'}
+        with mock.patch.object(m, 'preview_landed_head', return_value='a'*40):
+            result = m.upgrade_preview(inst, n, 'a'*40, adapters={'fixture': adapter})
+        self.assertEqual(result['state'], 'pending')
+        self.assertEqual(result['active_step'], 'acquire')
+        self.assertEqual(self.calls, [])
+
+    def test_foreign_resource_claim_never_starts_backup(self):
+        self.foreign_claim('resource')
+
+    def test_foreign_boot_claim_never_starts_backup(self):
+        self.foreign_claim('host')
+
+    def test_foreign_run_claim_never_starts_backup(self):
+        self.foreign_claim('run_id')
+
+    def unconfirmed_step(self, field):
+        m, inst, n, adapter = self.preview()
+        original = adapter.step
+        def step(name, context):
+            result = original(name, context)
+            result[field] = {**context['ownership'], 'lease': 'foreign'} if field == 'ownership' else False
+            return result
+        adapter.step = step
+        adapter.release = mock.Mock(side_effect=AssertionError('in-flight resource released'))
+        with mock.patch.object(m, 'preview_landed_head', return_value='a'*40):
+            result = m.upgrade_preview(inst, n, 'a'*40, adapters={'fixture': adapter})
+        self.assertEqual(result['state'], 'pending')
+        self.assertEqual(result['active_step'], 'backup')
+        self.assertEqual([item[0] for item in self.calls], ['backup'])
+        adapter.release.assert_not_called()
+
+    def test_foreign_step_lease_never_starts_next_step(self):
+        self.unconfirmed_step('ownership')
+
+    def test_unjoined_descendants_never_start_next_step(self):
+        self.unconfirmed_step('quiescent')
+
+    def test_release_failure_cannot_publish_or_replay_success(self):
+        m, inst, n, adapter = self.preview()
+        adapter.release = mock.Mock(side_effect=RuntimeError('unknown release'))
+        with mock.patch.object(m, 'preview_landed_head', return_value='a'*40):
+            result = m.upgrade_preview(inst, n, 'a'*40, adapters={'fixture': adapter})
+            self.assertEqual(result['state'], 'pending')
+            self.assertFalse(result['released'])
+            self.assertEqual(len(self.calls), 4)
+            again = m.upgrade_preview(inst, n, 'a'*40, adapters={'fixture': adapter})
+            self.assertEqual(again['state'], 'pending')
+            self.assertEqual(len(self.calls), 4)
+            self.assertEqual(adapter.release.call_count, 1)
+
+    def test_exact_resource_lock_blocks_another_node_lock_before_claim(self):
+        m, inst, n, adapter = self.preview()
+        adapter.acquire = mock.Mock(wraps=adapter.acquire)
+        with m.preview_resource_lock(inst, n['local']['preview_upgrade']['resource']), mock.patch.object(
+                m, 'preview_landed_head', return_value='a'*40):
+            result = m.upgrade_preview(inst, n, 'a'*40, adapters={'fixture': adapter})
+        self.assertEqual(result['state'], 'pending')
+        adapter.acquire.assert_not_called()
+        self.assertEqual(self.calls, [])
+
+    def test_terminal_receipt_requires_ownership_and_release_for_every_step(self):
+        m, inst, n, adapter = self.preview()
+        with mock.patch.object(m, 'preview_landed_head', return_value='a'*40):
+            result = m.upgrade_preview(inst, n, 'a'*40, adapters={'fixture': adapter})
+        self.assertTrue(m.preview_receipt_valid(result, n['id'], 'a'*40, result['host']))
+        for mutate in (lambda data: data.pop('ownership'),
+                       lambda data: data.update(released=False),
+                       lambda data: data['steps'][0].update(quiescent=False),
+                       lambda data: data['steps'][0]['ownership'].update(lease='foreign')):
+            data = json.loads(json.dumps(result))
+            mutate(data)
+            self.assertFalse(m.preview_receipt_valid(data, n['id'], 'a'*40, result['host']))
 
 
 del HandbackLifecycle

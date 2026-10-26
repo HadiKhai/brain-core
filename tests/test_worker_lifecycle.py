@@ -80,6 +80,33 @@ class WorkerLifecycle(Scenario):
         receipt = self.m.lifecycle_read(self.inst)['usage'][self.m.digest(['root', self.key])]
         self.assertEqual(receipt['baseline'], {'processed': 800, 'compactions': 3, 'active_minutes': 4})
 
+    def test_restart_receipt_from_another_boot_never_launches_replacement(self):
+        self.assertEqual(self.tick()['state'], 'stopping')
+        self.calls.clear()
+        with mock.patch.object(self.owner._m_lifecycle_identity, 'lifecycle_host_identity', return_value='foreign-boot'):
+            result = self.tick()
+        self.assertEqual(result['state'], 'pending')
+        self.assertIn('host changed', result['reason'])
+        self.assertEqual(self.actions('t3_thread_launch'), [])
+        self.assertEqual(self.actions('t3_thread_interrupt'), [])
+
+    def test_boot_changes_during_inventory_prevent_interrupt(self):
+        original = self.rpc
+        host = self.m._owners['lifecycle_host_identity']
+        identity = host.lifecycle_host_identity()
+        changed = [False]
+        def rpc(name, args):
+            result = original(name, args)
+            if name == 't3_thread_list':
+                changed[0] = True
+            return result
+        with mock.patch.object(host, 'lifecycle_host_identity', side_effect=lambda: 'foreign' if changed[0] else identity), \
+                mock.patch.object(self, 'rpc', side_effect=rpc):
+            result = self.tick()
+        self.assertEqual(result['state'], 'pending')
+        self.assertEqual(self.actions('t3_thread_interrupt'), [])
+        self.assertEqual(self.actions('t3_thread_launch'), [])
+
     def test_pending_request_or_live_child_prevents_even_interrupt(self):
         self.pending = ['request']
         self.assertEqual(self.tick()['state'], 'pending')

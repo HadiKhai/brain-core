@@ -13,6 +13,7 @@ from . import host_lifecycle as _m_host
 from . import host_rpc as _m_rpc
 from . import host_instances as _m_host_instances
 from . import instance as _m_instance
+from . import lifecycle_identity as _m_lifecycle_identity
 from . import jobs as _m_jobs
 from . import machine as _m_machine
 from . import nodes as _m_nodes
@@ -137,13 +138,23 @@ def restart_children(n, identity, rpc):
     return projects, inventory, callers
 
 
+def worker_host_rpc(inst, n, rpc):
+    routed = _m_host_instances.routed_host_rpc(inst, n['id'], rpc)
+    host = _m_lifecycle_identity.lifecycle_host_identity()
+    def call(name, arguments):
+        if not host or _m_lifecycle_identity.lifecycle_host_identity() != host:
+            raise ValueError('worker host boot changed or unavailable; no native action taken')
+        return routed(name, arguments)
+    return call
+
+
 def restart_worker(inst, n, job_key, rpc=None):
     """Execute at most one stop request or one launch; a later tick observes completion.
 
     The caller may schedule this explicit native maintenance entry. File-only
     due/watch/UI reads never execute host lifecycle actions.
     """
-    rpc = _m_host_instances.routed_host_rpc(inst, n['id'], rpc or _m_rpc.call)
+    rpc = worker_host_rpc(inst, n, rpc or _m_rpc.call)
     result = {'job': job_key, 'state': 'pending'}
     try:
         return _restart_worker(inst, n, job_key, rpc)
@@ -178,10 +189,15 @@ def _restart_worker(inst, n, key, rpc):
         fresh, current, row = restart_source(inst, n['id'], key)
         if row is None:
             return {'job': key, 'state': 'idle', 'reason': 'job is closed, unknown or has a terminal handback'}
+        host = _m_lifecycle_identity.lifecycle_host_identity()
+        if not host:
+            raise ValueError('restart host identity unavailable; ownership unproven')
         receipt = json.loads(path.read_text()) if path.exists() and path.stat().st_size <= 262144 else None
         if path.exists() and (not isinstance(receipt, dict) or receipt.get('job') != key
                 or receipt.get('phase') not in ('stopping', 'launching', 'launched', 'bound', 'done')):
             raise ValueError('restart receipt unreadable; retained for repair')
+        if receipt is not None and receipt.get('host') != host:
+            raise ValueError('restart receipt host changed or unknown; retain for reconciliation')
         if receipt is None or receipt['phase'] == 'done':
             need = _m_reminders.usage_restart_item(fresh, current, row)
             if need is None:
@@ -200,7 +216,7 @@ def _restart_worker(inst, n, key, rpc):
             captured_restart_usage(fresh, current, row)  # refuse before any stop if measurement is unknown
             restart_brief(fresh, current, row)  # validate resumable task and route before stopping
             thread = restart_thread(rpc, old)
-            receipt = {'version': 1, 'job': key, 'episode': need['episode'], 'phase': 'stopping',
+            receipt = {'version': 1, 'job': key, 'host': host, 'episode': need['episode'], 'phase': 'stopping',
                        'old': old, 'run': thread['activeRunId'], 'at': inst.now()}
             publish(receipt)
         old = receipt['old']
@@ -302,7 +318,7 @@ def _restart_worker(inst, n, key, rpc):
 
 def launch_worker(inst, n, key, rpc=None):
     """Launch an unbound recorded job once, preserving its initial budget."""
-    rpc = _m_host_instances.routed_host_rpc(inst, n['id'], rpc or _m_rpc.call)
+    rpc = worker_host_rpc(inst, n, rpc or _m_rpc.call)
     try:
         import re
         if not isinstance(key, str) or not re.fullmatch('[0-9a-f]{24}', key) or _m_common.outward_links(inst.root):
@@ -328,6 +344,9 @@ def launch_worker(inst, n, key, rpc=None):
             projects, inventory, callers = _m_host.lifecycle_inventory(current, rpc)
             def publish(value):
                 _m_machine.machine_publish(inst, path, json.dumps(value, sort_keys=True) + '\n')
+            host = _m_lifecycle_identity.lifecycle_host_identity()
+            if not host:
+                raise ValueError('launch host identity unavailable; ownership unproven')
             receipt = None
             if path.exists():
                 if path.stat().st_size > 65536:
@@ -335,7 +354,7 @@ def launch_worker(inst, n, key, rpc=None):
                 receipt = json.loads(path.read_text())
                 if (not isinstance(receipt, dict) or receipt.get('job') != key
                         or receipt.get('phase') not in ('launching', 'launched', 'done')
-                        or receipt.get('workspace') != workspace):
+                        or receipt.get('workspace') != workspace or receipt.get('host') != host):
                     raise ValueError('invalid initial launch receipt; retained for repair')
                 if receipt['phase'] == 'done':
                     raise ValueError('initial binding was removed after launch; no duplicate launch permitted')
@@ -356,7 +375,7 @@ def launch_worker(inst, n, key, rpc=None):
                         raise ValueError('existing unbound conversation uses this workspace; adopt it explicitly')
                 text, selection = restart_brief(fresh, current, row)
                 marker = 'native-launch: ' + identity + '-' + os.urandom(12).hex()
-                receipt = {'job': key, 'phase': 'launching', 'workspace': workspace,
+                receipt = {'job': key, 'host': host, 'phase': 'launching', 'workspace': workspace,
                            'modelSelection': selection, 'marker': marker, 'at': inst.now()}
                 publish(receipt)
                 _, checked, live = restart_source(inst, n['id'], key)

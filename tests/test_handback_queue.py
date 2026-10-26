@@ -300,6 +300,36 @@ class HandbackLifecycle(Scenario):
                     with m.claim_handback(inst, n, request['id'], recover=True):
                         self.fail('legacy ownership adopted')
 
+    def test_copied_lease_cannot_dispatch_or_stamp_without_owned_descriptor(self):
+        m, inst, n, row = self.fixture()
+        args = argparse.Namespace(id='root', branch=row['Job'], state='blocked', summary='Fixture result')
+        with mock.patch.dict(os.environ, self.env, clear=True), mock.patch.object(
+                m, 'attempt_binding', return_value={'head':'a', 'base':'b', 'inputs':'c'}):
+            request = m.enqueue_handback(inst, n, row, args)
+            with m.claim_handback(inst, n, request['id']) as claimed:
+                copied = dict(claimed)
+            before = m.queue_path(n, request['id']).read_bytes()
+            with self.assertRaisesRegex(ValueError, 'caller-owned'):
+                m.queue_dispatch(inst, n, copied)
+            self.assertFalse(m.queue_terminal(inst, n, request['id'], copied['lease'], 'terminal'))
+            self.assertEqual(m.queue_path(n, request['id']).read_bytes(), before)
+
+    def test_replaced_lease_inode_cannot_launch_or_publish(self):
+        m, inst, n, row = self.fixture()
+        args = argparse.Namespace(id='root', branch=row['Job'], state='blocked', summary='Fixture result')
+        with mock.patch.dict(os.environ, self.env, clear=True), mock.patch.object(
+                m, 'attempt_binding', return_value={'head':'a', 'base':'b', 'inputs':'c'}):
+            request = m.enqueue_handback(inst, n, row, args)
+            with m.claim_handback(inst, n, request['id']) as claimed:
+                lease = m.queue_path(n, request['id']).with_suffix('.lease')
+                lease.unlink()
+                lease.touch()
+                with self.assertRaisesRegex(ValueError, 'replaced|unlinked'):
+                    m.queue_descendant_fd()
+                with self.assertRaisesRegex(ValueError, 'replaced|unlinked'):
+                    m.queue_dispatch(inst, n, claimed)
+                self.assertFalse(m.queue_terminal(inst, n, request['id'], claimed['lease'], 'terminal'))
+
     def test_foreign_boot_never_probes_local_pid_or_recovers_lease(self):
         m, inst, n, row = self.fixture()
         args = argparse.Namespace(id='root', branch=row['Job'], state='blocked', summary='Fixture result')

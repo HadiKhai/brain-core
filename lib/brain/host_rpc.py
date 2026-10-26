@@ -28,6 +28,10 @@ def call(tool_name, arguments):
             raise HostRPCError('thread organization requires singular threadId; unknown arguments refused')
         if not isinstance(arguments.get('threadId'), str) or not arguments['threadId'].strip():
             raise HostRPCError('thread organization requires an explicit singular threadId')
+    if tool_name == 't3_thread_organize' and arguments.get('action') == 'settle':
+        # This native schema has no expected revision/run/descendant predicate.
+        # Read-before/write-after checks cannot make this mutation atomic.
+        raise HostRPCError('native atomic settlement unsupported; retain thread until host supplies a conditional mutation')
     try:
         payload = json.dumps(arguments, allow_nan=False, separators=(',', ':'))
     except (TypeError, ValueError):

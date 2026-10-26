@@ -2368,6 +2368,26 @@ confirmed, retains the job and never invents exhaustive completion. Host atomic
 ownership/settlement and dispatched-descendant shutdown still require their real
 capabilities; no PID-only cancellation or automatic takeover is introduced.
 
+Preview execution now requires synchronous product-owned acquisition and release.
+The returned ownership binds the exact configured resource, kernel boot and run
+with an opaque lease and receipt. Each step echoes that ownership and confirms
+quiescent descendants before another step or rollback starts. A separate local
+resource lock serializes competing node locks; it does not claim distributed
+ownership. Unknown acquisition, step or release outcomes retain pending evidence
+without retries. Earlier receipts lacking ownership or release cannot authorize
+another operation. Product adapters still supply real backup, migration, restart,
+acceptance, rollback, lease enforcement and descendant shutdown semantics.
+
+The native organization schema has no conditional revision/run/descendant
+predicate. Its settlement transport therefore refuses automatic mutation before
+starting a bridge process. Mock-host settlement evidence does not establish that
+missing native capability. Worker restart and initial-launch receipts are boot
+bound, and every native worker call rechecks the boot. Queue dispatch, verifier
+lease inheritance and terminal mutation require the caller's live descriptor,
+matching process stamp and unchanged lease inode. A copied lease token grants no
+such authority. This guards the owned dispatch boundary; arbitrary dispatched
+process-tree shutdown remains unsupported, and crash takeover stays fail closed.
+
 ## D30001: Address hosts privately and complete interrupted metadata explicitly
 
 Addressed host descriptors live only in the machine-local bindings file. Each

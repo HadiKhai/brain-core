@@ -27,6 +27,25 @@ QUEUE_ARGS = ('id', 'branch', 'state', 'summary', 'question', 'lessons', 'report
 QUEUE_LEASE = contextvars.ContextVar('brain_queue_lease', default=None)
 
 
+def queue_owned_context(n, request, fd=None):
+    """A copied lease token is not a foreground ownership capability."""
+    context = QUEUE_LEASE.get()
+    if context is None:
+        raise ValueError('queue mutation requires the caller-owned lease descriptor')
+    held, _, bound, claimed = context
+    if (bound['dir'] != n['dir'] or claimed['id'] != request['id']
+            or claimed['lease'] != request.get('lease') or fd is not None and held != fd
+            or request.get('owner') != [os.getpid(), _m_machine.process_stamp(os.getpid())]):
+        raise ValueError('queue foreground ownership changed')
+    info = os.fstat(held)
+    path = queue_path(n, request['id']).with_suffix('.lease')
+    current = os.stat(path, follow_symlinks=False)
+    if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
+            or (info.st_dev, info.st_ino) != (current.st_dev, current.st_ino)):
+        raise ValueError('queue lease descriptor replaced or unlinked')
+    return held
+
+
 def queue_descendant_fd():
     """Keep the caller-owned lease alive through native verifier exec boundaries."""
     context = QUEUE_LEASE.get()
@@ -38,8 +57,7 @@ def queue_descendant_fd():
     if (not host or data.get('run', {}).get('host') != host
             or data.get('lease') != request['lease'] or data.get('state') != 'running'):
         raise ValueError('queue descendant lease changed')
-    os.fstat(fd)
-    return fd
+    return queue_owned_context(n, data, fd)
 
 
 def queue_dispatch(inst, n, request):
@@ -50,6 +68,7 @@ def queue_dispatch(inst, n, request):
         if (not host or data.get('run', {}).get('host') != host
                 or data.get('lease') != request['lease'] or data['state'] != 'running'):
             raise ValueError('queue dispatch lease changed')
+        queue_owned_context(n, data)
         data['run']['phase'] = 'dispatched'
         write_queue_request(n, data)
     _m_instance.unlock()
@@ -186,6 +205,10 @@ def queue_terminal(inst, n, identity, lease, state):
         host = _m_lifecycle_identity.lifecycle_host_identity()
         if (not host or data.get('run', {}).get('host') != host
                 or data['state'] != 'running' or data['lease'] != lease):
+            return False
+        try:
+            queue_owned_context(n, data)
+        except (OSError, ValueError):
             return False
         data.update(state=state, finished_at=inst.now_dt().isoformat())
         write_queue_request(n, data)

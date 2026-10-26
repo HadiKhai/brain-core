@@ -44,8 +44,8 @@ class HostRPC(unittest.TestCase):
                     self.rpc.call('t3_thread_organize', args)
                 run.assert_not_called()
         with mock.patch.object(self.rpc.subprocess, 'run', return_value=self.response({'settled': True})) as run:
-            self.rpc.call('t3_thread_organize', {'action': 'settle', 'threadId': 'fixture'})
-            self.assertEqual(json.loads(run.call_args.args[0][-1]), {'action': 'settle', 'threadId': 'fixture'})
+            self.rpc.call('t3_thread_organize', {'action': 'pin', 'threadId': 'fixture'})
+            self.assertEqual(json.loads(run.call_args.args[0][-1]), {'action': 'pin', 'threadId': 'fixture'})
 
     def test_unavailable_invalid_and_nonfinite_requests_do_not_execute(self):
         with mock.patch.object(self.rpc.subprocess, 'run') as run:
@@ -66,6 +66,12 @@ class HostRPC(unittest.TestCase):
                 kwargs = {'side_effect': outcome} if isinstance(outcome, Exception) else {'return_value': outcome}
                 with mock.patch.object(self.rpc.subprocess, 'run', **kwargs) as run:
                     with self.assertRaises(self.rpc.HostRPCError) as error:
-                        self.rpc.call('t3_thread_organize', {'action': 'settle', 'threadId': 'fixture'})
+                        self.rpc.call('t3_thread_organize', {'action': 'pin', 'threadId': 'fixture'})
                     self.assertNotIn('PRIVATE-ERROR-CONTENT', str(error.exception))
                     self.assertEqual(run.call_count, 1)
+
+    def test_native_settlement_without_atomic_predicate_never_reaches_transport(self):
+        with mock.patch.object(self.rpc.subprocess, 'run') as run:
+            with self.assertRaisesRegex(self.rpc.HostRPCError, 'atomic settlement unsupported'):
+                self.rpc.call('t3_thread_organize', {'action': 'settle', 'threadId': 'fixture'})
+            run.assert_not_called()
