@@ -2183,3 +2183,15 @@ argv, cwd and bytecode restoration and real assertion/evidence subprocess paths
 remain unchanged. Regression controls inject a partial copy and import failure,
 exercise command success and failure, and preserve colliding and unrelated module
 objects while checking owned-package cleanup.
+
+## D30004: Keep forced-platform template publication coverage portable
+
+The template publication regression forces the Darwin branch to exercise atomic
+cache construction on every host. Scope a deterministic clone subprocess fake
+to its recovery call: require the exact executable, flags, constructed template,
+destination and subprocess options, then copy that actual template using the
+saved real copytree and return a completed result. Wrong operands fail before
+copying. This retains the real interrupted-copy failure, partial-directory
+cleanup, cache and content checks, and module ownership and context restoration
+assertions. Separate real-platform clone, inode and launcher controls continue
+to exercise the actual platform implementation.

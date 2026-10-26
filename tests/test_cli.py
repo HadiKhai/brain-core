@@ -58,7 +58,19 @@ class FixtureSetup(Scenario):
                 if any(path.exists() for path in partials):
                     failures.append('partial template was not discarded')
                 destination = self.tmp / 'recovered'
-                scenario.clone_fixture_core(source, destination)
+
+                def clone_template(argv, **options):
+                    template = Path(scenario._core_template.name) / 'core'
+                    self.assertEqual(argv, ['/bin/cp', '-cR', str(template), str(destination)])
+                    self.assertEqual(options, {'check': True, 'capture_output': True, 'text': True})
+                    real_copytree(template, destination)
+                    return subprocess.CompletedProcess(argv, 0, stdout='', stderr='')
+
+                with mock.patch.object(scenario.subprocess, 'run', side_effect=clone_template) as clone:
+                    scenario.clone_fixture_core(source, destination)
+                clone.assert_called_once_with(
+                    ['/bin/cp', '-cR', str(Path(scenario._core_template.name) / 'core'), str(destination)],
+                    check=True, capture_output=True, text=True)
                 if sorted(p.name for p in destination.iterdir()) != ['complete']:
                     failures.append('next copy reused the partial template')
                 elif (destination / 'complete').read_text() != 'complete source\n':
