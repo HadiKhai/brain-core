@@ -782,6 +782,7 @@ class EventViews(Scenario):
     def test_status_commit_is_hourly_and_skips_someone_elses_judgement(self):
         r = self.init('demo')
         self.b(r, 'new', 'app', '--title', 'App')
+        self.b(r, 'status', 'app', '--refresh')
         inst = instance.Instance(r)
         n = inst.node('app')
         with instance.brain_lock(inst):
