@@ -61,7 +61,9 @@ class PreviewStdio(Scenario):
         (root / '.brain').mkdir(mode=0o700)
         (root / '.brain/local.json').write_text(json.dumps(dict(nodes=dict(root=dict(
             home=str(product), preview_upgrade=config)))))
-        executable = str(Path(sys.executable).resolve())
+        # Xcode's interpreter can sit below group-writable /Applications.
+        executable = str(Path('/Library/Developer/CommandLineTools/usr/bin/python3'
+                              if sys.platform == 'darwin' else sys.executable).resolve())
         driver = str(product / 'driver.py')
         registration = dict(version=1, name='synthetic', protocol='synthetic-v1', executable=executable,
             argv=[driver, mode], checkout=str(product), head=head,
