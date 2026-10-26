@@ -92,6 +92,7 @@ class OwnedCopies:
             def cancel(signum, frame):
                 raise KeyboardInterrupt
             signal.signal(signal.SIGTERM, cancel)
+        self.parent_copies = ACTIVE_COPIES.get()
         self.token = ACTIVE_COPIES.set(self)
         from .rehearse import retained_temporary_directory
         self.native_scope = retained_temporary_directory(copies=self)
@@ -110,28 +111,37 @@ class OwnedCopies:
             if self.previous_term is not None:
                 signal.signal(signal.SIGTERM, self.previous_term)
 
+    def retain_unknown(self):
+        # Context links are captured on entry, never recovered from disk receipts.
+        # Mark the entire enclosing chain before any fallible cleanup operation.
+        owner = self
+        while owner is not None:
+            owner.unknown = True
+            owner = getattr(owner, 'parent_copies', None)
+
     def retire(self, kind):
         ACTIVE_COPIES.reset(self.token)
-        owned = self.safe()
-        # Bulk owns evidence only. Native retention alone decides deletion.
-        self.receipt.update(terminal='success' if kind is None else kind.__name__,
-                            signal_audit=self.signals,
-                            processes=[dict(pid=p.pid, returncode=p.poll()) for p in self.processes])
-        ended = self.processes_ended()
-        self.receipt.update(state='retained', processes_ended=ended)
-        parent = ACTIVE_COPIES.get()
         try:
+            if self.unknown:
+                self.retain_unknown()
+            owned = self.safe()
+            if not owned:
+                self.retain_unknown()
+            # Bulk owns evidence only. Native retention alone decides deletion.
+            self.receipt.update(terminal='success' if kind is None else kind.__name__,
+                                signal_audit=self.signals,
+                                processes=[dict(pid=p.pid, returncode=p.poll()) for p in self.processes])
+            ended = self.processes_ended()
+            if not ended:
+                self.retain_unknown()
+            self.receipt.update(state='retained', processes_ended=ended)
             if owned:
                 self.publish()
                 self.retirement_ready = ended and self.safe()
             if not self.retirement_ready:
-                self.unknown = True
-                if parent is not None:
-                    parent.unknown = True
+                self.retain_unknown()
         except BaseException:
-            self.unknown = True
-            if parent is not None:
-                parent.unknown = True
+            self.retain_unknown()
             raise
         return False
 

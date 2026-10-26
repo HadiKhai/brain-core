@@ -67,6 +67,16 @@ their operation boundaries.
 Outward aliases, replaced physical ancestors and shared files remain refused.
 Each sync failure propagates; no multi-file transaction, namespace lock or
 physical power-loss guarantee is implied.
+## D30006: Propagate retention uncertainty before fallible cleanup
+
+Owned copy scopes capture their enclosing in-memory owners on entry. A known
+refusal or cleanup failure marks that entire chain uncertain before inspecting,
+restoring, publishing or checkpointing retained copies. This state is monotonic;
+successful cleanup retains all existing ownership and process predicates.
+Staged rollback remains best-effort under the original inode checks. A secondary
+rollback or checkpoint error is chained to the primary exception using Python 3.9
+exception causes; the primary exception and surviving original bytes remain
+observable. No receipt grants deletion authority or later recovery ownership.
 
 ## D30002: Native retention owns final bulk deletion
 
