@@ -13,6 +13,7 @@ import argparse
 import contextlib
 import io
 import os
+import py_compile
 import shutil
 import shlex
 import subprocess
@@ -25,7 +26,8 @@ from pathlib import Path
 
 CORE = Path(os.environ.get("BRAIN_CORE") or Path(__file__).resolve().parent.parent)
 
-# Source-only per-worker APFS template; instance state is always initialized anew.
+# Per-worker APFS template; instance state is always initialized anew. Checked
+# bytecode avoids recompiling unchanged core sources in every real CLI child.
 _core_template = None
 
 
@@ -37,6 +39,10 @@ def clone_fixture_core(source, destination, **kwargs):
         candidate = tempfile.TemporaryDirectory(prefix='brain-test-core-')
         try:
             shutil.copytree(source, Path(candidate.name) / 'core', **kwargs)
+            for module in (Path(candidate.name) / 'core/lib/brain').glob('*.py'):
+                cache = module.parent / '__pycache__' / (module.stem + '.' + sys.implementation.cache_tag + '.pyc')
+                py_compile.compile(str(module), cfile=str(cache), doraise=True,
+                                   invalidation_mode=py_compile.PycInvalidationMode.CHECKED_HASH)
         except BaseException:
             candidate.cleanup()
             raise
@@ -85,7 +91,10 @@ class Scenario(unittest.TestCase):
 
     # helpers
     def run_(self, args, cwd, ok=True, brain=None):
-        r = subprocess.run([sys.executable, str(brain or (cwd / "core" / "bin" / "brain")), *args], cwd=cwd,
+        # Apple's Python redirects caches by default. Read the checked caches
+        # carried by fixture clones; the real launcher still forbids writes.
+        r = subprocess.run([sys.executable, '-X', 'pycache_prefix=',
+                            str(brain or (cwd / "core" / "bin" / "brain")), *args], cwd=cwd,
                            env=self.env, capture_output=True, text=True)
         if ok is True and r.returncode:
             self.fail(f"brain {' '.join(args)} failed:\n{r.stdout}\n{r.stderr}")

@@ -29,6 +29,91 @@ from scenario import Scenario, AutonomyProject, shlex_quote
 
 
 class FixtureSetup(Scenario):
+    def test_commit_avoids_existing_path_queries_and_preserves_owned_deletions(self):
+        root = self.init('alice')
+        deleted = root / 'deleted.txt'
+        deleted.write_text('tracked\n')
+        self.git('add', 'deleted.txt', cwd=root)
+        self.git('commit', '-qm', 'tracked deletion fixture', cwd=root)
+        deleted.unlink()
+        created = root / 'created.txt'
+        created.write_text('new owned file\n')
+        empty = root / 'empty'
+        empty.mkdir()
+        (root / 'unrelated.txt').write_text('leave this work alone\n')
+        module = self.load_fixture_source(CORE)
+        common = module._owners['TOUCHED']
+        with mock.patch.dict(os.environ, self.env, clear=True), \
+                mock.patch.object(common, 'git', wraps=common.git) as query:
+            module.Instance(root).commit([created, deleted, empty, root / 'missing'], 'owned changes')
+        lookups = [call.args for call in query.call_args_list if call.args[:1] == ('ls-files',)]
+        self.assertEqual(set(lookups), {('ls-files', '--', name) for name in ('deleted.txt', 'empty', 'missing')})
+        self.assertEqual(self.git('show', '--pretty=format:', '--name-only', 'HEAD', cwd=root).split(),
+                         ['created.txt', 'deleted.txt'])
+        self.assertEqual(self.git('status', '--porcelain', cwd=root).strip(), '?? unrelated.txt')
+
+    def test_template_bytecode_is_built_once_and_validates_changed_source(self):
+        import scenario
+        source, package = self.fixture_source()
+        state = package / 'state.py'
+        state.write_text('def current(): return "first"\n')
+        original_compile = scenario.py_compile.compile
+        with mock.patch.object(scenario, 'CORE', source), \
+                mock.patch.object(scenario, '_core_template', None), \
+                mock.patch.object(scenario.py_compile, 'compile', wraps=original_compile) as compile_source:
+            try:
+                first, second = self.tmp / 'first', self.tmp / 'second'
+                scenario.clone_fixture_core(source, first)
+                compiled = compile_source.call_count
+                scenario.clone_fixture_core(source, second)
+                if sys.platform != 'darwin':
+                    self.assertEqual(compiled, 0)
+                    return
+                self.assertEqual(compiled, len(list(package.glob('*.py'))))
+                self.assertEqual(compile_source.call_count, compiled)
+                cached = next((second / 'lib/brain/__pycache__').glob('state.*.pyc'))
+                self.assertEqual(int.from_bytes(cached.read_bytes()[4:8], 'little'), 3)
+                code = ('import sys; sys.path.insert(0, sys.argv[1]); '
+                        'from brain.state import current; '
+                        'print(current()); print(current.__code__.co_filename)')
+                def read(core):
+                    result = subprocess.run([sys.executable, '-B', '-X', 'pycache_prefix=', '-c', code, str(core / 'lib')],
+                                            env=self.env, capture_output=True, text=True, check=True)
+                    return result.stdout.splitlines()
+                self.assertEqual(read(first), ['first', str(first / 'lib/brain/state.py')])
+                changed = second / 'lib/brain/state.py'
+                stamp = changed.stat()
+                changed.write_text('def current(): return "other"\n')
+                os.utime(changed, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
+                self.assertEqual(changed.stat().st_size, stamp.st_size)
+                self.assertEqual(read(second), ['other', str(changed)])
+                self.assertEqual(read(first)[0], 'first')
+                changed.unlink()
+                missing = subprocess.run([sys.executable, '-B', '-X', 'pycache_prefix=', '-c', code, str(second / 'lib')],
+                                         env=self.env, capture_output=True, text=True)
+                self.assertNotEqual(missing.returncode, 0)
+                self.assertIn('ModuleNotFoundError', missing.stderr)
+            finally:
+                if scenario._core_template is not None:
+                    scenario._core_template.cleanup()
+
+    def test_failed_template_compilation_is_not_published(self):
+        import scenario
+        source, package = self.fixture_source()
+        candidates = []
+        def broken_compile(path, **options):
+            candidates.append(Path(path).parents[3])
+            raise RuntimeError('injected compilation error')
+        with mock.patch.object(scenario, 'CORE', source), \
+                mock.patch.object(scenario, '_core_template', None), \
+                mock.patch.object(sys, 'platform', 'darwin'), \
+                mock.patch.object(scenario.py_compile, 'compile', broken_compile):
+            with self.assertRaisesRegex(RuntimeError, 'injected compilation error'):
+                scenario.clone_fixture_core(source, self.tmp / 'failed')
+            self.assertIsNone(scenario._core_template)
+            self.assertTrue(candidates)
+            self.assertFalse(any(path.exists() for path in candidates))
+
     def fixture_source(self):
         core = self.tmp / 'source-core'
         (core / 'bin').mkdir(parents=True)

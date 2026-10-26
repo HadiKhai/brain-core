@@ -174,8 +174,12 @@ class Instance:
             if root not in [rx, *rx.parents] or ".brain" in rx.relative_to(root).parts:
                 continue
             rel = str(rx.relative_to(root)) or "."
-            if _m_common.git("ls-files", "--", rel, cwd=root).stdout.strip() or x.is_symlink() or (
-                    x.exists() and not (x.is_dir() and not _m_common.holds_files(x))):
+            # Existing files need no index query. Keep the tracked-path fallback
+            # for deletions and empty tracked directories, without launching Git
+            # once for every file the command just wrote.
+            if x.is_symlink() or (
+                    x.exists() and not (x.is_dir() and not _m_common.holds_files(x))) or (
+                    _m_common.git("ls-files", "--", rel, cwd=root).stdout.strip()):
                 want.append(rel)  # an empty folder is nothing git can add: naming it fails the whole commit
         if not want:
             return
