@@ -79,7 +79,7 @@ def pytest_xdist_make_scheduler(config, log):
             Path(arg.split('::', 1)[0]).name == 'test_brain.py' for arg in config.args):
         return None
     from xdist.scheduler.load import LoadScheduling
-    from lanes import SERIAL_CLASSES
+    from lanes import SERIAL_CLASSES, SERIAL_TESTS
 
     class SerialAfterParallel(LoadScheduling):
         def __init__(self, config, log):
@@ -113,7 +113,9 @@ def pytest_xdist_make_scheduler(config, log):
                 return
             self.collection = next(iter(self.node2collection.values()))
             self.serial_indices = [i for i, name in enumerate(self.collection)
-                                   if len(name.split('::')) > 2 and name.split('::')[1] in SERIAL_CLASSES]
+                                   if len(name.split('::')) > 2 and (
+                                       name.split('::')[1] in SERIAL_CLASSES
+                                       or name.split('::', 1)[1] in SERIAL_TESTS)]
             serial = set(self.serial_indices)
             self.pending[:] = [i for i in range(len(self.collection)) if i not in serial]
             self.maxschedchunk = 2  # bounded lookahead and balanced duration order
