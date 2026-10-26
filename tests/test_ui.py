@@ -202,6 +202,35 @@ class ExpandedUI(Scenario):
         self.m = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
         loader.exec_module(self.m)
 
+    def test_complete_warm_fill_retains_real_metadata_and_usage_under_ten_seconds(self):
+        import dashboard_acceptance as acceptance
+        folder = self.tmp / 'acceptance'
+        manifest = acceptance.prepare(folder, nodes=2, transcripts=8, events=50)
+        before = acceptance.business_snapshot(folder / 'meadow')
+        with mock.patch.dict(os.environ, acceptance.environment(folder), clear=True):
+            inst = self.m.UIInstance(folder / 'meadow')
+            spend = self.m.UISpend(inst)
+            spend.discover()
+            self.m.advance_warm(spend, seconds=10)
+            self.assertTrue(spend.value['complete'])
+            cache, inputs = self.m.UIStateCache(), self.m.UIInputs(inst)
+            for _ in range(3):
+                started = time.monotonic()
+                spend.discover()
+                self.m.advance_warm(spend, seconds=10)
+                signature = inputs.signature()
+                state = self.m.ui_state(self.m.UIInstance(inst.root),
+                    cache.problems_for(inst, signature), machine_spend=spend.value,
+                    cache=cache, node_keys=inputs.node_keys(inst, signature))
+                acceptance.validate(state, manifest)
+                self.assertLessEqual(time.monotonic() - started, 10)
+            # Completion alone cannot qualify a metadata-only or truncated reading.
+            with self.assertRaises(AssertionError):
+                acceptance.validate({**state, 'spend': None}, manifest)
+            with self.assertRaises(AssertionError):
+                acceptance.validate({**state, 'items': {'all': []}}, manifest)
+        self.assertEqual(before, acceptance.business_snapshot(inst.root))
+
     def test_complete_build_is_a_detached_business_projection(self):
         root = self.init('demo')
         self.b(root, 'new', 'project', '--title', 'Field Guide')
