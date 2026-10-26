@@ -1,13 +1,95 @@
 """Reports mechanics for Brain."""
 import hashlib
 import json
+import os
 import re
+import stat
+import time
 import urllib.parse
 from pathlib import Path
 
 from . import common as _m_common
 from . import nodes as _m_nodes
 from . import worktrees as _m_worktrees
+
+
+# Decimal GB, matching the ordinary-check operator threshold. Logical file bytes;
+# no content reads, allocated-block accounting, or APFS clone-size claims.
+REPORT_WARNING_BYTES = 1_000_000_000
+REPORT_SIZE_ENTRIES = 10000
+REPORT_SIZE_SECONDS = 0.1
+
+
+def report_size_warnings(inst, nodes):
+    """Bound all report metadata work per check; never follow directory links."""
+    warnings, seen = [], set()
+    remaining = REPORT_SIZE_ENTRIES
+    deadline = time.monotonic() + REPORT_SIZE_SECONDS
+
+    def size(folder):
+        nonlocal remaining
+        total, pending, unknown = 0, [folder], False
+        while pending:
+            if remaining <= 0 or time.monotonic() >= deadline:
+                return total, False
+            current = pending.pop()
+            if any(p.is_symlink() for p in (current, *current.parents)):
+                return total, False
+            try:
+                with os.scandir(current) as entries:
+                    for entry in entries:
+                        remaining -= 1
+                        if remaining < 0 or time.monotonic() >= deadline:
+                            return total, False
+                        value = entry.stat(follow_symlinks=False)
+                        if stat.S_ISDIR(value.st_mode):
+                            pending.append(Path(entry.path))
+                        elif stat.S_ISREG(value.st_mode):
+                            total += value.st_size
+                        else:
+                            unknown = True  # link/special targets are never read
+                        if total > REPORT_WARNING_BYTES:
+                            return total, True  # lower bound already proves warning
+            except OSError:
+                return total, False
+        return total, not unknown
+
+    for node in nodes:
+        if remaining <= 0 or time.monotonic() >= deadline:
+            warnings.append('reports: remaining report roots unknown (metadata budget)')
+            break
+        if (node.get('external') and not node.get('home_path')
+                and not node.get('local', {}).get('workbench')):
+            warnings.append(node['id'] + ': reports: size unknown (workbench not bound)')
+            continue
+        root = _m_worktrees.workbench(inst, node) / 'reports'
+        if root in seen:
+            continue
+        seen.add(root)
+        label = node['id'] + ': reports'
+        if any(p.is_symlink() for p in (root, *root.parents)):
+            warnings.append(label + ': size unknown (linked report root)')
+            continue
+        try:
+            if not root.exists():
+                continue
+            with os.scandir(root) as folders:
+                for entry in folders:
+                    remaining -= 1
+                    if remaining < 0 or time.monotonic() >= deadline:
+                        warnings.append(label + ': remaining folder sizes unknown (metadata budget)')
+                        break
+                    if entry.is_symlink():
+                        warnings.append(label + '/' + entry.name + ': size unknown (link)')
+                    elif entry.is_dir(follow_symlinks=False):
+                        total, known = size(Path(entry.path))
+                        if total > REPORT_WARNING_BYTES:
+                            warnings.append(label + '/' + entry.name + ': report folder exceeds 1 GB; review retained bulk copies')
+                        elif not known:
+                            warnings.append(label + '/' + entry.name + ': size unknown (metadata budget or unreadable)')
+        except OSError:
+            warnings.append(label + ': size unknown (unreadable)')
+    return warnings
 
 
 def preview_receipt_file(inst, n):

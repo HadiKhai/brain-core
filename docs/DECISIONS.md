@@ -1,5 +1,23 @@
 # Code decisions
 
+## D30002: Native retention owns final bulk deletion
+
+Bulk scopes supply exact allocated-directory identity, synced terminal receipts
+and observed process termination. They never independently delete. The native
+retention scope encloses setup, commands and early failure, checks child capture
+completion and renews ownership after terminal publication before cleanup.
+Missing retention results, incomplete capture, changed identity, unknown process
+ownership and publication failures retain copies and refuse enclosing cleanup.
+The final directory is staged under its private owner until publication succeeds;
+a failed publication restores the same inode where ownership still holds.
+Bulk history and native diagnostic capsules remain separate. Opt-in evidence
+controls and ordinary non-bulk cleanup retain their existing behavior. As with
+other filesystem cleanup, concurrent kernel-level replacement or partial delete
+failure is not a multi-file transaction or a descendant identity guarantee.
+
+D18402 below records the earlier bulk design; its independent deletion authority
+is superseded by this decision. No historical cleanup authority is introduced.
+
 ## D28002: Preserve the publication error when temporary cleanup fails
 
 Before replacement, a failed atomic write removes only its captured temporary
@@ -46,6 +64,30 @@ file count, rebuild count and read-only assertions without relying on startup sp
 The legacy brief oracle accepts the resolver's extra-path argument and verifies it
 is empty in the byte-comparison scenario. Release notices live under dated headings
 following the changes document's title and introduction.
+## D18402: Retire only bulk copies allocated by the current rehearsal
+
+Native rehearsals and clone-copy preparation allocate a private run directory
+with one bulk child. An in-memory capability binds the creator PID, random run
+identity and both directory inodes to a synced receipt. It never adopts an
+existing report, source, worktree or historical copy. A terminal scope removes
+only that bulk child after ownership, containment, link checks, reaped leaders
+and absent owned process groups all hold. Missing or changed ownership, denied
+signals, live descendants and unknown process state retain the bytes. Nested
+uncertainty prevents deletion by the enclosing run. The receipt keeps exit,
+identity and signal facts without source contents, argv or exception messages;
+normal redacted rehearsal evidence and explicit private diffs remain separate.
+The outer main-thread scope turns SIGTERM cancellation into stack unwinding and
+restores the prior signal handler afterwards. Uncatchable termination retains
+copies; no later run inherits authority to delete them.
+Standalone external snapshot callers retain their copies unless enclosed in an
+owned scope. There is no historical cleanup command or inferred deletion grant.
+
+Ordinary check warns when a report folder's logical regular-file bytes exceed
+1,000,000,000 (decimal GB). It uses the existing per-node workbench report roots,
+shares a 10,000-entry/100 ms metadata budget across them, reads no contents and
+never follows links. An unreadable, linked or budget-limited size is unknown;
+an observed lower bound above the threshold still proves a warning. Warnings
+are advisory and have no automatic fix or business mutation.
 
 ## D18401: Exercise native persistence contracts in focused fixtures
 

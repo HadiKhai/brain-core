@@ -649,6 +649,20 @@ if __name__ == "__main__":
 
 
 class DecisionApplicability(Scenario):
+    def test_ordinary_check_includes_report_warning_without_changing_business_files(self):
+        from brain import check, instance, reports
+        root = self.init('demo')
+        folder = root / 'reports/example'
+        folder.mkdir(parents=True)
+        note = folder / 'index.md'
+        note.write_text('fabricated report')
+        before = note.read_bytes()
+        with mock.patch.object(reports, 'REPORT_WARNING_BYTES', 8):
+            problems, warnings, fixable = check.collect_problems(instance.Instance(root))
+        self.assertTrue(any('report folder exceeds 1 GB' in warning for warning in warnings))
+        self.assertEqual(before, note.read_bytes())
+        self.assertNotIn('reports', fixable)
+
     def test_dated_decisions_require_scope_and_external_claim_sources(self):
         r = self.init('alice')
         decisions = r / 'decisions.md'
@@ -679,3 +693,51 @@ class DecisionApplicability(Scenario):
         r = self.init('alice')
         (r / 'decisions.md').write_text('## 2026-05-02 10:00 +00:00: Policy\nApplies to: app\nExternal fact: Provider requires consent.\nSource: http://[invalid\n')
         self.assertIn('external fact has no valid Source:', self.b(r, 'check'))
+
+
+class ReportFolderWarnings(unittest.TestCase):
+    def setUp(self):
+        from brain import reports
+        self.reports = reports
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.base = Path(self.temp.name).resolve()
+        self.folder = self.base / 'reports/example'
+        self.folder.mkdir(parents=True)
+        self.node = dict(id='demo')
+        self.workbench = mock.patch.object(reports._m_worktrees, 'workbench', return_value=self.base)
+        self.workbench.start()
+        self.addCleanup(self.workbench.stop)
+        self.clock = mock.patch.object(reports.time, 'monotonic', return_value=0)
+        self.clock.start()
+        self.addCleanup(self.clock.stop)
+
+    def warnings(self):
+        return self.reports.report_size_warnings(None, [self.node, self.node])
+
+    def test_threshold_is_decimal_gb_and_strict_with_tiny_fixtures(self):
+        self.assertEqual(1_000_000_000, self.reports.REPORT_WARNING_BYTES)
+        for size in (7, 8, 9):
+            with self.subTest(size=size), mock.patch.object(self.reports, 'REPORT_WARNING_BYTES', 8):
+                (self.folder / 'index.md').write_bytes(b'x' * size)
+                warnings = self.warnings()
+                self.assertEqual(int(size > 8), len(warnings))
+                if warnings:
+                    self.assertIn('report folder exceeds 1 GB', warnings[0])
+
+    def test_budget_and_unreadable_sizes_are_unknown_never_small_or_fixable(self):
+        (self.folder / 'index.md').touch()
+        with mock.patch.object(self.reports, 'REPORT_SIZE_ENTRIES', 1):
+            self.assertTrue(any('unknown' in warning for warning in self.warnings()))
+        with mock.patch.object(self.reports.os, 'scandir', side_effect=PermissionError):
+            self.assertEqual(['demo: reports: size unknown (unreadable)'], self.warnings())
+
+    def test_links_are_never_followed_or_reported_as_known_small(self):
+        outside = self.base / 'outside'
+        outside.mkdir()
+        (outside / 'keep').write_text('unchanged')
+        (self.folder / 'alias').symlink_to(outside, target_is_directory=True)
+        self.assertTrue(any('unknown' in warning for warning in self.warnings()))
+        (self.base / 'reports/linked').symlink_to(outside, target_is_directory=True)
+        self.assertTrue(any('linked: size unknown (link)' in warning for warning in self.warnings()))
+        self.assertEqual('unchanged', (outside / 'keep').read_text())

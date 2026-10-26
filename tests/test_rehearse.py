@@ -32,14 +32,51 @@ def result(text='', code=0, seconds=0.01, unexpected=0):
 class RehearsalRetention(unittest.TestCase):
     """Failure injection stops before acceptance work; only retention is exercised."""
     def setUp(self):
-        self.directory = Path(tempfile.mkdtemp(prefix='rehearsal-retention-'))
+        raw_directory = Path(tempfile.mkdtemp(prefix='rehearsal-retention-'))
+        self.directory = raw_directory.resolve(strict=True)
         self.addCleanup(shutil.rmtree, self.directory)
         destination = os.environ.get('BRAIN_REHEARSAL_EVIDENCE_DIR')
         if destination:
-            self.evidence = Path(tempfile.mkdtemp(prefix='retention-test-', dir=destination))
+            raw_evidence = Path(tempfile.mkdtemp(prefix='retention-test-', dir=destination))
         else:
-            self.evidence = self.directory / 'evidence'
-            self.evidence.mkdir(mode=0o700)
+            raw_evidence = raw_directory / 'evidence'
+            raw_evidence.mkdir(mode=0o700)
+        # Only these freshly created, owned positive fixtures are canonicalized.
+        # Caller-supplied invalid destinations in the negative controls stay raw.
+        self.evidence = raw_evidence.resolve(strict=True)
+        observations = dict(nodeid=self.id(), directories={})
+        for name, raw, canonical in (
+                ('temporary', raw_directory, self.directory),
+                ('evidence', raw_evidence, self.evidence)):
+            spellings = {}
+            for spelling, path in (('raw', raw), ('canonical', canonical)):
+                info, link_info = path.stat(), path.lstat()
+                spellings[spelling] = dict(
+                    path=str(path), uid=info.st_uid, mode=stat.S_IMODE(info.st_mode),
+                    device=info.st_dev, inode=info.st_ino,
+                    is_directory=stat.S_ISDIR(info.st_mode),
+                    lstat_device=link_info.st_dev, lstat_inode=link_info.st_ino,
+                    lstat_mode=stat.S_IMODE(link_info.st_mode),
+                    ancestry=[dict(path=str(parent), symlink=parent.is_symlink())
+                              for parent in (path, *path.parents)])
+            observations['directories'][name] = spellings
+        # This sidecar is separate from native *.json packets, including off
+        # controls. With an external evidence destination it survives cleanup.
+        fd = os.open(str(self.evidence / 'fixture-paths.private'),
+                     os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, 'w', encoding='utf-8') as stream:
+            json.dump(observations, stream, sort_keys=True)
+            stream.write('\n')
+            stream.flush()
+            os.fsync(stream.fileno())
+        for spellings in observations['directories'].values():
+            raw, canonical = spellings['raw'], spellings['canonical']
+            self.assertEqual((raw['device'], raw['inode']),
+                             (canonical['device'], canonical['inode']))
+            self.assertEqual(os.getuid(), canonical['uid'])
+            self.assertEqual(0o700, canonical['mode'])
+            self.assertTrue(canonical['is_directory'])
+            self.assertFalse(any(parent['symlink'] for parent in canonical['ancestry']))
         self.environment = mock.patch.dict(os.environ, {
             'BRAIN_REHEARSAL_EVIDENCE_DIR': str(self.evidence)})
         self.environment.start()
@@ -518,7 +555,7 @@ class RehearsalFixture(Scenario):
     def run_rehearsal(self, mutation=lambda: None, during_run=False, damage_copy=None,
                       outputs=None, inspect_lane=None, now=None, lane_runner=None, diagnostic_dir=None):
         from types import SimpleNamespace
-        inst = SimpleNamespace(root=self.root, nodes=lambda: [],
+        inst = SimpleNamespace(root=self.root, local={}, nodes=lambda: [],
                                now=lambda: '2035-01-03 00:00 +00:00',
                                now_dt=lambda: now or datetime.datetime(2035, 1, 3, tzinfo=datetime.timezone.utc))
         node = dict(external=True, home_path=self.home, id='engine',

@@ -31,6 +31,7 @@ from . import hosts as _m_hosts
 from . import instance as _m_instance
 from . import jobs as _m_jobs
 from . import nodes as _m_nodes
+from . import rehearse_external as _m_rehearse_external
 from . import transitions as _m_transitions
 from . import rehearse_transactions as _m_transactions
 from . import upgrade as _m_upgrade
@@ -175,29 +176,72 @@ class NativeRetention:
 
 
 @contextlib.contextmanager
-def retained_temporary_directory():
-    """Keep only this owned temporary tree when opt-in persistence fails."""
-    temporary = tempfile.TemporaryDirectory(prefix='brain-rehearse-')
-    retention = NativeRetention(temporary.name, 'before-native-setup')
+def retained_temporary_directory(copies=None):
+    """Native retention is the sole final cleanup authority for owned copies."""
+    temporary = None if copies is not None else tempfile.TemporaryDirectory(prefix='brain-rehearse-')
+    owned = copies.bulk if copies is not None else Path(temporary.name)
+    retention = NativeRetention(owned, 'before-native-setup')
     children = []
     token = _retention_children.set(children)
     try:
-        yield temporary.name
+        yield str(owned)
     except BaseException as error:
         retention.exception(error)
         raise
     finally:
-        # Detach BEFORE cleanup, including when setup never produced a lane.
-        if any(child.incomplete and (child.owned == Path(temporary.name) or
-                                    Path(temporary.name) in child.owned.parents)
+        if any(child.incomplete and (child.owned == owned or owned in child.owned.parents)
                for child in children):
             retention.incomplete = True
         _retention_children.reset(token)
-        retention.checkpoint(stage='before-native-delete')
-        if retention.incomplete:
-            temporary._finalizer.detach()
+        saved = retention.checkpoint(stage='before-native-delete') is True
+        if copies is None:
+            if retention.incomplete or not saved:
+                temporary._finalizer.detach()
+            else:
+                temporary.cleanup()
         else:
-            temporary.cleanup()
+            parent = _m_rehearse_external.ACTIVE_COPIES.get()
+            approved = (saved and not retention.incomplete and copies.retirement_ready
+                        and copies.safe() and copies.processes_ended())
+            if approved:
+                # Keep the exact inode recoverable until terminal publication has
+                # succeeded. No post-delete publication can erase the last copy.
+                staged = copies.root / ('retiring-' + copies.run)
+                moved = False
+                try:
+                    if staged.exists() or staged.is_symlink():
+                        raise OSError('owned retirement destination occupied')
+                    copies.bulk.rename(staged)
+                    moved = True
+                    copies.receipt['state'] = 'removed'
+                    copies.publish()
+                    valid = (copies.identity(copies.root) == copies.identities[0]
+                             and copies.identity(staged) == copies.identities[1]
+                             and not copies.bulk.exists() and not copies.bulk.is_symlink()
+                             and not (copies.root / 'cleanup.json').is_symlink()
+                             and json.loads((copies.root / 'cleanup.json').read_text()) == copies.receipt
+                             and copies.processes_ended())
+                    if not valid:
+                        raise OSError('owned retirement identity changed')
+                    shutil.rmtree(staged)
+                except BaseException:
+                    retention.incomplete = True
+                    copies.unknown = True
+                    copies.receipt['state'] = 'retained-cleanup-error'
+                    if (moved and not copies.bulk.exists() and not copies.bulk.is_symlink()
+                            and copies.identity(copies.root) == copies.identities[0]
+                            and staged.exists() and copies.identity(staged) == copies.identities[1]):
+                        staged.rename(copies.bulk)
+                    if parent is not None:
+                        parent.unknown = True
+                    raise
+            else:
+                retention.incomplete = True
+                copies.unknown = True
+                copies.receipt.update(state='retained', refusal='native-retention-or-ownership-incomplete')
+                retention.checkpoint(bulk_cleanup=dict(copies.receipt))
+                if parent is not None:
+                    parent.unknown = True
 
 
 @contextlib.contextmanager
@@ -443,10 +487,10 @@ def copy_tree(source, dest):
     if sys.platform == 'darwin':
         # Unsupported cloning can leave a partial tree. Only clean up the tree
         # inside this operation's own temporary directory, never its destination.
-        with tempfile.TemporaryDirectory(prefix='.rehearse-copy-', dir=dest.parent) as td:
-            cloned = Path(td) / 'tree'
-            r = subprocess.run(['/bin/cp', '-c', '-p', '-R', '-P', str(source), str(cloned)],
-                               capture_output=True)
+        with _m_rehearse_external.OwnedCopies(prefix='.rehearse-copy-', parent=dest.parent) as copies:
+            cloned = copies.bulk / 'tree'
+            r = _m_rehearse_external.owned_run(['/bin/cp', '-c', '-p', '-R', '-P', str(source), str(cloned)],
+                                             capture_output=True)
             if not r.returncode:
                 cloned.rename(dest)
     if not dest.exists():
@@ -1427,6 +1471,9 @@ runpy.run_path(entry, run_name='__main__')
                           str(core / 'bin/brain'), *args],
                          cwd=unrelated if kind == 'hook' else brain, env=env, stdin=subprocess.PIPE,
                          stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors='replace', start_new_session=True)
+    owner = _m_rehearse_external.ACTIVE_COPIES.get()
+    if owner is not None:
+        owner.processes.append(p)
     timed_out = False
     leftovers = []
     signal_audit = []
@@ -1436,6 +1483,8 @@ runpy.run_path(entry, run_name='__main__')
         audit = dict(pid=p.pid, pgid=p.pid, signal=int(signal.SIGKILL),
                      at=datetime.datetime.now(datetime.timezone.utc).isoformat(), result='attempted')
         signal_audit.append(audit)
+        if owner is not None:
+            owner.signals.append(audit)
         try:
             os.killpg(p.pid, signal.SIGKILL)
             audit['result'] = 'sent'
@@ -1466,7 +1515,10 @@ runpy.run_path(entry, run_name='__main__')
     finally:
         # Stop remaining processes in this command's group. Any detached helper
         # still inherits the OS sandbox and cannot write to the live machine.
-        stop_group()
+        if stop_group():
+            p.wait()
+        elif owner is not None:
+            owner.unknown = True
         retention.packet.update(stdout=locals().get('out', 'UNKNOWN'),
                                 stderr=locals().get('err', 'UNKNOWN'), owner_pid=p.pid,
                                 code=p.returncode, timeout=timed_out, signal_audit=signal_audit)
@@ -1852,8 +1904,9 @@ def rehearse(inst, n, branch, local_diff_dir=None):
         raise RehearsalError('candidate branch or cached integration main missing', code='candidate-branch-or-cached-integration-main-missing')
     # Probe admission before any candidate is executed. The sandbox protects live
     # homes even when local.json points to them; they are read-only observations.
-    with retained_temporary_directory() as td:
-        folder = Path(td).resolve()
+    with _m_rehearse_external.OwnedCopies() as copies:
+        folder = copies.bulk
+        copies.record(head=head, main=main, integration_base=integration_base)
         sandbox_self_check(folder)
         frozen = folder / 'source'
         (folder / 'rehearse-clock').write_text(inst.now_dt().isoformat())
@@ -1864,6 +1917,7 @@ def rehearse(inst, n, branch, local_diff_dir=None):
         # The copy is common fixed input, not an atomic historical snapshot.
         # Live writers are irrelevant after preparation; audit only private data.
         baseline_commit = installed_core_commit(frozen)
+        copies.record(installed_core_commit=baseline_commit)
         # Keep core-relative links into the captured brain valid until the core
         # is installed into a lane. No extra standalone baseline copy is needed.
         baseline = frozen / 'core'
@@ -1877,17 +1931,17 @@ def rehearse(inst, n, branch, local_diff_dir=None):
                         GIT_CONFIG_NOSYSTEM='1', GIT_OPTIONAL_LOCKS='0', GIT_TERMINAL_PROMPT='0')
         bind_git_executable(prep_env)
         prefix = sandbox_prefix(folder)
-        r = subprocess.run([*prefix, 'git', '-c', 'core.hooksPath=/dev/null', 'clone', '--no-local', '--no-hardlinks',
+        r = _m_rehearse_external.owned_run([*prefix, 'git', '-c', 'core.hooksPath=/dev/null', 'clone', '--no-local', '--no-hardlinks',
                             '--no-checkout', '--quiet', str(n['home_path']), str(candidate)],
                            env=prep_env, capture_output=True)
         if r.returncode:
             raise RehearsalError('candidate snapshot failed', code='candidate-snapshot-failed')
-        r = subprocess.run([*prefix, 'git', '-C', str(candidate), '-c', 'core.hooksPath=/dev/null',
+        r = _m_rehearse_external.owned_run([*prefix, 'git', '-C', str(candidate), '-c', 'core.hooksPath=/dev/null',
                             'checkout', '--detach', '--quiet', head], env=prep_env, capture_output=True)
         if r.returncode or not (candidate / 'bin/brain').is_file():
             raise RehearsalError('candidate is not a core checkout', code='candidate-is-not-a-core-checkout')
         validate_frozen_links(candidate)
-        subprocess.run([*prefix, 'git', '-C', str(candidate), 'remote', 'remove', 'origin'],
+        _m_rehearse_external.owned_run([*prefix, 'git', '-C', str(candidate), 'remote', 'remove', 'origin'],
                        env=prep_env, capture_output=True, check=True)
         frozen_inst = _m_instance.Instance(frozen)
         from . import rehearse_external
@@ -1974,7 +2028,7 @@ def rehearse(inst, n, branch, local_diff_dir=None):
                    for name in ('before', 'after_')]
             write_local_diff(inst, n, local_diff_dir, *raw,
                              metadata=dict(branch=branch, head=head, frozen_now=frozen_now))
-        return {'version': 1, 'node': n['id'], 'branch': branch, 'head': head, 'main': main,
+        result = {'version': 1, 'node': n['id'], 'branch': branch, 'head': head, 'main': main,
                 'installed_core_commit': baseline_commit,
                 'frozen_now': frozen_now,
                 'integration_base': integration_base,
@@ -1994,6 +2048,15 @@ def rehearse(inst, n, branch, local_diff_dir=None):
                 'hook_seconds': new['hook']['seconds'],
                 'delivery': delivery,
                 'output_digests': {k: hashlib.sha256(new[k]['text'].encode()).hexdigest() for k in new}}
+        copies.record(comparison=dict(passed=result['passed'], commands=result['commands'],
+                                      regressions=list(flags), output_digests=result['output_digests']))
+    result['bulk_cleanup'] = dict(run=copies.run, state=copies.receipt['state'],
+                                  processes_ended=copies.receipt['processes_ended'])
+    if copies.receipt['state'] != 'removed':
+        result['warnings'].append('owned bulk copies retained; cleanup ownership or process proof incomplete')
+        result['regressions'].append('owned bulk cleanup incomplete')
+        result['passed'] = False
+    return result
 
 
 def cmd_rehearse(a):
