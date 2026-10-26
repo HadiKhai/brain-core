@@ -157,6 +157,73 @@ class OwnedCopyLifecycle(unittest.TestCase):
             self.assertTrue(outer.unknown)
         self.assertTrue(outer.bulk.exists())
 
+    def _retirement_failure_preserves_primary(self, body_failure, native_failure=False):
+        primary = AssertionError('fixture original body failure') if body_failure else None
+        retirement = OSError('fixture retirement publication failure')
+        finalization = OSError('fixture native finalization failure')
+        original_traceback = None
+        caught = None
+        entries = []
+        checkpoint = rehearse.NativeRetention.checkpoint
+        with mock.patch.dict(os.environ, {'BRAIN_REHEARSAL_EVIDENCE_DIR': ''}):
+            with rehearse_external.OwnedCopies(parent=self.parent) as ancestor:
+                with rehearse_external.OwnedCopies(parent=ancestor.bulk) as outer:
+                    owner = rehearse_external.OwnedCopies(parent=outer.bulk)
+                    def fail_checkpoint(retention, **fields):
+                        if retention.owned == owner.bulk and fields.get('stage') == 'before-native-delete':
+                            entries.append((owner.unknown, outer.unknown, ancestor.unknown))
+                            if native_failure:
+                                raise finalization
+                        return checkpoint(retention, **fields)
+                    def body():
+                        nonlocal original_traceback
+                        if primary is not None:
+                            try:
+                                raise primary
+                            except AssertionError:
+                                original_traceback = sys.exc_info()[2]
+                                raise
+                    with mock.patch.object(owner, 'publish', side_effect=retirement), \
+                            mock.patch.object(rehearse.NativeRetention, 'checkpoint', fail_checkpoint):
+                        try:
+                            with owner:
+                                (owner.bulk / 'original').write_bytes(b'fixture original operands\x00\xff')
+                                body()
+                        except BaseException as error:
+                            caught = error
+            self.assertTrue(owner.unknown)
+            self.assertTrue(outer.unknown)
+            self.assertTrue(ancestor.unknown)
+            self.assertTrue(ancestor.bulk.exists())
+            self.assertTrue(outer.bulk.exists())
+            self.assertEqual(b'fixture original operands\x00\xff', (owner.bulk / 'original').read_bytes())
+            self.assertEqual([(True, True, True)], entries)
+            self.assertIs(caught, primary if body_failure else retirement)
+            if body_failure:
+                tracebacks = []
+                cursor = caught.__traceback__
+                while cursor is not None:
+                    tracebacks.append(cursor)
+                    cursor = cursor.tb_next
+                self.assertIn(original_traceback, tracebacks)
+                self.assertIs(caught.__cause__, retirement)
+                if native_failure:
+                    self.assertIs(retirement.__cause__, finalization)
+            elif native_failure:
+                self.assertIs(caught.__cause__, finalization)
+
+    def test_nested_evidence_off_body_assertion_survives_retirement_publication_failure(self):
+        self._retirement_failure_preserves_primary(True)
+
+    def test_nested_evidence_off_body_assertion_survives_retirement_and_native_failure(self):
+        self._retirement_failure_preserves_primary(True, True)
+
+    def test_nested_evidence_off_no_body_propagates_retirement_publication_failure(self):
+        self._retirement_failure_preserves_primary(False)
+
+    def test_nested_evidence_off_no_body_retirement_survives_native_failure(self):
+        self._retirement_failure_preserves_primary(False, True)
+
     def _nested_rollback_failure(self, failure):
         primary = OSError('fixture terminal publication failure')
         secondary = OSError('fixture rollback ' + failure + ' failure')
