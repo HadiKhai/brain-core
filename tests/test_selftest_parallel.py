@@ -16,6 +16,62 @@ from scenario import CORE, Scenario
 
 
 class ParallelSelftest(Scenario):
+    def test_canonical_serial_lane_waits_for_parallel_workers_without_dropping_tests(self):
+        source = ('import time, unittest\nfrom pathlib import Path\n'
+                  'class ParallelFixture(unittest.TestCase):\n'
+                  ' def test_a(self): time.sleep(.1); Path("a.done").touch()\n'
+                  ' def test_b(self): time.sleep(.1); Path("b.done").touch()\n'
+                  'class DecisionGate(unittest.TestCase):\n'
+                  ' def test_a(self): assert Path("a.done").exists() and Path("b.done").exists()\n'
+                  ' def test_b(self): assert Path("a.done").exists() and Path("b.done").exists()\n')
+        folder, env, command = self.result_fixture(source)
+        (folder / 'test_sample.py').rename(folder / 'test_brain.py')
+        shutil.copyfile(CORE / 'tests/lanes.py', folder / 'lanes.py')
+        command[-1] = 'test_brain.py'
+        workers = min(3, os.cpu_count() or 1)
+        result = subprocess.run(command + ['-n', str(workers), '--max-worker-restart=0'],
+                                cwd=folder, env=env, capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        rows = [json.loads(line) for line in (folder / 'results.jsonl').read_text().splitlines()]
+        done = [row for row in rows if row['event'] == 'completed']
+        self.assertEqual(len(done), 4)
+        self.assertEqual(len({row['nodeid'] for row in done}), 4)
+        self.assertTrue(all(row['outcome'] == 'passed' for row in done))
+        lanes = [row for row in rows if row['event'] == 'lane']
+        self.assertEqual([row['lane'] for row in lanes],
+                         ['parallel', 'serial'] if workers > 1 else ['parallel'])
+        if workers > 1:
+            self.assertEqual([row['tests'] for row in lanes], [2, 2])
+            self.assertEqual(lanes[-1]['workers'], 1)
+        self.assertEqual(rows[-1]['collected'], 4)
+        self.assertEqual(rows[-1]['exitstatus'], 0)
+
+    def test_serial_lane_failure_remains_a_failed_session(self):
+        folder, env, command = self.result_fixture(
+            'import unittest\nclass ParallelFixture(unittest.TestCase):\n'
+            ' def test_pass(self): pass\nclass DecisionGate(unittest.TestCase):\n'
+            ' def test_failure(self): assert False, "serial failure fixture"\n')
+        (folder / 'test_sample.py').rename(folder / 'test_brain.py')
+        shutil.copyfile(CORE / 'tests/lanes.py', folder / 'lanes.py')
+        command[-1] = 'test_brain.py'
+        result = subprocess.run(command + ['-n', str(min(2, os.cpu_count() or 1)), '--max-worker-restart=0'],
+                                cwd=folder, env=env, capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        rows = [json.loads(line) for line in (folder / 'results.jsonl').read_text().splitlines()]
+        done = [row for row in rows if row['event'] == 'completed']
+        self.assertEqual(len(done), 2)
+        self.assertEqual(sorted(row['outcome'] for row in done), ['failed', 'passed'])
+        self.assertEqual(rows[-1]['failed'], 1)
+        self.assertEqual(rows[-1]['exitstatus'], 1)
+
+    def test_worker_oversubscription_refuses_before_running_tests(self):
+        folder, env, command = self.result_fixture('def test_only(): pass\n')
+        result = subprocess.run(command + ['-n', str((os.cpu_count() or 1) + 1)],
+                                cwd=folder, env=env, capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 4, result.stdout + result.stderr)
+        self.assertIn('workers exceed available CPU cores', result.stdout + result.stderr)
+        self.assertFalse((folder / 'results.jsonl').exists())
+
     def test_duration_order_preserves_inventory_and_prioritizes_longer_tests(self):
         folder, env, command = self.result_fixture(
             'def test_fast(): pass\ndef test_unknown(): pass\ndef test_slow(): pass\n')
