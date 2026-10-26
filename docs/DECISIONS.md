@@ -67,6 +67,20 @@ their operation boundaries.
 Outward aliases, replaced physical ancestors and shared files remain refused.
 Each sync failure propagates; no multi-file transaction, namespace lock or
 physical power-loss guarantee is implied.
+## D31003: Keep the owned-copy body exception primary during exit
+
+When retirement publication fails while a body exception is already unwinding,
+OwnedCopies passes that original exception object and traceback into native
+finalization. The body exception remains primary, with the retirement failure
+as its cause. A further native finalization failure remains secondary in that
+cause chain. Without a body exception, the retirement failure remains primary.
+Successful exit keeps the existing native cleanup behavior and predicates.
+
+This decision narrows R6-INT-2 to exit/error composition. It changes no ownership,
+identity, process, evidence, ancestor uncertainty or deletion predicates. The
+stopped original ten-file review remains open; focused proof or a narrow source
+review of this contract does not establish whole R6 acceptance.
+
 ## D30006: Propagate retention uncertainty before fallible cleanup
 
 Owned copy scopes capture their enclosing in-memory owners on entry. A known
