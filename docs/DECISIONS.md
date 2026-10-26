@@ -2652,3 +2652,5 @@ the communication store lock, serializing it with recovery after the initial
 receipt has been saved. Existing deferral remains owned by morning delivery.
 The instance writer lock precedes this publication critical section, matching
 the inbox event writer's lock order even when called outside CLI dispatch.
+
+Atomic file publication writes and fsyncs at 0600, then applies and fsyncs the existing destination mode (0644 for a new public file, 0600 for private targets) before rename; mode-preparation failures abort publication and attempt private cleanup.

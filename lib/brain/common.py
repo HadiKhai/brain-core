@@ -372,19 +372,33 @@ class DirectoryTarget:
                 staging = os.stat(name, dir_fd=self.fd, follow_symlinks=False)
                 if (staging.st_dev, staging.st_ino) != identity or staging.st_nlink != 1:
                     raise OSError('publication temporary file changed')
+                # Content is written and synced privately. Prepare and persist
+                # the intended mode before rename so a killed writer cannot
+                # leave the published destination with the staging mode.
+                mode = (stat.S_IMODE(prior.st_mode)
+                        if prior and stat.S_ISREG(prior.st_mode) else 0o644)
+                os.fchmod(stream.fileno(), 0o600 if self.private else mode)
+                os.fsync(stream.fileno())
+                if self.generation(self.stat()) != self.generation(prior):
+                    raise OSError('publication target changed')
+                staging = os.stat(name, dir_fd=self.fd, follow_symlinks=False)
+                if (staging.st_dev, staging.st_ino) != identity or staging.st_nlink != 1:
+                    raise OSError('publication temporary file changed')
                 os.replace(name, self.path.name, src_dir_fd=self.fd, dst_dir_fd=self.fd)
                 published = True
-                # Failed publication/cleanup must leave only a private staging
-                # inode. Restore the old mode only on the published inode.
-                if prior and stat.S_ISREG(prior.st_mode):
-                    self.check_file(stream.fileno())
-                    os.fchmod(stream.fileno(), stat.S_IMODE(prior.st_mode))
                 os.fsync(self.fd)
             except BaseException as primary:
                 if not published:
+                    cleanup = None
+                    try:
+                        os.fchmod(stream.fileno(), 0o600)
+                    except OSError as error:
+                        cleanup = error
                     try:
                         self.unlink_owned(name, identity)
-                    except OSError as cleanup:
+                    except OSError as error:
+                        cleanup = error
+                    if cleanup is not None:
                         # A failed cleanup must not replace the write/replace
                         # failure that tells callers whether publication ran.
                         raise primary from cleanup
