@@ -51,23 +51,6 @@ class FixtureSetup(Scenario):
                                          if key == package or key.startswith(package + '.')])
         return module
 
-    def test_launcher_help_defers_command_only_modules(self):
-        script = """import runpy, sys
-sys.argv = [sys.argv[1], '--help']
-try:
-    runpy.run_path(sys.argv[0], run_name='__main__')
-except SystemExit as error:
-    assert error.code == 0, error.code
-else:
-    raise AssertionError('help did not exit through argparse')
-for name in ('diagnostics', 'full_gate', 'spec_run', 'train', 'dispatcher', 'scorecard'):
-    assert 'brain.' + name not in sys.modules, name
-"""
-        result = subprocess.run([sys.executable, '-B', '-c', script, str(CORE / 'bin/brain')],
-                                cwd=self.tmp, env=self.env, capture_output=True, text=True)
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        for command in ('diagnose', 'full-run', 'spec-run', 'train', 'dispatch', 'scorecard'):
-            self.assertIn(command, result.stdout)
 
     def test_deferred_command_uses_real_module_and_current_patch(self):
         loader = core_loader.SourceFileLoader('deferred_cli_fixture', str(CORE / 'bin/brain'))

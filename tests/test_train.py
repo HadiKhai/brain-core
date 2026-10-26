@@ -1,13 +1,35 @@
 """Local train scenarios use made-up Git homes and isolated brains only."""
 import json
 import shlex
+import subprocess
+import sys
 from pathlib import Path
 
-from scenario import Scenario
+from scenario import Scenario, CORE
 
 
 class MergeTrain(Scenario):
     fixture_init_in_process = True
+
+    def test_launcher_help_defers_command_only_modules(self):
+        script = """import runpy, sys
+sys.argv = [sys.argv[1], '--help']
+try:
+    runpy.run_path(sys.argv[0], run_name='__main__')
+except SystemExit as error:
+    assert error.code == 0, error.code
+else:
+    raise AssertionError('help did not exit through argparse')
+for name in ('diagnostics', 'full_gate', 'spec_run', 'train', 'dispatcher', 'scorecard'):
+    assert 'brain.' + name not in sys.modules, name
+"""
+        result = subprocess.run([sys.executable, '-B', '-c', script, str(CORE / 'bin/brain')],
+                                cwd=self.tmp, env=self.env, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        for command in ('diagnose', 'full-run', 'spec-run', 'train', 'dispatch', 'scorecard'):
+            self.assertIn(command, result.stdout)
+
+
     def project(self, command="python3 -B verify.py", settings=()):
         root = self.init("alice")
         home = self.repo(self.tmp / "app", {"verify.py": "from pathlib import Path\nassert not Path('bad').exists()\n", "shared": "base\n"})

@@ -2237,3 +2237,8 @@ handling retain their existing order. Shared imports remain eager where parser
 metadata or dispatch requires them; this change does not claim to eliminate that
 shared dependency graph. Contract controls cover unused modules during real
 launcher help and current patches on the real owning module.
+
+
+### Launcher help control dependency ownership
+
+Keep the real launcher help negative-import control in the canonical train-owned test class. Its unchanged literal train command/module assertions are dependencies recognized by the strict lane scanner. The control still executes the real launcher subprocess; no fixture initialization path or dependency-scanner exemption is introduced.
