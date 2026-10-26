@@ -2100,3 +2100,18 @@ child directory symlinks or change the existing input exclusions.
 The index contains no source contents and writes no files. It does not replace source
 authorization, usage aggregation, private publication or the completion marker. Its reuse
 alone establishes neither complete warm performance nor browser paint timing.
+
+## D28002: Measure dashboard acceptance on real serving code and source files
+
+Qualify complete warm fill with an isolated synthetic instance, real transcript records
+and an authenticated integrated server. After the initial fill, change metadata and append
+usage; stop the warm timer only when both changes appear in a complete backend reading.
+Check source-derived entity inventories and independently calculated token totals. Keep
+startup and warm refill timings separate, and retain three samples and their medians.
+
+Browser acceptance navigates the actual serving URL without injected snapshots or mocked
+responses. Bound first real-data paint by the rendered DOM and two animation frames; report
+the browser engine and this conservative timing definition. Audit every view, paginate all
+lists, compare graph entity identities, and inspect every project's jobs, tasks and threads.
+Preserve unavailable readings as unavailable. A synthetic acceptance result qualifies its
+recorded data envelope, not arbitrary production sizes or the integrated release gate.
