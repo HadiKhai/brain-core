@@ -1120,6 +1120,8 @@ class RuleActivationDue(unittest.TestCase):
 
 
 class RenderedFingerprint(Scenario):
+    fixture_templates = True
+    fixture_init_in_process = True
     """Native fabricated readiness, plus focused render-boundary telemetry probes."""
 
     def setUp(self):

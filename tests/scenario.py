@@ -13,6 +13,7 @@ import argparse
 import contextlib
 import io
 import os
+import py_compile
 import shutil
 import shlex
 import subprocess
@@ -25,8 +26,77 @@ from pathlib import Path
 
 CORE = Path(os.environ.get("BRAIN_CORE") or Path(__file__).resolve().parent.parent)
 
-# Source-only per-worker APFS template; instance state is always initialized anew.
+# Per-worker APFS template; instance state is always initialized anew. Checked
+# bytecode avoids recompiling unchanged core sources in every real CLI child.
 _core_template = None
+_core_bytecode = {}
+_runtime_bytecode = None
+_bytecode_lock = threading.RLock()
+
+
+def compiled_fixture_core(source, identity):
+    """Share immutable checked code, never initialized modules or instance state."""
+    with _bytecode_lock:
+        return _compiled_fixture_core(source, identity)
+
+
+def _compiled_fixture_core(source, identity):
+    key = str(identity)
+    if key not in _core_bytecode:
+        candidate = tempfile.TemporaryDirectory(prefix='brain-test-bytecode-')
+        try:
+            for module in (Path(source) / 'lib/brain').glob('*.py'):
+                cache = Path(candidate.name) / (module.stem + '.' + sys.implementation.cache_tag + '.pyc')
+                py_compile.compile(str(module), cfile=str(cache), doraise=True,
+                                   invalidation_mode=py_compile.PycInvalidationMode.CHECKED_HASH)
+        except BaseException:
+            candidate.cleanup()
+            raise
+        _core_bytecode[key] = candidate
+    return Path(_core_bytecode[key].name)
+
+
+def fixture_runtime_cache(core):
+    """A worker-private prefix for both stdlib and copied-core import caches.
+
+    Checked hashes reject changed sources even when size and mtime are restored.
+    Children run with -B, so sharing immutable cache files cannot publish changed
+    bytecode back into another fixture. CPython restores each installed filename.
+    """
+    with _bytecode_lock:
+        return _fixture_runtime_cache(core)
+
+
+def _fixture_runtime_cache(core):
+    global _runtime_bytecode
+    if _runtime_bytecode is None:
+        candidate = tempfile.TemporaryDirectory(prefix='brain-test-runtime-cache-')
+        try:
+            # Compile the already loaded stdlib once, rather than losing Apple's
+            # redirected caches when selecting a private cache prefix. Never
+            # compile dependencies or write to a system/user cache directory.
+            stdlib = Path(os.__file__).parent
+            sources = {Path(module.__file__) for module in list(sys.modules.values())
+                       if getattr(module, '__file__', None) and str(module.__file__).endswith('.py')}
+            for source in sources:
+                if stdlib not in source.parents or 'site-packages' in source.parts:
+                    continue
+                relative = source.absolute().relative_to(source.anchor)
+                cache = Path(candidate.name) / relative.parent / (source.stem + '.' + sys.implementation.cache_tag + '.pyc')
+                py_compile.compile(str(source), cfile=str(cache), doraise=True,
+                                   invalidation_mode=py_compile.PycInvalidationMode.CHECKED_HASH)
+        except BaseException:
+            candidate.cleanup()
+            raise
+        _runtime_bytecode = candidate
+    prefix = Path(_runtime_bytecode.name)
+    package = Path(core).resolve() / 'lib/brain'
+    if package.is_dir():
+        cached = prefix / package.relative_to(package.anchor)
+        if not cached.exists():
+            cached.parent.mkdir(parents=True, exist_ok=True)
+            cached.symlink_to(compiled_fixture_core(CORE, CORE), target_is_directory=True)
+    return prefix
 
 
 def clone_fixture_core(source, destination, **kwargs):
@@ -37,6 +107,10 @@ def clone_fixture_core(source, destination, **kwargs):
         candidate = tempfile.TemporaryDirectory(prefix='brain-test-core-')
         try:
             shutil.copytree(source, Path(candidate.name) / 'core', **kwargs)
+            package = Path(candidate.name) / 'core/lib/brain'
+            if package.is_dir():
+                shutil.copytree(compiled_fixture_core(Path(candidate.name) / 'core', CORE),
+                                package / '__pycache__')
         except BaseException:
             candidate.cleanup()
             raise
@@ -48,8 +122,91 @@ def clone_fixture_core(source, destination, **kwargs):
     return str(destination)
 
 
+_instance_templates = {}
+_repo_templates = {}
+_setup_templates = {}
+
+
+def _copy_fixture_tree(source, destination):
+    """Copy mutable fixtures with independent inodes, preserving relative links."""
+    destination = Path(destination)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if sys.platform == 'darwin':
+        subprocess.run(['/bin/cp', '-cR', str(source), str(destination)],
+                       check=True, capture_output=True, text=True)
+    else:
+        shutil.copytree(source, destination, symlinks=True)
+
+
+def _relocate_fixture_value(value, old, new):
+    if isinstance(value, Path):
+        return Path(str(value).replace(old, new))
+    if isinstance(value, str):
+        return value.replace(old, new)
+    if isinstance(value, tuple):
+        return tuple(_relocate_fixture_value(v, old, new) for v in value)
+    if isinstance(value, list):
+        return [_relocate_fixture_value(v, old, new) for v in value]
+    if isinstance(value, dict):
+        return {_relocate_fixture_value(k, old, new): _relocate_fixture_value(v, old, new)
+                for k, v in value.items()}
+    if value is None or type(value) in (bool, int, float):
+        return value
+    raise TypeError('fixture templates hold paths and plain values, never live objects')
+
+
+class _FixtureTemplate:
+    """A privately published filesystem snapshot, never shared mutable test state.
+
+    Audited setups keep absolute machine bindings in ignored metadata, Git's
+    worktree pointers and synthetic session files. Relocate those on each copy;
+    Git objects and installed source stay byte-for-byte unchanged.
+    """
+    def __init__(self, source, home, value):
+        self.directory = tempfile.TemporaryDirectory(prefix='brain-test-template-')
+        self.home = str(home)
+        self.relocations, self.links = [], []
+        tree = Path(self.directory.name) / 'tree'
+        try:
+            self.value = _relocate_fixture_value(value, self.home, self.home)
+            _copy_fixture_tree(source, tree)
+            for directory, dirs, files in os.walk(tree, followlinks=False):
+                base = Path(directory)
+                # Installed source and compressed Git objects are immutable.
+                if base.name == '.git':
+                    dirs[:] = [d for d in dirs if d != 'objects']
+                dirs[:] = [d for d in dirs if d != 'core']
+                for name in dirs + files:
+                    path = base / name
+                    if path.is_symlink():
+                        target = os.readlink(path)
+                        if self.home in target:
+                            self.links.append((path.relative_to(tree), target))
+                    elif path.is_file() and not (base.name == '.git' and name == 'index'):
+                        data = path.read_bytes()
+                        if self.home.encode() in data:
+                            # Reject an unrecognized binary binding rather than
+                            # corrupting a database or a Git index by replacing it.
+                            data.decode('utf-8')
+                            self.relocations.append((path.relative_to(tree), data))
+        except BaseException:
+            self.directory.cleanup()
+            raise
+
+    def clone(self, destination, home):
+        _copy_fixture_tree(Path(self.directory.name) / 'tree', destination)
+        for relative, data in self.relocations:
+            (destination / relative).write_bytes(data.replace(self.home.encode(), str(home).encode()))
+        for relative, target in self.links:
+            path = destination / relative
+            path.unlink()
+            path.symlink_to(target.replace(self.home, str(home)))
+        return _relocate_fixture_value(self.value, self.home, str(home))
+
+
 class Scenario(unittest.TestCase):
     fixture_init_in_process = False
+    fixture_templates = False
     def setUp(self):
         # A real verify may enclose the test runner. Its descriptor stays open and
         # locked; its environment proof must not identify our temporary instances.
@@ -81,6 +238,9 @@ class Scenario(unittest.TestCase):
         for k in ("BRAIN_ROOT", "BRAIN_CONFIG", "XDG_CONFIG_HOME", "CLAUDE_CONFIG_DIR", "CODEX_HOME",
                   "CLAUDE_CODE_SESSION_ID", "CODEX_THREAD_ID"):
             self.env.pop(k, None)
+
+        self.env['PYTHONPYCACHEPREFIX'] = str(fixture_runtime_cache(CORE))
+        self.env['PYTHONDONTWRITEBYTECODE'] = '1'
 
     def tearDown(self):
         # Diagnostic finalizers must run before removal, not in addCleanup.
@@ -166,7 +326,10 @@ class Scenario(unittest.TestCase):
 
     # helpers
     def run_(self, args, cwd, ok=True, brain=None):
-        r = subprocess.run([sys.executable, str(brain or (cwd / "core" / "bin" / "brain")), *args], cwd=cwd,
+        launcher = Path(brain or (cwd / 'core/bin/brain'))
+        cache = fixture_runtime_cache(launcher.resolve().parent.parent)
+        r = subprocess.run([sys.executable, '-B', '-X', 'pycache_prefix=' + str(cache),
+                            str(launcher), *args], cwd=cwd,
                            env=self.env, capture_output=True, text=True)
         if ok is True and r.returncode:
             self.fail(f"brain {' '.join(args)} failed:\n{r.stdout}\n{r.stderr}")
@@ -183,49 +346,96 @@ class Scenario(unittest.TestCase):
 
     def init(self, name, operator=None):
         root = self.tmp / name
-        args = ["init", str(root), "--operator", operator or name, "--title", f"{name} brain",
-                "--tz", "UTC"]
-        if self.fixture_init_in_process:
-            self.fixture_cli(args, cwd=self.tmp, brain=CORE / 'bin/brain')
+        use_template = self.fixture_templates and not getattr(self, '_evidence', None)
+        key = self._fixture_key(name, operator or name)
+        if use_template and key in _instance_templates and not root.exists():
+            _instance_templates[key].clone(root, self.tmp)
+            # Registration is machine-local and must describe this fresh HOME,
+            # including any other instances already registered by this test.
+            with self._fixture_module(self.tmp, CORE / 'bin/brain') as module:
+                module._owners['cmd_init'].register(root)
         else:
-            self.run_(args, cwd=self.tmp, brain=CORE / 'bin/brain')
+            args = ['init', str(root), '--operator', operator or name,
+                    '--title', f'{name} brain', '--tz', 'UTC']
+            if self.fixture_init_in_process:
+                self.fixture_cli(args, cwd=self.tmp, brain=CORE / 'bin/brain')
+            else:
+                self.run_(args, cwd=self.tmp, brain=CORE / 'bin/brain')
+            if use_template and key not in _instance_templates:
+                candidate = _FixtureTemplate(root, self.tmp, root)
+                _instance_templates[key] = candidate
+        fixture_runtime_cache(root / 'core')
         return root
 
+    def _fixture_key(self, *parts):
+        # The pytest identity changes per method; it is not fixture input.
+        environment = tuple(sorted((k, v.replace(str(self.tmp), '<fixture-home>'))
+                                   for k, v in self.env.items() if k != 'PYTEST_CURRENT_TEST'))
+        return (str(CORE), environment, *parts)
+
+    def cached_setup(self, key, build):
+        """Reuse an audited setup tree; each test still gets independent files.
+
+        Only an empty fresh HOME is eligible. Repeated calls in a mutated test
+        take the original path, and evidence fixtures retain real subprocesses.
+        """
+        if getattr(self, '_evidence', None) or any(self.tmp.iterdir()):
+            return build()
+        key = self._fixture_key(type(self).__module__, type(self).__qualname__, key)
+        if key not in _setup_templates:
+            value = build()
+            candidate = _FixtureTemplate(self.tmp, self.tmp, value)
+            _setup_templates[key] = candidate
+            return value
+        self.tmp.rmdir()  # known empty; never remove a populated fixture
+        value = _setup_templates[key].clone(self.tmp, self.tmp)
+        self._prepare_fixture_cores()
+        return value
+
+    def _prepare_fixture_cores(self):
+        # Raw subprocess.run/Popen calls inherit the same checked cache as run_.
+        for launcher in self.tmp.glob('*/core/bin/brain'):
+            fixture_runtime_cache(launcher.parent.parent)
+
+    @contextlib.contextmanager
+    def _fixture_module(self, cwd, brain=None):
+        previous = Path.cwd()
+        launcher = str(brain or cwd / 'core/bin/brain')
+        loader = core_loader.SourceFileLoader('fixture_setup', launcher)
+        try:
+            with mock.patch.dict(os.environ, self.env, clear=True), \
+                    mock.patch.object(sys, 'dont_write_bytecode', True):
+                os.chdir(cwd)
+                spec = importlib.util.spec_from_loader(loader.name, loader)
+                module = importlib.util.module_from_spec(spec)
+                loader.exec_module(module)
+                yield module
+        finally:
+            os.chdir(previous)
+            package = getattr(loader, 'package_name', None)
+            if package is not None:
+                for key in list(sys.modules):
+                    if key == package or key.startswith(package + '.'):
+                        del sys.modules[key]
 
     def fixture_cli(self, args, cwd, brain=None):
         """Fresh command state for setup only; never replace an asserted CLI call."""
         if getattr(self, '_evidence', None):
             return self.run_(args, cwd=cwd, brain=brain)
         stdout, stderr = io.StringIO(), io.StringIO()
-        previous = Path.cwd()
-        loader = core_loader.SourceFileLoader('fixture_setup', str(brain or cwd / 'core/bin/brain'))
-        try:
-            with mock.patch.dict(os.environ, self.env, clear=True), \
-                    mock.patch.object(sys, 'argv', [str(brain or cwd / 'core/bin/brain'), *args]), \
-                    mock.patch.object(sys, 'dont_write_bytecode', True), \
-                    contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
-                os.chdir(cwd)
-                spec = importlib.util.spec_from_loader(loader.name, loader)
-                module = importlib.util.module_from_spec(spec)
-                loader.exec_module(module)
-                nodes = module._owners['cmd_init']
-                copy = types.SimpleNamespace(**vars(shutil))
-                copy.copytree = clone_fixture_core
-                with mock.patch.object(nodes, 'shutil', copy):
-                    try:
-                        module.main()
-                    except SystemExit as error:
-                        if error.code not in (None, 0):
-                            self.fail('fixture command failed: ' + ' '.join(args) + '\n' + stdout.getvalue() + stderr.getvalue())
-        finally:
-            os.chdir(previous)
-            # The next setup call gets new TOUCHED, context variables and caches,
-            # just as a subprocess would; no fixture package survives the call.
-            package = getattr(loader, 'package_name', None)
-            if package is not None:
-                for key in list(sys.modules):
-                    if key == package or key.startswith(package + '.'):
-                        del sys.modules[key]
+        launcher = str(brain or cwd / 'core/bin/brain')
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr), \
+                mock.patch.object(sys, 'argv', [launcher, *args]), \
+                self._fixture_module(cwd, brain) as module:
+            nodes = module._owners['cmd_init']
+            copy = types.SimpleNamespace(**vars(shutil))
+            copy.copytree = clone_fixture_core
+            with mock.patch.object(nodes, 'shutil', copy):
+                try:
+                    module.main()
+                except SystemExit as error:
+                    if error.code not in (None, 0):
+                        self.fail('fixture command failed: ' + ' '.join(args) + '\n' + stdout.getvalue() + stderr.getvalue())
         return stdout.getvalue() + stderr.getvalue()
 
     def fixture_b(self, root, *args):
@@ -235,12 +445,21 @@ class Scenario(unittest.TestCase):
         return self.run_(list(args), cwd=root, ok=ok)
 
     def repo(self, path, files=None):
+        files = files or {'README.md': 'hello\n'}
+        key = self._fixture_key(tuple(sorted(files.items())))
+        use_template = self.fixture_templates and not getattr(self, '_evidence', None)
+        if use_template and key in _repo_templates and not path.exists():
+            _repo_templates[key].clone(path, self.tmp)
+            return path
         path.mkdir(parents=True, exist_ok=True)
-        self.git("init", "-q", "-b", "main", cwd=path)
-        for k, v in (files or {"README.md": "hello\n"}).items():
+        self.git('init', '-q', '-b', 'main', cwd=path)
+        for k, v in files.items():
             (path / k).write_text(v)
-        self.git("add", "-A", cwd=path)
-        self.git("commit", "-qm", "init", cwd=path)
+        self.git('add', '-A', cwd=path)
+        self.git('commit', '-qm', 'init', cwd=path)
+        if use_template and key not in _repo_templates:
+            candidate = _FixtureTemplate(path, self.tmp, path)
+            _repo_templates[key] = candidate
         return path
 
     def all_text(self, folder):

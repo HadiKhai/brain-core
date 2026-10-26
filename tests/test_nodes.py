@@ -588,6 +588,8 @@ class ImportDiscovery(Scenario):
 
 
 class TeamHomes(Scenario):
+    fixture_templates = True
+    fixture_init_in_process = True
     def old_core_job(self):
         # Exercise the actual pre-team-home writer, not a new packet with fields removed.
         history = Path(__file__).resolve().parent.parent

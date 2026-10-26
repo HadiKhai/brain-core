@@ -12,8 +12,10 @@ import core_loader
 
 
 class VerifyLanes(Scenario):
+    fixture_templates = True
     fixture_init_in_process = True
-    job = test_verify.WorkerReadyPackets.job
+    def job(self):
+        return self.cached_setup('ready-job', lambda: test_verify.WorkerReadyPackets.job(self))
     record = test_verify.WorkerReadyPackets.record
     packet = test_verify.WorkerReadyPackets.packet
 

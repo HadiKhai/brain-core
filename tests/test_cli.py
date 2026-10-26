@@ -29,6 +29,281 @@ from scenario import Scenario, AutonomyProject, shlex_quote
 
 
 class FixtureSetup(Scenario):
+    def test_cached_setup_relocates_worktrees_and_never_shares_mutable_state(self):
+        import scenario
+        built = []
+        children = []
+        def child():
+            case = Scenario()
+            case.fixture_init_in_process = case.fixture_templates = True
+            case.setUp()
+            children.append(case)
+            self.addCleanup(case.doCleanups)
+            self.addCleanup(case.tearDown)
+            return case
+        def build(case):
+            built.append(case.tmp)
+            root = case.init('alice')
+            home = case.repo(case.tmp / 'app')
+            case.b(root, 'new', 'app', '--title', 'App', '--home', str(home))
+            worktree = case.tmp / 'worker'
+            case.git('worktree', 'add', '-qb', 'job', str(worktree), cwd=home)
+            script = case.tmp / 'binding.txt'
+            script.write_text(str(home))
+            (case.tmp / 'absolute-link').symlink_to(home)
+            return {'root': root, 'home': home, 'worktree': worktree, 'command': str(script)}
+        with mock.patch.object(scenario, '_setup_templates', {}), \
+                mock.patch.object(scenario, '_instance_templates', {}), \
+                mock.patch.object(scenario, '_repo_templates', {}):
+            try:
+                first, second = child(), child()
+                left = first.cached_setup('isolation-control', lambda: build(first))
+                right = second.cached_setup('isolation-control', lambda: build(second))
+                self.assertEqual(built, [first.tmp])
+                self.assertEqual(Path(right['command']).read_text(), str(right['home']))
+                self.assertEqual((second.tmp / 'absolute-link').resolve(), right['home'])
+                for case, tree in ((first, left), (second, right)):
+                    self.assertEqual(case.git('status', '--porcelain', cwd=tree['root']), '')
+                    self.assertEqual(case.git('status', '--porcelain', cwd=tree['worktree']), '')
+                    self.assertEqual(Path(case.git('rev-parse', '--show-toplevel', cwd=tree['worktree']).strip()),
+                                     tree['worktree'])
+                    binding = json.loads((tree['root'] / '.brain/local.json').read_text())
+                    self.assertEqual(binding['nodes']['app']['home'], str(tree['home']))
+                    prefix = Path(case.env['PYTHONPYCACHEPREFIX'])
+                    self.assertEqual(case.env['PYTHONDONTWRITEBYTECODE'], '1')
+                    self.assertTrue((prefix / (tree['root'] / 'core/lib/brain').relative_to(tree['root'].anchor)).is_symlink())
+                for relative in ('README.md', '.git/config'):
+                    a, b = left['home'] / relative, right['home'] / relative
+                    self.assertNotEqual((a.stat().st_dev, a.stat().st_ino), (b.stat().st_dev, b.stat().st_ino))
+                    self.assertEqual(a.stat().st_nlink, 1)
+                    self.assertEqual(b.stat().st_nlink, 1)
+                (left['worktree'] / 'README.md').write_text('only the first worktree\n')
+                (left['root'] / 'core/bin/brain').write_text('changed first installed core\n')
+                self.assertEqual((right['worktree'] / 'README.md').read_text(), 'hello\n')
+                self.assertEqual((right['root'] / 'core/bin/brain').read_bytes(), (CORE / 'bin/brain').read_bytes())
+                first.tearDown()
+                self.assertIn('app', second.b(right['root'], 'tree'))
+                raw = subprocess.run([sys.executable, str(right['root'] / 'core/bin/brain'), 'tree'],
+                                     cwd=right['root'], env=second.env, capture_output=True, text=True)
+                self.assertEqual(raw.returncode, 0, raw.stdout + raw.stderr)
+                self.assertIn('app', raw.stdout)
+                self.assertEqual(second.git('status', '--porcelain', cwd=right['worktree']), '')
+            finally:
+                for cache in (scenario._setup_templates, scenario._instance_templates, scenario._repo_templates):
+                    for template in cache.values():
+                        template.directory.cleanup()
+
+    def test_instance_templates_preserve_registration_operator_and_independent_git(self):
+        import scenario
+        cases = []
+        with mock.patch.object(scenario, '_instance_templates', {}):
+            try:
+                for _ in range(2):
+                    case = Scenario()
+                    case.fixture_init_in_process = case.fixture_templates = True
+                    case.setUp()
+                    cases.append(case)
+                    self.addCleanup(case.doCleanups)
+                    self.addCleanup(case.tearDown)
+                    case.env['BRAIN_CONFIG'] = str(case.tmp / 'custom/brains.json')
+                    root = case.init('alice')
+                    second = case.init('bob', operator='other')
+                    registration = json.loads(Path(case.env['BRAIN_CONFIG']).read_text())
+                    self.assertEqual(registration['default'], 'alice')
+                    self.assertEqual(registration['brains'], {'alice': {'root': str(root)}, 'bob': {'root': str(second)}})
+                    self.assertIn('principals: other', (second / 'instance.md').read_text())
+                    self.assertEqual(case.git('status', '--porcelain', cwd=root), '')
+                    self.assertEqual(case.git('status', '--porcelain', cwd=second), '')
+                    nested = case.repo(case.tmp / 'nested' / 'repositories' / 'app')
+                    self.assertEqual(case.git('status', '--porcelain', cwd=nested), '')
+                self.assertEqual(len(scenario._instance_templates), 2)
+                first, second = (case.tmp / 'alice' for case in cases)
+                before = (second / '.git/config').read_bytes()
+                (first / '.git/config').write_text('changed first config\n')
+                self.assertEqual((second / '.git/config').read_bytes(), before)
+            finally:
+                for template in scenario._instance_templates.values():
+                    template.directory.cleanup()
+
+    def test_failed_setup_snapshot_is_never_published(self):
+        import scenario
+        case = Scenario()
+        case.setUp()
+        self.addCleanup(case.doCleanups)
+        self.addCleanup(case.tearDown)
+        candidates = []
+        def broken_copy(source, destination):
+            candidates.append(destination.parent)
+            destination.mkdir()
+            (destination / 'partial').write_text('incomplete\n')
+            raise OSError('injected snapshot failure')
+        with mock.patch.object(scenario, '_setup_templates', {}), \
+                mock.patch.object(scenario, '_copy_fixture_tree', side_effect=broken_copy):
+            with self.assertRaisesRegex(OSError, 'injected snapshot failure'):
+                case.cached_setup('broken', lambda: case.tmp)
+            self.assertEqual(scenario._setup_templates, {})
+            self.assertEqual(len(candidates), 1)
+            self.assertFalse(candidates[0].exists())
+
+    def test_concurrent_runtime_cache_initialization_compiles_each_core_source_once(self):
+        import scenario
+        source, package = self.fixture_source()
+        results, errors = [], []
+        original_compile = scenario.py_compile.compile
+        with mock.patch.object(scenario, 'CORE', source), \
+                mock.patch.object(scenario, '_runtime_bytecode', None), \
+                mock.patch.object(scenario.py_compile, 'compile', wraps=original_compile) as compile_source:
+            try:
+                def initialize():
+                    try:
+                        results.append(scenario.fixture_runtime_cache(source))
+                    except BaseException as error:
+                        errors.append(error)
+                threads = [threading.Thread(target=initialize) for _ in range(8)]
+                for thread in threads:
+                    thread.start()
+                for thread in threads:
+                    thread.join(timeout=10)
+                self.assertFalse(any(thread.is_alive() for thread in threads))
+                self.assertEqual(errors, [])
+                self.assertEqual(len(results), 8)
+                self.assertEqual(len(set(results)), 1)
+                compiled = [call.args[0] for call in compile_source.call_args_list
+                            if Path(call.args[0]).parent == package]
+                self.assertEqual(sorted(compiled), sorted(str(path) for path in package.glob('*.py')))
+            finally:
+                if scenario._runtime_bytecode is not None:
+                    scenario._runtime_bytecode.cleanup()
+
+    def test_private_runtime_cache_reuses_code_without_poisoning_other_cores(self):
+        import scenario
+        source, package = self.fixture_source()
+        state = package / 'state.py'
+        state.write_text('def current(): return "first"\n')
+        (source / 'bin/brain').write_text(
+            'import sys\nfrom pathlib import Path\n'
+            'sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))\n'
+            'from brain.state import current\nprint(current())\nprint(current.__code__.co_filename)\n')
+        first, second = self.tmp / 'one', self.tmp / 'two'
+        shutil.copytree(source, first)
+        shutil.copytree(source, second)
+        with mock.patch.object(scenario, 'CORE', source), \
+                mock.patch.object(scenario, '_runtime_bytecode', None):
+            try:
+                def read(core):
+                    return self.run_([], self.tmp, brain=core / 'bin/brain').splitlines()
+                self.assertEqual(read(first), ['first', str(first / 'lib/brain/state.py')])
+                self.assertEqual(read(second), ['first', str(second / 'lib/brain/state.py')])
+                prefix = Path(scenario._runtime_bytecode.name)
+                links = [prefix / (core / 'lib/brain').relative_to(core.anchor)
+                         for core in (first, second)]
+                self.assertTrue(all(link.is_symlink() for link in links))
+                self.assertEqual(links[0].resolve(), links[1].resolve())
+                cache = next(links[0].glob('state.*.pyc'))
+                before = cache.read_bytes()
+                self.assertEqual(int.from_bytes(before[4:8], 'little'), 3)
+                changed = first / 'lib/brain/state.py'
+                stamp = changed.stat()
+                changed.write_text('def current(): return "other"\n')
+                os.utime(changed, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
+                self.assertEqual(changed.stat().st_size, stamp.st_size)
+                self.assertEqual(read(first), ['other', str(changed)])
+                self.assertEqual(read(second)[0], 'first')
+                self.assertEqual(cache.read_bytes(), before)
+                self.assertEqual(list(first.rglob('__pycache__')), [])
+                self.assertEqual(list(second.rglob('__pycache__')), [])
+                changed.unlink()
+                missing = self.run_([], self.tmp, ok=False, brain=first / 'bin/brain')
+                self.assertIn('ModuleNotFoundError', missing)
+            finally:
+                if scenario._runtime_bytecode is not None:
+                    scenario._runtime_bytecode.cleanup()
+
+    def test_commit_avoids_existing_path_queries_and_preserves_owned_deletions(self):
+        root = self.init('alice')
+        deleted = root / 'deleted.txt'
+        deleted.write_text('tracked\n')
+        self.git('add', 'deleted.txt', cwd=root)
+        self.git('commit', '-qm', 'tracked deletion fixture', cwd=root)
+        deleted.unlink()
+        created = root / 'created.txt'
+        created.write_text('new owned file\n')
+        empty = root / 'empty'
+        empty.mkdir()
+        (root / 'unrelated.txt').write_text('leave this work alone\n')
+        module = self.load_fixture_source(CORE)
+        common = module._owners['TOUCHED']
+        with mock.patch.dict(os.environ, self.env, clear=True), \
+                mock.patch.object(common, 'git', wraps=common.git) as query:
+            module.Instance(root).commit([created, deleted, empty, root / 'missing'], 'owned changes')
+        lookups = [call.args for call in query.call_args_list if call.args[:1] == ('ls-files',)]
+        self.assertEqual(set(lookups), {('ls-files', '--', name) for name in ('deleted.txt', 'empty', 'missing')})
+        self.assertEqual(self.git('show', '--pretty=format:', '--name-only', 'HEAD', cwd=root).split(),
+                         ['created.txt', 'deleted.txt'])
+        self.assertEqual(self.git('status', '--porcelain', cwd=root).strip(), '?? unrelated.txt')
+
+    def test_template_bytecode_is_built_once_and_validates_changed_source(self):
+        import scenario
+        source, package = self.fixture_source()
+        state = package / 'state.py'
+        state.write_text('def current(): return "first"\n')
+        original_compile = scenario.py_compile.compile
+        with mock.patch.object(scenario, 'CORE', source), \
+                mock.patch.object(scenario, '_core_template', None), \
+                mock.patch.object(scenario.py_compile, 'compile', wraps=original_compile) as compile_source:
+            try:
+                first, second = self.tmp / 'first', self.tmp / 'second'
+                scenario.clone_fixture_core(source, first)
+                compiled = compile_source.call_count
+                scenario.clone_fixture_core(source, second)
+                if sys.platform != 'darwin':
+                    self.assertEqual(compiled, 0)
+                    return
+                self.assertEqual(compiled, len(list(package.glob('*.py'))))
+                self.assertEqual(compile_source.call_count, compiled)
+                cached = next((second / 'lib/brain/__pycache__').glob('state.*.pyc'))
+                self.assertEqual(int.from_bytes(cached.read_bytes()[4:8], 'little'), 3)
+                code = ('import sys; sys.path.insert(0, sys.argv[1]); '
+                        'from brain.state import current; '
+                        'print(current()); print(current.__code__.co_filename)')
+                def read(core):
+                    result = subprocess.run([sys.executable, '-B', '-X', 'pycache_prefix=', '-c', code, str(core / 'lib')],
+                                            env=self.env, capture_output=True, text=True, check=True)
+                    return result.stdout.splitlines()
+                self.assertEqual(read(first), ['first', str(first / 'lib/brain/state.py')])
+                changed = second / 'lib/brain/state.py'
+                stamp = changed.stat()
+                changed.write_text('def current(): return "other"\n')
+                os.utime(changed, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
+                self.assertEqual(changed.stat().st_size, stamp.st_size)
+                self.assertEqual(read(second), ['other', str(changed)])
+                self.assertEqual(read(first)[0], 'first')
+                changed.unlink()
+                missing = subprocess.run([sys.executable, '-B', '-X', 'pycache_prefix=', '-c', code, str(second / 'lib')],
+                                         env=self.env, capture_output=True, text=True)
+                self.assertNotEqual(missing.returncode, 0)
+                self.assertIn('ModuleNotFoundError', missing.stderr)
+            finally:
+                if scenario._core_template is not None:
+                    scenario._core_template.cleanup()
+
+    def test_failed_template_compilation_is_not_published(self):
+        import scenario
+        source, package = self.fixture_source()
+        candidates = []
+        def broken_compile(path, **options):
+            candidates.append(Path(path).parents[3])
+            raise RuntimeError('injected compilation error')
+        with mock.patch.object(scenario, 'CORE', source), \
+                mock.patch.object(scenario, '_core_template', None), \
+                mock.patch.object(sys, 'platform', 'darwin'), \
+                mock.patch.object(scenario.py_compile, 'compile', broken_compile):
+            with self.assertRaisesRegex(RuntimeError, 'injected compilation error'):
+                scenario.clone_fixture_core(source, self.tmp / 'failed')
+            self.assertIsNone(scenario._core_template)
+            self.assertTrue(candidates)
+            self.assertFalse(any(path.exists() for path in candidates))
+
     def fixture_source(self):
         core = self.tmp / 'source-core'
         (core / 'bin').mkdir(parents=True)
