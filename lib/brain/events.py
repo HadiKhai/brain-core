@@ -1188,7 +1188,13 @@ def maintain(op, changed):
     # document or its archive. An explicit refresh still materializes the view.
     local_only = (op.command == 'set' and changed and
                   set(changed) <= {'.brain/local.json', '.brain/inbox-seen.json'})
-    materialize = op.command not in ('wt_prune', 'wt_rm') and not op.study_handback and not local_only
+    # Connect plans and saved briefs live outside shared state. Keep their
+    # journal/lease lifecycle and replay views without ticking shared status.
+    # A connect operation that actually changes tracked state still projects it.
+    private_connect = (op.command == 'connect' and not changed
+                       and not op.changes(resources(op.inst)))
+    materialize = (op.command not in ('wt_prune', 'wt_rm') and not op.study_handback
+                   and not local_only and not private_connect)
     _, recorded_views, _ = replay(op.inst)
     selected = {n['id']: n for n in affected_nodes(op.inst, changed, op.node)}
     for n in op.inst.nodes():

@@ -61,6 +61,42 @@ class Connections(Scenario):
         return self.add(iid, "--from", src, "--repo", "brain/alice", "--commit", self.H, "--proposed", "--body", body,
                         *args, ok=ok)
 
+    def connect_at(self, root, *args, now):
+        # Exercise the real CLI and operation lifecycle through the existing
+        # isolated loader/Instance clock seam, without changing production time.
+        m = core_loader.SourceFileLoader('connect_clock', str(CORE / 'bin/brain')).load_module()
+        output = io.StringIO()
+        with mock.patch.dict(os.environ, {**self.env, 'BRAIN_ROOT': str(root)}), \
+                mock.patch.object(sys, 'argv', ['brain', *args]), \
+                mock.patch.object(m.Instance, 'now_dt', return_value=now), \
+                contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
+            m.main()
+        return output.getvalue()
+
+    def test_private_connect_modes_keep_shared_bytes_across_clock_boundary(self):
+        r = self.r
+        before = (r / 'status.md').read_bytes()
+        refreshed = re.search(rb'^Facts refreshed: (.+)$', before, re.M).group(1).decode()
+        clock = datetime.datetime.strptime(refreshed, '%Y-%m-%d %H:%M %z')
+        modes = [((), True), (('plan',), True), (('plan', '--fresh'), True),
+                 (('--fresh', '--json'), True), (('brief', 'app'), False),
+                 (('brief', 'app', '--save'), True)]
+        for i, (args, writes) in enumerate(modes, 1):
+            with self.subTest(args=args):
+                count = len((r / '.brain/events.jsonl').read_text().splitlines())
+                self.connect_at(r, 'connect', 'root', *args, now=clock + datetime.timedelta(minutes=i))
+                self.assertEqual((r / 'status.md').read_bytes(), before)
+                self.assertEqual(self.git('status', '--porcelain', cwd=r), '')
+                records = [json.loads(line) for line in (r / '.brain/events.jsonl').read_text().splitlines()][count:]
+                if writes:
+                    self.assertEqual([row['kind'] for row in records], ['begin', 'commit'])
+                    self.assertEqual(records[0]['ref'], records[1]['ref'])
+                    self.assertEqual(records[1]['data']['command'], 'connect')
+                    self.assertTrue(records[1]['data']['maintenance_ok'])
+                else:
+                    self.assertEqual(records, [])
+        self.assertIn('app', (r / '.brain/connect/root/briefs/app.md').read_text())
+
     def test_a_plan_deletes_nothing_in_a_connect_folder_moved_away(self):
         from core_loader import SourceFileLoader
         self.b(self.r, "connect", "root")
@@ -228,7 +264,16 @@ class Connections(Scenario):
         self.git("add", "-A", cwd=r)
         self.git("commit", "-qm", "more", cwd=r)
         before = self.git("status", "--porcelain", cwd=r)
-        summary = self.b(r, "connect", "root")
+        status_before = (r / 'status.md').read_text()
+        refreshed = re.search(r'^Facts refreshed: (.+)$', status_before, re.M).group(1)
+        boundary = datetime.datetime.strptime(refreshed, '%Y-%m-%d %H:%M %z') + datetime.timedelta(minutes=1)
+        started = time.monotonic()
+        summary = self.connect_at(r, "connect", "root", now=boundary)
+        print('connect-clock-evidence: ' + json.dumps(dict(
+            clock_before=refreshed, clock_after=boundary.isoformat(), seconds=time.monotonic() - started,
+            status_before=status_before, status_after=(r / 'status.md').read_text(),
+            porcelain_before=before, porcelain_after=self.git('status', '--porcelain', cwd=r),
+            diff=self.git('diff', '--', 'status.md', cwd=r))))
         self.assertIn("owners differ", summary)
         self.assertIn("client: ", summary)
         d = r / ".brain/connect/root"

@@ -2128,3 +2128,16 @@ The native resume-brief fixture accepts the routing helper's explicit `extra`
 argument and checks its empty context list. It retains the early-acknowledgement
 trap and verifies the complete restart lifecycle record is unchanged by brief
 preparation. Runtime delivery, ownership and baseline rules remain unchanged.
+
+## D22001: Private connection outputs do not refresh shared status
+
+Connection plans and saved briefs keep their normal write lock, operation lease,
+durable journal and replay views. When neither the command nor its maintenance
+changes tracked instance state, automatic status materialization is unnecessary:
+a clock boundary alone must not dirty the shared tree. Actual shared changes,
+including writes made during maintenance, still materialize their projection.
+Explicit status refresh and other commands retain their existing behavior.
+
+Regression coverage crosses the existing instance clock seam while retaining the
+original plan, digest, gating and clean-tree assertions. Connected controls cover
+private plan variants, saved and unsaved briefs, and genuine shared mutations.

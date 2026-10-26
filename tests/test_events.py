@@ -260,6 +260,36 @@ class EventAppend(Scenario):
 
 
 class EventViews(Scenario):
+    def test_connect_shared_mutation_still_materializes_projection(self):
+        for during_maintenance in (False, True):
+            with self.subTest(during_maintenance=during_maintenance):
+                r = self.init('demo-' + str(during_maintenance).lower())
+                inst = instance.Instance(r)
+                before = (r / 'status.md').read_bytes()
+                clock = inst.now_dt() + __import__('datetime').timedelta(minutes=1)
+                dispatch = events.dispatch_landings
+                def shared_write():
+                    (r / 'backlog.md').write_text('# Backlog\n\n- public pending work\n')
+                def maintain_write(inst):
+                    shared_write()
+                    return dispatch(inst)
+                with mock.patch.object(instance.Instance, 'now_dt', return_value=clock), \
+                        mock.patch.object(events, 'dispatch_landings',
+                                          side_effect=maintain_write if during_maintenance else dispatch), \
+                        instance.brain_lock(r):
+                    with events.Command(r, command='connect') as op:
+                        self.assertTrue(events.lease_live(op.inst, op.ref))
+                        if not during_maintenance:
+                            shared_write()
+                self.assertFalse(events.lease_live(op.inst, op.ref))
+                self.assertNotEqual((r / 'status.md').read_bytes(), before)
+                self.assertIn('Facts refreshed: ' + clock.strftime('%Y-%m-%d %H:%M %z')[:-2] + ':00',
+                              (r / 'status.md').read_text())
+                self.assertEqual(events.read(inst)[-1]['data']['resources'][0]['id'],
+                                 events.digest(b'backlog.md'))
+                self.assertEqual(events.pending(events.read(inst)), {})
+                self.assertTrue(events.read(inst)[-1]['data']['maintenance_ok'])
+
     def test_node_refresh_does_not_adopt_a_foreign_live_subtree(self):
         r = self.init('demo')
         for nid in ('app', 'app/child', 'other'):
