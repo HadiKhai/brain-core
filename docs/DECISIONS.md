@@ -1,6 +1,6 @@
 # Code decisions
 
-## D31005: Reconcile only durably recorded local queue processes
+## D31005: Reconcile only absent, durably recorded local queue processes
 
 Before releasing a verifier bootstrap to exec, the foreground queue records the
 child PID and OS start stamp, verifies it is its direct child, and binds that
@@ -10,24 +10,27 @@ expiry only refuses recovery and does not stop normal execution. Legacy
 dispatched runs without this evidence retain their existing refusal.
 
 Explicit `queue run --once --request-id ID --recover` serializes on a stable
-per-request takeover lock and writes a durable intent before action. It requires
-the original owner to be absent (live, reused and unknown PIDs all refuse), the
-exact current job/attempt/binding, unchanged run and lease, and matching recorded
-process identities. It rechecks those operands after intent and immediately
-before each singular SIGTERM, including a final PID/start check at the signal
-boundary. No process-group kill, discovery-based ownership, SIGKILL escalation,
-host mutation or provider capability is added.
+per-request takeover lock and writes a durable intent before reconciliation.
+The original owner and every recorded process must already be absent. A live,
+reused or unknown identity refuses, preserving run/attempt evidence and recording
+why. A PID/start observation cannot authorize a later numeric-PID signal: this
+path obtains no lifetime-bound process handle and sends no process signals.
+A matching live process therefore refuses automatic stop even if every recorded
+ownership field still matches. No additional observation closes PID reuse.
 
-Only after all recorded processes are absent and the original inherited lease
-can be exclusively acquired does recovery interrupt the request and attempt.
-It never replays verifier work, publishes success, wakes a coordinator or settles
-a host thread. Unknown or still-running descendants retain uncertainty; escaped
-or unrecorded descendants are not claimed or signalled. A partial stop or crash
-after intent requires inspection and is never automatically signalled again.
-Refusals retain run/attempt bytes and record why in separate private evidence.
-These remain separate durable writes, not a multi-file transaction. PID/start
-observation followed by signalling is not a kernel-level conditional signal;
-external PID reuse or namespace changes between system calls are not excluded.
+Only after the recorded processes are already gone, the exact job/attempt/binding
+and run/lease remain unchanged, and the original inherited lease can be
+exclusively acquired does recovery interrupt the request and attempt. It never
+replays verifier work, publishes success, wakes a coordinator or settles a host
+thread. Unknown descendants retain uncertainty; unrecorded descendants are not
+claimed. Legacy intent or potentially sent-signal evidence requires inspection.
+Separate durable writes are not a multi-file transaction or namespace lock.
+
+Takeover audits remain beside requests as `<ID>.takeover.json`. Both ordinary
+selection and queue projection enumerate only exact 32-hex request basenames;
+audits never enter the request parser. Explicit request validation remains
+strict, including rejection of an audit basename. Successful and refused audits
+are retained and do not block selection/projection of another queued request.
 
 ## D31004: Fence queued terminal publication with the live foreground capability
 

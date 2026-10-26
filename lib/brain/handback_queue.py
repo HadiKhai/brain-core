@@ -239,7 +239,8 @@ def queue_publication_context(n, request):
 def queue_projection(n, identity, strict=False):
     try:
         data = read_queue_request(n, identity)
-        waiting = sorted((read_queue_request(n, p.stem) for p in queue_path(n, identity).parent.glob('*.json')),
+        waiting = sorted((read_queue_request(n, p.stem) for p in queue_path(n, identity).parent.glob('*.json')
+                          if re.fullmatch('[0-9a-f]{32}', p.stem)),
                          key=lambda r: (r['at'], r['id']))
         waiting = [r['id'] for r in waiting if r['state'] == 'queued']
         return {'request_id': identity, 'state': data['state'], 'owner': data['owner'],
@@ -256,7 +257,8 @@ def run_queue_once(inst, n, identity=None, recover=False):
     if recover and identity is None:
         raise ValueError('recovery requires an explicit request ID')
     if identity is None:
-        waiting = sorted((read_queue_request(n, p.stem) for p in (n['dir'] / 'handback-queue').glob('*.json')),
+        waiting = sorted((read_queue_request(n, p.stem) for p in (n['dir'] / 'handback-queue').glob('*.json')
+                          if re.fullmatch('[0-9a-f]{32}', p.stem)),
                          key=lambda r: (r['at'], r['id']))
         identity = next((r['id'] for r in waiting if r['state'] == 'queued'), None)
     if identity is None:

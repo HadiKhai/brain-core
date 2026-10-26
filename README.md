@@ -162,10 +162,11 @@ An active replacement attempt makes the previous hand-back historical until an e
 terminal publication replaces it. `--enqueue` returns a durable request ID and requires an
 explicit `brain queue run website --once`. Recovery requires an exact request:
 `brain queue run website --once --request-id ID --recover`. For recorded local
-verifier processes, it writes intent, checks owner/start times and the original
-lease, then sends SIGTERM only to matching PIDs. After recorded processes exit
-and the inherited lease is free, the attempt becomes interrupted. It never
-replays verification or certifies success. Live/reused/unknown owners, expired
+verifier processes, it writes intent and checks owner/start times and the original
+lease. Every recorded process must already be gone and the inherited lease free
+before the attempt becomes interrupted. A live process refuses automatic stop:
+this path has no lifetime-bound process handle and never signals a numeric PID.
+It never replays verification or certifies success. Live/reused/unknown owners, expired
 24-hour takeover authority, changed identities, and unknown descendants retain
 the run with a refusal record. Legacy dispatched runs remain unadopted.
 

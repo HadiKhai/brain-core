@@ -7,7 +7,6 @@ import fcntl
 import json
 import math
 import os
-import signal
 import stat
 import subprocess
 from pathlib import Path
@@ -69,16 +68,6 @@ def write_takeover(n, identity, audit):
     _m_common.atomic_write(path, json.dumps(audit, sort_keys=True) + '\n', private=True)
 
 
-def owned_process_signal(pid, stamp):
-    """Last identity observation immediately precedes the singular signal."""
-    if stamp in (None, '', 'unknown') or _m_machine.process_stamp(pid) != stamp:
-        raise ValueError('owned process identity changed before signal')
-    try:
-        os.kill(pid, signal.SIGTERM)
-    except ProcessLookupError:
-        pass  # disappearance is checked again before settlement
-
-
 def _takeover_check(inst, n, expected, lease_fd, lock_fd):
     held = os.fstat(lock_fd)
     named = os.stat(_m_queue.queue_path(n, expected['id']).with_suffix('.takeover.lock'), follow_symlinks=False)
@@ -116,8 +105,10 @@ def _takeover_check(inst, n, expected, lease_fd, lock_fd):
         raise ValueError('owned process inventory invalid')
     for pid, stamp in children:
         observed = _m_machine.process_stamp(pid)
-        if observed is not None and observed != stamp:
-            raise ValueError('owned process identity is foreign, reused or unknown')
+        if observed is not None:
+            if observed != stamp:
+                raise ValueError('owned process identity is foreign, reused or unknown')
+            raise ValueError('automatic stop refused: live recorded process has no lifetime-bound identity handle')
     fresh = _m_instance.Instance(inst.root)
     current_node = fresh.node(n['id'])
     row = _m_jobs.open_job(_m_jobs.read_jobs(current_node) or [], data['args'].get('branch'))
@@ -134,8 +125,8 @@ def _takeover_check(inst, n, expected, lease_fd, lock_fd):
 def takeover_owned_run(inst, n, identity):
     """Return True only when this exact dispatched request was interrupted safely.
 
-    A busy inherited lease after stopping recorded children leaves reconciliation
-    pending. Unrecorded/escaped descendants are never searched for or signalled.
+    Only already-absent recorded processes can be reconciled. A live process
+    refuses: PID/start observations do not provide a lifetime-bound signal handle.
     """
     path = _m_queue.queue_path(n, identity)
     lock_path = path.with_suffix('.takeover.lock')
@@ -171,20 +162,6 @@ def takeover_owned_run(inst, n, identity):
             # Intent is durable before even the first ownership probe/action.
             lease_fd = os.open(path.with_suffix('.lease'), os.O_RDWR | os.O_NOFOLLOW)
             _takeover_check(inst, n, data, lease_fd, lock)
-            for pid, stamp in data['run']['processes']:
-                current_node, row = _takeover_check(inst, n, data, lease_fd, lock)
-                if _m_machine.process_stamp(pid) is None:
-                    continue
-                # Record potential action BEFORE signalling; a crash cannot replay it.
-                audit['signalled'].append([pid, stamp])
-                write_takeover(n, identity, audit)
-                _takeover_check(inst, n, data, lease_fd, lock)
-                owned_process_signal(pid, stamp)
-            deadline = time.monotonic() + 2
-            while any(_m_machine.process_stamp(pid) == stamp for pid, stamp in data['run']['processes']):
-                if time.monotonic() >= deadline:
-                    raise ValueError('owned process still live; partial takeover retained')
-                time.sleep(.02)
             current_node, row = _takeover_check(inst, n, data, lease_fd, lock)
             try:
                 fcntl.flock(lease_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
