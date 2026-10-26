@@ -741,6 +741,8 @@ def run_verify_stream(inst, n, branch, verify, w, env, token, lane=None):
                 os.close(gate_read)
                 gate_read = None
                 _m_machine.machine_child(token, proc.pid)
+                from . import owned_runs
+                owned_runs.queue_child(proc.pid)
                 payload = memoryview(json.dumps([verify, env]).encode())
                 while payload:
                     payload = payload[os.write(gate_write, payload):]

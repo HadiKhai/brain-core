@@ -426,7 +426,7 @@ def main():
     cmd("queue", _m_queue_priority.cmd_gate_queue, "run one hand-back or explicitly reorder queued native verify tokens",
         opt("action", choices=['run'], nargs='?'), opt('id', nargs='?'), opt('--once', action='store_true'),
         opt('--request-id'), opt('--node'), opt('--move'), opt('--before'),
-        opt('--recover', action='store_true', help='recover one exact quiescent queue runner; unknown descendants stay retained'))
+        opt('--recover', action='store_true', help='recover an exact queue run; stop only its proven local processes; unknown descendants stay retained'))
     cmd("dispatch", _m_dispatcher.cmd_dispatch, "bounded read-only plan of explicit root/operator asks; empty scan is silent",
         opt('--limit', type=int, default=50), opt('--node-limit', type=int, default=200),
         opt('--run', action='store_true', help='enqueue only current questions through the durable coalesced wake path'))

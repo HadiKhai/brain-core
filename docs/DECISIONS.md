@@ -1,5 +1,34 @@
 # Code decisions
 
+## D31005: Reconcile only durably recorded local queue processes
+
+Before releasing a verifier bootstrap to exec, the foreground queue records the
+child PID and OS start stamp, verifies it is its direct child, and binds that
+inventory to the original owner, boot-scoped host, run/lease ID and lease inode.
+The record grants takeover authority for 24 hours from first registration;
+expiry only refuses recovery and does not stop normal execution. Legacy
+dispatched runs without this evidence retain their existing refusal.
+
+Explicit `queue run --once --request-id ID --recover` serializes on a stable
+per-request takeover lock and writes a durable intent before action. It requires
+the original owner to be absent (live, reused and unknown PIDs all refuse), the
+exact current job/attempt/binding, unchanged run and lease, and matching recorded
+process identities. It rechecks those operands after intent and immediately
+before each singular SIGTERM, including a final PID/start check at the signal
+boundary. No process-group kill, discovery-based ownership, SIGKILL escalation,
+host mutation or provider capability is added.
+
+Only after all recorded processes are absent and the original inherited lease
+can be exclusively acquired does recovery interrupt the request and attempt.
+It never replays verifier work, publishes success, wakes a coordinator or settles
+a host thread. Unknown or still-running descendants retain uncertainty; escaped
+or unrecorded descendants are not claimed or signalled. A partial stop or crash
+after intent requires inspection and is never automatically signalled again.
+Refusals retain run/attempt bytes and record why in separate private evidence.
+These remain separate durable writes, not a multi-file transaction. PID/start
+observation followed by signalling is not a kernel-level conditional signal;
+external PID reuse or namespace changes between system calls are not excluded.
+
 ## D31004: Fence queued terminal publication with the live foreground capability
 
 Final queued publication and invalidation reread the job, attempt and dispatched
