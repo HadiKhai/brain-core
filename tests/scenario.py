@@ -20,12 +20,31 @@ import sys
 import tempfile
 import time
 import unittest
+import types
 from pathlib import Path
 
 CORE = Path(os.environ.get("BRAIN_CORE") or Path(__file__).resolve().parent.parent)
 
+# Source-only per-worker APFS template; instance state is always initialized anew.
+_core_template = None
+
+
+def clone_fixture_core(source, destination, **kwargs):
+    global _core_template
+    if Path(source) != CORE or sys.platform != 'darwin':
+        return shutil.copytree(source, destination, **kwargs)
+    if _core_template is None:
+        _core_template = tempfile.TemporaryDirectory(prefix='brain-test-core-')
+        shutil.copytree(source, Path(_core_template.name) / 'core', **kwargs)
+    # APFS clones have independent inodes and copy-on-write file contents. Never
+    # use hard links: scenarios deliberately edit their installed core copies.
+    subprocess.run(['/bin/cp', '-cR', str(Path(_core_template.name) / 'core'),
+                    str(destination)], check=True, capture_output=True, text=True)
+    return str(destination)
+
 
 class Scenario(unittest.TestCase):
+    fixture_init_in_process = False
     def setUp(self):
         # A real verify may enclose the test runner. Its descriptor stays open and
         # locked; its environment proof must not identify our temporary instances.
@@ -78,9 +97,49 @@ class Scenario(unittest.TestCase):
 
     def init(self, name, operator=None):
         root = self.tmp / name
-        self.run_(["init", str(root), "--operator", operator or name, "--title", f"{name} brain",
-                   "--tz", "UTC"], cwd=self.tmp, brain=CORE / "bin" / "brain")
+        args = ["init", str(root), "--operator", operator or name, "--title", f"{name} brain",
+                "--tz", "UTC"]
+        if self.fixture_init_in_process:
+            self.fixture_cli(args, cwd=self.tmp, brain=CORE / 'bin/brain')
+        else:
+            self.run_(args, cwd=self.tmp, brain=CORE / 'bin/brain')
         return root
+
+
+    def fixture_cli(self, args, cwd, brain=None):
+        """Fresh command state for setup only; never replace an asserted CLI call."""
+        if getattr(self, '_evidence', None):
+            return self.run_(args, cwd=cwd, brain=brain)
+        stdout, stderr = io.StringIO(), io.StringIO()
+        previous = Path.cwd()
+        packages = {key for key in sys.modules if key.startswith('_brain_fixture_')}
+        try:
+            with mock.patch.dict(os.environ, self.env, clear=True), \
+                    mock.patch.object(sys, 'argv', [str(brain or cwd / 'core/bin/brain'), *args]), \
+                    mock.patch.object(sys, 'dont_write_bytecode', True), \
+                    contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                os.chdir(cwd)
+                module = core_loader.SourceFileLoader('fixture_setup', str(brain or cwd / 'core/bin/brain')).load_module()
+                nodes = module._owners['cmd_init']
+                copy = types.SimpleNamespace(**vars(shutil))
+                copy.copytree = clone_fixture_core
+                with mock.patch.object(nodes, 'shutil', copy):
+                    try:
+                        module.main()
+                    except SystemExit as error:
+                        if error.code not in (None, 0):
+                            self.fail('fixture command failed: ' + ' '.join(args) + '\n' + stdout.getvalue() + stderr.getvalue())
+        finally:
+            os.chdir(previous)
+            # The next setup call gets new TOUCHED, context variables and caches,
+            # just as a subprocess would; no fixture package survives the call.
+            for key in list(sys.modules):
+                if key.startswith('_brain_fixture_') and key not in packages:
+                    del sys.modules[key]
+        return stdout.getvalue() + stderr.getvalue()
+
+    def fixture_b(self, root, *args):
+        return self.fixture_cli(list(args), cwd=root)
 
     def b(self, root, *args, ok=True):
         return self.run_(list(args), cwd=root, ok=ok)
@@ -108,10 +167,11 @@ class Scenario(unittest.TestCase):
 
 
 class AutonomyProject(Scenario):
+    fixture_init_in_process = True
     def project(self):
         r = self.init('alice')
         home = self.repo(self.tmp / 'code' / 'app')
-        self.b(r, 'new', 'app', '--title', 'App', '--home', str(home))
+        self.fixture_b(r, 'new', 'app', '--title', 'App', '--home', str(home))
         self.b(r, 'wt', 'add', 'app', 'job-a')
         local = json.loads((r / '.brain' / 'local.json').read_text())
         wt = Path(local['nodes']['app']['worktrees']['job-a']['path'])

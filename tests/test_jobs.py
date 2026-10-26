@@ -872,6 +872,7 @@ class AutonomyHandbackPaths(AutonomyProject):
 
 
 class Workflow(Scenario):
+    fixture_init_in_process = True
     """Less ceremony: core changes reach every coordinator, green verify runs are reused, contracts and advice."""
 
     job = _test_verify.WorkerReadyPackets.job
