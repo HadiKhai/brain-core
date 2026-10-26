@@ -16,6 +16,39 @@ from scenario import CORE, Scenario
 
 
 class ParallelSelftest(Scenario):
+    def test_duration_order_preserves_inventory_and_prioritizes_longer_tests(self):
+        folder, env, command = self.result_fixture(
+            'def test_fast(): pass\ndef test_unknown(): pass\ndef test_slow(): pass\n')
+        previous = folder / 'previous.jsonl'
+        previous.write_text('\n'.join(json.dumps(dict(event='completed', nodeid=nodeid, duration=duration))
+                                      for nodeid, duration in (
+                                          ('tests/test_brain.py::test_fast', 1),
+                                          ('tests/test_brain.py::test_slow', 20))) + '\n')
+        result = subprocess.run(command + ['--duration-order=' + str(previous)],
+                                cwd=folder, env=env, capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        rows = [json.loads(line) for line in (folder / 'results.jsonl').read_text().splitlines()]
+        completed = [row for row in rows if row['event'] == 'completed']
+        self.assertEqual([row['nodeid'] for row in completed],
+                         ['test_sample.py::test_slow', 'test_sample.py::test_fast', 'test_sample.py::test_unknown'])
+        self.assertTrue(all(row['outcome'] == 'passed' for row in completed))
+        self.assertEqual(rows[-1]['collected'], 3)
+
+    def test_duration_order_refuses_empty_and_unmatched_inputs(self):
+        folder, env, command = self.result_fixture('def test_only(): pass\n')
+        previous = folder / 'previous.jsonl'
+        for content in ('', json.dumps(dict(event='completed', nodeid='other.py::test_missing', duration=1))):
+            with self.subTest(content=content):
+                previous.write_text(content)
+                output = folder / 'results.jsonl'
+                output.unlink(missing_ok=True)
+                result = subprocess.run(command + ['--duration-order=' + str(previous)],
+                                        cwd=folder, env=env, capture_output=True, text=True, timeout=30)
+                self.assertEqual(result.returncode, 4, result.stdout + result.stderr)
+                self.assertIn('cannot use duration-order:', result.stdout + result.stderr)
+                rows = [json.loads(line) for line in output.read_text().splitlines()]
+                self.assertFalse(any(row['event'] == 'completed' for row in rows))
+
     def test_parallel_workers_use_pinned_pytest_suite_and_no_restarts(self):
         m = core_loader.SourceFileLoader('parallel_selftest_fixture', str(CORE / 'bin/brain')).load_module()
         with mock.patch.object(m.subprocess, 'run', return_value=mock.Mock(returncode=0)) as execute:
