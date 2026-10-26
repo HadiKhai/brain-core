@@ -2404,3 +2404,42 @@ inside an explicit command handler. Its callable source is a shared lane input,
 so changing recovery invalidates every consumer's verification. A regression
 checks this selection and keeps the durability tests owned exactly once by the
 machine lane. Recovery ownership, refusal and persistence semantics are unchanged.
+
+## D1601: Retain quiet notices before publishing a daily inbox brief
+
+An explicit machine-local message policy gates typed notification publication
+using the instance timezone. Deferred notices survive restarts. One immutable
+daily snapshot owns inbox delivery; interrupted publication reuses that snapshot
+and idempotent inbox marker. New notices cannot overwrite it. Questions retain
+their immediate path and ordinary notices have no implicit urgency override.
+Morning briefs are inbox-only and never widen root's question-only wake rule.
+Other host and messaging channels require their own delivery integration.
+
+## D1602: Revalidate prepared task authority at native initial launch
+
+Task plans use their contract's real separation reason. Required mode refuses a
+missing reason. The native initial-launch path requires the exact active task,
+job and contract binding and rechecks authority, dependencies and holds before
+calling the lifecycle adapter. A prepared attempt keeps its allocated capacity
+slot while competing work still counts. Arbitrary Markdown never authorizes a
+host launch. Existing lifecycle receipts own uncertain-outcome recovery.
+
+## D1603: Combine documented native run starts with owned queue evidence
+
+The host exporter reads actual active-run identity and its matching absolute
+start timestamp from the native thread-read schema. Fresh bound observations
+combine with the coalesced Brain queue for busy-coordinator advisories. Host
+question requests, last-update times and unobserved queue state do not substitute
+for queued wakes or run starts. Unsupported host-only queue observations remain
+unknown.
+
+## D28003: Reserve an operator brief's local delivery day before publication
+
+The explicit operator inbox summary aggregates retained quiet-hour notices from
+active nodes. It uses a separate immutable snapshot and daily reservation from
+node inbox briefs. Recovery claims the current local delivery day before inbox
+publication, preventing a recovered snapshot and a fresh snapshot on that day.
+Later notices remain retained for a subsequent day. Empty calls reserve nothing.
+The instance timezone and explicit quiet-hour policy apply; questions keep their
+existing immediate path. This local boundary neither sends host messages nor
+configures schedules, and an inbox receipt does not prove person delivery.

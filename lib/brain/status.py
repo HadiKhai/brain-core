@@ -874,6 +874,8 @@ def cmd_due(a):
     items = coordinator_due_items(inst, nodes, include_handled=getattr(a, 'handled', False))
     from . import communication as _m_communication
     items += _m_communication.communication_items(inst, nodes)
+    from . import communication_policy
+    items += communication_policy.morning_items(inst, nodes)
     from . import host_observations as _m_host_observations
     try:
         items += _m_host_observations.host_observation_items(inst, nodes)

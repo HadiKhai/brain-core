@@ -78,6 +78,9 @@ def communication_record(inst, n, kind, text, key, question=None):
         typed = {**typed, 'options': [{**o, 'label': _m_nodes.import_text(o['label'], terms)} for o in typed['options']]}
     identity = _m_hosts.wake_binding(json.dumps([n['id'], kind, key]))
     record = {'id': identity, 'node': n['id'], 'kind': kind, 'text': text, 'at': inst.now(), **typed}
+    from . import communication_policy
+    if not typed and communication_policy.quiet_now(inst):
+        record['deferred'] = True
     with communication_store(inst) as data:
         records = data['questions'] if typed else data['notices']
         previous = records.get(identity)
@@ -88,13 +91,15 @@ def communication_record(inst, n, kind, text, key, question=None):
             record = previous
         else:
             records[identity] = record
+    if record.get('deferred'):
+        return record  # durable source retained; morning publication owns its inbox delivery
     marker = '<!-- communication:' + identity + ' -->'
     # Receipt first: interrupted inbox publication is recoverable by the next same-key call.
     _m_transitions.inbox_append(n['dir'], '- ' + inst.now() + ' from notification: ' + kind + ': ' + text + ' ' + marker + '\n', marker)
     if typed and 'answer' not in record:
         _m_hosts.request_wake(inst, n, 'question:' + identity,
                               items=[{'id': identity, 'kind': 'question'}])
-    elif n['id'] != 'root':
+    elif n['id'] != 'root' and not record.get('deferred'):
         # Coordinator doorbells may include results; root's channel carries questions only.
         target, _ = _m_hosts.wake_target(inst, n)
         if target['id'] != 'root':

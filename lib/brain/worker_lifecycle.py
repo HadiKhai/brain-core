@@ -322,6 +322,8 @@ def launch_worker(inst, n, key, rpc=None):
             fresh, current, row = restart_source(inst, n['id'], key)
             if row is None or current['local'].get('workers', {}).get(key):
                 return {'job': key, 'state': 'idle'}
+            from . import task_dispatch
+            task_dispatch.validate_launch_job(fresh, current, row)
             workspace = restart_workspace(current, row)
             projects, inventory, callers = _m_host.lifecycle_inventory(current, rpc)
             def publish(value):
@@ -360,6 +362,7 @@ def launch_worker(inst, n, key, rpc=None):
                 _, checked, live = restart_source(inst, n['id'], key)
                 if live is None or checked['local'].get('workers', {}).get(key) or restart_workspace(checked, live) != workspace:
                     raise ValueError('job changed before initial launch; intent retained')
+                task_dispatch.validate_launch_job(fresh.__class__(fresh.root), checked, live)
                 response = _m_host.host_object(rpc, 't3_thread_launch', {'title': row['Job'],
                     'projectId': current['local'].get('home_project') or projects[0],
                     'workspaceStrategy': {'type': 'existing_worktree', 'worktreePath': workspace, 'branch': row['Job']},

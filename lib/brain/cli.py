@@ -14,6 +14,7 @@ from . import action_guard as _m_action_guard
 from . import briefs as _m_briefs
 from . import check as _m_check
 from . import communication as _m_communication
+from . import communication_policy as _m_communication_policy
 from . import common as _m_common
 from . import events as _m_events
 from . import connect as _m_connect
@@ -406,6 +407,8 @@ def main():
         "id", opt("kind", choices=_m_communication.COMMUNICATION_KINDS), "text",
         opt("--key", required=True, help="stable idempotency key"), opt("--question-file"))
     cmd("question-answer", _m_communication.cmd_question_answer, "answer one typed question", "id", "choice")
+    cmd('morning-brief', _m_communication_policy.cmd_morning_brief, 'publish a retained quiet-hours inbox brief; never wakes', 'id',
+        opt('--operator', action='store_true', help='root only: aggregate retained notices once per local delivery day'))
     cmd("msg", _m_messages.cmd_msg, "format start/done/blocked/question for a coordinator (does not send)",
         "id", opt("kind", choices=_m_messages.MESSAGE_KINDS), "message", opt("--branch"), opt("--report"))
     cmd("handback", _m_jobs.cmd_handback, "done/blocked/question hand-back; worker messages are start/done/blocked/question",

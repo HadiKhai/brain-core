@@ -86,7 +86,7 @@ def coordinator_native_queue(inst, n, now):
 
 def coordinator_queue_view(inst, n, now, host_record=None):
     """Use the transport owner's bound turn projection when that hook is installed."""
-    if host_record and host_record['thread'] == n['local'].get('coordinator'):
+    if host_record and host_record.get('queued') is not None and host_record['thread'] == n['local'].get('coordinator'):
         queued = host_record['queued']
         source = 'fresh_host_snapshot'
     else:
@@ -114,6 +114,8 @@ def coordinator_queue_view(inst, n, now, host_record=None):
 def coordinator_advisories(inst):
     now = inst.now_dt().timestamp()
     host = coordinator_host_runs(inst, now)
+    from . import host_observations
+    host.update(host_observations.host_coordinator_runs(inst))
     items = []
     for n in inst.nodes():
         if n['archived'] or not n['local'].get('coordinator'):
@@ -139,7 +141,7 @@ def coordinator_advisories(inst):
                 busy_minutes = 20
         except (ValueError, TypeError):
             busy_minutes = 20
-        if rec and rec['queued'] and rec['status'] == 'active' and now - rec['started'] >= busy_minutes * 60:
+        if rec and queue['count'] and rec['status'] == 'active' and now - rec['started'] >= busy_minutes * 60:
             add('coordinator-busy', [rec['run'], rec['started']],
                 f"{n['id']}: coordinator active for {int((now - rec['started']) / 60)} min "
                 'with wakes queued behind this run; inspect its current work.')

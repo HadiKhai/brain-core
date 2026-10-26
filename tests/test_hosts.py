@@ -1709,6 +1709,9 @@ class NativeHostExport(Scenario):
         self.inst.save_local()
 
     def rpc(self, name, args):
+        if name == 't3_thread_read':
+            return {'thread': {'threadId': args['threadId'], 'activeRunId': None,
+                               'latestRunId': 'run-root', 'status': 'running'}, 'recentRuns': []}
         if name == 't3_thread_list':
             return {'threads': [{'threadId': 'fixture-root', 'status': 'running', 'latestRunId': 'run-root'},
                                 {'threadId': 'fixture-worker', 'status': 'failed', 'latestRunId': 'run-worker'}],
@@ -1737,6 +1740,36 @@ class NativeHostExport(Scenario):
         with mock.patch.object(self.m, 'host_native_call') as call:
             self.m.host_export_if_enabled(self.inst)
             call.assert_not_called()
+
+    def test_real_run_start_and_native_queue_produce_busy_advisory_without_invented_host_queue(self):
+        import datetime
+        now = self.inst.now_dt()
+        started = (now - datetime.timedelta(minutes=25)).isoformat()
+        def rpc(name, args):
+            if name == 't3_thread_read':
+                return {'thread': {'threadId': 'fixture-root', 'activeRunId': 'run-root',
+                                   'latestRunId': 'run-root', 'status': 'running'},
+                        'recentRuns': [{'runId': 'run-root', 'startedAt': started, 'status': 'running'}]}
+            return self.rpc(name, args)
+        self.m.host_export(self.inst, rpc=rpc)
+        record = self.m.host_snapshot(self.inst)['records'][0]
+        self.assertEqual(record['started_at'], started)
+        self.assertNotIn('queued_wakes', record)
+        with mock.patch.object(self.m, 'coordinator_queue_view', return_value={
+                'count': 1, 'oldest_at': now.timestamp() - 30, 'episode': ['fixture'], 'source': 'coalesced_native_queue'}):
+            items = self.m.coordinator_advisories(self.inst)
+        self.assertEqual([i['kind'] for i in items], ['coordinator-busy'])
+
+    def test_unknown_or_mismatched_active_run_does_not_invent_start_time(self):
+        def rpc(name, args):
+            if name == 't3_thread_read':
+                return {'thread': {'threadId': 'fixture-root', 'activeRunId': 'new-run',
+                                   'latestRunId': 'new-run', 'status': 'running'},
+                        'recentRuns': [{'runId': 'run-root', 'startedAt': '2026-01-01T00:00:00Z', 'status': 'running'}]}
+            return self.rpc(name, args)
+        self.m.host_export(self.inst, rpc=rpc)
+        record = self.m.host_snapshot(self.inst)['records'][0]
+        self.assertIsNone(record['started_at'])
 
 
 class WakeIdentityTypes(Scenario):

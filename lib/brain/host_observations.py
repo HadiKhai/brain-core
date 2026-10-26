@@ -107,7 +107,27 @@ def _host_export(inst, rpc=None):
         pending = call('t3_pending_request_list', {'threadId': binding['thread']}).get('requestIds')
         if not isinstance(pending, list) or len(pending) > 200 or any(not isinstance(p, str) or not p for p in pending):
             raise ValueError('invalid pending request export')
+        active_run, started_at = None, None
+        if binding['role'] == 'coordinator':
+            # These are documented native fields. updatedAt/requestedAt measure
+            # different events and cannot stand in for an actual running start.
+            detail = call('t3_thread_read', {'threadId': binding['thread'], 'limit': 1,
+                                           'maxCharsPerItem': 1, 'runLimit': 50})
+            thread, runs = detail.get('thread'), detail.get('recentRuns')
+            if not isinstance(thread, dict) or thread.get('threadId') != binding['thread'] or not isinstance(runs, list):
+                raise ValueError('invalid native coordinator run evidence')
+            active = thread.get('activeRunId')
+            matching = [r for r in runs if isinstance(r, dict) and r.get('runId') == active]
+            if (isinstance(active, str) and active and thread.get('status') == row['status'] == 'running'
+                    and thread.get('latestRunId') == row.get('latestRunId') == active and len(matching) == 1
+                    and matching[0].get('status') == 'running'):
+                at = matching[0].get('startedAt')
+                parsed = inst.parse_time(at) if isinstance(at, str) else None
+                # Native timestamps include their zone. Never infer one for host evidence.
+                if parsed and re.search(r'(Z|[+-][0-9]{2}:[0-9]{2})$', at) and parsed <= inst.parse_time(observed):
+                    active_run, started_at = active, at
         records.append({**binding, 'status': row['status'], 'run': row.get('latestRunId'),
+                        'active_run': active_run, 'started_at': started_at,
                         'pending': sorted({_m_hosts.wake_binding(json.dumps([binding['thread'], p])) for p in pending})})
     # Rebinding while reads were in flight cannot publish stale ownership as fresh.
     if host_bindings(inst.__class__(inst.root)) != bindings:
@@ -151,6 +171,25 @@ def host_export_runs(inst):
     value = host_snapshot(inst)
     return [{**r, 'error': 'host run failed'} for r in value['records']
             if r['role'] == 'worker' and r['status'] == 'failed' and r['run']] if value else []
+
+
+def host_coordinator_runs(inst):
+    """Fresh bound native starts; queue age/count belongs to the native wake owner."""
+    try:
+        value = host_snapshot(inst)
+        result = {}
+        for r in value['records'] if value else []:
+            at = r.get('started_at')
+            started = inst.parse_time(at) if isinstance(at, str) else None
+            if (r['role'] == 'coordinator' and r['status'] == 'running' and
+                    isinstance(r.get('active_run'), str) and r['active_run'] == r.get('run')
+                    and started and re.search(r'(Z|[+-][0-9]{2}:[0-9]{2})$', at)
+                    and started <= inst.parse_time(value['observed_at'])):
+                result[r['node']] = {**r, 'run': r['active_run'], 'status': 'active',
+                                     'started': started.timestamp(), 'queued': None}
+        return result
+    except (OSError, ValueError, TypeError, AttributeError, KeyError):
+        return {}
 
 
 def host_observation_items(inst, nodes=None):

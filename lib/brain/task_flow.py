@@ -137,7 +137,7 @@ def completion(n, row, seen=None, records=None):
         raise ValueError('unfinished dependencies or successors prevent completion')
 
 
-def holds(inst, n, row=None):
+def holds(inst, n, row=None, exclude_task=None):
     reasons = []
     current = n
     while current:
@@ -173,9 +173,10 @@ def holds(inst, n, row=None):
         records = _m_tasks.read_records(n)
         active_states = ('in-progress', 'in-review', 'testing')
         live = [r for r in _m_jobs.read_jobs(n) or [] if not r.get('Ended') and
+                (not exclude_task or r.get('Task') != exclude_task) and
                 (not r.get('Task') or records.get(r['Task'], {}).get('status') in active_states)]
         identities = {_m_jobs.job_key(r) for r in live}
-        identities.update(a['id'] for task in records.values() if task['status'] in active_states
+        identities.update(a['id'] for task in records.values() if task['status'] in active_states and task['id'] != exclude_task
                           for a in task.get('attempts', []) if a.get('state') == 'open' and a.get('id'))
         if len(identities) >= limit:
             reasons.append('configured active-attempt capacity is occupied')
@@ -303,6 +304,9 @@ def cmd_task_flow(a):
 
 
 def register(actions):
+    from . import task_dispatch
+    p = actions.add_parser('launch', help='explicitly launch one contract-bound prepared native job')
+    p.add_argument('node'); p.add_argument('task_id'); p.set_defaults(f=task_dispatch.cmd_launch_task)
     p = actions.add_parser('launch-plan', help='contract-gated native launch commands; no host action')
     p.add_argument('node'); p.add_argument('task_id', nargs='?'); p.add_argument('--branch')
     p.set_defaults(f=cmd_task_flow)
@@ -335,17 +339,10 @@ def launch_plan(inst, n, task_id=None, branch=None):
     _m_tasks.prepare_start(n, task_id, branch or '')
     row = rows[task_id]
     import re
-    if not re.fullmatch(r'(?:repo:D[0-9]+|private:D-[A-Za-z0-9-]+)', row.get('authority', '')):
-        raise ValueError('task launch requires its explicit decision authority')
+    from . import task_dispatch
+    text, reason = task_dispatch.contract_authority(n, row)
     relative = row.get('contract', '')
     path = n['dir'] / relative
-    if not relative or Path(relative).is_absolute() or '..' in Path(relative).parts or path.is_symlink() or not path.is_file() or not path.resolve().is_relative_to(n['dir'].resolve()):
-        raise ValueError('task launch requires its node-local contract file')
-    text = path.read_text()
-    if _m_jobs.contract_problems(text):
-        raise ValueError('task launch contract is incomplete')
-    if row.get('completion_kind') == 'merge' and not row.get('scope'):
-        raise ValueError('task launch requires explicit code scope')
     selected_branch = branch or 'job/task-' + task_id.lower()
     if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_./-]*', selected_branch):
         raise ValueError('invalid launch branch')
@@ -353,7 +350,7 @@ def launch_plan(inst, n, task_id=None, branch=None):
         ['brain', 'wt', 'add', n['id'], selected_branch, '--task-id', task_id],
         ['brain', 'jobs', n['id'], '--branch', selected_branch, '--contract-file', str(path)],
         ['brain', 'brief', n['id'], '--branch', selected_branch, '--task', row['title'],
-         '--why-separate', 'Implement the scoped task under its explicit contract'],
+         *(['--why-separate', reason] if reason else [])],
     ]
     return {'task': task_id, 'node': n['id'], 'branch': selected_branch, 'authority': row['authority'],
             'contract': relative, 'contract_sha256': hashlib.sha256(text.encode()).hexdigest(),
