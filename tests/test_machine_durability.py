@@ -228,6 +228,39 @@ class MachineDurability(unittest.TestCase):
     def test_local_physical_alias_before_publication_refuses_foreign_publication(self):
         self._assert_local_physical_replacement_refused('publication')
 
+    def test_local_directory_replaced_after_persistence_refuses_foreign_publication(self):
+        storage = self.inst.local_path.parent
+        storage.mkdir()
+        self.inst.local_path.write_bytes(b'retained original bytes')
+        replacement = self.root/'replacement-state'
+        replacement.mkdir()
+        (replacement/'local.json').write_bytes(b'foreign bytes')
+        retained = self.root/'retained-state'
+        replaced = []
+        dumps = json.dumps
+
+        def serialize(value, *args, **kwargs):
+            if value is self.inst.local:
+                # Serialization happens after directory persistence, before
+                # publication. Replace the directory itself, without a link.
+                storage.rename(retained)
+                replacement.rename(storage)
+                replaced.append(True)
+            return dumps(value, *args, **kwargs)
+
+        refusal = None
+        with mock.patch.object(json, 'dumps', side_effect=serialize):
+            try:
+                self.inst.save_local()
+            except OSError as error:
+                refusal = error
+        self.assertEqual(replaced, [True], 'replace the actual persisted directory once')
+        self.assertEqual({p.name: p.read_bytes() for p in storage.iterdir()},
+                         {'local.json': b'foreign bytes'})
+        self.assertEqual({p.name: p.read_bytes() for p in retained.iterdir()},
+                         {'local.json': b'retained original bytes'})
+        self.assertIsNotNone(refusal, 'directory replacement must refuse publication')
+
     def test_recovery_completes_partial_metadata_once_and_preserves_foreign_edits(self):
         recovery = importlib.import_module('.metadata_recovery', self.package)
         a, b = self.root/'node.md', self.root/'schedules.md'
