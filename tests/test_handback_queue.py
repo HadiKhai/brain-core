@@ -125,7 +125,7 @@ class HandbackLifecycle(Scenario):
             current = next(i for i in m.due_items(inst, n, (state, '', ''),
                            include_stale=False, include_advice=False) if i['kind'] == 'handback')
             legacy = {k: v for k, v in current.items() if k not in ('id', 'handling')}
-            legacy['episode'] = m.digest([m.job_key(row), {k: signal.get(k) for k in
+            legacy['episode'] = m._owners['job_key'].digest([m.job_key(row), {k: signal.get(k) for k in
                 ('state', 'summary', 'question', 'report', 'lessons', 'restart')}])
             legacy = m.reminder_items(inst, n, [legacy])[0]
             m.record_reminder(inst, n, [legacy], legacy['id'], 'ack', 'Dependency handled',
