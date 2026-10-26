@@ -2496,3 +2496,14 @@ never cleared by a later retry: morning publication retains ownership of the
 pending notice and its exactly-once inbox marker. Typed questions keep their
 immediate path and existing action authority. This changes no host transport,
 schedule or root routing policy.
+
+A completed direct publication must not become pending morning work on a quiet
+retry. Legacy receipts establish that state from their existing inbox marker,
+read under the inbox writer's lock; observation or durability errors refuse the
+retry before deferral changes. Content collision validation still comes first.
+Both published and unpublished quiet retries suppress inbox and wake delivery.
+Direct notice append rechecks the durable receipt and current quiet policy under
+the communication store lock, serializing it with recovery after the initial
+receipt has been saved. Existing deferral remains owned by morning delivery.
+The instance writer lock precedes this publication critical section, matching
+the inbox event writer's lock order even when called outside CLI dispatch.

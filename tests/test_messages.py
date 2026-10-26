@@ -205,6 +205,84 @@ class TypedCommunication(Scenario):
             self.assertNotIn('<!-- communication:', inbox.read_text())
             send.assert_not_called()
 
+    def test_published_notice_quiet_retry_does_not_become_morning_work(self):
+        import datetime
+        from unittest import mock
+        child = self.quiet_recovery_child()
+        inbox = child['dir'] / 'inbox.md'
+        with mock.patch.object(self.m.Instance, 'now_dt', return_value=datetime.datetime.fromisoformat(
+                '2026-01-01T23:59:00+00:00')) as clock, mock.patch.object(self.m, 'request_wake') as send:
+            original = self.m.communication_record(self.inst, child, 'fyi', 'Already delivered', 'delivered')
+            self.assertNotIn('deferred', original)
+            send.assert_called_once()
+            send.reset_mock()
+            before = inbox.read_bytes()
+            clock.return_value = datetime.datetime.fromisoformat('2026-01-02T00:01:00+00:00')
+            retry = self.m.communication_record(self.inst, child, 'fyi', 'Already delivered', 'delivered')
+            send.assert_not_called()
+            self.assertEqual(inbox.read_bytes(), before)
+            clock.return_value = datetime.datetime.fromisoformat('2026-01-02T07:00:00+00:00')
+            self.assertEqual(self.m.morning_items(self.inst, [child]), [])
+            self.assertEqual(self.m.morning_brief(self.inst, child)['state'], 'empty')
+            self.assertEqual(self.m.operator_brief(self.inst)['state'], 'empty')
+            self.assertEqual(inbox.read_bytes(), before)
+            self.assertEqual(inbox.read_text().count('Already delivered'), 1)
+            self.assertEqual(retry, original)
+            self.assertEqual(self.m.communication_read(self.inst)['notices'][original['id']], original)
+            send.assert_not_called()
+
+    def test_quiet_retry_refuses_unknown_publication_after_collision_check(self):
+        import datetime
+        from unittest import mock
+        child = self.quiet_recovery_child()
+        inbox = child['dir'] / 'inbox.md'
+        with mock.patch.object(self.m.Instance, 'now_dt', return_value=datetime.datetime.fromisoformat(
+                '2026-01-01T23:59:00+00:00')) as clock, mock.patch.object(self.m, 'request_wake') as send:
+            self.m.communication_record(self.inst, child, 'fyi', 'Delivered update', 'unknown-publication')
+            send.reset_mock()
+            store = self.root / '.brain/communications.json'
+            before = store.read_bytes()
+            inbox.unlink()
+            inbox.mkdir()  # Neither published nor unpublished can be established.
+            clock.return_value = datetime.datetime.fromisoformat('2026-01-02T00:01:00+00:00')
+            with self.assertRaisesRegex(ValueError, 'stable notification key already names different content'):
+                self.m.communication_record(self.inst, child, 'fyi', 'Changed update', 'unknown-publication')
+            with self.assertRaises((OSError, ValueError)):
+                self.m.communication_record(self.inst, child, 'fyi', 'Delivered update', 'unknown-publication')
+            self.assertEqual(store.read_bytes(), before)
+            self.assertEqual(list(inbox.iterdir()), [])
+            send.assert_not_called()
+
+    def test_direct_publisher_rechecks_deferral_after_saving_receipt(self):
+        import contextlib
+        import datetime
+        from unittest import mock
+        child = self.quiet_recovery_child()
+        inbox = child['dir'] / 'inbox.md'
+        before = inbox.read_bytes() if inbox.exists() else None
+        store = self.m.communication_store
+        interrupted = False
+        with mock.patch.object(self.m.Instance, 'now_dt', return_value=datetime.datetime.fromisoformat(
+                '2026-01-01T23:59:00+00:00')) as clock, mock.patch.object(self.m, 'request_wake') as send:
+            @contextlib.contextmanager
+            def quiet_retry_after_receipt(inst):
+                nonlocal interrupted
+                with store(inst) as data:
+                    yield data
+                if not interrupted:
+                    interrupted = True
+                    clock.return_value = datetime.datetime.fromisoformat('2026-01-02T00:01:00+00:00')
+                    self.m.communication_record(inst, child, 'fyi', 'Racing update', 'racing')
+            with mock.patch.object(self.m, 'communication_store', quiet_retry_after_receipt):
+                record = self.m.communication_record(self.inst, child, 'fyi', 'Racing update', 'racing')
+            self.assertTrue(record['deferred'])
+            self.assertEqual(inbox.read_bytes() if inbox.exists() else None, before)
+            send.assert_not_called()
+            clock.return_value = datetime.datetime.fromisoformat('2026-01-02T07:00:00+00:00')
+            self.assertEqual(self.m.morning_brief(self.inst, child)['items'], [record['id']])
+            self.assertEqual(inbox.read_text().count('Racing update'), 1)
+            send.assert_not_called()
+
     def test_interrupted_question_retry_still_bypasses_quiet_policy(self):
         import datetime
         from unittest import mock
