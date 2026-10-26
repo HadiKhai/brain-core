@@ -255,6 +255,60 @@ class OwnedCopyLifecycle(unittest.TestCase):
     def test_nested_evidence_off_refusal_checkpoint_failure_preserves_body_error(self):
         self._nested_refusal_checkpoint_failure(True)
 
+    def _incomplete_child_at_predelete_entry(self, body_failure):
+        primary = ValueError('fixture body failure') if body_failure else None
+        secondary = OSError('fixture first predelete checkpoint failure')
+        evidence = self.parent / 'evidence'
+        evidence.mkdir(mode=0o700)
+        caught = None
+        entries = []
+        checkpoint = rehearse.NativeRetention.checkpoint
+        with mock.patch.dict(os.environ, {'BRAIN_REHEARSAL_EVIDENCE_DIR': str(evidence)}):
+            with rehearse_external.OwnedCopies(parent=self.parent) as ancestor:
+                with rehearse_external.OwnedCopies(parent=ancestor.bulk) as outer:
+                    owner = rehearse_external.OwnedCopies(parent=outer.bulk)
+                    def fail_first_predelete(retention, **fields):
+                        if retention.owned == owner.bulk and fields.get('stage') == 'before-native-delete':
+                            entries.append((retention.incomplete, owner.unknown,
+                                            outer.unknown, ancestor.unknown))
+                            raise secondary
+                        return checkpoint(retention, **fields)
+                    with mock.patch.object(rehearse.NativeRetention, 'checkpoint', fail_first_predelete):
+                        try:
+                            with owner:
+                                (owner.bulk / 'original').write_bytes(b'fixture original bytes')
+                                child_path = owner.bulk / 'child'
+                                child_path.mkdir(mode=0o700)
+                                evidence.chmod(0o755)
+                                try:
+                                    child = rehearse.NativeRetention(child_path, 'fixture-child')
+                                finally:
+                                    evidence.chmod(0o700)
+                                self.assertTrue(child.incomplete)
+                                self.assertIn(child, rehearse._retention_children.get())
+                                self.assertTrue(list(child_path.glob('unsaved-native-retention-*.json')))
+                                if primary is not None:
+                                    raise primary
+                        except BaseException as error:
+                            caught = error
+            self.assertTrue(ancestor.bulk.exists())
+            self.assertTrue(outer.bulk.exists())
+            self.assertEqual(b'fixture original bytes', (owner.bulk / 'original').read_bytes())
+            self.assertTrue(list(child_path.glob('unsaved-native-retention-*.json')))
+            self.assertTrue(owner.unknown)
+            self.assertTrue(outer.unknown)
+            self.assertTrue(ancestor.unknown)
+            self.assertIs(caught, primary if body_failure else secondary)
+            if body_failure:
+                self.assertIs(caught.__cause__, secondary)
+            self.assertEqual([(True, True, True, True)], entries)
+
+    def test_incomplete_child_marks_ancestors_at_first_predelete_checkpoint_entry(self):
+        self._incomplete_child_at_predelete_entry(False)
+
+    def test_incomplete_child_predelete_failure_preserves_body_error(self):
+        self._incomplete_child_at_predelete_entry(True)
+
     def test_linked_parent_refuses_before_allocation(self):
         link = self.parent / 'alias'
         link.symlink_to(self.parent, target_is_directory=True)
