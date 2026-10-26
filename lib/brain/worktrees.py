@@ -462,6 +462,11 @@ def remove_worktree(inst, n, branch, force=False, thread_hook=None):
     if thread_hook is not None:
         if thread_hook(worktree_cleanup_result(n, branch, record=w)) is not True:
             _m_common.die(f"{branch}: thread cleanup not confirmed; worktree retained")
+        fresh = _m_instance.Instance(inst.root)
+        n = fresh.node(n['id'])
+        if n['local'].get('worktrees', {}).get(branch) != w:
+            _m_common.die(f"{branch}: worktree binding changed; worktree retained")
+        inst.local = fresh.local
         # Host work can take time. Recheck current branch and live job ownership
         # after the callback; the original preflight grants no lasting permission.
         reason = removal_refusal(n, branch, w)
@@ -496,7 +501,7 @@ def cmd_wt_rm(a):
     _m_jobs.print_job_handback(n, a.branch)
     _m_jobs.print_worktree_threads(n, a.branch)
     state = cleanup_recheck(home, w, a.branch, n, generation, state)
-    remove_worktree(inst, n, a.branch, a.force)
+    remove_worktree(inst, n, a.branch, a.force, thread_hook=cleanup_thread_callback(inst, n, a))
     _m_jobs.job_ended(inst, n, a.branch, "merged" if state[1] else "abandoned", job_commits(home, w, a.branch), a.cause or "",
               worktree=(w or {}).get("path"), prepared=prepared)
     print(f"removed the worktree for {a.branch} (the branch itself stays)")
@@ -544,7 +549,7 @@ def cmd_wt_prune(a):
             if not a.dry_run:
                 prepared = _m_jobs.prepare_job_usage(inst, inst.node(n["id"]), br, w.get("path"))
                 dirty, merged, ahead = cleanup_recheck(home, w, br, n, generation, (dirty, merged, ahead))
-                remove_worktree(inst, inst.node(n["id"]), br)
+                remove_worktree(inst, inst.node(n["id"]), br, thread_hook=cleanup_thread_callback(inst, n, a))
                 _m_jobs.job_ended(inst, n, br, "merged" if merged else "abandoned", job_commits(home, w, br),
                           "" if merged else "worktree was gone", worktree=w.get("path"), prepared=prepared)
             removed.append(br)
@@ -555,3 +560,10 @@ def cmd_wt_prune(a):
     print(f"{'would remove' if a.dry_run else 'removed'}: {', '.join(removed) or 'none'}")
     if kept:
         print(f"kept: {', '.join(kept)}")
+
+
+def cleanup_thread_callback(inst, n, args):
+    if not getattr(args, 'settle_threads', False):
+        return None
+    from . import host_lifecycle as _m_host_lifecycle
+    return lambda facts: _m_host_lifecycle.worktree_thread_hook(inst, n, facts, tell=True)

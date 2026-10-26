@@ -1,10 +1,12 @@
 """Durable requests and an explicitly caller-owned foreground handback runner.
 
-No daemon, cancellation, takeover or descendant crash recovery. An abandoned
-running lease stays unknown until the ownership redesign supplies safe recovery.
+Recovery is explicit and limited to a quiescent pre-dispatch run or its exact
+published terminal receipt. Dispatched descendants without shutdown proof stay
+unknown. No daemon, signalling or adoption of legacy leases.
 """
 import argparse
 import contextlib
+import contextvars
 import fcntl
 import json
 import os
@@ -17,10 +19,74 @@ from . import job_attempts as _m_attempts
 from . import jobs as _m_jobs
 from . import machine as _m_machine
 from . import nodes as _m_nodes
+from . import lifecycle_identity as _m_lifecycle_identity
 
 
 QUEUE_ARGS = ('id', 'branch', 'state', 'summary', 'question', 'lessons', 'report', 'reviews',
               'need_human', 'restart', 'reverify', 'full_receipt')
+QUEUE_LEASE = contextvars.ContextVar('brain_queue_lease', default=None)
+
+
+def queue_descendant_fd():
+    """Keep the caller-owned lease alive through native verifier exec boundaries."""
+    context = QUEUE_LEASE.get()
+    if context is None:
+        return None
+    fd, inst, n, request = context
+    data = read_queue_request(n, request['id'])
+    host = _m_lifecycle_identity.lifecycle_host_identity()
+    if (not host or data.get('run', {}).get('host') != host
+            or data.get('lease') != request['lease'] or data.get('state') != 'running'):
+        raise ValueError('queue descendant lease changed')
+    os.fstat(fd)
+    return fd
+
+
+def queue_dispatch(inst, n, request):
+    """Fence before any code that may launch descendants, including admission."""
+    with _m_instance.brain_lock(inst):
+        data = read_queue_request(n, request['id'])
+        host = _m_lifecycle_identity.lifecycle_host_identity()
+        if (not host or data.get('run', {}).get('host') != host
+                or data.get('lease') != request['lease'] or data['state'] != 'running'):
+            raise ValueError('queue dispatch lease changed')
+        data['run']['phase'] = 'dispatched'
+        write_queue_request(n, data)
+    _m_instance.unlock()
+
+
+def recover_request(inst, n, data):
+    """Called only under the original exclusive lease FD and instance lock."""
+    owner, run = data.get('owner'), data.get('run')
+    if (not isinstance(owner, list) or len(owner) != 2 or type(owner[0]) is not int
+            or owner[0] <= 0 or not isinstance(owner[1], str) or owner[1] in ('', 'unknown')
+            or not isinstance(run, dict) or run.get('id') != data.get('lease')
+            or type(run.get('version')) is not int or run.get('version') != 1):
+        raise ValueError('legacy or unknown runner ownership; preserve lease')
+    host = _m_lifecycle_identity.lifecycle_host_identity()
+    if not host or run.get('host') != host:
+        raise ValueError('runner host is foreign or unknown; preserve lease without probing its PID')
+    stamp = _m_machine.process_stamp(owner[0])
+    if stamp == 'unknown' or stamp == owner[1]:
+        raise ValueError('runner is live or unknown; preserve lease')
+    row = _m_jobs.open_job(_m_jobs.read_jobs(n) or [], data['args'].get('branch'))
+    attempt = _m_attempts.current_attempt(n, row) if row else None
+    if (not row or data.get('node') != n['id'] or data['args'].get('id') != n['id']
+            or _m_jobs.job_key(row) != data['job_key'] or not attempt
+            or attempt['id'] != data['attempt_id'] or data['binding'] != attempt['binding']
+            or not _m_attempts.attempt_matches(n, row, attempt)):
+        raise ValueError('request job, attempt or binding changed; preserve lease')
+    published = _m_jobs.read_handback(n, row) or {}
+    if (published.get('attempt_id') == data['attempt_id']
+            and published.get('queue_publication') == {'request': data['id'], 'lease': data['lease']}):
+        _m_attempts.finish_attempt(inst, n, row, data['attempt_id'], 'terminal')
+        data.update(state='terminal', finished_at=inst.now_dt().isoformat())
+        write_queue_request(n, data)
+        return False
+    if run.get('phase') != 'claimed' or attempt['state'] != 'queued':
+        raise ValueError('dispatched descendant shutdown unproven; preserve lease')
+    data.setdefault('recovered', []).append({'lease': data['lease'], 'owner': owner, 'run': run})
+    return True
 
 
 def queue_path(n, identity):
@@ -73,9 +139,12 @@ def enqueue_handback(inst, n, row, args):
 
 
 @contextlib.contextmanager
-def claim_handback(inst, n, identity):
-    """The lock FD is the live lease. Persistent running state forbids crash takeover."""
+def claim_handback(inst, n, identity, recover=False):
+    """A stable lock FD plus durable run phase fences explicit crash takeover."""
     path = queue_path(n, identity).with_suffix('.lease')
+    host = _m_lifecycle_identity.lifecycle_host_identity()
+    if not host:
+        raise ValueError('runner host identity unavailable; no lease acquired')
     _m_common.safe_target(path)
     fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
     try:
@@ -87,15 +156,24 @@ def claim_handback(inst, n, identity):
             raise ValueError('handback request already has an owner')
         with _m_instance.brain_lock(inst):
             data = read_queue_request(n, identity)
-            if data['state'] != 'queued':
+            if data['state'] == 'running' and recover:
+                if not recover_request(inst, n, data):
+                    yield None
+                    return
+            elif data['state'] != 'queued':
                 raise ValueError('request is not queued; retained running leases need ownership recovery')
             data.update(state='running', lease=os.urandom(16).hex(),
                         owner=[os.getpid(), _m_machine.process_stamp(os.getpid())])
             if data['owner'][1] in (None, 'unknown'):
                 raise ValueError('cannot identify foreground runner')
+            data['run'] = {'version': 1, 'id': data['lease'], 'phase': 'claimed', 'host': host}
             write_queue_request(n, data)
         _m_instance.unlock()  # the foreground lease, not brain_lock, owns the wait
-        yield data
+        context = QUEUE_LEASE.set((fd, inst, n, data))
+        try:
+            yield data
+        finally:
+            QUEUE_LEASE.reset(context)
     finally:
         os.close(fd)
 
@@ -105,7 +183,9 @@ def queue_terminal(inst, n, identity, lease, state):
         raise ValueError('invalid terminal request state')
     with _m_instance.brain_lock(inst):
         data = read_queue_request(n, identity)
-        if data['state'] != 'running' or data['lease'] != lease:
+        host = _m_lifecycle_identity.lifecycle_host_identity()
+        if (not host or data.get('run', {}).get('host') != host
+                or data['state'] != 'running' or data['lease'] != lease):
             return False
         data.update(state=state, finished_at=inst.now_dt().isoformat())
         write_queue_request(n, data)
@@ -127,20 +207,26 @@ def queue_projection(n, identity, strict=False):
         return {'request_id': identity, 'state': 'unknown', 'position': None, 'owner': None}
 
 
-def run_queue_once(inst, n, identity=None):
+def run_queue_once(inst, n, identity=None, recover=False):
     _m_instance.unlock()  # only short state transactions hold the instance lock
+    if recover and identity is None:
+        raise ValueError('recovery requires an explicit request ID')
     if identity is None:
         waiting = sorted((read_queue_request(n, p.stem) for p in (n['dir'] / 'handback-queue').glob('*.json')),
                          key=lambda r: (r['at'], r['id']))
         identity = next((r['id'] for r in waiting if r['state'] == 'queued'), None)
     if identity is None:
         return None
-    with claim_handback(inst, n, identity) as request:
+    with claim_handback(inst, n, identity, recover=recover) as request:
+        if request is None:
+            return identity  # publication already exists; never replay its wake
+        queue_dispatch(inst, n, request)
         row = _m_jobs.open_job(_m_jobs.read_jobs(n) or [], request['args'].get('branch'))
         attempt = _m_attempts.current_attempt(n, row) if row else None
         if (request.get('node') != n['id'] or request['args'].get('id') != n['id']
                 or not row or _m_jobs.job_key(row) != request['job_key'] or not attempt
                 or attempt['id'] != request['attempt_id'] or attempt['state'] != 'queued'
+                or request['binding'] != attempt['binding']
                 or not _m_attempts.attempt_matches(n, row, attempt)):
             queue_terminal(inst, n, identity, request['lease'], 'invalidated')
             if row:
@@ -160,7 +246,7 @@ def cmd_queue(a):
         _m_common.die('queue run requires --once; no background runner is installed')
     inst = _m_nodes.load()
     try:
-        result = run_queue_once(inst, inst.node(a.id), a.request_id)
+        result = run_queue_once(inst, inst.node(a.id), a.request_id, recover=getattr(a, 'recover', False))
     except (OSError, ValueError) as error:
         _m_common.die(str(error))
     if result:

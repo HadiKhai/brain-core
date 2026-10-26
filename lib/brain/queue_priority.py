@@ -29,7 +29,7 @@ def cmd_gate_queue(a):
         if a.action == 'run' and a.id:
             return _m_handback_queue.cmd_queue(a)
         _m_common.die('queue requires run NODE --once or --node NODE --move TOKEN --before TOKEN')
-    if a.action or a.id or a.once or a.request_id or not a.before or not a.node:
+    if a.action or a.id or a.once or a.request_id or getattr(a, 'recover', False) or not a.before or not a.node:
         _m_common.die('queue reorder requires only --node NODE --move TOKEN --before TOKEN')
     inst = _m_nodes.load()
     try:

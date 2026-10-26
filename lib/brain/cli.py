@@ -418,7 +418,8 @@ def main():
         opt("--reverify", action="store_true", help="run verify even when an earlier green run still proves it"))
     cmd("queue", _m_queue_priority.cmd_gate_queue, "run one hand-back or explicitly reorder queued native verify tokens",
         opt("action", choices=['run'], nargs='?'), opt('id', nargs='?'), opt('--once', action='store_true'),
-        opt('--request-id'), opt('--node'), opt('--move'), opt('--before'))
+        opt('--request-id'), opt('--node'), opt('--move'), opt('--before'),
+        opt('--recover', action='store_true', help='recover one exact quiescent queue runner; unknown descendants stay retained'))
     cmd("dispatch", _m_dispatcher.cmd_dispatch, "bounded read-only plan of explicit root/operator asks; empty scan is silent",
         opt('--limit', type=int, default=50), opt('--node-limit', type=int, default=200),
         opt('--run', action='store_true', help='enqueue only current questions through the durable coalesced wake path'))
@@ -541,8 +542,10 @@ def main():
     t = wsub.add_parser("rm", help="brain wt rm <node> <branch> [--force] [--cause 'why it was dropped']")
     t.add_argument("id"); t.add_argument("branch"); t.add_argument("--force", action="store_true")
     t.add_argument("--cause", help="why the job ended without a merge; kept in the node's job-ledger.md")
+    t.add_argument('--settle-threads', action='store_true', help='tell and freshly settle exact closed-job threads before removal; retain while pending')
     t.set_defaults(f=_m_worktrees.cmd_wt_rm)
     t = wsub.add_parser("prune", help="brain wt prune <node>: remove clean worktrees whose branch is merged")
+    t.add_argument('--settle-threads', action='store_true', help='tell and freshly settle exact closed-job threads before removal; retain while pending')
     t.add_argument("id"); t.add_argument("--dry-run", action="store_true", dest="dry_run")
     t.add_argument("--offline", action="store_true")
     t.set_defaults(f=_m_worktrees.cmd_wt_prune)

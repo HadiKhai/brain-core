@@ -339,14 +339,28 @@ def reconcile_manual_landings(inst, n):
             state = _m_verify.ready_state(inst, current, row['Job'], train=True)
             if not state['ready']:
                 continue
-            _m_jobs.close_ledger_job(inst, current, row['Job'])
+            _m_jobs.close_ledger_job(inst, current, row['Job'], preview=False)
             closed.append(_m_jobs.job_key(row))
             print('train: reconciled manual landing ' + row['Job'])
+    if closed and 'preview_upgrade' in n['local']:
+        from . import preview_upgrade as _m_preview_upgrade
+        result = _m_preview_upgrade.landed_preview(inst, n, _m_preview_upgrade.preview_landed_head(n))
+        print('train: reconciled preview ' + result['state'])
     return closed
 
 
 def post_publication(inst, n, path, data):
     """Host settlement runs outside the instance lock; failure cannot undo landing."""
+    if data.get('publication_succeeded') is True and 'preview_upgrade' in n['local']:
+        from . import preview_upgrade as _m_preview_upgrade
+        preview = _m_preview_upgrade.landed_preview(inst, n, data['tip'])
+        with _m_instance.brain_lock(inst):
+            current = json.loads(path.read_text())
+            if current.get('tip') != data.get('tip') or current.get('accepted') != data.get('accepted'):
+                raise ValueError('train journal changed; preview receipt retained separately')
+            current['preview_upgrade'] = preview
+            save(path, current)
+        print('train: preview ' + preview['state'])
     if not data.get('settle_requested') or data.get('publication_succeeded') is not True:
         return None
     keys = [entry['key'] for entry in data['accepted']]

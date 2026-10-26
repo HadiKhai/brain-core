@@ -718,6 +718,8 @@ def run_verify_stream(inst, n, branch, verify, w, env, token, lane=None):
             # EOF before publication means no verify starts. The bootstrap FD closes
             # before exec; only the validated node gate FD survives into the real gate.
             node_gate_fd = _m_gate_lock.gate_inherited_fd(inst.root, env, n['id'])
+            from . import handback_queue as _m_queue
+            queue_fd = _m_queue.queue_descendant_fd()
             gate_read, gate_write = os.pipe()
             bootstrap = ("import json,os,sys,signal; fd=int(sys.argv[1]); data=bytearray()\n"
                          "while True:\n"
@@ -734,7 +736,8 @@ def run_verify_stream(inst, n, branch, verify, w, env, token, lane=None):
                 proc = subprocess.Popen([sys.executable, "-I", "-S", "-c", bootstrap, str(gate_read)],
                                         cwd=w["path"], env=env, stdout=subprocess.PIPE,
                                         stderr=subprocess.STDOUT, pass_fds=(gate_read,) +
-                                        ((node_gate_fd,) if node_gate_fd is not None else ()))
+                                        ((node_gate_fd,) if node_gate_fd is not None else ()) +
+                                        ((queue_fd,) if queue_fd is not None else ()))
                 os.close(gate_read)
                 gate_read = None
                 _m_machine.machine_child(token, proc.pid)

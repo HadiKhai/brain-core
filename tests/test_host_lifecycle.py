@@ -1,5 +1,6 @@
 """Native settlement consumes fresh exact host evidence; no real host is called."""
 import json
+import types
 from unittest import mock
 
 import core_loader
@@ -100,6 +101,46 @@ class HostLifecycle(Scenario):
             self.m.settle_closed_jobs(self.inst, self.n, incomplete)
         self.assertEqual(self.settled_calls(), [])
 
+    def test_closed_job_rebinding_during_observation_preserves_foreign_thread(self):
+        self.threads.pop('fixture-child')
+        def rebind(identity):
+            if identity == 'fixture-worker' and self.reads[identity] == 2:
+                self.inst.local_of('root')['workers'][self.m.job_key(self.closed)] = 'fixture-other'
+                self.inst.save_local()
+        self.on_read = rebind
+        result = self.m.settle_closed_jobs(self.inst, self.n, self.rpc)
+        self.assertEqual(self.settled_calls(), [])
+        self.assertEqual(result['settled_jobs'], [])
+        self.assertTrue(result['retained'])
+
+    def test_partial_settlement_error_retains_truthful_confirmed_threads(self):
+        original = self.rpc
+        def fail(tool, args):
+            if tool == 't3_thread_organize' and args['threadId'] == 'fixture-worker':
+                raise self.m.HostRPCError('fixture outcome unknown')
+            return original(tool, args)
+        result = self.m.settle_closed_jobs(self.inst, self.n, fail)
+        self.assertEqual(result['settled_threads'], ['fixture-child'])
+        self.assertEqual(result['settled_jobs'], [])
+        self.assertTrue(result['retained'])
+        self.assertFalse(self.m.read_jobs(self.n)[0].get('Settled'))
+
+    def test_kernel_host_identity_is_exact_and_unavailable_stays_unknown(self):
+        identity = self.m._owners['lifecycle_host_identity']
+        value = '12345678-1234-1234-1234-123456789abc'
+        with mock.patch.object(identity.sys, 'platform', 'linux'), mock.patch.object(
+                identity, 'Path') as path:
+            path.return_value.read_text.return_value = value
+            self.assertEqual(identity.lifecycle_host_identity(), 'linux:' + value)
+            path.return_value.read_text.return_value = 'fixture-hostname'
+            self.assertIsNone(identity.lifecycle_host_identity())
+        with mock.patch.object(identity.sys, 'platform', 'darwin'), mock.patch.object(
+                identity.subprocess, 'run', return_value=types.SimpleNamespace(returncode=0, stdout=value.upper())) as run:
+            self.assertEqual(identity.lifecycle_host_identity(), 'darwin:' + value)
+            self.assertEqual(run.call_args[0][0], ['/usr/sbin/sysctl', '-n', 'kern.bootsessionuuid'])
+            run.return_value.returncode = 1
+            self.assertIsNone(identity.lifecycle_host_identity())
+
     def test_unattributed_threads_never_create_false_complete_attestation(self):
         self.threads['fixture-unknown'] = {'threadId': 'fixture-unknown', 'status': 'completed',
                                          'settled': False, 'parentThreadId': None}
@@ -150,6 +191,49 @@ class HostLifecycle(Scenario):
         self.calls.clear()
         self.assertFalse(self.m.worktree_thread_hook(self.inst, self.n, cleanup, rpc=self.rpc))
         self.assertEqual(self.calls, [])
+
+    def test_cleanup_tells_once_then_waits_for_fresh_terminal_settlement(self):
+        self.threads.pop('fixture-child')
+        branch = self.closed['Job']
+        checkout = self.tmp / 'checkout'
+        checkout.mkdir()
+        self.n['local']['worktrees'] = {branch: {'path': str(checkout)}}
+        self.inst.save_local()
+        cleanup = self.m.worktree_cleanup_result(self.n, branch)
+        sends = []
+        def rpc(tool, args):
+            if tool == 't3_thread_send':
+                sends.append(args)
+                self.threads[args['threadId']].update(status='running', activeRunId='fixture-final-run')
+                return dict(threadId=args['threadId'], delivery='started', messageId='fixture-message',
+                            runId='fixture-final-run', status='running')
+            return self.rpc(tool, args)
+        self.assertFalse(self.m.worktree_thread_hook(self.inst, self.n, cleanup, rpc=rpc, tell=True))
+        self.assertEqual(len(sends), 1)
+        self.assertEqual(self.settled_calls(), [])
+        self.threads['fixture-worker'].update(status='completed', activeRunId=None)
+        self.assertTrue(self.m.worktree_thread_hook(self.inst, self.n, cleanup, rpc=rpc, tell=True))
+        self.assertEqual(len(sends), 1)
+        self.assertEqual(self.settled_calls(), ['fixture-worker'])
+
+    def test_cleanup_unknown_tell_outcome_is_retained_without_retry(self):
+        self.threads.pop('fixture-child')
+        branch = self.closed['Job']
+        checkout = self.tmp / 'checkout'
+        checkout.mkdir()
+        self.n['local']['worktrees'] = {branch: {'path': str(checkout)}}
+        self.inst.save_local()
+        cleanup = self.m.worktree_cleanup_result(self.n, branch)
+        sends = []
+        def rpc(tool, args):
+            if tool == 't3_thread_send':
+                sends.append(args)
+                raise self.m.HostRPCError('fixture unknown delivery')
+            return self.rpc(tool, args)
+        for _ in range(2):
+            self.assertFalse(self.m.worktree_thread_hook(self.inst, self.n, cleanup, rpc=rpc, tell=True))
+        self.assertEqual(len(sends), 1)
+        self.assertEqual(self.settled_calls(), [])
 
     def test_binding_change_after_host_action_never_publishes_settled_job(self):
         original = self.rpc

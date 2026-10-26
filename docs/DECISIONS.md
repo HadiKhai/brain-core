@@ -2309,3 +2309,61 @@ marks evidence incomplete. Owner-only artifacts bind source identities and a
 post-run receipt manifest. Uncatchable termination can still prevent retention.
 This instrumentation changes no native publication, acceptance rule, assertion,
 schema or write permission and supplies no qualification by itself.
+
+## D1401: Queue recovery requires a quiescent run or an exact publication
+
+Foreground handback claims record a random run generation before dispatch. An
+explicit recovery of one request first acquires the same stable exclusive lease,
+checks the process start identity and revalidates the exact job, attempt and input
+binding. It can reclaim a pre-dispatch claim or reconcile its exact already-written
+terminal handback. It preserves prior generations and fences their publication.
+Only a schema-valid terminal handback can reconcile a publication.
+The native verifier inherits the lease descriptor through its bootstrap and exec.
+Legacy claims, live or unknown owners and dispatched runs without descendant
+shutdown proof remain retained. Recovery never signals a PID or infers that an
+unlocked descriptor proves every descendant has stopped.
+
+## D1402: Cleanup tells workers before fresh settlement
+
+The explicit worktree cleanup settlement option uses the existing closed-job
+callback. A durable notice binds the exact job, thread and checkout inode before
+the native send. An accepted notice is not repeated; an unknown outcome stays
+retained. Sending may start a final turn, so removal waits for a later terminal,
+request-free host observation and the existing exhaustive settlement validation.
+Already-settled threads receive no message, and missing checkouts never wake old
+threads. Current ownership and worktree bindings are rechecked before removal.
+
+## D1403: Preview upgrades use product-owned protocols after landing
+
+Per-node machine-local configuration names a registered trusted adapter, resource,
+protocol revision and explicit backup, migration, restart, acceptance and rollback
+operations. Core provides no shell executor or inferred product protocol. Product
+adapters synchronously own and join their resources, return bounded opaque step
+receipts, and implement snapshot restoration plus acceptance during rollback.
+
+Landing hooks run only after confirmed publication. A stable node lock serializes
+heads and each step intent is durable before crossing the product boundary.
+Successful heads are idempotent; failed acceptance rolls back to the saved backup
+and remains failed. Unknown/interrupted effects, configuration changes and failed
+rollback stay unresolved and block further automatic heads. Missing configuration
+or unsupported adapters remain pending. These core receipts do not establish real
+product backup, migration, restart or host acceptance.
+
+## D28004: Lifecycle authority stays with the exact local host and current owner
+
+Code-only candidate. Queue runner generations and preview operation receipts bind
+to a kernel boot UUID; a hostname, PID or boot timestamp cannot establish authority
+over another machine. Unknown, foreign and legacy identities retain their evidence
+without local PID probing, automatic replay or inferred success. A reboot requires
+explicit reconciliation rather than adoption of prior lifecycle authority.
+
+Preview completion requires a structurally complete ordered product receipt, not
+just terminal state text. Missing product adapters remain pending. The registered
+product adapter must own its resource and synchronously join each operation;
+the core provides no distributed lease, generic executor or backup implementation.
+
+Settlement reloads exact closed-job worker bindings after host observation and
+before mutation. A partial transport failure reports the threads already freshly
+confirmed, retains the job and never invents exhaustive completion. Host atomic
+ownership/settlement and dispatched-descendant shutdown still require their real
+capabilities; no PID-only cancellation or automatic takeover is introduced.

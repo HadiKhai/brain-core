@@ -22,6 +22,9 @@ class HandbackLifecycle(Scenario):
         (root / 'instance.md').write_text('---\ntimezone: UTC\n---\n')
         (root / 'node.md').write_text('---\ntitle: Root\nhome: none\n---\n')
         m = core_loader.SourceFileLoader('queue_fixture', str(CORE / 'bin/brain')).load_module()
+        host = mock.patch.object(m, 'lifecycle_host_identity', return_value='fixture-boot-a', create=True)
+        host.start()
+        self.addCleanup(host.stop)
         inst = m.Instance(root)
         inst.commit = mock.Mock()
         inst.now_dt = lambda: datetime.datetime(2026,10,24,4,0,tzinfo=datetime.timezone.utc)
@@ -254,6 +257,110 @@ class HandbackLifecycle(Scenario):
                     m.enqueue_handback(inst, n, study if invalid.branch == study['Job'] else row, invalid)
                 self.assertEqual(before, {p.name: p.read_bytes()
                                           for p in (n['dir'] / 'handback-queue').glob('*.json')})
+
+    def test_crash_recovery_is_explicit_and_fenced_before_dispatch(self):
+        m, inst, n, row = self.fixture()
+        args = argparse.Namespace(id='root', branch=row['Job'], state='blocked', summary='Fixture result',
+                                  question=None, lessons='none: fixture', report=None, reviews=None)
+        with mock.patch.dict(os.environ, self.env, clear=True), mock.patch.object(m, 'attempt_binding', return_value={'head':'a', 'base':'b', 'inputs':'c'}):
+            request = m.enqueue_handback(inst, n, row, args)
+            with m.claim_handback(inst, n, request['id']) as first:
+                old = first['lease']
+            data = m.read_queue_request(n, request['id'])
+            data['owner'] = [12345, 'old-run']
+            m.write_queue_request(n, data)
+            for stamp in ('old-run', 'unknown'):
+                with mock.patch.object(m, 'process_stamp', return_value=stamp), self.assertRaises(ValueError):
+                    with m.claim_handback(inst, n, request['id'], recover=True):
+                        self.fail('live or unknown runner adopted')
+            with mock.patch.object(m, 'process_stamp', side_effect=lambda pid: 'new-run' if pid == os.getpid() else None):
+                with m.claim_handback(inst, n, request['id'], recover=True) as second:
+                    self.assertNotEqual(second['lease'], old)
+                    self.assertEqual(second['recovered'][0]['lease'], old)
+                    self.assertFalse(m.queue_terminal(inst, n, request['id'], old, 'terminal'))
+
+    def test_dispatched_crash_and_legacy_owner_are_never_adopted(self):
+        m, inst, n, row = self.fixture()
+        args = argparse.Namespace(id='root', branch=row['Job'], state='blocked', summary='Fixture result')
+        with mock.patch.dict(os.environ, self.env, clear=True), mock.patch.object(m, 'attempt_binding', return_value={'head':'a', 'base':'b', 'inputs':'c'}):
+            request = m.enqueue_handback(inst, n, row, args)
+            with m.claim_handback(inst, n, request['id']) as claimed:
+                m.queue_dispatch(inst, n, claimed)
+                self.assertIsInstance(m.queue_descendant_fd(), int)
+            data = m.read_queue_request(n, request['id'])
+            data['owner'] = [12345, 'dead-run']
+            m.write_queue_request(n, data)
+            with mock.patch.object(m, 'process_stamp', return_value=None):
+                with self.assertRaisesRegex(ValueError, 'descendant'):
+                    with m.claim_handback(inst, n, request['id'], recover=True):
+                        self.fail('dispatched run adopted')
+                data.pop('run', None)
+                m.write_queue_request(n, data)
+                with self.assertRaises(ValueError):
+                    with m.claim_handback(inst, n, request['id'], recover=True):
+                        self.fail('legacy ownership adopted')
+
+    def test_foreign_boot_never_probes_local_pid_or_recovers_lease(self):
+        m, inst, n, row = self.fixture()
+        args = argparse.Namespace(id='root', branch=row['Job'], state='blocked', summary='Fixture result')
+        with mock.patch.dict(os.environ, self.env, clear=True), mock.patch.object(
+                m, 'attempt_binding', return_value={'head':'a', 'base':'b', 'inputs':'c'}):
+            request = m.enqueue_handback(inst, n, row, args)
+            with m.claim_handback(inst, n, request['id']):
+                pass
+            data = m.read_queue_request(n, request['id'])
+            data['owner'] = [12345, 'foreign-process']
+            data['run']['host'] = 'fixture-boot-b'
+            m.write_queue_request(n, data)
+            before = m.queue_path(n, request['id']).read_bytes()
+            with mock.patch.object(m, 'process_stamp', return_value=None) as probe:
+                with self.assertRaisesRegex(ValueError, 'host'):
+                    with m.claim_handback(inst, n, request['id'], recover=True):
+                        self.fail('foreign runner adopted')
+                probe.assert_not_called()
+            self.assertEqual(m.queue_path(n, request['id']).read_bytes(), before)
+
+    def test_unknown_host_cannot_claim_or_publish_a_queue_run(self):
+        m, inst, n, row = self.fixture()
+        args = argparse.Namespace(id='root', branch=row['Job'], state='blocked', summary='Fixture result')
+        with mock.patch.dict(os.environ, self.env, clear=True), mock.patch.object(
+                m, 'attempt_binding', return_value={'head':'a', 'base':'b', 'inputs':'c'}):
+            request = m.enqueue_handback(inst, n, row, args)
+            with mock.patch.object(m, 'lifecycle_host_identity', return_value=None):
+                with self.assertRaisesRegex(ValueError, 'host'):
+                    with m.claim_handback(inst, n, request['id']):
+                        self.fail('unknown host claimed')
+            with m.claim_handback(inst, n, request['id']) as claimed:
+                with mock.patch.object(m, 'lifecycle_host_identity', return_value='fixture-boot-b'):
+                    self.assertFalse(m.queue_terminal(inst, n, request['id'], claimed['lease'], 'terminal'))
+                    with self.assertRaises(ValueError):
+                        m.queue_dispatch(inst, n, claimed)
+                    with self.assertRaises(ValueError):
+                        m.queue_descendant_fd()
+
+    def test_exact_terminal_publication_reconciles_without_second_writer(self):
+        m, inst, n, row = self.fixture()
+        args = argparse.Namespace(id='root', branch=row['Job'], state='blocked', summary='Fixture result')
+        with mock.patch.dict(os.environ, self.env, clear=True), mock.patch.object(m, 'attempt_binding', return_value={'head':'a', 'base':'b', 'inputs':'c'}):
+            request = m.enqueue_handback(inst, n, row, args)
+            with m.claim_handback(inst, n, request['id']) as claimed:
+                m.queue_dispatch(inst, n, claimed)
+            data = m.read_queue_request(n, request['id'])
+            data['owner'] = [12345, 'dead-run']
+            m.write_queue_request(n, data)
+            path = m.handback_file(n, row)
+            path.parent.mkdir(exist_ok=True)
+            path.write_text(json.dumps(dict(version=3, job=row['Job'], started=row['Started'], state='blocked',
+                summary='Fixture result', lessons='none: fixture', ready=None, ready_reasons=[],
+                attempt_id=request['attempt_id'], wake_id='b'*32,
+                queue_publication=dict(request=request['id'], lease=claimed['lease']))))
+            before = path.read_bytes()
+            with mock.patch.object(m, 'process_stamp', return_value=None), mock.patch.object(m, 'cmd_handback') as writer:
+                self.assertEqual(m.run_queue_once(inst, n, request['id'], recover=True), request['id'])
+                writer.assert_not_called()
+            self.assertEqual(path.read_bytes(), before)
+            self.assertEqual(m.read_queue_request(n, request['id'])['state'], 'terminal')
+            self.assertEqual(m.current_attempt(n, row)['state'], 'terminal')
 
     def test_p2_attestation_refuses_unsafe_entries_without_ledger_mutation(self):
         m, inst, n, row = self.fixture()

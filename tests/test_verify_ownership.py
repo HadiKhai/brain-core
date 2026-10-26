@@ -56,6 +56,30 @@ class NativeVerifierLifecycle(Scenario):
     command = _verify_tests.VerifyLogs.command
     execute = _verify_tests.VerifyLogs.run_verify
 
+    def test_queue_lease_survives_native_bootstrap_and_shell_exec(self):
+        import argparse
+        setup = self.runner()
+        m, inst, n = setup[:3]
+        row = m.open_job(m.read_jobs(n), 'job')
+        args = argparse.Namespace(id='a', branch='job', state='blocked', summary='Fixture only')
+        with mock.patch.object(m, 'request_wake', return_value=True), \
+                mock.patch.object(m, 'docker_cleanup_nodes', return_value={'stopped': [], 'removed': [], 'errors': []}):
+            request = m.enqueue_handback(inst, n, row, args)
+            with m.claim_handback(inst, n, request['id']) as claimed:
+                m.queue_dispatch(inst, n, claimed)
+                fd = m.queue_descendant_fd()
+                lease = str(m.queue_path(n, request['id']).with_suffix('.lease'))
+                code = ('import os,fcntl\n'
+                        + f'os.fstat({fd})\nf=os.open({lease!r},os.O_RDWR)\n'
+                        + 'try:\n fcntl.flock(f,fcntl.LOCK_EX|fcntl.LOCK_NB)\n'
+                        + 'except BlockingIOError:\n print("owned lease inherited")\n'
+                        + 'else:\n raise AssertionError("lease lost")\n'
+                        + 'finally:\n os.close(f)\n')
+                result, log, _ = self.execute(setup, code)
+                self.assertEqual(result, 0)
+                self.assertEqual(log.read_text(), 'owned lease inherited\n')
+                m.queue_terminal(inst, n, request['id'], claimed['lease'], 'interrupted')
+
     def terminal(self, inst):
         rows = json.loads((inst.root / '.brain/wake/machine-holds.json').read_text())['waits']
         rows = [row for row in rows.values() if row['kind'] == 'verify']

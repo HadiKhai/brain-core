@@ -104,7 +104,7 @@ def terminal_host_thread(rpc, identity):
     return thread if pending.get('requestIds') == [] else None
 
 
-def settle_closed_jobs(inst, n, rpc=None, job_keys=None, revalidate=False):
+def settle_closed_jobs(inst, n, rpc=None, job_keys=None, revalidate=False, tell=False, workspace=None):
     rpc = rpc or _m_rpc.call
     if _m_common.outward_links(inst.root):
         raise ValueError('lifecycle refused: unsafe instance links')
@@ -141,6 +141,8 @@ def settle_closed_jobs(inst, n, rpc=None, job_keys=None, revalidate=False):
             for identity in ids:
                 if identity not in inventory or identity in owner and owner[identity] != key:
                     missing.add(key)
+                    if identity in owner:
+                        missing.add(owner[identity])
                 owner[identity] = key
     # Follow all listed descendants before considering first-prompt markers.
     for _ in range(len(inventory) + 1):
@@ -163,73 +165,108 @@ def settle_closed_jobs(inst, n, rpc=None, job_keys=None, revalidate=False):
         owner.update(additions)
     result['unknown_threads'] = [identity for identity in result['unknown_threads'] if identity not in owner]
     for row in targets:
-        key = _m_jobs.job_key(row)
-        group = sorted(identity for identity, claimed in owner.items() if claimed == key)
-        if key in missing or not group or any(identity in protected for identity in group):
-            result['retained'].append({'job': key, 'reason': 'missing, ambiguous or protected thread ownership'})
-            continue
-        if any(terminal_host_thread(rpc, identity) is None for identity in group):
-            result['retained'].append({'job': key, 'reason': 'live, waiting, pending or unknown host state'})
-            continue
         confirmed = []
-        for identity in group:
-            # Re-read files and host state immediately before each singular call.
-            fresh = _m_instance.Instance(inst.root)
-            current = next((r for r in _m_jobs.read_jobs(fresh.node(n['id'])) or [] if _m_jobs.job_key(r) == key), None)
-            thread = terminal_host_thread(rpc, identity)
-            if not current or not _m_jobs.closed_job(current) or identity in lifecycle_protected(fresh) | callers or thread is None:
-                break
-            if thread.get('settled') is not True:
-                reply = host_object(rpc, 't3_thread_organize', {'action': 'settle', 'threadId': identity})
-                if reply.get('settlesWhenTurnEnds'):
-                    rpc('t3_thread_organize', {'action': 'unsettle', 'threadId': identity})
-                    raise ValueError('host attempted to settle the caller; immediately unsettled, no job stamped')
-            confirmed.append(identity)
-        if len(confirmed) != len(group):
-            result['retained'].append({'job': key, 'reason': 'ownership or activity changed before settlement'})
-            continue
-        _, after, _ = lifecycle_inventory(n, rpc)
-        states = {identity: terminal_host_thread(rpc, identity) for identity in group}
-        if any(after.get(identity, {}).get('settled') is not True or states[identity] is None for identity in group):
-            result['retained'].append({'job': key, 'reason': 'host did not confirm settled terminal threads'})
-            continue
-        result['settled_threads'].extend(group)
-        if result['unknown_threads']:
-            result['retained'].append({'job': key, 'reason': 'unattributed project threads prevent exhaustive job attestation'})
-            continue
-        with _m_instance.brain_lock(inst):
-            fresh_owner = _m_instance.Instance(inst.root)
-            fresh_node = fresh_owner.node(n['id'])
-            if _m_jobs.bound_worker_threads(fresh_node, row['Job']) != ownership[key]:
-                raise ValueError('worker ownership changed before settlement publication; no job stamped')
-            current_rows = _m_jobs.ledger_rows(n)
-            current = next((r for r in current_rows or [] if _m_jobs.job_key(r) == key), None)
-            if not current or not _m_jobs.closed_job(current):
-                raise ValueError('job changed before settlement publication; host observations retained by caller')
-            evidence = {'version': 1, 'node': n['id'], 'observed_at': inst.now_dt().isoformat(),
-                        'source': 'native-host-rpc', 'project_ids': projects,
-                        'coverage': {'project': True, 'nested': True, 'complete': True},
-                        'jobs': [{'job_key': key, 'threads': [
-                            {'threadId': identity, 'job_key': key, 'state': states[identity]['status'],
-                             'settled': True, 'pending_requests': [],
-                             **({'parentThreadId': after[identity]['parentThreadId']}
-                                if after[identity].get('parentThreadId') in group else {}),
-                             **({'external_parentThreadId': after[identity]['parentThreadId']}
-                                if after[identity].get('parentThreadId') and after[identity]['parentThreadId'] not in group else {})}
-                            for identity in group]}]}
-            _m_settlement.validate_settlement_attestation(inst, n, [current], evidence)
-            path = n['dir'] / 'job-settlements' / (key + '.json')
-            _m_common.safe_target(path)
-            path.parent.mkdir(exist_ok=True)
-            _m_common.atomic_write(path, json.dumps(evidence, sort_keys=True) + '\n')
-            current['Settled'] = inst.now()
-            _m_jobs.write_jobs(inst, n, current_rows)
-            inst.commit([path], f"{n['id']}: native host settlement confirmed")
-            result['settled_jobs'].append(key)
+        try:
+            key = _m_jobs.job_key(row)
+            group = sorted(identity for identity, claimed in owner.items() if claimed == key)
+            if key in missing or not group or any(identity in protected for identity in group):
+                result['retained'].append({'job': key, 'reason': 'missing, ambiguous or protected thread ownership'})
+                continue
+            if any(terminal_host_thread(rpc, identity) is None for identity in group):
+                result['retained'].append({'job': key, 'reason': 'live, waiting, pending or unknown host state'})
+                continue
+            confirmed = []
+            for identity in group:
+                # Re-read files and host state immediately before each singular call.
+                thread = terminal_host_thread(rpc, identity)
+                # Host reads can outlive a local rebind. Reload AFTER observation,
+                # and require the exact closed-job binding before any mutation.
+                fresh = _m_instance.Instance(inst.root)
+                current_node = fresh.node(n['id'])
+                current = next((r for r in _m_jobs.read_jobs(current_node) or [] if _m_jobs.job_key(r) == key), None)
+                if not current or not _m_jobs.closed_job(current) or identity in lifecycle_protected(fresh) | callers or thread is None:
+                    break
+                if _m_jobs.bound_worker_threads(current_node, current['Job']) != ownership[key]:
+                    break
+                if thread.get('settled') is not True:
+                    if tell:
+                        from . import cleanup_notices as _m_cleanup_notices
+                        fresh_node = fresh.node(n['id'])
+                        if (fresh_node['local'].get('worktrees', {}).get(current['Job'], {}).get('path') != workspace
+                                or _m_jobs.bound_worker_threads(fresh_node, current['Job']) != ownership[key]
+                                or not _m_cleanup_notices.cleanup_notice(fresh, fresh_node, key, identity,
+                                                                        workspace, rpc)):
+                            break
+                        if terminal_host_thread(rpc, identity) is None:
+                            break
+                        fresh = _m_instance.Instance(inst.root)
+                        current_node = fresh.node(n['id'])
+                        current = next((r for r in _m_jobs.read_jobs(current_node) or [] if _m_jobs.job_key(r) == key), None)
+                        if (not current or not _m_jobs.closed_job(current)
+                                or _m_jobs.bound_worker_threads(current_node, current['Job']) != ownership[key]
+                                or identity in lifecycle_protected(fresh) | callers):
+                            break
+                    reply = host_object(rpc, 't3_thread_organize', {'action': 'settle', 'threadId': identity})
+                    if reply.get('settlesWhenTurnEnds'):
+                        rpc('t3_thread_organize', {'action': 'unsettle', 'threadId': identity})
+                        raise ValueError('host attempted to settle the caller; immediately unsettled, no job stamped')
+                    checked = terminal_host_thread(rpc, identity)
+                    if checked is None or checked.get('settled') is not True:
+                        break
+                confirmed.append(identity)
+                result['settled_threads'].append(identity)
+            if len(confirmed) != len(group):
+                result['retained'].append({'job': key, 'reason': 'ownership or activity changed before settlement'})
+                continue
+            _, after, _ = lifecycle_inventory(n, rpc)
+            if (set(after) != set(inventory) or any(
+                    after[item].get('parentThreadId') != inventory[item].get('parentThreadId') for item in after)):
+                result['retained'].append({'job': key, 'reason': 'host thread ownership inventory changed'})
+                continue
+            states = {identity: terminal_host_thread(rpc, identity) for identity in group}
+            if any(after.get(identity, {}).get('settled') is not True or states[identity] is None for identity in group):
+                result['retained'].append({'job': key, 'reason': 'host did not confirm settled terminal threads'})
+                continue
+            if result['unknown_threads']:
+                result['retained'].append({'job': key, 'reason': 'unattributed project threads prevent exhaustive job attestation'})
+                continue
+            with _m_instance.brain_lock(inst):
+                fresh_owner = _m_instance.Instance(inst.root)
+                fresh_node = fresh_owner.node(n['id'])
+                if _m_jobs.bound_worker_threads(fresh_node, row['Job']) != ownership[key]:
+                    raise ValueError('worker ownership changed before settlement publication; no job stamped')
+                current_rows = _m_jobs.ledger_rows(n)
+                current = next((r for r in current_rows or [] if _m_jobs.job_key(r) == key), None)
+                if not current or not _m_jobs.closed_job(current):
+                    raise ValueError('job changed before settlement publication; host observations retained by caller')
+                evidence = {'version': 1, 'node': n['id'], 'observed_at': inst.now_dt().isoformat(),
+                            'source': 'native-host-rpc', 'project_ids': projects,
+                            'coverage': {'project': True, 'nested': True, 'complete': True},
+                            'jobs': [{'job_key': key, 'threads': [
+                                {'threadId': identity, 'job_key': key, 'state': states[identity]['status'],
+                                 'settled': True, 'pending_requests': [],
+                                 **({'parentThreadId': after[identity]['parentThreadId']}
+                                    if after[identity].get('parentThreadId') in group else {}),
+                                 **({'external_parentThreadId': after[identity]['parentThreadId']}
+                                    if after[identity].get('parentThreadId') and after[identity]['parentThreadId'] not in group else {})}
+                                for identity in group]}]}
+                _m_settlement.validate_settlement_attestation(inst, n, [current], evidence)
+                path = n['dir'] / 'job-settlements' / (key + '.json')
+                _m_common.safe_target(path)
+                path.parent.mkdir(exist_ok=True)
+                _m_common.atomic_write(path, json.dumps(evidence, sort_keys=True) + '\n')
+                current['Settled'] = inst.now()
+                _m_jobs.write_jobs(inst, n, current_rows)
+                inst.commit([path], f"{n['id']}: native host settlement confirmed")
+                result['settled_jobs'].append(key)
+        except (OSError, _m_rpc.HostRPCError):
+            result['settled_threads'] = list(dict.fromkeys(result['settled_threads'] + confirmed))
+            result['retained'].append({'job': _m_jobs.job_key(row),
+                'reason': 'partial lifecycle outcome unknown; no job completion inferred'})
     return result
 
 
-def worktree_thread_hook(inst, n, cleanup, rpc=None):
+def worktree_thread_hook(inst, n, cleanup, rpc=None, tell=False):
     """C06 callback: True only after exact closed jobs are freshly host-settled.
 
     The caller still owns path removal and its final branch/live-owner recheck.
@@ -265,7 +302,10 @@ def worktree_thread_hook(inst, n, cleanup, rpc=None):
         supplied = {item.get('id') for item in cleanup['threads'] if isinstance(item, dict)}
         if not supplied or supplied != references:
             return False
-        observation = settle_closed_jobs(fresh, current, rpc=rpc, job_keys=list(expected), revalidate=True)
+        _m_instance.unlock()
+        observation = settle_closed_jobs(fresh, current, rpc=rpc, job_keys=list(expected), revalidate=True,
+                                        tell=tell and cleanup.get('workspace_exists') is True
+                                        and cleanup.get('phase') == 'before-remove', workspace=workspace)
         if set(observation['settled_jobs']) != set(expected) or observation['retained']:
             return False
         with _m_instance.brain_lock(inst):

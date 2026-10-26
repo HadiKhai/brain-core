@@ -387,6 +387,8 @@ def publish_handback(a):
                 "at": inst.now(), "report": _m_common.tilde(a.report) if a.report is not None else previous.get("report", ""),
                 "lessons": lessons, "ready": packet, "ready_reasons": reasons,
                 "verify_runs": count("verify_runs") + fresh, "verify_reused": count("verify_reused") + reused}
+        if request:
+            data['queue_publication'] = {'request': request['id'], 'lease': request['lease']}
         if duration is not None:
             data["verify_duration"] = duration
             prior_wait = forecast_number(previous.get("admission_wait_seconds_total"))
@@ -682,6 +684,7 @@ def job_ended(inst, n, branch, outcome, commits="", cause="", worktree=None, pre
         cleanup_handback(inst, n, r, rows)
         inst.commit([], f"{n['id']}: job {outcome}")
         print_thread_checklist(n, r)
+    job_preview_after_landing(inst, n, r)
     _m_docker_leftovers.docker_leftover_nodes(inst, [n])
 
 
@@ -974,7 +977,7 @@ def manual_landing(n, row):
     return None
 
 
-def close_ledger_job(inst, n, branch, reason=None):
+def close_ledger_job(inst, n, branch, reason=None, preview=True):
     with _m_instance.brain_lock(inst):
         rows = ledger_rows(n)
         row = open_job(rows or [], branch)
@@ -1001,6 +1004,18 @@ def close_ledger_job(inst, n, branch, reason=None):
         events.close_active_work(inst, n, row)
         inst.commit([], f"{n['id']}: ledger job closed")
         print_thread_checklist(n, row)
+    if preview:
+        job_preview_after_landing(inst, n, row)
+
+
+def job_preview_after_landing(inst, n, row):
+    if row.get('Outcome') != 'merged' or 'preview_upgrade' not in n['local']:
+        return None
+    from . import preview_upgrade as _m_preview_upgrade
+    head = _m_preview_upgrade.preview_landed_head(n)
+    result = _m_preview_upgrade.landed_preview(inst, n, head)
+    print('jobs: preview ' + result['state'])
+    return result
 
 
 def jobs_summary(inst, n):

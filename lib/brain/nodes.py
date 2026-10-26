@@ -600,6 +600,19 @@ def prepare_settings(inst, n, pairs, messages=None):
             else:
                 workers.pop(key, None)
             messages.append('  worker binding: this machine (.brain/local.json)')
+        elif k == 'preview_upgrade':
+            from . import preview_upgrade as _m_preview_upgrade
+            if v == 'off':
+                inst.local_of(n['id']).pop(k, None)
+            else:
+                try:
+                    value = json.loads(v)
+                    _m_preview_upgrade.preview_config({'local': {k: value}})
+                except (ValueError, TypeError, KeyError):
+                    _m_common.die('preview_upgrade requires off or a complete version 1 JSON product protocol')
+                inst.local_of(n['id'])[k] = value
+            fm.pop(k, None)
+            messages.append('  preview_upgrade: explicit product protocol on this machine (.brain/local.json)')
         elif k == "auto_upgrade":
             if n["id"] != "root" or v not in ("on", "off"):
                 _m_common.die("auto_upgrade is per machine: brain set root auto_upgrade=on|off")
