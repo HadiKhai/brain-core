@@ -15,7 +15,7 @@ from types import SimpleNamespace
 import unittest
 from unittest import mock
 
-from test_rehearse import RehearsalFixture, rehearsal, result
+from test_rehearse import RehearsalFixture, rehearsal, result, owned_rehearsal_workdir
 from scenario import CORE, Scenario
 
 
@@ -71,6 +71,7 @@ def tiny_environment(case):
 
 
 def tiny_rehearsal_fixture(case):
+    owned_rehearsal_workdir(case)
     case.root = case.tmp / 'live'
     case.root.mkdir()
     (case.root / 'instance.md').write_text('---\ntimezone: UTC\n---\n')
@@ -770,7 +771,8 @@ elif sys.argv[1] == 'ui':
         old = {'due:0': result('cannot render due', code=1), 'hook': result()}
         outcome = self.run_rehearsal(outputs=[old, old])
         self.assertTrue(outcome['passed'], outcome['regressions'])
-        self.assertEqual(['due:0: identical baseline failure'], outcome['warnings'])
+        self.assertEqual(['delivery not probed (rehearsal)', 'due:0: identical baseline failure'],
+                         outcome['warnings'])
         new = {'due:0': result('[]'), 'hook': result()}
         outcome = self.run_rehearsal(outputs=[old, new])
         self.assertFalse(outcome['passed'])
@@ -832,7 +834,7 @@ class BaselineDiagnostics(RehearsalFixture):
                 new = {key: result('✗ unchanged error\nnew advisory', code=1), 'hook': result()}
                 outcome = self.run_rehearsal(outputs=[old, new])
                 self.assertTrue(outcome['passed'], outcome['regressions'])
-                self.assertEqual([], outcome['warnings'])
+                self.assertEqual(['delivery not probed (rehearsal)'], outcome['warnings'])
                 self.assertEqual([], outcome['diagnostics'])
 
     def test_changed_exit_code_still_refuses_without_incomplete_baseline(self):
@@ -897,7 +899,8 @@ class BaselineDiagnostics(RehearsalFixture):
         old = dict(check=result('✗ existing', code=1), fix=result('✗ existing', code=1), hook=result())
         outcome = self.run_rehearsal(outputs=[old, old])
         self.assertTrue(outcome['passed'], outcome['regressions'])
-        self.assertEqual(['check: identical baseline failure', 'fix: identical baseline failure'], outcome['warnings'])
+        self.assertEqual(['delivery not probed (rehearsal)', 'check: identical baseline failure',
+                          'fix: identical baseline failure'], outcome['warnings'])
         self.assertEqual([], outcome['diagnostics'])
         printed = self.publish(outcome)
         for warning in outcome['warnings']:
@@ -1049,6 +1052,7 @@ class CandidateNotices(RehearsalFixture):
 
 @unittest.skipUnless(sys.platform == 'darwin', 'requires macOS OS sandbox')
 class FrozenClock(Scenario):
+    temporary_parent = CORE.parent
     def prepare_private_fixture(self):
         tiny_rehearsal_fixture(self)
         worktree = self.tmp / 'diagnostic-candidate-work/worktrees/job'

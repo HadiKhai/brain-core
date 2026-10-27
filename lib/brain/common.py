@@ -202,6 +202,15 @@ def durable_makedirs(path, mode=0o700):
         pass
 
 
+def publication_mode(prior_mode=None, *, private=False):
+    """Permissions a writer intends to publish, distinct from private staging."""
+    if private:
+        return 0o600
+    if prior_mode is not None and stat.S_ISREG(prior_mode):
+        return stat.S_IMODE(prior_mode)
+    return 0o644
+
+
 class DirectoryTarget:
     """A checked physical parent held until its last read, publication or cleanup.
 
@@ -383,9 +392,7 @@ class DirectoryTarget:
                 # Content is written and synced privately. Prepare and persist
                 # the intended mode before rename so a killed writer cannot
                 # leave the published destination with the staging mode.
-                mode = (stat.S_IMODE(prior.st_mode)
-                        if prior and stat.S_ISREG(prior.st_mode) else 0o644)
-                mode = 0o600 if self.private else mode
+                mode = publication_mode(prior.st_mode if prior else None, private=self.private)
                 record = self.mode_record(stream.fileno(), text, mode)
                 os.fchmod(stream.fileno(), mode)
                 os.fsync(stream.fileno())

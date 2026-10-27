@@ -650,7 +650,8 @@ if __name__ == "__main__":
 
 class DecisionApplicability(Scenario):
     def test_ordinary_check_includes_report_warning_without_changing_business_files(self):
-        from brain import check, instance, reports
+        core = core_loader.SourceFileLoader('report_check', str(CORE / 'bin/brain')).load_module()
+        reports = core._owners['report_size_warnings']
         root = self.init('demo')
         folder = root / 'reports/example'
         folder.mkdir(parents=True)
@@ -658,8 +659,8 @@ class DecisionApplicability(Scenario):
         note.write_text('fabricated report')
         before = note.read_bytes()
         with mock.patch.object(reports, 'REPORT_WARNING_BYTES', 8):
-            problems, warnings, fixable = check.collect_problems(instance.Instance(root))
-        self.assertTrue(any('report folder exceeds 1 GB' in warning for warning in warnings))
+            problems, warnings, fixable = core.collect_problems(core.Instance(root))
+        self.assertTrue(any('report folder exceeds 1 GiB' in warning for warning in warnings))
         self.assertEqual(before, note.read_bytes())
         self.assertNotIn('reports', fixable)
 
@@ -697,8 +698,8 @@ class DecisionApplicability(Scenario):
 
 class ReportFolderWarnings(unittest.TestCase):
     def setUp(self):
-        from brain import reports
-        self.reports = reports
+        core = core_loader.SourceFileLoader('report_warnings', str(CORE / 'bin/brain')).load_module()
+        self.reports = reports = core._owners['report_size_warnings']
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.base = Path(self.temp.name).resolve()
@@ -715,15 +716,29 @@ class ReportFolderWarnings(unittest.TestCase):
     def warnings(self):
         return self.reports.report_size_warnings(None, [self.node, self.node])
 
-    def test_threshold_is_decimal_gb_and_strict_with_tiny_fixtures(self):
-        self.assertEqual(1_000_000_000, self.reports.REPORT_WARNING_BYTES)
+    def test_one_gib_boundary_counts_sparse_bytes_without_reading_contents(self):
+        payload = self.folder / 'bulk'
+        with payload.open('wb') as stream:
+            stream.truncate(1024 ** 3)
+        before = payload.stat()
+        self.assertEqual([], self.warnings())
+        with payload.open('ab') as stream:
+            stream.write(b'x')
+        with mock.patch.object(Path, 'read_bytes', side_effect=AssertionError('content read')):
+            warnings = self.warnings()
+        self.assertEqual(1, len(warnings))
+        self.assertIn('report folder exceeds 1 GiB', warnings[0])
+        self.assertEqual(before.st_ino, payload.stat().st_ino)
+
+    def test_threshold_is_binary_gib_and_strict_with_tiny_fixtures(self):
+        self.assertEqual(1024 ** 3, self.reports.REPORT_WARNING_BYTES)
         for size in (7, 8, 9):
             with self.subTest(size=size), mock.patch.object(self.reports, 'REPORT_WARNING_BYTES', 8):
                 (self.folder / 'index.md').write_bytes(b'x' * size)
                 warnings = self.warnings()
                 self.assertEqual(int(size > 8), len(warnings))
                 if warnings:
-                    self.assertIn('report folder exceeds 1 GB', warnings[0])
+                    self.assertIn('report folder exceeds 1 GiB', warnings[0])
 
     def test_budget_and_unreadable_sizes_are_unknown_never_small_or_fixable(self):
         (self.folder / 'index.md').touch()
