@@ -144,17 +144,17 @@ def governance_principals(n):
 
 def governance_file(n, path):
     """Only real instance library items and specialist role files get metadata treatment."""
-    while n["parent"]:
-        n = n["parent"]
     path = Path(os.path.abspath(path))
-    if path.is_symlink():
-        return False
     if path.parent.name == "library" and path.suffix == ".md":
         owner = path.parent.parent
     elif path.name in ("role.md", "lessons.md") and path.parent.parent.name == "specialists":
         owner = path.parent.parent.parent
     else:
         return False
+    if path.is_symlink():
+        return False
+    while n["parent"]:
+        n = n["parent"]
     try:
         parts = owner.relative_to(n["dir"].absolute()).parts
         relative = path.relative_to(n["dir"].absolute())
@@ -267,7 +267,7 @@ def file_mentions(fp, needles, errors=None, chunk=1 << 20, principals=(), lesson
     try:
         if not stat.S_ISREG(os.stat(fp).st_mode):
             return found
-        with open(fp, "rb") as fh:
+        with open(fp, "rb", buffering=0) as fh:
             before = os.fstat(fh.fileno())
             cache = _TERM_SCAN_CACHE.get()
             key = ('file', os.path.abspath(fp), tuple(needles), tuple(principals), lessons)
@@ -278,7 +278,7 @@ def file_mentions(fp, needles, errors=None, chunk=1 << 20, principals=(), lesson
             content_key = None
             if cache is not None and before.st_size <= chunk:
                 data = fh.read(before.st_size + 1)
-                if len(data) <= before.st_size:
+                if len(data) == before.st_size:
                     # Worktrees often contain identical bytes with distinct inodes.
                     # Read them once, but decode/search each content only once.
                     content_key = ('content', hashlib.sha256(data).digest(),
@@ -375,10 +375,11 @@ def scan_terms(n, paths=(), terms=None):
                         pending.append(sub)
                     continue
                 # An unstaged deletion is valid; the index blob below still guards what a commit would keep.
-                if f in tracked and not os.path.lexists(root / f):
+                fp = root / f
+                if f in tracked and not os.path.lexists(fp):
                     continue
-                kind = governance_file(n, root / f)
-                seen = file_mentions(root / f, needles, errors=unread,
+                kind = governance_file(n, fp)
+                seen = file_mentions(fp, needles, errors=unread,
                                      principals=principals if kind else (), lessons=kind == "lessons")
                 hits += [(label, f"{_m_common.tilde(root)}/{f}") for t, label in terms if t.casefold() in seen]
             blobs = {}
@@ -408,8 +409,8 @@ def scan_terms(n, paths=(), terms=None):
                         available = {oid for oid, row in zip(cached_oids, rows)
                                      if len(row) == 3 and row[:2] == [oid, 'blob'] and row[2].isdigit()}
                 # One streaming process per repository: no size cap, and no process per file.
-                with subprocess.Popen(["git", "cat-file", "--batch"], cwd=root, stdin=subprocess.PIPE,
-                                      stdout=subprocess.PIPE, stderr=subprocess.DEVNULL) as proc:
+                with contextlib.ExitStack() as stack:
+                    proc = None
                     try:
                         for (oid, kind), names in blobs.items():
                             key = ('blob', oid, tuple(needles), tuple(principals) if kind else (), kind)
@@ -418,6 +419,10 @@ def scan_terms(n, paths=(), terms=None):
                                 hits += [(label, f"index stage {stage}: {_m_common.tilde(root)}/{f}")
                                          for f, stage in names for t, label in terms if t.casefold() in seen]
                                 continue
+                            if proc is None:
+                                proc = stack.enter_context(subprocess.Popen(
+                                    ["git", "cat-file", "--batch"], cwd=root, stdin=subprocess.PIPE,
+                                    stdout=subprocess.PIPE, stderr=subprocess.DEVNULL))
                             proc.stdin.write((oid + "\n").encode()); proc.stdin.flush()
                             header = proc.stdout.readline().split()
                             if len(header) != 3 or header[1] != b"blob":
@@ -432,9 +437,10 @@ def scan_terms(n, paths=(), terms=None):
                     except (OSError, ValueError) as e:
                         errors.append(redact(f"reading index in {_m_common.tilde(root)}: {e}", terms))
                     finally:
-                        proc.stdin.close()
-                        proc.stdout.close()
-                    if proc.wait():
+                        if proc is not None:
+                            proc.stdin.close()
+                            proc.stdout.close()
+                    if proc is not None and proc.wait():
                         errors.append(f"git cat-file failed in {redact(_m_common.tilde(root), terms)}")
             if own_repo:
                 r = _m_common.git("rev-parse", "--git-common-dir", cwd=root)
