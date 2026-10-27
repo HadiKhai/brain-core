@@ -115,17 +115,26 @@ class MachineDurability(unittest.TestCase):
             self.assertEqual(path.stat().st_mode & 0o777, 0o600)
             self.assertEqual(path.stat().st_ino, inode)
             self.assertEqual(path.read_text(), str(os.getpid()))
-        for module, method, command in ((machine, 'machine_sample', machine.machine_sample_once),
+        def collect(*args, **kwargs):
+            # Release-7 collects before locking; privacy must hold at publication.
+            self.assertIsNone(machine._m_instance._LOCK['fh'])
+            self.assertEqual(path.stat().st_mode & 0o777, 0o644)
+            self.assertEqual(path.stat().st_ino, inode)
+            self.assertEqual(path.read_text(), 'old holder')
+            return None, {'pending_notice': None, 'samples': [], 'episode': False}, machine.machine_policy(), False
+        for module, method, command in ((machine, 'machine_publish', machine.machine_sample_once),
                                         (watch, 'watch_run', watch.watch_once)):
             with self.subTest(writer=method):
                 path.chmod(0o644)
-                with mock.patch.object(module, method, side_effect=observed) as called:
+                with mock.patch.object(machine, 'machine_sample_plan', side_effect=collect), \
+                        mock.patch.object(module, method, side_effect=observed) as called:
                     command(self.inst)
                 called.assert_called_once()
                 self.assertEqual(path.stat().st_ino, inode)
                 path.write_text('old holder')
                 path.chmod(0o644)
-                with mock.patch.object(module, method) as called, \
+                with mock.patch.object(machine, 'machine_sample_plan', side_effect=collect), \
+                        mock.patch.object(module, method) as called, \
                         mock.patch.object(module.os, 'fchmod', side_effect=OSError('mode refused')):
                     with self.assertRaisesRegex(OSError, 'mode refused'):
                         command(self.inst)
