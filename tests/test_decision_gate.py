@@ -301,6 +301,83 @@ with mock.patch.object(m,'machine_admit',side_effect=held):
                 assert_writer_released()
                 self.assertIn(('root', 'in-flight node gate'), m.open_jobs_anywhere(inst))
 
+    def assert_gate_released(self):
+        row = json.loads(self.gate_path().read_text())
+        self.assertEqual(row['phase'], 'released')
+        self.assertNotIn('phase_owner', row)
+        successor = self.start_gate('successor', 'print(42)')
+        out, err = successor.communicate(timeout=5)
+        self.assertEqual(successor.returncode, 0, err)
+        self.assertEqual(out.strip(), '42')
+        self.assertNotIn('stale holder', err)
+
+    def test_cli_close_marks_normal_nonzero_and_signal_exits_released(self):
+        for code, expected in (('pass', 0), ('raise SystemExit(7)', 7),
+                               ('import os,signal; os.kill(os.getpid(),signal.SIGTERM)', -signal.SIGTERM),
+                               ('import os,signal; os.kill(os.getpid(),signal.SIGKILL)', -signal.SIGKILL)):
+            with self.subTest(code=code):
+                child = self.start_gate('exit', code)
+                out, err = child.communicate(timeout=5)
+                self.assertEqual(child.returncode, expected, err)
+                self.assertNotIn('stale holder', err)
+                self.assert_gate_released()
+        child = self.start_gate('forwarded', "import sys; print('held'); sys.stdin.readline()")
+        self.assertEqual(self.line(child.stdout), 'held')
+        child.terminate()
+        child.communicate(timeout=5)
+        self.assertEqual(child.returncode, -signal.SIGTERM)
+        self.assert_gate_released()
+
+    def test_cli_preserves_callers_inheritable_descriptors(self):
+        with (self.root / 'caller-input').open('w+b') as stream:
+            stream.write(b'caller descriptor')
+            stream.seek(0)
+            fd = stream.fileno()
+            code = "import os,sys; print(os.read(int(sys.argv[1]),4096).decode())"
+            result = subprocess.run([sys.executable, str(CORE / 'bin/brain'), 'gate-lock', '--',
+                                     sys.executable, '-c', code, str(fd)], cwd=self.root, env=self.env,
+                                    pass_fds=(fd,), capture_output=True, text=True, timeout=5)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), 'caller descriptor')
+        self.assert_gate_released()
+
+    def test_cli_failed_exec_marks_released_and_preserves_exit_code(self):
+        for command, expected in ((str(self.root / 'missing-command'), 127), (str(self.root), 126)):
+            with self.subTest(command=command):
+                result = subprocess.run([sys.executable, str(CORE / 'bin/brain'), 'gate-lock', '--', command],
+                                        cwd=self.root, env=self.env, capture_output=True, text=True, timeout=5)
+                self.assertEqual(result.returncode, expected, result.stderr)
+                self.assertIn('gate-lock:', result.stderr)
+                self.assert_gate_released()
+
+    def test_nested_close_does_not_release_outer_metadata(self):
+        code = """import os,subprocess,sys
+fd=int(os.environ['BRAIN_GATE_FD'])
+subprocess.run([sys.executable,sys.argv[1],'gate-lock','--',sys.executable,'-c','pass'],pass_fds=(fd,),check=True)
+print('nested-finished',flush=True)
+sys.stdin.readline()
+"""
+        child = self.start_gate('outer', code, str(CORE / 'bin/brain'))
+        self.assertEqual(self.line(child.stdout), 'nested-finished')
+        self.assertNotEqual(json.loads(self.gate_path().read_text())['phase'], 'released')
+        child.communicate('\n', timeout=5)
+        self.assert_gate_released()
+
+    def test_owned_close_failure_still_closes_fd_and_context_setup_failure_releases(self):
+        gate = self.m.node_gate.__wrapped__.__globals__
+        fd, owned = self.m.gate_acquire(self.inst, 'root', self.env, 'failure')
+        self.assertTrue(owned)
+        with mock.patch.object(gate['os'], 'pwrite', side_effect=OSError('fixture failure')):
+            gate['gate_close'](fd)
+        with self.assertRaises(OSError):
+            os.fstat(fd)
+        with mock.patch.object(gate['_m_machine'], 'process_stamp', return_value='fixture'), \
+                mock.patch.dict(gate, gate_environment=mock.Mock(side_effect=RuntimeError('setup failure'))):
+            with self.assertRaisesRegex(RuntimeError, 'setup failure'):
+                with self.m.node_gate(self.inst, self.n, self.env, 'setup'):
+                    self.fail('must not yield')
+        self.assertEqual(json.loads(self.gate_path().read_text())['phase'], 'released')
+
     def test_dead_holder_is_reported_and_reclaimed_without_replacing_inode(self):
         dead = subprocess.Popen([sys.executable, '-c', 'pass'], env=self.env)
         dead.wait(timeout=5)

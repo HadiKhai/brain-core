@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import stat
 import signal
+import subprocess
 import sys
 import threading
 
@@ -224,35 +225,33 @@ def gate_environment(inst, node, env, fd):
     return env
 
 
+def gate_close(fd):
+    """Mark an owned close before dropping our reference, never unlock a child."""
+    try:
+        row = gate_metadata(fd)
+        if row.get('pid') == os.getpid():
+            row.update(phase='released')
+            row.pop('phase_owner', None)
+            gate_write_metadata(fd, row)
+    except (OSError, SystemExit):
+        pass  # Best effort: failed publication must never leak the descriptor.
+    finally:
+        os.close(fd)
+
+
 @contextlib.contextmanager
 def node_gate(inst, n, env, label):
     fd, owned = gate_acquire(inst, n['id'], env, label)
-    env = gate_environment(inst, n['id'], env, fd)
-    active = ACTIVE_GATE.set((inst.root, n['id'], env))
     try:
-        yield env
+        env = gate_environment(inst, n['id'], env, fd)
+        active = ACTIVE_GATE.set((inst.root, n['id'], env))
+        try:
+            yield env
+        finally:
+            ACTIVE_GATE.reset(active)
     finally:
-        ACTIVE_GATE.reset(active)
         if owned:
             gate_close(fd)
-
-
-def gate_close(fd):
-    # Close, never unlock: a surviving child retains the same ownership.
-    # Released is never idle while the flock is held, so this best-effort
-    # mark needs no instance lock; it only spares the next holder a
-    # stale-holder report after an ordinary close.
-    row = gate_metadata(fd)
-    if row.get('pid') == os.getpid():
-        row.update(phase='released')
-        row.pop('phase_owner', None)
-        data = (json.dumps(row) + '\n').encode()
-        try:
-            if len(data) <= 4096 and os.pwrite(fd, data, 0) == len(data):
-                os.ftruncate(fd, len(data))
-        except OSError:
-            pass
-    os.close(fd)
 
 
 def gate_wrapper_admission(inst, node, env):
@@ -269,6 +268,7 @@ def gate_wrapper_admission(inst, node, env):
         ACTIVE_GATE.reset(active)
 
 
+
 def cmd_gate_lock(a):
     command = a.command[1:] if a.command[:1] == ['--'] else a.command
     if not command:
@@ -276,23 +276,54 @@ def cmd_gate_lock(a):
     inst = _m_nodes.load()
     n = gate_node(inst, getattr(a, 'node', None))
     fd, owned = gate_acquire(inst, n['id'], os.environ, a.label or command[0])
-    os.set_inheritable(fd, True)
-    _m_core_releases.hold_pin(_m_common.CORE)  # the exec'd command keeps this release from prune
-    env = gate_environment(inst, n['id'], os.environ, fd)
-    if owned:  # an inherited gate's outer wrapper already admitted
-        try:
-            gate_wrapper_admission(inst, n['id'], env)
-        except BaseException:
-            gate_close(fd)
-            raise
-    sys.stdout.flush()
-    sys.stderr.flush()
-    for name in ('SIGPIPE', 'SIGXFZ', 'SIGXFSZ'):
-        if hasattr(signal, name):
-            signal.signal(getattr(signal, name), signal.SIG_DFL)
+    child = None
+    pending = []
+    handlers = {}
+
+    def forward(signum, frame):
+        if child is None:
+            pending.append(signum)
+        else:
+            try:
+                child.send_signal(signum)
+            except ProcessLookupError:
+                pass
+
+
     try:
-        os.execvpe(command[0], command, env)
+        os.set_inheritable(fd, True)
+        _m_core_releases.hold_pin(_m_common.CORE)  # the command keeps this release from prune
+        env = gate_environment(inst, n['id'], os.environ, fd)
+        if owned:  # an inherited gate's outer wrapper already admitted
+            gate_wrapper_admission(inst, n['id'], env)
+        sys.stdout.flush()
+        sys.stderr.flush()
+        if not owned:
+            # The outer owner supervises the complete chain. Preserve exec for
+            # nested wrappers so they cannot outlive their actual command.
+            for name in ('SIGPIPE', 'SIGXFZ', 'SIGXFSZ'):
+                if hasattr(signal, name):
+                    signal.signal(getattr(signal, name), signal.SIG_DFL)
+            os.execvpe(command[0], command, env)
+        for signum in (signal.SIGHUP, signal.SIGINT, signal.SIGQUIT, signal.SIGTERM):
+            handlers[signum] = signal.signal(signum, forward)
+        child = subprocess.Popen(command, env=env, close_fds=False)
+        for signum in pending:
+            forward(signum, None)
+        result = child.wait()
     except OSError as e:
-        os.close(fd)
         print('gate-lock: ' + str(e), file=sys.stderr)
         raise SystemExit(127 if e.errno == errno.ENOENT else 126)
+    finally:
+        if owned:
+            gate_close(fd)
+        else:
+            os.close(fd)  # Only reached if nested exec failed.
+        for signum, handler in handlers.items():
+            signal.signal(signum, handler)
+    if result < 0:
+        signum = -result
+        if signum != signal.SIGKILL:
+            signal.signal(signum, signal.SIG_DFL)
+        os.kill(os.getpid(), signum)
+    raise SystemExit(result)
