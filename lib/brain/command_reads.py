@@ -45,6 +45,10 @@ def scope(*reads):
         _SCOPED.reset(token)
 
 
+def active():
+    return _VALUES.get() is not None
+
+
 @contextlib.contextmanager
 def snapshot():
     from . import common, instance, nodes, spend, status, verify

@@ -68,6 +68,8 @@ def dispatch_run(inst, limit=50, node_limit=200):
     if not asks:
         return result
     groups = _m_watch.watch_groups(inst)
+    if getattr(groups, 'stale', False):
+        return {**result, 'busy': True}  # stale identities would be fallback keys: duplicate wakes later
     def text_key(text):
         return ' '.join(text.removeprefix('inbox: ').split())[:400]
     actual = {(i['node'], text_key(i['text'])): i for g in groups.values() for i in g['items']}

@@ -175,7 +175,8 @@ def watch_source_signature(inst, layout=None):
     layout = {} if layout is None else layout
     for n in nodes:
         if n.get('external') and n.get('home_path'):
-            home = str(n['home_path'])
+            # A retargeted home resolves elsewhere and rediscovers its Git layout.
+            home = (str(n['home_path']), str(n['home_path'].resolve()))
             if home not in layout:
                 layout[home] = _m_instance.git_state_paths(n['home_path'])
             paths.extend(layout[home])
@@ -635,7 +636,13 @@ def watch_groups(inst, nodes=None):
         with command_reads.snapshot():
             return watch_scan(inst, nodes)
     try:
-        return watch_due_episodes(inst, scan)
+        groups = watch_due_episodes(inst, scan)
+        if groups.stale and not command_reads.active():
+            # Overtaken by another reconciliation (or moved sources): one fresh
+            # scan usually completes alone; callers still treat stale as unknown.
+            # Inside an enclosing read scope a rescan would reuse old reads.
+            groups = watch_due_episodes(inst, scan)
+        return groups
     except (OSError, ValueError):
         if _m_common.outward_links(inst.root):
             raise  # fail open for receipt I/O, never for unsafe links
@@ -899,7 +906,8 @@ def watch_once(inst, kinds=None, quiet=False, sources=None, groups=None):
             return
         generation = _m_instance.state_signature(inst, list(inst.nodes()))
         if groups is None:
-            with command_reads.snapshot(), _m_timings.phase('watch_compute'):
+            # Each scan opens its own read scope, so an overtaken scan can rescan fresh.
+            with _m_timings.phase('watch_compute'):
                 groups = watch_groups(inst)
     with command_reads.scope(_m_common.outward_links):
         if _m_common.outward_links(inst.root):

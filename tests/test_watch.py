@@ -221,6 +221,36 @@ class Watcher(Scenario):
         target.write_text('- Choose cyan\n')  # same size; only the referent changes
         self.assertNotEqual(m.watch_source_signature(inst, layout), before)
 
+    def test_source_signature_sees_retargeted_home_with_cached_layout(self):
+        import subprocess
+        m, inst = self.m, self.inst
+        homes = self.tmp / 'fixture-homes'
+        for name in ('a', 'b'):
+            (homes / name).mkdir(parents=True)
+            subprocess.run(['git', 'init', '-q', str(homes / name)], check=True)
+        link = homes / 'home'
+        link.symlink_to(homes / 'a')
+        external = {**inst.node('root'), 'id': 'fixture-external', 'parent': None,
+                    'external': True, 'home_path': link}
+        nodes = list(inst.nodes()) + [external]
+        with mock.patch.object(type(inst), 'nodes', return_value=nodes):
+            layout = {}
+            before = m.watch_source_signature(inst, layout)
+            link.unlink()
+            link.symlink_to(homes / 'b')
+            self.assertNotEqual(m.watch_source_signature(inst, layout), before)
+
+    def test_dispatcher_defers_on_stale_scan_instead_of_fallback_identity(self):
+        m, inst = self.m, self.inst
+        dispatcher = m._owners['dispatch_run']
+        (self.root / 'inbox.md').write_text('- Host question: choose a color <!-- host-question:color -->\n')
+        stale = m.WatchGroups({}, None, None, stale=True)
+        with mock.patch.object(m._owners['watch_groups'], 'watch_groups', return_value=stale), \
+                mock.patch.object(m._owners['request_wake'], 'request_wake') as request:
+            result = dispatcher.dispatch_run(inst)
+        request.assert_not_called()
+        self.assertTrue(result.get('busy'))
+
     def test_command_snapshot_keeps_overdue_questions_repeatable_and_retains_pending_wake(self):
         m, inst = self.m, self.inst
         line = '- 2020-01-01 00:00 +00:00 from runtime: Host question: choose a color <!-- host-question:color -->'
