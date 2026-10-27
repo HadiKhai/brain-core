@@ -3024,3 +3024,16 @@ and explicit accounting commands retain their existing behavior.
 An authenticated browser startup may seed its first response from the existing private full JSON snapshot only after the existing code, instance, scan selection, word policy and allowed-source privacy binding validates. Explicitly partial/unavailable-format records fall back to the file-only startup. The displayed capture timestamp and age stay attached to that reading; a background rebuild replaces it only after usage and metadata are complete. Cached deliveries revalidate the stored snapshot and current privacy policy. Browser full rebuilds persist a complete snapshot under their original privacy fence. A changed core version intentionally invalidates the old snapshot, so installation needs one complete fill under the new version before this warm startup path is available.
 
 Concurrent explicit JSON waiters first attempt the fill lock without blocking. A follower joins the existing owner, then consumes its newly published validated complete generation. It never queues another rebuild; failed or unpublished owners fail closed for the follower. The source-bound input-index work is parked separately while this urgent 7.3a change is reviewed.
+
+
+## D40009: Bound live accounting to command and job observations
+
+Each command captures transcript discovery once. A job aggregate's revision
+contains only files selected by the existing permission-checked job attribution,
+plus its policy, ledger and hand-back inputs. Unrelated transcript appends cannot
+invalidate every job aggregate. Live accounting and runaway checks select fresh
+observed worker threads or unended jobs updated within 24 hours (start/update
+clocks and their own receipt/contract/attempt modification times). Stale rows keep
+recorded final usage where available; unavailable live observations remain unknown.
+The memo scope names accounting reads only; mutation guards remain fresh. Parser
+changes and moving refresh computation outside the writer lock are separate work.

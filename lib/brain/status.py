@@ -1673,6 +1673,8 @@ def runaway_jobs(inst, n, structured=False, readonly=False):
         return []
     j, out = _m_jobs.jobs_summary(inst, n), []
     for r in j["open"]:
+        if not _m_spend.live_usage_eligible(inst, n, r):
+            continue
         # Open ledger records include stopped workers awaiting settlement. Their
         # latched advice stays visible; final usage is a cached observation.
         u = _m_spend.live_usage(inst, n, r)

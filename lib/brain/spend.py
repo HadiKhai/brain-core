@@ -836,6 +836,7 @@ def job_window(inst, row):
     return (a.timestamp() if a else None), (b.timestamp() if b else time.time())
 
 
+@_m_command_reads.memo
 def job_sessions(inst, n, row, worktree=None):
     """The sessions that did this job, and the sub-agents they started: begun in its worktree, given a brief that
     names it (a reviewer runs in its coordinator's folder), or recorded by its hand-back (a worker elsewhere).
@@ -947,7 +948,10 @@ def job_usage(inst, n, row, worktree=None):
         local = status.local_job_state(n, row['Job'], work) if work else {}
         if local.get('merged'):
             finished, merged_tip = True, local.get('tip', '')
-    revision = job_usage_signature(inst, n, row)
+    try:
+        revision = job_usage_signature(inst, n, row, worktree)
+    except DiscoveryIncomplete:
+        return None  # no aggregate/signature publication from an unstable mapping
     # Terminal worker/ledger records fix the accounting episode. Unrelated live
     # transcripts cannot invalidate every finished job on every dashboard read.
     stable = (revision[0][:3], revision[1], merged_tip, *revision[3:]) if finished else revision
@@ -1197,6 +1201,16 @@ def live_usage_snapshot(values, revision):
 
 
 def live_usage(inst, n, row):
+    try:
+        return _live_usage_selected(inst, n, row)
+    except (OSError, ValueError, RuntimeError):
+        return None  # source discovery/permission uncertainty is never a zero
+
+
+def _live_usage_selected(inst, n, row):
+    if not live_usage_eligible(inst, n, row):
+        return host_row_usage(row) if (str(row.get('Usage', '')).startswith('host') or
+                                      row.get('Ended') and row_usage(row) is not None) else None
     scope = _UI_USAGE.get()
     if scope is None:
         return _live_usage(inst, n, row)
@@ -1209,6 +1223,46 @@ def live_usage(inst, n, row):
     return values[job][1]
 
 
+@contextmanager
+def accounting_snapshot():
+    """One accounting observation per command, without memoizing write guards."""
+    token = _UI_DISCOVERY.set({})
+    try:
+        with _m_command_reads.scope(spend_input_signature, job_sessions, job_usage_signature, live_threads):
+            yield
+    finally:
+        _UI_DISCOVERY.reset(token)
+
+
+@_m_command_reads.memo
+def live_threads(inst):
+    from . import host_observations
+    try:
+        snapshot = host_observations.host_snapshot(inst)
+        return {(r['node'], r.get('job_key')) for r in snapshot['records']
+                if r['role'] == 'worker' and r['status'] in ('running', 'starting', 'preparing', 'waiting')}
+    except (OSError, ValueError, TypeError, KeyError):
+        return set()
+
+
+def live_usage_eligible(inst, n, row):
+    if (n['id'], _m_jobs.job_key(row)) in live_threads(inst):
+        return True
+    if row.get('Ended'):
+        return False
+    now = inst.now_dt().timestamp()
+    dates = [inst.parse_time(row.get(field, '')) for field in ('Updated', 'Started')]
+    stamps = [date.timestamp() for date in dates if date is not None]
+    from . import job_attempts
+    for path in (_m_jobs.handback_file(n, row), _m_jobs.contract_file(n, row), job_attempts.attempt_path(n, row)):
+        try:
+            stamps.append(path.stat().st_mtime)
+        except OSError:
+            pass
+    return any(0 <= now - stamp <= 86400 for stamp in stamps)
+
+
+@_m_command_reads.memo
 @ui_discovery
 def spend_input_signature(inst):
     """Cheap metadata revision shared by all jobs in one dashboard snapshot.
@@ -1236,13 +1290,18 @@ def spend_input_signature(inst):
 
 
 @_m_command_reads.memo
-def job_usage_signature(inst, n, row):
+def job_usage_signature(inst, n, row, worktree=None):
     try:
         st = _m_jobs.handback_file(n, row).stat()
         handback = (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
     except OSError:
         handback = None
-    return (spend_input_signature(inst), handback, json.dumps(n['local'], sort_keys=True),
+    # Selection uses the existing permission-checked job/session attribution.
+    # Unrelated transcripts participate in discovery, never this job's revision.
+    files = tuple(sorted((a['path'], tuple(a.get('ino', ())), tuple(a.get('stamp', ())))
+                         for a in job_sessions(inst, n, row, worktree)))
+    inputs = (*spend_input_signature(inst)[:3], files)
+    return (inputs, handback, json.dumps(n['local'], sort_keys=True),
             tuple(_m_guard.never_terms(n)), tuple(row.get(name, '') for name in _m_jobs.JOB_COLS))
 
 
