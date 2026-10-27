@@ -2844,18 +2844,6 @@ execution and reconciliation; the transport creates no second lifecycle engine.
 The same absolute deadline reaches request encoding and subprocess creation, so
 serialization and scheduling time cannot renew the remaining operation budget.
 
-## Command-scoped Git observation batches
-
-Read commands share branch tips, commit dates and linked-worktree HEADs from one
-ref/worktree enumeration per repository. Ancestry queries, commit counts and
-clean-title checks share one commit graph per base, with roots pinned to the
-enumerated commit IDs even if refs move during the command. Unfinished-title findings retain the original Git
-log order. Configured signature display retains the native date-log read. These
-derived reads expire at the end of the command, without a time
-limit or persistent authority. Failed or malformed batches fall back to the
-individual Git reads, including local job-state observations. Read-only `ready`
-uses this scope; readiness recording and other write paths keep their existing
-reads and writes.
 ## D40006: Select per-change test consumers and keep a separate full release gate
 
 A node can opt into a project-owned `verify_change` command for native readiness

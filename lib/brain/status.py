@@ -439,23 +439,13 @@ def local_job_state(n, branch, w):
                 refs = _m_common.branch_refs(home)
                 tips = {name[len('refs/heads/'):]: tip for name, tip in (refs or {}).items()
                         if name.startswith('refs/heads/')}
-                if refs is None:
-                    tips = None
                 if target:
                     graph = _m_common.git('rev-list', target, cwd=home)
-                    if not graph.returncode and tips is not None:
+                    if not graph.returncode:
                         ancestors = set(graph.stdout.splitlines())
                         merged = {name for name, tip in tips.items() if tip in ancestors}
-                    elif graph.returncode:
-                        tips = None
             repositories[repository] = tips, merged
         tips, merged = repositories[repository]
-        if tips is None:
-            token = _LOCAL_JOB_SNAPSHOT.set(None)
-            try:
-                return local_job_state(n, branch, w)
-            finally:
-                _LOCAL_JOB_SNAPSHOT.reset(token)
         tip = tips.get(branch, '')
         result = {'exists': Path(w['path']).is_dir(), 'tip': tip,
                   'merged': bool(tip and tip != w.get('start') and branch in merged)}
