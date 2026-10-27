@@ -850,9 +850,26 @@ with instance.brain_lock(instance.Instance(__import__('pathlib').Path(sys.argv[2
             builds.append(head)
             return head
         with mock.patch.dict(os.environ, self.env), refresh.instance.held():
-            with self.assertRaisesRegex(SystemExit, 'Git refs kept moving through 3 locked builds'):
+            with self.assertRaisesRegex(SystemExit, 'kept changing through 3 locked builds'):
                 refresh.compute(inst, inst.node('app'), churn)
         self.assertEqual(len(builds), refresh.HELD_BUILDS)
+
+    def test_held_refresh_rebuilds_after_a_changed_input_file(self):
+        root = self.init('alice')
+        loader = core_loader.SourceFileLoader('refresh_held_file_fence', str(CORE / 'bin/brain'))
+        m = loader.load_module()
+        refresh = importlib.import_module(loader.package_name + '.status_refresh')
+        inst = m.Instance(root)
+        backlog, builds = root / 'backlog.md', []
+        def changed(current, target):
+            text = m.refreshed_text(current, target)
+            if not builds:  # a fenced input changes during the held build
+                backlog.write_text(backlog.read_text() + '\n- concurrent item\n')
+            builds.append(text)
+            return text
+        with mock.patch.dict(os.environ, self.env), refresh.instance.held():
+            refresh.compute(inst, inst.node('root'), changed)
+        self.assertEqual(len(builds), 2)
 
     def test_refresh_fences_complete_ref_names(self):
         root, home, wt = self.project()
@@ -1009,6 +1026,22 @@ with instance.brain_lock(instance.Instance(__import__('pathlib').Path(sys.argv[2
         self.assertTrue(records[-1]['data']['maintenance_ok'])
         self.assertEqual(events.replay(m.Instance(root))[1]['root'], view)
         self.assertIn(ref, events.replay(m.Instance(root))[2])  # the writer's operation stays open
+
+    def test_refresh_reports_a_failed_terminal_screen_as_failure(self):
+        root = self.init('alice')
+        loader = core_loader.SourceFileLoader('refresh_screen_failure', str(CORE / 'bin/brain'))
+        m = loader.load_module()
+        events = importlib.import_module(loader.package_name + '.events')
+        screen = events.screen
+        def failing(inst, data):
+            if 'maintenance_ok' in data:
+                raise ValueError('display failed')
+            return screen(inst, data)
+        with mock.patch.object(events, 'screen', side_effect=failing), \
+                self.assertRaisesRegex(SystemExit, 'status refresh maintenance refused'):
+            with m.brain_lock(m.Instance(root)), events.Command(root, command='status'):
+                pass
+        self.assertFalse(events.read(m.Instance(root))[-1]['data']['maintenance_ok'])
 
     def test_refresh_does_not_retry_a_real_repair_refusal(self):
         root = self.init('alice')

@@ -1,4 +1,5 @@
 """Optimistic preparation for explicit status refreshes, never action authority."""
+import contextlib
 import os
 import hashlib
 import json
@@ -349,37 +350,6 @@ def contended(error):
     return any(text in message for text in CONTENTION)
 
 
-def held_compute(inst, n, build):
-    """The contended last attempt computes under the held lock.
-
-    No Brain writer can publish beside it, but worktree commits still can, so
-    Git answers stay fenced: drift rebuilds under the lock, a bounded number
-    of times, and never publishes an unfenced build.
-    """
-    with instance.brain_lock(inst), timings.phase('refresh_compute'):
-        for build_index in range(HELD_BUILDS):
-            current = instance.Instance(inst.root)
-            git_inputs = GitInputs()
-            token = _ACTIVE.set(True)
-            observer = common._GIT_OBSERVER.set(git_inputs.observe)
-            reads = common._GIT_READS.set(None)
-            try:
-                result = build(current, current.node(n['id']))
-                git_inputs.validate()
-                git_inputs.final_check()
-                return result
-            except SystemExit as error:
-                if not any(text in str(error.code) for text in GIT_DRIFT):
-                    raise
-                if build_index == HELD_BUILDS - 1:
-                    common.die(f'status refresh Git refs kept moving through {HELD_BUILDS} locked builds; '
-                               'worktree commits are outside the Brain lock')
-            finally:
-                common._GIT_OBSERVER.reset(observer)
-                common._GIT_READS.reset(reads)
-                _ACTIVE.reset(token)
-
-
 def compute(inst, n, build, *, all_nodes=False, targets=None, extra=()):
     """Release physical ownership, prepare once, then refuse relevant drift.
 
@@ -391,7 +361,21 @@ def compute(inst, n, build, *, all_nodes=False, targets=None, extra=()):
     if active():
         return build(inst, n)
     if instance.holding():
-        return held_compute(inst, n, build)
+        # The contended last attempt keeps the lock, so no Brain writer can
+        # publish beside it. Worktree files and Git still can: every build stays
+        # fenced, drift rebuilds under the lock, and only a bounded number.
+        for _ in range(HELD_BUILDS):
+            try:
+                return fenced(inst, n, build, all_nodes, targets, extra)
+            except SystemExit as error:
+                if not contended(error):
+                    raise
+        common.die(f'status refresh inputs kept changing through {HELD_BUILDS} locked builds; '
+                   'worktree files and Git are outside the Brain lock')
+    return fenced(inst, n, build, all_nodes, targets, extra)
+
+
+def fenced(inst, n, build, all_nodes, targets, extra):
     git_inputs = GitInputs()
     with instance.brain_lock(inst):
         current = instance.Instance(inst.root)
@@ -402,7 +386,7 @@ def compute(inst, n, build, *, all_nodes=False, targets=None, extra=()):
                     for target in selected for w in target['local'].get('worktrees', {}).values()]
         def paths():
             return [path for target in selected for path in input_paths(current, target)] + list(extra() if callable(extra) else extra)
-        with instance.released(inst, list(current.nodes())):
+        with (contextlib.nullcontext() if instance.holding() else instance.released(inst, list(current.nodes()))):
             token = _ACTIVE.set(True)
             observer = common._GIT_OBSERVER.set(git_inputs.observe)
             reads = common._GIT_READS.set(None)

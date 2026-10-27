@@ -797,7 +797,7 @@ class Command:
                 append(self.inst, self.node, 'abort', self.ref, {'command': self.command})
             else:
                 append(self.inst, self.node, 'commit', self.ref, data, scrub=False)
-            if self.command == 'status' and not maintenance_ok:
+            if self.command == 'status' and not data.get('maintenance_ok'):
                 reason = f'; cause: {maintenance_error}' if maintenance_error is not None else ''
                 common.die('status refresh maintenance refused; generated view needs repair; retry from fresh state' + reason)
         elif not changed:
