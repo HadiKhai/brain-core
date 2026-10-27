@@ -5,7 +5,7 @@ def seed_tasks(state):
     def row(ident, title, status, **extra):
         return {'id': ident, 'title': title, 'status': status, 'priority': 'P2', 'order': 1,
                 'owner': 'Demo developer', 'depends_on': [], 'blocked_by': [], 'blocks': [],
-                'decisions': [], 'evidence': [], 'request': {'quote': 'Keep the source request',
+                'decisions': [], 'evidence': [], 'ready_now': status == 'ready' and not extra.get('blocked_by'), 'request': {'quote': 'Keep the source request',
                     'at': '2026-01-01T10:00:00Z', 'ref': 'notes.md:3', 'date_basis': 'source-timestamp'}, **extra}
     node['tasks'] = {'source': 'local', 'error': '', 'rows': [
         row('APP-1', 'Export the field report', 'in-progress', branch='job/navigation', blocks=['APP-2'], attempt_count=2),

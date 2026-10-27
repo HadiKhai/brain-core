@@ -2878,3 +2878,43 @@ For a successful new backlog/ready task whose native operation changes no ledger
 resources, retain the native command journal and skip the unrelated status/usage
 projection. Resource changes, configured managed indexes and other transitions retain
 normal maintenance, including partially failed index regeneration.
+
+## D28004: Show task workflow and downstream dependencies from one snapshot
+
+The task board keeps five stable columns (backlog, ready, in progress, parked and done),
+with dropped records available through an explicit toggle. Review/testing states remain
+in progress; blocked tasks and delivery claims without proof remain parked. Filtering
+by node, owner or text affects both the board and dependency canvas.
+
+Use a directed SVG canvas with a deterministic layered layout and a compact grid for
+independent tasks. Edges point from a dependency to its dependent. Node-qualified task
+identities preserve cross-node links and duplicate local IDs; downstream traversal is
+transitive and bounded for malformed provider cycles. Filters hide edges with missing
+endpoints while retaining full-snapshot downstream context in task details. No graph
+library is needed. Pan, zoom and task reading work with pointer and keyboard controls.
+
+The existing read-only task snapshot reports dispatch holds and a ready-now flag using
+the same dependency and hold checks as task selection. A ready status alone does not
+promise that a task can start. Source records remain authoritative; this visualization
+does not change workflow state or reconcile records.
+
+## D28005: Prioritize active dependency chains and retain full task context
+
+The task canvas defaults to connected active tasks, laid out left to right by dependency
+depth. Completed/dropped work and unlinked tasks are available through Show all. Unlinked
+tasks are listed separately and never shrink a dependency graph into an unreadable grid.
+When no applicable edges exist, show an explicit no-links explanation. State colours have
+text labels in a legend; blocked work has a visible marker and parked work is collapsed.
+Task navigation counts exclude dropped records.
+
+Parse title markup with `mdast-util-from-markdown`, already locked and bundled through
+react-markdown, now declared directly because task presentation calls it. This adds no
+new transitive or bundled package. Cards use short plain-text summaries and three-line
+clamps; graph labels use one-line ellipsis. The reader retains the full source text and
+original title. Branch-based task titles bypass prose identifier substitution, so a real
+job name is not reduced to a generic label. Hide empty dependency facts.
+
+Task tab selection paints immediately instead of fading from the previous selection.
+Visual evidence waits for finite shell animations to settle before capture. Reconciliation
+and proof of job completion remain backend responsibilities; collapsing a parked row
+never changes its state or evidence.

@@ -588,6 +588,22 @@ class Tasks(Scenario):
         self.assertEqual(state['rows'], [])
         self.assertTrue(state['error'])
 
+    def test_ui_ready_now_matches_dependency_and_dispatch_holds(self):
+        from brain import task_flow
+        self.add(status='ready')
+        with mock.patch.object(task_flow, 'holds', return_value=[]):
+            self.assertTrue(tasks.ui_tasks(self.inst, self.n)['rows'][0]['ready_now'])
+        with mock.patch.object(task_flow, 'holds', return_value=['task hold remains active']):
+            row = tasks.ui_tasks(self.inst, self.n)['rows'][0]
+            self.assertFalse(row['ready_now'])
+            self.assertEqual(row['dispatch_holds'], ['task hold remains active'])
+        self.add('APP-2')
+        tasks.mutate(self.inst, self.n, 'APP-1', {'depends_on': ['APP-2']})
+        with mock.patch.object(task_flow, 'holds', return_value=[]):
+            row = tasks.ui_tasks(self.inst, self.n)['rows'][0]
+            self.assertFalse(row['ready_now'])
+            self.assertEqual(row['blocked_by'], ['APP-2'])
+
     def peer_node(self, ident, owners='sample'):
         path = self.root / 'nodes' / ident
         path.mkdir(parents=True)
