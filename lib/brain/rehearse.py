@@ -1654,7 +1654,8 @@ runpy.run_path(entry, run_name='__main__')
     transaction_verdict = 'unproven'
     diagnostics, capture_after_metadata = {}, {}
     validation_now, raw_trace_hex = None, None
-    validator_command = args[0] if kind == 'read' else 'status' if kind == 'refresh' else 'check'
+    validator_command = (args[0] if args else 'dashboard') if kind == 'read' else (
+        'status' if kind == 'refresh' else 'check')
     if kind in ('read', 'fix', 'refresh'):
         retention.checkpoint(stage='capture-after')
         try:

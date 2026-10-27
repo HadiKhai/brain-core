@@ -999,6 +999,7 @@ def install_observer(events, root, trace, read=False):
                 return original_write(model, name, value)
             finally:
                 ui_active.pop()
+        @functools.wraps(original_atomic)
         def ui_atomic(path, text, *args, **kwargs):
             owned = bool(ui_active) and ui_active[-1] == Path(path)
             before = ui_capture() if owned else None
