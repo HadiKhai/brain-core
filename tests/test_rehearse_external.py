@@ -676,6 +676,34 @@ with copies:
 
 
 class DeclaredExternalSnapshot(Scenario):
+    def test_provider_installation_routes_are_excluded_without_waiving_link_guard(self):
+        root = self.init('provider-routes')
+        provider = self.tmp / 'provider-config'
+        provider.mkdir()
+        outside = self.tmp / 'outside'
+        outside.mkdir()
+        (provider / 'linked-directory').symlink_to(outside, target_is_directory=True)
+        local_file = root / '.brain/local.json'
+        local = copy.deepcopy(instance.Instance(root).local)
+        local['global'] = {'codex': [str(provider)]}
+        local_file.write_text(json.dumps(local))
+        original = local_file.read_bytes()
+        inst = instance.Instance(root)
+        with self.assertRaises(rehearse.RehearsalError):
+            rehearse.external_inputs(inst)
+        with mock.patch.object(rehearse, 'copy_tree', side_effect=AssertionError('provider copied')):
+            captured = rehearse_external.without_provider_bindings(inst)
+        self.assertNotIn('global', captured.local)
+        self.assertEqual(local['nodes'], captured.local['nodes'])
+        self.assertTrue(rehearse.external_inputs(captured))
+        self.assertEqual(original, local_file.read_bytes())
+        self.assertEqual(local, inst.local)
+        with self.assertRaises(rehearse.RehearsalError):
+            rehearse.external_inputs(inst)
+        inst.local['global'] = []
+        with self.assertRaises(ValueError):
+            rehearse_external.without_provider_bindings(inst)
+
     def test_comparison_uses_captured_operands_during_peer_publication(self):
         inst, home, tree = self.fixture()
         (home / 'bin').mkdir()

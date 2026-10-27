@@ -2034,6 +2034,7 @@ def rehearse(inst, n, branch, local_diff_dir=None):
         frozen_inst = _m_instance.Instance(frozen)
         from . import rehearse_external
         captured_inst = rehearse_external.freeze_declared(frozen_inst, folder / 'external')
+        captured_inst = rehearse_external.without_provider_bindings(captured_inst)
         if captured_inst is not frozen_inst:
             # This root is the owned source copy, never the live caller's root.
             _m_common.atomic_write(frozen / '.brain/local.json', json.dumps(captured_inst.local), private=True)

@@ -68,6 +68,16 @@ Outward aliases, replaced physical ancestors and shared files remain refused.
 Each sync failure propagates; no multi-file transaction, namespace lock or
 physical power-loss guarantee is implied.
 
+## D40006: Exclude provider installation routes from aggregate-only rehearsal
+
+The machine-local `global` map records runtime installation directories used to
+find a Brain from a provider environment. Rehearsal has a private HOME and reads
+one attested aggregate capsule; provider installation routes are outside that
+input contract. Copy preparation omits this map only from its owned source
+copy. It preserves project homes, workbenches, worktrees, privacy policy and the
+external observer's link refusal. The original local bindings are never written.
+
+
 ## D40004: Lease preparation writers and prove their exact projections
 
 Locked command preparation starts its native operation before folding hooks or

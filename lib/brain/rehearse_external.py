@@ -483,6 +483,25 @@ def freeze_declared(inst, directory):
     return captured
 
 
+def without_provider_bindings(inst):
+    """Provider installation routes are not inputs to aggregate-only probes.
+
+    Return independent local bindings; only the owner may persist them into its
+    fresh clone. Project homes/workbenches and all privacy guards stay intact.
+    """
+    if 'global' not in inst.local:
+        return inst
+    routes = inst.local['global']
+    if (not isinstance(routes, dict) or any(not isinstance(k, str) or not isinstance(v, list)
+            or any(not isinstance(p, str) for p in v) for k, v in routes.items())):
+        raise ValueError('invalid provider installation routes')
+    from .instance import Instance
+    captured = Instance(inst.root)
+    captured.local = copy.deepcopy(inst.local)
+    captured.local.pop('global')
+    return captured
+
+
 def freeze_accounting(inst, clock, destination):
     """Attest existing Brain-owned aggregates; never discover provider inputs."""
     import hashlib
