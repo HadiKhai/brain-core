@@ -10,7 +10,7 @@ import subprocess
 import contextlib
 from pathlib import Path
 
-from . import common, guard, instance, nodes
+from . import common, guard, instance, nodes, timings
 
 VERSION = 1
 # No command arguments, messages, note bodies, item bodies or schedule briefs enter the journal.
@@ -390,7 +390,7 @@ class Journal:
         self.save()
         self.append('root', 'damage', note['ref'], {'reason': note['reason'], 'flagged': True})
 
-    def append(self, node, kind, ref, data, scrub=True):
+    def append(self, node, kind, ref, data, scrub=True, persist=True):
         self.sync()
         data = dict(data)
         if 'views' in data:
@@ -418,7 +418,7 @@ class Journal:
                     os.fsync(target.fd)
             path = target.path
         append_line(path, record)
-        self.sync(persist=True)
+        self.sync(persist=persist)
         return record
 
     def fault(self, reason, packet=None):
@@ -439,8 +439,8 @@ def journal(inst, repair=False):
         return store
 
 
-def append(inst, node, kind, ref, data, scrub=True):
-    return journal(inst).append(node, kind, ref, data, scrub=scrub)
+def append(inst, node, kind, ref, data, scrub=True, persist=True):
+    return journal(inst).append(node, kind, ref, data, scrub=scrub, persist=persist)
 
 
 def replay(inst, records=None):
@@ -664,9 +664,22 @@ class Command:
 
     def __enter__(self):
         nested = any(op.inst.root == self.inst.root for op in _CURRENT)
+        comparison_plan = None
+        if self.command == 'status' and not nested:
+            def replay_inputs():
+                return [*_paths(self.inst), self.inst.root / '.brain/events-compare.jsonl',
+                        self.inst.root / '.brain/events-repair-needed.json']
+            with instance.released(self.inst, extra=replay_inputs), timings.phase('refresh_compute'):
+                try:
+                    # Decode source and prepare derived bytes only. Every
+                    # publication/repair stays in the locked path below.
+                    journal(self.inst)
+                    comparison_plan = read_comparisons(self.inst, prepare=True)
+                except (JournalError, OSError, ValueError, SystemExit):
+                    pass
         journal(self.inst, repair=True)
         if not nested:
-            read_comparisons(self.inst, repair=True)
+            read_comparisons(self.inst, repair=True, prepared=comparison_plan)
             fold_hooks(self.inst)
             recover_records(self.inst)
             if journal(self.inst).positions:
@@ -965,12 +978,16 @@ def reconcile(inst, node=None, snapshot=False):
             views = {n['id']: snapshot_view(inst, n) for n in inst.nodes() if not n['archived']}
         existing = {r['id'] for r in current}
         current += [{**r, 'hash': None} for key, r in state.items() if key not in existing]
-        for ref in dead or [uuid.uuid4().hex]:
+        refs = dead or [uuid.uuid4().hex]
+        for index, ref in enumerate(refs):
             lease = leases.get(ref)
             if lease:
                 lease[0].check_file(lease[1])
+            refresh = status_refresh.requested(inst)
+            snapshot = index == 0 or not refresh
             append(inst, opened.get(ref, {}).get("node", "root"), 'reconcile', ref,
-                   {'resources': current, 'views': views, 'flagged': True, 'clear_faults': True})
+                   {'resources': current if snapshot else [], 'views': views if snapshot else {},
+                    'flagged': True, 'clear_faults': True}, persist=not refresh or index == len(refs) - 1)
             if lease:
                 st = os.fstat(lease[1])
                 lease[0].unlink_owned(lease[0].path.name, (st.st_dev, st.st_ino))
@@ -978,13 +995,17 @@ def reconcile(inst, node=None, snapshot=False):
             marker.unlink_owned(marker.path.name, (marker_st.st_dev, marker_st.st_ino))
 
 
-def read_comparisons(inst, repair=False):
+def read_comparisons(inst, repair=False, prepared=None, prepare=False):
     """Tail-index comparison evidence; retain one day plus the first real comparison per node."""
     path = inst.root / '.brain/events-compare.jsonl'
     cache = inst.root / '.brain/events-compare-index.json'
     stamp = _stamp(path)
+    if prepared is not None and prepared[0] == stamp:
+        if prepared[1] is not None:
+            common.atomic_write(cache, prepared[1], private=True, create=True)
+        return prepared[2]
     if stamp is None:
-        return []
+        return (None, None, []) if prepare else []
     try:
         saved = json.loads(private_read(cache))
         if (saved['version'] != 1 or not isinstance(saved['rows'], list) or not isinstance(saved['first'], dict)
@@ -1024,9 +1045,12 @@ def read_comparisons(inst, repair=False):
     # Old coverage rows do not establish a day, and old differences cannot poison a future clean day.
     rows = [r for r in rows if (now - inst.parse_time(r['ts'])).total_seconds() <= 86400]
     saved.update(rows=rows, first=first, mtime=stamp[3], anchor=_anchor(path, saved['offset']))
+    result = rows + [r for r in first.values() if r not in rows]
+    if prepare:
+        return stamp, json.dumps(saved, separators=(',', ':'), sort_keys=True), result
     if repair:
         common.atomic_write(cache, json.dumps(saved, separators=(',', ':'), sort_keys=True), private=True, create=True)
-    return rows + [r for r in first.values() if r not in rows]
+    return result
 
 
 def switch_gate(inst, n):

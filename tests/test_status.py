@@ -405,8 +405,14 @@ class AutonomyFacts(AutonomyProject):
         script = '''import sys, time
 from pathlib import Path
 sys.path.insert(0, sys.argv[1])
-from brain import cli, status, instance
+from brain import cli, status, instance, events
 marker, release = map(Path, sys.argv[2:4])
+load_index = events.Journal.load_index
+def checked_load_index(journal):
+    if not journal.loaded:
+        assert instance._LOCK['fh'] is None, 'cold refresh journal read holds the instance lock'
+    return load_index(journal)
+events.Journal.load_index = checked_load_index
 original = status.status_facts
 def slow(*args, **kwargs):
     assert instance._LOCK['fh'] is None, 'refresh projection holds the instance lock'
@@ -551,6 +557,35 @@ with instance.brain_lock(instance.Instance(__import__('pathlib').Path(sys.argv[2
         self.assertEqual(commit['kind'], 'commit')
         self.assertFalse(commit['data']['maintenance_ok'])
         self.assertEqual(commit['data']['views'], {})
+
+    def test_refresh_reconciliation_persists_one_complete_replay_index(self):
+        root = self.init('alice')
+        loader = core_loader.SourceFileLoader('refresh_reconcile_index', str(CORE / 'bin/brain'))
+        m = loader.load_module()
+        events = __import__('importlib').import_module(loader.package_name + '.events')
+        inst = m.Instance(root)
+        refs = [character * 32 for character in ('a', 'b', 'c')]
+        with m.brain_lock(inst):
+            for ref in refs:
+                events.append(inst, 'root', 'begin', ref, {'command': 'interrupted fixture'})
+            op = argparse.Namespace(inst=inst, command='status', ref='f' * 32)
+            events._CURRENT.append(op)
+            store = events.journal(inst)
+            try:
+                with mock.patch.object(store, 'save', wraps=store.save) as saved:
+                    events.reconcile(inst, node=inst.node('root'), snapshot=True)
+                self.assertEqual(saved.call_count, 1)
+            finally:
+                events._CURRENT.pop()
+        # A new reader must get the complete durable result, independently of
+        # the writer's in-memory replay state.
+        replay = events.Journal(inst).sync()
+        self.assertFalse(set(refs) & set(replay.state['opened']))
+        self.assertIn(events.node_ref('root'), replay.state['views'])
+        records = [record for record in events.read(inst) if record['kind'] == 'reconcile' and record['ref'] in refs]
+        self.assertEqual(len(records), 3)
+        self.assertTrue(records[0]['data']['views'])
+        self.assertTrue(all(not record['data']['views'] and not record['data']['resources'] for record in records[1:]))
 
     def test_refresh_fences_symbolic_replacement_targets(self):
         root, home, wt = self.project()
