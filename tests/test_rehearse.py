@@ -1388,6 +1388,27 @@ class RehearsalCloneCaches(Scenario):
                    if o['type'] == 'event' and o['record']['kind'] == 'reconcile']
         self.assertEqual(2, len(records))
         self.assertEqual(1, sum(r['hash'] is None for e in records for r in e['data']['resources']))
+        # Compact retirements require an earlier proven baseline in this batch;
+        # they cannot replace it, introduce an operation, or publish new views.
+        import copy
+        from brain import rehearse_transactions as transactions
+        packet = raw[0]['transaction_evidence']
+        now = datetime.datetime.fromisoformat(packet['validation_instant'])
+        for damage in ('baseline', 'ref', 'views'):
+            observations = copy.deepcopy(packet['observations'])
+            reconciles = [o for o in observations if o['type'] == 'event' and
+                          o['record']['kind'] == 'reconcile']
+            if damage == 'baseline':
+                observations.remove(reconciles[0])
+            elif damage == 'ref':
+                reconciles[1]['record']['ref'] = 'c' * 32
+            else:
+                reconciles[1]['record']['data']['views'] = {'root': {}}
+            diagnostics = {}
+            self.assertEqual((set(), 'unproven'), transactions.validate(
+                packet['before'], packet['after'], observations, packet['owner_pid'],
+                'status', now, diagnostics))
+            self.assertEqual('lifecycle.event', diagnostics['checkpoint'])
 
     def test_preparation_records_and_hook_acknowledgements_are_owned_and_exact(self):
         import copy

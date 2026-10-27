@@ -913,7 +913,12 @@ def source(inst, n):
     return n['fm'].get('status_source', inst.node('root')['fm'].get('status_source', inst.cfg.get('status_source', 'files')))
 
 
-def comparison(inst, n, current=None, record=True):
+def comparison(inst, n, current=None, record=True, prepared=None):
+    # A refresh may publish this result only after its complete input fence.
+    if prepared is not None:
+        if record:
+            append_line(inst.root / '.brain/events-compare.jsonl', screen(inst, prepared))
+        return prepared
     state, views, opened = replay(inst)
     actual = resource_list(inst, resources(inst))
     actual = {r['id']: r for r in actual}
@@ -983,7 +988,8 @@ def reconcile(inst, node=None, snapshot=False):
                 return paths
             def prepare_reconciliation(current_inst, _node):
                 projected = {n['id']: snapshot_view(current_inst, n) for n in current_inst.nodes()}
-                comparisons = [comparison(current_inst, n, current=projected[n['id']], record=False)
+                comparisons = [(n['id'], projected[n['id']],
+                                comparison(current_inst, n, current=projected[n['id']], record=False))
                                for n in current_inst.nodes()]
                 current_resources = resource_list(current_inst, resources(current_inst))
                 views = {n['id']: projected[n['id']] for n in current_inst.nodes() if not n['archived']}
@@ -993,8 +999,8 @@ def reconcile(inst, node=None, snapshot=False):
             comparisons, current, views = status_refresh.compute(
                 inst, node or inst.node('root'), prepare_reconciliation,
                 all_nodes=True, extra=reconciliation_inputs)
-            for result in comparisons:
-                append_line(inst.root / '.brain/events-compare.jsonl', screen(inst, result))
+            for node_id, view, result in comparisons:
+                comparison(inst, inst.node(node_id), current=view, prepared=result)
         else:
             # One snapshot feeds both comparison and reconciliation.
             views = {n['id']: snapshot_view(inst, n) for n in inst.nodes() if not n['archived']}

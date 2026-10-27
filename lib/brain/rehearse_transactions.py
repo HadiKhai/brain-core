@@ -780,11 +780,20 @@ def _validate(before, after, observations, owner_pid, command, now, diagnostics=
                     require(event['ref'] not in live and event['data'].get('flagged') is True)
                     require(event['data'].get('clear_faults') is True)
                     reconciled = resource_map(event['data'].get('resources'))
-                    require(hashes(event['data'].get('resources')) == hashes(observation['resources']))
-                    require(all(reconciled[k]['scope'] == row['scope'] for k, row in actual.items()))
-                    require(set(reconciled) == set(actual) | set(state['resources']))
-                    require(all(row['hash'] is None for k, row in reconciled.items() if k not in actual))
-                    require(all(scope['views'].get(k) == v for k, v in event['data'].get('views', {}).items()))
+                    if not reconciled and scope['reconciliation'].get('baseline'):
+                        # Later records in this same batch only retire dead refs.
+                        # They cannot establish a baseline or adopt changed bytes.
+                        require(event['data'].get('views') == {} and event['ref'] in state['opened'])
+                        require(set(state['resources']) == set(actual))
+                        require(all((state['resources'][k]['hash'], state['resources'][k]['scope']) ==
+                                    (row['hash'], row['scope']) for k, row in actual.items()))
+                    else:
+                        require(hashes(event['data'].get('resources')) == hashes(observation['resources']))
+                        require(all(reconciled[k]['scope'] == row['scope'] for k, row in actual.items()))
+                        require(set(reconciled) == set(actual) | set(state['resources']))
+                        require(all(row['hash'] is None for k, row in reconciled.items() if k not in actual))
+                        require(all(scope['views'].get(k) == v for k, v in event['data'].get('views', {}).items()))
+                        scope['reconciliation']['baseline'] = True
                     # A reconciliation may not hide a new or foreign operation.
                     require(event['ref'] not in state['opened'] or event['node'] == state['opened'][event['ref']]['node'])
                 elif tag in ('record', 'record_applied', 'hook'):
@@ -1258,7 +1267,7 @@ def install_observer(events, root, trace, read=False):
     events.cap_now = projection(events.cap_now, 'cap-now')
     events.status_commit = projection(events.status_commit, 'status-commit')
     original_comparison = events.comparison
-    def comparison(inst, node, current=None, record=True):
+    def comparison(inst, node, current=None, record=True, prepared=None):
         # Observe the native call's view without moving its computation or writes.
         captured = []
         previous_view = events.snapshot_view
@@ -1268,7 +1277,8 @@ def install_observer(events, root, trace, read=False):
             return result
         events.snapshot_view = observe_view
         try:
-            row = original_comparison(inst, node, current=current, record=record)
+            options = {'prepared': prepared} if prepared is not None else {}
+            row = original_comparison(inst, node, current=current, record=record, **options)
         finally:
             events.snapshot_view = previous_view
         if record:
