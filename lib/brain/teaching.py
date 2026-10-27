@@ -90,7 +90,7 @@ def native_copy(inst, node, item, root, a, terms):
                   'source_sha256': hashlib.sha256(source_bytes).hexdigest(),
                   'native_sha256': hashlib.sha256(content.encode()).hexdigest(), 'proof': proof}
         receipt_dir.mkdir(parents=True, exist_ok=True)
-        _m_common.atomic_write(receipt, json.dumps(record, indent=2) + '\n')
+        _m_common.atomic_write(receipt, json.dumps(record, indent=2) + '\n', private=True)
     except (Exception, SystemExit):
         if applied and target.is_file() and target.read_text() == content:
             if previous is None:

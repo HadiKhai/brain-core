@@ -137,7 +137,7 @@ def write_queue_request(n, data):
             raise ValueError('linked handback request evidence')
         _m_common.safe_target(path)
         path.parent.mkdir(exist_ok=True)
-        _m_common.atomic_write(path, json.dumps(data, sort_keys=True) + '\n')
+        _m_common.atomic_write(path, json.dumps(data, sort_keys=True) + '\n', private=True)
 
 
 def enqueue_handback(inst, n, row, args):

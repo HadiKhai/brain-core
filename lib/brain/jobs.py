@@ -1605,7 +1605,7 @@ def cmd_jobs(a):
             folder.mkdir(exist_ok=True)
             for target in targets:
                 path = folder / (job_key(target) + '.json')
-                _m_common.atomic_write(path, serialized)
+                _m_common.atomic_write(path, serialized, private=True)
                 _m_common.touch(path)
             for identity in identities:
                 print('t3_thread_organize ' + json.dumps({'action': 'settle', 'threadId': identity}, sort_keys=True))

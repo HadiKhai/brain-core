@@ -66,7 +66,7 @@ def wake_turn_read(path, binding):
 
 
 def wake_turn_write(path, value):
-    _m_common.atomic_write(path, json.dumps(value, sort_keys=True) + '\n')
+    _m_common.atomic_write(path, json.dumps(value, sort_keys=True) + '\n', private=True)
 
 
 def wake_turn_pending_summary(pending):
@@ -171,7 +171,7 @@ def wake_turn_consume(inst, n, consume=True, shown=None):
             for name in value['paths']:
                 pending = directory / name
                 _m_common.safe_target(pending)
-                _m_common.atomic_write(pending.with_suffix('.sent'), 'consumed\n')
+                _m_common.atomic_write(pending.with_suffix('.sent'), 'consumed\n', private=True)
                 pending.unlink(missing_ok=True)
             return value
     except (OSError, ValueError, KeyError, TypeError):

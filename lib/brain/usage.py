@@ -860,9 +860,7 @@ def usage_install(a):
         path.parent.mkdir(parents=True, exist_ok=True)
         # launchd requires the log's parent to exist.
         (Path.home() / "Library/Logs").mkdir(parents=True, exist_ok=True)
-        tmp = path.with_name(path.name + ".tmp")
-        tmp.write_bytes(plistlib.dumps(data))
-        os.replace(tmp, path)
+        _m_common.atomic_write(path, plistlib.dumps(data).decode('utf-8'), private=True)
     state = "unchanged" if same else "wrote"
     if a.no_load or path != usage_agent_default() or not usage_service_managed():
         print(f"{state} {_m_common.tilde(path)}; not loaded. Start with: launchctl bootstrap gui/$(id -u) "

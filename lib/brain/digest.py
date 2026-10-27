@@ -144,7 +144,7 @@ def daily_retro(inst):
         value = retro_for_day(inst, n, day)
         _m_common.safe_target(path)
         folder.mkdir(parents=True, exist_ok=True)
-        _m_common.atomic_write(path, json.dumps(value, indent=2) + '\n')
+        _m_common.atomic_write(path, json.dumps(value, indent=2) + '\n', private=True)
 
 
 def cmd_digest(a):

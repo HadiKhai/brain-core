@@ -111,5 +111,5 @@ def record_review_findings(inst, n, branch, head, findings):
         path = finding_state_path(inst, n, row)
         _m_common.safe_target(path)
         path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        _m_common.atomic_write(path, serialized)
+        _m_common.atomic_write(path, serialized, private=True)
     return review_finding_state(inst, n, branch, head)

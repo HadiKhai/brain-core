@@ -1239,7 +1239,7 @@ def cmd_inbox(a):
         f = inst.root / ".brain" / "inbox-seen.json"
         f.parent.mkdir(exist_ok=True)
         reporters[reporter] = state
-        _m_common.atomic_write(f, json.dumps({"version": 2, "reporters": reporters}, indent=2) + "\n")
+        _m_common.atomic_write(f, json.dumps({"version": 2, "reporters": reporters}, indent=2) + "\n", private=True)
 
 
 def answer_inbox(inst, item_id, text):

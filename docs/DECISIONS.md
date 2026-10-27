@@ -2687,6 +2687,8 @@ the inbox event writer's lock order even when called outside CLI dispatch.
 
 Atomic file publication writes and fsyncs at 0600, then applies and fsyncs the existing destination mode (0644 for a new public file, 0600 for private targets) before rename; mode-preparation failures abort publication and attempt private cleanup.
 
+Private local bindings, host/wake state, inventories, caches and execution receipts explicitly select private publication (0600), including durable-directory and metadata-recovery writers; generic shared content retains existing destination modes and its public default.
+
 ## D28002: Measure dashboard acceptance on real serving code and source files
 
 Qualify complete warm fill with an isolated synthetic instance, real transcript records

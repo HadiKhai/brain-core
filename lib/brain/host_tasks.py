@@ -53,7 +53,7 @@ def host_task_store(inst):
         if len(after.encode()) > 1024 * 1024:
             raise ValueError('delegated task registry exceeds bound')
         if after != before:
-            _m_common.atomic_write(inst.root / '.brain/host-tasks.json', after + '\n')
+            _m_common.atomic_write(inst.root / '.brain/host-tasks.json', after + '\n', private=True)
 
 
 def host_delegate(inst, n, task, target, key, rpc=None):
@@ -141,7 +141,7 @@ def host_task_refresh(inst, rpc=None):
             current['tasks'][item['task_key']]['completion'] = item
     snapshot = {'version': 1, 'parent_thread': parent, 'observed_at': inst.now_dt().isoformat(), 'items': statuses}
     path = inst.root / '.brain' / ('host-task-status-' + _m_hosts.wake_binding(parent) + '.json')
-    _m_common.atomic_write(path, json.dumps(snapshot) + '\n')
+    _m_common.atomic_write(path, json.dumps(snapshot) + '\n', private=True)
     for item in statuses:
         n = inst.node(item['node'])
         marker = '<!-- host-task:' + item['id'] + ' -->'

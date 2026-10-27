@@ -80,7 +80,7 @@ def save_allowances(inst, n, state):
     path = allowance_path(inst, n)
     _m_common.safe_target(path)
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    _m_common.atomic_write(path, json.dumps(state, sort_keys=True) + '\n')
+    _m_common.atomic_write(path, json.dumps(state, sort_keys=True) + '\n', private=True)
     os.chmod(path, 0o600)
 
 

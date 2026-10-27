@@ -138,7 +138,7 @@ def cmd_rotate(a):
     _m_common.safe_target(path)
     _m_common.safe_target(local_file)
     local_file.parent.mkdir(parents=True, exist_ok=True)
-    _m_common.atomic_write(local_file, json.dumps(bindings, indent=2) + "\n")
+    _m_common.atomic_write(local_file, json.dumps(bindings, indent=2) + "\n", private=True)
     _m_common.atomic_write(path, _m_guard.redact("\n".join(lines), _m_guard.never_terms(n)))
     inst.commit([path], f"{n['id']}: prepare coordinator handover")
     print(f"handover: {_m_common.tilde(path)}")

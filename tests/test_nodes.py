@@ -1212,10 +1212,10 @@ class R2SettingsBatch(Scenario):
         before = (r / "node.md").read_text()
         planned = {r / "node.md": before + "\nNew fixture data\n", r / "schedules.md": "# Fixture\n"}
         original_write = m.atomic_write
-        def fail_schedule(path, text):
+        def fail_schedule(path, text, **kwargs):
             if path == r / "schedules.md":
                 raise OSError("synthetic disk failure")
-            return original_write(path, text)
+            return original_write(path, text, **kwargs)
         with mock.patch.object(m, "atomic_write", side_effect=fail_schedule), \
              mock.patch.object(inst, "commit_settings_batch") as commit:
             with self.assertRaises(SystemExit) as refused:

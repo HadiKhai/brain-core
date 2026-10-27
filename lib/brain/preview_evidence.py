@@ -85,7 +85,7 @@ def record_preview_receipt(inst, n, branch, data):
         path = preview_receipt_path(inst, n, row, head)
         _m_common.safe_target(path)
         path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        _m_common.atomic_write(path, serialized)
+        _m_common.atomic_write(path, serialized, private=True)
         return path
 
 

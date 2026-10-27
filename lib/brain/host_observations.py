@@ -135,7 +135,7 @@ def _host_export(inst, rpc=None):
     snapshot = {'version': 1, 'observed_at': observed, 'bindings': _m_jobs.digest(bindings), 'records': records}
     path = inst.root / '.brain/host-observations.json'
     _m_common.safe_target(path)
-    _m_common.atomic_write(path, json.dumps(snapshot, sort_keys=True) + '\n')
+    _m_common.atomic_write(path, json.dumps(snapshot, sort_keys=True) + '\n', private=True)
     return snapshot
 
 

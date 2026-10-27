@@ -105,18 +105,18 @@ def publish_settings_batch(inst, planned, count):
     record = {"state": "pending", "base": _m_common.git("rev-parse", "HEAD", cwd=inst.root).stdout.strip(),
               "before": before, "after": after, "operations": count}
     try:
-        _m_common.atomic_write(packet, json.dumps(record, indent=2) + "\n")
+        _m_common.atomic_write(packet, json.dumps(record, indent=2) + "\n", private=True)
         for path, text in planned.items():
             _m_common.durable_makedirs(path.parent)
-            _m_common.atomic_write(path, text)
+            _m_common.atomic_write(path, text, private=(path == inst.local_path))
         inst.commit_settings_batch(shared, f"settings: batch {count} operations")
         record.update(state="committed" if shared else "applied-local", head=_m_common.git("rev-parse", "HEAD", cwd=inst.root).stdout.strip())
-        _m_common.atomic_write(packet, json.dumps(record, indent=2) + "\n")
+        _m_common.atomic_write(packet, json.dumps(record, indent=2) + "\n", private=True)
     except (OSError, SystemExit) as error:
         # The pending record is itself sufficient if updating it fails.
         record["state"] = "failed"
         try:
-            _m_common.atomic_write(packet, json.dumps(record, indent=2) + "\n")
+            _m_common.atomic_write(packet, json.dumps(record, indent=2) + "\n", private=True)
         except (OSError, SystemExit):
             pass
         _m_common.die(f"settings batch publication failed; ask the coordinator before recovery. "

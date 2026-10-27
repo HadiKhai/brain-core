@@ -239,7 +239,7 @@ def accept_rotation(inst, n, ticket, session_id, rpc=None):
                                      'ticket': ticket, 'settled': False})
                 state.update(coordinator=new, coordinator_sessions=list(sessions), previous=previous)
                 state.pop('pending_session', None)
-                _m_common.atomic_write(_m_rotation.rotation_file(latest, bound), json.dumps(state, sort_keys=True) + '\n')
+                _m_common.atomic_write(_m_rotation.rotation_file(latest, bound), json.dumps(state, sort_keys=True) + '\n', private=True)
                 receipt['phase'] = 'bound'
                 receipt['session_id'] = session_id
                 publish(receipt)
@@ -272,7 +272,7 @@ def accept_rotation(inst, n, ticket, session_id, rpc=None):
             for value in state['previous']:
                 if value.get('coordinator') == old and value.get('ticket') == ticket:
                     value['settled'] = True
-            _m_common.atomic_write(_m_rotation.rotation_file(latest, bound), json.dumps(state, sort_keys=True) + '\n')
+            _m_common.atomic_write(_m_rotation.rotation_file(latest, bound), json.dumps(state, sort_keys=True) + '\n', private=True)
             inst.local = latest.local
             return {'state': 'done', 'thread': new, 'previous': old}
     except (OSError, ValueError, _m_rpc.HostRPCError, SystemExit) as error:

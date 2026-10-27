@@ -58,7 +58,7 @@ def preview_folder(n):
 
 def preview_save(path, data):
     path = _m_common.safe_target(path) or path
-    _m_common.atomic_write(path, json.dumps(data, sort_keys=True, allow_nan=False) + '\n')
+    _m_common.atomic_write(path, json.dumps(data, sort_keys=True, allow_nan=False) + '\n', private=True)
 
 
 @contextlib.contextmanager

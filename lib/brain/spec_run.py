@@ -36,7 +36,7 @@ def cmd_spec_run(a):
     _m_common.safe_target(folder)
     folder.mkdir(exist_ok=True)
     path = folder / (os.urandom(16).hex() + '.json')
-    _m_common.atomic_write(path, json.dumps(receipt, indent=2) + '\n')
+    _m_common.atomic_write(path, json.dumps(receipt, indent=2) + '\n', private=True)
     print('spec-run: focused result ' + str(result) + '; receipt ' + str(path))
     if result:
         sys.exit(result)

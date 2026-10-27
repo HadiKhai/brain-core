@@ -417,7 +417,7 @@ def spend_file(inst, path, runtime, allowed, forbidden, budget=None, window=None
                     agg["published"] = True
                     cf.parent.mkdir(parents=True, exist_ok=True)
                     _m_common.atomic_write(cf, json.dumps({k: v for k, v in agg.items() if k not in SPEND_UNKEPT},
-                                                separators=(",", ":")))
+                                                separators=(",", ":")), private=True)
             except OSError:
                 agg["published"] = False  # still right for this run; publish on the next explicit read
         # A time slice can end exactly after the final whole line. There is no next
@@ -802,7 +802,7 @@ def job_usage(inst, n, row, worktree=None):
         try:
             cache.parent.mkdir(parents=True, exist_ok=True)
             _m_common.atomic_write(cache, json.dumps({'version': SPEND_VERSION,
-                                   'signature': signature, 'usage': u}, separators=(',', ':')))
+                                   'signature': signature, 'usage': u}, separators=(',', ':')), private=True)
         except OSError:
             pass  # Accounting is useful even when the optional private cache is unwritable.
     return u
@@ -1323,7 +1323,7 @@ def spend_lookback(inst, n, since=None, also=()):
                   "days": spend_days(inst, aggs, days=0, weeks=26), "sessions": sorted(sessions, key=lambda x: x["start"])}
     f = spend_node_file(inst, n)
     f.parent.mkdir(parents=True, exist_ok=True)
-    _m_common.atomic_write(f, json.dumps(record, separators=(",", ":")))
+    _m_common.atomic_write(f, json.dumps(record, separators=(",", ":")), private=True)
     return record, aggs
 
 
