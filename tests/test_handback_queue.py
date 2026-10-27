@@ -626,6 +626,79 @@ print(enqueue_handback(i,n,r,a)['id'],flush=True)
                 if child.poll() is None:
                     child.kill(); child.wait()
 
+    def test_p6_overlapping_binding_reads_allow_both_process_enqueues(self):
+        m, inst, n, row = self.fixture()
+        script = """import argparse,sys
+from pathlib import Path
+from brain.instance import Instance
+from brain.jobs import read_jobs
+from brain import job_attempts
+from brain.handback_queue import enqueue_handback
+i=Instance(Path(sys.argv[1])); n=i.node('root'); r=read_jobs(n)[0]
+original=job_attempts.attempt_binding
+def binding(n,r):
+    value=original(n,r)
+    print('binding',flush=True); sys.stdin.readline()
+    return value
+job_attempts.attempt_binding=binding
+a=argparse.Namespace(id='root',branch=r['Job'],state='blocked',summary='Synthetic result',question=None)
+print(enqueue_handback(i,n,r,a)['id'],flush=True)
+"""
+        env = {**self.env, 'PYTHONPATH': str(CORE / 'lib')}
+        children = [subprocess.Popen([sys.executable, '-B', '-c', script, str(inst.root)], env=env,
+                    stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) for _ in range(2)]
+        try:
+            # Both signatures precede either publication. Finish the first
+            # enqueue before the second process retakes the writer lock.
+            self.assertEqual([p.stdout.readline().strip() for p in children], ['binding', 'binding'])
+            ids = []
+            for child in children:
+                out, err = child.communicate(input='\n', timeout=5)
+                self.assertEqual(child.returncode, 0, err)
+                ids.append(out.strip())
+            self.assertEqual(len(set(ids)), 2)
+            requests = [m.read_queue_request(n, identity) for identity in ids]
+            self.assertEqual([request['state'] for request in requests], ['queued', 'queued'])
+            self.assertEqual(len(list((n['dir'] / 'handback-queue').glob('*.json'))), 2)
+            self.assertEqual(m.current_attempt(n, row)['request_id'], ids[1])
+            self.assertEqual(m.current_attempt(n, row)['id'], requests[1]['attempt_id'])
+        finally:
+            for child in children:
+                if child.poll() is None:
+                    child.kill(); child.wait()
+
+    def test_p6_creation_still_refuses_changed_binding_sources(self):
+        m, inst, n, row = self.fixture()
+        paths = (n['dir'] / m.JOBS_FILE, n['dir'] / 'node.md', inst.local_path)
+        before = {path: path.read_bytes() if path.exists() else None for path in paths}
+        for source in ('ledger', 'policy', 'local'):
+            with self.subTest(source=source):
+                original = m.attempt_binding
+                def changed(n, row):
+                    value = original(n, row)
+                    if source == 'ledger':
+                        m.write_jobs(inst, n, [{**row, 'Ended': '2026-01-01T01:00Z', 'Outcome': 'closed'}])
+                    elif source == 'policy':
+                        (n['dir'] / 'node.md').write_text('---\ntitle: Changed\nhome: none\n---\n')
+                    else:
+                        inst.local.setdefault('nodes', {}).setdefault(n['id'], {})['preview'] = 'changed'
+                        inst.save_local()
+                    return value
+                args = argparse.Namespace(id='root', branch=row['Job'], state='blocked',
+                                          summary='Synthetic result', question=None)
+                with mock.patch.dict(os.environ, self.env, clear=True), \
+                        mock.patch.object(m, 'attempt_binding', side_effect=changed):
+                    with self.assertRaisesRegex(SystemExit, 'state changed during the unlocked step'):
+                        m.enqueue_handback(inst, n, row, args)
+                self.assertIsNone(m.current_attempt(n, row))
+                self.assertFalse((n['dir'] / 'handback-queue').exists())
+                for path, data in before.items():
+                    if data is None:
+                        path.unlink(missing_ok=True)
+                    else:
+                        path.write_bytes(data)
+                inst.local = inst._load_local()
+
     def test_p5_stale_attempt_binding_and_closed_or_replaced_job_refuse(self):
         m, inst, n, row = self.fixture()
         with mock.patch.dict(os.environ, self.env, clear=True), mock.patch.object(m, 'attempt_binding') as binding:

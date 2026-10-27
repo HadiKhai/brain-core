@@ -52,6 +52,39 @@ class Spend(Scenario):
         self.assertIsNone(m.spend_stamp(b'not a timestamp'))
         self.assertLessEqual(m.spend_month.cache_info().currsize, 128)
 
+    def test_command_signature_maps_only_job_files_across_unrelated_append(self):
+        mine = self.cx(self.wt, '11111111-owned', [(1, *self.record('11111111-owned', 'one', 10, 0, 1))])
+        other = self.cx(self.tmp / 'unrelated', '22222222-other', [(1, *self.record('22222222-other', 'two', 20, 0, 2))])
+        m = core_loader.SourceFileLoader('mapped_revision_fixture', str(CORE / 'bin/brain')).load_module()
+        with mock.patch.dict(os.environ, self.env, clear=True):
+            inst = m.Instance(self.r)
+            node, row = inst.node('app'), self.row()
+            with m.accounting_snapshot():
+                global_before = m.spend_input_signature(inst)
+                before = m.job_usage_signature(inst, node, row)
+                self.jsonl(other, [{'type': 'event_msg', 'payload': {'type': 'noop'}}])
+                self.assertIs(m.spend_input_signature(inst), global_before)
+            with m.accounting_snapshot():
+                self.assertNotEqual(m.spend_input_signature(inst), global_before)
+                self.assertEqual(m.job_usage_signature(inst, node, row), before)
+            self.jsonl(mine, [{'type': 'event_msg', 'payload': {'type': 'noop'}}])
+            with m.accounting_snapshot():
+                self.assertNotEqual(m.job_usage_signature(inst, node, row), before)
+                self.assertEqual(m.job_usage(inst, node, row)['processed'], 11)
+
+    def test_live_usage_skips_old_unbound_jobs_but_keeps_recent_and_observed_live(self):
+        m = core_loader.SourceFileLoader('recent_usage_fixture', str(CORE / 'bin/brain')).load_module()
+        inst, row = m.Instance(self.r), self.row()
+        node = inst.node('app')
+        row.update(Job='job/old', Started='2000-01-01T00:00Z', Ended='')
+        with mock.patch.object(m, 'live_threads', return_value=set()), mock.patch.object(m, 'job_usage', side_effect=AssertionError('stale scan')):
+            self.assertFalse(m.live_usage_eligible(inst, node, row))
+            self.assertIsNone(m.live_usage(inst, node, row))
+        row['Updated'] = inst.now()
+        self.assertTrue(m.live_usage_eligible(inst, node, row))
+        row['Updated'] = ''
+        with mock.patch.object(m, 'live_threads', return_value={(node['id'], m.job_key(row))}):
+            self.assertTrue(m.live_usage_eligible(inst, node, row))
 
     def setUp(self):
         super().setUp()

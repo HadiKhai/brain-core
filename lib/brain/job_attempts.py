@@ -49,14 +49,16 @@ def attempt_binding(n, row):
             'port_reservation': _m_jobs.digest([w.get('port'), w.get('ports', 1)]) if w else ''}
 
 
-def binding_paths(n, row):
+def binding_paths(n, row, *, include_attempt=True):
     """Cheap generation checks around unlocked ref/input fingerprinting.
 
     Ref files and packed refs cover both ordinary repositories and worktrees;
     objects are immutable and are deliberately not traversed. Include resolved
     input targets as well as their links because the input reader follows links.
     """
-    paths = [n['dir'] / _m_jobs.JOBS_FILE, attempt_path(n, row)]
+    paths = [n['dir'] / _m_jobs.JOBS_FILE]
+    if include_attempt:
+        paths.append(attempt_path(n, row))
     home = n.get('home_path')
     if home:
         paths.extend(_m_instance.git_state_paths(home))
@@ -131,7 +133,10 @@ def begin_attempt(inst, n, row, request_id=None):
             raise ValueError('job changed before handback attempt')
         if sum(_m_jobs.job_key(r) == _m_jobs.job_key(row) for r in rows) != 1:
             raise ValueError('ambiguous job key; coordinator must reconcile it before handback')
-        with _m_instance.released(inst, n, extra=lambda: binding_paths(n, row)):
+        # Creation replaces the previous attempt under the retaken lock; its
+        # binding does not read that attempt. Concurrent creation is legitimate.
+        # Publication callers still fence the attempt they intend to complete.
+        with _m_instance.released(inst, n, extra=lambda: binding_paths(n, row, include_attempt=False)):
             binding = attempt_binding(n, row)
             owner = [os.getpid(), _m_machine.process_stamp(os.getpid())]
         data = {'version': 1, 'id': os.urandom(16).hex(), 'job_key': _m_jobs.job_key(row),

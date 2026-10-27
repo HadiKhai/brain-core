@@ -23,6 +23,83 @@ class Watcher(Scenario):
     fixture_templates = True
     fixture_init_in_process = True
 
+    def test_direct_wake_snapshot_batches_discovery_and_refreshes_after_append(self):
+        m, inst = self.m, self.inst
+        cfg = self.tmp / 'watch-transcripts'
+        folder = cfg / 'sessions'
+        folder.mkdir(parents=True)
+        transcript = folder / 'rollout-fixture.jsonl'
+        transcript.write_text('{}\n')
+        observed = []
+        appended = threading.Event()
+        resume = threading.Event()
+        def writer():
+            if resume.wait(10):
+                with transcript.open('a') as stream:
+                    stream.write('{}\n')
+                appended.set()
+        def scan(*args):
+            first = m.spend_input_signature(inst)
+            if not observed:
+                resume.set()
+                if not appended.wait(10):
+                    raise RuntimeError('fixture writer timeout')
+            second = m.spend_input_signature(inst)
+            self.assertIs(first, second)
+            observed.append(first)
+            return {}
+        thread = threading.Thread(target=writer)
+        thread.start()
+        try:
+            with mock.patch.object(m, 'spend_sources', return_value=([('codex', cfg)], {cfg}, set())), \
+                    mock.patch.object(m, 'watch_scan', side_effect=scan):
+                m.wake_snapshot(inst, inst.node('root'), [])
+                m.wake_snapshot(inst, inst.node('root'), [])
+            self.assertNotEqual(observed[0], observed[1])
+        finally:
+            resume.set()
+            thread.join(10)
+        self.assertFalse(thread.is_alive())
+
+    def test_direct_wake_snapshot_cannot_publish_sources_changed_during_cached_scan(self):
+        m, inst = self.m, self.inst
+        root = inst.node('root')
+        inbox = self.root / 'inbox.md'
+        inbox.write_text('- Choose blue\n')
+        def scan(*args):
+            self.assertEqual(m.inbox_lines(root), ['- Choose blue'])
+            inbox.write_text('- Choose green\n')
+            self.assertEqual(m.inbox_lines(root), ['- Choose blue'])
+            return {'root': {'node': root, 'items': [{'id': m.watch_digest(['blue']),
+                            'kind': 'inbox', 'node': 'root', 'text': 'Choose blue'}],
+                            'command': 'fixture-send'}}
+        with mock.patch.object(m, 'watch_scan', side_effect=scan):
+            groups = m.watch_groups(inst)
+        self.assertTrue(groups.stale)
+        self.assertEqual(groups, {})
+        self.assertEqual(m.inbox_lines(root), ['- Choose green'])
+
+    def test_direct_watch_fallback_discards_failed_scan_reads_before_new_source_fence(self):
+        m, inst = self.m, self.inst
+        root = inst.node('root')
+        inbox = self.root / 'inbox.md'
+        inbox.write_text('- Choose blue\n')
+        observations = []
+        def scan(*args):
+            lines = m.inbox_lines(root)
+            observations.append(lines)
+            if len(observations) == 1:
+                inbox.write_text('- Choose green\n')
+                raise OSError('transient fixture scan failure')
+            return {'root': {'node': root, 'items': [{'id': m.watch_digest(['green']),
+                            'kind': 'inbox', 'node': 'root', 'text': lines[0]}],
+                            'command': 'fixture-send'}}
+        with mock.patch.object(m, 'watch_scan', side_effect=scan):
+            groups = m.watch_groups(inst)
+        self.assertEqual(observations, [['- Choose blue'], ['- Choose green']])
+        self.assertFalse(groups['root']['episodes_known'])
+        self.assertEqual(groups['root']['items'][0]['text'], '- Choose green')
+
     def test_corrupt_episode_receipts_still_enqueue_current_questions(self):
         directory = self.root / '.brain/wake'
         directory.mkdir(exist_ok=True)

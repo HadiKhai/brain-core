@@ -842,6 +842,7 @@ def job_window(inst, row):
     return (a.timestamp() if a else None), (b.timestamp() if b else time.time())
 
 
+@_m_command_reads.memo
 def job_sessions(inst, n, row, worktree=None):
     """The sessions that did this job, and the sub-agents they started: begun in its worktree, given a brief that
     names it (a reviewer runs in its coordinator's folder), or recorded by its hand-back (a worker elsewhere).
@@ -953,25 +954,42 @@ def job_usage(inst, n, row, worktree=None):
         local = status.local_job_state(n, row['Job'], work) if work else {}
         if local.get('merged'):
             finished, merged_tip = True, local.get('tip', '')
-    revision = job_usage_signature(inst, n, row)
-    # Terminal worker/ledger records fix the accounting episode. Unrelated live
-    # transcripts cannot invalidate every finished job on every dashboard read.
+    # Check the complete discovery observation before attributing/parsing a job.
+    # The aggregate revision still includes only its mapped transcript files.
+    revision = job_usage_signature(inst, n, row, worktree, discover=False)
     stable = (revision[0][:3], revision[1], merged_tip, *revision[3:]) if finished else revision
-    signature = hashlib.sha256(json.dumps(stable, sort_keys=True).encode()).hexdigest()
+    observation = hashlib.sha256(json.dumps(
+        stable if finished else (stable, spend_discovery_signature(inst)), sort_keys=True).encode()).hexdigest()
     key = _m_jobs.digest([n['id'], _m_jobs.job_key(row), str(worktree or '')])
     cache = spend_cache_dir(inst) / 'jobs' / (key + '.json')
+    saved = {}
     try:
         saved = json.loads(cache.read_text())
-        used = saved.get('usage')
-        if (saved.get('version') == SPEND_VERSION and saved.get('signature') == signature
+    except (OSError, ValueError):
+        pass
+    def cached(signature=None):
+        used = saved.get('usage') if isinstance(saved, dict) else None
+        if (isinstance(saved, dict) and saved.get('version') == SPEND_VERSION
+                and (saved.get('observation') == observation if signature is None else
+                     saved.get('signature') == signature)
                 and isinstance(used, dict) and isinstance(used.get('models'), dict)
                 and all(type(used.get(k)) is int and used[k] >= 0
                         for k in (*SPEND_TOKENS, 'processed', 'compactions', 'sessions',
                                   'tools', 'subagents', 'active_minutes', 'agent_minutes'))):
             used['models'] = spend_models(used['models'], spend_terms(inst))
             return used
-    except (OSError, ValueError, AttributeError):
-        pass
+    used = cached()
+    if used is not None:
+        return used
+    if not finished:
+        try:
+            stable = job_usage_signature(inst, n, row, worktree)
+        except DiscoveryIncomplete:
+            return None  # no aggregate/signature publication from an unstable mapping
+    signature = hashlib.sha256(json.dumps(stable, sort_keys=True).encode()).hexdigest()
+    used = cached(signature)
+    if used is not None:
+        return used
     start, end = job_window(inst, row)
     if start is None:
         return None
@@ -995,7 +1013,7 @@ def job_usage(inst, n, row, worktree=None):
         try:
             cache.parent.mkdir(parents=True, exist_ok=True)
             _m_common.atomic_write(cache, json.dumps({'version': SPEND_VERSION,
-                                   'signature': signature, 'usage': u}, separators=(',', ':')), private=True)
+                                   'signature': signature, 'observation': observation, 'usage': u}, separators=(',', ':')), private=True)
         except OSError:
             pass  # Accounting is useful even when the optional private cache is unwritable.
     return u
@@ -1196,25 +1214,77 @@ def live_usage_snapshot(values, revision):
     token = _UI_USAGE.set((values, revision))
     discovery = _UI_DISCOVERY.set({})
     try:
-        yield
+        with _m_command_reads.scope(spend_discovery_signature):
+            yield
     finally:
         _UI_USAGE.reset(token)
         _UI_DISCOVERY.reset(discovery)
 
 
 def live_usage(inst, n, row):
+    try:
+        return _live_usage_selected(inst, n, row)
+    except (OSError, ValueError, RuntimeError):
+        return None  # source discovery/permission uncertainty is never a zero
+
+
+def _live_usage_selected(inst, n, row):
     scope = _UI_USAGE.get()
+    # An explicit snapshot requests a complete observation, independently of age.
+    if scope is None and not live_usage_eligible(inst, n, row):
+        return host_row_usage(row) if (str(row.get('Usage', '')).startswith('host') or
+                                      row.get('Ended') and row_usage(row) is not None) else None
     if scope is None:
         return _live_usage(inst, n, row)
     values, revision = scope
     job = (str(inst.root), n['id'], _m_jobs.job_key(row))
-    key = (revision, job_usage_signature(inst, n, row))
+    key = (revision, job_usage_signature(inst, n, row, discover=False), spend_discovery_signature(inst))
     old = values.get(job)
     if old is None or old[0] != key:
         values[job] = (key, _read_live_usage(inst, n, row))
     return values[job][1]
 
 
+@contextmanager
+def accounting_snapshot():
+    """One accounting observation per command, without memoizing write guards."""
+    token = _UI_DISCOVERY.set({})
+    try:
+        with _m_command_reads.scope(spend_input_signature, spend_discovery_signature, job_sessions, job_usage_signature, live_threads):
+            yield
+    finally:
+        _UI_DISCOVERY.reset(token)
+
+
+@_m_command_reads.memo
+def live_threads(inst):
+    from . import host_observations
+    try:
+        snapshot = host_observations.host_snapshot(inst)
+        return {(r['node'], r.get('job_key')) for r in snapshot['records']
+                if r['role'] == 'worker' and r['status'] in ('running', 'starting', 'preparing', 'waiting')}
+    except (OSError, ValueError, TypeError, KeyError):
+        return set()
+
+
+def live_usage_eligible(inst, n, row):
+    if (n['id'], _m_jobs.job_key(row)) in live_threads(inst):
+        return True
+    if row.get('Ended'):
+        return False
+    now = inst.now_dt().timestamp()
+    dates = [inst.parse_time(row.get(field, '')) for field in ('Updated', 'Started')]
+    stamps = [date.timestamp() for date in dates if date is not None]
+    from . import job_attempts
+    for path in (_m_jobs.handback_file(n, row), _m_jobs.contract_file(n, row), job_attempts.attempt_path(n, row)):
+        try:
+            stamps.append(path.stat().st_mtime)
+        except OSError:
+            pass
+    return any(0 <= now - stamp <= 86400 for stamp in stamps)
+
+
+@_m_command_reads.memo
 @ui_discovery
 def spend_input_signature(inst):
     """Cheap metadata revision shared by all jobs in one dashboard snapshot.
@@ -1242,13 +1312,24 @@ def spend_input_signature(inst):
 
 
 @_m_command_reads.memo
-def job_usage_signature(inst, n, row):
+def spend_discovery_signature(inst):
+    """Hash the shared discovery observation once, rather than once per job."""
+    return hashlib.sha256(json.dumps(spend_input_signature(inst), sort_keys=True).encode()).hexdigest()
+
+
+@_m_command_reads.memo
+def job_usage_signature(inst, n, row, worktree=None, discover=True):
     try:
         st = _m_jobs.handback_file(n, row).stat()
         handback = (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
     except OSError:
         handback = None
-    return (spend_input_signature(inst), handback, json.dumps(n['local'], sort_keys=True),
+    # Selection uses the existing permission-checked job/session attribution.
+    # Unrelated transcripts participate in discovery, never this job's revision.
+    files = tuple(sorted((a['path'], tuple(a.get('ino', ())), tuple(a.get('stamp', ())))
+                         for a in job_sessions(inst, n, row, worktree))) if discover else ()
+    inputs = (*spend_input_signature(inst)[:3], files)
+    return (inputs, handback, json.dumps(n['local'], sort_keys=True),
             tuple(_m_guard.never_terms(n)), tuple(row.get(name, '') for name in _m_jobs.JOB_COLS))
 
 

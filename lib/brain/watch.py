@@ -596,15 +596,22 @@ def watch_state_invalid(inst):
 
 def watch_groups(inst, nodes=None):
     """The file-only wake queue, grouped by the coordinator who can act on it."""
-    from . import communication
+    from . import command_reads, communication
     communication.communication_reconcile(inst)  # defaults precede observation, including fallback scans
+    # Direct wake drains and snapshots enter here without watch_once's read
+    # scope. Batch their transcript/Git observations too. Each standalone scan
+    # needs its own scope, including fallback after a failed first observation;
+    # cached old reads must never acquire the fallback's newer source signature.
+    def scan():
+        with command_reads.snapshot():
+            return watch_scan(inst, nodes)
     try:
-        return watch_due_episodes(inst, lambda: watch_scan(inst, nodes))
+        return watch_due_episodes(inst, scan)
     except (OSError, ValueError):
         if _m_common.outward_links(inst.root):
             raise  # fail open for receipt I/O, never for unsafe links
         generation = watch_source_signature(inst)
-        groups = watch_scan(inst, nodes)
+        groups = scan()
         if watch_source_signature(inst) != generation:
             return WatchGroups({}, None, generation, stale=True)
         return watch_untracked(groups, generation)

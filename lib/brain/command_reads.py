@@ -5,12 +5,16 @@ import functools
 import json
 
 _VALUES = contextvars.ContextVar('brain_command_reads', default=None)
+_SCOPED = contextvars.ContextVar('brain_scoped_reads', default=None)
 
 
 def memo(fn):
     @functools.wraps(fn)
     def read(*args, **kwargs):
         values = _VALUES.get()
+        scoped = _SCOPED.get()
+        if scoped is not None and fn in scoped:
+            values = scoped[fn]
         if values is None:
             return fn(*args, **kwargs)
         # Instance/node identities are stable within one command; callers supply
@@ -26,6 +30,19 @@ def memo(fn):
             values[identity] = fn(*args, **kwargs)
         return values[identity]
     return read
+
+
+@contextlib.contextmanager
+def scope(*reads):
+    """Memoize only named observations; writer guards remain uncached."""
+    values = dict(_SCOPED.get() or {})
+    for read in reads:
+        values.setdefault(getattr(read, '__wrapped__', read), {})
+    token = _SCOPED.set(values)
+    try:
+        yield
+    finally:
+        _SCOPED.reset(token)
 
 
 @contextlib.contextmanager

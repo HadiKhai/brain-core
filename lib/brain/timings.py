@@ -50,7 +50,7 @@ def timed(name):
 
 @contextlib.contextmanager
 def command(persist=True):
-    from . import usage_cache
+    from . import spend, usage_cache
     start = time.perf_counter()
     phases = {}
     token = _CURRENT.set(phases)
@@ -62,7 +62,7 @@ def command(persist=True):
     profiler.enable()
     success = False
     try:
-        with usage_cache.batch():
+        with usage_cache.batch(), spend.accounting_snapshot():
             yield
         success = True
     except SystemExit as error:
