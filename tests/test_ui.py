@@ -1599,18 +1599,20 @@ class GitReadBatches(Scenario):
             commands = [call.args[0] for call in run.call_args_list]
         self.assertEqual(sum('worktree' in c for c in commands), 1)
         self.assertEqual(sum(any(str(a).startswith('--format=%(refname)') for a in c) for c in commands), 1)
-        self.assertEqual(sum(any(str(a).startswith('--contains=') for a in c) for c in commands), 2)
-        self.assertEqual(sum('--format=%H%x00%P%x00%s' in c for c in commands), 1)
+        self.assertEqual(sum('merge-base' in c for c in commands), 0)
+        self.assertEqual(sum('--format=%H%x00%P%x00%s' in c for c in commands), 2)
         self.assertEqual(sum('config' in c for c in commands), 1)
-        self.assertEqual(len(commands), 6)
+        self.assertEqual(len(commands), 5)
 
     def test_batch_failures_use_individual_reads_and_never_invent_missing_refs(self):
         tree = self.linked()
         native = subprocess.run
-        for failure in ('refs', 'contains', 'worktree'):
+        for failure in ('refs', 'graph', 'large-graph', 'worktree'):
             def run(args, **kwargs):
+                if failure == 'large-graph' and '--format=%H%x00%P%x00%s' in args:
+                    raise OSError(7, 'injected argument limit')
                 broken = (failure == 'refs' and any(str(a).startswith('--format=%(refname)') for a in args)
-                          or failure == 'contains' and any(str(a).startswith('--contains=') for a in args)
+                          or failure == 'graph' and '--format=%H%x00%P%x00%s' in args
                           or failure == 'worktree' and 'worktree' in args)
                 return subprocess.CompletedProcess(args, 128, '', 'injected batch failure') if broken else native(args, **kwargs)
             with self.subTest(failure=failure), mock.patch.object(subprocess, 'run', side_effect=run) as calls:
@@ -1618,7 +1620,7 @@ class GitReadBatches(Scenario):
                     self.assertEqual(self.common.git('rev-parse', '--verify', '--quiet', 'refs/heads/main', cwd=self.home).stdout.strip(), self.base)
                     self.assertEqual(self.common.git('merge-base', '--is-ancestor', self.base, self.base, cwd=self.home).returncode, 0)
                     self.assertEqual(self.common.git('symbolic-ref', '--short', 'HEAD', cwd=tree).stdout.strip(), 'job/é-space')
-                if failure == 'contains':
+                if failure in ('graph', 'large-graph'):
                     self.assertTrue(any('merge-base' in call.args[0] for call in calls.call_args_list))
         def malformed(args, **kwargs):
             if any(str(a).startswith('--format=%(refname)') for a in args):
@@ -1691,10 +1693,16 @@ class GitReadBatches(Scenario):
                   self.base + '..refs/heads/main', 'refs/heads/main..refs/heads/main',
                   'refs/heads/missing..refs/heads/main']
         expected = [self.common.git('rev-list', '--count', value, cwd=self.home) for value in ranges]
+        ancestry = [('refs/heads/side', 'refs/heads/main'), ('refs/heads/main', 'refs/heads/side'),
+                    (self.base, 'refs/heads/main')]
+        expected_ancestry = [self.common.git('merge-base', '--is-ancestor', *pair, cwd=self.home).returncode
+                             for pair in ancestry]
         with self.common.git_read_snapshot():
             for value, before in zip(ranges, expected):
                 after = self.common.git('rev-list', '--count', value, cwd=self.home)
                 self.assertEqual((after.returncode, after.stdout, after.stderr), (before.returncode, before.stdout, before.stderr))
+            for pair, expected_code in zip(ancestry, expected_ancestry):
+                self.assertEqual(self.common.git('merge-base', '--is-ancestor', *pair, cwd=self.home).returncode, expected_code)
         native = subprocess.run
         def fail(args, **kwargs):
             if '--format=%H%x00%P%x00%s' in args:
@@ -1720,6 +1728,21 @@ class GitReadBatches(Scenario):
         with self.common.git_read_snapshot():
             after = self.ui.ui_worktree(None, self.home, 'main', record)
         self.assertEqual(before, after)
+
+    def test_ref_move_during_a_command_keeps_pinned_range_and_ancestry_evidence(self):
+        tree = self.git('rev-parse', 'HEAD^{tree}', cwd=self.home).strip()
+        tip = self.git('commit-tree', tree, '-p', self.base, '-m', 'WIP prior tip', cwd=self.home).strip()
+        other = self.git('commit-tree', tree, '-m', 'new unrelated tip', cwd=self.home).strip()
+        self.git('branch', 'job/moving', tip, cwd=self.home)
+        with self.common.git_read_snapshot():
+            self.common.branch_refs(self.home)
+            # Simulate a concurrent writer, after snapshot enumeration and before
+            # the first graph/ancestry query. The old tip is no longer referenced.
+            self.git('update-ref', 'refs/heads/job/moving', other, cwd=self.home)
+            result = self.common.git('merge-base', '--is-ancestor', self.base, tip, cwd=self.home)
+            self.assertEqual(result.returncode, 0)
+            self.assertEqual(self.common.git('rev-list', '--count', self.base + '..' + tip, cwd=self.home).stdout, '1\n')
+            self.assertEqual(self.common.unfinished_commit_titles(self.home, self.base, tip), ['WIP prior tip'])
 
 
 if __name__ == "__main__":

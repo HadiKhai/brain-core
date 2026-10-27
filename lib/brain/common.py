@@ -522,10 +522,16 @@ def commit_range_summary(cwd, base, head):
             repository = reads.get((where, 'repository'), where)
             key = (repository, 'title-graph', base)
             if key not in reads:
-                batch = git('log', '--format=%H%x00%P%x00%s', '--branches', '--remotes', '--not', base, '--', cwd=cwd)
+                try:
+                    # Pin the roots we enumerated: refs may move while the read
+                    # runs, and an old tip must not become an invented empty range.
+                    batch = git('log', '--format=%H%x00%P%x00%s', *sorted(set(refs.values())),
+                                '--not', base, '--', cwd=cwd)
+                except OSError:
+                    batch = None  # e.g. an argument limit; individual reads still work
                 graph = {}
-                valid = not batch.returncode
-                for line in batch.stdout.splitlines():
+                valid = batch is not None and not batch.returncode
+                for line in batch.stdout.splitlines() if batch is not None else []:
                     parts = line.split('\0')
                     if len(parts) != 3 or not all(re.fullmatch('[0-9a-f]{40}|[0-9a-f]{64}', oid)
                             for oid in [parts[0], *parts[1].split()]):
@@ -539,7 +545,7 @@ def commit_range_summary(cwd, base, head):
                 if summary_key in reads:
                     return reads[summary_key]
                 pending, seen = [head], set()
-                unfinished = False
+                unfinished, contains = False, head == base
                 while pending:
                     tip = pending.pop()
                     if tip in seen or tip not in graph:
@@ -547,8 +553,9 @@ def commit_range_summary(cwd, base, head):
                     seen.add(tip)
                     parents, bad_title = graph[tip]
                     unfinished = unfinished or bad_title
+                    contains = contains or base in parents
                     pending.extend(parents)
-                reads[summary_key] = len(seen), unfinished
+                reads[summary_key] = len(seen), unfinished, contains
                 return reads[summary_key]
     return None
 
@@ -617,23 +624,9 @@ def git(*args, cwd=None, check=False, env=None):
             if summary is not None:
                 result = subprocess.CompletedProcess(['git', *args], 0, str(summary[0]) + '\n', '')
         elif len(args) == 4 and args[:2] == ('merge-base', '--is-ancestor'):
-            refs = branch_refs(cwd)
-            ancestor, descendant = args[2:]
-            tip = (refs or {}).get(descendant, descendant)
-            # Only answer for enumerated commit tips. Arbitrary revisions and
-            # failed batches retain Git's individual error/ancestry semantics.
-            if refs is not None and tip in refs.values() and re.fullmatch(
-                    r'[0-9a-f]{40}|[0-9a-f]{64}|refs/(?:heads|remotes)/[^~^: ?*\[\]\\]+', ancestor):
-                contains_key = (repository, 'contains', ancestor)
-                if contains_key not in reads:
-                    batch = git('for-each-ref', '--contains=' + ancestor, '--format=%(objectname)',
-                                'refs/heads/', 'refs/remotes/', cwd=cwd)
-                    lines = batch.stdout.splitlines()
-                    reads[contains_key] = (set(lines) if not batch.returncode and all(
-                        re.fullmatch('[0-9a-f]{40}|[0-9a-f]{64}', line) for line in lines) else None)
-                contains = reads[contains_key]
-                if contains is not None:
-                    result = subprocess.CompletedProcess(['git', *args], 0 if tip in contains else 1, '', '')
+            summary = commit_range_summary(cwd, *args[2:])
+            if summary is not None:
+                result = subprocess.CompletedProcess(['git', *args], 0 if summary[2] else 1, '', '')
         if result is not None:
             reads[key] = result
     if result is None:
