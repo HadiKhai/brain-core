@@ -384,8 +384,9 @@ class PreviewLongOperations(Scenario):
             operation_deadlines={'migration': 1}), {}, None, {})
         clock = [0]
         fake_time = types.SimpleNamespace(monotonic=lambda: clock[0])
-        def late(argv, cwd, request, seconds):
+        def late(argv, cwd, request, seconds, deadline=None):
             self.assertEqual(seconds, 1)
+            self.assertEqual(deadline, 1)
             clock[0] = 1
             return {**{k: v for k, v in request.items() if k != 'context'}, 'result': dict(
                 state='done', receipt='observed', value=dict(ok=True, receipt='done',
@@ -398,8 +399,8 @@ class PreviewLongOperations(Scenario):
     def test_registration_change_after_start_refuses_without_status_or_replay(self):
         root, _, head, m = self.fixture()
         original = m.bounded_call
-        def replaced(argv, cwd, request, seconds=None):
-            response = original(argv, cwd, request, seconds)
+        def replaced(argv, cwd, request, seconds=None, deadline=None):
+            response = original(argv, cwd, request, seconds, deadline=deadline)
             if request['method'] == 'start':
                 path = root / '.brain/preview-adapter.json'
                 saved = json.loads(path.read_text())
@@ -427,8 +428,8 @@ class PreviewLongOperations(Scenario):
     def test_identity_git_calls_share_remaining_operation_deadline(self):
         m = core_loader.SourceFileLoader('long_git_deadline', str(CORE / 'bin/brain')).load_module()
         clock, budgets = [0], []
-        def git(argv, cwd, raw, env, seconds=None):
-            budgets.append(seconds)
+        def git(argv, cwd, raw, env, seconds=None, deadline=None):
+            budgets.append((seconds, deadline))
             clock[0] += .6
             return str(self.tmp).encode() if '--show-toplevel' in argv else b'a' * 40
         owner = m._owners['checkout_identity']
@@ -436,7 +437,25 @@ class PreviewLongOperations(Scenario):
                 mock.patch.object(m, 'bounded_process', side_effect=git):
             with self.assertRaisesRegex(ValueError, 'outcome unknown'):
                 m.checkout_identity(str(self.tmp), 'a'*40, deadline=1)
-        self.assertEqual(budgets, [1, .4])
+        self.assertEqual(budgets, [(1, 1), (.4, 1)])
+
+    def test_request_serialization_cannot_start_a_child_after_operation_expiry(self):
+        m = core_loader.SourceFileLoader('long_serialization_deadline', str(CORE / 'bin/brain')).load_module()
+        adapter = m.StdioPreviewAdapter(dict(name='synthetic', protocol='synthetic-v1',
+            executable='/not-invoked', argv=[], checkout=str(self.tmp)), {}, None, {})
+        owner, clock = m._owners['StdioPreviewAdapter'], [0]
+        real_dumps = owner.json.dumps
+        def slow_encode(value, *args, **kwargs):
+            if isinstance(value, dict) and 'request_id' in value:
+                clock[0] = 2
+            return real_dumps(value, *args, **kwargs)
+        with mock.patch.object(owner, 'time', types.SimpleNamespace(monotonic=lambda: clock[0])), \
+                mock.patch.object(owner.json, 'dumps', side_effect=slow_encode), \
+                mock.patch.object(owner.subprocess, 'Popen') as spawn, mock.patch.object(adapter, 'check'):
+            with self.assertRaisesRegex(ValueError, 'outcome unknown'):
+                adapter.exchange('start', 'migration', {},
+                                 dict(id='0'*32, method='step', timeout_seconds=1), deadline=1)
+            spawn.assert_not_called()
 
     def test_identity_hash_uses_operation_deadline_and_does_not_start_after_expiry(self):
         m = core_loader.SourceFileLoader('long_hash_deadline', str(CORE / 'bin/brain')).load_module()

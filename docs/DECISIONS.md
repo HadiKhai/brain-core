@@ -2726,3 +2726,5 @@ identity checks. Only a valid quiescent terminal method result can complete a
 lifecycle step. Expiry, lost operation ids, crashes and binding changes preserve
 pending intent without replay, rollback or release. Product drivers own durable
 execution and reconciliation; the transport creates no second lifecycle engine.
+The same absolute deadline reaches request encoding and subprocess creation, so
+serialization and scheduling time cannot renew the remaining operation budget.

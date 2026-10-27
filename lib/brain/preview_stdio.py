@@ -119,7 +119,7 @@ def checkout_identity(path, head, deadline=None):
         try:
             output = bounded_process(['/usr/bin/git', '-c', 'core.fsmonitor=false',
                 '-c', 'core.untrackedCache=false', '-C', str(path), *args],
-                str(path), b'', env, operation_remaining(deadline))
+                str(path), b'', env, operation_remaining(deadline), deadline=deadline)
         except subprocess.SubprocessError as error:
             raise ValueError('preview checkout identity unavailable') from error
         operation_remaining(deadline)
@@ -210,10 +210,11 @@ def bootstrap_preview_adapters(n, existing):
     return {**existing, value['name']: StdioPreviewAdapter(value, saved['identity'], path, saved)}
 
 
-def bounded_process(argv, cwd, raw, env, seconds=None):
+def bounded_process(argv, cwd, raw, env, seconds=None, deadline=None):
     """Join only our direct child; pipe EOF/exit never certify descendants."""
     output, errors = bytearray(), bytearray()
-    deadline = time.monotonic() + (CALL_SECONDS if seconds is None else min(CALL_SECONDS, seconds))
+    call_deadline = time.monotonic() + (CALL_SECONDS if seconds is None else min(CALL_SECONDS, seconds))
+    deadline = call_deadline if deadline is None else min(call_deadline, deadline)
     if time.monotonic() >= deadline:
         raise ValueError('preview operation deadline exceeded; outcome unknown')
     child = subprocess.Popen(argv, cwd=cwd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
@@ -261,11 +262,13 @@ def bounded_process(argv, cwd, raw, env, seconds=None):
             stream.close()
 
 
-def bounded_call(argv, cwd, request, seconds=None):
+def bounded_call(argv, cwd, request, seconds=None, deadline=None):
+    operation_remaining(deadline)
     raw = (json.dumps(request, sort_keys=True, allow_nan=False) + '\n').encode('utf-8')
     if len(raw) > JSON_LIMIT:
         raise ValueError('preview request exceeds limit')
-    return strict_json(bounded_process(argv, cwd, raw, {'PATH': '/usr/bin:/bin', 'LANG': 'C.UTF-8'}, seconds))
+    return strict_json(bounded_process(argv, cwd, raw, {'PATH': '/usr/bin:/bin', 'LANG': 'C.UTF-8'}, seconds,
+                                      deadline=deadline))
 
 
 class StdioPreviewAdapter:
@@ -291,7 +294,8 @@ class StdioPreviewAdapter:
         if operation is not None:
             binding['operation'] = dict(operation)
         response = bounded_call([self.registration['executable'], *self.registration['argv']],
-                                self.registration['checkout'], {**binding, 'context': context}, operation_remaining(deadline))
+                                self.registration['checkout'], {**binding, 'context': context},
+                                operation_remaining(deadline), deadline=deadline)
         self.check(deadline)
         operation_remaining(deadline)
         if (not isinstance(response, dict) or set(response) != set(binding) | {'result'}
