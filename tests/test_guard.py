@@ -873,3 +873,217 @@ class PreviewUrlConfiguration(Scenario):
         data['urls'].append(dict(data['urls'][0], url=extra))
         m.record_preview_receipt(inst, n, 'job', data)
         self.assertEqual(m.validate_ready_preview(inst, n, 'job', data['head']), [])
+
+
+class JobPreviewReceipts(Scenario):
+    def context(self):
+        m, inst, n, data = PreviewSampleReceipts.context(self)
+        row = m.open_job(m.read_jobs(n), 'job')
+        data.update(scope='job', worktree_generation=m.job_preview_generation(inst, n, row, data['head']))
+        data['urls'][0]['url'] = 'http://127.0.0.1:' + str(n['local']['worktrees']['job']['port']) + '/review'
+        return m, inst, n, row, data
+
+    def test_bound_port_accepts_own_job_and_exact_head_without_changing_node_urls(self):
+        m, inst, n, row, data = self.context()
+        before = json.dumps(n['local'], sort_keys=True)
+        m.record_preview_receipt(inst, n, 'job', data)
+        self.assertEqual(m.validate_ready_preview(inst, n, 'job', data['head']), [])
+        self.assertEqual(m.preview_urls(n), ['https://preview.example/app'])
+        self.assertEqual(json.dumps(m.Instance(inst.root).node('web')['local'], sort_keys=True), before)
+        legacy = json.loads(json.dumps(data))
+        legacy.pop('scope')
+        legacy.pop('worktree_generation')
+        with self.assertRaises(ValueError):
+            m.validate_preview_receipt(inst, n, row, data['head'], legacy)
+        legacy['urls'][0]['url'] = n['local']['preview']
+        self.assertEqual(m.validate_preview_receipt(inst, n, row, data['head'], legacy), legacy)
+
+    def test_other_job_and_stale_head_refuse_receipt_and_relabelled_url(self):
+        m, inst, n, row, data = self.context()
+        self.b(inst.root, 'wt', 'add', 'web', 'other')
+        other = m.open_job(m.read_jobs(n), 'other')
+        with self.assertRaises(ValueError):
+            m.validate_preview_receipt(inst, n, other, data['head'], data)
+        relabelled = json.loads(json.dumps(data))
+        relabelled.update(branch='other', job_key=m.job_key(other),
+                          worktree_generation=m.job_preview_generation(inst, n, other, data['head']))
+        with self.assertRaises(ValueError):
+            m.record_preview_receipt(inst, n, 'other', relabelled)
+        m.record_preview_receipt(inst, n, 'job', data)
+        wt = Path(n['local']['worktrees']['job']['path'])
+        (wt / 'change').write_text('new code\n')
+        self.git('add', 'change', cwd=wt)
+        self.git('commit', '-qm', 'New code', cwd=wt)
+        new_head = self.git('rev-parse', 'HEAD', cwd=wt).strip()
+        with self.assertRaises(ValueError):
+            m.record_preview_receipt(inst, n, 'job', data)
+        with self.assertRaises(ValueError):
+            m.validate_preview_receipt(inst, n, row, data['head'], data)
+        self.assertTrue(m.validate_ready_preview(inst, n, 'job', new_head))
+
+    def test_generation_changes_on_rebinding_and_same_path_recreation(self):
+        m, inst, n, row, data = self.context()
+        m.record_preview_receipt(inst, n, 'job', data)
+        fresh = m.Instance(inst.root)
+        fresh.local_of('web')['worktrees']['job']['created'] = '2026-01-01T00:00:00Z'
+        fresh.save_local()
+        self.assertTrue(m.validate_ready_preview(inst, n, 'job', data['head']))
+        # Restore the record, but replace the physical worktree at the same path
+        # and head. Cached callers and identical metadata cannot revive evidence.
+        fresh.local_of('web')['worktrees']['job'] = dict(n['local']['worktrees']['job'])
+        fresh.save_local()
+        wt = Path(n['local']['worktrees']['job']['path'])
+        retained = wt.with_name('retained-generation')
+        self.git('worktree', 'move', str(wt), str(retained), cwd=n['home_path'])
+        self.git('checkout', '--detach', cwd=retained)
+        self.git('worktree', 'add', str(wt), 'job', cwd=n['home_path'])
+        self.assertTrue(m.validate_ready_preview(inst, n, 'job', data['head']))
+        self.assertNotEqual(m.job_preview_generation(inst, n, row, data['head']), data['worktree_generation'])
+
+    def test_unbound_ports_remote_hosts_and_bad_observations_refuse(self):
+        m, inst, n, row, data = self.context()
+        port = n['local']['worktrees']['job']['port']
+        for url in ('http://127.0.0.1:' + str(port + 1000),
+                    'http://remote.example:' + str(port),
+                    'http://localhost.evil:' + str(port),
+                    'http://user@localhost:' + str(port)):
+            bad = json.loads(json.dumps(data))
+            bad['urls'][0]['url'] = url
+            with self.subTest(url=url), self.assertRaises(ValueError):
+                m.record_preview_receipt(inst, n, 'job', bad)
+        for mutate in ('render', 'few', 'mismatch', 'generation', 'job_key'):
+            bad = json.loads(json.dumps(data))
+            if mutate == 'render': bad['urls'][0]['rendered'] = False
+            if mutate == 'few': bad['urls'][0]['items'].pop()
+            if mutate == 'mismatch': bad['urls'][0]['items'][0]['source_item'] = 'different'
+            if mutate == 'generation': bad['worktree_generation'] = 'unknown'
+            if mutate == 'job_key': bad['job_key'] = 'unknown'
+            with self.subTest(mutate=mutate), self.assertRaises(ValueError):
+                m.record_preview_receipt(inst, n, 'job', bad)
+
+    def test_ledger_and_contract_exact_url_declarations_are_job_scoped(self):
+        m, inst, n, row, data = self.context()
+        for source in ('ledger', 'contract'):
+            url = 'http://localhost:65000/' + source
+            if source == 'ledger':
+                rows = m.read_jobs(n)
+                rows[-1]['Preview URLs'] = json.dumps([url])
+                m.write_jobs(inst, n, rows)
+            else:
+                path = m.contract_file(n, row)
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text('## Preview URLs\n- `' + url + '`\n')
+            data['worktree_generation'] = m.job_preview_generation(inst, n, row, data['head'])
+            data['urls'][0]['url'] = url
+            m.record_preview_receipt(inst, n, 'job', data)
+            self.assertEqual(m.validate_ready_preview(inst, n, 'job', data['head']), [])
+            bad = json.loads(json.dumps(data))
+            bad['urls'][0]['url'] += '/unbound'
+            with self.assertRaises(ValueError):
+                m.record_preview_receipt(inst, n, 'job', bad)
+        m.contract_file(n, row).unlink()
+        self.assertTrue(m.validate_ready_preview(inst, n, 'job', data['head']))
+
+    def test_live_node_binding_removal_refuses_even_with_cached_node(self):
+        m, inst, n, row, data = self.context()
+        m.record_preview_receipt(inst, n, 'job', data)
+        fresh = m.Instance(inst.root)
+        del fresh.local_of('web')['worktrees']['job']
+        fresh.save_local()
+        self.assertTrue(m.validate_ready_preview(inst, n, 'job', data['head']))
+        with self.assertRaises(ValueError):
+            m.record_preview_receipt(inst, n, 'job', data)
+
+    def test_pre_full_verify_policy_accepts_job_receipt_and_blocks_changed_binding(self):
+        m, inst, n, row, data = self.context()
+        self.b(inst.root, 'set', 'web', 'verify=true')
+        inst = m.Instance(inst.root)
+        n = inst.node('web')
+        m.record_preview_receipt(inst, n, 'job', data)
+        self.assertEqual(m.ready_policy_reasons(inst, n, 'job', data['head']), [])
+        # Stop at the real execution boundary; never launch a full verify here.
+        with mock.patch.object(m, 'run_verify', side_effect=RuntimeError('execution boundary')) as execute:
+            with self.assertRaisesRegex(RuntimeError, 'execution boundary'):
+                m.record_ready(inst, n, 'job', 1)
+            execute.assert_called_once()
+        fresh = m.Instance(inst.root)
+        fresh.local_of('web')['worktrees']['job']['port'] += 1000
+        fresh.save_local()
+        with mock.patch.object(m, 'run_verify') as execute:
+            packet, reasons = m.record_ready(inst, n, 'job', 1)
+        execute.assert_not_called()
+        self.assertIsNone(packet)
+        self.assertIn('missing or invalid exact-head preview rendering and three-source-sample receipt', reasons)
+
+    def test_optional_job_receipt_is_validated_without_node_urls(self):
+        m, inst, n, row, data = self.context()
+        self.b(inst.root, 'set', 'web', 'preview=')
+        inst = m.Instance(inst.root)
+        n = inst.node('web')
+        self.assertEqual(m.validate_ready_preview(inst, n, 'job', data['head']), [])
+        m.record_preview_receipt(inst, n, 'job', data)
+        self.assertEqual(m.validate_ready_preview(inst, n, 'job', data['head']), [])
+        fresh = m.Instance(inst.root)
+        del fresh.local_of('web')['worktrees']['job']
+        fresh.save_local()
+        self.assertTrue(m.validate_ready_preview(inst, n, 'job', data['head']))
+
+    def test_display_git_snapshot_cannot_hide_a_changed_checkout_head(self):
+        m, inst, n, row, data = self.context()
+        wt = Path(n['local']['worktrees']['job']['path'])
+        m.record_preview_receipt(inst, n, 'job', data)
+        with m.git_read_snapshot():
+            self.assertEqual(m.validate_ready_preview(inst, n, 'job', data['head']), [])
+            # Prime the exact display queries with the old identity as well.
+            m.git('rev-parse', 'HEAD', cwd=wt)
+            m.git('rev-parse', '--verify', 'refs/heads/job^{commit}', cwd=n['home_path'])
+            (wt / 'changed').write_text('different code\n')
+            self.git('add', 'changed', cwd=wt)
+            self.git('commit', '-qm', 'Different code', cwd=wt)
+            self.assertTrue(m.validate_ready_preview(inst, n, 'job', data['head']))
+
+    def test_allocated_port_block_and_loopback_variants_accept_only_bound_ports(self):
+        m, inst, n, row, data = self.context()
+        fresh = m.Instance(inst.root)
+        worktree = fresh.local_of('web')['worktrees']['job']
+        worktree['ports'] = 2
+        fresh.save_local()
+        data['worktree_generation'] = m.job_preview_generation(inst, n, row, data['head'])
+        for host in ('127.0.0.1', 'localhost', '[::1]'):
+            data['urls'][0]['url'] = 'http://' + host + ':' + str(worktree['port'] + 1)
+            m.record_preview_receipt(inst, n, 'job', data)
+        data['urls'][0]['url'] = 'http://localhost:' + str(worktree['port'] + 2)
+        with self.assertRaises(ValueError):
+            m.record_preview_receipt(inst, n, 'job', data)
+
+    def test_reopened_job_and_removed_node_refuse_previous_receipt(self):
+        m, inst, n, row, data = self.context()
+        m.record_preview_receipt(inst, n, 'job', data)
+        rows = m.read_jobs(n)
+        rows[-1]['Started'] = '2026-01-01T00:00:00Z'
+        m.write_jobs(inst, n, rows)
+        with self.assertRaises(ValueError):
+            m.validate_preview_receipt(inst, n, row, data['head'], data)
+        # Restore the job identity, then remove its node while retaining cached
+        # node objects. Readiness reports refusal rather than trusting the cache.
+        m.write_jobs(inst, n, [row])
+        (n['dir'] / 'node.md').unlink()
+        self.assertTrue(m.validate_ready_preview(inst, n, 'job', data['head']))
+
+    def test_removed_live_home_binding_refuses_before_full_verify(self):
+        m, inst, n, row, data = self.context()
+        self.b(inst.root, 'set', 'web', 'verify=true')
+        inst = m.Instance(inst.root)
+        n = inst.node('web')
+        m.record_preview_receipt(inst, n, 'job', data)
+        fresh = m.Instance(inst.root)
+        del fresh.local_of('web')['home']
+        fresh.save_local()
+        self.assertTrue(m.validate_ready_preview(inst, n, 'job', data['head']))
+        with self.assertRaises(ValueError):
+            m.record_preview_receipt(inst, n, 'job', data)
+        with mock.patch.object(m, 'run_verify') as execute:
+            packet, reasons = m.record_ready(inst, n, 'job', 1)
+        execute.assert_not_called()
+        self.assertIsNone(packet)
+        self.assertIn('missing or invalid exact-head preview rendering and three-source-sample receipt', reasons)
