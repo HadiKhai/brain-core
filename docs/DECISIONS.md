@@ -2924,8 +2924,10 @@ real. Keep installation, upgrade and logging/status-ownership scenarios on their
 original setup path.
 
 On macOS, fixtures that select `/usr/bin/git` resolve the same developer Git once
-with `xcrun --find git` and prepend its directory to the fixture PATH. This removes
-repeated dispatcher launches while preserving custom Git installations and the
+with `xcrun --find git` and expose only that executable through a worker-private
+directory containing a `git` symlink. Prepend that directory to the fixture PATH,
+preserving the selection of Python and every other tool. This removes repeated
+dispatcher launches while preserving custom Git installations and the
 original PATH on other platforms or lookup failures. Freshness tests set the
 changed note's timestamp directly instead of sleeping across the comparison
 threshold, and reset it before testing the subsequent status update.

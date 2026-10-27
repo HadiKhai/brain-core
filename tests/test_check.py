@@ -42,8 +42,12 @@ class FixtureGitConfig(Scenario):
                                   subprocess.CompletedProcess([], 0, str(native) + '\n', '')) as run:
             scenario.fixture_executable_path.cache_clear()
             self.addCleanup(scenario.fixture_executable_path.cache_clear)
-            self.assertEqual(scenario.fixture_executable_path(path), str(native.parent) + ':' + path)
-            self.assertEqual(scenario.fixture_executable_path(path), str(native.parent) + ':' + path)
+            resolved = scenario.fixture_executable_path(path)
+            directory, original = resolved.split(os.pathsep, 1)
+            self.assertEqual(original, path)
+            self.assertEqual(sorted(p.name for p in Path(directory).iterdir()), ['git'])
+            self.assertEqual((Path(directory) / 'git').resolve(), native)
+            self.assertEqual(scenario.fixture_executable_path(path), resolved)
             run.assert_called_once_with(['/usr/bin/xcrun', '--find', 'git'], check=True,
                                         capture_output=True, text=True)
             for selected, platform in (('/custom/git', 'darwin'), ('/usr/bin/git', 'linux')):

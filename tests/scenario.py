@@ -33,6 +33,7 @@ _core_template = None
 _core_bytecode = {}
 _runtime_bytecode = None
 _bytecode_lock = threading.RLock()
+_git_directories = {}
 
 
 @lru_cache(maxsize=8)
@@ -50,7 +51,18 @@ def fixture_executable_path(path):
                                 capture_output=True, text=True)
         executable = Path(result.stdout.strip())
         if executable.is_absolute() and executable.is_file() and os.access(executable, os.X_OK):
-            return str(executable.parent) + os.pathsep + path
+            key = str(executable)
+            if key not in _git_directories:
+                candidate = tempfile.TemporaryDirectory(prefix='brain-test-git-')
+                try:
+                    (Path(candidate.name) / 'git').symlink_to(executable)
+                except BaseException:
+                    candidate.cleanup()
+                    raise
+                _git_directories[key] = candidate
+            # Prepending the developer's whole bin directory also overrides
+            # python3 and other tools. Expose only Git to preserve those choices.
+            return _git_directories[key].name + os.pathsep + path
     except (OSError, subprocess.CalledProcessError):
         pass
     return path
