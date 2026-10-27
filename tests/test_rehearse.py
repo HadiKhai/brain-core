@@ -2341,6 +2341,10 @@ class RehearsalPipeline(Scenario):
     def test_committed_candidate_clean_pass_and_all_incident_mutations(self):
         """Actual subprocess orchestration with fabricated installed/candidate CLIs."""
         from brain.instance import Instance
+        transport = mock.patch('urllib.request.OpenerDirector.open',
+                               side_effect=AssertionError('rehearsal must not use network transport'))
+        post = transport.start()
+        self.addCleanup(transport.stop)
         owned_rehearsal_workdir(self)
         r = self.init('sample')
         home = self.tmp / 'candidate'
@@ -2384,11 +2388,17 @@ elif command == 'hook':
         # Root and sibling probes can legitimately name another node's term.
         (r / 'nodes/b/never-name.txt').write_text('invented-canary\n')
         (r / 'core/bin/brain').write_text(baseline)
-        original = rehearsal.snapshot(r)
         inst = Instance(r)
+        inst.local['nodes']['root'].update(coordinator='fabricated-thread',
+                                          wake='https://example.invalid/rehearsal-must-not-post')
+        inst.save_local()
+        original = rehearsal.snapshot(r)
         n = inst.node('a')
         clean = rehearsal.rehearse(inst, n, 'job')
+        post.assert_not_called()
         self.assertTrue(clean['passed'], clean['regressions'])
+        self.assertEqual([], clean['delivery'])
+        self.assertIn('delivery not probed (rehearsal)', clean['warnings'])
         self.assertEqual(0, clean['changed_outputs'])
         self.assertNotIn('invented-canary', json.dumps(clean))
         self.assertEqual(original, rehearsal.snapshot(r))
@@ -2396,7 +2406,10 @@ elif command == 'hook':
         (wt / 'bin/brain').write_text(fixture.replace('MODE', 'True'))
         self.git('commit', '-qam', 'incident mutations', cwd=wt)
         bad = rehearsal.rehearse(inst, n, 'job')
+        post.assert_not_called()
         self.assertFalse(bad['passed'])
+        self.assertEqual([], bad['delivery'])
+        self.assertIn('delivery not probed (rehearsal)', bad['warnings'])
         for flag in ('fix: new check errors', 'ready:1:0: ready became not ready',
                      'ready:1:1: ready became not ready', 'due:0: new due items',
                      'due:1: new due items', 'brief:0: brief warning disappeared', 'hook: latency exceeds 1 s'):

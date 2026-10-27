@@ -2846,3 +2846,12 @@ and altered KPI values; all negative controls must be rejected before acceptance
 For first-data paint, derive the oracle from the actual HTTP response delivered to the
 app. Do not add a second state request to the measured navigation merely to obtain
 expected values; that changes the workload instead of observing the displayed reading.
+
+## Rehearsal preparation does not probe delivery
+
+Copied webhook bindings never authorize delivery during rehearsal preparation.
+Do not seed command copies with a live probe or a fabricated successful status:
+retain the captured cache, leave delivery results empty, and record
+`delivery not probed (rehearsal)` in diagnostic warnings. Command execution keeps
+its existing OS network boundary and strict comparison rules; a passing rehearsal
+does not certify webhook delivery.
