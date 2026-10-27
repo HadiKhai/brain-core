@@ -196,6 +196,7 @@ def brief_index(inst, n):
             and not task_reconcile.nonwork_reason(inst, n, r, requirements, lifecycle)]
     if not rows:
         return []
+    rows.sort(key=lambda r: (r.get('order', 0), r.get('priority', 'P2'), r['id']))
     parked = sum(r['status'] == 'parked' for r in rows)
     lines = ['## Open task obligations', '', f'{len(rows)} open; {parked} parked. Attempts do not replace these obligations.', '']
     lines += [r['id'] + ' [' + r['status'] + ']: ' + r['title'] + '; next: ' +
