@@ -3145,3 +3145,62 @@ to the command. Readiness retains its strict dirty-worktree evidence after a
 dynamic map runs. Index-consuming revision expressions also bypass the cache.
 Configured external lane-map execution clears the enclosing Git snapshot even
 on failure, so its post-map checks observe changed refs and graph roots too.
+
+## Reuse term-scan observations within a command
+
+Mechanical checks share term-scan results across nodes and the two fix passes.
+File results use the absolute path, device, inode, size, nanosecond modification
+and change times, mode, owner, group and link count, plus the complete folded term
+set and governance context. Each lookup opens the file and checks its descriptor;
+only reads whose identity remains stable are retained. Read failures are never
+cached. No file observations survive the command.
+Small files with identical byte hashes share decoding and matching after each
+file's bytes have been read; large files retain the bounded streaming path.
+
+Index blobs always read their complete bodies before sharing matches by byte
+hash. Bounded batches of requests reduce pipe round trips without buffering
+large responses or trusting object headers as proof of body readability.
+Detected file changes report an incomplete scan rather than a clean result.
+File inventories, index entries, paths, commit messages, refs,
+governance decisions and scan errors remain current; results keep the original
+labels, ordering and redaction. The cache stores match sets rather than file text.
+
+## Keep private blob verdicts between commands
+
+An explicit `check --fix` may publish `.brain/term-scan-cache.json` with mode
+0600 through checked directory authority and generation-checked replacement.
+Read commands only consume it. The rebuildable cache contains canonical Git blob
+IDs and boolean verdicts, opaque hashes of policy/path bindings, and numeric file
+identities; it never contains terms, labels, paths or source text. A changed word
+list, scanner implementation/version, Unicode runtime or governance context
+invalidates reuse. Failed verdicts are scanned again for their current labels.
+
+A working file must still open successfully and retain its complete descriptor
+identity before a clean verdict is reused. Index reuse additionally requires a
+prior complete canonical body read in that object store, with unchanged readable
+loose-object or pack/index storage. Alternates and replacement refs disable that
+shortcut. Changed storage during reuse reports an incomplete scan; cache damage,
+unavailable storage and publication races fall back to current source reads.
+The complete loaded schema must contain only the allowed digest/OID keys,
+boolean verdicts and bounded integer identities; any malformed record rebuilds
+the artifact. Reftable storage conservatively disables persistent index reuse.
+Git directory/index bindings are checked around each inventory and after use.
+Fresh tagged Git inventories distinguish untracked names from stage records,
+including names containing tabs/newlines. At most four inventory/file readers
+overlap in copied command contexts; labels, ordering and publication remain in
+the caller. Large bodies retain bounded streaming while their Git IDs are hashed.
+An inventoried repository retains its classification if its Git marker disappears;
+saved inventory errors and later binding failures cannot become a plain folder scan.
+Regular-file checks use a freshly opened nonblocking descriptor, preventing a FIFO
+replacement from blocking and avoiding a redundant pathname stat on each warm file.
+Scanner identity includes its compiled implementation as well as source hashes,
+so a command loaded before an upgrade cannot publish as the newly installed code.
+The compiled identity includes normalized positional and keyword-only defaults;
+unsupported defaults disable persistent reuse/publication while source scanning
+continues normally.
+Only exact immutable scalar/tuple defaults are supported. Callable, mutable,
+unordered and subclass defaults remain opaque and disable persistence; keyword
+binding order is preserved. The streaming hash helper selects SHA-1 inside its
+constructor from a None default instead of encoding a callable as a bare symbol.
+The executing scanner/cache module code is captured too, including top-level
+initializers, so a global-only source upgrade also changes the loaded identity.
