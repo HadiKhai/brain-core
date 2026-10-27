@@ -1,6 +1,6 @@
 # Code decisions
 
-- Rehearsal stores timestamp-preserving copies in a private directory beside the workbench, outside captured source roots, and refuses real paths under system temp or macOS aging roots before starting; owned cleanup still retires their bulk data.
+- Rehearsal stores timestamp-preserving copies in a private directory beside the workbench, outside captured source roots; every owned allocation requires an explicit parent and refuses physical paths under system temp, macOS aging roots or HOME dot-directories before starting, while native cleanup still retires its bulk data.
 
 ## D31005: Reconcile only absent, durably recorded local queue processes
 

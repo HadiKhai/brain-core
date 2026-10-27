@@ -1050,6 +1050,7 @@ class CandidateNotices(RehearsalFixture):
 
 @unittest.skipUnless(sys.platform == 'darwin', 'requires macOS OS sandbox')
 class FrozenClock(Scenario):
+    temporary_parent = CORE.parent
     def prepare_private_fixture(self):
         tiny_rehearsal_fixture(self)
         worktree = self.tmp / 'diagnostic-candidate-work/worktrees/job'

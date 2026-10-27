@@ -22,8 +22,16 @@ _guardian_popen = subprocess.Popen
 
 
 def persistent_copy_root(path):
-    """Refuse OS-aged locations using physical paths, including temp aliases."""
-    resolved = Path(path).resolve()
+    """Refuse HOME dot-directories and OS-aged locations by physical path."""
+    resolved = Path(path).expanduser().resolve()
+    home = Path.home().resolve()
+    try:
+        relative = resolved.relative_to(home)
+    except ValueError:
+        pass
+    else:
+        if relative.parts and relative.parts[0].startswith('.'):
+            raise ValueError('HOME dot-directory rehearsal copy root refused')
     forbidden = [Path('/var/folders').resolve(), Path('/private/var/folders').resolve(),
                  Path(tempfile.gettempdir()).resolve()]
     if os.environ.get('TMPDIR'):
@@ -40,20 +48,18 @@ class OwnedCopies:
     receipt is evidence, not deletion authority. Unknown processes retain bytes.
     """
     def __init__(self, parent=None, prefix='brain-rehearse-', persistent=False):
+        if parent is None:
+            raise ValueError('owned rehearsal copy parent required')
+        parent = Path(parent).expanduser().absolute()
+        persistent_copy_root(parent)
+        persistent_copy_root(parent / (prefix + 'probe'))
+        if any(p.is_symlink() for p in (parent, *parent.parents)):
+            raise ValueError('linked owned-copy parent refused')
         if persistent:
-            if parent is None:
-                raise ValueError('persistent rehearsal copy parent required')
-            persistent_copy_root(parent)
-        if parent is not None:
-            parent = Path(parent).absolute()
-            if any(p.is_symlink() for p in (parent, *parent.parents)):
-                raise ValueError('linked owned-copy parent refused')
-            if persistent:
-                parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-                self.identity(parent)
+            parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            self.identity(parent)
         self.root = Path(tempfile.mkdtemp(prefix=prefix, dir=parent)).resolve()
-        if persistent:
-            persistent_copy_root(self.root)
+        persistent_copy_root(self.root)
         self.bulk = self.root / 'bulk'
         self.bulk.mkdir(mode=0o700)
         self.pid = os.getpid()
