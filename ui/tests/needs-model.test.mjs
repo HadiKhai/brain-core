@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync, readdirSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import ts from "typescript";
 const source = readFileSync(
   new URL("../src/model.ts", import.meta.url),
@@ -29,4 +29,13 @@ test("open decisions use explicit asks and operator waits, never inbox volume", 
   assert.equal(m.openDecision({ kind: "inbox", text: "Pick a date <!-- host-question:123 -->" }), true);
   assert.equal(m.openDecision({ kind: "inbox", text: "fyi: question: already handled" }), false);
   assert.equal(m.needsView({ nodes: [{ id: "demo", blocked: ["Choose a date"], blocked_metadata: [{ waiting_on_operator: true }] }] }).decisions.length, 1);
+});
+
+
+test("native human-needed handbacks stay open decisions while blocked notices do not", () => {
+  const need = { id: "human-need", node: "demo", kind: "inbox", text: "inbox: 2026-10-27 10:00 +00:00 from worker job/deploy: blocked: Choose whether to approve deployment <!-- wake:0123456789abcdef0123456789abcdef --> <!-- handback:0123456789abcdef01234567 -->" };
+  const ordinary = { id: "ci-wait", node: "demo", kind: "inbox", text: "2026-10-27 10:00 +00:00 from worker job/checks: blocked: Waiting for CI" };
+  assert.deepEqual(m.needsView({ inbox: [need, ordinary], due: [{ ...need }] }).decisions.map(i => i.id), ["human-need"]);
+  assert.equal(m.openDecision({ ...need, state: "resolved" }), false);
+  assert.equal(m.openDecision({ ...need, kind: "machine-alert" }), false);
 });

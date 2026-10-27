@@ -38,7 +38,7 @@ test("Needs you counts two open decisions and excludes inbox noise and machine s
   const state = await (await page.request.get(base + "/api/state?k=demo")).json();
   for (const node of state.nodes) { node.blocked = []; node.blocked_metadata = []; }
   const question = { first_seen: "2026-10-27T10:00:00Z", id: "choose-color", node: "field-guide", kind: "inbox", text: "2026-10-27 10:00 +00:00 from worker: question: Choose a color?" };
-  const decision = { first_seen: "2026-10-27T10:00:00Z", id: "choose-launch", node: "field-guide", kind: "blocked", waiting_on_operator: true, text: "Choose the launch date" };
+  const decision = { first_seen: "2026-10-27T10:00:00Z", id: "choose-launch", node: "field-guide", kind: "inbox", text: "2026-10-27 10:00 +00:00 from worker job/launch: blocked: Choose the launch date <!-- wake:0123456789abcdef0123456789abcdef --> <!-- handback:0123456789abcdef01234567 -->" };
   state.inbox = [question, { ...question }, decision,
     { id: "notice", node: "field-guide", kind: "inbox", text: "2026-10-27 10:01 +00:00 from worker: done: shipped the question reader?" },
     { id: "machine", kind: "machine-alert", text: "Machine needs attention" },

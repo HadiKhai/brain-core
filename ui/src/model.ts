@@ -420,7 +420,8 @@ export function openDecision(item: RecordData) {
   // A timestamped inbox envelope does not itself make the message an operator ask.
   const ask = String(item.text || "").replace(/^inbox:\s*/i, "")
     .replace(/^\d{4}-\d{2}-\d{2}[^\n]*? from [^:]+:\s*/i, "");
-  return /^(?:question|decision):\s*\S/i.test(ask) || /<!-- host-question:/.test(ask);
+  return /^(?:question|decision):\s*\S/i.test(ask) || /<!-- host-question:/.test(ask) ||
+    (/^blocked:\s*\S/i.test(ask) && /<!-- handback:[0-9a-f]{24} -->/.test(ask));
 }
 export const needAsk = (text: unknown) => String(text || "")
   .replace(/(?:^|;\s*)(?:since|recommendation|default):\s*[^;]*/gi, "")
