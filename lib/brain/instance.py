@@ -355,7 +355,7 @@ def state_signature(inst, node=None, extra=(), local_keys=()):
                 for child in sorted(p.iterdir()):
                     visit(child)
             # Identity and both change clocks catch edits without reading bodies.
-        except FileNotFoundError:
+        except (FileNotFoundError, NotADirectoryError):
             h.update(b"missing")
     for p in sorted(set(paths)):
         visit(p)
@@ -419,7 +419,7 @@ def git_state_paths(home, *, task_proof=False, refs=None, include_head=True):
                 try:
                     with path.open('rb') as stream:
                         symbolic = stream.read(4) == b'ref:'
-                except (FileNotFoundError, IsADirectoryError):
+                except (FileNotFoundError, NotADirectoryError, IsADirectoryError):
                     continue
                 if symbolic:
                     break
@@ -442,8 +442,12 @@ def git_state_paths(home, *, task_proof=False, refs=None, include_head=True):
     return paths
 
 
+class StateChanged(Exception):
+    """A fenced input changed during an unlocked step; the writer lock is held again."""
+
+
 @contextlib.contextmanager
-def released(inst, node=None, extra=(), local_keys=()):
+def released(inst, node=None, extra=(), local_keys=(), retry=False):
     """Release an existing writer lock, then validate and reload before publication.
 
     Readers, hook descendants and nested unlocked scopes retain main's lock-free
@@ -463,8 +467,10 @@ def released(inst, node=None, extra=(), local_keys=()):
                     after = state_signature(inst, node, extra, local_keys)
                     local = inst._load_local()
                 except (OSError, ValueError, TypeError, AttributeError):
-                    _m_common.die("state changed during the unlocked step; retry from fresh state")
-                if before != after:
+                    after = None
+                if after is None or before != after:
+                    if retry:
+                        raise StateChanged()
                     _m_common.die("state changed during the unlocked step; retry from fresh state")
                 inst.local = local
 

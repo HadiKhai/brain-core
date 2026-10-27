@@ -3,6 +3,7 @@ import argparse
 import importlib
 import json
 import os
+import subprocess
 import sys
 import time
 import unittest
@@ -17,6 +18,123 @@ from brain import events, instance, transitions
 
 
 class EventAppend(Scenario):
+    def test_projection_ref_fence_handles_reftable_storage_and_updates(self):
+        root = self.init('reftable-fence')
+        home = self.tmp / 'reftable-home'
+        result = subprocess.run(['git', 'init', '-q', '--ref-format=reftable', str(home)],
+                                env=self.env, capture_output=True, text=True)
+        if result.returncode:
+            self.skipTest('installed Git does not support reftable fixtures: ' + result.stderr)
+        self.git('commit', '--allow-empty', '-qm', 'First', cwd=home)
+        inst = instance.Instance(root)
+        def inputs():
+            return instance.git_state_paths(home, refs={'refs/heads/main', 'refs/remotes/origin/HEAD'},
+                                            include_head=False)
+        self.assertIn(home / '.git/reftable', inputs())
+        with instance.brain_lock(inst), self.assertRaises(instance.StateChanged):
+            with instance.released(inst, extra=inputs, retry=True):
+                self.git('commit', '--allow-empty', '-qm', 'Concurrent ref update', cwd=home)
+
+    def test_short_writers_prepare_facts_and_machine_text_without_the_writer_lock(self):
+        from brain import status
+        for command in ('set', 'task', 'handback'):
+            with self.subTest(command=command):
+                root = self.init('unlocked-' + command)
+                home = self.repo(self.tmp / ('code-' + command))
+                self.b(root, 'new', 'app', '--title', 'App', '--home', str(home))
+                self.b(root, 'new', 'peer', '--title', 'Peer')
+                inst = instance.Instance(root)
+                entered = []
+                app_reads = []
+
+                def unlocked(original, name):
+                    def call(*args, **kwargs):
+                        self.assertIsNone(instance._LOCK['fh'], name)
+                        entered.append(name)
+                        if name == 'file_state' and entered.count(name) == 1:
+                            # A real sibling CLI writer must finish while this
+                            # command is still in its projection window.
+                            self.b(root, 'backlog', 'peer', 'add', 'concurrent writer')
+                        return original(*args, **kwargs)
+                    return call
+
+                def snapshot(*args, **kwargs):
+                    if args[1]['id'] == 'app':
+                        app_reads.append(1)
+                    return original_snapshot(*args, **kwargs)
+
+                original_snapshot = events.snapshot_view
+                with mock.patch.object(events, 'snapshot_view', side_effect=snapshot), \
+                        mock.patch.object(status, 'file_state', side_effect=unlocked(status.file_state, 'file_state')), \
+                        mock.patch.object(status, 'status_facts', side_effect=unlocked(status.status_facts, 'status_facts')), \
+                        mock.patch.object(status._m_machine, 'machine_state',
+                                          side_effect=unlocked(status._m_machine.machine_state, 'machine_state')):
+                    with instance.brain_lock(inst), events.Command(root, command=command, node='app'):
+                        (root / 'nodes/app/backlog.md').write_text('- durable mutation\n')
+                self.assertEqual(len(app_reads), 1)
+                self.assertIn('status_facts', entered)
+                self.assertIn('machine_state', entered)
+                self.assertIn('concurrent writer', (root / 'nodes/peer/backlog.md').read_text())
+                records = self.records(root)
+                self.assertEqual(events.pending(records), {})
+                self.assertTrue(records[-1]['data']['maintenance_ok'])
+
+    def test_short_writer_retries_from_fresh_status_and_preserves_concurrent_prose(self):
+        from brain import status
+        root = self.init('retry-status')
+        inst = instance.Instance(root)
+        path = root / 'status.md'
+        original = events.snapshot_view
+        calls = []
+
+        def edited(current, node, known):
+            self.assertIsNone(instance._LOCK['fh'])
+            calls.append(list(known))
+            view = original(current, node, known)
+            if len(calls) == 1:
+                text = path.read_text().replace('## Now', 'Concurrent human prose\n\n## Now')
+                path.write_text(text)
+            return view
+
+        with mock.patch.object(events, 'snapshot_view', side_effect=edited):
+            with instance.brain_lock(inst), events.Command(root, command='task'):
+                (root / 'backlog.md').write_text('- durable mutation\n')
+        self.assertEqual(len(calls), 2)
+        self.assertIn('Concurrent human prose', path.read_text())
+        self.assertTrue(status.facts_meta(inst.node('root')))
+        self.assertTrue(self.records(root)[-1]['data']['maintenance_ok'])
+        self.assertEqual(events.pending(self.records(root)), {})
+
+    def test_short_writer_retry_exhaustion_keeps_mutation_and_invalidates_only_the_view(self):
+        import contextlib
+        import io
+        root = self.init('exhaust-status')
+        inst = instance.Instance(root)
+        path = root / 'status.md'
+        original = events.snapshot_view
+        calls = []
+
+        def edited(current, node, known):
+            self.assertIsNone(instance._LOCK['fh'])
+            calls.append(1)
+            view = original(current, node, known)
+            with path.open('a') as stream:
+                stream.write('\nConcurrent human prose\n')
+            return view
+
+        with mock.patch.object(events, 'snapshot_view', side_effect=edited), \
+                contextlib.redirect_stderr(io.StringIO()):
+            with instance.brain_lock(inst), events.Command(root, command='handback'):
+                (root / 'backlog.md').write_text('- durable mutation\n')
+        self.assertEqual(len(calls), events.RELEASED_PROJECTION_ATTEMPTS)
+        self.assertEqual((root / 'backlog.md').read_text(), '- durable mutation\n')
+        self.assertEqual(path.read_text().count('Concurrent human prose'), len(calls))
+        records = self.records(root)
+        self.assertEqual(records[-1]['kind'], 'commit')
+        self.assertFalse(records[-1]['data']['maintenance_ok'])
+        self.assertIn(events.node_ref('root'), records[-1]['data']['invalidate'])
+        self.assertEqual(events.pending(records), {})
+
     def test_resource_scopes_and_gap_scan_discover_nodes_once_per_batch(self):
         root = self.init('batch-scopes')
         self.b(root, 'new', 'app', '--title', 'App')

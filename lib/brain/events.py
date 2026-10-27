@@ -455,8 +455,12 @@ def replay(inst, records=None):
     return state['resources'], {k: v for k, v in views.items() if v is not None}, state['opened']
 
 
-def resources(inst):
-    """Content hashes only. Git, external homes, reports, source imports and caches are outside this stream."""
+def resources(inst, *, paths_only=False):
+    """Tracked resource hashes, or paths without body reads for a stamp fence.
+
+    Git, external homes, reports, source imports and caches are outside this stream.
+    Path discovery repeats on each fence check to detect additions and removals.
+    """
     result = {}
     def walk(folder, deep=False):
         for p in sorted(folder.iterdir()):
@@ -469,12 +473,12 @@ def resources(inst):
                     walk(p, True)
             elif p.is_file() and p.suffix in (".md", ".json", ".txt", ".sh"):
                 rel = p.relative_to(inst.root).as_posix()
-                result[rel] = digest(p.read_bytes())
+                result[rel] = None if paths_only else digest(p.read_bytes())
     walk(inst.root)
     for name in ("local.json", "inbox-seen.json"):
         path = inst.root / ".brain" / name
         if _stamp(path):
-            result[".brain/" + name] = digest(private_read(path))
+            result[".brain/" + name] = None if paths_only else digest(private_read(path))
     # Ready packets are Brain-owned state in workbenches, not external Git operations.
     for n in inst.nodes():
         wb = n["local"].get("workbench")
@@ -482,7 +486,7 @@ def resources(inst):
             folder = Path(wb).expanduser() / "scratch/ready"
             if folder.is_dir():
                 for path in folder.glob("*.json"):
-                    result["@ready/" + n["id"] + "/" + path.name] = digest(path.read_bytes())
+                    result["@ready/" + n["id"] + "/" + path.name] = None if paths_only else digest(path.read_bytes())
     return result
 
 
@@ -648,9 +652,9 @@ class Command:
         self.study_handback = (self.command == 'handback' and
                                str(getattr(args, 'branch', '')).startswith('import:'))
 
-    def start(self):
+    def start(self, before=None):
         self.ref = uuid.uuid4().hex
-        self.before = resources(self.inst)
+        self.before = resources(self.inst) if before is None else before
         self.lease_target = common.directory_target(lease_path(self.inst, self.ref), create=True, private=True)
         self.lease_target.__enter__()
         try:
@@ -668,11 +672,15 @@ class Command:
 
     def __enter__(self):
         nested = any(op.inst.root == self.inst.root for op in _CURRENT)
+        # Coverage and begin observe the same locked source generation. Journal
+        # repairs below only change private journal/index files, not resources.
+        before = (resources(self.inst) if not nested and
+                  self.command in ('set', 'task', 'handback') else None)
         # Refused writes must not first publish repairs or reconstructed sources.
         # Read the retained state without changing it before admitting a writer.
         if (not nested and self.command not in ("status", "set")
                 and any(source(self.inst, n) == "events" for n in self.inst.nodes())
-                and journal(self.inst).positions and detect_gaps(self.inst, self.node, record=False)):
+                and journal(self.inst).positions and detect_gaps(self.inst, self.node, record=False, actual=before)):
             common.die("events source has unreconciled state; run status --refresh before writing")
         comparison_plan = None
         if self.command == 'status' and not nested:
@@ -691,8 +699,8 @@ class Command:
         if not nested:
             read_comparisons(self.inst, repair=True, prepared=comparison_plan)
             if journal(self.inst).positions:
-                detect_gaps(self.inst, self.node)
-        self.start()
+                detect_gaps(self.inst, self.node, actual=before)
+        self.start(before=before)
         _CURRENT.append(self)
         try:
             if not nested:
@@ -1339,6 +1347,44 @@ def affected_nodes(inst, changed, preferred):
     return [n for n in inst.nodes() if n['id'] in selected and not n['archived']]
 
 
+RELEASED_PROJECTION_ATTEMPTS = 3
+
+
+def released_view(op, n, known_of, inputs, prepare=None, retry=False):
+    """Render a generated view unlocked; a concurrent source change recomputes it.
+
+    Retry is an explicit caller policy. Other callers refuse their first
+    stale observation. Every attempt reloads the instance, node and merge
+    baseline inside the fenced window. Exhaustion refuses maintenance; it never
+    falls back to an unbounded render under the writer lock. A refused attempt
+    publishes nothing. Returns the view and node; op.inst becomes that instance.
+    """
+    def render():
+        current = instance.Instance(op.inst.root)
+        node = current.node(n['id'])
+        from . import command_reads, status
+        with command_reads.snapshot():
+            if prepare is not None:
+                with ThreadPoolExecutor(max_workers=1) as pool:
+                    sample = pool.submit(status._m_machine.machine_state, current)
+                    view = snapshot_view(current, node, known_of(node))
+                    prepare(current, node, view, sample.result())
+            else:
+                view = snapshot_view(current, node, known_of(node))
+        return current, node, view
+    for _ in range(RELEASED_PROJECTION_ATTEMPTS if retry else 1):
+        try:
+            with instance.released(op.inst, list(op.inst.nodes()), extra=inputs, retry=retry):
+                current, node, view = render()
+            break
+        except instance.StateChanged:
+            op.inst = instance.Instance(op.inst.root)
+    else:
+        common.die('state changed during the unlocked step; retry from fresh state')
+    op.inst = current
+    return view, node
+
+
 def maintain(op, changed):
     if op.command == "project_status":
         return getattr(op, "projected_views", {})
@@ -1394,7 +1440,7 @@ def maintain(op, changed):
                                           targets=list(selected), extra=(op.inst.root / '.brain/events.jsonl',)
                                           if any(source(op.inst, n) == 'events' for n in selected.values()) else ())
     for n in selected.values():
-        machine_snapshot = None
+        text = None
         if materialize and op.command != 'status':
             cap_now(op.inst, n)
         if op.command == 'status' or (op.command == 'check' and status.facts_meta(n)):
@@ -1404,14 +1450,18 @@ def maintain(op, changed):
             known = status.facts_meta(n).get('merged', [])
         if op.command == 'status':
             view = prepared[n['id']][0]
-        elif op.command in ('handback', 'task', 'review', 'preview_receipt'):
+        elif op.command in ('set', 'handback', 'task', 'review', 'preview_receipt'):
             # Status projection can scan worker transcripts. It grants no action
             # authority, and must not hold up writers after terminal publication.
             # A concurrent source change refuses this generated view; the normal
             # maintenance-failure path invalidates it for an explicit refresh.
             def projection_inputs():
-                paths = [op.inst.root / path for path in resources(op.inst)
-                         if not path.startswith('@ready/')]
+                prefix = n['dir'].relative_to(op.inst.root).as_posix()
+                prefix = '' if prefix == '.' else prefix + '/'
+                scoped = op.command in ('set', 'handback', 'task')
+                paths = [op.inst.root / path for path in resources(op.inst, paths_only=True)
+                         if not path.startswith('@ready/') and (not scoped or
+                             path.startswith(prefix) and not path[len(prefix):].startswith('nodes/'))]
                 for node in op.inst.nodes():
                     paths.extend(node['dir'] / name for name in ('tasks', 'requirements'))
                     if node['id'] == n['id'] and node.get('home_path'):
@@ -1424,18 +1474,12 @@ def maintain(op, changed):
                         paths.extend(instance.git_state_paths(node['home_path'], refs=refs - {''}, include_head=False))
                 paths.append(op.inst.root / '.brain/communications.json')
                 return paths
-            from . import command_reads
-            reads = command_reads.snapshot
-            with instance.released(op.inst, list(op.inst.nodes()), extra=projection_inputs), reads():
-                if materialize:
-                    # Telemetry is display-only and independent of node facts.
-                    # Sample it alongside the view, while the writer is released.
-                    with ThreadPoolExecutor(max_workers=1) as pool:
-                        sample = pool.submit(status._m_machine.machine_state, op.inst)
-                        view = snapshot_view(op.inst, n, known)
-                        machine_snapshot = sample.result()
-                else:
-                    view = snapshot_view(op.inst, n, known)
+            def prepare(current, node, view, machine):
+                nonlocal text
+                text = status.refreshed_text(current, node, view, machine_snapshot=machine)
+            view, n = released_view(op, n, lambda node: status.facts_meta(node).get('merged', []),
+                                    projection_inputs, prepare=prepare if materialize else None,
+                                    retry=op.command in ('set', 'handback', 'task'))
         else:
             view = snapshot_view(op.inst, n, known)
         # During comparison, files supply new facts. After switching, a write materializes its
@@ -1445,8 +1489,7 @@ def maintain(op, changed):
         views[n['id']] = view
         if materialize:
             status.refresh_status(op.inst, n, view,
-                                  prepared_text=prepared[n['id']][1] if op.command == 'status' else None,
-                                  machine_snapshot=machine_snapshot)
+                                  prepared_text=prepared[n['id']][1] if op.command == 'status' else text)
             active_table(op.inst, n, view)
             ledger = (n["dir"] / "job-ledger.md").relative_to(op.inst.root).as_posix()
             force = op.command in ('new', 'merge', 'changes') or (op.close_job and ledger in changed)
@@ -1457,10 +1500,10 @@ def maintain(op, changed):
     return views
 
 
-def detect_gaps(inst, preferred, record=True):
+def detect_gaps(inst, preferred, record=True, actual=None):
     """Cheap pre-write coverage check: one resource scan, no Git or status rendering."""
     recorded, views, opened = replay(inst)
-    actual = {r['id']: r for r in resource_list(inst, resources(inst))}
+    actual = {r['id']: r for r in resource_list(inst, resources(inst) if actual is None else actual)}
     changed = [k for k in recorded.keys() | actual.keys()
                if recorded.get(k, {}).get('hash') != actual.get(k, {}).get('hash')]
     affected = {preferred}
