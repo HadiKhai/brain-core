@@ -29,6 +29,52 @@ from scenario import Scenario, AutonomyProject, shlex_quote
 
 
 class FixtureSetup(Scenario):
+    def test_runtime_core_preserves_assets_native_writes_and_independent_installations(self):
+        class Runtime(Scenario):
+            fixture_init_in_process = fixture_templates = fixture_runtime_only_core = True
+        roots = []
+        for _ in range(2):
+            case = Runtime()
+            case.setUp()
+            self.addCleanup(case.doCleanups)
+            self.addCleanup(case.tearDown)
+            root = case.init('alice')
+            roots.append(root)
+            self.assertFalse((root / 'core').is_symlink())
+            self.assertFalse((root / 'core/tests').exists())
+            self.assertFalse((root / 'core/docs').exists())
+            self.assertEqual(sorted(p.name for p in (root / 'core/ui').iterdir()), ['dist'])
+            for folder in ('bin', 'lib', 'templates', 'roles', 'skills', 'adapters', 'ui/dist'):
+                for path in (CORE / folder).rglob('*'):
+                    if path.is_file() and '__pycache__' not in path.parts:
+                        self.assertEqual((root / 'core' / path.relative_to(CORE)).read_bytes(), path.read_bytes())
+            self.assertIn('created: ' + str(root / 'nodes/app'), case.b(root, 'new', 'app', '--title', 'App'))
+            self.assertEqual(case.git('status', '--porcelain', cwd=root), '')
+        a, b = (r / 'core/bin/brain' for r in roots)
+        self.assertNotEqual(a.stat().st_ino, b.stat().st_ino)
+        self.assertEqual(a.stat().st_nlink, 1)
+        a.write_text('only the first installed core\n')
+        self.assertEqual(b.read_bytes(), (CORE / 'bin/brain').read_bytes())
+
+    def test_runtime_core_mode_is_exact_and_frozen_before_environment_replacement(self):
+        class Runtime(Scenario):
+            fixture_init_in_process = fixture_templates = fixture_runtime_only_core = True
+        class Inherited(Runtime):
+            pass
+        for cls, ambient in ((Runtime, True), (Scenario, False), (Inherited, False), (Runtime, False)):
+            case = cls()
+            case.fixture_init_in_process = case.fixture_templates = True
+            case.setUp()
+            self.addCleanup(case.doCleanups)
+            self.addCleanup(case.tearDown)
+            if ambient:
+                # Absent from self.env: only the original caller carries it.
+                case.env.pop('BRAIN_REHEARSAL_EVIDENCE_DIR', None)
+            with mock.patch.dict(os.environ, {'BRAIN_REHEARSAL_EVIDENCE_DIR': str(self.tmp)} if ambient else {}):
+                root = case.init('alice')
+            self.assertEqual((root / 'core/tests').is_dir(), cls is not Runtime or ambient)
+            self.assertFalse((root / 'core').is_symlink())
+
     def result_core(self):
         core, package = self.fixture_source()
         (core / 'bin/brain').write_bytes((CORE / 'bin/brain').read_bytes())

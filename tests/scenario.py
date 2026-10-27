@@ -30,6 +30,7 @@ CORE = Path(os.environ.get("BRAIN_CORE") or Path(__file__).resolve().parent.pare
 # Per-worker APFS template; instance state is always initialized anew. Checked
 # bytecode avoids recompiling unchanged core sources in every real CLI child.
 _core_template = None
+_runtime_core_template = None
 _core_bytecode = {}
 _runtime_bytecode = None
 _bytecode_lock = threading.RLock()
@@ -162,6 +163,33 @@ _repo_templates = {}
 _setup_templates = {}
 
 
+def clone_fixture_runtime_core(source, destination, **kwargs):
+    """Copy runtime assets independently; omit developer docs/tests/UI sources."""
+    global _runtime_core_template
+    if Path(source) != CORE:
+        return clone_fixture_core(source, destination, **kwargs)
+    if _runtime_core_template is None:
+        candidate = tempfile.TemporaryDirectory(prefix='brain-test-runtime-core-')
+        original_ignore = kwargs.get('ignore')
+        def ignore(directory, names):
+            ignored = set(original_ignore(directory, names) if original_ignore else ())
+            if Path(directory) == Path(source):
+                ignored.update({'docs', 'tests'})
+            elif Path(directory) == Path(source) / 'ui':
+                ignored.update(set(names) - {'dist'})
+            return ignored
+        try:
+            tree = Path(candidate.name) / 'core'
+            shutil.copytree(source, tree, **{**kwargs, 'ignore': ignore})
+            shutil.copytree(compiled_fixture_core(tree, CORE), tree / 'lib/brain/__pycache__')
+        except BaseException:
+            candidate.cleanup()
+            raise
+        _runtime_core_template = candidate
+    _copy_fixture_tree(Path(_runtime_core_template.name) / 'core', destination)
+    return str(destination)
+
+
 def _copy_fixture_tree(source, destination):
     """Copy mutable fixtures with independent inodes, preserving relative links."""
     destination = Path(destination)
@@ -251,6 +279,7 @@ class Scenario(unittest.TestCase):
     fixture_init_in_process = False
     fixture_templates = False
     cli_in_process = False
+    fixture_runtime_only_core = False
     def setUp(self):
         # A real verify may enclose the test runner. Its descriptor stays open and
         # locked; its environment proof must not identify our temporary instances.
@@ -392,20 +421,8 @@ class Scenario(unittest.TestCase):
         # Exact-class opt-in: a future subclass must audit its own boundaries.
         if (native or not type(self).__dict__.get('cli_in_process', False)
                 or self.env.get('BRAIN_NO_REEXEC') != '1'
-                or getattr(self, '_evidence', None)
-                or getattr(self, 'retain_rehearsal_evidence', False)
-                or hasattr(self, '_native_retention')
-                or self.env.get('BRAIN_REHEARSAL_EVIDENCE_DIR')
-                or os.environ.get('BRAIN_REHEARSAL_EVIDENCE_DIR')):
+                or self._native_evidence_active()):
             return False
-        for module in list(sys.modules.values()):
-            name = getattr(module, '__name__', '')
-            for suffix, variable in (('.rehearse', '_retention_children'),
-                                     ('.rehearse_transactions', '_validation_retainer')):
-                if name.endswith(suffix):
-                    context = getattr(module, variable, None)
-                    if context is not None and context.get() is not None:
-                        return False
         package = launcher.resolve().parent.parent / 'lib/brain'
         required = ('__init__', 'cli', 'common', 'instance', 'jobs', 'events')
         try:
@@ -413,6 +430,28 @@ class Scenario(unittest.TestCase):
                     and launcher.read_bytes() == (CORE / 'bin/brain').read_bytes())
         except OSError:
             return False
+
+    def _native_evidence_active(self):
+        if (getattr(self, '_evidence', None)
+                or getattr(self, 'retain_rehearsal_evidence', False)
+                or hasattr(self, '_native_retention')
+                or self.env.get('BRAIN_REHEARSAL_EVIDENCE_DIR')
+                or os.environ.get('BRAIN_REHEARSAL_EVIDENCE_DIR')):
+            return True
+        for module in list(sys.modules.values()):
+            name = getattr(module, '__name__', '')
+            for suffix, variable in (('.rehearse', '_retention_children'),
+                                     ('.rehearse_transactions', '_validation_retainer')):
+                if name.endswith(suffix):
+                    context = getattr(module, variable, None)
+                    if context is not None and context.get() is not None:
+                        return True
+        return False
+
+    def _runtime_only_core(self):
+        return (type(self).__dict__.get('fixture_runtime_only_core', False)
+                and self.fixture_init_in_process and self.fixture_templates
+                and not self._native_evidence_active())
 
     def _in_process_result(self, args, cwd, launcher, command):
         """Text-only audited commands; fresh main, never native child evidence."""
@@ -478,7 +517,7 @@ class Scenario(unittest.TestCase):
         # The pytest identity changes per method; it is not fixture input.
         environment = tuple(sorted((k, v.replace(str(self.tmp), '<fixture-home>'))
                                    for k, v in self.env.items() if k != 'PYTEST_CURRENT_TEST'))
-        return (str(CORE), environment, *parts)
+        return (str(CORE), self._runtime_only_core(), environment, *parts)
 
     def cached_setup(self, key, build):
         """Reuse an audited setup tree; each test still gets independent files.
@@ -531,12 +570,14 @@ class Scenario(unittest.TestCase):
             return self.run_(args, cwd=cwd, brain=brain)
         stdout, stderr = io.StringIO(), io.StringIO()
         launcher = str(brain or cwd / 'core/bin/brain')
+        # Freeze mode before _fixture_module replaces the caller's environment.
+        copy_core = clone_fixture_runtime_core if self._runtime_only_core() else clone_fixture_core
         with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr), \
                 mock.patch.object(sys, 'argv', [launcher, *args]), \
                 self._fixture_module(cwd, brain) as module:
             nodes = module._owners['cmd_init']
             copy = types.SimpleNamespace(**vars(shutil))
-            copy.copytree = clone_fixture_core
+            copy.copytree = copy_core
             with mock.patch.object(nodes, 'shutil', copy):
                 try:
                     module.main()

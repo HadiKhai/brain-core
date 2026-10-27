@@ -344,6 +344,7 @@ class EventAppend(Scenario):
 
 
 class EventViews(Scenario):
+    fixture_runtime_only_core = True
     fixture_init_in_process = True
     fixture_templates = True
     def tracked_state(self, root, paths):

@@ -9,6 +9,7 @@ from scenario import Scenario, CORE
 
 
 class MergeTrain(Scenario):
+    fixture_runtime_only_core = True
     fixture_init_in_process = True
     fixture_templates = True
 

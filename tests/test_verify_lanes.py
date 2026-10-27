@@ -12,6 +12,7 @@ import core_loader
 
 
 class VerifyLanes(Scenario):
+    fixture_runtime_only_core = True
     fixture_templates = True
     fixture_init_in_process = True
     def job(self):

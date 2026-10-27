@@ -2966,3 +2966,14 @@ Keep changed configurations distinct and rebuild when a test has already changed
 its HOME. Old-core migration producers and asserted test operations retain their
 original execution paths. A remote-clone control removes the source fixture and
 proves subsequent fetch/push operations stay within each independent clone.
+
+## D28007: Copy smaller independent runtime cores for audited scenario setup
+
+Explicit class opt-ins may omit developer documentation, the installed test
+sources and unbuilt UI development files from fixture installations. Preserve
+the complete CLI, library, templates, adapters, roles, skills, built UI and root
+runtime metadata, with independent files and Git state for every instance.
+Installation, upgrade, evidence and unaudited subclass fixtures retain full
+copies. Partition setup caches by this mode and select it before replacing the
+caller environment, so an ambient evidence marker cannot contaminate a full
+installation cache. Keep native asserted commands and the write guard unchanged.
