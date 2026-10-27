@@ -11,12 +11,13 @@ import re
 import subprocess
 
 from . import common as _m_common
-from . import hosts as _m_hosts
-from . import host_instances as _m_host_instances
 from . import instance as _m_instance
-from . import knowledge as _m_knowledge
-from . import nodes as _m_nodes
-from . import schedules as _m_schedules
+
+_m_hosts = _m_common.LazyModule(__package__, 'hosts')
+_m_host_instances = _m_common.LazyModule(__package__, 'host_instances')
+_m_knowledge = _m_common.LazyModule(__package__, 'knowledge')
+_m_nodes = _m_common.LazyModule(__package__, 'nodes')
+_m_schedules = _m_common.LazyModule(__package__, 'schedules')
 
 
 AUTOMATED = 'Automated turn: no operator present; cancellations are host events.'

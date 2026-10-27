@@ -6,10 +6,11 @@ import re
 import time
 
 from . import common as _m_common
-from . import hosts as _m_hosts
-from . import host_instances as _m_host_instances
-from . import jobs as _m_jobs
-from . import nodes as _m_nodes
+
+_m_hosts = _m_common.LazyModule(__package__, 'hosts')
+_m_host_instances = _m_common.LazyModule(__package__, 'host_instances')
+_m_jobs = _m_common.LazyModule(__package__, 'jobs')
+_m_nodes = _m_common.LazyModule(__package__, 'nodes')
 
 
 HOST_SNAPSHOT_SECONDS = 180

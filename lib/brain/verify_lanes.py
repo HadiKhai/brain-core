@@ -13,7 +13,8 @@ from functools import lru_cache
 from pathlib import Path
 
 from . import common as _m_common
-from . import jobs as _m_jobs
+
+_m_jobs = _m_common.LazyModule(__package__, 'jobs')
 
 VERIFY_LANE_MAP_TIMEOUT = 5
 LANE_ENV_KEYS = {'VIRTUAL_ENV', 'JAVA_HOME', 'RUSTUP_TOOLCHAIN', 'NODE_OPTIONS',

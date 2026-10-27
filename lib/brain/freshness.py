@@ -6,10 +6,11 @@ import stat
 from pathlib import Path
 
 from . import common as _m_common
-from . import guard as _m_guard
-from . import history as _m_history
-from . import nodes as _m_nodes
-from . import reminders as _m_reminders
+
+_m_guard = _m_common.LazyModule(__package__, 'guard')
+_m_history = _m_common.LazyModule(__package__, 'history')
+_m_nodes = _m_common.LazyModule(__package__, 'nodes')
+_m_reminders = _m_common.LazyModule(__package__, 'reminders')
 
 
 INDEX_FILE_LIMIT = 64

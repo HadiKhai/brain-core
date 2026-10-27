@@ -9,15 +9,16 @@ import time
 from pathlib import Path
 
 from . import common as _m_common
-from . import guard as _m_guard
 from . import instance as _m_instance
-from . import jobs as _m_jobs
-from . import tasks as _m_tasks
-from . import knowledge as _m_knowledge
-from . import machine as _m_machine
-from . import nodes as _m_nodes
-from . import status as _m_status
-from . import verify as _m_verify
+
+_m_guard = _m_common.LazyModule(__package__, 'guard')
+_m_jobs = _m_common.LazyModule(__package__, 'jobs')
+_m_tasks = _m_common.LazyModule(__package__, 'tasks')
+_m_knowledge = _m_common.LazyModule(__package__, 'knowledge')
+_m_machine = _m_common.LazyModule(__package__, 'machine')
+_m_nodes = _m_common.LazyModule(__package__, 'nodes')
+_m_status = _m_common.LazyModule(__package__, 'status')
+_m_verify = _m_common.LazyModule(__package__, 'verify')
 
 
 WT_PORT_BASE = 4100

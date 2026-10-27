@@ -9,15 +9,16 @@ import re
 from pathlib import Path
 
 from . import common as _m_common
-from . import host_lifecycle as _m_host
-from . import host_rpc as _m_rpc
-from . import host_instances as _m_host_instances
 from . import instance as _m_instance
-from . import jobs as _m_jobs
-from . import machine as _m_machine
-from . import rotation as _m_rotation
-from . import settlement as _m_settlement
-from . import worker_lifecycle as _m_worker
+
+_m_host = _m_common.LazyModule(__package__, 'host_lifecycle')
+_m_rpc = _m_common.LazyModule(__package__, 'host_rpc')
+_m_host_instances = _m_common.LazyModule(__package__, 'host_instances')
+_m_jobs = _m_common.LazyModule(__package__, 'jobs')
+_m_machine = _m_common.LazyModule(__package__, 'machine')
+_m_rotation = _m_common.LazyModule(__package__, 'rotation')
+_m_settlement = _m_common.LazyModule(__package__, 'settlement')
+_m_worker = _m_common.LazyModule(__package__, 'worker_lifecycle')
 
 
 def rotation_packet(inst, n):

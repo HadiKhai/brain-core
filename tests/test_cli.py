@@ -624,7 +624,56 @@ class EntryPoints(Scenario):
                 self.assertEqual(self.git("status", "--porcelain", "--untracked-files=all", "--ignored", cwd=core), "")
                 self.assertEqual(list((core / "lib").rglob("__pycache__")), [])
 
+    def test_argument_parsing_compiles_only_the_light_core(self):
+        # Every hook, wake and hand-back pays startup; sources compile without bytecode.
+        probe = ("import json, runpy, sys\n"
+                 "sys.argv = sys.argv[1:]\n"
+                 "try:\n"
+                 "    runpy.run_path(sys.argv[0], run_name='__main__')\n"
+                 "except SystemExit:\n"
+                 "    pass\n"
+                 "sys.stderr.write('\\n' + json.dumps(sorted(m for m in sys.modules if m.startswith('brain.'))))\n")
+        heavy = {'brain.' + m for m in ('status', 'jobs', 'guard', 'hosts', 'machine', 'ui', 'rehearse',
+                                         'verify', 'history', 'knowledge', 'events', 'check', 'briefs')}
+        r = self.init('alice')
+        for args, handler in ((['--help'], None), (['handback', '--help'], None), (['task', '--help'], None),
+                              (['now'], 'brain.status')):
+            with self.subTest(args=args):
+                result = subprocess.run([sys.executable, '-B', '-c', probe, str(CORE / 'bin/brain'), *args],
+                                        cwd=r, env=self.env, capture_output=True, text=True)
+                loaded = set(json.loads(result.stderr.splitlines()[-1]))
+                self.assertIn('brain.cli', loaded)
+                self.assertEqual(loaded & heavy, {handler} - {None}, result.stderr)
+                if handler:
+                    self.assertRegex(result.stdout, r'^\d{4}-\d\d-\d\d \d\d:\d\d ')
 
+    def test_lazy_module_loads_on_first_use_and_forwards_patches(self):
+        package = 'lazy_fixture_' + self.tmp.name.replace('-', '_')
+        folder = self.tmp / 'lazy-lib' / package
+        folder.mkdir(parents=True)
+        for name in ('__init__.py', 'common.py', 'command_reads.py'):
+            shutil.copyfile(CORE / 'lib/brain' / name, folder / name)
+        (folder / 'heavy.py').write_text('value = 1\n')
+        (folder / 'user.py').write_text("from . import common as _m_common\n"
+                                        "_m_heavy = _m_common.LazyModule(__package__, 'heavy')\n"
+                                        "def read():\n    return _m_heavy.value\n")
+        sys.path.insert(0, str(folder.parent))
+        self.addCleanup(sys.path.remove, str(folder.parent))
+        self.addCleanup(lambda: [sys.modules.pop(k) for k in list(sys.modules)
+                                 if k == package or k.startswith(package + '.')])
+        user = importlib.import_module(package + '.user')
+        self.assertIn('lazy module', repr(user._m_heavy))
+        self.assertNotIn(package + '.heavy', sys.modules)
+        self.assertEqual(user.read(), 1)
+        heavy = sys.modules[package + '.heavy']
+        self.assertIs(user._m_heavy.__dict__, heavy.__dict__)
+        with mock.patch.object(user._m_heavy, 'value', 2):
+            self.assertEqual((heavy.value, user.read()), (2, 2))
+        self.assertEqual(heavy.value, 1)
+        user._m_heavy.extra = 3
+        self.assertEqual(heavy.extra, 3)
+        del user._m_heavy.extra
+        self.assertFalse(hasattr(heavy, 'extra'))
 
     def test_policy_and_complete_rule_snapshot_cli_boundaries(self):
         r = self.init('alice')

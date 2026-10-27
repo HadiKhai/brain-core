@@ -13,11 +13,12 @@ import sys
 import time
 
 from . import common as _m_common
-from . import guard as _m_guard
-from . import nodes as _m_nodes
-from . import spend as _m_spend
-from . import ui_readmodel as _m_ui_readmodel
-from . import usage as _m_usage
+
+_m_guard = _m_common.LazyModule(__package__, 'guard')
+_m_nodes = _m_common.LazyModule(__package__, 'nodes')
+_m_spend = _m_common.LazyModule(__package__, 'spend')
+_m_ui_readmodel = _m_common.LazyModule(__package__, 'ui_readmodel')
+_m_usage = _m_common.LazyModule(__package__, 'usage')
 
 
 UI_JSON_WAIT = 1  # static capability for cross-version rehearsal callers

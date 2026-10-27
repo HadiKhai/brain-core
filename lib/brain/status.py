@@ -12,38 +12,39 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from pathlib import Path
 
-from . import briefs as _m_briefs
-from . import check as _m_check
 from . import common as _m_common
-from . import docker_cleanup as _m_docker_cleanup
-from . import conversation_answers as _m_conversation_answers
-from . import docker_leftovers as _m_docker_leftovers
-from . import guard as _m_guard
-from . import history as _m_history
-from . import hosts as _m_hosts
 from . import instance as _m_instance
-from . import jobs as _m_jobs
-from . import ui as _m_ui
-from . import knowledge as _m_knowledge
-from . import machine as _m_machine
-from . import nodes as _m_nodes
-from . import recurrence as _m_recurrence
-from . import learning as _m_learning
-from . import feedback as _m_feedback
-from . import teaching as _m_teaching
-from . import proposals as _m_proposals
-from . import reports as _m_reports
-from . import schedules as _m_schedules
-from . import rotation as _m_rotation
-from . import reminders as _m_reminders
-from . import spend as _m_spend
-from . import transitions as _m_transitions
-from . import upgrade as _m_upgrade
-from . import usage as _m_usage
-from . import verify as _m_verify
-from . import worktrees as _m_worktrees
 from . import command_reads as _m_command_reads
 from . import timings as _m_timings
+
+_m_briefs = _m_common.LazyModule(__package__, 'briefs')
+_m_check = _m_common.LazyModule(__package__, 'check')
+_m_docker_cleanup = _m_common.LazyModule(__package__, 'docker_cleanup')
+_m_conversation_answers = _m_common.LazyModule(__package__, 'conversation_answers')
+_m_docker_leftovers = _m_common.LazyModule(__package__, 'docker_leftovers')
+_m_guard = _m_common.LazyModule(__package__, 'guard')
+_m_history = _m_common.LazyModule(__package__, 'history')
+_m_hosts = _m_common.LazyModule(__package__, 'hosts')
+_m_jobs = _m_common.LazyModule(__package__, 'jobs')
+_m_ui = _m_common.LazyModule(__package__, 'ui')
+_m_knowledge = _m_common.LazyModule(__package__, 'knowledge')
+_m_machine = _m_common.LazyModule(__package__, 'machine')
+_m_nodes = _m_common.LazyModule(__package__, 'nodes')
+_m_recurrence = _m_common.LazyModule(__package__, 'recurrence')
+_m_learning = _m_common.LazyModule(__package__, 'learning')
+_m_feedback = _m_common.LazyModule(__package__, 'feedback')
+_m_teaching = _m_common.LazyModule(__package__, 'teaching')
+_m_proposals = _m_common.LazyModule(__package__, 'proposals')
+_m_reports = _m_common.LazyModule(__package__, 'reports')
+_m_schedules = _m_common.LazyModule(__package__, 'schedules')
+_m_rotation = _m_common.LazyModule(__package__, 'rotation')
+_m_reminders = _m_common.LazyModule(__package__, 'reminders')
+_m_spend = _m_common.LazyModule(__package__, 'spend')
+_m_transitions = _m_common.LazyModule(__package__, 'transitions')
+_m_upgrade = _m_common.LazyModule(__package__, 'upgrade')
+_m_usage = _m_common.LazyModule(__package__, 'usage')
+_m_verify = _m_common.LazyModule(__package__, 'verify')
+_m_worktrees = _m_common.LazyModule(__package__, 'worktrees')
 
 
 def status_line(n):

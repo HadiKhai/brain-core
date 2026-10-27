@@ -111,6 +111,10 @@ def imports(tree):
             found.update(a.name for a in node.names)
         elif isinstance(node, ast.ImportFrom) and (node.module or '').startswith('brain.'):
             found.add(node.module.split('.')[1])
+        elif (isinstance(node, ast.Call) and len(node.args) == 2
+              and getattr(node.func, 'attr', getattr(node.func, 'id', None)) == 'LazyModule'
+              and isinstance(node.args[1], ast.Constant) and isinstance(node.args[1].value, str)):
+            found.add(node.args[1].value)  # a deferred sibling import is still an edge
     return found
 
 

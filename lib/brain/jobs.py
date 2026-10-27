@@ -10,24 +10,25 @@ import sys
 import time
 from pathlib import Path
 
-from . import briefs as _m_briefs
 from . import command_reads as _m_command_reads
 from . import common as _m_common
-from . import docker_leftovers as _m_docker_leftovers
-from . import guard as _m_guard
-from . import hosts as _m_hosts
 from . import instance as _m_instance
-from . import machine as _m_machine
-from . import nodes as _m_nodes
-from . import review as _m_review
-from . import spend as _m_spend
-from . import status as _m_status
-from . import sync as _m_sync
-from . import transitions as _m_transitions
-from . import ui as _m_ui
-from . import tasks as _m_tasks
-from . import usage as _m_usage
-from . import verify as _m_verify
+
+_m_briefs = _m_common.LazyModule(__package__, 'briefs')
+_m_docker_leftovers = _m_common.LazyModule(__package__, 'docker_leftovers')
+_m_guard = _m_common.LazyModule(__package__, 'guard')
+_m_hosts = _m_common.LazyModule(__package__, 'hosts')
+_m_machine = _m_common.LazyModule(__package__, 'machine')
+_m_nodes = _m_common.LazyModule(__package__, 'nodes')
+_m_review = _m_common.LazyModule(__package__, 'review')
+_m_spend = _m_common.LazyModule(__package__, 'spend')
+_m_status = _m_common.LazyModule(__package__, 'status')
+_m_sync = _m_common.LazyModule(__package__, 'sync')
+_m_transitions = _m_common.LazyModule(__package__, 'transitions')
+_m_ui = _m_common.LazyModule(__package__, 'ui')
+_m_tasks = _m_common.LazyModule(__package__, 'tasks')
+_m_usage = _m_common.LazyModule(__package__, 'usage')
+_m_verify = _m_common.LazyModule(__package__, 'verify')
 
 
 JOBS_FILE = "job-ledger.md"  # in a node folder: one row per job, written by `brain wt` and `brain review`
@@ -531,8 +532,8 @@ def publish_handback(a):
             _m_guard.never_terms(n)))
 
 
-JOB_CLASSES = ("build", "diagnose", "review", "ui", "migration", "docs", "mechanical")
-JOB_EFFORTS = ("low", "medium", "high", "xhigh")
+JOB_CLASSES = _m_common.JOB_CLASSES
+JOB_EFFORTS = _m_common.JOB_EFFORTS
 CLASS_EFFORTS = {"build": "high", "ui": "high", "migration": "high", "docs": "medium",
                  "mechanical": "medium", "review": "high", "diagnose": "xhigh"}
 
@@ -740,7 +741,7 @@ def cleanup_handback(inst, n, row, rows):
             _m_common.touch(record)
 
 
-CONTRACT_FIELDS = ("Outcome", "Authorized", "Discretion", "Stop when", "Needs consent", "Done means")
+CONTRACT_FIELDS = _m_common.CONTRACT_FIELDS
 
 
 def contract_file(n, row):

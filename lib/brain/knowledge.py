@@ -5,16 +5,17 @@ import shlex
 import sys
 from pathlib import Path
 
-from . import briefs as _m_briefs
 from . import common as _m_common
-from . import guard as _m_guard
-from . import history as _m_history
 from . import instance as _m_instance
-from . import jobs as _m_jobs
-from . import nodes as _m_nodes
-from . import spend as _m_spend
-from . import usage as _m_usage
-from . import worktrees as _m_worktrees
+
+_m_briefs = _m_common.LazyModule(__package__, 'briefs')
+_m_guard = _m_common.LazyModule(__package__, 'guard')
+_m_history = _m_common.LazyModule(__package__, 'history')
+_m_jobs = _m_common.LazyModule(__package__, 'jobs')
+_m_nodes = _m_common.LazyModule(__package__, 'nodes')
+_m_spend = _m_common.LazyModule(__package__, 'spend')
+_m_usage = _m_common.LazyModule(__package__, 'usage')
+_m_worktrees = _m_common.LazyModule(__package__, 'worktrees')
 
 
 def usable(item_fm, owners):

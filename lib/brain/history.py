@@ -10,13 +10,14 @@ import sys
 from pathlib import Path
 
 from . import common as _m_common
-from . import guard as _m_guard
 from . import instance as _m_instance
-from . import knowledge as _m_knowledge
-from . import nodes as _m_nodes
-from . import spend as _m_spend
-from . import usage as _m_usage
-from . import worktrees as _m_worktrees
+
+_m_guard = _m_common.LazyModule(__package__, 'guard')
+_m_knowledge = _m_common.LazyModule(__package__, 'knowledge')
+_m_nodes = _m_common.LazyModule(__package__, 'nodes')
+_m_spend = _m_common.LazyModule(__package__, 'spend')
+_m_usage = _m_common.LazyModule(__package__, 'usage')
+_m_worktrees = _m_common.LazyModule(__package__, 'worktrees')
 
 
 HISTORY_REF = re.compile(r"\b[A-Za-z]+-[0-9A-Za-z]+#t\d+\b")  # citation-shaped; check rejects unknown ones

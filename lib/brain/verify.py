@@ -15,16 +15,17 @@ import time
 from pathlib import Path
 
 from . import common as _m_common
-from . import docker_leftovers as _m_docker_leftovers
-from . import guard as _m_guard
-from . import gate_lock as _m_gate_lock
-from . import history as _m_history
 from . import instance as _m_instance
-from . import jobs as _m_jobs
-from . import machine as _m_machine
-from . import nodes as _m_nodes
-from . import worktrees as _m_worktrees
-from . import verify_lanes as _m_lanes
+
+_m_docker_leftovers = _m_common.LazyModule(__package__, 'docker_leftovers')
+_m_guard = _m_common.LazyModule(__package__, 'guard')
+_m_gate_lock = _m_common.LazyModule(__package__, 'gate_lock')
+_m_history = _m_common.LazyModule(__package__, 'history')
+_m_jobs = _m_common.LazyModule(__package__, 'jobs')
+_m_machine = _m_common.LazyModule(__package__, 'machine')
+_m_nodes = _m_common.LazyModule(__package__, 'nodes')
+_m_worktrees = _m_common.LazyModule(__package__, 'worktrees')
+_m_lanes = _m_common.LazyModule(__package__, 'verify_lanes')
 
 
 def ready_path(inst, n, branch):

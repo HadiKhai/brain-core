@@ -5,8 +5,9 @@ import re
 
 from . import common as _m_common
 from . import instance as _m_instance
-from . import jobs as _m_jobs
-from . import tasks as _m_tasks
+
+_m_jobs = _m_common.LazyModule(__package__, 'jobs')
+_m_tasks = _m_common.LazyModule(__package__, 'tasks')
 
 
 SOURCES = ('backlog.md', 'build-order.md')

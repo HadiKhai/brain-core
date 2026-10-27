@@ -11,8 +11,9 @@ import tempfile
 from pathlib import Path
 
 from . import common as _m_common
-from . import history as _m_history
-from . import semantic_runtime as _m_semantic_runtime
+
+_m_history = _m_common.LazyModule(__package__, 'history')
+_m_semantic_runtime = _m_common.LazyModule(__package__, 'semantic_runtime')
 
 MODEL_REVISION = '761b726dd34fb83930e26aab4e9ac3899aa1fa78'
 MODEL_ID = 'multilingual-e5-small-int8-' + MODEL_REVISION

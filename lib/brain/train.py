@@ -12,19 +12,20 @@ import sys
 import uuid
 from pathlib import Path
 
-from . import briefs as _m_briefs
 from . import common as _m_common
-from . import docker_leftovers as _m_docker_leftovers
-from . import guard as _m_guard
 from . import instance as _m_instance
-from . import jobs as _m_jobs
-from . import land_checks as _m_land_checks
-from . import nodes as _m_nodes
-from . import spend as _m_spend
-from . import status as _m_status
-from . import tasks as _m_tasks
-from . import verify as _m_verify
-from . import worktrees as _m_worktrees
+
+_m_briefs = _m_common.LazyModule(__package__, 'briefs')
+_m_docker_leftovers = _m_common.LazyModule(__package__, 'docker_leftovers')
+_m_guard = _m_common.LazyModule(__package__, 'guard')
+_m_jobs = _m_common.LazyModule(__package__, 'jobs')
+_m_land_checks = _m_common.LazyModule(__package__, 'land_checks')
+_m_nodes = _m_common.LazyModule(__package__, 'nodes')
+_m_spend = _m_common.LazyModule(__package__, 'spend')
+_m_status = _m_common.LazyModule(__package__, 'status')
+_m_tasks = _m_common.LazyModule(__package__, 'tasks')
+_m_verify = _m_common.LazyModule(__package__, 'verify')
+_m_worktrees = _m_common.LazyModule(__package__, 'worktrees')
 
 
 def ref(home, name):

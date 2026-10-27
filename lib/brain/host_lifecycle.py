@@ -3,12 +3,13 @@ import json
 import re
 
 from . import common as _m_common
-from . import host_rpc as _m_rpc
-from . import host_instances as _m_host_instances
 from . import instance as _m_instance
-from . import jobs as _m_jobs
-from . import nodes as _m_nodes
-from . import settlement as _m_settlement
+
+_m_rpc = _m_common.LazyModule(__package__, 'host_rpc')
+_m_host_instances = _m_common.LazyModule(__package__, 'host_instances')
+_m_jobs = _m_common.LazyModule(__package__, 'jobs')
+_m_nodes = _m_common.LazyModule(__package__, 'nodes')
+_m_settlement = _m_common.LazyModule(__package__, 'settlement')
 
 
 def host_object(rpc, name, args):

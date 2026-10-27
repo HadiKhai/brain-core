@@ -27,16 +27,17 @@ from pathlib import Path
 import traceback
 
 from . import common as _m_common
-from . import guard as _m_guard
-from . import hosts as _m_hosts
 from . import instance as _m_instance
-from . import jobs as _m_jobs
-from . import nodes as _m_nodes
-from . import rehearse_external as _m_rehearse_external
-from . import transitions as _m_transitions
-from . import rehearse_transactions as _m_transactions
-from . import upgrade as _m_upgrade
-from . import verify as _m_verify
+
+_m_guard = _m_common.LazyModule(__package__, 'guard')
+_m_hosts = _m_common.LazyModule(__package__, 'hosts')
+_m_jobs = _m_common.LazyModule(__package__, 'jobs')
+_m_nodes = _m_common.LazyModule(__package__, 'nodes')
+_m_rehearse_external = _m_common.LazyModule(__package__, 'rehearse_external')
+_m_transitions = _m_common.LazyModule(__package__, 'transitions')
+_m_transactions = _m_common.LazyModule(__package__, 'rehearse_transactions')
+_m_upgrade = _m_common.LazyModule(__package__, 'upgrade')
+_m_verify = _m_common.LazyModule(__package__, 'verify')
 
 
 class RehearsalError(Exception):

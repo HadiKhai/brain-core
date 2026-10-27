@@ -6,14 +6,15 @@ import time
 from pathlib import Path
 
 from . import common as _m_common
-from . import guard as _m_guard
-from . import hosts as _m_hosts
 from . import instance as _m_instance
-from . import jobs as _m_jobs
-from . import knowledge as _m_knowledge
-from . import nodes as _m_nodes
-from . import schedules as _m_schedules
-from . import status as _m_status
+
+_m_guard = _m_common.LazyModule(__package__, 'guard')
+_m_hosts = _m_common.LazyModule(__package__, 'hosts')
+_m_jobs = _m_common.LazyModule(__package__, 'jobs')
+_m_knowledge = _m_common.LazyModule(__package__, 'knowledge')
+_m_nodes = _m_common.LazyModule(__package__, 'nodes')
+_m_schedules = _m_common.LazyModule(__package__, 'schedules')
+_m_status = _m_common.LazyModule(__package__, 'status')
 
 
 def decision_warnings(inst, n):

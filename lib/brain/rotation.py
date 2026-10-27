@@ -4,12 +4,13 @@ import re
 import urllib.parse
 
 from . import common as _m_common
-from . import guard as _m_guard
-from . import jobs as _m_jobs
-from . import nodes as _m_nodes
-from . import schedules as _m_schedules
-from . import spend as _m_spend
-from . import status as _m_status
+
+_m_guard = _m_common.LazyModule(__package__, 'guard')
+_m_jobs = _m_common.LazyModule(__package__, 'jobs')
+_m_nodes = _m_common.LazyModule(__package__, 'nodes')
+_m_schedules = _m_common.LazyModule(__package__, 'schedules')
+_m_spend = _m_common.LazyModule(__package__, 'spend')
+_m_status = _m_common.LazyModule(__package__, 'status')
 
 
 def rotation_file(inst, n):

@@ -62,14 +62,15 @@ class RepositoryLanes(unittest.TestCase):
             root = Path(folder)
             shutil.copytree(lanes.ROOT / 'tests', root / 'tests', ignore=shutil.ignore_patterns('__pycache__'))
             shutil.copytree(lanes.ROOT / 'lib', root / 'lib', ignore=shutil.ignore_patterns('__pycache__'))
-            edge = 'from . import sync as _m_sync\n'
+            # An eager or deferred (LazyModule) sibling import is the same graph edge.
+            edges = {'from . import sync as _m_sync', "_m_sync = _m_common.LazyModule(__package__, 'sync')"}
             removed = []
             for path in (root / 'lib/brain').glob('*.py'):
                 source = path.read_text()
-                if edge in source:
+                if any(line.strip() in edges for line in source.splitlines()):
                     removed.append(path.stem)
                     path.write_text(''.join(line for line in source.splitlines(keepends=True)
-                                            if line.strip() != edge.strip()))
+                                            if line.strip() not in edges))
             self.assertIn('jobs', removed)
             self.assertIn('tasks', removed)
             graph = {p.stem: lanes.imports(lanes.parse(p)) for p in (root / 'lib/brain').glob('*.py')}

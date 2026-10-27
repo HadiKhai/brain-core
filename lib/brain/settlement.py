@@ -1,6 +1,8 @@
 """Validate coordinator-supplied host observations; never claim independent host proof."""
-from . import jobs as _m_jobs
-from . import status as _m_status
+from . import common as _m_common
+
+_m_jobs = _m_common.LazyModule(__package__, 'jobs')
+_m_status = _m_common.LazyModule(__package__, 'status')
 
 
 SETTLEMENT_MAX_AGE = 300

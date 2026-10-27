@@ -11,7 +11,8 @@ import uuid
 
 from . import common as _m_common
 from . import instance as _m_instance
-from . import tasks as _m_tasks
+
+_m_tasks = _m_common.LazyModule(__package__, 'tasks')
 
 ENDPOINT = 'https://api.linear.app/graphql'
 ISSUE_FIELDS = '''id identifier title description priority url updatedAt team { id }

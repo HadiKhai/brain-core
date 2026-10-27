@@ -5,9 +5,10 @@ import subprocess
 from pathlib import Path
 
 from . import common as _m_common
-from . import hosts as _m_hosts
-from . import nodes as _m_nodes
-from . import status as _m_status
+
+_m_hosts = _m_common.LazyModule(__package__, 'hosts')
+_m_nodes = _m_common.LazyModule(__package__, 'nodes')
+_m_status = _m_common.LazyModule(__package__, 'status')
 
 
 def do_move(inst, nid, parent_id):

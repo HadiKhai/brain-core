@@ -1,6 +1,8 @@
 """Delivery measurements from explicit observed facts, with missing evidence left unknown."""
 import datetime as _datetime
-from . import events as _m_events
+from . import common as _m_common
+
+_m_events = _m_common.LazyModule(__package__, 'events')
 
 
 _TERMINAL = ('delivery_completed', 'landed', 'job_landed', 'task_landed')

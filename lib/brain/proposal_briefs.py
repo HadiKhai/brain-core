@@ -3,7 +3,9 @@ import json
 import re
 import shlex
 
-from . import history as _m_history
+from . import common as _m_common
+
+_m_history = _m_common.LazyModule(__package__, 'history')
 
 
 def proposal_claim(body):

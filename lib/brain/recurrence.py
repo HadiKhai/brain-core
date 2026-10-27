@@ -5,9 +5,10 @@ import re
 from collections import Counter, defaultdict
 
 from . import common as _m_common
-from . import guard as _m_guard
 from . import instance as _m_instance
-from . import knowledge as _m_knowledge
+
+_m_guard = _m_common.LazyModule(__package__, 'guard')
+_m_knowledge = _m_common.LazyModule(__package__, 'knowledge')
 
 
 def synthesis_digest(value):

@@ -6,7 +6,9 @@ import math
 import re
 import stat
 
-from . import hosts as _m_hosts
+from . import common as _m_common
+
+_m_hosts = _m_common.LazyModule(__package__, 'hosts')
 
 
 COORDINATOR_OBSERVATION_MAX_AGE = 180

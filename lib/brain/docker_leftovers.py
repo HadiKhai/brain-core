@@ -17,9 +17,10 @@ import sys
 import time
 
 from . import common as _m_common
-from . import guard as _m_guard
-from . import machine as _m_machine
-from . import transitions as _m_transitions
+
+_m_guard = _m_common.LazyModule(__package__, 'guard')
+_m_machine = _m_common.LazyModule(__package__, 'machine')
+_m_transitions = _m_common.LazyModule(__package__, 'transitions')
 
 LEFTOVER_SECONDS = 5
 _LEFTOVER_PROJECT = 'com.docker.compose.project'

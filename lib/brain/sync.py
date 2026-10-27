@@ -6,19 +6,20 @@ import shutil
 import subprocess
 from pathlib import Path
 
-from . import briefs as _m_briefs
 from . import common as _m_common
-from . import guard as _m_guard
-from . import history as _m_history
 from . import instance as _m_instance
-from . import jobs as _m_jobs
-from . import knowledge as _m_knowledge
-from . import nodes as _m_nodes
-from . import review as _m_review
-from . import status as _m_status
-from . import usage as _m_usage
-from . import verify as _m_verify
-from . import worktrees as _m_worktrees
+
+_m_briefs = _m_common.LazyModule(__package__, 'briefs')
+_m_guard = _m_common.LazyModule(__package__, 'guard')
+_m_history = _m_common.LazyModule(__package__, 'history')
+_m_jobs = _m_common.LazyModule(__package__, 'jobs')
+_m_knowledge = _m_common.LazyModule(__package__, 'knowledge')
+_m_nodes = _m_common.LazyModule(__package__, 'nodes')
+_m_review = _m_common.LazyModule(__package__, 'review')
+_m_status = _m_common.LazyModule(__package__, 'status')
+_m_usage = _m_common.LazyModule(__package__, 'usage')
+_m_verify = _m_common.LazyModule(__package__, 'verify')
+_m_worktrees = _m_common.LazyModule(__package__, 'worktrees')
 
 
 def cmd_review(a):

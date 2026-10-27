@@ -4,10 +4,11 @@ import math
 import statistics
 
 from . import common as _m_common
-from . import guard as _m_guard
-from . import jobs as _m_jobs
-from . import nodes as _m_nodes
-from . import spend as _m_spend
+
+_m_guard = _m_common.LazyModule(__package__, 'guard')
+_m_jobs = _m_common.LazyModule(__package__, 'jobs')
+_m_nodes = _m_common.LazyModule(__package__, 'nodes')
+_m_spend = _m_common.LazyModule(__package__, 'spend')
 
 
 def model_fit_candidates(rows, kind, runtime, effort, allowed, min_samples=3):

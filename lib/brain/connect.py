@@ -7,11 +7,12 @@ import sys
 from pathlib import Path
 
 from . import common as _m_common
-from . import guard as _m_guard
-from . import history as _m_history
 from . import instance as _m_instance
-from . import knowledge as _m_knowledge
-from . import nodes as _m_nodes
+
+_m_guard = _m_common.LazyModule(__package__, 'guard')
+_m_history = _m_common.LazyModule(__package__, 'history')
+_m_knowledge = _m_common.LazyModule(__package__, 'knowledge')
+_m_nodes = _m_common.LazyModule(__package__, 'nodes')
 
 
 # What several projects share (how they're built, what broke and what fixed it, how the operator wants code

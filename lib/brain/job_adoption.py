@@ -3,12 +3,13 @@ import argparse
 from pathlib import Path
 
 from . import common as _m_common
-from . import guard as _m_guard
 from . import instance as _m_instance
-from . import jobs as _m_jobs
-from . import knowledge as _m_knowledge
-from . import nodes as _m_nodes
-from . import worktrees as _m_worktrees
+
+_m_guard = _m_common.LazyModule(__package__, 'guard')
+_m_jobs = _m_common.LazyModule(__package__, 'jobs')
+_m_knowledge = _m_common.LazyModule(__package__, 'knowledge')
+_m_nodes = _m_common.LazyModule(__package__, 'nodes')
+_m_worktrees = _m_common.LazyModule(__package__, 'worktrees')
 
 
 def adoption_checkout(home, branch):

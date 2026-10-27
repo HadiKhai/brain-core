@@ -5,9 +5,10 @@ import re
 from pathlib import PurePosixPath
 
 from . import common as _m_common
-from . import guard as _m_guard
 from . import instance as _m_instance
-from . import jobs as _m_jobs
+
+_m_guard = _m_common.LazyModule(__package__, 'guard')
+_m_jobs = _m_common.LazyModule(__package__, 'jobs')
 
 
 def finding_state_path(inst, n, row):

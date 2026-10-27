@@ -9,7 +9,8 @@ from pathlib import Path
 
 from . import common as _m_common
 from . import instance as _m_instance
-from . import nodes as _m_nodes
+
+_m_nodes = _m_common.LazyModule(__package__, 'nodes')
 
 VERSION = 1
 STATUSES = ('backlog', 'ready', 'in-progress', 'in-review', 'testing', 'merged', 'done', 'blocked', 'parked', 'dropped')

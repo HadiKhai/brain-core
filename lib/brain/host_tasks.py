@@ -6,14 +6,15 @@ import os
 import re
 import time
 
-from . import briefs as _m_briefs
 from . import common as _m_common
-from . import host_observations as _m_host_observations
-from . import hosts as _m_hosts
-from . import host_instances as _m_host_instances
 from . import instance as _m_instance
-from . import nodes as _m_nodes
-from . import transitions as _m_transitions
+
+_m_briefs = _m_common.LazyModule(__package__, 'briefs')
+_m_host_observations = _m_common.LazyModule(__package__, 'host_observations')
+_m_hosts = _m_common.LazyModule(__package__, 'hosts')
+_m_host_instances = _m_common.LazyModule(__package__, 'host_instances')
+_m_nodes = _m_common.LazyModule(__package__, 'nodes')
+_m_transitions = _m_common.LazyModule(__package__, 'transitions')
 
 
 HOST_TASK_TERMINAL = ('completed', 'failed', 'cancelled', 'interrupted')

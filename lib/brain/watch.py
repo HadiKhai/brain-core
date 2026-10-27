@@ -10,21 +10,22 @@ import stat
 import time
 from pathlib import Path
 
-from . import briefs as _m_briefs
 from . import common as _m_common
 from . import timings as _m_timings
-from . import guard as _m_guard
-from . import hosts as _m_hosts
 from . import instance as _m_instance
-from . import jobs as _m_jobs
-from . import machine as _m_machine
-from . import nodes as _m_nodes
-from . import reminders as _m_reminders
-from . import status as _m_status
-from . import transitions as _m_transitions
-from . import usage as _m_usage
-from . import upgrade as _m_upgrade
-from . import verify as _m_verify
+
+_m_briefs = _m_common.LazyModule(__package__, 'briefs')
+_m_guard = _m_common.LazyModule(__package__, 'guard')
+_m_hosts = _m_common.LazyModule(__package__, 'hosts')
+_m_jobs = _m_common.LazyModule(__package__, 'jobs')
+_m_machine = _m_common.LazyModule(__package__, 'machine')
+_m_nodes = _m_common.LazyModule(__package__, 'nodes')
+_m_reminders = _m_common.LazyModule(__package__, 'reminders')
+_m_status = _m_common.LazyModule(__package__, 'status')
+_m_transitions = _m_common.LazyModule(__package__, 'transitions')
+_m_usage = _m_common.LazyModule(__package__, 'usage')
+_m_upgrade = _m_common.LazyModule(__package__, 'upgrade')
+_m_verify = _m_common.LazyModule(__package__, 'verify')
 
 
 WATCH_LOCAL_KINDS = ('unsettled-threads',)

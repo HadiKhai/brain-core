@@ -1,9 +1,10 @@
 """Explicit node-scoped reordering of queued native verify reservations."""
 
 from . import common as _m_common
-from . import handback_queue as _m_handback_queue
-from . import machine as _m_machine
-from . import nodes as _m_nodes
+
+_m_handback_queue = _m_common.LazyModule(__package__, 'handback_queue')
+_m_machine = _m_common.LazyModule(__package__, 'machine')
+_m_nodes = _m_common.LazyModule(__package__, 'nodes')
 
 
 def move_verify_before(inst, n, token, before):

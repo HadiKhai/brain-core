@@ -6,17 +6,18 @@ import pickle
 import os
 import re
 
-from . import briefs as _m_briefs
 from . import common as _m_common
 from . import command_reads as _m_command_reads
-from . import briefs as _m_briefs
-from . import guard as _m_guard
-from . import history as _m_history
-from . import jobs as _m_jobs
-from . import job_attempts as _m_attempts
-from . import status as _m_status
-from . import machine as _m_machine
-from . import spend as _m_spend
+
+_m_briefs = _m_common.LazyModule(__package__, 'briefs')
+_m_briefs = _m_common.LazyModule(__package__, 'briefs')
+_m_guard = _m_common.LazyModule(__package__, 'guard')
+_m_history = _m_common.LazyModule(__package__, 'history')
+_m_jobs = _m_common.LazyModule(__package__, 'jobs')
+_m_attempts = _m_common.LazyModule(__package__, 'job_attempts')
+_m_status = _m_common.LazyModule(__package__, 'status')
+_m_machine = _m_common.LazyModule(__package__, 'machine')
+_m_spend = _m_common.LazyModule(__package__, 'spend')
 
 
 _USAGE_NOT_OBSERVED = object()

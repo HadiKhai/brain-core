@@ -1,8 +1,10 @@
 """Explicit reviewed publication decisions; prose is never interpreted as an ACL."""
 import json
 
-from . import knowledge as _m_knowledge
-from . import guard as _m_guard
+from . import common as _m_common
+
+_m_knowledge = _m_common.LazyModule(__package__, 'knowledge')
+_m_guard = _m_common.LazyModule(__package__, 'guard')
 
 
 def _policy_text(n, text):

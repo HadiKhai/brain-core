@@ -5,13 +5,14 @@ import re
 from pathlib import Path
 
 from . import common as _m_common
-from . import coordinator_advisories as _m_coordinators
-from . import events as _m_events
-from . import guard as _m_guard
-from . import jobs as _m_jobs
-from . import nodes as _m_nodes
-from . import review as _m_review
-from . import ui as _m_ui
+
+_m_coordinators = _m_common.LazyModule(__package__, 'coordinator_advisories')
+_m_events = _m_common.LazyModule(__package__, 'events')
+_m_guard = _m_common.LazyModule(__package__, 'guard')
+_m_jobs = _m_common.LazyModule(__package__, 'jobs')
+_m_nodes = _m_common.LazyModule(__package__, 'nodes')
+_m_review = _m_common.LazyModule(__package__, 'review')
+_m_ui = _m_common.LazyModule(__package__, 'ui')
 
 
 CAUSAL_REASONS = {

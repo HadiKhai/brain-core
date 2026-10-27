@@ -13,10 +13,11 @@ import tempfile
 from pathlib import Path
 
 from . import common as _m_common
-from . import jobs as _m_jobs
-from . import nodes as _m_nodes
-from . import review as _m_review
-from . import review_findings as _m_review_findings
+
+_m_jobs = _m_common.LazyModule(__package__, 'jobs')
+_m_nodes = _m_common.LazyModule(__package__, 'nodes')
+_m_review = _m_common.LazyModule(__package__, 'review')
+_m_review_findings = _m_common.LazyModule(__package__, 'review_findings')
 
 
 def release_ref(home, name):

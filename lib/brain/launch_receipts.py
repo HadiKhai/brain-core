@@ -3,7 +3,9 @@ import json
 import sys
 from pathlib import Path
 
-from . import nodes as _m_nodes
+from . import common as _m_common
+
+_m_nodes = _m_common.LazyModule(__package__, 'nodes')
 
 
 RECEIPT_MAX_BYTES = 256 * 1024

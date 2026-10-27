@@ -6,15 +6,16 @@ import os
 import stat
 
 from . import common as _m_common
-from . import guard as _m_guard
-from . import hosts as _m_hosts
 from . import instance as _m_instance
-from . import jobs as _m_jobs
-from . import nodes as _m_nodes
-from . import transitions as _m_transitions
+
+_m_guard = _m_common.LazyModule(__package__, 'guard')
+_m_hosts = _m_common.LazyModule(__package__, 'hosts')
+_m_jobs = _m_common.LazyModule(__package__, 'jobs')
+_m_nodes = _m_common.LazyModule(__package__, 'nodes')
+_m_transitions = _m_common.LazyModule(__package__, 'transitions')
 
 
-COMMUNICATION_KINDS = ('question', 'landing', 'park', 'fyi')
+COMMUNICATION_KINDS = _m_common.COMMUNICATION_KINDS
 
 
 def communication_read(inst):

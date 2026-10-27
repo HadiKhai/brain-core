@@ -11,14 +11,15 @@ import urllib.parse
 import unicodedata
 from pathlib import Path
 
-from . import briefs as _m_briefs
 from . import common as _m_common
-from . import guard as _m_guard
-from . import hosts as _m_hosts
 from . import instance as _m_instance
-from . import jobs as _m_jobs
-from . import reports as _m_reports
-from . import status as _m_status
+
+_m_briefs = _m_common.LazyModule(__package__, 'briefs')
+_m_guard = _m_common.LazyModule(__package__, 'guard')
+_m_hosts = _m_common.LazyModule(__package__, 'hosts')
+_m_jobs = _m_common.LazyModule(__package__, 'jobs')
+_m_reports = _m_common.LazyModule(__package__, 'reports')
+_m_status = _m_common.LazyModule(__package__, 'status')
 
 
 def brain_name(root):

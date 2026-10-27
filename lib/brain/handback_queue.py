@@ -20,11 +20,12 @@ import io
 
 from . import common as _m_common
 from . import instance as _m_instance
-from . import job_attempts as _m_attempts
-from . import jobs as _m_jobs
-from . import machine as _m_machine
-from . import nodes as _m_nodes
-from . import lifecycle_identity as _m_lifecycle_identity
+
+_m_attempts = _m_common.LazyModule(__package__, 'job_attempts')
+_m_jobs = _m_common.LazyModule(__package__, 'jobs')
+_m_machine = _m_common.LazyModule(__package__, 'machine')
+_m_nodes = _m_common.LazyModule(__package__, 'nodes')
+_m_lifecycle_identity = _m_common.LazyModule(__package__, 'lifecycle_identity')
 
 
 QUEUE_ARGS = ('id', 'branch', 'state', 'summary', 'question', 'lessons', 'report', 'reviews',

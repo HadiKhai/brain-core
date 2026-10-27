@@ -10,11 +10,12 @@ import subprocess
 from pathlib import Path
 
 from . import common as _m_common
-from . import guard as _m_guard
 from . import instance as _m_instance
-from . import jobs as _m_jobs
-from . import policy as _m_policy
-from . import verify as _m_verify
+
+_m_guard = _m_common.LazyModule(__package__, 'guard')
+_m_jobs = _m_common.LazyModule(__package__, 'jobs')
+_m_policy = _m_common.LazyModule(__package__, 'policy')
+_m_verify = _m_common.LazyModule(__package__, 'verify')
 
 
 def land_check_instructions(n):

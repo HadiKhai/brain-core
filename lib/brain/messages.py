@@ -3,11 +3,12 @@ from pathlib import Path
 import re
 
 from . import common as _m_common
-from . import guard as _m_guard
-from . import jobs as _m_jobs
-from . import nodes as _m_nodes
 
-MESSAGE_KINDS = ("start", "done", "blocked", "question")
+_m_guard = _m_common.LazyModule(__package__, 'guard')
+_m_jobs = _m_common.LazyModule(__package__, 'jobs')
+_m_nodes = _m_common.LazyModule(__package__, 'nodes')
+
+MESSAGE_KINDS = _m_common.MESSAGE_KINDS
 MESSAGE_PROTOCOL = (
     "Send the coordinator only start, done, blocked or question; no progress notes, receipts, acknowledgements or hash relays. "
     "Use `brain msg <node> <kind> \"<one line>\"` to format a host message, adding branch and report when known, or use the existing hand-back path. "

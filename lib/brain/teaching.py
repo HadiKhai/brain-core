@@ -5,10 +5,11 @@ from pathlib import Path
 import re
 
 from . import common as _m_common
-from . import feedback as _m_feedback
-from . import guard as _m_guard
-from . import knowledge as _m_knowledge
-from . import nodes as _m_nodes
+
+_m_feedback = _m_common.LazyModule(__package__, 'feedback')
+_m_guard = _m_common.LazyModule(__package__, 'guard')
+_m_knowledge = _m_common.LazyModule(__package__, 'knowledge')
+_m_nodes = _m_common.LazyModule(__package__, 'nodes')
 
 
 def teaching_root(node, branch):

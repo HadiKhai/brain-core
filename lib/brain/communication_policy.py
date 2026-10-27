@@ -2,8 +2,10 @@
 import hashlib
 import re
 
-from . import communication as _m_communication
-from . import transitions as _m_transitions
+from . import common as _m_common
+
+_m_communication = _m_common.LazyModule(__package__, 'communication')
+_m_transitions = _m_common.LazyModule(__package__, 'transitions')
 
 
 def quiet_now(inst):

@@ -7,20 +7,21 @@ import json
 import os
 from pathlib import Path
 
-from . import briefs as _m_briefs
 from . import common as _m_common
-from . import host_lifecycle as _m_host
-from . import host_rpc as _m_rpc
-from . import host_instances as _m_host_instances
 from . import instance as _m_instance
-from . import lifecycle_identity as _m_lifecycle_identity
-from . import jobs as _m_jobs
-from . import machine as _m_machine
-from . import nodes as _m_nodes
-from . import reminders as _m_reminders
-from . import settlement as _m_settlement
-from . import spend as _m_spend
-from . import worktrees as _m_worktrees
+
+_m_briefs = _m_common.LazyModule(__package__, 'briefs')
+_m_host = _m_common.LazyModule(__package__, 'host_lifecycle')
+_m_rpc = _m_common.LazyModule(__package__, 'host_rpc')
+_m_host_instances = _m_common.LazyModule(__package__, 'host_instances')
+_m_lifecycle_identity = _m_common.LazyModule(__package__, 'lifecycle_identity')
+_m_jobs = _m_common.LazyModule(__package__, 'jobs')
+_m_machine = _m_common.LazyModule(__package__, 'machine')
+_m_nodes = _m_common.LazyModule(__package__, 'nodes')
+_m_reminders = _m_common.LazyModule(__package__, 'reminders')
+_m_settlement = _m_common.LazyModule(__package__, 'settlement')
+_m_spend = _m_common.LazyModule(__package__, 'spend')
+_m_worktrees = _m_common.LazyModule(__package__, 'worktrees')
 
 
 def restart_brief(inst, n, row):

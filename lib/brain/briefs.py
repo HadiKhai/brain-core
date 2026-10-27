@@ -6,16 +6,17 @@ import sys
 from pathlib import Path
 
 from . import common as _m_common
-from . import guard as _m_guard
-from . import history as _m_history
 from . import instance as _m_instance
-from . import jobs as _m_jobs
-from . import knowledge as _m_knowledge
-from . import nodes as _m_nodes
-from . import reminders as _m_reminders
-from . import ui as _m_ui
-from . import verify as _m_verify
-from . import worktrees as _m_worktrees
+
+_m_guard = _m_common.LazyModule(__package__, 'guard')
+_m_history = _m_common.LazyModule(__package__, 'history')
+_m_jobs = _m_common.LazyModule(__package__, 'jobs')
+_m_knowledge = _m_common.LazyModule(__package__, 'knowledge')
+_m_nodes = _m_common.LazyModule(__package__, 'nodes')
+_m_reminders = _m_common.LazyModule(__package__, 'reminders')
+_m_ui = _m_common.LazyModule(__package__, 'ui')
+_m_verify = _m_common.LazyModule(__package__, 'verify')
+_m_worktrees = _m_common.LazyModule(__package__, 'worktrees')
 
 
 COMPACTION_POLICY = ("After your second context compaction, hand back `--state blocked` with "

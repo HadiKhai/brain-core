@@ -16,8 +16,9 @@ import stat
 
 from . import common as _m_common
 from . import instance as _m_instance
-from . import lifecycle_identity as _m_lifecycle_identity
-from . import preview_stdio as _m_preview_stdio
+
+_m_lifecycle_identity = _m_common.LazyModule(__package__, 'lifecycle_identity')
+_m_preview_stdio = _m_common.LazyModule(__package__, 'preview_stdio')
 
 
 PREVIEW_ADAPTERS = {}

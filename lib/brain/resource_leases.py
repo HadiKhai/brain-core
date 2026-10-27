@@ -12,7 +12,9 @@ import re
 import stat
 import time
 
-from . import machine as _m_machine
+from . import common as _m_common
+
+_m_machine = _m_common.LazyModule(__package__, 'machine')
 
 _RESOURCE_HASH = re.compile(r'[0-9a-f]{64}')
 _RESOURCE_TOKEN = re.compile(r'[0-9a-f]{32}')

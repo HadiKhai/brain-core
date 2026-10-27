@@ -15,35 +15,36 @@ import time
 import urllib.parse
 from pathlib import Path
 
-from . import check as _m_check
 from . import common as _m_common
-from . import guard as _m_guard
-from . import inbox_notices as _m_inbox_notices
 from . import instance as _m_instance
-from . import jobs as _m_jobs
-from . import knowledge as _m_knowledge
-from . import learning as _m_learning
-from . import feedback as _m_feedback
-from . import teaching as _m_teaching
-from . import machine as _m_machine
-from . import nodes as _m_nodes
-from . import rehearse as _m_rehearse
-from . import reports as _m_reports
-from . import schedules as _m_schedules
-from . import spend as _m_spend
-from . import status as _m_status
-from . import usage as _m_usage
-from . import usage_cache as _m_usage_cache
-from . import ui_review as _m_ui_review
-from . import ui_status as _m_ui_status
-from . import ui_server as _m_ui_server
-from . import ui_fill as _m_ui_fill
-from . import ui_readmodel as _m_ui_readmodel
-from . import verify as _m_verify
-from . import worktrees as _m_worktrees
+
+_m_check = _m_common.LazyModule(__package__, 'check')
+_m_guard = _m_common.LazyModule(__package__, 'guard')
+_m_inbox_notices = _m_common.LazyModule(__package__, 'inbox_notices')
+_m_jobs = _m_common.LazyModule(__package__, 'jobs')
+_m_knowledge = _m_common.LazyModule(__package__, 'knowledge')
+_m_learning = _m_common.LazyModule(__package__, 'learning')
+_m_feedback = _m_common.LazyModule(__package__, 'feedback')
+_m_teaching = _m_common.LazyModule(__package__, 'teaching')
+_m_machine = _m_common.LazyModule(__package__, 'machine')
+_m_nodes = _m_common.LazyModule(__package__, 'nodes')
+_m_rehearse = _m_common.LazyModule(__package__, 'rehearse')
+_m_reports = _m_common.LazyModule(__package__, 'reports')
+_m_schedules = _m_common.LazyModule(__package__, 'schedules')
+_m_spend = _m_common.LazyModule(__package__, 'spend')
+_m_status = _m_common.LazyModule(__package__, 'status')
+_m_usage = _m_common.LazyModule(__package__, 'usage')
+_m_usage_cache = _m_common.LazyModule(__package__, 'usage_cache')
+_m_ui_review = _m_common.LazyModule(__package__, 'ui_review')
+_m_ui_status = _m_common.LazyModule(__package__, 'ui_status')
+_m_ui_server = _m_common.LazyModule(__package__, 'ui_server')
+_m_ui_fill = _m_common.LazyModule(__package__, 'ui_fill')
+_m_ui_readmodel = _m_common.LazyModule(__package__, 'ui_readmodel')
+_m_verify = _m_common.LazyModule(__package__, 'verify')
+_m_worktrees = _m_common.LazyModule(__package__, 'worktrees')
 
 
-UI_PORT = 4747
+UI_PORT = _m_common.UI_PORT
 UI_TELEMETRY_SECONDS = 30
 UI_HOURS = 48  # the activity grid's span
 LINK_RE = re.compile(r"\[([^\]]*)\]\(([^)\s]+)\)")
@@ -1256,6 +1257,7 @@ def cmd_ui(a):
             print(f'brain ui: {existing}  (reusing this version on port {a.port})', flush=True)
             webbrowser.open(existing)
             return
+    _m_common.import_whole_core(__package__)  # the server keeps the core it started with
     assets = _m_common.CORE / "ui" / "dist"
     started = (assets / "index.html").read_bytes()
 

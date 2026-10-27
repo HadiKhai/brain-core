@@ -14,11 +14,12 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from . import common as _m_common
-from . import jobs as _m_jobs
-from . import machine as _m_machine
-from . import nodes as _m_nodes
-from . import status as _m_status
-from . import term_cache as _m_term_cache
+
+_m_jobs = _m_common.LazyModule(__package__, 'jobs')
+_m_machine = _m_common.LazyModule(__package__, 'machine')
+_m_nodes = _m_common.LazyModule(__package__, 'nodes')
+_m_status = _m_common.LazyModule(__package__, 'status')
+_m_term_cache = _m_common.LazyModule(__package__, 'term_cache')
 
 
 def trace_patterns(inst):
@@ -62,7 +63,7 @@ def scan_traces(inst, home, errors=None):
 
 # ---------- words a home must never contain ----------
 
-NEVER_FILE = "never-name.txt"  # in a node folder (outside the home): one term per line; also covers descendants
+NEVER_FILE = _m_common.NEVER_FILE
 
 _TERM_SCAN_CACHE = contextvars.ContextVar('brain_term_scan_cache', default=None)
 _TERM_VERDICTS = contextvars.ContextVar('brain_term_verdicts', default=None)

@@ -5,7 +5,8 @@ from pathlib import Path
 
 from . import common as _m_common
 from . import instance as _m_instance
-from . import tasks as _m_tasks
+
+_m_tasks = _m_common.LazyModule(__package__, 'tasks')
 
 
 def instance_for(n):

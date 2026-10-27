@@ -7,7 +7,8 @@ import os
 import re
 
 from . import common as _m_common
-from . import hosts as _m_hosts
+
+_m_hosts = _m_common.LazyModule(__package__, 'hosts')
 
 
 @contextlib.contextmanager

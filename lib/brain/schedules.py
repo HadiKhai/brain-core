@@ -1,9 +1,10 @@
 """Schedules mechanics for Brain."""
 import re
 
-from . import briefs as _m_briefs
 from . import common as _m_common
-from . import nodes as _m_nodes
+
+_m_briefs = _m_common.LazyModule(__package__, 'briefs')
+_m_nodes = _m_common.LazyModule(__package__, 'nodes')
 
 
 SCHEDULE_FIELDS = ["when", "node", "brief"]

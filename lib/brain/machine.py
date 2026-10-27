@@ -17,13 +17,14 @@ import time
 from pathlib import Path
 
 from . import common as _m_common
-from . import history as _m_history
 from . import instance as _m_instance
-from . import nodes as _m_nodes
-from . import schedules as _m_schedules
-from . import ui as _m_ui
 from . import timings as _m_timings
-from . import gate_lock as _m_gate_lock
+
+_m_gate_lock = _m_common.LazyModule(__package__, 'gate_lock')
+_m_history = _m_common.LazyModule(__package__, 'history')
+_m_nodes = _m_common.LazyModule(__package__, 'nodes')
+_m_schedules = _m_common.LazyModule(__package__, 'schedules')
+_m_ui = _m_common.LazyModule(__package__, 'ui')
 
 
 MACHINE_DEFAULTS = {"load5_per_cpu": 0.8, "memory_free_gb": 8, "disk_free_gb": 40,

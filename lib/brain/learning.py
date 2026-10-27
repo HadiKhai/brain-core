@@ -4,11 +4,12 @@ import re
 from pathlib import Path
 
 from . import common as _m_common
-from . import guard as _m_guard
 from . import instance as _m_instance
-from . import knowledge as _m_knowledge
-from . import nodes as _m_nodes
-from . import recurrence as _m_recurrence
+
+_m_guard = _m_common.LazyModule(__package__, 'guard')
+_m_knowledge = _m_common.LazyModule(__package__, 'knowledge')
+_m_nodes = _m_common.LazyModule(__package__, 'nodes')
+_m_recurrence = _m_common.LazyModule(__package__, 'recurrence')
 
 
 def resolve_enforcing_check(node, value):

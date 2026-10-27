@@ -11,8 +11,10 @@ import shutil
 import subprocess
 import time
 
-from . import docker_leftovers as _m_leftovers
-from . import machine as _m_machine
+from . import common as _m_common
+
+_m_leftovers = _m_common.LazyModule(__package__, 'docker_leftovers')
+_m_machine = _m_common.LazyModule(__package__, 'machine')
 
 CLEANUP_SECONDS = 5
 CLEANUP_GRACE = 1800

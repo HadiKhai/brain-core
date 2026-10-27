@@ -9,8 +9,9 @@ import urllib.parse
 from pathlib import Path
 
 from . import common as _m_common
-from . import nodes as _m_nodes
-from . import worktrees as _m_worktrees
+
+_m_nodes = _m_common.LazyModule(__package__, 'nodes')
+_m_worktrees = _m_common.LazyModule(__package__, 'worktrees')
 
 
 # Binary GiB. Logical file bytes;

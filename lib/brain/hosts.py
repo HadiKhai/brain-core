@@ -16,17 +16,18 @@ import time
 import urllib.parse
 from pathlib import Path
 
-from . import briefs as _m_briefs
 from . import common as _m_common
-from . import conversation_answers as _m_conversation_answers
-from . import guard as _m_guard
 from . import instance as _m_instance
-from . import jobs as _m_jobs
-from . import nodes as _m_nodes
-from . import status as _m_status
-from . import transitions as _m_transitions
-from . import upgrade as _m_upgrade
-from . import wake_turns as _m_wake_turns
+
+_m_briefs = _m_common.LazyModule(__package__, 'briefs')
+_m_conversation_answers = _m_common.LazyModule(__package__, 'conversation_answers')
+_m_guard = _m_common.LazyModule(__package__, 'guard')
+_m_jobs = _m_common.LazyModule(__package__, 'jobs')
+_m_nodes = _m_common.LazyModule(__package__, 'nodes')
+_m_status = _m_common.LazyModule(__package__, 'status')
+_m_transitions = _m_common.LazyModule(__package__, 'transitions')
+_m_upgrade = _m_common.LazyModule(__package__, 'upgrade')
+_m_wake_turns = _m_common.LazyModule(__package__, 'wake_turns')
 
 
 # Wake state belongs to the instance, never to an external home. Only opaque reason

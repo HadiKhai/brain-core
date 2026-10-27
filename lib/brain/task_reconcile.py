@@ -7,13 +7,14 @@ from collections import Counter
 from pathlib import Path
 
 from . import common as _m_common
-from . import events as _m_events
-from . import inbox_notices as _m_notices
 from . import instance as _m_instance
-from . import jobs as _m_jobs
-from . import nodes as _m_nodes
-from . import reminders as _m_reminders
-from . import tasks as _m_tasks
+
+_m_events = _m_common.LazyModule(__package__, 'events')
+_m_notices = _m_common.LazyModule(__package__, 'inbox_notices')
+_m_jobs = _m_common.LazyModule(__package__, 'jobs')
+_m_nodes = _m_common.LazyModule(__package__, 'nodes')
+_m_reminders = _m_common.LazyModule(__package__, 'reminders')
+_m_tasks = _m_common.LazyModule(__package__, 'tasks')
 
 DECISION = 'D-task-counts-v1'
 RULE = ('Import only explicit backlog/build-order work and demonstrably live jobs. '

@@ -14,12 +14,13 @@ import sys
 import time
 
 from . import common as _m_common
-from . import handback_queue as _m_queue
 from . import instance as _m_instance
-from . import job_attempts as _m_attempts
-from . import jobs as _m_jobs
-from . import lifecycle_identity as _m_identity
-from . import machine as _m_machine
+
+_m_queue = _m_common.LazyModule(__package__, 'handback_queue')
+_m_attempts = _m_common.LazyModule(__package__, 'job_attempts')
+_m_jobs = _m_common.LazyModule(__package__, 'jobs')
+_m_identity = _m_common.LazyModule(__package__, 'lifecycle_identity')
+_m_machine = _m_common.LazyModule(__package__, 'machine')
 
 
 TAKEOVER_WINDOW_SECONDS = 86400

@@ -39,6 +39,67 @@ ITEM_FIELDS = ["id", "title", "kind", "source_node", "source_ref", "learned_at",
 STALE_DAYS = 7
 TOUCHED = set()  # every path this command wrote; commits include these and nothing else (axiom 15)
 
+# Vocabularies the argument parser needs before any handler module loads; their owning
+# modules (jobs, communication, messages, guard, ui) re-export them under the same names.
+JOB_CLASSES = ("build", "diagnose", "review", "ui", "migration", "docs", "mechanical")
+JOB_EFFORTS = ("low", "medium", "high", "xhigh")
+CONTRACT_FIELDS = ("Outcome", "Authorized", "Discretion", "Stop when", "Needs consent", "Done means")
+COMMUNICATION_KINDS = ('question', 'landing', 'park', 'fyi')
+MESSAGE_KINDS = ("start", "done", "blocked", "question")
+NEVER_FILE = "never-name.txt"  # in a node folder (outside the home): one term per line; also covers descendants
+UI_PORT = 4747
+
+
+class LazyModule:
+    """A sibling module imported on its first attribute use.
+
+    Core sources load without cached bytecode, so every module a command imports is
+    compiled again; heavy siblings wait until something reads them. Attribute reads,
+    writes and deletes (including test patches) reach the real module object.
+    """
+    __slots__ = ('_lazy_name', '_lazy_package', '_lazy_module')
+
+    def __init__(self, package, name):
+        object.__setattr__(self, '_lazy_name', '.' + name)
+        object.__setattr__(self, '_lazy_package', package)
+        object.__setattr__(self, '_lazy_module', None)
+
+    def _load(self):
+        module = object.__getattribute__(self, '_lazy_module')
+        if module is None:
+            # import_module holds the import lock: concurrent first uses load once.
+            import importlib
+            module = importlib.import_module(object.__getattribute__(self, '_lazy_name'),
+                                             object.__getattribute__(self, '_lazy_package'))
+            object.__setattr__(self, '_lazy_module', module)
+        return module
+
+    @property
+    def __dict__(self):
+        return self._load().__dict__
+
+    def __getattr__(self, name):
+        return getattr(self._load(), name)
+
+    def __setattr__(self, name, value):
+        setattr(self._load(), name, value)
+
+    def __delattr__(self, name):
+        delattr(self._load(), name)
+
+    def __repr__(self):
+        return f"<lazy module {object.__getattribute__(self, '_lazy_package')}" \
+               f"{object.__getattribute__(self, '_lazy_name')}>"
+
+
+def import_whole_core(package):
+    """Load every core module now, so a long-running process never mixes in sources
+    replaced while it runs (an in-place upgrade) through a later lazy import."""
+    import importlib
+    for path in sorted(Path(__file__).parent.glob('*.py')):
+        if path.stem != '__init__':
+            importlib.import_module('.' + path.stem, package)
+
 
 def touch(*paths):
     for x in paths:

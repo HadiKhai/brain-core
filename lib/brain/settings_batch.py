@@ -6,9 +6,10 @@ from pathlib import Path
 
 from . import common as _m_common
 from . import instance as _m_instance
-from . import nodes as _m_nodes
-from . import schedules as _m_schedules
-from . import status as _m_status
+
+_m_nodes = _m_common.LazyModule(__package__, 'nodes')
+_m_schedules = _m_common.LazyModule(__package__, 'schedules')
+_m_status = _m_common.LazyModule(__package__, 'status')
 
 
 def plan_settings_batch(inst, operations):

@@ -13,9 +13,10 @@ import sys
 import threading
 
 from . import common as _m_common
-from . import nodes as _m_nodes
 from . import instance as _m_instance
-from . import machine as _m_machine
+
+_m_nodes = _m_common.LazyModule(__package__, 'nodes')
+_m_machine = _m_common.LazyModule(__package__, 'machine')
 
 
 GATE_ENV = ('BRAIN_GATE_FD', 'BRAIN_GATE_PATH', 'BRAIN_GATE_NODE')

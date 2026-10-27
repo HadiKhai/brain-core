@@ -6,9 +6,10 @@ import re
 from pathlib import Path
 
 from . import common as _m_common
-from . import jobs as _m_jobs
-from . import nodes as _m_nodes
-from . import verify as _m_verify
+
+_m_jobs = _m_common.LazyModule(__package__, 'jobs')
+_m_nodes = _m_common.LazyModule(__package__, 'nodes')
+_m_verify = _m_common.LazyModule(__package__, 'verify')
 
 
 def full_receipt_path(n, identity):

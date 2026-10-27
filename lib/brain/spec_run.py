@@ -6,10 +6,11 @@ import sys
 
 from . import common as _m_common
 from . import instance as _m_instance
-from . import jobs as _m_jobs
-from . import verify as _m_verify
-from . import worktrees as _m_worktrees
-from . import nodes as _m_nodes
+
+_m_jobs = _m_common.LazyModule(__package__, 'jobs')
+_m_verify = _m_common.LazyModule(__package__, 'verify')
+_m_worktrees = _m_common.LazyModule(__package__, 'worktrees')
+_m_nodes = _m_common.LazyModule(__package__, 'nodes')
 
 
 def cmd_spec_run(a):

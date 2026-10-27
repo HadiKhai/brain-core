@@ -5,8 +5,9 @@ import re
 from pathlib import Path
 
 from . import common as _m_common
-from . import guard as _m_guard
 from . import instance as _m_instance
+
+_m_guard = _m_common.LazyModule(__package__, 'guard')
 
 
 RULES_BEGIN = '<!-- brain:imported-rules begin -->'

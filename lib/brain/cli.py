@@ -11,22 +11,17 @@ import subprocess
 import sys
 from pathlib import Path
 
-from . import communication as _m_communication
-from . import communication_policy as _m_communication_policy
 from . import common as _m_common
-from . import events as _m_events
-from . import guard as _m_guard
 from . import instance as _m_instance
-from . import jobs as _m_jobs
-from . import messages as _m_messages
-from . import machine as _m_machine
-from . import nodes as _m_nodes
-from . import status as _m_status
-from . import status_refresh as _m_status_refresh
-from . import tasks as _m_tasks
-from . import ui as _m_ui
 from . import timings as _m_timings
 from . import command_reads as _m_command_reads
+
+# Parsing argv must not compile the whole core: handler modules load at dispatch.
+_m_events = _m_common.LazyModule(__package__, 'events')
+_m_nodes = _m_common.LazyModule(__package__, 'nodes')
+_m_status = _m_common.LazyModule(__package__, 'status')
+_m_status_refresh = _m_common.LazyModule(__package__, 'status_refresh')
+_m_tasks = _m_common.LazyModule(__package__, 'tasks')
 
 
 class _Command:
@@ -244,12 +239,12 @@ def queueable_command(cmd, name):
     """The same public option schema for full dispatch and the admission parser."""
     opt = lambda *n, **kw: (n, kw)  # noqa: E731
     if name == 'inbox':
-        return cmd("inbox", _m_status.cmd_inbox, "needs in a node's subtree (default: calling node); --new remembers per reporter",
+        return cmd("inbox", _Command("status", "cmd_inbox"), "needs in a node's subtree (default: calling node); --new remembers per reporter",
         opt("id", nargs="?"), opt("--json", action="store_true"), opt("--new", action="store_true"),
         opt('--add', help='append a screened inbox item'),
         opt('--request-id', help='retry --add with the same payload-bound ID; queue wait ID before dependent reads'),
         opt('--weekly', action='store_true', help='read-only sweep of unresolved requests aged at least seven days'))
-    return cmd("handback", _m_jobs.cmd_handback, "done/blocked/question hand-back; worker messages are start/done/blocked/question",
+    return cmd("handback", _Command("jobs", "cmd_handback"), "done/blocked/question hand-back; worker messages are start/done/blocked/question",
         "id", opt("--branch", required=True), opt("--state", choices=["done", "failed", "blocked", "question"], required=True),
         opt("--summary", required=True, help="nonempty one-line worker result"),
         opt("--question", help="one-line choice, required for question state"),
@@ -312,13 +307,13 @@ def _main():
     cmd("rehearse", _Command("rehearse", "cmd_rehearse"), "compare installed and candidate cores on isolated brain copies",
         "id", opt("--branch", required=True))
 
-    cmd("init", _m_nodes.cmd_init, "create a new instance from this core", "dir",
+    cmd("init", _Command("nodes", "cmd_init"), "create a new instance from this core", "dir",
         opt("--operator", required=True), opt("--title", required=True), opt("--runtimes", default="claude,codex"),
         opt("--host", default="t3"), opt("--tz", default="UTC"),
         opt("--name", help="short name for `brain -b <name>` (default: the folder's name)"))
     cmd("model-fit", _Command("model_fit", "cmd_model_fit"), "learn model recommendations from comparable recorded jobs", "id",
-        opt("--class", dest="job_class", choices=_m_jobs.JOB_CLASSES, required=True),
-        opt("--runtime", required=True), opt("--effort", choices=_m_jobs.JOB_EFFORTS, default="high"))
+        opt("--class", dest="job_class", choices=_m_common.JOB_CLASSES, required=True),
+        opt("--runtime", required=True), opt("--effort", choices=_m_common.JOB_EFFORTS, default="high"))
     cmd("launch-check", _Command("launch_receipts", "cmd_launch_check"), "compare routed selection with returned host receipt metadata", "id",
         opt("--selection-file", required=True), opt("--receipt-file", required=True))
     cmd("usage", _Command("usage", "cmd_usage"), "account-wide subscription usage (agents read the machine cache)",
@@ -327,14 +322,14 @@ def _main():
         opt("--every", type=float, default=300, help="poll interval in seconds"),
         opt("--launch-agent", help="install: plist path elsewhere (writes only; does not load it)"),
         opt("--no-load", action="store_true", help="install: write the LaunchAgent without loading it"))
-    cmd("new", _m_nodes.cmd_new, "create a node", "id", opt("--title", required=True), opt("--owners", default=""),
+    cmd("new", _Command("nodes", "cmd_new"), "create a node", "id", opt("--title", required=True), opt("--owners", default=""),
         opt("--labels", default=""), opt("--runtime"), opt("--home", help="a path outside the instance"),
         opt("--home-url", dest="home_url"), opt("--brief", help="initial node outcome"),
         opt("--coordinator", action="store_true", help="also provision the host project and coordinator"),
         opt("--model", help="coordinator model; otherwise use configured routing"))
-    cmd("scan", _m_nodes.cmd_scan, "discover git repos without writing (given folders are depth 0)",
+    cmd("scan", _Command("nodes", "cmd_scan"), "discover git repos without writing (given folders are depth 0)",
         opt("dirs", nargs="+"), opt("--json", action="store_true"), opt("--depth", type=int, default=4))
-    cmd("adopt", _m_nodes.cmd_adopt, "make existing git repositories node homes, then print study commands",
+    cmd("adopt", _Command("nodes", "cmd_adopt"), "make existing git repositories node homes, then print study commands",
         opt("paths", nargs="+"), opt("--parent", default="root"), opt("--id"), opt("--title"))
     cmd("brief", _Command("briefs", "cmd_brief"), "a worker brief: where it runs, the task, the node's limits, how to ask and hand back",
         "id", opt("--import", dest="import_study", action="store_true", help="study an existing home"),
@@ -344,12 +339,12 @@ def _main():
         opt("--context-file", action="append", help="embed shared findings; repeatable; recorded as job inputs on this machine"),
         opt("--why-separate", help="why this concern needs its own agent (or contract ## Why separate)"),
         opt("--allow-unexplained", action="store_true", help="allow an urgent launch without a separation reason"),
-        opt("--class", dest="job_class", choices=_m_jobs.JOB_CLASSES),
-        opt("--effort", choices=_m_jobs.JOB_EFFORTS),
+        opt("--class", dest="job_class", choices=_m_common.JOB_CLASSES),
+        opt("--effort", choices=_m_common.JOB_EFFORTS),
         opt("--runtime"), opt("--model", help="job model for scoped usage limits"),
         opt("--to", help="the thread the worker reports to (default: the node's coordinator)"),
         opt("--peer", help="shared-commit peer thread; coordinate directly with it"), opt("--out"))
-    cmd("scrub", _m_nodes.cmd_scrub, "filter source data without revealing never-name terms; reads paths or stdin",
+    cmd("scrub", _Command("nodes", "cmd_scrub"), "filter source data without revealing never-name terms; reads paths or stdin",
         "id", opt("paths", nargs="*"), opt("--check", action="store_true"),
         opt("--metadata", action="store_true", help="file names and identities, not source content"))
     cmd("history", _Command("history", "cmd_history"), "past AI conversations about a node's home, in batches readers never compact "
@@ -383,7 +378,7 @@ def _main():
         "brain recall <node> \"what goes wrong\"", opt("id", nargs="?", default="root"), opt("words", nargs="*"),
         opt("--limit", type=int, default=10), opt("--setup", action="store_true", help="prepare the optional local multilingual ONNX model"),
         opt("--json", action="store_true"))
-    cmd("proposals", _m_status.cmd_proposals, "everything waiting for review, node by node, with full text and the commands "
+    cmd("proposals", _Command("status", "cmd_proposals"), "everything waiting for review, node by node, with full text and the commands "
         "to accept or reject several at once", opt("id", nargs="?"),
         opt("--only", help="only these nodes (comma-separated)"), opt("--json", action="store_true"),
         opt("--brief", action="store_true", help="compact independent reviewer sheet with claim, citation and decision commands"),
@@ -394,7 +389,7 @@ def _main():
     cmd('land-check', _Command("land_checks", "cmd_land_check"), 'record/check exact-candidate evidence; only prints supported push steps', 'id',
         opt('--branch', required=True), opt('--run', action='store_true', help='run the configured check explicitly'),
         opt('--push-step', action='store_true', help='print a policy-allowed SHA-pinned push step with current evidence'))
-    cmd("guard", _m_guard.cmd_guard, f"check a home and its worktrees for the terms in {_m_guard.NEVER_FILE} (and, if sealed, "
+    cmd("guard", _Command("guard", "cmd_guard"), f"check a home and its worktrees for the terms in {_m_common.NEVER_FILE} (and, if sealed, "
         "upward traces); exits 1 if any", "id", opt("paths", nargs="*"))
     cmd("spend", _Command("spend", "cmd_spend"), "time and tokens from this machine's transcripts: a node's past sessions (opt-in, "
         "aggregates only, never committed), or every session here", opt("id", nargs="?"),
@@ -410,17 +405,17 @@ def _main():
         opt('--register', required=True, metavar='PRIVATE_JSON'))
     cmd('preview-upgrade', _Command("preview_stdio", "cmd_preview_upgrade"), 'reconcile the existing preview protocol for exact landed main', 'id',
         opt('--head', required=True))
-    cmd("ui", _m_ui.cmd_ui, "a live view of this brain in your browser: projects, work in flight, worktrees, activity "
-        "(read-only by default, this machine only)", opt("--port", type=int, default=_m_ui.UI_PORT),
+    cmd("ui", _Command("ui", "cmd_ui"), "a live view of this brain in your browser: projects, work in flight, worktrees, activity "
+        "(read-only by default, this machine only)", opt("--port", type=int, default=_m_common.UI_PORT),
         opt("--every", type=float, default=3.0, help="seconds between refreshes"),
         opt("--write", action="store_true", help="allow explicit keyed local proposal reviews as the configured operator"),
         opt("--scan", nargs="+", action="extend", default=[], help="discover import candidates in DIR... (read-only)"),
         opt("--open", action="store_true", help="open it in the browser"),
         opt("--json", action="store_true", help="print an initial or dated cached JSON observation"),
         opt("--wait", action="store_true", help="with --json: compute a fresh complete snapshot before returning"))
-    cmd("stale", _m_status.cmd_stale, "freshness check: is <id>'s status.md behind a time the host gave (e.g. a thread's "
+    cmd("stale", _Command("status", "cmd_stale"), "freshness check: is <id>'s status.md behind a time the host gave (e.g. a thread's "
         "updatedAt, in UTC)?", "id", "host_time", opt("--grace", type=int, default=5, help="minutes allowed"))
-    cmd("jobs", _m_jobs.cmd_jobs, "jobs per node: open ones and their age, median hours and review rounds, causes",
+    cmd("jobs", _Command("jobs", "cmd_jobs"), "jobs per node: open ones and their age, median hours and review rounds, causes",
         opt("id", nargs="?"), opt("--branch"), opt("--job-key", help="select one ledger job when a branch was reused"), opt("--lessons", help="learned item ids, or none: <reason>"),
         opt("--switch", help="record provider switch: old -> new: reason"),
         opt("--start", action="store_true", help="coordinator: start an import study or adopt an existing --thread"),
@@ -432,7 +427,7 @@ def _main():
         opt("--all-closed", action="store_true", help="with --settled: attest a complete host sweep for all closed ledger jobs"),
         opt("--attestation-file", help="fresh version 1 coordinator export with exhaustive per-job/thread/project coverage"),
         opt("--contract-file", dest="contract_file", help="coordinator: the job's contract (" +
-            ", ".join(f"## {f}" for f in _m_jobs.CONTRACT_FIELDS) + "; an optional ## Budget, e.g. 20M tokens, 3 h)"),
+            ", ".join(f"## {f}" for f in _m_common.CONTRACT_FIELDS) + "; an optional ## Budget, e.g. 20M tokens, 3 h)"),
         opt("--usage-file", dest="usage_file", help="coordinator: the job's usage as the host reports it (JSON); "
             "wins over what transcripts show"))
     cmd("lifecycle", _Command("host_lifecycle", "cmd_lifecycle"), "execute a native host lifecycle action with fresh ownership checks",
@@ -441,7 +436,7 @@ def _main():
         opt("--ticket", help="accept only this exact confirmed rotation launch"),
         opt("--session-id", help="replacement runtime actual session identity; never a host thread ID substitute"))
     cmd("rotate", _Command("rotation", "cmd_rotate"), "prepare a file-based coordinator handover; prints host steps", "id")
-    cmd("due", _m_status.cmd_due, "coordinator actions and machine holds; empty means no output",
+    cmd("due", _Command("status", "cmd_due"), "coordinator actions and machine holds; empty means no output",
         opt("--since-wake", action="store_true", help="new file-only wake items compared with the wake before the latest delivery"),
         opt("--synthesis-seen", metavar="SET", help="record an exact synthesis set after its proposal has been reviewed"),
         opt("--machine", action="store_true", help="also show informational machine readings, even without node actions"),
@@ -457,7 +452,7 @@ def _main():
     cmd('inbox-seen', _Command('inbox_notices', 'cmd_inbox_seen'),
         'mark one owning node inbox episode handled, recording the action and retaining its source',
         'id', 'item_id', 'reason')
-    cmd('answer', _m_status.cmd_answer, 'record text for exactly one current inbox episode, retaining source/history',
+    cmd('answer', _Command("status", "cmd_answer"), 'record text for exactly one current inbox episode, retaining source/history',
         'item_id', 'text')
     cmd('index', _Command("freshness", "cmd_index"), 'configured upstream index freshness or opt-in native link generation', 'id',
         opt('--record', action='store_true', help='explicitly record current input/output fingerprints after regeneration'),
@@ -465,14 +460,14 @@ def _main():
     cmd("delegate", _Command("host_tasks", "cmd_delegate"), "explicit registered native delegation with completion fallback",
         "id", opt("--task-file", required=True), opt("--target-file", required=True), opt("--key", required=True))
     cmd("host-export", _Command("host_observations", "cmd_host_export"), "one bounded native export; preserves previous snapshot on failure")
-    cmd("notify", _m_communication.cmd_notify, "record typed notification; root wakes only for questions",
-        "id", opt("kind", choices=_m_communication.COMMUNICATION_KINDS), "text",
+    cmd("notify", _Command("communication", "cmd_notify"), "record typed notification; root wakes only for questions",
+        "id", opt("kind", choices=_m_common.COMMUNICATION_KINDS), "text",
         opt("--key", required=True, help="stable idempotency key"), opt("--question-file"))
-    cmd("question-answer", _m_communication.cmd_question_answer, "answer one typed question", "id", "choice")
-    cmd('morning-brief', _m_communication_policy.cmd_morning_brief, 'publish a retained quiet-hours inbox brief; never wakes', 'id',
+    cmd("question-answer", _Command("communication", "cmd_question_answer"), "answer one typed question", "id", "choice")
+    cmd('morning-brief', _Command("communication_policy", "cmd_morning_brief"), 'publish a retained quiet-hours inbox brief; never wakes', 'id',
         opt('--operator', action='store_true', help='root only: aggregate retained notices once per local delivery day'))
-    cmd("msg", _m_messages.cmd_msg, "format start/done/blocked/question for a coordinator (does not send)",
-        "id", opt("kind", choices=_m_messages.MESSAGE_KINDS), "message", opt("--branch"), opt("--report"))
+    cmd("msg", _Command("messages", "cmd_msg"), "format start/done/blocked/question for a coordinator (does not send)",
+        "id", opt("kind", choices=_m_common.MESSAGE_KINDS), "message", opt("--branch"), opt("--report"))
     queueable_command(cmd, 'handback')
     cmd("queue", _Command("queue_priority", "cmd_gate_queue"), "run one hand-back or explicitly reorder queued native verify tokens",
         opt("action", choices=['run', 'wait', 'drain'], nargs='?'), opt('id', nargs='?'), opt('--once', action='store_true'),
@@ -483,7 +478,7 @@ def _main():
     cmd("dispatch", _Command("dispatcher", "cmd_dispatch"), "bounded read-only plan of explicit root/operator asks; empty scan is silent",
         opt('--limit', type=int, default=50), opt('--node-limit', type=int, default=200),
         opt('--run', action='store_true', help='enqueue only current questions through the durable coalesced wake path'))
-    cmd("backlog", _m_events.cmd_backlog, "append a dated backlog item", "id",
+    cmd("backlog", _Command("events", "cmd_backlog"), "append a dated backlog item", "id",
         opt("action", choices=["add"]), "item")
     cmd("introspect", _Command("introspection", "cmd_introspect"), "recorded causal job progress and communication metrics",
         "id", opt("--branch"), opt("--hours", type=float, default=24), opt("--limit", type=int, default=50))
@@ -494,8 +489,8 @@ def _main():
         opt("--attempt"), opt("--state", choices=["setup-failed", "observed"]))
     cmd("scorecard", _Command("scorecard", "cmd_scorecard"), "score a supplied evidence window; missing evidence stays unknown",
         "id", opt("--file", required=True, help="version 1 measurement manifest"))
-    cmd("show", _m_status.cmd_show, "everything about one node, including this machine's bindings", "id")
-    cmd("set", _m_nodes.cmd_set, "set fields: brain set <id> key=value ... (host IDs and home paths stay on this machine)",
+    cmd("show", _Command("status", "cmd_show"), "everything about one node, including this machine's bindings", "id")
+    cmd("set", _Command("nodes", "cmd_set"), "set fields: brain set <id> key=value ... (host IDs and home paths stay on this machine)",
         "id", opt("pairs", nargs="+"))
     s = sub.add_parser("settings", help="apply an explicit validated settings batch")
     settings_sub = s.add_subparsers(dest="settings_action", required=True)
@@ -508,9 +503,9 @@ def _main():
     cmd("host-instance", _Command("host_instances", "cmd_host_instance"), "private addressed host inventory; execution remains local",
         opt("action", choices=['list', 'remember', 'route', 'plan']), opt("name", nargs='?'),
         opt("--node", default='root'), opt("--machine"), opt("--adapter"), opt("--file"))
-    cmd("relabel", _m_nodes.cmd_relabel, "brain relabel <id> key:value ... (key:- removes)", "id", opt("labels", nargs="+"))
-    cmd("owners", _m_nodes.cmd_owners, "change owners: brain owners <id> a,b  ('' = same as parent)", "id", "owners")
-    cmd("seal", _m_guard.cmd_seal, "give a node new owners and an external home (the sealing procedure's mechanics)",
+    cmd("relabel", _Command("nodes", "cmd_relabel"), "brain relabel <id> key:value ... (key:- removes)", "id", opt("labels", nargs="+"))
+    cmd("owners", _Command("nodes", "cmd_owners"), "change owners: brain owners <id> a,b  ('' = same as parent)", "id", "owners")
+    cmd("seal", _Command("guard", "cmd_seal"), "give a node new owners and an external home (the sealing procedure's mechanics)",
         "id", opt("--owners", required=True), opt("--home", required=True), opt("--url"),
         opt("--move", nargs="*", help="files or folders (relative to the node) that belong to the new owners"),
         opt("--no-git", action="store_true", dest="no_git"))
@@ -582,8 +577,8 @@ def _main():
         opt("--principle", default="unclassified", help="id in the target's direction.md; default: unclassified"), "text")
     cmd("hire", _Command("knowledge", "cmd_hire"), "print a specialist's brief for a job: brain hire <specialist> <node> --task \"...\"",
         "specialist", "node", opt("--task", required=True), opt("--items", default=""),
-        opt("--runtime"), opt("--class", dest="job_class", choices=_m_jobs.JOB_CLASSES),
-        opt("--effort", choices=_m_jobs.JOB_EFFORTS),
+        opt("--runtime"), opt("--class", dest="job_class", choices=_m_common.JOB_CLASSES),
+        opt("--effort", choices=_m_common.JOB_EFFORTS),
         opt("--model", help="job model for scoped usage limits"), opt("--out"), opt("--branch"),
         opt("--why-separate", help="why this specialist needs a separate agent; defaults to the contract"),
         opt("--allow-unexplained", action="store_true", help="allow an urgent launch without a reason"),
@@ -620,8 +615,8 @@ def _main():
     cmd("review", _Command("sync", "cmd_review"), "brief for an independent review: brain review <node> --branch B",
         "id", opt("--branch", required=True), opt("--base"), opt("--built-by", dest="built_by"),
         opt("--by", "--runtime", help="reviewer runtime (default: configured independence policy)"), opt("--focus"),
-        opt("--class", dest="job_class", choices=_m_jobs.JOB_CLASSES),
-        opt("--effort", choices=_m_jobs.JOB_EFFORTS),
+        opt("--class", dest="job_class", choices=_m_common.JOB_CLASSES),
+        opt("--effort", choices=_m_common.JOB_EFFORTS),
         opt("--why-separate", help="reason for a separate reviewer; defaults to the independence policy"),
         opt("--allow-unexplained", action="store_true", help="allow an urgent launch without a reason"),
         opt("--model", help="job model for scoped usage limits"), opt("--out"),
@@ -693,21 +688,21 @@ def _main():
         opt("reason", nargs="?"), opt("--drain", action="store_true", help=argparse.SUPPRESS))
     cmd("watch", _Command("watch", "cmd_watch"), "queue wakes only for new actionable file items",
         opt("--once", action="store_true", required=True))
-    cmd("now", _m_status.cmd_now, "the current time in the instance's timezone, as every record writes it (axiom 17)",
+    cmd("now", _Command("status", "cmd_now"), "the current time in the instance's timezone, as every record writes it (axiom 17)",
         opt("--iso", action="store_true"))
-    cmd("tree", _m_status.cmd_tree, "show the node tree")
-    cmd("status", _m_status.cmd_status, "status timestamps; --refresh regenerates only one node's facts block",
+    cmd("tree", _Command("status", "cmd_tree"), "show the node tree")
+    cmd("status", _Command("status", "cmd_status"), "status timestamps; --refresh regenerates only one node's facts block",
         opt("id", nargs="?"), opt("--refresh", action="store_true"),
         opt("--project", action="store_true", help="explicit phase for configured generated-facts ownership"),
         opt("--from-events", action="store_true"), opt("--json", action="store_true"))
     cmd("timings", _m_timings.cmd_timings, "recent command durations and automatic slow profiles",
         opt("--slow", action="store_true"), opt("--command"), opt("--json", action="store_true"))
-    cmd("events", _m_events.cmd_events, "private event metadata; --compare summarizes the last day", "id",
+    cmd("events", _Command("events", "cmd_events"), "private event metadata; --compare summarizes the last day", "id",
         opt("--compare", action="store_true"), opt("--json", action="store_true"),
         opt("--metrics", action="store_true"), opt("--explain", metavar="DIFFERENCE_ID"), opt("--reason"),
         opt("--rebuild-records", action="store_true"),
         opt("--record", metavar="FACT_TYPE"), opt("--job-key"), opt("--data", default="{}"))
-    cmd("registry", _m_status.cmd_registry, "regenerate registry.md")
+    cmd("registry", _Command("status", "cmd_registry"), "regenerate registry.md")
     cmd("link", _Command("hosts", "cmd_link"), "create runtime links (axiom 22); --command puts 'brain' on your PATH; --global adds a "
         "pointer to this Brain in each runtime's user-wide instructions",
         opt("--command", action="store_true"), opt("--bin-dir", dest="bin_dir", default="~/.local/bin"),
@@ -720,9 +715,9 @@ def _main():
     cmd("gate-lock", _Command("gate_lock", "cmd_gate_lock"), "serialize a command for one node",
         opt("--node", help="node id (default: unambiguous current folder)"),
         opt("--label"), opt("command", nargs=argparse.REMAINDER))
-    cmd("heavy", _m_machine.cmd_heavy, "wait until the machine admits new heavy work",
+    cmd("heavy", _Command("machine", "cmd_heavy"), "wait until the machine admits new heavy work",
         opt("--node", help="coordinator whose work is waiting (default root)"))
-    cmd("machine", _m_machine.cmd_machine, "machine state, sampler and bindings",
+    cmd("machine", _Command("machine", "cmd_machine"), "machine state, sampler and bindings",
         opt("action", nargs="?", choices=["sample", "install", "uninstall", 'wake-setup']), opt('id', nargs='?'),
         opt("--yes", action="store_true", help="install/remove the sampler with operator consent"),
         opt("--missing-homes", action="store_true", dest="missing_homes"))
@@ -775,7 +770,7 @@ def _main():
             with open(os.devnull, "w") as sink:
                 os.dup2(sink.fileno(), sys.stdout.fileno())
         return
-    if a.f == _m_machine.cmd_machine and a.action == "sample":
+    if a.f.__name__ == "cmd_machine" and a.action == "sample":
         a.f(a)  # sampler and watcher each take a short nonblocking instance lock
         return
     if command_read(a):

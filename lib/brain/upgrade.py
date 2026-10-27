@@ -9,14 +9,15 @@ import time
 from pathlib import Path
 
 from . import common as _m_common
-from . import gate_lock as _m_gate_lock
-from . import guard as _m_guard
-from . import history as _m_history
 from . import instance as _m_instance
-from . import jobs as _m_jobs
-from . import machine as _m_machine
-from . import nodes as _m_nodes
-from . import usage as _m_usage
+
+_m_gate_lock = _m_common.LazyModule(__package__, 'gate_lock')
+_m_guard = _m_common.LazyModule(__package__, 'guard')
+_m_history = _m_common.LazyModule(__package__, 'history')
+_m_jobs = _m_common.LazyModule(__package__, 'jobs')
+_m_machine = _m_common.LazyModule(__package__, 'machine')
+_m_nodes = _m_common.LazyModule(__package__, 'nodes')
+_m_usage = _m_common.LazyModule(__package__, 'usage')
 
 
 def _version_git(*args, cwd):

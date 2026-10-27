@@ -5,7 +5,9 @@ import json
 import re
 
 from . import common
-from . import reminders as _m_reminders
+from . import common as _m_common
+
+_m_reminders = _m_common.LazyModule(__package__, 'reminders')
 
 
 def terminal_notice(line):

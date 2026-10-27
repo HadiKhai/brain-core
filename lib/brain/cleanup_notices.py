@@ -7,7 +7,8 @@ import stat
 from pathlib import Path
 
 from . import common as _m_common
-from . import host_rpc as _m_rpc
+
+_m_rpc = _m_common.LazyModule(__package__, 'host_rpc')
 
 
 def cleanup_notice(inst, n, job_key, identity, workspace, rpc):

@@ -2,7 +2,8 @@
 import re
 
 from . import common as _m_common
-from . import nodes as _m_nodes
+
+_m_nodes = _m_common.LazyModule(__package__, 'nodes')
 
 
 RESERVED_JOB_ENV = {'HOME', 'MAIN', 'WORKTREE', 'BRANCH', 'NODE', 'GIT_DIR', 'GIT_WORK_TREE',

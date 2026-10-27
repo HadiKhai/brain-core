@@ -2,10 +2,12 @@
 import json
 import re
 
-from . import guard as _m_guard
-from . import jobs as _m_jobs
-from . import nodes as _m_nodes
-from . import status as _m_status
+from . import common as _m_common
+
+_m_guard = _m_common.LazyModule(__package__, 'guard')
+_m_jobs = _m_common.LazyModule(__package__, 'jobs')
+_m_nodes = _m_common.LazyModule(__package__, 'nodes')
+_m_status = _m_common.LazyModule(__package__, 'status')
 
 
 def ui_work_metadata(inst, n):

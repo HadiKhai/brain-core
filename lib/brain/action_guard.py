@@ -12,9 +12,10 @@ import sys
 from pathlib import Path
 
 from . import common as _m_common
-from . import guard as _m_guard
 from . import instance as _m_instance
-from . import nodes as _m_nodes
+
+_m_guard = _m_common.LazyModule(__package__, 'guard')
+_m_nodes = _m_common.LazyModule(__package__, 'nodes')
 
 
 SHELL_TOOLS = ('Bash', 'bash', 'exec_command', 'functions.exec_command')

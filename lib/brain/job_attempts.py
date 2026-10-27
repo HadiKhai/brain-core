@@ -7,9 +7,10 @@ from pathlib import Path
 
 from . import common as _m_common
 from . import instance as _m_instance
-from . import jobs as _m_jobs
-from . import machine as _m_machine
-from . import verify as _m_verify
+
+_m_jobs = _m_common.LazyModule(__package__, 'jobs')
+_m_machine = _m_common.LazyModule(__package__, 'machine')
+_m_verify = _m_common.LazyModule(__package__, 'verify')
 
 
 ATTEMPT_ACTIVE = ('queued', 'verifying')

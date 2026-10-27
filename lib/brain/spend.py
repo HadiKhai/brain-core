@@ -10,19 +10,20 @@ import re
 import time
 from pathlib import Path
 
-from . import briefs as _m_briefs
 from . import common as _m_common
-from . import connect as _m_connect
-from . import guard as _m_guard
-from . import history as _m_history
 from . import instance as _m_instance
-from . import jobs as _m_jobs
-from . import nodes as _m_nodes
-from . import ui as _m_ui
-from . import usage as _m_usage
-from . import usage_cache as _m_usage_cache
 from . import timings as _m_timings
 from . import command_reads as _m_command_reads
+
+_m_briefs = _m_common.LazyModule(__package__, 'briefs')
+_m_connect = _m_common.LazyModule(__package__, 'connect')
+_m_guard = _m_common.LazyModule(__package__, 'guard')
+_m_history = _m_common.LazyModule(__package__, 'history')
+_m_jobs = _m_common.LazyModule(__package__, 'jobs')
+_m_nodes = _m_common.LazyModule(__package__, 'nodes')
+_m_ui = _m_common.LazyModule(__package__, 'ui')
+_m_usage = _m_common.LazyModule(__package__, 'usage')
+_m_usage_cache = _m_common.LazyModule(__package__, 'usage_cache')
 
 
 # Read from the runtimes' own transcripts on this machine, in the subscription folders this brain may use. Only
