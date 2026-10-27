@@ -1461,6 +1461,65 @@ cli.main()
             self.assertIsNot(m.status_facts(inst, node, state, [], metadata_only=True), first)
 
 
+    def file_state_attempt_fixture(self):
+        root = self.init('demo')
+        m = core_loader.SourceFileLoader('file_state_fixture', str(CORE / 'bin/brain')).load_module()
+        inst = m.Instance(root)
+        node = inst.node('root')
+        rows = [{**dict.fromkeys(m.JOB_COLS, ''), 'Job': 'job/' + str(i),
+                 'Started': inst.now(), 'Ended': inst.now(), 'Outcome': 'merged'} for i in range(4)]
+        ledger = node['dir'] / m.JOBS_FILE
+        def save(rows):
+            ledger.write_text(m.JOBS_MARK + '\n| ' + ' | '.join(m.JOB_COLS) + ' |\n' +
+                              '\n'.join('| ' + ' | '.join(m.cell(row[c]) for c in m.JOB_COLS) + ' |'
+                                        for row in rows) + '\n')
+        save(rows)
+        for row in rows:
+            path = m.attempt_path(node, row)
+            path.parent.mkdir(exist_ok=True)
+            path.write_text(json.dumps({'version': 1, 'id': 'a' * 32, 'job_key': m.job_key(row),
+                                       'state': 'interrupted', 'binding': {'head': '', 'base': '', 'inputs': ''}}))
+        return m, inst, node, rows, ledger, save
+
+    def test_file_state_parses_attempt_ledger_once_and_expires_before_inbox(self):
+        m, inst, node, rows, ledger, save = self.file_state_attempt_fixture()
+        read_text = Path.read_text
+        ledger_reads = []
+        def counted(path, *args, **kwargs):
+            if path == ledger:
+                ledger_reads.append(path)
+            return read_text(path, *args, **kwargs)
+        def deliver(*args, **kwargs):
+            save(rows + [rows[0]])
+            # Delivery may invoke writer guards; the observation scope is gone.
+            with self.assertRaisesRegex(ValueError, 'ambiguous'):
+                m.current_attempt(node, rows[0])
+            return []
+        with mock.patch.object(Path, 'read_text', counted), mock.patch.object(m, 'inbox_lines', return_value=[]):
+            with m.brain_lock(inst):
+                state = m.file_state(inst, node)
+        self.assertEqual(len(ledger_reads), 1)
+        self.assertEqual(len(state['job_projections']), len(rows))
+        self.assertTrue(all(p['attempt']['state'] == 'interrupted' for p in state['job_projections'].values()))
+        with mock.patch.object(m, 'inbox_lines', side_effect=deliver):
+            m.file_state(inst, node)
+        # A later observation must see changed ledger ownership too.
+        with mock.patch.object(m, 'inbox_lines', return_value=[]):
+            state = m.file_state(inst, node)
+        self.assertEqual(state['job_projections'][m.job_key(rows[0])]['attempt']['state'], 'unknown')
+        with self.assertRaisesRegex(ValueError, 'ambiguous'):
+            m.current_attempt(node, rows[0])
+
+    def test_file_state_duplicate_job_keys_remain_unknown(self):
+        m, inst, node, rows, ledger, save = self.file_state_attempt_fixture()
+        save(rows + [rows[0]])
+        with mock.patch.object(m, 'inbox_lines', return_value=[]):
+            state = m.file_state(inst, node)
+        projection = state['job_projections'][m.job_key(rows[0])]
+        self.assertEqual(projection['attempt']['state'], 'unknown')
+        self.assertIsNone(projection['signal'])
+
+
 class NodeHygiene(Scenario):
     def setUp(self):
         super().setUp()

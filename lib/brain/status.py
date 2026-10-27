@@ -561,11 +561,14 @@ def status_fingerprint(lines):
 @_m_command_reads.memo
 @_m_timings.timed("file_state")
 def file_state(inst, n):
-    rows = _m_jobs.read_jobs(n)
-    with local_job_snapshot():
-        wts = {b: {**w, **local_job_state(n, b, w)} for b, w in sorted(n["local"].get("worktrees", {}).items())}
-    from . import job_attempts as _m_attempts
-    projections = {_m_jobs.job_key(r): _m_attempts.job_projection(inst, n, r) for r in rows or []}
+    # Attempt ownership checks revisit this ledger for every projection. Share
+    # its parse only within this observation, before inbox delivery can write.
+    with _m_command_reads.scope(_m_jobs.read_jobs):
+        rows = _m_jobs.read_jobs(n)
+        with local_job_snapshot():
+            wts = {b: {**w, **local_job_state(n, b, w)} for b, w in sorted(n["local"].get("worktrees", {}).items())}
+        from . import job_attempts as _m_attempts
+        projections = {_m_jobs.job_key(r): _m_attempts.job_projection(inst, n, r) for r in rows or []}
     signals = {key: value['signal'] for key, value in projections.items()}
     return {"jobs": rows, "worktrees": wts, "handbacks": signals, "job_projections": projections, "inbox": inbox_lines(n)}
 
