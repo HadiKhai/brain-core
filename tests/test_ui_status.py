@@ -72,6 +72,23 @@ class UIStatus(Scenario):
         self.assertEqual(archive.read_bytes(), before)
         self.assertEqual((self.root / 'inbox.md').read_text(), raw)
 
+    def test_archive_projection_preserves_crlf_episode_proof_and_deduplicates(self):
+        import hashlib
+        raw = '- 2026-01-02 10:00 +00:00 from worker: question: Which color?; options: Blue | Gray; recommendation: Blue\r\n'
+        identity = 'c' * 24
+        receipt = {'id': identity, 'answered': True}
+        entry = ('<!-- inbox-archive:' + identity + ':' + hashlib.sha256(raw.encode()).hexdigest() + ' -->\n'
+                 '<!-- episode ' + json.dumps(receipt) + ' -->\n' + raw)
+        archive = self.root / 'inbox-archive.md'
+        before = (entry + entry).encode()
+        archive.write_bytes(before)
+        rows = self.m.ui_inbox_projection(self.inst, [self.n], [])
+        self.assertEqual([row['id'] for row in rows], [identity])
+        self.assertTrue(rows[0]['answered'])
+        self.assertFalse(rows[0]['open'])
+        self.assertEqual(rows[0]['source'], 'root/inbox-archive.md')
+        self.assertEqual(archive.read_bytes(), before)
+
     def row(self, branch='import:sample', start='2026-01-01T00:00Z', ended=''):
         return {**dict.fromkeys(self.m.JOB_COLS, ''), 'Job': branch, 'Started': start, 'Ended': ended}
 

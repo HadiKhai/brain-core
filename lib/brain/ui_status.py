@@ -47,7 +47,7 @@ def ui_inbox_projection(inst, nodes, items):
             if not path.is_file() or path.is_symlink():
                 continue
             marker, retained = None, None
-            for number, raw in enumerate(path.read_text().splitlines(keepends=True), 1):
+            for number, raw in enumerate(path.read_bytes().decode().splitlines(keepends=True), 1):
                 line = raw.rstrip('\r\n')
                 if name == 'inbox-archive.md' and line.startswith('<!-- inbox-archive:'):
                     marker = re.fullmatch(r'<!-- inbox-archive:([0-9a-f]{24}):([0-9a-f]{64}) -->', line)

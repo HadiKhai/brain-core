@@ -4227,3 +4227,5 @@ source-derived display identities rather than a reconstructed lifecycle episode.
 Typed choice IDs remain in technical details; operator-facing recommendations and
 next actions resolve their option labels. Selecting a sidebar history or ledger-only
 job explicitly includes that job in the destination's thread collection.
+Archive reads preserve original line endings before checksum verification, matching
+the native archive producer for CRLF source lines as well as LF source lines.
