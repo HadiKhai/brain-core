@@ -140,9 +140,14 @@ def intent_index(inst):
             raise ValueError('blocked write queue: short or oversized index line')
         try:
             entry = json.loads(line)
+            if not isinstance(entry, dict):
+                raise ValueError('invalid index shape')
             identity = intent_id(entry['id'])
             data = intent_read(inst, identity + '.request')
-            if (set(entry) != {'id', 'hash'} or data.get('version') != 2 or data.get('id') != identity
+            if (not isinstance(data, dict) or not isinstance(data.get('payload'), dict)
+                    or set(data) != {'version', 'id', 'payload', 'hash'}
+                    or set(entry) != {'id', 'hash'} or type(data.get('version')) is not int
+                    or data.get('version') != 2 or data.get('id') != identity
                     or data.get('hash') != entry['hash'] or intent_hash(data['payload']) != entry['hash']):
                 raise ValueError('request hash mismatch')
         except (KeyError, TypeError, ValueError, OSError) as error:
@@ -160,10 +165,23 @@ def intent_receipt(inst, identity):
     except FileNotFoundError:
         return None
     request = intent_read(inst, identity + '.request')
-    if (result.get('id') != identity or result.get('hash') != request.get('hash')
+    if (not isinstance(result, dict) or not isinstance(request, dict)
+            or result.get('id') != identity or result.get('hash') != request.get('hash')
             or result.get('state') not in ('applied', 'rejected') or type(result.get('sequence')) is not int):
         raise ValueError('blocked write queue: invalid receipt')
     return result
+
+
+def pending_intents(inst):
+    pending = []
+    for sequence, data in intent_index(inst):
+        receipt = intent_receipt(inst, data['id'])
+        if receipt:
+            if receipt['sequence'] != sequence or pending:
+                raise ValueError('blocked write queue: receipt order or index identity changed')
+        else:
+            pending.append((sequence, data))
+    return pending
 
 
 def intent_lease(inst):
@@ -359,7 +377,7 @@ def drain_intents(inst, lease_fd=None):
             target.check_file(fd)
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         while True:
-            pending = [(seq, data) for seq, data in intent_index(inst) if not intent_receipt(inst, data['id'])]
+            pending = pending_intents(inst)
             if not pending:
                 break
             sequence, data = pending[0]
@@ -394,7 +412,7 @@ def drain_intents(inst, lease_fd=None):
         os.close(fd)
         # Release then inspect: a producer that saw the old lease is covered;
         # a producer arriving after this inspection acquires the free lease itself.
-        if not blocked and any(not intent_receipt(inst, d['id']) for _, d in intent_index(inst)):
+        if not blocked and pending_intents(inst):
             start_intent_drainer(inst)
 
 
