@@ -864,6 +864,67 @@ class QuestionWake(Scenario):
         self.assertEqual(len(self.calls.read_text().splitlines()), 1)
         self.assertFalse(list(directory.glob("*.pending")))
 
+    def fenced_delivery(self, change_sources=False, known=True):
+        """Drain once with a controlled watch scan; return the call order and the shown set."""
+        item = {'id': 'e' * 64, 'kind': 'inbox', 'node': 'a', 'text': 'fixture need'}
+        delivered = {'id': 'd' * 64, 'kind': 'inbox'}
+        with mock.patch.object(self.module, "wake_start"):
+            self.module.request_wake(self.inst, self.n, "fenced", items=[delivered], explicit=True)
+        (self.r / ".brain/watch.json").write_text(json.dumps(
+            {'version': 1, 'seen': [], 'items': [item] if known else []}))
+        order, generation = [], ['before']
+        def signature(inst, layout=None):
+            order.append('signature')
+            return generation[0]
+        def groups(inst, nodes=None):
+            order.append('scan')
+            return self.module.WatchGroups({'a': {'node': self.n, 'items': [item]}}, None, generation[0])
+        def send(command, reason=None):
+            order.append('send')
+            if change_sources:
+                generation[0] = 'after'  # a source moved between the send and the scan
+            return True
+        with mock.patch.object(self.module, "watch_source_signature", side_effect=signature), \
+                mock.patch.object(self.module, "watch_groups", side_effect=groups), \
+                mock.patch.object(self.module, "wake_send", side_effect=send):
+            self.drain()
+        return order, self.module.wake_shown(self.inst, self.n), item, delivered
+
+    def test_doorbell_precedes_the_snapshot_scan_and_acknowledges_known_items(self):
+        order, shown, item, delivered = self.fenced_delivery()
+        self.assertEqual(order, ['signature', 'send', 'scan'])
+        self.assertIn(item['id'], shown)
+        self.assertIn(delivered['id'], shown)
+
+    def test_sources_moved_after_send_acknowledge_only_delivered_refs(self):
+        order, shown, item, delivered = self.fenced_delivery(change_sources=True)
+        self.assertEqual(order, ['signature', 'send', 'scan'])
+        self.assertNotIn(item['id'], shown)  # it may only wake again, never hide
+        self.assertIn(delivered['id'], shown)
+        history = self.module.wake_history(self.module.wake_directory(self.inst, self.n))
+        self.assertNotIn(item['id'], {i['id'] for i in history[-1]['snapshot']})
+
+    def test_item_unknown_before_send_is_not_acknowledged(self):
+        order, shown, item, delivered = self.fenced_delivery(known=False)
+        self.assertNotIn(item['id'], shown)
+        self.assertIn(delivered['id'], shown)
+
+    def test_unknown_source_state_before_send_acknowledges_only_delivered_refs(self):
+        def broken(inst, layout=None):
+            raise OSError("fixture signature")
+        item = {'id': 'e' * 64, 'kind': 'inbox', 'node': 'a', 'text': 'fixture need'}
+        (self.r / ".brain/watch.json").write_text(json.dumps({'version': 1, 'seen': [], 'items': [item]}))
+        with mock.patch.object(self.module, "wake_start"):
+            self.module.request_wake(self.inst, self.n, "unknown", items=[{'id': 'd' * 64, 'kind': 'inbox'}], explicit=True)
+        with mock.patch.object(self.module, "watch_source_signature", side_effect=broken), \
+                mock.patch.object(self.module, "watch_groups",
+                                  return_value=self.module.WatchGroups({'a': {'node': self.n, 'items': [item]}}, None, None)):
+            self.drain()
+        self.assertEqual(len(self.calls.read_text().splitlines()), 1)
+        shown = self.module.wake_shown(self.inst, self.n)
+        self.assertNotIn(item['id'], shown)
+        self.assertIn('d' * 64, shown)
+
     def test_second_timer_exits_while_one_covers_the_opening(self):
         import fcntl
         self.enqueue("covered")
@@ -1836,11 +1897,21 @@ class AckAllShown(Scenario):
         self.b(self.root, 'set', 'root', 'wake=fixture-send', 'coordinator=fixture-root')
         self.inst = self.m.Instance(self.root)
 
+    @contextlib.contextmanager
+    def stable_scan(self, group):
+        """Scans whose sources hold across the send, and whose items the watcher published before it."""
+        m = self.m
+        with mock.patch.object(m, 'watch_groups', side_effect=lambda inst, nodes=None: m.WatchGroups(group, None, 'fixture-sources')), \
+                mock.patch.object(m, 'watch_source_signature', return_value='fixture-sources'), \
+                mock.patch.object(m, 'wake_known_before',
+                                  side_effect=lambda inst: frozenset(i['id'] for g in group.values() for i in g['items'])):
+            yield
+
     def test_shown_item_queued_later_is_acknowledged_but_new_item_wakes(self):
         m, n = self.m, self.inst.node('root')
         refs = [{'id': str(i) * 64, 'kind': 'inbox'} for i in (1, 2, 3)]
         group = {'root': {'items': refs[:2]}}
-        with mock.patch.object(m, 'watch_groups', return_value=group), \
+        with self.stable_scan(group), \
                 mock.patch.object(m, 'wake_start'), mock.patch.object(m, 'WAKE_INTERVAL', 0), \
                 mock.patch.object(m, 'wake_send', return_value=True) as send:
             self.assertTrue(m.request_wake(self.inst, n, 'fixture first', items=refs[:1]))
@@ -1858,7 +1929,7 @@ class AckAllShown(Scenario):
     def test_failed_transport_cannot_acknowledge_snapshot(self):
         m, n = self.m, self.inst.node('root')
         refs = [{'id': str(i) * 64, 'kind': 'inbox'} for i in (1, 2)]
-        with mock.patch.object(m, 'watch_groups', return_value={'root': {'items': refs}}), \
+        with self.stable_scan({'root': {'items': refs}}), \
                 mock.patch.object(m, 'wake_start'), mock.patch.object(m, 'WAKE_INTERVAL', 0):
             m.request_wake(self.inst, n, 'fixture first', items=refs[:1])
             with mock.patch.object(m, 'wake_send', return_value=False):
@@ -1873,7 +1944,7 @@ class AckAllShown(Scenario):
         m, n = self.m, self.inst.node('root')
         refs = [{'id': str(i) * 64, 'kind': 'inbox'} for i in (1, 2, 3)]
         group = {'root': {'items': refs[:2]}}
-        with mock.patch.object(m, 'watch_groups', return_value=group), \
+        with self.stable_scan(group), \
                 mock.patch.object(m, 'wake_start'), mock.patch.object(m, 'WAKE_INTERVAL', 0):
             m.request_wake(self.inst, n, 'fixture first', items=refs[:1])
             def send(command, reason=None):
@@ -1890,7 +1961,7 @@ class AckAllShown(Scenario):
     def test_successful_snapshot_is_scoped_to_coordinator_and_transport(self):
         m, n = self.m, self.inst.node('root')
         refs = [{'id': str(i) * 64, 'kind': 'inbox'} for i in (1, 2)]
-        with mock.patch.object(m, 'watch_groups', return_value={'root': {'items': refs}}), \
+        with self.stable_scan({'root': {'items': refs}}), \
                 mock.patch.object(m, 'wake_start'), mock.patch.object(m, 'WAKE_INTERVAL', 0), \
                 mock.patch.object(m, 'wake_send', return_value=True) as send:
             m.request_wake(self.inst, n, 'fixture first', items=refs[:1])
@@ -1911,7 +1982,7 @@ class AckAllShown(Scenario):
                 failed.append(True)
                 raise OSError('fixture transient history write')
             return atomic(path, value, **kwargs)
-        with mock.patch.object(m, 'watch_groups', return_value={'root': {'items': refs}}), \
+        with self.stable_scan({'root': {'items': refs}}), \
                 mock.patch.object(m, 'wake_start'), mock.patch.object(m, 'WAKE_INTERVAL', 0), \
                 mock.patch.object(m, 'wake_send', return_value=True) as send:
             m.request_wake(self.inst, n, 'fixture first', items=refs[:1])
@@ -1925,7 +1996,7 @@ class AckAllShown(Scenario):
     def test_acknowledgement_outlives_display_history(self):
         m, n = self.m, self.inst.node('root')
         refs = [{'id': str(i) * 64, 'kind': 'inbox'} for i in (1, 2)]
-        with mock.patch.object(m, 'watch_groups', return_value={'root': {'items': refs}}), \
+        with self.stable_scan({'root': {'items': refs}}), \
                 mock.patch.object(m, 'wake_start'), mock.patch.object(m, 'WAKE_INTERVAL', 0), \
                 mock.patch.object(m, 'wake_send', return_value=True) as send:
             m.request_wake(self.inst, n, 'fixture first', items=refs[:1])
@@ -1996,7 +2067,7 @@ class AckAllShown(Scenario):
                 failed.append(True)
                 raise OSError('fixture transient shown receipt failure')
             return atomic(target, value, **kwargs)
-        with mock.patch.object(m, 'watch_groups', return_value={'root': {'items': refs}}), \
+        with self.stable_scan({'root': {'items': refs}}), \
                 mock.patch.object(m, 'wake_start'), mock.patch.object(m, 'WAKE_INTERVAL', 0), \
                 mock.patch.object(m, 'wake_send', return_value=True) as send:
             m.request_wake(self.inst, n, 'fixture first', items=refs[:1])

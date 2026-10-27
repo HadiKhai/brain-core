@@ -405,15 +405,42 @@ def wake_reason_items(inst, n, reason):
                           and reason in (i.get('reason'), i.get('legacy_reason')))
 
 
-def wake_snapshot(inst, n, refs, scan=None):
+def wake_snapshot(inst, n, refs, scan=None, fence=None):
+    """The display snapshot a delivery acknowledges as shown.
+
+    Taken after the send, it is `fence`d by what was known before it: the watch
+    source signature must be unchanged and each item already known. Otherwise
+    only the delivered refs are acknowledged; a later need can only wake again.
+    """
     try:
         items = wake_group_items(inst, n, scan)
     except ValueError:
         items = []  # a display snapshot must never gate delivery
+    if fence is not None:
+        generation, known = fence
+        groups = (scan or {}).get('groups')
+        if (generation is None or groups is None or getattr(groups, 'stale', False)
+                or getattr(groups, 'source_generation', None) != generation):
+            items = []
+        known = known | {i['id'] for i in refs}
+        items = [i for i in items if i['id'] in known]
     try:
         return wake_item_refs(items + refs)
     except ValueError:
         return []  # a contradictory display snapshot cannot block an opaque wake
+
+
+def wake_known_before(inst):
+    """Identities the watcher had already published before a send; unknown evidence proves none."""
+    from . import watch as _m_watch
+    try:
+        state = _m_watch.watch_state(inst)
+        items = state.get('items', [])
+        return frozenset(state.get('seen', [])) | frozenset(
+            i['id'] for i in (items if isinstance(items, list) else [])
+            if isinstance(i, dict) and isinstance(i.get('id'), str))
+    except (OSError, ValueError):
+        return frozenset()
 
 
 def wake_previous_items(directory):
@@ -884,14 +911,17 @@ def wake_drain(inst, n, once=False):
                         if broken.exists():
                             broken.replace(directory / ('history-invalid-' + os.urandom(8).hex() + '.json'))
                         history = []
-                    # Projection can inspect transcripts and local repositories.
-                    # Recheck the transport generation after that computation,
-                    # before reserving a turn or recording a delivery attempt.
-                    # Name recovery and the display snapshot share one scan.
+                    # Recheck the transport generation before reserving a turn or
+                    # recording a delivery attempt. No watch scan precedes the send:
+                    # unparsed requests keep their opaque keys, as when a scan fails,
+                    # and the display snapshot is taken after the send, fenced.
+                    from . import watch as _m_watch
                     generation = _m_instance.state_signature(current, target)
-                    scan = {}
-                    refs = wake_delivery_items(current, target, pending, scan)
-                    snapshot = wake_snapshot(current, target, refs, scan)
+                    try:
+                        fence = (_m_watch.watch_source_signature(current), wake_known_before(current))
+                    except (Exception, SystemExit):
+                        fence = (None, frozenset())  # an unknown source state acknowledges only the delivered refs
+                    refs = wake_delivery_items(current, target, pending, {'groups': None})
                     latest = _m_instance.Instance(inst.root)
                     latest_target = latest.node(target['id'])
                     if _m_instance.state_signature(latest, latest_target) != generation:
@@ -900,17 +930,8 @@ def wake_drain(inst, n, once=False):
                     if action == 'hold':
                         attempted.update(path.name for path in pending)
                         return
-                    if history:
-                        before = history[-1].get('snapshot', history[-1]['items'])
-                    else:
-                        # An upgraded watcher already knows old queued/delivered identities.
-                        # Do not bring those back merely because delivery logs are new.
-                        from . import watch as _m_watch
-                        try:
-                            known = set(_m_watch.watch_state(current).get('seen', [])) - {i['id'] for i in refs}
-                        except (OSError, ValueError):
-                            known = set()
-                        before = [i for i in snapshot if i['id'] in known]
+                    # Until the post-send snapshot exists, a first delivery compares with nothing.
+                    before = history[-1].get('snapshot', history[-1]['items']) if history else []
                     _m_common.atomic_write(last, str(WAKE_CLOCK.time()), private=True)  # failures are rate-limited too
                     inflight = directory / 'inflight.json'
                     try:
@@ -933,6 +954,15 @@ def wake_drain(inst, n, once=False):
                         for item in refs:
                             if item['kind'] in WAKE_TERMINAL_KINDS:
                                 wake_accept_write(wake_terminal_receipt(current, item['id']), 'delivered\n')
+                        snapshot = wake_snapshot(current, target, refs, {}, fence)
+                        if not history:
+                            # An upgraded watcher already knows old queued/delivered identities.
+                            # Do not bring those back merely because delivery logs are new.
+                            try:
+                                known = set(_m_watch.watch_state(current).get('seen', [])) - {i['id'] for i in refs}
+                            except (OSError, ValueError):
+                                known = set()
+                            before = [i for i in snapshot if i['id'] in known]
                         try:
                             wake_ack_shown(current, target, snapshot)
                         except OSError:
