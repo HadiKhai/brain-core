@@ -278,12 +278,6 @@ def machine_sample_lock(inst):
                 print("machine sample: skipped; instance busy")
                 yield False
                 return
-            held = os.fstat(fd)
-            current = os.stat('lock', dir_fd=dfd, follow_symlinks=False)
-            if (not stat.S_ISREG(held.st_mode) or held.st_nlink != 1
-                    or (held.st_dev, held.st_ino) != (current.st_dev, current.st_ino)):
-                _m_common.die('machine sampler: instance lock changed')
-            os.fchmod(fd, 0o600)
             stream = os.fdopen(fd, "r+")
             fd = None
             stream.seek(0)
