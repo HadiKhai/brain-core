@@ -413,6 +413,14 @@ def checked_load_index(journal):
         assert instance._LOCK['fh'] is None, 'cold refresh journal read holds the instance lock'
     return load_index(journal)
 events.Journal.load_index = checked_load_index
+serialized = []
+dumps = events.json.dumps
+def checked_dumps(value, *args, **kwargs):
+    if isinstance(value, dict) and {'identity', 'offset', 'rows', 'first'} <= value.keys():
+        assert instance._LOCK['fh'] is None, 'refresh comparison cache serialization holds the instance lock'
+        serialized.append(True)
+    return dumps(value, *args, **kwargs)
+events.json.dumps = checked_dumps
 original = status.status_facts
 def slow(*args, **kwargs):
     assert instance._LOCK['fh'] is None, 'refresh projection holds the instance lock'
@@ -426,6 +434,7 @@ def slow(*args, **kwargs):
 status.status_facts = slow
 sys.argv = ['brain', 'status', 'app', '--refresh']
 cli.main()
+assert serialized, 'refresh comparison cache was not prepared'
 '''
         env = {**self.env, 'BRAIN_ROOT': str(root)}
         reader = subprocess.Popen([sys.executable, '-B', '-c', script, str(CORE / 'lib'), str(marker), str(release)],
