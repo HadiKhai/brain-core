@@ -211,7 +211,7 @@ def plan_node(inst, n, lifecycle):
             'requirements_dropped': len(req_changes), 'records_deleted': 0}, rows, req_changes, decision_text
 
 
-def reconcile(inst, nodes, apply=False, drain=False):
+def reconcile(inst, nodes, apply=False, drain=False, archive=False):
     """Default is a read-only plan. Apply never removes records or changes the ledger."""
     with _m_instance.brain_lock(inst) if apply else contextlib.nullcontext():
         lifecycle = _m_reminders.lifecycle_read(inst)
@@ -220,6 +220,9 @@ def reconcile(inst, nodes, apply=False, drain=False):
             _m_notices.expire(inst, nodes, data=lifecycle)
             if len(json.dumps(lifecycle, sort_keys=True).encode()) > _m_reminders.LIFECYCLE_BYTES:
                 raise ValueError('notice expiry exceeds lifecycle bound; retain records for repair')
+        archives = [_m_notices.archive_plan(inst, n, lifecycle) for n in nodes] if archive else []
+        for (_, (result, *_)), archived in zip(plans, archives):
+            result['inbox_lines_archived'] = len(archived['episodes'])
         # Preflight every node before the first publication.
         if apply:
             for n, (result, rows, requirements, decision_text) in plans:
@@ -233,6 +236,8 @@ def reconcile(inst, nodes, apply=False, drain=False):
                     _m_tasks.save_record(n, req, 'requirements')
             if drain:
                 _m_notices.expire(inst, nodes)
+            for archived in archives:
+                _m_notices.publish_archive(archived)
             inst.commit([], 'Reconcile imported task records without deleting sources')
             # Publication follows the entire durable batch, including interrupted replays.
             for n in nodes:
@@ -249,7 +254,7 @@ def cmd_records(a):
     nodes = [n for n in inst.nodes() if not n['archived']] if a.all else [inst.node(a.node or 'root')]
     try:
         value = ([count_node(inst, n) for n in nodes] if a.action == 'counts' else
-                 reconcile(inst, nodes, a.apply, a.drain_notices))
+                 reconcile(inst, nodes, a.apply, a.drain_notices, a.archive_handled))
         print(json.dumps(value, ensure_ascii=False))
     except (OSError, ValueError) as error:
         _m_common.die(str(error))
@@ -262,4 +267,5 @@ def register(actions):
         if action == 'reconcile-records':
             p.add_argument('--apply', action='store_true')
             p.add_argument('--drain-notices', action='store_true', help='expire terminal machine notices, retaining source lines')
+            p.add_argument('--archive-handled', action='store_true', help='retain answered/expired lines in inbox-archive.md before removing them from the active inbox')
         p.set_defaults(f=cmd_records)

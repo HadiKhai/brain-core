@@ -1,6 +1,10 @@
 """Retained terminal machine notices expire only after successful delivery."""
+import copy
+import hashlib
+import json
 import re
 
+from . import common
 from . import reminders as _m_reminders
 
 
@@ -42,3 +46,41 @@ def expire(inst, nodes, delivered=None, data=None):
                 record.update(expired=True, seen_at=inst.now(), expiry_rule='terminal-machine-notice-v1')
                 changes.append({'node': n['id'], 'episode': record['id'], 'source_id': key})
     return changes
+
+
+def archive_plan(inst, n, data):
+    """Retain exact handled lines and their episode proof before shortening the inbox."""
+    source, archive = n['dir'] / 'inbox.md', n['dir'] / 'inbox-archive.md'
+    for path in (source, archive):
+        common.safe_target(path)
+        if path.is_symlink():
+            raise ValueError('inbox archive paths must be regular node-local files')
+    text = source.read_bytes().decode() if source.exists() else ''
+    old = archive.read_bytes().decode() if archive.exists() else ''
+    lines = text.splitlines(keepends=True)
+    current = _m_reminders.reconcile_requests(
+        inst, n, [line.rstrip('\r\n') for line in lines if line.startswith('- ')], copy.deepcopy(data))
+    kept, additions, episodes = [], [], []
+    for raw in lines:
+        line = raw.rstrip('\r\n')
+        record = current.get(_m_reminders.inbox_source_id(n, line)) if line.startswith('- ') else None
+        if record is None or notice_pending(line, record):
+            kept.append(raw)
+            continue
+        # Proof and original bytes survive even if the following inbox replacement fails.
+        digest = hashlib.sha256(raw.encode()).hexdigest()
+        marker = '<!-- inbox-archive:' + record['id'] + ':' + digest + ' -->'
+        if marker not in old:
+            additions.append(marker + '\n<!-- episode ' + json.dumps(record, sort_keys=True) + ' -->\n' +
+                             raw + ('' if raw.endswith('\n') else '\n'))
+        episodes.append(record['id'])
+    archived = old + (('\n' if old and not old.endswith('\n') else '') + ''.join(additions))
+    return {'source': source, 'archive': archive, 'inbox_text': ''.join(kept),
+            'archive_text': archived, 'episodes': episodes}
+
+
+def publish_archive(plan):
+    if plan['episodes']:
+        # Always durably publish the retained copy first; retry deduplicates its markers.
+        common.atomic_write(plan['archive'], plan['archive_text'])
+        common.atomic_write(plan['source'], plan['inbox_text'])

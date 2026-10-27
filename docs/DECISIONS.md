@@ -2847,6 +2847,13 @@ Terminal machine completion/exit notices expire only after their successful inbo
 delivery, or an explicit drain. Expiry is a retained lifecycle receipt, separate from
 an answer, and never suppresses a question, worker failure or actionable machine hold.
 
+Handled inbox archiving is explicit in reconciliation: only strictly answered episodes
+or expired terminal notices qualify. Publish exact original lines and episode proof to
+the node-local inbox archive durably before replacing the active inbox. Replays reuse
+the retained episode/line marker, so an interrupted replacement cannot lose a message
+or duplicate its retained copy. Unknown state stays pending. Closed jobs use retained
+delivery evidence even when their worktrees have already been pruned.
+
 Unlinked new task creation validates only the new record, with direct requirement
 lookups. Linked additions, existing-record edits and explicit task checks retain
 whole-graph validation, including qualified and cross-node return edges. This avoids repeatedly parsing every requirement

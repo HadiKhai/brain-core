@@ -984,6 +984,25 @@ class Tasks(Scenario):
         self.assertEqual(result[0]['changes'][0]['evidence']['outcome'], 'abandoned')
         self.assertIn('Operator cancelled', row['drop_reason'])
 
+    def test_reconcile_closed_merged_job_uses_retained_head_after_worktree_prune(self):
+        from brain import jobs, task_reconcile
+        self.repo(self.root)
+        base = self.git('rev-parse', 'HEAD', cwd=self.root).strip()
+        (self.root / 'engine.py').write_text('VALUE = 1\n')
+        self.git('add', 'engine.py', cwd=self.root)
+        self.git('commit', '-qm', 'Deliver engine', cwd=self.root)
+        head = self.git('rev-parse', 'HEAD', cwd=self.root).strip()
+        job, _ = self.legacy_job()
+        job.update(Ended=self.inst.now(), Outcome='merged', **{'Base commit': base, 'Head commit': head})
+        jobs.write_jobs(self.inst, self.n, [job])
+        self.n['local']['worktrees'] = {}
+        ledger = (self.n['dir'] / 'job-ledger.md').read_bytes()
+        task_reconcile.reconcile(self.inst, [self.n], apply=True)
+        row = tasks.read_records(self.n)['IMPORTED']
+        self.assertEqual((row['status'], row['merge_sha']), ('done', head))
+        self.assertEqual((self.n['dir'] / 'job-ledger.md').read_bytes(), ledger)
+        self.assertEqual(task_reconcile.reconcile(self.inst, [self.n], apply=True)[0]['changes'], [])
+
     def test_migrate_missing_reused_and_merged_worktrees_are_not_live(self):
         from brain import task_reconcile, tasks_backfill
         self.repo(self.root)

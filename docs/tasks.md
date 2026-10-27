@@ -138,3 +138,10 @@ Add `--drain-notices` to expire terminal machine notices through retained lifecy
 receipts when applying repairs. Normal `brain inbox` delivery also expires those
 notices after output succeeds. Source lines and exact answer evidence are retained;
 questions, worker failures and machine holds remain pending.
+
+Add `--archive-handled` to move strictly answered lines and expired terminal notices
+from `inbox.md` to `inbox-archive.md`. The plan reports the line count without writing.
+Apply durably retains each exact source line and its lifecycle episode proof before
+shortening the active inbox. A retry reuses that retained copy; publication failure
+leaves the source available. Pending questions, FYIs without answers, worker failures
+and active holds stay in the inbox. No task, requirement, answer or archive is deleted.
