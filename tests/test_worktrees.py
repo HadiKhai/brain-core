@@ -37,7 +37,7 @@ class Workbench(Scenario):
         self.b(root, 'new', 'app', '--title', 'App', '--home', str(home))
         marker, release = self.tmp / 'computed', self.tmp / 'release'
         # A separate process is essential: brain_lock is process-reentrant.
-        script = '''import json, os, sys, time
+        script = '''import json, os, subprocess, sys, time
 from pathlib import Path
 sys.path.insert(0, sys.argv[1] + '/lib')
 from brain import cli, events, instance
@@ -47,7 +47,10 @@ def paused(inst, node, *args):
     view = original(inst, node, *args)
     if node['id'] == 'app':
         assert instance._LOCK['fh'] is None, 'projection retained writer lock'
-        marker.write_text('computed')
+        head = subprocess.run(['git', 'rev-parse', 'HEAD'], cwd=node['home_path'],
+                              capture_output=True, text=True, check=True).stdout.strip()
+        with marker.open('a') as stream:
+            stream.write(json.dumps({'head': head, 'view': view, 'node': events.node_ref(node['id'])}) + '\\n')
         deadline = time.monotonic() + 20
         while not release.exists():
             if time.monotonic() > deadline: raise AssertionError('release missing')
@@ -81,7 +84,9 @@ cli.main()
                                         cwd=root, env=env, capture_output=True, text=True, timeout=10)
                 self.assertEqual(writer.returncode, 0, writer.stdout + writer.stderr)
             elif change == 'git':
+                old_head = self.git('rev-parse', 'HEAD', cwd=home).strip()
                 self.git('commit', '--allow-empty', '-qm', 'concurrent integration', cwd=home)
+                new_head = self.git('rev-parse', 'HEAD', cwd=home).strip()
             release.write_text('continue')
             out, err = child.communicate(timeout=20)
             self.assertEqual(child.returncode, 0, out + err)
@@ -93,9 +98,16 @@ cli.main()
         rows = [json.loads(line) for line in (root / '.brain/events.jsonl').read_text().splitlines()]
         commits = [row for row in rows if row['kind'] == 'commit']
         last = commits[-1]['data']
-        self.assertEqual(last['maintenance_ok'], change is None, out + err)
+        retried = command[0] == 'wt' and change == 'git'
+        self.assertEqual(last['maintenance_ok'], change is None or retried, out + err)
         self.assertEqual(last['command'], {'report': 'report', 'workbench': 'workbench', 'wt': 'wt_add'}[command[0]])
-        if change:
+        observations = [json.loads(line) for line in marker.read_text().splitlines()]
+        if retried:
+            self.assertEqual([row['head'] for row in observations], [old_head, new_head])
+            self.assertEqual(last['views'][observations[-1]['node']], observations[-1]['view'])
+        else:
+            self.assertEqual(len(observations), 1)
+        if change and not retried:
             self.assertEqual((root / 'nodes/app/status.md').read_bytes(), before)
             self.assertEqual(last['views'], {})
             self.assertTrue(last['invalidate'])
@@ -126,7 +138,7 @@ cli.main()
     def test_workbench_refuses_stale_projection_after_binding_write(self):
         self.projection_race(['workbench', 'app', '--path'], 'binding')
 
-    def test_wt_refuses_stale_projection_after_integration_moves(self):
+    def test_wt_recomputes_stale_projection_after_integration_moves(self):
         self.projection_race(['wt', 'add', 'app', 'job-race', '--no-setup'], 'git')
 
     def machine_unlocked(self, command):
