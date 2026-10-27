@@ -3610,3 +3610,12 @@ Legacy generated-map packets without that environment require a receipt.
 Policy signatures enclose the live load as well as classification.
 Full-receipt adoption defers preview validation until the original packet's
 environment is available; independent review and integration preflight stay first.
+
+## 2026-10-27: Bound nested gate-proof fixture initialization
+
+The enclosing-gate scenario initializes its nested instances through the existing
+isolated in-process setup helper and pristine initialized fixture templates.
+Each instance still gets independent files and fresh module state.
+The asserted gate commands, native lane execution, descriptor
+checks and environment restoration continue through their original paths. This
+removes repeated setup CLI startup from the existing 30-second subprocess bound.

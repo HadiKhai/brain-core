@@ -244,6 +244,9 @@ sys.path.insert(0,sys.argv[1]+'/lib')
 from pathlib import Path
 from brain.gate_lock import GATE_ENV, gate_inherited_fd
 from test_decision_gate import DecisionGate
+# Reuse isolated setup initialization inside this already nested CLI probe.
+DecisionGate.fixture_init_in_process = True
+DecisionGate.fixture_templates = True
 before={key:os.environ[key] for key in GATE_ENV}
 fd=gate_inherited_fd(Path.cwd(),os.environ,'root')
 identity=os.fstat(fd)
