@@ -25,6 +25,15 @@ OPERATION_TYPES = {'acquire', 'backup', 'migration', 'restart', 'acceptance', 'r
 POLL_SECONDS = 0.1
 
 
+def operation_remaining(deadline):
+    if deadline is None:
+        return None
+    seconds = deadline - time.monotonic()
+    if seconds <= 0:
+        raise ValueError('preview operation deadline exceeded; outcome unknown')
+    return seconds
+
+
 def strict_json(raw):
     def pairs(items):
         value = {}
@@ -63,7 +72,8 @@ def trusted_path(value, directory=False):
     return path
 
 
-def file_identity(path):
+def file_identity(path, deadline=None):
+    operation_remaining(deadline)
     path = trusted_path(str(path))
     with _m_common.directory_target(path) as target:
         with os.fdopen(target.open(), 'rb') as stream:
@@ -71,14 +81,17 @@ def file_identity(path):
             if before.st_size > 128 * 1024 * 1024:
                 raise ValueError('preview registered file exceeds identity limit')
             digest = hashlib.sha256()
-            deadline = time.monotonic() + CALL_SECONDS
+            hash_deadline = time.monotonic() + CALL_SECONDS
+            if deadline is not None:
+                hash_deadline = min(hash_deadline, deadline)
             for block in iter(lambda: stream.read(65536), b''):
-                if time.monotonic() >= deadline:
+                if time.monotonic() >= hash_deadline:
                     raise ValueError('preview registered file identity timed out')
                 digest.update(block)
             target.check_file(stream.fileno())
             if target.generation(before) != target.generation(os.fstat(stream.fileno())):
                 raise ValueError('preview file changed while reading')
+            operation_remaining(deadline)
             return [before.st_dev, before.st_ino, digest.hexdigest()]
 
 
@@ -96,7 +109,8 @@ def private_json(path):
     return strict_json(raw)
 
 
-def checkout_identity(path, head):
+def checkout_identity(path, head, deadline=None):
+    operation_remaining(deadline)
     path = trusted_path(path, directory=True)
     # Explicit configuration cannot turn this read into an fsmonitor command.
     env = {'PATH': '/usr/bin:/bin', 'LC_ALL': 'C', 'GIT_CONFIG_NOSYSTEM': '1',
@@ -105,19 +119,22 @@ def checkout_identity(path, head):
         try:
             output = bounded_process(['/usr/bin/git', '-c', 'core.fsmonitor=false',
                 '-c', 'core.untrackedCache=false', '-C', str(path), *args],
-                str(path), b'', env)
+                str(path), b'', env, operation_remaining(deadline))
         except subprocess.SubprocessError as error:
             raise ValueError('preview checkout identity unavailable') from error
+        operation_remaining(deadline)
         return output.decode('utf-8').strip()
     if git('rev-parse', '--show-toplevel') != str(path) or git('rev-parse', 'HEAD') != head:
         raise ValueError('preview checkout head mismatched')
     if git('status', '--porcelain', '--untracked-files=all', '--ignore-submodules=none'):
         raise ValueError('preview checkout must be clean')
     info = path.stat()
+    operation_remaining(deadline)
     return [info.st_dev, info.st_ino]
 
 
-def registration_identity(value):
+def registration_identity(value, deadline=None):
+    operation_remaining(deadline)
     if (not isinstance(value, dict) or set(value) not in (REGISTRATION_KEYS, REGISTRATION_KEYS | {'operation_deadlines'})
             or type(value['version']) is not int or value['version'] != 1
             or not isinstance(value['name'], str) or not re.fullmatch('[a-z][a-z0-9_-]{0,63}', value['name'])
@@ -133,7 +150,7 @@ def registration_identity(value):
                 or any(type(seconds) is not int or not 1 <= seconds <= 86400
                        for seconds in deadlines.values())):
             raise ValueError('invalid preview operation deadlines')
-    checkout = checkout_identity(value['checkout'], value['head'])
+    checkout = checkout_identity(value['checkout'], value['head'], deadline)
     executable = trusted_path(value['executable'])
     if not os.access(executable, os.X_OK) or str(executable) not in value['files']:
         raise ValueError('preview executable requires a pinned digest and execute permission')
@@ -141,7 +158,7 @@ def registration_identity(value):
     for path, digest in value['files'].items():
         if not isinstance(digest, str) or not re.fullmatch('[0-9a-f]{64}', digest):
             raise ValueError('invalid preview file digest')
-        identity = file_identity(path)
+        identity = file_identity(path, deadline)
         if identity[2] != digest:
             raise ValueError('preview registered file digest changed')
         files[path] = identity
@@ -150,6 +167,7 @@ def registration_identity(value):
     for arg in value['argv']:
         if arg.startswith('/') and arg not in files:
             raise ValueError('absolute preview argument requires a pinned file')
+    operation_remaining(deadline)
     return dict(checkout=checkout, files=files)
 
 
@@ -256,21 +274,16 @@ class StdioPreviewAdapter:
         self.path, self.saved = path, saved
         self.protocol = registration['protocol']
 
-    def check(self):
-        if private_json(self.path) != self.saved or registration_identity(self.registration) != self.identity:
+    def check(self, deadline=None):
+        operation_remaining(deadline)
+        if private_json(self.path) != self.saved or registration_identity(self.registration, deadline) != self.identity:
             raise ValueError('preview registration changed')
+        operation_remaining(deadline)
 
     def exchange(self, method, step, context, operation=None, deadline=None):
-        def remaining():
-            if deadline is None:
-                return None
-            seconds = deadline - time.monotonic()
-            if seconds <= 0:
-                raise ValueError('preview operation deadline exceeded; outcome unknown')
-            return seconds
-        remaining()
-        self.check()
-        remaining()
+        operation_remaining(deadline)
+        self.check(deadline)
+        operation_remaining(deadline)
         binding = dict(version=1, adapter=self.registration['name'], protocol=self.protocol,
             request_id=os.urandom(16).hex(), method=method, step=step,
             context_sha256=hashlib.sha256(json.dumps(context, sort_keys=True,
@@ -278,9 +291,9 @@ class StdioPreviewAdapter:
         if operation is not None:
             binding['operation'] = dict(operation)
         response = bounded_call([self.registration['executable'], *self.registration['argv']],
-                                self.registration['checkout'], {**binding, 'context': context}, remaining())
-        self.check()
-        remaining()
+                                self.registration['checkout'], {**binding, 'context': context}, operation_remaining(deadline))
+        self.check(deadline)
+        operation_remaining(deadline)
         if (not isinstance(response, dict) or set(response) != set(binding) | {'result'}
                 or type(response.get('version')) is not int
                 or any(response.get(key) != value for key, value in binding.items())):

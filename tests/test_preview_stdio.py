@@ -422,6 +422,44 @@ class PreviewLongOperations(Scenario):
         self.assertEqual([call['method'] for call in self.calls()], ['status'])
         self.assertEqual(list(self.tmp.glob('operation-*.json')), [])
 
+    def test_identity_git_calls_share_remaining_operation_deadline(self):
+        m = core_loader.SourceFileLoader('long_git_deadline', str(CORE / 'bin/brain')).load_module()
+        clock, budgets = [0], []
+        def git(argv, cwd, raw, env, seconds=None):
+            budgets.append(seconds)
+            clock[0] += .6
+            return str(self.tmp).encode() if '--show-toplevel' in argv else b'a' * 40
+        owner = m._owners['checkout_identity']
+        with mock.patch.object(owner, 'time', types.SimpleNamespace(monotonic=lambda: clock[0])), \
+                mock.patch.object(m, 'bounded_process', side_effect=git):
+            with self.assertRaisesRegex(ValueError, 'outcome unknown'):
+                m.checkout_identity(str(self.tmp), 'a'*40, deadline=1)
+        self.assertEqual(budgets, [1, .4])
+
+    def test_identity_hash_uses_operation_deadline_and_does_not_start_after_expiry(self):
+        m = core_loader.SourceFileLoader('long_hash_deadline', str(CORE / 'bin/brain')).load_module()
+        path = self.tmp / 'pinned-file'
+        path.write_bytes(b'x' * 131072)
+        owner = m._owners['file_identity']
+        real_sha256 = owner.hashlib.sha256
+        clock, updates = [0], []
+        class SlowDigest:
+            def __init__(self): self.inner = real_sha256()
+            def update(self, block):
+                updates.append(len(block))
+                self.inner.update(block)
+                clock[0] += 1
+            def hexdigest(self): return self.inner.hexdigest()
+        with mock.patch.object(owner, 'time', types.SimpleNamespace(monotonic=lambda: clock[0])), \
+                mock.patch.object(owner.hashlib, 'sha256', side_effect=SlowDigest):
+            with self.assertRaisesRegex(ValueError, 'identity timed out'):
+                m.file_identity(path, deadline=1)
+            with self.assertRaisesRegex(ValueError, 'outcome unknown'), \
+                    mock.patch.object(m, 'trusted_path') as trusted:
+                m.file_identity(path, deadline=1)
+            trusted.assert_not_called()
+        self.assertEqual(updates, [65536])
+
     def test_deadline_registration_refuses_invalid_maps_before_driver_invocation(self):
         root, _, _, packet, original = PreviewStdio.fixture(self, install=False)
         for deadlines in ({}, {'migration': True}, {'migration': 0}, {'migration': 86401},
