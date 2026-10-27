@@ -145,3 +145,6 @@ Apply durably retains each exact source line and its lifecycle episode proof bef
 shortening the active inbox. A retry reuses that retained copy; publication failure
 leaves the source available. Pending questions, FYIs without answers, worker failures
 and active holds stay in the inbox. No task, requirement, answer or archive is deleted.
+Publication shares the native inbox append lock and refuses a changed planning
+snapshot. Appenders that opened a replaced inbox retry its current inode; nonblocking
+hooks report contention so their existing question queue retains the message.

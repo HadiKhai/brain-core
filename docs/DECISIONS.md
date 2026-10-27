@@ -2854,6 +2854,11 @@ the retained episode/line marker, so an interrupted replacement cannot lose a me
 or duplicate its retained copy. Unknown state stays pending. Closed jobs use retained
 delivery evidence even when their worktrees have already been pruned.
 
+Archive publication fences both captured file generations and holds the native inbox
+append lock through source replacement. An appender verifies its opened inode after
+locking; a replaced inode is retried or reported busy to the hook's durable queue.
+The instance lock alone cannot fence nonblocking hook question delivery.
+
 Unlinked new task creation validates only the new record, with direct requirement
 lookups. Linked additions, existing-record edits and explicit task checks retain
 whole-graph validation, including qualified and cross-node return edges. This avoids repeatedly parsing every requirement

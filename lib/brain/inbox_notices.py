@@ -55,8 +55,15 @@ def archive_plan(inst, n, data):
         common.safe_target(path)
         if path.is_symlink():
             raise ValueError('inbox archive paths must be regular node-local files')
-    text = source.read_bytes().decode() if source.exists() else ''
-    old = archive.read_bytes().decode() if archive.exists() else ''
+    def snapshot(path):
+        with common.directory_target(path) as target:
+            generation = target.generation(target.stat())
+            text = target.read_bytes().decode() if generation else ''
+            if target.generation(target.stat()) != generation:
+                raise OSError('inbox archive input changed while planning')
+            return text, generation
+    text, source_generation = snapshot(source)
+    old, archive_generation = snapshot(archive)
     lines = text.splitlines(keepends=True)
     current = _m_reminders.reconcile_requests(
         inst, n, [line.rstrip('\r\n') for line in lines if line.startswith('- ')], copy.deepcopy(data))
@@ -77,11 +84,27 @@ def archive_plan(inst, n, data):
         episodes.append(record['id'])
     archived = old + (('\n' if old and not old.endswith('\n') else '') + ''.join(additions))
     return {'source': source, 'archive': archive, 'inbox_text': ''.join(kept),
-            'archive_text': archived, 'episodes': episodes}
+            'archive_text': archived, 'episodes': episodes,
+            'source_generation': source_generation, 'archive_generation': archive_generation}
+
+
+def archive_replace(target, text, generation):
+    target.atomic_write(text, expected=generation)
 
 
 def publish_archive(plan):
     if plan['episodes']:
-        # Always durably publish the retained copy first; retry deduplicates its markers.
-        common.atomic_write(plan['archive'], plan['archive_text'])
-        common.atomic_write(plan['source'], plan['inbox_text'])
+        import fcntl
+        import os
+        # Share the native append lock, retaining the original inode until replacement.
+        # Appenders recheck their opened inode after acquiring this lock.
+        with common.directory_target(plan['source']) as source:
+            with os.fdopen(source.open(), 'rb') as stream:
+                fcntl.flock(stream, fcntl.LOCK_EX)
+                source.check_file(stream.fileno())
+                if source.generation(os.fstat(stream.fileno())) != plan['source_generation']:
+                    raise OSError('inbox changed after archive planning; replan before publishing')
+                with common.directory_target(plan['archive']) as archive:
+                    # Always durably publish the retained copy first, with both snapshots fenced.
+                    archive_replace(archive, plan['archive_text'], plan['archive_generation'])
+                    archive_replace(source, plan['inbox_text'], plan['source_generation'])
