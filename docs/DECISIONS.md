@@ -2833,3 +2833,5 @@ clear and every strict assertion; production hourly coalescing is unchanged.
 ## Private rehearsal copy and alternate writer permissions
 
 Sampler/watcher lock writers and generated rehearsal diagnostics enforce 0600 on held inodes; rehearsal copying separates private state and private-mode sources from native cloning, writes copies through 0600 descriptors, and preserves ordinary shared modes after content fsync.
+
+Probe instance files and detached Git administration use the same checked copy writer, including tightening existing destination inodes before truncation. Source descriptors are opened nonblocking and validated as regular files before reading, so unsupported FIFOs refuse without hanging.

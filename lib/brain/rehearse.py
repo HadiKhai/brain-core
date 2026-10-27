@@ -330,11 +330,11 @@ def required(n):
 
 def isolated_probe_instance(inst, directory):
     """The shared transport helper's cache belongs in a private instance."""
-    shutil.copy2(inst.root / 'instance.md', directory / 'instance.md')
+    copy_regular_file((inst.root / 'instance.md').resolve(), directory / 'instance.md')
     for node in inst.nodes():
         dest = directory / node['dir'].relative_to(inst.root)
         dest.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(node['dir'] / 'node.md', dest / 'node.md')
+        copy_regular_file((node['dir'] / 'node.md').resolve(), dest / 'node.md')
     _m_common.atomic_write(directory / '.brain/local.json', json.dumps(inst.local), private=True, create=True)
     return _m_instance.Instance(directory)
 
@@ -492,10 +492,10 @@ def private_copy_file(path, mode=None):
             stat.S_IMODE(path.stat().st_mode if mode is None else mode) & 0o077 == 0)
 
 
-def copy_regular_file(source, dest):
+def copy_regular_file(source, dest, *, overwrite=False):
     # Never pass private content through copy2's ordinary-open-before-copystat
     # fallback, or a clone that preserves a legacy permissive source mode.
-    fd = os.open(source, os.O_RDONLY | os.O_NOFOLLOW)
+    fd = os.open(source, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     with os.fdopen(fd, 'rb') as incoming:
         saved = os.fstat(incoming.fileno())
         if not stat.S_ISREG(saved.st_mode):
@@ -504,7 +504,8 @@ def copy_regular_file(source, dest):
         if mode == 0o600 and saved.st_mode & stat.S_IXUSR and Path(source).suffix not in PRIVATE_COPY_DATA:
             mode |= stat.S_IXUSR  # retain execution of private helper programs
         with _m_common.directory_target(dest, private=True) as target:
-            with os.fdopen(target.open(os.O_WRONLY | os.O_CREAT | os.O_EXCL), 'wb') as outgoing:
+            flags = os.O_WRONLY | os.O_CREAT | (os.O_TRUNC if overwrite else os.O_EXCL)
+            with os.fdopen(target.open(flags), 'wb') as outgoing:
                 shutil.copyfileobj(incoming, outgoing)
                 outgoing.flush()
                 os.fsync(outgoing.fileno())
@@ -631,7 +632,7 @@ def capture_gitfiles(source, dest):
         for name in ('HEAD', 'index'):
             origin = (private_own if private_own is not None else own) / name
             if origin.is_file() and origin != metadata / name:
-                shutil.copy2(origin, metadata / name)
+                copy_regular_file(origin, metadata / name, overwrite=True)
         # The copied administration's old relative worktree binding is invalid
         # at its new location. Remove it before any Git discovery in this copy.
         copied_locks = []
@@ -715,7 +716,7 @@ def materialize_git(source, dest):
                 (Path(dp) / name).unlink()
     for name in ('HEAD', 'index'):
         if (own / name).is_file() and own / name != target / name:
-            shutil.copy2(own / name, target / name)
+            copy_regular_file(own / name, target / name, overwrite=True)
     # A copied submodule config can still name its old relative worktree. Bind
     # both directories explicitly while reading it, before replacing that config.
     config = _m_common.git('--git-dir=' + str(target), '--work-tree=' + str(dest),
