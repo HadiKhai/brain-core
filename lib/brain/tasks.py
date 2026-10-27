@@ -339,8 +339,12 @@ def command_changes(a):
         raise ValueError(a.task_id + ': unknown status or kind')
     if 'kind' in changes and changes['kind'] not in KINDS:
         raise ValueError(a.task_id + ': unknown status or kind')
-    if 'title' in changes and not changes['title'].strip():
+    if (a.action == 'add' or 'title' in changes) and not changes.get('title', '').strip():
         raise ValueError(a.task_id + ': title required')
+    if 'priority' in changes and changes['priority'] not in ('P0', 'P1', 'P2', 'P3'):
+        raise ValueError(a.task_id + ': priority must be P0-P3')
+    if 'source' in changes and changes['source'] not in ('local', 'linear'):
+        raise ValueError(a.task_id + ': invalid task source')
     return changes
 
 

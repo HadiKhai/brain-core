@@ -259,6 +259,9 @@ class ImportReview(Scenario):
             ['task', 'set', 'root', 'TASK-1', 'title=one', 'title=two'],
             ['task', 'set', 'root', 'TASK-1', 'unknown=value'],
             ['task', 'set', 'root', 'TASK-1', 'status=invalid'],
+            ['task', 'add', 'root', 'TASK-1'],
+            ['task', 'set', 'root', 'TASK-1', 'priority=P9'],
+            ['task', 'set', 'root', 'TASK-1', 'source=invalid'],
         ]
         for args in commands:
             with self.subTest(args=args), mock.patch.object(sys, 'argv', ['brain', *args]), \
