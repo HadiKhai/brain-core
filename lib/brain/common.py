@@ -499,24 +499,63 @@ def branch_refs(cwd):
 
 
 @contextlib.contextmanager
-def git_diff_index(cwd, env):
-    """Let Git refresh a private index while preserving its normal diff output.
+def git_read_index(cwd, env, *, diff=False):
+    """Isolate index refreshes while preserving Git's normal read output.
 
     Disabling diff.autoRefreshIndex changes name-only/raw output for stat-only
     changes. Git versions that ignore optional locks during diff must therefore
-    refresh a disposable copy instead of the caller's index.
+    refresh a disposable copy instead of the caller's index. Split-index reads
+    also need private per-worktree administration for their backing-file mtimes.
     """
     location = git('rev-parse', '--path-format=absolute', '--git-path', 'index', cwd=cwd, env=env)
     source = Path(location.stdout.removesuffix('\n')) if not location.returncode else None
     if source is None or not source.is_file():
         yield env  # no repository/index to refresh; preserve Git's own verdict
         return
+    with source.open('rb') as stream:
+        original = os.fstat(stream.fileno())
+        contents = stream.read()
+    split = b'link' in contents  # conservative: a filename may also contain it
+    if not diff and not split:
+        yield env
+        return
     with tempfile.TemporaryDirectory(prefix='brain-diff-index-') as temporary:
-        private = Path(temporary) / 'index'
-        shutil.copyfile(source, private)
-        for shared in source.parent.glob('sharedindex.*'):
-            shutil.copyfile(shared, Path(temporary) / shared.name)
-        yield {**env, 'GIT_INDEX_FILE': str(private)}
+        directory = Path(temporary)
+        private = directory / 'index'
+        private.write_bytes(contents)
+        # The source descriptor binds bytes and mtime even across an atomic
+        # index replacement. Git needs that mtime for racy-clean detection.
+        os.utime(private, ns=(original.st_atime_ns, original.st_mtime_ns))
+        child = {**env, 'GIT_INDEX_FILE': str(private)}
+        if split:
+            own = git('rev-parse', '--absolute-git-dir', cwd=cwd, env=env, check=True)
+            own = Path(own.stdout.removesuffix('\n'))
+            shared = list(own.glob('sharedindex.*'))
+            if shared:
+                # Split backing files live under GIT_DIR, not next to an
+                # alternate index. Reads freshen their mtimes even with -uno
+                # and optional locks disabled, so isolate the per-worktree
+                # administration while retaining the real object/ref store.
+                common = git('rev-parse', '--path-format=absolute', '--git-common-dir', cwd=cwd, env=env, check=True)
+                worktree = git('rev-parse', '--show-toplevel', cwd=cwd, env=env)
+                # Ref backends also inspect the commondir file, independently
+                # of GIT_COMMON_DIR. An alias keeps its line-oriented operand
+                # valid even when the real common directory contains newlines.
+                (directory / 'common').symlink_to(common.stdout.removesuffix('\n'), target_is_directory=True)
+                (directory / 'commondir').write_text('common\n')
+                for entry in own.iterdir():
+                    if entry.is_file() and entry.name not in ('index', 'commondir', 'gitdir', 'common') and not entry.name.endswith('.lock'):
+                        shutil.copy2(entry, directory / entry.name)
+                for name in ('info', 'refs', 'rebase-merge', 'rebase-apply', 'sequencer'):
+                    if (own / name).is_dir():
+                        shutil.copytree(own / name, directory / name, symlinks=True)
+                if (own / 'logs/HEAD').is_file():
+                    (directory / 'logs').mkdir()
+                    shutil.copy2(own / 'logs/HEAD', directory / 'logs/HEAD')
+                child.update(GIT_DIR=str(directory), GIT_COMMON_DIR=common.stdout.removesuffix('\n'))
+                if not worktree.returncode:
+                    child['GIT_WORK_TREE'] = worktree.stdout.removesuffix('\n')
+        yield child
 
 
 def git(*args, cwd=None, check=False, env=None):
@@ -564,7 +603,8 @@ def git(*args, cwd=None, check=False, env=None):
                 break
         if lock_query and lock_query[0] in ('status', 'diff'):
             env = {**(os.environ if env is None else env), 'GIT_OPTIONAL_LOCKS': '0'}
-        index = git_diff_index(cwd, env) if lock_query and lock_query[0] == 'diff' else contextlib.nullcontext(env)
+        index = (git_read_index(cwd, env, diff=lock_query[0] == 'diff')
+                 if lock_query and lock_query[0] in ('status', 'diff') else contextlib.nullcontext(env))
         with index as child_env:
             result = subprocess.run(["git", *(["-C", str(cwd)] if cwd else []), *args],
                                     capture_output=True, text=True, errors="replace", check=False, env=child_env)

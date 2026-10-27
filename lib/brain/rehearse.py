@@ -75,9 +75,12 @@ class NativeRetention:
             source = Path(__file__).resolve().parents[2]
             if 'source_binding' not in self.packet:
                 def git(*args):
-                    return subprocess.run(['git', '--no-optional-locks', '-c', 'diff.autoRefreshIndex=false',
-                                           '-C', str(source), *args], check=True,
-                                          capture_output=True, timeout=5).stdout
+                    env = {**os.environ, 'GIT_OPTIONAL_LOCKS': '0'}
+                    index = (_m_common.git_read_index(source, env, diff=True) if args[0] == 'diff'
+                             else contextlib.nullcontext(env))
+                    with index as child_env:
+                        return subprocess.run(['git', '--no-optional-locks', '-C', str(source), *args], check=True,
+                                              capture_output=True, timeout=5, env=child_env).stdout
                 names = ('bin/brain', 'lib/brain/rehearse.py', 'lib/brain/rehearse_transactions.py',
                          'lib/brain/events.py', 'lib/brain/instance.py', 'tests/scenario.py',
                          'tests/test_rehearse.py', 'tests/nightly_rehearse.py')

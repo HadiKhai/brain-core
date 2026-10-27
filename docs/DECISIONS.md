@@ -2767,7 +2767,9 @@ revision label uses `status -uno`: it describes tracked code changes and already
 excluded untracked files. Tests cover stale index metadata, an existing index
 lock, explicit environment overrides, and paths with spaces, Unicode or newlines.
 Git diff can refresh stale index metadata even with optional locks disabled.
-Shared diff calls therefore use a disposable private index, preserving normal
-name-only/raw output; disabling automatic refresh would expose stat-only changes.
-The separate retention diagnostic emits a binary patch and can safely disable
-`diff.autoRefreshIndex` along with optional locks.
+Shared diff calls and the binary retention diagnostic therefore use a disposable
+private index, preserving normal name-only/raw output; disabling automatic refresh
+would expose stat-only changes. Copies preserve the source descriptor's mtime for
+racy-clean detection. Split-index status/diff reads also isolate per-worktree
+administration, because Git freshens backing-file mtimes even without optional
+locks. The original object/ref store remains authoritative; writers stay unchanged.

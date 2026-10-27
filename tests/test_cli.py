@@ -775,10 +775,15 @@ class GitReadLocks(Scenario):
             path.write_text('synthetic diagnostic source\n')
         self.git('add', '-A', cwd=root)
         self.git('commit', '-qm', 'diagnostic fixture', cwd=root)
+        self.git('update-index', '--split-index', cwd=root)
+        backing = list((root / '.git').glob('sharedindex.*'))
+        self.assertTrue(backing)
+        for shared in backing:
+            os.utime(shared, ns=(1_000_000_000, 1_000_000_000))
         original = (root / 'README.md').stat()
         os.utime(root / 'README.md', ns=(original.st_atime_ns, original.st_mtime_ns + 2_000_000_000))
         index = root / '.git/index'
-        before = index.stat().st_ino, index.stat().st_mtime_ns, index.read_bytes()
+        before = {p: (p.stat().st_ino, p.stat().st_mtime_ns, p.read_bytes()) for p in [index, *backing]}
         owned, evidence = self.tmp / 'owned', self.tmp / 'evidence'
         owned.mkdir()
         evidence.mkdir(mode=0o700)
@@ -789,7 +794,7 @@ class GitReadLocks(Scenario):
         self.assertEqual(retention.packet['retention_errors'], [])
         self.assertEqual(retention.packet['source_binding']['head'], self.git('rev-parse', 'HEAD', cwd=root).strip())
         self.assertTrue(list(evidence.glob('native-retention-*.json')))
-        self.assertEqual((index.stat().st_ino, index.stat().st_mtime_ns, index.read_bytes()), before)
+        self.assertEqual({p: (p.stat().st_ino, p.stat().st_mtime_ns, p.read_bytes()) for p in [index, *backing]}, before)
 
     def test_diff_against_head_preserves_the_source_index(self):
         root = self.repo(self.tmp / 'diff café\nwith spaces')
@@ -832,3 +837,79 @@ class GitReadLocks(Scenario):
         self.assertEqual(env['GIT_INDEX_FILE'], str(custom))
         self.assertEqual(env['GIT_OPTIONAL_LOCKS'], '1')
         self.assertEqual(foreign.read_bytes(), b'foreign index lock')
+
+    def test_private_diff_index_keeps_racy_clean_detection(self):
+        root = self.repo(self.tmp / 'racy source')
+        self.git('config', 'core.trustctime', 'false', cwd=root)
+        path = root / 'README.md'
+        instant = 1_600_000_000_000_000_000
+        os.utime(path, ns=(instant, instant))
+        self.git('add', 'README.md', cwd=root)
+        index = root / '.git/index'
+        os.utime(index, ns=(instant, instant))
+        path.write_text('other\n')  # same length as the fixture's hello newline
+        os.utime(path, ns=(instant, instant))
+        (root / '.git/index.lock').write_bytes(b'foreign')
+        expected = subprocess.run(['git', '--no-optional-locks', '-C', str(root), 'diff', '--name-only'],
+                                  env=self.env, capture_output=True, text=True, check=True)
+        with mock.patch.dict(os.environ, self.env, clear=True):
+            actual = self.common.git('diff', '--name-only', cwd=root, check=True)
+        self.assertEqual(expected.stdout, 'README.md\n')
+        self.assertEqual(actual.stdout, expected.stdout)
+
+    def test_split_index_reads_keep_backing_metadata_and_outside_indexes(self):
+        root = self.repo(self.tmp / 'split backing café\nsource')
+        self.git('update-index', '--split-index', cwd=root)
+        shared = list((root / '.git').glob('sharedindex.*'))
+        self.assertTrue(shared)
+        outside = self.tmp / 'outside index\n雪'
+        shutil.copy2(root / '.git/index', outside)
+        (root / 'README.md').write_text('tracked change\n')
+        (root / 'new.txt').write_text('untracked change\n')
+        for source in (root / '.git/index', outside):
+            env = {**self.env, 'GIT_INDEX_FILE': str(source)}
+            foreign = Path(str(source) + '.lock')
+            foreign.write_bytes(b'foreign')
+            for query in [('status', '--porcelain=v1', '-z', '-uall'), ('status', '--porcelain=v1', '-z', '-uno'),
+                          ('diff', '--name-only', '-z'), ('diff', '--binary', 'HEAD')]:
+                with self.subTest(index=source.name, query=query):
+                    expected = subprocess.run(['git', '--no-optional-locks', '-C', str(root), *query],
+                                              env=env, capture_output=True, text=True, check=True)
+                    for backing in shared:
+                        os.utime(backing, ns=(1_000_000_000, 1_000_000_000))
+                    def metadata():
+                        return {p: (p.stat().st_ino, p.stat().st_mtime_ns, p.read_bytes()) for p in [source, *shared]}
+                    before = metadata()
+                    with mock.patch.dict(os.environ, self.env, clear=True):
+                        actual = self.common.git(*query, cwd=root, env=env, check=True)
+                    self.assertEqual((actual.stdout, actual.stderr), (expected.stdout, expected.stderr))
+                    self.assertEqual(metadata(), before)
+            self.assertEqual(foreign.read_bytes(), b'foreign')
+            foreign.unlink()
+
+    def test_split_linked_worktree_keeps_common_refs_and_worktree_configuration(self):
+        home = self.repo(self.tmp / 'common store')
+        root = self.tmp / 'linked café\ncheckout'
+        self.git('worktree', 'add', '-qb', 'worker', str(root), cwd=home)
+        self.git('config', 'extensions.worktreeConfig', 'true', cwd=home)
+        self.git('config', '--worktree', 'core.quotePath', 'false', cwd=root)
+        self.git('update-index', '--split-index', cwd=root)
+        own = Path(self.git('rev-parse', '--absolute-git-dir', cwd=root).removesuffix('\n'))
+        backing = list(own.glob('sharedindex.*'))
+        self.assertTrue(backing)
+        index = own / 'index'
+        lock = own / 'index.lock'
+        lock.write_bytes(b'foreign')
+        (root / 'README.md').write_text('tracked change\n')
+        (root / '雪.txt').write_text('new change\n')
+        for query in [('status', '--short', '--branch'), ('diff', '--name-only', 'HEAD')]:
+            expected = subprocess.run(['git', '--no-optional-locks', '-C', str(root), *query],
+                                      env=self.env, capture_output=True, text=True, check=True)
+            for shared in backing:
+                os.utime(shared, ns=(1_000_000_000, 1_000_000_000))
+            before = {p: (p.stat().st_ino, p.stat().st_mtime_ns, p.read_bytes()) for p in [index, *backing]}
+            with mock.patch.dict(os.environ, self.env, clear=True):
+                actual = self.common.git(*query, cwd=root, check=True)
+            self.assertEqual((actual.stdout, actual.stderr), (expected.stdout, expected.stderr))
+            self.assertEqual({p: (p.stat().st_ino, p.stat().st_mtime_ns, p.read_bytes()) for p in [index, *backing]}, before)
+        self.assertEqual(lock.read_bytes(), b'foreign')
