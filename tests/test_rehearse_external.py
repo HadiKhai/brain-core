@@ -182,7 +182,13 @@ with OwnedCopies(parent=sys.argv[1]) as copies:
             process.kill()  # only the worker this fixture just started
             process.communicate(timeout=5)
             deadline = time.monotonic() + 5
-            while (root / 'bulk').exists() and time.monotonic() < deadline:
+            # Bulk disappears when staged; wait for deletion and final publication too.
+            while time.monotonic() < deadline:
+                if (not (root / 'bulk').exists()
+                        and json.loads((root / 'cleanup.json').read_text())['state'] == 'removed'
+                        and not any(root.glob('.cleanup.json.*'))
+                        and not any(root.glob('retiring-*'))):
+                    break
                 time.sleep(.02)
             self.assertFalse((root / 'bulk').exists())
             self.assertEqual(['cleanup.json'], [p.name for p in root.iterdir()])
