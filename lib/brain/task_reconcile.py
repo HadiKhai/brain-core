@@ -7,6 +7,7 @@ from collections import Counter
 from pathlib import Path
 
 from . import common as _m_common
+from . import events as _m_events
 from . import inbox_notices as _m_notices
 from . import instance as _m_instance
 from . import jobs as _m_jobs
@@ -213,7 +214,7 @@ def plan_node(inst, n, lifecycle):
 
 def reconcile(inst, nodes, apply=False, drain=False, archive=False):
     """Default is a read-only plan. Apply never removes records or changes the ledger."""
-    with _m_instance.brain_lock(inst) if apply else contextlib.nullcontext():
+    with inst.commit_batch('Reconcile imported task records without deleting sources') if apply else contextlib.nullcontext():
         lifecycle = _m_reminders.lifecycle_read(inst)
         plans = [(n, plan_node(inst, n, lifecycle)) for n in nodes]
         if drain:
@@ -238,12 +239,14 @@ def reconcile(inst, nodes, apply=False, drain=False, archive=False):
                 _m_notices.expire(inst, nodes)
             for archived in archives:
                 _m_notices.publish_archive(archived)
-            inst.commit([], 'Reconcile imported task records without deleting sources')
             # Publication follows the entire durable batch, including interrupted replays.
             for n in nodes:
                 for row in _m_tasks.read_records(n).values():
                     if row.get('reconcile_rule') == DECISION and row.get('event_pending') == 'task_landed':
                         _m_tasks.emit_task_landed(inst, n, row)
+            # A fact consumer can flush other pending tasks while dispatch is
+            # reentrancy-guarded. Acknowledge those facts in this same batch too.
+            _m_events.dispatch_landings(inst)
         return [plan[0] for _, plan in plans]
 
 

@@ -3486,3 +3486,20 @@ descriptor and permissions before returning, without opening the usage database
 or reading transcript bytes. Background slices share one database snapshot.
 The filling marker names the outstanding token-file counts while accounting is
 partial, and disappears only when the displayed reading is complete.
+
+## 2026-10-27: Landing completes task IDs and reconciliation commits one batch
+
+Native land/train publication and verified job closure complete the exact task
+IDs bound to delivered jobs as `done`, with the integration commit on local main
+as evidence. Retain each job's changed paths, task baseline, scope validation,
+attempt identity and exact verification requirements. Incomplete proof stays
+parked. Existing landing facts make eligible blocked dependents ready without
+dispatching work or removing holds. Coordinators record waits through task
+add/set `depends_on`, whose ID, ownership and cycle checks remain authoritative.
+
+Reconcile-records apply owns one locked commit batch on its instance. Publication,
+synchronous landing-event consumers and dependent updates share that commit;
+journal facts and pending intents remain durable for interruption recovery.
+Nested commits defer their paths rather than staging unrelated work. Read-only
+planning does not enter the batch. Board and canvas match/attempt totals exclude
+dropped records until the explicit Show dropped toggle includes them.

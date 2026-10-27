@@ -23,6 +23,8 @@ as a rule. Provider issue references on external-backed nodes await a provider p
 ```sh
 brain task requirement-add demo REQ-1 --quote 'Export a report' --at '2026-01-01 10:00 +00:00' --ref inbox.md:4
 brain task add demo APP-1 --title 'Export report' requirement=REQ-1 decisions=repo:D123,private:D-12 owner=developer status=ready scope=report.py
+brain task add demo APP-2 depends_on=APP-1 --title 'Publish the export'
+brain task set demo APP-2 depends_on=APP-1,other:APP-3
 brain task next demo --json
 brain wt add demo job/export --task-id APP-1
 brain task list demo --status parked
@@ -77,7 +79,20 @@ with `source=local`. Network errors retain the mirror and pending write intent.
 ## Preserve obligations across attempts and dependencies
 
 Cross-node dependencies use `node:id` and require the same owner set and sealing
-boundary. `task reconcile <node> --event-id <landing-ref>` reevaluates dependents
+boundary. Record "waits on X" with `brain task add ... depends_on=X` or
+`brain task set ... depends_on=X,Y,other:Z`; prose is not a dependency record.
+The IDs must exist, and cycles (including cross-node cycles) are refused before
+writing. `depends_on=` clears the list explicitly. Local task edits preserve
+provider ownership of externally managed dependencies.
+
+Landing through `brain land` / `brain train` or verified job closure marks each
+delivered task ID `done`, retains its changed code scope, and records the landed
+main commit. A release publishes that already reconciled train; it does not infer
+additional delivered tasks from prose or branch names. Missing verification or
+incomplete scope remains parked. The landing event automatically makes blocked
+dependents ready once all their dependencies are proved complete, respecting
+holds and capacity; it does not start a job.
+`task reconcile <node> --event-id <landing-ref>` reevaluates dependents
 idempotently. The event journal calls this on landing. A node/ancestor pause,
 `tasks.hold`, per-task `hold`, native machine hold or configured `tasks.capacity`
 prevents dispatch; review dates never remove a hold. `task brief <node>` indexes
@@ -129,6 +144,9 @@ imports inbox messages, status history, closed attempts, or their requirements.
 requirement totals/drops and pending inbox lines. Reads do not drain notices.
 
 `brain task reconcile-records NODE` plans repairs without writing. Add `--apply`
+to publish the whole repair, task landing events and dependent updates in one
+commit, including `--all` batches. Durable pending events survive an interrupted
+publication and are retried without duplicating landing facts. Use `--apply`
 to retain non-work imports as dropped with a per-node private decision. Exact
 main-delivery evidence closes imported jobs; abandoned attempts retain their ledger
 cause, and incomplete evidence remains parked with a resume action. The command

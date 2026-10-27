@@ -27,6 +27,59 @@ class BatchLand(Scenario):
             inst = m.Instance(root)
         return m, inst, inst.node('a')
 
+    def task_job(self, ident, branch):
+        self.b(self.root, 'task', 'add', 'a', ident, 'status=ready', 'scope=' + branch,
+               '--title', 'Deliver ' + branch)
+        self.b(self.root, 'wt', 'add', 'a', branch, '--task-id', ident)
+        local = json.loads((self.root / '.brain/local.json').read_text())
+        wt = Path(local['nodes']['a']['worktrees'][branch]['path'])
+        (wt / branch).write_text(branch + '\n')
+        self.git('add', branch, cwd=wt)
+        self.git('commit', '-qm', branch, cwd=wt)
+        self.b(self.root, 'handback', 'a', '--branch', branch, '--state', 'done',
+               '--summary', 'Synthetic result', '--reviews', '1')
+
+    def test_native_land_completes_delivered_task_ids_at_main_and_unblocks_dependents(self):
+        root, home = self.project()
+        self.task_job('DELIVER-1', 'one')
+        self.task_job('DELIVER-2', 'two')
+        self.b(root, 'task', 'add', 'a', 'FOLLOW', 'status=blocked', 'depends_on=DELIVER-1,DELIVER-2',
+               '--title', 'Wait for both')
+        self.b(root, 'task', 'add', 'a', 'UNRELATED', '--title', 'Separate work')
+        self.b(root, 'land', 'a', '--jobs', 'one', 'two')
+        main = self.git('rev-parse', 'main', cwd=home).strip()
+        rows = {r['id']: r for r in json.loads(self.b(root, 'task', 'list', 'a', '--json'))}
+        for index, branch in enumerate(('one', 'two'), 1):
+            task = rows['DELIVER-' + str(index)]
+            self.assertEqual(task['status'], 'done')
+            self.assertEqual(task['merge_sha'], main)
+            self.assertEqual(task['code_path'], branch)
+            self.assertEqual(task['attempts'][0]['state'], 'closed')
+            self.assertTrue(task['landing_event'])
+        self.assertEqual(rows['FOLLOW']['status'], 'ready')
+        self.assertEqual(rows['UNRELATED']['status'], 'backlog')
+        self.b(root, 'task', 'check', 'a')
+
+    def test_native_manual_landing_uses_main_commit_beyond_the_delivered_job_head(self):
+        root, home = self.project()
+        self.task_job('DELIVER', 'one')
+        branch_head = self.git('rev-parse', 'one', cwd=home).strip()
+        self.b(root, 'task', 'add', 'a', 'FOLLOW', 'status=blocked', 'depends_on=DELIVER',
+               '--title', 'Follow delivered job')
+        self.git('merge', '--ff-only', 'one', cwd=home)
+        (home / 'later').write_text('Separate later work\n')
+        self.git('add', 'later', cwd=home)
+        self.git('commit', '-qm', 'Later main work', cwd=home)
+        main = self.git('rev-parse', 'main', cwd=home).strip()
+        self.assertNotEqual(branch_head, main)
+        self.b(root, 'jobs', 'a', '--branch', 'one', '--close')
+        rows = {r['id']: r for r in json.loads(self.b(root, 'task', 'list', 'a', '--json'))}
+        self.assertEqual(rows['DELIVER']['status'], 'done')
+        self.assertEqual(rows['DELIVER']['merge_sha'], main)
+        self.assertEqual(rows['DELIVER']['code_path'], 'one')
+        self.assertEqual(rows['FOLLOW']['status'], 'ready')
+        self.assertIn(branch_head, ' '.join(rows['DELIVER']['evidence']))
+
     def test_foreign_occupied_same_tip_never_owns_publication(self):
         root, home = self.project()
         self.job('one')
