@@ -2731,6 +2731,7 @@ wait, in `.brain/timings/events.jsonl`. The operational journal retains its
 existing transaction records. Commands over five seconds also save cumulative
 function profiles. `brain timings --slow --command due` retrieves observations;
 arguments, transcript text and raw session identities never enter these records.
+The timing stream has a separate `lock_wait_s` field, and timing-write failures never fail the command.
 
 Inbox computation and due watcher scans run outside the exclusive instance lock.
 Inbox delivery precedes a short transaction that rereads and merges reporter

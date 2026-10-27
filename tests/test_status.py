@@ -646,12 +646,14 @@ class AutonomyInbox(Scenario):
         with mock.patch.dict(os.environ, {**self.env, 'BRAIN_ROOT': str(root)}), \
                 mock.patch.object(sys, 'argv', ['brain', 'now']), mock.patch.object(tm, 'SLOW_SECONDS', 0):
             with tm.command():
+                tm.record('lock_wait', 0.125)
                 with tm.phase('fixture'):
                     sum(range(100))
         self.assertEqual(journal.read_bytes() if journal.exists() else None, before)
         self.assertTrue((root / '.brain/timings/events.jsonl').is_file())
         rows = json.loads(self.b(root, 'timings', '--slow', '--command', 'now', '--json'))
         self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]['lock_wait_s'], 0.125)
         self.assertGreaterEqual(rows[0]['phases']['fixture'], 0)
         profile = json.loads((root / '.brain/timings' / rows[0]['profile']).read_text())
         self.assertTrue(profile['top'])
@@ -663,6 +665,18 @@ class AutonomyInbox(Scenario):
             with tm.command():
                 pass  # optional telemetry cannot turn a successful read into failure
         self.assertEqual(m.pending(m.read(m.Instance(root))), {})
+
+    def test_timed_writes_keep_operational_commit_and_abort_as_last_rows(self):
+        root = self.init('demo')
+        journal = root / '.brain/events.jsonl'
+        self.b(root, 'new', 'app', '--title', 'App')
+        self.assertEqual(json.loads(journal.read_text().splitlines()[-1])['kind'], 'commit')
+        self.b(root, 'set', 'app', 'id=other', ok=False)
+        self.assertEqual(json.loads(journal.read_text().splitlines()[-1])['kind'], 'abort')
+        timings = json.loads(self.b(root, 'timings', '--command', 'set', '--json'))
+        self.assertTrue(timings)
+        self.assertFalse(timings[-1]['success'])
+        self.assertGreaterEqual(timings[-1]['lock_wait_s'], 0)
 
     def test_long_inbox_read_does_not_block_status_refresh(self):
         self.assert_read_does_not_block_status('inbox')
