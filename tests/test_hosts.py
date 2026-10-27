@@ -1922,8 +1922,7 @@ class NativeHostExport(Scenario):
     def rpc(self, name, args):
         if name == 't3_thread_read':
             return {'thread': {'threadId': args['threadId'], 'activeRunId': None,
-                               'latestRunId': 'run-worker' if args['threadId'] == 'fixture-worker' else 'run-root',
-                               'status': 'failed' if args['threadId'] == 'fixture-worker' else 'running'}, 'recentRuns': []}
+                               'latestRunId': 'run-root', 'status': 'running'}, 'recentRuns': []}
         if name == 't3_thread_list':
             return {'threads': [{'threadId': 'fixture-root', 'status': 'running', 'latestRunId': 'run-root'},
                                 {'threadId': 'fixture-worker', 'status': 'failed', 'latestRunId': 'run-worker'}],
@@ -1958,7 +1957,7 @@ class NativeHostExport(Scenario):
         now = self.inst.now_dt()
         started = (now - datetime.timedelta(minutes=25)).isoformat()
         def rpc(name, args):
-            if name == 't3_thread_read' and args['threadId'] == 'fixture-root':
+            if name == 't3_thread_read':
                 return {'thread': {'threadId': 'fixture-root', 'activeRunId': 'run-root',
                                    'latestRunId': 'run-root', 'status': 'running'},
                         'recentRuns': [{'runId': 'run-root', 'startedAt': started, 'status': 'running'}]}
@@ -1974,7 +1973,7 @@ class NativeHostExport(Scenario):
 
     def test_unknown_or_mismatched_active_run_does_not_invent_start_time(self):
         def rpc(name, args):
-            if name == 't3_thread_read' and args['threadId'] == 'fixture-root':
+            if name == 't3_thread_read':
                 return {'thread': {'threadId': 'fixture-root', 'activeRunId': 'new-run',
                                    'latestRunId': 'new-run', 'status': 'running'},
                         'recentRuns': [{'runId': 'run-root', 'startedAt': '2026-01-01T00:00:00Z', 'status': 'running'}]}

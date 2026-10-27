@@ -258,7 +258,7 @@ def wake_is_question(item):
 def wake_root_policy(inst, n, refs):
     target, _ = wake_target(inst, n)
     if target['id'] == 'root' and target['local'].get('wake_policy') == 'questions':
-        return [i for i in refs if wake_is_question(i) or i.get('kind') == 'worker-failure']
+        return [i for i in refs if wake_is_question(i)]
     return refs
 
 
