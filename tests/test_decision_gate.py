@@ -119,7 +119,10 @@ def pause(seconds):
  print('admission-barrier',file=sys.stderr,flush=True)
  sys.stdin.readline()
  reading['load_per_cpu']=[0,0,0]
-with mock.patch.object(m,'machine_reading',side_effect=lambda inst=None:dict(reading)), mock.patch.object(m.time,'sleep',side_effect=pause):
+wait=m.machine_wait
+def admission(*args,**kwargs):
+ return wait(*args,**kwargs,read=lambda:dict(reading),pause=pause)
+with mock.patch.object(m,'machine_wait',side_effect=admission):
  m.cmd_heavy(argparse.Namespace(node=None))
 print('running-barrier',file=sys.stderr,flush=True)
 sys.stdin.readline()
