@@ -37,7 +37,7 @@ class EventAppend(Scenario):
 
     def test_short_writers_prepare_facts_and_machine_text_without_the_writer_lock(self):
         from brain import status
-        for command in ('set', 'task', 'handback'):
+        for command in ('set', 'task', 'handback', 'wt_add', 'wt_setup', 'upgrade'):
             with self.subTest(command=command):
                 root = self.init('unlocked-' + command)
                 home = self.repo(self.tmp / ('code-' + command))
