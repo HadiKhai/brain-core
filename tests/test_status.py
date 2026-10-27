@@ -2258,3 +2258,58 @@ class IncrementalFacts(Scenario):
         with self.m._m_spend.spend_read_only():
             self.facts()
         self.assertFalse((self.root / '.brain/usage.sqlite').exists())
+
+
+    def test_json_surrogate_in_hidden_worker_fields_is_a_valid_cache_input(self):
+        self.row['Ended'] = ''
+        self.row['Outcome'] = ''
+        projection = {'branch': 'job/one', 'state': 'open', 'summary': json.loads('"\\ud800"'),
+                      'historical_summary': None, 'ledger': self.row, 'admission': None,
+                      'queue': None, 'next_action': 'inspect'}
+        self.state['job_projections'] = {self.jobs.job_key(self.row): projection}
+        with mock.patch.object(self.m._m_verify, 'read_ready_packet', return_value=None):
+            first = self.facts()
+            self.assertEqual(self.facts(), first)
+            self.assertNotIn(projection['summary'], '\n'.join(first[0]))
+
+    def test_invalid_configured_timezone_binds_the_process_fallback_zone(self):
+        import time
+        if not hasattr(time, 'tzset'):
+            self.skipTest('process timezone switching unavailable')
+        self.inst.tz = 'invalid/facts-zone'
+        try:
+            with mock.patch.dict(os.environ, {'TZ': 'UTC0'}):
+                time.tzset()
+                utc = self.facts()[0]
+            with mock.patch.dict(os.environ, {'TZ': 'EST5'}):
+                time.tzset()
+                eastern = self.facts()[0]
+            self.assertNotEqual(utc, eastern)
+            self.assertIn('- 2026-10-20 11:00 +00:00: job/one (2 commits)', utc)
+            self.assertIn('- 2026-10-20 06:00 -05:00: job/one (2 commits)', eastern)
+        finally:
+            time.tzset()
+
+
+    def test_alternating_merge_baselines_reuse_two_bounded_generations(self):
+        self.facts()
+        known = [self.jobs.job_key(self.row)]
+        self.facts(known=known)
+        with mock.patch.object(self.m, 'display_time', side_effect=AssertionError('baseline thrash')):
+            self.facts()
+            self.facts(known=known)
+
+    def test_irrelevant_admission_telemetry_does_not_invalidate_rendered_sections(self):
+        self.row['Ended'] = ''
+        self.row['Outcome'] = ''
+        projection = {'branch': 'job/one', 'state': 'queued', 'summary': '', 'historical_summary': None,
+                      'ledger': self.row, 'admission': {'position': 1, 'owner': 'fixture', 'recorded_at': 1},
+                      'queue': None, 'next_action': 'wait'}
+        self.state['job_projections'] = {self.jobs.job_key(self.row): projection}
+        with mock.patch.object(self.m._m_verify, 'read_ready_packet', return_value=None):
+            first = self.facts()
+            projection['admission']['recorded_at'] = 2
+            with mock.patch.object(self.m, 'display_time', side_effect=AssertionError('telemetry invalidated running display')):
+                self.assertEqual(self.facts(), first)
+            projection['admission']['position'] = 2
+            self.assertNotEqual(self.facts(), first)

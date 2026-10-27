@@ -3662,7 +3662,9 @@ private derived database. Ledger records, local worktree/ref observations, worke
 projections, merge baseline, metadata mode, timezone and privacy terms bind each
 section. Input dictionaries retain their order. Only changed sections render
 again; missing or damaged storage falls back to fresh computation. Cache entries
-are bound to implementation bytes and contain no raw input records.
+are bound to implementation bytes and contain no raw input records. Two bounded
+generations accommodate alternating merge baselines within the same display
+context; admission telemetry that is not rendered does not invalidate strings.
 
 Tasks, inbox requests, time thresholds, reminder lifecycle and readiness are
 observed on every command. No cached status section authorizes an action or skips

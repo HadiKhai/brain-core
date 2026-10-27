@@ -5,6 +5,7 @@ import json
 import os
 import re
 import sys
+import time
 import urllib.parse
 import uuid
 from contextlib import contextmanager
@@ -1087,7 +1088,10 @@ def ledger_facts(inst, n, state, known_merges, metadata_only, sections, terms):
     projections = [state.get('job_projections', {}).get(_m_jobs.job_key(r)) or _m_attempts.job_projection(inst, n, r)
                    for r in state['jobs'] or [] if not r['Ended']]
     lines += ["", "Running jobs (open in ledger; a hand-back means the worker stopped):"]
-    lines += sections.render('running', projections, lambda: [
+    running_inputs = [(p['branch'], p['state'], p['summary'] if not metadata_only else '',
+                       p['historical_summary'] if not metadata_only else '',
+                       p['ledger']['Started'], p['ledger']['Reviews']) for p in projections]
+    lines += sections.render('running', running_inputs, lambda: [
         _m_guard.redact(f"- {p['branch']}: {p['state']}; host activity unknown; " +
                        ('runtime activity unknown; ' if p['state'] == 'open' else '') +
                        ('summary retained in worker record' if metadata_only else
@@ -1107,7 +1111,13 @@ def ledger_facts(inst, n, state, known_merges, metadata_only, sections, terms):
         if len(projections) > 8:
             result.append(f'{len(projections) - 8} more open jobs; brain jobs --live lists all recorded rows.')
         return result
-    lines += sections.render('active', projections, active)
+    active_inputs = []
+    for p in projections[:8]:
+        queue = p['admission'] or p['queue']
+        active_inputs.append((p['branch'], p['state'], p['summary'] if not metadata_only else '',
+                              p['historical_summary'] if not metadata_only else '', p['next_action'],
+                              (queue.get('position'), queue.get('owner')) if queue else None))
+    lines += sections.render('active', [len(projections), active_inputs], active)
     switches = [r for r in state['jobs'] or [] if r.get('Switches')]
     if switches:
         lines += ['', 'Runtime switches (recorded):']
@@ -1146,7 +1156,8 @@ def status_facts(inst, n, state, known_merges, metadata_only=False):
     from . import facts_cache, usage_cache
     terms = _m_guard.never_terms(n)
     with usage_cache.database(inst, readonly=_m_spend._SPEND_READ_ONLY.get()) as cache:
-        sections = facts_cache.Sections(cache, n['id'], [inst.tz, metadata_only, terms])
+        fallback_zone = None if inst.zone() else (os.environ.get('TZ'), time.tzname, time.timezone, time.altzone)
+        sections = facts_cache.Sections(cache, n['id'], [inst.tz, fallback_zone, metadata_only, terms])
         lines, merged, lesson_lines, forecasts = ledger_facts(
             inst, n, state, known_merges, metadata_only, sections, terms)
     # These observations include time thresholds, source validation and lifecycle
