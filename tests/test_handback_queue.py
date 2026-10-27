@@ -69,6 +69,51 @@ class HandbackLifecycle(Scenario):
         self.assertLess(m.intent_receipt(inst, first['id'])['sequence'], m.intent_receipt(inst, second['id'])['sequence'])
         self.assertEqual(m.intent_receipt(inst, second['id'])['state'], 'applied')
 
+    def test_write_rejection_receipt_keeps_order_and_wait_never_locks(self):
+        m, inst, n, row = self.fixture()
+        rejected = m.submit_intent(inst, dict(kind='task', node='root', task='MISSING', changes={'priority': 'P1'}), start=False)
+        following = m.submit_intent(inst, dict(kind='inbox', node='root', text='After rejection', at=inst.now()), start=False)
+        with mock.patch.dict(os.environ, self.env, clear=True), mock.patch.object(m.Instance, 'commit'):
+            m.drain_intents(inst)
+        self.assertEqual(m.intent_receipt(inst, rejected['id'])['state'], 'rejected')
+        self.assertIn('task not found', m.intent_receipt(inst, rejected['id'])['reason'])
+        self.assertEqual(m.intent_receipt(inst, following['id'])['state'], 'applied')
+        with mock.patch.object(m, 'brain_lock', side_effect=AssertionError('receipt reader locked')), \
+                mock.patch.object(m, 'find_root', return_value=inst.root), \
+                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit) as exit:
+                m.cmd_intent_queue(argparse.Namespace(action='wait', id=rejected['id'], timeout=0))
+            self.assertEqual(exit.exception.code, 1)
+            m.cmd_intent_queue(argparse.Namespace(action='wait', id=following['id'], timeout=0))
+            with self.assertRaises(SystemExit):
+                m.cmd_intent_queue(argparse.Namespace(action='wait', id='f' * 32, timeout=0))
+
+    def test_write_archive_retains_identity_and_malformed_shapes_block(self):
+        m, inst, n, row = self.fixture()
+        request = m.submit_intent(inst, dict(kind='inbox', node='root', text='Retained identity', at=inst.now()), start=False)
+        with mock.patch.dict(os.environ, self.env, clear=True), mock.patch.object(m.Instance, 'commit'):
+            m.apply_intent(inst, request)
+            (n['dir'] / 'inbox-archive.md').write_text((n['dir'] / 'inbox.md').read_text())
+            (n['dir'] / 'inbox.md').write_text('')
+            m.apply_intent(inst, request)
+        self.assertEqual((n['dir'] / 'inbox.md').read_text(), '')
+        self.assertEqual((n['dir'] / 'inbox-archive.md').read_text().count(request['id']), 1)
+        m.intent_store(inst, request['id'] + '.request', [])
+        with self.assertRaisesRegex(ValueError, 'blocked'):
+            m.intent_index(inst)
+
+    def test_write_inbox_commit_failure_retains_replay_instead_of_false_rejection(self):
+        m, inst, n, row = self.fixture()
+        request = m.submit_intent(inst, dict(kind='inbox', node='root', text='Commit retry', at=inst.now()), start=False)
+        with mock.patch.dict(os.environ, self.env, clear=True):
+            with mock.patch.object(m.Instance, 'commit', side_effect=SystemExit(1)), self.assertRaises(RuntimeError):
+                m.drain_intents(inst)
+            self.assertIsNone(m.intent_receipt(inst, request['id']))
+            with mock.patch.object(m.Instance, 'commit'):
+                m.drain_intents(inst)
+        self.assertEqual((n['dir'] / 'inbox.md').read_text().count(request['id']), 1)
+        self.assertEqual(m.intent_receipt(inst, request['id'])['state'], 'applied')
+
     def test_write_task_replay_compares_before_after_and_refuses_drift(self):
         m, inst, n, row = self.fixture()
         m.mutate(inst, n, 'TASK1', {'title': 'Before', 'owner': 'fixture'}, create=True)
@@ -105,6 +150,12 @@ class HandbackLifecycle(Scenario):
                            ['authority=operator'], ['contract=path'], ['priority=P1', 'status=ready']):
                 args.fields = fields
                 self.assertFalse(m.fast_intent(args, inst.root), fields)
+            handback = argparse.Namespace(f=m.cmd_handback, id='root', branch=row['Job'], state='done',
+                         summary='Checked result', question=None, lessons=None, report=None, reviews=1, enqueue=True)
+            self.assertFalse(m.fast_intent(handback, inst.root))
+            handback.reviews, handback.state = None, 'blocked'
+            self.assertTrue(m.fast_intent(handback, inst.root))
+        self.assertIsNone(m.current_attempt(n, row))
 
     def test_write_applier_lease_is_exclusive_and_submission_starts_detached(self):
         m, inst, n, row = self.fixture()

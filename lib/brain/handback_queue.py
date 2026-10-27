@@ -269,11 +269,18 @@ def apply_intent(inst, data):
         raise ValueError('unsafe instance links; write request rejected')
     if payload['kind'] == 'inbox':
         marker = '<!-- write-request:' + identity + ' -->'
+        line = '- ' + payload['at'] + ' from brain: ' + payload['text'] + ' ' + marker + '\n'
+        try:
+            prepared = intent_read(inst, identity + '.prepared')
+        except FileNotFoundError:
+            prepared = dict(hash=data['hash'], line=line)
+            intent_store(inst, identity + '.prepared', prepared, exclusive=True)
+        if prepared != dict(hash=data['hash'], line=line):
+            raise RuntimeError('inbox preparation identity changed')
         # Archives retain the marker. A death after append must not resurrect it.
         archived = archived_intent_marker(n, marker)
         if not archived:
-            transitions.inbox_append(n['dir'], '- ' + payload['at'] + ' from brain: ' +
-                                     payload['text'] + ' ' + marker + '\n', marker)
+            transitions.inbox_append(n['dir'], line, marker)
         _m_common.touch(n['dir'] / 'inbox.md')
         _m_common.sync_directory(n['dir'])
         inst.commit([], n['id'] + ': inbox item')
