@@ -1430,6 +1430,11 @@ def cmd_machine(a):
         machine_sample_once(inst)
         from . import host_observations as _m_host_observations
         _m_host_observations.host_export_if_enabled(inst)
+        from . import worker_failures as _m_worker_failures
+        try:
+            _m_worker_failures.resume_failures_if_enabled(inst)
+        except (OSError, ValueError):
+            print('worker recovery unavailable; retained state needs inspection')
         from . import host_tasks as _m_host_tasks
         _m_host_tasks.host_task_refresh_if_enabled(inst)
         from . import dispatcher as _m_dispatcher

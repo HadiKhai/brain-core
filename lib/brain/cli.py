@@ -537,6 +537,7 @@ def _main():
     t.add_argument("id"); t.add_argument("branch"); t.add_argument("--base")
     t.add_argument("--no-setup", action="store_true", dest="no_setup")
     t.add_argument("--task-id", help="ready task to link to this job")
+    t.add_argument("--thread", help="existing builder thread to bind to the new job")
     t.set_defaults(f=_Command("worktrees", "cmd_wt_add"))
     t = wsub.add_parser('env', help='set machine-local per-worktree environment overrides; values are never printed')
     t.add_argument('id'); t.add_argument('branch'); t.add_argument('pairs', nargs='*')
