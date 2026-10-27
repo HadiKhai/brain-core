@@ -143,15 +143,34 @@ class GitInputs:
             return
         paths, replay, before = self.pending.pop(key)
         value = (result.returncode, result.stdout)
-        if before != generation(paths) or key in self.queries and self.queries[key][-1] != value:
+        after = generation(paths)
+        if before != after:
+            # One unrelated commit may land during the query itself. Compare
+            # its semantic answer once instead of refusing on ref clocks alone.
+            checked, after = self.reread(args, cwd, env, paths)
+            if checked != value:
+                common.die('status refresh inputs changed during computation; retry from fresh state')
+        if key in self.queries and self.queries[key][-1] != value:
             common.die('status refresh inputs changed during computation; retry from fresh state')
-        self.queries[key] = (env, paths, replay, before, value)
+        self.queries[key] = (env, paths, replay, after, value)
+
+    def reread(self, args, cwd, env, paths):
+        before = generation(paths)
+        token = common._GIT_OBSERVER.set(None)
+        try:
+            result = common.git(*args, cwd=cwd, env=dict(os.environ) if env is None else env)
+        finally:
+            common._GIT_OBSERVER.reset(token)
+        after = generation(paths)
+        if before != after:
+            common.die('status refresh Git inputs kept changing during validation; retry from fresh state')
+        return (result.returncode, result.stdout), after
 
     def validate(self):
         for (args, cwd), (env, paths, replay, stamp, before) in self.queries.items():
             if replay or generation(paths) != stamp:
-                after = common.git(*args, cwd=cwd, env=dict(os.environ) if env is None else env)
-                if (after.returncode, after.stdout) != before:
+                after, _stamp = self.reread(args, cwd, env, paths)
+                if after != before:
                     common.die('status refresh inputs changed during computation; retry from fresh state')
 
 

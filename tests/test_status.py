@@ -516,6 +516,27 @@ with instance.brain_lock(instance.Instance(__import__('pathlib').Path(sys.argv[2
         with self.assertRaisesRegex(SystemExit, 'status refresh inputs changed'):
             refresh.compute(inst, inst.node('app'), changed)
 
+    def test_refresh_accepts_unrelated_commit_inside_a_git_query(self):
+        root, home, wt = self.project()
+        loader = core_loader.SourceFileLoader('refresh_commit_during_query', str(CORE / 'bin/brain'))
+        m = loader.load_module()
+        refresh = __import__('importlib').import_module(loader.package_name + '.status_refresh')
+        inst = m.Instance(root)
+        base = self.git('rev-parse', 'HEAD', cwd=home).strip()
+        run = subprocess.run
+        committed = []
+        def interleave(command, *args, **kwargs):
+            if 'merge-base' in command and not committed:
+                self.assertIsNone(refresh.instance._LOCK['fh'])
+                committed.append(True)
+                self.git('commit', '--allow-empty', '-qm', 'unrelated commit during query', cwd=home)
+            return run(command, *args, **kwargs)
+        def prepare(current, target):
+            return refresh.common.git('merge-base', '--is-ancestor', base, 'refs/heads/main', cwd=home).returncode
+        with mock.patch.object(subprocess, 'run', side_effect=interleave):
+            self.assertEqual(refresh.compute(inst, inst.node('app'), prepare), 0)
+        self.assertTrue(committed)
+
     def test_refresh_reports_maintenance_refusal_as_failure(self):
         root = self.init('alice')
         loader = core_loader.SourceFileLoader('refresh_maintenance_failure', str(CORE / 'bin/brain'))
