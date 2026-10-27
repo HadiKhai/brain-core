@@ -1832,6 +1832,32 @@ class AckAllShown(Scenario):
             m.wake_drain(self.inst, n, once=True)
             self.assertEqual(send.call_count, 1)
 
+    def test_history_is_parsed_once_per_file_generation(self):
+        m, n = self.m, self.inst.node('root')
+        binding = m.wake_owner_binding(self.inst, n)
+        history = m.wake_directory(self.inst, n) / 'history.json'
+        history.parent.mkdir(parents=True, exist_ok=True)
+        def write(key):
+            row = {'at': 1.0, 'items': [], 'snapshot': [{'id': key * 64, 'kind': 'inbox'}], 'ack_binding': binding}
+            history.write_text(json.dumps({'version': 1, 'deliveries': [row]}))
+        write('a')
+        parse = m.wake_history_parse
+        with mock.patch.object(m, 'wake_history_parse', side_effect=parse) as parsed:
+            for _ in range(3):
+                self.assertEqual(m.wake_shown(self.inst, n), {'a' * 64})
+            m.wake_history(history.parent).append('caller-owned copy')
+            self.assertEqual(len(m.wake_history(history.parent)), 1)
+            self.assertEqual(parsed.call_count, 1)
+            write('b')  # same size, rewritten in place: change clocks still miss
+            self.assertEqual(m.wake_shown(self.inst, n), {'b' * 64})
+            self.assertEqual(parsed.call_count, 2)
+            history.write_text('{"version": 1, "deliveries": [{}]}')
+            self.assertEqual(m.wake_shown(self.inst, n), set())
+            with self.assertRaises(ValueError):
+                m.wake_history(history.parent)
+            history.unlink()
+            self.assertEqual(m.wake_history(history.parent), [])
+
     def test_shown_receipt_preserves_corrupt_bytes_and_retries_publication(self):
         m, n = self.m, self.inst.node('root')
         refs = [{'id': str(i) * 64, 'kind': 'inbox'} for i in (1, 2)]

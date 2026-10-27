@@ -227,8 +227,11 @@ def wake_shown(inst, n):
         pass  # preserve unknown evidence; valid delivery history can still certify work
     try:
         binding = wake_owner_binding(inst, n)
-        shown.update(i['id'] for row in wake_history(wake_directory(inst, n))
-                     if row.get('ack_binding') == binding for i in row.get('snapshot', []))
+        _, history, acknowledged = wake_history_entry(wake_directory(inst, n))
+        if binding not in acknowledged:
+            acknowledged[binding] = frozenset(i['id'] for row in history if row.get('ack_binding') == binding
+                                              for i in row.get('snapshot', []))
+        shown.update(acknowledged[binding])
     except (OSError, ValueError):
         pass  # unknown evidence never certifies delivery
     return shown
@@ -285,11 +288,37 @@ def wake_log_refs(refs):
     return [{'id': i['id'], 'kind': i['kind']} for i in refs]
 
 
-def wake_history(directory):
+# Validated delivery history by path and file identity. Every publication replaces
+# the file (atomic_write), so a changed inode or ctime marks each new generation.
+_WAKE_HISTORY_CACHE = {}
+
+
+def wake_history_entry(directory):
+    """(fingerprint, validated rows, acknowledged ids by binding); rows are shared, never mutated."""
     path = directory / 'history.json'
-    if not path.exists():
-        return []
-    value = json.loads(path.read_text())
+    try:
+        stream = path.open('rb')
+    except FileNotFoundError:
+        _WAKE_HISTORY_CACHE.pop(str(path), None)
+        return None, (), {}
+    with stream:
+        info = os.fstat(stream.fileno())
+        fingerprint = (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+        entry = _WAKE_HISTORY_CACHE.get(str(path))
+        if entry and entry[0] == fingerprint:
+            return entry
+        _WAKE_HISTORY_CACHE.pop(str(path), None)
+        entry = (fingerprint, tuple(wake_history_parse(stream.read())), {})
+    _WAKE_HISTORY_CACHE[str(path)] = entry
+    return entry
+
+
+def wake_history(directory):
+    return list(wake_history_entry(directory)[1])
+
+
+def wake_history_parse(data):
+    value = json.loads(data)
     if not isinstance(value, dict) or value.get('version') != 1 or not isinstance(value.get('deliveries'), list):
         raise ValueError('invalid wake history')
     for row in value['deliveries']:
