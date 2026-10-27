@@ -19,6 +19,16 @@ from . import history
 
 _PROJECTION = ContextVar('dashboard_projection', default=None)
 _USAGE_CACHE = ContextVar('dashboard_usage_cache', default=None)
+_CACHE_WRITES = ContextVar('dashboard_cache_writes', default=True)
+
+
+@contextlib.contextmanager
+def cache_writes(enabled):
+    token = _CACHE_WRITES.set(bool(enabled) and _CACHE_WRITES.get())
+    try:
+        yield
+    finally:
+        _CACHE_WRITES.reset(token)
 
 
 def projection(root):
@@ -31,11 +41,12 @@ class Observation:
         self.root = root.resolve()
         self.records = {}
 
-    def store(self, path, reader):
+    def store(self, path, reader, select=None):
         key = str(path)
         if key not in self.records:
             self.records[key] = reader()
-        return copy.deepcopy(self.records[key])
+        value = self.records[key]
+        return copy.deepcopy(select(value) if select is not None else value)
 
 
 @contextlib.contextmanager
@@ -82,7 +93,7 @@ class ReadModel:
             return None
 
     def write(self, name, value):
-        if not self.writable:
+        if not self.writable or not _CACHE_WRITES.get():
             return False
         text = json.dumps(value, separators=(',', ':'), sort_keys=True)
         if len(text.encode()) > self.MAX_BYTES:

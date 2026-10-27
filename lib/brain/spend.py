@@ -40,17 +40,24 @@ SPEND_MODEL = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,79}")
 SPEND_RECENT = 64  # Claude splits one response into a few adjacent records: ids remembered to count it once
 
 
+@functools.lru_cache(maxsize=128)
+def spend_month(year, month):
+    """Pure calendar arithmetic, independent of any transcript or observation."""
+    return (datetime.date(int(year), int(month), 1).toordinal() - 719163) * 86400
+
+
 def spend_stamp(raw):
-    """A record's UTC time in seconds, from the raw line (both runtimes write UTC `…Z` stamps). Codex puts it
-    first, Claude Code near the end: the last one in the line is the record's own."""
+    """The last compact timestamp in a record, interpreted as UTC."""
     at = raw.rfind(b'"timestamp":"')
     m = SPEND_STAMP.match(raw, at) if at >= 0 else None
     if not m:
         return None
-    import calendar
     try:
-        y, mo, d, h, mi, sec = (int(x) for x in m.groups()[:6])
-        return calendar.timegm((y, mo, d, h, mi, sec, 0, 0, 0)) + (float(m[7]) if m[7] else 0.0)
+        # calendar.timegm normalizes day/hour/minute/second overflow. Preserve
+        # that behavior while reusing the immutable month's Gregorian epoch.
+        return (spend_month(m[1], m[2]) + (int(m[3]) - 1) * 86400 +
+                int(m[4]) * 3600 + int(m[5]) * 60 + int(m[6]) +
+                (float(m[7]) if m[7] else 0.0))
     except (ValueError, OverflowError):
         return None
 
@@ -750,6 +757,10 @@ def codex_discovery_source(path, allowed, forbidden):
 @ui_discovery
 def codex_index(inst, cfg, allowed, forbidden):
     """One metadata scan per command; persist only opaque session/location identities."""
+    from . import ui_readmodel
+    display = ui_readmodel.usage_cache()
+    if display is not None and display.inst.root.resolve() != inst.root.resolve():
+        display = None
     out = []
     with _m_usage_cache.database(inst, readonly=_SPEND_READ_ONLY.get()) as cache:
         for root in (cfg / 'sessions', cfg / 'archived_sessions'):
@@ -765,9 +776,21 @@ def codex_index(inst, cfg, allowed, forbidden):
                              st.st_mode, st.st_nlink]
                     key = 'discovery:' + opaque(str(path))
                     saved = cache.get(key)
-                    if not (isinstance(saved, dict) and saved.get('version') == SPEND_VERSION
-                            and saved.get('stamp') == stamp and isinstance(saved.get('places'), list)
-                            and all(isinstance(saved.get(k), str) for k in ('id', 'parent', 'job'))):
+                    display_key = 'discovery-' + opaque(str(path))
+                    if display is not None and not valid_discovery(saved, stamp):
+                        candidate = display.read(display_key)
+                        if valid_discovery(candidate, stamp):
+                            fh, _ = _m_history.history_open(path, allowed, forbidden)
+                            if fh is not None:
+                                with fh:
+                                    current = os.fstat(fh.fileno())
+                                    identity = [current.st_dev, current.st_ino, current.st_size,
+                                                current.st_mtime_ns, current.st_ctime_ns,
+                                                current.st_mode, current.st_nlink]
+                                    if identity != stamp:
+                                        raise DiscoveryIncomplete('session discovery changed during lookup')
+                                    saved = candidate
+                    if not valid_discovery(saved, stamp):
                         for attempt in range(3):
                             try:
                                 observed = codex_discovery_source(path, allowed, forbidden)
@@ -789,12 +812,28 @@ def codex_index(inst, cfg, allowed, forbidden):
                                      parent=opaque(parent) if parent else '', places=places,
                                      job=job)
                         cache.put(key, saved)
+                        if display is not None:
+                            display.write(display_key, saved)
                     out.append((path, saved, st.st_mtime))
                 except DiscoveryIncomplete:
                     raise  # never turn an incomplete permitted source into an absent session
                 except (OSError, ValueError, RuntimeError):
                     continue
     return out
+
+
+def valid_discovery(value, stamp):
+    """Private UI discovery records contain only canonical digests and identities."""
+    def digest(text):
+        return isinstance(text, str) and re.fullmatch('[0-9a-f]{16}', text) is not None
+    return (isinstance(value, dict) and set(value) == {'version', 'stamp', 'id', 'parent', 'places', 'job'}
+            and type(value['version']) is int and value['version'] == SPEND_VERSION
+            and isinstance(value['stamp'], list) and all(type(item) is int for item in value['stamp'])
+            and value['stamp'] == stamp and digest(value['id'])
+            and (value['parent'] == '' or digest(value['parent']))
+            and isinstance(value['places'], list) and all(digest(item) for item in value['places'])
+            and isinstance(value['job'], str) and (value['job'] == '' or re.fullmatch(
+                '[0-9a-f]{24}', value['job']) is not None))
 
 
 def job_window(inst, row):
@@ -1046,9 +1085,16 @@ def job_round_usage(inst, n, row, usage):
     time since their acknowledgement instead of charging the previous worker's hours.
     """
     from . import reminders as _m_reminders
+    from . import ui_readmodel
     key = _m_jobs.digest([n['id'], _m_jobs.job_key(row)])
-    with _m_reminders.lifecycle_store(inst, readonly=True) as data:
-        record = data['usage'].get(key)
+    view = ui_readmodel.projection(inst.root)
+    if view is not None:
+        record = view.store(inst.root / '.brain/wake/lifecycle.json',
+                            lambda: _m_reminders.lifecycle_read(inst),
+                            select=lambda data: data['usage'].get(key))
+    else:
+        with _m_reminders.lifecycle_store(inst, readonly=True) as data:
+            record = data['usage'].get(key)
     if record is None:
         return None
     if not isinstance(record, dict) or record.get('job') != _m_jobs.job_key(row):

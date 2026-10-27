@@ -90,6 +90,21 @@ def lifecycle_store(inst, readonly=False):
             _m_machine.machine_publish(inst, folder / 'lifecycle.json', after + '\n')
 
 
+@contextlib.contextmanager
+def usage_restart_store(inst, key):
+    """Detach one projected restart record, retaining the real ledger bound."""
+    from . import ui_readmodel
+    view = ui_readmodel.projection(inst.root)
+    if view is not None:
+        record, present, count = view.store(inst.root / '.brain/wake/lifecycle.json',
+            lambda: lifecycle_read(inst),
+            select=lambda data: (data['usage'].get(key, {}), key in data['usage'], len(data['usage'])))
+        yield {'usage': {key: record} if present else {}}, count
+    else:
+        with lifecycle_store(inst) as data:
+            yield data, len(data['usage'])
+
+
 @_m_command_reads.memo
 def usage_restart_item(inst, n, row):
     """One protected restart need per job and successful rebrief baseline."""
@@ -101,7 +116,7 @@ def usage_restart_item(inst, n, row):
     key = _m_jobs.digest([n['id'], _m_jobs.job_key(row)])
     budget = (_m_spend.job_budget(n, row) or {}).get('tokens')
     budget = budget if type(budget) in (int, float) and budget > 0 else None
-    with lifecycle_store(inst) as data:
+    with usage_restart_store(inst, key) as (data, usage_size):
         record = data['usage'].get(key, {})
         if not isinstance(record, dict):
             raise ValueError('invalid restart usage receipt')
@@ -123,7 +138,7 @@ def usage_restart_item(inst, n, row):
         if not episode and not crossed:
             return None
         if not episode:
-            if len(data['usage']) >= LIFECYCLE_LIMIT and key not in data['usage']:
+            if usage_size >= LIFECYCLE_LIMIT and key not in data['usage']:
                 raise ValueError('restart receipt bound reached')
             from . import ui_readmodel
             episode = ui_readmodel.episode(inst, [key, baseline, record])

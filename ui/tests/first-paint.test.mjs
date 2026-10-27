@@ -78,3 +78,12 @@ test('a failed refresh keeps the partial reading marked and explains why details
     assert.ok(live.readingMarker(value, { version: 1 }, connection, now).includes(connection));
   assert.match(live.readingMarker({ ...value, brain: { filling_in: true } }, null, 'Live', now), /Filling in.*age unknown/);
 });
+
+test('the last complete reading shows its capture time until the replacement arrives', () => {
+  const now = Date.parse('2026-01-01T16:32:00Z');
+  const value = { brain: { now: '2026-01-01T16:00:00Z', tz: 'UTC' },
+    source: { kind: 'cached-full', built_at: '2026-01-01T16:31:00Z' }, __ui_version: '1' };
+  assert.match(live.readingMarker(value, { version: 1, refreshing: true }, 'Live', now), /As of 16:31.*Refreshing.*60s old/);
+  assert.match(live.readingMarker(value, { version: 1 }, 'Live', now), /As of 16:31/);
+  assert.equal(live.readingMarker({ ...value, source: { kind: 'live' } }, { version: 1 }, 'Live', now), null);
+});

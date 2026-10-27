@@ -3291,3 +3291,116 @@ The accessor reads without registration, instance locking or telemetry writes,
 rechecks authority before emitting JSON, and refuses unavailable/stale bindings.
 It changes neither global preview/review URLs nor recording/readiness policy.
 The recorder still validates the supplied receipt against live authority.
+
+A working file must still open successfully and retain its complete descriptor
+identity before a clean verdict is reused. Index reuse additionally requires a
+prior complete canonical body read in that object store, with unchanged readable
+loose-object or pack/index storage. Alternates and replacement refs disable that
+shortcut. Changed storage during reuse reports an incomplete scan; cache damage,
+unavailable storage and publication races fall back to current source reads.
+The complete loaded schema must contain only the allowed digest/OID keys,
+boolean verdicts and bounded integer identities; any malformed record rebuilds
+the artifact. Reftable storage conservatively disables persistent index reuse.
+Git directory/index bindings are checked around each inventory and after use.
+Fresh tagged Git inventories distinguish untracked names from stage records,
+including names containing tabs/newlines. At most four inventory/file readers
+overlap in copied command contexts; labels, ordering and publication remain in
+the caller. Large bodies retain bounded streaming while their Git IDs are hashed.
+An inventoried repository retains its classification if its Git marker disappears;
+saved inventory errors and later binding failures cannot become a plain folder scan.
+Regular-file checks use a freshly opened nonblocking descriptor, preventing a FIFO
+replacement from blocking and avoiding a redundant pathname stat on each warm file.
+Scanner identity includes its compiled implementation as well as source hashes,
+so a command loaded before an upgrade cannot publish as the newly installed code.
+The compiled identity includes normalized positional and keyword-only defaults;
+unsupported defaults disable persistent reuse/publication while source scanning
+continues normally.
+Only exact immutable scalar/tuple defaults are supported. Callable, mutable,
+unordered and subclass defaults remain opaque and disable persistence; keyword
+binding order is preserved. The streaming hash helper selects SHA-1 inside its
+constructor from a None default instead of encoding a callable as a bare symbol.
+Read commands share branch tips, commit dates and linked-worktree HEADs from one
+ref/worktree enumeration per repository. Ancestry queries, commit counts and
+clean-title checks share one commit graph per base, with roots pinned to the
+enumerated commit IDs even if refs move during the command. Unfinished-title findings retain the original Git
+log order. Configured signature display retains the native date-log read. These
+derived reads expire at the end of the command, without a time
+limit or persistent authority. Failed or malformed batches fall back to the
+individual Git reads, including local job-state observations. Read-only `ready`
+uses this scope; readiness recording and other write paths keep their existing
+reads and writes.
+
+## Reduce transcript candidate and timestamp overhead
+
+Usage parsing uses one compiled byte-pattern search for the existing candidate
+markers instead of repeatedly scanning large tool-output lines. Candidate JSON
+parsing and accounting rules stay unchanged. UTC timestamp conversion reuses
+pure Gregorian month arithmetic in a bounded cache; the key contains only year
+and month. Day, hour, minute and second overflow retains calendar.timegm's
+normalization, and fractional seconds retain their previous interpretation.
+No transcript observation or accounting result is retained by this arithmetic
+cache, and the aggregate schema does not change.
+
+## Retain guard blob verdicts for detached dashboard fills
+
+A full detached dashboard fill keeps its own term verdicts under the private
+UI cache directory. It uses the scanner's existing compiled/source identity,
+policy, descriptor, object-storage and Git-binding checks. Every fill still
+reads inventories, paths, refs and commit messages; a changed source, unsafe
+storage or damaged cache falls back to scanning. The ordinary check cache and
+its explicit publication policy remain separate. A fill whose optional storage
+was refused does not publish this cache.
+
+## Preserve generation-aware watchers and revalidate warm file reads
+
+Integration keeps one generation-aware WatchGroups definition. Both the
+persistent and per-command term-file shortcuts recheck the opened descriptor
+after cache lookup; a concurrent change reports an incomplete scan. Warm
+lookups retain the same descriptor-stability obligation as complete body reads.
+
+The compiled candidate filter described above is removed: full-parser samples
+showed a regression despite an isolated candidate-search win. Retain literal
+candidate checks and the independent Gregorian-month arithmetic optimization.
+
+## Select one detached lifecycle record before copying
+
+Read-only round-usage projection selects its job record from the command's
+captured lifecycle ledger before making a defensive deep copy. Unrelated
+receipts are not copied for each job. The selected nested data remains detached,
+mutations cannot reach the captured ledger, and a new observation reads current
+source state. Mutating projections retain whole-ledger defensive copies.
+
+## Bound independent dashboard worktree reads
+
+Full worktree projection runs at most four independent readers concurrently.
+Each reader inherits the command's observation, Git and readiness contexts;
+shared refs are resolved before launch. Results retain sorted branch order,
+closed work remains metadata-only, and any source failure rejects the complete
+result instead of publishing a partial list.
+
+Projected restart advice also detaches only its selected usage record. The
+projection carries the original ledger entry count separately, so selecting a
+small record cannot bypass the global capacity bound. Explicit restart writes
+retain the ordinary whole-ledger lock and publication path.
+
+## Retain private source-bound session discovery for dashboard rebuilds
+
+Dashboard fills retain canonical session-discovery digests beside their usage
+aggregates. Metadata reuse requires the current parser version and complete
+file identity, and opens the current source descriptor before accepting a UI
+cache hit. A changed descriptor is incomplete; malformed records and older
+versions trigger native source discovery. Records contain opaque identifiers,
+location digests and numeric identities only. Current allowed/forbidden source
+roots are checked independently on each discovery pass.
+
+Disabling optional dashboard storage now applies to nested usage and discovery
+publication as well as the final snapshot. Nested scopes cannot re-enable
+publication denied by an outer read-only scope. Ordinary accounting storage
+and explicit accounting commands retain their existing behavior.
+
+
+## 2026-10-27: Open the last complete dashboard reading while its replacement builds
+
+An authenticated browser startup may seed its first response from the existing private full JSON snapshot only after the existing code, instance, scan selection, word policy and allowed-source privacy binding validates. Explicitly partial/unavailable-format records fall back to the file-only startup. The displayed capture timestamp and age stay attached to that reading; a background rebuild replaces it only after usage and metadata are complete. Cached deliveries revalidate the stored snapshot and current privacy policy. Browser full rebuilds persist a complete snapshot under their original privacy fence. A changed core version intentionally invalidates the old snapshot, so installation needs one complete fill under the new version before this warm startup path is available.
+
+Concurrent explicit JSON waiters first attempt the fill lock without blocking. A follower joins the existing owner, then consumes its newly published validated complete generation. It never queues another rebuild; failed or unpublished owners fail closed for the follower. The source-bound input-index work is parked separately while this urgent 7.3a change is reviewed.
