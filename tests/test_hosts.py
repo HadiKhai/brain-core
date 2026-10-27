@@ -65,6 +65,11 @@ class LockHotfix(Scenario):
             args = ['machine', 'sample'] if site.startswith('sample') else ['wake', 'root', '--drain']
             if site.startswith('task'):
                 args = ['task', 'add', 'root', 'PROOF-1', '--title', 'Fixture task']
+                if site == 'task_projection':
+                    # Open additions skip unrelated projection; managed indexes retain it.
+                    (root / 'source.md').write_text('Fixture source\n')
+                    self.b(root, 'set', 'root', 'upstream_generator=links',
+                           'upstream_inputs=source.md', 'upstream_output=index.md')
             if site == 'wake':
                 self.b(root, 'set', 'root', 'coordinator=old-owner', 'wake=exit 0')
                 m = core_loader.SourceFileLoader('compute_wake', str(CORE / 'bin/brain')).load_module()
