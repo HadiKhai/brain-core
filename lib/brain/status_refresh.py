@@ -385,7 +385,11 @@ def fenced(inst, n, build, all_nodes, targets, extra):
         bindings = [(Path(w['path']), Path(w['path']).is_dir())
                     for target in selected for w in target['local'].get('worktrees', {}).values()]
         def paths():
-            return [path for target in selected for path in input_paths(current, target)] + list(extra() if callable(extra) else extra)
+            # Instance policy (inherited status_source, timezone) is read too;
+            # released() fences it, and a held build must as well.
+            policy = [current.root / 'instance.md', (current.root / 'instance.md').resolve()]
+            return ([path for target in selected for path in input_paths(current, target)] + policy +
+                    list(extra() if callable(extra) else extra))
         with (contextlib.nullcontext() if instance.holding() else instance.released(inst, list(current.nodes()))):
             token = _ACTIVE.set(True)
             observer = common._GIT_OBSERVER.set(git_inputs.observe)

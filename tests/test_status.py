@@ -501,9 +501,12 @@ class AutonomyFacts(AutonomyProject):
         self.assertEqual(compare.call_count, 0)
         self.assertEqual((root / 'status.md').read_bytes(), original)
         self.assertIn('Concurrent source update.', (root / 'backlog.md').read_text())
+        # Refused before publishing anything of its own: the bytes that landed
+        # during its compute are not this refresh's, and no view is invalidated.
         terminal = events.read(m.Instance(root))[-1]
-        self.assertFalse(terminal['data']['maintenance_ok'])
-        self.assertEqual(terminal['data']['views'], {})
+        self.assertEqual(terminal['kind'], 'abort')
+        self.assertEqual(terminal['data']['command'], 'status')
+        self.assertFalse({'resources', 'views', 'invalidate'} & terminal['data'].keys())
 
     def test_refresh_batch_preserves_individual_branch_and_ancestry_answers(self):
         root, home, wt = self.project()
@@ -871,6 +874,21 @@ with instance.brain_lock(instance.Instance(__import__('pathlib').Path(sys.argv[2
             refresh.compute(inst, inst.node('root'), changed)
         self.assertEqual(len(builds), 2)
 
+    def test_held_refresh_rebuilds_after_an_instance_policy_change(self):
+        root = self.init('alice')
+        loader = core_loader.SourceFileLoader('refresh_held_policy_fence', str(CORE / 'bin/brain'))
+        m = loader.load_module()
+        refresh = importlib.import_module(loader.package_name + '.status_refresh')
+        inst = m.Instance(root)
+        policy, builds = root / 'instance.md', []
+        def changed(current, target):
+            if not builds:  # an editor changes inherited policy during the held build
+                policy.write_text(policy.read_text() + '\n')
+            builds.append(True)
+            return len(builds)
+        with mock.patch.dict(os.environ, self.env), refresh.instance.held():
+            self.assertEqual(refresh.compute(inst, inst.node('root'), changed), 2)
+
     def test_refresh_fences_complete_ref_names(self):
         root, home, wt = self.project()
         loader = core_loader.SourceFileLoader('refresh_complete_refs', str(CORE / 'bin/brain'))
@@ -1042,6 +1060,45 @@ with instance.brain_lock(instance.Instance(__import__('pathlib').Path(sys.argv[2
             with m.brain_lock(m.Instance(root)), events.Command(root, command='status'):
                 pass
         self.assertFalse(events.read(m.Instance(root))[-1]['data']['maintenance_ok'])
+
+    def test_contended_refresh_leaves_a_live_writers_pending_bytes_to_it(self):
+        root = self.init('alice')
+        self.b(root, 'status', 'root', '--refresh')
+        m, cli, status, events, instance = self.refresh_cli(root, 'refresh_retry_pending')
+        ref, held, writer = 'e' * 32, [], []
+        facts = status.status_facts
+        def foreign(*args, **kwargs):
+            result = facts(*args, **kwargs)
+            if not held and instance._LOCK['fh'] is None:
+                # Another writer begins, leaves pending bytes, and stays live.
+                inst = m.Instance(root)
+                events.append(inst, 'root', 'begin', ref, {'command': 'fixture'})
+                lease = events.lease_path(inst, ref, create=True)
+                lease.write_text('')
+                writer.append(os.open(lease, os.O_RDONLY))
+                events.fcntl.flock(writer[0], events.fcntl.LOCK_EX)
+                (root / 'backlog.md').write_text((root / 'backlog.md').read_text() + '\n- pending item\n')
+                held.append(True)
+            return result
+        start = len(events.read(m.Instance(root)))
+        try:
+            with mock.patch.dict(os.environ, {**self.env, 'BRAIN_ROOT': str(root)}), \
+                    mock.patch.object(sys, 'argv', ['brain', 'status', 'root', '--refresh']), \
+                    mock.patch.object(status, 'status_facts', side_effect=foreign), \
+                    mock.patch('random.uniform', return_value=0), \
+                    contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                cli.main()  # exit 0: no SystemExit
+            records = events.read(m.Instance(root))[start:]
+        finally:
+            for fd in writer:
+                os.close(fd)
+        self.assertTrue(held)
+        ours = [r for r in records if r['ref'] != ref]
+        self.assertFalse(any(r['kind'] == 'commit' and (r['data'].get('invalidate') or
+                             any(x.get('id') == events.digest(b'backlog.md') for x in r['data'].get('resources', [])))
+                             for r in ours))
+        self.assertTrue(ours[-1]['data']['maintenance_ok'])
+        self.assertIn(ref, events.replay(m.Instance(root))[2])  # the writer's operation stays open
 
     def test_refresh_does_not_retry_a_real_repair_refusal(self):
         root = self.init('alice')

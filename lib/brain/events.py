@@ -791,9 +791,11 @@ class Command:
                         'resources': resource_list(self.inst, changed, display=False),
                         'maintenance_ok': False,
                         'invalidate': [node_ref(n['id']) for n in affected_nodes(self.inst, changed, self.node)]}
-            if not maintenance_ok and getattr(self, 'unpublished_contention', False) and not changed:
+            if (not maintenance_ok and getattr(self, 'unpublished_contention', False)
+                    and not self.changes(self.before_compute)):
                 # Plain contention refused the refresh before it published or
-                # changed anything: committed views stay valid for the retry.
+                # changed anything. Bytes another writer left during the
+                # compute stay that writer's; committed views stay valid.
                 append(self.inst, self.node, 'abort', self.ref, {'command': self.command})
             else:
                 append(self.inst, self.node, 'commit', self.ref, data, scrub=False)
@@ -1517,6 +1519,8 @@ def maintain(op, changed):
                     view = compared
                 result[nid] = (view, status.refreshed_text(current, target, view), compared)
             return result
+        # Held since start(): only the released compute below admits other writers.
+        op.before_compute = resources(op.inst)
         try:
             prepared = status_refresh.compute(op.inst, next(iter(selected.values())), prepare_views,
                                               targets=list(selected), extra=(op.inst.root / '.brain/events.jsonl',)
