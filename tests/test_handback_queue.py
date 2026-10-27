@@ -16,6 +16,36 @@ from scenario import CORE, Scenario
 
 
 class HandbackLifecycle(Scenario):
+    def test_attempt_binding_ignores_other_branch_commits_but_fences_own_branch(self):
+        m, inst, n, row = self.fixture()
+        home = self.repo(self.tmp / 'home')
+        wt = self.tmp / 'worktree'
+        branch = row['Job']
+        self.git('worktree', 'add', '-qb', branch, str(wt), cwd=home)
+        self.git('checkout', '-qb', 'job/other', cwd=home)
+        n.update(external=True, home_path=home)
+        n['local']['worktrees'] = {branch: {'path': str(wt), 'port': 4100}}
+        binding = m.attempt_binding
+        def changed(n, row):
+            value = binding(n, row)
+            self.git('commit', '--allow-empty', '-qm', 'Other worker commit', cwd=home)
+            return value
+        with mock.patch.dict(os.environ, self.env, clear=True), \
+                mock.patch.object(m, 'attempt_binding', side_effect=changed):
+            attempt = m.begin_attempt(inst, n, row)
+        self.assertEqual(attempt['binding'], binding(n, row))
+        def own_branch_changed(n, row):
+            value = changed(n, row)
+            head = self.git('rev-parse', 'HEAD', cwd=home).strip()
+            self.git('update-ref', 'refs/heads/' + branch, head, cwd=home)
+            return value
+        before = m.attempt_path(n, row).read_bytes()
+        with mock.patch.dict(os.environ, self.env, clear=True), \
+                mock.patch.object(m, 'attempt_binding', side_effect=own_branch_changed), \
+                self.assertRaises(SystemExit):
+            m.begin_attempt(inst, n, row)
+        self.assertEqual(m.attempt_path(n, row).read_bytes(), before)
+
     def fixture(self):
         root = self.tmp / 'instance'
         root.mkdir()

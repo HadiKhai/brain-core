@@ -567,8 +567,11 @@ def fold_hooks(inst):
                     fresh.append(row)
                 else:
                     fresh.append({'id': old['id'], 'scope': old.get('scope', '*'), 'hash': None})
-            append(inst, data['node'], 'hook', data['ref'], {'resources': fresh, 'at': data['ts'], 'outbox': packet}, scrub=False)
+            # Journal appends are durable individually; publish the derived replay
+            # index once for the batch, before acknowledging the outbox cursor.
+            append(inst, data['node'], 'hook', data['ref'], {'resources': fresh, 'at': data['ts'], 'outbox': packet}, scrub=False, persist=False)
             offset = end
+    store.sync(persist=True)
     common.atomic_write(cursor, str(offset), private=True, create=True)
 
 
@@ -1409,8 +1412,14 @@ def maintain(op, changed):
                          if not path.startswith('@ready/')]
                 for node in op.inst.nodes():
                     paths.extend(node['dir'] / name for name in ('tasks', 'requirements'))
-                    if node.get('external') and node.get('home_path'):
-                        paths.extend(instance.git_state_paths(node['home_path']))
+                    if node['id'] == n['id'] and node.get('home_path'):
+                        from . import verify
+                        integration = verify.integration_ref(node['home_path'])
+                        refs = {'refs/heads/' + branch for branch in node['local'].get('worktrees', {})}
+                        refs.update((integration, 'refs/remotes/origin/HEAD'))
+                        if integration.startswith('refs/remotes/origin/') and node['fm'].get('merge', 'local') != 'pr':
+                            refs.add(integration.replace('refs/remotes/origin/', 'refs/heads/', 1))
+                        paths.extend(instance.git_state_paths(node['home_path'], refs=refs - {''}, include_head=False))
                 paths.append(op.inst.root / '.brain/communications.json')
                 return paths
             with instance.released(op.inst, list(op.inst.nodes()), extra=projection_inputs):
@@ -1441,11 +1450,13 @@ def detect_gaps(inst, preferred, record=True):
     changed = [k for k in recorded.keys() | actual.keys()
                if recorded.get(k, {}).get('hash') != actual.get(k, {}).get('hash')]
     affected = {preferred}
+    scope_nodes = {node_ref(n['id']): n['id'] for n in inst.nodes()}
     for key in changed:
         scope = (actual.get(key) or recorded[key]).get('scope', '*')
-        for n in inst.nodes():
-            if scope in ('*', node_ref(n['id'])):
-                affected.add(n['id'])
+        if scope == '*':
+            affected.update(scope_nodes.values())
+        elif scope in scope_nodes:
+            affected.add(scope_nodes[scope])
     dead = [ref for ref in opened if not lease_live(inst, ref)]
     faults = list(journal(inst).state['faults'])
     for nid in sorted(affected):

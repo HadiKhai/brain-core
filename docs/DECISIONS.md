@@ -3440,6 +3440,42 @@ before the snapshot. Source-signature and receipt-generation checks still run
 before publication, so cached reads cannot authorize a changed source state.
 The scope stores no cross-command watcher output or delivery authority.
 
+## 2026-10-27: Batch event coverage and refuse malformed writes before admission
+
+Resource coverage maps opaque scope identities to one discovered node list per
+scan, independent of the number of changed resources. Resource-list construction
+continues to sort nodes once per batch. Hook records retain individual durable
+journal appends; their derived replay index is saved once before publishing the
+outbox cursor. A crash before cursor publication replays the journal acknowledgements
+without duplicating hooks.
+
+CLI proposal acceptance checks reviewer names before opening the writer lock or
+event operation. Names match case-insensitively and persist the configured spelling;
+errors list the operator and non-revoked principals. Task add/set likewise parse
+and validate argument shape before admission. Handlers repeat validation, including
+current authority and state-dependent checks, in their existing mutation path.
+
+## 2026-10-27: Fence task and handback inputs without unrelated Git branches
+
+An unlinked task update validates and fences its own record, requirement, active
+ledger and completion proof. Linked updates retain the full dependency graph
+check, but scalar validation and completion proof concern the changed task and
+its dependencies. Unrelated completed tasks do not introduce Git refs into that
+write's read set. The same-task generation must still match after computation;
+a concurrent replacement refuses publication and preserves the other writer's
+bytes.
+
+Git generation fences accept explicit refs and follow their symbolic targets.
+Task completion watches intended main and replacement refs without checkout
+HEAD. A handback watches its job branch, cached integration refs, its checkout's
+HEAD and verify inputs. Generated status watches the branches it renders. An
+unrelated worker commit cannot invalidate those observations; changes to a
+selected ref, policy, task, requirement or owned attempt still refuse. Packed
+ref storage, replacement refs and repository configuration remain fenced.
+
+The event batching implementation includes its optional derived-index persistence
+argument and shared sorted resource-scope lookup on the current integration base;
+neither relies on a previous status-refresh implementation.
 
 ## 2026-10-27: Finish dashboard accounting without restarting a bounded file walk
 

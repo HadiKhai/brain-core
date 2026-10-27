@@ -61,11 +61,17 @@ def binding_paths(n, row, *, include_attempt=True):
         paths.append(attempt_path(n, row))
     home = n.get('home_path')
     if home:
-        paths.extend(_m_instance.git_state_paths(home))
+        integration = _m_verify.integration_ref(home)
+        refs = {'refs/heads/' + row['Job'], 'refs/remotes/origin/HEAD', integration}
+        if integration.startswith('refs/remotes/origin/') and n['fm'].get('merge', 'local') != 'pr':
+            refs.add(integration.replace('refs/remotes/origin/', 'refs/heads/', 1))
+        paths.extend(_m_instance.git_state_paths(home, refs=refs - {''}, include_head=False))
     w = n['local'].get('worktrees', {}).get(row['Job'])
     if w:
         root = Path(w['path'])
-        paths.append(root / '.git')
+        # Watch this checkout's branch selection, never recursively traverse a
+        # normal checkout's .git directory and every other worker's refs.
+        paths.extend(_m_instance.git_state_paths(root, refs=(), include_head=True))
         for pattern in _m_common.lst(n['fm'].get('verify_inputs')) or _m_common.lst(_m_verify.VERIFY_INPUTS):
             for path in root.glob(pattern):
                 paths.extend((path, path.resolve()))

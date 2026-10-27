@@ -250,9 +250,15 @@ def cmd_item_status(a, status):
 
 
 def review_principal(inst, reviewer):
-    if reviewer != inst.cfg.get("operator") and (reviewer not in inst.principals or reviewer in inst.revoked):
-        _m_common.die("--reviewed-by must be the operator or a non-revoked principal in instance.md")
-    return reviewer
+    operator = inst.cfg.get("operator")
+    revoked = {p.casefold() for p in inst.revoked}
+    accepted = list(dict.fromkeys(([operator] if operator else []) +
+                                  [p for p in inst.principals if p.casefold() not in revoked]))
+    for principal in accepted:
+        if isinstance(reviewer, str) and reviewer.casefold() == principal.casefold():
+            return principal
+    _m_common.die("--reviewed-by must be the operator or a non-revoked principal in instance.md; "
+                  "accepted names: " + ", ".join(accepted))
 
 
 def review_proposals(inst, records, action, reviewer=None, via=None):
@@ -260,7 +266,7 @@ def review_proposals(inst, records, action, reviewer=None, via=None):
     if action not in ("accept", "reject"):
         _m_common.die("unknown review action")
     if action == "accept" or reviewer is not None:
-        review_principal(inst, reviewer)
+        reviewer = review_principal(inst, reviewer)
         if _m_nodes.SECRET_META.search(reviewer):
             _m_common.die("unsafe review attribution")
     todo, seen = [], set()

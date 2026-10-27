@@ -343,7 +343,7 @@ def state_signature(inst, node=None, extra=(), local_keys=()):
     return h.digest()
 
 
-def git_state_paths(home, *, task_proof=False):
+def git_state_paths(home, *, task_proof=False, refs=None, include_head=True):
     """Mutable ref/config generations, including linked-worktree common refs.
 
     Git objects are immutable; traversing them would turn a recheck into a scan.
@@ -365,9 +365,11 @@ def git_state_paths(home, *, task_proof=False):
             bases.append(base)
             paths.extend((base / 'commondir', (base / 'commondir').resolve()))
     replace_base = os.environ.get('GIT_REPLACE_REF_BASE', 'refs/replace/').rstrip('/')
-    refs = {'refs/heads/main', replace_base} if task_proof else {'refs'}
-    if task_proof:
-        pending = ['refs/heads/main']
+    scoped = task_proof or refs is not None
+    refs = ({'refs/heads/main', replace_base} if task_proof else
+            set(refs) | {replace_base} if refs is not None else {'refs'})
+    if scoped:
+        pending = list(refs - {replace_base})
         # Loose replacement refs may be Git symbolic refs, including broken
         # ones omitted by for-each-ref. Packed refs cannot be symbolic; a
         # reftable generation already fences all its ref updates.
@@ -388,7 +390,10 @@ def git_state_paths(home, *, task_proof=False):
             if result.returncode == 0 and target and not Path(target).is_absolute() and '..' not in Path(target).parts:
                 pending.append(target)
     for base in bases:
-        for name in ('HEAD', *sorted(refs), 'packed-refs', 'reftable', 'shallow', 'info/grafts', 'config'):
+        names = (() if task_proof or not include_head else ('HEAD',))
+        for name in (*names, *sorted(refs), 'packed-refs', 'reftable', 'shallow', 'info/grafts', 'config'):
+            if scoped and name == 'HEAD' and base != bases[0]:
+                continue  # a linked checkout reads its own HEAD, not the common checkout's
             path = base / name
             paths.extend((path, path.resolve()))
             if name in ('refs', replace_base) and path.is_dir():

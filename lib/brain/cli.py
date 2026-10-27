@@ -725,6 +725,16 @@ def _main():
         a.f = read_handler
     root = _m_nodes.try_find_root() if writes(a) else None
     if root:
+        # Reject malformed arguments before lock admission or journal preparation.
+        # Handlers still validate current authority and mutable state under lock.
+        if a.f.__name__ in ('cmd_item_accept', 'cmd_specialist_accept'):
+            from . import knowledge
+            knowledge.review_principal(_m_instance.Instance(root), a.reviewed_by)
+        if a.f.__name__ == 'cmd_task' and a.action in ('add', 'set'):
+            try:
+                _m_tasks.command_changes(a)
+            except ValueError as error:
+                _m_common.die(str(error))
         out = _m_common.outward_links(root)
         if out:  # checked before anything is written: no command half-done through a link
             _m_common.die("these links (symbolic or hard) lead out of the brain, and brain writes only inside it: "

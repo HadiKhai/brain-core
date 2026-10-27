@@ -17,6 +17,50 @@ from brain import events, instance, transitions
 
 
 class EventAppend(Scenario):
+    def test_resource_scopes_and_gap_scan_discover_nodes_once_per_batch(self):
+        root = self.init('batch-scopes')
+        self.b(root, 'new', 'app', '--title', 'App')
+        inst = instance.Instance(root)
+        values = {f'nodes/app/task-{i}.md': events.digest(str(i).encode()) for i in range(200)}
+        values.update({'node.md': 'root-hash', '.brain/local.json': 'local-hash',
+                       '@ready/app/proof.json': 'ready-hash'})
+        expected = [{'id': events.digest(k.encode()), 'scope': events.resource_scope(inst, k),
+                     'hash': v} for k, v in sorted(values.items())]
+        with mock.patch.object(inst, 'nodes', wraps=inst.nodes) as discover:
+            self.assertEqual(events.resource_list(inst, values, display=False), expected)
+            self.assertEqual(discover.call_count, 1)
+        with mock.patch.object(events, 'resources', return_value=values), \
+                mock.patch.object(inst, 'nodes', wraps=inst.nodes) as discover:
+            self.assertTrue(events.detect_gaps(inst, 'root', record=False))
+            # replay, resource_list, screening, scope lookup; independent of resources.
+            self.assertEqual(discover.call_count, 4)
+
+    def test_hook_batch_publishes_one_index_before_cursor_and_replays_after_crash(self):
+        root = self.init('hook-batch')
+        inst = instance.Instance(root)
+        path = root / '.brain/hook-events.jsonl'
+        for i in range(12):
+            events.append_line(path, {'node': events.node_ref('root'), 'ref': f'{i:032x}',
+                                     'ts': inst.now(), 'data': {'resources': []}})
+        store = events.journal(inst)
+        cursor = root / '.brain/hook-events-offset'
+        write = events.common.atomic_write
+        def crash_before_cursor(target, *args, **kwargs):
+            if target == cursor:
+                raise OSError('cursor publication failed')
+            return write(target, *args, **kwargs)
+        with instance.brain_lock(inst), mock.patch.object(store, 'save', wraps=store.save) as save, \
+                mock.patch.object(events.common, 'atomic_write', side_effect=crash_before_cursor):
+            with self.assertRaises(OSError):
+                events.fold_hooks(inst)
+            self.assertEqual(save.call_count, 1)
+        events._JOURNALS.pop(str(root.resolve()), None)
+        with instance.brain_lock(inst):
+            events.fold_hooks(instance.Instance(root))
+        hooks = [e for e in self.records(root) if e['kind'] == 'hook']
+        self.assertEqual(len(hooks), 12)
+        self.assertEqual(int(events.private_read(cursor)), path.stat().st_size)
+
     def test_private_journal_append_tightens_existing_mode_before_new_data(self):
         r = self.init('alice')
         path = r / '.brain/fixture-journal.jsonl'

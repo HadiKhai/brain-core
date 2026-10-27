@@ -11,6 +11,57 @@ from brain.instance import Instance
 
 
 class Tasks(Scenario):
+    def test_set_survives_unrelated_instance_commit_with_other_completed_tasks(self):
+        self.repo(self.root, {'engine.py': 'value = 1\n'})
+        base = self.git('rev-parse', 'HEAD', cwd=self.root).strip()
+        (self.root / 'engine.py').write_text('value = 2\n')
+        self.git('add', 'engine.py', cwd=self.root)
+        self.git('commit', '-qm', 'Deliver unrelated task', cwd=self.root)
+        head = self.git('rev-parse', 'HEAD', cwd=self.root).strip()
+        self.add('DONE-1', status='done', baseline_sha=base, merge_sha=head,
+                 code_path='engine.py', scope=['engine.py'], evidence=['Tests passed'])
+        self.add('OPEN-1')
+        self.add('UNLINKED')
+        self.add('LINKED', depends_on=['OPEN-1'])
+        prepare = tasks.prepare_mutation
+        def changed(*args, **kwargs):
+            self.assertIsNone(tasks._m_instance._LOCK['fh'])
+            result = prepare(*args, **kwargs)
+            self.git('commit', '--allow-empty', '-qm', 'Unrelated agent commit', cwd=self.root)
+            return result
+        for ident in ('UNLINKED', 'LINKED'):
+            with self.subTest(task=ident), mock.patch.object(tasks, 'prepare_mutation', side_effect=changed):
+                tasks.mutate(self.inst, self.n, ident, {'priority': 'P1'})
+            self.assertEqual(tasks.read_records(self.n)[ident]['priority'], 'P1')
+
+    def test_set_refuses_same_task_change_and_preserves_concurrent_bytes(self):
+        self.add('TARGET')
+        prepare = tasks.prepare_mutation
+        saved = []
+        def changed(*args, **kwargs):
+            result = prepare(*args, **kwargs)
+            concurrent = tasks.read_records(self.n, ident='TARGET')['TARGET']
+            tasks.save_record(self.n, {**concurrent, 'priority': 'P0'})
+            saved.append(tasks.record_path(self.n, 'TARGET').read_bytes())
+            return result
+        with mock.patch.object(tasks, 'prepare_mutation', side_effect=changed), self.assertRaises(SystemExit):
+            tasks.mutate(self.inst, self.n, 'TARGET', {'priority': 'P1'})
+        self.assertEqual(tasks.record_path(self.n, 'TARGET').read_bytes(), saved[0])
+
+    def test_unlinked_set_ignores_other_task_edits(self):
+        self.add('TARGET')
+        self.add('OTHER')
+        prepare = tasks.prepare_mutation
+        def changed(*args, **kwargs):
+            result = prepare(*args, **kwargs)
+            other = tasks.read_records(self.n, ident='OTHER')['OTHER']
+            tasks.save_record(self.n, {**other, 'priority': 'P0'})
+            return result
+        with mock.patch.object(tasks, 'prepare_mutation', side_effect=changed):
+            tasks.mutate(self.inst, self.n, 'TARGET', {'priority': 'P1'})
+        self.assertEqual(tasks.read_records(self.n)['OTHER']['priority'], 'P0')
+        self.assertEqual(tasks.read_records(self.n)['TARGET']['priority'], 'P1')
+
     def assert_home_prepare_commit(self, *, symbolic=False, linked=False, move_main=False):
         home = self.tmp / 'home'
         self.repo(home, {'engine.py': 'value = 1\n'})
