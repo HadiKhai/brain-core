@@ -36,6 +36,7 @@ class Tasks(Scenario):
         self.git('checkout', '-qb', 'job/builder', cwd=home)
         prepare = tasks.prepare_mutation
         def changed(*args, **kwargs):
+            self.assertIsNone(tasks._m_instance._LOCK['fh'])
             result = prepare(*args, **kwargs)
             self.git('commit', '--allow-empty', '-qm', 'Unrelated builder commit', cwd=home)
             if move_main:
@@ -149,6 +150,21 @@ class Tasks(Scenario):
         with mock.patch.object(tasks, 'prepare_mutation', side_effect=changed), self.assertRaises(SystemExit):
             self.add('NEW-1')
         self.assertNotIn('NEW-1', tasks.read_records(self.n))
+
+    def test_target_record_change_during_prepare_refuses_without_lost_update(self):
+        self.add('BASE-1')
+        prepare = tasks.prepare_mutation
+        def changed(*args, **kwargs):
+            result = prepare(*args, **kwargs)
+            concurrent = tasks.read_records(self.n)['BASE-1']
+            concurrent['title'] = 'Concurrent update'
+            tasks.save_record(self.n, concurrent)
+            return result
+        with mock.patch.object(tasks, 'prepare_mutation', side_effect=changed), self.assertRaises(SystemExit):
+            self.add('NEW-1')
+        rows = tasks.read_records(self.n)
+        self.assertNotIn('NEW-1', rows)
+        self.assertEqual(rows['BASE-1']['title'], 'Concurrent update')
 
     def assert_conversion_rechecks_internal_main(self, child=False, normalized_status=False):
         self.repo(self.root, {'engine.py': 'value = 1\n'})
