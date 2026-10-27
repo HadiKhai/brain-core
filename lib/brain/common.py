@@ -10,6 +10,7 @@ import contextlib
 import contextvars
 import datetime
 import fnmatch
+import fcntl
 import hashlib
 import json
 import os
@@ -356,8 +357,9 @@ class DirectoryTarget:
         return True
 
     def atomic_write(self, text, *, expected=Ellipsis):
+        recovered = self.recover_mode(expected=expected)
         prior = self.stat()
-        if expected is not Ellipsis and self.generation(prior) != expected:
+        if self.generation(prior) != recovered:
             raise OSError('publication target changed')
         name = '.' + self.path.name + '.' + os.urandom(12).hex()
         fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=self.fd)
@@ -367,6 +369,7 @@ class DirectoryTarget:
             owned = os.fstat(stream.fileno())
             identity = (owned.st_dev, owned.st_ino)
             published = False
+            record = None
             try:
                 stream.write(text)
                 stream.flush()
@@ -382,7 +385,9 @@ class DirectoryTarget:
                 # leave the published destination with the staging mode.
                 mode = (stat.S_IMODE(prior.st_mode)
                         if prior and stat.S_ISREG(prior.st_mode) else 0o644)
-                os.fchmod(stream.fileno(), 0o600 if self.private else mode)
+                mode = 0o600 if self.private else mode
+                record = self.mode_record(stream.fileno(), text, mode)
+                os.fchmod(stream.fileno(), mode)
                 os.fsync(stream.fileno())
                 if self.generation(self.stat()) != self.generation(prior):
                     raise OSError('publication target changed')
@@ -392,6 +397,7 @@ class DirectoryTarget:
                 os.replace(name, self.path.name, src_dir_fd=self.fd, dst_dir_fd=self.fd)
                 published = True
                 os.fsync(self.fd)
+                self.unlink_owned(record[0], record[1])
             except BaseException as primary:
                 if not published:
                     cleanup = None
@@ -403,11 +409,133 @@ class DirectoryTarget:
                         self.unlink_owned(name, identity)
                     except OSError as error:
                         cleanup = error
+                    if record is not None:
+                        try:
+                            self.unlink_owned(record[0], record[1])
+                        except OSError as error:
+                            cleanup = error
                     if cleanup is not None:
                         # A failed cleanup must not replace the write/replace
                         # failure that tells callers whether publication ran.
                         raise primary from cleanup
                 raise
+            finally:
+                if record is not None:
+                    os.close(record[2])
+
+    def mode_prefix(self, st):
+        key = hashlib.sha256(os.fsencode(self.path.name)).hexdigest()
+        return '.intended-mode-' + key + '-' + format(st.st_dev, 'x') + '-' + format(st.st_ino, 'x') + '-'
+
+    def mode_record(self, fd, text, mode):
+        """Persist intent before chmod/rename, bound to this exact content inode."""
+        self.check()
+        st = os.fstat(fd)
+        name = self.mode_prefix(st) + os.urandom(12).hex()
+        record_fd = os.open(name, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=self.fd)
+        held = os.fstat(record_fd)
+        identity = (held.st_dev, held.st_ino)
+        try:
+            fcntl.flock(record_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            os.fchmod(record_fd, 0o600)
+            if stat.S_IMODE(os.fstat(record_fd).st_mode) != 0o600:
+                raise OSError('intended-mode record is not private')
+            data = json.dumps(dict(version=1, destination=self.path.name, device=st.st_dev,
+                                   inode=st.st_ino, size=st.st_size, mtime_ns=st.st_mtime_ns,
+                                   sha256=hashlib.sha256(text.encode('utf-8')).hexdigest(), mode=mode)).encode()
+            with os.fdopen(os.dup(record_fd), 'wb') as record:
+                record.write(data)
+                record.flush()
+                os.fsync(record.fileno())
+            os.fsync(self.fd)
+            return name, identity, record_fd
+        except BaseException as primary:
+            try:
+                self.unlink_owned(name, identity)
+            except OSError as cleanup:
+                raise primary from cleanup
+            finally:
+                os.close(record_fd)
+            raise
+
+    def recover_mode(self, *, expected=Ellipsis):
+        """Repair only a published inode; abandoned staging never gets promoted.
+
+        Call under the caller's writer lock. Ordinary reads do not recover or
+        mutate permissions. Records for other inodes remain for reconciliation.
+        """
+        current = self.stat()
+        original = self.generation(current)
+        if expected is not Ellipsis and original != expected:
+            raise OSError('publication target changed')
+        if current is None or not stat.S_ISREG(current.st_mode):
+            return original
+        prefix = self.mode_prefix(current)
+        for name in os.listdir(self.fd):
+            if not re.fullmatch(re.escape(prefix) + r'[0-9a-f]{24}', name):
+                continue
+            fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=self.fd)
+            try:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    continue  # the publishing writer still owns its intent
+                held = os.fstat(fd)
+                if (not stat.S_ISREG(held.st_mode) or held.st_nlink != 1
+                        or held.st_uid != os.geteuid() or stat.S_IMODE(held.st_mode) != 0o600
+                        or held.st_size > 2048):
+                    raise OSError('unsafe intended-mode record')
+                try:
+                    record = json.loads(os.read(fd, 2049))
+                except (ValueError, UnicodeError) as error:
+                    raise OSError('invalid intended-mode record') from error
+                if (not isinstance(record, dict) or record.get('version') != 1
+                        or record.get('destination') != self.path.name
+                        or record.get('device') != current.st_dev or record.get('inode') != current.st_ino
+                        or record.get('size') != current.st_size or record.get('mtime_ns') != current.st_mtime_ns
+                        or type(record.get('mode')) is not int or not 0 <= record['mode'] <= 0o7777):
+                    raise OSError('intended-mode record does not match publication')
+                with os.fdopen(self.open(), 'rb') as stream:
+                    opened = os.fstat(stream.fileno())
+                    before = self.generation(opened)
+                    digest = hashlib.sha256()
+                    for chunk in iter(lambda: stream.read(1024 * 1024), b''):
+                        digest.update(chunk)
+                    self.check_file(stream.fileno())
+                    if (self.generation(os.fstat(stream.fileno())) != before
+                            or before != self.generation(current) or opened.st_uid != os.geteuid()
+                            or digest.hexdigest() != record.get('sha256')):
+                        raise OSError('published content changed before mode recovery')
+                    named = os.stat(name, dir_fd=self.fd, follow_symlinks=False)
+                    if (self.generation(os.fstat(fd)) != self.generation(held)
+                            or self.generation(named) != self.generation(held)):
+                        raise OSError('intended-mode record changed during recovery')
+                    mode = 0o600 if self.private else record['mode']
+                    if stat.S_IMODE(opened.st_mode) != mode:
+                        os.fchmod(stream.fileno(), mode)
+                    prepared = os.fstat(stream.fileno())
+                    # Only our chmod may change mode/ctime. Do not adopt an
+                    # independent write as the caller's expected generation.
+                    if (self.generation(prepared)[:4] != before[:4]
+                            or prepared.st_nlink != opened.st_nlink
+                            or prepared.st_uid != opened.st_uid
+                            or stat.S_IMODE(prepared.st_mode) != mode):
+                        raise OSError('published content changed during mode recovery')
+                    os.fsync(stream.fileno())
+                    os.fsync(self.fd)
+                    stream.seek(0)
+                    recovered_digest = hashlib.sha256()
+                    for chunk in iter(lambda: stream.read(1024 * 1024), b''):
+                        recovered_digest.update(chunk)
+                    self.check_file(stream.fileno())
+                    if (self.generation(os.fstat(stream.fileno())) != self.generation(prepared)
+                            or recovered_digest.hexdigest() != record['sha256']):
+                        raise OSError('published content changed during mode recovery')
+                    current = prepared
+                self.unlink_owned(name, (held.st_dev, held.st_ino))
+            finally:
+                os.close(fd)
+        return self.generation(current)
 
 
 

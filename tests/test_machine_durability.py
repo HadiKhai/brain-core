@@ -177,7 +177,9 @@ class MachineDurability(unittest.TestCase):
         with mock.patch.object(self.m.os, 'fsync', side_effect=sync):
             self.m.durable_makedirs(folder)
             self.m.atomic_write(folder/'record', 'complete')
-        expected = [(p.stat().st_dev,p.stat().st_ino) for p in (self.root, self.root/'new', folder)]
+        # Persist ancestors first, then the intent entry, publication and intent removal.
+        expected = [(p.stat().st_dev,p.stat().st_ino)
+                    for p in (self.root, self.root/'new', folder, folder, folder)]
         self.assertEqual(events, expected)
 
     def test_existing_ancestors_are_resynced_after_interrupted_creation(self):

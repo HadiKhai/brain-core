@@ -180,12 +180,12 @@ m.main()
         self.assertEqual(proc.returncode, -9)
         self.assertNotEqual(before, after, 'fixture must change the destination')
         self.assertEqual(destination.read_bytes(), before if phase == 'before' else after)
-        self.assertEqual(destination.stat().st_mode & 0o777, mode)
         self.assertEqual(self.git('rev-parse', 'HEAD', cwd=root), head)
         # This command takes the instance lock and must not wedge on the dead writer's pid.
         follow = subprocess.run([sys.executable, str(root / 'core/bin/brain'), *args], cwd=root,
                                 env=self.env, capture_output=True, text=True, timeout=10)
         self.assertEqual(follow.returncode, 0, follow.stderr)
+        self.assertEqual(destination.stat().st_mode & 0o777, mode)
 
     def test_recover_sigkill_status_handback_inbox_and_jobs(self):
         def vanished_entry(function, path, exc_info):
