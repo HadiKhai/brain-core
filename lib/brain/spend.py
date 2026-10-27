@@ -30,7 +30,7 @@ from . import command_reads as _m_command_reads
 # then incrementally: transcripts only grow, so the next read starts where the last one stopped.
 
 SPEND_IDLE_MIN = 5  # a gap between two events of more than this many minutes is idle time
-SPEND_VERSION = 7  # rebuild aggregates whose hinted thread identities skipped usage records
+SPEND_VERSION = 8  # rebuild aggregates whose rotated-source metadata skipped usage records
 SPEND_FIELDS = ("events", "fresh", "cache_read", "cache_write", "output", "reasoning", "tools")
 SPEND_TOKENS = ("fresh", "cache_read", "cache_write", "output", "reasoning")  # reasoning is part of output
 JOB_MARK = "brain-job: {}"  # in every job brief: the sessions a brief starts are found again by it
@@ -425,7 +425,17 @@ def _spend_file(inst, path, runtime, allowed, forbidden, budget, window, cache):
         elif hint:
             agg.update(id=hint['id'], parent=hint['parent'], id_opaque=True)
         elif not agg.get("id") or agg.get('id_opaque'):
-            meta = codex_meta(real, allowed, forbidden)
+            # Header identity must describe this checked descriptor, not a
+            # path-only discovery memo or another replacement at that pathname.
+            try:
+                fh.seek(0)
+                if packed:
+                    with _m_history.Decompressed(os.fdopen(os.dup(fh.fileno()), 'rb')) as header:
+                        meta = codex_meta_reader(header)
+                else:
+                    meta = codex_meta_reader(fh)
+            except OSError:
+                return None
             if meta:
                 agg.update(id=meta[0], parent=meta[2], id_opaque=False)
         dirty = agg.get("stamp") != stamp or not agg.get("published")
@@ -435,6 +445,7 @@ def _spend_file(inst, path, runtime, allowed, forbidden, budget, window, cache):
             try:
                 if agg["state"]["offset"] < size:
                     if packed:
+                        fh.seek(0)
                         with _m_history.Decompressed(os.fdopen(os.dup(fh.fileno()), 'rb')) as unpacked:
                             agg["complete"] = spend_read(agg, unpacked, budget)
                     else:
@@ -621,10 +632,15 @@ def codex_meta(path, allowed, forbidden):
     if not fh:
         return None
     with fh:
-        try:
-            r = json.loads(fh.readline(1 << 20))
-        except (OSError, ValueError):
-            return None
+        return codex_meta_reader(fh)
+
+
+def codex_meta_reader(fh):
+    """Decode a header from the caller's held source generation; never reopen it."""
+    try:
+        r = json.loads(fh.readline(1 << 20))
+    except (OSError, ValueError):
+        return None
     p = r.get("payload") if isinstance(r, dict) and r.get("type") == "session_meta" and \
         isinstance(r.get("payload"), dict) else None
     if p is None:
@@ -678,22 +694,45 @@ def codex_mark(path, allowed, forbidden):
     if not fh:
         return ""
     with fh:
-        for k, raw in enumerate(fh):
-            if k > 400 or b'"token_usage_record"' in raw or b'"token_count"' in raw:
-                break
-            if b'"user' not in raw:
-                continue
-            try:
-                r = json.loads(raw)
-            except ValueError:
-                continue
-            p = r.get("payload") if isinstance(r, dict) and isinstance(r.get("payload"), dict) else {}
-            if (r.get("type") == "response_item" and p.get("type") == "message" and p.get("role") == "user") or \
-                    (r.get("type") == "event_msg" and p.get("type") == "user_message"):
-                m = JOB_MARK_RE.search(raw)
-                if m:
-                    return m.group(1).decode()
+        return codex_mark_reader(fh)
+
+
+def codex_mark_reader(fh, start=0):
+    for k, raw in enumerate(fh, start=start):
+        if k > 400 or b'"token_usage_record"' in raw or b'"token_count"' in raw:
+            break
+        if b'"user' not in raw:
+            continue
+        try:
+            r = json.loads(raw)
+        except ValueError:
+            continue
+        p = r.get("payload") if isinstance(r, dict) and isinstance(r.get("payload"), dict) else {}
+        if (r.get("type") == "response_item" and p.get("type") == "message" and p.get("role") == "user") or \
+                (r.get("type") == "event_msg" and p.get("type") == "user_message"):
+            m = JOB_MARK_RE.search(raw)
+            if m:
+                return m.group(1).decode()
     return ""
+
+
+def codex_discovery_source(path, allowed, forbidden):
+    """Bind both discovery fields and their stamp to one authorized descriptor."""
+    fh, _ = _m_history.history_open(path, allowed, forbidden)
+    if not fh:
+        return None
+    with fh:
+        before = os.fstat(fh.fileno())
+        if str(path).endswith('.zst'):
+            if not _m_history.ZSTD:
+                return None
+            with _m_history.Decompressed(os.fdopen(os.dup(fh.fileno()), 'rb')) as reader:
+                meta, job = codex_meta_reader(reader), codex_mark_reader(reader, start=1)
+        else:
+            meta, job = codex_meta_reader(fh), codex_mark_reader(fh, start=1)
+        if not meta or _m_common.DirectoryTarget.generation(before) != _m_common.DirectoryTarget.generation(os.fstat(fh.fileno())):
+            return None  # an unstable generation is not a persistent discovery observation
+        return meta, job, before
 
 
 @ui_discovery
@@ -717,9 +756,12 @@ def codex_index(inst, cfg, allowed, forbidden):
                     if not (isinstance(saved, dict) and saved.get('version') == SPEND_VERSION
                             and saved.get('stamp') == stamp and isinstance(saved.get('places'), list)
                             and all(isinstance(saved.get(k), str) for k in ('id', 'parent', 'job'))):
-                        meta = codex_meta(path, allowed, forbidden)
-                        if not meta:
+                        observed = codex_discovery_source(path, allowed, forbidden)
+                        if not observed:
                             continue
+                        meta, job, st = observed
+                        stamp = [st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns,
+                                 st.st_mode, st.st_nlink]
                         sid, cwd, parent = meta
                         places = []
                         if cwd and os.path.isabs(cwd):
@@ -727,7 +769,7 @@ def codex_index(inst, cfg, allowed, forbidden):
                             places = [opaque(str(p)) for p in (place, *place.parents)]
                         saved = dict(version=SPEND_VERSION, stamp=stamp, id=opaque(sid),
                                      parent=opaque(parent) if parent else '', places=places,
-                                     job=codex_mark(path, allowed, forbidden))
+                                     job=job)
                         cache.put(key, saved)
                     out.append((path, saved, st.st_mtime))
                 except (OSError, ValueError, RuntimeError):

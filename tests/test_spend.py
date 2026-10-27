@@ -735,7 +735,8 @@ class Spend(Scenario):
             # A newly opened cache hit neither reparses source bytes nor recovers raw headers.
             m._MACHINE.clear()
             with mock.patch.object(m, 'spend_read', side_effect=AssertionError('unchanged recount')), \
-                    mock.patch.object(m, 'codex_meta', side_effect=AssertionError('unchanged header')):
+                    mock.patch.object(m, 'codex_meta', side_effect=AssertionError('unchanged header')), \
+                    mock.patch.object(m, 'codex_discovery_source', side_effect=AssertionError('unchanged discovery')):
                 warm = m.spend_machine(inst, budget=None)
             self.assertEqual(warm['since_week']['processed'], 107)
             self.jsonl(path, [{'timestamp': self.at(3), 'type': 'token_usage_record',
@@ -779,6 +780,83 @@ class Spend(Scenario):
         self.assertEqual(state['spend']['since_week']['processed'], 170)
         self.assertNotIn(sid, cache.read_text())
         self.assertNotIn(sid.encode(), (self.r / '.brain/usage.sqlite').read_bytes())
+
+    def test_rotation_metadata_uses_checked_descriptor_inside_command_snapshot(self):
+        scratch = self.tmp / 'rotation-scratch'
+        scratch.mkdir()
+        first, second, third = '11111111-first', '22222222-second', '33333333-third'
+        path = self.cx(scratch, first, [(1, *self.record(first, 'a1', 10, 0, 1))])
+        replacement = self.cx(scratch, second, [(1, *self.record(second, 'b1', 90, 30, 7)),
+                                               (2, *self.record(first, 'foreign', 50000, 0, 50000))])
+        next_bytes = replacement.read_bytes()
+        replacement.unlink()
+        replacement = self.cx(scratch, third, [(1, *self.record(third, 'c1', 50, 0, 3))])
+        last_bytes = replacement.read_bytes()
+        replacement.unlink()
+        staged = self.tmp / 'next-transcript'
+        staged.write_bytes(next_bytes)
+        m = core_loader.SourceFileLoader('rotation_metadata_fixture', str(CORE / 'bin/brain')).load_module()
+        snapshot = m._owners['spend_file']._m_command_reads.snapshot
+        with mock.patch.dict(os.environ, {**self.env, 'BRAIN_ROOT': str(self.r)}):
+            inst = m.Instance(self.r)
+            original_index = m.codex_index
+            def rotate_after_discovery(*args, **kwargs):
+                entries = original_index(*args, **kwargs)
+                staged.replace(path)
+                return entries
+            with snapshot():
+                self.assertEqual(m.codex_meta(path, {self.codex}, set())[0], first)
+                with mock.patch.object(m, 'codex_index', side_effect=rotate_after_discovery):
+                    value = m.spend_machine(inst, budget=None)
+            self.assertTrue(value['complete'])
+            raw = m.spend_new('codex', path)
+            with path.open('rb') as stream:
+                m.spend_read(raw, stream)
+            self.assertEqual(value['since_week']['processed'], m.spend_sum([raw])['processed'])
+            self.assertEqual(value['since_week']['processed'], 97)
+            m._SPEND_MEM.clear(); m._MACHINE.clear()
+            with snapshot():
+                self.assertEqual(m.spend_machine(inst, budget=None)['since_week']['processed'], 97)
+            self.jsonl(path, [{'timestamp': self.at(4), 'type': 'token_usage_record',
+                               'payload': self.record(second, 'b2', 20, 0, 1)[1]}])
+            staged.write_bytes(last_bytes)
+            original_open = m.history_open
+            def rotate_after_open(source, *args, **kwargs):
+                result = original_open(source, *args, **kwargs)
+                if Path(source) == path and staged.exists():
+                    staged.replace(path)
+                return result
+            m._SPEND_MEM.clear()
+            with snapshot(), mock.patch.object(m, 'history_open', side_effect=rotate_after_open):
+                held = m.spend_file(inst, path, 'codex', {self.codex}, set())
+            self.assertEqual(held['id'], second, 'metadata must describe the held inode, not the new pathname')
+            self.assertEqual(m.spend_sum([held])['processed'], 118)
+            m._SPEND_MEM.clear(); m._MACHINE.clear()
+            with snapshot():
+                self.assertEqual(m.spend_machine(inst, budget=None)['since_week']['processed'], 53)
+            stat = path.stat()
+            key = m.hashlib.sha256(str(path.resolve()).encode()).hexdigest()[:32]
+            bad = {**m.spend_new('codex', path), 'v': 7, 'key': key, 'ino': [stat.st_dev, stat.st_ino],
+                   'stamp': [stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns, stat.st_mode, stat.st_nlink],
+                   'complete': True, 'published': True}
+            bad['state']['offset'] = stat.st_size
+            kept = {k: v for k, v in bad.items() if k not in m.SPEND_UNKEPT}
+            with m._owners['spend_file']._m_usage_cache.database(inst) as database:
+                database.put('file:' + key, kept)
+            m._SPEND_MEM.clear(); m._MACHINE.clear()
+            with snapshot():
+                self.assertEqual(m.spend_machine(inst, budget=None)['since_week']['processed'], 53)
+            fourth = '44444444-fourth'
+            replacement = self.cx(scratch, fourth, [(1, *self.record(fourth, 'd1', 70, 0, 4))])
+            staged.write_bytes(replacement.read_bytes())
+            replacement.unlink()
+            m._SPEND_MEM.clear(); m._MACHINE.clear()
+            with snapshot():
+                self.assertEqual(m.codex_meta(path, {self.codex}, set())[0], third)
+                staged.replace(path)  # the stale memo now predates discovery itself
+                self.assertEqual(m.spend_machine(inst, budget=None)['since_week']['processed'], 74)
+            for sid in (first, second, third, fourth):
+                self.assertNotIn(sid.encode(), (self.r / '.brain/usage.sqlite').read_bytes())
 
     def test_finished_usage_uses_the_recorded_final_ledger_counts(self):
         m = core_loader.SourceFileLoader('speed_finished_fixture', str(CORE / 'bin/brain')).load_module()
