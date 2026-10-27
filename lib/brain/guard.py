@@ -66,6 +66,7 @@ NEVER_FILE = "never-name.txt"  # in a node folder (outside the home): one term p
 
 _TERM_SCAN_CACHE = contextvars.ContextVar('brain_term_scan_cache', default=None)
 _TERM_VERDICTS = contextvars.ContextVar('brain_term_verdicts', default=None)
+_TERM_READ_DIRECTORY = contextvars.ContextVar('brain_term_read_directory', default=None)
 
 
 @contextlib.contextmanager
@@ -325,6 +326,9 @@ def stream_mentions(fh, needles, size=None, chunk=1 << 20, principals=(), raw=No
 def term_open_file(path, flags):
     # Inspect the opened descriptor, without blocking if a regular path was
     # replaced by a FIFO. No bytes are read from nonregular descriptors.
+    directory = _TERM_READ_DIRECTORY.get()
+    if directory is not None and isinstance(path, str) and path.startswith(directory[0]):
+        return os.open(path[len(directory[0]):], flags | os.O_NONBLOCK, dir_fd=directory[1])
     return os.open(path, flags | os.O_NONBLOCK)
 
 
@@ -479,14 +483,35 @@ def term_file_observations(n, root, files, entries, needles, principals, policie
     tracked = {f for _, _, _, f in entries}
     submodules = {f for mode, _, _, f in entries if mode == '160000'}
     observed, errors = {}, []
-    for f in files:
-        if f in submodules or f in observed:
-            continue
-        fp = os.path.join(root, f)
-        kind = governance_file(n, fp) if f.endswith('.md') else False
-        seen = file_mentions(fp, needles, errors=errors, principals=principals if kind else (),
-                             lessons=kind == 'lessons', policy=policies.get(kind), missing_ok=f in tracked)
-        observed[f] = (kind, seen)
+    # Keep fresh opens/fstats for every file, while resolving the common root
+    # once. A replaced root makes the observation incomplete, never clean.
+    directory, token = None, None
+    try:
+        directory = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+        before = os.fstat(directory)
+        token = _TERM_READ_DIRECTORY.set((os.path.join(os.fspath(root), ''), directory))
+        for f in files:
+            if f in submodules or f in observed:
+                continue
+            fp = os.path.join(root, f)
+            kind = governance_file(n, fp) if f.endswith('.md') else False
+            seen = file_mentions(fp, needles, errors=errors, principals=principals if kind else (),
+                                 lessons=kind == 'lessons', policy=policies.get(kind), missing_ok=f in tracked)
+            observed[f] = (kind, seen)
+        after = os.stat(root)
+        if (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino):
+            errors.append((root, 'directory changed during term scan'))
+    except OSError as error:
+        errors.append((root, error.strerror or str(error)))
+        # Preserve the inventory shape even when opening its root failed.
+        for f in files:
+            if f not in submodules:
+                observed.setdefault(f, (False, set()))
+    finally:
+        if token is not None:
+            _TERM_READ_DIRECTORY.reset(token)
+        if directory is not None:
+            os.close(directory)
     return observed, errors
 
 

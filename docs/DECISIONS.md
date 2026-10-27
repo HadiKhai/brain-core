@@ -2889,3 +2889,7 @@ binding order is preserved. The streaming hash helper selects SHA-1 inside its
 constructor from a None default instead of encoding a callable as a bare symbol.
 The executing scanner/cache module code is captured too, including top-level
 initializers, so a global-only source upgrade also changes the loaded identity.
+Repository file observations share an open directory descriptor to avoid resolving
+the same root for every file. Each file still opens nonblocking and checks its own
+descriptor; a changed or unavailable root after observation makes the scan incomplete.
+The directory authority is scoped to that observation and always closed/reset.
