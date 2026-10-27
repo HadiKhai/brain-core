@@ -913,3 +913,93 @@ class GitReadLocks(Scenario):
             self.assertEqual((actual.stdout, actual.stderr), (expected.stdout, expected.stderr))
             self.assertEqual({p: (p.stat().st_ino, p.stat().st_mtime_ns, p.read_bytes()) for p in [index, *backing]}, before)
         self.assertEqual(lock.read_bytes(), b'foreign')
+
+    def test_split_index_reads_preserve_conditional_configuration(self):
+        root = self.repo(self.tmp / 'conditional café source')
+        self.git('update-index', '--split-index', cwd=root)
+        own = root / '.git'
+        include = own / 'conditional.inc'
+        nested = own / 'nested.inc'
+        patterns = self.tmp / 'ignore.patterns'
+        patterns.write_text('ignored.tmp\n')
+        include.write_text('[include]\n\tpath = ./nested.inc\n')
+        nested.write_text('[core]\n\texcludesFile = ' + str(patterns) + '\n\tquotePath = false\n')
+        (root / 'ignored.tmp').write_text('ignored work\n')
+        (root / '雪.txt').write_text('visible work\n')
+        (root / 'README.md').write_text('tracked work\n')
+        cases = [('gitdir:' + str(own), False),
+                 ('gitdir/i:' + ''.join(c.swapcase() if c.isascii() else c for c in str(own)), False),
+                 ('gitdir:**/brain-diff-index-*/', True)]
+        backing = list(own.glob('sharedindex.*'))
+        for predicate, visible_ignored in cases:
+            key = 'includeIf.' + predicate + '.path'
+            self.git('config', key, './conditional.inc', cwd=root)
+            try:
+                for query in [('status', '--porcelain'), ('diff', '--name-only')]:
+                    with self.subTest(predicate=predicate, query=query):
+                        expected = subprocess.run(['git', '--no-optional-locks', '-C', str(root), *query],
+                                                  env=self.env, capture_output=True, text=True, check=True)
+                        for shared in backing:
+                            os.utime(shared, ns=(1_000_000_000, 1_000_000_000))
+                        paths = [own / 'index', *backing]
+                        before = {p: (p.stat().st_ino, p.stat().st_mtime_ns, p.read_bytes()) for p in paths}
+                        with mock.patch.dict(os.environ, self.env, clear=True):
+                            actual = self.common.git(*query, cwd=root, check=True)
+                        self.assertEqual((actual.stdout, actual.stderr), (expected.stdout, expected.stderr))
+                        if query[0] == 'status':
+                            self.assertEqual('ignored.tmp' in actual.stdout, visible_ignored)
+                        self.assertEqual({p: (p.stat().st_ino, p.stat().st_mtime_ns, p.read_bytes()) for p in paths}, before)
+            finally:
+                self.git('config', '--unset', key, cwd=root)
+
+    def test_split_private_index_preserves_sha256_and_caller_git_environment(self):
+        root = self.tmp / 'sha256 source'
+        root.mkdir()
+        self.git('init', '-q', '-b', 'main', '--object-format=sha256', cwd=root)
+        (root / 'tracked.txt').write_text('before\n')
+        self.git('add', '-A', cwd=root)
+        self.git('commit', '-qm', 'sha256 fixture', cwd=root)
+        self.git('update-index', '--split-index', cwd=root)
+        (root / 'tracked.txt').write_text('after!\n')
+        (root / 'ignored.tmp').write_text('ignored work\n')
+        patterns = self.tmp / 'caller.patterns'
+        patterns.write_text('ignored.tmp\n')
+        env = {**self.env, 'GIT_CONFIG_COUNT': '1', 'GIT_CONFIG_KEY_0': 'core.excludesFile',
+               'GIT_CONFIG_VALUE_0': str(patterns)}
+        original_env = env.copy()
+        paths = [root / '.git/index', *(root / '.git').glob('sharedindex.*')]
+        for query in [('status', '--porcelain'), ('diff', '--binary', 'HEAD')]:
+            expected = subprocess.run(['git', '--no-optional-locks', '-C', str(root), *query],
+                                      env=env, capture_output=True, text=True, check=True)
+            for backing in paths[1:]:
+                os.utime(backing, ns=(1_000_000_000, 1_000_000_000))
+            before = {p: (p.stat().st_ino, p.stat().st_mtime_ns, p.read_bytes()) for p in paths}
+            actual = self.common.git(*query, cwd=root, env=env, check=True)
+            self.assertEqual((actual.stdout, actual.stderr), (expected.stdout, expected.stderr))
+            self.assertEqual({p: (p.stat().st_ino, p.stat().st_mtime_ns, p.read_bytes()) for p in paths}, before)
+        self.assertEqual(env, original_env)
+
+    def test_flattened_split_index_keeps_racy_clean_detection(self):
+        root = self.repo(self.tmp / 'split racy source')
+        self.git('config', 'core.trustctime', 'false', cwd=root)
+        path = root / 'README.md'
+        instant = 1_600_000_000_000_000_000
+        os.utime(path, ns=(instant, instant))
+        self.git('add', 'README.md', cwd=root)
+        self.git('update-index', '--split-index', cwd=root)
+        indexes = [root / '.git/index', *(root / '.git').glob('sharedindex.*')]
+        for index in indexes:
+            os.utime(index, ns=(instant, instant))
+        path.write_text('other\n')
+        os.utime(path, ns=(instant, instant))
+        (root / '.git/index.lock').write_bytes(b'foreign')
+        expected = subprocess.run(['git', '--no-optional-locks', '-C', str(root), 'diff', '--name-only'],
+                                  env=self.env, capture_output=True, text=True, check=True)
+        for index in indexes:
+            os.utime(index, ns=(instant, instant))
+        before = {p: (p.stat().st_ino, p.stat().st_mtime_ns, p.read_bytes()) for p in indexes}
+        with mock.patch.dict(os.environ, self.env, clear=True):
+            actual = self.common.git('diff', '--name-only', cwd=root, check=True)
+        self.assertEqual(expected.stdout, 'README.md\n')
+        self.assertEqual(actual.stdout, expected.stdout)
+        self.assertEqual({p: (p.stat().st_ino, p.stat().st_mtime_ns, p.read_bytes()) for p in indexes}, before)

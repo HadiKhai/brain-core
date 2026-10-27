@@ -504,8 +504,8 @@ def git_read_index(cwd, env, *, diff=False):
 
     Disabling diff.autoRefreshIndex changes name-only/raw output for stat-only
     changes. Git versions that ignore optional locks during diff must therefore
-    refresh a disposable copy instead of the caller's index. Split-index reads
-    also need private per-worktree administration for their backing-file mtimes.
+    refresh a disposable copy instead of the caller's index. Split indexes are
+    flattened privately so reads cannot freshen their original backing files.
     """
     location = git('rev-parse', '--path-format=absolute', '--git-path', 'index', cwd=cwd, env=env)
     source = Path(location.stdout.removesuffix('\n')) if not location.returncode else None
@@ -530,31 +530,27 @@ def git_read_index(cwd, env, *, diff=False):
         if split:
             own = git('rev-parse', '--absolute-git-dir', cwd=cwd, env=env, check=True)
             own = Path(own.stdout.removesuffix('\n'))
-            shared = list(own.glob('sharedindex.*'))
+            shared = [path for path in own.glob('sharedindex.*') if path.is_file()]
             if shared:
-                # Split backing files live under GIT_DIR, not next to an
-                # alternate index. Reads freshen their mtimes even with -uno
-                # and optional locks disabled, so isolate the per-worktree
-                # administration while retaining the real object/ref store.
-                common = git('rev-parse', '--path-format=absolute', '--git-common-dir', cwd=cwd, env=env, check=True)
-                worktree = git('rev-parse', '--show-toplevel', cwd=cwd, env=env)
-                # Ref backends also inspect the commondir file, independently
-                # of GIT_COMMON_DIR. An alias keeps its line-oriented operand
-                # valid even when the real common directory contains newlines.
-                (directory / 'common').symlink_to(common.stdout.removesuffix('\n'), target_is_directory=True)
-                (directory / 'commondir').write_text('common\n')
-                for entry in own.iterdir():
-                    if entry.is_file() and entry.name not in ('index', 'commondir', 'gitdir', 'common') and not entry.name.endswith('.lock'):
-                        shutil.copy2(entry, directory / entry.name)
-                for name in ('info', 'refs', 'rebase-merge', 'rebase-apply', 'sequencer'):
-                    if (own / name).is_dir():
-                        shutil.copytree(own / name, directory / name, symlinks=True)
-                if (own / 'logs/HEAD').is_file():
-                    (directory / 'logs').mkdir()
-                    shutil.copy2(own / 'logs/HEAD', directory / 'logs/HEAD')
-                child.update(GIT_DIR=str(directory), GIT_COMMON_DIR=common.stdout.removesuffix('\n'))
-                if not worktree.returncode:
-                    child['GIT_WORK_TREE'] = worktree.stdout.removesuffix('\n')
+                # Flatten the copied split index before the actual read. Moving
+                # the real query's GIT_DIR changes conditional configuration.
+                # Conversion needs no objects/refs and uses only scratch config.
+                form = git('rev-parse', '--show-object-format', cwd=cwd, env=env, check=True)
+                (directory / 'objects').mkdir()
+                (directory / 'refs').mkdir()
+                (directory / 'HEAD').write_text('ref: refs/heads/scratch\n')
+                (directory / 'config').write_text(
+                    '[core]\nrepositoryformatversion = 1\nbare = false\n'
+                    '[extensions]\nobjectFormat = ' + form.stdout.removesuffix('\n') + '\n')
+                for backing in shared:
+                    shutil.copy2(backing, directory / backing.name)
+                conversion = {key: value for key, value in env.items() if not key.startswith('GIT_')}
+                conversion.update(GIT_DIR=str(directory), GIT_INDEX_FILE=str(private),
+                                  GIT_WORK_TREE=str(Path(cwd or Path.cwd()).absolute()),
+                                  GIT_CONFIG_NOSYSTEM='1', GIT_CONFIG_SYSTEM=os.devnull,
+                                  GIT_CONFIG_GLOBAL=os.devnull, GIT_OPTIONAL_LOCKS='0', GIT_NO_LAZY_FETCH='1')
+                git('update-index', '--no-split-index', cwd=cwd, env=conversion, check=True)
+                os.utime(private, ns=(original.st_atime_ns, original.st_mtime_ns))
         yield child
 
 

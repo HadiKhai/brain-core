@@ -2770,6 +2770,8 @@ Git diff can refresh stale index metadata even with optional locks disabled.
 Shared diff calls and the binary retention diagnostic therefore use a disposable
 private index, preserving normal name-only/raw output; disabling automatic refresh
 would expose stat-only changes. Copies preserve the source descriptor's mtime for
-racy-clean detection. Split-index status/diff reads also isolate per-worktree
-administration, because Git freshens backing-file mtimes even without optional
-locks. The original object/ref store remains authoritative; writers stay unchanged.
+racy-clean detection. Split-index status/diff reads first flatten the copied index in a scratch
+repository with no objects, refs or inherited Git configuration. The actual read
+retains its original Git directory and configuration, including matching and
+nonmatching conditional includes. Restoring the original index mtime after
+conversion preserves racy-clean detection. Writers stay unchanged.
