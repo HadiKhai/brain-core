@@ -2846,4 +2846,6 @@ Validation still runs outside the instance writer lock. After reacquiring that
 lock, publication compares fresh generations of every selected input before
 saving. Relevant drift refuses without writing the prepared task. Automatic
 retries are not needed to tolerate unrelated builder commits and are omitted
-so genuine validation conflicts remain explicit.
+so genuine validation conflicts remain explicit. Requirements are read once per
+validation pass, using a local snapshot protected by the same generation fence,
+instead of rereading the entire requirement directory for each task row.

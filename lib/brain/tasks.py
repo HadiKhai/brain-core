@@ -106,7 +106,7 @@ def normalize(changes):
 
 
 def validate(n, records):
-    jobs = None
+    jobs = requirements = None
     for ident, row in records.items():
         record_path(n, ident)
         if not isinstance(row.get('title'), str) or not row['title'].strip():
@@ -142,8 +142,11 @@ def validate(n, records):
         for link in row['decisions']:
             if not re.fullmatch(r'(?:repo:D[0-9]+|private:D-[A-Za-z0-9-]+)', link):
                 raise ValueError('decision links use repo:D123 or private:D-123')
-        if row.get('requirement') and row['requirement'] not in read_records(n, 'requirements'):
-            raise ValueError(ident + ': requirement not found')
+        if row.get('requirement'):
+            if requirements is None:
+                requirements = read_records(n, 'requirements')
+            if row['requirement'] not in requirements:
+                raise ValueError(ident + ': requirement not found')
         if row['status'] in ('in-progress', 'in-review', 'testing') and not external:
             if jobs is None:
                 from . import jobs as _m_jobs

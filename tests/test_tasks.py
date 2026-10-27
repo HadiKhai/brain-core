@@ -196,6 +196,26 @@ class Tasks(Scenario):
             self.add('NEW-1')
         self.assertNotIn('NEW-1', tasks.read_records(self.n))
 
+    def test_validation_reads_requirement_snapshot_once_per_prepare(self):
+        tasks.requirement_add(self.inst, self.n, 'REQ-1', 'Exact words', self.inst.now(), 'notes.md:1')
+        self.add('BASE-1', requirement='REQ-1')
+        read = tasks.read_records
+        with mock.patch.object(tasks, 'read_records', wraps=read) as reads:
+            tasks.prepare_mutation(self.inst, self.n, 'NEW-1',
+                                   {'title': 'New task', 'requirement': 'REQ-1'}, create=True)
+        self.assertEqual(sum(call.args[1:] == ('requirements',) for call in reads.call_args_list), 1)
+
+    def test_requirement_change_during_prepare_refuses(self):
+        tasks.requirement_add(self.inst, self.n, 'REQ-1', 'Exact words', self.inst.now(), 'notes.md:1')
+        prepare = tasks.prepare_mutation
+        def changed(*args, **kwargs):
+            result = prepare(*args, **kwargs)
+            (self.n['dir'] / 'requirements/REQ-1.md').unlink()
+            return result
+        with mock.patch.object(tasks, 'prepare_mutation', side_effect=changed), self.assertRaises(SystemExit):
+            self.add('NEW-1', requirement='REQ-1')
+        self.assertNotIn('NEW-1', tasks.read_records(self.n))
+
     def test_target_record_change_during_prepare_refuses_without_lost_update(self):
         self.add('BASE-1')
         prepare = tasks.prepare_mutation
