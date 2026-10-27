@@ -418,6 +418,28 @@ class EventAppend(Scenario):
 class EventViews(Scenario):
     fixture_init_in_process = True
 
+    def test_snapshot_setup_failure_restores_both_read_scopes_before_writer_recheck(self):
+        from brain import command_reads, spend
+        r = self.init('snapshot-entry-failure')
+        inst = instance.Instance(r)
+        before = spend._UI_DISCOVERY.get()
+        original = instance.Instance.nodes
+        def fail_during_setup(value):
+            if command_reads._VALUES.get() is not None:
+                raise OSError('node discovery failed')
+            return original(value)
+        with mock.patch.dict(os.environ, self.env, clear=True), instance.brain_lock(inst), \
+                mock.patch.object(instance.Instance, 'nodes', fail_during_setup):
+            with self.assertRaisesRegex(OSError, 'node discovery failed'):
+                with instance.released(inst), command_reads.snapshot():
+                    self.fail('failed entry must not reach the body')
+            self.assertIsNotNone(instance._LOCK['fh'])
+            self.assertIsNone(command_reads._VALUES.get())
+            self.assertIs(spend._UI_DISCOVERY.get(), before)
+        with mock.patch.dict(os.environ, self.env, clear=True), command_reads.snapshot():
+            self.assertIsNotNone(command_reads._VALUES.get())
+        self.assertIsNone(command_reads._VALUES.get())
+
     def test_terminal_projection_samples_machine_alongside_view_without_writer_lock(self):
         import threading
         from brain import status
