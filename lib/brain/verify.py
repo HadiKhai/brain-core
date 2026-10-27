@@ -125,12 +125,11 @@ def ready_preflight(n, branch, base=None):
                            "in a coordinator-owned worktree, or configure merge=pr; never change the operator checkout")
         elif _m_common.git("merge-base", "--is-ancestor", base or local, head, cwd=n["home_path"]).returncode:
             reasons.append("worker must rebase on current local main as well as origin default for merge=local")
-    titles = _m_common.git("log", "--format=%s", main + ".." + head, cwd=n["home_path"])
-    if titles.returncode:
+    titles = _m_common.unfinished_commit_titles(n["home_path"], main, head)
+    if titles is None:
         reasons.append("branch commit titles are unreadable")
     else:
-        reasons.extend("unfinished commit: " + title for title in titles.stdout.splitlines()
-                       if re.match(r"(?:wip|fixup!|squash!)", title, re.IGNORECASE))
+        reasons.extend("unfinished commit: " + title for title in titles)
     w = n["local"].get("worktrees", {}).get(branch)
     if not w or not Path(w["path"]).exists():
         reasons.append("job worktree is missing")
@@ -1050,15 +1049,16 @@ def cmd_ready(a):
     if a.record:  # compatibility alias: one writer, one record, same verification
         a.state = "done"
         return _m_jobs.cmd_handback(a)
-    inst = _m_nodes.load()
-    main_notice(inst.node(a.id))
-    n = inst.node(a.id)
-    state = ready_state(inst, n, a.branch)
-    show_lanes(n, state["packet"])
-    print(VerifyScrubber(_m_guard.never_terms(n)).feed(
-        "ready" if state["ready"] else "not ready: " + "; ".join(state["reasons"]), final=True))
-    if not state["ready"]:
-        sys.exit(1)
+    with _m_common.git_read_snapshot():
+        inst = _m_nodes.load()
+        main_notice(inst.node(a.id))
+        n = inst.node(a.id)
+        state = ready_state(inst, n, a.branch)
+        show_lanes(n, state["packet"])
+        print(VerifyScrubber(_m_guard.never_terms(n)).feed(
+            "ready" if state["ready"] else "not ready: " + "; ".join(state["reasons"]), final=True))
+        if not state["ready"]:
+            sys.exit(1)
 
 def verify_input_files(n, w):
     """Private per-path evidence. Contents never leave this reader; hashes are never diagnostics."""
