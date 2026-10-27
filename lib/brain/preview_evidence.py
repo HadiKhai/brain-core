@@ -62,7 +62,8 @@ def job_preview_binding(inst, n, row, head):
         if not current or _m_jobs.job_key(current) != _m_jobs.job_key(row):
             refuse()
         worktree = current_node['local'].get('worktrees', {}).get(row['Job'])
-        if not current_node['external'] or not isinstance(worktree, dict):
+        if (not current_node['external'] or not current_node.get('home_path') or
+                not isinstance(worktree, dict)):
             refuse()
         created = live.parse_time(worktree.get('created'))
         if not created or created > live.now_dt() or not worktree.get('start'):

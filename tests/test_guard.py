@@ -1069,3 +1069,21 @@ class JobPreviewReceipts(Scenario):
         m.write_jobs(inst, n, [row])
         (n['dir'] / 'node.md').unlink()
         self.assertTrue(m.validate_ready_preview(inst, n, 'job', data['head']))
+
+    def test_removed_live_home_binding_refuses_before_full_verify(self):
+        m, inst, n, row, data = self.context()
+        self.b(inst.root, 'set', 'web', 'verify=true')
+        inst = m.Instance(inst.root)
+        n = inst.node('web')
+        m.record_preview_receipt(inst, n, 'job', data)
+        fresh = m.Instance(inst.root)
+        del fresh.local_of('web')['home']
+        fresh.save_local()
+        self.assertTrue(m.validate_ready_preview(inst, n, 'job', data['head']))
+        with self.assertRaises(ValueError):
+            m.record_preview_receipt(inst, n, 'job', data)
+        with mock.patch.object(m, 'run_verify') as execute:
+            packet, reasons = m.record_ready(inst, n, 'job', 1)
+        execute.assert_not_called()
+        self.assertIsNone(packet)
+        self.assertIn('missing or invalid exact-head preview rendering and three-source-sample receipt', reasons)
