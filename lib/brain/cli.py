@@ -711,7 +711,8 @@ def _main():
     cmd("allow", _Command("action_guard", "cmd_allow"), "allow one exact forbidden shell command once", "id", "action",
         opt("--once", action="store_true", required=True), opt("--cwd"), opt("--tool", default="Bash"))
     cmd("wake", _Command("hosts", "cmd_wake"), "wake a node coordinator (or root); inbox remains the record", "id",
-        opt("reason", nargs="?"), opt("--drain", action="store_true", help=argparse.SUPPRESS))
+        opt("reason", nargs="?"), opt("--drain", action="store_true", help=argparse.SUPPRESS),
+        opt("--retry", action="store_true", help=argparse.SUPPRESS))
     cmd("watch", _Command("watch", "cmd_watch"), "queue wakes only for new actionable file items",
         opt("--once", action="store_true", required=True))
     cmd("now", _Command("status", "cmd_now"), "the current time in the instance's timezone, as every record writes it (axiom 17)",

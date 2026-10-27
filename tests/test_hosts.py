@@ -357,6 +357,7 @@ cli.main()
                 p.communicate()
 
     def test_rate_wait_leaves_instance_responsive(self):
+        import fcntl
         r = self.copy_brain(self.init("fixture"))
         self.b(r, "new", "other", "--title", "Other")
         self.b(r, "set", "root", "wake=exit 0")
@@ -364,31 +365,35 @@ cli.main()
         directory.mkdir(parents=True)
         (directory / "reason.pending").touch()
         (directory / "last").write_text(str(time.time()))
-        p = self.start(r, "wake", "root", "--drain")
-        try:
-            # The holder pid isn't recorded for the wake lock; probe its flock instead.
-            import fcntl
+        def held(name):
+            # Lock holders aren't recorded; probe each flock instead.
+            with (directory / name).open("a+") as stream:
+                try:
+                    fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    return True
+                return False
+        def wait(condition, message):
             deadline = time.monotonic() + 20
-            acquired = False
-            while time.monotonic() < deadline:
-                with (directory / "lock").open("a+") as stream:
-                    try:
-                        fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                    except BlockingIOError:
-                        acquired = True
-                        break
+            while not condition():
+                self.assertLess(time.monotonic(), deadline, message)
                 time.sleep(.02)
-            self.assertTrue(acquired, "drain did not enter rate wait")
+        try:
+            for _ in range(2):  # a closed window ends every drain; one timer covers the opening
+                p = self.start(r, "wake", "root", "--drain")
+                out, err = p.communicate(timeout=15)
+                self.assertEqual(p.returncode, 0, out + err)
+                wait(lambda: held("retry.lock"), "drain scheduled no timer for the window opening")
+                self.assertFalse(held("lock"), "the timer must not hold the delivery lock")
+                self.assertFalse((directory / "reason.sent").exists())
             self.responsive(r)
-            self.assertIsNone(p.poll())
             (directory / "last").write_text(str(time.time() - 121))
-            out, err = p.communicate(timeout=20)
-            self.assertEqual(p.returncode, 0, out + err)
-            self.assertTrue((directory / "reason.sent").exists())
+            wait(lambda: (directory / "reason.sent").exists(), "the timer did not deliver at the opening")
+            # Requests published after that delivery wait for the next opening under a new timer.
+            wait(lambda: held("retry.lock") or not list(directory.glob("*.pending")),
+                 "a request remained without a timer")
         finally:
-            if p.poll() is None:
-                p.kill()
-                p.communicate()
+            (directory / "last").write_text(str(time.time() - 121))  # release any surviving timer
 
     def test_binding_publication_failure_preserves_readable_prior_state(self):
         r = self.init("fixture")
@@ -460,6 +465,20 @@ class QuestionWake(Scenario):
     def drain(self, node=None):
         self.module.wake_drain(self.inst, node or self.n, once=True)
 
+    @contextlib.contextmanager
+    def inline_timer(self):
+        """Run the detached timer and the drains it starts in-process, recording each."""
+        calls = types.SimpleNamespace(schedules=[], starts=[])
+        def schedule(inst, node):
+            calls.schedules.append(node["id"])
+            self.module.wake_retry(inst, node)
+        def start(inst, node):
+            calls.starts.append(node["id"])
+            self.module.wake_drain(inst, node)
+        with mock.patch.object(self.module, "wake_schedule", side_effect=schedule), \
+                mock.patch.object(self.module, "wake_start", side_effect=start):
+            yield calls
+
     def test_dedup_rate_window_and_delayed_delivery(self):
         self.assertEqual(self.enqueue("first question"), 1)
         self.drain()
@@ -485,10 +504,25 @@ class QuestionWake(Scenario):
         self.enqueue("second")
         directory = self.module.wake_directory(self.inst, self.n)
         (directory / "last").write_text(str(time.time()))
-        start = time.monotonic()
-        with mock.patch.object(self.module, "WAKE_INTERVAL", 0.15):
+        sleeps = []
+        clock = types.SimpleNamespace(monotonic=time.monotonic, time=time.time,
+                                      sleep=lambda seconds: (sleeps.append(seconds), time.sleep(seconds)))
+        with mock.patch.object(self.module, "WAKE_INTERVAL", 0.15), mock.patch.object(self.module, "WAKE_CLOCK", clock), \
+                mock.patch.object(self.module, "wake_schedule") as schedule:
+            start = time.monotonic()
             self.module.wake_drain(self.inst, self.n)
+            self.assertLess(time.monotonic() - start, 0.14, "a closed window must end the drain, not wait")
+            self.assertEqual(sleeps, [])
+            self.assertEqual(schedule.call_count, 1)
+            self.assertEqual(len(self.calls.read_text().splitlines()), 1)
+            self.assertEqual(len(list(directory.glob("*.pending"))), 1)
+            with self.inline_timer() as calls:
+                start = time.monotonic()
+                self.module.wake_retry(self.inst, self.n)
         self.assertGreaterEqual(time.monotonic() - start, 0.14)
+        self.assertTrue(sleeps)
+        self.assertEqual(calls.starts, ["a"])
+        self.assertEqual(calls.schedules, [])
         self.assertEqual(len(self.calls.read_text().splitlines()), 2)
         self.assertFalse(list(directory.glob("*.pending")))
 
@@ -793,9 +827,40 @@ class QuestionWake(Scenario):
         self.enqueue("clock rollback")
         directory = self.module.wake_directory(self.inst, self.n)
         (directory / "last").write_text(str(time.time() + 86400))
-        with mock.patch.object(self.module, "WAKE_INTERVAL", 0.1):
+        with mock.patch.object(self.module, "WAKE_INTERVAL", 0.1), self.inline_timer() as calls:
             self.module.wake_drain(self.inst, self.n)
         self.assertEqual(len(self.calls.read_text().splitlines()), 1)
+        self.assertEqual((calls.schedules, calls.starts), (["a"], ["a"]))
+
+    def test_timer_follows_rollback_without_repair_and_bounds_its_wait(self):
+        self.enqueue("timer rollback")
+        directory = self.module.wake_directory(self.inst, self.n)
+        now, slept = [1000.0], []
+        def advance(seconds):
+            slept.append(seconds)
+            now[0] += seconds
+        clock = types.SimpleNamespace(monotonic=lambda: now[0], time=lambda: now[0], sleep=advance)
+        (directory / "last").write_text(str(now[0] + 86400))
+        with mock.patch.object(self.module, "WAKE_CLOCK", clock), \
+                mock.patch.object(self.module, "wake_start") as start:
+            self.module.wake_retry(self.inst, self.n)
+        self.assertEqual(start.call_count, 1)
+        self.assertTrue(all(0 < s <= 5 for s in slept), slept)
+        self.assertAlmostEqual(sum(slept), 120)  # one window at most, as the drain bounds it
+        self.assertEqual((directory / "last").read_text(), str(1000.0 + 86400), "only the drain repairs the window")
+
+    def test_second_timer_exits_while_one_covers_the_opening(self):
+        import fcntl
+        self.enqueue("covered")
+        directory = self.module.wake_directory(self.inst, self.n)
+        (directory / "last").write_text(str(time.time()))
+        with (directory / "retry.lock").open("a+") as stream, \
+                mock.patch.object(self.module, "wake_start") as start, \
+                mock.patch.object(self.module.WAKE_CLOCK, "sleep") as sleep:
+            fcntl.flock(stream, fcntl.LOCK_EX)
+            self.module.wake_retry(self.inst, self.n)
+        start.assert_not_called()
+        sleep.assert_not_called()
 
     def test_wake_start_drops_parent_instance_lock_capability(self):
         with mock.patch.dict(os.environ, {"BRAIN_LOCK_HELD": "fixture|123", "FIXTURE_SETTING": "kept"}, clear=True), \
@@ -808,30 +873,40 @@ class QuestionWake(Scenario):
             self.assertEqual(env["BRAIN_NO_REEXEC"], "1")
             self.assertEqual(os.environ["BRAIN_LOCK_HELD"], "fixture|123")
 
-    def test_deadline_hands_off_reason_arriving_during_last_send(self):
+    def test_reason_arriving_during_each_send_is_delivered_at_each_opening(self):
         self.enqueue("first")
-        now, sends, starts = [1000.0], [], []
+        now, sends, held = [1000.0], [], []
         def advance(seconds):
             now[0] += seconds
-        def start(inst, node):
-            starts.append((now[0], node["id"]))
-            self.module.wake_drain(inst, node)  # inline newcomer really conflicts with LOCK_NB
         def send(command, reason=None):
             time.sleep(.001)  # An unrelated stdlib poll must not advance the wake clock.
             sends.append(now[0])
             if len(sends) <= 5:
+                before = len(calls.starts)
                 self.module.request_wake(self.inst, self.n, "during-send-" + str(len(sends)))
+                held.append(len(calls.starts) - before)  # inline newcomer really conflicts with LOCK_NB
             return True
         clock = types.SimpleNamespace(monotonic=lambda: now[0], time=lambda: now[0], sleep=advance)
         with mock.patch.object(self.module, "WAKE_CLOCK", clock), \
-                mock.patch.object(self.module, "wake_send", side_effect=send), \
-                mock.patch.object(self.module, "wake_start", side_effect=start):
+                mock.patch.object(self.module, "wake_send", side_effect=send), self.inline_timer() as calls:
             self.module.wake_drain(self.inst, self.n)
         directory = self.module.wake_directory(self.inst, self.n)
         self.assertFalse(list(directory.glob("*.pending")))
         self.assertEqual(sends, [1000.0 + i * 120 for i in range(6)])
-        self.assertEqual(len(starts), 6)  # five losing newcomers, one post-unlock handoff
+        self.assertEqual(held, [1] * 5)  # each newcomer lost LOCK_NB to the sending drain
+        self.assertEqual(len(calls.schedules), 5)  # one post-unlock timer per closed window
+        self.assertEqual(len(calls.starts), 10)
         self.assertEqual(len(list(directory.glob("*.sent"))), 6)
+        self.assertFalse((directory / "retry.lock").exists() and self.retry_held(directory))
+
+    def retry_held(self, directory):
+        import fcntl
+        with (directory / "retry.lock").open("a+") as stream:
+            try:
+                fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return True
+            return False
 
     def test_failed_attempts_do_not_respawn_at_deadline(self):
         self.enqueue("failure")
@@ -842,13 +917,28 @@ class QuestionWake(Scenario):
                 mock.patch.object(self.module.time, "time", side_effect=lambda: now[0]), \
                 mock.patch.object(self.module.time, "sleep", side_effect=advance), \
                 mock.patch.object(self.module, "wake_send", return_value=False) as send, \
-                mock.patch.object(self.module, "wake_start") as start:
+                mock.patch.object(self.module, "wake_start") as start, \
+                mock.patch.object(self.module, "wake_schedule") as schedule:
             self.module.wake_drain(self.inst, self.n)
-        self.assertEqual(send.call_count, 5)
+        # The drain no longer waits out a window; the watcher's next start retries the failure.
+        self.assertEqual(send.call_count, 1)
         start.assert_not_called()
+        schedule.assert_not_called()
         directory = self.module.wake_directory(self.inst, self.n)
         self.assertEqual(len(list(directory.glob("*.pending"))), 1)
         self.assertFalse(list(directory.glob("*.sent")))
+        # A fresh start inside the window schedules the opening; the timer's drain retries.
+        with mock.patch.object(self.module.time, "monotonic", side_effect=lambda: now[0]), \
+                mock.patch.object(self.module.time, "time", side_effect=lambda: now[0]), \
+                mock.patch.object(self.module.time, "sleep", side_effect=advance), \
+                mock.patch.object(self.module, "wake_send", return_value=True) as send, \
+                self.inline_timer() as calls:
+            now[0] += 60
+            self.module.wake_drain(self.inst, self.n)
+        self.assertEqual(send.call_count, 1)
+        self.assertEqual((calls.schedules, calls.starts), (["a"], ["a"]))
+        self.assertEqual(now[0], 1120.0)
+        self.assertFalse(list(directory.glob("*.pending")))
 
     def test_drain_error_leaves_pending_without_spawning_replacement(self):
         self.enqueue("retry later")
@@ -917,7 +1007,7 @@ class QuestionWake(Scenario):
                 self.enqueue("second")
             return True
         with mock.patch.object(self.module, "wake_send", side_effect=send), \
-                mock.patch.object(self.module, "WAKE_INTERVAL", .01):
+                mock.patch.object(self.module, "WAKE_INTERVAL", .01), self.inline_timer():
             self.module.wake_drain(self.inst, self.n)
         directory = self.module.wake_directory(self.inst, self.n)
         self.assertEqual(len(sends), 2)

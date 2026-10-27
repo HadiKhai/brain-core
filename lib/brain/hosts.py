@@ -723,9 +723,67 @@ def wake_diagnostic(inst, n):
     return None
 
 
+def wake_window_delay(directory, repair=False):
+    """Seconds until the rate window opens; a clock rollback defers one window at most."""
+    last = directory / "last"
+    try:
+        previous, now = float(last.read_text()), WAKE_CLOCK.time()
+    except (OSError, ValueError):
+        return 0
+    if previous > now:
+        if repair:
+            _m_common.atomic_write(last, str(now), private=True)  # bound deferral after a clock rollback
+        previous = now
+    return max(0, WAKE_INTERVAL - (now - previous))
+
+
+def wake_schedule(inst, n):
+    """Detach one timer for the window opening; the drain itself never waits."""
+    env = {**os.environ, "BRAIN_ROOT": str(inst.root), "BRAIN_NO_REEXEC": "1"}
+    env.pop("BRAIN_LOCK_HELD", None)
+    subprocess.Popen([sys.executable, str(_m_common.CORE / "bin" / "brain"), "wake", n["id"], "--retry"],
+                     cwd=inst.root, env=env,
+                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                     start_new_session=True, close_fds=True)
+
+
+def wake_retry(inst, n):
+    """The single timer per destination: hold no delivery lock, start a drain once the window opens.
+
+    It re-reads the window in short steps, so a moved window is followed. A second
+    timer exits at once; the lock is released before the drain starts, so that
+    drain can schedule the next timer itself.
+    """
+    import fcntl
+    directory = wake_directory(inst, n)
+    if not directory.is_dir():
+        return
+    path = directory / "retry.lock"
+    _m_common.safe_target(path)
+    fd = os.open(path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(fd, "a+") as stream:
+        if os.fstat(stream.fileno()).st_nlink != 1:
+            raise ValueError("linked wake retry lock")
+        try:
+            fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return  # an existing timer already covers the next window
+        # Never wait longer than one window, even if the clock rolls back meanwhile.
+        deadline = WAKE_CLOCK.monotonic() + WAKE_INTERVAL
+        while True:
+            delay = min(wake_window_delay(directory), deadline - WAKE_CLOCK.monotonic())
+            if delay <= 0:
+                break
+            WAKE_CLOCK.sleep(min(delay, 5))
+    wake_start(inst, n)
+
+
 def wake_drain(inst, n, once=False):
-    """A short-lived stdlib worker waits out the rate window, without an LLM tick.
-    Failed deliveries remain pending; stop after ten minutes, with due retrying later.
+    """A short-lived stdlib worker delivers only while the rate window is open.
+
+    A closed window ends the drain at once; after the delivery lock is released,
+    one timer is scheduled for the opening, when queued reasons coalesce.
+    Failed deliveries remain pending for the watcher's next start.
     """
     import fcntl
     if wake_route_disabled(inst, n):
@@ -752,30 +810,24 @@ def wake_drain(inst, n, once=False):
             while WAKE_CLOCK.monotonic() < deadline:
                 if _m_common.outward_links(inst.root):
                     return
-                pending = []
+                queued = []
                 for path in sorted(directory.glob("*.pending")):
                     # A requester may have checked .sent just before another worker published it.
                     # Recheck under the delivery lock so this race cannot send the same reason twice.
                     if path.with_suffix(".sent").exists():
                         path.unlink(missing_ok=True)
-                    elif wake_actionable_pending(inst, path):
-                        pending.append(path)
-                if not pending and not _m_wake_turns.wake_turn_stuck(inst, n):
+                    else:
+                        queued.append(path)
+                if not queued and not _m_wake_turns.wake_turn_stuck(inst, n):
                     return
+                # Check the window before any revalidation scan: a closed window
+                # exits now and the finally below schedules the opening.
                 last = directory / "last"
-                try:
-                    previous, now = float(last.read_text()), WAKE_CLOCK.time()
-                    if previous > now:
-                        _m_common.atomic_write(last, str(now), private=True)  # bound deferral after a clock rollback
-                        previous = now
-                    delay = max(0, WAKE_INTERVAL - (now - previous))
-                except (OSError, ValueError):
-                    delay = 0
-                if delay:
-                    if once:
-                        return
-                    WAKE_CLOCK.sleep(min(delay, 5))
-                    continue
+                if wake_window_delay(directory, repair=True):
+                    return
+                pending = [path for path in queued if wake_actionable_pending(inst, path)]
+                if not pending and not _m_wake_turns.wake_turn_stuck(inst, n):
+                    continue  # retired requests may leave newer arrivals behind
                 attempted.update(path.name for path in pending)
                 # Reload bindings so removed/changed transport capabilities take effect.
                 current = _m_instance.Instance(inst.root)
@@ -893,11 +945,15 @@ def wake_drain(inst, n, once=False):
         raise
     finally:
         # A requester can publish after our final scan and lose its worker to LOCK_NB.
-        # Recheck only after releasing the flock so the replacement can take over.
+        # Recheck only after releasing the flock so the replacement can take over:
+        # now if the window is open, else one timer for its opening.
         # Reasons already attempted stay pending on failure, without a respawn loop.
         if owned and not once and not _m_common.outward_links(inst.root) and any(
                 path.name not in attempted for path in directory.glob("*.pending")):
-            wake_start(inst, n)
+            if wake_window_delay(directory):
+                wake_schedule(inst, n)
+            else:
+                wake_start(inst, n)
 
 
 def cmd_wake(a):
@@ -905,6 +961,8 @@ def cmd_wake(a):
     n = inst.node(a.id)
     if a.drain:
         wake_drain(inst, n)
+    elif a.retry:
+        wake_retry(inst, n)
     elif a.reason is not None:
         request_wake(inst, n, a.reason)
     else:
