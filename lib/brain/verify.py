@@ -230,13 +230,15 @@ def ready_state(inst, n, branch, train=False, display=False):
     return values[job][1]
 
 
-def ready_policy_reasons(inst, n, branch, head, packet=None):
+def ready_policy_reasons(inst, n, branch, head, packet=None, preview=True):
     """Use independently owned receipt validators; absent required APIs fail closed."""
     reasons = []
     cfg = getattr(inst, 'cfg', {})
     cfg = cfg if isinstance(cfg, dict) else {}
     for module_name, function in (('.review', 'validate_ready_reviews'),
                                   ('.preview_evidence', 'validate_ready_preview')):
+        if module_name == '.preview_evidence' and not preview:
+            continue
         try:
             validator = getattr(importlib.import_module(module_name, __package__), function, None)
         except ImportError:
@@ -963,7 +965,9 @@ def record_ready(inst, n, branch, reviews, previous=None, reverify=False, full_r
     full = full or full_receipt is not None or bool(change and lanes_configured)
     change = change if not full and not lanes_configured else ''
     preview_context = {'integration_base': integration_base, 'verify_scope': 'change' if change else 'full'}
-    reasons.extend(ready_policy_reasons(inst, n, branch, head, preview_context))
+    # A supplied full receipt owns the map environment. Check its preview
+    # policy after adoption loads that packet; review and preflight still run.
+    reasons.extend(ready_policy_reasons(inst, n, branch, head, preview_context, preview=full_receipt is None))
     from . import rehearse as _m_rehearse
     rehearsal = _m_rehearse.read_evidence(n, branch, head)
     verify = n["fm"].get("verify", "").strip()
@@ -974,7 +978,8 @@ def record_ready(inst, n, branch, reviews, previous=None, reverify=False, full_r
     if reasons:
         return None, reasons
     from . import preview_evidence as _m_preview
-    preview_scope = _m_preview.preview_requirement(inst, n, branch, head, preview_context)
+    preview_scope = (None if full_receipt is not None else
+                     _m_preview.preview_requirement(inst, n, branch, head, preview_context))
     w = n["local"]["worktrees"][branch]
     input_files = verify_input_files(n, w)
     inputs = verify_inputs(n, w, input_files)

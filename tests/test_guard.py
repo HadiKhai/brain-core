@@ -1739,6 +1739,25 @@ class PreviewDiffScoping(Scenario):
         with mock.patch.object(m.Instance, 'nodes', mutate_after_load):
             self.assertTrue(m.validate_ready_preview(inst, n, 'job', data['head']))
 
+    def test_full_receipt_adoption_uses_original_map_environment_before_preview_check(self):
+        script = ('import json, os; print(json.dumps([dict(name="ui", command="true", '
+                  'inputs=["ui/**" if os.environ.get("NODE_OPTIONS") == "gate-fixture" else "server/**"])]))')
+        m, inst, n, data = self.context('verify_lanes_from=python3 -c ' + shlex.quote(script))
+        self.change(m, inst, n, data, {'server/api.py': 'backend\n'})
+        with mock.patch.dict(os.environ, {**self.env, 'NODE_OPTIONS': 'gate-fixture'}, clear=True), \
+                mock.patch.object(m, 'load', return_value=inst), contextlib.redirect_stdout(io.StringIO()):
+            m.cmd_full_run(argparse.Namespace(id='web', branch='job', reviews=1))
+        receipts = list((n['dir'] / 'full-gates').glob('*.json'))
+        self.assertEqual(len(receipts), 1)
+        original = json.loads(receipts[0].read_text())['packet']
+        with mock.patch.dict(os.environ, {**self.env, 'NODE_OPTIONS': 'other'}, clear=True), \
+                mock.patch.object(m, 'run_verify', side_effect=AssertionError('adoption must reuse')):
+            adopted, reasons = m.record_ready(inst, n, 'job', 1, full_receipt=receipts[0].stem)
+        self.assertEqual(reasons, [])
+        self.assertTrue(adopted['verify_reused'])
+        self.assertEqual(adopted['preview_scope'], original['preview_scope'])
+        self.assertEqual(adopted['verify_lane_env'], original['verify_lane_env'])
+
 
 class GuardAllowanceRenewal(Scenario):
     def test_changed_policy_can_receive_a_new_exact_allowance(self):

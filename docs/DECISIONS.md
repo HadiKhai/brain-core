@@ -3584,3 +3584,5 @@ Generated classifiers use the verifier's root, base, head and scope environment;
 new packets retain the existing lane-environment format for subsequent reads.
 Legacy generated-map packets without that environment require a receipt.
 Policy signatures enclose the live load as well as classification.
+Full-receipt adoption defers preview validation until the original packet's
+environment is available; independent review and integration preflight stay first.
