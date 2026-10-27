@@ -1087,3 +1087,21 @@ class JobPreviewReceipts(Scenario):
         execute.assert_not_called()
         self.assertIsNone(packet)
         self.assertIn('missing or invalid exact-head preview rendering and three-source-sample receipt', reasons)
+
+    def test_unbound_home_refuses_before_git_state_preflight(self):
+        m, inst, n, row, data = self.context()
+        file_home = self.tmp / 'file-home'
+        file_home.write_text('not a directory\n')
+        for home in (None, str(self.tmp / 'missing-home'), str(file_home)):
+            fresh = m.Instance(inst.root)
+            if home is None:
+                fresh.local_of('web').pop('home')
+            else:
+                fresh.local_of('web')['home'] = home
+            fresh.save_local()
+            with self.subTest(home=home), mock.patch.object(m, 'git_state_paths') as state, \
+                    mock.patch.object(m, 'git') as git:
+                with self.assertRaisesRegex(ValueError, 'preview receipt requires a bound home'):
+                    m.record_preview_receipt(inst, n, 'job', data)
+                state.assert_not_called()
+                git.assert_not_called()

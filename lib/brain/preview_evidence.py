@@ -175,6 +175,8 @@ def record_preview_receipt(inst, n, branch, data):
         if not row:
             raise ValueError('preview receipt requires an open job')
         repo = n.get('home_path') if n.get('external') else inst.root
+        if repo is None or not repo.is_dir():
+            raise ValueError('preview receipt requires a bound home')
         paths = lambda: [n['dir'] / _m_jobs.JOBS_FILE, *_m_instance.git_state_paths(repo)]
         with _m_instance.released(inst, n, extra=paths):
             head = _m_common.git('rev-parse', '--verify', 'refs/heads/' + branch + '^{commit}', cwd=repo).stdout.strip()
