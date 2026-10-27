@@ -2878,3 +2878,22 @@ For a successful new backlog/ready task whose native operation changes no ledger
 resources, retain the native command journal and skip the unrelated status/usage
 projection. Resource changes, configured managed indexes and other transitions retain
 normal maintenance, including partially failed index regeneration.
+
+## D28004: Show task workflow and downstream dependencies from one snapshot
+
+The task board keeps five stable columns (backlog, ready, in progress, parked and done),
+with dropped records available through an explicit toggle. Review/testing states remain
+in progress; blocked tasks and delivery claims without proof remain parked. Filtering
+by node, owner or text affects both the board and dependency canvas.
+
+Use a directed SVG canvas with a deterministic layered layout and a compact grid for
+independent tasks. Edges point from a dependency to its dependent. Node-qualified task
+identities preserve cross-node links and duplicate local IDs; downstream traversal is
+transitive and bounded for malformed provider cycles. Filters hide edges with missing
+endpoints while retaining full-snapshot downstream context in task details. No graph
+library is needed. Pan, zoom and task reading work with pointer and keyboard controls.
+
+The existing read-only task snapshot reports dispatch holds and a ready-now flag using
+the same dependency and hold checks as task selection. A ready status alone does not
+promise that a task can start. Source records remain authoritative; this visualization
+does not change workflow state or reconcile records.

@@ -351,12 +351,14 @@ export function Choice({
   onChange,
   options,
   disabled = false,
+  tooltips = true,
 }: {
   name: string;
   value: string;
   onChange: (v: string) => void;
   options: { value: string; label: string }[];
   disabled?: boolean;
+  tooltips?: boolean;
 }) {
   const id = useId();
   return (
@@ -372,14 +374,14 @@ export function Choice({
           <SelectValue />
         </SelectTrigger>
         <SelectContent>
-          {options.map((o) => (
+          {options.map((o) => tooltips ? (
             <Tooltip key={o.value}>
               <TooltipTrigger render={<SelectItem value={o.value} />}>
                 <span className="option-label" dir="auto">{humanText(o.label)}</span>
               </TooltipTrigger>
               <TooltipContent>{humanText(o.label)}</TooltipContent>
             </Tooltip>
-          ))}
+          ) : <SelectItem key={o.value} value={o.value}><span className="option-label" dir="auto">{humanText(o.label)}</span></SelectItem>)}
         </SelectContent>
       </Select>
     </div>

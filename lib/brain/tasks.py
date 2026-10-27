@@ -754,7 +754,11 @@ def ui_tasks(inst, n):
                     delivery = 'provider' if row.get('source') == 'linear' else 'verified'
                 except (OSError, ValueError):
                     delivery = 'unproven'
-            row = {**row, 'delivery_state': delivery, 'attempt_count': len(row.get('attempts', []))}
+            from . import task_flow as _m_flow
+            holds = _m_flow.holds(inst, n, row) if row['status'] == 'ready' else []
+            row = {**row, 'delivery_state': delivery, 'attempt_count': len(row.get('attempts', [])),
+                   'dispatch_holds': holds,
+                   'ready_now': row['status'] == 'ready' and not row['blocked_by'] and not holds}
             rows.append({**row, 'request': {'quote': req.get('quote', ''), 'at': req.get('at', ''),
                                           'ref': req.get('ref', ''), 'date_basis': req.get('date_basis', 'source-timestamp')}})
         terms = _m_guard.never_terms(n)
