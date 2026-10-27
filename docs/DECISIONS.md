@@ -2750,3 +2750,8 @@ and unchanged.
 Accounting regressions inspect the cache keyed to the measured job episode;
 fixture setup may retain an earlier episode's cache, so directory iteration is
 not a reliable selector for the aggregate under test.
+
+Inbox acknowledgement publication errors retain the already-flushed delivery
+and warning, then propagate the original error with a nonzero exit. They never
+report successful persistence. A stale-generation no-op may still repeat later
+without overwriting a newer acknowledgement or resolution.

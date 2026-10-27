@@ -1312,6 +1312,7 @@ def publish_inbox_seen(inst, reporter, state, generation):
         _publish_inbox_seen(inst, reporter, state, generation)
     except (OSError, ValueError, SystemExit):
         print('brain: inbox delivered; seen markers not saved, retain state for repair', file=sys.stderr)
+        raise  # Delivery remains visible; failed acknowledgement must fail the command.
 
 
 def _publish_inbox_seen(inst, reporter, state, generation):
