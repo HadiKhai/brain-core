@@ -4,7 +4,7 @@ const base = process.env.BRAIN_TEST_UI_URL || "http://127.0.0.1:4109";
 test("Needs you deduplicates source ids and shows the ask without advice", async ({ page }) => {
   const state = await (await page.request.get(base + "/api/state?k=demo")).json();
   const text = "Choose a color; waiting on operator; clears when chosen; since: 2020-01-01; recommendation: Blue advice; default: Gray advice";
-  const request = { id: "one-need", node: "field-guide", kind: "blocked-overdue", waiting_on_operator: true, text, first_seen: "2020-01-01T00:00:00Z", recommendation: "Blue advice", default: "Gray advice" };
+  const request = { id: "one-need", node: "field-guide", kind: "blocked-overdue", waiting_on_operator: true, question: true, options: ["Blue advice", "Gray advice"], text, first_seen: "2020-01-01T00:00:00Z", recommendation: "Blue advice", default: "Gray advice" };
   state.inbox = [request, { ...request }];
   state.due = [{ ...request }, { id: "informational", node: "field-guide", kind: "job", informational: true, text: "Split this job advice" }];
   state.nodes.find((n: any) => n.id === "field-guide").blocked = [text];
@@ -37,8 +37,8 @@ test("Needs you deduplicates source ids and shows the ask without advice", async
 test("Needs you counts two open decisions and excludes inbox noise and machine steps", async ({ page }) => {
   const state = await (await page.request.get(base + "/api/state?k=demo")).json();
   for (const node of state.nodes) { node.blocked = []; node.blocked_metadata = []; }
-  const question = { first_seen: "2026-10-27T10:00:00Z", id: "choose-color", node: "field-guide", kind: "inbox", text: "2026-10-27 10:00 +00:00 from worker: question: Choose a color?" };
-  const decision = { first_seen: "2026-10-27T10:00:00Z", id: "choose-launch", node: "field-guide", kind: "inbox", text: "2026-10-27 10:00 +00:00 from worker job/launch: blocked: Choose the launch date <!-- wake:0123456789abcdef0123456789abcdef --> <!-- handback:0123456789abcdef01234567 -->" };
+  const question = { first_seen: "2026-10-27T10:00:00Z", id: "choose-color", node: "field-guide", kind: "inbox", recipient: "operator", question: true, options: ["Blue", "Gray"], recommendation: "Blue", text: "2026-10-27 10:00 +00:00 from worker: question: Choose a color?" };
+  const decision = { first_seen: "2026-10-27T10:00:00Z", id: "choose-launch", node: "field-guide", kind: "inbox", recipient: "operator", question: true, options: ["Blue", "Gray"], recommendation: "Blue", text: "2026-10-27 10:00 +00:00 from worker job/launch: blocked: Choose the launch date <!-- wake:0123456789abcdef0123456789abcdef --> <!-- handback:0123456789abcdef01234567 -->" };
   state.inbox = [question, { ...question }, decision,
     { id: "notice", node: "field-guide", kind: "inbox", text: "2026-10-27 10:01 +00:00 from worker: done: shipped the question reader?" },
     { id: "machine", kind: "machine-alert", text: "Machine needs attention" },

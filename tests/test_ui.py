@@ -604,6 +604,10 @@ ui_json.ui_json_background(root, '[]')
         self.assertEqual([(a['id'], a['answer']) for a in answers], [(episode, 'Blue')])
         after = self.m.ui_state(self.m.UIInstance(root), problems=0, machine_spend={})
         self.assertFalse(any('Which color?' in i['text'] for i in after['inbox']))
+        archived = next(i for i in after['inbox_archive'] if 'Which color?' in i['text'])
+        self.assertTrue(archived['answered'])
+        self.assertEqual(archived['source'], 'root/inbox.md')
+        self.assertIn(line, (root / 'inbox.md').read_text())
 
     def test_ui_hold_projection_keeps_recorded_episode_and_command_claims_once(self):
         root = self.first_paint_root()

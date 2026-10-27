@@ -156,19 +156,20 @@ export function Empty({
 }
 export function PagedCollection({ children, name }: { children: ReactNode; name: string }) {
   const items = Children.toArray(children);
-  const { page, size, setPage, setSize, start, end } = usePage(items.length, name);
-  return <ListFrame total={items.length} page={page} size={size} onPage={setPage} onSize={setSize} noun={name.replace(/s$/, "")}>{items.slice(start, end)}</ListFrame>;
+  const { page, size, setPage, setSize, start, end, showMore } = usePage(items.length, name);
+  return <ListFrame total={items.length} page={page} size={size} onPage={setPage} onSize={setSize} end={end} onMore={showMore} noun={name.replace(/s$/, "")}>{items.slice(start, end)}</ListFrame>;
 }
 // All growing lists share a header, a single scrolling body and a persistent pager.
 // Controlled cursors let every list keep its existing context-reset and live-shrink behavior.
-export function ListFrame({ total, page, size, onPage, onSize, noun, children, className = "", controls }: {
+export function ListFrame({ total, page, size, onPage, onSize, noun, children, className = "", controls, end: visibleEnd, onMore }: {
   total: number; page: number; size: number; onPage: (page: number) => void; onSize: (size: number) => void;
-  noun: string; children: ReactNode; className?: string; controls?: ReactNode;
+  noun: string; children: ReactNode; className?: string; controls?: ReactNode; end?: number; onMore?: () => void;
 }) {
   const body = useRef<HTMLDivElement>(null);
   useEffect(() => { if (body.current) body.current.scrollTop = 0; }, [page, size, total]);
   const pages = Math.max(1, Math.ceil(total / size));
-  const range = total ? `${page * size + 1}–${Math.min(total, (page + 1) * size)} of ${total} ${noun}${total === 1 ? "" : "s"}` : `0 ${noun}s`;
+  const end = visibleEnd ?? Math.min(total, (page + 1) * size);
+  const range = total ? `${page * size + 1}–${end} of ${total} ${noun}${total === 1 ? "" : "s"}` : `0 ${noun}s`;
   return <div className={`list-frame ${className}`} data-list-frame>
     <header className="list-header">
       <span className="list-count" aria-live="polite">{range}</span>
@@ -179,11 +180,12 @@ export function ListFrame({ total, page, size, onPage, onSize, noun, children, c
       <span className="sr-only">{range}</span>
       <span className="page-position">Page {page + 1} of {pages}</span>
       <div className="pager">
-        <Button variant="ghost" size="sm" disabled={!page} onClick={() => onPage(0)}>First</Button>
+        {onMore && <Button variant="outline" size="sm" disabled={end >= total} onClick={onMore}>Show more</Button>}
+        <Button className="page-first" variant="ghost" size="sm" disabled={!page} onClick={() => onPage(0)}>First</Button>
         <Button variant="outline" size="sm" disabled={!page} onClick={() => onPage(page - 1)}>Previous</Button>
         <span className="tabular-nums">{page + 1} / {pages}</span>
         <Button variant="outline" size="sm" disabled={page === pages - 1} onClick={() => onPage(page + 1)}>Next</Button>
-        <Button variant="ghost" size="sm" disabled={page === pages - 1} onClick={() => onPage(pages - 1)}>Last</Button>
+        <Button className="page-last" variant="ghost" size="sm" disabled={page === pages - 1} onClick={() => onPage(pages - 1)}>Last</Button>
       </div>
     </footer>
   </div>;
@@ -422,15 +424,15 @@ export type Column = {
   sortValue?: (row: RecordData) => string | number;
   numeric?: boolean;
 };
-export function Reader({ title, text, trigger = "Read full", children, footer, open: controlled, onOpenChange, primary = false, literalTitle = false }: {
-  title: string; text: string; trigger?: string; children?: ReactNode; footer?: ReactNode; open?: boolean; onOpenChange?: (open: boolean) => void; primary?: boolean; literalTitle?: boolean;
+export function Reader({ title, text, trigger = "Read full", children, footer, open: controlled, onOpenChange, primary = false, outlined = false, literalTitle = false }: {
+  title: string; text: string; trigger?: string; children?: ReactNode; footer?: ReactNode; open?: boolean; onOpenChange?: (open: boolean) => void; primary?: boolean; outlined?: boolean; literalTitle?: boolean;
 }) {
   const [internal, setInternal] = useState(false);
   const open = controlled ?? internal;
   const setOpen = (value: boolean) => { setInternal(value); onOpenChange?.(value); };
   const zone = useContext(TimeZoneContext);
   return <>
-    <Button variant={primary ? "default" : "ghost"} size="sm" className={primary ? "" : "reader-trigger"} onClick={() => setOpen(true)}>{trigger}</Button>
+    <Button variant={primary ? "default" : outlined ? "outline" : "ghost"} size="sm" className={primary ? "" : "reader-trigger"} onClick={() => setOpen(true)}>{trigger}</Button>
     <Sheet open={open} onOpenChange={setOpen}>
       <SheetContent className="reading-sheet" initialFocus={() => document.querySelector<HTMLElement>(".reading-sheet [data-slot=sheet-close]")}>
         <SheetHeader><SheetTitle>{literalTitle ? title : <Text>{title}</Text>}</SheetTitle><SheetDescription>Read the full context, then return to your place.</SheetDescription></SheetHeader>
@@ -476,7 +478,7 @@ export function DataTable({
   onRowOpen?: (row: RecordData) => void;
 }) {
   const [sort, setSort] = useState({ key: "", direction: 1 });
-  const { page: actual, size, setPage, setSize, start, end } = usePage(rows.length, JSON.stringify([name, resetKey, sort.key, sort.direction]));
+  const { page: actual, size, setPage, setSize, start, end, showMore } = usePage(rows.length, JSON.stringify([name, resetKey, sort.key, sort.direction]));
   const sortColumn = columns.find((c) => c.key === sort.key);
   const value = (r: RecordData) =>
     sortColumn?.sortValue ? sortColumn.sortValue(r) : (r[sort.key] ?? "");
@@ -489,7 +491,7 @@ export function DataTable({
   );
   const shown = sorted.slice(start, end);
   return (
-    <ListFrame total={rows.length} page={actual} size={size} onPage={setPage} onSize={setSize} noun={name.replace(/s$/, "")} className="data-table">
+    <ListFrame total={rows.length} page={actual} size={size} onPage={setPage} onSize={setSize} end={end} onMore={showMore} noun={name.replace(/s$/, "")} className="data-table">
       {!rows.length ? <Empty text={"No " + name + " yet."} /> : <>
       <div className="mobile-table-sort">
         <Choice

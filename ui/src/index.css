@@ -686,7 +686,7 @@ svg.searching .gnode:not(.match):not(.selected) { opacity: 0.28; }
 @media (max-width: 767px) {
   .list-frame > .table-footer { gap: 8px; }
   .list-frame .pager { gap: 4px; }
-  .list-frame .pager > .tabular-nums, .list-frame .pager > button:first-child, .list-frame .pager > button:last-child { display: none; }
+  .list-frame .pager > .tabular-nums, .list-frame .pager > .page-first, .list-frame .pager > .page-last { display: none; }
 }
 
 .review-actions:empty { display: none; }

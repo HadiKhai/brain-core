@@ -108,7 +108,7 @@ export function flight(nodes: RecordData[]): {
         ledger: open.find((r) => r.Job === w.branch),
       })),
       ...list(n.worktrees)
-        .filter((w) => !branches.has(w.branch) && !doneBranches.has(w.branch))
+        .filter((w) => !branches.has(w.branch) && (!doneBranches.has(w.branch) || open.some(r => r.Job === w.branch)))
         .map((w) => ({
           node: n,
           job: { branch: w.branch, state: "Worktree only" },
@@ -397,31 +397,63 @@ export function needRows(items: RecordData[]) {
     return true;
   });
 }
+// A request needs an explicit human destination, a question, choices and a recommendation.
+// Legacy prose stays readable in Archive; its presence is never evidence of an open ask.
+export function requestInfo(item: RecordData, now = Date.now(), operator = "operator") {
+  const text = String(item.text || "").replace(/^inbox:\s*/i, "")
+    .replace(/^\d{4}-\d{2}-\d{2}[^\n]*? from [^:]+:\s*/i, "");
+  const ended = item.resolved || item.answered || item.answer != null || item.open === false || item.superseded ||
+    /^(?:closed|resolved|answered|done|dropped|cancelled|canceled|superseded|expired)$/i.test(item.state || item.status || "");
+  const deadline = stamp(item.deadline), expiry = stamp(item.expires_at);
+  const consent = list(item.options).some(option => ["outward", "destructive"].includes(option.action));
+  const expired = (Number.isFinite(expiry) && expiry <= now) || (!consent && Number.isFinite(deadline) && deadline <= now);
+  const recipient = String(item.recipient || item.to || item.waiting_on || "").trim().toLowerCase();
+  const names = ["operator", "you", operator.toLowerCase()].filter(Boolean);
+  const routed = item.waiting_on_operator === true || names.includes(recipient);
+  const question = /^(?:question|decision):\s*\S/i.test(text) ||
+    ["question", "decision", "host-question"].includes(item.kind) || item.question === true;
+  const options: (string | RecordData)[] = Array.isArray(item.options) ? item.options : [];
+  const recommendation = typeof item.recommendation === "string" ? item.recommendation.trim() : "";
+  const choices = options.length >= 2 && options.every(o => typeof o === "string" ? o.trim() : o && typeof o.label === "string" && o.label.trim());
+  const recommended = recommendation && (!options.some(o => typeof o === "object" && o?.id) || options.some(o => typeof o === "object" && o?.id === recommendation));
+  const open = !ended && !expired && !item.informational && routed && question && choices && !!recommended;
+  const reason = ended ? "Closed" : expired ? "Expired" : !routed ? "Coordinator traffic" : !question || !choices || !recommended ? "Unstructured item" : "Informational";
+  return { open, reason, text, options, recommendation };
+}
 export function needsView(s: RecordData, node?: string) {
   const inScope = (item: RecordData) => node === undefined || item.node === node;
-  const requests = new Set(list(s.inbox).filter(inScope));
-  const items = needRows([...requests, ...list(s.due).filter(inScope)]);
-  const blocked = list(s.nodes).filter(n => node === undefined || n.id === node).flatMap(n =>
-    list(n.blocked).map((text, i) => ({ ...list(n.blocked_metadata)[i],
-      ...items.find(a => a.node === n.id && ["blocked", "blocked-overdue"].includes(a.kind) && a.text === text),
-      node: n.id, kind: "blocked", text })));
-  // Keep the general inbox and machine queue available, but share one decision
-  // projection across every Needs-you count and list. IDs identify source episodes.
-  const decisions = needRows([...items, ...blocked]).filter(openDecision);
-  return { items, decisions, inbox: items.filter(i => requests.has(i)), due: items.filter(i => !requests.has(i)) };
+  const requestKinds = ["inbox", "blocked", "blocked-overdue", "question", "decision", "host-question"];
+  const requests = needRows([...list(s.inbox).filter(inScope), ...list(s.inbox_archive).filter(inScope), ...list(s.due).filter(inScope).filter(item => requestKinds.includes(item.kind))]);
+  const now = nowOf(s), operator = s.brain?.operator || "operator";
+  const inbox = requests.filter(item => openDecision(item, now, operator));
+  const requestIds = new Set(requests.map(item => item.id).filter(Boolean));
+  const steps = needRows(list(s.due).filter(inScope)).filter(item =>
+    !requestIds.has(item.id) && !requestKinds.includes(item.kind));
+  const due = steps.filter(item => !item.resolved && !item.answered && item.open !== false &&
+    !/^(?:closed|resolved|answered|done|dropped|cancelled|superseded|expired)$/i.test(item.state || item.status || "") &&
+    !(Number.isFinite(stamp(item.deadline || item.expires_at)) && stamp(item.deadline || item.expires_at) <= now));
+  const archive: RecordData[] = [...requests.filter(item => !openDecision(item, now, operator)).map(item => ({ ...item, archive_reason: requestInfo(item, now, operator).reason })),
+    ...steps.filter(item => !due.includes(item)).map(item => ({ ...item, archive_reason: "Closed step" }))];
+  return { items: [...inbox, ...due], decisions: inbox, inbox, due, archive };
 }
-export function openDecision(item: RecordData) {
-  if (item.resolved || item.answered || item.answer != null || item.open === false ||
-      /^(?:closed|resolved|answered|done|dropped|cancelled|canceled)$/i.test(item.state || item.status || "")) return false;
-  if (!["inbox", "blocked", "blocked-overdue", "question", "decision", "host-question"].includes(item.kind)) return false;
-  if (item.waiting_on_operator === true) return true;
-  if (["question", "decision", "host-question"].includes(item.kind)) return true;
-  if (item.kind !== "inbox") return false;
-  // A timestamped inbox envelope does not itself make the message an operator ask.
-  const ask = String(item.text || "").replace(/^inbox:\s*/i, "")
-    .replace(/^\d{4}-\d{2}-\d{2}[^\n]*? from [^:]+:\s*/i, "");
-  return /^(?:question|decision):\s*\S/i.test(ask) || /<!-- host-question:/.test(ask) ||
-    (/^blocked:\s*\S/i.test(ask) && /<!-- handback:[0-9a-f]{24} -->/.test(ask));
+export function openDecision(item: RecordData, now = Date.now(), operator = "operator") {
+  return ["inbox", "blocked", "blocked-overdue", "question", "decision", "host-question"].includes(item.kind) && requestInfo(item, now, operator).open;
+}
+
+// The sidebar can reveal historical threads without counting them as live work.
+export function sidebarThreads(nodes: RecordData[], history = false) {
+  const observed = threads(nodes);
+  // Status tables are historical prose. Only an unended ledger episode proves
+  // unfinished work, including jobs whose status table or working copy is missing.
+  const active = nodes.flatMap(node => list(node.jobs?.open).filter(row => !closed(row)).map(ledger =>
+    observed.find(f => f.node.id === node.id && f.job.branch === ledger.Job) || {
+      node, job: { branch: ledger.Job, state: ledger.state || "Unfinished" },
+      ledger, wt: list(node.worktrees).find(w => w.branch === ledger.Job),
+    }));
+  if (!history) return active;
+  return [...active, ...nodes.flatMap(node => list(node.work).filter(job =>
+    !active.some(f => f.node.id === node.id && f.job.branch === job.branch))
+    .map(job => ({ node, job, wt: list(node.worktrees).find(w => w.branch === job.branch), ledger: list(node.jobs?.rows).find(r => r.Job === job.branch) })))];
 }
 export const needAsk = (text: unknown) => String(text || "")
   .replace(/(?:^|;\s*)(?:since|recommendation|default):\s*[^;]*/gi, "")

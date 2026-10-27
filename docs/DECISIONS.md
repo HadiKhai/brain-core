@@ -4196,3 +4196,26 @@ Foreground scans retain their blocking reconciliation and fresh retry policy.
 Background source scanning and receipt reconciliation remain serialized by the same lock, using the existing source
 generation and receipt revision APIs. Episode-lock wait and hold timings are
 separate from writer-lock timings, and discarded scan duration is observable.
+## 2026-10-27: Separate operator asks from retained inbox traffic
+
+The dashboard labels an item as waiting on the operator only when it has an
+explicit human destination, a question, at least two choices and a recommendation.
+Resolved, answered, superseded and expired episodes belong to Archive; an old
+creation date alone is not an expiry. A structured outward or destructive choice
+stays open after its response deadline, because that deadline cannot grant
+consent. Explicit expiry or closure remains authoritative. Coordinator orders and unstructured imports
+remain inspectable there without contributing to operator counts. Native open
+inbox data keeps its API semantics; retained source records use the additive
+`inbox_archive` field. The projection never acknowledges messages or rewrites
+source files. Source text and its location remain available in the reader.
+
+Sidebar history is opt-in and does not change live-thread totals. Closed ledger
+outcomes determine finished work; unfinished work has no arbitrary age cutoff.
+Settlement guidance leads to the coordinator's existing safety checks, rather
+than claiming that displaying or closing a job has settled a host thread.
+
+Every shared paginated collection can append ten rows to its current window.
+Appending preserves its first row, scroll position and page-size preference;
+page navigation, filtering and sorting reset the extension. A shrinking live
+result clears the extension and clamps the page. Tasks also offer a table view
+using this same frame alongside their board and dependency canvas.

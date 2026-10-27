@@ -239,7 +239,7 @@ test("subscription stop lines override the default in meters and routing", () =>
 });
 
 test("Needs you keeps one item per id and leaves advice out", () => {
-  const request = { id: "one", kind: "inbox", node: "demo", text: "Which color?" };
+  const request = { id: "one", kind: "inbox", node: "demo", text: "question: Which color?", recipient: "operator", options: ["Blue", "Gray"], recommendation: "Blue" };
   const another = { ...request, id: "two" };
   const state = { inbox: [request, { ...request }, another], due: [
     { ...request }, { id: "step", node: "demo", kind: "handback", text: "Review the report" },

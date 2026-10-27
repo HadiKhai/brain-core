@@ -364,7 +364,11 @@ def ui_node(inst, n, since, cache=None, partial=False):
     u = _m_status.updated_at(inst, n)
     work = []
     work_metadata = _m_ui_status.ui_work_metadata(inst, n)
-    for r in _m_status.active_work(n):
+    for r in _m_status.active_work(n, include_closed=True):
+        if len(r) >= 5:  # generated: Branch | State | Summary | Queue | Next action
+            work.append({"branch": r[0], "state": r[1], "summary": r[2],
+                         **work_metadata.get(r[0], {})})
+            continue
         m = LINK_RE.search(r[1] if len(r) > 1 else "")
         work.append({"branch": r[0], "thread": m.group(1) if m else (r[1] if len(r) > 1 else ""),
                      "link": m.group(2) if m else "", "runtime": (re.search(r"\((Claude|Codex|[A-Za-z]+)\)\s*$",
@@ -563,7 +567,7 @@ def _ui_state(inst, problems=None, scan=None, spend_budget=None, machine_spend=N
             item["branch"] = branches[(item["node"], item["job"])]
     machine_due = _m_status.machine_due_items(inst, nodes, machine, due)
     inbox = []
-    for item in _m_status.inbox_items(inst, nodes)[0]:
+    for item in _m_ui_status.ui_inbox_projection(inst, nodes, _m_status.inbox_items(inst, nodes)[0]):
         if item.get('informational'):
             continue
         extra = {}
@@ -591,7 +595,7 @@ def _ui_state(inst, problems=None, scan=None, spend_budget=None, machine_spend=N
         **usage,
         "brain": {"name": _m_nodes.brain_name(inst.root), "title": nodes[0]["fm"].get("title", "Brain"),
                   "root": _m_common.tilde(inst.root), "machine": inst.local.get("machine", ""), "tz": str(inst.zone() or ""),
-                  "fallback": inst.local.get("fallback", []),
+                  "fallback": inst.local.get("fallback", []), "operator": inst.cfg.get("operator", ""),
                   "now": now.isoformat(timespec="seconds"), "others": [k for k, r in _m_instance.brains_here()
                                                                        if r.resolve() != inst.root.resolve()]},
         "nodes": out_nodes,
@@ -599,7 +603,8 @@ def _ui_state(inst, problems=None, scan=None, spend_budget=None, machine_spend=N
                             **(_m_ui_status.ui_blocked_metadata(inst, next(n for n in nodes if n["id"] == a), t) if k in ("blocked", "blocked-overdue") else {})})
                       for a, k, t in _m_status.attention_items(inst, nodes)
                       if k != 'inbox' or not _m_inbox_notices.informational_notice('- ' + t.removeprefix('inbox: '))],
-        "inbox": inbox,
+        "inbox": [item for item in inbox if item.get('open') is not False],
+        "inbox_archive": [item for item in inbox if item.get('open') is False],
         "commits": commits[:300], "hours": UI_HOURS, "activity": {"start": start, "counts": activity},
         "commits_24h": sum(1 for c in commits if c["t"] > time.time() - 86400), "commits_total": len(commits),
         "specialists": specialists,

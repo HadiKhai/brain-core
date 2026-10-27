@@ -2,40 +2,40 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import ts from "typescript";
-const source = readFileSync(
-  new URL("../src/model.ts", import.meta.url),
-  "utf8",
-);
-const emitted = ts.transpile(source, {
-  module: ts.ModuleKind.ESNext,
-  target: ts.ScriptTarget.ES2022,
-});
-const m = await import(
-  "data:text/javascript;base64," + Buffer.from(emitted).toString("base64")
-);
-test("open decisions use explicit asks and operator waits, never inbox volume", () => {
-  const question = { id: "q", node: "demo", kind: "inbox", text: "inbox: 2026-10-27 10:00 +00:00 from worker: question: Which color?" };
-  const blocked = { id: "b", node: "demo", kind: "blocked", text: "Choose a date", waiting_on_operator: true };
-  const state = { nodes: [{ id: "demo", blocked: [blocked.text, "Waiting for CI"], blocked_metadata: [{ waiting_on_operator: true }, { waiting_on_operator: false }] }],
-    inbox: [question, { ...question }, blocked, { id: "noise", kind: "inbox", text: "done: reviewed the question?" }],
-    due: [{ ...question }, { id: "machine", kind: "machine", waiting_on_operator: true }, { id: "job", kind: "handback", ready: true }] };
-  assert.deepEqual(m.needsView(state).decisions.map(i => i.id), ["q", "b"]);
-  assert.deepEqual(m.needsView(state, "demo").decisions.map(i => i.id), ["q", "b"]);
-  assert.deepEqual(m.needsView(state, "other").decisions, []);
-  assert.equal(m.needsView(state).due.length, 2); // Coordinator work stays available separately.
-  for (const closed of [{ resolved: true }, { answered: true }, { answer: "blue" }, { open: false }, { state: "closed" }, { status: "done" }])
-    assert.equal(m.openDecision({ ...question, ...closed }), false);
-  assert.equal(m.openDecision({ kind: "inbox", text: "decision: Choose a date" }), true);
-  assert.equal(m.openDecision({ kind: "inbox", text: "Pick a date <!-- host-question:123 -->" }), true);
-  assert.equal(m.openDecision({ kind: "inbox", text: "fyi: question: already handled" }), false);
-  assert.equal(m.needsView({ nodes: [{ id: "demo", blocked: ["Choose a date"], blocked_metadata: [{ waiting_on_operator: true }] }] }).decisions.length, 1);
+const source = readFileSync(new URL("../src/model.ts", import.meta.url), "utf8");
+const emitted = ts.transpile(source, { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 });
+const m = await import("data:text/javascript;base64," + Buffer.from(emitted).toString("base64"));
+const ask = { id: "q", node: "demo", kind: "inbox", text: "question: Which color?", recipient: "operator", options: ["Blue", "Gray"], recommendation: "Blue" };
+
+test("only open routed questions with choices and a recommendation need the operator", () => {
+  assert.equal(m.openDecision(ask), true);
+  assert.equal(m.openDecision({ ...ask, recipient: "maple" }, Date.now(), "maple"), true);
+  for (const invalid of [{ recipient: "coordinator" }, { options: [] }, { recommendation: "" }, { text: "DECISION verify-speed: Land the fix" },
+    { resolved: true }, { answered: true }, { answer: "Blue" }, { open: false }, { state: "closed" }, { status: "done" },
+    { superseded: true }, { state: "expired" }, { deadline: "2000-01-01T00:00:00Z" }, { informational: true }, { kind: "machine-alert" }])
+    assert.equal(m.openDecision({ ...ask, ...invalid }), false, JSON.stringify(invalid));
+  assert.equal(m.openDecision({ ...ask, deadline: "2000-01-01T00:00:00Z", options: [{ id: "a", label: "Publish", action: "outward" }, { id: "b", label: "Wait", action: "routine" }], recommendation: "b" }), true);
+  assert.equal(m.openDecision({ ...ask, options: [{ id: "a", label: "Blue" }, { id: "b", label: "Gray" }], recommendation: "missing" }), false);
 });
 
+test("requests, decisions and coordinator steps share lifecycle filtering and retain archive sources", () => {
+  const order = { ...ask, id: "order", text: "DECISION verify-speed: Land the fix", source: "demo/inbox.md" };
+  const closed = { ...ask, id: "closed", answered: true, source: "demo/inbox-archive.md" };
+  const state = { inbox: [ask, { ...ask }, order, closed], due: [{ ...ask }, { id: "ready", kind: "handback", ready: true },
+    { id: "old", kind: "handback", state: "done" }, { id: "advice", kind: "job", informational: true }] };
+  const view = m.needsView(state);
+  assert.deepEqual(view.inbox.map(i => i.id), ["q"]);
+  assert.deepEqual(view.decisions.map(i => i.id), ["q"]);
+  assert.deepEqual(view.due.map(i => i.id), ["ready"]);
+  assert.deepEqual(view.archive.map(i => i.id), ["order", "closed", "old"]);
+  assert.equal(view.archive[1].source, "demo/inbox-archive.md");
+  assert.equal(state.inbox.length, 4);
+});
 
-test("native human-needed handbacks stay open decisions while blocked notices do not", () => {
-  const need = { id: "human-need", node: "demo", kind: "inbox", text: "inbox: 2026-10-27 10:00 +00:00 from worker job/deploy: blocked: Choose whether to approve deployment <!-- wake:0123456789abcdef0123456789abcdef --> <!-- handback:0123456789abcdef01234567 -->" };
-  const ordinary = { id: "ci-wait", node: "demo", kind: "inbox", text: "2026-10-27 10:00 +00:00 from worker job/checks: blocked: Waiting for CI" };
-  assert.deepEqual(m.needsView({ inbox: [need, ordinary], due: [{ ...need }] }).decisions.map(i => i.id), ["human-need"]);
-  assert.equal(m.openDecision({ ...need, state: "resolved" }), false);
-  assert.equal(m.openDecision({ ...need, kind: "machine-alert" }), false);
+test("sidebar hides closed jobs but retains unfinished and reopened branches behind no age cutoff", () => {
+  const nodes = [{ id: "demo", work: [{ branch: "job/old", state: "merged" }, { branch: "job/open", state: "blocked" }, { branch: "job/unrecorded", state: "Review approved" }],
+    jobs: { rows: [{ Job: "job/old", Ended: "2020-01-01" }, { Job: "job/open", Ended: "2020-01-01" }], open: [{ Job: "job/open" }] },
+    worktrees: [{ branch: "job/open" }] }];
+  assert.deepEqual(m.sidebarThreads(nodes).map(f => f.job.branch), ["job/open"]);
+  assert.deepEqual(m.sidebarThreads(nodes, true).map(f => f.job.branch), ["job/open", "job/old", "job/unrecorded"]);
 });

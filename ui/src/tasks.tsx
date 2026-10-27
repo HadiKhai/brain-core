@@ -4,7 +4,7 @@ import { Input } from "@/components/ui/input";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { SectionTabs } from "./dash";
 import { ReaderRow } from "./detail-panel";
-import { Choice, Empty, Reader, Status, TechnicalDetails, Text } from "./shared";
+import { Choice, DataTable, Empty, Reader, Status, TechnicalDetails, Text } from "./shared";
 import { label, list, safeHref, time, type RecordData } from "./model";
 import type { Route } from "./routes";
 import { TaskCanvas } from "./task-canvas";
@@ -109,6 +109,12 @@ export function Tasks({ s, go, node }: { s: RecordData; go: Go; node?: string })
         </div>
       </> },
       { id: "dependencies", label: "Canvas", body: filtered.length ? <TaskCanvas rows={filtered} graph={graph} onOpen={setOpened} /> : <Empty text="No tasks to draw." action="Try another filter or show dropped tasks." /> },
+      { id: "list", label: "List", body: <DataTable name="tasks" rows={filtered.map(t => ({ ...t, _key: taskKey(t) }))} resetKey={JSON.stringify([query, owner, node, filterNode, dropped])} details={false} onRowOpen={setOpened} columns={[
+        { key: "display_title", label: "Task" },
+        { key: "project", label: "Project" },
+        { key: "status", label: "State", render: t => <Status>{label(t.status)}</Status> },
+        { key: "owner", label: "Owner", render: t => t.owner || "Unassigned" },
+      ]} /> },
     ]} />
     {opened && <div className="task-canvas-reader"><Reader literalTitle title={taskTitle(opened)} text={taskDetails(opened)} open onOpenChange={open => { if (!open) setOpened(null); }} footer={<TaskTechnical task={opened} />}>
       <p><code>{opened.id}</code> · {opened.priority} · {opened.owner || "Unassigned"}</p>

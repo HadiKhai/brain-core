@@ -10,6 +10,96 @@ _m_nodes = _m_common.LazyModule(__package__, 'nodes')
 _m_status = _m_common.LazyModule(__package__, 'status')
 
 
+def ui_inbox_projection(inst, nodes, items):
+    """Retain source lines and lifecycle facts without acknowledging or archiving files.
+
+    Root is the operator rollup. Other inboxes address their coordinator unless
+    the source explicitly names the operator as its recipient.
+    """
+    from . import communication, reminders
+    try:
+        questions = communication.communication_read(inst)['questions']
+    except (OSError, ValueError):
+        questions = {}
+    try:
+        lifecycle = reminders.lifecycle_read(inst)
+    except (OSError, ValueError):
+        lifecycle = reminders.lifecycle_empty()
+    by_node = {n['id']: n for n in nodes if not n['archived']}
+    out = []
+    known = set()
+    for item in items:
+        node = by_node.get(item['node'])
+        if node is None:
+            continue
+        item = dict(item)
+        if item['kind'] == 'inbox':
+            line = '- ' + item['text'].removeprefix('inbox: ')
+            known.add((node['id'], line))
+            item['source'] = node['id'] + '/inbox.md'
+            item.update(ui_request_metadata(inst, node, line, questions, lifecycle))
+        out.append(item)
+    for node in by_node.values():
+        terms = _m_guard.never_terms(node)
+        for name in ('inbox.md', 'inbox-archive.md'):
+            path = node['dir'] / name
+            if not path.is_file() or path.is_symlink():
+                continue
+            for line in path.read_text().splitlines():
+                if not line.startswith('- ') or (node['id'], line) in known:
+                    continue
+                known.add((node['id'], line))
+                metadata = ui_request_metadata(inst, node, line, questions, lifecycle)
+                # A source no longer in the open projection stays in the archive.
+                metadata.update(open=False, source=node['id'] + '/' + name)
+                out.append({'id': reminders.request_episode_id(inst, node, line, lifecycle),
+                            'node': node['id'], 'kind': 'inbox',
+                            'text': _m_guard.redact(line[2:], terms), **metadata})
+    return out
+
+
+def ui_request_metadata(inst, node, line, questions, lifecycle):
+    """Only explicit routing and structured choices can turn prose into an ask."""
+    from . import reminders
+    operator = str(inst.cfg.get('operator', 'operator'))
+    body = re.sub(r'^- .*? from [^:]+:\s*', '', line)
+    recipient = operator if node['id'] == 'root' else ''
+    match = re.search(r'(?:^|;\s*)(?:to|recipient|waiting on)\s*:?\s*([^;]+)', body, re.I)
+    if match:
+        recipient = match[1].strip()
+    item = {'recipient': recipient, 'question': bool(re.match(r'(?:question|decision):\s*\S', body, re.I))}
+    timestamp = re.match(r'^- (.*?) from ', line)
+    first_seen = inst.parse_time(timestamp[1]) if timestamp else None
+    if first_seen:
+        item['first_seen'] = first_seen.isoformat(timespec='seconds')
+    marker = re.search(r'<!-- communication:([0-9a-f]+) -->', line)
+    question = questions.get(marker[1]) if marker else None
+    if isinstance(question, dict) and question.get('node') == node['id']:
+        item.update({k: question[k] for k in ('options', 'recommendation', 'default', 'deadline', 'answer') if k in question})
+        item['question'] = True
+    else:
+        fields = dict((k.lower(), v.strip()) for k, v in re.findall(
+            r'(?:^|;\s*)(options|recommendation|deadline|expires_at|state):\s*([^;]+)', body, re.I))
+        options = fields.pop('options', '')
+        if options:
+            item['options'] = [part.strip() for part in options.split('|') if part.strip()]
+        item.update(fields)
+    source_id = reminders.inbox_source_id(node, line)
+    receipt = lifecycle.get('inbox', {}).get(node['id'], {}).get(source_id, {})
+    if isinstance(receipt, dict) and receipt.get('answered') is True:
+        item['answered'] = True
+    terms = _m_guard.never_terms(node)
+    def screened(value):
+        if isinstance(value, str):
+            return _m_guard.redact(value, terms)
+        if isinstance(value, list):
+            return [screened(v) for v in value]
+        if isinstance(value, dict):
+            return {k: screened(v) for k, v in value.items()}
+        return value
+    return screened(item)
+
+
 def ui_work_metadata(inst, n):
     """Open ledger work, with faults bound to the current worker's latest valid run.
 

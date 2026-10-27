@@ -95,7 +95,7 @@ export function Graph({ s, go }: { s: RecordData; go: Go }) {
   const results = found.items.filter((f) => f.kind !== "job");
   const projects = nodes.filter((n) => n.kind === "node").sort((a, b) => (degrees.get(b.key) || 0) - (degrees.get(a.key) || 0));
   const sideTotal = query.trim() ? results.length : projects.length;
-  const { page, size, setPage, setSize, start, end } = usePage(sideTotal, query);
+  const { page, size, setPage, setSize, start, end, showMore } = usePage(sideTotal, query);
   const open = (p: GNode) => p.kind === "node" ? go({ view: "project", node: p.id }) : p.kind === "specialist" ? go({ view: "specialists", item: p.id }) : go({ view: "learnings", item: p.id });
   const tip = nodes.find((n) => n.key === (hover || focused));
   const viewRef = useRef(view);
@@ -240,7 +240,7 @@ export function Graph({ s, go }: { s: RecordData; go: Go }) {
           </div>}
           {query.trim() ? <>
             {found.state === "loading" && <p className="results-meta" role="status">Searching…</p>}
-            <ListFrame total={sideTotal} page={page} size={size} onPage={setPage} onSize={setSize} noun="result">
+            <ListFrame total={sideTotal} page={page} size={size} onPage={setPage} onSize={setSize} end={end} onMore={showMore} noun="result">
               <div className="rows">{results.slice(start, end).map((f) => (
                 <Button variant="ghost" className="row match-row" data-item key={f.kind + f.id} onClick={() => focus(f.kind + ":" + f.id)}>
                   <span className={"swatch kind-" + f.kind} />
@@ -253,7 +253,7 @@ export function Graph({ s, go }: { s: RecordData; go: Go }) {
               <p>Search to light up matching records. Select a project to see its links.</p>
               <Status>{`${nodes.filter((n) => n.recent).length} recently active`}</Status>
             </div>
-            <ListFrame total={sideTotal} page={page} size={size} onPage={setPage} onSize={setSize} noun="project">
+            <ListFrame total={sideTotal} page={page} size={size} onPage={setPage} onSize={setSize} end={end} onMore={showMore} noun="project">
               <div className="rows">{projects.slice(start, end).map((p) => (
                 <Button variant="ghost" className="row match-row" data-item key={p.key} onClick={() => focus(p.key)} onPointerEnter={() => setHover(p.key)} onPointerLeave={() => setHover(null)}>
                   <span className={"swatch kind-node" + (p.recent ? " recent" : "")} />

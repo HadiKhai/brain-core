@@ -23,13 +23,13 @@ export function Specialists({ s, active, item }: { s: RecordData; active: boolea
   const [query, setQuery] = useState(""), [selected, setSelected] = useState<string | null>(null), [dismissed, setDismissed] = useState<string | null>(null);
   const nodes = list(s.nodes), all = list(s.specialists);
   const rows = all.filter((sp) => `${sp.title} ${(sp.scope || []).join(" ")} ${sp.runtime}`.toLowerCase().includes(query.toLowerCase()));
-  const { page, size, setPage, setSize, start, end } = usePage(rows.length, query);
+  const { page, size, setPage, setSize, start, end, showMore } = usePage(rows.length, query);
   const current = item && item !== dismissed ? item : selected;
   return <>
     <ScreenAction active={active}><Reader title="Bring in a specialist" text="Choose a role below, read when to hire it, and copy its hire command for your project coordinator. Each hire records its task, runtime and outcome here." trigger="Hire a specialist" primary /></ScreenAction>
     <section className="surface list-surface" aria-label="Specialists">
       <FilterToolbar query={query} onQuery={setQuery} placeholder="Search specialists" />
-      <ListFrame total={rows.length} page={page} size={size} onPage={setPage} onSize={setSize} noun="specialist" controls={<ReviewActions all records={rows.filter(sp => sp.status === "proposed").map(sp => ({ kind: "specialist" as const, id: sp.id, node: sp.node }))} />}>
+      <ListFrame total={rows.length} page={page} size={size} onPage={setPage} onSize={setSize} end={end} onMore={showMore} noun="specialist" controls={<ReviewActions all records={rows.filter(sp => sp.status === "proposed").map(sp => ({ kind: "specialist" as const, id: sp.id, node: sp.node }))} />}>
         <div className="rows">{rows.slice(start, end).map((sp, i) => {
           const key = sp.node + "/" + sp.id;
           return <DetailRow className="row specialist" key={key + i} onOpen={() => { setSelected(key); setDismissed(item || null); }}>

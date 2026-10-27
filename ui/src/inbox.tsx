@@ -14,29 +14,38 @@ type Go = (r: Partial<Route> & { view: string }) => void;
 const body = (item: RecordData) => String(item.text || "").replace(/^(?:inbox:\s*)?\d{4}-\d{2}-\d{2}[^\n]*? from [^:]+:\s*(?:question:\s*)?/i, "");
 
 // One request, one line of context, one action: the sender comes from the record, never the text.
-export function RequestRow({ s, item, go, showProject = true, compact = false }: { s: RecordData; item: RecordData; go: Go; showProject?: boolean; compact?: boolean }) {
+export function RequestRow({ s, item, go, showProject = true, compact = false, archived = false }: { s: RecordData; item: RecordData; go: Go; showProject?: boolean; compact?: boolean; archived?: boolean }) {
   const [open, setOpen] = useState(false);
   const project = list(s.nodes).find((n) => n.id === item.node);
   const conversation = item.link || project?.coordinator;
   const recommendation = typeof item.recommendation === "string" ? item.recommendation : "";
   const nextAction = typeof item.default === "string" && item.default.trim() ? `Review: ${item.default}` : "";
   const question = /question|answer|\?/i.test(item.text || "");
-  const full = [item.text, recommendation, nextAction].filter(Boolean).join("\n\n");
+  const full = [item.text, list(item.options).map(o => typeof o === "string" ? o : o.label).join("\n"), recommendation, nextAction,
+    item.source && `Source: ${item.source}`].filter(Boolean).join("\n\n");
   return (
     <DetailRow className="row request" data-item onOpen={() => setOpen(true)}>
       <div className="row-main">
-        <div className="row-line">{showProject && <strong dir="auto"><Text>{project?.title || "Workspace"}</Text></strong>}<small>{sender(item)} · {time(item.first_seen, s.brain?.tz)}</small><WorkStatus item={{ ...item, state: item.state || "waiting", waiting_on_operator: true }} s={s} /></div>
+        <div className="row-line">{showProject && <strong dir="auto"><Text>{project?.title || "Workspace"}</Text></strong>}<small>{sender(item)} · {time(item.first_seen, s.brain?.tz)}</small>{archived ? <Status>{item.archive_reason || "Archived"}</Status> : <WorkStatus item={{ ...item, state: item.state || "waiting", waiting_on_operator: true }} s={s} />}</div>
         <p className="row-text" dir="auto"><Text>{compact ? needAsk(body(item)) : body(item)}</Text></p>
         {!compact && recommendation && <p className="row-note" dir="auto">Recommended: <Text>{recommendation}</Text></p>}
       </div>
       <div className="row-actions">
-        {conversation ? <ThreadLink href={conversation} label={(!compact && nextAction) || (question ? "Answer" : "Open conversation")} />
+        {conversation ? <ThreadLink href={conversation} label={archived ? "Open source conversation" : (!compact && nextAction) || (question ? "Answer" : "Open conversation")} />
           : project ? <Button variant="outline" size="sm" onClick={() => go({ view: "project", node: project.id })}><Text>{(!compact && nextAction) || "Open project"}</Text></Button>
           : null}
-        <Reader open={open} onOpenChange={setOpen} title="Request" text={full} trigger="Read request" />
+        <Reader open={open} onOpenChange={setOpen} title={archived ? "Archived item" : "Request"} text={full} trigger={archived ? "Read source" : "Read request"} />
       </div>
     </DetailRow>
   );
+}
+
+export function SettlementGuide({ node }: { node: RecordData }) {
+  const total = Number(node.jobs?.unsettled || 0);
+  if (!total) return null;
+  return <Reader outlined title="Settle closed job threads" trigger={`Settle threads (${total})`} text={`There are ${total} closed jobs with unsettled threads. Ask the coordinator to inspect each closed job's recorded threads, check that no work or question is pending, settle each safe thread in the host, then record the settlement for that job. Running jobs must remain open.`}>
+    {node.coordinator && <ThreadLink href={node.coordinator} label="Open coordinator" />}
+  </Reader>;
 }
 
 // A coordinator step names its job, then says what to do; inline code renders as code.
@@ -67,8 +76,8 @@ export function Pager(props: { total: number; page: number; size: number; onPage
 
 // Any list that can grow: ten rows at a time with a pager, never an unbounded column.
 export function PagedRows<T>({ items, render, noun, size: initial = 10, className = "rows", resetKey = "" }: { items: T[]; render: (item: T, i: number) => ReactNode; noun: string; size?: number; className?: string; resetKey?: string }) {
-  const { page: current, size, setPage, setSize, start, end } = usePage(items.length, resetKey, initial);
-  return <ListFrame total={items.length} page={current} size={size} onPage={setPage} onSize={setSize} noun={noun}>
+  const { page: current, size, setPage, setSize, start, end, showMore } = usePage(items.length, resetKey, initial);
+  return <ListFrame total={items.length} page={current} size={size} onPage={setPage} onSize={setSize} end={end} onMore={showMore} noun={noun}>
     <div className={className}>{items.slice(start, end).map((item, i) => render(item, current * size + i))}</div>
   </ListFrame>;
 }
@@ -80,8 +89,9 @@ export function InboxView({ s, go, tab, active }: { s: RecordData; go: Go; tab: 
   const needs = needsView(s);
   const decisions = needs.decisions.filter(match);
   const requests = needs.inbox.filter(match), steps = needs.due.filter(match).sort((a, b) => Number(!!b.ready) - Number(!!a.ready));
-  const current = tab === "due" ? "due" : tab === "decisions" ? "decisions" : "inbox", rows = current === "due" ? steps : current === "decisions" ? decisions : requests;
-  const { page, size, setPage, setSize, start, end } = usePage(rows.length, JSON.stringify([current, query, project?.id]));
+  const archive = needs.archive.filter(match);
+  const current = tab === "due" ? "due" : tab === "decisions" ? "decisions" : tab === "archive" ? "archive" : "inbox", rows = current === "due" ? steps : current === "decisions" ? decisions : current === "archive" ? archive : requests;
+  const { page, size, setPage, setSize, start, end, showMore } = usePage(rows.length, JSON.stringify([current, query, project?.id]));
   const shown = rows.slice(start, end);
   const next = (current === "decisions" ? decisions : requests)[0], conversation = next && (next.link || nodes.find((n) => n.id === next.node)?.coordinator);
   // The primary action follows the tab: the next request, or the next coordinator step.
@@ -104,9 +114,10 @@ export function InboxView({ s, go, tab, active }: { s: RecordData; go: Go; tab: 
             { id: "decisions", label: "Open decisions", count: decisions.length, body: null },
             { id: "inbox", label: "Requests", count: requests.length, body: null },
             { id: "due", label: "Coordinator steps", count: steps.length, body: null },
+            { id: "archive", label: "Archive", count: archive.length, body: null },
           ]} />
-        <ListFrame total={rows.length} page={page} size={size} onPage={setPage} onSize={setSize} noun={current === "due" ? "step" : current === "decisions" ? "decision" : "request"}>
-        <div className="rows">{shown.map((a, i) => current === "due" ? <DueRow key={i} s={s} item={a} go={go} /> : <RequestRow key={a.id || i} s={s} item={a} go={go} />)}</div>
+        <ListFrame total={rows.length} page={page} size={size} onPage={setPage} onSize={setSize} end={end} onMore={showMore} noun={current === "due" ? "step" : current === "decisions" ? "decision" : "request"}>
+        <div className="rows">{shown.map((a, i) => current === "due" ? <DueRow key={i} s={s} item={a} go={go} /> : <RequestRow key={a.id || i} s={s} item={a} go={go} archived={current === "archive"} />)}</div>
         {!rows.length && <Empty text={query || project ? "Nothing matches these filters." : current === "due" ? "All caught up." : "Nothing waiting here."} action={query || project ? "Clear the filters to see every item." : "Questions and review requests arrive here."} />}
         </ListFrame>
       </section>

@@ -18,6 +18,39 @@ class UIStatus(Scenario):
         self.inst.now_dt = lambda: self.now
         self.n = self.inst.node('root')
 
+    def test_request_projection_retains_sources_answers_and_explicit_routing(self):
+        line = '- 2026-01-02 10:00 +00:00 from worker: question: Which color?; options: Blue | Gray; recommendation: Blue'
+        order = '- 2026-01-02 10:01 +00:00 from coordinator: DECISION verify-speed: Land the fix'
+        (self.root / 'inbox.md').write_text(line + '\n' + order + '\n')
+        item = {'id': self.m.request_episode_id(self.inst, self.n, line), 'node': 'root', 'kind': 'inbox', 'text': 'inbox: ' + line[2:]}
+        before = (self.root / 'inbox.md').read_bytes()
+        projected = self.m.ui_inbox_projection(self.inst, [self.n], [item])
+        self.assertEqual(projected[0]['recipient'], 'maple')
+        self.assertEqual(projected[0]['options'], ['Blue', 'Gray'])
+        self.assertEqual(projected[0]['recommendation'], 'Blue')
+        self.assertTrue(projected[0]['question'])
+        self.assertFalse(projected[1]['open'])
+        self.assertEqual(projected[1]['source'], 'root/inbox.md')
+        self.assertEqual((self.root / 'inbox.md').read_bytes(), before)
+        self.assertFalse((self.root / '.brain/wake').exists())
+        self.m.record_answer(self.inst, self.n, line, item['id'], 'Blue')
+        archived = self.m.ui_inbox_projection(self.inst, [self.n], [])
+        self.assertTrue(archived[0]['answered'])
+        self.assertFalse(archived[0]['open'])
+        self.assertEqual(archived[0]['text'], line[2:])
+        self.assertEqual((self.root / 'inbox.md').read_bytes(), before)
+
+    def test_structured_question_keeps_its_options_deadline_and_answer(self):
+        line = '- 2026-01-02 10:00 +00:00 from notification: question: Which color? <!-- communication:abcdef -->'
+        questions = {'abcdef': {'node': 'root', 'options': [{'id': 'a', 'label': 'Blue'}, {'id': 'b', 'label': 'Gray'}],
+                                'recommendation': 'a', 'deadline': '2026-01-03T00:00:00Z', 'answer': 'a'}}
+        result = self.m.ui_request_metadata(self.inst, self.n, line, questions, self.m.lifecycle_empty())
+        self.assertEqual(result['answer'], 'a')
+        self.assertEqual(result['deadline'], '2026-01-03T00:00:00Z')
+        self.assertEqual(result['options'], questions['abcdef']['options'])
+        child = {**self.n, 'id': 'child'}
+        self.assertEqual(self.m.ui_request_metadata(self.inst, child, line, questions, self.m.lifecycle_empty())['recipient'], '')
+
     def row(self, branch='import:sample', start='2026-01-01T00:00Z', ended=''):
         return {**dict.fromkeys(self.m.JOB_COLS, ''), 'Job': branch, 'Started': start, 'Ended': ended}
 

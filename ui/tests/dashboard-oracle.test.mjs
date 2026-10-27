@@ -13,7 +13,7 @@ const model = await import('data:text/javascript;base64,' + Buffer.from(source).
 const oracle = createDashboardOracle(model);
 const state = { brain: { now: '2026-01-01T12:00:00Z', tz: 'UTC' }, machine: {},
   nodes: [{ id: 'demo', title: 'Notebook', jobs: { rows: [], open: [] }, work: [], worktrees: [] }],
-  inbox: [{ id: 'request', node: 'demo', kind: 'question', text: 'Choose a cover?' }],
+  inbox: [{ id: 'request', node: 'demo', kind: 'question', recipient: 'operator', options: ['Blue', 'Gray'], recommendation: 'Blue', text: 'Choose a cover?' }],
   due: [{ id: 'step', node: 'demo', kind: 'handback', branch: 'job/cover', text: 'job/cover: review the cover', ready: true }] };
 const request = oracle.request(state, state.inbox[0]);
 const step = oracle.step(state, state.due[0]);

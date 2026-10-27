@@ -3,7 +3,7 @@ import { ArrowUpRight, FolderPlus, GitCommitHorizontal } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { DataTable, Status, Text, Empty, Reader, Preview, Command, TechnicalDetails, ScreenAction, Tip, DetailRow } from "./shared";
 import { Kpi, Spark, SectionTabs } from "./dash";
-import { DueRow, RequestRow, PagedRows } from "./inbox";
+import { DueRow, RequestRow, PagedRows, SettlementGuide } from "./inbox";
 import { ThreadRow } from "./agents";
 import { list, needsView, needAsk, count, time, flight, threads, jobTitle, closed, safeHref, nowOf, within, type RecordData } from "./model";
 import { ThreadLink } from "./thread-link";
@@ -59,13 +59,13 @@ export function Project({ s, route, go, active }: { s: RecordData; route: Route;
             { id: "threads", label: "Threads", count: work.length, body: work.length ? <PagedRows resetKey={route.thread || ""} items={[...work].sort((a, b) => Number(b.job.branch === route.thread) - Number(a.job.branch === route.thread))} noun="thread" render={(f, i) => <ThreadRow key={f.job.branch + i} s={s} f={f} go={go} showProject={false} highlight={route.thread === f.job.branch} />} />
                 : <Empty text="No threads in flight." action="Start a job from this project's coordinator." /> },
             { id: "tasks", label: "Tasks", count: visibleTaskCount(list(n.tasks?.rows)), body: <Tasks s={s} go={go} node={n.id} /> },
-            { id: "jobs", label: "Jobs", count: rows.length, body: <DataTable rows={rows} name="jobs" columns={[
+            { id: "jobs", label: "Jobs", count: rows.length, body: <><SettlementGuide node={n} /><DataTable rows={rows} name="jobs" columns={[
                 { key: "Job", label: "Job", render: (r) => <Text>{jobTitle(r.Job)}</Text> },
                 { key: "Started", label: "Started", render: (r) => time(r.Started, s.brain?.tz) },
                 { key: "Hours", label: "Hours", numeric: true, render: (r) => closed(r) ? r.Hours || "Unmeasured" : "open" },
                 { key: "Outcome", label: "Outcome", render: (r) => <div><Status>{r.Outcome || "Open"}</Status>{r.Cause && <small><Text>{r.Cause}</Text></small>}</div> },
                 { key: "Reviews", label: "Reviews", numeric: true },
-              ]} /> },
+              ]} /></> },
             { id: "activity", label: "Activity", count: feed.length, body: feed.length ? <PagedRows className="rows log" items={feed} noun="entry" render={(r, i) => (
                 <ReaderRow key={i} title={r.kind || "Activity"} text={[r.text, r.said].filter(Boolean).join("\n\n")}>
                   <span className="row-icon"><GitCommitHorizontal size={16} /></span>

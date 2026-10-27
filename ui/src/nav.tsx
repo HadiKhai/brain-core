@@ -10,7 +10,7 @@ import {
 } from "@/components/ui/sidebar";
 import { Button } from "@/components/ui/button";
 import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem, DropdownMenuGroup, DropdownMenuLabel } from "@/components/ui/dropdown-menu";
-import { list, needsView, quote, safeHref, treeRows, threads, tone, jobTitle, learningRows, type RecordData } from "./model";
+import { list, needsView, quote, safeHref, treeRows, threads, sidebarThreads, tone, jobTitle, learningRows, type RecordData } from "./model";
 import { fold } from "./search";
 import { visibleTaskCount } from "./task-model";
 import { writeRoute, type Route } from "./routes";
@@ -22,7 +22,9 @@ export function Navigation({ s, route, go, onAdd, onNotice }: {
 }) {
   const { setOpenMobile, isMobile } = useSidebar();
   const [filter, setFilter] = useState(""), [closed, setClosed] = useState<Record<string, boolean>>({});
+  const [history, setHistory] = useState(false);
   const nodes = list(s?.nodes), open = threads(nodes);
+  const visibleThreads = sidebarThreads(nodes, history);
   const { inbox, due } = needsView(s || {});
   const needs = (id: string) => inbox.filter((a) => a.node === id).length;
   const rows = treeRows(nodes), long = rows.length > 8;
@@ -84,12 +86,13 @@ export function Navigation({ s, route, go, onAdd, onNotice }: {
           <SidebarGroup>
             <SidebarGroupLabel>Brain</SidebarGroupLabel>
             <SidebarGroupAction aria-label="Add projects" onClick={() => { if (isMobile) setOpenMobile(false); onAdd(); }}><Plus /></SidebarGroupAction>
+            <Button className="group-data-[collapsible=icon]:hidden" variant={history ? "secondary" : "ghost"} size="sm" aria-pressed={history} onClick={() => setHistory(value => !value)}>{history ? "Hide past jobs" : "Show past jobs"}</Button>
             {long && <div className="tree-filter"><Search size={14} /><SidebarInput aria-label="Filter projects" placeholder="Filter projects" value={filter} onChange={(e) => setFilter(e.target.value)} /></div>}
             <SidebarMenu className="brain-tree">
               {item("projects", "All projects", FolderTree, rows.length)}
               {item("tasks", "Tasks", Workflow, nodes.reduce((total, n) => total + visibleTaskCount(list(n.tasks?.rows)), 0))}
               {shown.filter(({ node }) => !hidden.has(node.id)).map(({ node: n, depth }) => {
-                const work = open.filter((f) => f.node.id === n.id);
+                const work = visibleThreads.filter((f) => f.node.id === n.id);
                 const children = nodes.some((c) => c.parent === n.id && !c.archived);
                 const active = route.view === "project" && route.node === n.id;
                 return (
@@ -109,7 +112,7 @@ export function Navigation({ s, route, go, onAdd, onNotice }: {
                         {closed[n.id] ? <ChevronRight /> : <ChevronDown />}
                       </SidebarMenuAction>
                     ) : needs(n.id) ? <SidebarMenuBadge className="badge-alert">{needs(n.id)}</SidebarMenuBadge> : null}
-                    {(work.length > 0 || n.coordinator) && (
+                    {(work.length > 0 || n.coordinator || Number(n.jobs?.unsettled) > 0) && (
                       <SidebarMenuSub>
                         {safeHref(n.coordinator) && (
                           <SidebarMenuSubItem>
@@ -127,6 +130,7 @@ export function Navigation({ s, route, go, onAdd, onNotice }: {
                             </SidebarMenuSubButton>
                           </SidebarMenuSubItem>
                         ))}
+                        {Number(n.jobs?.unsettled) > 0 && <SidebarMenuSubItem><SidebarMenuSubButton render={<Button variant="ghost" />} onClick={() => goto({ view: "project", node: n.id, tab: "jobs" })}><Workflow /><span>Settle threads ({n.jobs.unsettled})</span></SidebarMenuSubButton></SidebarMenuSubItem>}
                       </SidebarMenuSub>
                     )}
                   </SidebarMenuItem>

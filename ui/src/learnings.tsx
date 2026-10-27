@@ -63,7 +63,7 @@ export function Learnings({ s, active, initialState, item }: { s: RecordData; ac
     scoped = rows.filter((i) => (!node || node.id === i.node) && (!specialist || specialist.id === i.specialist) &&
       `${i.title} ${i.body || ""}`.toLowerCase().includes(query.toLowerCase())),
     filtered = scoped.filter((i) => state === "all" || state === i.state);
-  const { page, size, setPage, setSize, start, end } = usePage(filtered.length, JSON.stringify([query, node?.id, specialist?.id, state]));
+  const { page, size, setPage, setSize, start, end, showMore } = usePage(filtered.length, JSON.stringify([query, node?.id, specialist?.id, state]));
   const title = (id: string) => list(s.nodes).find((n) => n.id === id)?.title || "Source project not recorded";
   const reset = () => { setQuery(""); setNode(null); setSpecialist(null); setState("all"); setPage(0); };
   const first = rows.find((r) => r.state === "proposed" && !r.specialist) || rows[0];
@@ -79,7 +79,7 @@ export function Learnings({ s, active, initialState, item }: { s: RecordData; ac
       <div className="learning-results">
         <SectionTabs value={state} onValue={(v) => { setState(v); setPage(0); }} tabs={states.map(([id, label]) => ({ id, label, count: scoped.filter((r) => id === "all" || r.state === id).length, body: null }))} />
         <ReviewActions all records={filtered.filter(i => i.state === "proposed" && !i.specialist).map(i => ({kind:"item",id:i.id,node:i.review_node || i.node || "root"}))} />
-        <ListFrame total={filtered.length} page={page} size={size} onPage={setPage} onSize={setSize} noun="learning">
+        <ListFrame total={filtered.length} page={page} size={size} onPage={setPage} onSize={setSize} end={end} onMore={showMore} noun="learning">
         <div className="rows">{filtered.slice(start, end).map((i: any, k) => (
           <DetailRow onOpen={() => setSelected(i.id)} className="row learning" data-item key={i.id + ":" + i.specialist + k}>
             <div className="row-main">
