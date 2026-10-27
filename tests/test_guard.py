@@ -215,6 +215,53 @@ class ScanTermsCache(TermsFixture):
                 self.assertEqual(self.guard.file_mentions(path, ['needle'], errors=errors), set())
             self.assertEqual(errors, [])
 
+    def test_repository_file_opens_share_only_directory_resolution(self):
+        guard = self.guard
+        original = os.open
+        opens = []
+        def capture(path, flags, *args, **kwargs):
+            opens.append((path, flags, kwargs.get('dir_fd')))
+            return original(path, flags, *args, **kwargs)
+        with mock.patch.object(guard.os, 'open', side_effect=capture):
+            observed, errors = guard.term_file_observations(
+                self.node, self.home, ['one.txt', 'two.txt'], [], ('needle',), (), {})
+        self.assertEqual(errors, [])
+        self.assertEqual(observed, {'one.txt': (False, {'needle'}), 'two.txt': (False, set())})
+        relative = [(path, flags, fd) for path, flags, fd in opens if fd is not None]
+        self.assertEqual([path for path, _, _ in relative], ['one.txt', 'two.txt'])
+        self.assertTrue(all(flags & os.O_NONBLOCK for _, flags, _ in relative))
+        self.assertEqual(len({fd for _, _, fd in relative}), 1)
+        with self.assertRaises(OSError):
+            os.fstat(relative[0][2])
+        self.assertIsNone(guard._TERM_READ_DIRECTORY.get())
+
+    def test_replaced_repository_directory_reports_incomplete_and_resets_authority(self):
+        guard = self.guard
+        original = guard.file_mentions
+        saved = self.tmp / 'displaced-home'
+        def replace(path, *args, **kwargs):
+            if not saved.exists():
+                self.home.rename(saved)
+                self.home.mkdir()
+                (self.home / 'one.txt').write_text('clean\n')
+            return original(path, *args, **kwargs)
+        with mock.patch.object(guard, 'file_mentions', side_effect=replace):
+            observed, errors = guard.term_file_observations(
+                self.node, self.home, ['one.txt', 'two.txt'], [], ('needle',), (), {})
+        self.assertEqual(observed['one.txt'], (False, {'needle'}))
+        self.assertTrue(any('directory changed' in why for _, why in errors))
+        self.assertIsNone(guard._TERM_READ_DIRECTORY.get())
+        self.assertEqual(guard.file_mentions(self.home / 'one.txt', ('needle',)), set())
+
+    def test_unreadable_repository_directory_keeps_inventory_and_errors(self):
+        guard = self.guard
+        with mock.patch.object(guard.os, 'open', side_effect=PermissionError(13, 'Permission denied')):
+            observed, errors = guard.term_file_observations(
+                self.node, self.home, ['one.txt', 'two.txt'], [], ('needle',), (), {})
+        self.assertEqual(set(observed), {'one.txt', 'two.txt'})
+        self.assertTrue(any('Permission denied' in why for _, why in errors))
+        self.assertIsNone(guard._TERM_READ_DIRECTORY.get())
+
 
 class PersistentTermsCache(TermsFixture):
     @property

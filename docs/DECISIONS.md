@@ -3367,3 +3367,8 @@ recursive rev-parse fallback. Publication fences read worktree and common Git
 metadata locations together, with the original two queries as an old-Git fallback.
 These queries bypass display caching and remain fresh on each recheck. Keep every
 ancestry, title, dirty-state, post-child and publication check unchanged.
+
+Repository file observations share an open directory descriptor to avoid resolving
+the same root for every file. Each file still opens nonblocking and checks its own
+descriptor; a changed or unavailable root after observation makes the scan incomplete.
+The directory authority is scoped to that observation and always closed/reset.
