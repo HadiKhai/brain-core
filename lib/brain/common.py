@@ -704,12 +704,11 @@ def git(*args, cwd=None, check=False, env=None):
                  or (query[0] == 'symbolic-ref' and len([x for x in query[1:] if not x.startswith('-')]) == 1
                      and all(not x.startswith('-') or x in ('--short', '--quiet', '-q') for x in query[1:]))))
     observer = _GIT_OBSERVER.get()
-    observed = observer(args, cwd, env, None) if observer is not None and read_only else None
+    if observer is not None and read_only:
+        observer(args, cwd, env, None)
     cacheable = (reads is not None and read_only and env is None
                  and not any(str(a).startswith('--output') for a in args))
-    # A dependency observer may supply an exact query result whose inputs it
-    # has just fenced. Ordinary display caches keep their existing behaviour.
-    result = observed if observed is not None else reads.get(key) if cacheable else None
+    result = reads.get(key) if cacheable else None
     tree_key = (key[0], 'worktree-branch')
     if (result is None and cacheable and query in (('symbolic-ref', '--short', 'HEAD'),
                                                   ('symbolic-ref', '--quiet', '--short', 'HEAD'))

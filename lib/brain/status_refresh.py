@@ -50,7 +50,6 @@ class GitInputs:
         self.layouts = {}
         self.queries = {}
         self.pending = {}
-        self.results = {}
 
     def bases(self, cwd, env):
         cached = self.layouts.get(cwd)
@@ -169,15 +168,9 @@ class GitInputs:
         key = (args, str(cwd) if cwd is not None else None)
         if result is None:
             paths, replay = self.paths(args, key[1], env)
-            stamp = generation(paths)
-            environment = tuple(sorted((os.environ if env is None else env).items()))
-            self.pending[key] = (paths, replay, stamp, environment)
-            previous = self.queries.get(key)
-            if (not replay and not any(arg.startswith('--output') for arg in args) and previous is not None and
-                    previous[:4] == (env, paths, replay, stamp) and self.results[key][0] == environment):
-                return self.results[key][1]
+            self.pending[key] = (paths, replay, generation(paths))
             return
-        paths, replay, before, environment = self.pending.pop(key)
+        paths, replay, before = self.pending.pop(key)
         value = (result.returncode, result.stdout)
         discovered, _ = self.paths(args, key[1], env)
         if set(discovered) != set(paths):
@@ -192,7 +185,6 @@ class GitInputs:
         if key in self.queries and self.queries[key][-1] != value:
             common.die('status refresh inputs changed during computation; retry from fresh state')
         self.queries[key] = (env, paths, replay, after, value)
-        self.results[key] = (environment, result)
 
     def reread(self, args, cwd, env, paths):
         # A semantic reread may adopt new ref values, never a new dependency

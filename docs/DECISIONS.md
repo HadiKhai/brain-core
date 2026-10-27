@@ -3444,10 +3444,9 @@ The scope stores no cross-command watcher output or delivery authority.
 
 An unlocked status computation shares repeated ledger and projection reads only
 inside its build callback. Input discovery and publication validation remain
-outside that scope. Each exact Git query may reuse its complete result while its
-dependency paths, generations and process environment are unchanged. Working-tree
-queries, unsupported revision grammar and output-file queries still execute
-normally. The existing semantic revalidation and final generation checks remain
+outside that scope. Git commands retain their ordinary fresh execution: changes
+to global or included Git configuration must remain observable on repeated
+queries. Existing semantic revalidation and final generation checks remain
 mandatory; a changed answer refuses publication. No cache survives a computation
 or grants writer, readiness or completion authority.
 

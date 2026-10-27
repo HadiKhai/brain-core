@@ -420,32 +420,6 @@ class AutonomyFacts(AutonomyProject):
         self.assertFalse(expected['job-a']['merged'])
         self.assertEqual(expected['missing-job']['tip'], '')
 
-    def test_refresh_reuses_exact_git_queries_only_until_their_inputs_change(self):
-        root = self.init('alice')
-        loader = core_loader.SourceFileLoader('refresh_query_reuse', str(CORE / 'bin/brain'))
-        m = loader.load_module()
-        refresh = importlib.import_module(loader.package_name + '.status_refresh')
-        inst = m.Instance(root)
-        query = ('rev-parse', '--verify', '--quiet', 'refs/heads/main')
-        run, calls = subprocess.run, []
-        def counted(command, *args, **kwargs):
-            if command[-len(query):] == list(query):
-                calls.append(command)
-            return run(command, *args, **kwargs)
-        def prepare(current, node):
-            first = refresh.common.git(*query, cwd=root)
-            second = refresh.common.git(*query, cwd=root)
-            self.assertEqual((first.returncode, first.stdout, first.stderr),
-                             (second.returncode, second.stdout, second.stderr))
-            return first.stdout
-        with mock.patch.object(subprocess, 'run', side_effect=counted):
-            before = refresh.compute(inst, inst.node('root'), prepare)
-            self.assertEqual(len(calls), 1)
-            self.git('commit', '--allow-empty', '-qm', 'next observation', cwd=root)
-            after = refresh.compute(inst, inst.node('root'), prepare)
-            self.assertEqual(len(calls), 2)
-        self.assertNotEqual(before, after)
-
     def test_refresh_repeated_query_refuses_a_relevant_ref_change(self):
         root = self.init('alice')
         loader = core_loader.SourceFileLoader('refresh_repeated_ref_fence', str(CORE / 'bin/brain'))
@@ -461,6 +435,22 @@ class AutonomyFacts(AutonomyProject):
         with self.assertRaisesRegex(SystemExit, 'status refresh inputs changed'):
             refresh.compute(inst, inst.node('root'), prepare)
         self.assertEqual((root / 'status.md').read_bytes(), original)
+
+    def test_refresh_repeated_remote_query_observes_changed_included_config(self):
+        root = self.init('alice')
+        config = self.tmp / 'included.gitconfig'
+        config.write_text('[remote "first"]\nurl = https://example.test/first\n')
+        self.git('config', 'include.path', str(config), cwd=root)
+        loader = core_loader.SourceFileLoader('refresh_included_config', str(CORE / 'bin/brain'))
+        m = loader.load_module()
+        refresh = importlib.import_module(loader.package_name + '.status_refresh')
+        inst = m.Instance(root)
+        def prepare(current, node):
+            self.assertIn('first', refresh.common.git('remote', cwd=root).stdout)
+            config.write_text('[remote "second"]\nurl = https://example.test/second\n')
+            return refresh.common.git('remote', cwd=root).stdout
+        with self.assertRaisesRegex(SystemExit, 'status refresh inputs changed'):
+            refresh.compute(inst, inst.node('root'), prepare)
 
     def test_refresh_repeated_query_observes_changed_environment_and_worktree(self):
         root = self.init('alice')
