@@ -32,6 +32,36 @@ class Spend(Scenario):
     """Time and tokens per job from the runtimes' own transcripts: counted once, attributed to the right job."""
     fixture_init_in_process = True
 
+    def test_timestamp_fast_path_preserves_utc_calendar_normalization(self):
+        import calendar
+        m = core_loader.SourceFileLoader('timestamp_fast_path', str(CORE / 'bin/brain')).load_module()
+        for stamp in ('2026-10-27T09:02:03.123456789', '1970-01-01T00:00:00',
+                      '1969-12-31T23:59:59.9', '2024-02-29T23:59:60',
+                      '2026-02-00T99:99:99', '2026-02-99T00:00:00',
+                      '9999-12-31T23:59:59', '0000-01-01T00:00:00',
+                      '2026-00-01T00:00:00', '2026-13-01T00:00:00'):
+            raw = ('{"timestamp":"2000-01-01T00:00:00Z","payload":{"timestamp":"' + stamp + 'Z"}}').encode()
+            match = m.SPEND_STAMP.match(raw, raw.rfind(b'"timestamp":"'))
+            try:
+                fields = tuple(int(x) for x in match.groups()[:6])
+                expected = calendar.timegm((*fields, 0, 0, 0)) + (float(match[7]) if match[7] else 0.0)
+            except (ValueError, OverflowError):
+                expected = None
+            self.assertEqual(m.spend_stamp(raw), expected, stamp)
+        self.assertIsNone(m.spend_stamp(b'{"timestamp": "2026-10-27T00:00:00Z"}'))
+        self.assertIsNone(m.spend_stamp(b'not a timestamp'))
+        self.assertLessEqual(m.spend_month.cache_info().currsize, 128)
+
+    def test_codex_candidate_search_retains_all_record_and_tool_forms(self):
+        m = core_loader.SourceFileLoader('candidate_fast_path', str(CORE / 'bin/brain')).load_module()
+        markers = (b'"session_meta"', b'"token_usage_record"', b'"token_count"', b'"compacted"',
+                   b'"turn_context"', b'"user_message"', b'_call"')
+        # Nested and malformed candidates must still reach the existing JSON
+        # parser; a filter may reject only records the original filter rejected.
+        for marker in (*markers, b'"agent_message"', b'token_count', b'\\"token_count\\"', b'\xff'):
+            raw = b'{"payload":"' + b'large tool output ' * 1000 + b'",' + marker + b'}'
+            self.assertEqual(bool(m.SPEND_CODEX_HOT.search(raw)), any(x in raw for x in markers))
+
     def setUp(self):
         super().setUp()
         self.cfg = self.tmp / "config"

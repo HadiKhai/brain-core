@@ -37,20 +37,29 @@ JOB_MARK = "brain-job: {}"  # in every job brief: the sessions a brief starts ar
 JOB_MARK_RE = re.compile(rb"brain-job: ([0-9a-f]{24})\b")
 SPEND_STAMP = re.compile(rb'"timestamp":"(\d{4})-(\d\d)-(\d\d)T(\d\d):(\d\d):(\d\d)(\.\d+)?')
 SPEND_MODEL = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,79}")
+# One C-level search replaces repeated full-line scans of large tool payloads.
+SPEND_CODEX_HOT = re.compile(rb'"(?:session_meta|token_usage_record|token_count|compacted|turn_context|user_message)"|_call"')
 SPEND_RECENT = 64  # Claude splits one response into a few adjacent records: ids remembered to count it once
 
 
+@functools.lru_cache(maxsize=128)
+def spend_month(year, month):
+    """Pure calendar arithmetic, independent of any transcript or observation."""
+    return (datetime.date(int(year), int(month), 1).toordinal() - 719163) * 86400
+
+
 def spend_stamp(raw):
-    """A record's UTC time in seconds, from the raw line (both runtimes write UTC `…Z` stamps). Codex puts it
-    first, Claude Code near the end: the last one in the line is the record's own."""
+    """The last compact timestamp in a record, interpreted as UTC."""
     at = raw.rfind(b'"timestamp":"')
     m = SPEND_STAMP.match(raw, at) if at >= 0 else None
     if not m:
         return None
-    import calendar
     try:
-        y, mo, d, h, mi, sec = (int(x) for x in m.groups()[:6])
-        return calendar.timegm((y, mo, d, h, mi, sec, 0, 0, 0)) + (float(m[7]) if m[7] else 0.0)
+        # calendar.timegm normalizes day/hour/minute/second overflow. Preserve
+        # that behavior while reusing the immutable month's Gregorian epoch.
+        return (spend_month(m[1], m[2]) + (int(m[3]) - 1) * 86400 +
+                int(m[4]) * 3600 + int(m[5]) * 60 + int(m[6]) +
+                (float(m[7]) if m[7] else 0.0))
     except (ValueError, OverflowError):
         return None
 
@@ -165,9 +174,7 @@ def spend_codex_line(agg, raw, minute, at=None):
     if at is not None and st["own_start"] is not None and at < st["own_start"]:
         return  # history a fork copied from its parent: the parent's own file counts it, its time too
     spend_add(agg, "m", minute, -1, (1, 0, 0, 0, 0, 0, 0))
-    hot = (b'"session_meta"', b'"token_usage_record"', b'"token_count"', b'"compacted"', b'"turn_context"', b'"user_message"',
-           b'_call"')
-    if not any(h in raw for h in hot) and not (not st["prompt_done"] and b'"user' in raw):
+    if not SPEND_CODEX_HOT.search(raw) and not (not st["prompt_done"] and b'"user' in raw):
         return
     try:
         r = json.loads(raw)

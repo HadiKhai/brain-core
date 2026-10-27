@@ -2912,3 +2912,51 @@ retries are not needed to tolerate unrelated builder commits and are omitted
 so genuine validation conflicts remain explicit. Requirements are read once per
 validation pass, using a local snapshot protected by the same generation fence,
 instead of rereading the entire requirement directory for each task row.
+A working file must still open successfully and retain its complete descriptor
+identity before a clean verdict is reused. Index reuse additionally requires a
+prior complete canonical body read in that object store, with unchanged readable
+loose-object or pack/index storage. Alternates and replacement refs disable that
+shortcut. Changed storage during reuse reports an incomplete scan; cache damage,
+unavailable storage and publication races fall back to current source reads.
+The complete loaded schema must contain only the allowed digest/OID keys,
+boolean verdicts and bounded integer identities; any malformed record rebuilds
+the artifact. Reftable storage conservatively disables persistent index reuse.
+Git directory/index bindings are checked around each inventory and after use.
+Fresh tagged Git inventories distinguish untracked names from stage records,
+including names containing tabs/newlines. At most four inventory/file readers
+overlap in copied command contexts; labels, ordering and publication remain in
+the caller. Large bodies retain bounded streaming while their Git IDs are hashed.
+An inventoried repository retains its classification if its Git marker disappears;
+saved inventory errors and later binding failures cannot become a plain folder scan.
+Regular-file checks use a freshly opened nonblocking descriptor, preventing a FIFO
+replacement from blocking and avoiding a redundant pathname stat on each warm file.
+Scanner identity includes its compiled implementation as well as source hashes,
+so a command loaded before an upgrade cannot publish as the newly installed code.
+The compiled identity includes normalized positional and keyword-only defaults;
+unsupported defaults disable persistent reuse/publication while source scanning
+continues normally.
+Only exact immutable scalar/tuple defaults are supported. Callable, mutable,
+unordered and subclass defaults remain opaque and disable persistence; keyword
+binding order is preserved. The streaming hash helper selects SHA-1 inside its
+constructor from a None default instead of encoding a callable as a bare symbol.
+Read commands share branch tips, commit dates and linked-worktree HEADs from one
+ref/worktree enumeration per repository. Ancestry queries, commit counts and
+clean-title checks share one commit graph per base, with roots pinned to the
+enumerated commit IDs even if refs move during the command. Unfinished-title findings retain the original Git
+log order. Configured signature display retains the native date-log read. These
+derived reads expire at the end of the command, without a time
+limit or persistent authority. Failed or malformed batches fall back to the
+individual Git reads, including local job-state observations. Read-only `ready`
+uses this scope; readiness recording and other write paths keep their existing
+reads and writes.
+
+## Reduce transcript candidate and timestamp overhead
+
+Usage parsing uses one compiled byte-pattern search for the existing candidate
+markers instead of repeatedly scanning large tool-output lines. Candidate JSON
+parsing and accounting rules stay unchanged. UTC timestamp conversion reuses
+pure Gregorian month arithmetic in a bounded cache; the key contains only year
+and month. Day, hour, minute and second overflow retains calendar.timegm's
+normalization, and fractional seconds retain their previous interpretation.
+No transcript observation or accounting result is retained by this arithmetic
+cache, and the aggregate schema does not change.
