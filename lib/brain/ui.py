@@ -32,6 +32,7 @@ from . import schedules as _m_schedules
 from . import spend as _m_spend
 from . import status as _m_status
 from . import usage as _m_usage
+from . import usage_cache as _m_usage_cache
 from . import ui_review as _m_ui_review
 from . import ui_status as _m_ui_status
 from . import ui_server as _m_ui_server
@@ -321,7 +322,7 @@ class UIInstance(_m_instance.Instance):
 
 
 @_m_ui_readmodel.read_view
-def ui_state(inst, problems=None, scan=None, spend_budget=2.0, machine_spend=None, cache=None, node_keys=None):
+def ui_state(inst, problems=None, scan=None, spend_budget=None, machine_spend=None, cache=None, node_keys=None):
     readiness = _m_verify.display_cache(cache.ready, cache.worktree_keys) if cache is not None else contextlib.nullcontext()
     usage = _m_spend.live_usage_snapshot(cache.usage, cache.usage_revision) if cache is not None else contextlib.nullcontext()
     jobs = _m_status.local_job_snapshot(cache.local_jobs, cache.worktree_keys) if cache is not None else _m_status.local_job_snapshot()
@@ -472,7 +473,7 @@ class UIStateCache:
         return self.problems
 
 
-def _ui_state(inst, problems=None, scan=None, spend_budget=2.0, machine_spend=None, cache=None, node_keys=None):
+def _ui_state(inst, problems=None, scan=None, spend_budget=None, machine_spend=None, cache=None, node_keys=None):
     """Everything the page shows, from the same files `brain` reads. Read-only."""
     now = inst.now_dt()
     nodes = inst.nodes()
@@ -781,7 +782,8 @@ class UISpend:
         # Passive tabs reserve CPU for metadata and genuine workspace changes;
         # unfinished files still advance on every slice and publish completion.
         deadline = time.monotonic() + self.BUDGET * (0.5 if self.background else 1)
-        with _m_spend.spend_read_only(), _m_ui_readmodel.ReadModel(self.inst, '').usage_scope():
+        with _m_spend.spend_read_only(), _m_usage_cache.batch(), \
+                _m_ui_readmodel.ReadModel(self.inst, '').usage_scope():
             while self.queue and time.monotonic() < deadline:
                 runtime, path = self.queue.popleft()
                 self.pending.discard(path)

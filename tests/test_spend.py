@@ -762,6 +762,32 @@ class Spend(Scenario):
         scan.assert_called_once()
         self.assertEqual(scan.call_args.kwargs['budget'], .01)
 
+    def test_machine_default_finishes_and_memory_hits_skip_database_and_source_reads(self):
+        path = self.cl(self.wt, '11111111-cache', 'A fabricated task.',
+                       [('said', 1, 'm1', (1, 2, 3, 4))])
+        m = core_loader.SourceFileLoader('machine_complete_default', str(CORE / 'bin/brain')).load_module()
+        with mock.patch.dict(os.environ, self.env):
+            inst = m.Instance(self.r)
+            scan = m.spend_all
+            with mock.patch.object(m, 'spend_all', wraps=scan) as called:
+                value = m.spend_machine(inst)
+            self.assertTrue(value['complete'])
+            self.assertIsNone(called.call_args.kwargs['budget'])
+            sources, allowed, forbidden = m.spend_sources(inst)
+            expected = m.spend_file(inst, path, 'claude', allowed, forbidden)
+            owner = m._owners['spend_file']
+            with mock.patch.object(owner._m_usage_cache, 'database', side_effect=AssertionError('cache opened')), \
+                 mock.patch.object(m, 'spend_read', side_effect=AssertionError('source parsed')):
+                self.assertEqual(m.spend_file(inst, path, 'claude', allowed, forbidden), expected)
+                # Current permissions are checked even on an unchanged memory hit.
+                self.assertIsNone(m.spend_file(inst, path, 'claude', allowed, {path.parent.resolve()}))
+            self.jsonl(path, [{'timestamp': self.at(2), 'type': 'assistant', 'message': {
+                'id': 'append', 'model': 'm1', 'usage': {'input_tokens': 7, 'output_tokens': 2}}}])
+            with mock.patch.object(m, 'spend_read', wraps=m.spend_read) as parse:
+                changed = m.spend_file(inst, path, 'claude', allowed, forbidden)
+            self.assertTrue(parse.called)
+            self.assertTrue(changed['complete'])
+
     def test_full_machine_hints_match_thread_records_recount_append_and_rebuild_old_cache(self):
         scratch = self.tmp / 'machine-scratch'
         scratch.mkdir()

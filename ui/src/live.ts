@@ -16,7 +16,9 @@ export function readingMarker(value: any, progress: ReadingProgress | null, conn
   const captured = cached && Number.isFinite(at) ? 'As of ' + new Intl.DateTimeFormat('en-GB', {
     hour: '2-digit', minute: '2-digit', timeZone: value?.brain?.tz || undefined,
   }).format(new Date(at)) : null;
-  return [captured, partial ? 'Filling in…' : !failure ? 'Refreshing…' : null, failure, age].filter(Boolean).join(' · ');
+  const spend = value?.spend;
+  const missing = spend?.complete === false ? `token totals ${Number(spend.read || 0).toLocaleString('en-US')}/${Number(spend.files || 0).toLocaleString('en-US')}` : 'workspace details';
+  return [captured, partial ? `Filling in… ${missing}` : !failure ? 'Refreshing…' : null, failure, age].filter(Boolean).join(' · ');
 }
 
 export function watchLive(key: string, state: (value: any) => void, status: (value: string) => void, notify = false) {

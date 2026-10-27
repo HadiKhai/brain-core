@@ -3439,3 +3439,14 @@ callers retain their enclosing command scope. Communication reconciliation runs
 before the snapshot. Source-signature and receipt-generation checks still run
 before publication, so cached reads cannot authorize a changed source state.
 The scope stores no cross-command watcher output or delivery authority.
+
+
+## 2026-10-27: Finish dashboard accounting without restarting a bounded file walk
+
+Machine-wide accounting defaults to a complete pass. Explicitly budgeted callers
+retain partial results; the server uses its existing resumable file queue for
+background slices. Unchanged in-memory aggregates validate the current source
+descriptor and permissions before returning, without opening the usage database
+or reading transcript bytes. Background slices share one database snapshot.
+The filling marker names the outstanding token-file counts while accounting is
+partial, and disappears only when the displayed reading is complete.
