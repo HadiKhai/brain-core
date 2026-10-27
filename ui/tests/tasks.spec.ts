@@ -34,10 +34,18 @@ test("canvas directs edges, highlights downstream and opens task details with pa
   const tasks = page.locator('[data-page=tasks]');
   await tasks.getByRole('tab', { name: 'Canvas', exact: true }).click();
   const canvas = tasks.getByRole('group', { name: 'Task dependency canvas' });
-  await expect(canvas.locator('.task-graph-node')).toHaveCount(6);
+  await expect(canvas.locator('.task-graph-node')).toHaveCount(2);
+  await expect(tasks.getByRole('tab', { name: 'Canvas', exact: true })).toHaveAttribute('aria-selected', 'true');
+  await expect(tasks.getByRole('tab', { name: 'Board', exact: true })).toHaveAttribute('aria-selected', 'false');
+  const tabColors = await tasks.getByRole('tab').evaluateAll(es => es.map(e => getComputedStyle(e).backgroundColor));
+  expect(tabColors[0]).toBe('rgba(0, 0, 0, 0)');
+  expect(tabColors[1]).not.toBe(tabColors[0]);
+  await expect(tasks.getByLabel('Task status legend')).toContainText('Blocked');
   await expect(canvas.locator('[data-task-from="field-guide:APP-1"][data-task-to="field-guide:APP-2"]')).toHaveCount(1);
   await expect(canvas.locator('[data-task-key="field-guide:APP-2"]')).not.toHaveAttribute('data-ready');
-  await expect(canvas.locator('[data-task-key="observatory:DEMO-7"]')).toHaveAttribute('data-ready', 'true');
+  await expect(canvas.locator('[data-task-key="observatory:DEMO-7"]')).toHaveCount(0);
+  await tasks.getByRole('button', { name: 'Show all 6 tasks', exact: true }).click();
+  await expect(tasks.getByRole('region', { name: 'Tasks without links' })).toContainText('Translate the public report');
   const source = canvas.getByRole('button', { name: 'Open task APP-1:', exact: false });
   await source.focus();
   await expect(canvas.locator('[data-task-key="field-guide:APP-2"]')).toHaveAttribute('data-downstream', 'true');
@@ -75,9 +83,11 @@ test("node, owner and search filters work in both views and empty columns remain
   await expect(tasks.locator('.task-card')).toHaveCount(5);
   await expect(tasks).not.toContainText('Translate the public report');
   await tasks.getByRole('tab', { name: 'Canvas', exact: true }).click();
-  await expect(tasks.locator('.task-graph-node')).toHaveCount(5);
+  await expect(tasks.locator('.task-graph-node')).toHaveCount(2);
   await tasks.getByRole('textbox', { name: 'Search tasks' }).fill('parser');
-  await expect(tasks.locator('.task-graph-node')).toHaveCount(1);
+  await expect(tasks).toContainText('No active dependency links.');
+  await tasks.getByRole('button', { name: 'Show all 1 tasks', exact: true }).click();
+  await expect(tasks.getByRole('region', { name: 'Tasks without links' })).toContainText('Repair recurring parser failure');
   await tasks.getByRole('textbox', { name: 'Search tasks' }).fill('no matches');
   await expect(tasks).toContainText('No tasks to draw.');
   await tasks.getByRole('tab', { name: 'Board', exact: true }).click();
@@ -114,7 +124,7 @@ test("keyboard focus reveals distant tasks and viewport shortcuts work from a fo
     const response = await route.fetch();
     const html = (await response.text()).replace('</head>', `<script>
       const seed = window.__STATE__.nodes[1].tasks.rows[0];
-      window.__STATE__.nodes[1].tasks.rows = Array.from({length:1500}, (_, i) => ({...seed, id:'LARGE-'+i, title:'Large task '+i, status:'backlog', depends_on:[], blocked_by:[], blocks:[]}));
+      window.__STATE__.nodes[1].tasks.rows = Array.from({length:1500}, (_, i) => ({...seed, id:'LARGE-'+i, title:'Large task '+i, status:'backlog', depends_on:i%2?['LARGE-'+(i-1)]:[], blocked_by:[], blocks:[]}));
       </script></head>`);
     await route.fulfill({ response, body: html });
   });
@@ -137,4 +147,72 @@ test("keyboard focus reveals distant tasks and viewport shortcuts work from a fo
   await expect(canvas).toHaveAttribute('data-zoom', '1.25');
   await node.press('Enter');
   await expect(page.getByRole('dialog')).toContainText('Large task 1000');
+});
+
+test("short plain titles retain full context, parked tasks collapse and blocked work remains visible", async ({ page }) => {
+  const full = '**Imported summary** ' + 'Retained context with [reference](https://example.com). '.repeat(25) + 'End of retained original note.';
+  await page.route('**/snapshot?scenario=tasks', async route => {
+    const response = await route.fetch();
+    const html = (await response.text()).replace('</head>', `<script>
+      window.__STATE__.nodes[1].tasks.rows.find(t=>t.id==='APP-1').title=${JSON.stringify(full)};
+      window.__STATE__.nodes[1].tasks.rows.find(t=>t.id==='APP-5').title='Work on this job';
+      window.__STATE__.nodes[1].tasks.rows.find(t=>t.id==='APP-5').branch='job/verify-log';
+      window.__STATE__.nodes[1].tasks.rows.find(t=>t.id==='APP-2').depends_on=['APP-5'];
+      window.__STATE__.nodes[1].tasks.rows.find(t=>t.id==='APP-2').blocked_by=[];
+      window.__STATE__.nodes[1].tasks.rows.find(t=>t.id==='APP-3').status='blocked';
+      </script></head>`);
+    await route.fulfill({ response, body: html });
+  });
+  await page.goto('/snapshot?scenario=tasks#view=tasks');
+  const tasks = page.locator('[data-page=tasks]');
+  const imported = tasks.locator('[data-task-id="APP-1"]');
+  await expect(imported.locator('.task-card-copy strong')).not.toContainText('**');
+  expect((await imported.locator('.task-card-copy strong').innerText()).length).toBeLessThanOrEqual(120);
+  expect(await imported.locator('.task-card-copy strong').evaluate(e => e.getBoundingClientRect().height <= parseFloat(getComputedStyle(e).lineHeight) * 3 + 1)).toBe(true);
+  await imported.getByRole('button', { name: 'Read task', exact: true }).click();
+  await expect(page.getByRole('dialog')).toContainText('End of retained original note.');
+  await page.keyboard.press('Escape');
+  await expect(tasks.locator('[data-task-id="APP-5"] .task-card-copy strong')).toHaveText('Work on job/verify-log');
+  await expect(tasks.locator('[data-task-id="APP-2"] .task-facts')).toContainText('APP-5: Work on job/verify-log');
+  await expect(tasks.locator('[data-task-id="APP-5"]')).not.toContainText('Depends on: None');
+  await expect(tasks.locator('[data-task-id="APP-5"]')).not.toContainText('Blockers: None');
+  await expect(tasks.locator('[data-task-id="APP-5"]')).not.toContainText('Unlocks 0');
+  await expect(tasks.locator('[data-task-id="APP-3"]')).toBeVisible();
+  await expect(tasks.locator('[data-task-id="APP-3"] .task-blocked')).toHaveText('Blocked');
+  await expect(tasks.locator('[data-task-id="APP-6"]')).toBeHidden();
+  await tasks.getByText('Show 1 parked tasks', { exact: true }).click();
+  await expect(tasks.locator('[data-task-id="APP-6"]')).toBeVisible();
+  const read = await imported.getByRole('button', { name: 'Read task' }).evaluate(e => ({ border: getComputedStyle(e).borderStyle, radius: getComputedStyle(e).borderRadius }));
+  expect(read.border).toBe('solid');
+  expect(read.radius).not.toBe('0px');
+});
+
+test("zero-link canvas explains the empty graph and show all lists tasks without a grid", async ({ page }) => {
+  await page.goto('/snapshot?scenario=tasks#view=project&node=observatory&tab=tasks');
+  const project = page.locator('[data-page=project]');
+  const tasks = project.getByRole('region', { name: 'Tasks', exact: true });
+  await expect(project.getByRole('tab', { name: 'Tasks 1', exact: true })).toHaveAttribute('aria-selected', 'true');
+  await tasks.getByRole('tab', { name: 'Canvas', exact: true }).click();
+  await expect(tasks).toContainText('No active dependency links.');
+  await expect(tasks.locator('svg.task-canvas')).toHaveCount(0);
+  await tasks.getByRole('button', { name: 'Show all 1 tasks', exact: true }).click();
+  await expect(tasks).toContainText('No dependency links in these tasks.');
+  await expect(tasks.getByRole('region', { name: 'Tasks without links' })).toContainText('Translate the public report');
+  await expect(tasks.locator('svg.task-canvas')).toHaveCount(0);
+});
+
+test("task count excludes dropped and the settled navigation labels match expanded or icon mode", async ({ page }) => {
+  await page.setViewportSize({ width: 1680, height: 1060 });
+  await page.goto('/snapshot?scenario=tasks#view=project&node=field-guide&tab=tasks');
+  await expect(page.locator('[data-page=project]').getByRole('tab', { name: 'Tasks 5', exact: true })).toHaveAttribute('aria-selected', 'true');
+  for (const name of ['Overview', 'Inbox', 'Tasks']) {
+    const button = page.getByRole('navigation', { name: 'Workspace navigation' }).getByRole('button', { name, exact: true });
+    expect(await button.locator('span').last().evaluate(e => e.scrollWidth <= e.clientWidth)).toBe(true);
+  }
+  await page.getByRole('button', { name: 'Toggle Sidebar' }).click();
+  const rail = page.locator('[data-slot=sidebar][data-state=collapsed]');
+  await rail.evaluate(async e => { await Promise.all(e.getAnimations({ subtree: true }).filter(a=>a.effect?.getTiming().iterations!==Infinity).map(a=>a.finished.catch(()=>{}))); });
+  for (const name of ['Overview', 'Inbox', 'Tasks']) {
+    expect(await rail.getByRole('button', { name, exact: true }).locator('span').last().evaluate(e => e.getBoundingClientRect().width)).toBe(0);
+  }
 });

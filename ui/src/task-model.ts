@@ -1,4 +1,36 @@
 import type { RecordData } from "./model";
+import { fromMarkdown } from "mdast-util-from-markdown";
+
+type TitleNode = { type: string; value?: string; alt?: string | null; children?: TitleNode[] };
+export function plainTaskTitle(value: string): string {
+  const text = (node: TitleNode): string => {
+    if (node.type === "html" || node.type === "definition") return "";
+    if (node.type === "image" || node.type === "imageReference") return node.alt || "";
+    if (node.type === "break") return " ";
+    if (node.value != null) return node.value;
+    return (node.children || []).map(text).join(["root", "list", "listItem", "blockquote"].includes(node.type) ? " " : "");
+  };
+  return text(fromMarkdown(value)).replace(/\s+/g, " ").trim();
+}
+
+export function taskTitle(task: RecordData): string {
+  if (task.display_title) return task.display_title;
+  let title = plainTaskTitle(String(task.title || "Untitled task"));
+  if (/^work on (?:this job\b|job\b|job\/)/i.test(title) && (task.branch || task.job)) return `Work on ${task.branch || task.job}`;
+  if (title.length > 120) {
+    const firstSentence = title.match(/^.{15,120}?[.!?](?:\s|$)/)?.[0]?.trim();
+    title = firstSentence || title.slice(0, 110).replace(/\s+\S*$/, "") + "…";
+  }
+  return title;
+}
+
+export const visibleTaskCount = (rows: RecordData[]) => rows.filter(t => t.status !== "dropped").length;
+export const activeTask = (task: RecordData) => task.delivery_state !== "unproven" && !["done", "merged", "dropped", "parked"].includes(task.status);
+export function taskTone(task: RecordData): string {
+  if (task.delivery_state === "unproven") return "unproven";
+  if (task.status === "blocked" || task.blocked_by?.length) return "blocked";
+  return taskColumn(task).toLowerCase().replace(/ /g, "-");
+}
 
 export const taskKey = (task: RecordData) => `${task.node}:${task.id}`;
 export const dependencyKey = (task: RecordData, ref: string) => ref.includes(":") ? ref : `${task.node}:${ref}`;
@@ -38,6 +70,11 @@ export function taskGraph(rows: RecordData[]) {
 }
 
 export type TaskGraph = ReturnType<typeof taskGraph>;
+
+export function connectedActiveTasks(rows: RecordData[]): RecordData[] {
+  const active = rows.filter(activeTask), graph = taskGraph(active);
+  return active.filter(t => graph.incoming.get(taskKey(t))!.size || graph.outgoing.get(taskKey(t))!.size);
+}
 
 export function downstream(graph: TaskGraph, key: string): Set<string> {
   const seen = new Set([key]), result = new Set<string>(), queue = [key];

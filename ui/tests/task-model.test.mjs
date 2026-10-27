@@ -3,7 +3,8 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import ts from "typescript";
 const source = readFileSync(new URL("../src/task-model.ts", import.meta.url), "utf8");
-const emitted = ts.transpile(source, { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 });
+let emitted = ts.transpile(source, { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 });
+emitted = emitted.replace('"mdast-util-from-markdown"', JSON.stringify(new URL("../node_modules/mdast-util-from-markdown/index.js", import.meta.url).href));
 const m = await import("data:text/javascript;base64," + Buffer.from(emitted).toString("base64"));
 const row = (node, id, status = "backlog", depends_on = [], extra = {}) => ({ node, id, status, depends_on, title: id, ...extra });
 
@@ -44,4 +45,28 @@ test("real-size independent layouts pack tasks instead of a single unreadable co
   assert.equal(layout.positions.size, 1500);
   assert.equal(new Set([...layout.positions.values()].map(p => p.x + ":" + p.y)).size, 1500);
   assert.ok(layout.width < 1600);
+});
+
+
+test("titles use CommonMark text, preserve escaped punctuation and shorten raw dumps without losing stored text", () => {
+  assert.equal(m.plainTaskTitle('**Bold** _title_ with `code` and [context](https://example.com)'), 'Bold title with code and context');
+  assert.equal(m.plainTaskTitle('Keep snake_case and \\*literal stars\\*'), 'Keep snake_case and *literal stars*');
+  assert.equal(m.plainTaskTitle('<b>Visible</b> &amp; ![image label](image.png)'), 'Visible & image label');
+  assert.equal(m.taskTitle({ title: 'Work on job/verify-log', branch: 'job/verify-log' }), 'Work on job/verify-log');
+  assert.equal(m.taskTitle({ title: 'Work on this job', branch: 'job/verify-log' }), 'Work on job/verify-log');
+  const source = '**A raw imported note** ' + 'Full retained body. '.repeat(30);
+  const task = { title: source };
+  assert.ok(m.taskTitle(task).length <= 120);
+  assert.equal(task.title, source);
+});
+
+test("default canvas includes only connected active tasks while totals exclude dropped", () => {
+  const rows = [row('a', '1', 'ready'), row('a', '2', 'backlog', ['1']), row('a', '3', 'done', ['2']), row('a', '4', 'parked'), row('a', '5', 'dropped')];
+  assert.deepEqual(m.connectedActiveTasks(rows).map(m.taskKey), ['a:1', 'a:2']);
+  assert.equal(m.visibleTaskCount(rows), 4);
+  assert.equal(m.activeTask({ status: 'parked' }), false);
+  assert.equal(m.activeTask({ status: 'done', delivery_state: 'unproven' }), false);
+  assert.equal(m.taskTone({ status: 'blocked' }), 'blocked');
+  assert.equal(m.taskTone({ status: 'ready', blocked_by: ['1'] }), 'blocked');
+  assert.equal(m.taskTone({ status: 'done', delivery_state: 'unproven' }), 'unproven');
 });

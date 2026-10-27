@@ -7,18 +7,18 @@ import { Choice, Empty, Reader, Status, TechnicalDetails, Text } from "./shared"
 import { label, list, safeHref, time, type RecordData } from "./model";
 import type { Route } from "./routes";
 import { TaskCanvas } from "./task-canvas";
-import { dependencyKey, downstream, filterTasks, taskColumn, taskColumns, taskGraph, taskKey, type TaskGraph } from "./task-model";
+import { dependencyKey, downstream, filterTasks, taskColumn, taskColumns, taskGraph, taskKey, taskTitle, taskTone, type TaskGraph } from "./task-model";
 import "./tasks.css";
 
 type Go = (r: Partial<Route> & { view: string }) => void;
 
 export function taskRows(s: RecordData, node?: string): RecordData[] {
-  return list(s.nodes).filter(n => !node || n.id === node).flatMap(n => list(n.tasks?.rows).map((task): RecordData => ({ ...task, node: n.id, project: n.title })))
+  return list(s.nodes).filter(n => !node || n.id === node).flatMap(n => list(n.tasks?.rows).map((task): RecordData => ({ ...task, display_title: taskTitle(task), node: n.id, project: n.title })))
     .sort((a, b) => (a.order || 0) - (b.order || 0) || String(a.id).localeCompare(String(b.id)));
 }
 
 function taskDetails(t: RecordData) {
-  return [t.description, t.request?.quote && "Source request:\n" + t.request.quote,
+  return ["## Full task\n\n" + t.title, t.description, t.request?.quote && "Source request:\n" + t.request.quote,
     t.park_reason && "Waiting: " + t.park_reason, t.resume && "Resume when: " + t.resume,
     t.drop_reason && "Dropped: " + t.drop_reason,
     list(t.evidence).length ? "Evidence:\n" + t.evidence.join("\n") : "",
@@ -28,27 +28,27 @@ function taskDetails(t: RecordData) {
 function TaskFacts({ task: t, graph }: { task: RecordData; graph: TaskGraph }) {
   const titles = (refs: string[]) => refs.map(ref => {
     const match = graph.byKey.get(dependencyKey(t, ref));
-    return match ? `${match.id}: ${match.title}` : `${ref} (outside this view or unavailable)`;
+    return match ? `${match.id}: ${taskTitle(match)}` : `${ref} (outside this view or unavailable)`;
   }).join(", ");
   const unlocks = [...downstream(graph, taskKey(t))].map(key => graph.byKey.get(key)!.id);
   return <div className="task-facts">
-    <p>Depends on: <Text>{t.depends_on?.length ? titles(t.depends_on) : "None"}</Text></p>
-    <p className={t.blocked_by?.length ? "task-blocker" : ""}>Blockers: <Text>{t.blocked_by?.length ? titles(t.blocked_by) : "None"}</Text></p>
-    <p>Unlocks {unlocks.length} downstream: {unlocks.length ? unlocks.join(", ") : "None"}</p>
+    {!!t.depends_on?.length && <p>Depends on: <span dir="auto">{titles(t.depends_on)}</span></p>}
+    {!!t.blocked_by?.length && <p className="task-blocker">Blockers: <span dir="auto">{titles(t.blocked_by)}</span></p>}
+    {unlocks.length > 0 && <p>Unlocks {unlocks.length} downstream: {unlocks.join(", ")}</p>}
     {t.dispatch_holds?.length ? <p className="task-blocker"><Text>{t.dispatch_holds.join(" · ")}</Text></p> : null}
   </div>;
 }
 
 function TaskTechnical({ task: t }: { task: RecordData }) {
-  return <TechnicalDetails values={{ Task: t.id, Job: t.branch, Commit: t.merge_sha, Code: t.code_path,
+  return <TechnicalDetails values={{ Task: t.id, "Original title": t.title, Job: t.branch, Commit: t.merge_sha, Code: t.code_path,
     Requirement: t.requirement, Decisions: t.decisions?.join(", "), Source: t.request?.ref }} />;
 }
 
 function TaskCard({ task: t, graph, s, go }: { task: RecordData; graph: TaskGraph; s: RecordData; go: Go }) {
-  return <article className="task-card" data-task-status={t.status} data-task-id={t.id}>
-    <div className="task-card-id"><code>{t.id}</code>{t.ready_now && <span className="task-ready">Ready now</span>}</div>
-    <ReaderRow title={t.title} text={taskDetails(t)} className="task-reader" trigger="Read task" footer={<TaskTechnical task={t} />}>
-      <div className="task-card-copy"><strong><Text>{t.title}</Text></strong><small><Text>{t.project}</Text></small></div>
+  return <article className="task-card" data-task-status={t.status} data-task-id={t.id} data-tone={taskTone(t)}>
+    <div className="task-card-id"><code>{t.id}</code>{taskTone(t) === "blocked" ? <span className="task-blocked">Blocked</span> : t.ready_now ? <span className="task-ready">Ready now</span> : null}</div>
+    <ReaderRow literalTitle title={taskTitle(t)} text={taskDetails(t)} className="task-reader" trigger="Read task" footer={<TaskTechnical task={t} />}>
+      <div className="task-card-copy"><strong dir="auto">{taskTitle(t)}</strong><small><Text>{t.project}</Text></small></div>
     </ReaderRow>
     <div className="task-meta"><Status>{t.delivery_state === "unproven" ? "Evidence unproven" : label(t.status)}</Status><span>{t.priority}</span><span dir="auto">{t.owner || "Unassigned"}</span></div>
     <p className="task-branch">Job/branch: <code>{t.branch || t.job || "Unlinked"}</code></p>
@@ -93,14 +93,19 @@ export function Tasks({ s, go, node }: { s: RecordData; go: Go; node?: string })
             const cards = filtered.filter(t => taskColumn(t) === column);
             return <section className="task-column" key={column} aria-label={column + " tasks"}>
               <h2>{column} <span>{cards.length}</span></h2>
-              <div className="task-column-cards">{cards.length ? cards.map(t => <TaskCard key={taskKey(t)} task={t} graph={graph} s={s} go={go} />) : <p className="task-column-empty">No tasks</p>}</div>
+              <div className="task-column-cards">{cards.length ? <>
+                {cards.filter(t => column !== "Parked" || t.status === "blocked").map(t => <TaskCard key={taskKey(t)} task={t} graph={graph} s={s} go={go} />)}
+                {column === "Parked" && cards.some(t => t.status !== "blocked") && <details className="task-parked-group"><summary>Show {cards.filter(t => t.status !== "blocked").length} parked tasks</summary>
+                  {cards.filter(t => t.status !== "blocked").map(t => <TaskCard key={taskKey(t)} task={t} graph={graph} s={s} go={go} />)}
+                </details>}
+              </> : <p className="task-column-empty">No tasks</p>}</div>
             </section>;
           })}
         </div>
       </> },
       { id: "dependencies", label: "Canvas", body: filtered.length ? <TaskCanvas rows={filtered} graph={graph} onOpen={setOpened} /> : <Empty text="No tasks to draw." action="Try another filter or show dropped tasks." /> },
     ]} />
-    {opened && <div className="task-canvas-reader"><Reader title={opened.title} text={taskDetails(opened)} open onOpenChange={open => { if (!open) setOpened(null); }} footer={<TaskTechnical task={opened} />}>
+    {opened && <div className="task-canvas-reader"><Reader literalTitle title={taskTitle(opened)} text={taskDetails(opened)} open onOpenChange={open => { if (!open) setOpened(null); }} footer={<TaskTechnical task={opened} />}>
       <p><code>{opened.id}</code> · {opened.priority} · {opened.owner || "Unassigned"}</p>
       <p>Job/branch: <code>{opened.branch || opened.job || "Unlinked"}</code></p>
       <TaskFacts task={opened} graph={graph} />

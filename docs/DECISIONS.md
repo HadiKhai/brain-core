@@ -2897,3 +2897,24 @@ The existing read-only task snapshot reports dispatch holds and a ready-now flag
 the same dependency and hold checks as task selection. A ready status alone does not
 promise that a task can start. Source records remain authoritative; this visualization
 does not change workflow state or reconcile records.
+
+## D28005: Prioritize active dependency chains and retain full task context
+
+The task canvas defaults to connected active tasks, laid out left to right by dependency
+depth. Completed/dropped work and unlinked tasks are available through Show all. Unlinked
+tasks are listed separately and never shrink a dependency graph into an unreadable grid.
+When no applicable edges exist, show an explicit no-links explanation. State colours have
+text labels in a legend; blocked work has a visible marker and parked work is collapsed.
+Task navigation counts exclude dropped records.
+
+Parse title markup with `mdast-util-from-markdown`, already locked and bundled through
+react-markdown, now declared directly because task presentation calls it. This adds no
+new transitive or bundled package. Cards use short plain-text summaries and three-line
+clamps; graph labels use one-line ellipsis. The reader retains the full source text and
+original title. Branch-based task titles bypass prose identifier substitution, so a real
+job name is not reduced to a generic label. Hide empty dependency facts.
+
+Task tab selection paints immediately instead of fading from the previous selection.
+Visual evidence waits for finite shell animations to settle before capture. Reconciliation
+and proof of job completion remain backend responsibilities; collapsing a parked row
+never changes its state or evidence.
