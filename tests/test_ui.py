@@ -1191,9 +1191,9 @@ ui_json.ui_json_background(root, '[]')
                               ("-c", "diff.ignoreSubmodules=none", "status", "--porcelain")):
                     owner.git(*query)
                     owner.git(*query)
-            self.assertEqual(run.call_count, 6)
+            self.assertEqual(run.call_count, 7)  # one uncached index-location read for status
             owner.git("rev-parse", "HEAD")
-            self.assertEqual(run.call_count, 7)
+            self.assertEqual(run.call_count, 8)
 
     def test_snapshot_age_is_visible_until_a_successful_full_refresh(self):
         box = {"partial": True, "built_at": 100, "building": True, "error": ""}

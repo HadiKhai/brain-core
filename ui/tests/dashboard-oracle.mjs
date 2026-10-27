@@ -62,7 +62,7 @@ export function createDashboardOracle(model) {
     const merged = state.nodes.flatMap(node => node.jobs?.rows || []).filter(row =>
       /merged/i.test(row.Outcome || '') && model.stamp(row.Ended) <= now && model.stamp(row.Ended) > now - 86400000);
     return [
-      { label: 'Needs you', value: String(needs.inbox.length + needs.due.length) },
+      { label: 'Needs you', value: String(needs.decisions.length) },
       { label: 'Merges today', value: String(merged.length) },
       { label: 'Threads live', value: String(model.threads(state.nodes).length) },
       { label: 'Ready to merge', value: String(needs.due.filter(row => row.ready).length) },

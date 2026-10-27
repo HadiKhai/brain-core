@@ -14,6 +14,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'lib'))
 from brain import rehearse as rehearsal
 from scenario import Scenario, CORE
+from test_rehearse import owned_rehearsal_workdir
 
 
 @unittest.skipUnless(sys.platform == 'darwin', 'requires macOS OS sandbox')
@@ -33,6 +34,7 @@ class RehearsalNativeCore(Scenario):
         import http.server
         import shutil
         import threading
+        owned_rehearsal_workdir(self)
         self.update_native_evidence(stage='optional-setup')
         r = self.init('sample')
         self.update_native_evidence(root=str(r))
@@ -63,14 +65,15 @@ class RehearsalNativeCore(Scenario):
         server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Handler)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
-        local_file = r / '.brain/local.json'
-        local = json.loads(local_file.read_text())
-        local['nodes'].setdefault('root', {}).update(coordinator='thread', wake='http://127.0.0.1:' + str(server.server_port))
-        local_file.write_text(json.dumps(local))
-        original_brain = rehearsal.snapshot(r)
-        original_home = rehearsal.snapshot(home)
-        self.update_native_evidence(stage='optional-command')
         try:
+            # Bind through the native writer so the strict journal baseline
+            # describes the exact input we freeze. A raw local.json edit leaves
+            # a gap that a later check --fix must not silently adopt.
+            self.b(r, 'set', 'root', 'coordinator=thread',
+                   'wake=http://127.0.0.1:' + str(server.server_port))
+            original_brain = rehearsal.snapshot(r)
+            original_home = rehearsal.snapshot(home)
+            self.update_native_evidence(stage='optional-command')
             import argparse
             # Control only the parent's elapsed timer; the real CLI subprocesses,
             # sandbox, delivery probe and their timeout clocks still run normally.

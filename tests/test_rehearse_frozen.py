@@ -15,7 +15,7 @@ from types import SimpleNamespace
 import unittest
 from unittest import mock
 
-from test_rehearse import RehearsalFixture, rehearsal, result
+from test_rehearse import RehearsalFixture, rehearsal, result, owned_rehearsal_workdir
 from scenario import CORE, Scenario
 
 
@@ -71,6 +71,7 @@ def tiny_environment(case):
 
 
 def tiny_rehearsal_fixture(case):
+    owned_rehearsal_workdir(case)
     case.root = case.tmp / 'live'
     case.root.mkdir()
     (case.root / 'instance.md').write_text('---\ntimezone: UTC\n---\n')
@@ -127,7 +128,7 @@ class FrozenInputs(RehearsalFixture):
         else:
             super().setUp()
 
-    def probe(self, stdout, stderr='', command='ui', mutation=None):
+    def probe(self, stdout, stderr='', command='ui', mutation=None, kind='read'):
         self.probes += 1
         lane = self.tmp / ('probe-' + str(self.probes))
         (lane / 'brain').mkdir(parents=True)
@@ -140,7 +141,171 @@ class FrozenInputs(RehearsalFixture):
         with mock.patch.object(rehearsal, 'sandbox_prefix', return_value=[]), \
                 mock.patch.object(rehearsal.subprocess, 'Popen', return_value=process), \
                 mock.patch.object(rehearsal.os, 'killpg'):
-            return rehearsal.run_command(lane / 'brain/core', lane, [command], 'read', [], self.terms)
+            return rehearsal.run_command(lane / 'brain/core', lane, [command], kind, [], self.terms)
+
+    def test_hook_inventory_and_generated_audit_marker_publish_privately(self):
+        self.probes = 0
+        self.probe('', command='hook', kind='hook')
+        lane = self.tmp / ('probe-' + str(self.probes))
+        inventory = lane / 'home/brains.json'
+        self.assertEqual(inventory.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(json.loads(inventory.read_text())['default'], 'rehearsal')
+        marker = lane / 'home/write-attempt'
+        marker.write_text('earlier fixture\n')
+        marker.chmod(0o644)
+        inode = marker.stat().st_ino
+        outside = self.tmp / 'outside-fixture'
+        code = "import os,runpy,sys; runpy.run_path(sys.argv[1]); fd=os.open(sys.argv[2],os.O_WRONLY|os.O_CREAT,0o600); os.close(fd)"
+        env = dict(os.environ, BRAIN_REHEARSAL_BOUNDARY=str(lane), BRAIN_REHEARSAL_MARKER=str(marker))
+        child = subprocess.run([sys.executable, '-I', '-S', '-c', code,
+                                str(lane / 'bootstrap/rehearsal_audit.py'), str(outside)],
+                               env=env, capture_output=True, text=True, timeout=10)
+        self.assertEqual(child.returncode, 0, child.stderr)
+        self.assertEqual(marker.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(marker.stat().st_ino, inode)
+        lines = marker.read_text().splitlines()
+        self.assertEqual(lines[0], 'earlier fixture')
+        self.assertEqual(len(lines), 2)
+        self.assertEqual(json.loads(lines[1])['path'], str(outside))
+
+    def test_private_copy_modes_precede_content_in_native_and_fallback_paths(self):
+        source = self.tmp / 'private-copy-source'
+        (source / '.brain').mkdir(parents=True)
+        (source / 'job-handbacks').mkdir()
+        (source / 'job-trains').mkdir()
+        (source / 'ordinary').mkdir()
+        private = {'.brain/local.json': b'legacy-local', 'job-handbacks/receipt.json': b'legacy-receipt',
+                   'protected': b'protected-content'}
+        for name, value in private.items():
+            path = source / name
+            path.write_bytes(value)
+            path.chmod(0o600 if name == 'protected' else 0o644)
+        shared = source / 'ordinary/note'
+        shared.write_text('shared content')
+        shared.chmod(0o640)
+        shared_ignore = source / 'job-trains/.gitignore'
+        shared_ignore.write_text('*.log\n')
+        shared_ignore.chmod(0o640)
+        tool = source / '.brain/private-tool'
+        tool.write_text('private helper')
+        tool.chmod(0o700)
+        original = rehearsal.snapshot(source)
+        copy = shutil.copyfileobj
+        for platform, result in (('linux', 0), ('darwin', 0), ('darwin', 1)):
+            with self.subTest(platform=platform, native_result=result):
+                seen = []
+                def copied(incoming, outgoing, *args, **kwargs):
+                    payload = os.pread(incoming.fileno(), 100, 0)
+                    if payload in set(private.values()) | {b'private helper'}:
+                        self.assertEqual(stat.S_IMODE(os.fstat(outgoing.fileno()).st_mode), 0o600)
+                    seen.append(payload)
+                    return copy(incoming, outgoing, *args, **kwargs)
+                def native(args, **kwargs):
+                    src, dst = Path(args[-2]), Path(args[-1])
+                    self.assertIn(src, (source / 'ordinary', source / 'job-trains'))
+                    if result:
+                        dst.mkdir()
+                        (dst / 'partial').write_text('partial clone')
+                    else:
+                        shutil.copytree(src, dst)
+                    return subprocess.CompletedProcess(args, result, b'', b'')
+                dest = self.tmp / ('private-copy-' + platform + str(result))
+                with mock.patch.object(rehearsal.sys, 'platform', platform), \
+                        mock.patch.object(rehearsal._m_rehearse_external, 'owned_run', side_effect=native), \
+                        mock.patch.object(rehearsal.shutil, 'copyfileobj', side_effect=copied):
+                    rehearsal.copy_tree(source, dest)
+                self.assertTrue(set(private.values()).issubset(seen))
+                self.assertIn(b'private helper', seen)
+                for name, value in private.items():
+                    path = dest / name
+                    self.assertEqual(path.read_bytes(), value)
+                    self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+                    self.assertNotEqual(path.stat().st_ino, (source / name).stat().st_ino)
+                self.assertEqual(stat.S_IMODE((dest / 'ordinary/note').stat().st_mode), 0o640)
+                self.assertEqual(stat.S_IMODE((dest / 'job-trains/.gitignore').stat().st_mode), 0o640)
+                self.assertEqual(stat.S_IMODE((dest / '.brain/private-tool').stat().st_mode), 0o700)
+                self.assertFalse(list(dest.glob('.rehearse-copy-*')))
+                self.assertEqual(rehearsal.snapshot(source), original)
+
+    def test_private_tree_copy_refuses_fifo_without_blocking(self):
+        source = self.tmp / 'fifo-source'
+        (source / '.brain').mkdir(parents=True)
+        (source / '.brain/local.json').write_text('{}')
+        os.mkfifo(source / 'pipe')
+        code = ("import sys; sys.path.insert(0, sys.argv[1]); from brain import rehearse\n"
+                "from pathlib import Path\n"
+                "try: rehearse.copy_tree(Path(sys.argv[2]), Path(sys.argv[3]))\n"
+                "except OSError as error: print(str(error))\n"
+                "else: raise SystemExit('FIFO unexpectedly copied')\n")
+        child = subprocess.run([sys.executable, '-I', '-S', '-B', '-c', code,
+                                str(CORE / 'lib'), str(source), str(self.tmp / 'fifo-copy')],
+                               capture_output=True, text=True, timeout=5)
+        self.assertEqual(child.returncode, 0, child.stderr)
+        self.assertIn('not a regular file', child.stdout)
+        self.assertTrue(stat.S_ISFIFO((source / 'pipe').stat().st_mode))
+
+    def test_probe_copy_protects_private_sources_and_preserves_shared_modes(self):
+        source = self.tmp / 'probe-copy-source'
+        source.mkdir()
+        (source / 'instance.md').write_text('---\nname: fixture\n---\n')
+        (source / 'node.md').write_text('---\nid: root\n---\n')
+        inst = SimpleNamespace(root=source, nodes=lambda: [dict(dir=source)], local={})
+        copy = shutil.copyfileobj
+        for index, (mode, linked) in enumerate(((0o600, False), (0o640, False), (0o600, True))):
+            if linked:
+                for name in ('instance.md', 'node.md'):
+                    (source / name).rename(source / (name + '.real'))
+                    (source / name).symlink_to(name + '.real')
+            for path in source.iterdir():
+                path.chmod(mode)
+            original = rehearsal.snapshot(source)
+            dest = self.tmp / ('probe-copy-' + str(index))
+            dest.mkdir()
+            seen = []
+            def copying(incoming, outgoing, *args, **kwargs):
+                self.assertEqual(stat.S_IMODE(os.fstat(outgoing.fileno()).st_mode), 0o600)
+                seen.append(True)
+                return copy(incoming, outgoing, *args, **kwargs)
+            with mock.patch.object(rehearsal.shutil, 'copyfileobj', side_effect=copying):
+                rehearsal.isolated_probe_instance(inst, dest)
+            self.assertEqual(len(seen), 2)
+            for name in ('instance.md', 'node.md'):
+                self.assertEqual((dest / name).read_bytes(), (source / name).read_bytes())
+                self.assertEqual(stat.S_IMODE((dest / name).stat().st_mode), mode)
+            self.assertEqual(rehearsal.snapshot(source), original)
+
+    def test_detached_git_copies_tighten_existing_targets_before_content(self):
+        source = self.tmp / 'private-metadata-worktree'
+        self.git('worktree', 'add', '-q', '-b', 'private-metadata', str(source), cwd=self.root)
+        own = Path(self.git('rev-parse', '--path-format=absolute', '--git-dir', cwd=source).strip())
+        for name in ('HEAD', 'index'):
+            (own / name).chmod(0o600)
+            (self.root / '.git' / name).chmod(0o644)
+        original = rehearsal.snapshot(self.root)
+        dest = self.tmp / 'detached-metadata-copy'
+        copy, regular = shutil.copyfileobj, rehearsal.copy_regular_file
+        overwrites, writes = [], []
+        def copying(incoming, outgoing, *args, **kwargs):
+            self.assertEqual(stat.S_IMODE(os.fstat(outgoing.fileno()).st_mode), 0o600)
+            writes.append(True)
+            return copy(incoming, outgoing, *args, **kwargs)
+        def classified(src, dst, **kwargs):
+            if kwargs.get('overwrite'):
+                self.assertEqual(stat.S_IMODE(Path(dst).stat().st_mode), 0o644)
+                overwrites.append(Path(src).name)
+            return regular(src, dst, **kwargs)
+        with mock.patch.object(rehearsal.shutil, 'copyfileobj', side_effect=copying), \
+                mock.patch.object(rehearsal, 'copy_regular_file', side_effect=classified):
+            rehearsal.copy_tree(source, dest)  # capture_gitfiles overwrites common HEAD/index
+            self.assertEqual(overwrites, ['HEAD', 'index'])
+            rehearsal.materialize_git(source, dest)
+        self.assertEqual(overwrites, ['HEAD', 'index', 'HEAD', 'index'])
+        self.assertGreaterEqual(len(writes), 4)
+        for name in ('HEAD', 'index'):
+            self.assertEqual((dest / '.git' / name).read_bytes(), (own / name).read_bytes())
+            self.assertEqual(stat.S_IMODE((dest / '.git' / name).stat().st_mode), 0o600)
+        self.assertEqual(stat.S_IMODE((dest / '.git/config').stat().st_mode), 0o644)
+        self.assertEqual(rehearsal.snapshot(self.root), original)
 
     def ui(self):
         def job(branch, ready):
@@ -770,7 +935,8 @@ elif sys.argv[1] == 'ui':
         old = {'due:0': result('cannot render due', code=1), 'hook': result()}
         outcome = self.run_rehearsal(outputs=[old, old])
         self.assertTrue(outcome['passed'], outcome['regressions'])
-        self.assertEqual(['due:0: identical baseline failure'], outcome['warnings'])
+        self.assertEqual(['delivery not probed (rehearsal)', 'due:0: identical baseline failure'],
+                         outcome['warnings'])
         new = {'due:0': result('[]'), 'hook': result()}
         outcome = self.run_rehearsal(outputs=[old, new])
         self.assertFalse(outcome['passed'])
@@ -832,7 +998,7 @@ class BaselineDiagnostics(RehearsalFixture):
                 new = {key: result('✗ unchanged error\nnew advisory', code=1), 'hook': result()}
                 outcome = self.run_rehearsal(outputs=[old, new])
                 self.assertTrue(outcome['passed'], outcome['regressions'])
-                self.assertEqual([], outcome['warnings'])
+                self.assertEqual(['delivery not probed (rehearsal)'], outcome['warnings'])
                 self.assertEqual([], outcome['diagnostics'])
 
     def test_changed_exit_code_still_refuses_without_incomplete_baseline(self):
@@ -897,7 +1063,8 @@ class BaselineDiagnostics(RehearsalFixture):
         old = dict(check=result('✗ existing', code=1), fix=result('✗ existing', code=1), hook=result())
         outcome = self.run_rehearsal(outputs=[old, old])
         self.assertTrue(outcome['passed'], outcome['regressions'])
-        self.assertEqual(['check: identical baseline failure', 'fix: identical baseline failure'], outcome['warnings'])
+        self.assertEqual(['delivery not probed (rehearsal)', 'check: identical baseline failure',
+                          'fix: identical baseline failure'], outcome['warnings'])
         self.assertEqual([], outcome['diagnostics'])
         printed = self.publish(outcome)
         for warning in outcome['warnings']:
@@ -1049,6 +1216,7 @@ class CandidateNotices(RehearsalFixture):
 
 @unittest.skipUnless(sys.platform == 'darwin', 'requires macOS OS sandbox')
 class FrozenClock(Scenario):
+    temporary_parent = CORE.parent
     def prepare_private_fixture(self):
         tiny_rehearsal_fixture(self)
         worktree = self.tmp / 'diagnostic-candidate-work/worktrees/job'

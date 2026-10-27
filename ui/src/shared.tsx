@@ -351,12 +351,14 @@ export function Choice({
   onChange,
   options,
   disabled = false,
+  tooltips = true,
 }: {
   name: string;
   value: string;
   onChange: (v: string) => void;
   options: { value: string; label: string }[];
   disabled?: boolean;
+  tooltips?: boolean;
 }) {
   const id = useId();
   return (
@@ -372,14 +374,14 @@ export function Choice({
           <SelectValue />
         </SelectTrigger>
         <SelectContent>
-          {options.map((o) => (
+          {options.map((o) => tooltips ? (
             <Tooltip key={o.value}>
               <TooltipTrigger render={<SelectItem value={o.value} />}>
                 <span className="option-label" dir="auto">{humanText(o.label)}</span>
               </TooltipTrigger>
               <TooltipContent>{humanText(o.label)}</TooltipContent>
             </Tooltip>
-          ))}
+          ) : <SelectItem key={o.value} value={o.value}><span className="option-label" dir="auto">{humanText(o.label)}</span></SelectItem>)}
         </SelectContent>
       </Select>
     </div>
@@ -420,8 +422,8 @@ export type Column = {
   sortValue?: (row: RecordData) => string | number;
   numeric?: boolean;
 };
-export function Reader({ title, text, trigger = "Read full", children, footer, open: controlled, onOpenChange, primary = false }: {
-  title: string; text: string; trigger?: string; children?: ReactNode; footer?: ReactNode; open?: boolean; onOpenChange?: (open: boolean) => void; primary?: boolean;
+export function Reader({ title, text, trigger = "Read full", children, footer, open: controlled, onOpenChange, primary = false, literalTitle = false }: {
+  title: string; text: string; trigger?: string; children?: ReactNode; footer?: ReactNode; open?: boolean; onOpenChange?: (open: boolean) => void; primary?: boolean; literalTitle?: boolean;
 }) {
   const [internal, setInternal] = useState(false);
   const open = controlled ?? internal;
@@ -431,7 +433,7 @@ export function Reader({ title, text, trigger = "Read full", children, footer, o
     <Button variant={primary ? "default" : "ghost"} size="sm" className={primary ? "" : "reader-trigger"} onClick={() => setOpen(true)}>{trigger}</Button>
     <Sheet open={open} onOpenChange={setOpen}>
       <SheetContent className="reading-sheet" initialFocus={() => document.querySelector<HTMLElement>(".reading-sheet [data-slot=sheet-close]")}>
-        <SheetHeader><SheetTitle><Text>{title}</Text></SheetTitle><SheetDescription>Read the full context, then return to your place.</SheetDescription></SheetHeader>
+        <SheetHeader><SheetTitle>{literalTitle ? title : <Text>{title}</Text>}</SheetTitle><SheetDescription>Read the full context, then return to your place.</SheetDescription></SheetHeader>
         <div className="reader-body"><Markdown text={text} />{children}
           {humanText(readable(text, zone)) !== readable(text, zone) && <Disclosure title="Technical details"><pre className="verbatim" dir="ltr">{text}</pre></Disclosure>}
         </div>

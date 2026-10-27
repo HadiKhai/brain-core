@@ -61,7 +61,7 @@ def ui_json_save_complete(inst, code, scan, state, privacy):
 def ui_json_privacy_key(inst, code):
     # A stale observation may be dated; changed visibility or source permission
     # never permits replaying old display text. Persist only this opaque digest.
-    sources, allowed, forbidden = _m_spend.spend_sources(inst)
+    privacy = _m_spend.spend_privacy_signature(inst)
     declarations = []
     for name in ('subscriptions.json', 'brains.json'):
         path = _m_usage.usage_file(name)
@@ -71,7 +71,7 @@ def ui_json_privacy_key(inst, code):
             declarations.append((name, None))
     value = [str(inst.root.resolve()), code, inst.cfg, inst.principals, inst.revoked,
              [(n['id'], n['owners'], n['sealed'], str(n['home_path']), _m_guard.never_terms(n)) for n in inst.nodes()],
-             [(rt, str(cfg)) for rt, cfg in sources], sorted(map(str, allowed)), sorted(map(str, forbidden)), declarations]
+             privacy, declarations]
     return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
 
 

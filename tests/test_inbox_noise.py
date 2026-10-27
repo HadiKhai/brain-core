@@ -246,3 +246,288 @@ class InboxNoise(Scenario):
         self.assertEqual((self.root / 'job-ledger.md').read_bytes(), ledger)
         after = json.loads(self.b(self.root, 'due', 'root', '--json'))
         self.assertEqual([i['id'] for i in after if i['kind'] == 'job-landed'], [landed['id']])
+
+    def test_terminal_machine_notice_expires_after_delivery_without_changing_source(self):
+        reminders = self.m._owners['lifecycle_read']
+        path = self.root / 'inbox.md'
+        notice = '- 2026-10-25T15:41:07.261523+00:00 from machine: command completed: command completed successfully <!-- machine-wait:00ad91d121f4a41cac633f58bb1275f8:completed -->'
+        question = '- 2026-10-25 15:42 +00:00 from worker: Which export? <!-- host-question:fixture -->'
+        text = notice + '\n' + question + '\n'
+        path.write_text(text)
+        first = self.inbox()
+        self.assertTrue(any('command completed' in i['text'] for i in first))
+        second = self.inbox()
+        self.assertFalse(any('command completed' in i['text'] for i in second))
+        self.assertTrue(any('Which export?' in i['text'] for i in second))
+        self.assertEqual(path.read_text(), text)
+        inst = self.m.Instance(self.root)
+        key = reminders.inbox_source_id(inst.node('root'), notice)
+        record = reminders.lifecycle_read(inst)['inbox']['root'][key]
+        self.assertTrue(record['expired'])
+        self.assertFalse(record['answered'])
+        self.assertTrue(record['seen_at'])
+
+    def test_drain_only_terminal_notices_and_readonly_counts_never_write(self):
+        inbox_notices = self.m._owners['terminal_notice']
+        task_reconcile = self.m._owners['count_node']
+        path = self.root / 'inbox.md'
+        lines = ['- 2026-10-25 15:40 +00:00 from machine: held step exited: command exited with status 2',
+                 '- 2026-10-25 15:41 +00:00 from machine: hold heavy work: thermal warning',
+                 '- 2026-10-25 15:42 +00:00 from worker: command completed: command completed successfully',
+                 '- 2026-10-25 15:43 +00:00 from machine: command completed: command completed successfully <!-- host-question:protected -->']
+        path.write_text('\n'.join(lines) + '\n')
+        n = self.inst.node('root')
+        before = {p: p.read_bytes() for p in self.root.rglob('*') if p.is_file() and not p.is_symlink()}
+        self.assertEqual(task_reconcile.count_node(self.inst, n)['inbox_pending'], 4)
+        self.assertEqual(before, {p: p.read_bytes() for p in before})
+        self.assertEqual(len(inbox_notices.expire(self.inst, [n])), 1)
+        self.assertEqual(inbox_notices.expire(self.inst, [n]), [])
+        self.assertEqual(task_reconcile.count_node(self.inst, n)['inbox_pending'], 3)
+        self.assertEqual(path.read_text(), '\n'.join(lines) + '\n')
+
+    def test_failed_stdout_delivery_never_expires_a_notice(self):
+        import argparse
+        reminders = self.m._owners['lifecycle_read']
+        path = self.root / 'inbox.md'
+        notice = '- 2026-10-25 15:40 +00:00 from machine: command completed: command completed successfully'
+        path.write_text(notice + '\n')
+        with mock.patch.object(self.m, 'load', return_value=self.inst), \
+                mock.patch('sys.stdout.write', side_effect=BrokenPipeError):
+            with self.assertRaises(BrokenPipeError):
+                self.m.cmd_inbox(argparse.Namespace(id='root', json=True, new=False))
+        state = reminders.lifecycle_read(self.inst)
+        key = reminders.inbox_source_id(self.inst.node('root'), notice)
+        self.assertNotIn('expired', state['inbox'].get('root', {}).get(key, {}))
+
+    def test_resolved_machine_variants_expire_but_live_holds_and_questions_remain(self):
+        notices = self.m._owners['terminal_notice']
+        for text, event in [('held step exited: command exited with status -15', 'exited'),
+                            ('held step exited: interrupted (KeyboardInterrupt)', 'exited'),
+                            ('held step exited: owner stopped before the command completed', 'exited'),
+                            ('held step resumed automatically: heavy example held since 2026-10-25T15:00Z: pressure; clears when resources clear', 'resumed')]:
+            line = '- 2026-10-25T15:40:29+00:00 from machine: ' + text + ' <!-- machine-wait:' + 'a' * 32 + ':' + event + ' -->'
+            with self.subTest(text=text):
+                self.assertTrue(notices.terminal_notice(line))
+                self.assertFalse(notices.terminal_notice(line + ' <!-- host-question:protected -->'))
+        held = '- 2026-10-25T15:40:29+00:00 from machine: heavy example held since 2026-10-25T15:00Z: pressure; clears when resources clear <!-- machine-wait:' + 'a' * 32 + ':coordinator -->'
+        self.assertFalse(notices.terminal_notice(held))
+        self.assertFalse(notices.terminal_notice(held.replace(':coordinator -->', ':completed -->')))
+
+    def test_archive_handled_retains_exact_lines_and_unresolved_requests(self):
+        notices = self.m._owners['terminal_notice']
+        reminders = self.m._owners['lifecycle_read']
+        reconcile = self.m._owners['count_node']
+        n = self.inst.node('root')
+        question = '- 2026-10-25 15:40 +00:00 from worker: Which export?'
+        pending = '- 2026-10-25 15:41 +00:00 from worker: Still needs an answer'
+        notice = '- 2026-10-25 15:42 +00:00 from machine: command completed: command completed successfully'
+        text = '# Inbox\r\n' + question + '\r\n' + pending + '\r\n' + notice + '\r\n'
+        source = self.root / 'inbox.md'
+        source.write_bytes(text.encode())
+        with reminders.lifecycle_store(self.inst) as data:
+            current = reminders.reconcile_requests(self.inst, n, [question, pending, notice], data)
+            key = reminders.inbox_source_id(n, question)
+            record = current[key]
+            record['answered'] = True
+            data['answers'].append({'id': record['id'], 'source_id': key, 'node': n['id'], 'answer': 'Use the CSV export'})
+        before = source.read_bytes()
+        plan = reconcile.reconcile(self.inst, [n], drain=True, archive=True)
+        self.assertEqual(plan[0]['inbox_lines_archived'], 2)
+        self.assertEqual(source.read_bytes(), before)
+        self.assertFalse((self.root / 'inbox-archive.md').exists())
+        reconcile.reconcile(self.inst, [n], apply=True, drain=True, archive=True)
+        archive = (self.root / 'inbox-archive.md').read_bytes()
+        self.assertIn((question + '\r\n').encode(), archive)
+        self.assertIn((notice + '\r\n').encode(), archive)
+        self.assertIn(b'"answered": true', archive)
+        self.assertIn(b'"expired": true', archive)
+        self.assertEqual(source.read_bytes(), ('# Inbox\r\n' + pending + '\r\n').encode())
+        self.assertEqual(reconcile.count_node(self.inst, n)['inbox_pending'], 1)
+        self.assertEqual(reconcile.reconcile(self.inst, [n], apply=True, drain=True, archive=True)[0]['inbox_lines_archived'], 0)
+        self.assertEqual((self.root / 'inbox-archive.md').read_bytes(), archive)
+        # The exact retained answer and expired episode remain auditable.
+        self.assertEqual(reminders.lifecycle_read(self.inst)['answers'][-1]['answer'], 'Use the CSV export')
+
+    def test_archive_failure_retains_source_and_retry_deduplicates(self):
+        notices = self.m._owners['terminal_notice']
+        reminders = self.m._owners['lifecycle_read']
+        n = self.inst.node('root')
+        source = self.root / 'inbox.md'
+        notice = '- 2026-10-25 15:42 +00:00 from machine: held step exited: command exited with status 2\n'
+        source.write_text(notice)
+        notices.expire(self.inst, [n])
+        plan = notices.archive_plan(self.inst, n, reminders.lifecycle_read(self.inst))
+        write = notices.archive_replace
+        with mock.patch.object(notices, 'archive_replace', side_effect=OSError('archive unavailable')):
+            with self.assertRaises(OSError):
+                notices.publish_archive(plan)
+        self.assertEqual(source.read_text(), notice)
+        def fail_source(target, text, generation):
+            if target.path == source:
+                raise OSError('inbox publication unavailable')
+            return write(target, text, generation)
+        with mock.patch.object(notices, 'archive_replace', side_effect=fail_source):
+            with self.assertRaises(OSError):
+                notices.publish_archive(plan)
+        self.assertEqual(source.read_text(), notice)
+        archived = (self.root / 'inbox-archive.md').read_bytes()
+        notices.publish_archive(notices.archive_plan(self.inst, n, reminders.lifecycle_read(self.inst)))
+        self.assertEqual(source.read_text(), '')
+        self.assertEqual((self.root / 'inbox-archive.md').read_bytes(), archived)
+
+    def test_archive_refuses_linked_target_before_any_inbox_change(self):
+        notices = self.m._owners['terminal_notice']
+        reminders = self.m._owners['lifecycle_read']
+        n = self.inst.node('root')
+        source = self.root / 'inbox.md'
+        notice = '- 2026-10-25 15:42 +00:00 from machine: command completed: command completed successfully\n'
+        source.write_text(notice)
+        notices.expire(self.inst, [n])
+        target = self.root / 'untouched.md'
+        target.write_text('Original bytes\n')
+        (self.root / 'inbox-archive.md').symlink_to(target)
+        with self.assertRaises(ValueError):
+            notices.archive_plan(self.inst, n, reminders.lifecycle_read(self.inst))
+        self.assertEqual(source.read_text(), notice)
+        self.assertEqual(target.read_text(), 'Original bytes\n')
+
+    def test_archive_marker_without_retained_source_cannot_discard_a_line(self):
+        notices = self.m._owners['terminal_notice']
+        reminders = self.m._owners['lifecycle_read']
+        n = self.inst.node('root')
+        source, archive = self.root / 'inbox.md', self.root / 'inbox-archive.md'
+        notice = '- 2026-10-25 15:42 +00:00 from machine: command completed: command completed successfully\n'
+        source.write_text(notice)
+        notices.expire(self.inst, [n])
+        state = reminders.lifecycle_read(self.inst)
+        first = notices.archive_plan(self.inst, n, state)
+        archive.write_text(first['archive_text'].splitlines()[0] + '\n')
+        notices.publish_archive(notices.archive_plan(self.inst, n, state))
+        self.assertEqual(source.read_text(), '')
+        self.assertIn(notice, archive.read_text())
+        self.assertIn('"expired": true', archive.read_text())
+
+    def test_archive_refuses_a_native_question_append_after_planning(self):
+        notices = self.m._owners['terminal_notice']
+        reminders = self.m._owners['lifecycle_read']
+        transitions = self.m._owners['inbox_append']
+        n = self.inst.node('root')
+        source, archive = self.root / 'inbox.md', self.root / 'inbox-archive.md'
+        notice = '- 2026-10-25 15:42 +00:00 from machine: command completed: command completed successfully\n'
+        question = '- 2026-10-25 15:43 +00:00 from runtime: Which export? <!-- host-question:concurrent -->\n'
+        source.write_text(notice)
+        notices.expire(self.inst, [n])
+        plan = notices.archive_plan(self.inst, n, reminders.lifecycle_read(self.inst))
+        self.assertTrue(transitions.inbox_append(n['dir'], question, nonblocking=True))
+        with self.assertRaisesRegex(OSError, 'inbox changed'):
+            notices.publish_archive(plan)
+        self.assertEqual(source.read_text(), notice + question)
+        self.assertFalse(archive.exists())
+        notices.publish_archive(notices.archive_plan(self.inst, n, reminders.lifecycle_read(self.inst)))
+        self.assertEqual(source.read_text(), question)
+        self.assertIn(notice, archive.read_text())
+        self.assertIn(question.rstrip('\n'), self.m.inbox_lines(n, readonly=True))
+
+    def test_appender_opening_old_inode_retries_after_archive_replacement(self):
+        import builtins
+        notices = self.m._owners['terminal_notice']
+        reminders = self.m._owners['lifecycle_read']
+        transitions = self.m._owners['inbox_append']
+        n = self.inst.node('root')
+        source = self.root / 'inbox.md'
+        notice = '- 2026-10-25 15:42 +00:00 from machine: command completed: command completed successfully\n'
+        question = '- 2026-10-25 15:43 +00:00 from runtime: Still pending <!-- host-question:old-inode -->\n'
+        for nonblocking in (True, False):
+            with self.subTest(nonblocking=nonblocking):
+                source.write_text(notice)
+                notices.expire(self.inst, [n])
+                plan = notices.archive_plan(self.inst, n, reminders.lifecycle_read(self.inst))
+                opened, actual_open = [], builtins.open
+                def replace_after_open(path, mode='r', *args, **kwargs):
+                    stream = actual_open(path, mode, *args, **kwargs)
+                    if path == source and mode == 'a+' and not opened:
+                        opened.append(stream)
+                        notices.publish_archive(plan)
+                    return stream
+                with mock.patch('builtins.open', side_effect=replace_after_open):
+                    if nonblocking:
+                        with self.assertRaises(BlockingIOError):
+                            transitions.inbox_append(n['dir'], question, nonblocking=True)
+                    else:
+                        self.assertTrue(transitions.inbox_append(n['dir'], question))
+                if nonblocking:
+                    self.assertTrue(transitions.inbox_append(n['dir'], question, nonblocking=True))
+                self.assertEqual(source.read_text(), question)
+                self.assertIn(notice, (self.root / 'inbox-archive.md').read_text())
+                self.assertIn(question.rstrip('\n'), self.m.inbox_lines(n, readonly=True))
+
+    def test_archive_lock_rejects_nonblocking_append_until_replacement_finishes(self):
+        notices = self.m._owners['terminal_notice']
+        reminders = self.m._owners['lifecycle_read']
+        transitions = self.m._owners['inbox_append']
+        n = self.inst.node('root')
+        source = self.root / 'inbox.md'
+        notice = '- 2026-10-25 15:42 +00:00 from machine: command completed: command completed successfully\n'
+        question = '- 2026-10-25 15:43 +00:00 from runtime: Awaiting retry <!-- host-question:lock -->\n'
+        source.write_text(notice)
+        notices.expire(self.inst, [n])
+        plan = notices.archive_plan(self.inst, n, reminders.lifecycle_read(self.inst))
+        actual_replace = notices.archive_replace
+        attempts = []
+        def blocked_append(target, text, generation):
+            if target.path == source:
+                with self.assertRaises(BlockingIOError):
+                    transitions.inbox_append(n['dir'], question, nonblocking=True)
+                attempts.append(True)
+            actual_replace(target, text, generation)
+        with mock.patch.object(notices, 'archive_replace', side_effect=blocked_append):
+            notices.publish_archive(plan)
+        self.assertEqual(attempts, [True])
+        self.assertTrue(transitions.inbox_append(n['dir'], question, nonblocking=True))
+        self.assertEqual(source.read_text(), question)
+
+    def test_archive_refuses_intervening_archive_change_without_overwriting_it(self):
+        notices = self.m._owners['terminal_notice']
+        reminders = self.m._owners['lifecycle_read']
+        n = self.inst.node('root')
+        source, archive = self.root / 'inbox.md', self.root / 'inbox-archive.md'
+        notice = '- 2026-10-25 15:42 +00:00 from machine: command completed: command completed successfully\n'
+        source.write_text(notice)
+        notices.expire(self.inst, [n])
+        plan = notices.archive_plan(self.inst, n, reminders.lifecycle_read(self.inst))
+        archive.write_text('Concurrent retained history\n')
+        with self.assertRaisesRegex(OSError, 'publication target changed'):
+            notices.publish_archive(plan)
+        self.assertEqual(source.read_text(), notice)
+        self.assertEqual(archive.read_text(), 'Concurrent retained history\n')
+
+    def test_hook_question_queued_during_archive_is_delivered_after_replacement(self):
+        notices = self.m._owners['terminal_notice']
+        reminders = self.m._owners['lifecycle_read']
+        n = self.inst.node('root')
+        source = self.root / 'inbox.md'
+        notice = '- 2026-10-25 15:42 +00:00 from machine: command completed: command completed successfully\n'
+        source.write_text(notice)
+        notices.expire(self.inst, [n])
+        plan = notices.archive_plan(self.inst, n, reminders.lifecycle_read(self.inst))
+        transcript = self.tmp / 'archive-question.jsonl'
+        transcript.write_text(json.dumps({'type': 'response_item', 'payload': {
+            'type': 'function_call', 'call_id': 'archive-race', 'name': 'request_user_input',
+            'arguments': json.dumps({'questions': [{'id': 'export', 'question': 'Which concurrent export?'}]})}}) + '\n')
+        actual_replace = notices.archive_replace
+        queued = []
+        def queue_hook(target, text, generation):
+            if target.path == source:
+                with mock.patch.object(self.m, 'request_wake', return_value=False):
+                    self.m.capture_hook_questions(self.inst, n, {'transcript_path': str(transcript), 'session_id': 'archive-race'})
+                pending = list(self.m.hook_question_queue(n).glob('*.json'))
+                self.assertEqual(len(pending), 1)
+                queued.append(json.loads(pending[0].read_text())['line'])
+            actual_replace(target, text, generation)
+        with mock.patch.object(notices, 'archive_replace', side_effect=queue_hook):
+            notices.publish_archive(plan)
+        current = self.m.inbox_lines(n)
+        self.assertEqual(len(queued), 1)
+        self.assertIn(queued[0].rstrip('\n'), current)
+        self.assertIn(queued[0], source.read_text())
+        self.assertEqual(list(self.m.hook_question_queue(n).glob('*.json')), [])

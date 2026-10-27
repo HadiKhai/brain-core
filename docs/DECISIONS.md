@@ -1,5 +1,7 @@
 # Code decisions
 
+- Rehearsal stores timestamp-preserving copies in a private directory beside the workbench, outside captured source roots; every owned allocation requires an explicit parent and refuses physical paths under system temp, macOS aging roots or HOME dot-directories before starting, while native cleanup still retires its bulk data.
+
 ## D31005: Reconcile only absent, durably recorded local queue processes
 
 Before releasing a verifier bootstrap to exec, the foreground queue records the
@@ -67,6 +69,135 @@ their operation boundaries.
 Outward aliases, replaced physical ancestors and shared files remain refused.
 Each sync failure propagates; no multi-file transaction, namespace lock or
 physical power-loss guarantee is implied.
+
+## D40007: Keep unavailable coordinator measurements unknown in rehearsal
+
+Coordinator context and turn counts have no authorized Brain-owned aggregate in
+this rehearsal contract. The frozen read adapter returns the native unknown
+value for that API and continues to refuse provider discovery. A coordinator
+session binding must not turn an otherwise read-only measurement into a provider
+scan or strand a leased refresh. The control covers due, UI and native refresh
+with a fabricated coordinator session; raw discovery remains refused.
+
+
+## D40006: Exclude provider installation routes from aggregate-only rehearsal
+
+The machine-local `global` map records runtime installation directories used to
+find a Brain from a provider environment. Rehearsal has a private HOME and reads
+one attested aggregate capsule; provider installation routes are outside that
+input contract. Copy preparation omits this map only from its owned source
+copy. It preserves project homes, workbenches, worktrees, privacy policy and the
+external observer's link refusal. The original local bindings are never written.
+
+
+## D40004: Lease preparation writers and prove their exact projections
+
+Locked command preparation starts its native operation before folding hooks or
+reconstructing record sources. Event-source refusals inspect coverage without
+publishing repairs first. Preparation failures close their own lease and retain
+the original error even if terminal publication fails. A copied empty lease
+file cannot transfer a kernel lock: private clones discard only their own fresh
+copies and preserve all begin records for native reconciliation.
+
+Rehearsal attests each record object by its content address, schema and text hash;
+record materialization and hook acknowledgements require matching native writer,
+lock and lease evidence. Hook and reconciliation batches share one observed
+resource operand, verified again at completion. Reconciliation consumes each deleted-resource tombstone once, even when it closes
+several interrupted operations. Archive rollover and status-commit stamps require
+exact independently derived bytes and permissions under the live operation.
+Historical prefixes, live foreign leases, lifecycle completion and unexplained
+residual writes remain strict.
+
+## D40005: Freeze aggregate accounting and stream large history evidence
+
+Both rehearsal cores consume one digest-bound snapshot of existing Brain-owned
+accounting aggregates at the frozen instant. Missing aggregates remain unknown.
+The snapshot binds immutable job-generation fields and explicit worktree scope;
+provider directories, configuration, credentials and transcripts are not copied
+or discovered. Machine totals without an authorized aggregate remain explicitly
+incomplete, and any unplanned provider accounting discovery refuses. Accounting writers retain their strict counter-generation checks;
+usage readers use the fail-soft generation handling from the integration train.
+
+Large journal and comparison operands stream into private owned spool files,
+with source identity, stable metadata and whole-file digests checked on capture
+and consumption. Comparison history and its native cache are independently
+replayed and reconstructed with bounded reads. Unsupported or damaged evidence
+still refuses proof; the ordinary capture bound remains 32 MiB. Bulk spools use
+the same owned terminal cleanup as the clones.
+
+
+## D40003: Count nested open callbacks as one audited operation
+
+Python 3.9 pathlib uses an opener for io.open, producing a second os.open audit
+callback inside the same operation. Consume that callback only when an identical
+path/flags pair was already recorded from its exact parent frame. Consuming the
+pair also requires the captured standard-library Path.open code in both frames.
+It clears the pair; another operation must produce another record. Built-in open,
+direct os.open and repeated pathlib attempts remain individually observed. The
+violation marker is created before a pair can be consumed, so write refusal,
+unexpected-write outcomes and path permissions do not change.
+
+## D40002: Journal the strict rehearsal fixture's binding changes
+
+The real-core fixture configures its fabricated delivery binding through the
+native settings command before freezing its source. Directly rewriting machine
+bindings after the last native transaction left an unexplained baseline gap.
+An unrelated check repair correctly refused to adopt that gap. Keep that
+refusal, complete history/replay checks and all original rehearsal assertions;
+fix the fixture's writer instead of granting paths or forgiving residual state.
+The delivery server's finalizer also encloses this setup command.
+
+## D40001: Preserve an owned allocation capability across worker death
+
+The outer copy scope starts a separate cleanup guardian and transfers the exact
+new allocation over an anonymous socket. A receipt alone never grants cleanup
+authority. Normal exit still uses native retention, then dismisses the guardian.
+On worker death, recovery requires the captured directory identities, immutable
+receipt binding, a dead owner and proven absence of every registered process
+group. A live registered group may be stopped only while its leader still has
+the witnessed OS start identity. Launch gaps, denied or reused groups, explicit
+uncertainty, changed identities and invalid receipts retain bytes. Nested copy
+scopes register launches with their enclosing guardian.
+Every successful publication transfers a complete receipt witness; recovery
+requires exact equality, including mutable metadata, before any filesystem move.
+
+Recovery reuses native checkpoint, staged retirement and publication checks. It
+can recover the same captured inode if worker death interrupted staged deletion.
+Repeat cancellation signals are deferred during terminal cleanup and handlers
+are restored afterward. The existing body exception remains primary, including
+retirement publication failure. This is process recovery, not a guarantee after
+all supervisors die or storage/ownership evidence becomes unavailable.
+
+Report warnings use logical regular-file bytes strictly above one binary GiB.
+Traversal remains bounded, metadata-only and link-refusing; unknown sizes never
+become known-small results.
+
+## D31003: Keep the owned-copy body exception primary during exit
+
+When retirement publication fails while a body exception is already unwinding,
+OwnedCopies passes that original exception object and traceback into native
+finalization. The body exception remains primary, with the retirement failure
+as its cause. A further native finalization failure remains secondary in that
+cause chain. Without a body exception, the retirement failure remains primary.
+Successful exit keeps the existing native cleanup behavior and predicates.
+
+This decision narrows R6-INT-2 to exit/error composition. It changes no ownership,
+identity, process, evidence, ancestor uncertainty or deletion predicates. The
+stopped original ten-file review remains open; focused proof or a narrow source
+review of this contract does not establish whole R6 acceptance.
+
+## D30006: Propagate retention uncertainty before fallible cleanup
+
+Owned copy scopes capture their enclosing in-memory owners on entry. A known
+refusal or cleanup failure marks that entire chain uncertain before inspecting,
+restoring, publishing or checkpointing retained copies. This state is monotonic;
+successful cleanup retains all existing ownership and process predicates.
+An already-incomplete child capture marks the captured owner chain before the
+first pre-delete checkpoint, including when that checkpoint itself fails.
+Staged rollback remains best-effort under the original inode checks. A secondary
+rollback or checkpoint error is chained to the primary exception using Python 3.9
+exception causes; the primary exception and surviving original bytes remain
+observable. No receipt grants deletion authority or later recovery ownership.
 
 ## D30002: Native retention owns final bulk deletion
 
@@ -2831,6 +2962,230 @@ adding a worktree. A minute boundary can otherwise refresh root's generated
 the handback under test. This fixture correction retains the pre-handback stamp
 clear and every strict assertion; production hourly coalescing is unchanged.
 
+## D28003: Keep task migration limited to explicit work and retain reconciliation history
+
+Automatic migration imports backlog/build-order entries and open jobs with a matching,
+unmerged local Git worktree without a stopped worker signal. Inbox messages, status history, and explicitly labelled decision/history sections
+are observations rather than work sources. Pending inbox requests stay in their
+original delivery lifecycle when their legacy task copies are dropped. The explicit record reconciliation command defaults to a read-only
+plan and retains every task, requirement, source line and ledger row. It records one
+private decision per node for dropped imports. Proven main delivery closes imported
+job tasks with their baseline, delivering commit and changed paths; incomplete proof
+keeps a visible reconciliation obligation. Shared requirement records stay active while
+any linked task remains active.
+
+Terminal machine completion/exit notices expire only after their successful inbox
+delivery, or an explicit drain. Expiry is a retained lifecycle receipt, separate from
+an answer, and never suppresses a question, worker failure or actionable machine hold.
+
+Handled inbox archiving is explicit in reconciliation: only strictly answered episodes
+or expired terminal notices qualify. Publish exact original lines and episode proof to
+the node-local inbox archive durably before replacing the active inbox. Replays reuse
+the retained episode/line marker, so an interrupted replacement cannot lose a message
+or duplicate its retained copy. Unknown state stays pending. Closed jobs use retained
+delivery evidence even when their worktrees have already been pruned.
+
+Archive publication fences both captured file generations and holds the native inbox
+append lock through source replacement. An appender verifies its opened inode after
+locking; a replaced inode is retried or reported busy to the hook's durable queue.
+The instance lock alone cannot fence nonblocking hook question delivery.
+
+Mixed backlog sections can contain policy history as well as work. Exclude standalone
+authority announcements, review-independence rules, spent allowances and resume
+conditions using their explicit forms, without dropping ordinary work or manual tasks.
+Cleared preview bindings are missing job evidence, never proof of abandonment.
+
+After integration with unlocked task validation, a new unlinked backlog/ready task
+fences its exact destination and requirement plus inherited node policy. It does not
+scan unrelated task/requirement bodies or directories under the instance lock. Linked
+and completed mutations retain the full graph, artifact and Git evidence fences.
+
+Unlinked new task creation validates only the new record, with direct requirement
+lookups. Linked additions, existing-record edits and explicit task checks retain
+whole-graph validation, including qualified and cross-node return edges. This avoids repeatedly parsing every requirement
+for every existing task while holding the instance lock for a single unrelated add.
+
+For a successful new backlog/ready task whose native operation changes no ledger/status
+resources, retain the native command journal and skip the unrelated status/usage
+projection. Resource changes, configured managed indexes and other transitions retain
+normal maintenance, including partially failed index regeneration.
+
+## D28004: Show task workflow and downstream dependencies from one snapshot
+
+The task board keeps five stable columns (backlog, ready, in progress, parked and done),
+with dropped records available through an explicit toggle. Review/testing states remain
+in progress; blocked tasks and delivery claims without proof remain parked. Filtering
+by node, owner or text affects both the board and dependency canvas.
+
+Use a directed SVG canvas with a deterministic layered layout and a compact grid for
+independent tasks. Edges point from a dependency to its dependent. Node-qualified task
+identities preserve cross-node links and duplicate local IDs; downstream traversal is
+transitive and bounded for malformed provider cycles. Filters hide edges with missing
+endpoints while retaining full-snapshot downstream context in task details. No graph
+library is needed. Pan, zoom and task reading work with pointer and keyboard controls.
+
+The existing read-only task snapshot reports dispatch holds and a ready-now flag using
+the same dependency and hold checks as task selection. A ready status alone does not
+promise that a task can start. Source records remain authoritative; this visualization
+does not change workflow state or reconcile records.
+
+## D28005: Prioritize active dependency chains and retain full task context
+
+The task canvas defaults to connected active tasks, laid out left to right by dependency
+depth. Completed/dropped work and unlinked tasks are available through Show all. Unlinked
+tasks are listed separately and never shrink a dependency graph into an unreadable grid.
+When no applicable edges exist, show an explicit no-links explanation. State colours have
+text labels in a legend; blocked work has a visible marker and parked work is collapsed.
+Task navigation counts exclude dropped records.
+
+Parse title markup with `mdast-util-from-markdown`, already locked and bundled through
+react-markdown, now declared directly because task presentation calls it. This adds no
+new transitive or bundled package. Cards use short plain-text summaries and three-line
+clamps; graph labels use one-line ellipsis. The reader retains the full source text and
+original title. Branch-based task titles bypass prose identifier substitution, so a real
+job name is not reduced to a generic label. Hide empty dependency facts.
+
+Task tab selection paints immediately instead of fading from the previous selection.
+Visual evidence waits for finite shell animations to settle before capture. Reconciliation
+and proof of job completion remain backend responsibilities; collapsing a parked row
+never changes its state or evidence.
+
+## D40004: Bind job preview evidence to its current worktree generation
+
+Preview receipts may opt into `scope: job` and include `worktree_generation`
+from native binding authority (consumer access is superseded by D40008 below).
+This permits an
+owned preview without changing the node's configured preview or review URLs.
+Receipts without job scope retain the existing exact node-URL policy.
+
+A job URL must use HTTP(S) and either a loopback host (`localhost`, `127.0.0.1`,
+or `::1`) on the current worktree's allocated port block, or an exact URL
+declared in that job's ledger `Preview URLs` cell (a JSON string array) or
+contract `## Preview URLs` section (one URL per line, optionally bulleted and
+backtick-quoted). Credentials in job preview URLs are refused. Declarations
+are exact URLs, not host or port wildcards.
+
+Job receipts bind the open job key, exact head, current node binding, worktree
+creation record, physical checkout and Git metadata identities, allocated ports
+and current URL declarations. Validation reloads authority from disk, verifies
+the checked-out branch and head against the node's home repository, and refuses
+a missing, replaced or rebound worktree. Both required and supplied optional
+job receipts are revalidated by the readiness policy before full verification.
+A receipt still needs a rendered-page observation and three distinct matching
+source comparisons for every URL; recording remains a supplied observation,
+not an automated browser check.
+
+## Private rehearsal copy and alternate writer permissions
+
+Sampler/watcher lock writers and generated rehearsal diagnostics enforce 0600 on held inodes; rehearsal copying separates private state and private-mode sources from native cloning, writes copies through 0600 descriptors, and preserves ordinary shared modes after content fsync.
+
+Probe instance files and detached Git administration use the same checked copy writer, including tightening existing destination inodes before truncation. Source descriptors are opened nonblocking and validated as regular files before reading, so unsupported FIFOs refuse without hanging.
+
+## Rehearsal preparation does not probe delivery
+
+Copied webhook bindings never authorize delivery during rehearsal preparation.
+Do not seed command copies with a live probe or a fabricated successful status:
+retain the captured cache, leave delivery results empty, and record
+`delivery not probed (rehearsal)` in diagnostic warnings. Command execution keeps
+its existing OS network boundary and strict comparison rules; a passing rehearsal
+does not certify webhook delivery.
+
+Baseline diagnostic fixtures assert the complete warning list, including the
+explicit skipped-delivery notice alongside their existing baseline warnings.
+
+
+## Prove read observations during isolated rehearsal
+
+Read probes observe command telemetry through the same exact native append proof
+as mutations. Full synchronous UI probes additionally attest only native cache-lock
+creation and the cache producer's exact atomic payloads, private modes and file
+identities. Missing or altered observations grant no write permission; operational
+journal proofs and zero-residual assertions remain unchanged. UI privacy keys use
+a provider-permission signature separately from transcript discovery, allowing a
+frozen accounting adapter to bind the captured aggregate identity without opening
+provider roots or interpreting unavailable measurements as zero.
+The UI JSON cache producer shares the frozen wall clock with the rendered view,
+so observation dates and ages compare without discarding those fields.
+
+## Read Git status and diffs without refreshing the index
+
+The shared Git helper supplies `GIT_OPTIONAL_LOCKS=0` only to status/diff child
+processes, including reads with per-command configuration or explicit environments.
+This prevents optional index refresh writes without changing Git writers or the
+parent environment. Worktree activity, cleanup, review readiness, configuration
+protection and source cleanliness continue to include untracked files. The core
+revision label uses `status -uno`: it describes tracked code changes and already
+excluded untracked files. Tests cover stale index metadata, an existing index
+lock, explicit environment overrides, and paths with spaces, Unicode or newlines.
+Git diff can refresh stale index metadata even with optional locks disabled.
+Shared diff calls and the binary retention diagnostic therefore use a disposable
+private index, preserving normal name-only/raw output; disabling automatic refresh
+would expose stat-only changes. Copies preserve the source descriptor's mtime for
+racy-clean detection. Split-index status/diff reads first flatten the copied index in a scratch
+repository with no objects, refs or inherited Git configuration. The actual read
+retains its original Git directory and configuration, including matching and
+nonmatching conditional includes. Restoring the original index mtime after
+conversion preserves racy-clean detection. Writers stay unchanged.
+
+## Reuse term-scan observations within a command
+
+Mechanical checks share term-scan results across nodes and the two fix passes.
+File results use the absolute path, device, inode, size, nanosecond modification
+and change times, mode, owner, group and link count, plus the complete folded term
+set and governance context. Each lookup opens the file and checks its descriptor;
+only reads whose identity remains stable are retained. Read failures are never
+cached. No file observations survive the command.
+Small files with identical byte hashes share decoding and matching after each
+file's bytes have been read; large files retain the bounded streaming path.
+
+Index blobs always read their complete bodies before sharing matches by byte
+hash. Bounded batches of requests reduce pipe round trips without buffering
+large responses or trusting object headers as proof of body readability.
+Detected file changes report an incomplete scan rather than a clean result.
+File inventories, index entries, paths, commit messages, refs,
+governance decisions and scan errors remain current; results keep the original
+labels, ordering and redaction. The cache stores match sets rather than file text.
+
+## Keep private blob verdicts between commands
+
+An explicit `check --fix` may publish `.brain/term-scan-cache.json` with mode
+0600 through checked directory authority and generation-checked replacement.
+Read commands only consume it. The rebuildable cache contains canonical Git blob
+IDs and boolean verdicts, opaque hashes of policy/path bindings, and numeric file
+identities; it never contains terms, labels, paths or source text. A changed word
+list, scanner implementation/version, Unicode runtime or governance context
+invalidates reuse. Failed verdicts are scanned again for their current labels.
+
+A working file must still open successfully and retain its complete descriptor
+identity before a clean verdict is reused. Index reuse additionally requires a
+prior complete canonical body read in that object store, with unchanged readable
+loose-object or pack/index storage. Alternates and replacement refs disable that
+shortcut. Changed storage during reuse reports an incomplete scan; cache damage,
+unavailable storage and publication races fall back to current source reads.
+The complete loaded schema must contain only the allowed digest/OID keys,
+boolean verdicts and bounded integer identities; any malformed record rebuilds
+the artifact. Reftable storage conservatively disables persistent index reuse.
+Git directory/index bindings are checked around each inventory and after use.
+Fresh tagged Git inventories distinguish untracked names from stage records,
+including names containing tabs/newlines. At most four inventory/file readers
+overlap in copied command contexts; labels, ordering and publication remain in
+the caller. Large bodies retain bounded streaming while their Git IDs are hashed.
+An inventoried repository retains its classification if its Git marker disappears;
+saved inventory errors and later binding failures cannot become a plain folder scan.
+Regular-file checks use a freshly opened nonblocking descriptor, preventing a FIFO
+replacement from blocking and avoiding a redundant pathname stat on each warm file.
+Scanner identity includes its compiled implementation as well as source hashes,
+so a command loaded before an upgrade cannot publish as the newly installed code.
+The compiled identity includes normalized positional and keyword-only defaults;
+unsupported defaults disable persistent reuse/publication while source scanning
+continues normally.
+Only exact immutable scalar/tuple defaults are supported. Callable, mutable,
+unordered and subclass defaults remain opaque and disable persistence; keyword
+binding order is preserved. The streaming hash helper selects SHA-1 inside its
+constructor from a None default instead of encoding a callable as a bare symbol.
+The executing scanner/cache module code is captured too, including top-level
+initializers, so a global-only source upgrade also changes the loaded identity.
+
 ## D40004: Poll opted-in preview operations without relaxing call bounds
 
 Private adapter registrations may declare `operation_deadlines` per lifecycle
@@ -2912,6 +3267,31 @@ retries are not needed to tolerate unrelated builder commits and are omitted
 so genuine validation conflicts remain explicit. Requirements are read once per
 validation pass, using a local snapshot protected by the same generation fence,
 instead of rereading the entire requirement directory for each task row.
+
+Repository file observations share an open directory descriptor to avoid resolving
+the same root for every file. Each file still opens nonblocking and checks its own
+descriptor; a changed or unavailable root after observation makes the scan incomplete.
+The directory authority is scoped to that observation and always closed/reset.
+
+## D40008: Expose a read-only native job preview receipt skeleton
+
+Consumers use `brain preview-receipt-skeleton <node> --branch <job> --json`.
+This supersedes D40004's instruction to use the Python
+`job_preview_generation(instance, node, job_row, head)` helper. Product workers
+must not import core or reconstruct its generation hash.
+
+The CLI prints the recorder's version-1 job receipt shape with current node,
+open job key, branch, exact head, native worktree generation, descriptive live
+binding metadata and an allocated loopback URL. Observation timestamp, renderer,
+render result/artifact and three source comparisons remain null until supplied
+from actual observation. An unfilled skeleton cannot pass recorder validation.
+See `docs/verification-receipts.md` for the complete output contract.
+
+The accessor reads without registration, instance locking or telemetry writes,
+rechecks authority before emitting JSON, and refuses unavailable/stale bindings.
+It changes neither global preview/review URLs nor recording/readiness policy.
+The recorder still validates the supplied receipt against live authority.
+
 A working file must still open successfully and retain its complete descriptor
 identity before a clean verdict is reused. Index reuse additionally requires a
 prior complete canonical body read in that object store, with unchanged readable

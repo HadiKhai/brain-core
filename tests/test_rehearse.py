@@ -29,9 +29,49 @@ def result(text='', code=0, seconds=0.01, unexpected=0):
     return dict(text=text, code=code, seconds=seconds, unexpected=unexpected, timeout=False)
 
 
+def persistent_fixture_directory(case):
+    # No automatic TemporaryDirectory finalizer may override native retention.
+    directory = Path(tempfile.mkdtemp(prefix='.rehearsal-test-', dir=CORE.parent)).resolve()
+    identity = rehearsal._m_rehearse_external.OwnedCopies.identity(directory)
+    def cleanup():
+        try:
+            if (any(p.is_symlink() for p in (directory, *directory.parents))
+                    or rehearsal._m_rehearse_external.OwnedCopies.identity(directory) != identity):
+                return
+            def unreadable(error):
+                raise error
+            for top, dirs, files in os.walk(directory, followlinks=False, onerror=unreadable):
+                if ('bulk' in dirs or any(name.startswith('retiring-') for name in dirs)
+                        or any(name.startswith('unsaved-native-retention-') for name in files)
+                        or any((Path(top) / name).is_symlink() for name in dirs + files)):
+                    return
+                if 'cleanup.json' in files:
+                    receipt = Path(top) / 'cleanup.json'
+                    if receipt.is_symlink():
+                        return
+                    packet = json.loads(receipt.read_text())
+                    if packet.get('state') != 'removed' or packet.get('processes_ended') is not True:
+                        return
+            shutil.rmtree(directory)
+        except (OSError, ValueError, AttributeError):
+            return  # Unknown fixture ownership or retirement preserves evidence.
+    case.addCleanup(cleanup)
+    return directory
+
+
+def owned_rehearsal_workdir(case):
+    # Keep runner copies outside OS-aged temp even in fabricated scenarios.
+    directory = persistent_fixture_directory(case)
+    patch = mock.patch.object(rehearsal, 'rehearsal_copy_parent',
+                              return_value=directory)
+    patch.start()
+    case.addCleanup(patch.stop)
+
+
 class RehearsalRetention(unittest.TestCase):
     """Failure injection stops before acceptance work; only retention is exercised."""
     def setUp(self):
+        owned_rehearsal_workdir(self)
         raw_directory = Path(tempfile.mkdtemp(prefix='rehearsal-retention-'))
         self.directory = raw_directory.resolve(strict=True)
         self.addCleanup(shutil.rmtree, self.directory)
@@ -84,6 +124,25 @@ class RehearsalRetention(unittest.TestCase):
 
     def packets(self):
         return [json.loads(p.read_text()) for p in sorted(self.evidence.glob('*.json'))]
+
+    def test_persistent_fixture_cleanup_preserves_native_retention_and_removes_retired_copies(self):
+        invalid = self.directory / 'invalid-evidence'
+        invalid.write_text('not a directory')
+        for incomplete in (False, True):
+            with self.subTest(incomplete=incomplete):
+                case = unittest.TestCase()
+                directory = persistent_fixture_directory(case)
+                self.addCleanup(shutil.rmtree, directory, True)  # explicit disposal after this control
+                target = str(invalid) if incomplete else ''
+                with mock.patch.dict(os.environ, {'BRAIN_REHEARSAL_EVIDENCE_DIR': target}):
+                    with rehearsal._m_rehearse_external.OwnedCopies(parent=directory, persistent=True) as copies:
+                        (copies.bulk / 'sole-operand').write_bytes(b'fixture retained bytes')
+                case.doCleanups()
+                if incomplete:
+                    self.assertEqual(b'fixture retained bytes', (copies.bulk / 'sole-operand').read_bytes())
+                    self.assertTrue(list(copies.bulk.glob('unsaved-native-retention-*.json')))
+                else:
+                    self.assertFalse(directory.exists())
 
     def fixture(self, cls):
         case = cls('runTest')
@@ -559,8 +618,10 @@ class RehearsalRedaction(Scenario):
 
 
 class RehearsalFixture(Scenario):
+    temporary_parent = CORE.parent
     def setUp(self):
         super().setUp()
+        owned_rehearsal_workdir(self)
         self.root = self.repo(self.tmp / 'live', {'note.md': 'original\n',
                                                 '.gitignore': '.brain/\nignored/\n'})
         (self.root / 'core/bin').mkdir(parents=True)
@@ -1148,6 +1209,302 @@ class RehearsalCoverageFaultTypes(unittest.TestCase):
 
 
 class RehearsalCloneCaches(Scenario):
+    temporary_parent = CORE.parent
+    def test_frozen_aggregate_bootstrap_covers_read_and_ui_without_provider_discovery(self):
+        import copy
+        from brain import instance, rehearse_external, rehearse_transactions as transactions
+        source = self.init('accounting-source')
+        lane = self.tmp / 'accounting-clone'
+        lane.mkdir()
+        rehearsal.copy_brain(source, lane / 'brain', self.tmp)
+        inst = instance.Instance(lane / 'brain')
+        inst.local.setdefault('nodes', {}).setdefault('root', {}).update(
+            coordinator='thread', coordinator_sessions=['11111111-1111-4111-8111-111111111111'])
+        (lane / 'brain/.brain/local.json').write_text(json.dumps(inst.local))
+        clock = inst.now_dt().isoformat()
+        (lane / 'rehearse-clock').write_text(clock)
+        rehearsal.freeze_machine_inputs(inst, clock)
+        accounting = rehearse_external.freeze_accounting(inst, clock, self.tmp / 'accounting.json')
+        for args in (['due', '--json'], ['ui', '--json', '--wait'], ['status', 'root', '--refresh']):
+            with self.subTest(args=args):
+                raw = []
+                kind = 'refresh' if args[0] == 'status' else 'read'
+                row = rehearsal.run_command(lane / 'brain/core', lane, args, kind, [],
+                                            raw_output=raw, accounting=accounting)
+                self.assertEqual(0, row['code'], raw[0]['stderr'])
+                self.assertEqual(0, row['unexpected'])
+                packet = raw[0]['transaction_evidence']
+                self.assertEqual('proven', row['transaction_evidence'])
+                if kind == 'read':
+                    def validate(after, observations, pid=packet['owner_pid']):
+                        return transactions.validate_read(packet['before'], after, observations, pid, args[0])
+                    self.assertEqual('proven', validate(packet['after'], packet['observations'])[1])
+                    self.assertEqual((set(), 'unproven'), validate(packet['after'], []))
+                    self.assertEqual((set(), 'unproven'), validate(packet['after'], packet['observations'],
+                                                                  packet['owner_pid'] + 100000))
+                    damaged = copy.deepcopy(packet['after'])
+                    damaged['timings/events.jsonl']['hex'] += b'x'.hex()
+                    self.assertEqual((set(), 'unproven'), validate(damaged, packet['observations']))
+                    damaged = copy.deepcopy(packet['after'])
+                    damaged['timings/events.jsonl']['mode'] = 0o100644
+                    self.assertEqual((set(), 'unproven'), validate(damaged, packet['observations']))
+                    if args[0] == 'ui':
+                        self.assertTrue(any(o['type'] == 'ui-cache' for o in packet['observations']))
+                        self.assertEqual((set(), 'unproven'), validate(packet['after'],
+                            [o for o in packet['observations'] if o['type'] != 'ui-cache']))
+                        for name in ('json-snapshot.json', 'json-fill-status.json', 'json-fill.lock'):
+                            damaged = copy.deepcopy(packet['after'])
+                            damaged['ui-cache/' + name]['hex'] += b'x'.hex()
+                            self.assertEqual((set(), 'unproven'), validate(damaged, packet['observations']))
+                        damaged = copy.deepcopy(packet['after'])
+                        damaged['ui-cache']['entries'].append('unobserved.json')
+                        self.assertEqual((set(), 'unproven'), validate(damaged, packet['observations']))
+                if args[0] == 'ui':
+                    ui = json.loads(raw[0]['stdout'])
+                    self.assertEqual(datetime.datetime.fromisoformat(clock).astimezone(
+                        datetime.timezone.utc).isoformat(), ui['source']['built_at'])
+                    self.assertEqual(0, ui['source']['age_seconds'])
+                    usage = ui['spend']
+                    self.assertFalse(usage['complete'])
+                    self.assertIsNone(usage['since_week'])
+
+    def test_status_overflow_and_commit_stamps_require_exact_owned_projection(self):
+        import copy
+        from brain import rehearse_transactions as transactions
+        source = self.init('overflow-source')
+        (source / 'status.md').write_text('# Demo\n\n## Now\n' +
+                                        ''.join('- item %d\n' % i for i in range(35)))
+        (source / 'status-archive.md').write_text('retained archive\n')
+        self.git('add', 'status.md', 'status-archive.md', cwd=source)
+        self.git('commit', '-m', 'fixture status baseline', cwd=source)
+        lane = self.tmp / 'overflow-clone'
+        lane.mkdir()
+        rehearsal.copy_brain(source, lane / 'brain', self.tmp)
+        raw = []
+        row = rehearsal.run_command(lane / 'brain/core', lane,
+                                    ['status', 'root', '--refresh'], 'refresh', [], raw_output=raw)
+        self.assertEqual(0, row['code'])
+        self.assertEqual('proven', row['transaction_evidence'], raw[0]['transaction_evidence']['diagnostics'])
+        self.assertEqual(0, row['unexpected'])
+        self.assertIn('- item 34', (lane / 'brain/status-archive.md').read_text())
+        self.assertTrue((lane / 'brain/.brain/events-status-commits.json').is_file())
+        packet = raw[0]['transaction_evidence']
+        now = datetime.datetime.fromisoformat(packet['validation_instant'])
+        def validate(after, observations):
+            return transactions.validate(packet['before'], after, observations,
+                                         packet['owner_pid'], 'status', now)
+        observations = [o for o in packet['observations'] if not o['type'].startswith('projection-')]
+        self.assertEqual((set(), 'unproven'), validate(packet['after'], observations))
+        damaged = copy.deepcopy(packet['after'])
+        damaged['status-archives']['status-archive.md']['sha256'] = '0' * 64
+        self.assertEqual((set(), 'unproven'), validate(damaged, packet['observations']))
+        damaged = copy.deepcopy(packet['after'])
+        damaged['status-archives']['status-archive.md']['mode'] ^= 0o100
+        self.assertEqual((set(), 'unproven'), validate(damaged, packet['observations']))
+        damaged = copy.deepcopy(packet['after'])
+        damaged['events-status-commits.json']['hex'] = b'{}'.hex()
+        self.assertEqual((set(), 'unproven'), validate(damaged, packet['observations']))
+
+    def new_projection_files(self):
+        source = self.init('new-projection-source')
+        (source / 'status.md').write_text('# Demo\n\n## Now\n' +
+                                        ''.join('- item %d\n' % i for i in range(35)))
+        (source / 'status-archive.md').unlink(missing_ok=True)
+        self.git('add', 'status.md', cwd=source)
+        self.git('commit', '-m', 'fixture status baseline', cwd=source)
+        lane = self.tmp / 'new-projection-clone'
+        lane.mkdir()
+        rehearsal.copy_brain(source, lane / 'brain', self.tmp)
+        raw = []
+        row = rehearsal.run_command(lane / 'brain/core', lane,
+                                    ['status', 'root', '--refresh'], 'refresh', [], raw_output=raw)
+        self.assertEqual(0, row['code'])
+        packet = raw[0]['transaction_evidence']
+        self.assertEqual('proven', row['transaction_evidence'], packet['diagnostics'])
+        self.assertEqual(0, row['unexpected'])
+        return lane / 'brain', packet
+
+    def test_new_shared_projection_archive_uses_writer_publication_mode(self):
+        import copy
+        from brain import events, rehearse_transactions as transactions
+        root, packet = self.new_projection_files()
+        self.assertEqual({}, packet['before']['status-archives'])
+        self.assertEqual(stat.S_IFREG | 0o644, (root / 'status-archive.md').stat().st_mode)
+        self.assertIn('- item 34', (root / 'status-archive.md').read_text())
+        entered = next(o['packet'] for o in packet['observations']
+                       if o['type'] == 'projection-enter' and o['method'] == 'cap-now')
+        exited = next(o['packet'] for o in packet['observations']
+                      if o['type'] == 'projection-exit' and o['method'] == 'cap-now')
+        self.assertIsNone(entered['archive'])
+        self.assertNotIn('status-archive.md', entered['modes'])
+        self.assertEqual(stat.S_IFREG | 0o644, exited['modes']['status-archive.md'])
+        now = datetime.datetime.fromisoformat(packet['validation_instant'])
+        transactions.projection_result(events, 'cap-now', entered, exited, now)
+        wrong_mode = copy.deepcopy(exited)
+        wrong_mode['modes']['status-archive.md'] = stat.S_IFREG | 0o600
+        with self.assertRaises(transactions.EvidenceError):
+            transactions.projection_result(events, 'cap-now', entered, wrong_mode, now)
+        observations = copy.deepcopy(packet['observations'])
+        for observation in observations:
+            if observation['type'] == 'projection-exit' and observation['method'] == 'cap-now':
+                observation['packet']['modes']['status-archive.md'] = stat.S_IFREG | 0o600
+        damaged = copy.deepcopy(packet['after'])
+        damaged['status-archives']['status-archive.md']['mode'] = stat.S_IFREG | 0o600
+        self.assertEqual((set(), 'unproven'), transactions.validate(
+            packet['before'], damaged, observations, packet['owner_pid'], 'status', now))
+
+    def test_new_private_projection_index_uses_writer_publication_mode(self):
+        import copy
+        from brain import rehearse_transactions as transactions
+        root, packet = self.new_projection_files()
+        self.assertNotIn('events-index.json', packet['before'])
+        self.assertEqual(stat.S_IFREG | 0o600, (root / '.brain/events-index.json').stat().st_mode)
+        self.assertEqual(stat.S_IFREG | 0o644, (root / 'status-archive.md').stat().st_mode)
+        damaged = copy.deepcopy(packet['after'])
+        damaged['events-index.json']['mode'] = stat.S_IFREG | 0o644
+        now = datetime.datetime.fromisoformat(packet['validation_instant'])
+        self.assertEqual((set(), 'unproven'), transactions.validate(
+            packet['before'], damaged, packet['observations'], packet['owner_pid'], 'status', now))
+
+    def test_multiple_interrupted_operations_consume_each_deleted_resource_once(self):
+        from brain import events, instance
+        source = self.init('interrupted-source')
+        self.b(source, 'backlog', 'root', 'add', 'retained source')
+        inst = instance.Instance(source)
+        with mock.patch.dict(os.environ, self.env), instance.brain_lock(inst):
+            for ref in ('a' * 32, 'b' * 32):
+                events.append(inst, 'root', 'begin', ref, {'command': 'fixture'})
+        (source / 'backlog.md').unlink()
+        lane = self.tmp / 'interrupted-clone'
+        lane.mkdir()
+        rehearsal.copy_brain(source, lane / 'brain', self.tmp)
+        raw = []
+        row = rehearsal.run_command(lane / 'brain/core', lane,
+                                    ['status', 'root', '--refresh'], 'refresh', [], raw_output=raw)
+        self.assertEqual(0, row['code'])
+        self.assertEqual('proven', row['transaction_evidence'], raw[0]['transaction_evidence']['diagnostics'])
+        self.assertEqual(0, row['unexpected'])
+        records = [o['record'] for o in raw[0]['transaction_evidence']['observations']
+                   if o['type'] == 'event' and o['record']['kind'] == 'reconcile']
+        self.assertEqual(2, len(records))
+        self.assertEqual(1, sum(r['hash'] is None for e in records for r in e['data']['resources']))
+
+    def test_preparation_records_and_hook_acknowledgements_are_owned_and_exact(self):
+        import copy
+        from brain import events, instance, jobs, rehearse_transactions as transactions
+        source = self.init('preparation-source')
+        # A valid, pre-existing ledger has no reconstructed event object yet.
+        ledger = source / 'job-ledger.md'
+        ledger.write_text(jobs.JOBS_MARK + '\n\n| ' + ' | '.join(jobs.JOB_COLS) +
+                          ' |\n| ' + ' | '.join(['---'] * len(jobs.JOB_COLS)) + ' |\n')
+        with mock.patch.dict(os.environ, self.env):
+            events.hook_written(source)
+        original = {p.relative_to(source).as_posix(): p.read_bytes()
+                    for p in (source / '.brain').rglob('*') if p.is_file()}
+        lane = self.tmp / 'preparation-clone'
+        lane.mkdir()
+        rehearsal.copy_brain(source, lane / 'brain', self.tmp)
+        raw = []
+        row = rehearsal.run_command(lane / 'brain/core', lane,
+                                    ['status', 'root', '--refresh'], 'refresh', [], raw_output=raw)
+        self.assertEqual(0, row['code'])
+        self.assertEqual('proven', row['transaction_evidence'], raw[0]['transaction_evidence']['diagnostics'])
+        self.assertEqual(0, row['unexpected'])
+        packet = raw[0]['transaction_evidence']
+        now = datetime.datetime.fromisoformat(packet['validation_instant'])
+        def validate(after, observations):
+            return transactions.validate(packet['before'], after, observations,
+                                         packet['owner_pid'], 'status', now)
+        tags = [o['record']['kind'] for o in packet['observations'] if o['type'] == 'event']
+        self.assertTrue({'record', 'record_applied', 'hook'} <= set(tags))
+        for writer in ('record', 'apply', 'hooks'):
+            observations = [o for o in packet['observations']
+                            if not (o['type'].startswith('writer-') and o['writer']['kind'] == writer)]
+            self.assertEqual((set(), 'unproven'), validate(packet['after'], observations))
+        damaged = copy.deepcopy(packet['after'])
+        next(iter(damaged['event-objects']['entries'].values()))['text_sha256'] = '0' * 64
+        self.assertEqual((set(), 'unproven'), validate(damaged, packet['observations']))
+        damaged = copy.deepcopy(packet['after'])
+        damaged['hook-events-offset']['hex'] = b'0'.hex()
+        self.assertEqual((set(), 'unproven'), validate(damaged, packet['observations']))
+        self.assertEqual(original, {p.relative_to(source).as_posix(): p.read_bytes()
+                                   for p in (source / '.brain').rglob('*') if p.is_file()})
+
+    def test_cloned_lease_files_do_not_transfer_or_release_the_source_lock(self):
+        import fcntl
+        source = self.init('lease-source')
+        directory = source / '.brain/events-leases'
+        directory.mkdir(exist_ok=True)
+        lease = directory / ('a' * 32)
+        with lease.open('wb') as held:
+            fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            clone = self.tmp / 'lease-clone'
+            rehearsal.copy_brain(source, clone, self.tmp)
+            self.assertEqual([], list((clone / '.brain/events-leases').iterdir()))
+            self.assertTrue(lease.exists())
+            with lease.open('rb') as foreign:
+                with self.assertRaises(BlockingIOError):
+                    fcntl.flock(foreign, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+    def test_streamed_comparison_history_preserves_schema_prefix_and_native_cache(self):
+        from brain import events, instance, rehearse_transactions as transactions
+        root = self.init('stream-history')
+        inst = instance.Instance(root)
+        history = root / '.brain/events-compare.jsonl'
+        rows = [dict(id=format(i, '032x'), ts=inst.now(), node=events.node_ref('root'),
+                     kind='comparison', equal=True, resources=[], view_equal=True,
+                     interrupted=[], faults=[], out_of_scope=[]) for i in range(1000)]
+        history.write_text(''.join(json.dumps(r) + '\n' for r in rows))
+        spools = self.tmp / 'spools'
+        spools.mkdir(mode=0o700)
+        with mock.patch.dict(os.environ, self.env), instance.brain_lock(inst):
+            events.read_comparisons(inst, repair=True)
+        with mock.patch.object(transactions, 'CAPTURE_BYTES', 65536):
+            self.assertIsNone(transactions.capture(root))
+            before = transactions.capture(root, stream_dir=spools)
+            self.assertIsNotNone(before)
+            old = transactions.check_comparisons(before, inst.now_dt())
+            self.assertEqual(1000, len(old))
+            added = {**rows[-1], 'id': format(1000, '032x')}
+            with history.open('a') as stream:
+                stream.write(json.dumps(added) + '\n')
+            with mock.patch.dict(os.environ, self.env), instance.brain_lock(inst):
+                events.read_comparisons(inst, repair=True)
+            after = transactions.capture(root, stream_dir=spools)
+            current = transactions.check_comparisons(after, inst.now_dt())
+            self.assertTrue(transactions._prefix_preserved(before, after, 'events-compare.jsonl'))
+            self.assertEqual(old, current[:len(old)])
+            self.assertEqual([added], current[len(old):])
+            captured = Path(after['events-compare-index.json']['stream']['path'])
+            captured.write_bytes(captured.read_bytes().replace(b'"equal":true', b'"equal":null', 1))
+            with self.assertRaises(transactions.EvidenceError):
+                transactions.check_comparisons(after, inst.now_dt())
+
+    def test_cloned_native_fix_with_existing_job_preserves_owned_history_proof(self):
+        import shutil
+        from brain import rehearse_transactions as transactions
+        source = self.init('native-fix-source')
+        home = self.tmp / 'candidate-home'
+        shutil.copytree(CORE, home, symlinks=True, ignore=shutil.ignore_patterns('.git', '__pycache__'))
+        self.git('init', '-q', '-b', 'main', cwd=home)
+        self.git('add', '.', cwd=home)
+        self.git('commit', '-qm', 'candidate fixture', cwd=home)
+        self.b(source, 'new', 'engine', '--title', 'Engine', '--home', str(home))
+        self.b(source, 'wt', 'add', 'engine', 'job')
+        self.b(source, 'check', '--fix')
+        lane = self.tmp / 'fix-clone'
+        lane.mkdir()
+        rehearsal.copy_brain(source, lane / 'brain', self.tmp)
+        rehearsal.materialize_git(lane / 'brain', lane / 'brain')
+        raw = []
+        row = rehearsal.run_command(lane / 'brain/core', lane,
+            ['check', '--fix'], 'fix', [], raw_output=raw)
+        packet = raw[0]['transaction_evidence']
+        transactions._persist_fixture_evidence(lane, raw, row)
+        self.assertEqual(0, row['code'])
+        self.assertEqual('proven', row['transaction_evidence'], packet['diagnostics'])
+        self.assertEqual(0, row['unexpected'])
+
     retain_rehearsal_evidence = True
 
     def test_native_copied_caches_are_removed_before_each_lane_capture(self):
@@ -1360,6 +1717,7 @@ class RehearsalCloneCaches(Scenario):
 
 
 class RehearsalSandbox(Scenario):
+    temporary_parent = CORE.parent
     retain_rehearsal_evidence = True
 
     def runner(self, script, args=(), terms=(), kind='read', raw_output=None):
@@ -2052,6 +2410,11 @@ class RehearsalPipeline(Scenario):
     def test_committed_candidate_clean_pass_and_all_incident_mutations(self):
         """Actual subprocess orchestration with fabricated installed/candidate CLIs."""
         from brain.instance import Instance
+        transport = mock.patch('urllib.request.OpenerDirector.open',
+                               side_effect=AssertionError('rehearsal must not use network transport'))
+        post = transport.start()
+        self.addCleanup(transport.stop)
+        owned_rehearsal_workdir(self)
         r = self.init('sample')
         home = self.tmp / 'candidate'
         (home / 'bin').mkdir(parents=True)
@@ -2094,11 +2457,17 @@ elif command == 'hook':
         # Root and sibling probes can legitimately name another node's term.
         (r / 'nodes/b/never-name.txt').write_text('invented-canary\n')
         (r / 'core/bin/brain').write_text(baseline)
-        original = rehearsal.snapshot(r)
         inst = Instance(r)
+        inst.local['nodes']['root'].update(coordinator='fabricated-thread',
+                                          wake='https://example.invalid/rehearsal-must-not-post')
+        inst.save_local()
+        original = rehearsal.snapshot(r)
         n = inst.node('a')
         clean = rehearsal.rehearse(inst, n, 'job')
+        post.assert_not_called()
         self.assertTrue(clean['passed'], clean['regressions'])
+        self.assertEqual([], clean['delivery'])
+        self.assertIn('delivery not probed (rehearsal)', clean['warnings'])
         self.assertEqual(0, clean['changed_outputs'])
         self.assertNotIn('invented-canary', json.dumps(clean))
         self.assertEqual(original, rehearsal.snapshot(r))
@@ -2106,7 +2475,10 @@ elif command == 'hook':
         (wt / 'bin/brain').write_text(fixture.replace('MODE', 'True'))
         self.git('commit', '-qam', 'incident mutations', cwd=wt)
         bad = rehearsal.rehearse(inst, n, 'job')
+        post.assert_not_called()
         self.assertFalse(bad['passed'])
+        self.assertEqual([], bad['delivery'])
+        self.assertIn('delivery not probed (rehearsal)', bad['warnings'])
         for flag in ('fix: new check errors', 'ready:1:0: ready became not ready',
                      'ready:1:1: ready became not ready', 'due:0: new due items',
                      'due:1: new due items', 'brief:0: brief warning disappeared', 'hook: latency exceeds 1 s'):
@@ -2241,6 +2613,7 @@ class RehearsalDelivery(unittest.TestCase):
 
 
 class RehearsalGitFormats(Scenario):
+    temporary_parent = CORE.parent
     def test_reftable_and_sha256_formats_survive_without_hooks_or_helpers(self):
         for name, option, key, value in [('reftable', '--ref-format=reftable', 'extensions.refstorage', 'reftable'),
                                          ('sha256', '--object-format=sha256', 'extensions.objectformat', 'sha256')]:

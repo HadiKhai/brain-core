@@ -401,7 +401,27 @@ export function needsView(s: RecordData, node?: string) {
   const inScope = (item: RecordData) => node === undefined || item.node === node;
   const requests = new Set(list(s.inbox).filter(inScope));
   const items = needRows([...requests, ...list(s.due).filter(inScope)]);
-  return { items, inbox: items.filter(i => requests.has(i)), due: items.filter(i => !requests.has(i)) };
+  const blocked = list(s.nodes).filter(n => node === undefined || n.id === node).flatMap(n =>
+    list(n.blocked).map((text, i) => ({ ...list(n.blocked_metadata)[i],
+      ...items.find(a => a.node === n.id && ["blocked", "blocked-overdue"].includes(a.kind) && a.text === text),
+      node: n.id, kind: "blocked", text })));
+  // Keep the general inbox and machine queue available, but share one decision
+  // projection across every Needs-you count and list. IDs identify source episodes.
+  const decisions = needRows([...items, ...blocked]).filter(openDecision);
+  return { items, decisions, inbox: items.filter(i => requests.has(i)), due: items.filter(i => !requests.has(i)) };
+}
+export function openDecision(item: RecordData) {
+  if (item.resolved || item.answered || item.answer != null || item.open === false ||
+      /^(?:closed|resolved|answered|done|dropped|cancelled|canceled)$/i.test(item.state || item.status || "")) return false;
+  if (!["inbox", "blocked", "blocked-overdue", "question", "decision", "host-question"].includes(item.kind)) return false;
+  if (item.waiting_on_operator === true) return true;
+  if (["question", "decision", "host-question"].includes(item.kind)) return true;
+  if (item.kind !== "inbox") return false;
+  // A timestamped inbox envelope does not itself make the message an operator ask.
+  const ask = String(item.text || "").replace(/^inbox:\s*/i, "")
+    .replace(/^\d{4}-\d{2}-\d{2}[^\n]*? from [^:]+:\s*/i, "");
+  return /^(?:question|decision):\s*\S/i.test(ask) || /<!-- host-question:/.test(ask) ||
+    (/^blocked:\s*\S/i.test(ask) && /<!-- handback:[0-9a-f]{24} -->/.test(ask));
 }
 export const needAsk = (text: unknown) => String(text || "")
   .replace(/(?:^|;\s*)(?:since|recommendation|default):\s*[^;]*/gi, "")

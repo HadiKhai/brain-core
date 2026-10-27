@@ -385,6 +385,15 @@ class UnifiedHandbacks(Scenario):
         source = inbox.read_bytes()
         request, = [i for i in json.loads(self.b(r, 'inbox', 'a', '--json'))
                     if i['kind'] == 'inbox' and ':completed -->' in i['text']]
+        # Terminal delivery is informational and expires; it cannot be answered later.
+        refused = self.b(r, 'answer', request['id'], 'Observed successful fixture verification', ok=False)
+        self.assertIn('unknown or ambiguous item ID; inspect the current inbox or due output', refused)
+        self.assertEqual(inbox.read_bytes(), source)
+        # The lesson workflow still answers a real unresolved request and retains its source.
+        self.b(r, 'inbox', 'a', '--add', 'question: Which retained lesson resolution should be recorded?')
+        source = inbox.read_bytes()
+        request, = [i for i in json.loads(self.b(r, 'inbox', 'a', '--json'))
+                    if i['kind'] == 'inbox' and 'Which retained lesson resolution' in i['text']]
         self.b(r, 'answer', request['id'], 'Observed successful fixture verification')
         self.assertEqual(inbox.read_bytes(), source)
         self.assertNotIn('inbox', [i['kind'] for i in self.due(r)])

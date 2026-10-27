@@ -5,11 +5,12 @@ import { DataTable, Status, Text, Empty, Reader, Preview, Command, TechnicalDeta
 import { Kpi, Spark, SectionTabs } from "./dash";
 import { DueRow, RequestRow, PagedRows } from "./inbox";
 import { ThreadRow } from "./agents";
-import { list, needsView, needRows, needAsk, count, time, flight, threads, jobTitle, closed, safeHref, nowOf, within, type RecordData } from "./model";
+import { list, needsView, needAsk, count, time, flight, threads, jobTitle, closed, safeHref, nowOf, within, type RecordData } from "./model";
 import { ThreadLink } from "./thread-link";
 import { ReaderRow } from "./detail-panel";
 import { WorkStatus } from "./work-status";
 import { Tasks } from "./tasks";
+import { visibleTaskCount } from "./task-model";
 import type { Route } from "./routes";
 
 type Go = (r: Partial<Route> & { view: string }) => void;
@@ -25,14 +26,13 @@ export function Project({ s, route, go, active }: { s: RecordData; route: Route;
   const nodes = list(s.nodes), n = nodes.find((x) => x.id === route.node);
   if (!n) return <section className="surface"><Empty text="Project unavailable in this reading." action="Choose a project in the sidebar, or refresh the workspace." /></section>;
   const now = nowOf(s);
-  const { inbox, due } = needsView(s, n.id);
+  const { decisions: needs } = needsView(s, n.id);
   const work = flight([n]), open = threads([n]), rows = [...list(n.jobs?.rows)].reverse();
   const activity: number[] = s.activity?.counts?.[n.id] || [];
   const feed = [
     ...list(s.commits).filter((c) => c.node === n.id).map((c): RecordData => ({ t: c.t, text: c.subject, kind: c.where === "home" ? "Home commit" : "Brain commit" })),
     ...list(n.decisions).map((d) => ({ t: d.t, text: d.title, said: d.said, kind: "Decision" })),
   ].sort((a, b) => (b.t || 0) - (a.t || 0));
-  const needs = needRows([...list(n.blocked).map((t, i) => ({ ...inbox.find(a => ["blocked", "blocked-overdue"].includes(a.kind) && a.text === t), ...list(n.blocked_metadata)[i], kind: "blocked", text: t })), ...inbox, ...due]);
   const notes = Object.entries(n.status || {}).filter(([k]) => !/^blocked/i.test(k));
   const coordinator = n.coordinator;
   return (
@@ -40,7 +40,7 @@ export function Project({ s, route, go, active }: { s: RecordData; route: Route;
       <ScreenAction active={active}>{coordinator ? <ThreadLink href={coordinator} label="Open coordinator" primary /> : <Reader title="Set up a coordinator" text="No coordinator is linked on this machine. Open the machine-setup skill in your agent and ask it to connect this project’s coordinator. It checks the host setup, records the conversation and gives this project a place to continue work." trigger="Set up coordinator" primary />}</ScreenAction>
       <section className="surface kpi-band compact" aria-label="Project at a glance">
         <div className="kpi-row">
-          <Kpi label="Needs you" value={needs.length} note={`${count(inbox.length, "request")} · ${count(due.length, "step")}`} />
+          <Kpi label="Needs you" value={needs.length} note={count(needs.length, "open decision")} />
           <Kpi label="Threads" value={open.length} note={`${count(list(n.worktrees).filter((w) => list(w.listening).length).length, "listening")} locally`} />
           <Kpi label="Jobs merged" value={n.jobs?.merged || 0} note={n.jobs?.median_hours != null ? `median ${n.jobs.median_hours} h · ${n.jobs.median_reviews ?? "?"} reviews` : "no median yet"} trend={{ delta: rows.filter((r) => /merged/i.test(r.Outcome || "") && within(r.Ended, now, 168)).length, text: `${rows.filter((r) => /merged/i.test(r.Outcome || "") && within(r.Ended, now, 168)).length} this week` }} />
           <Kpi label={`Commits · ${activity.length || s.hours || 72} h`} value={activity.reduce((a, b) => a + b, 0)} note={n.updated ? "status " + (n.updated_ago || time(n.updated, s.brain?.tz)) : "status time not recorded"}>
@@ -55,10 +55,10 @@ export function Project({ s, route, go, active }: { s: RecordData; route: Route;
             { id: "needs", label: "Needs you", count: needs.length, body: needs.length ? <PagedRows items={needs} noun="item" render={(a: RecordData, i) =>
                 a.kind === "blocked" && !a.id && typeof a.text === "string" && !("first_seen" in a)
                   ? <BlockedRow key={"b" + i} item={a} s={s} />
-                  : "first_seen" in a ? <RequestRow key={a.id || i} s={s} item={a} go={go} showProject={false} compact /> : <DueRow key={"d" + i} s={s} item={a} go={go} showProject={false} />} /> : <Empty text="Nothing needs you here." action="Questions and coordinator steps for this project arrive here." /> },
+                  : "first_seen" in a ? <RequestRow key={a.id || i} s={s} item={a} go={go} showProject={false} compact /> : <DueRow key={"d" + i} s={s} item={a} go={go} showProject={false} />} /> : <Empty text="Nothing needs you here." action="Open questions and decisions waiting on you arrive here." /> },
             { id: "threads", label: "Threads", count: work.length, body: work.length ? <PagedRows resetKey={route.thread || ""} items={[...work].sort((a, b) => Number(b.job.branch === route.thread) - Number(a.job.branch === route.thread))} noun="thread" render={(f, i) => <ThreadRow key={f.job.branch + i} s={s} f={f} go={go} showProject={false} highlight={route.thread === f.job.branch} />} />
                 : <Empty text="No threads in flight." action="Start a job from this project's coordinator." /> },
-            { id: "tasks", label: "Tasks", count: list(n.tasks?.rows).length, body: <Tasks s={s} go={go} node={n.id} /> },
+            { id: "tasks", label: "Tasks", count: visibleTaskCount(list(n.tasks?.rows)), body: <Tasks s={s} go={go} node={n.id} /> },
             { id: "jobs", label: "Jobs", count: rows.length, body: <DataTable rows={rows} name="jobs" columns={[
                 { key: "Job", label: "Job", render: (r) => <Text>{jobTitle(r.Job)}</Text> },
                 { key: "Started", label: "Started", render: (r) => time(r.Started, s.brain?.tz) },
@@ -112,7 +112,7 @@ export function Projects({ s, go, onAdd }: { s: RecordData; go: Go; onAdd: () =>
   );
   return (
     <section className="surface" aria-label="Projects">
-      <DataTable name="projects" details={false} onRowOpen={(n) => go({ view: "project", node: n.id })} rows={nodes.map((n) => ({ ...n, _needs: needsView(s, n.id).items.length, _threads: open.filter((f) => f.node.id === n.id).length, _key: n.id }))}
+      <DataTable name="projects" details={false} onRowOpen={(n) => go({ view: "project", node: n.id })} rows={nodes.map((n) => ({ ...n, _needs: needsView(s, n.id).decisions.length, _threads: open.filter((f) => f.node.id === n.id).length, _key: n.id }))}
         columns={[
           { key: "title", label: "Project", render: (n) => <div><strong><Tip text={n.title || "Project"}><span className="clamp-1"><Text>{n.title || "Untitled project"}</Text></span></Tip></strong><small>{nodes.find((p) => p.id === n.parent)?.title || "Workspace root"}</small></div> },
           { key: "_needs", label: "Needs you", numeric: true },

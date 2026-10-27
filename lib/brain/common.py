@@ -202,6 +202,15 @@ def durable_makedirs(path, mode=0o700):
         pass
 
 
+def publication_mode(prior_mode=None, *, private=False):
+    """Permissions a writer intends to publish, distinct from private staging."""
+    if private:
+        return 0o600
+    if prior_mode is not None and stat.S_ISREG(prior_mode):
+        return stat.S_IMODE(prior_mode)
+    return 0o644
+
+
 class DirectoryTarget:
     """A checked physical parent held until its last read, publication or cleanup.
 
@@ -383,9 +392,7 @@ class DirectoryTarget:
                 # Content is written and synced privately. Prepare and persist
                 # the intended mode before rename so a killed writer cannot
                 # leave the published destination with the staging mode.
-                mode = (stat.S_IMODE(prior.st_mode)
-                        if prior and stat.S_ISREG(prior.st_mode) else 0o644)
-                mode = 0o600 if self.private else mode
+                mode = publication_mode(prior.st_mode if prior else None, private=self.private)
                 record = self.mode_record(stream.fileno(), text, mode)
                 os.fchmod(stream.fileno(), mode)
                 os.fsync(stream.fileno())
@@ -627,6 +634,62 @@ def branch_refs(cwd):
     return refs
 
 
+@contextlib.contextmanager
+def git_read_index(cwd, env, *, diff=False):
+    """Isolate index refreshes while preserving Git's normal read output.
+
+    Disabling diff.autoRefreshIndex changes name-only/raw output for stat-only
+    changes. Git versions that ignore optional locks during diff must therefore
+    refresh a disposable copy instead of the caller's index. Split indexes are
+    flattened privately so reads cannot freshen their original backing files.
+    """
+    location = git('rev-parse', '--path-format=absolute', '--git-path', 'index', cwd=cwd, env=env)
+    source = Path(location.stdout.removesuffix('\n')) if not location.returncode else None
+    if source is None or not source.is_file():
+        yield env  # no repository/index to refresh; preserve Git's own verdict
+        return
+    with source.open('rb') as stream:
+        original = os.fstat(stream.fileno())
+        contents = stream.read()
+    split = b'link' in contents  # conservative: a filename may also contain it
+    if not diff and not split:
+        yield env
+        return
+    with tempfile.TemporaryDirectory(prefix='brain-diff-index-') as temporary:
+        directory = Path(temporary)
+        private = directory / 'index'
+        private.write_bytes(contents)
+        # The source descriptor binds bytes and mtime even across an atomic
+        # index replacement. Git needs that mtime for racy-clean detection.
+        os.utime(private, ns=(original.st_atime_ns, original.st_mtime_ns))
+        child = {**env, 'GIT_INDEX_FILE': str(private)}
+        if split:
+            own = git('rev-parse', '--absolute-git-dir', cwd=cwd, env=env, check=True)
+            own = Path(own.stdout.removesuffix('\n'))
+            shared = [path for path in own.glob('sharedindex.*') if path.is_file()]
+            if shared:
+                # Flatten the copied split index before the actual read. Moving
+                # the real query's GIT_DIR changes conditional configuration.
+                # Conversion needs no objects/refs and uses only scratch config.
+                form = git('rev-parse', '--show-object-format', cwd=cwd, env=env, check=True)
+                (directory / 'objects').mkdir()
+                (directory / 'refs').mkdir()
+                (directory / 'HEAD').write_text('ref: refs/heads/scratch\n')
+                (directory / 'config').write_text(
+                    '[core]\nrepositoryformatversion = 1\nbare = false\n'
+                    '[extensions]\nobjectFormat = ' + form.stdout.removesuffix('\n') + '\n')
+                for backing in shared:
+                    shutil.copy2(backing, directory / backing.name)
+                conversion = {key: value for key, value in env.items() if not key.startswith('GIT_')}
+                conversion.update(GIT_DIR=str(directory), GIT_INDEX_FILE=str(private),
+                                  GIT_WORK_TREE=str(Path(cwd or Path.cwd()).absolute()),
+                                  GIT_CONFIG_NOSYSTEM='1', GIT_CONFIG_SYSTEM=os.devnull,
+                                  GIT_CONFIG_GLOBAL=os.devnull, GIT_OPTIONAL_LOCKS='0', GIT_NO_LAZY_FETCH='1')
+                git('update-index', '--no-split-index', cwd=cwd, env=conversion, check=True)
+                os.utime(private, ns=(original.st_atime_ns, original.st_mtime_ns))
+        yield child
+
+
 def git(*args, cwd=None, check=False, env=None):
     reads = _GIT_READS.get()
     key = (str(Path(cwd or Path.cwd()).absolute()), args)
@@ -664,8 +727,24 @@ def git(*args, cwd=None, check=False, env=None):
             result = subprocess.CompletedProcess(['git', *args], 0 if tip else 1, (tip + '\n') if tip else '', '')
             reads[key] = result
     if result is None:
-        result = subprocess.run(["git", *(["-C", str(cwd)] if cwd else []), *args],
-                                capture_output=True, text=True, errors="replace", check=False, env=env)
+        # Status/diff may refresh the index even though their callers only read.
+        # Scope the override to this child, including explicitly supplied envs;
+        # add/commit and other writers keep their original locking behaviour.
+        lock_query = args
+        while lock_query:
+            if len(lock_query) >= 2 and lock_query[0] == '-c':
+                lock_query = lock_query[2:]
+            elif lock_query[0] == '--no-optional-locks':
+                lock_query = lock_query[1:]
+            else:
+                break
+        if lock_query and lock_query[0] in ('status', 'diff'):
+            env = {**(os.environ if env is None else env), 'GIT_OPTIONAL_LOCKS': '0'}
+        index = (git_read_index(cwd, env, diff=lock_query[0] == 'diff')
+                 if lock_query and lock_query[0] in ('status', 'diff') else contextlib.nullcontext(env))
+        with index as child_env:
+            result = subprocess.run(["git", *(["-C", str(cwd)] if cwd else []), *args],
+                                    capture_output=True, text=True, errors="replace", check=False, env=child_env)
         if cacheable:
             reads[key] = result
     if check:

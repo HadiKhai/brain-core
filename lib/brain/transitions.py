@@ -90,22 +90,34 @@ def inbox_append(n_dir, line, marker=None, nonblocking=False):
 def _inbox_append(n_dir, line, marker=None, nonblocking=False):
     """One append, shared by CLI writers and hooks. Hooks never wait for an inbox writer."""
     import fcntl
+    import errno
+    import os
     target = n_dir / "inbox.md"
     _m_common.safe_target(target)
-    with open(target, "a+") as fh:
-        fcntl.flock(fh, fcntl.LOCK_EX | (fcntl.LOCK_NB if nonblocking else 0))
-        if marker:
-            fh.seek(0)
-            if marker in fh.read():
-                return False
-        fh.write(line)
-        fh.flush()
-        import os
-        os.fsync(fh.fileno())
-        if nonblocking:
-            from . import events
-            events.hook_written(n_dir)
-        return True
+    while True:
+        with open(target, "a+", opener=lambda path, flags: os.open(path, flags | os.O_NOFOLLOW, 0o666)) as fh:
+            fcntl.flock(fh, fcntl.LOCK_EX | (fcntl.LOCK_NB if nonblocking else 0))
+            held = os.fstat(fh.fileno())
+            current = os.stat(target, follow_symlinks=False)
+            if (held.st_dev, held.st_ino) != (current.st_dev, current.st_ino):
+                # Archiving may have replaced the inode after this appender opened it.
+                # Hooks queue on EAGAIN; blocking writers reopen the current inbox.
+                if nonblocking:
+                    raise BlockingIOError(errno.EAGAIN, 'inbox replaced before append')
+                continue
+            if held.st_nlink != 1:
+                raise OSError('inbox append target is shared')
+            if marker:
+                fh.seek(0)
+                if marker in fh.read():
+                    return False
+            fh.write(line)
+            fh.flush()
+            os.fsync(fh.fileno())
+            if nonblocking:
+                from . import events
+                events.hook_written(n_dir)
+            return True
 
 
 def cmd_split(a):

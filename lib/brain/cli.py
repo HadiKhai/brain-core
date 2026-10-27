@@ -125,7 +125,7 @@ READ_ONLY = {"cmd_show", "cmd_tree", "cmd_status", "cmd_now", "cmd_jobs", "cmd_s
              "cmd_brief", "cmd_hire", "cmd_reports", "cmd_brains", "cmd_use", "cmd_machine", "cmd_usable",
              "cmd_item_list", "cmd_item_show", "cmd_wt_list", "cmd_selftest", "cmd_init", "cmd_hook", "cmd_hook_pretool", "cmd_hook_approve", "cmd_help",
              "cmd_dashboard", "cmd_ready", "cmd_usage", "cmd_scan", "cmd_scrub", "cmd_history",
-             "cmd_digest", "cmd_model_fit", "cmd_launch_check", "cmd_events", "cmd_gate_lock", "cmd_version", "cmd_connect", "cmd_recall", "cmd_proposals", "cmd_changes", "cmd_heavy", "cmd_rehearse", "cmd_policy", "cmd_preview"}
+             "cmd_digest", "cmd_model_fit", "cmd_launch_check", "cmd_events", "cmd_gate_lock", "cmd_version", "cmd_connect", "cmd_recall", "cmd_proposals", "cmd_changes", "cmd_heavy", "cmd_rehearse", "cmd_policy", "cmd_preview", "cmd_preview_receipt_skeleton"}
 
 
 def writes(a):
@@ -147,6 +147,8 @@ def writes(a):
         return a.action == "rule-add"
     if name == "cmd_task_migrate":
         return True
+    if name == 'cmd_records':
+        return a.action == 'reconcile-records' and a.apply
     if name == "cmd_task_backfill":
         return a.apply
     if name == "cmd_requirement":
@@ -572,6 +574,10 @@ def _main():
         opt("--same-runtime-reason", help="reason for a configured expiring same-runtime exception"))
     cmd("preview-receipt", _Command("preview_evidence", "cmd_preview_receipt"), "record rendered preview source samples", "id",
         opt("--branch", required=True), opt("--file", required=True))
+    cmd("preview-receipt-skeleton", _Command("preview_evidence", "cmd_preview_receipt_skeleton"),
+        "read current own-job receipt JSON; fill null browser/render and three-source fields before preview-receipt; writes nothing",
+        "id", opt("--branch", required=True),
+        opt("--json", action="store_true", help="emit receipt skeleton JSON (also the default)"))
     cmd('release', _Command("release", "cmd_release"), 'inspect or execute an opted-in reviewed full-green release', 'id',
         opt('--run', action='store_true'))
     cmd("train", _Command("train", "cmd_train"), "batch ready jobs onto local main, verify once, and print the release command", "id",

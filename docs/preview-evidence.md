@@ -37,3 +37,18 @@ review must actually happen before recording evidence.
 matching evidence. Source changes, dirty source files, changed preview bindings,
 missing screenshots or changed artifacts invalidate the receipt. Record a new
 tour after checking the new preview; a failed recording preserves the old receipt.
+
+## Own-job rendering and source receipts
+
+For a job-scoped source-sample receipt, read the native skeleton:
+
+```sh
+brain preview-receipt-skeleton <node> --branch <job> --json
+```
+
+This is the supported consumer interface; product workers do not import core
+Python or reconstruct generation hashes. See
+[the output contract](verification-receipts.md#own-job-receipt-skeleton) for the
+fields to fill before `brain preview-receipt`. The accessor writes nothing,
+takes no instance lock, and leaves the node's preview and review URLs unchanged.
+It does not render a page, create a screenshot tour, or establish readiness.
