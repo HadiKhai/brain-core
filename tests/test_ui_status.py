@@ -51,6 +51,27 @@ class UIStatus(Scenario):
         child = {**self.n, 'id': 'child'}
         self.assertEqual(self.m.ui_request_metadata(self.inst, child, line, questions, self.m.lifecycle_empty())['recipient'], '')
 
+    def test_archive_projection_preserves_distinct_retained_episodes_of_the_same_line(self):
+        import hashlib
+        line = '- 2026-01-02 10:00 +00:00 from worker: question: Which color?; options: Blue | Gray; recommendation: Blue'
+        raw = line + '\n'
+        (self.root / 'inbox.md').write_text(raw)
+        current = self.m.request_episode_id(self.inst, self.n, line)
+        def entry(identity):
+            receipt = {'id': identity, 'answered': True}
+            return ('<!-- inbox-archive:' + identity + ':' + hashlib.sha256(raw.encode()).hexdigest() + ' -->\n'
+                    '<!-- episode ' + json.dumps(receipt) + ' -->\n' + raw)
+        archive = self.root / 'inbox-archive.md'
+        archive.write_text(entry('a' * 24) + entry('b' * 24) + entry('a' * 24))
+        before = archive.read_bytes()
+        items = [{'id': current, 'node': 'root', 'kind': 'inbox', 'text': line[2:]}]
+        rows = self.m.ui_inbox_projection(self.inst, [self.n], items)
+        self.assertEqual([row['id'] for row in rows], [current, 'a' * 24, 'b' * 24])
+        self.assertTrue(all(row['answered'] and row['open'] is False for row in rows[1:]))
+        self.assertTrue(all(row['source'] == 'root/inbox-archive.md' for row in rows[1:]))
+        self.assertEqual(archive.read_bytes(), before)
+        self.assertEqual((self.root / 'inbox.md').read_text(), raw)
+
     def row(self, branch='import:sample', start='2026-01-01T00:00Z', ended=''):
         return {**dict.fromkeys(self.m.JOB_COLS, ''), 'Job': branch, 'Started': start, 'Ended': ended}
 

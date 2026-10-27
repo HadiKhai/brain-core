@@ -5,7 +5,7 @@ import { DataTable, Status, Text, Empty, Reader, Preview, Command, TechnicalDeta
 import { Kpi, Spark, SectionTabs } from "./dash";
 import { DueRow, RequestRow, PagedRows, SettlementGuide } from "./inbox";
 import { ThreadRow } from "./agents";
-import { list, needsView, needAsk, count, time, flight, threads, jobTitle, closed, safeHref, nowOf, within, type RecordData } from "./model";
+import { list, needsView, needAsk, count, time, flight, threads, sidebarThreads, jobTitle, closed, safeHref, nowOf, within, type RecordData } from "./model";
 import { ThreadLink } from "./thread-link";
 import { ReaderRow } from "./detail-panel";
 import { WorkStatus } from "./work-status";
@@ -27,7 +27,9 @@ export function Project({ s, route, go, active }: { s: RecordData; route: Route;
   if (!n) return <section className="surface"><Empty text="Project unavailable in this reading." action="Choose a project in the sidebar, or refresh the workspace." /></section>;
   const now = nowOf(s);
   const { decisions: needs } = needsView(s, n.id);
-  const work = flight([n]), open = threads([n]), rows = [...list(n.jobs?.rows)].reverse();
+  const observed = flight([n]), selected = route.thread && sidebarThreads([n], true).find(f => f.job.branch === route.thread);
+  const work = selected && !observed.some(f => f.job.branch === selected.job.branch) ? [selected, ...observed] : observed;
+  const open = threads([n]), rows = [...list(n.jobs?.rows)].reverse();
   const activity: number[] = s.activity?.counts?.[n.id] || [];
   const feed = [
     ...list(s.commits).filter((c) => c.node === n.id).map((c): RecordData => ({ t: c.t, text: c.subject, kind: c.where === "home" ? "Home commit" : "Brain commit" })),

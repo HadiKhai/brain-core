@@ -1,6 +1,7 @@
 """Read-only age and waiting/failure evidence for cached dashboard snapshots."""
 import json
 import re
+import hashlib
 
 from . import common as _m_common
 
@@ -35,7 +36,7 @@ def ui_inbox_projection(inst, nodes, items):
         item = dict(item)
         if item['kind'] == 'inbox':
             line = '- ' + item['text'].removeprefix('inbox: ')
-            known.add((node['id'], line))
+            known.add((node['id'], item['id']))
             item['source'] = node['id'] + '/inbox.md'
             item.update(ui_request_metadata(inst, node, line, questions, lifecycle))
         out.append(item)
@@ -45,14 +46,39 @@ def ui_inbox_projection(inst, nodes, items):
             path = node['dir'] / name
             if not path.is_file() or path.is_symlink():
                 continue
-            for line in path.read_text().splitlines():
-                if not line.startswith('- ') or (node['id'], line) in known:
+            marker, retained = None, None
+            for number, raw in enumerate(path.read_text().splitlines(keepends=True), 1):
+                line = raw.rstrip('\r\n')
+                if name == 'inbox-archive.md' and line.startswith('<!-- inbox-archive:'):
+                    marker = re.fullmatch(r'<!-- inbox-archive:([0-9a-f]{24}):([0-9a-f]{64}) -->', line)
+                    retained = None
                     continue
-                known.add((node['id'], line))
+                if name == 'inbox-archive.md' and line.startswith('<!-- episode '):
+                    try:
+                        retained = json.loads(line.removeprefix('<!-- episode ').removesuffix(' -->'))
+                    except ValueError:
+                        retained = None
+                    continue
+                if not line.startswith('- '):
+                    continue
+                verified = (marker is not None and isinstance(retained, dict) and retained.get('id') == marker[1]
+                            and type(retained.get('answered')) is bool and marker[2] in
+                            {hashlib.sha256(value.encode()).hexdigest() for value in (raw, line)})
+                if name == 'inbox-archive.md':
+                    identity = marker[1] if verified else _m_jobs.digest(['ui-archive-source', node['id'], number, line])
+                else:
+                    identity = reminders.request_episode_id(inst, node, line, lifecycle)
+                if (node['id'], identity) in known:
+                    marker, retained = None, None
+                    continue
+                known.add((node['id'], identity))
                 metadata = ui_request_metadata(inst, node, line, questions, lifecycle)
+                if verified:
+                    metadata['answered'] = retained['answered']
+                marker, retained = None, None
                 # A source no longer in the open projection stays in the archive.
                 metadata.update(open=False, source=node['id'] + '/' + name)
-                out.append({'id': reminders.request_episode_id(inst, node, line, lifecycle),
+                out.append({'id': identity,
                             'node': node['id'], 'kind': 'inbox',
                             'text': _m_guard.redact(line[2:], terms), **metadata})
     return out

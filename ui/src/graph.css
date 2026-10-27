@@ -9,7 +9,7 @@
 .graph-side .list-header-controls { margin-left: auto; }
 .graph-side .table-footer { gap: 6px; }
 .graph-side .pager { gap: 4px; }
-.graph-side .pager > .tabular-nums, .graph-side .pager > button:first-child, .graph-side .pager > button:last-child { display: none; }
+.graph-side .pager > .tabular-nums, .graph-side .pager > .page-first, .graph-side .pager > .page-last { display: none; }
 .graph-layout .graph-canvas svg:focus-visible { outline: 2px solid var(--ring); outline-offset: -3px; }
 .graph-layout .gnode:focus-visible { outline: none; }
 .graph-layout .gnode:focus-visible .dot { stroke: var(--foreground); stroke-width: 3; }

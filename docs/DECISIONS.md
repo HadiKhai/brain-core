@@ -4219,3 +4219,11 @@ Appending preserves its first row, scroll position and page-size preference;
 page navigation, filtering and sorting reset the extension. A shrinking live
 result clears the extension and clamps the page. Tasks also offer a table view
 using this same frame alongside their board and dependency canvas.
+
+Retained native inbox archive markers bind the original episode ID and receipt to
+its source bytes. The dashboard preserves each verified episode separately, even
+when the same source line recurs. Unmarked or invalid legacy archive entries get
+source-derived display identities rather than a reconstructed lifecycle episode.
+Typed choice IDs remain in technical details; operator-facing recommendations and
+next actions resolve their option labels. Selecting a sidebar history or ledger-only
+job explicitly includes that job in the destination's thread collection.

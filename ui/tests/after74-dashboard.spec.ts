@@ -40,7 +40,7 @@ test('requests and decisions exclude coordinator orders and closed asks while Ar
   await expect(inbox).not.toContainText('Waiting on you');
   await inbox.locator('.request').filter({ hasText: 'Answered layout' }).getByRole('button', { name: 'Read source' }).click();
   await page.getByRole('dialog').getByRole('button', { name: 'Technical details', exact: true }).click();
-  await expect(page.getByRole('dialog')).toContainText('Source: field-guide/inbox.md');
+  await expect(page.getByRole('dialog').locator('.technical-facts')).toContainText('field-guide/inbox.md');
   await page.keyboard.press('Escape');
   await page.goto('/?k=demo#view=overview');
   await expect(page.locator('[data-page=overview] [data-kpi]').first().locator('.kpi-value')).toHaveText('35');
@@ -108,4 +108,43 @@ test('Show more stays visible and preserves scroll at phone width', async ({ pag
   await expect(frame.locator('.request')).toHaveCount(20);
   expect(await frame.locator('.list-scroll').evaluate(e => e.scrollTop)).toBe(top);
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390);
+});
+
+
+test('sidebar history and ledger-only jobs open their selected destination', async ({ page, request, state }) => {
+  state.nodes[1].jobs.open.push({ Job: 'job/ledger-only', Started: '2026-01-01' });
+  await request.post('/fixture/update', { data: state });
+  await page.goto('/?k=demo');
+  const nav = page.getByRole('navigation', { name: 'Workspace navigation' });
+  await nav.getByRole('button', { name: 'Show past jobs', exact: true }).click();
+  await nav.getByText('Finished layout', { exact: true }).click();
+  await expect(page.locator('[data-page=project] [data-thread="job/finished-layout"].highlighted')).toBeVisible();
+  await nav.getByText('Ledger only', { exact: true }).click();
+  await expect(page.locator('[data-page=project] [data-thread="job/ledger-only"].highlighted')).toBeVisible();
+});
+
+test('Graph keeps Show more visible and appends its next ten projects', async ({ page, request, state }) => {
+  state.nodes.push(...Array.from({ length: 35 }, (_, i) => ({ id: `project-${i}`, title: `Project ${i}`, parent: 'root', jobs: { rows: [], open: [] }, work: [] })));
+  await request.post('/fixture/update', { data: state });
+  await page.goto('/?k=demo#view=graph');
+  const frame = page.locator('[data-page=graph] .graph-side [data-list-frame]');
+  await expect(frame.getByRole('button', { name: 'Show more', exact: true })).toBeVisible();
+  await expect(frame.locator('.list-count')).toContainText('1–10 of');
+  await frame.getByRole('button', { name: 'Show more', exact: true }).click();
+  await expect(frame.locator('.list-count')).toContainText('1–20 of');
+});
+
+test('typed recommendations and defaults show option labels with identifiers in details', async ({ page, request, state }) => {
+  state.inbox = [{ ...state.inbox[0], options: [{ id: 'opaque-a', label: 'Keep the navigation' }, { id: 'opaque-b', label: 'Collapse the navigation' }], recommendation: 'opaque-a', default: 'opaque-b' }];
+  state.due = [];
+  await request.post('/fixture/update', { data: state });
+  await page.goto('/?k=demo#view=inbox');
+  const row = page.locator('[data-page=inbox] .request');
+  await expect(row).toContainText('Recommended: Keep the navigation');
+  await expect(row).not.toContainText('opaque-a');
+  await expect(row).not.toContainText('opaque-b');
+  await row.getByRole('button', { name: 'Read request', exact: true }).click();
+  await expect(page.getByRole('dialog')).toContainText('Collapse the navigation');
+  await page.getByRole('dialog').getByRole('button', { name: 'Technical details', exact: true }).click();
+  await expect(page.getByRole('dialog').locator('.technical-facts')).toContainText('opaque-a');
 });

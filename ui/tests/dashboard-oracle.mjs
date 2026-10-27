@@ -11,7 +11,7 @@ export function createDashboardOracle(model) {
       sender: normalize(model.sender(item) + ' · ' + model.time(item.first_seen, state.brain?.tz)),
       body: display(body, state) };
     if (typeof item.recommendation === 'string' && item.recommendation)
-      row.recommendation = 'Recommended: ' + display(item.recommendation, state);
+      row.recommendation = 'Recommended: ' + display(model.optionLabel(item, item.recommendation), state);
     return row;
   }
   function step(state, item) {

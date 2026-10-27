@@ -440,6 +440,12 @@ export function openDecision(item: RecordData, now = Date.now(), operator = "ope
   return ["inbox", "blocked", "blocked-overdue", "question", "decision", "host-question"].includes(item.kind) && requestInfo(item, now, operator).open;
 }
 
+export function optionLabel(item: RecordData, value: unknown) {
+  if (typeof value !== "string") return "";
+  const option = list(item.options).find(o => o && o.id === value);
+  return typeof option?.label === "string" ? option.label : value;
+}
+
 // The sidebar can reveal historical threads without counting them as live work.
 export function sidebarThreads(nodes: RecordData[], history = false) {
   const observed = threads(nodes);

@@ -3,10 +3,10 @@ import { usePage } from "./hooks/use-page";
 import { ThreadLink } from "./thread-link";
 import { WorkStatus } from "./work-status";
 import { Button } from "@/components/ui/button";
-import { FilterToolbar, Text, Reader, Empty, ScreenAction, Status, ListFrame, DetailRow } from "./shared";
+import { FilterToolbar, Text, Reader, Empty, ScreenAction, Status, ListFrame, DetailRow, TechnicalDetails } from "./shared";
 import { SectionTabs } from "./dash";
 import { RecordPicker } from "./picker";
-import { list, time, sender, dueParts, readable, needAsk, needsView, type RecordData } from "./model";
+import { list, time, sender, dueParts, readable, needAsk, needsView, optionLabel, type RecordData } from "./model";
 import type { Found } from "./search";
 import type { Route } from "./routes";
 
@@ -18,11 +18,10 @@ export function RequestRow({ s, item, go, showProject = true, compact = false, a
   const [open, setOpen] = useState(false);
   const project = list(s.nodes).find((n) => n.id === item.node);
   const conversation = item.link || project?.coordinator;
-  const recommendation = typeof item.recommendation === "string" ? item.recommendation : "";
-  const nextAction = typeof item.default === "string" && item.default.trim() ? `Review: ${item.default}` : "";
+  const recommendation = optionLabel(item, item.recommendation);
+  const nextAction = typeof item.default === "string" && item.default.trim() ? `Review: ${optionLabel(item, item.default)}` : "";
   const question = /question|answer|\?/i.test(item.text || "");
-  const full = [item.text, list(item.options).map(o => typeof o === "string" ? o : o.label).join("\n"), recommendation, nextAction,
-    item.source && `Source: ${item.source}`].filter(Boolean).join("\n\n");
+  const full = [item.text, list(item.options).map(o => typeof o === "string" ? o : o.label).join("\n"), recommendation && `Recommended: ${recommendation}`, nextAction].filter(Boolean).join("\n\n");
   return (
     <DetailRow className="row request" data-item onOpen={() => setOpen(true)}>
       <div className="row-main">
@@ -34,7 +33,7 @@ export function RequestRow({ s, item, go, showProject = true, compact = false, a
         {conversation ? <ThreadLink href={conversation} label={archived ? "Open source conversation" : (!compact && nextAction) || (question ? "Answer" : "Open conversation")} />
           : project ? <Button variant="outline" size="sm" onClick={() => go({ view: "project", node: project.id })}><Text>{(!compact && nextAction) || "Open project"}</Text></Button>
           : null}
-        <Reader open={open} onOpenChange={setOpen} title={archived ? "Archived item" : "Request"} text={full} trigger={archived ? "Read source" : "Read request"} />
+        <Reader open={open} onOpenChange={setOpen} title={archived ? "Archived item" : "Request"} text={full} trigger={archived ? "Read source" : "Read request"} footer={<TechnicalDetails values={{ Source: item.source, "Recommendation ID": item.recommendation, "Default ID": item.default }} />} />
       </div>
     </DetailRow>
   );
