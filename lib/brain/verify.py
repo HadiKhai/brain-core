@@ -79,10 +79,12 @@ def main_notice(n):
         print(f"main: {short} (cached); local {name} is missing")
 
 
-def ready_refs(n, branch):
+def ready_refs(n, branch, integration=None):
     home = n["home_path"]
+    if integration is None:
+        integration = integration_ref(home)
     return tuple(_m_common.git("rev-parse", "--verify", "--quiet", ref + "^{commit}", cwd=home).stdout.strip()
-                 for ref in ("refs/heads/" + branch, integration_ref(home)))
+                 for ref in ("refs/heads/" + branch, integration))
 
 
 def ready_preflight(n, branch, base=None):
@@ -90,7 +92,9 @@ def ready_preflight(n, branch, base=None):
     reasons = []
     if not n["external"] or not n["home_path"] or not n["home_path"].exists():
         return ["an external git home on this machine is required"], "", ""
-    head, main = ready_refs(n, branch)
+    ref = integration_ref(n["home_path"])
+    head, main = ready_refs(n, branch, integration=ref)
+    remote_main = main
     if not head or not main:
         return ["branch or integration main is missing (origin needs a valid cached origin/HEAD)"], head, main
     if base is not None:
@@ -102,7 +106,7 @@ def ready_preflight(n, branch, base=None):
         else:
             main = base
     if branch == "main" or ("refs/heads/" + branch ==
-                            integration_ref(n["home_path"]).replace("refs/remotes/origin/", "refs/heads/")):
+                            ref.replace("refs/remotes/origin/", "refs/heads/")):
         reasons.append("the job branch must differ from main")
     if _m_common.git("merge-base", "--is-ancestor", main, head, cwd=n["home_path"]).returncode:
         reasons.append("worker must rebase on current main")
@@ -114,13 +118,12 @@ def ready_preflight(n, branch, base=None):
         elif result.returncode:
             reasons.append(f"merge-tree failed (exit {result.returncode}); merge cleanliness is unknown")
     # A local merge integrates with unpublished local work too; PR mode integrates on the host.
-    ref = integration_ref(n["home_path"])
     if n["fm"].get("merge", "local") != "pr" and ref.startswith("refs/remotes/origin/"):
         local_ref = ref.replace("refs/remotes/origin/", "refs/heads/", 1)
         local = _m_common.git("rev-parse", "--verify", "--quiet", local_ref + "^{commit}", cwd=n["home_path"]).stdout.strip()
         if not local:
             reasons.append("local integration branch is missing; configure merge=pr for host merges")
-        elif _m_common.git("merge-base", "--is-ancestor", ready_refs(n, branch)[1], local, cwd=n["home_path"]).returncode:
+        elif _m_common.git("merge-base", "--is-ancestor", remote_main, local, cwd=n["home_path"]).returncode:
             reasons.append("local default must include origin default for merge=local; coordinator must update it "
                            "in a coordinator-owned worktree, or configure merge=pr; never change the operator checkout")
         elif _m_common.git("merge-base", "--is-ancestor", base or local, head, cwd=n["home_path"]).returncode:
@@ -266,12 +269,12 @@ def current_ready_reasons(reasons):
 
 def _ready_state(inst, n, branch, train=False, display=False, advisory=False):
     display = display and (not train or advisory)
-    reasons, head, main = ready_preflight(n, branch)
     row = _m_jobs.open_job(_m_jobs.read_jobs(n) or [], branch)
     signal = _m_jobs.read_handback(n, row) if row else None
     packet = read_ready_packet(inst, n, branch, row)
+    base = packet.get("integration_base", packet.get("main")) if train and packet else None
+    reasons, head, main = ready_preflight(n, branch, base=base)
     if train and packet:
-        reasons, head, main = ready_preflight(n, branch, base=packet.get("integration_base", packet.get("main")))
         remote = ready_refs(n, branch)[1]
         old_remote = packet.get("main")
         if (not isinstance(old_remote, str) or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", old_remote)

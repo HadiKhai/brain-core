@@ -31,6 +31,32 @@ from scenario import Scenario, AutonomyProject, shlex_quote
 class WorkerReadyPackets(Scenario):
     fixture_init_in_process = True
     fixture_templates = True
+    def test_preflight_resolves_remote_once_and_refreshes_changed_refs_on_next_call(self):
+        r, home, wt = self.job()
+        self.git('remote', 'add', 'origin', str(self.tmp / 'uncontacted-origin'), cwd=home)
+        self.git('update-ref', 'refs/remotes/origin/main', 'main', cwd=home)
+        self.git('symbolic-ref', 'refs/remotes/origin/HEAD', 'refs/remotes/origin/main', cwd=home)
+        m = core_loader.SourceFileLoader('brain_preflight_ref_reads', str(CORE / 'bin/brain')).load_module()
+        n = m.Instance(r).node('a')
+        n['fm']['merge'] = 'pr'
+        with mock.patch.dict(os.environ, self.env, clear=True):
+            def preflight():
+                with mock.patch.object(m, 'integration_ref', wraps=m.integration_ref) as remote:
+                    result = m.ready_preflight(n, 'job')
+                    self.assertEqual(remote.call_count, 1)
+                    self.assertEqual(result[0], [])
+                    return result[1:]
+            first = preflight()
+            self.git('update-ref', 'refs/remotes/origin/other', 'job', cwd=home)
+            self.git('symbolic-ref', 'refs/remotes/origin/HEAD', 'refs/remotes/origin/other', cwd=home)
+            second = preflight()
+            self.assertEqual(second[0], first[0])
+            self.assertNotEqual(second[1], first[1])
+            self.git('commit', '--allow-empty', '-qm', 'next worker head', cwd=wt)
+            third = preflight()
+            self.assertNotEqual(third[0], second[0])
+            self.assertEqual(third[1], second[1])
+
     def test_port_changes_rerun_monolithic_and_lane_commands(self):
         m = core_loader.SourceFileLoader('brain_port_reuse', str(CORE / 'bin/brain')).load_module()
         owner = m.record_ready.__globals__

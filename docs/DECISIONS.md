@@ -2977,3 +2977,14 @@ Installation, upgrade, evidence and unaudited subclass fixtures retain full
 copies. Partition setup caches by this mode and select it before replacing the
 caller environment, so an ambient evidence marker cannot contaminate a full
 installation cache. Keep native asserted commands and the write guard unchanged.
+
+## D28008: Resolve integration identity once within each readiness preflight
+
+Reuse the integration ref and its resolved remote commit within one preflight,
+keeping the remote base distinct from a train's recorded integration base.
+Load the retained packet before selecting the train preflight so the immediately
+discarded duplicate preflight is unnecessary. Do not retain refs across calls,
+verification children or publication boundaries. Later verification and train
+checks still obtain fresh Git state, and changed refs between preflights must be
+observed. Keep all existing refusal conditions, Git subprocesses and dirty-state
+checks on the remaining reads.
