@@ -337,10 +337,21 @@ def compute(inst, n, build, *, all_nodes=False, targets=None, extra=()):
 
     Query-result fences preserve path-specific history and ancestry semantics:
     an unrelated commit may move HEAD/main without changing any answer used by
-    this projection. No retries, and no stale text reaches the writer.
+    this projection. The CLI retries a refused refresh whole; no stale text
+    reaches the writer.
     """
     if active():
         return build(inst, n)
+    if instance.holding():
+        # The contended last attempt computes under the held lock: no writer can
+        # publish beside it, so it needs no drift fence and cannot refuse one.
+        with instance.brain_lock(inst), timings.phase('refresh_compute'):
+            current = instance.Instance(inst.root)
+            token = _ACTIVE.set(True)
+            try:
+                return build(current, current.node(n['id']))
+            finally:
+                _ACTIVE.reset(token)
     git_inputs = GitInputs()
     with instance.brain_lock(inst):
         current = instance.Instance(inst.root)

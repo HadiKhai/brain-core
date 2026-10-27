@@ -314,6 +314,20 @@ class brain_lock:
             unlock()
 
 
+def holding():
+    return bool(_LOCK.get("hold"))
+
+
+@contextlib.contextmanager
+def held():
+    """Keep the instance lock through every released step: a contended last attempt."""
+    _LOCK["hold"] = True
+    try:
+        yield
+    finally:
+        _LOCK["hold"] = False
+
+
 def unlock():
     """Let go of the instance lock now (before a long, unrelated step); a later `with brain_lock` takes it again."""
     fh = _LOCK["fh"]
@@ -453,7 +467,7 @@ def released(inst, node=None, extra=(), local_keys=(), retry=False):
     Readers, hook descendants and nested unlocked scopes retain main's lock-free
     behavior. Only the enclosing writer owns validation and the binding reload.
     """
-    if _LOCK["fh"] is None:
+    if _LOCK["fh"] is None or _LOCK.get("hold"):
         yield
         return
     with brain_lock(inst):

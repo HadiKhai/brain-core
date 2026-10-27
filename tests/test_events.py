@@ -1,10 +1,13 @@
 """Metadata-only event stream scenarios; all data and instances are fabricated."""
 import argparse
+import contextlib
 import importlib
+import io
 import json
 import os
 import subprocess
 import sys
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -891,6 +894,48 @@ class EventViews(Scenario):
                             events.reconcile(inst, node=inst.node('app'))
                         self.assertEqual((r / '.brain/events.jsonl').read_bytes(), before)
                         self.assertTrue(events.lease_live(inst, op.ref))
+
+    def test_lease_probes_share_a_dead_lease_and_reconciliation_waits_them_out(self):
+        r = self.init('demo')
+        inst = instance.Instance(r)
+        with instance.brain_lock(r), events.Command(r, command='fixture', node='root'):
+            pass  # a journal baseline and the lease directory
+        ref = 'b' * 32
+        events.append(inst, 'root', 'begin', ref, {'command': 'interrupted'})
+        path = events.lease_path(inst, ref, create=True)
+        path.write_text('')
+        probe = os.open(path, os.O_RDONLY)
+        try:
+            events.fcntl.flock(probe, events.fcntl.LOCK_SH)  # another reader's probe in flight
+            self.assertFalse(events.lease_live(inst, ref))
+            releaser = threading.Timer(0.2, lambda: events.fcntl.flock(probe, events.fcntl.LOCK_UN))
+            releaser.start()
+            with events.dead_lease(inst, ref) as held:
+                self.assertIsNotNone(held)
+            releaser.join()
+        finally:
+            os.close(probe)
+
+    def test_held_refresh_defers_reconciliation_beside_a_live_writer(self):
+        r = self.init('demo')
+        self.b(r, 'new', 'app', '--title', 'App')
+        inst = instance.Instance(r)
+        with instance.brain_lock(r):
+            with events.Command(r, command='fixture', node='app') as op:
+                (r / 'nodes/app/backlog.md').write_text('- app writer pending\n')
+                before = (r / '.brain/events.jsonl').read_bytes()
+                with mock.patch.object(events, '_CURRENT', []):
+                    with self.assertRaisesRegex(SystemExit, 'another write is active'):
+                        events.reconcile(inst, node=inst.node('app'))
+                    err = io.StringIO()
+                    with instance.held(), contextlib.redirect_stderr(err):
+                        events.reconcile(inst, node=inst.node('app'))
+                        with self.assertRaisesRegex(SystemExit, 'another write is active'):
+                            events.reconcile(inst)  # whole-instance reconciliation stays strict
+                    self.assertIn('left to a later refresh', err.getvalue())
+                    self.assertFalse(instance.holding())
+                self.assertEqual((r / '.brain/events.jsonl').read_bytes(), before)
+                self.assertTrue(events.lease_live(inst, op.ref))
 
     def test_snapshot_refresh_does_not_hide_partial_or_damaged_operations_beside_live_writer(self):
         for fault in ('partial', 'damage', 'invalid'):

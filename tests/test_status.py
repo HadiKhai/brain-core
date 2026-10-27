@@ -493,7 +493,9 @@ class AutonomyFacts(AutonomyProject):
                 mock.patch.object(sys, 'argv', ['brain', 'status', 'root', '--refresh']), \
                 mock.patch.object(status, 'status_facts', side_effect=changed), \
                 mock.patch.object(events, 'comparison', wraps=events.comparison) as compare, \
+                mock.patch.object(cli, 'refresh_with_retry', lambda attempt: attempt()), \
                 contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            # One optimistic attempt keeps its fence; retries have their own specs.
             with self.assertRaisesRegex(SystemExit, 'status refresh maintenance refused'):
                 cli.main()
         self.assertEqual(compare.call_count, 0)
@@ -867,6 +869,87 @@ with instance.brain_lock(instance.Instance(__import__('pathlib').Path(sys.argv[2
         with mock.patch.object(subprocess, 'run', side_effect=interleave):
             self.assertEqual(refresh.compute(inst, inst.node('app'), prepare), 0)
         self.assertTrue(committed)
+
+    def refresh_cli(self, root, name):
+        loader = core_loader.SourceFileLoader(name, str(CORE / 'bin/brain'))
+        m = loader.load_module()
+        modules = [importlib.import_module(loader.package_name + '.' + part)
+                   for part in ('cli', 'status', 'events', 'instance')]
+        return (m, *modules)
+
+    def test_refresh_retries_a_concurrent_write_and_publishes_fresh_facts(self):
+        root = self.init('alice')
+        self.b(root, 'status', 'root', '--refresh')
+        m, cli, status, events, instance = self.refresh_cli(root, 'refresh_retry_fresh')
+        backlog = root / 'backlog.md'
+        backlog.write_text('# Backlog\n\n## Build order\n\n- [ ] Ship the fixture\n')
+        facts, landed = status.status_facts, []
+        def concurrent(*args, **kwargs):
+            result = facts(*args, **kwargs)
+            if not landed and instance._LOCK['fh'] is None:
+                landed.append(True)  # another writer lands once during the unlocked compute
+                backlog.write_text(backlog.read_text().replace('[ ]', '[x]'))
+            return result
+        err = io.StringIO()
+        with mock.patch.dict(os.environ, {**self.env, 'BRAIN_ROOT': str(root)}), \
+                mock.patch.object(sys, 'argv', ['brain', 'status', 'root', '--refresh']), \
+                mock.patch.object(status, 'status_facts', side_effect=concurrent), \
+                mock.patch('random.uniform', return_value=0), \
+                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+            cli.main()  # exit 0: no SystemExit
+        self.assertTrue(landed)
+        self.assertNotIn('under the lock', err.getvalue())
+        inst = m.Instance(root)
+        published = (root / 'status.md').read_text()
+        self.b(root, 'status', 'root', '--refresh')  # a quiet refresh finds nothing newer
+        self.assertEqual((root / 'status.md').read_text(), published)
+        terminal = events.read(inst)[-1]
+        self.assertEqual(terminal['kind'], 'commit')
+        self.assertTrue(terminal['data']['maintenance_ok'])
+
+    def test_contended_refresh_finishes_under_the_lock(self):
+        root = self.init('alice')
+        self.b(root, 'status', 'root', '--refresh')
+        m, cli, status, events, instance = self.refresh_cli(root, 'refresh_retry_locked')
+        backlog = root / 'backlog.md'
+        facts, locked = status.status_facts, []
+        def contended(*args, **kwargs):
+            result = facts(*args, **kwargs)
+            if instance._LOCK['fh'] is None:
+                with backlog.open('a') as stream:  # a writer lands in every unlocked compute
+                    stream.write('\n- concurrent item\n')
+            else:
+                locked.append(instance.holding())
+            return result
+        err, start = io.StringIO(), len(events.read(m.Instance(root)))
+        with mock.patch.dict(os.environ, {**self.env, 'BRAIN_ROOT': str(root)}), \
+                mock.patch.object(sys, 'argv', ['brain', 'status', 'root', '--refresh']), \
+                mock.patch.object(status, 'status_facts', side_effect=contended), \
+                mock.patch('random.uniform', return_value=0), \
+                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+            cli.main()  # exit 0: no SystemExit
+        self.assertIn(f'contended {cli.REFRESH_TRIES} times; refreshing under the lock', err.getvalue())
+        self.assertTrue(locked and any(locked))
+        self.assertFalse(instance.holding())
+        records = events.read(m.Instance(root))[start:]
+        self.assertEqual(len([r for r in records if r['kind'] == 'begin' and r['data'].get('command') == 'status']),
+                         cli.REFRESH_TRIES + 1)
+        self.assertEqual(records[-1]['kind'], 'commit')
+        self.assertTrue(records[-1]['data']['maintenance_ok'])
+        published = (root / 'status.md').read_text()
+        self.b(root, 'status', 'root', '--refresh')  # a quiet refresh finds nothing newer
+        self.assertEqual((root / 'status.md').read_text(), published)
+
+    def test_refresh_does_not_retry_a_real_repair_refusal(self):
+        root = self.init('alice')
+        m, cli, status, events, instance = self.refresh_cli(root, 'refresh_retry_cause')
+        with mock.patch.dict(os.environ, {**self.env, 'BRAIN_ROOT': str(root)}), \
+                mock.patch.object(sys, 'argv', ['brain', 'status', 'root', '--refresh']), \
+                mock.patch.object(events, 'maintain', side_effect=ValueError('view repair failed')) as maintain, \
+                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaisesRegex(SystemExit, 'maintenance refused.*cause: view repair failed'):
+                cli.main()
+        self.assertEqual(maintain.call_count, 1)
 
     def test_refresh_reports_maintenance_refusal_as_failure(self):
         root = self.init('alice')

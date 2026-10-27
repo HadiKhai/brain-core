@@ -7,6 +7,7 @@ import uuid
 import fcntl
 import stat
 import subprocess
+import time
 import contextlib
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -604,7 +605,9 @@ def lease_live(inst, ref):
             fd = target.open()
             try:
                 try:
-                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    # Shared: concurrent lock-free probes must not make a dead
+                    # lease look live to each other or to a reconciler.
+                    fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
                 except BlockingIOError:
                     return True
                 target.check_file(fd)
@@ -626,10 +629,16 @@ def dead_lease(inst, ref):
             yield None
             return
         stack.callback(os.close, fd)
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            common.die('another write is active; cannot reconcile its snapshot')
+        # A dead lease is held only by momentary shared probes; wait them out.
+        deadline = time.monotonic() + 2
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    common.die('another write is active; cannot reconcile its snapshot')
+                time.sleep(0.01)
         target.check_file(fd)
         yield target, fd
 
@@ -985,6 +994,12 @@ def reconcile(inst, node=None, snapshot=False):
                    if state.get(k, {}).get('hash') != actual_map.get(k, {}).get('hash')]
         if (node is not None and node_ref(node['id']) not in scopes and healthy
                 and all(r.get('scope') in scopes for r in changed)):
+            return
+        if node is not None and instance.holding():
+            # The final contended refresh holds the lock: reconciling now would
+            # adopt that writer's pending bytes, so leave it to a later refresh.
+            print('brain: another write is active; its reconciliation is left to a later refresh',
+                  file=__import__('sys').stderr)
             return
         common.die("another write is active; cannot reconcile its snapshot")
     with contextlib.ExitStack() as stack:

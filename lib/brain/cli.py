@@ -749,8 +749,46 @@ def _main():
             _m_common.die("these links (symbolic or hard) lead out of the brain, and brain writes only inside it: "
                 + ", ".join(str(p.relative_to(Path(root).resolve())) if Path(root).resolve() in p.parents else str(p)
                             for p in out[:5]) + ("…" if len(out) > 5 else "") + "; remove them (brain check lists them)")
-        with _m_instance.brain_lock(root):
-            with _m_events.Command(root, a):
-                a.f(a)
+        def attempt():
+            with _m_instance.brain_lock(root):
+                with _m_events.Command(root, a):
+                    a.f(a)
+        if a.f.__name__ == 'cmd_status' and a.refresh:
+            refresh_with_retry(attempt)
+        else:
+            attempt()
     else:
         a.f(a)
+
+
+REFRESH_TRIES = 5
+# Plain contention: another writer moved inputs or held a lease during this
+# refresh. Any other refusal, including a repair's own cause, stays final.
+CONTENTION = ('another write is active; cannot reconcile its snapshot',
+              'state changed during the unlocked step',
+              'status refresh inputs changed during computation',
+              'status refresh Git inputs kept changing during validation',
+              'status refresh Git dependency bindings changed')
+
+
+def contended(error):
+    message = error.code if isinstance(error.code, str) else ''
+    if 'status refresh maintenance refused' in message:
+        message = message.partition('; cause: ')[2]
+    return any(text in message for text in CONTENTION)
+
+
+def refresh_with_retry(attempt):
+    """Retry a contended refresh with fresh state, then once under the held lock."""
+    import random
+    import time
+    for tries in range(1, REFRESH_TRIES + 1):
+        try:
+            return attempt()
+        except SystemExit as error:
+            if not contended(error):
+                raise
+        time.sleep(random.uniform(0.05, 0.25) * tries)
+    print(f'brain: status refresh contended {REFRESH_TRIES} times; refreshing under the lock', file=sys.stderr)
+    with _m_instance.held():
+        return attempt()
