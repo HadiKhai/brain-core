@@ -3053,7 +3053,8 @@ never changes its state or evidence.
 ## D40004: Bind job preview evidence to its current worktree generation
 
 Preview receipts may opt into `scope: job` and include `worktree_generation`
-from `job_preview_generation(instance, node, job_row, head)`. This permits an
+from native binding authority (consumer access is superseded by D40008 below).
+This permits an
 owned preview without changing the node's configured preview or review URLs.
 Receipts without job scope retain the existing exact node-URL policy.
 
@@ -3271,3 +3272,22 @@ Repository file observations share an open directory descriptor to avoid resolvi
 the same root for every file. Each file still opens nonblocking and checks its own
 descriptor; a changed or unavailable root after observation makes the scan incomplete.
 The directory authority is scoped to that observation and always closed/reset.
+
+## D40008: Expose a read-only native job preview receipt skeleton
+
+Consumers use `brain preview-receipt-skeleton <node> --branch <job> --json`.
+This supersedes D40004's instruction to use the Python
+`job_preview_generation(instance, node, job_row, head)` helper. Product workers
+must not import core or reconstruct its generation hash.
+
+The CLI prints the recorder's version-1 job receipt shape with current node,
+open job key, branch, exact head, native worktree generation, descriptive live
+binding metadata and an allocated loopback URL. Observation timestamp, renderer,
+render result/artifact and three source comparisons remain null until supplied
+from actual observation. An unfilled skeleton cannot pass recorder validation.
+See `docs/verification-receipts.md` for the complete output contract.
+
+The accessor reads without registration, instance locking or telemetry writes,
+rechecks authority before emitting JSON, and refuses unavailable/stale bindings.
+It changes neither global preview/review URLs nor recording/readiness policy.
+The recorder still validates the supplied receipt against live authority.

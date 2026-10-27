@@ -75,6 +75,47 @@ distinct displayed values and matching source values with source references.
 The receipt binds the exact job generation and code head. A screenshot tour alone
 does not establish data correctness.
 
+### Own-job receipt skeleton
+
+```sh
+brain preview-receipt-skeleton app --branch fix/range --json > preview.json
+# Fill the observation fields after inspecting the actual rendered page and sources.
+brain preview-receipt app --branch fix/range --file preview.json
+```
+
+The accessor emits one JSON object on stdout (JSON is also the default without
+`--json`). Exit 0 means current authority was read, not that evidence passed.
+It fills `version: 1`, `scope: "job"`, `node`, `job_key`, `branch`, exact `head`
+and opaque `worktree_generation` from the current open job and live worktree.
+`binding` describes that authority: canonical absolute `home` and `worktree`
+paths, worktree `created` (ISO timestamp), `start` commit, allocated `port` and
+`ports` count, and the current exact declared URL list in `urls`. This metadata
+is informational; the recorder re-reads binding authority rather than trusting it.
+
+The top-level `urls` list initially has one owned URL,
+`http://127.0.0.1:<allocated-port>/`. Set its path to the actual observed route,
+or use another HTTP(S) loopback URL on the allocated port block or an exact
+declared URL. Add entries for any other URLs being presented. Node preview and
+review URLs do not change. Every URL entry still needs actual rendering and
+at least three distinct matching source comparisons.
+
+`checked_at` and `renderer_threadId` are `null`. Each URL has `rendered: null`,
+`render_evidence: null`, and three `items` containing `null` values for
+`page_item`, `source_ref`, and `source_item`. Replace these with the actual
+observation timestamp, browser thread identity, `rendered: true`, render artifact
+reference and observed source comparisons. An unfilled skeleton is deliberately
+invalid. No timestamp, renderer, sample, PASS or readiness is invented.
+
+The command takes no instance lock and creates no files, receipts, registry
+entries, caches or timing events. Shell redirection above creates only the file
+you explicitly choose. Missing/closed jobs, missing node/home/worktree bindings,
+missing job refs, wrong checked-out branches or heads, invalid creation/port
+metadata and inconsistent Git repositories refuse with nonzero exit, a reason
+on stderr and no JSON on stdout. Authority changes detected during collection
+also refuse; retry against the current binding. Removal/rebinding or code changes
+after a successful read can invalidate the result: the recorder and readiness
+policy retain every live generation and evidence check.
+
 Readiness integrations call `review.validate_ready_reviews` and
 `preview_evidence.validate_ready_preview` before verification and when reading an
 existing packet. Both return refusal reasons without running a host or browser.
