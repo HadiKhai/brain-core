@@ -61,7 +61,7 @@ LANE_TESTS.update({
     'catch-all': ('test_repo_lanes.py',),
     'messages': ('test_messages.py', 'test_worker_message_guard.py', 'test_communication_policy.py'),
     'rotation': ('test_rotation.py', 'test_rotation_host.py'),
-    'diagnostics': ('test_diagnostics.py',),
+    'diagnostics': ('test_diagnostics.py', 'test_write_queue_proof.py'),
     'scorecard': ('test_scorecard.py',),
 })
 COMPATIBILITY = 'test_brain.py'
@@ -75,7 +75,7 @@ SUPPORT = ('scenario.py', 'core_loader.py', 'conftest.py', 'tempdirs.py', 'lanes
 # Only these modules have separately audited dispatch/call selection. The gate
 # requires all remaining core modules in every lane, even after import refactors.
 SELECTIVE_MODULES = ('train',)
-EXTRA_INPUTS = {'rehearse': ('tests/nightly_rehearse.py',), 'ui': ('tests/live.py', 'tests/ui-checks.js', 'tests/ui-fitness.js', 'tests/dashboard_acceptance.py')}
+EXTRA_INPUTS = {'diagnostics': ('tools/write_queue_*.py',), 'rehearse': ('tests/nightly_rehearse.py',), 'ui': ('tests/live.py', 'tests/ui-checks.js', 'tests/ui-fitness.js', 'tests/dashboard_acceptance.py')}
 # Mirror the development node's existing documentation/image skip policy.
 OUTSIDE_INPUTS = ('README.md', 'docs/**', 'ui/**/*.png', 'LICENSE')
 SHARED_INPUTS = (

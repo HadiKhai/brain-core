@@ -4258,3 +4258,14 @@ receipts. Main's standalone `watch_groups` retries that attempt under the receip
 lock; the retry starts a new inventory and observes the changed tree and bindings.
 Inside an enclosing read snapshot, main retains stale as unknown instead of
 retrying cached reads. Node observation adds no retry policy of its own.
+
+## 2026-10-28: Keep write queue live proof outside the instance command path
+
+The phase-one analyzer reads timings, caller observations and immutable transport
+evidence directly, without core imports or instance writes. It distinguishes
+whole-process latency from internal dispatch measurements and keeps missing
+action, lock-attempt, failure-cause and queue-age evidence unknown. Receipt
+reconciliation binds the payload hash and first index byte offset, deduplicating
+same-key transport retries. The optional workload driver defaults to a plan and
+uses only marked inbox additions and metadata patches on a unique proof task;
+legitimate handbacks and native readiness remain with their actual owners.
