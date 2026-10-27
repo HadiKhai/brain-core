@@ -214,6 +214,20 @@ def writes(a):
 
 
 def main():
+    # Admission must not pay for the full command profiler/accounting lifecycle.
+    # Source/application commands retain the normal measurement path below.
+    take_brain_flag()
+    reexec_into_instance_core()
+    candidate = fast_write_arguments()
+    if candidate is not None:
+        root = _m_nodes.try_find_root()
+        if root:
+            from . import handback_queue
+            try:
+                if handback_queue.fast_intent(candidate, root):
+                    return
+            except (OSError, ValueError) as error:
+                _m_common.die(str(error))
     with _m_timings.command(persist=False), _m_timings.phase('dispatch'):
         _main()
 
@@ -277,16 +291,6 @@ def fast_write_arguments():
 def _main():
     take_brain_flag()
     reexec_into_instance_core()
-    candidate = fast_write_arguments()
-    if candidate is not None:
-        root = _m_nodes.try_find_root()
-        if root:
-            from . import handback_queue
-            try:
-                if handback_queue.fast_intent(candidate, root):
-                    return
-            except (OSError, ValueError) as error:
-                _m_common.die(str(error))
     ap = argparse.ArgumentParser(prog="brain", description=__doc__.splitlines()[0])
     ap.add_argument("-b", "--brain", metavar="NAME", help="use this brain (when this machine has several; "
                     "default: the one whose folders you are in, else `brain use`)")
