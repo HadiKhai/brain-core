@@ -2849,3 +2849,23 @@ Detected file changes report an incomplete scan rather than a clean result.
 File inventories, index entries, paths, commit messages, refs,
 governance decisions and scan errors remain current; results keep the original
 labels, ordering and redaction. The cache stores match sets rather than file text.
+
+## Keep private blob verdicts between commands
+
+An explicit `check --fix` may publish `.brain/term-scan-cache.json` with mode
+0600 through checked directory authority and generation-checked replacement.
+Read commands only consume it. The rebuildable cache contains canonical Git blob
+IDs and boolean verdicts, opaque hashes of policy/path bindings, and numeric file
+identities; it never contains terms, labels, paths or source text. A changed word
+list, scanner implementation/version, Unicode runtime or governance context
+invalidates reuse. Failed verdicts are scanned again for their current labels.
+
+A working file must still open successfully and retain its complete descriptor
+identity before a clean verdict is reused. Index reuse additionally requires a
+prior complete canonical body read in that object store, with unchanged readable
+loose-object or pack/index storage. Alternates and replacement refs disable that
+shortcut. Changed storage during reuse reports an incomplete scan; cache damage,
+unavailable storage and publication races fall back to current source reads.
+Fresh tagged Git inventories distinguish untracked names from stage records,
+including names containing tabs/newlines. At most four inventory readers overlap;
+result collection, matching and publication retain deterministic command scope.

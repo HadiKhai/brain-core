@@ -359,7 +359,7 @@ def apply_fixes(inst, kinds):
 
 
 def cmd_check(a):
-    with _m_guard.term_scan_cache():
+    with _m_guard.term_scan_cache(persist=bool(a.fix)):
         return _cmd_check(a)
 
 

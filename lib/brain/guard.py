@@ -10,6 +10,7 @@ import shutil
 import stat
 import subprocess
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from . import common as _m_common
@@ -17,6 +18,7 @@ from . import jobs as _m_jobs
 from . import machine as _m_machine
 from . import nodes as _m_nodes
 from . import status as _m_status
+from . import term_cache as _m_term_cache
 
 
 def trace_patterns(inst):
@@ -63,18 +65,24 @@ def scan_traces(inst, home, errors=None):
 NEVER_FILE = "never-name.txt"  # in a node folder (outside the home): one term per line; also covers descendants
 
 _TERM_SCAN_CACHE = contextvars.ContextVar('brain_term_scan_cache', default=None)
+_TERM_VERDICTS = contextvars.ContextVar('brain_term_verdicts', default=None)
 
 
 @contextlib.contextmanager
-def term_scan_cache():
-    """Share stable file and immutable blob results only within one command."""
+def term_scan_cache(persist=False):
+    """Share observations within a command; only check --fix publishes verdicts."""
     if _TERM_SCAN_CACHE.get() is not None:
         yield
         return
     token = _TERM_SCAN_CACHE.set({})
+    verdicts = {}
+    saved = _TERM_VERDICTS.set((verdicts, persist))
     try:
         yield
     finally:
+        for cache in verdicts.values():
+            cache.close()
+        _TERM_VERDICTS.reset(saved)
         _TERM_SCAN_CACHE.reset(token)
 
 
@@ -82,6 +90,20 @@ def term_file_identity(value):
     # ctime catches same-size rewrites with restored mtime, chmod and hard links.
     return (value.st_dev, value.st_ino, value.st_size, value.st_mtime_ns,
             value.st_ctime_ns, value.st_mode, value.st_uid, value.st_gid, value.st_nlink)
+
+
+def term_verdict_cache(n):
+    current = _TERM_VERDICTS.get()
+    if current is None:
+        return None
+    top = n
+    while top['parent']:
+        top = top['parent']
+    root = top['dir']
+    caches, writable = current
+    if root not in caches:
+        caches[root] = _m_term_cache.VerdictCache(root, writable=writable)
+    return caches[root]
 
 
 def byte_mentions(data, needles, chunk=1 << 20, principals=(), lessons=False):
@@ -158,7 +180,13 @@ def governance_principals(n):
 
 def governance_file(n, path):
     """Only real instance library items and specialist role files get metadata treatment."""
-    path = Path(os.path.abspath(path))
+    raw = os.fspath(path)
+    folder, name = os.path.split(raw)
+    if (not raw.endswith('.md') or (os.path.basename(folder) != 'library'
+            and not (name in ('role.md', 'lessons.md')
+                     and os.path.basename(os.path.dirname(folder)) == 'specialists'))):
+        return False
+    path = Path(path)
     if path.suffix != '.md':
         return False
     if path.parent.name == "library" and path.suffix == ".md":
@@ -167,6 +195,8 @@ def governance_file(n, path):
         owner = path.parent.parent.parent
     else:
         return False
+    path = Path(os.path.abspath(path))
+    owner = Path(os.path.abspath(owner))
     if path.is_symlink():
         return False
     while n["parent"]:
@@ -275,7 +305,8 @@ def stream_mentions(fh, needles, size=None, chunk=1 << 20, principals=(), raw=No
         tail = text[-keep:] if keep else ""
 
 
-def file_mentions(fp, needles, errors=None, chunk=1 << 20, principals=(), lessons=False):
+def file_mentions(fp, needles, errors=None, chunk=1 << 20, principals=(), lessons=False, policy=None,
+                  missing_ok=False):
     """Which of `needles` (case-folded) appear in a regular file, read whole in chunks that overlap by the longest
     needle, so nothing is missed at a boundary or past any size. Not a regular file: nothing (a FIFO would block
     a read forever). A regular file that can't be read: nothing, and the reason goes to `errors`."""
@@ -285,9 +316,11 @@ def file_mentions(fp, needles, errors=None, chunk=1 << 20, principals=(), lesson
             return found
         with open(fp, "rb", buffering=0) as fh:
             before = os.fstat(fh.fileno())
+            identity = term_file_identity(before)
+            if policy is not None and policy.file_clean(fp, before):
+                return found  # opening/fstat still verifies current read access
             cache = _TERM_SCAN_CACHE.get()
             key = ('file', os.path.abspath(fp), tuple(needles), tuple(principals), lessons)
-            identity = term_file_identity(before)
             old = cache.get(key) if cache is not None else None
             if old is not None and old[0] == identity:
                 return set(old[1])
@@ -308,20 +341,37 @@ def file_mentions(fp, needles, errors=None, chunk=1 << 20, principals=(), lesson
                     errors.append((fp, 'file changed during term scan'))
             elif cache is not None:
                 cache[key] = (identity, frozenset(found))
+                if policy is not None and buffered:
+                    policy.remember_file(fp, before, data, not found)
     except OSError as e:
+        if isinstance(e, FileNotFoundError) and missing_ok and not os.path.lexists(fp):
+            return found  # valid tracked deletion; its index body remains guarded
         if errors is not None:
             errors.append((fp, e.strerror or str(e)))
     return found
 
 
-def home_files(root, in_node):
+def home_files(root, in_node, with_stage=False):
     """(relative paths, error): files of `root` that git would keep (tracked, or untracked and not ignored).
     For a node whose home is its own folder: without its notes, its child nodes' folders, and the core."""
-    r = _m_common.git("ls-files", "--cached", "--others", "--exclude-standard", "-z", "--", ".", cwd=root)
+    r = _m_common.git('ls-files', *(('--stage', '-t') if with_stage else ('--cached',)),
+                       '--others', '--exclude-standard', '-z', '--', '.', cwd=root)
     if r.returncode or r.stderr.strip():  # "could not open directory …" is only a warning, with exit 0
-        return None, r.stderr.strip() or f"git ls-files exited {r.returncode}"
-    out = []
-    for f in (x for x in r.stdout.split("\0") if x):
+        error = r.stderr.strip() or f"git ls-files exited {r.returncode}"
+        return (None, [], error) if with_stage else (None, error)
+    out, entries = [], []
+    for record in (x for x in r.stdout.split("\0") if x):
+        f = record
+        if with_stage:
+            if record.startswith('? '):
+                f = record[2:]
+            else:
+                try:
+                    meta, f = record[2:].split('\t', 1)
+                    mode, oid, stage = meta.split()
+                except ValueError:
+                    return None, [], 'invalid Git file inventory'
+                entries.append((mode, oid, stage, f))
         parts = Path(f).parts
         if in_node:
             if len(parts) == 1 and parts[0] in NOTE_FILES:
@@ -333,7 +383,44 @@ def home_files(root, in_node):
             if len(parts) > 2 and parts[0] == "nodes" and (root / "nodes" / parts[1] / "node.md").exists():
                 continue  # a child node (always in nodes/<name>/) is its own home
         out.append(f)
-    return out, None
+    return (out, entries, None) if with_stage else (out, None)
+
+
+def term_git_directory(root):
+    """Read Git's explicit worktree binding; unusual discovery uses Git itself."""
+    if not any(os.environ.get(key) for key in ('GIT_DIR', 'GIT_COMMON_DIR', 'GIT_WORK_TREE')):
+        try:
+            directory = root / '.git'
+            if directory.is_file():
+                text = directory.read_text()
+                if not text.startswith('gitdir: '):
+                    raise ValueError('invalid Git directory file')
+                directory = (root / text[8:].strip()).resolve()
+            if directory.is_dir():
+                common = directory / 'commondir'
+                if common.exists():
+                    directory = directory / common.read_text().strip()
+                return str(directory.resolve()), None
+        except (OSError, ValueError):
+            pass
+    result = _m_common.git('rev-parse', '--git-common-dir', cwd=root)
+    return (str((root / result.stdout.strip()).resolve()), None) if not result.returncode else (None, result)
+
+
+def term_file_observations(n, root, files, entries, needles, principals, policies):
+    """Independent read observations; matching labels and final ordering stay in the caller."""
+    tracked = {f for _, _, _, f in entries}
+    submodules = {f for mode, _, _, f in entries if mode == '160000'}
+    observed, errors = {}, []
+    for f in files:
+        if f in submodules or f in observed:
+            continue
+        fp = os.path.join(root, f)
+        kind = governance_file(n, fp) if f.endswith('.md') else False
+        seen = file_mentions(fp, needles, errors=errors, principals=principals if kind else (),
+                             lessons=kind == 'lessons', policy=policies.get(kind), missing_ok=f in tracked)
+        observed[f] = (kind, seen)
+    return observed, errors
 
 
 @term_scan_cache()
@@ -343,7 +430,10 @@ def scan_terms(n, paths=(), terms=None):
     git repository, also its commit messages and branch names. Neither the label nor `where` shows the term.
     Any error makes the scan incomplete, never clean."""
     terms = never_terms(n) if terms is None else terms
+    verdict_cache = term_verdict_cache(n)
     if not terms:
+        if verdict_cache is not None:
+            verdict_cache.forget(n['dir'])
         return [], []
     hits, errors, repos, unread = [], [], {}, []
     folded_terms = [(t.casefold(), label) for t, label in terms]
@@ -351,11 +441,31 @@ def scan_terms(n, paths=(), terms=None):
     path_matches = {}
     visited = set()
     principals = governance_principals(n)
+    policies = {}
+    if verdict_cache is not None:
+        for kind in (False, 'frontmatter', 'lessons'):
+            policies[kind] = verdict_cache.policy(n['dir'], [t for t, _ in terms], principals, kind)
+    stores = {}
 
     def failed(what, root, r):
         errors.append(f"{what} in {redact(_m_common.tilde(root), terms)}: {redact((r.stderr or '').strip(), terms)}")
 
     pending = list(guard_paths(n, paths))
+    # Every worktree still gets a fresh tagged inventory. Bound read concurrency
+    # instead of serially paying process/I/O latency for hundreds of worktrees.
+    initial = {root: root.resolve() == n['dir'].resolve() for root in pending
+               if (root / '.git').exists() or root.resolve() == n['dir'].resolve()}
+    if len(initial) > 1:
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            futures = {root: pool.submit(home_files, root, in_node, True) for root, in_node in initial.items()}
+            inventories = {root: future.result() for root, future in futures.items()}
+            futures = {root: pool.submit(contextvars.copy_context().run, term_file_observations,
+                                         n, root, files, entries, needles, principals, policies)
+                       for root, (files, entries, error) in inventories.items() if error is None}
+            observations = {root: future.result() for root, future in futures.items()}
+    else:
+        inventories = {}
+        observations = {}
     while pending:
         root = pending.pop(0)
         if root.resolve() in visited:
@@ -364,22 +474,27 @@ def scan_terms(n, paths=(), terms=None):
         in_node = root.resolve() == n["dir"].resolve()
         own_repo = (root / ".git").exists() and not in_node
         if own_repo or in_node:
-            files, err = home_files(root, in_node)
+            storage = None
+            directory, error = term_git_directory(root)
+            if error is not None:
+                failed('git rev-parse', root, error)
+            else:
+                if own_repo:
+                    repos.setdefault(directory, root)
+                if policies:
+                    if directory not in stores:
+                        stores[directory] = _m_term_cache.ObjectStorage(directory)
+                    storage = stores[directory]
+            files, entries, err = inventories.pop(root) if root in inventories else home_files(root, in_node, with_stage=True)
             if err:
                 errors.append(f"listing {redact(_m_common.tilde(root), terms)}: {redact(err, terms)}")
                 continue
-            index = _m_common.git("ls-files", "--stage", "-z", "--", ".", cwd=root)
-            if index.returncode or index.stderr.strip():
-                failed("git ls-files --stage", root, index)
-                continue
-            entries = []
-            for entry in index.stdout.split("\0"):
-                if entry:
-                    meta, f = entry.split("\t", 1)
-                    mode, oid, stage = meta.split()
-                    entries.append((mode, oid, stage, f))
             tracked = {f for _, _, _, f in entries}
             submodules = {f for mode, _, _, f in entries if mode == "160000"}
+            observed, read_errors = (observations.pop(root) if root in observations else
+                                     term_file_observations(n, root, files, entries, needles, principals, policies))
+            unread.extend(read_errors)
+            kinds = {}
             for f in files:  # names and folders, then contents: every file, binary or not, whole
                 if f not in path_matches:
                     path_matches[f] = find_terms(f, terms)
@@ -391,20 +506,17 @@ def scan_terms(n, paths=(), terms=None):
                     else:
                         pending.append(sub)
                     continue
-                # An unstaged deletion is valid; the index blob below still guards what a commit would keep.
-                fp = root / f
-                if f in tracked and not os.path.lexists(fp):
-                    continue
-                kind = governance_file(n, fp)
-                seen = file_mentions(fp, needles, errors=unread,
-                                     principals=principals if kind else (), lessons=kind == "lessons")
+                kind, seen = observed[f]
+                kinds[f] = kind
                 hits += [(label, f"{_m_common.tilde(root)}/{f}") for t, label in folded_terms if t in seen]
             blobs = {}
             included = set(files)
             for mode, oid, stage, f in entries:
                 if f in included and mode != "160000" and set(oid) != {"0"}:
-                    kind = governance_file(n, root / f) if mode in ("100644", "100755") else False
+                    kind = kinds.get(f, False) if mode in ("100644", "100755") else False
                     blobs.setdefault((oid, kind), []).append((f, stage))
+            blobs = {key: names for key, names in blobs.items()
+                     if not (policies.get(key[1]) and policies[key[1]].blob_clean(key[0], storage))}
             if blobs:
                 # One streaming process per repository: no size cap, and no process per file.
                 with subprocess.Popen(["git", "cat-file", "--batch"], cwd=root, stdin=subprocess.PIPE,
@@ -436,6 +548,14 @@ def scan_terms(n, paths=(), terms=None):
                                                            principals=principals if kind else (), lessons=kind == "lessons")
                                 if proc.stdout.read(1) != b"\n":
                                     raise OSError("incomplete Git blob response")
+                                # Only canonical bodies authorize future OID reuse.
+                                # Replacement refs and malformed object contents
+                                # can return bytes whose identity differs.
+                                algorithm = hashlib.sha256 if len(oid) == 64 else hashlib.sha1
+                                canonical = (algorithm(b'blob ' + str(size).encode() + b'\0' + data).hexdigest()
+                                             if size <= 1 << 20 else None)
+                                if policies.get(kind) and canonical == oid:
+                                    policies[kind].remember_blob(oid, not seen, storage)
                                 hits += [(label, f"index stage {stage}: {_m_common.tilde(root)}/{f}")
                                          for f, stage in names for t, label in folded_terms if t in seen]
                     except (OSError, ValueError) as e:
@@ -445,12 +565,10 @@ def scan_terms(n, paths=(), terms=None):
                         proc.stdout.close()
                     if proc.wait():
                         errors.append(f"git cat-file failed in {redact(_m_common.tilde(root), terms)}")
-            if own_repo:
-                r = _m_common.git("rev-parse", "--git-common-dir", cwd=root)
-                if r.returncode:
-                    failed("git rev-parse", root, r)
-                else:
-                    repos.setdefault(str((root / r.stdout.strip()).resolve()), root)
+            if storage is not None and storage.reused and term_git_directory(root)[0] != directory:
+                errors.append('Git directory binding changed during term scan')
+                for policy in policies.values():
+                    policy.data['stores'].pop(storage.key, None)
         else:  # a folder given by path, outside any repository
             for dp, dn, fn in os.walk(root, onerror=lambda e: unread.append((Path(e.filename), e.strerror))):
                 dn[:] = [x for x in dn if x not in (".git", "node_modules")]
@@ -458,9 +576,16 @@ def scan_terms(n, paths=(), terms=None):
                     fp = Path(dp) / f
                     kind = governance_file(n, fp)
                     seen = file_mentions(fp, needles, errors=unread,
-                                         principals=principals if kind else (), lessons=kind == "lessons")
+                                         principals=principals if kind else (), lessons=kind == "lessons",
+                                         policy=policies.get(kind))
                     hits += [(label, _m_common.tilde(fp)) for t, label in folded_terms
                              if t in seen or t in str(fp.relative_to(root)).casefold()]
+    for storage in stores.values():
+        if storage.stamp is not None and not storage.unchanged():
+            if storage.reused:
+                errors.append('Git object storage changed during term scan')
+            for policy in policies.values():
+                policy.data['stores'].pop(storage.key, None)
     for root in repos.values():
         log = _m_common.git("log", "--all", "--format=%h%x00%B%x01", cwd=root)
         if log.returncode:
