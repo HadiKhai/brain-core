@@ -3,6 +3,7 @@ import contextlib
 import contextvars
 import hashlib
 import io
+import itertools
 import os
 import re
 import shutil
@@ -81,6 +82,19 @@ def term_file_identity(value):
     # ctime catches same-size rewrites with restored mtime, chmod and hard links.
     return (value.st_dev, value.st_ino, value.st_size, value.st_mtime_ns,
             value.st_ctime_ns, value.st_mode, value.st_uid, value.st_gid, value.st_nlink)
+
+
+def byte_mentions(data, needles, chunk=1 << 20, principals=(), lessons=False):
+    """Reuse matching only after the complete small content has been read."""
+    cache = _TERM_SCAN_CACHE.get()
+    key = ('content', hashlib.sha256(data).digest(), tuple(needles), tuple(principals), lessons)
+    old = cache.get(key) if cache is not None else None
+    if old is not None:
+        return set(old)
+    found = stream_mentions(io.BytesIO(data), needles, chunk=chunk, principals=principals, lessons=lessons)
+    if cache is not None:
+        cache[key] = frozenset(found)
+    return found
 
 
 def never_terms(n):
@@ -275,26 +289,23 @@ def file_mentions(fp, needles, errors=None, chunk=1 << 20, principals=(), lesson
             old = cache.get(key) if cache is not None else None
             if old is not None and old[0] == identity:
                 return set(old[1])
-            content_key = None
+            buffered = False
             if cache is not None and before.st_size <= chunk:
                 data = fh.read(before.st_size + 1)
                 if len(data) == before.st_size:
                     # Worktrees often contain identical bytes with distinct inodes.
                     # Read them once, but decode/search each content only once.
-                    content_key = ('content', hashlib.sha256(data).digest(),
-                                   tuple(needles), tuple(principals), lessons)
-                    cached = cache.get(content_key)
-                    found = (set(cached) if cached is not None else
-                             stream_mentions(io.BytesIO(data), needles, chunk=chunk,
-                                             principals=principals, lessons=lessons))
+                    buffered = True
+                    found = byte_mentions(data, needles, chunk=chunk, principals=principals, lessons=lessons)
                 else:
                     fh.seek(0)  # file grew: retain the complete streaming scan
-            if content_key is None:
+            if not buffered:
                 found = stream_mentions(fh, needles, chunk=chunk, principals=principals, lessons=lessons)
-            if cache is not None and term_file_identity(os.fstat(fh.fileno())) == identity:
+            if term_file_identity(os.fstat(fh.fileno())) != identity:
+                if errors is not None:
+                    errors.append((fp, 'file changed during term scan'))
+            elif cache is not None:
                 cache[key] = (identity, frozenset(found))
-                if content_key is not None:
-                    cache[content_key] = frozenset(found)
     except OSError as e:
         if errors is not None:
             errors.append((fp, e.strerror or str(e)))
@@ -389,58 +400,44 @@ def scan_terms(n, paths=(), terms=None):
                     kind = governance_file(n, root / f) if mode in ("100644", "100755") else False
                     blobs.setdefault((oid, kind), []).append((f, stage))
             if blobs:
-                cache = _TERM_SCAN_CACHE.get()
-                replacements = subprocess.run(
-                    ['git', 'for-each-ref', '--format=%(refname)', os.environ.get('GIT_REPLACE_REF_BASE', 'refs/replace/')],
-                    cwd=root, capture_output=True, text=True)
-                if replacements.returncode or replacements.stderr.strip() or replacements.stdout.strip():
-                    cache = {}  # replacement refs make the requested OID's contents mutable
-                cached_oids = sorted({oid for oid, kind in blobs
-                                      if ('blob', oid, tuple(needles), tuple(principals) if kind else (), kind) in cache})
-                available = set()
-                if cached_oids:
-                    # A result from another repository never proves this index's
-                    # object is available. Batch-check before skipping its bytes.
-                    probe = subprocess.run(['git', 'cat-file', '--batch-check'], cwd=root,
-                                           input='\n'.join(cached_oids) + '\n',
-                                           capture_output=True, text=True)
-                    rows = [line.split() for line in probe.stdout.splitlines()]
-                    if not probe.returncode and not probe.stderr.strip() and len(rows) == len(cached_oids):
-                        available = {oid for oid, row in zip(cached_oids, rows)
-                                     if len(row) == 3 and row[:2] == [oid, 'blob'] and row[2].isdigit()}
                 # One streaming process per repository: no size cap, and no process per file.
-                with contextlib.ExitStack() as stack:
-                    proc = None
+                with subprocess.Popen(["git", "cat-file", "--batch"], cwd=root, stdin=subprocess.PIPE,
+                                      stdout=subprocess.PIPE, stderr=subprocess.DEVNULL) as proc:
                     try:
-                        for (oid, kind), names in blobs.items():
-                            key = ('blob', oid, tuple(needles), tuple(principals) if kind else (), kind)
-                            seen = cache.get(key)
-                            if seen is not None and oid in available:
+                        remaining = iter(blobs.items())
+                        # Requests fit in one pipe write. Drain every response
+                        # before sending more, so large blobs cannot deadlock.
+                        batch_size = max(1, min(32, os.fpathconf(proc.stdin.fileno(), 'PC_PIPE_BUF') // 66))
+                        while True:
+                            batch = list(itertools.islice(remaining, batch_size))
+                            if not batch:
+                                break
+                            proc.stdin.write(''.join(oid + '\n' for (oid, _), _ in batch).encode())
+                            proc.stdin.flush()
+                            for (oid, kind), names in batch:
+                                header = proc.stdout.readline().split()
+                                if len(header) != 3 or header[1] != b"blob":
+                                    raise OSError("Git index blob unavailable")
+                                size = int(header[2])
+                                if size <= 1 << 20:
+                                    data = proc.stdout.read(size)
+                                    if len(data) != size:
+                                        raise OSError('unexpected end of Git blob')
+                                    seen = byte_mentions(data, needles, principals=principals if kind else (),
+                                                         lessons=kind == 'lessons')
+                                else:
+                                    seen = stream_mentions(proc.stdout, needles, size=size,
+                                                           principals=principals if kind else (), lessons=kind == "lessons")
+                                if proc.stdout.read(1) != b"\n":
+                                    raise OSError("incomplete Git blob response")
                                 hits += [(label, f"index stage {stage}: {_m_common.tilde(root)}/{f}")
                                          for f, stage in names for t, label in terms if t.casefold() in seen]
-                                continue
-                            if proc is None:
-                                proc = stack.enter_context(subprocess.Popen(
-                                    ["git", "cat-file", "--batch"], cwd=root, stdin=subprocess.PIPE,
-                                    stdout=subprocess.PIPE, stderr=subprocess.DEVNULL))
-                            proc.stdin.write((oid + "\n").encode()); proc.stdin.flush()
-                            header = proc.stdout.readline().split()
-                            if len(header) != 3 or header[1] != b"blob":
-                                raise OSError("Git index blob unavailable")
-                            seen = stream_mentions(proc.stdout, needles, size=int(header[2]),
-                                                   principals=principals if kind else (), lessons=kind == "lessons")
-                            if proc.stdout.read(1) != b"\n":
-                                raise OSError("incomplete Git blob response")
-                            cache[key] = frozenset(seen)
-                            hits += [(label, f"index stage {stage}: {_m_common.tilde(root)}/{f}")
-                                     for f, stage in names for t, label in terms if t.casefold() in seen]
                     except (OSError, ValueError) as e:
                         errors.append(redact(f"reading index in {_m_common.tilde(root)}: {e}", terms))
                     finally:
-                        if proc is not None:
-                            proc.stdin.close()
-                            proc.stdout.close()
-                    if proc is not None and proc.wait():
+                        proc.stdin.close()
+                        proc.stdout.close()
+                    if proc.wait():
                         errors.append(f"git cat-file failed in {redact(_m_common.tilde(root), terms)}")
             if own_repo:
                 r = _m_common.git("rev-parse", "--git-common-dir", cwd=root)

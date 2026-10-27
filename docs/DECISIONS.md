@@ -2842,8 +2842,10 @@ cached. No file observations survive the command.
 Small files with identical byte hashes share decoding and matching after each
 file's bytes have been read; large files retain the bounded streaming path.
 
-Index blob matches share content-addressed results, with a batch availability
-check in every repository before reuse. Replacement refs disable blob reuse for
-that repository. File inventories, index entries, paths, commit messages, refs,
+Index blobs always read their complete bodies before sharing matches by byte
+hash. Bounded batches of requests reduce pipe round trips without buffering
+large responses or trusting object headers as proof of body readability.
+Detected file changes report an incomplete scan rather than a clean result.
+File inventories, index entries, paths, commit messages, refs,
 governance decisions and scan errors remain current; results keep the original
 labels, ordering and redaction. The cache stores match sets rather than file text.

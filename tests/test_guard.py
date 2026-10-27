@@ -129,15 +129,61 @@ class ScanTermsCache(Scenario):
 
     def test_files_changed_during_read_are_not_cached(self):
         file = self.home / 'one.txt'
+        file.write_text('clean\n')
         original = self.guard.stream_mentions
         def changing(*args, **kwargs):
             result = original(*args, **kwargs)
-            file.write_text('clean\n')
+            file.write_text('clean\nneedle\n')
             return result
+        errors = []
         with self.guard.term_scan_cache():
             with mock.patch.object(self.guard, 'stream_mentions', side_effect=changing):
+                self.assertEqual(self.guard.file_mentions(file, ['needle'], errors=errors), set())
+            self.assertEqual(errors, [(file, 'file changed during term scan')])
+            self.assertEqual(self.guard.file_mentions(file, ['needle']), {'needle'})
+
+    def test_cached_matches_do_not_hide_corrupt_blob_bodies(self):
+        other = self.repo(self.tmp / 'other', {'one.txt': 'needle\n', 'two.txt': 'clean\n'})
+        oid = self.git('rev-parse', 'HEAD:one.txt', cwd=other).strip()
+        obj = other / '.git/objects' / oid[:2] / oid[2:]
+        with self.guard.term_scan_cache():
+            self.scan()
+            obj.chmod(0o600)
+            obj.write_bytes(obj.read_bytes()[:10])
+            hits, errors = self.guard.scan_terms(self.node, [other], terms=self.terms)
+            self.assertTrue(errors)
+            self.assertTrue(any('index' in error or 'cat-file' in error for error in errors), errors)
+
+    def test_short_small_file_reads_fall_back_to_complete_streaming(self):
+        file = self.home / 'one.txt'
+        with open(file, 'rb', buffering=0) as raw:
+            class ShortRead:
+                first = True
+                def __enter__(self):
+                    return self
+                def __exit__(self, *args):
+                    pass
+                def fileno(self):
+                    return raw.fileno()
+                def seek(self, offset):
+                    return raw.seek(offset)
+                def read(self, size):
+                    if self.first:
+                        self.first = False
+                        return raw.read(1)
+                    return raw.read(size)
+            with self.guard.term_scan_cache(), mock.patch('builtins.open', return_value=ShortRead()):
                 self.assertEqual(self.guard.file_mentions(file, ['needle']), {'needle'})
-            self.assertEqual(self.guard.file_mentions(file, ['needle']), set())
+
+    def test_index_request_batches_drain_large_blobs_and_all_following_entries(self):
+        (self.home / 'a-large.bin').write_bytes(b'x' * ((1 << 20) + 100) + b'needle')
+        for index in range(40):
+            (self.home / ('entry-%02d.txt' % index)).write_text('needle %d\n' % index)
+        self.git('add', '.', cwd=self.home)
+        hits, errors = self.scan()
+        self.assertEqual(errors, [])
+        indexed = [where for label, where in hits if label == 'term 1' and where.startswith('index stage')]
+        self.assertEqual(len(indexed), 42)  # original one.txt, large blob and forty small blobs
 
     def test_repeated_scan_avoids_duplicate_reads_with_timing_budget(self):
         stream = self.guard.stream_mentions
