@@ -1,6 +1,6 @@
 """Spend mechanics for Brain."""
 import datetime
-from contextlib import contextmanager
+from contextlib import contextmanager, ExitStack
 from contextvars import ContextVar
 import hashlib
 import functools
@@ -356,11 +356,11 @@ def spend_cache_valid(agg, key, ident, runtime, stamp, packed):
 
 @_m_timings.timed("usage_read")
 def spend_file(inst, path, runtime, allowed, forbidden, budget=None, window=None):
-    with _m_usage_cache.database(inst, readonly=_SPEND_READ_ONLY.get()) as cache:
-        return _spend_file(inst, path, runtime, allowed, forbidden, budget, window, cache)
+    with ExitStack() as resources:
+        return _spend_file(inst, path, runtime, allowed, forbidden, budget, window, resources)
 
 
-def _spend_file(inst, path, runtime, allowed, forbidden, budget, window, cache):
+def _spend_file(inst, path, runtime, allowed, forbidden, budget, window, resources):
     """One transcript's aggregate, brought up to date; None when unreadable or outside the folders this brain may
     read (checked on the open file, as `brain history` does). A file that shrank or was replaced is read again.
     With a window ([lo, hi] seconds), only what happened inside it, to the second; cached by exact window."""
@@ -394,6 +394,7 @@ def _spend_file(inst, path, runtime, allowed, forbidden, budget, window, cache):
                 not any(_m_guard.find_terms(m, terms) for m in known[1]["models"]) and \
                 (_SPEND_READ_ONLY.get() or known[1].get("published")):
             return known[1]  # unchanged, and its names still pass today's never-name words
+        cache = resources.enter_context(_m_usage_cache.database(inst, readonly=_SPEND_READ_ONLY.get()))
         identity = str(real) if window is None else str(real) + ':' + repr(tuple(window))
         key = hashlib.sha256(identity.encode()).hexdigest()[:32]
         cf = spend_cache_dir(inst) / "files" / f"{key}.json"
@@ -1413,7 +1414,7 @@ def usage_advice(u, median_tokens=None, round_usage=None):
 
 def spend_all(inst, budget=None, match=None):
     """Every transcript in the folders this brain may read (or those `match(path, head)` keeps), up to date.
-    With a budget in seconds, stops early and says so: the next call goes on where this one stopped."""
+    With a budget in seconds, stops early and says so; callers must retain their own file cursor."""
     sources, allowed, forbidden = spend_sources(inst)
     deadline = time.monotonic() + budget if budget else None
     aggs, total, done, seen = [], 0, True, set()
@@ -1499,9 +1500,11 @@ def spend_summary(u, terms=()):
 _MACHINE = {}
 
 
-def spend_machine(inst, budget=2.0):
-    """This machine's totals per runtime, for the live view: counted a little at each refresh until complete,
-    then again at most once a minute."""
+def spend_machine(inst, budget=None):
+    """Complete machine totals, then cached for a minute. Explicit budgets may return partial data.
+
+    Background dashboard slices use UISpend, which retains its file cursor.
+    """
     hit = _MACHINE.get(str(inst.root))
     if hit and hit["complete"] and time.monotonic() - hit["at"] < 60:
         return hit["value"]

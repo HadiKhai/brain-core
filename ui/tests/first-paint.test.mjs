@@ -87,3 +87,13 @@ test('the last complete reading shows its capture time until the replacement arr
   assert.match(live.readingMarker(value, { version: 1 }, 'Live', now), /As of 16:31/);
   assert.equal(live.readingMarker({ ...value, source: { kind: 'live' } }, { version: 1 }, 'Live', now), null);
 });
+
+
+test('partial readings name the missing token totals until completion', () => {
+  const now = Date.parse('2026-01-01T00:00:12Z');
+  const value = { brain: { now: '2026-01-01T00:00:00Z', filling_in: true },
+    spend: { complete: false, read: 180, files: 3518 }, __ui_version: '1' };
+  assert.match(live.readingMarker(value, { version: 1 }, 'Live', now), /token totals 180\/3,518/);
+  assert.equal(live.readingMarker({ ...value, brain: { ...value.brain, filling_in: false },
+    spend: { complete: true } }, { version: 1 }, 'Live', now), null);
+});
