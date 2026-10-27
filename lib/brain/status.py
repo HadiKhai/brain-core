@@ -1674,6 +1674,18 @@ def runaway_jobs(inst, n, structured=False, readonly=False):
     j, out = _m_jobs.jobs_summary(inst, n), []
     for r in j["open"]:
         if not _m_spend.live_usage_eligible(inst, n, r):
+            # Protected receipt damage remains visible without scanning a stale
+            # job's transcripts or producing ordinary runaway/budget advice.
+            if str(r.get('Usage', '')).startswith('host'):
+                meter = _m_spend.job_round_usage_read(inst, n, r, _m_spend.host_row_usage(r))
+                state = (meter or {}).get('state')
+                if state in ('regressed', 'unavailable'):
+                    reason = ('usage counters regressed below the retained restart baseline; current round unavailable'
+                              if state == 'regressed' else 'round usage unavailable; retain receipt for review')
+                    if structured:
+                        out.extend(_m_reminders.latch_job_advice(inst, n, r, {'usage-repair': reason}, readonly=readonly))
+                    else:
+                        out.append(_m_guard.redact(f"job {r['Job']}: " + reason, _m_guard.never_terms(n)))
             continue
         # Open ledger records include stopped workers awaiting settlement. Their
         # latched advice stays visible; final usage is a cached observation.
