@@ -530,6 +530,19 @@ def git(*args, cwd=None, check=False, env=None):
             result = subprocess.CompletedProcess(['git', *args], 0 if tip else 1, (tip + '\n') if tip else '', '')
             reads[key] = result
     if result is None:
+        # Status/diff may refresh the index even though their callers only read.
+        # Scope the override to this child, including explicitly supplied envs;
+        # add/commit and other writers keep their original locking behaviour.
+        lock_query = args
+        while lock_query:
+            if len(lock_query) >= 2 and lock_query[0] == '-c':
+                lock_query = lock_query[2:]
+            elif lock_query[0] == '--no-optional-locks':
+                lock_query = lock_query[1:]
+            else:
+                break
+        if lock_query and lock_query[0] in ('status', 'diff'):
+            env = {**(os.environ if env is None else env), 'GIT_OPTIONAL_LOCKS': '0'}
         result = subprocess.run(["git", *(["-C", str(cwd)] if cwd else []), *args],
                                 capture_output=True, text=True, errors="replace", check=False, env=env)
         if cacheable:

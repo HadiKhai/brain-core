@@ -674,3 +674,92 @@ class EntryPoints(Scenario):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class GitReadLocks(Scenario):
+    def setUp(self):
+        super().setUp()
+        self.m = core_loader.SourceFileLoader('git_locks_fixture', str(CORE / 'bin/brain')).load_module()
+        self.common = self.m._owners['git']
+
+    def test_status_and_diff_override_only_child_environment(self):
+        result = subprocess.CompletedProcess([], 0, '', '')
+        supplied = {'PATH': self.env['PATH'], 'GIT_OPTIONAL_LOCKS': '1', 'SAMPLE': 'retained'}
+        queries = [('status', '--porcelain'), ('diff', '--name-only'),
+                   ('-c', 'status.showUntrackedFiles=all', 'status', '--porcelain'),
+                   ('--no-optional-locks', '-c', 'diff.ignoreSubmodules=none', 'diff', '--quiet'),
+                   ('-c', 'core.quotepath=false', '--no-optional-locks', 'status', '-uno')]
+        with mock.patch.dict(os.environ, {'GIT_OPTIONAL_LOCKS': '1'}), \
+                mock.patch.object(subprocess, 'run', return_value=result) as run:
+            for query in queries:
+                for env in (None, supplied):
+                    with self.subTest(query=query, custom_env=env is not None):
+                        self.common.git(*query, cwd=self.tmp, env=env)
+                        child = run.call_args.kwargs['env']
+                        self.assertEqual(child['GIT_OPTIONAL_LOCKS'], '0')
+                        self.assertEqual(child['PATH'], (os.environ if env is None else supplied)['PATH'])
+                        self.assertIsNot(child, env)
+                        self.assertEqual(os.environ['GIT_OPTIONAL_LOCKS'], '1')
+                        self.assertEqual(supplied['GIT_OPTIONAL_LOCKS'], '1')
+            for query in [('add', '-A'), ('commit', '-qm', 'sample'), ('update-index', '--refresh'),
+                          ('config', 'sample.value', 'status'), ('show', 'HEAD:status')]:
+                for env in (None, supplied):
+                    self.common.git(*query, env=env)
+                    self.assertIs(run.call_args.kwargs['env'], env)
+
+    def test_reads_keep_stale_index_and_return_nasty_paths_with_a_held_lock(self):
+        names = ['space name.txt', 'café.txt', 'line\nbreak.txt']
+        root = self.repo(self.tmp / 'repo with café\nand spaces', files={name: 'same\n' for name in names})
+        # Changed inode/mtime with identical bytes forces an ordinary status to
+        # refresh stat data. A changed tracked file and new files remain visible.
+        for name in names:
+            path = root / name
+            original = path.stat()
+            os.utime(path, ns=(original.st_atime_ns, original.st_mtime_ns + 2_000_000_000))
+        (root / names[0]).write_text('different\n')
+        untracked = ['new space.txt', '雪.txt', 'new\nline.txt']
+        for name in untracked:
+            (root / name).write_text('untracked\n')
+        index = root / '.git/index'
+        def identity():
+            value = index.stat()
+            return value.st_ino, value.st_mtime_ns, index.read_bytes()
+        before = identity()
+        expected = subprocess.run(['git', '--no-optional-locks', '-C', str(root), 'status',
+                                   '--porcelain=v1', '-z', '-uall'], env=self.env,
+                                  capture_output=True, text=True, check=True).stdout
+        lock = root / '.git/index.lock'
+        lock.write_bytes(b'foreign lock must survive')
+        with mock.patch.dict(os.environ, self.env, clear=True):
+            for prefix in ((), ('-c', 'core.quotepath=false'), ('--no-optional-locks',)):
+                status = self.common.git(*prefix, 'status', '--porcelain=v1', '-z', '-uall', cwd=root, check=True)
+                self.assertEqual(status.stdout, expected)
+                self.assertEqual(identity(), before)
+                diff = self.common.git(*prefix, 'diff', '--name-only', '-z', cwd=root, check=True)
+                self.assertEqual(diff.stdout, names[0] + '\0')
+                self.assertEqual(identity(), before)
+            tracked = self.common.git('status', '--porcelain=v1', '-z', '-uno', cwd=root, check=True).stdout
+        for name in untracked:
+            self.assertIn('?? ' + name + '\0', expected)
+            self.assertNotIn(name + '\0', tracked)
+        self.assertIn(' M ' + names[0] + '\0', tracked)
+        self.assertEqual(lock.read_bytes(), b'foreign lock must survive')
+        lock.unlink()
+        with mock.patch.dict(os.environ, self.env, clear=True):
+            self.common.git('status', '--porcelain=v1', '-z', '-uall', cwd=root, check=True)
+            self.assertEqual(identity(), before)
+            self.common.git('add', '--', names[0], cwd=root, check=True)
+        self.assertNotEqual(index.read_bytes(), before[2])
+        self.assertFalse(lock.exists())
+
+    def test_core_revision_ignores_untracked_files_but_worktree_activity_keeps_them(self):
+        root = self.repo(self.tmp / 'code')
+        (root / 'new worker file.txt').write_text('work in progress\n')
+        with mock.patch.dict(os.environ, self.env, clear=True), \
+                mock.patch.object(self.common, 'CORE', root):
+            self.assertNotIn('uncommitted changes', self.m.core_revision())
+            state = self.m.ui_worktree(None, root, 'main', {'path': str(root)})
+            self.assertEqual(state['dirty'], 1)
+            self.assertIsNotNone(state['wrote'])
+            (root / 'README.md').write_text('tracked work\n')
+            self.assertIn('uncommitted changes', self.m.core_revision())

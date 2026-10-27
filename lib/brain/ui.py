@@ -667,7 +667,7 @@ def ui_search(state, kind="all", query="", offset=0, limit=20):
 def core_revision():
     """Which core serves the dashboard: its path and commit, so a preview names its source."""
     head = _m_common.git("rev-parse", "--short", "HEAD", cwd=_m_common.CORE).stdout.strip() if (_m_common.CORE / ".git").exists() else ""
-    dirty = _m_common.git("status", "--porcelain", "--untracked-files=no", cwd=_m_common.CORE).stdout.strip() if head else ""
+    dirty = _m_common.git("status", "--porcelain", "-uno", cwd=_m_common.CORE).stdout.strip() if head else ""
     return f"{_m_common.tilde(_m_common.CORE)} @ {head or 'no git commit'}{' (uncommitted changes)' if dirty else ''}"
 
 

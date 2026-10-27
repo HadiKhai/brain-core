@@ -2755,3 +2755,14 @@ Inbox acknowledgement publication errors retain the already-flushed delivery
 and warning, then propagate the original error with a nonzero exit. They never
 report successful persistence. A stale-generation no-op may still repeat later
 without overwriting a newer acknowledgement or resolution.
+
+## Read Git status and diffs without refreshing the index
+
+The shared Git helper supplies `GIT_OPTIONAL_LOCKS=0` only to status/diff child
+processes, including reads with per-command configuration or explicit environments.
+This prevents optional index refresh writes without changing Git writers or the
+parent environment. Worktree activity, cleanup, review readiness, configuration
+protection and source cleanliness continue to include untracked files. The core
+revision label uses `status -uno`: it describes tracked code changes and already
+excluded untracked files. Tests cover stale index metadata, an existing index
+lock, explicit environment overrides, and paths with spaces, Unicode or newlines.
