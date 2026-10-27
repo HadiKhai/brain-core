@@ -9,11 +9,57 @@ from . import jobs as _m_jobs
 from . import tasks as _m_tasks
 
 
-SOURCES = ('backlog.md', 'build-order.md', 'status.md', 'inbox.md')
+SOURCES = ('backlog.md', 'build-order.md')
 
 
 def fingerprint(*parts):
     return hashlib.sha256('\0'.join(parts).encode()).hexdigest()[:16].upper()
+
+
+def policy_bullet(line):
+    """Authority announcements and resume conditions are not standalone work items."""
+    match = re.match(r'^(?:[-*] |\d+[.)] )(.+)$', line)
+    if not match or re.match(r'\[[ xX]\] ', match[1]):
+        return False  # An explicit task checkbox remains an explicit commitment.
+    text = re.sub(r'[*_`]', '', match[1]).strip()
+    if re.match(r'REVIEW INDEPENDENCE(?:\s*[:,]|\s+supersed)', text, re.I):
+        return True
+    if re.match(r'Add\d+\s+ends\s+(?:the\s+)?(?:repair|execution|review|gate|runtime)\s+allowance\b', text, re.I):
+        return True
+    if re.match(r'Resume\s+requires\b', text, re.I):
+        return True
+    dated = re.match(r'^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}(?::\d{2})?(?:\s*[+-]\d{2}:?\d{2}|Z)?\s*:\s*(.+)', text)
+    return bool(dated and re.match(
+        r'^[A-Z][A-Z0-9 /-]*\b(?:UNPAUSE|PAUSE|FIXES[- ]ONLY|OVERRIDE|POLICY)\b', dated[1]))
+
+
+def nonwork_source_lines(n, filename='backlog.md'):
+    """Explicit history, code examples and standalone authority rules are not work."""
+    path = n['dir'] / filename
+    if not path.exists():
+        return {}
+    if path.is_symlink() or not path.is_file():
+        raise ValueError('backfill source must be a regular node-local file')
+    excluded, depth, fence = {}, None, None
+    for number, line in enumerate(path.read_text().splitlines(), 1):
+        marker = re.match(r'^\s*(`{3,}|~{3,})', line)
+        if marker:
+            if fence is None:
+                fence = marker[1]
+            elif marker[1][0] == fence[0] and len(marker[1]) >= len(fence):
+                fence = None
+            excluded[number] = line
+            continue
+        heading = re.match(r'^(#{1,6})\s+(.+)', line) if not fence else None
+        if heading:
+            level, title = len(heading[1]), heading[2].strip().casefold()
+            if depth is not None and level <= depth:
+                depth = None
+            if title.startswith('historical ') or title in ('operator decisions', 'decisions'):
+                depth = level
+        if fence or depth is not None or policy_bullet(line):
+            excluded[number] = line
+    return excluded
 
 
 def candidates(inst, n):
@@ -26,8 +72,11 @@ def candidates(inst, n):
         if path.is_symlink() or not path.is_file():
             raise ValueError('backfill source must be a regular node-local file')
         section, generated = '', False
+        nonwork = nonwork_source_lines(n, filename)
         observed = datetime.datetime.fromtimestamp(path.stat().st_mtime, datetime.timezone.utc).isoformat()
         for line_no, raw in enumerate(path.read_text().splitlines(), 1):
+            if line_no in nonwork:
+                continue
             if '<!-- brain:facts' in raw:
                 generated = True
             if generated:
@@ -36,8 +85,6 @@ def candidates(inst, n):
                 continue
             if raw.startswith('#'):
                 section = raw.lstrip('#').strip().lower()
-                continue
-            if filename == 'status.md' and not any(word in section for word in ('build order', 'promised', 'next', 'parked')):
                 continue
             match = re.match(r'^(?:[-*] |(\d+)[.)] )(?:\[([ xX])\] )?(.+)$', raw)
             if not match or match[2] and match[2].lower() == 'x':
@@ -55,19 +102,19 @@ def candidates(inst, n):
                             'order': int(match[1]) if match[1] else len(entries) + 1,
                             'status': 'backlog', 'source': 'local'})
     for row in _m_jobs.read_jobs(n) or []:
+        from . import task_reconcile as _m_reconcile
+        state = _m_reconcile.job_evidence(n, row)
+        if state['state'] != 'live':
+            continue
         key = _m_jobs.job_key(row)
         signal = _m_jobs.read_handback(n, row) or {}
         receipt = {'ref': 'job-ledger.md#' + key, 'scope': row.get('Cause') or row['Job'],
                    'raw': row, 'handback': signal, 'head': row.get('Head commit', '')}
-        closed = bool(row.get('Ended'))
-        mapping = delivery_mapping(n, row.get('Base commit'), row.get('Head commit')) if row.get('Base commit') and row.get('Head commit') else None
-        if mapping:
-            receipt['delivery_candidate'] = mapping
         entries.append({'id': row.get('Task') or 'TASK-' + key.upper(), 'title': 'Work on ' + row['Job'],
                         'quote': row['Job'], 'at': row['Started'], 'date_basis': 'job-start',
                         'ref': 'job-ledger.md#' + key, 'origin': 'job:' + key, 'order': len(entries) + 1,
-                        'status': 'backlog' if closed else 'in-progress', 'job': key, 'branch': row['Job'],
-                        'source': 'local', 'raw_receipts': [receipt], 'reconciliation': closed})
+                        'status': 'in-progress', 'job': key, 'branch': row['Job'],
+                        'source': 'local', 'raw_receipts': [receipt], 'reconciliation': False})
     # Exact external IDs collapse duplicate prose references. Open job identity wins.
     unique = {}
     for entry in entries:

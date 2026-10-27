@@ -189,9 +189,14 @@ def park_fields(inst):
 
 
 def brief_index(inst, n):
-    rows = [r for r in _m_tasks.projection(n) if r['status'] not in ('merged', 'done', 'dropped')]
+    from . import task_reconcile, reminders
+    requirements = _m_tasks.read_records(n, 'requirements')
+    lifecycle = reminders.lifecycle_read(inst)
+    rows = [r for r in _m_tasks.read_records(n).values() if r['status'] not in ('merged', 'done', 'dropped')
+            and not task_reconcile.nonwork_reason(inst, n, r, requirements, lifecycle)]
     if not rows:
         return []
+    rows.sort(key=lambda r: (r.get('order', 0), r.get('priority', 'P2'), r['id']))
     parked = sum(r['status'] == 'parked' for r in rows)
     lines = ['## Open task obligations', '', f'{len(rows)} open; {parked} parked. Attempts do not replace these obligations.', '']
     lines += [r['id'] + ' [' + r['status'] + ']: ' + r['title'] + '; next: ' +

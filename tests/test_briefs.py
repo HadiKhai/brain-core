@@ -66,6 +66,25 @@ class WorkerBriefs(Scenario):
         out = self.b(r, "hire", "qa", "app", "--branch", "job", "--task", "test it", ok=False)
         self.assertIn("the worktree for job is gone", out)
 
+    def test_dropped_private_task_history_cannot_poison_a_worker_brief(self):
+        r = self.init('alice')
+        home = self.repo(self.tmp / 'code/app')
+        self.b(r, 'new', 'app', '--title', 'App', '--home', str(home))
+        self.b(r, 'wt', 'add', 'app', 'job')
+        self.b(r, 'task', 'add', 'app', 'OLD', '--title', 'ForbiddenFixturePhrase historical notice')
+        self.b(r, 'task', 'set', 'app', 'OLD', 'status=dropped', 'drop_reason=Legacy non-work import',
+               'drop_decision=private:D-fixture')
+        self.b(r, 'task', 'add', 'app', 'LIVE', '--title', 'Keep current export work')
+        (r / 'nodes/app/never-name.txt').write_text('ForbiddenFixturePhrase\n')
+        out = self.b(r, 'brief', 'app', '--branch', 'job', '--task', 'Build the current export')
+        self.assertIn('LIVE [backlog]: Keep current export work', out)
+        self.assertNotIn('OLD [', out)
+        self.assertNotIn('ForbiddenFixturePhrase', out)
+        self.assertIn('guard: clean', self.b(r, 'guard', 'app', str(home)))
+        self.b(r, 'task', 'add', 'app', 'BAD', '--title', 'ForbiddenFixturePhrase active work')
+        refused = self.b(r, 'brief', 'app', '--branch', 'job', '--task', 'Build the current export', ok=False)
+        self.assertIn('term 1', refused)
+
     def test_a_brief_carries_the_job_its_limits_and_the_hand_back(self):
         r = self.init("alice")
         home = self.repo(self.tmp / "code" / "app")

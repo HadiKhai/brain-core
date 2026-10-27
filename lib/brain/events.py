@@ -1251,7 +1251,13 @@ def maintain(op, changed):
         return getattr(op, "projected_views", {})
     from . import status, freshness
     dispatch_landings(op.inst)
-    freshness.maintain_indexes(op.inst, op.inst.nodes())
+    indexed = freshness.maintain_indexes(op.inst, op.inst.nodes())
+    if (op.command == 'task' and getattr(op.args, '_open_task_added', False)
+            and not changed and not op.record_paths and not indexed
+            and not any(n['fm'].get('upstream_generator') == 'links' for n in op.inst.nodes())):
+        # Task files are outside this ledger/status projection. Preserve the
+        # native command journal without re-reading every job's live usage.
+        return {}
     changed = {**{path: None for path in op.record_paths}, **changed}
     views = {}
     # Cleanup records current metadata for replay, but never rewrites the status

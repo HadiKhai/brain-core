@@ -1301,6 +1301,14 @@ def cmd_inbox(a):
         (f" (age {item['age_days']:g}d)" if item.get('age_days') is not None else ' (age unknown)') +
         (f" (escalated: {item['age_hours']:g}h old, over 48h)" if item.get("escalated") else "") + "\n" for item in items)
     sys.stdout.write(output)
+    sys.stdout.flush()
+    if not weekly:
+        from . import inbox_notices
+        notices = [i for i in items if i['kind'] == 'inbox' and
+                   inbox_notices.terminal_notice('- ' + i['text'].removeprefix('inbox: '))]
+        delivered = {i['id'] for i in notices}
+        if delivered:
+            inbox_notices.expire(inst, [n for n in nodes if n['id'] in {i['node'] for i in notices}], delivered)
     if a.new:
         # Delivery precedes acknowledgement. Computing and printing hold no
         # instance lock; simultaneous readers may repeat delivery, never lose it.

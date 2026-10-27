@@ -2830,3 +2830,51 @@ adding a worktree. A minute boundary can otherwise refresh root's generated
 `Facts refreshed` timestamp without committing it, leaving setup dirty before
 the handback under test. This fixture correction retains the pre-handback stamp
 clear and every strict assertion; production hourly coalescing is unchanged.
+
+## D28003: Keep task migration limited to explicit work and retain reconciliation history
+
+Automatic migration imports backlog/build-order entries and open jobs with a matching,
+unmerged local Git worktree without a stopped worker signal. Inbox messages, status history, and explicitly labelled decision/history sections
+are observations rather than work sources. Pending inbox requests stay in their
+original delivery lifecycle when their legacy task copies are dropped. The explicit record reconciliation command defaults to a read-only
+plan and retains every task, requirement, source line and ledger row. It records one
+private decision per node for dropped imports. Proven main delivery closes imported
+job tasks with their baseline, delivering commit and changed paths; incomplete proof
+keeps a visible reconciliation obligation. Shared requirement records stay active while
+any linked task remains active.
+
+Terminal machine completion/exit notices expire only after their successful inbox
+delivery, or an explicit drain. Expiry is a retained lifecycle receipt, separate from
+an answer, and never suppresses a question, worker failure or actionable machine hold.
+
+Handled inbox archiving is explicit in reconciliation: only strictly answered episodes
+or expired terminal notices qualify. Publish exact original lines and episode proof to
+the node-local inbox archive durably before replacing the active inbox. Replays reuse
+the retained episode/line marker, so an interrupted replacement cannot lose a message
+or duplicate its retained copy. Unknown state stays pending. Closed jobs use retained
+delivery evidence even when their worktrees have already been pruned.
+
+Archive publication fences both captured file generations and holds the native inbox
+append lock through source replacement. An appender verifies its opened inode after
+locking; a replaced inode is retried or reported busy to the hook's durable queue.
+The instance lock alone cannot fence nonblocking hook question delivery.
+
+Mixed backlog sections can contain policy history as well as work. Exclude standalone
+authority announcements, review-independence rules, spent allowances and resume
+conditions using their explicit forms, without dropping ordinary work or manual tasks.
+Cleared preview bindings are missing job evidence, never proof of abandonment.
+
+After integration with unlocked task validation, a new unlinked backlog/ready task
+fences its exact destination and requirement plus inherited node policy. It does not
+scan unrelated task/requirement bodies or directories under the instance lock. Linked
+and completed mutations retain the full graph, artifact and Git evidence fences.
+
+Unlinked new task creation validates only the new record, with direct requirement
+lookups. Linked additions, existing-record edits and explicit task checks retain
+whole-graph validation, including qualified and cross-node return edges. This avoids repeatedly parsing every requirement
+for every existing task while holding the instance lock for a single unrelated add.
+
+For a successful new backlog/ready task whose native operation changes no ledger/status
+resources, retain the native command journal and skip the unrelated status/usage
+projection. Resource changes, configured managed indexes and other transitions retain
+normal maintenance, including partially failed index regeneration.

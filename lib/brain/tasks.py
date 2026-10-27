@@ -34,12 +34,15 @@ def record_path(n, ident, folder='tasks'):
     return path
 
 
-def read_records(n, folder='tasks'):
+def read_records(n, folder='tasks', ident=None):
     base = n['dir'] / folder
     if base.is_symlink():
         raise ValueError('record folder must not be a link')
     records = {}
-    for path in sorted(base.glob('*.md')):
+    paths = [record_path(n, ident, folder)] if ident is not None else sorted(base.glob('*.md'))
+    for path in paths:
+        if not path.exists():
+            continue
         record_path(n, path.stem, folder)
         fm, body = _m_common.read_fm(path)
         row = {}
@@ -142,7 +145,7 @@ def validate(n, records):
         for link in row['decisions']:
             if not re.fullmatch(r'(?:repo:D[0-9]+|private:D-[A-Za-z0-9-]+)', link):
                 raise ValueError('decision links use repo:D123 or private:D-123')
-        if row.get('requirement') and row['requirement'] not in read_records(n, 'requirements'):
+        if row.get('requirement') and row['requirement'] not in read_records(n, 'requirements', row['requirement']):
             raise ValueError(ident + ': requirement not found')
         if row['status'] in ('in-progress', 'in-review', 'testing') and not external:
             if jobs is None:
@@ -164,7 +167,19 @@ def validate(n, records):
     _m_flow.validate_graph(n, records)
 
 
-def mutation_paths(inst, target=None, changes=None, ident=None):
+def independent_add(changes):
+    from . import task_flow
+    return changes.get('status', 'backlog') in ('backlog', 'ready') and not task_flow.links(changes)
+
+
+def mutation_paths(inst, target=None, changes=None, ident=None, create=False):
+    if create and target is not None and ident is not None and independent_add(normalize(changes or {})):
+        node = inst.node(target)
+        paths = [record_path(node, ident)]
+        requirement = (changes or {}).get('requirement')
+        if requirement:
+            paths.append(record_path(node, requirement, 'requirements'))
+        return paths
     paths = []
     def artifact(node, receipt):
         if isinstance(receipt, str):
@@ -203,7 +218,7 @@ def mutation_paths(inst, target=None, changes=None, ident=None):
 
 
 def prepare_mutation(inst, n, ident, changes, create=False, provider=False):
-    rows = read_records(n)
+    rows = read_records(n, ident=ident) if create else read_records(n)
     if create == (ident in rows):
         raise ValueError('task already exists' if create else 'task not found')
     changes = normalize(changes)
@@ -224,6 +239,11 @@ def prepare_mutation(inst, n, ident, changes, create=False, provider=False):
     row.update(changes, updated=inst.now())
     if set(changes) & {'status', 'job', 'evidence', 'merge_sha', 'completion_receipt'}:
         row['last_progress_at'] = changes.get('last_progress_at') or inst.now()
+    if create:
+        from . import task_flow
+        # Every linked creation retains the complete graph, including qualified returns.
+        if task_flow.links(row):
+            rows = read_records(n)
     rows[ident] = row
     validate(n, rows)
     closed_transition = row['status'] in ('merged', 'done') and (create or read_records(n).get(ident, {}).get('status') != row['status'])
@@ -236,8 +256,9 @@ def mutate(inst, n, ident, changes, create=False, provider=False):
     with _m_instance.brain_lock(inst):
         current = _m_instance.Instance(inst.root)
         node = current.node(n['id'])
-        with _m_instance.released(inst, list(current.nodes()),
-                extra=lambda: mutation_paths(current, node['id'], changes, ident)):
+        independent = create and independent_add(normalize(changes))
+        with _m_instance.released(inst, node if independent else list(current.nodes()),
+                extra=lambda: mutation_paths(current, node['id'], changes, ident, create)):
             row, closed_transition = prepare_mutation(current, node, ident, changes, create, provider)
         n = node
         save_record(n, row)
@@ -301,6 +322,8 @@ def cmd_task(a):
                 changes['owner'] = a.owner
             rows = [mutate(inst, n, a.task_id, changes, create=a.action == 'add')]
             _m_instance.unlock()
+            # A new open task does not change the ledger/status fact projection.
+            a._open_task_added = a.action == 'add' and rows[0]['status'] in ('backlog', 'ready')
         else:
             rows = projection(n)
             if a.action == 'show':
@@ -356,6 +379,8 @@ def register(sub):
     from . import task_requirements as _m_requirements
     from . import tasks_backfill as _m_backfill
     _m_requirements.register(actions)
+    from . import task_reconcile
+    task_reconcile.register(actions)
     migration = actions.add_parser('migrate', help='additively migrate local task sources after install/upgrade')
     migration.add_argument('node', nargs='?')
     migration.add_argument('--all', action='store_true')
