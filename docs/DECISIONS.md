@@ -3439,3 +3439,18 @@ callers retain their enclosing command scope. Communication reconciliation runs
 before the snapshot. Source-signature and receipt-generation checks still run
 before publication, so cached reads cannot authorize a changed source state.
 The scope stores no cross-command watcher output or delivery authority.
+
+## 2026-10-27: Batch event coverage and refuse malformed writes before admission
+
+Resource coverage maps opaque scope identities to one discovered node list per
+scan, independent of the number of changed resources. Resource-list construction
+continues to sort nodes once per batch. Hook records retain individual durable
+journal appends; their derived replay index is saved once before publishing the
+outbox cursor. A crash before cursor publication replays the journal acknowledgements
+without duplicating hooks.
+
+CLI proposal acceptance checks reviewer names before opening the writer lock or
+event operation. Names match case-insensitively and persist the configured spelling;
+errors list the operator and non-revoked principals. Task add/set likewise parse
+and validate argument shape before admission. Handlers repeat validation, including
+current authority and state-dependent checks, in their existing mutation path.

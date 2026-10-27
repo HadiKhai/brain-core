@@ -29,6 +29,8 @@ import test_nodes as _test_nodes
 import test_verify as _test_verify
 from scenario import Scenario, AutonomyProject, shlex_quote
 
+sys.path.insert(0, str(CORE / 'lib'))
+
 
 class Specialists(Scenario):
     def test_hire_brings_only_the_lessons_in_scope(self):
@@ -246,6 +248,44 @@ class LessonTags(Scenario):
 
 
 class ImportReview(Scenario):
+    def test_invalid_review_and_task_arguments_refuse_before_lock_or_transaction(self):
+        from brain import cli, events, instance
+        root = self.init('preflight', operator='alice')
+        before = _test_nodes.ImportProjects.snapshot_files(self, root)
+        commands = [
+            ['item', 'accept', 'missing', '--reviewed-by', 'unknown'],
+            ['specialist', 'accept', 'missing', '--reviewed-by', 'unknown'],
+            ['task', 'set', 'root', 'TASK-1', 'title'],
+            ['task', 'set', 'root', 'TASK-1', 'title=one', 'title=two'],
+            ['task', 'set', 'root', 'TASK-1', 'unknown=value'],
+            ['task', 'set', 'root', 'TASK-1', 'status=invalid'],
+        ]
+        for args in commands:
+            with self.subTest(args=args), mock.patch.object(sys, 'argv', ['brain', *args]), \
+                    mock.patch.object(cli, 'reexec_into_instance_core'), \
+                    mock.patch.object(cli._m_nodes, 'try_find_root', return_value=root), \
+                    mock.patch.object(instance, 'brain_lock', side_effect=AssertionError('lock opened')), \
+                    mock.patch.object(events, 'Command', side_effect=AssertionError('transaction opened')):
+                with self.assertRaises(SystemExit):
+                    cli._main()
+            self.assertEqual(before, _test_nodes.ImportProjects.snapshot_files(self, root))
+
+    def test_review_names_ignore_case_and_report_only_accepted_principals(self):
+        from brain import instance, knowledge
+        root = self.init('case-review', operator='alice')
+        self.b(root, 'principal', 'add', 'reviewer')
+        self.b(root, 'principal', 'add', 'former')
+        self.b(root, 'revoke', 'former')
+        inst = instance.Instance(root)
+        self.assertEqual(knowledge.review_principal(inst, 'ALIce'), 'alice')
+        self.assertEqual(knowledge.review_principal(inst, 'REVIEWER'), 'reviewer')
+        with self.assertRaises(SystemExit) as error:
+            knowledge.review_principal(inst, 'FORMER')
+        self.assertIn('accepted names: alice, reviewer', str(error.exception))
+        self.propose(root)
+        self.b(root, 'item', 'accept', 'proposal', '--reviewed-by', 'ALIce')
+        self.assertIn('accepted_by: alice', (root / 'library/proposal.md').read_text())
+
     def propose(self, r, iid="proposal"):
         self.b(r, "item", "add", iid, "--from", "root", "--title", "Fact", "--kind", "fact",
                "--ref", "README.md@" + "a" * 40, "--repo", "fixture", "--commit", "a" * 40,

@@ -321,6 +321,29 @@ def cmd_requirement(a):
         _m_common.die(str(error))
 
 
+def command_changes(a):
+    """Validate argument shape without reading mutable task or ledger state."""
+    changes = {}
+    for item in a.fields:
+        key, sep, value = item.partition('=')
+        if not sep or key in changes:
+            raise ValueError('fields must be unique key=value pairs')
+        changes[key] = value
+    for key in ('title', 'status', 'owner'):
+        if getattr(a, key) is not None:
+            changes[key] = getattr(a, key)
+    changes = normalize(changes)
+    if not ID.fullmatch(a.task_id):
+        raise ValueError('record id must contain only letters, numbers, underscores and hyphens')
+    if 'status' in changes and changes['status'] not in STATUSES:
+        raise ValueError(a.task_id + ': unknown status or kind')
+    if 'kind' in changes and changes['kind'] not in KINDS:
+        raise ValueError(a.task_id + ': unknown status or kind')
+    if 'title' in changes and not changes['title'].strip():
+        raise ValueError(a.task_id + ': title required')
+    return changes
+
+
 def cmd_task(a):
     if a.action in ('add', 'set'):
         _m_instance.unlock()  # native mutate owns its write; parsing/validation do not
@@ -328,18 +351,7 @@ def cmd_task(a):
     n = inst.node(a.node)
     try:
         if a.action in ('add', 'set'):
-            changes = {}
-            for item in a.fields:
-                key, sep, value = item.partition('=')
-                if not sep or key in changes:
-                    raise ValueError('fields must be unique key=value pairs')
-                changes[key] = value
-            if a.title is not None:
-                changes['title'] = a.title
-            if a.status is not None:
-                changes['status'] = a.status
-            if a.owner is not None:
-                changes['owner'] = a.owner
+            changes = command_changes(a)
             rows = [mutate(inst, n, a.task_id, changes, create=a.action == 'add')]
             _m_instance.unlock()
             # A new open task does not change the ledger/status fact projection.
