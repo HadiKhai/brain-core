@@ -2830,3 +2830,13 @@ adding a worktree. A minute boundary can otherwise refresh root's generated
 `Facts refreshed` timestamp without committing it, leaving setup dirty before
 the handback under test. This fixture correction retains the pre-handback stamp
 clear and every strict assertion; production hourly coalescing is unchanged.
+
+Read commands share branch tips, commit dates and linked-worktree HEADs from one
+ref/worktree enumeration per repository. Ancestry queries use one ref-containment
+enumeration per ancestor. Commit counts and clean-title checks share one commit
+graph per integration base; unfinished-title findings retain the original Git
+log order. These derived reads expire at the end of the command, without a time
+limit or persistent authority. Failed or malformed batches fall back to the
+individual Git reads, including local job-state observations. Read-only `ready`
+uses this scope; readiness recording and other write paths keep their existing
+reads and writes.
