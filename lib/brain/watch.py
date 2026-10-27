@@ -173,6 +173,18 @@ def watch_untracked(groups):
     return groups
 
 
+class WatchGroups(dict):
+    def __init__(self, values, revision):
+        super().__init__(values)
+        self.receipt_revision = revision
+
+
+def watch_receipt_revision(inst):
+    with _m_common.directory_target(inst.root / '.brain/wake/due-episodes.json') as target:
+        with os.fdopen(target.open()) as stream:
+            return target.generation(os.fstat(stream.fileno()))
+
+
 def watch_due_episodes(inst, scan):
     """Persist opaque receipts while ordinary due needs remain open.
 
@@ -225,13 +237,15 @@ def watch_due_episodes(inst, scan):
             if item['kind'] == 'overdue-question':
                 item['legacy_reason'] = item['reason']
                 item['reason'] = 'overdue:' + item['id']
-        if current != data['open'] or not path.exists() or not data.get('overdue_episodes'):
-            try:
-                _m_machine.machine_publish(inst, path, json.dumps(
-                    {'version': 1, 'open': current, 'overdue_episodes': True}, sort_keys=True) + '\n')
-            except OSError:
-                return watch_untracked(groups)  # unpublished identities cannot prove resolution
-    return groups
+        try:
+            # Atomic replacement supplies a new generation even for an unchanged
+            # scan, without extending the existing receipt schema.
+            _m_machine.machine_publish(inst, path, json.dumps(
+                {'version': 1, 'open': current, 'overdue_episodes': True}, sort_keys=True) + '\n')
+            revision = watch_receipt_revision(inst)
+        except OSError:
+            return watch_untracked(groups)  # unpublished identities cannot prove resolution
+    return WatchGroups(groups, revision)
 
 
 def watch_items(inst, n):
@@ -660,7 +674,39 @@ def watch_since_wake(inst, nodes):
     return list({i['id']: i for i in out}.values())
 
 
+@contextlib.contextmanager
+def watch_precomputed_publication(inst, groups):
+    """Fence old scans without waiting for a long scan while holding the instance lock."""
+    import fcntl
+    revision = getattr(groups, 'receipt_revision', None)
+    if revision is None:
+        yield False
+        return
+    stack = contextlib.ExitStack()
+    try:
+        target = stack.enter_context(_m_common.directory_target(inst.root / '.brain/wake/due-episodes.lock'))
+        stream = stack.enter_context(os.fdopen(target.open(os.O_RDWR), 'r+'))
+        fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        target.check_file(stream.fileno())
+        current = watch_receipt_revision(inst) == revision
+    except (OSError, ValueError, SystemExit):
+        stack.close()
+        yield False
+        return
+    with stack:
+        yield current
+
+
 def watch_run(inst, kinds=None, quiet=False, sources=None, groups=None):
+    if groups is not None:
+        with watch_precomputed_publication(inst, groups) as current:
+            if current:
+                return watch_publish(inst, kinds, quiet, sources, groups)
+        return  # a newer/busy scan owns reconciliation; never publish obsolete episodes
+    return watch_publish(inst, kinds, quiet, sources)
+
+
+def watch_publish(inst, kinds=None, quiet=False, sources=None, groups=None):
     path = inst.root / '.brain' / 'watch.json'
     try:
         state = watch_state(inst)

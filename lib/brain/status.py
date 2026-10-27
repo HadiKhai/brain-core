@@ -2,6 +2,7 @@
 import datetime
 import hashlib
 import json
+import os
 import re
 import sys
 import urllib.parse
@@ -1152,6 +1153,25 @@ def refresh_status(inst, n, view=None):
     _m_common.touch(f)
 
 
+class InboxReporters(dict):
+    def __init__(self, values, generation):
+        super().__init__(values)
+        self.generation = generation
+
+
+def inbox_seen_snapshot(inst):
+    from . import events
+    try:
+        with events.private_open(inst.root / '.brain/inbox-seen.json') as stream:
+            before = _m_common.DirectoryTarget.generation(os.fstat(stream.fileno()))
+            data = json.load(stream)
+            if before != _m_common.DirectoryTarget.generation(os.fstat(stream.fileno())):
+                raise ValueError('inbox seen markers changed during read')
+            return data, before
+    except FileNotFoundError:
+        return {}, None
+
+
 def inbox_items(inst, nodes=None, reporter="root", readonly=False, requests_only=False, lifecycle_data=None):
     """The existing UI attention sources, with identities independent of line positions or other items.
     Read-only; until reported, first_seen comes from the source's git introduction (mtime if uncommitted)."""
@@ -1160,14 +1180,13 @@ def inbox_items(inst, nodes=None, reporter="root", readonly=False, requests_only
             lifecycle_data = _m_reminders.lifecycle_read(inst)
         except (OSError, ValueError):
             pass  # Display remains fail-open; mutations require a valid locked store.
-    saved = inst.root / ".brain" / "inbox-seen.json"
     try:
-        data = json.loads(saved.read_text()) if saved.exists() else {}
+        data, generation = inbox_seen_snapshot(inst)
         reporters = data.get("reporters", {}) if isinstance(data, dict) and data.get("version") == 2 else {}
         reporters = reporters if isinstance(reporters, dict) else {}
-    except (OSError, ValueError):
-        reporters = {}
-    reporters = {key: value for key, value in reporters.items() if isinstance(value, dict)}
+    except (OSError, ValueError, SystemExit):
+        reporters, generation = {}, False
+    reporters = InboxReporters({key: value for key, value in reporters.items() if isinstance(value, dict)}, generation)
     seen = {key: value for key, value in reporters.get(reporter, {}).items() if isinstance(value, dict)}
     by_id = {n["id"]: n for n in (nodes if nodes is not None else inst.nodes())}
     out, ids = [], set()
@@ -1283,23 +1302,24 @@ def cmd_inbox(a):
         # Delivery precedes acknowledgement. Computing and printing hold no
         # instance lock; simultaneous readers may repeat delivery, never lose it.
         sys.stdout.flush()
-        publish_inbox_seen(inst, reporter, state)
+        publish_inbox_seen(inst, reporter, state, getattr(reporters, 'generation', False))
 
 
-def publish_inbox_seen(inst, reporter, state):
+def publish_inbox_seen(inst, reporter, state, generation):
     try:
-        _publish_inbox_seen(inst, reporter, state)
+        _publish_inbox_seen(inst, reporter, state, generation)
     except (OSError, ValueError, SystemExit):
         print('brain: inbox delivered; seen markers not saved, retain state for repair', file=sys.stderr)
 
 
-def _publish_inbox_seen(inst, reporter, state):
+def _publish_inbox_seen(inst, reporter, state, generation):
     from . import events
     with _m_instance.brain_lock(inst), _m_timings.phase("seen_write"):
         f = inst.root / ".brain/inbox-seen.json"
-        try:
-            saved = json.loads(events.private_read(f))
-        except FileNotFoundError:
+        saved, current_generation = inbox_seen_snapshot(inst)
+        if generation is False or current_generation != generation:
+            return  # newer delivery/resolution won; stale acknowledgement may only repeat later
+        if not saved and generation is None:
             saved = {"version": 2, "reporters": {}}
         if isinstance(saved, dict) and saved.get("version") in (None, 1):
             saved = {"version": 2, "reporters": {}}  # legacy acknowledgements are unscoped; repeat safely

@@ -39,6 +39,38 @@ class Watcher(Scenario):
         with contextlib.redirect_stdout(io.StringIO()):
             self.m.watch_once(self.inst, kinds=kinds)
 
+    def test_stale_precomputed_scan_cannot_retire_new_pending_or_restore_closed_episode(self):
+        m, inst = self.m, self.inst
+        root = inst.node('root')
+        def scan(present):
+            items = [{'id': m.watch_digest(['fixture-need']), 'node': 'root',
+                      'kind': 'blocked-overdue', 'text': 'Choose a fixture color'}] if present else []
+            return m.watch_due_episodes(inst, lambda: {'root': {
+                'node': root, 'command': 'fixture-send', 'items': items}})
+        stale_absent = scan(False)
+        newer = scan(True)
+        current_id = newer['root']['items'][0]['id']
+        with mock.patch.object(m, 'wake_start'):
+            m.watch_once(inst, kinds={'blocked-overdue'}, quiet=True, groups=newer)
+            directory = m.wake_directory(inst, root)
+            pending = list(directory.glob('*.pending'))
+            self.assertEqual(len(pending), 1)
+            before = pending[0].read_bytes()
+            seen = inst.root / '.brain/wake/due-seen.json'
+            acknowledged = seen.read_bytes()
+            m.watch_once(inst, kinds={'blocked-overdue'}, quiet=True, groups=stale_absent)
+            self.assertEqual(pending[0].read_bytes(), before)
+            self.assertEqual(seen.read_bytes(), acknowledged)
+            receipt = inst.root / '.brain/wake/due-episodes.json'
+            self.assertIn(current_id, json.loads(receipt.read_text())['open'].values())
+            closed = scan(False)
+            m.watch_once(inst, kinds={'blocked-overdue'}, quiet=True, groups=closed)
+            self.assertFalse(list(directory.glob('*.pending')))
+            acknowledged = seen.read_bytes()
+            m.watch_once(inst, kinds={'blocked-overdue'}, quiet=True, groups=newer)
+            self.assertFalse(list(directory.glob('*.pending')), 'retired episode must not be restored')
+            self.assertEqual(seen.read_bytes(), acknowledged)
+
     def since(self, node='root'):
         with mock.patch.object(self.m, 'load', return_value=self.inst), \
                 mock.patch.object(self.m, 'request_wake') as request, \

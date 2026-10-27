@@ -646,6 +646,7 @@ class AutonomyInbox(Scenario):
         with mock.patch.dict(os.environ, {**self.env, 'BRAIN_ROOT': str(root)}), \
                 mock.patch.object(sys, 'argv', ['brain', 'now']), mock.patch.object(tm, 'SLOW_SECONDS', 0):
             with tm.command():
+                tm.select_command('now')
                 tm.record('lock_wait', 0.125)
                 with tm.phase('fixture'):
                     sum(range(100))
@@ -677,6 +678,63 @@ class AutonomyInbox(Scenario):
         self.assertTrue(timings)
         self.assertFalse(timings[-1]['success'])
         self.assertGreaterEqual(timings[-1]['lock_wait_s'], 0)
+
+    def test_rejected_command_never_persists_raw_command_text(self):
+        root = self.init('demo')
+        (root / 'never-name.txt').write_text('Orchid\n')
+        m = core_loader.SourceFileLoader('rejected_timing_fixture', str(CORE / 'bin/brain')).load_module()
+        tm = m._owners['cmd_timings']
+        with mock.patch.dict(os.environ, {**self.env, 'BRAIN_ROOT': str(root)}), \
+                mock.patch.object(sys, 'argv', ['brain', 'orchid-private']), \
+                mock.patch.object(tm, 'SLOW_SECONDS', 0), contextlib.redirect_stderr(io.StringIO()), \
+                self.assertRaises(SystemExit) as rejected:
+            m.main()
+        self.assertEqual(rejected.exception.code, 2)
+        row = json.loads((root / '.brain/timings/events.jsonl').read_text().splitlines()[-1])['data']
+        self.assertEqual(row['command'], 'invalid')
+        self.assertFalse(row['success'])
+        self.assertTrue(row['profile'])
+        for path in (root / '.brain/timings').glob('*.json*'):
+            self.assertNotIn('orchid', path.read_text().lower())
+
+    def test_stale_inbox_acknowledgement_cannot_erase_new_ids_or_restore_resolved_markers(self):
+        root = self.init('demo')
+        self.b(root, 'new', 'app', '--title', 'App')
+        status = root / 'nodes/app/status.md'
+        initial = status.read_text()
+        def blocked(*items):
+            status.write_text(initial.replace('## Blocked / needs the operator\n',
+                              '## Blocked / needs the operator\n\n' + ''.join('- ' + item + '\n' for item in items)))
+        m = core_loader.SourceFileLoader('stale_inbox_fixture', str(CORE / 'bin/brain')).load_module()
+        with mock.patch.dict(os.environ, {**self.env, 'BRAIN_ROOT': str(root)}):
+            inst = m.Instance(root)
+            def scan():
+                items, reporters = m.inbox_items(inst)
+                now = inst.now_dt().isoformat(timespec='seconds')
+                state = {i['id']: {'first_seen': i['first_seen'], 'reported_at': now} for i in items}
+                return items, state, reporters.generation
+            blocked('Choose a plan.')
+            _, old, old_generation = scan()
+            blocked('Choose a plan.', 'Choose a color.')
+            _, new, new_generation = scan()
+            m.publish_inbox_seen(inst, 'root', new, new_generation)
+            path = root / '.brain/inbox-seen.json'
+            latest = path.read_bytes()
+            m.publish_inbox_seen(inst, 'root', old, old_generation)
+            self.assertEqual(path.read_bytes(), latest, 'older scan must retain newly acknowledged IDs')
+            items, old, old_generation = scan()
+            plan = next(i['id'] for i in items if i['text'] == 'Choose a plan.')
+            blocked('Choose a color.')
+            _, new, new_generation = scan()
+            m.publish_inbox_seen(inst, 'root', new, new_generation)
+            latest = path.read_bytes()
+            m.publish_inbox_seen(inst, 'root', old, old_generation)
+            self.assertEqual(path.read_bytes(), latest, 'older scan must not undo a newer resolution')
+            self.assertNotIn(plan, json.loads(latest)['reporters']['root'])
+            blocked('Choose a plan.', 'Choose a color.')
+            items, _, _ = scan()
+            self.assertFalse(next(i for i in items if i['id'] == plan)['reported'])
+        self.assertIn('Choose a plan.', [i['text'] for i in self.items(root, '--new')])
 
     def test_long_inbox_read_does_not_block_status_refresh(self):
         self.assert_read_does_not_block_status('inbox')

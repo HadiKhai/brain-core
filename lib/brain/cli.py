@@ -673,6 +673,7 @@ def _main():
             a.paths.extend(extra)
         else:
             ap.error("unrecognized arguments: " + " ".join(extra))
+    _m_timings.select_command(a.cmd or 'dashboard')
     if not getattr(a, "f", None):
         if a.cmd in ("item", "specialist", "wt", "hook"):
             sub.choices[a.cmd].print_help()

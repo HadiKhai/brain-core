@@ -276,6 +276,33 @@ class ExpandedUI(Scenario):
         self.assertFalse(warm['loading']['failed'])
         self.assertEqual(warm['source']['kind'], 'cached-full')
 
+    def test_json_wait_refused_optional_lock_still_builds_full_without_cache_or_instance_lock(self):
+        root = self.init('demo')
+        module = __import__(self.m._owners['ui_state'].__package__ + '.ui_json', fromlist=['read'])
+        inst = self.m.UIInstance(root)
+        foreign = self.tmp / 'refused-lock-target'
+        foreign.write_text('retain fixture evidence')
+        lock = root / '.brain/ui-cache/json-fill.lock'
+        lock.parent.mkdir(exist_ok=True)
+        lock.symlink_to(foreign)
+        before = foreign.read_bytes(), lock.lstat().st_ino
+        original = module.ui_json_build
+        def checked_build(*args, **kwargs):
+            self.assertIsNone(self.m._owners['brain_lock']._LOCK['fh'])
+            self.assertFalse(kwargs['cache'])
+            return original(*args, **kwargs)
+        with mock.patch.object(module, 'ui_json_build', side_effect=checked_build), \
+                mock.patch.object(module._m_ui_readmodel.ReadModel, 'write', side_effect=AssertionError('cache publication')):
+            state = module.ui_json_read(inst, [], wait=True)
+        self.assertEqual(state['source']['kind'], 'fresh-full')
+        self.assertIsInstance(state['problems'], int)
+        self.assertFalse(state['loading']['filling_in'])
+        self.assertEqual(before, (foreign.read_bytes(), lock.lstat().st_ino))
+        with mock.patch.object(module, 'ui_json_fill_lock', side_effect=PermissionError('optional lock')), \
+                mock.patch.object(module, 'ui_json_build', side_effect=RuntimeError('source computation')):
+            with self.assertRaisesRegex(RuntimeError, 'source computation'):
+                module.ui_json_read(inst, [], wait=True)
+
     def test_json_background_fill_computes_without_instance_lock(self):
         root = self.init('demo')
         marker, release = self.tmp / 'filling', self.tmp / 'fill-release'

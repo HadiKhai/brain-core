@@ -110,7 +110,7 @@ def ui_json_request_fill(inst, scan):
         return False
 
 
-def ui_json_build(inst, scan, code):
+def ui_json_build(inst, scan, code, cache=True):
     from . import check, ui
     before = ui_json_privacy_key(inst, code)
     # The full guard/check and recorded readiness observations stay unchanged.
@@ -122,9 +122,10 @@ def ui_json_build(inst, scan, code):
     state['brain'].pop('filling_in', None)
     record = {'version': 1, 'privacy': before, 'built_at': time.time(), 'state': state,
               'selection': hashlib.sha256(json.dumps(scan, sort_keys=True).encode()).hexdigest()}
-    model = _m_ui_readmodel.ReadModel(inst, code)
-    if model.write('json-snapshot', record):
-        model.write('json-fill-status', {'version': 1, 'state': 'complete', 'at': time.time()})
+    if cache:
+        model = _m_ui_readmodel.ReadModel(inst, code)
+        if model.write('json-snapshot', record):
+            model.write('json-fill-status', {'version': 1, 'state': 'complete', 'at': time.time()})
     return record  # --wait can deliver a fresh observation even if the optional cache is unwritable
 
 
@@ -132,9 +133,19 @@ def ui_json_read(inst, scan, wait=False):
     from . import ui, ui_server
     code = ui_server.ui_code_version()
     if wait:
-        with ui_json_fill_lock(inst, blocking=True):
-            # --wait requests a fresh complete observation, including full checks.
-            record = ui_json_build(inst, scan, code)
+        stack, cache = contextlib.ExitStack(), True
+        try:
+            try:
+                stack.enter_context(ui_json_fill_lock(inst, blocking=True))
+            except (OSError, ValueError, SystemExit):
+                cache = False  # refused optional storage never prevents a source read
+            # Build failures remain failures; only optional lock/storage errors fall back.
+            record = ui_json_build(inst, scan, code, cache=cache)
+        finally:
+            try:
+                stack.close()
+            except (OSError, ValueError, SystemExit):
+                pass
         if record is not None:
             return ui_json_source(record['state'], record, origin='fresh-full')
         _m_common.die('UI visibility changed during fill; retry --wait')
@@ -177,6 +188,7 @@ def ui_json_background(root, raw_scan):
                 return
             status('working')
             with timings.command(), usage_cache.batch(), command_reads.snapshot():
+                timings.select_command('ui')
                 record = ui_json_build(inst, json.loads(raw_scan), ui_server.ui_code_version())
             status('complete' if record is not None else 'failed')
     except (Exception, SystemExit):

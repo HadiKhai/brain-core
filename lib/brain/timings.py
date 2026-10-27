@@ -5,14 +5,18 @@ import cProfile
 import functools
 import json
 import pstats
-import re
-import sys
 import time
 import uuid
 from pathlib import Path
 
 SLOW_SECONDS = 5.0
 _CURRENT = contextvars.ContextVar('brain_command_timing', default=None)
+_LABEL = contextvars.ContextVar('brain_command_label', default='invalid')
+
+
+def select_command(name):
+    """Called only after the CLI has selected and validated a registered command."""
+    _LABEL.set(name)
 
 
 def record(name, seconds):
@@ -46,6 +50,7 @@ def command():
     start = time.perf_counter()
     phases = {}
     token = _CURRENT.set(phases)
+    label_token = _LABEL.set('invalid')
     # Function totals are sufficient for top-N diagnostics. Omitting caller
     # edges and individual C builtins keeps ordinary read commands inexpensive.
     profiler = cProfile.Profile(subcalls=False, builtins=False)
@@ -67,6 +72,8 @@ def command():
             publish(elapsed, phases, profiler, success)
         except (Exception, SystemExit):
             pass
+        finally:
+            _LABEL.reset(label_token)
 
 
 def publish(elapsed, phases, profiler, success):
@@ -76,9 +83,7 @@ def publish(elapsed, phases, profiler, success):
         return
     inst = instance.Instance(root)
     # Only a registered command word, never its arguments or raw invocation.
-    name = sys.argv[1] if len(sys.argv) > 1 else 'dashboard'
-    if not re.fullmatch('[a-z][a-z0-9-]{0,40}', name):
-        name = 'help'
+    name = _LABEL.get()
     identity = uuid.uuid4().hex
     data = dict(command=name, elapsed_s=round(elapsed, 6), slow=elapsed > SLOW_SECONDS,
                 lock_wait_s=round(phases.get('lock_wait', 0.0), 6),
