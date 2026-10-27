@@ -107,6 +107,7 @@ class LocalReviews(Scenario):
         self.assertEqual(fm['scope'], 'Demo reviewer')
 
     def test_write_waits_for_cli_instance_lock_and_commits_only_reviewed_files(self):
+        import fcntl
         import threading
         prepared = self.select()
         unrelated = self.root / 'status.md'
@@ -116,18 +117,28 @@ class LocalReviews(Scenario):
             str(self.root / '.brain/lock')], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
         self.assertEqual(holder.stdout.readline().strip(), 'locked')
         result = []
+        contended = threading.Event()
+        flock = fcntl.flock
+        def observed_flock(fd, operation):
+            try:
+                return flock(fd, operation)
+            except BlockingIOError:
+                contended.set()  # actual kernel refusal, while the CLI holds it
+                raise
         def apply():
             with mock.patch.dict(os.environ, self.env, clear=True):
                 result.append(self.reviews.apply({'token': prepared['token']}))
         worker = threading.Thread(target=apply)
         try:
-            worker.start()
-            time.sleep(.15)
-            self.assertTrue(worker.is_alive())
-            self.assertTrue(all(common.read_fm(self.root / r['path'])[0]['status'] == 'proposed' for r in prepared['records']))
+            with mock.patch.object(fcntl, 'flock', side_effect=observed_flock):
+                worker.start()
+                self.assertTrue(contended.wait(5), 'review never attempted the held instance lock')
+                self.assertTrue(worker.is_alive())
+                self.assertTrue(all(common.read_fm(self.root / r['path'])[0]['status'] == 'proposed' for r in prepared['records']))
         finally:
             holder.communicate('x', timeout=10)
-            worker.join(15)
+            if worker.ident is not None:
+                worker.join(15)
         self.assertFalse(worker.is_alive())
         self.assertEqual(result[0]['count'], 3)
         self.assertIn(' M status.md', self.git('status', '--short', cwd=self.root))

@@ -28,6 +28,7 @@ CORE = Path(os.environ.get("BRAIN_CORE") or Path(__file__).resolve().parent.pare
 
 import test_verify as _test_verify
 from scenario import Scenario, AutonomyProject, shlex_quote
+from waiting import FileGate, wait_until
 
 
 class LockHotfix(Scenario):
@@ -212,9 +213,7 @@ cli.main()
                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 
     def wait_file(self, path, process, timeout=20):
-        deadline = time.monotonic() + timeout
-        while not path.exists() and process.poll() is None and time.monotonic() < deadline:
-            time.sleep(0.02)
+        wait_until(lambda: path.exists() or process.poll() is not None, timeout)
         if not path.exists() and process.poll() is not None:
             out, err = process.communicate()
             self.fail('worker never reached its slow step: ' + out + err)
@@ -239,20 +238,27 @@ cli.main()
         r = self.copy_brain(r)
         self.b(r, "new", "other", "--title", "Other")
         marker = self.tmp / "verifying"
-        code = "from pathlib import Path; import time; Path(" + repr(str(marker)) + ").touch(); time.sleep(10)"
-        command = shlex.quote(sys.executable) + " -c " + shlex.quote(code)
+        release = FileGate(self.tmp / 'verify-release')
+        self.addCleanup(release.close)
+        code = "from pathlib import Path\nPath(" + repr(str(marker)) + ").touch()\n" + release.code()
+        script = self.tmp / 'verify-barrier.py'
+        script.write_text(code)
+        command = shlex.quote(sys.executable) + " " + shlex.quote(str(script))
         self.b(r, "set", "a", "verify=" + command)
         p = self.start(r, "handback", "--summary", "Synthetic result", "a", "--branch", "job", "--state", "done", "--reviews", "1",
                        "--lessons", "none: fixture")
         try:
             self.wait_file(marker, p)
             self.responsive(r)
+            self.assertIsNone(p.poll(), 'verify must remain held during sibling commands')
+            release.release()
             out, err = p.communicate(timeout=30)
             self.assertEqual(p.returncode, 0, out + err)
             packet = json.loads(next((r / "nodes/a/job-handbacks").glob("*.json")).read_text())["ready"]
             self.assertEqual(packet["verify_result"], 0)
             self.assertEqual(packet["head"], self.git("rev-parse", "HEAD", cwd=wt).strip())
         finally:
+            release.release()
             if p.poll() is None:
                 p.kill()
                 p.communicate()
@@ -265,11 +271,12 @@ cli.main()
                 case.setUp()
                 try:
                     r, home, wt = case.job()
-                    marker, release = (case.tmp / name for name in ("started", "release"))
+                    marker = case.tmp / 'started'
+                    release = FileGate(case.tmp / 'release')
+                    self.addCleanup(release.close)
                     script = case.tmp / "verify.py"
-                    script.write_text("from pathlib import Path\nimport time\nPath(" + repr(str(marker)) +
-                                      ").touch()\nwhile not Path(" + repr(str(release)) +
-                                      ").exists(): time.sleep(.02)\n")
+                    script.write_text("from pathlib import Path\nPath(" + repr(str(marker)) +
+                                      ").touch()\n" + release.code())
                     case.b(r, "set", "a", "verify=" + shlex.quote(sys.executable) + " " + shlex.quote(str(script)))
                     p = subprocess.Popen([sys.executable, str(CORE / "bin/brain"), "handback", "--summary", "Synthetic result", "a", "--branch", "job",
                                           "--state", "done", "--reviews", "1"], cwd=r,
@@ -288,7 +295,7 @@ cli.main()
                                 rows[-1]["Started"] = "2020-01-01T00:00:00+00:00"
                                 m.write_jobs(inst, n, rows)
                                 inst.commit([], "replace fixture job")
-                        release.touch()
+                        release.release()
                         out, err = p.communicate(timeout=20)
                         self.assertNotEqual(p.returncode, 0, out + err)
                         self.assertIn("verify changed the job's branch" if mutation == "head" else
@@ -297,10 +304,11 @@ cli.main()
                         self.assertFalse(any(x["ready"].get("verify_result") == 0
                                              for x in packets if isinstance(x.get("ready"), dict)))
                     finally:
-                        release.touch()
+                        release.release()
                         if p.poll() is None:
                             p.kill()
                             p.communicate()
+                        release.close()
                 finally:
                     case.tearDown()
 
@@ -308,11 +316,12 @@ cli.main()
         r = self.copy_brain(self.init("fixture"))
         self.b(r, "new", "a", "--title", "Alpha")
         self.b(r, "new", "other", "--title", "Other")
-        calls, started, release = (self.tmp / name for name in ("calls", "sending", "release"))
+        calls, started = (self.tmp / name for name in ("calls", "sending"))
+        release = FileGate(self.tmp / 'release')
+        self.addCleanup(release.close)
         script = self.tmp / "transport.py"
         script.write_text("from pathlib import Path\nimport sys,time\n"
-                          "Path(" + repr(str(started)) + ").touch()\n"
-                          "while not Path(" + repr(str(release)) + ").exists(): time.sleep(.02)\n"
+                          "Path(" + repr(str(started)) + ").touch()\n" + release.code() +
                           "with open(" + repr(str(calls)) + ", 'a') as f: f.write(sys.stdin.read()+'\\n')\n")
         self.b(r, "set", "a", "coordinator=fixture-thread",
                "wake=" + shlex.quote(sys.executable) + " " + shlex.quote(str(script)))
@@ -334,7 +343,7 @@ cli.main()
                 second.communicate()
                 self.fail("second drain waited for the delivery lock")
             self.assertEqual(second.returncode, 0, out + err)
-            release.touch()
+            release.release()
             out, err = p.communicate(timeout=20)
             self.assertEqual(p.returncode, 0, out + err)
             self.assertEqual(len(calls.read_text().splitlines()), 1)
@@ -346,7 +355,7 @@ cli.main()
             self.assertEqual(len(list(directory.glob("*.sent"))), 2)
             self.assertFalse(list(directory.glob("*.pending")))
         finally:
-            release.touch()
+            release.release()
             if p.poll() is None:
                 p.kill()
                 p.communicate()
@@ -806,13 +815,15 @@ class QuestionWake(Scenario):
     def test_deadline_hands_off_reason_arriving_during_last_send(self):
         self.enqueue("first")
         now, sends, starts = [1000.0], [], []
+        stdlib_sleep = time.sleep
         def advance(seconds):
             now[0] += seconds
         def start(inst, node):
             starts.append((now[0], node["id"]))
             self.module.wake_drain(inst, node)  # inline newcomer really conflicts with LOCK_NB
         def send(command, reason=None):
-            time.sleep(.001)  # An unrelated stdlib poll must not advance the wake clock.
+            # A product clock injection must never replace stdlib time globally.
+            self.assertIs(time.sleep, stdlib_sleep)
             sends.append(now[0])
             if len(sends) <= 5:
                 self.module.request_wake(self.inst, self.n, "during-send-" + str(len(sends)))

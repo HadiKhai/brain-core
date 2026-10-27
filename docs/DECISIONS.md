@@ -2931,3 +2931,13 @@ dispatcher launches while preserving custom Git installations and the
 original PATH on other platforms or lookup failures. Freshness tests set the
 changed note's timestamp directly instead of sleeping across the comparison
 threshold, and reset it before testing the subsequent status update.
+
+## D28004: Release test holds after observing the protected work
+
+Native verify and wake fixtures use owned FIFO gates with real deadlines and
+explicit finally-release cleanup. Sibling responsiveness assertions run while
+the verify child is still held. The local-review lock test acknowledges a real
+kernel flock refusal before asserting proposals remain unchanged. Keep the
+native children and all existing result, commit and isolation assertions.
+Set both Git fixture dates explicitly across sync boundaries instead of sleeping
+for Git's second resolution; product time and unrelated clocks remain real.
