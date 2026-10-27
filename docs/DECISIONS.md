@@ -2977,6 +2977,8 @@ Installation, upgrade, evidence and unaudited subclass fixtures retain full
 copies. Partition setup caches by this mode and select it before replacing the
 caller environment, so an ambient evidence marker cannot contaminate a full
 installation cache. Keep native asserted commands and the write guard unchanged.
+Keep the full-core default for classes whose measured native workload regresses;
+the complete project-setup cache can still be used independently of this opt-in.
 
 ## D28008: Resolve integration identity once within each readiness preflight
 
