@@ -95,6 +95,54 @@ class WriteQueueProof(unittest.TestCase):
         self.assertEqual(self.analyze([row])['global_lock_failures']['confirmed'], 1)
         self.assertEqual(self.analyze([row])['global_lock_failures']['gate'], 'FAIL')
 
+    def test_global_failures_include_unmatched_callers_and_deduplicate_exact_matches(self):
+        row = self.event(kind='proof_call', request_id=self.ident, exit_code=1, lock_wait_failure=True)
+        row['data']['success'] = False
+        report = self.analyze([self.event('show'), row])['global_lock_failures']
+        self.assertEqual((report['confirmed'], report['gate']), (1, 'FAIL'))
+        telemetry = self.event(request_id=self.ident, lock_wait_failure=True)
+        telemetry['data']['success'] = False
+        self.assertEqual(self.analyze([telemetry, row])['global_lock_failures']['confirmed'], 1)
+        del row['data']['lock_wait_failure']
+        report = self.analyze([self.event('show'), row])['global_lock_failures']
+        self.assertEqual((report['unknown_causes'], report['gate']), (1, 'UNKNOWN'))
+
+    def test_retry_calls_need_one_timing_per_invocation(self):
+        call = self.event(kind='proof_call', request_id=self.ident, exit_code=0)
+        timing = self.event(request_id=self.ident, lock_attempts=0, lock_acquisitions=0)
+        report = self.analyze([call, call, timing])
+        self.assertEqual(report['families']['task set']['lock_evidence'], 'UNKNOWN')
+        report = self.analyze([call, call, timing, timing])
+        self.assertEqual(report['families']['task set']['lock_evidence'], 'PASS')
+
+    def test_ambiguous_durable_acceptance_is_reconciled_despite_timeout(self):
+        self.request(receipt=False)
+        row = self.event(kind='proof_call', request_id=self.ident, exit_code=-1,
+                         acceptance_echo=False, cause='TimeoutExpired')
+        row['data']['success'] = False
+        q = self.analyze([row])['queue']
+        self.assertEqual(q['accepted'], 1)
+        self.assertEqual(q['ambiguous_accepted'], [self.ident])
+        self.assertEqual(q['missing_receipts'], [self.ident])
+        self.assertEqual(q['reconciliation'], 'FAIL')
+        receipt = dict(id=self.ident, hash=json.loads((self.queue / (self.ident + '.request')).read_text())['hash'],
+                       sequence=0, state='rejected', reason='conflict')
+        (self.queue / (self.ident + '.receipt')).write_text(json.dumps(receipt))
+        q = self.analyze([row])['queue']
+        self.assertEqual(q['rejected'], {self.ident: 'conflict'})
+        self.assertEqual(q['reconciliation'], 'FAIL')
+        receipt['state'] = 'applied'
+        (self.queue / (self.ident + '.receipt')).write_text(json.dumps(receipt))
+        self.assertEqual(self.analyze([row])['queue']['reconciliation'], 'PASS')
+
+    def test_start_without_completion_can_still_have_durable_acceptance(self):
+        self.request(receipt=False)
+        row = self.event(kind='proof_start', request_id=self.ident, call_id='pending')
+        report = self.analyze([row])
+        self.assertEqual(report['queue']['accepted'], 1)
+        self.assertEqual(report['queue']['reconciliation'], 'FAIL')
+        self.assertEqual(report['unfinished_calls'], ['pending'])
+
     def test_failure_with_wait_is_suspected_not_invented_as_confirmed(self):
         row = self.event('handback', lock_wait_s=300)
         row['data']['success'] = False

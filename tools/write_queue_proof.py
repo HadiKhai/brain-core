@@ -44,9 +44,12 @@ def read_json(path):
     return value
 
 
-def queue_snapshot(folder, selected):
+def queue_snapshot(folder, selected, attempted=None):
     """c50 index retries share one receipt; sequence is first index byte offset."""
     errors, requests, receipts, sequences = [], {}, {}, {}
+    selected = set(selected)
+    accepted_ids = set(selected)
+    attempted = set(attempted or ())
     folder = Path(folder)
     if not (folder / 'index').exists():
         return dict(available=False, accepted=len(selected), reconciled=0,
@@ -96,13 +99,18 @@ def queue_snapshot(folder, selected):
     except (OSError, ValueError, KeyError, TypeError) as error:
         errors.append(str(error))
         blocked = None
+    # A timeout/nonzero exit can follow durable admission. The index, not the
+    # caller's exit status or echoed response, decides acceptance for these IDs.
+    durable_attempts = attempted & requests.keys()
+    selected.update(durable_attempts)
     missing = sorted(selected - receipts.keys())
     unaccepted = sorted(selected - requests.keys())
     rejected = {i: receipts[i].get(SCHEMA['reason'], 'unknown') for i in selected & receipts.keys()
                 if receipts[i][SCHEMA['state']] == 'rejected'}
     pending = requests.keys() - receipts.keys()
     return dict(available=True, accepted=len(selected), indexed=len(requests),
-                window_selection='successful observed producer request IDs; v2 index has no timestamps',
+                window_selection='acknowledged IDs plus every observed attempted ID found in the durable index',
+                ambiguous_accepted=sorted(durable_attempts - accepted_ids),
                 unobserved_indexed=len(requests.keys() - selected),
                 reconciled=len(selected & receipts.keys()), missing_receipts=missing,
                 missing_requests=unaccepted, rejected=rejected, pending=len(pending),
@@ -112,13 +120,55 @@ def queue_snapshot(folder, selected):
                                ('PASS' if selected and not blocked else 'UNKNOWN'))
 
 
+def global_failures(internal, calls):
+    """Join only unambiguous call identities; retries are distinct invocations."""
+    groups = [[row] for row in internal]
+    internal_ids = Counter(r.get('request_id') for r in internal)
+    caller_ids = Counter(r.get('request_id') for r in calls)
+    internal_calls = Counter(r.get('call_id') for r in internal)
+    caller_calls = Counter(r.get('call_id') for r in calls)
+    used = set()
+    for row in calls:
+        match = None
+        for i, timing in enumerate(internal):
+            if i in used:
+                continue
+            cid, rid = row.get('call_id'), row.get('request_id')
+            same_call = (cid and cid == timing.get('call_id')
+                         and internal_calls[cid] == caller_calls[cid] == 1)
+            same_request = (rid and rid == timing.get('request_id')
+                            and internal_ids[rid] == caller_ids[rid] == 1
+                            and family(row) is not None and family(row) == family(timing))
+            if same_call or same_request:
+                match = i
+                break
+        if match is None:
+            groups.append([row])
+        else:
+            groups[match].append(row)
+            used.add(match)
+    confirmed, unknown, with_wait = 0, 0, 0
+    incomplete = False
+    for group in groups:
+        failed = [r for r in group if r.get('success') is False or r.get('exit_code') not in (None, 0)]
+        flags = [r.get(SCHEMA['lock_failure']) for r in group]
+        if any(flag is True for flag in flags):
+            confirmed += 1
+        elif any(type(r.get(SCHEMA['lock_failure'])) is not bool for r in failed):
+            unknown += 1
+            with_wait += any(number(r.get('lock_wait_s')) and r['lock_wait_s'] > 0 for r in group)
+        incomplete |= any(type(r.get('success')) is not bool for r in group)
+    return dict(confirmed=confirmed, unknown_causes=unknown, failures_with_wait=with_wait,
+                gate='FAIL' if confirmed else ('UNKNOWN' if unknown or incomplete or not groups else 'PASS'))
+
+
 def analyze(paths, queue, start, end, now=None):
     if end <= start:
         raise ValueError('end must be after start')
     now = now or datetime.now(timezone.utc)
     if len({Path(p).resolve() for p in paths}) != len(paths):
         raise ValueError('duplicate event input')
-    internal, calls, errors, accepted, starts = [], [], [], set(), []
+    internal, calls, errors, accepted, starts, attempted = [], [], [], set(), [], set()
     for path in paths:
         with Path(path).open() as stream:
             for lineno, line in enumerate(stream, 1):
@@ -138,10 +188,17 @@ def analyze(paths, queue, start, end, now=None):
                         calls.append(data)
                     elif row.get('kind') == 'proof_start':
                         starts.append(data)
+                        ident = data.get(SCHEMA['request_id'])
+                        if family(data) in FAMILIES and isinstance(ident, str) and IDENTITY.fullmatch(ident):
+                            attempted.add(ident)
                         continue
                     else:
                         continue
                     ident = data.get(SCHEMA['request_id'])
+                    if family(data) in FAMILIES and ident:
+                        if not isinstance(ident, str) or not IDENTITY.fullmatch(ident):
+                            raise ValueError('invalid attempted request identity')
+                        attempted.add(ident)
                     if (data.get('success') is True and ident and family(data) in FAMILIES
                             and data.get('acceptance_echo', True) is True):
                         if not isinstance(ident, str) or not IDENTITY.fullmatch(ident):
@@ -158,10 +215,11 @@ def analyze(paths, queue, start, end, now=None):
         timing = [r for r in internal if family(r) == name]
         attempts = [r.get(SCHEMA['attempts']) for r in timing]
         acquisitions = [r.get(SCHEMA['acquisitions']) for r in timing]
-        whole_ids = {r.get(SCHEMA['request_id']) for r in whole}
-        timing_ids = {r.get(SCHEMA['request_id']) for r in timing}
+        whole_ids = Counter(r.get(SCHEMA['request_id']) for r in whole)
+        timing_ids = Counter(r.get(SCHEMA['request_id']) for r in timing)
         covered = (bool(timing) and all(type(x) is int and x >= 0 for x in attempts + acquisitions)
-                   and (not whole or (None not in whole_ids and whole_ids <= timing_ids)))
+                   and (not whole or (None not in whole_ids
+                                      and all(count <= timing_ids[ident] for ident, count in whole_ids.items()))))
         stats = summary(whole)
         stats.update(internal=summary(timing), lock_attempts=sum(attempts) if covered else None,
                      lock_acquisitions=sum(acquisitions) if covered else None,
@@ -173,16 +231,13 @@ def analyze(paths, queue, start, end, now=None):
                                              and r.get('success') is True and r.get('exit_code') == 0
                                              for r in whole) else 'UNKNOWN'))
         families[name] = stats
-    failures = [r for r in internal if r.get('success') is False]
-    lock_failures = [r for r in internal if r.get(SCHEMA['lock_failure']) is True]
-    unknown_failures = [r for r in failures if type(r.get(SCHEMA['lock_failure'])) is not bool]
     # Whole-process outcomes supersede internal refresh samples in this series.
     refresh = [r for r in calls if family(r) == 'status --refresh']
     refresh_source = 'launch_to_exit'
     if not refresh:
         refresh = [r for r in internal if family(r) == 'status --refresh']
         refresh_source = 'internal'
-    q = queue_snapshot(queue, accepted)
+    q = queue_snapshot(queue, accepted, attempted)
     completed = Counter(r.get('call_id') for r in calls)
     unfinished = [r.get('call_id') for r in starts if completed[r.get('call_id')] != 1]
     unbound = sum(r.get('success') is True and family(r) in FAMILIES
@@ -193,13 +248,7 @@ def analyze(paths, queue, start, end, now=None):
                 evidence='INCOMPLETE' if errors or q.get('errors') or unfinished or unbound or end > now
                          else 'COLLECTED', unfinished_calls=unfinished, unbound_acceptances=unbound,
                 families=families, observed_commands={k: summary(v) for k, v in sorted(observed.items())},
-                global_lock_failures=dict(confirmed=len(lock_failures), unknown_causes=len(unknown_failures),
-                                          failures_with_wait=sum(number(r.get('lock_wait_s')) and r['lock_wait_s'] > 0
-                                                                 for r in unknown_failures),
-                                          gate='FAIL' if lock_failures else
-                                               ('UNKNOWN' if unknown_failures or not internal
-                                                or any(type(r.get('success')) is not bool for r in internal)
-                                                else 'PASS')),
+                global_lock_failures=global_failures(internal, calls),
                 refresh=dict(**summary(refresh), source=refresh_source,
                              gate='FAIL' if summary(refresh)['nonzero_exits'] else
                              ('PASS' if refresh and all(r.get('success') is True for r in refresh) else 'UNKNOWN')),

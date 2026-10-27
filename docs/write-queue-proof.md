@@ -56,7 +56,8 @@ Hash mismatch, a missing receipt, orphan/duplicate receipt or a receipt after an
 unapplied predecessor remains a failed reconciliation.
 
 The index currently has no acceptance timestamps, so window selection uses
-successful observed producer request IDs; unrelated indexed requests remain
+acknowledged producer IDs plus every attempted ID found in the durable index,
+including timeout/nonzero outcomes and starts without completion. Unrelated indexed requests remain
 visible in the total backlog. Current requests also lack an acceptance timestamp,
 so exact oldest age is UNKNOWN. File mtime is not substituted for queue age.
 If the producer schema gains timestamp fields, bind them in the adapter and add
@@ -70,10 +71,13 @@ Subcommands with explicit action/refresh/enqueue metadata enter the per-family
 internal series. No historical command-word aggregate is relabeled as a producer.
 
 Producer lock bypass requires explicit nonnegative integer `lock_attempts` and
-`lock_acquisitions`, with request-ID coverage for every externally measured call.
+`lock_acquisitions`, with at least as many internal observations per request ID
+as externally measured invocations. One timing cannot cover multiple same-ID retries.
 Zero rounded lock wait never proves bypass. `lock_wait_failure` classifies global
-failure causes; any failed internal call without this boolean keeps the global
-zero-failure gate UNKNOWN. The adapter allows these field names to change in one
+failure causes across internal and caller outcomes; an unclassified failed call
+keeps the global zero-failure gate UNKNOWN. Observations with unique matching
+call IDs (or unique request IDs and matching family) count once; ambiguous retry
+matches remain separate. The adapter allows these field names to change in one
 place when the producer instrumentation is committed. Failed calls with positive
 wait are reported as suspected, never invented as confirmed lock failures.
 
