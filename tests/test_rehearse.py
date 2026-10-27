@@ -29,9 +29,49 @@ def result(text='', code=0, seconds=0.01, unexpected=0):
     return dict(text=text, code=code, seconds=seconds, unexpected=unexpected, timeout=False)
 
 
+def persistent_fixture_directory(case):
+    # No automatic TemporaryDirectory finalizer may override native retention.
+    directory = Path(tempfile.mkdtemp(prefix='.rehearsal-test-', dir=CORE.parent)).resolve()
+    identity = rehearsal._m_rehearse_external.OwnedCopies.identity(directory)
+    def cleanup():
+        try:
+            if (any(p.is_symlink() for p in (directory, *directory.parents))
+                    or rehearsal._m_rehearse_external.OwnedCopies.identity(directory) != identity):
+                return
+            def unreadable(error):
+                raise error
+            for top, dirs, files in os.walk(directory, followlinks=False, onerror=unreadable):
+                if ('bulk' in dirs or any(name.startswith('retiring-') for name in dirs)
+                        or any(name.startswith('unsaved-native-retention-') for name in files)
+                        or any((Path(top) / name).is_symlink() for name in dirs + files)):
+                    return
+                if 'cleanup.json' in files:
+                    receipt = Path(top) / 'cleanup.json'
+                    if receipt.is_symlink():
+                        return
+                    packet = json.loads(receipt.read_text())
+                    if packet.get('state') != 'removed' or packet.get('processes_ended') is not True:
+                        return
+            shutil.rmtree(directory)
+        except (OSError, ValueError, AttributeError):
+            return  # Unknown fixture ownership or retirement preserves evidence.
+    case.addCleanup(cleanup)
+    return directory
+
+
+def owned_rehearsal_workdir(case):
+    # Keep runner copies outside OS-aged temp even in fabricated scenarios.
+    directory = persistent_fixture_directory(case)
+    patch = mock.patch.object(rehearsal, 'rehearsal_copy_parent',
+                              return_value=directory)
+    patch.start()
+    case.addCleanup(patch.stop)
+
+
 class RehearsalRetention(unittest.TestCase):
     """Failure injection stops before acceptance work; only retention is exercised."""
     def setUp(self):
+        owned_rehearsal_workdir(self)
         raw_directory = Path(tempfile.mkdtemp(prefix='rehearsal-retention-'))
         self.directory = raw_directory.resolve(strict=True)
         self.addCleanup(shutil.rmtree, self.directory)
@@ -84,6 +124,25 @@ class RehearsalRetention(unittest.TestCase):
 
     def packets(self):
         return [json.loads(p.read_text()) for p in sorted(self.evidence.glob('*.json'))]
+
+    def test_persistent_fixture_cleanup_preserves_native_retention_and_removes_retired_copies(self):
+        invalid = self.directory / 'invalid-evidence'
+        invalid.write_text('not a directory')
+        for incomplete in (False, True):
+            with self.subTest(incomplete=incomplete):
+                case = unittest.TestCase()
+                directory = persistent_fixture_directory(case)
+                self.addCleanup(shutil.rmtree, directory, True)  # explicit disposal after this control
+                target = str(invalid) if incomplete else ''
+                with mock.patch.dict(os.environ, {'BRAIN_REHEARSAL_EVIDENCE_DIR': target}):
+                    with rehearsal._m_rehearse_external.OwnedCopies(parent=directory, persistent=True) as copies:
+                        (copies.bulk / 'sole-operand').write_bytes(b'fixture retained bytes')
+                case.doCleanups()
+                if incomplete:
+                    self.assertEqual(b'fixture retained bytes', (copies.bulk / 'sole-operand').read_bytes())
+                    self.assertTrue(list(copies.bulk.glob('unsaved-native-retention-*.json')))
+                else:
+                    self.assertFalse(directory.exists())
 
     def fixture(self, cls):
         case = cls('runTest')
@@ -561,6 +620,7 @@ class RehearsalRedaction(Scenario):
 class RehearsalFixture(Scenario):
     def setUp(self):
         super().setUp()
+        owned_rehearsal_workdir(self)
         self.root = self.repo(self.tmp / 'live', {'note.md': 'original\n',
                                                 '.gitignore': '.brain/\nignored/\n'})
         (self.root / 'core/bin').mkdir(parents=True)
@@ -2255,6 +2315,7 @@ class RehearsalPipeline(Scenario):
     def test_committed_candidate_clean_pass_and_all_incident_mutations(self):
         """Actual subprocess orchestration with fabricated installed/candidate CLIs."""
         from brain.instance import Instance
+        owned_rehearsal_workdir(self)
         r = self.init('sample')
         home = self.tmp / 'candidate'
         (home / 'bin').mkdir(parents=True)

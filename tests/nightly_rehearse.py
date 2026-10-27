@@ -14,6 +14,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'lib'))
 from brain import rehearse as rehearsal
 from scenario import Scenario, CORE
+from test_rehearse import owned_rehearsal_workdir
 
 
 @unittest.skipUnless(sys.platform == 'darwin', 'requires macOS OS sandbox')
@@ -33,6 +34,7 @@ class RehearsalNativeCore(Scenario):
         import http.server
         import shutil
         import threading
+        owned_rehearsal_workdir(self)
         self.update_native_evidence(stage='optional-setup')
         r = self.init('sample')
         self.update_native_evidence(root=str(r))

@@ -15,7 +15,7 @@ from types import SimpleNamespace
 import unittest
 from unittest import mock
 
-from test_rehearse import RehearsalFixture, rehearsal, result
+from test_rehearse import RehearsalFixture, rehearsal, result, owned_rehearsal_workdir
 from scenario import CORE, Scenario
 
 
@@ -71,6 +71,7 @@ def tiny_environment(case):
 
 
 def tiny_rehearsal_fixture(case):
+    owned_rehearsal_workdir(case)
     case.root = case.tmp / 'live'
     case.root.mkdir()
     (case.root / 'instance.md').write_text('---\ntimezone: UTC\n---\n')

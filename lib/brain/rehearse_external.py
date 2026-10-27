@@ -21,18 +21,39 @@ ACTIVE_COPIES = contextvars.ContextVar('rehearsal_owned_copies', default=None)
 _guardian_popen = subprocess.Popen
 
 
+def persistent_copy_root(path):
+    """Refuse OS-aged locations using physical paths, including temp aliases."""
+    resolved = Path(path).resolve()
+    forbidden = [Path('/var/folders').resolve(), Path('/private/var/folders').resolve(),
+                 Path(tempfile.gettempdir()).resolve()]
+    if os.environ.get('TMPDIR'):
+        forbidden.append(Path(os.environ['TMPDIR']).resolve())
+    if any(resolved == root or root in resolved.parents for root in forbidden):
+        raise ValueError('temporary rehearsal copy root refused')
+    return resolved
+
+
 class OwnedCopies:
     """Exact-owned copy and process evidence for native retention cleanup.
 
     Never adopt a preexisting path or recover a capability from a receipt. The
     receipt is evidence, not deletion authority. Unknown processes retain bytes.
     """
-    def __init__(self, parent=None, prefix='brain-rehearse-'):
+    def __init__(self, parent=None, prefix='brain-rehearse-', persistent=False):
+        if persistent:
+            if parent is None:
+                raise ValueError('persistent rehearsal copy parent required')
+            persistent_copy_root(parent)
         if parent is not None:
             parent = Path(parent).absolute()
             if any(p.is_symlink() for p in (parent, *parent.parents)):
                 raise ValueError('linked owned-copy parent refused')
+            if persistent:
+                parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+                self.identity(parent)
         self.root = Path(tempfile.mkdtemp(prefix=prefix, dir=parent)).resolve()
+        if persistent:
+            persistent_copy_root(self.root)
         self.bulk = self.root / 'bulk'
         self.bulk.mkdir(mode=0o700)
         self.pid = os.getpid()
