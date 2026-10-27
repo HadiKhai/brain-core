@@ -667,6 +667,30 @@ print(json.dumps(guard.scan_terms(node, terms=[('Needle', 'term 1'), ('CAFÉ', '
                 with self.assertRaises(ValueError):
                     cache.loaded_code({'__name__': fixture.__module__, 'fixture': fixture})
 
+    def test_module_only_upgrade_cannot_reuse_a_clean_loaded_scanner(self):
+        notes = self.node['dir']
+        (notes / 'node.md').write_text('fixture\n')
+        (notes / 'library').mkdir()
+        (notes / 'library/item.md').write_text('---\nscope: needle\n---\nclean\n')
+        self.node['home_path'] = notes / 'library'
+        core = self.tmp / 'module-upgrade'
+        shutil.copytree(CORE / 'lib', core / 'lib')
+        (core / 'bin').mkdir()
+        shutil.copy2(CORE / 'bin/brain', core / 'bin/brain')
+        source = core / 'lib/brain/guard.py'
+        signature = 'def governance_text(text, principals=(), drop=False):'
+        text = source.read_text().replace('        if drop:', '        if _GOVERNANCE_DROP:', 1)
+        source.write_text(text.replace(signature, '_GOVERNANCE_DROP = True\n\n' + signature, 1))
+        old = core_loader.SourceFileLoader('old_global', str(core / 'bin/brain')).load_module()._owners['scan_terms']
+        source.write_text(text.replace(signature, '_GOVERNANCE_DROP = False\n\n' + signature, 1))
+        new = core_loader.SourceFileLoader('new_global', str(core / 'bin/brain')).load_module()._owners['scan_terms']
+        expected = new.scan_terms(self.node, terms=self.terms)
+        self.assertTrue(expected[0])
+        self.assertNotEqual(old._TERM_IMPLEMENTATION, new._TERM_IMPLEMENTATION)
+        with old.term_scan_cache(persist=True):
+            self.assertEqual(old.scan_terms(self.node, terms=self.terms), ([], []))
+        self.assertEqual(new.scan_terms(self.node, terms=self.terms), expected)
+
 
 class Hardening(Scenario):
     """What the second-runtime reviews broke, kept broken-proof."""

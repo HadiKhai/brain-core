@@ -58,7 +58,7 @@ def digest(value):
     return hashlib.sha256(json.dumps(value, ensure_ascii=True, separators=(',', ':')).encode()).hexdigest()
 
 
-def loaded_code(namespace):
+def loaded_code(namespace, *, module_code=None):
     """Fingerprint compiled implementation, independent of later source replacement."""
     import struct
     import types
@@ -93,6 +93,10 @@ def loaded_code(namespace):
         if isinstance(value, types.FunctionType):
             while hasattr(value, '__wrapped__'):
                 value = value.__wrapped__
+            if value.__defaults__ is not None and type(value.__defaults__) is not tuple:
+                raise ValueError('opaque positional-default binding')
+            if value.__kwdefaults__ is not None and type(value.__kwdefaults__) is not dict:
+                raise ValueError('opaque keyword-default binding')
             positional = (None if value.__defaults__ is None else
                           [constant(x, default=True) for x in value.__defaults__])
             keyword = (None if value.__kwdefaults__ is None else
@@ -106,6 +110,8 @@ def loaded_code(namespace):
                 add(name + '.' + method, function)
         else:
             add(name, value)
+    if module_code is not None:
+        rows.append(['<module>', digest(constant(module_code))])
     return digest(rows)
 
 
@@ -348,6 +354,6 @@ class ObjectStorage:
 
 
 try:
-    _TERM_CACHE_IMPLEMENTATION = loaded_code(globals())
-except (TypeError, ValueError, RecursionError):
+    _TERM_CACHE_IMPLEMENTATION = loaded_code(globals(), module_code=sys._getframe().f_code)
+except (TypeError, ValueError, RecursionError, AttributeError, RuntimeError, OSError):
     _TERM_CACHE_IMPLEMENTATION = None  # unavailable identity disables persistence, never source scanning

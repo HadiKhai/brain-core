@@ -2887,3 +2887,5 @@ Only exact immutable scalar/tuple defaults are supported. Callable, mutable,
 unordered and subclass defaults remain opaque and disable persistence; keyword
 binding order is preserved. The streaming hash helper selects SHA-1 inside its
 constructor from a None default instead of encoding a callable as a bare symbol.
+The executing scanner/cache module code is captured too, including top-level
+initializers, so a global-only source upgrade also changes the loaded identity.

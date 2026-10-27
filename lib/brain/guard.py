@@ -848,8 +848,9 @@ def cmd_seal(a):
 # source files installed while it runs. Capture its actual compiled semantics.
 try:
     _TERM_IMPLEMENTATION = _m_term_cache.digest([
-        _m_term_cache.loaded_code(globals()), _m_term_cache.loaded_code(vars(_m_common)),
+        _m_term_cache.loaded_code(globals(), module_code=sys._getframe().f_code),
+        _m_term_cache.loaded_code(vars(_m_common)),
         _m_common.FRONTMATTER_RE.pattern, _m_common.FRONTMATTER_RE.flags,
         NEVER_FILE, sorted(NOTE_FILES)])
-except (TypeError, ValueError, RecursionError):
+except (TypeError, ValueError, RecursionError, AttributeError, RuntimeError, OSError):
     _TERM_IMPLEMENTATION = None
