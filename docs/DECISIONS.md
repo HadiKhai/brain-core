@@ -1,5 +1,7 @@
 # Code decisions
 
+- Rehearsal stores timestamp-preserving copies in a private directory beside the workbench, outside captured source roots; every owned allocation requires an explicit parent and refuses physical paths under system temp, macOS aging roots or HOME dot-directories before starting, while native cleanup still retires its bulk data.
+
 ## D31005: Reconcile only absent, durably recorded local queue processes
 
 Before releasing a verifier bootstrap to exec, the foreground queue records the
@@ -67,6 +69,135 @@ their operation boundaries.
 Outward aliases, replaced physical ancestors and shared files remain refused.
 Each sync failure propagates; no multi-file transaction, namespace lock or
 physical power-loss guarantee is implied.
+
+## D40007: Keep unavailable coordinator measurements unknown in rehearsal
+
+Coordinator context and turn counts have no authorized Brain-owned aggregate in
+this rehearsal contract. The frozen read adapter returns the native unknown
+value for that API and continues to refuse provider discovery. A coordinator
+session binding must not turn an otherwise read-only measurement into a provider
+scan or strand a leased refresh. The control covers due, UI and native refresh
+with a fabricated coordinator session; raw discovery remains refused.
+
+
+## D40006: Exclude provider installation routes from aggregate-only rehearsal
+
+The machine-local `global` map records runtime installation directories used to
+find a Brain from a provider environment. Rehearsal has a private HOME and reads
+one attested aggregate capsule; provider installation routes are outside that
+input contract. Copy preparation omits this map only from its owned source
+copy. It preserves project homes, workbenches, worktrees, privacy policy and the
+external observer's link refusal. The original local bindings are never written.
+
+
+## D40004: Lease preparation writers and prove their exact projections
+
+Locked command preparation starts its native operation before folding hooks or
+reconstructing record sources. Event-source refusals inspect coverage without
+publishing repairs first. Preparation failures close their own lease and retain
+the original error even if terminal publication fails. A copied empty lease
+file cannot transfer a kernel lock: private clones discard only their own fresh
+copies and preserve all begin records for native reconciliation.
+
+Rehearsal attests each record object by its content address, schema and text hash;
+record materialization and hook acknowledgements require matching native writer,
+lock and lease evidence. Hook and reconciliation batches share one observed
+resource operand, verified again at completion. Reconciliation consumes each deleted-resource tombstone once, even when it closes
+several interrupted operations. Archive rollover and status-commit stamps require
+exact independently derived bytes and permissions under the live operation.
+Historical prefixes, live foreign leases, lifecycle completion and unexplained
+residual writes remain strict.
+
+## D40005: Freeze aggregate accounting and stream large history evidence
+
+Both rehearsal cores consume one digest-bound snapshot of existing Brain-owned
+accounting aggregates at the frozen instant. Missing aggregates remain unknown.
+The snapshot binds immutable job-generation fields and explicit worktree scope;
+provider directories, configuration, credentials and transcripts are not copied
+or discovered. Machine totals without an authorized aggregate remain explicitly
+incomplete, and any unplanned provider accounting discovery refuses. Accounting writers retain their strict counter-generation checks;
+usage readers use the fail-soft generation handling from the integration train.
+
+Large journal and comparison operands stream into private owned spool files,
+with source identity, stable metadata and whole-file digests checked on capture
+and consumption. Comparison history and its native cache are independently
+replayed and reconstructed with bounded reads. Unsupported or damaged evidence
+still refuses proof; the ordinary capture bound remains 32 MiB. Bulk spools use
+the same owned terminal cleanup as the clones.
+
+
+## D40003: Count nested open callbacks as one audited operation
+
+Python 3.9 pathlib uses an opener for io.open, producing a second os.open audit
+callback inside the same operation. Consume that callback only when an identical
+path/flags pair was already recorded from its exact parent frame. Consuming the
+pair also requires the captured standard-library Path.open code in both frames.
+It clears the pair; another operation must produce another record. Built-in open,
+direct os.open and repeated pathlib attempts remain individually observed. The
+violation marker is created before a pair can be consumed, so write refusal,
+unexpected-write outcomes and path permissions do not change.
+
+## D40002: Journal the strict rehearsal fixture's binding changes
+
+The real-core fixture configures its fabricated delivery binding through the
+native settings command before freezing its source. Directly rewriting machine
+bindings after the last native transaction left an unexplained baseline gap.
+An unrelated check repair correctly refused to adopt that gap. Keep that
+refusal, complete history/replay checks and all original rehearsal assertions;
+fix the fixture's writer instead of granting paths or forgiving residual state.
+The delivery server's finalizer also encloses this setup command.
+
+## D40001: Preserve an owned allocation capability across worker death
+
+The outer copy scope starts a separate cleanup guardian and transfers the exact
+new allocation over an anonymous socket. A receipt alone never grants cleanup
+authority. Normal exit still uses native retention, then dismisses the guardian.
+On worker death, recovery requires the captured directory identities, immutable
+receipt binding, a dead owner and proven absence of every registered process
+group. A live registered group may be stopped only while its leader still has
+the witnessed OS start identity. Launch gaps, denied or reused groups, explicit
+uncertainty, changed identities and invalid receipts retain bytes. Nested copy
+scopes register launches with their enclosing guardian.
+Every successful publication transfers a complete receipt witness; recovery
+requires exact equality, including mutable metadata, before any filesystem move.
+
+Recovery reuses native checkpoint, staged retirement and publication checks. It
+can recover the same captured inode if worker death interrupted staged deletion.
+Repeat cancellation signals are deferred during terminal cleanup and handlers
+are restored afterward. The existing body exception remains primary, including
+retirement publication failure. This is process recovery, not a guarantee after
+all supervisors die or storage/ownership evidence becomes unavailable.
+
+Report warnings use logical regular-file bytes strictly above one binary GiB.
+Traversal remains bounded, metadata-only and link-refusing; unknown sizes never
+become known-small results.
+
+## D31003: Keep the owned-copy body exception primary during exit
+
+When retirement publication fails while a body exception is already unwinding,
+OwnedCopies passes that original exception object and traceback into native
+finalization. The body exception remains primary, with the retirement failure
+as its cause. A further native finalization failure remains secondary in that
+cause chain. Without a body exception, the retirement failure remains primary.
+Successful exit keeps the existing native cleanup behavior and predicates.
+
+This decision narrows R6-INT-2 to exit/error composition. It changes no ownership,
+identity, process, evidence, ancestor uncertainty or deletion predicates. The
+stopped original ten-file review remains open; focused proof or a narrow source
+review of this contract does not establish whole R6 acceptance.
+
+## D30006: Propagate retention uncertainty before fallible cleanup
+
+Owned copy scopes capture their enclosing in-memory owners on entry. A known
+refusal or cleanup failure marks that entire chain uncertain before inspecting,
+restoring, publishing or checkpointing retained copies. This state is monotonic;
+successful cleanup retains all existing ownership and process predicates.
+An already-incomplete child capture marks the captured owner chain before the
+first pre-delete checkpoint, including when that checkpoint itself fails.
+Staged rollback remains best-effort under the original inode checks. A secondary
+rollback or checkpoint error is chained to the primary exception using Python 3.9
+exception causes; the primary exception and surviving original bytes remain
+observable. No receipt grants deletion authority or later recovery ownership.
 
 ## D30002: Native retention owns final bulk deletion
 
@@ -2948,3 +3079,29 @@ not an automated browser check.
 Sampler/watcher lock writers and generated rehearsal diagnostics enforce 0600 on held inodes; rehearsal copying separates private state and private-mode sources from native cloning, writes copies through 0600 descriptors, and preserves ordinary shared modes after content fsync.
 
 Probe instance files and detached Git administration use the same checked copy writer, including tightening existing destination inodes before truncation. Source descriptors are opened nonblocking and validated as regular files before reading, so unsupported FIFOs refuse without hanging.
+
+## Rehearsal preparation does not probe delivery
+
+Copied webhook bindings never authorize delivery during rehearsal preparation.
+Do not seed command copies with a live probe or a fabricated successful status:
+retain the captured cache, leave delivery results empty, and record
+`delivery not probed (rehearsal)` in diagnostic warnings. Command execution keeps
+its existing OS network boundary and strict comparison rules; a passing rehearsal
+does not certify webhook delivery.
+
+Baseline diagnostic fixtures assert the complete warning list, including the
+explicit skipped-delivery notice alongside their existing baseline warnings.
+
+
+## Prove read observations during isolated rehearsal
+
+Read probes observe command telemetry through the same exact native append proof
+as mutations. Full synchronous UI probes additionally attest only native cache-lock
+creation and the cache producer's exact atomic payloads, private modes and file
+identities. Missing or altered observations grant no write permission; operational
+journal proofs and zero-residual assertions remain unchanged. UI privacy keys use
+a provider-permission signature separately from transcript discovery, allowing a
+frozen accounting adapter to bind the captured aggregate identity without opening
+provider roots or interpreting unavailable measurements as zero.
+The UI JSON cache producer shares the frozen wall clock with the rendered view,
+so observation dates and ages compare without discarding those fields.
