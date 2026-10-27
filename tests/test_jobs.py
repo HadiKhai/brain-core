@@ -452,6 +452,38 @@ class UnifiedHandbacks(Scenario):
 
 
 class LedgerVersionRegressions(Scenario):
+    def test_repeated_reads_share_only_immutable_ledger_parsing(self):
+        jobs = core_loader.SourceFileLoader("ledger_parse_cache", str(CORE / "bin/brain")).load_module()
+        r = self.init("alice")
+        n = {"dir": r}
+        path = r / "job-ledger.md"
+        text = ("<!-- brain:job-ledger v1 -->\n"
+                "| Job | Started | Cause | Extra |\n"
+                "| --- | --- | --- | --- |\n"
+                "| old | 2020-01-01T00:00Z | left\\|right\\\\tail | retained |\n")
+        path.write_text(text)
+        jobs.parsed_job_rows.cache_clear()
+        first = jobs.read_jobs(n)
+        self.assertEqual(first[0]['Cause'], 'left|right\\tail')
+        self.assertEqual(first[0]['Extra'], 'retained')
+        self.assertEqual(first[0]['Ended'], '')
+        first[0]['Cause'] = 'caller mutation'
+        first.append({'Job': 'injected'})
+        second = jobs.read_jobs(n)
+        self.assertEqual(len(second), 1)
+        self.assertEqual(second[0]['Cause'], 'left|right\\tail')
+        self.assertEqual(jobs.parsed_job_rows.cache_info().hits, 1)
+        # A same-length edit with a restored mtime must still be observed.
+        stamp = path.stat()
+        path.write_text(text.replace('| old |', '| new |'))
+        os.utime(path, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
+        self.assertEqual(jobs.read_jobs(n)[0]['Job'], 'new')
+        self.assertEqual(jobs.parsed_job_rows.cache_info().misses, 2)
+        path.write_text('unrecognized ledger\n')
+        self.assertIsNone(jobs.read_jobs(n))
+        path.unlink()
+        self.assertEqual(jobs.read_jobs(n), [])
+
     def test_legacy_ledgers_migrate_without_losing_rows_or_extended_fields(self):
         r = self.init("alice")
         home = self.repo(self.tmp / "app")

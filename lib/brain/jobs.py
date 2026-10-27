@@ -59,7 +59,14 @@ def read_jobs(n):
     text = f.read_text()
     if JOBS_MARK not in text and not any(m in text for m in JOBS_LEGACY_MARKS):
         return None
-    rows, columns = [], JOB_COLS
+    # Repeated attempt/readiness observations still read the file every time.
+    # Only parsing identical bytes is shared; callers own fresh mutable rows.
+    return [dict(row) for row in parsed_job_rows(text, tuple(JOB_COLS))]
+
+
+@functools.lru_cache(maxsize=16)
+def parsed_job_rows(text, defaults):
+    rows, columns = [], defaults
     for line in text.splitlines():
         if line.startswith("| "):
             cells = [uncell(c) for c in re.split(r"(?<!\\)\|", line.strip()[1:-1])]
@@ -68,8 +75,8 @@ def read_jobs(n):
                 continue
             if set("".join(cells)) <= set("-: "):
                 continue
-            rows.append({**dict.fromkeys(JOB_COLS, ""), **dict(zip(columns, cells))})
-    return rows
+            rows.append(tuple({**dict.fromkeys(defaults, ""), **dict(zip(columns, cells))}.items()))
+    return tuple(rows)
 
 
 def write_jobs(inst, n, rows):
