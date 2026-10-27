@@ -356,13 +356,19 @@ def compute(inst, n, build, *, all_nodes=False, targets=None, extra=()):
             observer = common._GIT_OBSERVER.set(git_inputs.observe)
             reads = common._GIT_READS.set(None)
             try:
-                from . import ui_readmodel, spend, status
+                from . import ui_readmodel, spend, status, jobs, command_reads
                 with ui_readmodel.observe(current), spend.spend_read_only(), status.machine_alert_snapshot() as alerts, timings.phase('refresh_compute'):
                     before_paths = tuple(sorted(set(paths())))
                     before = generation(before_paths)
                     before_directories = membership_paths(current, selected)
                     before_membership = generation(before_directories, shallow=True)
-                    result = build(current, node)
+                    # Repeated projections in this one fenced read share source
+                    # observations. Discovery and every publication guard stay
+                    # outside the scope; no result survives a compute boundary.
+                    with command_reads.scope(jobs.read_jobs, status.file_state, status.status_facts,
+                                             status.facts_meta, status.status_section, status.active_work,
+                                             status.inbox_lines, status.blocked_entries, status.pending_imports):
+                        result = build(current, node)
                     final_paths = tuple(sorted(set(paths())))
                     expected = generation(final_paths)
                     final_directories = membership_paths(current, selected)

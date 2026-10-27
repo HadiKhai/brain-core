@@ -450,8 +450,37 @@ def local_job_state(n, branch, w):
     """Only files and local git refs. Unlike worktree_state, never asks gh or a remote."""
     scope = _LOCAL_JOB_SNAPSHOT.get()
     from . import status_refresh
-    if status_refresh.active():
-        scope = None  # refresh fences selected branch answers, never all refs
+    if status_refresh.active() and scope is not None:
+        # Ask only for the registered branches. A merged-name query preserves
+        # the old ancestry booleans when unrelated integration commits arrive;
+        # enumerating the integration DAG would unnecessarily refuse them.
+        repositories = scope[2]
+        home = n['home_path']
+        repository = (home, n['id'], n['fm'].get('merge', 'local'))
+        if repository not in repositories:
+            wanted = {'refs/heads/' + b for b in n['local'].get('worktrees', {})}
+            tips, merged = {}, set()
+            if home and home.exists() and wanted:
+                refs = _m_common.git('for-each-ref', '--format=%(refname)%00%(objectname)',
+                                     '--', *sorted(wanted), cwd=home)
+                tips = {parts[0][len('refs/heads/'):]: parts[1] for line in refs.stdout.splitlines()
+                        for parts in [line.split('\0')] if len(parts) == 2 and parts[0] in wanted}
+                target = _m_worktrees.integration_target(n)
+                ancestry = (_m_common.git('for-each-ref', '--merged', target, '--format=%(refname)',
+                                         '--', *sorted(wanted), cwd=home) if target else None)
+                if refs.returncode or (ancestry is not None and ancestry.returncode):
+                    tips = None  # retain individual Git verdicts on malformed refs
+                elif ancestry is not None:
+                    merged = {ref[len('refs/heads/'):] for ref in ancestry.stdout.splitlines() if ref in wanted}
+            repositories[repository] = tips, merged
+        tips, merged = repositories[repository]
+        if tips is not None:
+            tip = tips.get(branch, '')
+            return {'exists': Path(w['path']).is_dir(), 'tip': tip,
+                    'merged': bool(tip and tip != w.get('start') and branch in merged)}
+        scope = None
+    elif status_refresh.active():
+        scope = None
     if scope is not None:
         values, keys, repositories = scope
         job = (n['id'], branch)
@@ -1596,9 +1625,19 @@ def cmd_status(a):
         if a.refresh:
             from . import events
             events.reconcile(inst, node=n, snapshot=events.source(inst, n) != 'events')
-            events.comparison(inst, n)
-            view = events.events_view_without_current(inst, n) if events.source(inst, n) == "events" else None
-            refresh_status(inst, n, view)
+            from . import status_refresh
+            if status_refresh.requested(inst):
+                def prepare(current, node):
+                    compared = events.snapshot_view(current, node)
+                    view = events.events_view_without_current(current, node) if events.source(current, node) == 'events' else None
+                    return compared, refreshed_text(current, node, view)
+                compared, text = status_refresh.compute(inst, n, prepare, extra=(inst.root / '.brain/events.jsonl',))
+                events.comparison(inst, n, current=compared)
+                refresh_status(inst, n, prepared_text=text)
+            else:
+                events.comparison(inst, n)
+                view = events.events_view_without_current(inst, n) if events.source(inst, n) == "events" else None
+                refresh_status(inst, n, view)
         print(f"{n['id']:<28} {status_line(n)}")
 
 

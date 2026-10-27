@@ -393,6 +393,115 @@ class AutonomyDue(AutonomyProject):
 
 
 class AutonomyFacts(AutonomyProject):
+    def test_refresh_batch_preserves_individual_branch_and_ancestry_answers(self):
+        root, home, wt = self.project()
+        self.git('commit', '--allow-empty', '-qm', 'worker change', cwd=wt)
+        self.git('branch', 'merged-job', cwd=home)
+        self.git('branch', 'untouched-job', cwd=home)
+        loader = core_loader.SourceFileLoader('refresh_branch_batch', str(CORE / 'bin/brain'))
+        m = loader.load_module()
+        refresh = importlib.import_module(loader.package_name + '.status_refresh')
+        inst = m.Instance(root)
+        node = inst.node('app')
+        worktrees = node['local']['worktrees']
+        # The merged branch moved from an older recorded start; the untouched
+        # branch did not. A missing ref and an unmerged worker stay distinct.
+        worktrees['merged-job'] = {**worktrees['job-a'], 'start': '0' * 40}
+        worktrees['untouched-job'] = {**worktrees['job-a'], 'start': self.git('rev-parse', 'HEAD', cwd=home).strip()}
+        worktrees['missing-job'] = {**worktrees['job-a'], 'path': str(self.tmp / 'absent-worktree')}
+        inst.save_local()
+        expected = {b: m.local_job_state(node, b, w) for b, w in worktrees.items()}
+        def prepare(current, target):
+            with m.local_job_snapshot():
+                return {b: m.local_job_state(target, b, w) for b, w in target['local']['worktrees'].items()}
+        self.assertEqual(refresh.compute(inst, node, prepare), expected)
+        self.assertTrue(expected['merged-job']['merged'])
+        self.assertFalse(expected['untouched-job']['merged'])
+        self.assertFalse(expected['job-a']['merged'])
+        self.assertEqual(expected['missing-job']['tip'], '')
+
+    def test_refresh_repeated_query_refuses_a_relevant_ref_change(self):
+        root = self.init('alice')
+        loader = core_loader.SourceFileLoader('refresh_repeated_ref_fence', str(CORE / 'bin/brain'))
+        m = loader.load_module()
+        refresh = importlib.import_module(loader.package_name + '.status_refresh')
+        inst = m.Instance(root)
+        original = (root / 'status.md').read_bytes()
+        def prepare(current, node):
+            query = ('rev-parse', '--verify', '--quiet', 'refs/heads/main')
+            refresh.common.git(*query, cwd=root)
+            self.git('commit', '--allow-empty', '-qm', 'concurrent ref change', cwd=root)
+            return refresh.common.git(*query, cwd=root).stdout
+        with self.assertRaisesRegex(SystemExit, 'status refresh inputs changed'):
+            refresh.compute(inst, inst.node('root'), prepare)
+        self.assertEqual((root / 'status.md').read_bytes(), original)
+
+    def test_refresh_repeated_remote_query_observes_changed_included_config(self):
+        root = self.init('alice')
+        config = self.tmp / 'included.gitconfig'
+        config.write_text('[remote "first"]\nurl = https://example.test/first\n')
+        self.git('config', 'include.path', str(config), cwd=root)
+        loader = core_loader.SourceFileLoader('refresh_included_config', str(CORE / 'bin/brain'))
+        m = loader.load_module()
+        refresh = importlib.import_module(loader.package_name + '.status_refresh')
+        inst = m.Instance(root)
+        def prepare(current, node):
+            self.assertIn('first', refresh.common.git('remote', cwd=root).stdout)
+            config.write_text('[remote "second"]\nurl = https://example.test/second\n')
+            return refresh.common.git('remote', cwd=root).stdout
+        with self.assertRaisesRegex(SystemExit, 'status refresh inputs changed'):
+            refresh.compute(inst, inst.node('root'), prepare)
+
+    def test_refresh_repeated_query_observes_changed_environment_and_worktree(self):
+        root = self.init('alice')
+        loader = core_loader.SourceFileLoader('refresh_query_context', str(CORE / 'bin/brain'))
+        m = loader.load_module()
+        refresh = importlib.import_module(loader.package_name + '.status_refresh')
+        inst = m.Instance(root)
+        env = {**os.environ, 'GIT_CONFIG_COUNT': '1', 'GIT_CONFIG_KEY_0': 'remote.first.url',
+               'GIT_CONFIG_VALUE_0': 'https://example.test/first'}
+        def environment_changed(current, node):
+            refresh.common.git('remote', cwd=root, env=env)
+            env['GIT_CONFIG_KEY_0'] = 'remote.second.url'
+            return refresh.common.git('remote', cwd=root, env=env).stdout
+        def worktree_changed(current, node):
+            refresh.common.git('status', '--porcelain', cwd=root)
+            (root / 'new-untracked.txt').write_text('concurrent source\n')
+            return refresh.common.git('status', '--porcelain', cwd=root).stdout
+        for prepare in (environment_changed, worktree_changed):
+            with self.subTest(prepare=prepare.__name__), self.assertRaisesRegex(SystemExit, 'status refresh inputs changed'):
+                refresh.compute(inst, inst.node('root'), prepare)
+
+    def test_refresh_memoizes_ledger_reads_only_inside_one_fenced_build(self):
+        root, home, wt = self.project()
+        loader = core_loader.SourceFileLoader('refresh_ledger_scope', str(CORE / 'bin/brain'))
+        m = loader.load_module()
+        refresh = importlib.import_module(loader.package_name + '.status_refresh')
+        jobs = importlib.import_module(loader.package_name + '.jobs')
+        inst = m.Instance(root)
+        reads, read_text = [], Path.read_text
+        ledger = inst.node('app')['dir'] / jobs.JOBS_FILE
+        def counted(path, *args, **kwargs):
+            if path == ledger:
+                reads.append(path)
+            return read_text(path, *args, **kwargs)
+        def prepare(current, node):
+            start = len(reads)
+            first = jobs.read_jobs(node)
+            second = jobs.read_jobs(node)
+            self.assertEqual(first, second)
+            self.assertEqual(len(reads) - start, 1)
+            return first
+        with mock.patch.object(Path, 'read_text', counted):
+            first = refresh.compute(inst, inst.node('app'), prepare)
+            self.assertEqual(refresh.compute(inst, inst.node('app'), prepare), first)
+        # Outside the build scope, writers must see physical state each time.
+        with mock.patch.object(Path, 'read_text', counted):
+            start = len(reads)
+            jobs.read_jobs(inst.node('app'))
+            jobs.read_jobs(inst.node('app'))
+            self.assertEqual(len(reads) - start, 2)
+
     def test_refresh_computes_unlocked_beside_a_real_background_commit(self):
         root, home, wt = self.project()
         (wt / 'feature.txt').write_text('worker change\n')
