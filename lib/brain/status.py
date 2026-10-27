@@ -1192,6 +1192,7 @@ def inbox_items(inst, nodes=None, reporter="root", readonly=False, requests_only
     reporters = InboxReporters({key: value for key, value in reporters.items() if isinstance(value, dict)}, generation)
     seen = {key: value for key, value in reporters.get(reporter, {}).items() if isinstance(value, dict)}
     by_id = {n["id"]: n for n in (nodes if nodes is not None else inst.nodes())}
+    from . import inbox_notices
     out, ids = [], set()
     # The live attention view retains advice; delivery queues filter it separately.
     if requests_only:
@@ -1255,7 +1256,7 @@ def inbox_items(inst, nodes=None, reporter="root", readonly=False, requests_only
                     'age_days': round(max(0, elapsed(inst.parse_time(first), inst.now_dt()) / 86400), 2)
                     if inst.parse_time(first) else None,
                     **({"informational": True} if kind == "job" or
-                       (kind == "inbox" and _m_docker_leftovers.leftover_report_line('- ' + text.removeprefix('inbox: '))) else {}),
+                       (kind == "inbox" and inbox_notices.informational_notice('- ' + text.removeprefix('inbox: '))) else {}),
                     **blocked_metadata(inst, n, kind, text)})
     return sorted(out, key=lambda i: i['node']), reporters
 
@@ -1283,6 +1284,9 @@ def cmd_inbox(a):
     weekly = getattr(a, 'weekly', False)
     if weekly and a.new:
         _m_common.die('--weekly is read-only and cannot combine with --new')
+    if not weekly:
+        from . import inbox_notices
+        inbox_notices.autoarchive(inst, nodes)
     items, reporters = inbox_items(inst, nodes, reporter, readonly=weekly, requests_only=weekly)
     if weekly:
         items = [i for i in items if i['kind'] == 'inbox' and i['age_days'] is not None and i['age_days'] >= 7]

@@ -18,6 +18,7 @@ from pathlib import Path
 from . import check as _m_check
 from . import common as _m_common
 from . import guard as _m_guard
+from . import inbox_notices as _m_inbox_notices
 from . import instance as _m_instance
 from . import jobs as _m_jobs
 from . import knowledge as _m_knowledge
@@ -410,7 +411,8 @@ def ui_node(inst, n, since, cache=None, partial=False):
         "coordinator": inst.thread_link(loc["coordinator"]) if loc.get("coordinator") else "",
         "updated": u.isoformat() if u else None, "updated_ago": _m_status.ago(inst, u),
         "status": {k: v for k, v in secs.items() if v and k.lower() != "active work"},
-        "work": work, "worktrees": wts, "inbox": [l[2:] for l in _m_status.inbox_lines(n, readonly=partial)],
+        "work": work, "worktrees": wts, "inbox": [l[2:] for l in _m_status.inbox_lines(n, readonly=partial)
+                                                  if not _m_inbox_notices.informational_notice(l)],
         "blocked": _m_status.status_section(n, "blocked"),
         "blocked_metadata": [_m_ui_status.ui_blocked_metadata(inst, n, t, file_only=partial) for t in _m_status.status_section(n, "blocked")], "decisions": ui_decisions(inst, n), "limits": _m_knowledge.limits_of(n),
         "never_name": len(terms), "spend": lookback,
@@ -566,6 +568,8 @@ def _ui_state(inst, problems=None, scan=None, spend_budget=2.0, machine_spend=No
     machine_due = _m_status.machine_due_items(inst, nodes, machine, due)
     inbox = []
     for item in _m_status.inbox_items(inst, nodes)[0]:
+        if item.get('informational'):
+            continue
         extra = {}
         if item['kind'] in ('blocked', 'blocked-overdue'):
             node = next(n for n in nodes if n['id'] == item['node'])
@@ -598,7 +602,8 @@ def _ui_state(inst, problems=None, scan=None, spend_budget=2.0, machine_spend=No
         "nodes": out_nodes,
         "attention": [safe({"node": a, "kind": k, "text": t,
                             **(_m_ui_status.ui_blocked_metadata(inst, next(n for n in nodes if n["id"] == a), t) if k in ("blocked", "blocked-overdue") else {})})
-                      for a, k, t in _m_status.attention_items(inst, nodes)],
+                      for a, k, t in _m_status.attention_items(inst, nodes)
+                      if k != 'inbox' or not _m_inbox_notices.informational_notice('- ' + t.removeprefix('inbox: '))],
         "inbox": inbox,
         "commits": commits[:300], "hours": UI_HOURS, "activity": {"start": start, "counts": activity},
         "commits_24h": sum(1 for c in commits if c["t"] > time.time() - 86400), "commits_total": len(commits),
