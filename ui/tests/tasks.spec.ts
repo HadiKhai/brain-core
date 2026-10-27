@@ -108,3 +108,33 @@ test("project task tab is scoped and mobile board scrolls within its surface", a
   await tasks.locator('[data-task-id="APP-2"]').getByRole('button', { name: 'Read task', exact: true }).click();
   await expect(page.getByRole('dialog')).toContainText('Keep the source request');
 });
+
+test("keyboard focus reveals distant tasks and viewport shortcuts work from a focused node", async ({ page }) => {
+  await page.route('**/snapshot?scenario=tasks', async route => {
+    const response = await route.fetch();
+    const html = (await response.text()).replace('</head>', `<script>
+      const seed = window.__STATE__.nodes[1].tasks.rows[0];
+      window.__STATE__.nodes[1].tasks.rows = Array.from({length:1500}, (_, i) => ({...seed, id:'LARGE-'+i, title:'Large task '+i, status:'backlog', depends_on:[], blocked_by:[], blocks:[]}));
+      </script></head>`);
+    await route.fulfill({ response, body: html });
+  });
+  await page.goto('/snapshot?scenario=tasks#view=tasks');
+  const tasks = page.locator('[data-page=tasks]');
+  await tasks.getByRole('tab', { name: 'Canvas', exact: true }).click();
+  const canvas = tasks.getByRole('group', { name: 'Task dependency canvas' });
+  const node = canvas.locator('[data-task-key="field-guide:LARGE-1000"]');
+  await page.keyboard.press('Tab');
+  await node.focus();
+  const box = await node.boundingBox(), viewport = await canvas.boundingBox();
+  expect(box!.x).toBeGreaterThanOrEqual(viewport!.x);
+  expect(box!.y).toBeGreaterThanOrEqual(viewport!.y);
+  expect(box!.x + box!.width).toBeLessThanOrEqual(viewport!.x + viewport!.width);
+  expect(box!.y + box!.height).toBeLessThanOrEqual(viewport!.y + viewport!.height);
+  const transform = await canvas.locator(':scope > g').getAttribute('transform');
+  await node.press('ArrowDown');
+  expect(await canvas.locator(':scope > g').getAttribute('transform')).not.toBe(transform);
+  await node.press('+');
+  await expect(canvas).toHaveAttribute('data-zoom', '1.25');
+  await node.press('Enter');
+  await expect(page.getByRole('dialog')).toContainText('Large task 1000');
+});

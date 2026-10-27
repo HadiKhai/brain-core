@@ -48,7 +48,6 @@ export function TaskCanvas({ rows, graph, onOpen }: { rows: RecordData[]; graph:
       }}
       onPointerUp={() => { drag.current = null; }} onPointerCancel={() => { drag.current = null; }}
       onKeyDown={e => {
-        if (e.target !== e.currentTarget) return;
         const moves: Record<string, [number, number]> = { ArrowLeft: [60, 0], ArrowRight: [-60, 0], ArrowUp: [0, 60], ArrowDown: [0, -60] };
         if (moves[e.key]) { e.preventDefault(); const [x, y] = moves[e.key]; setView(v => ({ ...v, x: v.x + x, y: v.y + y })); }
         else if (["+", "=", "-", "Home"].includes(e.key)) { e.preventDefault(); if (e.key === "Home") fit(); else zoom(e.key === "-" ? 0.8 : 1.25); }
@@ -69,7 +68,12 @@ export function TaskCanvas({ rows, graph, onOpen }: { rows: RecordData[]; graph:
             data-task-key={key} data-ready={t.ready_now === true || undefined} data-downstream={unlocked.has(key) || undefined}
             className={`task-graph-node${active === key ? " selected" : ""}`}
             onPointerEnter={() => setHover(key)} onPointerLeave={() => setHover("")}
-            onFocus={() => setHover(key)} onBlur={() => setHover("")} onClick={activate}
+            onFocus={e => {
+              setHover(key);
+              if (e.currentTarget.matches(":focus-visible")) {
+                setView(v => ({ ...v, x: width / 2 - (p.x + 124) * v.k, y: height / 2 - (p.y + 44) * v.k }));
+              }
+            }} onBlur={() => setHover("")} onClick={activate}
             onKeyDown={e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); e.stopPropagation(); activate(); } }}>
             <title>{`${t.id} · ${t.title}\n${t.project} · ${taskColumn(t)}\n${t.ready_now ? "Ready now" : "Not ready to start"}`}</title>
             <rect width="248" height="88" rx="10" />
