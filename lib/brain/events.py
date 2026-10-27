@@ -390,7 +390,7 @@ class Journal:
         self.save()
         self.append('root', 'damage', note['ref'], {'reason': note['reason'], 'flagged': True})
 
-    def append(self, node, kind, ref, data, scrub=True):
+    def append(self, node, kind, ref, data, scrub=True, persist=True):
         self.sync()
         data = dict(data)
         if 'views' in data:
@@ -418,7 +418,7 @@ class Journal:
                     os.fsync(target.fd)
             path = target.path
         append_line(path, record)
-        self.sync(persist=True)
+        self.sync(persist=persist)
         return record
 
     def fault(self, reason, packet=None):
@@ -439,8 +439,8 @@ def journal(inst, repair=False):
         return store
 
 
-def append(inst, node, kind, ref, data, scrub=True):
-    return journal(inst).append(node, kind, ref, data, scrub=scrub)
+def append(inst, node, kind, ref, data, scrub=True, persist=True):
+    return journal(inst).append(node, kind, ref, data, scrub=scrub, persist=persist)
 
 
 def replay(inst, records=None):
@@ -485,10 +485,10 @@ def resources(inst):
     return result
 
 
-def resource_scope(inst, path):
+def resource_scope(inst, path, ordered_nodes=None):
     if path in ('.brain/local.json', '.brain/inbox-seen.json'):
         return '*'
-    for n in sorted(inst.nodes(), key=lambda n: len(n['dir'].parts), reverse=True):
+    for n in ordered_nodes if ordered_nodes is not None else sorted(inst.nodes(), key=lambda n: len(n['dir'].parts), reverse=True):
         prefix = n['dir'].relative_to(inst.root).as_posix()
         if path.startswith('@ready/' + n['id'] + '/') or prefix == '.' or path.startswith(prefix + '/'):
             return node_ref(n['id'])
@@ -496,7 +496,8 @@ def resource_scope(inst, path):
 
 
 def resource_list(inst, values, display=True):
-    rows = [{'id': digest(k.encode()), 'scope': resource_scope(inst, k), 'hash': v,
+    ordered_nodes = sorted(inst.nodes(), key=lambda n: len(n['dir'].parts), reverse=True)
+    rows = [{'id': digest(k.encode()), 'scope': resource_scope(inst, k, ordered_nodes), 'hash': v,
              **({'path': k} if display else {})} for k, v in sorted(values.items())]
     return screen(inst, rows) if display else rows
 
@@ -1332,8 +1333,14 @@ def maintain(op, changed):
                          if not path.startswith('@ready/')]
                 for node in op.inst.nodes():
                     paths.extend(node['dir'] / name for name in ('tasks', 'requirements'))
-                    if node.get('external') and node.get('home_path'):
-                        paths.extend(instance.git_state_paths(node['home_path']))
+                    if node['id'] == n['id'] and node.get('home_path'):
+                        from . import verify
+                        integration = verify.integration_ref(node['home_path'])
+                        refs = {'refs/heads/' + branch for branch in node['local'].get('worktrees', {})}
+                        refs.update((integration, 'refs/remotes/origin/HEAD'))
+                        if integration.startswith('refs/remotes/origin/') and node['fm'].get('merge', 'local') != 'pr':
+                            refs.add(integration.replace('refs/remotes/origin/', 'refs/heads/', 1))
+                        paths.extend(instance.git_state_paths(node['home_path'], refs=refs - {''}, include_head=False))
                 paths.append(op.inst.root / '.brain/communications.json')
                 return paths
             with instance.released(op.inst, list(op.inst.nodes()), extra=projection_inputs):

@@ -108,9 +108,11 @@ def normalize(changes):
     return out
 
 
-def validate(n, records):
+def validate(n, records, selected=None):
     jobs = requirements = None
     for ident, row in records.items():
+        if selected is not None and ident != selected:
+            continue
         record_path(n, ident)
         if not isinstance(row.get('title'), str) or not row['title'].strip():
             raise ValueError(ident + ': title required')
@@ -178,13 +180,33 @@ def independent_add(changes):
     return changes.get('status', 'backlog') in ('backlog', 'ready') and not task_flow.links(changes)
 
 
+def independent_set(n, ident, changes):
+    from . import task_flow
+    row = read_records(n, ident=ident).get(ident)
+    return row is not None and not task_flow.links({**row, **normalize(changes)})
+
+
 def mutation_paths(inst, target=None, changes=None, ident=None, create=False):
-    if create and target is not None and ident is not None and independent_add(normalize(changes or {})):
+    if target is not None and ident is not None and (
+            create and independent_add(normalize(changes or {})) or
+            not create and independent_set(inst.node(target), ident, changes or {})):
         node = inst.node(target)
         paths = [record_path(node, ident)]
-        requirement = (changes or {}).get('requirement')
+        effective = {**read_records(node, ident=ident).get(ident, {}), **normalize(changes or {})}
+        requirement = effective.get('requirement')
         if requirement:
             paths.append(record_path(node, requirement, 'requirements'))
+        if effective.get('status') in ('in-progress', 'in-review', 'testing'):
+            paths.append(node['dir'] / 'job-ledger.md')
+        if effective.get('status') in ('done', 'merged'):
+            if effective.get('completion_kind', 'merge') == 'merge' and node.get('home_path'):
+                paths.extend(_m_instance.git_state_paths(node['home_path'], task_proof=True))
+            receipt = effective.get('completion_receipt')
+            relative = receipt.get('artifact') if isinstance(receipt, dict) else None
+            if isinstance(relative, str) and relative and not Path(relative).is_absolute() and '..' not in Path(relative).parts:
+                path = node['dir'] / relative
+                if not path.is_dir():
+                    paths.extend((path, path.resolve()))
         return paths
     paths = []
     def artifact(node, receipt):
@@ -203,18 +225,19 @@ def mutation_paths(inst, target=None, changes=None, ident=None, create=False):
     selected = list(nodes) if target is None else [target]
     cache, visited, proof_nodes = {}, set(), set()
 
-    def visit(node, row):
-        key = (node['id'], row['id'])
+    def visit(node, row, proof=True):
+        key = (node['id'], row['id'], proof)
         if key in visited:
             return
         visited.add(key)
-        artifact(node, row.get('completion_receipt'))
-        if row.get('status') in ('merged', 'done') and row.get('completion_kind', 'merge') == 'merge':
+        if proof:
+            artifact(node, row.get('completion_receipt'))
+        if proof and row.get('status') in ('merged', 'done') and row.get('completion_kind', 'merge') == 'merge':
             proof_nodes.add(node['id'])
         for ref in _m_flow.links(row):
             peer, dep, _ = _m_flow.resolve(node, ref, cache.get(node['id']), cache)
             if dep is not None:
-                visit(peer, dep)
+                visit(peer, dep, proof)
 
     for node_id in selected:
         node = nodes[node_id]
@@ -225,7 +248,7 @@ def mutation_paths(inst, target=None, changes=None, ident=None, create=False):
                          **cache[node_id].get(ident, {}), **normalize(changes or {}), 'id': ident}
             cache[node_id] = {**cache[node_id], ident: effective}
         for row in cache[node_id].values():
-            visit(node, row)
+            visit(node, row, target is None or ident is None or row['id'] == ident)
     for node_id in cache:
         node = nodes[node_id]
         paths.extend(node['dir'] / name for name in
@@ -238,7 +261,8 @@ def mutation_paths(inst, target=None, changes=None, ident=None, create=False):
 
 
 def prepare_mutation(inst, n, ident, changes, create=False, provider=False):
-    rows = read_records(n, ident=ident) if create else read_records(n)
+    rows = (read_records(n, ident=ident) if create or independent_set(n, ident, changes)
+            else read_records(n))
     if create == (ident in rows):
         raise ValueError('task already exists' if create else 'task not found')
     changes = normalize(changes)
@@ -265,8 +289,8 @@ def prepare_mutation(inst, n, ident, changes, create=False, provider=False):
         if task_flow.links(row):
             rows = read_records(n)
     rows[ident] = row
-    validate(n, rows)
-    closed_transition = row['status'] in ('merged', 'done') and (create or read_records(n).get(ident, {}).get('status') != row['status'])
+    validate(n, rows, selected=ident)
+    closed_transition = row['status'] in ('merged', 'done') and (create or read_records(n, ident=ident).get(ident, {}).get('status') != row['status'])
     if closed_transition:
         row['event_pending'] = 'task_landed'
     return row, closed_transition
@@ -276,7 +300,8 @@ def mutate(inst, n, ident, changes, create=False, provider=False):
     with _m_instance.brain_lock(inst):
         current = _m_instance.Instance(inst.root)
         node = current.node(n['id'])
-        independent = create and independent_add(normalize(changes))
+        independent = (create and independent_add(normalize(changes)) or
+                       not create and independent_set(node, ident, changes))
         with _m_instance.released(inst, node if independent else list(current.nodes()),
                 extra=lambda: mutation_paths(current, node['id'], changes, ident, create)):
             row, closed_transition = prepare_mutation(current, node, ident, changes, create, provider)
