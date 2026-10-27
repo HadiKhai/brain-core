@@ -298,3 +298,16 @@ class InboxNoise(Scenario):
         state = reminders.lifecycle_read(self.inst)
         key = reminders.inbox_source_id(self.inst.node('root'), notice)
         self.assertNotIn('expired', state['inbox'].get('root', {}).get(key, {}))
+
+    def test_resolved_machine_variants_expire_but_live_holds_and_questions_remain(self):
+        notices = self.m._owners['terminal_notice']
+        for text, event in [('held step exited: command exited with status -15', 'exited'),
+                            ('held step exited: interrupted (KeyboardInterrupt)', 'exited'),
+                            ('held step exited: owner stopped before the command completed', 'exited'),
+                            ('held step resumed automatically: heavy example held since 2026-10-25T15:00Z: pressure; clears when resources clear', 'resumed')]:
+            line = '- 2026-10-25T15:40:29+00:00 from machine: ' + text + ' <!-- machine-wait:' + 'a' * 32 + ':' + event + ' -->'
+            with self.subTest(text=text):
+                self.assertTrue(notices.terminal_notice(line))
+                self.assertFalse(notices.terminal_notice(line + ' <!-- host-question:protected -->'))
+        held = '- 2026-10-25T15:40:29+00:00 from machine: heavy example held since 2026-10-25T15:00Z: pressure; clears when resources clear <!-- machine-wait:' + 'a' * 32 + ':coordinator -->'
+        self.assertFalse(notices.terminal_notice(held))

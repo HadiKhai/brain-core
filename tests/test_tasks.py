@@ -1074,17 +1074,17 @@ class Tasks(Scenario):
         task_reconcile.reconcile(self.inst, [self.n], apply=True)
         self.assertEqual(len([e for e in events.facts(self.inst, self.n) if e['data'].get('fact_type') == 'task_landed']), 1)
 
-    def test_add_validates_only_the_reachable_subgraph_and_exact_requirements(self):
+    def test_add_validates_only_an_unlinked_record_and_its_exact_requirement(self):
         self.add('DEPENDENCY')
         tasks.requirement_add(self.inst, self.n, 'REQ-ADD', 'Keep a source', self.inst.now(), 'notes.md:1')
         self.add('UNRELATED')
         with mock.patch.object(tasks, 'read_records', wraps=tasks.read_records) as reads:
-            self.add('NEW', requirement='REQ-ADD', depends_on=['DEPENDENCY'])
+            self.add('NEW', requirement='REQ-ADD')
         self.assertTrue(all(call.kwargs.get('ident') is not None or len(call.args) == 3 for call in reads.call_args_list))
         requested = [call.kwargs.get('ident') or call.args[2] for call in reads.call_args_list]
         self.assertNotIn('UNRELATED', requested)
         self.assertIn('REQ-ADD', requested)
-        self.assertIn('DEPENDENCY', requested)
+        self.assertNotIn('DEPENDENCY', requested)
         with self.assertRaisesRegex(ValueError, 'missing dependency'):
             self.add('MISSING-REF', depends_on=['ABSENT'])
         with self.assertRaisesRegex(ValueError, 'requirement not found'):
@@ -1121,3 +1121,53 @@ class Tasks(Scenario):
         self.assertTrue(any(e['kind'] == 'begin' and e['data']['command'] == 'task' for e in records))
         self.assertTrue(any(e['kind'] == 'commit' and e['data']['command'] == 'task' for e in records))
         self.assertEqual(events.pending(records), {})
+
+    def test_add_keeps_qualified_local_and_cross_node_return_graph_validation(self):
+        peer = self.peer_node('producer')
+        self.add('OLD')
+        self.add('QUALIFIED', depends_on=['root:OLD'])
+        tasks.mutate(self.inst, peer, 'P', {'title': 'Peer dependency', 'depends_on': ['root:OLD']}, create=True)
+        self.add('CROSS', depends_on=['producer:P'])
+        rows = tasks.read_records(self.n)
+        self.assertEqual(rows['QUALIFIED']['depends_on'], ['root:OLD'])
+        self.assertEqual(rows['CROSS']['depends_on'], ['producer:P'])
+        tasks.validate(self.n, rows)
+
+    def test_add_rejects_a_linear_return_edge_cycle_before_any_write(self):
+        from brain import task_linear
+        peer = self.peer_node('producer')
+        old = self.add('OLD')
+        self.linear_config()
+        old.update(source='linear', depends_on=['NEW'],
+                   provider={'team': task_linear.config(self.n), 'id': self.linear_issue()['id']})
+        tasks.save_record(self.n, old)
+        remote = {**old, 'id': 'P', 'depends_on': ['root:OLD']}
+        tasks.save_record(peer, remote)
+        before = {p: p.read_bytes() for p in self.root.rglob('*.md')}
+        with self.assertRaisesRegex(ValueError, 'cycle'):
+            self.add('NEW', source='local', depends_on=['producer:P'])
+        self.assertEqual(before, {p: p.read_bytes() for p in before})
+        self.assertFalse((self.root / 'tasks/NEW.md').exists())
+
+    def test_open_task_add_keeps_projection_after_a_partial_managed_index_failure(self):
+        import contextlib
+        import io
+        from brain import common, events, freshness, status
+        fm, body = common.read_fm(self.root / 'node.md')
+        fm.update(upstream_generator='links', upstream_inputs='source.md', upstream_output='index.md')
+        common.write_fm(self.root / 'node.md', fm, body)
+        (self.root / 'source.md').write_text('A source\n')
+        (self.root / '.brain').mkdir(exist_ok=True)
+        op = events.Command(self.root, command='task')
+        op.args = argparse.Namespace(_open_task_added=True)
+        view = {'facts': [], 'active': [], 'active_keys': [], 'merged': [], 'merged_before': []}
+        with mock.patch.object(freshness, 'record_freshness', side_effect=ValueError('receipt publication failed')), \
+                mock.patch.object(events, 'snapshot_view', return_value=view) as snapshot, \
+                mock.patch.object(events, 'cap_now'), mock.patch.object(status, 'refresh_status'), \
+                mock.patch.object(events, 'active_table'), mock.patch.object(events, 'status_commit'), \
+                contextlib.redirect_stderr(io.StringIO()):
+            result = events.maintain(op, {})
+        self.assertTrue((self.root / 'index.md').exists())
+        self.assertIn(freshness.MANAGED_INDEX_MARKER, (self.root / 'index.md').read_text())
+        snapshot.assert_called_once()
+        self.assertEqual(result, {'root': view})

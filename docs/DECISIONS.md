@@ -2846,11 +2846,12 @@ Terminal machine completion/exit notices expire only after their successful inbo
 delivery, or an explicit drain. Expiry is a retained lifecycle receipt, separate from
 an answer, and never suppresses a question, worker failure or actionable machine hold.
 
-New task creation validates the new record and its outgoing reachable local dependency
-subgraph, with direct requirement lookups. Existing-record edits and explicit task
-checks retain whole-graph validation. This avoids repeatedly parsing every requirement
+Unlinked new task creation validates only the new record, with direct requirement
+lookups. Linked additions, existing-record edits and explicit task checks retain
+whole-graph validation, including qualified and cross-node return edges. This avoids repeatedly parsing every requirement
 for every existing task while holding the instance lock for a single unrelated add.
 
 For a successful new backlog/ready task whose native operation changes no ledger/status
 resources, retain the native command journal and skip the unrelated status/usage
-projection. Resource changes and other transitions retain normal maintenance.
+projection. Resource changes, configured managed indexes and other transitions retain
+normal maintenance, including partially failed index regeneration.

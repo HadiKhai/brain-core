@@ -1253,7 +1253,8 @@ def maintain(op, changed):
     dispatch_landings(op.inst)
     indexed = freshness.maintain_indexes(op.inst, op.inst.nodes())
     if (op.command == 'task' and getattr(op.args, '_open_task_added', False)
-            and not changed and not op.record_paths and not indexed):
+            and not changed and not op.record_paths and not indexed
+            and not any(n['fm'].get('upstream_generator') == 'links' for n in op.inst.nodes())):
         # Task files are outside this ledger/status projection. Preserve the
         # native command journal without re-reading every job's live usage.
         return {}

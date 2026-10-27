@@ -8,9 +8,13 @@ def terminal_notice(line):
     # Requests, worker failures and actionable holds must never expire as telemetry.
     if re.search(r'<!-- (?:host-question|handback|worker-failure|communication):', line):
         return False
+    from . import machine
+    if (machine.machine_wait_notice_line(line) and
+            re.search(r'<!-- machine-wait:[0-9a-f]{32}:(?:completed|exited|resumed) -->$', line)):
+        return True
     return bool(re.fullmatch(
         r'- \S.*? from machine: (?:command completed: command completed successfully|'
-        r'held step exited: command exited with status [0-9]+)'
+        r'held step exited: command exited with status -?[0-9]+)'
         r'(?: <!-- machine-wait:[0-9a-f]{32}:(?:completed|exited) -->)?', line))
 
 
