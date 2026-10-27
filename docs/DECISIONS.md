@@ -2755,3 +2755,14 @@ Inbox acknowledgement publication errors retain the already-flushed delivery
 and warning, then propagate the original error with a nonzero exit. They never
 report successful persistence. A stale-generation no-op may still repeat later
 without overwriting a newer acknowledgement or resolution.
+
+Atomic publication persists a private intended-mode record alongside the staging file
+before applying its mode and renaming. The record binds the destination name, device,
+inode, size, modification timestamp and content digest to the intended mode. A writer
+recovers a matching published inode before deriving the next publication's mode;
+readers never repair permissions. Recovery refuses unsafe records or changed content,
+retains intent on failure, and caps private targets at 0600. Active publication records
+are locked, and successful publication removes its owned record only after directory
+sync. Unpublished staging and records for other inodes are left for reconciliation;
+recovery never promotes them. Chmod failures still abort publication and attempt
+private cleanup, preserving the original failure if cleanup also fails.
