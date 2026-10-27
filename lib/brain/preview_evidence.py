@@ -281,13 +281,16 @@ def preview_requirement(inst, n, branch, head, packet=None):
         if not preview_urls(n) and required not in ('true', 'yes', '1', 'on'):
             return {**evidence, 'status': 'optional', 'reason': 'preview is optional'}
         # Read live policy and refs, even within a dashboard's Git read snapshot.
+        # Fence before loading any policy: a post-load fence can bless stale data.
+        policy_paths = [n['dir'] / _m_jobs.JOBS_FILE]
+        policy_before = _m_instance.state_signature(inst, n, extra=policy_paths)
         live = _m_instance.Instance(inst.root)
-        n = live.node(n['id'])
+        n = next((node for node in live.nodes() if node['id'] == n['id']), None)
+        if n is None:
+            return evidence
         row = _m_jobs.open_job(_m_jobs.read_jobs(n) or [], branch)
         if not row or not n.get('external') or not n.get('home_path'):
             return evidence
-        policy_paths = [n['dir'] / _m_jobs.JOBS_FILE]
-        policy_before = _m_instance.state_signature(live, n, extra=policy_paths)
         repo = n['home_path']
         env = {**os.environ, 'GIT_OPTIONAL_LOCKS': '0'}
 
@@ -346,7 +349,15 @@ def preview_requirement(inst, n, branch, head, packet=None):
             w = n['local'].get('worktrees', {}).get(branch)
             if not isinstance(w, dict):
                 return evidence
-            lanes, _ = _m_lanes.lane_map(n, w, _m_verify.verify_env(n, branch, w))
+            lane_env = _m_verify.verify_env(n, branch, w)
+            if 'verify_lane_env' in (packet or {}):
+                lane_env = _m_lanes.recorded_lane_environment(lane_env, packet['verify_lane_env'])
+            elif (packet or {}).get('version') == 1 and n['fm'].get('verify_lanes_from'):
+                return evidence  # Legacy full packets did not retain the map environment.
+            scope = (packet or {}).get('verify_scope', 'full')
+            lane_env.update(BRAIN_ROOT=str(inst.root), BRAIN_VERIFY_BASE=base,
+                            BRAIN_VERIFY_HEAD=head, BRAIN_VERIFY_SCOPE=scope)
+            lanes, _ = _m_lanes.lane_map(n, w, lane_env)
             selected = {lane['name'] for lane in lanes if lane['name'] in ('ui', 'rendered')}
             if not selected:
                 return evidence
@@ -375,7 +386,8 @@ def preview_requirement(inst, n, branch, head, packet=None):
                 query('rev-parse', '--verify', ref + '^{commit}').strip() != current_base):
             return {**evidence, 'reason': 'preview classification refs changed'}
         current = _m_instance.Instance(inst.root)
-        if _m_instance.state_signature(current, current.node(n['id']), extra=policy_paths) != policy_before:
+        current_node = next((node for node in current.nodes() if node['id'] == n['id']), None)
+        if current_node is None or _m_instance.state_signature(current, current_node, extra=policy_paths) != policy_before:
             return {**evidence, 'reason': 'preview classification policy changed'}
         if any(_m_lanes.matches(path, patterns) for path in paths for patterns in groups):
             return {**evidence, 'reason': 'rendered paths touched'}

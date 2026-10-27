@@ -956,7 +956,13 @@ def verification_config_valid(n, packet):
 def record_ready(inst, n, branch, reviews, previous=None, reverify=False, full_receipt=None, full=False):
     reasons, head, main = ready_preflight(n, branch)
     integration_base = integration_parent(n, main) if head and main else main
-    preview_context = {'integration_base': integration_base}
+    change = n['fm'].get('verify_change', '').strip()
+    # A complete gate must never be replaced by lanes or by a per-change command.
+    # Combining two selection mechanisms is unknown: use the complete command.
+    lanes_configured = bool(n['fm'].get('verify_lanes') or n['fm'].get('verify_lanes_from'))
+    full = full or full_receipt is not None or bool(change and lanes_configured)
+    change = change if not full and not lanes_configured else ''
+    preview_context = {'integration_base': integration_base, 'verify_scope': 'change' if change else 'full'}
     reasons.extend(ready_policy_reasons(inst, n, branch, head, preview_context))
     from . import rehearse as _m_rehearse
     rehearsal = _m_rehearse.read_evidence(n, branch, head)
@@ -975,14 +981,10 @@ def record_ready(inst, n, branch, reviews, previous=None, reverify=False, full_r
     if previous and previous.get("integration_base", previous.get("main")) != integration_base:
         reverify = True
     env = verify_env(n, branch, w)
-    change = n['fm'].get('verify_change', '').strip()
-    # A complete gate must never be replaced by lanes or by a per-change command.
-    # Combining two selection mechanisms is unknown: use the complete command.
-    lanes_configured = bool(n['fm'].get('verify_lanes') or n['fm'].get('verify_lanes_from'))
-    full = full or full_receipt is not None or bool(change and lanes_configured)
-    change = change if not full and not lanes_configured else ''
     env = {**env, 'BRAIN_ROOT': str(inst.root), 'BRAIN_VERIFY_BASE': integration_base, 'BRAIN_VERIFY_HEAD': head,
            'BRAIN_VERIFY_SCOPE': 'change' if change else 'full'}
+    lane_env = _m_lanes.lane_environment(env)
+    preview_context['verify_lane_env'] = lane_env
     port_context = verify_port_context(n, env)
     try:
         snap = None if full or change else _m_lanes.lane_snapshot(n, w, env, inputs)
@@ -1002,7 +1004,10 @@ def record_ready(inst, n, branch, reviews, previous=None, reverify=False, full_r
                                                    inputs, port_context, snap, reviews)
         except (OSError, ValueError, KeyError, TypeError):
             return None, ['full receipt missing, changed, failed or stale; run full-run on this exact candidate']
-        return {**packet, 'preview_scope': preview_scope}, []
+        preview_reasons = _m_preview.validate_ready_preview(inst, n, branch, head, packet)
+        if preview_reasons:
+            return None, preview_reasons
+        return {**packet, 'preview_scope': _m_preview.preview_requirement(inst, n, branch, head, packet)}, []
     reuse = None if full or reverify or snap or (previous or {}).get('verify_lanes') is not None else verify_reuse(n, branch, previous, head, main, verify, w["path"], inputs, port_context)
     # Do not sweep an operator's dirty .gitignore into
     # the worker hand-back commit just because we added the local-output exclusion.
@@ -1026,6 +1031,7 @@ def record_ready(inst, n, branch, reviews, previous=None, reverify=False, full_r
                 "inputs": inputs, "input_files_ref": input_ref, "verify_log": previous.get("verify_log"), "rehearsal": rehearsal,
                 "verify_port_context": port_context,
                 "preview_scope": preview_scope,
+                "verify_lane_env": lane_env,
                 "review_rounds": reviews, "checked_at": _m_jobs.stamp(inst)}, []
     _m_instance.unlock()  # verification belongs to this worker, not the instance-wide lock
     lane_evidence = run_lanes(inst, n, branch, w, env, snap, previous, head, main, inputs, reverify) if snap else None
@@ -1066,6 +1072,7 @@ def record_ready(inst, n, branch, reviews, previous=None, reverify=False, full_r
               "inputs": inputs, "input_files_ref": input_ref, "review_rounds": reviews, "checked_at": _m_jobs.stamp(inst), "rehearsal": rehearsal}
     packet['verify_port_context'] = port_context
     packet['preview_scope'] = preview_scope
+    packet['verify_lane_env'] = lane_env
     if full or change:
         packet.update(verify_scope='change' if change else 'full',
                       verify_config_hash=_m_lanes.lane_config_hash(n))

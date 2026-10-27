@@ -3580,3 +3580,7 @@ declarations and applicability, and readiness recomputes the decision rather
 than accepting a cached exemption. Classification changes during verification
 refuse publication. A retained train base must precede the current integration
 base, so it cannot narrow away rendered changes.
+Generated classifiers use the verifier's root, base, head and scope environment;
+new packets retain the existing lane-environment format for subsequent reads.
+Legacy generated-map packets without that environment require a receipt.
+Policy signatures enclose the live load as well as classification.

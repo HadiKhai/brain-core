@@ -1702,6 +1702,43 @@ class PreviewDiffScoping(Scenario):
             scope = m.preview_requirement(inst, n, 'job', data['head'])
             self.assertEqual(scope['status'], 'required')
 
+    def test_generated_map_uses_full_gate_identity_and_retains_environment_for_readers(self):
+        script = ('import json, os\n'
+                  'active = all(os.environ.get(k) for k in '
+                  '["BRAIN_ROOT", "BRAIN_VERIFY_BASE", "BRAIN_VERIFY_HEAD"]) '
+                  'and os.environ.get("BRAIN_VERIFY_SCOPE") == "full" '
+                  'and os.environ.get("NODE_OPTIONS") == "gate-fixture"\n'
+                  'print(json.dumps([dict(name="ui", command="true", '
+                  'inputs=["ui/**" if active else "server/**"])]))')
+        declaration = 'verify_lanes_from=python3 -c ' + shlex.quote(script.replace('\n', '; '))
+        m, inst, n, data = self.context(declaration)
+        self.change(m, inst, n, data, {'server/api.py': 'backend\n'})
+        with mock.patch.dict(os.environ, {**self.env, 'NODE_OPTIONS': 'gate-fixture'}, clear=True):
+            packet, reasons = m.record_ready(inst, n, 'job', 1, full=True)
+        self.assertEqual(reasons, [])
+        self.assertEqual(packet['preview_scope']['status'], 'not_applicable')
+        with mock.patch.dict(os.environ, {**self.env, 'NODE_OPTIONS': 'other'}, clear=True):
+            self.assertEqual(m.preview_requirement(inst, n, 'job', data['head'], packet), packet['preview_scope'])
+        self.change(m, inst, n, data, {'ui/page.html': 'rendered\n'})
+        with mock.patch.dict(os.environ, {**self.env, 'NODE_OPTIONS': 'gate-fixture'}, clear=True):
+            packet, reasons = m.record_ready(inst, n, 'job', 1, full=True)
+        self.assertIsNone(packet)
+        self.assertIn('missing or invalid exact-head preview rendering and three-source-sample receipt', reasons)
+
+    def test_policy_mutation_between_loading_and_fencing_refuses_exemption(self):
+        m, inst, n, data = self.context()
+        self.change(m, inst, n, data, {'server/api.py': 'backend\n'})
+        original = m.Instance.nodes
+        pending = [True]
+        def mutate_after_load(current):
+            nodes = original(current)
+            if pending[0]:
+                pending[0] = False
+                self.declaration(m, inst, n, 'ui_globs=server/**')
+            return nodes
+        with mock.patch.object(m.Instance, 'nodes', mutate_after_load):
+            self.assertTrue(m.validate_ready_preview(inst, n, 'job', data['head']))
+
 
 class GuardAllowanceRenewal(Scenario):
     def test_changed_policy_can_receive_a_new_exact_allowance(self):
