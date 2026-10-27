@@ -343,6 +343,34 @@ def state_signature(inst, node=None, extra=(), local_keys=()):
     return h.digest()
 
 
+def git_state_paths(home):
+    """Mutable ref/config generations, including linked-worktree common refs.
+
+    Git objects are immutable; traversing them would turn a recheck into a scan.
+    Keep both the logical metadata entry and its resolved target in the fence.
+    """
+    marker = Path(home) / '.git'
+    paths = [marker] if not marker.is_dir() else []
+    directory = marker
+    if marker.is_file():
+        value = marker.read_text().strip()
+        if not value.startswith('gitdir: '):
+            raise ValueError('invalid Git directory pointer')
+        directory = (Path(home) / value[8:]).resolve()
+    common = directory / 'commondir'
+    paths.append(common)
+    bases = [directory]
+    if common.is_file():
+        bases.append((directory / common.read_text().strip()).resolve())
+    for base in bases:
+        for name in ('HEAD', 'refs', 'packed-refs', 'config'):
+            path = base / name
+            paths.extend((path, path.resolve()))
+            if name == 'refs' and path.is_dir():
+                paths.extend(p.resolve() for p in path.rglob('*') if p.is_symlink())
+    return paths
+
+
 @contextlib.contextmanager
 def released(inst, node=None, extra=(), local_keys=()):
     """Release an existing writer lock, then validate and reload before publication.

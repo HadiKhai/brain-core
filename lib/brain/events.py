@@ -1284,14 +1284,21 @@ def maintain(op, changed):
             known = status.facts_meta(n).get('merged_before', [])
         else:
             known = status.facts_meta(n).get('merged', [])
-        if op.command == 'handback':
+        if op.command in ('handback', 'task', 'review', 'preview_receipt'):
             # Status projection can scan worker transcripts. It grants no action
             # authority, and must not hold up writers after terminal publication.
             # A concurrent source change refuses this generated view; the normal
             # maintenance-failure path invalidates it for an explicit refresh.
-            with instance.released(op.inst, list(op.inst.nodes()),
-                    extra=lambda: [op.inst.root / path for path in resources(op.inst)
-                                   if not path.startswith('@ready/')]):
+            def projection_inputs():
+                paths = [op.inst.root / path for path in resources(op.inst)
+                         if not path.startswith('@ready/')]
+                for node in op.inst.nodes():
+                    paths.extend(node['dir'] / name for name in ('tasks', 'requirements'))
+                    if node.get('external') and node.get('home_path'):
+                        paths.extend(instance.git_state_paths(node['home_path']))
+                paths.append(op.inst.root / '.brain/communications.json')
+                return paths
+            with instance.released(op.inst, list(op.inst.nodes()), extra=projection_inputs):
                 view = snapshot_view(op.inst, n, known)
         else:
             view = snapshot_view(op.inst, n, known)

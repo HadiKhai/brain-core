@@ -476,11 +476,11 @@ def publish_handback(a):
             _m_common.touch(inbox)
         _m_tasks.handback_event(inst, n, row, data)
         inst.commit([], f"{n['id']}: worker hand-back")
+    _m_instance.unlock()  # wake identity scans follow durable publication, never its hold
     if question_created:
         _m_hosts.request_wake(inst, n, 'wake:' + wake_id)
     elif a.state == "blocked" and not need:
         _m_hosts.request_wake(inst, n, "wake:" + data["wake_id"])
-    _m_instance.unlock()  # accounting follows durable publication and does not mutate shared state
     try:
         current = open_job(read_jobs(n) or [], a.branch)
         if current:

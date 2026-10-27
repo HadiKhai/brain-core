@@ -276,14 +276,19 @@ def validate_review_receipt(inst, n, row, head, data, fresh=False):
 def record_review_receipt(inst, n, branch, data):
     from . import instance as _m_instance
     with _m_instance.brain_lock(inst):
+        n = _m_instance.Instance(inst.root).node(n['id'])
         row = _m_jobs.open_job(_m_jobs.read_jobs(n) or [], branch)
         if not row:
             raise ValueError('review receipt needs an open job')
         repo = n.get('home_path') if n.get('external') else inst.root
-        head = _m_common.git('rev-parse', '--verify', 'refs/heads/' + branch + '^{commit}', cwd=repo).stdout.strip()
-        validate_review_receipt(inst, n, row, head, data, fresh=True)
-        serialized = json.dumps(data, sort_keys=True) + '\n'
-        _m_guard.no_terms_in(n, serialized, 'review identity receipt')
+        paths = lambda: [n['dir'] / _m_jobs.JOBS_FILE, *_m_instance.git_state_paths(repo)]
+        with _m_instance.released(inst, n, extra=paths):
+            head = _m_common.git('rev-parse', '--verify', 'refs/heads/' + branch + '^{commit}', cwd=repo).stdout.strip()
+            validate_review_receipt(inst, n, row, head, data, fresh=True)
+            serialized = json.dumps(data, sort_keys=True) + '\n'
+            _m_guard.no_terms_in(n, serialized, 'review identity receipt')
+        if (inst.now_dt() - inst.parse_time(data['observed_at'])).total_seconds() > 300:
+            raise ValueError('review observation expired during preflight; use a fresh review context')
         path = review_receipt_path(n, row, head)
         _m_common.safe_target(path)
         path.parent.mkdir(parents=True, exist_ok=True)

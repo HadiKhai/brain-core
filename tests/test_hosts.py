@@ -34,14 +34,37 @@ class LockHotfix(Scenario):
     job = _test_verify.WorkerReadyPackets.job
 
     def assert_compute_allows_writer(self, site, drift=False):
-        if site.startswith('handback'):
+        if site.startswith('receipt'):
+            from test_review_discipline import IndependentReviewReceipts
+            root, wt, m, inst, n, receipt = IndependentReviewReceipts.context(self)
+            if site == 'receipt_preview':
+                self.b(root, 'set', 'a', 'preview=http://127.0.0.1:4999/')
+                receipt = {'version': 1, 'node': 'a', 'job_key': receipt['job_key'], 'branch': 'job',
+                           'head': receipt['head'], 'checked_at': inst.now_dt().isoformat(),
+                           'renderer_threadId': 'fixture-renderer', 'urls': [{
+                               'url': 'http://127.0.0.1:4999/', 'rendered': True, 'render_evidence': 'fixture',
+                               'items': [{'page_item': str(i), 'source_ref': 'fixture:' + str(i),
+                                          'source_item': str(i)} for i in range(3)]}]}
+            path = self.tmp / 'receipt.json'
+            path.write_text(json.dumps(receipt))
+            args = (['preview-receipt', 'a', '--branch', 'job', '--file', str(path)]
+                    if site == 'receipt_preview' else ['review', 'a', '--branch', 'job', '--receipt-file', str(path)])
+        elif site.startswith('handback'):
             root, _, wt = self.job()
             args = ['handback', 'a', '--branch', 'job', '--state', 'done',
                     '--reviews', '1', '--summary', 'Synthetic result', '--lessons', 'none: fixture']
+            if site in ('handback_question', 'handback_blocked'):
+                self.b(root, 'set', 'a', 'coordinator=fixture-owner', 'wake=exit 0')
+                args = ['handback', 'a', '--branch', 'job', '--state', site.removeprefix('handback_'),
+                        '--summary', 'Synthetic result', '--lessons', 'none: fixture']
+                if site == 'handback_question':
+                    args += ['--question', 'Choose a fixture color']
         else:
             root = self.init('fixture')
             wt = None
             args = ['machine', 'sample'] if site.startswith('sample') else ['wake', 'root', '--drain']
+            if site.startswith('task'):
+                args = ['task', 'add', 'root', 'PROOF-1', '--title', 'Fixture task']
             if site == 'wake':
                 self.b(root, 'set', 'root', 'coordinator=old-owner', 'wake=exit 0')
                 m = core_loader.SourceFileLoader('compute_wake', str(CORE / 'bin/brain')).load_module()
@@ -53,13 +76,17 @@ class LockHotfix(Scenario):
         script = '''import sys,time
 from pathlib import Path
 sys.path.insert(0, sys.argv[1])
-from brain import cli, instance, ui, job_attempts, verify, spend, hosts, watch, events
+from brain import cli, instance, ui, job_attempts, verify, spend, hosts, watch, events, tasks, review, preview_evidence
 site, marker, release = sys.argv[2:5]
 owner, name = {'sample': (ui, 'machine_load'), 'sample_watcher': (watch, 'watch_scan'),
                'handback_binding': (job_attempts, 'attempt_binding'),
                'handback_preflight': (verify, 'record_ready'), 'handback_accounting': (spend, 'live_usage'),
                'handback_projection': (events, 'snapshot_view'),
                'handback_publication': (job_attempts, 'attempt_matches'),
+               'handback_question': (watch, 'watch_scan'), 'handback_blocked': (watch, 'watch_scan'),
+               'task_validation': (tasks, 'validate'), 'task_projection': (events, 'snapshot_view'),
+               'receipt_review': (review, 'validate_review_receipt'),
+               'receipt_preview': (preview_evidence, 'validate_preview_receipt'),
                'wake': (hosts, 'wake_snapshot')}[site]
 original, fired = getattr(owner, name), False
 def slow(*args, **kwargs):
@@ -74,6 +101,7 @@ def slow(*args, **kwargs):
             time.sleep(.01)
     return original(*args, **kwargs)
 setattr(owner, name, slow)
+hosts.wake_start = lambda *args, **kwargs: None
 if site != 'sample_watcher': watch.watch_once = lambda inst: None
 sys.argv = ['brain', *sys.argv[5:]]
 cli.main()
@@ -85,8 +113,10 @@ cli.main()
         stale = None
         try:
             self.wait_file(marker, child)
-            writer = subprocess.run([sys.executable, '-B', str(CORE / 'bin/brain'), 'set', 'other',
-                                     'stack=concurrent'], env=env, capture_output=True, text=True, timeout=5)
+            writer_args = (['status', 'other', '--refresh'] if site.startswith('task') else
+                           ['set', 'other', 'stack=concurrent'])
+            writer = subprocess.run([sys.executable, '-B', str(CORE / 'bin/brain'), *writer_args],
+                                    env=env, capture_output=True, text=True, timeout=5)
             self.assertEqual(writer.returncode, 0, writer.stdout + writer.stderr)
             self.assertIsNone(child.poll(), 'writer must finish while computation is paused')
             if drift and site == 'sample':
@@ -149,6 +179,24 @@ cli.main()
 
     def test_handback_publication_binding_allows_writer_and_refuses_drift(self):
         self.assert_compute_allows_writer('handback_publication', drift=True)
+
+    def test_question_handback_wake_scan_allows_writer(self):
+        self.assert_compute_allows_writer('handback_question')
+
+    def test_blocked_handback_wake_scan_allows_writer(self):
+        self.assert_compute_allows_writer('handback_blocked')
+
+    def test_task_add_validation_allows_writer(self):
+        self.assert_compute_allows_writer('task_validation')
+
+    def test_task_add_projection_allows_writer(self):
+        self.assert_compute_allows_writer('task_projection')
+
+    def test_review_receipt_validation_allows_writer(self):
+        self.assert_compute_allows_writer('receipt_review')
+
+    def test_preview_receipt_validation_allows_writer(self):
+        self.assert_compute_allows_writer('receipt_preview')
 
     def test_wake_projection_allows_writer_and_rechecks_coordinator(self):
         self.assert_compute_allows_writer('wake', drift=True)

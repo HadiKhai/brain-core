@@ -59,11 +59,7 @@ def binding_paths(n, row):
     paths = [n['dir'] / _m_jobs.JOBS_FILE, attempt_path(n, row)]
     home = n.get('home_path')
     if home:
-        for flag in ('--absolute-git-dir', '--git-common-dir'):
-            value = _m_common.git('rev-parse', flag, cwd=home).stdout.strip()
-            if value:
-                directory = (Path(home) / value).resolve()
-                paths.extend(directory / name for name in ('HEAD', 'refs', 'packed-refs', 'config'))
+        paths.extend(_m_instance.git_state_paths(home))
     w = n['local'].get('worktrees', {}).get(row['Job'])
     if w:
         root = Path(w['path'])

@@ -984,7 +984,7 @@ def record_ready(inst, n, branch, reviews, previous=None, reverify=False, full_r
     # Do not sweep an operator's dirty .gitignore into
     # the worker hand-back commit just because we added the local-output exclusion.
     gi = inst.root / ".gitignore"
-    with _m_instance.brain_lock(inst):
+    with _m_instance.brain_lock(inst.root):
         dirty_ignore = _m_common.git("status", "--porcelain", "--", ".gitignore", cwd=inst.root).stdout.strip()
         _m_nodes.ensure_gitignore(inst.root)
         if dirty_ignore:

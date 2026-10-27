@@ -93,6 +93,7 @@ class Tasks(Scenario):
 
     def test_external_fields_cannot_be_locally_overwritten(self):
         self.n['fm']['tasks.source'] = 'linear'
+        tasks._m_common.write_fm(self.n['dir'] / 'node.md', self.n['fm'], '')
         with self.assertRaises(ValueError):
             self.add()
         self.add(source='local')
@@ -405,6 +406,7 @@ class Tasks(Scenario):
         self.n['fm'].update({'tasks.source': 'linear', 'tasks.linear.team_id': '11111111-1111-4111-8111-111111111111',
                              'tasks.linear.started_state_id': '22222222-2222-4222-8222-222222222222',
                              'tasks.linear.done_state_id': '33333333-3333-4333-8333-333333333333'})
+        tasks._m_common.write_fm(self.n['dir'] / 'node.md', self.n['fm'], '')
 
     def linear_issue(self, ident='DEMO-1', state='unstarted'):
         return {'id': '44444444-4444-4444-8444-444444444444', 'identifier': ident, 'title': 'Export report',
