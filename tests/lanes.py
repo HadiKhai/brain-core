@@ -70,7 +70,7 @@ OUTSIDE_JOB_LANES = {
     'ui-checks.js': 'browser assertions; separate browser verification',
     'ui-fitness.js': 'browser layout assertions; separate browser verification',
 }
-SUPPORT = ('scenario.py', 'core_loader.py', 'conftest.py', 'lanes.py', 'check_lanes.py', 'per_change_gate.py', 'dashboard_acceptance.py')
+SUPPORT = ('scenario.py', 'core_loader.py', 'waiting.py', 'conftest.py', 'lanes.py', 'check_lanes.py', 'per_change_gate.py', 'dashboard_acceptance.py')
 # Only these modules have separately audited dispatch/call selection. The gate
 # requires all remaining core modules in every lane, even after import refactors.
 SELECTIVE_MODULES = ('train',)
@@ -90,7 +90,7 @@ SHARED_INPUTS = (
     'lib/brain/settings_batch.py', 'lib/brain/metadata_recovery.py', 'lib/brain/dispatcher.py',
     'lib/brain/host_rpc.py', 'lib/brain/host_lifecycle.py', 'lib/brain/worker_lifecycle.py', 'lib/brain/coordinator_lifecycle.py',
     'lib/brain/__init__.py', 'tests/scenario.py', 'tests/core_loader.py',
-    'tests/conftest.py', 'tests/lanes.py', 'tests/check_lanes.py', 'tests/per_change_gate.py',
+    'tests/conftest.py', 'tests/waiting.py', 'tests/lanes.py', 'tests/check_lanes.py', 'tests/per_change_gate.py',
     'bin/**', 'templates/**', 'skills/**', 'roles/**', 'adapters/**', 'ui/**', '!ui/**/*.png',
     'install.sh', 'MODEL.md', 'CHANGES.md', '.gitignore', 'requirements-test.txt', 'pytest.ini',
 )

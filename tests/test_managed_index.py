@@ -4,6 +4,7 @@ from scenario import Scenario
 
 
 class ManagedIndex(Scenario):
+    cli_in_process = True
     def app(self):
         root = self.init('demo')
         home = self.repo(self.tmp / 'code', {'source.md': 'first\n'})

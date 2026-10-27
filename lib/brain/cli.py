@@ -28,6 +28,89 @@ from . import timings as _m_timings
 from . import command_reads as _m_command_reads
 
 
+class _DeferredActions:
+    def __init__(self):
+        self.operations = []
+
+    def add_argument(self, *args, **kwargs):
+        self.operations.append(('add_argument', args, kwargs))
+
+    def set_defaults(self, **kwargs):
+        self.operations.append(('set_defaults', (), kwargs))
+
+    def add_argument_group(self, *args, **kwargs):
+        return self._group('add_argument_group', args, kwargs)
+
+    def add_mutually_exclusive_group(self, **kwargs):
+        return self._group('add_mutually_exclusive_group', (), kwargs)
+
+    def _group(self, method, args, options):
+        group = _DeferredGroup(method, args, options)
+        self.operations.append(group)
+        return group
+
+    def _populate(self, container):
+        for operation in self.operations:
+            if isinstance(operation, _DeferredSubparsers):
+                children = container.add_subparsers(parser_class=_DeferredParser, **operation.options)
+                for name, options, schema in operation.children:
+                    children.add_parser(name, **options).operations = schema.operations
+            elif isinstance(operation, _DeferredGroup):
+                group = getattr(container, operation.method)(*operation.args, **operation.options)
+                operation._populate(group)
+            else:
+                name, args, kwargs = operation
+                getattr(container, name)(*args, **kwargs)
+
+
+class _DeferredGroup(_DeferredActions):
+    def __init__(self, method, args, options):
+        super().__init__()
+        self.method, self.args, self.options = method, args, options
+
+
+class _DeferredParser(_DeferredActions):
+    """Record a command schema; instantiate argparse only when it is selected.
+
+    Each invocation owns this schema and its parser. No parser defaults, handlers
+    or namespaces are retained between commands. The public parser_class hook
+    keeps argparse's normal choice validation, aliases and help descriptions.
+    """
+    def __init__(self, **options):
+        super().__init__()
+        self.options = options
+        self.parser = None
+
+    def add_subparsers(self, **kwargs):
+        children = _DeferredSubparsers(kwargs)
+        self.operations.append(children)
+        return children
+
+    def materialize(self):
+        if self.parser is None:
+            parser = argparse.ArgumentParser(**self.options)
+            self._populate(parser)
+            self.parser = parser
+        return self.parser
+
+    def parse_known_args(self, *args, **kwargs):
+        return self.materialize().parse_known_args(*args, **kwargs)
+
+    def print_help(self, *args, **kwargs):
+        return self.materialize().print_help(*args, **kwargs)
+
+
+class _DeferredSubparsers:
+    def __init__(self, options):
+        self.options = options
+        self.children = []
+
+    def add_parser(self, name, **options):
+        schema = _DeferredParser()
+        self.children.append((name, options, schema))
+        return schema
+
+
 class _Command:
     """Resolve only the selected handler, through its real owning module.
 
@@ -228,7 +311,7 @@ def _main():
     ap.add_argument("-b", "--brain", metavar="NAME", help="use this brain (when this machine has several; "
                     "default: the one whose folders you are in, else `brain use`)")
     ap.add_argument("-a", "--all", action="store_true", help="with no command: every brain's dashboard")
-    sub = ap.add_subparsers(dest="cmd", metavar="<command>")
+    sub = ap.add_subparsers(dest="cmd", metavar="<command>", parser_class=_DeferredParser)
 
     _m_tasks.register(sub)
 

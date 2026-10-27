@@ -29,14 +29,20 @@ from scenario import Scenario, AutonomyProject, shlex_quote
 
 
 class History(Scenario):
+    cli_in_process = True
     """brain history: past sessions about a home, extracted without a model into batches readers finish."""
     fixture_init_in_process = True
+    fixture_templates = True
 
     def setUp(self):
         super().setUp()
         self.cfg = self.tmp / "config"
-        self.cfg.mkdir()
         self.env["BRAIN_CONFIG"] = str(self.cfg / "brains.json")
+        (self.r, self.home, self.wt, self.clone, self.claude,
+         self.codex, self.other) = self.cached_setup('history', self.history_fixture)
+
+    def history_fixture(self):
+        self.cfg.mkdir()
         self.r = self.init("alice")
         self.home = self.repo(self.tmp / "garden")
         self.git("remote", "add", "origin", "https://github.com/Acme/Garden.git", cwd=self.home)
@@ -54,6 +60,7 @@ class History(Scenario):
         self.git("clone", "-q", str(self.home), str(self.clone), cwd=self.tmp)
         self.git("remote", "set-url", "origin", "git@github.com:acme/garden.git", cwd=self.clone)
         self.sessions()
+        return self.r, self.home, self.wt, self.clone, self.claude, self.codex, self.other
 
     @staticmethod
     def jsonl(path, rows):
@@ -676,6 +683,7 @@ class History(Scenario):
 
 
 class HistorySizes(History):
+    cli_in_process = True
     fixture_templates = True
     # Both History.setUp and the extra instance below only construct fixtures;
     # history, containment and Git assertions still use their original paths.

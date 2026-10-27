@@ -14,7 +14,9 @@ import test_train
 
 
 class TrainReviewFixes(Scenario):
+    fixture_runtime_only_core = True
     fixture_init_in_process = True
+    fixture_templates = True
     project = test_train.MergeTrain.project
     job = test_train.MergeTrain.job
     detach = test_train.MergeTrain.detach

@@ -182,6 +182,8 @@ class JobLessonOutcomes(Scenario):
 
 
 class UnifiedHandbacks(Scenario):
+    fixture_init_in_process = True
+    fixture_templates = True
     job = _test_verify.WorkerReadyPackets.job
     packet = _test_verify.WorkerReadyPackets.packet
 
@@ -1424,8 +1426,9 @@ class Workflow(Scenario):
         self.assertNotIn("core was upgraded", reason(hook(r, session="tick")))  # spaced out per session
         self.assertNotIn("core was upgraded", reason(hook(a)))  # no coordinator runs it here
         self.b(r, "set", "a", "coordinator=thread-1")
-        time.sleep(1.1)
         (a / "brief.md").write_text((a / "brief.md").read_text() + "\nAudience: teenagers\n")
+        stamp = (a / 'status.md').stat().st_mtime + 2
+        os.utime(a / 'brief.md', (stamp, stamp))
         both = reason(hook(a))
         self.assertIn(f"{r}/core/bin/brain changes a", both)
         self.assertIn("Also:", both)  # the notes reminder still comes, in the same notice

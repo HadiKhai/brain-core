@@ -12,6 +12,7 @@ import core_loader
 
 
 class VerifyLanes(Scenario):
+    fixture_runtime_only_core = True
     fixture_templates = True
     fixture_init_in_process = True
     def job(self):
@@ -20,13 +21,17 @@ class VerifyLanes(Scenario):
     packet = test_verify.WorkerReadyPackets.packet
 
     def setup_lanes(self, extra=None):
-        r, home, wt = self.job()
-        for name in ('static.txt', 'ui.txt', 'server.txt'):
-            (wt / name).write_text('initial')
         lanes = [dict(name=name, command='echo ' + name, inputs=[path]) for name, path in
                  [('static', '**/*.md'), ('ui', 'ui.txt'), ('integration', 'server.txt')]]
         if extra:
             extra(lanes)
+        return self.cached_setup(('lanes', json.dumps(lanes, sort_keys=True)),
+                                 lambda: self.lanes_fixture(lanes))
+
+    def lanes_fixture(self, lanes):
+        r, home, wt = self.job()
+        for name in ('static.txt', 'ui.txt', 'server.txt'):
+            (wt / name).write_text('initial')
         self.git('add', '.', cwd=wt)
         self.git('commit', '-qm', 'lane fixtures', cwd=wt)
         self.b(r, 'set', 'a', 'verify=false', 'verify_lanes=' + json.dumps(lanes))

@@ -29,15 +29,28 @@ from scenario import Scenario, AutonomyProject, shlex_quote
 
 
 class Spend(Scenario):
+    cli_in_process = True
     """Time and tokens per job from the runtimes' own transcripts: counted once, attributed to the right job."""
+    fixture_runtime_only_core = True
     fixture_init_in_process = True
+    fixture_templates = True
 
     def setUp(self):
         super().setUp()
         self.cfg = self.tmp / "config"
-        self.cfg.mkdir()
         self.env["BRAIN_CONFIG"] = str(self.cfg / "brains.json")
         self.claude, self.codex, self.other = (self.tmp / d for d in (".claude-work", ".codex", ".claude-other"))
+        self.r, self.home, self.wt = self.cached_setup('spend', self.spend_fixture)
+        self.node = self.r / "nodes/app"
+        # Time-sensitive test inputs are refreshed after each independent clone.
+        ledger = self.node / "job-ledger.md"
+        started = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=3)).isoformat(timespec="seconds")
+        ledger.write_text(re.sub(r"(\| job \| )[^|]+", lambda m: m.group(1) + started + " ", ledger.read_text()))
+        self.git("commit", "-qam", "app: job started earlier", cwd=self.r)
+        self.t0 = int(time.time()) - 2 * 3600
+
+    def spend_fixture(self):
+        self.cfg.mkdir()
         subs = [{"id": "work-claude", "runtime": "claude", "config_dir": str(self.claude), "brains": ["alice"]},
                 {"id": "codex", "runtime": "codex", "config_dir": str(self.codex), "brains": ["*"]},
                 {"id": "someone-else", "runtime": "claude", "config_dir": str(self.other), "brains": ["bob"]}]
@@ -51,13 +64,7 @@ class Spend(Scenario):
         self.b(self.r, "new", "app", "--title", "App", "--home", str(self.home))
         self.b(self.r, "wt", "add", "app", "job")
         self.wt = self.tmp / "app-work/worktrees/job"
-        self.node = self.r / "nodes/app"
-        # The job started three hours ago; its sessions ran in the hours since.
-        ledger = self.node / "job-ledger.md"
-        started = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=3)).isoformat(timespec="seconds")
-        ledger.write_text(re.sub(r"(\| job \| )[^|]+", lambda m: m.group(1) + started + " ", ledger.read_text()))
-        self.git("commit", "-qam", "app: job started earlier", cwd=self.r)
-        self.t0 = int(time.time()) - 2 * 3600
+        return self.r, self.home, self.wt
 
     def at(self, minutes):
         return datetime.datetime.fromtimestamp(self.t0 + minutes * 60, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")

@@ -29,6 +29,210 @@ from scenario import Scenario, AutonomyProject, shlex_quote
 
 
 class FixtureSetup(Scenario):
+    def test_direct_api_discovery_uses_owned_home_and_restores_parent_environment(self):
+        from scenario import Scenario as Base
+        outside = self.tmp / 'outside-home'
+        foreign = outside / '.codex/sessions/rollout-foreign.jsonl'
+        foreign.parent.mkdir(parents=True)
+        foreign.write_text('foreign sentinel\n')
+        m = core_loader.SourceFileLoader('ambient_home_proof', str(CORE / 'bin/brain')).load_module()
+        with mock.patch.dict(os.environ, {'HOME': str(outside), 'CODEX_HOME': str(outside / '.codex'),
+                                         'CLAUDE_CONFIG_DIR': str(outside / '.claude'),
+                                         'BRAIN_CONFIG': str(outside / 'brains.json')}):
+            before = dict(os.environ)
+            case = Base()
+            case.setUp()
+            try:
+                self.assertEqual(Path.home(), case.tmp)
+                own = case.tmp / '.codex/sessions/rollout-own.jsonl'
+                own.parent.mkdir(parents=True)
+                own.write_text('owned sentinel\n')
+                with mock.patch.object(m.usage_config.__globals__['shutil'], 'which', return_value='/fixture/runtime'):
+                    sources = m.usage_config()['subscriptions']
+                self.assertEqual({Path(sub['config_dir']) for sub in sources},
+                                 {case.tmp / '.codex', case.tmp / '.claude'})
+                discovered = [p for sub in sources for p in m.history_files(sub)]
+                self.assertEqual(discovered, [own])
+                self.assertEqual(foreign.read_text(), 'foreign sentinel\n')
+            finally:
+                case.tearDown()
+                case.doCleanups()
+            self.assertEqual(dict(os.environ), before)
+
+    def test_ambient_home_restores_when_subclass_setup_raises(self):
+        class Broken(Scenario):
+            def setUp(inner):
+                super().setUp()
+                raise RuntimeError('fixture setup failure')
+            def runTest(inner):
+                raise AssertionError('must not run')
+        before = dict(os.environ)
+        case = Broken()
+        result = unittest.TestResult()
+        case.run(result)
+        self.addCleanup(shutil.rmtree, case.tmp, ignore_errors=True)
+        self.assertEqual(len(result.errors), 1)
+        self.assertIn('fixture setup failure', result.errors[0][1])
+        self.assertEqual(dict(os.environ), before)
+
+    def test_runtime_core_preserves_assets_native_writes_and_independent_installations(self):
+        class Runtime(Scenario):
+            fixture_init_in_process = fixture_templates = fixture_runtime_only_core = True
+        roots = []
+        for _ in range(2):
+            case = Runtime()
+            case.setUp()
+            self.addCleanup(case.doCleanups)
+            self.addCleanup(case.tearDown)
+            root = case.init('alice')
+            roots.append(root)
+            self.assertFalse((root / 'core').is_symlink())
+            self.assertFalse((root / 'core/tests').exists())
+            self.assertFalse((root / 'core/docs').exists())
+            self.assertEqual(sorted(p.name for p in (root / 'core/ui').iterdir()), ['dist'])
+            for folder in ('bin', 'lib', 'templates', 'roles', 'skills', 'adapters', 'ui/dist'):
+                for path in (CORE / folder).rglob('*'):
+                    if path.is_file() and '__pycache__' not in path.parts:
+                        self.assertEqual((root / 'core' / path.relative_to(CORE)).read_bytes(), path.read_bytes())
+            self.assertIn('created: ' + str(root / 'nodes/app'), case.b(root, 'new', 'app', '--title', 'App'))
+            self.assertEqual(case.git('status', '--porcelain', cwd=root), '')
+        a, b = (r / 'core/bin/brain' for r in roots)
+        self.assertNotEqual(a.stat().st_ino, b.stat().st_ino)
+        self.assertEqual(a.stat().st_nlink, 1)
+        a.write_text('only the first installed core\n')
+        self.assertEqual(b.read_bytes(), (CORE / 'bin/brain').read_bytes())
+
+    def test_runtime_core_mode_is_exact_and_frozen_before_environment_replacement(self):
+        class Runtime(Scenario):
+            fixture_init_in_process = fixture_templates = fixture_runtime_only_core = True
+        class Inherited(Runtime):
+            pass
+        for cls, ambient in ((Runtime, True), (Scenario, False), (Inherited, False), (Runtime, False)):
+            case = cls()
+            case.fixture_init_in_process = case.fixture_templates = True
+            case.setUp()
+            self.addCleanup(case.doCleanups)
+            self.addCleanup(case.tearDown)
+            if ambient:
+                # Absent from self.env: only the original caller carries it.
+                case.env.pop('BRAIN_REHEARSAL_EVIDENCE_DIR', None)
+            with mock.patch.dict(os.environ, {'BRAIN_REHEARSAL_EVIDENCE_DIR': str(self.tmp)} if ambient else {}):
+                root = case.init('alice')
+            self.assertEqual((root / 'core/tests').is_dir(), cls is not Runtime or ambient)
+            self.assertFalse((root / 'core').is_symlink())
+
+    def result_core(self):
+        core, package = self.fixture_source()
+        (core / 'bin/brain').write_bytes((CORE / 'bin/brain').read_bytes())
+        for name in ('common', 'instance', 'events'):
+            (package / (name + '.py')).write_text('')
+        (package / 'cli.py').write_text(
+            'import os,sys\nfrom pathlib import Path\n'
+            'loaded = os.environ.get("BRAIN_RESULT_TEST")\ncalls = []\n'
+            'def main():\n'
+            ' mode = sys.argv[1]\n calls.append(mode)\n'
+            ' if mode == "pid":\n  print(os.getpid()); return\n'
+            ' print(len(calls), loaded, Path.cwd())\n'
+            ' sys.stdout.write("first\\r\\nsecond\\r")\n'
+            ' sys.stderr.write("error\\r\\n")\n'
+            ' if mode == "mutate":\n'
+            '  os.environ.clear(); os.chdir("/"); sys.argv.append("changed")\n'
+            '  sys.path.clear(); sys.meta_path.clear(); sys.pycache_prefix = "changed"\n'
+            '  sys.dont_write_bytecode = False\n'
+            '  raise RuntimeError("injected command failure")\n'
+            ' if mode == "string": raise SystemExit("refused")\n'
+            ' if mode == "object": raise SystemExit({"reason": "refused"})\n'
+            ' if mode == "none": raise SystemExit(None)\n'
+            ' if mode != "normal": raise SystemExit(int(mode))\n')
+        return core, package
+
+    def test_asserted_main_results_match_native_streams_exits_and_fresh_state(self):
+        core, _ = self.result_core()
+        launcher = core / 'bin/brain'
+        self.env['BRAIN_RESULT_TEST'] = 'fixture import environment'
+        for mode in ('normal', 'none', '0', '7', '-1', '257', 'string', 'object'):
+            with self.subTest(mode=mode):
+                native = self.command_result([mode], self.tmp, launcher, native=True)
+                result = self._in_process_result([mode], self.tmp, launcher, native.args)
+                self.assertTrue(result.in_process)
+                self.assertFalse(hasattr(result, 'pid'))
+                self.assertEqual((result.args, result.returncode, result.stdout, result.stderr),
+                                 (native.args, native.returncode, native.stdout, native.stderr))
+                self.assertIn('1 fixture import environment', result.stdout)
+        with mock.patch.object(type(self), 'cli_in_process', True):
+            self.assertIn('refused', self.run_(['string'], self.tmp, ok=False, brain=launcher))
+            with self.assertRaisesRegex(AssertionError, 'should have failed'):
+                self.run_(['normal'], self.tmp, ok=False, brain=launcher)
+            with self.assertRaisesRegex(AssertionError, 'refused'):
+                self.run_(['string'], self.tmp, brain=launcher)
+
+    def test_asserted_main_restores_globals_and_owned_imports_on_command_and_load_failure(self):
+        core, package = self.result_core()
+        environment, cwd = dict(os.environ), Path.cwd()
+        saved = {name: getattr(sys, name) for name in
+                 ('argv', 'path', 'meta_path', 'stdin', 'stdout', 'stderr', 'dont_write_bytecode', 'pycache_prefix')}
+        contents = {name: list(saved[name]) for name in ('argv', 'path', 'meta_path')}
+        foreign = type(sys)('_brain_fixture_foreign_result')
+        with mock.patch.dict(sys.modules, {foreign.__name__: foreign}):
+            before = {k: v for k, v in sys.modules.items() if k.startswith('_brain_fixture_')}
+            for failure in ('command', 'import'):
+                if failure == 'import':
+                    (package / 'cli.py').write_text('invalid source !!!\n')
+                with self.assertRaisesRegex(AssertionError, 'in-process brain command raised') as raised:
+                    self._in_process_result(['mutate'], self.tmp, core / 'bin/brain', ['fixture'])
+                self.assertIsInstance(raised.exception.__cause__, RuntimeError if failure == 'command' else SyntaxError)
+                if failure == 'command':
+                    self.assertIn('first\nsecond\nerror\n', str(raised.exception))
+                self.assertEqual(os.environ, environment)
+                self.assertEqual(Path.cwd(), cwd)
+                for name, value in saved.items():
+                    self.assertIs(getattr(sys, name), value)
+                for name, values in contents.items():
+                    self.assertEqual(getattr(sys, name), values)
+                self.assertEqual({k: v for k, v in sys.modules.items() if k.startswith('_brain_fixture_')}, before)
+        self.assertEqual(list(core.rglob('__pycache__')), [])
+
+    def test_asserted_main_keeps_evidence_inherited_opt_in_and_launcher_overrides_native(self):
+        # A focused test_cli.py run need not import the ordinary brain package.
+        with self._fixture_module(self.tmp, CORE / 'bin/brain') as module:
+            return self.assert_native_retention_fallbacks(module)
+
+    def assert_native_retention_fallbacks(self, module):
+        rehearse = sys.modules[module._owners['main'].__package__ + '.rehearse']
+        rehearse_transactions = sys.modules[module._owners['main'].__package__ + '.rehearse_transactions']
+        core, _ = self.result_core()
+        launcher = core / 'bin/brain'
+        def native(case=self, **options):
+            result = case.command_result(['pid'], self.tmp, launcher, **options)
+            self.assertFalse(getattr(result, 'in_process', False))
+            self.assertNotEqual(int(result.stdout), os.getpid())
+        with mock.patch.object(type(self), 'cli_in_process', True):
+            result = self.command_result(['pid'], self.tmp, launcher)
+            self.assertTrue(result.in_process)
+            self.assertEqual(int(result.stdout), os.getpid())
+            native(native=True)
+            class Inherited(type(self)):
+                pass
+            inherited = Inherited()
+            inherited.tmp, inherited.env = self.tmp, self.env
+            native(inherited)
+            for attribute, value in (('_evidence', {'retained': True}),
+                                     ('retain_rehearsal_evidence', True), ('_native_retention', object())):
+                with mock.patch.object(self, attribute, value, create=True):
+                    native()
+            for variable, value in (('BRAIN_NO_REEXEC', ''), ('BRAIN_REHEARSAL_EVIDENCE_DIR', str(self.tmp))):
+                with mock.patch.dict(self.env, {variable: value}):
+                    native()
+            for context, value in ((rehearse._retention_children, []),
+                                   (rehearse_transactions._validation_retainer, object())):
+                token = context.set(value)
+                try:
+                    native()
+                finally:
+                    context.reset(token)
+            launcher.write_text(launcher.read_text() + '\n# custom launcher contract\n')
+            native()
+
     def test_cached_setup_relocates_worktrees_and_never_shares_mutable_state(self):
         import scenario
         built = []
@@ -60,6 +264,11 @@ class FixtureSetup(Scenario):
                 left = first.cached_setup('isolation-control', lambda: build(first))
                 right = second.cached_setup('isolation-control', lambda: build(second))
                 self.assertEqual(built, [first.tmp])
+                for repository in (right['root'], right['home']):
+                    index = repository / '.git/index'
+                    before = index.read_bytes()
+                    self.assertEqual(second.git('status', '--porcelain', cwd=repository), '')
+                    self.assertEqual(index.read_bytes(), before, 'cloned index must be prepared before use')
                 self.assertEqual(Path(right['command']).read_text(), str(right['home']))
                 self.assertEqual((second.tmp / 'absolute-link').resolve(), right['home'])
                 for case, tree in ((first, left), (second, right)):
@@ -92,6 +301,41 @@ class FixtureSetup(Scenario):
                 for cache in (scenario._setup_templates, scenario._instance_templates, scenario._repo_templates):
                     for template in cache.values():
                         template.directory.cleanup()
+
+    def test_remote_setup_clones_keep_origin_local_and_independent_after_source_removal(self):
+        import scenario
+        cases = []
+        built = []
+        def build(case):
+            built.append(case.tmp)
+            seed = case.repo(case.tmp / 'seed')
+            origin = case.tmp / 'origin.git'
+            case.git('clone', '--bare', str(seed), str(origin), cwd=case.tmp)
+            home = case.tmp / 'app'
+            case.git('clone', str(origin), str(home), cwd=case.tmp)
+            return seed, origin, home
+        with mock.patch.object(scenario, '_setup_templates', {}):
+            try:
+                for _ in range(3):
+                    case = Scenario()
+                    case.setUp()
+                    cases.append(case)
+                    self.addCleanup(case.doCleanups)
+                    self.addCleanup(case.tearDown)
+                    seed, origin, home = case.cached_setup('remote-control', lambda: build(case))
+                    self.assertEqual(case.git('remote', 'get-url', 'origin', cwd=home).strip(), str(origin))
+                self.assertEqual(built, [cases[0].tmp])
+                cases[0].tearDown()
+                second, third = cases[1:]
+                second.git('commit', '--allow-empty', '-qm', 'independent remote', cwd=second.tmp / 'app')
+                second.git('push', 'origin', 'main', cwd=second.tmp / 'app')
+                for case in (second, third):
+                    case.git('fetch', 'origin', cwd=case.tmp / 'app')
+                self.assertNotEqual(second.git('rev-parse', 'main', cwd=second.tmp / 'origin.git'),
+                                    third.git('rev-parse', 'main', cwd=third.tmp / 'origin.git'))
+            finally:
+                for template in scenario._setup_templates.values():
+                    template.directory.cleanup()
 
     def test_instance_templates_preserve_registration_operator_and_independent_git(self):
         import scenario
@@ -372,6 +616,21 @@ class FixtureSetup(Scenario):
         self.assertEqual(second.remember.__code__.co_filename, str(package / 'state.py'))
         self.assertEqual(sys.meta_path, before)
         self.assertEqual(list(core.rglob('__pycache__')), [])
+
+    def test_identical_source_compiles_once_across_paths_with_nested_filenames_preserved(self):
+        source = b'def outer():\n def inner(): return 42\n return inner\n'
+        with mock.patch('builtins.compile', wraps=compile) as compile_source:
+            first = core_loader._compiled_source('/owned/first/state.py', source)
+            second = core_loader._compiled_source('/owned/second/state.py', source)
+        self.assertEqual(compile_source.call_count, 1)
+        left, right = {}, {}
+        exec(first, left)
+        exec(second, right)
+        for namespace, path in ((left, '/owned/first/state.py'), (right, '/owned/second/state.py')):
+            self.assertEqual(namespace['outer'].__code__.co_filename, path)
+            self.assertEqual(namespace['outer']().__code__.co_filename, path)
+            self.assertEqual(namespace['outer']()(), 42)
+        self.assertIsNot(left['outer'], right['outer'])
 
     def test_compiled_source_observes_same_metadata_edits_and_restores_failed_imports(self):
         core, package = self.fixture_source()
@@ -1003,3 +1262,73 @@ class GitReadLocks(Scenario):
         self.assertEqual(expected.stdout, 'README.md\n')
         self.assertEqual(actual.stdout, expected.stdout)
         self.assertEqual({p: (p.stat().st_ino, p.stat().st_mtime_ns, p.read_bytes()) for p in indexes}, before)
+
+
+class DeferredParsing(unittest.TestCase):
+    def core(self):
+        return core_loader.SourceFileLoader('deferred_parser_proof', str(CORE / 'bin/brain')).load_module()
+
+    def schema(self, factory):
+        parser = argparse.ArgumentParser(prog='proof')
+        parser.add_argument('--verbose', action='store_true')
+        choices = parser.add_subparsers(dest='command', parser_class=factory)
+        task = choices.add_parser('task', help='tasks', aliases=['t'])
+        task.set_defaults(owner='task')
+        flags = task.add_argument_group('Gate options')
+        mode = flags.add_mutually_exclusive_group()
+        mode.add_argument('--train', action='store_true')
+        mode.add_argument('--nightly', action='store_true')
+        actions = task.add_subparsers(dest='action', required=True)
+        add = actions.add_parser('add', help='add one', aliases=['a'])
+        add.add_argument('node')
+        add.add_argument('--count', type=int, choices=[1, 2], default=1)
+        add.add_argument('--title', required=True)
+        add.set_defaults(handler='add')
+        unused = choices.add_parser('unused', help='another command')
+        unused.add_argument('--other', required=True)
+        unused.set_defaults(handler='unused')
+        return parser, choices, task, unused
+
+    def capture(self, parser, argv):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            try:
+                namespace, extra = parser.parse_known_args(argv)
+                result = (vars(namespace), extra)
+            except SystemExit as error:
+                result = ('exit', error.code)
+        return result, out.getvalue(), err.getvalue()
+
+    def test_selected_nested_commands_match_eager_help_errors_aliases_and_defaults(self):
+        m = self.core()
+        cases = [[], ['--help'], ['bad'], ['task'], ['task', '--help'],
+                 ['task', 'bad'], ['task', 'add'], ['task', 'add', 'root', '--title', 'Work'],
+                 ['--verbose', 't', 'a', 'root', '--count', '2', '--title', 'Work'],
+                 ['task', 'add', 'root', '--count', '3', '--title', 'Work'],
+                 ['task', 'add', '--help'], ['task', 'add', 'root', '--title', 'Work', '--unknown'],
+                 ['unused', '--other', 'value'],
+                 ['task', '--train', 'add', 'root', '--title', 'Work'],
+                 ['task', '--nightly', 'add', 'root', '--title', 'Work'],
+                 ['task', '--train', '--nightly', 'add', 'root', '--title', 'Work']]
+        for argv in cases:
+            with self.subTest(argv=argv):
+                eager, *_ = self.schema(argparse.ArgumentParser)
+                lazy, *_ = self.schema(m._DeferredParser)
+                self.assertEqual(self.capture(lazy, argv), self.capture(eager, argv))
+
+    def test_unselected_schemas_stay_deferred_and_invocations_have_fresh_defaults(self):
+        m = self.core()
+        parser, choices, task, unused = self.schema(m._DeferredParser)
+        self.capture(parser, ['task', 'add', 'root', '--title', 'One'])
+        self.assertIsNotNone(task.parser)
+        self.assertIsNone(unused.parser)
+        task.parser.set_defaults(owner='changed')
+        fresh, _, fresh_task, _ = self.schema(m._DeferredParser)
+        result, _, _ = self.capture(fresh, ['task', 'add', 'root', '--title', 'Two'])
+        self.assertEqual(result[0]['owner'], 'task')
+        self.assertIsNot(fresh_task.parser, task.parser)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            choices.choices['unused'].print_help()
+        self.assertIn('--other', out.getvalue())
+        self.assertIsNotNone(unused.parser)

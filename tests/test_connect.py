@@ -29,6 +29,7 @@ from scenario import Scenario, AutonomyProject, shlex_quote
 
 
 class Connections(Scenario):
+    cli_in_process = True
     """Learning across nodes: items and specialists from several sources, review in bulk, recall, connect."""
     fixture_templates = True
 
