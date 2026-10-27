@@ -60,6 +60,11 @@ class FixtureSetup(Scenario):
                 left = first.cached_setup('isolation-control', lambda: build(first))
                 right = second.cached_setup('isolation-control', lambda: build(second))
                 self.assertEqual(built, [first.tmp])
+                for repository in (right['root'], right['home']):
+                    index = repository / '.git/index'
+                    before = index.read_bytes()
+                    self.assertEqual(second.git('status', '--porcelain', cwd=repository), '')
+                    self.assertEqual(index.read_bytes(), before, 'cloned index must be prepared before use')
                 self.assertEqual(Path(right['command']).read_text(), str(right['home']))
                 self.assertEqual((second.tmp / 'absolute-link').resolve(), right['home'])
                 for case, tree in ((first, left), (second, right)):

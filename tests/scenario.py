@@ -187,13 +187,15 @@ class _FixtureTemplate:
     def __init__(self, source, home, value):
         self.directory = tempfile.TemporaryDirectory(prefix='brain-test-template-')
         self.home = str(home)
-        self.relocations, self.links = [], []
+        self.relocations, self.links, self.repositories = [], [], []
         tree = Path(self.directory.name) / 'tree'
         try:
             self.value = _relocate_fixture_value(value, self.home, self.home)
             _copy_fixture_tree(source, tree)
             for directory, dirs, files in os.walk(tree, followlinks=False):
                 base = Path(directory)
+                if '.git' in dirs or '.git' in files:
+                    self.repositories.append(base.relative_to(tree))
                 # Installed source and compressed Git objects are immutable.
                 if base.name == '.git':
                     dirs[:] = [d for d in dirs if d != 'objects']
@@ -215,7 +217,7 @@ class _FixtureTemplate:
             self.directory.cleanup()
             raise
 
-    def clone(self, destination, home):
+    def clone(self, destination, home, env=None):
         _copy_fixture_tree(Path(self.directory.name) / 'tree', destination)
         for relative, data in self.relocations:
             (destination / relative).write_bytes(data.replace(self.home.encode(), str(home).encode()))
@@ -223,6 +225,12 @@ class _FixtureTemplate:
             path = destination / relative
             path.unlink()
             path.symlink_to(target.replace(self.home, str(home)))
+        # Copies have independent inodes. Refresh Git's stat cache before an
+        # asserted operation snapshots the index, so its first status read cannot
+        # appear to be an unrelated operator mutation. Preserve dirty contents.
+        for relative in self.repositories:
+            subprocess.run(['git', 'status', '--porcelain'], cwd=destination / relative,
+                           env=env, check=True, capture_output=True, text=True)
         return _relocate_fixture_value(self.value, self.home, str(home))
 
 
@@ -375,7 +383,7 @@ class Scenario(unittest.TestCase):
         use_template = self.fixture_templates and not getattr(self, '_evidence', None)
         key = self._fixture_key(name, operator or name)
         if use_template and key in _instance_templates and not root.exists():
-            _instance_templates[key].clone(root, self.tmp)
+            _instance_templates[key].clone(root, self.tmp, self.env)
             # Registration is machine-local and must describe this fresh HOME,
             # including any other instances already registered by this test.
             with self._fixture_module(self.tmp, CORE / 'bin/brain') as module:
@@ -414,7 +422,7 @@ class Scenario(unittest.TestCase):
             _setup_templates[key] = candidate
             return value
         self.tmp.rmdir()  # known empty; never remove a populated fixture
-        value = _setup_templates[key].clone(self.tmp, self.tmp)
+        value = _setup_templates[key].clone(self.tmp, self.tmp, self.env)
         self._prepare_fixture_cores()
         return value
 
@@ -475,7 +483,7 @@ class Scenario(unittest.TestCase):
         key = self._fixture_key(tuple(sorted(files.items())))
         use_template = self.fixture_templates and not getattr(self, '_evidence', None)
         if use_template and key in _repo_templates and not path.exists():
-            _repo_templates[key].clone(path, self.tmp)
+            _repo_templates[key].clone(path, self.tmp, self.env)
             return path
         path.mkdir(parents=True, exist_ok=True)
         self.git('init', '-q', '-b', 'main', cwd=path)

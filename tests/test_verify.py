@@ -368,8 +368,6 @@ class ReadyFailureRegressions(Scenario):
 
 
 class VerifyLogs(Scenario):
-    fixture_init_in_process = True
-    fixture_templates = True
     job = WorkerReadyPackets.job
 
     def runner(self):

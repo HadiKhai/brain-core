@@ -2916,12 +2916,16 @@ instead of rereading the entire requirement directory for each task row.
 
 Audited scenario classes reuse private filesystem snapshots for repeated setup.
 Each test receives its own files, Git metadata, relocated machine bindings and
-fresh module state. Refresh time-sensitive spend inputs after cloning; keep
+fresh module state. Prepare each cloned Git index's stat cache before tested
+operations capture checkout metadata, without changing dirty file contents.
+Refresh time-sensitive spend inputs after cloning; keep
 asserted CLI calls, crash children, contention probes and verification subprocesses
-real. Keep installation and upgrade scenarios on their original setup path.
+real. Keep installation, upgrade and logging/status-ownership scenarios on their
+original setup path.
 
 On macOS, fixtures that select `/usr/bin/git` resolve the same developer Git once
 with `xcrun --find git` and prepend its directory to the fixture PATH. This removes
 repeated dispatcher launches while preserving custom Git installations and the
 original PATH on other platforms or lookup failures. Freshness tests set the
-status file's age directly instead of sleeping across the comparison threshold.
+changed note's timestamp directly instead of sleeping across the comparison
+threshold, and reset it before testing the subsequent status update.
