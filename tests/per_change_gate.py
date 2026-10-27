@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Select source-derived unit lanes conservatively, then run cheap checks and guard."""
 import argparse
+import ast
 import json
 import os
 from pathlib import Path
@@ -36,6 +37,14 @@ def changed_paths(root, base):
     return sorted(set(paths) - {''})
 
 
+def body_only(root, base, path):
+    """The fixture imports every module: definition-time changes affect all tests."""
+    commit = git(root, 'rev-parse', '--verify', '--end-of-options', base + '^{commit}').strip()
+    before = ast.parse(git(root, 'show', commit + ':' + path))
+    after = lanes.parse(root / path)
+    return lanes.startup_fingerprint({'module': before}) == lanes.startup_fingerprint({'module': after})
+
+
 def select(root=ROOT, base=None, full=False):
     start = time.monotonic()
     plan = dict(scope='full', reason='batch/nightly', files=[], targets=['tests/test_brain.py'])
@@ -51,6 +60,9 @@ def select(root=ROOT, base=None, full=False):
                     raise ValueError('shared/root input changed')
                 if check_lanes.matches(path, lanes.OUTSIDE_INPUTS):
                     continue
+                if (path.startswith('lib/brain/') and Path(path).stem in lanes.SELECTIVE_MODULES
+                        and not body_only(root, base, path)):
+                    raise ValueError('module startup changed')
                 consumers = [lane for lane in mapping if check_lanes.matches(path, lane['inputs'])]
                 if not consumers or not (root / path).is_file():
                     raise ValueError('unknown or removed input')
@@ -83,6 +95,7 @@ def run(plan, root, jobs, execute=subprocess.run):
     from brain.gate_lock import gate_inherited_fd
     inherited = gate_inherited_fd(Path(instance), os.environ, node)
     pass_fds = () if inherited is None else (inherited,)
+    env = {**os.environ, 'BRAIN_CORE': str(root), 'BRAIN_NO_REEXEC': '1'}
     commands = [
         [sys.executable, '-B', str(root / 'tests/check_lanes.py')],
         [sys.executable, '-B', str(root / 'bin/brain'), 'guard', node, str(root)],
@@ -92,7 +105,7 @@ def run(plan, root, jobs, execute=subprocess.run):
                          '-n', str(jobs), '--max-worker-restart=0', '--serial-after-parallel',
                          *plan['targets']])
     for command in commands:
-        result = execute(command, cwd=root, pass_fds=pass_fds)
+        result = execute(command, cwd=root, pass_fds=pass_fds, env=env)
         if result.returncode:
             return result.returncode
     return 0

@@ -109,6 +109,8 @@ def imports(tree):
             found.update(a.name.split('.')[1] for a in node.names if a.name.startswith('brain.'))
         elif isinstance(node, ast.ImportFrom) and node.module == 'brain':
             found.update(a.name for a in node.names)
+        elif isinstance(node, ast.ImportFrom) and (node.module or '').startswith('brain.'):
+            found.add(node.module.split('.')[1])
     return found
 
 
@@ -186,7 +188,7 @@ def test_targets(root, files):
 
 
 def source_inputs(tree, train_symbols):
-    uses_train, helpers = False, set()
+    uses_train, helpers = 'train' in imports(tree), set()
     for node in ast.walk(tree):
         if (isinstance(node, ast.Attribute) and node.attr in train_symbols
                 and not (isinstance(node.value, ast.Name) and node.value.id == 'self')):

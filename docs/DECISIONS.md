@@ -2782,6 +2782,8 @@ command rather than combining two independent selection mechanisms.
 The source-derived import map is the repository's existing `tests/lanes.py` map:
 relative core imports are followed transitively; test helper imports and embedded
 Python are scanned; definition-time changes affect every lane's startup identity.
+Compare a selective module's startup AST with its integration-base source before
+narrowing its consumers. Changed or unavailable startup identity selects full.
 The fixture loader imports every module, and most core modules form a strongly
 connected graph. Keep these modules nonselective. Only the separately audited
 `train` dispatch/call boundary can narrow module-body changes; test-file changes

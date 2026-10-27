@@ -1,5 +1,6 @@
 """Per-change selection and native full-proof boundaries, without running a full suite."""
 import contextlib
+import ast
 import io
 import json
 import os
@@ -13,6 +14,7 @@ from unittest import mock
 import core_loader
 import lanes
 import per_change_gate
+import test_train
 from scenario import CORE, Scenario
 from test_verify import WorkerReadyPackets
 from test_selftest_parallel import ParallelSelftest
@@ -26,6 +28,7 @@ class ChangeSelection(unittest.TestCase):
     def selection(self, paths=(), error=None):
         with mock.patch.object(per_change_gate.lanes, 'lane_map', return_value=self.mapping), \
                 mock.patch.object(per_change_gate.check_lanes, 'check'), \
+                mock.patch.object(per_change_gate, 'body_only', return_value=True), \
                 mock.patch.object(per_change_gate, 'changed_paths', return_value=paths, side_effect=error):
             return per_change_gate.select(base='fixture')
 
@@ -67,6 +70,65 @@ class ChangeSelection(unittest.TestCase):
                 mock.patch.object(per_change_gate, 'changed_paths', side_effect=AssertionError('full needs no base')):
             self.assertEqual(per_change_gate.select(full=True)['targets'], ['tests/test_brain.py'])
 
+    def test_definition_time_changes_and_unknown_startup_select_full(self):
+        with mock.patch.object(per_change_gate.lanes, 'lane_map', return_value=self.mapping), \
+                mock.patch.object(per_change_gate.check_lanes, 'check'), \
+                mock.patch.object(per_change_gate, 'changed_paths', return_value=['lib/brain/train.py']):
+            for startup in (False, ValueError('missing base source')):
+                with self.subTest(startup=startup), mock.patch.object(per_change_gate, 'body_only',
+                        return_value=startup, side_effect=startup if isinstance(startup, Exception) else None):
+                    plan = per_change_gate.select(base='fixture')
+                    self.assertEqual(plan['scope'], 'full')
+                    self.assertIn('tests/test_usage.py', plan['files'])
+
+    def test_real_base_startup_comparison_keeps_only_function_body_edits_selective(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            source = root / 'lib/brain/train.py'
+            source.parent.mkdir(parents=True)
+            original = 'VALUE = 1\ndef entry(value=1):\n return value\n'
+            source.write_text(original)
+            for args in [('init', '-q'), ('add', '.'), ('commit', '-qm', 'base')]:
+                subprocess.run(['git', '-c', 'user.name=test', '-c', 'user.email=t@t', *args],
+                               cwd=root, check=True, capture_output=True)
+            base = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=root).decode().strip()
+            for changed, expected in [(original.replace('return value', 'return value + 1'), True),
+                                      (original.replace('VALUE = 1', 'VALUE = 2'), False),
+                                      (original.replace('value=1', 'value=2'), False),
+                                      ('from . import common\n' + original, False)]:
+                source.write_text(changed)
+                self.assertEqual(per_change_gate.body_only(root, base, 'lib/brain/train.py'), expected)
+            with self.assertRaises(ValueError):
+                per_change_gate.body_only(root, 'missing-ref', 'lib/brain/train.py')
+
+    def test_explicit_core_imports_include_train_without_attribute_calls(self):
+        for source in ('from brain.train import ref\nref()', 'import brain.train as batch\n',
+                       'from brain import train\n'):
+            self.assertTrue(lanes.source_inputs(ast.parse(source), set())[0])
+
+    def test_real_source_map_selects_body_consumers_and_expands_startup_to_full(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            for directory in ('tests', 'lib'):
+                shutil.copytree(CORE / directory, root / directory,
+                                ignore=shutil.ignore_patterns('__pycache__'))
+            for args in [('init', '-q'), ('add', '.'), ('commit', '-qm', 'base')]:
+                subprocess.run(['git', '-c', 'user.name=test', '-c', 'user.email=t@t', *args],
+                               cwd=root, check=True, capture_output=True)
+            base = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=root).decode().strip()
+            path = root / 'lib/brain/train.py'
+            original = path.read_text()
+            path.write_text(original.replace('def ref(home, name):',
+                                              'def ref(home, name):\n    fixture_value = 1'))
+            body = per_change_gate.select(root, base)
+            self.assertEqual(body['scope'], 'change', body)
+            self.assertIn('tests/test_train.py', body['files'])
+            self.assertNotIn('tests/test_usage.py', body['files'])
+            path.write_text(original + '\nFIXTURE_STARTUP = 1\n')
+            startup = per_change_gate.select(root, base)
+            self.assertEqual(startup['scope'], 'full')
+            self.assertIn('tests/test_usage.py', startup['files'])
+
     def test_nasty_git_paths_are_lossless_and_deletions_and_new_files_count(self):
         with tempfile.TemporaryDirectory(prefix='gate space é-') as folder:
             root = Path(folder)
@@ -101,6 +163,8 @@ class ChangeSelection(unittest.TestCase):
                 calls = []
                 def execute(argv, **kwargs):
                     calls.append(argv)
+                    self.assertEqual(kwargs['env']['BRAIN_CORE'], str(CORE))
+                    self.assertEqual(kwargs['env']['BRAIN_NO_REEXEC'], '1')
                     return mock.Mock(returncode=7 if len(calls) - 1 == failed else 0)
                 self.assertEqual(per_change_gate.run(plan, CORE, 2, execute), 0 if failed is None else 7)
                 self.assertEqual(len(calls), 3 if failed is None else failed + 1)
@@ -191,6 +255,36 @@ class NativeChangeGate(Scenario):
         self.assertEqual(reasons, [])
         self.assertEqual(packet['verify_result'], 0)
         fact.assert_not_called()
+
+    def test_change_packet_cannot_be_relabelled_as_an_adoptable_full_receipt(self):
+        root, _, _ = self.configure()
+        self.record(root)
+        packet = self.read_packet()
+        self.b(root, 'full-run', 'a', '--branch', 'job', '--reviews', '1')
+        receipt = next((root / 'nodes/a/full-gates').glob('*.json'))
+        data = json.loads(receipt.read_text())
+        data['packet'] = packet
+        receipt.write_text(json.dumps(data))
+        self.b(root, 'handback', 'a', '--branch', 'job', '--state', 'done', '--reviews', '1',
+               '--summary', 'Refuse partial receipt', '--full-receipt', receipt.stem, ok=False)
+
+
+class NativeFullTrain(Scenario):
+    project = test_train.MergeTrain.project
+    job = test_train.MergeTrain.job
+    detach = test_train.MergeTrain.detach
+    batches = test_train.MergeTrain.batches
+
+    def test_batch_forces_full_scope_instead_of_inheriting_change_mode(self):
+        root, _ = self.project(command='test "$BRAIN_VERIFY_SCOPE" = full',
+                               settings=('verify_change=echo selected',))
+        self.job('one')
+        self.detach()
+        self.env['BRAIN_VERIFY_SCOPE'] = 'change'
+        output = self.b(root, 'train', 'a', '--jobs', 'one')
+        self.assertIn('merged 1 job(s); 1 full verify run(s)', output)
+        self.assertEqual(len(self.batches()[0]['runs']), 1)
+        self.assertEqual(self.batches()[0]['runs'][0]['result'], 0)
 
 
 class SelectedSerialTail(Scenario):
