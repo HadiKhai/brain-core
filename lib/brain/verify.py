@@ -310,7 +310,8 @@ def _ready_state(inst, n, branch, train=False, display=False, advisory=False):
         if not train and not packet_main_matches(n, packet, main):
             reasons.append("main moved; return to worker to rebase and verify again")
         w = n["local"].get("worktrees", {}).get(branch)
-        lanes_configured = bool(n["fm"].get("verify_lanes") or n["fm"].get("verify_lanes_from"))
+        lanes_configured = (packet.get('verify_scope') != 'change'
+                            and bool(n["fm"].get("verify_lanes") or n["fm"].get("verify_lanes_from")))
         cheap = display and lanes_configured and packet.get('verify_scope') != 'full'
         if not cheap and isinstance(w, dict) and w.get("path") and Path(w["path"]).exists():
             files = verify_input_files(n, w)
@@ -346,6 +347,8 @@ def _ready_state(inst, n, branch, train=False, display=False, advisory=False):
                     or not rows or any(not isinstance(r, dict) or r.get('status') != 'passed'
                                        or type(r.get('result')) is not int or r['result'] != 0 for r in rows)):
                 reasons.append('recorded verify lane evidence missing, changed or failed; hand back again')
+        elif packet.get('verify_scope') == 'change':
+            pass  # The project-owned selector is bound by verify_config_hash above.
         elif isinstance(w, dict) and w.get("path"):
             try:
                 env = verify_env(n, branch, w)
@@ -959,11 +962,10 @@ def record_ready(inst, n, branch, reviews, previous=None, reverify=False, full_r
     reasons, head, main = ready_preflight(n, branch)
     integration_base = integration_parent(n, main) if head and main else main
     change = n['fm'].get('verify_change', '').strip()
-    # A complete gate must never be replaced by lanes or by a per-change command.
-    # Combining two selection mechanisms is unknown: use the complete command.
-    lanes_configured = bool(n['fm'].get('verify_lanes') or n['fm'].get('verify_lanes_from'))
-    full = full or full_receipt is not None or bool(change and lanes_configured)
-    change = change if not full and not lanes_configured else ''
+    # Explicit complete gates bypass selection. Otherwise the project-owned
+    # per-change command owns readiness; train supplies the landing unit's full run.
+    full = full or full_receipt is not None
+    change = change if not full else ''
     preview_context = {'integration_base': integration_base, 'verify_scope': 'change' if change else 'full'}
     # A supplied full receipt owns the map environment. Check its preview
     # policy after adoption loads that packet; review and preflight still run.

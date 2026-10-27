@@ -5,6 +5,7 @@ import io
 import json
 import os
 from pathlib import Path
+import shlex
 import shutil
 import subprocess
 import tempfile
@@ -256,6 +257,31 @@ class NativeChangeGate(Scenario):
         self.assertEqual(packet['verify_result'], 0)
         fact.assert_not_called()
 
+    def test_change_owns_readiness_with_lanes_and_keeps_all_bindings(self):
+        root, _, wt = self.configure()
+        # The project selector owns selection; a generic map is not a second gate.
+        self.b(root, 'set', 'a', 'verify_lanes_from=echo broken-map')
+        self.record(root)
+        packet = self.read_packet()
+        self.assertEqual(packet['verify_scope'], 'change')
+        self.assertNotIn('verify_lanes', packet)
+        m = core_loader.SourceFileLoader('change_with_lanes', str(CORE / 'bin/brain')).load_module()
+        inst = m.Instance(root)
+        with mock.patch.dict(os.environ, self.env, clear=True):
+            for train, display in ((False, False), (False, True), (True, False)):
+                state = m.ready_state(inst, inst.node('a'), 'job', train=train, display=display)
+                self.assertTrue(state['ready'], state['reasons'])
+        self.record(root)
+        self.assertTrue(self.read_packet()['verify_reused'])
+        (wt / '.env').write_text('CHANGED=1\n')
+        self.assertIn('verify_inputs changed', self.b(root, 'ready', 'a', '--branch', 'job', ok=False))
+        (wt / '.env').unlink()
+        self.b(root, 'set', 'a', 'verify_lanes_from=echo changed-map')
+        self.assertIn('verification configuration changed', self.b(root, 'ready', 'a', '--branch', 'job', ok=False))
+        self.b(root, 'set', 'a', 'verify_change=false')
+        self.record(root, ok=False)
+        self.assertNotEqual(self.read_packet()['verify_result'], 0)
+
     def test_change_packet_cannot_be_relabelled_as_an_adoptable_full_receipt(self):
         root, _, _ = self.configure()
         self.record(root)
@@ -274,6 +300,42 @@ class NativeFullTrain(Scenario):
     job = test_train.MergeTrain.job
     detach = test_train.MergeTrain.detach
     batches = test_train.MergeTrain.batches
+
+    def test_singleton_landing_runs_only_one_full_with_both_selectors(self):
+        counter = self.tmp / 'full-runs'
+        cheap = self.tmp / 'cheap-runs'
+        command = ('test "$BRAIN_VERIFY_SCOPE" = full && printf "full\\n" >> '
+                   + shlex.quote(str(counter)))
+        root, home = self.project(command=command, settings=(
+            'verify_change=test "$BRAIN_VERIFY_SCOPE" = change',
+            'verify_lanes_from=echo broken-map',
+            'verify_cheap=printf "cheap\\n" >> ' + shlex.quote(str(cheap))))
+        self.job('one')
+        self.assertFalse(counter.exists(), 'builder readiness ran the full command')
+        self.assertEqual(cheap.read_text().splitlines(), ['cheap'])
+        self.b(root, 'ready', 'a', '--branch', 'one')
+        self.detach()
+        output = self.b(root, 'train', 'a', '--jobs', 'one')
+        self.assertIn('merged 1 job(s); 1 full verify run(s)', output)
+        self.assertEqual(counter.read_text().splitlines(), ['full'])
+        self.assertEqual(cheap.read_text().splitlines(), ['cheap', 'cheap'])
+        self.assertEqual(len(self.batches()[0]['runs']), 1)
+        self.assertEqual(self.git('rev-parse', 'main', cwd=home),
+                         self.git('rev-parse', 'one', cwd=home))
+
+    def test_changed_singleton_head_refuses_before_full_execution(self):
+        counter = self.tmp / 'full-runs'
+        root, home = self.project(command='echo full >> ' + shlex.quote(str(counter)),
+                                  settings=('verify_change=true', 'verify_lanes_from=echo broken-map'))
+        wt = self.job('one')
+        main = self.git('rev-parse', 'main', cwd=home)
+        self.git('commit', '--allow-empty', '-qm', 'changed after readiness', cwd=wt)
+        self.detach()
+        output = self.b(root, 'train', 'a', '--jobs', 'one', ok=False)
+        self.assertIn('branch head changed', output)
+        self.assertFalse(counter.exists())
+        self.assertEqual(self.git('rev-parse', 'main', cwd=home), main)
+        self.assertEqual(self.batches(), [])
 
     def test_batch_forces_full_scope_instead_of_inheriting_change_mode(self):
         root, _ = self.project(command='test "$BRAIN_VERIFY_SCOPE" = full',

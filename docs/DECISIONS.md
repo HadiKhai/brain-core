@@ -3219,8 +3219,13 @@ the first failure, and preserves the canonical serial tail after parallel tests.
 `--plan --base <commit>` prints selection and its measured duration without
 running tests. Root/shared inputs, unsupported or removed paths, unavailable Git
 history, invalid source or incomplete ownership select the complete suite.
-Configuring both `verify_change` and generic verify lanes also chooses the full
-command rather than combining two independent selection mechanisms.
+When both `verify_change` and generic verify lanes are configured, the explicit
+project-owned change command owns readiness. Its packet binds the complete
+verification configuration without executing or claiming generic lane evidence.
+The landing train still runs `verify` on the exact staged result, so a green
+one-job landing pays for one full run. Nodes must configure `verify_change` (or
+affected lanes) to use this method; a node with only `verify` retains its complete
+readiness fallback. Full-run and explicit full gates continue to bypass selection.
 
 The source-derived import map is the repository's existing `tests/lanes.py` map:
 relative core imports are followed transitively; test helper imports and embedded
