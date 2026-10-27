@@ -1550,6 +1550,215 @@ class PreviewSampleReceipts(Scenario):
         self.assertTrue(m.validate_ready_preview(inst, n, 'job', data['head']))
 
 
+class PreviewDiffScoping(Scenario):
+    fixture_templates = True
+    fixture_init_in_process = True
+
+    def context(self, declaration='ui_globs=ui/**'):
+        m, inst, n, data = PreviewSampleReceipts.context(self)
+        self.b(inst.root, 'set', 'web', 'verify=true', declaration)
+        inst = m.Instance(inst.root)
+        return m, inst, inst.node('web'), data
+
+    def declaration(self, m, inst, n, value):
+        path = n['dir'] / 'node.md'
+        fm, body = m.read_fm(path)
+        for key in ('ui_globs', 'verify_lanes', 'verify_lanes_from'):
+            fm.pop(key, None)
+        key, raw = value.split('=', 1)
+        fm[key] = raw
+        m.write_fm(path, fm, body)
+        inst = m.Instance(inst.root)
+        return inst, inst.node('web')
+
+    def change(self, m, inst, n, data, paths):
+        wt = Path(n['local']['worktrees']['job']['path'])
+        for name, content in paths.items():
+            path = wt / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content)
+        self.git('add', '-A', cwd=wt)
+        self.git('commit', '-qm', 'Change declared inputs', cwd=wt)
+        data['head'] = self.git('rev-parse', 'HEAD', cwd=wt).strip()
+        return m.preview_requirement(inst, n, 'job', data['head'])
+
+    def test_backend_diff_skips_preview_for_globs_inline_and_generated_maps(self):
+        m, inst, n, data = self.context()
+        self.change(m, inst, n, data, {'server/api.py': 'backend\n'})
+        declarations = ['ui_globs=ui/**,templates/**', 'ui_globs=["ui/**"]',
+                        'verify_lanes=ui: true | ui/**; server: true | server/**',
+                        'verify_lanes_from=printf \'[{"name":"ui","command":"true","inputs":["ui/**"]}]\'']
+        for declaration in declarations:
+            with self.subTest(declaration=declaration):
+                inst, n = self.declaration(m, inst, n, declaration)
+                scope = m.preview_requirement(inst, n, 'job', data['head'])
+                self.assertEqual(scope['status'], 'not_applicable', scope)
+                self.assertEqual(scope['paths'], ['server/api.py'])
+                self.assertEqual(scope['reason'], 'preview: not applicable, no rendered paths touched')
+                self.assertEqual(m.validate_ready_preview(inst, n, 'job', data['head']), [])
+
+    def test_rendered_add_modify_delete_and_boundary_rename_require_receipt(self):
+        m, inst, n, data = self.context()
+        for content in ('first\n', 'second\n'):
+            scope = self.change(m, inst, n, data, {'ui/page.html': content})
+            self.assertEqual(scope['status'], 'required')
+            self.assertTrue(m.validate_ready_preview(inst, n, 'job', data['head']))
+        wt = Path(n['local']['worktrees']['job']['path'])
+        # Put the rendered file in the integration base, then rename it out.
+        self.git('merge', '--ff-only', 'job', cwd=n['home_path'])
+        self.git('mv', 'ui/page.html', 'backend.html', cwd=wt)
+        self.git('commit', '-qm', 'Move rendered input out', cwd=wt)
+        data['head'] = self.git('rev-parse', 'HEAD', cwd=wt).strip()
+        scope = m.preview_requirement(inst, n, 'job', data['head'])
+        self.assertEqual(scope['status'], 'required')
+        self.assertEqual(scope['paths'], ['backend.html', 'ui/page.html'])
+        self.git('reset', '--hard', 'main', cwd=wt)
+        self.git('rm', 'ui/page.html', cwd=wt)
+        self.git('commit', '-qm', 'Delete rendered input', cwd=wt)
+        data['head'] = self.git('rev-parse', 'HEAD', cwd=wt).strip()
+        self.assertEqual(m.preview_requirement(inst, n, 'job', data['head'])['status'], 'required')
+
+    def test_rename_into_ui_requires_receipt_and_backend_rename_is_classified(self):
+        m, inst, n, data = self.context()
+        self.change(m, inst, n, data, {'source.html': 'same\n'})
+        self.git('merge', '--ff-only', 'job', cwd=n['home_path'])
+        wt = Path(n['local']['worktrees']['job']['path'])
+        self.git('mv', 'source.html', 'destination.html', cwd=wt)
+        self.git('commit', '-qm', 'Rename backend input', cwd=wt)
+        data['head'] = self.git('rev-parse', 'HEAD', cwd=wt).strip()
+        self.assertEqual(m.preview_requirement(inst, n, 'job', data['head'])['status'], 'not_applicable')
+        (wt / 'ui').mkdir()
+        self.git('mv', 'destination.html', 'ui/page.html', cwd=wt)
+        self.git('commit', '-qm', 'Move into rendered paths', cwd=wt)
+        data['head'] = self.git('rev-parse', 'HEAD', cwd=wt).strip()
+        self.assertEqual(m.preview_requirement(inst, n, 'job', data['head'])['status'], 'required')
+
+    def test_missing_or_unknown_declarations_fail_closed(self):
+        m, inst, n, data = self.context()
+        self.change(m, inst, n, data, {'server.py': 'backend\n'})
+        declarations = ['verify=true', 'ui_globs=', 'ui_globs=none', 'ui_globs=[]',
+                        'ui_globs=["!ui/**"]', 'ui_globs=ui/[ab].html',
+                        'ui_globs=[true]', 'ui_globs=[invalid',
+                        'verify_lanes=server: true | server/**',
+                        'verify_lanes_from=false']
+        for declaration in declarations:
+            with self.subTest(declaration=declaration):
+                inst, n = self.declaration(m, inst, n, declaration)
+                self.assertEqual(m.preview_requirement(inst, n, 'job', data['head'])['status'], 'required')
+                self.assertTrue(m.validate_ready_preview(inst, n, 'job', data['head']))
+
+    def test_unreadable_or_malformed_diff_and_unavailable_base_fail_closed(self):
+        m, inst, n, data = self.context()
+        self.change(m, inst, n, data, {'server.py': 'backend\n'})
+        original = m.git
+        def broken(*args, **kwargs):
+            if args[0] == 'diff':
+                return subprocess.CompletedProcess(args, 0, 'M\0unterminated', '')
+            return original(*args, **kwargs)
+        with mock.patch.object(m, 'git', side_effect=broken):
+            self.assertTrue(m.validate_ready_preview(inst, n, 'job', data['head']))
+        def unreadable(*args, **kwargs):
+            if args[0] == 'diff':
+                return subprocess.CompletedProcess(args, 1, '', 'unreadable')
+            return original(*args, **kwargs)
+        with mock.patch.object(m, 'git', side_effect=unreadable):
+            self.assertTrue(m.validate_ready_preview(inst, n, 'job', data['head']))
+        self.assertTrue(m.validate_ready_preview(inst, n, 'job', data['head'], {'integration_base': '0' * 40}))
+        # A fabricated narrower base cannot exempt rendered changes.
+        self.change(m, inst, n, data, {'ui/page.html': 'rendered\n'})
+        self.assertTrue(m.validate_ready_preview(inst, n, 'job', data['head'], {'integration_base': data['head']}))
+
+    def test_existing_receipt_stays_validated_for_backend_diff(self):
+        m, inst, n, data = self.context()
+        self.change(m, inst, n, data, {'server.py': 'backend\n'})
+        path = m.record_preview_receipt(inst, n, 'job', data)
+        self.assertEqual(m.validate_ready_preview(inst, n, 'job', data['head']), [])
+        data['urls'][0]['items'].pop()
+        path.write_text(json.dumps(data))
+        self.assertTrue(m.validate_ready_preview(inst, n, 'job', data['head']))
+
+    def test_full_gate_records_paths_and_readers_recheck_policy_without_cached_git(self):
+        m, inst, n, data = self.context()
+        scope = self.change(m, inst, n, data, {'server/api.py': 'backend\n', 'strange\nname.py': 'backend\n'})
+        with mock.patch.dict(os.environ, self.env, clear=True):
+            packet, reasons = m.record_ready(inst, n, 'job', 1, full=True)
+        self.assertEqual(reasons, [])
+        self.assertEqual(packet['verify_result'], 0)
+        self.assertEqual(packet['verify_scope'], 'full')
+        self.assertEqual(packet['preview_scope'], scope)
+        with m.git_read_snapshot():
+            self.assertEqual(m.ready_policy_reasons(inst, n, 'job', data['head'], packet), [])
+            self.b(inst.root, 'set', 'web', 'ui_globs=server/**')
+            self.assertTrue(m.ready_policy_reasons(inst, n, 'job', data['head'], packet))
+
+    def test_rendered_lane_dependencies_and_strict_inputs_are_included(self):
+        m, inst, n, data = self.context()
+        self.change(m, inst, n, data, {'shared/view.json': '{}\n'})
+        for key in ('requires', 'strict_inputs'):
+            lanes = [dict(name='ui', command='true', inputs=['ui/**']),
+                     dict(name='server', command='true', inputs=['shared/**'])]
+            lanes[0][key] = ['server'] if key == 'requires' else ['shared/**']
+            inst, n = self.declaration(m, inst, n, 'verify_lanes=' + json.dumps(lanes))
+            scope = m.preview_requirement(inst, n, 'job', data['head'])
+            self.assertEqual(scope['status'], 'required')
+
+    def test_generated_map_uses_full_gate_identity_and_retains_environment_for_readers(self):
+        script = ('import json, os\n'
+                  'active = all(os.environ.get(k) for k in '
+                  '["BRAIN_ROOT", "BRAIN_VERIFY_BASE", "BRAIN_VERIFY_HEAD"]) '
+                  'and os.environ.get("BRAIN_VERIFY_SCOPE") == "full" '
+                  'and os.environ.get("NODE_OPTIONS") == "gate-fixture"\n'
+                  'print(json.dumps([dict(name="ui", command="true", '
+                  'inputs=["ui/**" if active else "server/**"])]))')
+        declaration = 'verify_lanes_from=python3 -c ' + shlex.quote(script.replace('\n', '; '))
+        m, inst, n, data = self.context(declaration)
+        self.change(m, inst, n, data, {'server/api.py': 'backend\n'})
+        with mock.patch.dict(os.environ, {**self.env, 'NODE_OPTIONS': 'gate-fixture'}, clear=True):
+            packet, reasons = m.record_ready(inst, n, 'job', 1, full=True)
+        self.assertEqual(reasons, [])
+        self.assertEqual(packet['preview_scope']['status'], 'not_applicable')
+        with mock.patch.dict(os.environ, {**self.env, 'NODE_OPTIONS': 'other'}, clear=True):
+            self.assertEqual(m.preview_requirement(inst, n, 'job', data['head'], packet), packet['preview_scope'])
+        self.change(m, inst, n, data, {'ui/page.html': 'rendered\n'})
+        with mock.patch.dict(os.environ, {**self.env, 'NODE_OPTIONS': 'gate-fixture'}, clear=True):
+            packet, reasons = m.record_ready(inst, n, 'job', 1, full=True)
+        self.assertIsNone(packet)
+        self.assertIn('missing or invalid exact-head preview rendering and three-source-sample receipt', reasons)
+
+    def test_policy_mutation_between_loading_and_fencing_refuses_exemption(self):
+        m, inst, n, data = self.context()
+        self.change(m, inst, n, data, {'server/api.py': 'backend\n'})
+        original = m.Instance.nodes
+        pending = [True]
+        def mutate_after_load(current):
+            nodes = original(current)
+            if pending[0]:
+                pending[0] = False
+                self.declaration(m, inst, n, 'ui_globs=server/**')
+            return nodes
+        with mock.patch.object(m.Instance, 'nodes', mutate_after_load):
+            self.assertTrue(m.validate_ready_preview(inst, n, 'job', data['head']))
+
+    def test_full_receipt_adoption_uses_original_map_environment_before_preview_check(self):
+        script = ('import json, os; print(json.dumps([dict(name="ui", command="true", '
+                  'inputs=["ui/**" if os.environ.get("NODE_OPTIONS") == "gate-fixture" else "server/**"])]))')
+        m, inst, n, data = self.context('verify_lanes_from=python3 -c ' + shlex.quote(script))
+        self.change(m, inst, n, data, {'server/api.py': 'backend\n'})
+        with mock.patch.dict(os.environ, {**self.env, 'NODE_OPTIONS': 'gate-fixture'}, clear=True), \
+                mock.patch.object(m, 'load', return_value=inst), contextlib.redirect_stdout(io.StringIO()):
+            m.cmd_full_run(argparse.Namespace(id='web', branch='job', reviews=1))
+        receipts = list((n['dir'] / 'full-gates').glob('*.json'))
+        self.assertEqual(len(receipts), 1)
+        original = json.loads(receipts[0].read_text())['packet']
+        with mock.patch.dict(os.environ, {**self.env, 'NODE_OPTIONS': 'other'}, clear=True), \
+                mock.patch.object(m, 'run_verify', side_effect=AssertionError('adoption must reuse')):
+            adopted, reasons = m.record_ready(inst, n, 'job', 1, full_receipt=receipts[0].stem)
+        self.assertEqual(reasons, [])
+        self.assertTrue(adopted['verify_reused'])
+        self.assertEqual(adopted['preview_scope'], original['preview_scope'])
+        self.assertEqual(adopted['verify_lane_env'], original['verify_lane_env'])
+
+
 class GuardAllowanceRenewal(Scenario):
     def test_changed_policy_can_receive_a_new_exact_allowance(self):
         r = self.init('alice')

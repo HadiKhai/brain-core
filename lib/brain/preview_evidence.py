@@ -12,6 +12,7 @@ from . import instance as _m_instance
 from . import jobs as _m_jobs
 from . import nodes as _m_nodes
 from . import ui as _m_ui
+from . import verify_lanes as _m_lanes
 
 
 def preview_urls(n):
@@ -266,8 +267,139 @@ def record_preview_receipt(inst, n, branch, data):
         return path
 
 
+def preview_requirement(inst, n, branch, head, packet=None):
+    """Classify the exact integration diff; uncertainty always requires a receipt.
+
+    UI declarations describe rendered inputs, including shared dependencies. Lane
+    names alone are not enough unless an explicit ui/rendered lane exists.
+    """
+    evidence = dict(status='required', reason='preview classification uncertain',
+                    head=head, base=None, paths=[], source=None, globs=[])
+    try:
+        cfg = inst.cfg if isinstance(inst.cfg, dict) else {}
+        required = str(n['fm'].get('requires_preview_evidence', cfg.get('requires_preview_evidence', ''))).lower()
+        if not preview_urls(n) and required not in ('true', 'yes', '1', 'on'):
+            return {**evidence, 'status': 'optional', 'reason': 'preview is optional'}
+        # Read live policy and refs, even within a dashboard's Git read snapshot.
+        # Fence before loading any policy: a post-load fence can bless stale data.
+        policy_paths = [n['dir'] / _m_jobs.JOBS_FILE]
+        policy_before = _m_instance.state_signature(inst, n, extra=policy_paths)
+        live = _m_instance.Instance(inst.root)
+        n = next((node for node in live.nodes() if node['id'] == n['id']), None)
+        if n is None:
+            return evidence
+        row = _m_jobs.open_job(_m_jobs.read_jobs(n) or [], branch)
+        if not row or not n.get('external') or not n.get('home_path'):
+            return evidence
+        repo = n['home_path']
+        env = {**os.environ, 'GIT_OPTIONAL_LOCKS': '0'}
+
+        def query(*args):
+            result = _m_common.git(*args, cwd=repo, env=env)
+            if result.returncode or '\ufffd' in result.stdout:
+                raise ValueError('unreadable preview diff')
+            return result.stdout
+
+        if not isinstance(head, str) or not re.fullmatch(r'[0-9a-f]{40}|[0-9a-f]{64}', head):
+            return evidence
+        if query('rev-parse', '--verify', 'refs/heads/' + branch + '^{commit}').strip() != head:
+            return evidence
+        from . import verify as _m_verify
+        ref = _m_verify.integration_ref(repo)
+        if not ref:
+            return evidence
+        if n['fm'].get('merge', 'local') != 'pr':
+            ref = ref.replace('refs/remotes/origin/', 'refs/heads/', 1)
+        current_base = query('rev-parse', '--verify', ref + '^{commit}').strip()
+        # A train may retain an older integration base. It must be an ancestor
+        # of today's base, never a caller-selected newer/narrower diff.
+        base = (packet or {}).get('integration_base', current_base)
+        if not isinstance(base, str) or not re.fullmatch(r'[0-9a-f]{40}|[0-9a-f]{64}', base):
+            return evidence
+        query('merge-base', '--is-ancestor', base, current_base)
+        query('merge-base', '--is-ancestor', base, head)
+        evidence['base'] = base
+        raw = query('diff', '--name-status', '-z', '--find-renames', '--no-ext-diff',
+                    '--no-textconv', '--ignore-submodules=none', base, head, '--')
+        fields = raw.split('\0')
+        if fields.pop() != '':
+            raise ValueError('unterminated preview diff')
+        paths = []
+        while fields:
+            status = fields.pop(0)
+            count = 2 if re.fullmatch(r'[RC][0-9]+', status) else 1
+            if not re.fullmatch(r'[AMDT]|[RC][0-9]+', status) or len(fields) < count:
+                raise ValueError('unknown preview diff status')
+            for _ in range(count):
+                path = fields.pop(0)
+                if not path or path.startswith('/') or any(p in ('', '.', '..') for p in path.split('/')):
+                    raise ValueError('invalid preview diff path')
+                paths.append(path)
+        evidence['paths'] = sorted(set(paths))
+        groups = []
+        if 'ui_globs' in n['fm']:
+            raw_globs = n['fm']['ui_globs']
+            if not isinstance(raw_globs, str):
+                return evidence
+            patterns = (json.loads(raw_globs) if raw_globs.strip().startswith('[')
+                        else _m_common.lst(raw_globs))
+            groups.append(patterns)
+            evidence['source'] = 'ui_globs'
+        else:
+            w = n['local'].get('worktrees', {}).get(branch)
+            if not isinstance(w, dict):
+                return evidence
+            lane_env = _m_verify.verify_env(n, branch, w)
+            if 'verify_lane_env' in (packet or {}):
+                lane_env = _m_lanes.recorded_lane_environment(lane_env, packet['verify_lane_env'])
+            elif (packet or {}).get('version') == 1 and n['fm'].get('verify_lanes_from'):
+                return evidence  # Legacy full packets did not retain the map environment.
+            scope = (packet or {}).get('verify_scope', 'full')
+            lane_env.update(BRAIN_ROOT=str(inst.root), BRAIN_VERIFY_BASE=base,
+                            BRAIN_VERIFY_HEAD=head, BRAIN_VERIFY_SCOPE=scope)
+            lanes, _ = _m_lanes.lane_map(n, w, lane_env)
+            selected = {lane['name'] for lane in lanes if lane['name'] in ('ui', 'rendered')}
+            if not selected:
+                return evidence
+            while True:
+                expanded = selected | {name for lane in lanes if lane['name'] in selected for name in lane['requires']}
+                if expanded == selected:
+                    break
+                selected = expanded
+            evidence['source'] = 'lanes:' + ','.join(sorted(selected))
+            for lane in lanes:
+                if lane['name'] in selected:
+                    if lane['always']:
+                        return {**evidence, 'reason': 'rendered lane always applies'}
+                    groups.extend([lane['inputs'], lane['strict_inputs']])
+        if not groups or not any(groups):
+            return evidence
+        for patterns in groups:
+            if not isinstance(patterns, list) or any(not isinstance(p, str) for p in patterns):
+                return evidence
+            if patterns and not any(not p.startswith('!') for p in patterns):
+                return evidence
+            for pattern in patterns:
+                _m_lanes.glob_regex(pattern)
+        evidence['globs'] = groups
+        if (query('rev-parse', '--verify', 'refs/heads/' + branch + '^{commit}').strip() != head or
+                query('rev-parse', '--verify', ref + '^{commit}').strip() != current_base):
+            return {**evidence, 'reason': 'preview classification refs changed'}
+        current = _m_instance.Instance(inst.root)
+        current_node = next((node for node in current.nodes() if node['id'] == n['id']), None)
+        if current_node is None or _m_instance.state_signature(current, current_node, extra=policy_paths) != policy_before:
+            return {**evidence, 'reason': 'preview classification policy changed'}
+        if any(_m_lanes.matches(path, patterns) for path in paths for patterns in groups):
+            return {**evidence, 'reason': 'rendered paths touched'}
+        return {**evidence, 'status': 'not_applicable',
+                'reason': 'preview: not applicable, no rendered paths touched'}
+    except (OSError, ValueError, TypeError, KeyError, RuntimeError, RecursionError):
+        return evidence
+
+
 def validate_ready_preview(inst, n, branch, head, packet=None):
     try:
+        scope = preview_requirement(inst, n, branch, head, packet)
         urls = preview_urls(n)
         cfg = inst.cfg if isinstance(inst.cfg, dict) else {}
         required = str(n['fm'].get('requires_preview_evidence', cfg.get('requires_preview_evidence', ''))).lower()
@@ -285,6 +417,10 @@ def validate_ready_preview(inst, n, branch, head, packet=None):
         if not row:
             return ['preview source samples require an open job']
         path = preview_receipt_path(inst, n, row, head)
+        # A supplied receipt remains authoritative even for a backend-only diff:
+        # malformed or stale observations must never become an exemption.
+        if scope['status'] == 'not_applicable' and not path.exists():
+            return []
         validate_preview_receipt(inst, n, row, head, json.loads(path.read_text()))
     except (OSError, ValueError, TypeError, KeyError):
         return ['missing or invalid exact-head preview rendering and three-source-sample receipt']

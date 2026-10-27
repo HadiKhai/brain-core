@@ -3590,3 +3590,23 @@ process barriers cover admission, upgrade refusal, same-node competitors, inode
 continuity, failed admission and dead reporters without generating machine load.
 Short writes also release a newly acquired physical instance lock when native
 readiness has suspended an outer CLI scope with nonzero logical lock depth.
+## Scope preview evidence to the exact rendered-input diff
+
+A bound preview requires an exact-head observation when the integration diff
+changes rendered inputs, or when that classification is uncertain. A node may
+explicitly declare `ui_globs` (JSON strings or comma-separated globs); otherwise
+`ui`/`rendered` verify lanes supply inputs, strict inputs and transitive lane
+dependencies. Unsupported or absent declarations, failed maps and unreadable
+Git data retain the receipt requirement. Rename endpoints and deleted inputs
+are both classified. Supplied receipts retain all existing validation even for
+backend-only changes. Gate packets record the base, head, changed paths,
+declarations and applicability, and readiness recomputes the decision rather
+than accepting a cached exemption. Classification changes during verification
+refuse publication. A retained train base must precede the current integration
+base, so it cannot narrow away rendered changes.
+Generated classifiers use the verifier's root, base, head and scope environment;
+new packets retain the existing lane-environment format for subsequent reads.
+Legacy generated-map packets without that environment require a receipt.
+Policy signatures enclose the live load as well as classification.
+Full-receipt adoption defers preview validation until the original packet's
+environment is available; independent review and integration preflight stay first.

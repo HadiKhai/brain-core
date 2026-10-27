@@ -125,3 +125,19 @@ candidate commit. Omitting an earlier major or blocker keeps it unresolved;
 changed or deleted bound inputs reopen a closure. Unchanged closures survive
 unrelated commits. Malformed or missing durable state refuses readiness and is
 preserved for repair, rather than replaced by an empty pass receipt.
+
+A bound preview's receipt requirement is scoped to the integration `base..head`
+diff. Declare rendered inputs with `ui_globs: ui/**,templates/**` (or a JSON
+array of glob strings) in the node frontmatter. These globs must include shared
+code and data that affect rendering. Without `ui_globs`, a verify lane named
+`ui` or `rendered` supplies its inputs, strict inputs and transitive prerequisite
+inputs. An always-applicable rendered lane always requires a receipt. Generated
+lane maps use the existing bounded map reader; no browser is launched.
+
+A classified diff outside those inputs records `preview: not applicable, no
+rendered paths touched` in the packet's `preview_scope`, with the complete Git
+path list and base/head. Renames check both endpoints; deletions count too.
+Absent declarations, unsupported/empty globs, failed maps, invalid bases and
+unreadable diffs keep the receipt mandatory. Any supplied receipt is still
+validated. Readiness recomputes classification, including for full gates, so
+changing declarations cannot preserve an earlier exemption.
