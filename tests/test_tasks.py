@@ -62,6 +62,51 @@ class Tasks(Scenario):
     def test_symbolic_main_target_change_during_prepare_refuses(self):
         self.assert_home_prepare_commit(symbolic=True, move_main=True)
 
+    def test_symbolic_main_intermediate_repoint_and_restore_refuses(self):
+        self.repo(self.root, {'engine.py': 'value = 1\n'})
+        base = self.git('rev-parse', 'HEAD', cwd=self.root).strip()
+        (self.root / 'engine.py').write_text('value = 2\n')
+        self.git('add', 'engine.py', cwd=self.root)
+        self.git('commit', '-qm', 'Deliver fixture change', cwd=self.root)
+        head = self.git('rev-parse', 'HEAD', cwd=self.root).strip()
+        self.add('DONE-1', status='done', baseline_sha=base, merge_sha=head,
+                 code_path='engine.py', scope=['engine.py'], evidence=['Tests passed'])
+        self.git('branch', 'stable', cwd=self.root)
+        self.git('branch', 'alternate', base, cwd=self.root)
+        self.git('symbolic-ref', 'refs/heads/middle', 'refs/heads/stable', cwd=self.root)
+        self.git('symbolic-ref', 'refs/heads/main', 'refs/heads/middle', cwd=self.root)
+        prepare = tasks.prepare_mutation
+        def changed(*args, **kwargs):
+            result = prepare(*args, **kwargs)
+            self.git('symbolic-ref', 'refs/heads/middle', 'refs/heads/alternate', cwd=self.root)
+            self.git('symbolic-ref', 'refs/heads/middle', 'refs/heads/stable', cwd=self.root)
+            return result
+        with mock.patch.object(tasks, 'prepare_mutation', side_effect=changed), self.assertRaises(SystemExit):
+            self.add('NEW-1')
+        self.assertNotIn('NEW-1', tasks.read_records(self.n))
+
+    def test_symbolic_replacement_target_change_during_prepare_refuses(self):
+        self.repo(self.root, {'engine.py': 'value = 1\n'})
+        base = self.git('rev-parse', 'HEAD', cwd=self.root).strip()
+        (self.root / 'engine.py').write_text('value = 2\n')
+        self.git('add', 'engine.py', cwd=self.root)
+        self.git('commit', '-qm', 'Deliver fixture change', cwd=self.root)
+        head = self.git('rev-parse', 'HEAD', cwd=self.root).strip()
+        self.add('DONE-1', status='done', baseline_sha=base, merge_sha=head,
+                 code_path='engine.py', scope=['engine.py'], evidence=['Tests passed'])
+        replacement = self.git('commit-tree', head + '^{tree}', '-p', base,
+                               '-m', 'Replacement fixture change', cwd=self.root).strip()
+        self.git('branch', 'replacement-target', replacement, cwd=self.root)
+        self.git('symbolic-ref', 'refs/replace/' + head, 'refs/heads/replacement-target', cwd=self.root)
+        prepare = tasks.prepare_mutation
+        def changed(*args, **kwargs):
+            result = prepare(*args, **kwargs)
+            self.git('update-ref', 'refs/heads/replacement-target', base, cwd=self.root)
+            return result
+        with mock.patch.object(tasks, 'prepare_mutation', side_effect=changed), self.assertRaises(SystemExit):
+            self.add('NEW-1')
+        self.assertNotIn('NEW-1', tasks.read_records(self.n))
+
     def test_task_entry_points_work_while_home_builder_commits(self):
         import os
         import subprocess

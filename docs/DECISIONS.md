@@ -2836,7 +2836,8 @@ clear and every strict assertion; production hourly coalescing is unchanged.
 Task mutations fence records from the target node and nodes reached through
 its prospective dependency, parent and successor graph. Completion artifacts
 and code proof homes are selected from that same graph. Code completion fences
-local main (including its symbolic target), packed and replacement refs, Git
+local main and replacement refs (including every Git symbolic-ref chain link),
+packed refs, Git
 configuration and ancestry metadata in both worktree and common directories.
 Unrelated branch refs are excluded from this task-specific fence; other Git
 publication fences retain their broader scope.
