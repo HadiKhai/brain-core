@@ -393,6 +393,116 @@ class AutonomyDue(AutonomyProject):
 
 
 class AutonomyFacts(AutonomyProject):
+    def _assert_refresh_preserves_merge_comparison(self, event_source):
+        root, home, wt = self.project()
+        (wt / 'merged.txt').write_text('merged fixture\n')
+        self.git('add', 'merged.txt', cwd=wt)
+        self.git('commit', '-qm', 'merged fixture', cwd=wt)
+        self.git('merge', '-q', 'job-a', cwd=home)
+        self.b(root, 'wt', 'prune', 'app', '--offline')
+        self.b(root, 'status', 'app', '--refresh')
+        path = root / 'nodes/app/status.md'
+        self.assertIn('job-a (1 commits)', path.read_text())
+        loader = core_loader.SourceFileLoader('refresh_comparison_baseline', str(CORE / 'bin/brain'))
+        m = loader.load_module()
+        cli = importlib.import_module(loader.package_name + '.cli')
+        events = importlib.import_module(loader.package_name + '.events')
+        inst = m.Instance(root)
+        committed = events.events_view(inst, inst.node('app'))
+        source = events.source
+        def selected_source(current, node):
+            return 'events' if event_source and node['id'] == 'app' else source(current, node)
+        with mock.patch.dict(os.environ, {**self.env, 'BRAIN_ROOT': str(root)}), \
+                mock.patch.object(sys, 'argv', ['brain', 'status', 'app', '--refresh']), \
+                mock.patch.object(events, 'source', side_effect=selected_source), \
+                contextlib.redirect_stdout(io.StringIO()):
+            cli.main()
+        comparisons = [json.loads(line) for line in (root / '.brain/events-compare.jsonl').read_text().splitlines()]
+        compared = next(row for row in reversed(comparisons)
+                        if row.get('kind') == 'comparison' and row['node'] == events.node_ref('app'))
+        self.assertTrue(compared['equal'], compared)
+        self.assertEqual(compared['out_of_scope'], [])
+        if event_source:
+            self.assertEqual(events.events_view(m.Instance(root), inst.node('app')), committed)
+            self.assertIn('job-a (1 commits)', path.read_text())
+        else:
+            self.assertIn('Merged since previous refresh:\n- None recorded.', path.read_text())
+
+    def test_file_refresh_preserves_comparison_before_consuming_merge_baseline(self):
+        self._assert_refresh_preserves_merge_comparison(False)
+
+    def test_event_refresh_preserves_comparison_and_committed_merge_baseline(self):
+        self._assert_refresh_preserves_merge_comparison(True)
+
+    def test_refresh_prepares_and_publishes_once_in_its_operation(self):
+        root = self.init('alice')
+        self.b(root, 'status', 'root', '--refresh')
+        loader = core_loader.SourceFileLoader('refresh_single_publication', str(CORE / 'bin/brain'))
+        m = loader.load_module()
+        package = loader.package_name
+        cli = importlib.import_module(package + '.cli')
+        status = importlib.import_module(package + '.status')
+        events = importlib.import_module(package + '.events')
+        refresh = importlib.import_module(package + '.status_refresh')
+        published, compared = [], []
+        atomic_write = refresh.common.atomic_write
+        comparison = events.comparison
+        def write(path, *args, **kwargs):
+            if path == root / 'status.md':
+                self.assertTrue(compared, 'comparison must precede publication')
+                self.assertIsNotNone(refresh.instance._LOCK['fh'])
+                published.append(path)
+            return atomic_write(path, *args, **kwargs)
+        def compare(*args, **kwargs):
+            self.assertFalse(published, 'comparison must use pre-publication resources')
+            self.assertIsNotNone(refresh.instance._LOCK['fh'])
+            compared.append(True)
+            return comparison(*args, **kwargs)
+        with mock.patch.dict(os.environ, {**self.env, 'BRAIN_ROOT': str(root)}), \
+                mock.patch.object(sys, 'argv', ['brain', 'status', 'root', '--refresh']), \
+                mock.patch.object(refresh, 'compute', wraps=refresh.compute) as compute, \
+                mock.patch.object(status, 'status_facts', wraps=status.status_facts) as facts, \
+                mock.patch.object(refresh.common, 'atomic_write', side_effect=write), \
+                mock.patch.object(events, 'comparison', side_effect=compare), \
+                contextlib.redirect_stdout(io.StringIO()):
+            cli.main()
+        self.assertEqual(compute.call_count, 1)
+        self.assertEqual(facts.call_count, 1)
+        self.assertEqual(len(published), 1)
+        terminal = events.read(m.Instance(root))[-1]
+        self.assertEqual(terminal['kind'], 'commit')
+        self.assertTrue(terminal['data']['maintenance_ok'])
+        self.assertTrue(terminal['data']['views'])
+
+    def test_deferred_refresh_refuses_drift_before_comparison_or_publication(self):
+        root = self.init('alice')
+        self.b(root, 'status', 'root', '--refresh')
+        loader = core_loader.SourceFileLoader('refresh_deferred_drift', str(CORE / 'bin/brain'))
+        m = loader.load_module()
+        cli = importlib.import_module(loader.package_name + '.cli')
+        status = importlib.import_module(loader.package_name + '.status')
+        events = importlib.import_module(loader.package_name + '.events')
+        original = (root / 'status.md').read_bytes()
+        facts = status.status_facts
+        def changed(*args, **kwargs):
+            result = facts(*args, **kwargs)
+            with (root / 'backlog.md').open('a') as stream:
+                stream.write('\nConcurrent source update.\n')
+            return result
+        with mock.patch.dict(os.environ, {**self.env, 'BRAIN_ROOT': str(root)}), \
+                mock.patch.object(sys, 'argv', ['brain', 'status', 'root', '--refresh']), \
+                mock.patch.object(status, 'status_facts', side_effect=changed), \
+                mock.patch.object(events, 'comparison', wraps=events.comparison) as compare, \
+                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaisesRegex(SystemExit, 'status refresh maintenance refused'):
+                cli.main()
+        self.assertEqual(compare.call_count, 0)
+        self.assertEqual((root / 'status.md').read_bytes(), original)
+        self.assertIn('Concurrent source update.', (root / 'backlog.md').read_text())
+        terminal = events.read(m.Instance(root))[-1]
+        self.assertFalse(terminal['data']['maintenance_ok'])
+        self.assertEqual(terminal['data']['views'], {})
+
     def test_refresh_batch_preserves_individual_branch_and_ancestry_answers(self):
         root, home, wt = self.project()
         self.git('commit', '--allow-empty', '-qm', 'worker change', cwd=wt)

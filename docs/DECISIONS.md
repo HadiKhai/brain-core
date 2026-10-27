@@ -3685,3 +3685,16 @@ refs. A concurrent change retries the complete batch for scoped writers; other
 writers refuse it. All prepared views then publish under the retained writer
 lock, so rendering a later node cannot cause an earlier stale view to overwrite
 a concurrent writer's journal evidence.
+## 2026-10-27: Publish an explicit refresh from one maintenance preparation
+
+A normal explicit refresh defers its projection to the enclosing status
+operation's maintenance step, after reconciliation and index maintenance. The
+selected node consumes its previous merged set exactly once; other maintained
+nodes retain their existing merge baselines. One unlocked, fenced preparation
+produces both the comparison snapshot and replacement text. Comparison retains
+merged_before; only the selected file-source publication consumes merged. The comparison is
+recorded under the writer lock before any prepared status is published. Input
+drift refuses publication and marks maintenance unsuccessful. Direct calls and
+archived-node refreshes retain their existing immediate path. No preparation or
+read observation survives the operation, and event-source views still come from
+committed replay.

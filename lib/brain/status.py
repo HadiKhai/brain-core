@@ -1672,19 +1672,20 @@ def cmd_status(a):
         if a.refresh:
             from . import events
             events.reconcile(inst, node=n, snapshot=events.source(inst, n) != 'events')
-            from . import status_refresh
-            if status_refresh.requested(inst):
-                def prepare(current, node):
-                    compared = events.snapshot_view(current, node)
-                    view = events.events_view_without_current(current, node) if events.source(current, node) == 'events' else None
-                    return compared, refreshed_text(current, node, view)
-                compared, text = status_refresh.compute(inst, n, prepare, extra=(inst.root / '.brain/events.jsonl',))
-                events.comparison(inst, n, current=compared)
-                refresh_status(inst, n, prepared_text=text)
-            else:
-                events.comparison(inst, n)
-                view = events.events_view_without_current(inst, n) if events.source(inst, n) == "events" else None
-                refresh_status(inst, n, view)
+            if not events.defer_status_refresh(inst, n):
+                from . import status_refresh
+                if status_refresh.requested(inst):
+                    def prepare(current, node):
+                        compared = events.snapshot_view(current, node)
+                        view = events.events_view_without_current(current, node) if events.source(current, node) == 'events' else None
+                        return compared, refreshed_text(current, node, view)
+                    compared, text = status_refresh.compute(inst, n, prepare, extra=(inst.root / '.brain/events.jsonl',))
+                    events.comparison(inst, n, current=compared)
+                    refresh_status(inst, n, prepared_text=text)
+                else:
+                    events.comparison(inst, n)
+                    view = events.events_view_without_current(inst, n) if events.source(inst, n) == "events" else None
+                    refresh_status(inst, n, view)
         print(f"{n['id']:<28} {status_line(n)}")
 
 

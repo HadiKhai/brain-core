@@ -1414,6 +1414,15 @@ def projection_inputs(op, selected):
             paths.extend(instance.git_state_paths(node['home_path'], refs=refs - {''}, include_head=False))
     paths.append(op.inst.root / '.brain/communications.json')
     return paths
+def defer_status_refresh(inst, n):
+    """Let the enclosing operation prepare and publish this refresh once."""
+    if n['archived']:
+        return False
+    for op in reversed(_CURRENT):
+        if op.inst.root == inst.root and op.command == 'status' and op.node == n['id']:
+            op.refresh_node = n['id']
+            return True
+    return False
 
 
 def maintain(op, changed):
@@ -1455,6 +1464,7 @@ def maintain(op, changed):
     prepared = {}
     released_projection = op.command in ('set', 'handback', 'task', 'review', 'preview_receipt',
                                          'report', 'workbench', 'upgrade', *WT_COMMANDS)
+    refresh_node = getattr(op, 'refresh_node', None)
     if op.command == 'status' and selected:
         from . import status_refresh
         for n in selected.values():
@@ -1464,14 +1474,23 @@ def maintain(op, changed):
             result = {}
             for nid in selected:
                 target = current.node(nid)
-                view = snapshot_view(current, target, status.facts_meta(target).get('merged_before', []))
+                # A deferred explicit refresh consumes the previous merged set
+                # once. Other maintained views retain their existing baseline.
+                meta = status.facts_meta(target)
+                compared = snapshot_view(current, target, meta.get('merged_before', []))
                 if source(current, target) == 'events':
                     view = events_view_without_current(current, target)
-                result[nid] = (view, status.refreshed_text(current, target, view))
+                elif nid == refresh_node:
+                    view = snapshot_view(current, target, meta.get('merged', [])) if meta.get('merged', []) != meta.get('merged_before', []) else compared
+                else:
+                    view = compared
+                result[nid] = (view, status.refreshed_text(current, target, view), compared)
             return result
         prepared = status_refresh.compute(op.inst, next(iter(selected.values())), prepare_views,
                                           targets=list(selected), extra=(op.inst.root / '.brain/events.jsonl',)
                                           if any(source(op.inst, n) == 'events' for n in selected.values()) else ())
+        if refresh_node in prepared:
+            comparison(op.inst, op.inst.node(refresh_node), current=prepared[refresh_node][2])
     elif released_projection and selected:
         if materialize:
             for n in selected.values():
