@@ -424,20 +424,25 @@ export type Column = {
   sortValue?: (row: RecordData) => string | number;
   numeric?: boolean;
 };
-export function Reader({ title, text, trigger = "Read full", children, footer, open: controlled, onOpenChange, primary = false, outlined = false, literalTitle = false }: {
-  title: string; text: string; trigger?: string; children?: ReactNode; footer?: ReactNode; open?: boolean; onOpenChange?: (open: boolean) => void; primary?: boolean; outlined?: boolean; literalTitle?: boolean;
+// `facts` join the verbatim source in the reader's one "Technical details" disclosure.
+export function Reader({ title, text, trigger = "Read full", children, footer, facts, open: controlled, onOpenChange, primary = false, outlined = false, literalTitle = false }: {
+  title: string; text: string; trigger?: string; children?: ReactNode; footer?: ReactNode; facts?: Record<string, any>; open?: boolean; onOpenChange?: (open: boolean) => void; primary?: boolean; outlined?: boolean; literalTitle?: boolean;
 }) {
   const [internal, setInternal] = useState(false);
   const open = controlled ?? internal;
   const setOpen = (value: boolean) => { setInternal(value); onOpenChange?.(value); };
   const zone = useContext(TimeZoneContext);
+  const verbatim = humanText(readable(text, zone)) !== readable(text, zone), shownFacts = factEntries(facts);
   return <>
     <Button variant={primary ? "default" : outlined ? "outline" : "ghost"} size="sm" className={primary ? "" : "reader-trigger"} onClick={() => setOpen(true)}>{trigger}</Button>
     <Sheet open={open} onOpenChange={setOpen}>
       <SheetContent className="reading-sheet" initialFocus={() => document.querySelector<HTMLElement>(".reading-sheet [data-slot=sheet-close]")}>
         <SheetHeader><SheetTitle>{literalTitle ? title : <Text>{title}</Text>}</SheetTitle><SheetDescription>Read the full context, then return to your place.</SheetDescription></SheetHeader>
         <div className="reader-body"><Markdown text={text} />{children}
-          {humanText(readable(text, zone)) !== readable(text, zone) && <Disclosure title="Technical details"><pre className="verbatim" dir="ltr">{text}</pre></Disclosure>}
+          {(verbatim || shownFacts.length > 0) && <Disclosure title="Technical details">
+            {shownFacts.length > 0 && <TechnicalFacts entries={shownFacts} />}
+            {verbatim && <pre className="verbatim" dir="ltr">{text}</pre>}
+          </Disclosure>}
         </div>
         {footer && <div className="reader-footer">{footer}</div>}
       </SheetContent>
@@ -453,8 +458,12 @@ export function SectionNote({ text, title = "Note" }: { text: any; title?: strin
 export function SectionBodyRow({ children, className = "" }: { children: ReactNode; className?: string }) {
   return <div className={`section-content ${className}`}>{children}</div>;
 }
+const factEntries = (values?: Record<string, any>) => Object.entries(values || {}).filter(([, v]) => v != null && v !== "");
+function TechnicalFacts({ entries }: { entries: [string, any][] }) {
+  return <dl className="technical-facts">{entries.map(([key, value]) => <div key={key}><dt>{key}</dt><dd className="verbatim" dir="ltr">{String(value)}</dd></div>)}</dl>;
+}
 export function TechnicalDetails({ values }: { values: Record<string, any> }) {
-  return <Disclosure title="Technical details"><dl className="technical-facts">{Object.entries(values).filter(([,v]) => v != null && v !== "").map(([key, value]) => <div key={key}><dt>{key}</dt><dd className="verbatim" dir="ltr">{String(value)}</dd></div>)}</dl></Disclosure>;
+  return <Disclosure title="Technical details"><TechnicalFacts entries={factEntries(values)} /></Disclosure>;
 }
 function nodeText(node: ReactNode): string {
   if (typeof node === "string" || typeof node === "number") return String(node);

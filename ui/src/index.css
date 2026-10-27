@@ -348,10 +348,11 @@ code, .inline-code, .verbatim { font-family: var(--font-mono); }
 .row-text, .row-note { font-size: 13px; line-height: 1.45; display: -webkit-box; -webkit-line-clamp: 1; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; color: var(--muted-foreground); }
 .row.request .row-text { color: var(--foreground); }
 .row-note { color: var(--ember-fg); font-size: 12.5px; }
-/* The recommendation shares the ask's line when both fit and wraps whole below it when not, so its value is never clipped. */
+/* The recommendation shares the ask's line when both fit and moves below it when not. It stays one line and
+   truncates at its end, so the start of the value is always visible; the reader holds the full text. */
 .row-ask { display: flex; flex-wrap: wrap; align-items: baseline; column-gap: 8px; min-width: 0; }
 .row-ask .row-text { flex: 1 1 12rem; min-width: 0; }
-.row-ask .row-note { flex: 0 1 auto; max-width: 100%; min-width: 0; -webkit-line-clamp: 2; }
+.row-ask .row-note { flex: 0 1 auto; max-width: 100%; min-width: 0; display: block; white-space: nowrap; text-overflow: ellipsis; }
 .row-actions { display: flex; align-items: center; gap: 10px; flex-shrink: 0; }
 .row-facts { display: flex; flex-direction: column; gap: 0; width: 240px; flex-shrink: 0; }
 .row-facts small { display: flex; gap: 4px; align-items: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }

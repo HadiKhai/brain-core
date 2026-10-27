@@ -3,7 +3,7 @@ import { usePage } from "./hooks/use-page";
 import { ThreadLink } from "./thread-link";
 import { WorkStatus } from "./work-status";
 import { Button } from "@/components/ui/button";
-import { FilterToolbar, Text, Reader, Empty, ScreenAction, Status, ListFrame, DetailRow, TechnicalDetails } from "./shared";
+import { FilterToolbar, Text, Reader, Empty, ScreenAction, Status, ListFrame, DetailRow } from "./shared";
 import { SectionTabs } from "./dash";
 import { RecordPicker } from "./picker";
 import { list, time, sender, dueParts, readable, needAsk, needsView, optionLabel, type RecordData } from "./model";
@@ -35,7 +35,7 @@ export function RequestRow({ s, item, go, showProject = true, compact = false, a
         {conversation ? <ThreadLink href={conversation} label={archived ? "Open source conversation" : (!compact && nextAction) || (question ? "Answer" : "Open conversation")} />
           : project ? <Button variant="outline" size="sm" onClick={() => go({ view: "project", node: project.id })}><Text>{(!compact && nextAction) || "Open project"}</Text></Button>
           : null}
-        <Reader open={open} onOpenChange={setOpen} title={archived ? "Archived item" : "Request"} text={full} trigger={archived ? "Read source" : "Read request"} footer={<TechnicalDetails values={{ Source: item.source, "Recommendation ID": item.recommendation, "Default ID": item.default }} />} />
+        <Reader open={open} onOpenChange={setOpen} title={archived ? "Archived item" : "Request"} text={full} trigger={archived ? "Read source" : "Read request"} facts={{ Source: item.source, "Recommendation ID": item.recommendation, "Default ID": item.default }} />
       </div>
     </DetailRow>
   );
