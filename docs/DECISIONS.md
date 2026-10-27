@@ -2880,3 +2880,6 @@ Regular-file checks use a freshly opened nonblocking descriptor, preventing a FI
 replacement from blocking and avoiding a redundant pathname stat on each warm file.
 Scanner identity includes its compiled implementation as well as source hashes,
 so a command loaded before an upgrade cannot publish as the newly installed code.
+The compiled identity includes normalized positional and keyword-only defaults;
+unsupported defaults disable persistent reuse/publication while source scanning
+continues normally.

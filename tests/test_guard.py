@@ -578,6 +578,52 @@ print(json.dumps(guard.scan_terms(node, terms=[('Needle', 'term 1'), ('CAFÉ', '
         self.assertNotEqual(old._m_term_cache.scanner_version(), new._m_term_cache.scanner_version())
         self.assertTrue(new.scan_terms(self.node, terms=self.terms)[0])
 
+    def test_default_only_upgrades_bind_positional_and_keyword_defaults(self):
+        notes = self.node['dir']
+        (notes / 'node.md').write_text('fixture\n')
+        (notes / 'library').mkdir()
+        (notes / 'library/item.md').write_text('---\nscope: needle\n---\nclean\n')
+        self.node['home_path'] = notes / 'library'
+        signature = 'def governance_text(text, principals=(), drop=False):'
+        for keyword_only in (False, True):
+            with self.subTest(keyword_only=keyword_only):
+                self.cache_file.unlink(missing_ok=True)
+                core = self.tmp / ('core-defaults-' + str(keyword_only))
+                shutil.copytree(CORE / 'lib', core / 'lib')
+                (core / 'bin').mkdir()
+                shutil.copy2(CORE / 'bin/brain', core / 'bin/brain')
+                source = core / 'lib/brain/guard.py'
+                original = source.read_text()
+                self.assertIn(signature, original)
+                prefix = 'def governance_text(text, principals=(), ' + ('*, ' if keyword_only else '')
+                source.write_text(original.replace(signature, prefix + 'drop=True):', 1))
+                old = core_loader.SourceFileLoader('old_defaults', str(core / 'bin/brain')).load_module()._owners['scan_terms']
+                source.write_text(original.replace(signature, prefix + 'drop=False):', 1))
+                new = core_loader.SourceFileLoader('new_defaults', str(core / 'bin/brain')).load_module()._owners['scan_terms']
+                expected = new.scan_terms(self.node, terms=self.terms)
+                self.assertTrue(expected[0])
+                self.assertNotEqual(old._TERM_IMPLEMENTATION, new._TERM_IMPLEMENTATION)
+                with old.term_scan_cache(persist=True):
+                    self.assertEqual(old.scan_terms(self.node, terms=self.terms), ([], []))
+                self.assertNotEqual(old._m_term_cache.scanner_version(), new._m_term_cache.scanner_version())
+                self.assertEqual(new.scan_terms(self.node, terms=self.terms), expected)
+                self.cache_file.unlink()
+                self.assertEqual(new.scan_terms(self.node, terms=self.terms), expected)
+
+    def test_unsupported_compiled_defaults_disable_cache_without_disabling_scan(self):
+        core = self.tmp / 'core-unsupported'
+        shutil.copytree(CORE / 'lib', core / 'lib')
+        (core / 'bin').mkdir()
+        shutil.copy2(CORE / 'bin/brain', core / 'bin/brain')
+        source = core / 'lib/brain/guard.py'
+        source.write_text(source.read_text().replace('def term_open_file(path, flags):',
+                          'def term_open_file(path, flags, unsupported=object()):', 1))
+        new = core_loader.SourceFileLoader('unsupported_defaults', str(core / 'bin/brain')).load_module()._owners['scan_terms']
+        self.assertIsNone(new._TERM_IMPLEMENTATION)
+        with new.term_scan_cache(persist=True):
+            self.assertTrue(new.scan_terms(self.node, terms=self.terms)[0])
+        self.assertFalse(self.cache_file.exists())
+
 
 class Hardening(Scenario):
     """What the second-runtime reviews broke, kept broken-proof."""

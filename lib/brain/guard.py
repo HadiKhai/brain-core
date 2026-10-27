@@ -844,7 +844,10 @@ def cmd_seal(a):
 
 # An already-running old command must not publish under the identity of newer
 # source files installed while it runs. Capture its actual compiled semantics.
-_TERM_IMPLEMENTATION = _m_term_cache.digest([
-    _m_term_cache.loaded_code(globals()), _m_term_cache.loaded_code(vars(_m_common)),
-    _m_common.FRONTMATTER_RE.pattern, _m_common.FRONTMATTER_RE.flags,
-    NEVER_FILE, sorted(NOTE_FILES)])
+try:
+    _TERM_IMPLEMENTATION = _m_term_cache.digest([
+        _m_term_cache.loaded_code(globals()), _m_term_cache.loaded_code(vars(_m_common)),
+        _m_common.FRONTMATTER_RE.pattern, _m_common.FRONTMATTER_RE.flags,
+        NEVER_FILE, sorted(NOTE_FILES)])
+except (TypeError, ValueError, RecursionError):
+    _TERM_IMPLEMENTATION = None

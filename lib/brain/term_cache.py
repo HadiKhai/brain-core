@@ -71,20 +71,30 @@ def loaded_code(namespace):
             return ['bytes', value.hex()]
         if isinstance(value, tuple):
             return ['tuple', [constant(x) for x in value]]
+        if isinstance(value, list):
+            return ['list', [constant(x) for x in value]]
+        if isinstance(value, dict):
+            return ['dict', sorted(([constant(k), constant(v)] for k, v in value.items()),
+                                   key=lambda x: json.dumps(x[0], sort_keys=True))]
         if isinstance(value, frozenset):
             return ['frozenset', sorted((constant(x) for x in value), key=lambda x: json.dumps(x, sort_keys=True))]
         if isinstance(value, complex):
             return ['complex', value.real, value.imag]
         if value is Ellipsis:
             return ['ellipsis']
-        return value
+        if isinstance(value, (types.BuiltinFunctionType, types.BuiltinMethodType)):
+            return ['builtin', value.__module__, value.__qualname__]
+        if value is None or type(value) in (str, bool, int, float):
+            return value
+        raise ValueError('unsupported compiled scanner constant/default')
     def add(name, value):
         if isinstance(value, (staticmethod, classmethod)):
             value = value.__func__
         if isinstance(value, types.FunctionType):
             while hasattr(value, '__wrapped__'):
                 value = value.__wrapped__
-            rows.append([name, digest(constant(value.__code__))])
+            rows.append([name, digest([constant(value.__code__), constant(value.__defaults__),
+                                       constant(value.__kwdefaults__)])])
     for name, value in sorted(namespace.items()):
         if getattr(value, '__module__', None) != namespace['__name__']:
             continue
@@ -112,6 +122,8 @@ def accessible(path, mode):
 def scanner_version():
     # Implementation changes invalidate even when the explicit format stays put.
     from . import guard as _m_guard
+    if _TERM_CACHE_IMPLEMENTATION is None or _m_guard._TERM_IMPLEMENTATION is None:
+        raise ValueError('compiled scanner identity unavailable')
     return digest([SCANNER_VERSION, MAX_BYTES, _TERM_CACHE_IMPLEMENTATION, _m_guard._TERM_IMPLEMENTATION,
                    unicodedata.unidata_version, list(sys.version_info[:3]),
                    hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
@@ -332,4 +344,7 @@ class ObjectStorage:
                 and all(self.source_stamp(oid) == old for oid, old in self.blobs.items()))
 
 
-_TERM_CACHE_IMPLEMENTATION = loaded_code(globals())
+try:
+    _TERM_CACHE_IMPLEMENTATION = loaded_code(globals())
+except (TypeError, ValueError, RecursionError):
+    _TERM_CACHE_IMPLEMENTATION = None  # unavailable identity disables persistence, never source scanning
