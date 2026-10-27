@@ -2974,6 +2974,7 @@ pending intent without replay, rollback or release. Product drivers own durable
 execution and reconciliation; the transport creates no second lifecycle engine.
 The same absolute deadline reaches request encoding and subprocess creation, so
 serialization and scheduling time cannot renew the remaining operation budget.
+
 ## D40004: Bind job preview evidence to its current worktree generation
 
 Preview receipts may opt into `scope: job` and include `worktree_generation`
@@ -2997,6 +2998,9 @@ job receipts are revalidated by the readiness policy before full verification.
 A receipt still needs a rendered-page observation and three distinct matching
 source comparisons for every URL; recording remains a supplied observation,
 not an automated browser check.
+
+## Command-scoped Git observation batches
+
 Read commands share branch tips, commit dates and linked-worktree HEADs from one
 ref/worktree enumeration per repository. Ancestry queries, commit counts and
 clean-title checks share one commit graph per base, with roots pinned to the
@@ -3043,6 +3047,9 @@ reduce coverage: `check_lanes.py` requires complete canonical ownership and
 nonselective module inputs. Selection reads source on every invocation, uses
 NUL-delimited Git paths, disables rename heuristics and optional Git locks, and
 includes staged, unstaged and untracked inputs. There is no time-based cache.
+
+## Recover atomic publication from durable intended-mode records
+
 Atomic publication persists a private intended-mode record alongside the staging file
 before applying its mode and renaming. The record binds the destination name, device,
 inode, size, modification timestamp and content digest to the intended mode. A writer
@@ -3053,6 +3060,7 @@ are locked, and successful publication removes its owned record only after direc
 sync. Unpublished staging and records for other inodes are left for reconciliation;
 recovery never promotes them. Chmod failures still abort publication and attempt
 private cleanup, preserving the original failure if cleanup also fails.
+
 ## Rehearsal preparation does not probe delivery
 
 Copied webhook bindings never authorize delivery during rehearsal preparation.
