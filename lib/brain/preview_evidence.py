@@ -1,6 +1,7 @@
 """Exact-code preview observations with three source comparisons per presented URL."""
 import hashlib
 import json
+import os
 import re
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -10,6 +11,7 @@ from . import guard as _m_guard
 from . import instance as _m_instance
 from . import jobs as _m_jobs
 from . import nodes as _m_nodes
+from . import ui as _m_ui
 
 
 def preview_urls(n):
@@ -30,6 +32,90 @@ def preview_receipt_path(inst, n, row, head):
     return inst.root / '.brain/preview-receipts' / hashlib.sha256(n['id'].encode()).hexdigest() / _m_jobs.job_key(row) / (head + '.json')
 
 
+def job_preview_binding(inst, n, row, head):
+    """Read current authority, never a caller's cached worktree or job declarations.
+
+    A port block authorizes loopback URLs only. An exact URL can also be declared
+    in the ledger's JSON ``Preview URLs`` cell or the contract's matching section.
+    Physical directory identities prevent receipt reuse after path recreation.
+    """
+    def refuse():
+        raise ValueError('job preview requires a current bound worktree at this head')
+
+    def query(path, *args):
+        # Receipt authority is live even inside a dashboard Git-read snapshot.
+        result = _m_common.git(*args, cwd=path, env={**os.environ, 'GIT_OPTIONAL_LOCKS': '0'})
+        if result.returncode or not result.stdout.strip():
+            refuse()
+        return result.stdout.strip()
+
+    def identity(path):
+        stat = path.stat()
+        return [stat.st_dev, stat.st_ino]
+
+    try:
+        live = _m_instance.Instance(inst.root)
+        current_node = next((node for node in live.nodes() if node['id'] == n['id']), None)
+        if current_node is None:
+            refuse()
+        current = _m_jobs.open_job(_m_jobs.read_jobs(current_node) or [], row['Job'])
+        if not current or _m_jobs.job_key(current) != _m_jobs.job_key(row):
+            refuse()
+        worktree = current_node['local'].get('worktrees', {}).get(row['Job'])
+        if (not current_node['external'] or not current_node.get('home_path') or
+                not isinstance(worktree, dict)):
+            refuse()
+        created = live.parse_time(worktree.get('created'))
+        if not created or created > live.now_dt() or not worktree.get('start'):
+            refuse()
+        path = Path(worktree['path']).expanduser().resolve(strict=True)
+        home = current_node['home_path'].resolve(strict=True)
+        if (Path(query(path, 'rev-parse', '--show-toplevel')).resolve() != path or
+                query(path, 'symbolic-ref', 'HEAD') != 'refs/heads/' + row['Job'] or
+                query(path, 'rev-parse', 'HEAD') != head or
+                query(home, 'rev-parse', '--verify', 'refs/heads/' + row['Job'] + '^{commit}') != head):
+            refuse()
+        common = (path / query(path, 'rev-parse', '--git-common-dir')).resolve(strict=True)
+        if common != (home / query(home, 'rev-parse', '--git-common-dir')).resolve(strict=True):
+            refuse()
+        admin = (path / query(path, 'rev-parse', '--git-dir')).resolve(strict=True)
+        port, count = worktree.get('port'), worktree.get('ports', 1)
+        if (type(port) is not int or type(count) is not int or
+                port < 1 or count < 1 or port + count - 1 > 65535):
+            refuse()
+        declared = json.loads(current.get('Preview URLs') or '[]')
+        if not isinstance(declared, list) or any(not isinstance(url, str) for url in declared):
+            refuse()
+        contract = _m_jobs.contract_file(current_node, current)
+        if contract.exists():
+            sections = {key.lower(): value for key, value in _m_ui.md_sections(contract.read_text()).items()}
+            declared += [re.sub(r'^[-*+]\s+', '', line.strip()).strip('`')
+                         for line in sections.get('preview urls', '').splitlines() if line.strip()]
+        generation = _m_jobs.digest([_m_jobs.job_key(current), str(home), str(path),
+                                    worktree['created'], worktree['start'], port, count,
+                                    identity(path), str(admin), identity(admin),
+                                    str(common), identity(common), sorted(set(declared))])
+        return {'generation': generation, 'created': created, 'port': port,
+                'ports': count, 'urls': declared}
+    except (OSError, TypeError, KeyError, RuntimeError) as error:
+        raise ValueError('job preview binding unavailable') from error
+
+
+def job_preview_generation(inst, n, row, head):
+    """Generation token to include in an explicit ``scope: job`` receipt."""
+    return job_preview_binding(inst, n, row, head)['generation']
+
+
+def job_preview_url(url, binding):
+    parsed = urlsplit(url)
+    if parsed.scheme not in ('http', 'https') or not parsed.netloc or parsed.username or parsed.password:
+        return False
+    if url in binding['urls']:
+        return True
+    return (parsed.hostname in ('localhost', '127.0.0.1', '::1') and
+            parsed.port is not None and binding['port'] <= parsed.port < binding['port'] + binding['ports'])
+
+
 def validate_preview_receipt(inst, n, row, head, data):
     def refuse():
         raise ValueError('preview receipt needs exact code, current URLs, rendering evidence and three distinct matching source samples per URL')
@@ -45,6 +131,15 @@ def validate_preview_receipt(inst, n, row, head, data):
         refuse()
     routes = data.get('urls')
     expected = preview_urls(n)
+    if data.get('scope') == 'job':
+        binding = job_preview_binding(inst, n, row, head)
+        if data.get('worktree_generation') != binding['generation'] or checked < binding['created']:
+            refuse()
+        if (not isinstance(routes, list) or not routes or any(not isinstance(route, dict) or
+                not isinstance(route.get('url'), str) or not job_preview_url(route['url'], binding)
+                for route in routes)):
+            refuse()
+        expected = list(dict.fromkeys(route['url'] for route in routes))
     if (not isinstance(routes, list) or not routes or any(not isinstance(r, dict) for r in routes) or
             {r.get('url') for r in routes if isinstance(r.get('url'), str)} != set(expected) or len(routes) != len(expected)):
         refuse()
@@ -80,6 +175,8 @@ def record_preview_receipt(inst, n, branch, data):
         if not row:
             raise ValueError('preview receipt requires an open job')
         repo = n.get('home_path') if n.get('external') else inst.root
+        if repo is None or not repo.is_dir():
+            raise ValueError('preview receipt requires a bound home')
         paths = lambda: [n['dir'] / _m_jobs.JOBS_FILE, *_m_instance.git_state_paths(repo)]
         with _m_instance.released(inst, n, extra=paths):
             head = _m_common.git('rev-parse', '--verify', 'refs/heads/' + branch + '^{commit}', cwd=repo).stdout.strip()
@@ -99,7 +196,15 @@ def validate_ready_preview(inst, n, branch, head, packet=None):
         cfg = inst.cfg if isinstance(inst.cfg, dict) else {}
         required = str(n['fm'].get('requires_preview_evidence', cfg.get('requires_preview_evidence', ''))).lower()
         if not urls and required not in ('true', 'yes', '1', 'on'):
-            return []
+            # Optional previews remain optional, but a supplied job receipt must
+            # still be checked against the current binding on every read.
+            optional_row = _m_jobs.open_job(_m_jobs.read_jobs(n) or [], branch)
+            optional_path = preview_receipt_path(inst, n, optional_row, head) if optional_row else None
+            if not optional_path or not optional_path.exists():
+                return []
+            optional_data = json.loads(optional_path.read_text())
+            if not isinstance(optional_data, dict) or optional_data.get('scope') != 'job':
+                return []
         row = _m_jobs.open_job(_m_jobs.read_jobs(n) or [], branch)
         if not row:
             return ['preview source samples require an open job']
