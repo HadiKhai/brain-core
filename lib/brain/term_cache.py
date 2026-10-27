@@ -6,6 +6,7 @@ without changing their input tree. Cache failures always fall back to scanning.
 import hashlib
 import json
 import os
+import re
 import stat
 import sys
 import unicodedata
@@ -17,6 +18,42 @@ SCANNER_VERSION = 1
 MAX_BYTES = 64 << 20
 
 
+def hex_key(value, lengths=(64,)):
+    return isinstance(value, str) and len(value) in lengths and re.fullmatch('[0-9a-f]+', value) is not None
+
+
+def valid_cache(value):
+    """Reject the entire artifact on unknown fields or nonprivate schema values."""
+    def fields(item, names):
+        return isinstance(item, dict) and item.keys() == set(names)
+    if not fields(value, ('version', 'nodes')) or not hex_key(value['version']) or not isinstance(value['nodes'], dict):
+        return False
+    for node_key, node in value['nodes'].items():
+        if (not hex_key(node_key) or not fields(node, ('words', 'contexts'))
+                or not hex_key(node['words']) or not isinstance(node['contexts'], dict)):
+            return False
+        for context_key, context in node['contexts'].items():
+            if (not hex_key(context_key) or not fields(context, ('blobs', 'files', 'stores'))
+                    or any(not isinstance(context[key], dict) for key in ('blobs', 'files', 'stores'))):
+                return False
+            blobs = context['blobs']
+            if any(not hex_key(oid, (40, 64)) or type(clean) is not bool for oid, clean in blobs.items()):
+                return False
+            for path_key, record in context['files'].items():
+                if (not hex_key(path_key) or not isinstance(record, list) or len(record) != 2
+                        or not isinstance(record[0], list) or len(record[0]) != 9
+                        or any(type(number) is not int or not -(1 << 127) <= number < (1 << 127)
+                               for number in record[0])
+                        or not hex_key(record[1], (40, 64)) or record[1] not in blobs):
+                    return False
+            for store_key, records in context['stores'].items():
+                if (not hex_key(store_key) or not isinstance(records, dict)
+                        or any(not hex_key(oid, (40, 64)) or oid not in blobs or not hex_key(stamp)
+                               for oid, stamp in records.items())):
+                    return False
+    return True
+
+
 def digest(value):
     return hashlib.sha256(json.dumps(value, ensure_ascii=True, separators=(',', ':')).encode()).hexdigest()
 
@@ -24,6 +61,14 @@ def digest(value):
 def identity(value):
     return [value.st_dev, value.st_ino, value.st_size, value.st_mtime_ns,
             value.st_ctime_ns, value.st_mode, value.st_uid, value.st_gid, value.st_nlink]
+
+
+def accessible(path, mode):
+    if os.access in os.supports_effective_ids:
+        return os.access(path, mode, effective_ids=True)
+    if os.getuid() != os.geteuid() or os.getgid() != os.getegid():
+        return False
+    return os.access(path, mode)
 
 
 def scanner_version():
@@ -56,8 +101,7 @@ class VerdictCache:
                     old = json.loads(self.target.read_bytes())
                 except (ValueError, TypeError, RecursionError):
                     old = None
-                if (isinstance(old, dict) and old.get('version') == self.data['version']
-                        and isinstance(old.get('nodes'), dict)):
+                if valid_cache(old) and old['version'] == self.data['version']:
                     self.data = old
                 else:
                     self.dirty = True
@@ -111,9 +155,9 @@ class Policy:
         return (isinstance(old, list) and len(old) == 2 and isinstance(old[1], str) and old[0] == identity(st)
                 and self.data['blobs'].get(old[1]) is True)
 
-    def remember_file(self, path, st, data, clean):
+    def remember_file(self, path, st, data, clean, oid=None):
         # Canonical SHA-1 Git blob identity, also for dirty/untracked files.
-        oid = hashlib.sha1(b'blob ' + str(len(data)).encode() + b'\0' + data).hexdigest()
+        oid = oid or hashlib.sha1(b'blob ' + str(len(data)).encode() + b'\0' + data).hexdigest()
         self.data['blobs'][oid] = bool(clean)
         self.data['files'][self.file_key(path)] = [identity(st), oid]
         self.owner.dirty = True
@@ -167,26 +211,29 @@ class ObjectStorage:
             if any(os.environ.get(key) for key in overrides):
                 return None
             objects = self.path / 'objects'
-            if (objects / 'info/alternates').exists() or (self.path / 'refs/replace').exists():
+            if os.path.lexists(self.path / 'reftable'):
+                return None  # replacement refs are not represented by refs/replace
+            if os.path.lexists(objects / 'info/alternates') or os.path.lexists(self.path / 'refs/replace'):
                 return None
             packed = self.path / 'packed-refs'
-            if packed.exists() and b'refs/replace/' in packed.read_bytes():
-                return None
+            if os.path.lexists(packed):
+                if packed.is_symlink() or not packed.is_file() or b'refs/replace/' in packed.read_bytes():
+                    return None
             rows = []
             # Parent access/ACL changes invalidate the proof too.
             for path in [self.path, *self.path.parents]:
                 st = path.stat()
-                if not os.access(path, os.R_OK | os.X_OK):
+                if not accessible(path, os.R_OK | os.X_OK):
                     return None
                 # Directory entry churn in an ancestor is irrelevant; access is
                 # checked afresh and object-directory churn is bound below.
                 rows.append([str(path), [st.st_dev, st.st_ino, st.st_mode, st.st_uid, st.st_gid]])
-            for name in ('config',):
+            for name in ('config', 'packed-refs'):
                 path = self.path / name
                 rows.append([name, identity(path.stat()) if path.exists() else None])
             def walk(directory):
                 before = directory.stat()
-                if directory.is_symlink() or not os.access(directory, os.R_OK | os.X_OK):
+                if directory.is_symlink() or not accessible(directory, os.R_OK | os.X_OK):
                     raise OSError('unreadable object directory')
                 rows.append([str(directory.relative_to(self.path)), identity(before)])
                 with os.scandir(directory) as entries:
@@ -194,7 +241,7 @@ class ObjectStorage:
                         st = entry.stat(follow_symlinks=False)
                         if stat.S_ISDIR(st.st_mode):
                             walk(Path(entry.path))
-                        elif stat.S_ISREG(st.st_mode) and os.access(entry.path, os.R_OK):
+                        elif stat.S_ISREG(st.st_mode) and accessible(entry.path, os.R_OK):
                             rows.append([str(Path(entry.path).relative_to(self.path)), identity(st)])
                         else:
                             raise OSError('unreadable or linked object storage')
@@ -204,7 +251,7 @@ class ObjectStorage:
             # bodies. Bind each loose body separately, and packed bodies to the
             # pack/index generation that proved their successful read.
             rows.append(['objects', self.directory_identity(objects)])
-            if (objects / 'pack').exists():
+            if os.path.lexists(objects / 'pack'):
                 walk(objects / 'pack')
             else:
                 rows.append(['pack', None])
@@ -215,7 +262,7 @@ class ObjectStorage:
     @staticmethod
     def directory_identity(path):
         st = path.stat()
-        if path.is_symlink() or not os.access(path, os.R_OK | os.X_OK):
+        if path.is_symlink() or not accessible(path, os.R_OK | os.X_OK):
             raise OSError('unreadable object directory')
         return [st.st_dev, st.st_ino, st.st_mode, st.st_uid, st.st_gid]
 
@@ -229,7 +276,7 @@ class ObjectStorage:
                 st = body.lstat()
             except FileNotFoundError:
                 return digest(['packed', self.stamp])
-            if not stat.S_ISREG(st.st_mode) or not os.access(body, os.R_OK):
+            if not stat.S_ISREG(st.st_mode) or not accessible(body, os.R_OK):
                 return None
             return digest(['loose', self.stamp, self.directory_identity(directory), identity(st)])
         except OSError:

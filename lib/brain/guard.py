@@ -119,6 +119,19 @@ def byte_mentions(data, needles, chunk=1 << 20, principals=(), lessons=False):
     return found
 
 
+class TermBlobReader:
+    """Hash a complete canonical Git blob while preserving bounded streaming."""
+    def __init__(self, stream, size, algorithm=hashlib.sha1):
+        self.stream, self.count = stream, 0
+        self.digest = algorithm(b'blob ' + str(size).encode() + b'\0')
+
+    def read(self, size):
+        data = self.stream.read(size)
+        self.count += len(data)
+        self.digest.update(data)
+        return data
+
+
 def never_terms(n):
     """[(term, label)] for a node: its own never-name.txt and its ancestors'. The label never shows the term."""
     out, m = [], n
@@ -181,6 +194,8 @@ def governance_principals(n):
 def governance_file(n, path):
     """Only real instance library items and specialist role files get metadata treatment."""
     raw = os.fspath(path)
+    if not os.path.isabs(raw):
+        raw = os.path.abspath(raw)
     folder, name = os.path.split(raw)
     if (not raw.endswith('.md') or (os.path.basename(folder) != 'library'
             and not (name in ('role.md', 'lessons.md')
@@ -324,7 +339,7 @@ def file_mentions(fp, needles, errors=None, chunk=1 << 20, principals=(), lesson
             old = cache.get(key) if cache is not None else None
             if old is not None and old[0] == identity:
                 return set(old[1])
-            buffered = False
+            buffered, reader = False, None
             if cache is not None and before.st_size <= chunk:
                 data = fh.read(before.st_size + 1)
                 if len(data) == before.st_size:
@@ -335,7 +350,8 @@ def file_mentions(fp, needles, errors=None, chunk=1 << 20, principals=(), lesson
                 else:
                     fh.seek(0)  # file grew: retain the complete streaming scan
             if not buffered:
-                found = stream_mentions(fh, needles, chunk=chunk, principals=principals, lessons=lessons)
+                reader = TermBlobReader(fh, before.st_size) if policy is not None else fh
+                found = stream_mentions(reader, needles, chunk=chunk, principals=principals, lessons=lessons)
             if term_file_identity(os.fstat(fh.fileno())) != identity:
                 if errors is not None:
                     errors.append((fp, 'file changed during term scan'))
@@ -343,6 +359,8 @@ def file_mentions(fp, needles, errors=None, chunk=1 << 20, principals=(), lesson
                 cache[key] = (identity, frozenset(found))
                 if policy is not None and buffered:
                     policy.remember_file(fp, before, data, not found)
+                elif policy is not None and reader.count == before.st_size:
+                    policy.remember_file(fp, before, None, not found, oid=reader.digest.hexdigest())
     except OSError as e:
         if isinstance(e, FileNotFoundError) and missing_ok and not os.path.lexists(fp):
             return found  # valid tracked deletion; its index body remains guarded
@@ -407,6 +425,40 @@ def term_git_directory(root):
     return (str((root / result.stdout.strip()).resolve()), None) if not result.returncode else (None, result)
 
 
+def term_git_binding(root):
+    directory, error = term_git_directory(root)
+    if error is not None:
+        raise OSError('Git directory unavailable')
+    marker = root / '.git'
+    admin = root / os.environ['GIT_DIR'] if os.environ.get('GIT_DIR') else marker
+    if admin.is_file():
+        text = admin.read_text()
+        if not text.startswith('gitdir: '):
+            raise OSError('invalid Git directory file')
+        admin = root / text[8:].strip()
+    tokens = []
+    for path in (marker, admin, admin / 'commondir', admin / 'index'):
+        try:
+            st = path.lstat()
+            value = (term_file_identity(st) if not stat.S_ISDIR(st.st_mode) else
+                     (st.st_dev, st.st_ino, st.st_mode, st.st_uid, st.st_gid))
+        except FileNotFoundError:
+            value = None
+        tokens.append(value)
+    return directory, tuple(tokens)
+
+
+def term_inventory(root, in_node):
+    try:
+        before = term_git_binding(root)
+        files, entries, error = home_files(root, in_node, with_stage=True)
+        if before != term_git_binding(root):
+            return None, [], 'Git directory/index binding changed during inventory', None
+        return files, entries, error, before
+    except OSError:
+        return None, [], 'Git directory/index binding unavailable', None
+
+
 def term_file_observations(n, root, files, entries, needles, principals, policies):
     """Independent read observations; matching labels and final ordering stay in the caller."""
     tracked = {f for _, _, _, f in entries}
@@ -457,11 +509,11 @@ def scan_terms(n, paths=(), terms=None):
                if (root / '.git').exists() or root.resolve() == n['dir'].resolve()}
     if len(initial) > 1:
         with ThreadPoolExecutor(max_workers=4) as pool:
-            futures = {root: pool.submit(home_files, root, in_node, True) for root, in_node in initial.items()}
+            futures = {root: pool.submit(term_inventory, root, in_node) for root, in_node in initial.items()}
             inventories = {root: future.result() for root, future in futures.items()}
             futures = {root: pool.submit(contextvars.copy_context().run, term_file_observations,
                                          n, root, files, entries, needles, principals, policies)
-                       for root, (files, entries, error) in inventories.items() if error is None}
+                       for root, (files, entries, error, _) in inventories.items() if error is None}
             observations = {root: future.result() for root, future in futures.items()}
     else:
         inventories = {}
@@ -474,22 +526,19 @@ def scan_terms(n, paths=(), terms=None):
         in_node = root.resolve() == n["dir"].resolve()
         own_repo = (root / ".git").exists() and not in_node
         if own_repo or in_node:
-            storage = None
-            directory, error = term_git_directory(root)
-            if error is not None:
-                failed('git rev-parse', root, error)
-            else:
-                if own_repo:
-                    repos.setdefault(directory, root)
-                if policies:
-                    if directory not in stores:
-                        stores[directory] = _m_term_cache.ObjectStorage(directory)
-                    storage = stores[directory]
-            files, entries, err = inventories.pop(root) if root in inventories else home_files(root, in_node, with_stage=True)
+            files, entries, err, binding = (inventories.pop(root) if root in inventories
+                                            else term_inventory(root, in_node))
             if err:
                 errors.append(f"listing {redact(_m_common.tilde(root), terms)}: {redact(err, terms)}")
                 continue
-            tracked = {f for _, _, _, f in entries}
+            storage = None
+            directory = binding[0]
+            if own_repo:
+                repos.setdefault(directory, root)
+            if policies:
+                if directory not in stores:
+                    stores[directory] = _m_term_cache.ObjectStorage(directory)
+                storage = stores[directory]
             submodules = {f for mode, _, _, f in entries if mode == "160000"}
             observed, read_errors = (observations.pop(root) if root in observations else
                                      term_file_observations(n, root, files, entries, needles, principals, policies))
@@ -537,6 +586,7 @@ def scan_terms(n, paths=(), terms=None):
                                 if len(header) != 3 or header[1] != b"blob":
                                     raise OSError("Git index blob unavailable")
                                 size = int(header[2])
+                                algorithm = hashlib.sha256 if len(oid) == 64 else hashlib.sha1
                                 if size <= 1 << 20:
                                     data = proc.stdout.read(size)
                                     if len(data) != size:
@@ -544,16 +594,16 @@ def scan_terms(n, paths=(), terms=None):
                                     seen = byte_mentions(data, needles, principals=principals if kind else (),
                                                          lessons=kind == 'lessons')
                                 else:
-                                    seen = stream_mentions(proc.stdout, needles, size=size,
+                                    reader = TermBlobReader(proc.stdout, size, algorithm)
+                                    seen = stream_mentions(reader, needles, size=size,
                                                            principals=principals if kind else (), lessons=kind == "lessons")
                                 if proc.stdout.read(1) != b"\n":
                                     raise OSError("incomplete Git blob response")
                                 # Only canonical bodies authorize future OID reuse.
                                 # Replacement refs and malformed object contents
                                 # can return bytes whose identity differs.
-                                algorithm = hashlib.sha256 if len(oid) == 64 else hashlib.sha1
                                 canonical = (algorithm(b'blob ' + str(size).encode() + b'\0' + data).hexdigest()
-                                             if size <= 1 << 20 else None)
+                                             if size <= 1 << 20 else reader.digest.hexdigest())
                                 if policies.get(kind) and canonical == oid:
                                     policies[kind].remember_blob(oid, not seen, storage)
                                 hits += [(label, f"index stage {stage}: {_m_common.tilde(root)}/{f}")
@@ -565,10 +615,15 @@ def scan_terms(n, paths=(), terms=None):
                         proc.stdout.close()
                     if proc.wait():
                         errors.append(f"git cat-file failed in {redact(_m_common.tilde(root), terms)}")
-            if storage is not None and storage.reused and term_git_directory(root)[0] != directory:
-                errors.append('Git directory binding changed during term scan')
-                for policy in policies.values():
-                    policy.data['stores'].pop(storage.key, None)
+            try:
+                unchanged = term_git_binding(root) == binding
+            except OSError:
+                unchanged = False
+            if not unchanged:
+                errors.append('Git directory/index binding changed during term scan')
+                if storage is not None:
+                    for policy in policies.values():
+                        policy.data['stores'].pop(storage.key, None)
         else:  # a folder given by path, outside any repository
             for dp, dn, fn in os.walk(root, onerror=lambda e: unread.append((Path(e.filename), e.strerror))):
                 dn[:] = [x for x in dn if x not in (".git", "node_modules")]

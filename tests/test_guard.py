@@ -402,6 +402,122 @@ with mock.patch.object(guard, 'stream_mentions', side_effect=AssertionError('une
             self.assertTrue(any('storage changed' in error for error in self.scan()[1]))
         self.assertTrue(self.scan()[1])
 
+    def test_large_clean_file_and_index_blob_reuse_bounded_stream_verdicts(self):
+        self.clean_fixture()
+        (self.home / 'large.bin').write_bytes(b'x' * ((1 << 20) + 10))
+        self.git('add', '.', cwd=self.home)
+        self.assertEqual(self.prime(), ([], []))
+        with mock.patch.object(self.guard, 'stream_mentions', side_effect=AssertionError('unexpected rescan')):
+            self.assertEqual(self.scan(), ([], []))
+
+    def test_changed_inventory_binding_and_corrupt_packed_storage_are_incomplete(self):
+        self.clean_fixture()
+        original = self.guard.home_files
+        def changing(*args, **kwargs):
+            result = original(*args, **kwargs)
+            self.git('update-index', '--force-remove', 'two.txt', cwd=self.home)
+            return result
+        with mock.patch.object(self.guard, 'home_files', side_effect=changing):
+            self.assertTrue(any('binding changed' in error for error in self.scan()[1]))
+        self.git('add', '.', cwd=self.home)
+        self.git('gc', '--prune=now', cwd=self.home)
+        self.assertEqual(self.prime(), ([], []))
+        pack = next((self.home / '.git/objects/pack').glob('*.pack'))
+        pack.chmod(0o600)
+        pack.write_bytes(pack.read_bytes()[:10])
+        self.assertTrue(self.scan()[1])
+
+    def test_nonprivate_cache_and_replaced_parent_do_not_publish(self):
+        self.clean_fixture()
+        self.prime()
+        self.cache_file.chmod(0o644)
+        with mock.patch.object(self.guard, 'stream_mentions', wraps=self.guard.stream_mentions) as read:
+            self.assertEqual(self.prime(), ([], []))
+            self.assertGreater(read.call_count, 0)
+        self.assertEqual(self.cache_file.stat().st_mode & 0o777, 0o644)
+        self.cache_file.chmod(0o600)
+        outside = self.tmp / 'different-parent'
+        outside.mkdir()
+        (self.home / 'one.txt').write_text('fresh\n')
+        with self.guard.term_scan_cache(persist=True):
+            self.scan()
+            original = self.cache_file.parent
+            original.rename(original.with_name('saved-cache-parent'))
+            original.symlink_to(outside, target_is_directory=True)
+        self.assertEqual(list(outside.iterdir()), [])
+
+    def test_reftable_replacement_verdict_matches_uncached_and_cold_processes(self):
+        repo = self.tmp / 'reftable repo'
+        result = subprocess.run(['git', 'init', '-q', '--ref-format=reftable', str(repo)], env=self.env,
+                                capture_output=True, text=True)
+        if result.returncode:
+            self.skipTest('installed Git does not support reftable fixtures: ' + result.stderr)
+        self.home = repo
+        self.node['home_path'] = repo
+        (repo / 'one.txt').write_text('clean\n')
+        self.git('add', '.', cwd=repo)
+        self.git('commit', '-m', 'fixture', cwd=repo)
+        replacement = self.tmp / 'replacement'
+        replacement.write_text('needle\n')
+        bad = self.git('hash-object', '-w', str(replacement), cwd=repo).strip()
+        good = self.git('rev-parse', 'HEAD:one.txt', cwd=repo).strip()
+        self.assertEqual(self.prime(), ([], []))
+        self.git('replace', good, bad, cwd=repo)
+        program = '''from pathlib import Path
+import json, sys
+from brain import guard
+node = dict(dir=Path(sys.argv[1]), parent=None, external=True,
+            home_path=Path(sys.argv[2]), local={}, id='fixture')
+class Uncached(dict):
+    def __setitem__(self, key, value): pass
+if sys.argv[3] == 'uncached': guard._TERM_SCAN_CACHE.set(Uncached())
+print(json.dumps(guard.scan_terms(node, terms=[('Needle', 'term 1'), ('CAFÉ', 'term 2'), ('ss', 'term 3')])))
+'''
+        def run(mode):
+            env = {**self.env, 'PYTHONPATH': str(CORE / 'lib')}
+            for key in list(env):
+                if key == 'GIT_CONFIG_COUNT' or key.startswith(('GIT_CONFIG_KEY_', 'GIT_CONFIG_VALUE_')):
+                    env.pop(key)
+            result = subprocess.run([sys.executable, '-B', '-c', program, str(self.node['dir']), str(repo), mode],
+                                    env=env, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            return json.loads(result.stdout)
+        expected = run('uncached')
+        self.assertTrue(any(where.startswith('index stage') for _, where in expected[0]))
+        self.assertEqual(run('warm'), expected)
+        self.cache_file.unlink()
+        self.assertEqual(run('cold'), expected)
+
+    def test_malformed_parseable_cache_never_republishes_plaintext_or_invalid_values(self):
+        self.clean_fixture()
+        self.prime()
+        original = self.cache_file.read_text()
+        def context(data):
+            return next(iter(next(iter(data['nodes'].values()))['contexts'].values()))
+        def root_field(data):
+            data['unexpected_plaintext'] = 'needle /absolute/private/path'
+        def bad_store(data):
+            context(data)['stores']['/absolute/secret/object-store'] = {'label': 'needle'}
+        def bad_verdict(data):
+            key = next(iter(context(data)['blobs']))
+            context(data)['blobs'][key] = 'needle'
+        def bad_file(data):
+            record = next(iter(context(data)['files'].values()))
+            record[0][0] = 'needle'
+        def bad_word_hash(data):
+            next(iter(data['nodes'].values()))['words'] = 'needle'
+        for corrupt in (root_field, bad_store, bad_verdict, bad_file, bad_word_hash):
+            data = json.loads(original)
+            corrupt(data)
+            self.cache_file.write_text(json.dumps(data))
+            prior = self.cache_file.stat().st_ino
+            self.assertEqual(self.prime(), ([], []))
+            self.assertNotEqual(self.cache_file.stat().st_ino, prior)
+            text = self.cache_file.read_text()
+            self.assertNotIn('needle', text.casefold())
+            self.assertNotIn('/absolute/', text)
+            self.assertTrue(self.guard._m_term_cache.valid_cache(json.loads(text)))
+
 
 class Hardening(Scenario):
     """What the second-runtime reviews broke, kept broken-proof."""

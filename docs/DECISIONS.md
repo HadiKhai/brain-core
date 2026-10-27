@@ -2866,6 +2866,11 @@ prior complete canonical body read in that object store, with unchanged readable
 loose-object or pack/index storage. Alternates and replacement refs disable that
 shortcut. Changed storage during reuse reports an incomplete scan; cache damage,
 unavailable storage and publication races fall back to current source reads.
+The complete loaded schema must contain only the allowed digest/OID keys,
+boolean verdicts and bounded integer identities; any malformed record rebuilds
+the artifact. Reftable storage conservatively disables persistent index reuse.
+Git directory/index bindings are checked around each inventory and after use.
 Fresh tagged Git inventories distinguish untracked names from stage records,
-including names containing tabs/newlines. At most four inventory readers overlap;
-result collection, matching and publication retain deterministic command scope.
+including names containing tabs/newlines. At most four inventory/file readers
+overlap in copied command contexts; labels, ordering and publication remain in
+the caller. Large bodies retain bounded streaming while their Git IDs are hashed.
