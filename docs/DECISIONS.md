@@ -2997,3 +2997,8 @@ Each reader inherits the command's observation, Git and readiness contexts;
 shared refs are resolved before launch. Results retain sorted branch order,
 closed work remains metadata-only, and any source failure rejects the complete
 result instead of publishing a partial list.
+
+Projected restart advice also detaches only its selected usage record. The
+projection carries the original ledger entry count separately, so selecting a
+small record cannot bypass the global capacity bound. Explicit restart writes
+retain the ordinary whole-ledger lock and publication path.

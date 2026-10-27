@@ -437,6 +437,23 @@ ui_json.ui_json_background(root, '[]')
             self.assertEqual(view.store(path, reader, select=lambda data: data['usage']['selected']), selected)
         self.assertEqual(reader.call_count, 2)
 
+    def test_selected_restart_store_retains_full_capacity_and_detaches_mutation(self):
+        root = self.init('demo')
+        inst = self.m.UIInstance(root)
+        module = self.m._owners['usage_restart_store']
+        selected = {'baseline': {'processed': 10}}
+        ledger = self.m.lifecycle_empty()
+        ledger['usage'] = {'selected': selected, 'other': {'baseline': {'processed': 20}}}
+        with self.m.observe(inst), mock.patch.object(module, 'lifecycle_read', return_value=ledger):
+            with module.usage_restart_store(inst, 'selected') as (data, count):
+                self.assertEqual(count, 2)
+                self.assertEqual(set(data['usage']), {'selected'})
+                data['usage']['selected']['baseline']['processed'] = 99
+            with module.usage_restart_store(inst, 'missing') as (data, count):
+                self.assertEqual(count, 2)
+                self.assertEqual(data['usage'], {})
+        self.assertEqual(selected['baseline']['processed'], 10)
+
     def test_readmodel_cache_validates_binding_and_keeps_metadata_separate_from_usage(self):
         ReadModel = self.m.ReadModel
         root = self.init('demo')
