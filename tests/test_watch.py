@@ -5,6 +5,7 @@ import datetime
 import io
 import json
 import os
+import sys
 import threading
 import time
 from unittest import mock
@@ -70,6 +71,34 @@ class Watcher(Scenario):
             m.watch_once(inst, kinds={'blocked-overdue'}, quiet=True, groups=newer)
             self.assertFalse(list(directory.glob('*.pending')), 'retired episode must not be restored')
             self.assertEqual(seen.read_bytes(), acknowledged)
+
+    def test_command_snapshot_keeps_overdue_questions_repeatable_and_retains_pending_wake(self):
+        m, inst = self.m, self.inst
+        line = '- 2020-01-01 00:00 +00:00 from runtime: Host question: choose a color <!-- host-question:color -->'
+        (self.root / 'inbox.md').write_text(line + '\n')
+        root = inst.node('root')
+        snapshot = m._owners['overdue_questions']._m_command_reads.snapshot
+        with mock.patch.dict(os.environ, {**self.env, 'BRAIN_ROOT': str(self.root)}), \
+                mock.patch.object(m, 'changes_due', return_value=[]), \
+                mock.patch.object(m, 'core_update'), mock.patch.object(m, 'auto_upgrade', return_value=None), \
+                mock.patch.object(m, 'wake_start'):
+            with snapshot():
+                first = list(m.overdue_questions(inst, root, m.inbox_lines(root)))
+                self.assertEqual(first, [line])
+                self.assertEqual(list(m.overdue_questions(inst, root, m.inbox_lines(root))), first)
+            m.watch_once(inst, kinds={'overdue-question'}, quiet=True)
+            pending = list(m.wake_directory(inst, root).glob('*.pending'))
+            self.assertEqual(len(pending), 1)
+            before, inode = pending[0].read_bytes(), pending[0].stat().st_ino
+            episode = json.loads(before)['items'][0]['id']
+            output = io.StringIO()
+            with mock.patch.object(sys, 'argv', ['brain', 'due', 'root', '--json']), \
+                    contextlib.redirect_stdout(output):
+                m.main()
+            self.assertTrue(any(i['kind'] == 'overdue-question' for i in json.loads(output.getvalue())))
+            self.assertEqual((pending[0].read_bytes(), pending[0].stat().st_ino), (before, inode))
+            receipt = json.loads((self.root / '.brain/wake/due-episodes.json').read_text())
+            self.assertIn(episode, receipt['open'].values())
 
     def since(self, node='root'):
         with mock.patch.object(self.m, 'load', return_value=self.inst), \

@@ -30,7 +30,7 @@ from . import command_reads as _m_command_reads
 # then incrementally: transcripts only grow, so the next read starts where the last one stopped.
 
 SPEND_IDLE_MIN = 5  # a gap between two events of more than this many minutes is idle time
-SPEND_VERSION = 6
+SPEND_VERSION = 7  # rebuild aggregates whose hinted thread identities skipped usage records
 SPEND_FIELDS = ("events", "fresh", "cache_read", "cache_write", "output", "reasoning", "tools")
 SPEND_TOKENS = ("fresh", "cache_read", "cache_write", "output", "reasoning")  # reasoning is part of output
 JOB_MARK = "brain-job: {}"  # in every job brief: the sessions a brief starts are found again by it
@@ -210,8 +210,14 @@ def spend_codex_line(agg, raw, minute, at=None):
             agg["job"] = m.group(1).decode()
         return
     if kind == "token_usage_record":
-        if p.get("thread_id") not in (None, agg["id"]):
-            return  # another thread's response, carried along
+        thread = p.get('thread_id')
+        if thread is not None:
+            if agg.get('id_opaque'):
+                if not isinstance(thread, str):
+                    return
+                thread = opaque(thread)
+            if thread != agg['id']:
+                return  # another thread's response, carried along
         st["prompt_done"] = True
         rid = opaque(p["response_id"]) if isinstance(p.get("response_id"), str) else None
         if rid and rid in st["recent"]:
@@ -273,7 +279,7 @@ def spend_read(agg, fh, budget=None):
     return True
 
 
-SPEND_UNKEPT = ("path", "cwd", "id", "parent", "fork_of")  # known again at each read, never written
+SPEND_UNKEPT = ("path", "cwd", "id", "parent", "fork_of", "id_opaque")  # known again at each read, never written
 _SPEND_MEM = {}  # this process's aggregates, by real path: a file that hasn't grown isn't read again
 _SPEND_TERMS = {}
 
@@ -370,6 +376,8 @@ def _spend_file(inst, path, runtime, allowed, forbidden, budget, window, cache):
         except OSError:
             return None
         packed = str(real).endswith('.zst')
+        if hint and hint.get('stamp') != [st.st_dev, st.st_ino, *stamp]:
+            hint = None  # discovery preceded rotation/append; do not apply its identity to another generation
         if packed and not _m_history.ZSTD:
             return None
         mem = (str(inst.root.resolve()), str(real), runtime, tuple(window) if window else None, bool(hint))
@@ -415,11 +423,11 @@ def _spend_file(inst, path, runtime, allowed, forbidden, budget, window, cache):
             agg.update(id=f"{real.parent.parent.name}/{claude_session_id(real)}" if sub else claude_session_id(real), subagent=sub,
                        parent=real.parent.parent.name if sub else "")
         elif hint:
-            agg.update(id=hint['id'], parent=hint['parent'])
-        elif not agg.get("id"):
+            agg.update(id=hint['id'], parent=hint['parent'], id_opaque=True)
+        elif not agg.get("id") or agg.get('id_opaque'):
             meta = codex_meta(real, allowed, forbidden)
             if meta:
-                agg.update(id=meta[0], parent=meta[2])
+                agg.update(id=meta[0], parent=meta[2], id_opaque=False)
         dirty = agg.get("stamp") != stamp or not agg.get("published")
         if agg["state"]["offset"] < size or stale or dirty:
             if dirty or stale:
@@ -453,7 +461,7 @@ def _spend_file(inst, path, runtime, allowed, forbidden, budget, window, cache):
         if display_cache is not None and update_private:
             display_cache.write("usage-" + key, {k: v for k, v in agg.items() if k not in SPEND_UNKEPT})
         if hint:
-            agg.update(id=hint['id'], parent=hint['parent'])
+            agg.update(id=hint['id'], parent=hint['parent'], id_opaque=True)
         agg["path"] = str(real)  # this run's own, never written
         _SPEND_MEM[mem] = ((stamp, list(ident)), agg)
     return agg
@@ -515,7 +523,10 @@ def spend_once(aggs):
     """Each session once: Codex may keep a session both as a transcript and as its compressed copy."""
     best = {}
     for a in aggs:
-        key = (a["runtime"], a["id"] or a["path"])
+        identity = a['id']
+        if a['runtime'] == 'codex' and identity and not a.get('id_opaque'):
+            identity = opaque(identity)
+        key = (a["runtime"], identity or a["path"])
         if key not in best or (a["last"] or 0, a["state"]["offset"]) > (best[key]["last"] or 0, best[key]["state"]["offset"]):
             best[key] = a
     return list(best.values())

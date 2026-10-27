@@ -318,6 +318,7 @@ def active_work(n, include_closed=False):
 
 @_m_command_reads.memo
 def overdue_questions(inst, n, lines):
+    out = []
     try:
         minutes = max(1, float(n["fm"].get("question_minutes", 10)))
     except (ValueError, TypeError):
@@ -328,7 +329,8 @@ def overdue_questions(inst, n, lines):
         match = re.match(r"- (.*?) from ", line)
         at = inst.parse_time(match[1]) if match else None
         if at and elapsed(at, inst.now_dt()) >= minutes * 60:
-            yield line
+            out.append(line)
+    return tuple(out)
 
 
 def hook_question_queue(n):

@@ -708,6 +708,78 @@ class Spend(Scenario):
         scan.assert_called_once()
         self.assertEqual(scan.call_args.kwargs['budget'], .01)
 
+    def test_full_machine_hints_match_thread_records_recount_append_and_rebuild_old_cache(self):
+        scratch = self.tmp / 'machine-scratch'
+        scratch.mkdir()
+        sid = '11111111-main'
+        path = self.cx(scratch, sid, [(1, *self.record(sid, 'r1', 100, 40, 7, 3)),
+                                     (2, *self.record('22222222-foreign', 'r9', 99999, 0, 99999))])
+        m = core_loader.SourceFileLoader('machine_hint_records', str(CORE / 'bin/brain')).load_module()
+        with mock.patch.dict(os.environ, self.env):
+            inst = m.Instance(self.r)
+            def recount():
+                agg = m.spend_new('codex', path)
+                with path.open('rb') as stream:
+                    self.assertTrue(m.spend_read(agg, stream))
+                return m.spend_sum([agg])
+            def machine():
+                m._MACHINE.clear()
+                value = m.spend_machine(inst, budget=None)
+                self.assertTrue(value['complete'])
+                expected = recount()
+                for key in ('fresh', 'cache_read', 'output', 'reasoning', 'processed', 'sessions'):
+                    self.assertEqual(value['since_week'][key], expected[key], key)
+                return value['since_week']
+            self.assertEqual(machine()['processed'], 107)
+            m._SPEND_MEM.clear()
+            # A newly opened cache hit neither reparses source bytes nor recovers raw headers.
+            m._MACHINE.clear()
+            with mock.patch.object(m, 'spend_read', side_effect=AssertionError('unchanged recount')), \
+                    mock.patch.object(m, 'codex_meta', side_effect=AssertionError('unchanged header')):
+                warm = m.spend_machine(inst, budget=None)
+            self.assertEqual(warm['since_week']['processed'], 107)
+            self.jsonl(path, [{'timestamp': self.at(3), 'type': 'token_usage_record',
+                               'payload': self.record(sid, 'r2', 50, 5, 2, 1)[1]}])
+            self.assertEqual(machine()['processed'], 159)
+            m._SPEND_MEM.clear()
+            self.assertEqual(machine()['processed'], 159)
+            stat = path.stat()
+            key = m.hashlib.sha256(str(path.resolve()).encode()).hexdigest()[:32]
+            bad = {**m.spend_new('codex', path), 'v': 6, 'key': key, 'ino': [stat.st_dev, stat.st_ino],
+                   'stamp': [stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns, stat.st_mode, stat.st_nlink],
+                   'complete': True, 'published': True}
+            bad['state']['offset'] = stat.st_size  # old defective aggregates consumed valid records as zero usage
+            kept = {k: v for k, v in bad.items() if k not in m.SPEND_UNKEPT}
+            cache = self.r / '.brain/spend/files' / (key + '.json')
+            cache.write_text(json.dumps(kept))
+            with m._owners['spend_file']._m_usage_cache.database(inst) as database:
+                database.put('file:' + key, kept)
+            m._SPEND_MEM.clear()
+            self.assertEqual(machine()['processed'], 159)
+            self.assertEqual(json.loads(cache.read_text())['v'], m.SPEND_VERSION)
+            archive = self.codex / 'archived_sessions' / path.name
+            archive.parent.mkdir(parents=True)
+            archive.write_bytes(path.read_bytes())
+            original_index = m.codex_index
+            def append_after_discovery(*args, **kwargs):
+                entries = original_index(*args, **kwargs)
+                self.jsonl(path, [{'timestamp': self.at(4), 'type': 'token_usage_record',
+                                   'payload': self.record(sid, 'r3', 10, 0, 1)[1]}])
+                return entries
+            m._SPEND_MEM.clear()
+            m._MACHINE.clear()
+            with mock.patch.object(m, 'codex_index', side_effect=append_after_discovery):
+                changed = m.spend_machine(inst, budget=None)
+            # The changed original uses a raw identity; its stable archive uses an opaque hint.
+            self.assertEqual(changed['files'], 2)
+            self.assertEqual(changed['since_week']['sessions'], 1)
+            self.assertEqual(changed['since_week']['processed'], recount()['processed'])
+            self.assertEqual(changed['since_week']['processed'], 170)
+        state = json.loads(self.b(self.r, 'ui', '--json', '--wait'))
+        self.assertEqual(state['spend']['since_week']['processed'], 170)
+        self.assertNotIn(sid, cache.read_text())
+        self.assertNotIn(sid.encode(), (self.r / '.brain/usage.sqlite').read_bytes())
+
     def test_finished_usage_uses_the_recorded_final_ledger_counts(self):
         m = core_loader.SourceFileLoader('speed_finished_fixture', str(CORE / 'bin/brain')).load_module()
         row = {**self.row(), 'Ended': self.at(10), 'Outcome': 'merged',
