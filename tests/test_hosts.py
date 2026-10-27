@@ -1919,7 +1919,8 @@ class AckAllShown(Scenario):
             self.b(self.root, 'set', 'root', 'coordinator=fixture-replacement', 'wake=fixture-other-send')
             self.inst = m.Instance(self.root)
             n = self.inst.node('root')
-            m.request_wake(self.inst, n, 'fixture replacement', items=refs[1:])
+            # The ref delivered under the old binding is not acknowledged for the new one.
+            m.request_wake(self.inst, n, 'fixture replacement', items=refs[:1])
             m.wake_drain(self.inst, n, once=True)
             self.assertEqual(send.call_count, 2)
 
