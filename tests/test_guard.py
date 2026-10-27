@@ -190,13 +190,17 @@ class ScanTermsCache(Scenario):
         def delayed(*args, **kwargs):
             time.sleep(.02)  # model read latency; no machine-speed assertion
             return stream(*args, **kwargs)
+        def scan_file():
+            return self.guard.file_mentions(self.home / 'one.txt', ('needle',))
+        # Time the cached file read, excluding Git process startup contention
+        # when the full suite runs other fixture repositories concurrently.
         with mock.patch.object(self.guard, 'stream_mentions', side_effect=delayed):
             start = time.monotonic()
-            self.scan(); self.scan()
+            scan_file(); scan_file()
             uncached = time.monotonic() - start
             start = time.monotonic()
             with self.guard.term_scan_cache():
-                self.scan(); self.scan()
+                scan_file(); scan_file()
             cached = time.monotonic() - start
         self.assertLess(cached, uncached * .85)
 
