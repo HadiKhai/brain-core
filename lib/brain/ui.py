@@ -1,7 +1,6 @@
 """Ui mechanics for Brain."""
 import argparse
 import contextlib
-import datetime
 import json
 import math
 import os
@@ -301,7 +300,18 @@ def ui_state(inst, problems=None, scan=None, spend_budget=2.0, machine_spend=Non
     usage = _m_spend.live_usage_snapshot(cache.usage, cache.usage_revision) if cache is not None else contextlib.nullcontext()
     jobs = _m_status.local_job_snapshot(cache.local_jobs, cache.worktree_keys) if cache is not None else _m_status.local_job_snapshot()
     with _m_common.git_read_snapshot(), _m_spend.spend_read_only(), readiness, usage, jobs:
-        return _ui_state(inst, problems, scan, spend_budget, machine_spend, cache, node_keys)
+        return _ui_observation(_ui_state(inst, problems, scan, spend_budget, machine_spend, cache, node_keys))
+
+
+def _ui_observation(state, partial=False):
+    """Captured view metadata; active transport progress belongs to /api/loading."""
+    return {**state,
+            'loading': {'filling_in': partial, 'age_seconds': 0, 'refreshing': False,
+                        'failed': False, 'version': 1},
+            'source': {'kind': 'live', 'built_at': state['brain']['now'],
+                       'age_seconds': 0, 'observation_only': True},
+            'readiness': ('unknown' if partial else
+                          'recorded snapshot; use brain ready for current readiness')}
 
 
 def ui_round_usage(inst, n, row, used):
@@ -404,7 +414,7 @@ def ui_node(inst, n, since, cache=None, partial=False):
 def ui_initial_state(inst, scan=None):
     """A file-only first reading; repository, readiness and usage fill in afterwards."""
     nodes = inst.nodes()
-    return {
+    return _ui_observation({
         'review': {'enabled': False}, 'due': [], 'scan': scan or [],
         'usage_policy': {'stop_percent': None, 'max_age_seconds': 120}, 'usage_routing_policy': {},
         'brain': {'name': _m_nodes.brain_name(inst.root), 'title': nodes[0]['fm'].get('title', 'Brain'),
@@ -417,7 +427,7 @@ def ui_initial_state(inst, scan=None):
         'commits_24h': 0, 'commits_total': 0, 'specialists': [],
         'items': {'count': 0, 'all': [], 'recent': []}, 'schedules': [],
         'machine': {}, 'spend': None, 'usage': [], 'usage_other_subscriptions': 0, 'problems': None,
-    }
+    }, partial=True)
 
 
 def ui_loading(box, now=None):
@@ -1268,16 +1278,6 @@ def cmd_ui(a):
                 else:
                     brain['filling_in'] = True
                 st = {**st, 'brain': brain}
-            # Live and detached JSON expose the same observation envelope. Live
-            # usage may still be filling after the metadata observation is ready.
-            built = time.time()
-            st = {**st, 'loading': {**ui_loading(box),
-                                    'filling_in': not _m_ui_fill.complete(st)},
-                  'source': {'kind': 'live', 'built_at': datetime.datetime.fromtimestamp(
-                      built, datetime.timezone.utc).isoformat(), 'age_seconds': 0,
-                             'observation_only': True},
-                  'readiness': ('recorded snapshot; use brain ready for current readiness'
-                                if box['metadata_ready'] else 'unknown')}
             box.update(state=st, json=json.dumps(st, sort_keys=True).encode(), version=box['version'] + 1)
             if box['metadata_ready']:
                 box['partial'] = not _m_ui_fill.complete(st)

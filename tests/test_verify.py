@@ -159,6 +159,8 @@ class WorkerReadyPackets(Scenario):
                          "verify.py": "from calc import value\nassert value == 2\n"})
         self.b(r, "new", "a", "--title", "A", "--home", str(home))
         self.b(r, "set", "a", "verify=python3 -B verify.py")
+        # Setup must commit its generated facts even across a minute rollover.
+        (r / '.brain/events-status-commits.json').unlink(missing_ok=True)
         self.b(r, "wt", "add", "a", "job")
         wt = self.tmp / "app-work/worktrees/job"
         (wt / "calc.py").write_text("value = 2\n")

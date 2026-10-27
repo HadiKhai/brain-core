@@ -2813,3 +2813,20 @@ lifecycle observations written by the scan are excluded from that input fence.
 Routine question defaults reconcile before observation. Damaged episode storage
 retains fail-open delivery with fresh identities and no retirement authority;
 source drift refuses stale publication without acknowledging the old scan.
+
+## D40007: Capture UI observation metadata before publication
+
+Full and initial UI producers include the canonical observation envelope. Its
+date is the already-captured `brain.now`, at the same precision; source kind is
+`live`, and loading metadata uses stable schema-version-1 snapshot defaults.
+The publisher preserves that captured observation. Active transport progress
+remains on `/api/loading`, SSE event IDs and version headers. Detached CLI JSON
+keeps its cache-specific dates, age, failure and unknown-state annotations.
+An unchanged complete publication therefore equals the standalone full view,
+while CLI and live views keep the same top-level fields.
+
+Disposable verification setup clears its status-commit coalescing stamp before
+adding a worktree. A minute boundary can otherwise refresh root's generated
+`Facts refreshed` timestamp without committing it, leaving setup dirty before
+the handback under test. This fixture correction retains the pre-handback stamp
+clear and every strict assertion; production hourly coalescing is unchanged.
