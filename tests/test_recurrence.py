@@ -11,6 +11,22 @@ from scenario import CORE, Scenario
 class LessonRecurrence(Scenario):
     fixture_templates = True
     fixture_init_in_process = True
+
+    def test_shared_synthesis_receipt_keeps_public_default_and_existing_mode(self):
+        r, folder = self.fixture()
+        for i in range(3):
+            self.record(r, 'correction ' + str(i))
+        notice, = self.notices(r)
+        self.b(r, 'due', 'root', '--synthesis-seen', notice['set'])
+        path = folder / 'synthesis.json'
+        self.assertEqual(path.stat().st_mode & 0o777, 0o644)
+        path.chmod(0o640)
+        for i in range(3):
+            self.record(r, 'fresh correction ' + str(i))
+        notice, = self.notices(r)
+        self.b(r, 'due', 'root', '--synthesis-seen', notice['set'])
+        self.assertEqual(path.stat().st_mode & 0o777, 0o640)
+        self.assertEqual(self.notices(r), [])
     def fixture(self):
         return self.cached_setup('recurrence', self.recurrence_fixture)
 

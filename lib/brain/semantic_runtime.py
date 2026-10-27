@@ -12,6 +12,7 @@ def prepare_model(folder, download, staging):
     # Import only the stdlib parent module, including immutable artifact hashes.
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     from brain.semantic import MODEL_FILES, MODEL_ID, MODEL_REVISION
+    from brain import common
     folder.mkdir(parents=True, exist_ok=True)
     manifest = folder / 'manifest.json'
     if folder.is_symlink() or manifest.is_symlink():
@@ -51,7 +52,7 @@ def prepare_model(folder, download, staging):
             os.replace(temporary, target)
         finally:
             Path(temporary).unlink(missing_ok=True)
-    manifest.write_text(json.dumps({'model': MODEL_ID}) + '\n')
+    common.atomic_write(manifest, json.dumps({'model': MODEL_ID}) + '\n', private=True)
 
 
 def run(request):

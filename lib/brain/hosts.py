@@ -1462,9 +1462,10 @@ def hook_stop(a):
         held = why + ([f"upgrade notice ({len(unread)} unread change entr{'y' if len(unread) == 1 else 'ies'})"]
                       if upgrade else [])
         if held:
-            with open(log, "a") as fh:
-                fh.write(f"{now.isoformat(timespec='seconds')} stop {n['id']} {sid}: "
-                         f"{_m_guard.redact('; '.join(held), _m_guard.never_terms(n))}\n")
+            with _m_common.directory_target(log, private=True) as target:
+                with os.fdopen(target.open(os.O_WRONLY | os.O_APPEND | os.O_CREAT), "a") as fh:
+                    fh.write(f"{now.isoformat(timespec='seconds')} stop {n['id']} {sid}: "
+                             f"{_m_guard.redact('; '.join(held), _m_guard.never_terms(n))}\n")
     except OSError:
         pass  # the reminder still goes out; only its bookkeeping is lost
     if not why and not upgrade:

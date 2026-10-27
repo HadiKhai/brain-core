@@ -48,6 +48,62 @@ class MachineDurability(unittest.TestCase):
     def hosts(self):
         return importlib.import_module('.host_instances', self.package)
 
+    def test_brain_inventory_and_model_manifest_publish_privately(self):
+        path = self.root / 'config/brain/brains.json'
+        with mock.patch.dict(os.environ, {'BRAIN_CONFIG': str(path)}):
+            self.m.write_brains({'brains': {'sample': {'root': '/invented/root'}}})
+            self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+            self.assertEqual(stat.S_IMODE(path.parent.stat().st_mode), 0o700)
+            path.chmod(0o644)
+            self.m.write_brains({'brains': {}})
+            self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+        semantic = importlib.import_module('brain.semantic')
+        runtime = importlib.import_module('brain.semantic_runtime')
+        folder = self.root / 'model'
+        folder.mkdir()
+        manifest = folder / 'manifest.json'
+        manifest.write_text('{}')
+        manifest.chmod(0o644)
+        with mock.patch.object(semantic, 'MODEL_FILES', {}), \
+                mock.patch.object(semantic, 'MODEL_ID', 'fixture-model'), \
+                mock.patch.dict(os.environ, {'BRAIN_USAGE_TESTING': '0'}):
+            runtime.prepare_model(folder, True, self.root)
+        self.assertEqual(stat.S_IMODE(manifest.stat().st_mode), 0o600)
+        self.assertEqual(json.loads(manifest.read_text()), {'model': 'fixture-model'})
+
+    def test_content_locks_tighten_mode_without_replacing_the_lock_inode(self):
+        path = self.root / '.brain/lock'
+        path.parent.mkdir(exist_ok=True)
+        path.write_text('old')
+        path.chmod(0o644)
+        inode = path.stat().st_ino
+        with self.m.brain_lock(self.inst):
+            self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+            self.assertEqual(path.stat().st_ino, inode)
+        usage = importlib.import_module('.usage', self.package)
+        path = self.root / '.brain/usage.lock'
+        path.write_text('old')
+        path.chmod(0o644)
+        inode = path.stat().st_ino
+        with mock.patch.object(usage, 'usage_file', return_value=path):
+            with usage.usage_lock('fixture') as acquired:
+                self.assertTrue(acquired)
+                self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+                self.assertEqual(path.stat().st_ino, inode)
+        gate = importlib.import_module('.gate_lock', self.package)
+        path = gate.gate_path(self.root, 'root')
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('{}')
+        path.chmod(0o644)
+        inode = path.stat().st_ino
+        fd, acquired = gate.gate_acquire(self.inst, 'root', {}, 'fixture')
+        try:
+            self.assertTrue(acquired)
+            self.assertEqual(stat.S_IMODE(os.fstat(fd).st_mode), 0o600)
+            self.assertEqual(os.fstat(fd).st_ino, inode)
+        finally:
+            os.close(fd)
+
     def test_separate_inventory_is_private_and_remote_route_never_calls_local_host(self):
         h = self.hosts()
         h.remember_host_instance(self.inst, 'desk', self.inst.local['machine'], 't3', {'root':{'coordinator':'desk-thread'}})

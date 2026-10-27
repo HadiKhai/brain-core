@@ -106,6 +106,7 @@ def gate_acquire(inst, node, env, label):
                 os.fstat(fd).st_nlink != 1):
             _m_common.die('gate-lock: lock path changed while waiting')
         metadata = json.dumps({'node': node, 'label': label, 'started': inst.now(), 'pid': os.getpid()}) + '\n'
+        os.fchmod(fd, 0o600)
         os.ftruncate(fd, 0)
         os.pwrite(fd, metadata.encode(), 0)
         return fd, True

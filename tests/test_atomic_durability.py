@@ -49,6 +49,32 @@ class AtomicDurability(unittest.TestCase):
         self.assertEqual({p.name: p.read_bytes() for p in outside.iterdir()}, before)
         self.assertEqual((moved / target.name).read_text(), 'owned old')
 
+    def test_private_writable_open_tightens_before_append_but_read_is_nonmutating(self):
+        self.path.chmod(0o644)
+        with self.m.directory_target(self.path, private=True) as target:
+            fd = target.open()
+            try:
+                self.assertEqual(os.read(fd, 3), b'old')
+                self.assertEqual(stat.S_IMODE(os.fstat(fd).st_mode), 0o644)
+            finally:
+                os.close(fd)
+            fd = target.open(os.O_WRONLY | os.O_APPEND)
+            try:
+                self.assertEqual(stat.S_IMODE(os.fstat(fd).st_mode), 0o600)
+                self.assertEqual(self.path.read_text(), 'old')
+                os.write(fd, b' new')
+            finally:
+                os.close(fd)
+        self.assertEqual(self.path.read_text(), 'old new')
+
+    def test_private_open_chmod_failure_prevents_truncation(self):
+        self.path.chmod(0o644)
+        with self.m.directory_target(self.path, private=True) as target:
+            with mock.patch.object(self.m.os, 'fchmod', side_effect=OSError('mode refused')):
+                with self.assertRaisesRegex(OSError, 'mode refused'):
+                    target.open(os.O_WRONLY | os.O_TRUNC)
+        self.assertEqual(self.path.read_text(), 'old')
+
     def test_file_sync_then_replace_then_parent_sync(self):
         events = []
         real_sync, real_replace = os.fsync, os.replace

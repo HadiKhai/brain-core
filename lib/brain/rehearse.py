@@ -334,8 +334,7 @@ def isolated_probe_instance(inst, directory):
         dest = directory / node['dir'].relative_to(inst.root)
         dest.mkdir(parents=True, exist_ok=True)
         shutil.copy2(node['dir'] / 'node.md', dest / 'node.md')
-    (directory / '.brain').mkdir()
-    (directory / '.brain/local.json').write_text(json.dumps(inst.local))
+    _m_common.atomic_write(directory / '.brain/local.json', json.dumps(inst.local), private=True, create=True)
     return _m_instance.Instance(directory)
 
 
@@ -1471,8 +1470,7 @@ runpy.run_path(entry, run_name='__main__')
     transaction_before = None
     capture_before_metadata = {}
     if kind in ('fix', 'refresh'):
-        trace.parent.mkdir(parents=True, exist_ok=True)
-        trace.write_text('')
+        _m_common.atomic_write(trace, '', private=True, create=True)
         env['BRAIN_REHEARSAL_TRANSACTIONS'] = str(trace)
         retention.bind_command_sources(core, bootstrap)
         retention.checkpoint(stage='capture-before', capture_before_metadata=capture_before_metadata,
@@ -1677,8 +1675,7 @@ def freeze_machine_inputs(inst, clock):
     data = dict(samples=[dict(at=instant, reading=_m_ui.machine_load())],
                 episode=False, heat_reasons=[])
     path = inst.root / '.brain/machine.json'
-    path.parent.mkdir(exist_ok=True)
-    path.write_text(json.dumps(data))
+    _m_common.atomic_write(path, json.dumps(data), private=True, create=True)
 
 
 def external_inputs(inst):
@@ -1965,7 +1962,7 @@ def rehearse(inst, n, branch, local_diff_dir=None):
         captured_inst = rehearse_external.freeze_declared(frozen_inst, folder / 'external')
         if captured_inst is not frozen_inst:
             # This root is the owned source copy, never the live caller's root.
-            (frozen / '.brain/local.json').write_text(json.dumps(captured_inst.local))
+            _m_common.atomic_write(frozen / '.brain/local.json', json.dumps(captured_inst.local), private=True)
             frozen_inst = captured_inst
         freeze_machine_inputs(frozen_inst, frozen_now)
         nodes = frozen_inst.nodes()

@@ -17,6 +17,18 @@ from brain import events, instance, transitions
 
 
 class EventAppend(Scenario):
+    def test_private_journal_append_tightens_existing_mode_before_new_data(self):
+        r = self.init('alice')
+        path = r / '.brain/fixture-journal.jsonl'
+        path.write_text('{"earlier": true}\n')
+        path.chmod(0o644)
+        inode = path.stat().st_ino
+        events.append_line(path, {'new': True})
+        self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(path.stat().st_ino, inode)
+        self.assertEqual([json.loads(line) for line in path.read_text().splitlines()],
+                         [{'earlier': True}, {'new': True}])
+
     def test_canonical_parent_retarget_refuses_append_and_private_read(self):
         r = self.init('demo')
         for operation in ('append', 'read', 'index'):

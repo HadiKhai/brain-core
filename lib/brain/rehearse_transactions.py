@@ -519,8 +519,9 @@ def install_observer(events, root, trace):
                 (fd.st_dev, fd.st_ino) == (path.st_dev, path.st_ino) and events.lease_live(op.inst, op.ref))
     def emit(kind, **data):
         if stack:
-            with Path(trace).open('a') as stream:
-                stream.write(json.dumps(dict(type=kind, scope=stack[-1], pid=os.getpid(), **data), sort_keys=True) + '\n')
+            with events.common.directory_target(Path(trace), private=True) as target:
+                with os.fdopen(target.open(os.O_WRONLY | os.O_APPEND | os.O_CREAT), 'a') as stream:
+                    stream.write(json.dumps(dict(type=kind, scope=stack[-1], pid=os.getpid(), **data), sort_keys=True) + '\n')
     def observe(kind, inst=None, **data):
         try:
             if inst is not None:

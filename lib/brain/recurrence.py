@@ -130,6 +130,6 @@ def synthesis_seen(inst, n, set_id):
     receipt["seen"] = sorted(set(receipt["seen"]) | set(item["tokens"]))
     receipt["at"] = inst.now()
     path = folder / "synthesis.json"
-    _m_common.atomic_write(path, json.dumps(receipt, indent=2, sort_keys=True) + "\n", private=True)
+    _m_common.atomic_write(path, json.dumps(receipt, indent=2, sort_keys=True) + "\n")
     inst.commit([path], "record synthesis receipt")
     print("synthesis set recorded; direction and lesson records unchanged")
