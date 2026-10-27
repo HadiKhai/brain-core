@@ -1145,6 +1145,31 @@ class Tasks(Scenario):
         self.assertFalse((self.root / 'tasks/MISSING-REF.md').exists())
         self.assertFalse((self.root / 'tasks/MISSING-REQ.md').exists())
 
+    def test_unlinked_add_rechecks_exact_requirement_after_unlocked_validation(self):
+        tasks.requirement_add(self.inst, self.n, 'REQ-ADD', 'Keep a source', self.inst.now(), 'notes.md:1')
+        path = tasks.record_path(self.n, 'REQ-ADD', 'requirements')
+        prepare = tasks.prepare_mutation
+        def changed(*args, **kwargs):
+            from brain import instance
+            self.assertIsNone(instance._LOCK['fh'])
+            row = prepare(*args, **kwargs)
+            path.write_text(path.read_text() + '\nConcurrent retained source\n')
+            return row
+        with mock.patch.object(tasks, 'prepare_mutation', side_effect=changed), self.assertRaises(SystemExit):
+            self.add('NEW', requirement='REQ-ADD')
+        self.assertFalse((self.root / 'tasks/NEW.md').exists())
+        self.assertIn('Concurrent retained source', path.read_text())
+
+    def test_unlinked_add_never_overwrites_a_task_created_during_unlocked_validation(self):
+        prepare = tasks.prepare_mutation
+        def changed(*args, **kwargs):
+            row, closed = prepare(*args, **kwargs)
+            tasks.save_record(self.n, {**row, 'title': 'Concurrent independent task'})
+            return row, closed
+        with mock.patch.object(tasks, 'prepare_mutation', side_effect=changed), self.assertRaises(SystemExit):
+            self.add('NEW')
+        self.assertEqual(tasks.read_records(self.n)['NEW']['title'], 'Concurrent independent task')
+
     def test_add_detects_cycles_through_an_existing_external_missing_reference(self):
         provider = self.add('PROVIDER')
         provider.update(depends_on=['NEW'])

@@ -2864,6 +2864,11 @@ authority announcements, review-independence rules, spent allowances and resume
 conditions using their explicit forms, without dropping ordinary work or manual tasks.
 Cleared preview bindings are missing job evidence, never proof of abandonment.
 
+After integration with unlocked task validation, a new unlinked backlog/ready task
+fences its exact destination and requirement plus inherited node policy. It does not
+scan unrelated task/requirement bodies or directories under the instance lock. Linked
+and completed mutations retain the full graph, artifact and Git evidence fences.
+
 Unlinked new task creation validates only the new record, with direct requirement
 lookups. Linked additions, existing-record edits and explicit task checks retain
 whole-graph validation, including qualified and cross-node return edges. This avoids repeatedly parsing every requirement
