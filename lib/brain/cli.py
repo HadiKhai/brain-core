@@ -763,17 +763,6 @@ def _main():
 
 
 REFRESH_TRIES = 5
-# Plain contention: another writer moved inputs or held a lease during this
-# refresh. Any other refusal, including a repair's own cause, stays final.
-CONTENTION = ('another write is active; cannot reconcile its snapshot',
-              'state changed during the unlocked step', *_m_status_refresh.GIT_DRIFT)
-
-
-def contended(error):
-    message = error.code if isinstance(error.code, str) else ''
-    if 'status refresh maintenance refused' in message:
-        message = message.partition('; cause: ')[2]
-    return any(text in message for text in CONTENTION)
 
 
 def refresh_with_retry(attempt):
@@ -784,7 +773,7 @@ def refresh_with_retry(attempt):
         try:
             return attempt()
         except SystemExit as error:
-            if not contended(error):
+            if not _m_status_refresh.contended(error):
                 raise
         time.sleep(random.uniform(0.05, 0.25) * tries)
     print(f'brain: status refresh contended {REFRESH_TRIES} times; refreshing under the lock', file=sys.stderr)

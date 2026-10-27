@@ -837,6 +837,23 @@ with instance.brain_lock(instance.Instance(__import__('pathlib').Path(sys.argv[2
         self.assertEqual(result, self.git('rev-parse', 'HEAD', cwd=wt).strip())
         self.assertNotEqual(builds[0], result)
 
+    def test_held_refresh_refuses_git_refs_that_keep_moving(self):
+        root, home, wt = self.project()
+        loader = core_loader.SourceFileLoader('refresh_held_git_churn', str(CORE / 'bin/brain'))
+        m = loader.load_module()
+        refresh = importlib.import_module(loader.package_name + '.status_refresh')
+        inst = m.Instance(root)
+        builds = []
+        def churn(current, target):
+            head = refresh.common.git('rev-parse', 'HEAD', cwd=wt).stdout.strip()
+            self.git('commit', '--allow-empty', '-qm', 'branch change %d' % len(builds), cwd=wt)
+            builds.append(head)
+            return head
+        with mock.patch.dict(os.environ, self.env), refresh.instance.held():
+            with self.assertRaisesRegex(SystemExit, 'Git refs kept moving through 3 locked builds'):
+                refresh.compute(inst, inst.node('app'), churn)
+        self.assertEqual(len(builds), refresh.HELD_BUILDS)
+
     def test_refresh_fences_complete_ref_names(self):
         root, home, wt = self.project()
         loader = core_loader.SourceFileLoader('refresh_complete_refs', str(CORE / 'bin/brain'))
@@ -961,6 +978,37 @@ with instance.brain_lock(instance.Instance(__import__('pathlib').Path(sys.argv[2
         published = (root / 'status.md').read_text()
         self.b(root, 'status', 'root', '--refresh')  # a quiet refresh finds nothing newer
         self.assertEqual((root / 'status.md').read_text(), published)
+
+    def test_contended_events_source_refresh_keeps_its_committed_view(self):
+        root = self.init('alice')
+        self.b(root, 'status', 'root', '--refresh')
+        m, cli, status, events, instance = self.refresh_cli(root, 'refresh_retry_events')
+        inst = m.Instance(root)
+        view = events.replay(inst)[1]['root']
+        ref = 'd' * 32  # a live writer in another process, mid-operation
+        events.append(inst, 'root', 'begin', ref, {'command': 'fixture'})
+        lease = events.lease_path(inst, ref, create=True)
+        lease.write_text('')
+        writer = os.open(lease, os.O_RDONLY)
+        source = events.source
+        err = io.StringIO()
+        try:
+            events.fcntl.flock(writer, events.fcntl.LOCK_EX)
+            with mock.patch.dict(os.environ, {**self.env, 'BRAIN_ROOT': str(root)}), \
+                    mock.patch.object(sys, 'argv', ['brain', 'status', 'root', '--refresh']), \
+                    mock.patch.object(events, 'source', lambda i, n: 'events' if n['id'] == 'root' else source(i, n)), \
+                    mock.patch('random.uniform', return_value=0), \
+                    contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+                cli.main()  # exit 0: no SystemExit
+            records = events.read(m.Instance(root))
+        finally:
+            os.close(writer)
+        self.assertIn('refreshing under the lock', err.getvalue())
+        self.assertFalse(any(r['kind'] == 'commit' and r['data'].get('invalidate') for r in records))
+        self.assertEqual(records[-1]['kind'], 'commit')
+        self.assertTrue(records[-1]['data']['maintenance_ok'])
+        self.assertEqual(events.replay(m.Instance(root))[1]['root'], view)
+        self.assertIn(ref, events.replay(m.Instance(root))[2])  # the writer's operation stays open
 
     def test_refresh_does_not_retry_a_real_repair_refusal(self):
         root = self.init('alice')
