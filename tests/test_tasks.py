@@ -11,6 +11,37 @@ from brain.instance import Instance
 
 
 class Tasks(Scenario):
+    def test_report_artifact_change_after_validation_refuses_new_completion(self):
+        import hashlib
+        path = self.root / 'measurement.txt'
+        path.write_text('original measurement')
+        receipt = {'ref': 'fixture', 'scope': 'sample', 'result': 'passed', 'at': self.inst.now(),
+                   'artifact': 'measurement.txt', 'sha256': hashlib.sha256(path.read_bytes()).hexdigest(), 'version': 1}
+        prepare = tasks.prepare_mutation
+        def changed(*args, **kwargs):
+            result = prepare(*args, **kwargs)
+            path.write_text('changed measurement')
+            return result
+        with mock.patch.object(tasks, 'prepare_mutation', side_effect=changed), self.assertRaises(SystemExit):
+            self.add('REPORT-1', completion_kind='report', status='done', evidence=['Measured'], completion_receipt=receipt)
+        self.assertNotIn('REPORT-1', tasks.read_records(self.n))
+
+    def test_dependency_report_artifact_change_refuses_new_task(self):
+        import hashlib
+        path = self.root / 'measurement.txt'
+        path.write_text('original measurement')
+        receipt = {'ref': 'fixture', 'scope': 'sample', 'result': 'passed', 'at': self.inst.now(),
+                   'artifact': 'measurement.txt', 'sha256': hashlib.sha256(path.read_bytes()).hexdigest(), 'version': 1}
+        self.add('REPORT-1', completion_kind='report', status='done', evidence=['Measured'], completion_receipt=receipt)
+        prepare = tasks.prepare_mutation
+        def changed(*args, **kwargs):
+            result = prepare(*args, **kwargs)
+            path.write_text('changed dependency measurement')
+            return result
+        with mock.patch.object(tasks, 'prepare_mutation', side_effect=changed), self.assertRaises(SystemExit):
+            self.add('CHILD-1', depends_on=['REPORT-1'])
+        self.assertNotIn('CHILD-1', tasks.read_records(self.n))
+
     def setUp(self):
         super().setUp()
         self.root = self.tmp / 'fixture'

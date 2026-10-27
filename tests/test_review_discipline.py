@@ -364,12 +364,26 @@ class IndependentReviewReceipts(Scenario):
             receipt['reviewer'].update(fields)
             with self.subTest(fields=fields), self.assertRaises(ValueError):
                 m.record_review_receipt(inst, n, 'job', receipt)
-        legacy = dict(n, fm={**n['fm'], 'review_independence': 'cross-runtime'})
+        self.b(r, 'set', 'a', 'review_independence=cross-runtime')
+        legacy = m.Instance(r).node('a')
         with self.assertRaises(ValueError):
             m.record_review_receipt(inst, legacy, 'job', original)
+        self.b(r, 'set', 'a', 'review_independence=fresh-thread')
         receipt = dict(original, verdict='blocked')
         m.record_review_receipt(inst, n, 'job', receipt)
         self.assertTrue(m.validate_ready_reviews(inst, n, 'job', receipt['head']))
+
+    def test_worker_status_change_after_review_validation_refuses_receipt(self):
+        root, wt, m, inst, n, receipt = self.context()
+        validate = m.validate_review_receipt
+        def changed(*args, **kwargs):
+            result = validate(*args, **kwargs)
+            m.active_table(inst, n, {'active': [['job', 'reviewer-thread', '-', 'building']]})
+            return result
+        with mock.patch.object(m, 'validate_review_receipt', side_effect=changed), self.assertRaises(SystemExit):
+            m.record_review_receipt(inst, n, 'job', receipt)
+        row = m.open_job(m.read_jobs(n), 'job')
+        self.assertFalse(m.review_receipt_path(n, row, receipt['head']).exists())
 
     def test_review_route_allows_same_runtime_only_with_explicit_fresh_policy(self):
         r, wt, m, inst, n, receipt = self.context()

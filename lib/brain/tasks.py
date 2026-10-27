@@ -164,12 +164,37 @@ def validate(n, records):
     _m_flow.validate_graph(n, records)
 
 
-def mutation_paths(inst):
+def mutation_paths(inst, target=None, changes=None):
     paths = []
+    def artifact(node, receipt):
+        if isinstance(receipt, str):
+            try:
+                receipt = json.loads(receipt)
+            except ValueError:
+                return  # the existing validator refuses malformed receipts
+        relative = receipt.get('artifact') if isinstance(receipt, dict) else None
+        if isinstance(relative, str) and relative and not Path(relative).is_absolute() and '..' not in Path(relative).parts:
+            path = node['dir'] / relative
+            if not path.is_dir():  # directory artifacts are invalid; never traverse their contents
+                paths.extend((path, path.resolve()))
     for node in inst.nodes():
         paths.extend(node['dir'] / name for name in
                      ('tasks', 'requirements', 'job-ledger.md', 'job-handbacks', 'job-attempts'))
-        if node.get('external') and node.get('home_path'):
+        try:
+            rows = read_records(node).values()
+        except (OSError, ValueError):
+            # The unchanged validator refuses malformed required task sources.
+            # An unrelated damaged node must not broaden this task's authority
+            # or prevent observing the sources which can actually validate.
+            rows = []
+        code_proof = False
+        for row in rows:
+            artifact(node, row.get('completion_receipt'))
+            code_proof |= row.get('status') in ('merged', 'done') and row.get('completion_kind', 'merge') == 'merge'
+        if target == node['id'] and changes:
+            artifact(node, changes.get('completion_receipt'))
+            code_proof |= changes.get('status') in ('merged', 'done') and changes.get('completion_kind', 'merge') == 'merge'
+        if node.get('home_path') and (node.get('external') or code_proof):
             paths.extend(_m_instance.git_state_paths(node['home_path']))
     return paths
 
@@ -208,7 +233,8 @@ def mutate(inst, n, ident, changes, create=False, provider=False):
     with _m_instance.brain_lock(inst):
         current = _m_instance.Instance(inst.root)
         node = current.node(n['id'])
-        with _m_instance.released(inst, list(current.nodes()), extra=lambda: mutation_paths(current)):
+        with _m_instance.released(inst, list(current.nodes()),
+                extra=lambda: mutation_paths(current, node['id'], changes)):
             row, closed_transition = prepare_mutation(current, node, ident, changes, create, provider)
         n = node
         save_record(n, row)

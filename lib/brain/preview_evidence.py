@@ -74,7 +74,8 @@ def validate_preview_receipt(inst, n, row, head, data):
 
 def record_preview_receipt(inst, n, branch, data):
     with _m_instance.brain_lock(inst):
-        n = _m_instance.Instance(inst.root).node(n['id'])
+        inst = _m_instance.Instance(inst.root)
+        n = inst.node(n['id'])
         row = _m_jobs.open_job(_m_jobs.read_jobs(n) or [], branch)
         if not row:
             raise ValueError('preview receipt requires an open job')
